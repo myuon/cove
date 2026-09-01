@@ -1,285 +1,266 @@
-//! Enums: one word of case index, then the payload of the case it is in.
+//! Enums, which are a discriminant word and a payload region.
 
-use std::sync::Arc;
+use super::listing;
 
-use super::{checked, listing};
-use crate::layout::{Case, Shape};
-use crate::lower::lower;
-use crate::repr::Repr;
-
+/// `docs/LINEAR_VM.md`'s fourth worked case. `Shape` is `[disc, Int,
+/// Int]`: `Dot` writes the discriminant and zeroes the rest, and `Box(3, 4)`
+/// writes all three. The zeroing is not tidiness — the payload region's
+/// reference map is static, so a word another case would put a reference
+/// in has to read null.
 #[test]
-fn a_case_with_no_payload_is_an_index_and_nothing_else() {
+fn a_case_writes_the_discriminant_and_zeroes_what_it_does_not_fill() {
     assert_eq!(
         listing(
-            "enum Verdict { Keep, Drop }\nfn keep() -> Verdict { Verdict.Keep }",
-            "keep"
+            "enum Shape { Dot, Line(Int), Box(Int, Int) }\nfn f() -> Shape { Shape.Dot }",
+            "f"
         ),
         "\
-fn0 m.keep(0) -> ref
-  frame 3: s0:ref s1:ref s2:int
-     0  alloc s1:ref m.Verdict<enum>
-     1  int s2:int 0
-     2  set-word s1:ref +0 s2:int
-     3  move s0:ref s1:ref
-     4  clear s1:ref
-     5  return s0:ref
+fn0 m.f() -> m.Shape
+  frame 6: s0:int s1:int s2:int s3:int s4:int s5:int
+     0  int s3:int 0
+     1  clear s4:int Int
+     2  clear s5:int Int
+     3  copy s0:int s3:int m.Shape
+     4  return s0:int
 "
     );
 }
 
 #[test]
-fn a_case_with_a_payload_writes_the_index_then_the_words() {
-    // The payload is evaluated before the object exists, so nothing is
-    // half-built across the expression that fills it; the index goes in
-    // first because it is what the collector reads to decide which of the
-    // remaining words are references.
+fn a_case_that_fills_the_region_zeroes_nothing() {
     assert_eq!(
         listing(
-            "enum Shape { Circle(Int), Square(Int, Int) }\n\
-             fn unit_square() -> Shape { Shape.Square(1, 1) }",
-            "unit_square"
+            "enum Shape { Dot, Line(Int), Box(Int, Int) }\nfn f() -> Shape { Shape.Box(3, 4) }",
+            "f"
         ),
         "\
-fn0 m.unit_square(0) -> ref
-  frame 5: s0:ref s1:int s2:int s3:ref s4:int
-     0  int s1:int 1
-     1  int s2:int 1
-     2  alloc s3:ref m.Shape<enum>
-     3  int s4:int 1
-     4  set-word s3:ref +0 s4:int
-     5  set-word s3:ref +1 s1:int
-     6  set-word s3:ref +2 s2:int
-     7  move s0:ref s3:ref
-     8  clear s3:ref
-     9  return s0:ref
+fn0 m.f() -> m.Shape
+  frame 8: s0:int s1:int s2:int s3:int s4:int s5:int s6:int s7:int
+     0  int s3:int 3
+     1  int s4:int 4
+     2  int s5:int 2
+     3  copy s6:int s3:int Int
+     4  copy s7:int s4:int Int
+     5  copy s0:int s5:int m.Shape
+     6  return s0:int
+"
+    );
+}
+
+/// `enum Msg { Ping, Text(String) }` is `[disc, Ref]`, and `Ping` leaves
+/// the reference word null — so the collector reads null rather than a
+/// stale address, without ever looking at the discriminant.
+#[test]
+fn a_reference_word_of_another_case_reads_null() {
+    assert_eq!(
+        listing(
+            "enum Msg { Ping, Text(String) }\nfn f() -> Msg { Msg.Ping }",
+            "f"
+        ),
+        "\
+fn0 m.f() -> m.Msg
+  frame 4: s0:int s1:ref s2:int s3:ref
+     0  int s2:int 0
+     1  clear s3:ref <ref>
+     2  copy s0:int s2:int m.Msg
+     3  clear s2:int m.Msg
+     4  return s0:int
+"
+    );
+}
+
+/// `A(Int, String)` and `B(Float)`: `A` takes payload words 0 and 1, and
+/// `B` can use neither — an `Int` is not a `Float` and a `Ref` is not a
+/// `Float` — so its payload takes a third. The value is four words, wider
+/// than either case, and that is the price of a map a collection can read
+/// without asking which case it is in.
+#[test]
+fn the_payload_words_of_two_cases_agree_or_do_not_overlap() {
+    assert_eq!(
+        listing(
+            "enum E { A(Int, String), B(Float) }\nfn f(x: Float) -> E { E.B(x) }",
+            "f"
+        ),
+        "\
+fn0 m.f(Float) -> m.E
+  frame 9: s0!:float s1:int s2:int s3:ref s4:float s5:int s6:int s7:ref s8:float
+     0  int s5:int 1
+     1  clear s6:int Int
+     2  clear s7:ref <ref>
+     3  copy s8:float s0:float Float
+     4  copy s1:int s5:int m.E
+     5  clear s5:int m.E
+     6  return s1:int
+"
+    );
+}
+
+/// The discriminant is word 0 of the value, already in the frame, so the
+/// switch names the location itself and nothing is read out of anything.
+/// Each arm's payload is at `base + 1 + Part::at`, which is why the arms
+/// below contain no loads either.
+#[test]
+fn a_match_reads_the_discriminant_at_offset_zero() {
+    assert_eq!(
+        listing(
+            "enum Shape { Dot, Line(Int), Box(Int, Int) }\nfn f(s: Shape) -> Int {\n  match s {\n    Shape.Dot => 0,\n    Shape.Line(a) => a,\n    Shape.Box(a, b) => a + b,\n  }\n}",
+            "f"
+        ),
+        "\
+fn0 m.f(m.Shape) -> Int
+  frame 8: s0!:int s1!:int s2!:int s3:int s4:int s5:int s6:int s7:int
+     0  switch s0:int [1 4 7] else 12
+     1  int s5:int 0
+     2  copy s4:int s5:int Int
+     3  jump 13
+     4  copy s5:int s1:int Int
+     5  copy s4:int s5:int Int
+     6  jump 13
+     7  copy s5:int s1:int Int
+     8  copy s6:int s2:int Int
+     9  add.int s7:int s5:int s6:int
+    10  copy s4:int s7:int Int
+    11  jump 13
+    12  trap \"no `match` arm covers this value\"
+    13  copy s3:int s4:int Int
+    14  return s3:int
 "
     );
 }
 
 #[test]
-fn option_and_result_are_enums_with_the_cases_the_design_fixes() {
-    // `docs/LINEAR_VM.md` fixes the order: `None` then `Some`, `Ok` then
-    // `Err`. It is a number in the heap, so it is written down where a
-    // reader can check it rather than derived from a table that might be
-    // reordered.
-    let program = lower(&checked(
-        "fn some() -> Option<Int> { Some(1) }\nfn ok() -> Result<Int, String> { Ok(1) }",
-    ))
-    .expect("the program lowers");
-    let shape = |name: &str| {
-        program
-            .layouts
-            .iter()
-            .find(|layout| &*layout.name == name)
-            .map(|layout| layout.shape.clone())
-            .unwrap_or_else(|| panic!("`{name}` was declared"))
-    };
-    assert_eq!(
-        shape("Option"),
-        Shape::Enum {
-            cases: vec![
-                Case {
-                    name: Arc::from("None"),
-                    payload: vec![],
-                },
-                Case {
-                    name: Arc::from("Some"),
-                    payload: vec![Repr::Int],
-                },
-            ],
-        }
-    );
-    assert_eq!(
-        shape("Result"),
-        Shape::Enum {
-            cases: vec![
-                Case {
-                    name: Arc::from("Ok"),
-                    payload: vec![Repr::Int],
-                },
-                Case {
-                    name: Arc::from("Err"),
-                    payload: vec![Repr::Ref],
-                },
-            ],
-        }
-    );
-}
-
-#[test]
-fn one_layout_per_payload_word_rather_than_per_instantiation() {
-    // A layout describes a family: `Option<String>` and `Option<Point>` are
-    // one, because a reference is a reference and what an element actually
-    // is is a question its own object answers. `Option<Int>` is another,
-    // because the word is not a reference and the boundary has to know.
-    let program = lower(&checked(
-        "struct Point { x: Int, y: Int }\n\
-         fn a() -> Option<String> { Some(\"s\") }\n\
-         fn b() -> Option<Point> { Some(Point(x: 0, y: 0)) }\n\
-         fn c() -> Option<Int> { Some(1) }\n\
-         fn d() -> Option<Duration> { Some(1s) }",
-    ))
-    .expect("the program lowers");
-    let options: Vec<&Shape> = program
-        .layouts
-        .iter()
-        .filter(|layout| &*layout.name == "Option")
-        .map(|layout| &layout.shape)
-        .collect();
-    let payloads: Vec<Vec<Repr>> = options
-        .iter()
-        .map(|shape| match shape {
-            Shape::Enum { cases } => cases[1].payload.clone(),
-            other => panic!("an `Option` is an enum, not {other:?}"),
-        })
-        .collect();
-    assert_eq!(
-        payloads,
-        vec![vec![Repr::Ref], vec![Repr::Int], vec![Repr::Duration]]
-    );
-}
-
-#[test]
-fn an_error_is_a_struct_the_language_declares() {
+fn an_option_is_two_words_and_none_is_the_zeroed_one() {
     assert_eq!(
         listing(
-            "fn boom() -> Result<Int, Error> { Err(Error(\"boom\")) }",
-            "boom"
+            "fn f(o: Option<Int>) -> Int {\n  match o {\n    Some(v) => v,\n    None => 0,\n  }\n}",
+            "f"
         ),
         "\
-fn0 m.boom(0) -> ref
-  frame 4: s0:ref s1:ref s2:ref s3:int
-     0  str s1:ref \"boom\"
-     1  alloc s2:ref Error<struct>
-     2  set-word s2:ref +0 s1:ref
-     3  clear s1:ref
-     4  alloc s1:ref Result<enum>
-     5  int s3:int 1
-     6  set-word s1:ref +0 s3:int
-     7  set-word s1:ref +1 s2:ref
-     8  clear s2:ref
-     9  move s0:ref s1:ref
-    10  clear s1:ref
-    11  return s0:ref
+fn0 m.f(Option) -> Int
+  frame 5: s0!:int s1!:int s2:int s3:int s4:int
+     0  switch s0:int [4 1] else 7
+     1  copy s4:int s1:int Int
+     2  copy s3:int s4:int Int
+     3  jump 8
+     4  int s4:int 0
+     5  copy s3:int s4:int Int
+     6  jump 8
+     7  trap \"no `match` arm covers this value\"
+     8  copy s2:int s3:int Int
+     9  return s2:int
 "
     );
 }
 
+/// A copy of an enum is a copy of the discriminant and the whole payload
+/// region, which is what makes the copy independent of what it came from.
 #[test]
-fn a_question_mark_reads_the_case_and_leaves_with_a_fresh_failure() {
-    // The failing side builds this function's own `Err` rather than passing
-    // the one it found along: the value `?` was applied to is a `Result` of
-    // some other pair of words, and two `Result`s whose words differ are two
-    // layouts. Handing the caller the object as it stands would give it one
-    // whose header names the wrong one.
-    //
-    // Nothing is cleared on that side, and nothing needs to be: the frame
-    // ends at the `Return`, so a slot that still holds a reference retains
-    // it for no instructions at all.
+fn a_case_is_copied_whole() {
     assert_eq!(
         listing(
-            "fn add_one(x: Result<Int, String>) -> Result<Int, String> {\n  let n = x?\n  Ok(n + 1)\n}",
-            "add_one"
+            "enum Shape { Dot, Line(Int), Box(Int, Int) }\nfn f(s: Shape) -> Shape { let t = s\n t }",
+            "f"
         ),
         "\
-fn0 m.add_one(1) -> ref
-  frame 8: s0!:ref s1:ref s2:int s3:int s4:bool s5:ref s6:ref s7:int
-     0  get-word s2:int s0:ref +0
-     1  int s3:int 0
-     2  eq.int s4:bool s2:int s3:int
-     3  branch-false s4:bool 6
-     4  get-word s2:int s0:ref +1
-     5  jump 12
-     6  get-word s5:ref s0:ref +1
-     7  alloc s6:ref Result<enum>
-     8  int s3:int 1
-     9  set-word s6:ref +0 s3:int
-    10  set-word s6:ref +1 s5:ref
-    11  return s6:ref
-    12  int s3:int 1
-    13  add.int s7:int s2:int s3:int
-    14  alloc s5:ref Result<enum>
-    15  int s3:int 0
-    16  set-word s5:ref +0 s3:int
-    17  set-word s5:ref +1 s7:int
-    18  move s1:ref s5:ref
-    19  clear s5:ref
-    20  return s1:ref
+fn0 m.f(m.Shape) -> m.Shape
+  frame 9: s0!:int s1!:int s2!:int s3:int s4:int s5:int s6:int s7:int s8:int
+     0  copy s6:int s0:int m.Shape
+     1  copy s3:int s6:int m.Shape
+     2  return s3:int
 "
     );
 }
 
+/// The value `?` was applied to is a `Result` of some other pair of types,
+/// so the `Err` it leaves through is built here rather than passed along —
+/// two `Result`s whose words differ are two layouts, and reusing the value
+/// would hand the caller one whose payload is not what its layout says.
 #[test]
-fn a_question_mark_on_an_option_leaves_with_a_fresh_none() {
-    // `Some` is case 1 of an `Option` where `Ok` is case 0 of a `Result`, so
-    // the index being tested is looked up rather than written down. The
-    // failure carries no payload, so the object is an index and nothing
-    // else.
+fn a_question_mark_leaves_through_the_enclosing_function_s_own_failure() {
     assert_eq!(
         listing(
-            "fn add_one(x: Option<Int>) -> Option<Int> {\n  let n = x?\n  Some(n + 1)\n}",
-            "add_one"
+            "fn g() -> Result<Int, Error> { Ok(1) }\nfn f() -> Result<Int, Error> {\n  let v = g()?\n  Ok(v + 1)\n}",
+            "f"
         ),
         "\
-fn0 m.add_one(1) -> ref
-  frame 7: s0!:ref s1:ref s2:int s3:int s4:bool s5:ref s6:int
-     0  get-word s2:int s0:ref +0
-     1  int s3:int 1
-     2  eq.int s4:bool s2:int s3:int
-     3  branch-false s4:bool 6
-     4  get-word s2:int s0:ref +1
+fn0 m.f() -> Result
+  frame 13: s0:int s1:int s2:ref s3:int s4:int s5:ref s6:int s7:bool s8:int s9:int s10:ref s11:int s12:int
+     0  call s3:int m.g ()
+     1  int s6:int 0
+     2  eq.int s7:bool s3:int s6:int
+     3  branch-false s7:bool 6
+     4  copy s6:int s4:int Int
      5  jump 10
-     6  alloc s5:ref Option<enum>
-     7  int s3:int 0
-     8  set-word s5:ref +0 s3:int
-     9  return s5:ref
-    10  int s3:int 1
-    11  add.int s6:int s2:int s3:int
-    12  alloc s5:ref Option<enum>
-    13  int s3:int 1
-    14  set-word s5:ref +0 s3:int
-    15  set-word s5:ref +1 s6:int
-    16  move s1:ref s5:ref
-    17  clear s5:ref
-    18  return s1:ref
+     6  int s8:int 1
+     7  clear s9:int Int
+     8  copy s10:ref s5:ref Error
+     9  return s8:int
+    10  clear s3:int Result
+    11  int s11:int 1
+    12  add.int s12:int s6:int s11:int
+    13  int s3:int 0
+    14  clear s5:ref <ref>
+    15  copy s4:int s12:int Int
+    16  copy s0:int s3:int Result
+    17  clear s3:int Result
+    18  return s0:int
 "
     );
 }
 
 #[test]
-fn a_question_mark_on_a_temporary_clears_it_on_the_way_through() {
-    // The value `?` read is dead once its payload has been taken out of it,
-    // and it is a temporary rather than a binding, so the clear is at that
-    // last use rather than at the end of a scope.
+fn a_question_mark_on_an_option_leaves_through_none() {
     assert_eq!(
         listing(
-            "fn one() -> Option<Int> { Some(1) }\n\
-             fn twice() -> Option<Int> {\n  let n = one()?\n  Some(n + n)\n}",
-            "twice"
+            "fn g() -> Option<Int> { Some(1) }\nfn f() -> Option<Int> {\n  let v = g()?\n  Some(v + 1)\n}",
+            "f"
         ),
         "\
-fn1 m.twice(0) -> ref
-  frame 7: s0:ref s1:ref s2:int s3:int s4:bool s5:ref s6:int
-     0  call s1:ref m.one ()
-     1  get-word s2:int s1:ref +0
-     2  int s3:int 1
-     3  eq.int s4:bool s2:int s3:int
-     4  branch-false s4:bool 7
-     5  get-word s2:int s1:ref +1
-     6  jump 11
-     7  alloc s5:ref Option<enum>
-     8  int s3:int 0
-     9  set-word s5:ref +0 s3:int
-    10  return s5:ref
-    11  clear s1:ref
-    12  add.int s3:int s2:int s2:int
-    13  alloc s1:ref Option<enum>
-    14  int s6:int 1
-    15  set-word s1:ref +0 s6:int
-    16  set-word s1:ref +1 s3:int
-    17  move s0:ref s1:ref
-    18  clear s1:ref
-    19  return s0:ref
+fn0 m.f() -> Option
+  frame 10: s0:int s1:int s2:int s3:int s4:int s5:bool s6:int s7:int s8:int s9:int
+     0  call s2:int m.g ()
+     1  int s4:int 1
+     2  eq.int s5:bool s2:int s4:int
+     3  branch-false s5:bool 6
+     4  copy s4:int s3:int Int
+     5  jump 9
+     6  int s6:int 0
+     7  clear s7:int Int
+     8  return s6:int
+     9  int s8:int 1
+    10  add.int s9:int s4:int s8:int
+    11  int s2:int 1
+    12  copy s3:int s9:int Int
+    13  copy s0:int s2:int Option
+    14  return s0:int
+"
+    );
+}
+
+/// Nesting is inline and recursive, so a `Wrapper` holding an enum is the
+/// enum's words followed by the rest of the fields, and the `match` reads
+/// the discriminant at the field's own offset.
+#[test]
+fn an_enum_inside_a_struct_is_inline_there_too() {
+    assert_eq!(
+        listing(
+            "enum E { A, B(Int) }\nstruct S { e: E, n: Int }\nfn f(s: S) -> Int {\n  match s.e {\n    E.A => 0,\n    E.B(v) => v + s.n,\n  }\n}",
+            "f"
+        ),
+        "\
+fn0 m.f(m.S) -> Int
+  frame 7: s0!:int s1!:int s2!:int s3:int s4:int s5:int s6:int
+     0  switch s0:int [1 4] else 8
+     1  int s5:int 0
+     2  copy s4:int s5:int Int
+     3  jump 9
+     4  copy s5:int s1:int Int
+     5  add.int s6:int s5:int s2:int
+     6  copy s4:int s6:int Int
+     7  jump 9
+     8  trap \"no `match` arm covers this value\"
+     9  copy s3:int s4:int Int
+    10  return s3:int
 "
     );
 }

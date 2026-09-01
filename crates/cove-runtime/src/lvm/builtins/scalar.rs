@@ -1,8 +1,10 @@
 //! `Int`, `Float` and `Duration`.
 //!
-//! A scalar is one word and none of these allocates unless it answers a
-//! `String` or a `Result`. What each one *means* is the oracle's, including
-//! the three places the answer is not the obvious one:
+//! A scalar is one word, and a `Result` is a run of words rather than an
+//! object, so the only thing any of these allocates is text: the `String` a
+//! `format` builds, and the message an `Err` explains itself with. What each
+//! one *means* is the oracle's, including the three places the answer is not
+//! the obvious one:
 //!
 //! - **`Int.abs()` at `Int.MIN` stops the run.** Integer overflow is a broken
 //!   invariant in this language and not a wrapped result, so `abs` raises
@@ -25,7 +27,7 @@
 //! `Repr::Duration` is the receiver of a reader, and anything else is the
 //! count of a builder. Nothing is inferred from a word.
 
-use cove_lir::Repr;
+use cove_lir::{LayoutId, Program, Repr, Shape};
 
 use crate::error::RuntimeError;
 use crate::lvm::builtins::operand::Operand;
@@ -46,6 +48,25 @@ fn float_receiver(machine: &Machine, method: &str, receiver: Operand) -> Result<
         Repr::Float => Ok(f64::from_bits(receiver.1)),
         _ => Err(operand::no_method(machine, receiver, method)),
     }
+}
+
+/// The one-word layout of a scalar family.
+///
+/// An operation that answers a `Result<Int, Error>` has to name the `Int` its
+/// `Ok` carries, and [`cove_lir::Builtin`] carries no layout for it — so the
+/// family is found in the layout table, the way [`make`] finds the `Result`
+/// around it. A miss is the same missing family [`make`] reports and says so
+/// in the same words.
+///
+/// `pub(super)` because [`super::text`] needs the same one word: `indexOf`
+/// answers an `Option<Int>`.
+pub(super) fn word_layout(program: &Program, repr: Repr) -> Result<LayoutId, RuntimeError> {
+    program
+        .layouts
+        .iter()
+        .position(|layout| layout.shape == Shape::Word(repr))
+        .map(|at| LayoutId(at as u32))
+        .ok_or_else(|| operand::unknown_family(repr.name()))
 }
 
 // --- Int -------------------------------------------------------------------
@@ -89,12 +110,16 @@ pub(super) fn int_max(machine: &mut Machine, operands: &[Operand]) -> Result<u64
 /// Rust's `str::parse::<i64>` reads a leading `+` or `-` and no digit
 /// separators, which is why a `1_000` that a literal may be written with is
 /// an `Err` here.
-pub(super) fn int_parse(machine: &mut Machine, operands: &[Operand]) -> Result<u64, RuntimeError> {
+pub(super) fn int_parse(
+    machine: &mut Machine,
+    operands: &[Operand],
+) -> Result<Vec<u64>, RuntimeError> {
     let args = operand::free("Int.parse", operands, 1)?;
     let text = operand::text(machine, "Int.parse", "text", args[0])?;
+    let int = word_layout(machine.program(), Repr::Int)?;
     match text.parse::<i64>() {
-        Ok(value) => make::ok(machine, Repr::Int, value as u64),
-        Err(_) => make::failed(machine, Repr::Int, &format!("`{text}` is not an Int")),
+        Ok(value) => make::ok(machine, int, &[value as u64]),
+        Err(_) => make::failed(machine, int, &format!("`{text}` is not an Int")),
     }
 }
 
@@ -106,18 +131,19 @@ pub(super) fn int_parse(machine: &mut Machine, operands: &[Operand]) -> Result<u
 pub(super) fn int_parse_radix(
     machine: &mut Machine,
     operands: &[Operand],
-) -> Result<u64, RuntimeError> {
+) -> Result<Vec<u64>, RuntimeError> {
     let args = operand::free("Int.parseRadix", operands, 2)?;
     let text = operand::text(machine, "Int.parseRadix", "text", args[0])?;
     let radix = operand::int(machine, "Int.parseRadix", "radix", args[1])?;
     let Some(base) = (2..=36).contains(&radix).then_some(radix as u32) else {
         return Err(operand::radix(radix));
     };
+    let int = word_layout(machine.program(), Repr::Int)?;
     match i64::from_str_radix(&text, base) {
-        Ok(value) => make::ok(machine, Repr::Int, value as u64),
+        Ok(value) => make::ok(machine, int, &[value as u64]),
         Err(_) => {
             let message = format!("`{text}` is not an Int in radix {base}");
-            make::failed(machine, Repr::Int, &message)
+            make::failed(machine, int, &message)
         }
     }
 }
@@ -128,26 +154,27 @@ pub(super) fn int_parse_radix(
 pub(super) fn float_to_int(
     machine: &mut Machine,
     operands: &[Operand],
-) -> Result<u64, RuntimeError> {
+) -> Result<Vec<u64>, RuntimeError> {
     let (self_, _) = operand::method("toInt", operands, 0)?;
     let x = float_receiver(machine, "toInt", self_)?;
+    let int = word_layout(machine.program(), Repr::Int)?;
     if x.is_nan() {
         return make::failed(
             machine,
-            Repr::Int,
+            int,
             "`Float.toInt` cannot convert `NaN`, which is not a number",
         );
     }
     if x.is_infinite() {
         let message = format!("`Float.toInt` cannot convert `{x}`, which has no truncation");
-        return make::failed(machine, Repr::Int, &message);
+        return make::failed(machine, int, &message);
     }
     let truncated = x.trunc();
     if truncated < i64::MIN as f64 || truncated >= i64::MAX as f64 {
         let message = format!("`Float.toInt` cannot convert `{x}`, which is outside Int's range");
-        return make::failed(machine, Repr::Int, &message);
+        return make::failed(machine, int, &message);
     }
-    make::ok(machine, Repr::Int, truncated as i64 as u64)
+    make::ok(machine, int, &[truncated as i64 as u64])
 }
 
 /// `Float.round() -> Float`.
@@ -204,12 +231,13 @@ pub(super) fn float_format(
 pub(super) fn float_parse(
     machine: &mut Machine,
     operands: &[Operand],
-) -> Result<u64, RuntimeError> {
+) -> Result<Vec<u64>, RuntimeError> {
     let args = operand::free("Float.parse", operands, 1)?;
     let text = operand::text(machine, "Float.parse", "text", args[0])?;
+    let float = word_layout(machine.program(), Repr::Float)?;
     match text.parse::<f64>() {
-        Ok(value) => make::ok(machine, Repr::Float, value.to_bits()),
-        Err(_) => make::failed(machine, Repr::Float, &format!("`{text}` is not a Float")),
+        Ok(value) => make::ok(machine, float, &[value.to_bits()]),
+        Err(_) => make::failed(machine, float, &format!("`{text}` is not a Float")),
     }
 }
 
@@ -265,14 +293,14 @@ pub(super) fn duration(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lvm::builtins::tests::{case_of, message_of, read, run, world};
+    use crate::lvm::builtins::tests::{message_of, read, result_of, run, scalar, word, world};
 
     fn int_of(machine: &mut Machine, operation: &str, operands: &[Operand]) -> i64 {
-        run(machine, "Int", operation, operands).unwrap() as i64
+        word(machine, "Int", operation, operands).unwrap() as i64
     }
 
     fn float_of(machine: &mut Machine, operation: &str, operands: &[Operand]) -> f64 {
-        f64::from_bits(run(machine, "Float", operation, operands).unwrap())
+        f64::from_bits(word(machine, "Float", operation, operands).unwrap())
     }
 
     #[test]
@@ -280,7 +308,7 @@ mod tests {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
         assert_eq!(
-            f64::from_bits(run(&mut machine, "Int", "toFloat", &[(Repr::Int, 3)]).unwrap()),
+            f64::from_bits(word(&mut machine, "Int", "toFloat", &[(Repr::Int, 3)]).unwrap()),
             3.0
         );
         assert_eq!(
@@ -323,37 +351,46 @@ mod tests {
     fn parsing_an_int_separates_bad_data_from_a_bad_call() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
+        let int = scalar(&program, Repr::Int);
         let parse = |machine: &mut Machine, text: &str| {
             let word = machine.new_string(text).unwrap();
             run(machine, "Int", "parse", &[(Repr::Ref, word)]).unwrap()
         };
-        let word = parse(&mut machine, "-12");
+        // A `Result` is a run of words — `[disc, Int]` — and not an object,
+        // so what the answer is read out of is the words themselves.
+        let words = parse(&mut machine, "-12");
         assert_eq!(
-            case_of(&machine, word),
+            result_of(&program, int, &words),
             ("Ok".to_string(), vec![-12i64 as u64])
         );
         // Rust's `parse` reads no digit separators, which a literal may be
         // written with.
-        let word = parse(&mut machine, "1_000");
-        assert_eq!(message_of(&machine, word), "`1_000` is not an Int");
+        let words = parse(&mut machine, "1_000");
+        assert_eq!(message_of(&machine, int, &words), "`1_000` is not an Int");
 
         let text = machine.new_string("ff").unwrap();
-        let word = run(
+        let words = run(
             &mut machine,
             "Int",
             "parseRadix",
             &[(Repr::Ref, text), (Repr::Int, 16)],
         )
         .unwrap();
-        assert_eq!(case_of(&machine, word), ("Ok".to_string(), vec![255]));
-        let word = run(
+        assert_eq!(
+            result_of(&program, int, &words),
+            ("Ok".to_string(), vec![255])
+        );
+        let words = run(
             &mut machine,
             "Int",
             "parseRadix",
             &[(Repr::Ref, text), (Repr::Int, 10)],
         )
         .unwrap();
-        assert_eq!(message_of(&machine, word), "`ff` is not an Int in radix 10");
+        assert_eq!(
+            message_of(&machine, int, &words),
+            "`ff` is not an Int in radix 10"
+        );
 
         let error = run(
             &mut machine,
@@ -392,14 +429,14 @@ mod tests {
             1.0
         );
 
-        let word = run(
+        let text = word(
             &mut machine,
             "Float",
             "format",
             &[(Repr::Float, 1.5f64.to_bits()), (Repr::Int, 3)],
         )
         .unwrap();
-        assert_eq!(read(&machine, word), "1.500");
+        assert_eq!(read(&machine, text), "1.500");
         let error = run(
             &mut machine,
             "Float",
@@ -416,28 +453,29 @@ mod tests {
     fn to_int_names_each_of_the_three_failures() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
+        let int = scalar(&program, Repr::Int);
         let to_int = |machine: &mut Machine, x: f64| {
             run(machine, "Float", "toInt", &[(Repr::Float, x.to_bits())]).unwrap()
         };
-        let word = to_int(&mut machine, -2.9);
+        let words = to_int(&mut machine, -2.9);
         assert_eq!(
-            case_of(&machine, word),
+            result_of(&program, int, &words),
             ("Ok".to_string(), vec![-2i64 as u64]),
             "truncated toward zero"
         );
-        let word = to_int(&mut machine, f64::NAN);
+        let words = to_int(&mut machine, f64::NAN);
         assert_eq!(
-            message_of(&machine, word),
+            message_of(&machine, int, &words),
             "`Float.toInt` cannot convert `NaN`, which is not a number"
         );
-        let word = to_int(&mut machine, f64::INFINITY);
+        let words = to_int(&mut machine, f64::INFINITY);
         assert_eq!(
-            message_of(&machine, word),
+            message_of(&machine, int, &words),
             "`Float.toInt` cannot convert `inf`, which has no truncation"
         );
-        let word = to_int(&mut machine, 1e30);
+        let words = to_int(&mut machine, 1e30);
         assert_eq!(
-            message_of(&machine, word),
+            message_of(&machine, int, &words),
             "`Float.toInt` cannot convert `1000000000000000000000000000000`, which is outside Int's range"
         );
     }
@@ -446,15 +484,16 @@ mod tests {
     fn parsing_a_float_answers_a_result() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
+        let float = scalar(&program, Repr::Float);
         let text = machine.new_string("1.5").unwrap();
-        let word = run(&mut machine, "Float", "parse", &[(Repr::Ref, text)]).unwrap();
+        let words = run(&mut machine, "Float", "parse", &[(Repr::Ref, text)]).unwrap();
         assert_eq!(
-            case_of(&machine, word),
+            result_of(&program, float, &words),
             ("Ok".to_string(), vec![1.5f64.to_bits()])
         );
         let text = machine.new_string("x").unwrap();
-        let word = run(&mut machine, "Float", "parse", &[(Repr::Ref, text)]).unwrap();
-        assert_eq!(message_of(&machine, word), "`x` is not a Float");
+        let words = run(&mut machine, "Float", "parse", &[(Repr::Ref, text)]).unwrap();
+        assert_eq!(message_of(&machine, float, &words), "`x` is not a Float");
     }
 
     /// The same name reads a duration and builds one, and the operand's
@@ -466,11 +505,11 @@ mod tests {
         let mut machine = Machine::new(&program, 1 << 14);
 
         // The builder: an `Int` count.
-        let built = run(&mut machine, "Duration", "millis", &[(Repr::Int, 1500)]).unwrap();
+        let built = word(&mut machine, "Duration", "millis", &[(Repr::Int, 1500)]).unwrap();
         assert_eq!(built as i64, 1_500_000_000);
         // The reader: a `Duration` receiver, truncating toward zero.
         assert_eq!(
-            run(
+            word(
                 &mut machine,
                 "Duration",
                 "millis",
@@ -480,7 +519,7 @@ mod tests {
             1500
         );
         assert_eq!(
-            run(
+            word(
                 &mut machine,
                 "Duration",
                 "seconds",
@@ -491,7 +530,7 @@ mod tests {
         );
         let negative = (-1_500_000_000i64) as u64;
         assert_eq!(
-            run(
+            word(
                 &mut machine,
                 "Duration",
                 "seconds",
@@ -509,7 +548,7 @@ mod tests {
     fn a_duration_builder_takes_a_negative_count_and_refuses_one_that_does_not_fit() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
-        let built = run(
+        let built = word(
             &mut machine,
             "Duration",
             "hours",

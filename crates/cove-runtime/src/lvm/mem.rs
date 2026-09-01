@@ -29,6 +29,18 @@
 //! reallocate as it grows while every live address stays correct. A growable
 //! stack and a non-moving heap coexist with no fixup pass over anything.
 //!
+//! # A payload is a run of words, like a frame
+//!
+//! A value is one or more consecutive words, and both regions say so the same
+//! way: a frame's value location is a base slot and a layout, and a heap
+//! object's payload is a word array the same kind of layout describes. So a
+//! struct in an array element or a closure environment is inline in that
+//! payload, and the collector walks it with the map it would walk a frame
+//! with. That is why the only thing this module knows about *values* is how
+//! to copy and clear runs of words — [`Memory::copy_words`] is the whole of
+//! ADR 0001's field-wise shallow copy — and why tracing is a walk of static
+//! per-word `Repr`s rather than a question asked of each object.
+//!
 //! # Why the collector does not move objects
 //!
 //! An assignable expression lowers to a `Repr::Addr` word holding the address
@@ -80,8 +92,9 @@ pub(crate) fn is_stack(addr: u64) -> bool {
 /// The header word of an object of `layout` whose length field is `len`.
 ///
 /// `len` means whatever the layout says it means — a byte count for a string,
-/// an element count for an array, nothing at all for a struct. The header
-/// carries it rather than the payload word count because
+/// an *element* count for an array or a set whatever an element's width is,
+/// the width of what it holds for a box, and nothing at all for a struct. The
+/// header carries it rather than the payload word count because
 /// [`Layout::payload_words`] can always recover the second from the first, and
 /// the first is what a program asks for.
 #[inline]
@@ -206,6 +219,114 @@ impl Memory {
             self.stack[addr as usize] = word;
         } else {
             self.heap[(addr - STACK_WORDS) as usize] = word;
+        }
+    }
+
+    /// Copies `words` words from `src` to `dst`, in whichever regions they
+    /// name.
+    ///
+    /// This is the whole of ADR 0001's field-wise shallow copy. A value is a
+    /// run of words where the value is, so copying one is copying its words:
+    /// a `Wrapper { p: Point, v: Vector }` is three, the `Point` becomes
+    /// independent because its two words were copied, and the `Vector` stays
+    /// shared because what was copied is its address. Neither answer needed a
+    /// policy, a sharing bit or a copy-on-write protocol, and there is none
+    /// here to keep in step.
+    ///
+    /// A copy within one region is a `memmove`, so a run may overlap itself —
+    /// which a copy between two slots of one frame can, and which a lowering
+    /// is free to emit rather than having to prove it does not.
+    pub(crate) fn copy_words(&mut self, dst: u64, src: u64, words: u32) {
+        if words == 0 || dst == src {
+            return;
+        }
+        debug_assert!(
+            self.holds(dst, words) && self.holds(src, words),
+            "a {words}-word copy between {src} and {dst} leaves the words that exist"
+        );
+        let n = words as usize;
+        match (is_stack(dst), is_stack(src)) {
+            (true, true) => {
+                let (d, s) = (dst as usize, src as usize);
+                self.stack.copy_within(s..s + n, d);
+            }
+            (false, false) => {
+                let (d, s) = ((dst - STACK_WORDS) as usize, (src - STACK_WORDS) as usize);
+                self.heap.copy_within(s..s + n, d);
+            }
+            (true, false) => {
+                let (d, s) = (dst as usize, (src - STACK_WORDS) as usize);
+                self.stack[d..d + n].copy_from_slice(&self.heap[s..s + n]);
+            }
+            (false, true) => {
+                let (d, s) = ((dst - STACK_WORDS) as usize, src as usize);
+                self.heap[d..d + n].copy_from_slice(&self.stack[s..s + n]);
+            }
+        }
+    }
+
+    /// Zeroes `words` words at `addr`.
+    ///
+    /// What `Clear` writes over a value location whose value is dead, and
+    /// what an enum's construction writes over the payload words its case
+    /// does not fill. Both exist so that a static reference map reads null
+    /// rather than a stale address: the map says which words the collector
+    /// *reads*, and only the data can say when what was in one stopped being
+    /// needed.
+    pub(crate) fn clear_words(&mut self, addr: u64, words: u32) {
+        if words == 0 {
+            return;
+        }
+        debug_assert!(
+            self.holds(addr, words),
+            "a {words}-word clear at {addr} leaves the words that exist"
+        );
+        let n = words as usize;
+        if is_stack(addr) {
+            let at = addr as usize;
+            self.stack[at..at + n].fill(0);
+        } else {
+            let at = (addr - STACK_WORDS) as usize;
+            self.heap[at..at + n].fill(0);
+        }
+    }
+
+    /// The `words` words at `addr`, copied out.
+    ///
+    /// The one reader is the boundary, which materialises a value location
+    /// into a public `Value` and needs the run of words rather than one of
+    /// them. Nothing in ordinary execution calls it: a copy inside the
+    /// machine is [`Memory::copy_words`], which never leaves the memory.
+    pub(crate) fn read_words(&self, addr: u64, words: u32) -> Vec<u64> {
+        debug_assert!(
+            self.holds(addr, words),
+            "a {words}-word read at {addr} leaves the words that exist"
+        );
+        let n = words as usize;
+        if is_stack(addr) {
+            let at = addr as usize;
+            self.stack[at..at + n].to_vec()
+        } else {
+            let at = (addr - STACK_WORDS) as usize;
+            self.heap[at..at + n].to_vec()
+        }
+    }
+
+    /// Whether the run of `words` words at `addr` is inside its region.
+    ///
+    /// A `debug_assert` rather than a check, because what makes it true is
+    /// static: the verifier holds every instruction to the frame it names its
+    /// slots in, and every offset into an object to that object's payload. A
+    /// run that leaves its region is therefore a lowering bug, and this is
+    /// here so that it is reported as one rather than as a slice index — the
+    /// dangerous case is not the panic but the one where the stack happens to
+    /// be long enough and the copy silently reads the frame above.
+    fn holds(&self, addr: u64, words: u32) -> bool {
+        let end = addr + words as u64;
+        if is_stack(addr) {
+            end <= self.stack.len() as u64
+        } else {
+            end <= STACK_WORDS + self.heap.len() as u64
         }
     }
 
@@ -412,7 +533,7 @@ impl Memory {
         if layout == LayoutId::FREE {
             return 1 + len as u64;
         }
-        1 + layouts[layout.index()].payload_words(len) as u64
+        1 + layouts[layout.index()].payload_words(len, layouts) as u64
     }
 
     /// Words the heap region currently occupies, free blocks included.
@@ -469,90 +590,98 @@ impl Memory {
 
     /// Marks and enqueues every object the object at `addr` refers to.
     ///
-    /// What an object refers to is answered by its layout *and* by its own
-    /// words, and both are needed. An enum is sized for its widest case, so
-    /// which of its payload words are references depends on the case it is in —
-    /// a fact about this object, at this moment, which only the object can
-    /// answer. A boxed value is the same question one level down: the tag it
-    /// carries is what says whether the word beside it is a reference. Tracing
-    /// by layout alone would retain whatever a payload-less case happened to
-    /// leave behind, and treating a boxed `Int` as an address would be worse
-    /// than a leak.
+    /// What an object refers to is a question its *layout* answers, and — for
+    /// one shape — one word of the object itself. That is new, and it is the
+    /// simplification the run-of-words model bought: an enum's payload region
+    /// has a static per-word reference map, because the lowering assigns case
+    /// offsets so that every case using a word agrees on its `Repr`. Nothing
+    /// here reads a discriminant to decide what to trace, and a payload-less
+    /// case cannot retain what another case left in a word it does not use,
+    /// because construction zeroes the region it does not fill.
+    ///
+    /// So a payload is walked by flattened per-word `Repr`s, and every shape
+    /// says where its runs of them are. The one object that still has to be
+    /// read is a box: erasure is where a value stops having a static width,
+    /// so the box carries the layout of what it holds in its first payload
+    /// word, and that is the word this asks for.
     fn trace(&mut self, layouts: &[Layout], addr: u64, work: &mut Vec<u64>) {
         let layout = &layouts[self.object_layout(addr).index()];
         // The one question that can be answered without reading the object at
         // all. A string, an `Array<Int>` and a scalar struct leave here having
         // cost a table lookup.
-        if !layout.may_hold_refs() {
+        if !layout.may_hold_refs(layouts) {
             return;
         }
+        let len = self.object_len(addr);
         match &layout.shape {
             Shape::Free | Shape::Str => {}
-            Shape::Struct { fields, .. } => {
-                for (at, field) in fields.iter().enumerate() {
-                    if field.repr.is_ref() {
-                        self.enqueue(self.payload(addr, at as u32), work);
-                    }
-                }
+            // A scalar, a struct or an enum in the heap is a value whose
+            // payload *is* the value, laid out exactly as it would be in a
+            // frame. `Layout::payload_words` answers the same width for the
+            // same reason, and this is the other half of that agreement.
+            Shape::Word(_) | Shape::Struct { .. } | Shape::Enum { .. } => {
+                self.trace_run(addr, 0, &layout.words, work)
             }
-            Shape::Enum { cases } => {
-                let case = self.payload(addr, 0);
-                // A case index the table does not have is a lowering bug, and a
-                // collection is the worst place to discover one by unwinding.
-                // Tracing nothing is the safe reading: it can only fail by
-                // freeing something, which the differential corpus catches, and
-                // it cannot corrupt the heap the way marking an arbitrary word
-                // would.
-                if let Some(case) = cases.get(case as usize) {
-                    for (at, repr) in case.payload.iter().enumerate() {
-                        if repr.is_ref() {
-                            self.enqueue(self.payload(addr, 1 + at as u32), work);
-                        }
-                    }
-                }
-            }
-            Shape::Elements { elem, .. } => {
-                if elem.is_ref() {
-                    for at in 0..self.object_len(addr) {
-                        self.enqueue(self.payload(addr, at), work);
-                    }
+            // The stride is the element's width, so an `Array<Point>` is a
+            // run of two-word elements rather than a run of addresses, and a
+            // `Set` of them is the same run kept sorted.
+            Shape::Elements { elem, .. } | Shape::Members { elem } => {
+                let elem = &layouts[elem.index()];
+                let stride = elem.width();
+                for at in 0..len {
+                    self.trace_run(addr, at * stride, &elem.words, work);
                 }
             }
             // Word 0 is the length and word 1 is the store, whose own layout
             // says what its elements are. A vector's header is a leaf apart
             // from the one reference that makes it growable.
             Shape::Vector { .. } => self.enqueue(self.payload(addr, 1), work),
-            Shape::Members { elem } => {
-                if elem.is_ref() {
-                    for at in 0..self.object_len(addr) {
-                        self.enqueue(self.payload(addr, at), work);
-                    }
-                }
-            }
-            // Two words an entry, key then value, and each is traced only if
-            // its own `Repr` says so: a `Map<String, Int>` scans half its
-            // words and a `Map<Int, Int>` none of them.
+            // Key then value, each at its own width: a `Map<String, Point>`
+            // is a run of three-word entries and only the first is traced.
             Shape::Entries { key, value } => {
-                for at in 0..self.object_len(addr) {
-                    if key.is_ref() {
-                        self.enqueue(self.payload(addr, at * 2), work);
-                    }
-                    if value.is_ref() {
-                        self.enqueue(self.payload(addr, at * 2 + 1), work);
-                    }
+                let (key, value) = (&layouts[key.index()], &layouts[value.index()]);
+                let stride = key.width() + value.width();
+                for at in 0..len {
+                    self.trace_run(addr, at * stride, &key.words, work);
+                    self.trace_run(addr, at * stride + key.width(), &value.words, work);
                 }
             }
+            // Word 0 is the callee. The captures follow it, each inline under
+            // its own layout, which is how a captured struct is stored where
+            // the capture is rather than behind another address.
             Shape::Closure { captures, .. } => {
-                for (at, repr) in captures.iter().enumerate() {
-                    if repr.is_ref() {
-                        self.enqueue(self.payload(addr, 1 + at as u32), work);
-                    }
+                let mut at = 1;
+                for id in captures {
+                    let capture = &layouts[id.index()];
+                    self.trace_run(addr, at, &capture.words, work);
+                    at += capture.width();
                 }
             }
+            // The only object whose own words say what the rest of them mean.
+            // A layout the table does not have is a lowering bug, and a
+            // collection is the worst place to discover one by unwinding, so
+            // nothing is traced — which can only fail by freeing something,
+            // and the differential corpus is what catches that.
             Shape::Boxed => {
-                if Repr::from_tag(self.payload(addr, 0)) == Some(Repr::Ref) {
-                    self.enqueue(self.payload(addr, 1), work);
+                let held = LayoutId(self.payload(addr, 0) as u32);
+                if let Some(held) = layouts.get(held.index()) {
+                    self.trace_run(addr, 1, &held.words, work);
                 }
+            }
+        }
+    }
+
+    /// Enqueues every reference in the run of `words` beginning at payload
+    /// word `at`.
+    ///
+    /// The one operation every shape above is written in terms of, because
+    /// under this model every one of them is a run of words with a static
+    /// per-word map — a frame's, an array element's and a capture's are the
+    /// same function of the same kind of layout.
+    fn trace_run(&mut self, addr: u64, at: u32, words: &[Repr], work: &mut Vec<u64>) {
+        for (offset, repr) in words.iter().enumerate() {
+            if repr.is_ref() {
+                self.enqueue(self.payload(addr, at + offset as u32), work);
             }
         }
     }
@@ -665,46 +794,95 @@ mod tests {
         }
     }
 
-    fn layout(name: &str, shape: Shape) -> Layout {
-        Layout {
-            name: Arc::from(name),
-            shape,
+    /// A table whose index 0 is the reserved free layout, as a program's is,
+    /// and whose next three are the scalars every fixture below builds on.
+    ///
+    /// A layout table is now what every width, offset and reference map is
+    /// read out of, so a fixture builds one rather than writing `Repr`s at
+    /// each use — which is also what stops a test from agreeing with a
+    /// machine that had a width wrong.
+    struct Table(Vec<Layout>);
+
+    const INT: LayoutId = LayoutId(1);
+    const REF: LayoutId = LayoutId(2);
+    const FLOAT: LayoutId = LayoutId(3);
+
+    impl Table {
+        fn new() -> Table {
+            Table(vec![
+                Layout::free(),
+                Layout::word("Int", Repr::Int),
+                Layout::word("String", Repr::Ref),
+                Layout::word("Float", Repr::Float),
+            ])
+        }
+
+        /// An inline family, whose words are the concatenation of its parts'.
+        fn inline(&mut self, name: &str, shape: Shape, words: Vec<Repr>) -> LayoutId {
+            self.0.push(Layout::inline(name, shape, words));
+            LayoutId(self.0.len() as u32 - 1)
+        }
+
+        /// A family that lives in the heap, so a value of it is one address.
+        fn object(&mut self, name: &str, shape: Shape) -> LayoutId {
+            self.0.push(Layout::object(name, shape));
+            LayoutId(self.0.len() as u32 - 1)
+        }
+
+        /// A struct of these fields, laid out inline.
+        fn structure(&mut self, name: &str, fields: &[(&str, LayoutId)]) -> LayoutId {
+            let named: Vec<(Arc<str>, LayoutId)> = fields
+                .iter()
+                .map(|(name, id)| (Arc::from(*name), *id))
+                .collect();
+            let (fields, words) = cove_lir::struct_layout(&named, &self.0);
+            self.inline(
+                name,
+                Shape::Struct {
+                    fields,
+                    opaque: false,
+                },
+                words,
+            )
+        }
+
+        /// An enum of these cases, under the payload-agreement rule.
+        fn enumeration(&mut self, name: &str, cases: &[(&str, Vec<LayoutId>)]) -> LayoutId {
+            let named: Vec<(Arc<str>, Vec<LayoutId>)> = cases
+                .iter()
+                .map(|(name, parts)| (Arc::from(*name), parts.clone()))
+                .collect();
+            let (cases, payload) = cove_lir::enum_layout(&named, &self.0);
+            let mut words = vec![Repr::Int];
+            words.extend_from_slice(&payload);
+            self.inline(name, Shape::Enum { cases, payload }, words)
+        }
+
+        fn layouts(&self) -> &[Layout] {
+            &self.0
+        }
+
+        fn payload_words(&self, id: LayoutId, len: u32) -> u32 {
+            self.0[id.index()].payload_words(len, &self.0)
         }
     }
 
-    fn field(name: &str, repr: Repr) -> cove_lir::Field {
-        cove_lir::Field {
-            name: Arc::from(name),
-            repr,
-        }
+    /// A leaf: an array of integers, which nothing traces into.
+    fn leaf(table: &mut Table) -> LayoutId {
+        table.object(
+            "Array",
+            Shape::Elements {
+                elem: INT,
+                growable: false,
+            },
+        )
     }
 
-    /// A table whose index 0 is the reserved free layout, as a program's is.
-    fn table(shapes: Vec<Shape>) -> Vec<Layout> {
-        let mut layouts = vec![Layout::free()];
-        layouts.extend(shapes.into_iter().map(|shape| layout("test", shape)));
-        layouts
-    }
-
-    /// `LayoutId` of the `n`th shape passed to [`table`].
-    fn id(n: u32) -> LayoutId {
-        LayoutId(n + 1)
-    }
-
-    /// A leaf: two words of nothing anybody points at.
-    fn leaf() -> Shape {
-        Shape::Elements {
-            elem: Repr::Int,
-            growable: false,
-        }
-    }
-
-    /// A one-word box holding one reference.
-    fn holder() -> Shape {
-        Shape::Struct {
-            fields: vec![field("it", Repr::Ref)],
-            opaque: false,
-        }
+    /// Allocates an object of `id` with header length `len`, sized the way
+    /// the machine sizes one.
+    fn alloc(mem: &mut Memory, table: &Table, id: LayoutId, len: u32) -> u64 {
+        let words = table.payload_words(id, len);
+        mem.alloc(id, len, words).expect("the fixture has room")
     }
 
     #[test]
@@ -748,9 +926,11 @@ mod tests {
 
     #[test]
     fn an_address_reads_the_same_way_in_either_region() {
+        let mut table = Table::new();
+        let array = leaf(&mut table);
         let mut mem = Memory::new(16);
         let base = mem.push_frame(2).unwrap();
-        let object = mem.alloc(id(0), 2, 2).unwrap();
+        let object = alloc(&mut mem, &table, array, 2);
 
         let local = base + 1;
         let element = mem.payload_addr(object, 1);
@@ -767,13 +947,87 @@ mod tests {
         assert_eq!(mem.payload(object, 1), 9);
     }
 
+    /// The copy ADR 0001 asks for, in the two regions and between them.
+    ///
+    /// A `Wrapper { p: Point, v: Vector }` is three words. Copying it copies
+    /// all three: the two `Point` words become independent of the source and
+    /// the `Vector` address is duplicated, so both wrappers name one vector.
+    /// Nothing decided which of the two happened — one word-range copy did
+    /// both, which is the whole of what replaced the sharing bit.
+    #[test]
+    fn a_copy_is_a_run_of_words_wherever_it_goes() {
+        let mut table = Table::new();
+        let array = leaf(&mut table);
+        let mut mem = Memory::new(64);
+        let base = mem.push_frame(8).unwrap();
+        let object = alloc(&mut mem, &table, array, 3);
+
+        // `a` at slots 0..3: two `Point` words and a `Vector` address.
+        for (slot, word) in [(0, 1), (1, 2), (2, object)] {
+            mem.set_slot(base, slot, word);
+        }
+        mem.copy_words(base + 3, base, 3);
+        assert_eq!(
+            (0..6).map(|s| mem.slot(base, s)).collect::<Vec<_>>(),
+            vec![1, 2, object, 1, 2, object]
+        );
+
+        // Writing through the copy leaves the source alone: `b.x = 7` is one
+        // word of `b`, and `a.x` is a different word.
+        mem.set_slot(base, 3, 7);
+        assert_eq!(mem.slot(base, 0), 1);
+
+        // Out to a heap payload and back, which is the same operation: a
+        // struct in an array element is inline in that payload.
+        mem.copy_words(mem.payload_addr(object, 0), base + 3, 3);
+        assert_eq!(mem.payload(object, 0), 7);
+        assert_eq!(mem.payload(object, 2), object);
+        mem.copy_words(base + 6, mem.payload_addr(object, 0), 2);
+        assert_eq!(mem.slot(base, 6), 7);
+        assert_eq!(mem.slot(base, 7), 2);
+    }
+
+    /// A copy within one region is a `memmove`, so a lowering may emit one
+    /// whose source and destination overlap rather than having to prove they
+    /// do not.
+    #[test]
+    fn an_overlapping_copy_moves_rather_than_smears() {
+        let mut mem = Memory::new(16);
+        let base = mem.push_frame(5).unwrap();
+        for slot in 0..5 {
+            mem.set_slot(base, slot, slot as u64 + 1);
+        }
+        mem.copy_words(base + 1, base, 4);
+        assert_eq!(
+            (0..5).map(|s| mem.slot(base, s)).collect::<Vec<_>>(),
+            vec![1, 1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn clearing_zeroes_the_words_a_layout_names() {
+        let mut mem = Memory::new(16);
+        let base = mem.push_frame(4).unwrap();
+        for slot in 0..4 {
+            mem.set_slot(base, slot, 0xfeed);
+        }
+        mem.clear_words(base + 1, 2);
+        assert_eq!(
+            (0..4).map(|s| mem.slot(base, s)).collect::<Vec<_>>(),
+            vec![0xfeed, 0, 0, 0xfeed]
+        );
+        assert_eq!(mem.read_words(base, 4), vec![0xfeed, 0, 0, 0xfeed]);
+    }
+
     #[test]
     fn an_object_round_trips_its_header_and_payload() {
+        let mut table = Table::new();
+        let text = table.object("String", Shape::Str);
         let mut mem = Memory::new(16);
-        let object = mem.alloc(id(2), 13, 3).unwrap();
+        let object = alloc(&mut mem, &table, text, 24);
         assert_eq!(object, STACK_WORDS);
-        assert_eq!(mem.object_layout(object), id(2));
-        assert_eq!(mem.object_len(object), 13);
+        assert_eq!(mem.object_layout(object), text);
+        assert_eq!(mem.object_len(object), 24);
         // The payload is zero before anything writes it.
         assert_eq!(mem.payload(object, 0), 0);
         mem.set_payload(object, 2, u64::MAX);
@@ -787,29 +1041,30 @@ mod tests {
     #[test]
     fn allocation_stops_at_the_budget() {
         let mut mem = Memory::new(4);
-        assert!(mem.alloc(id(0), 2, 2).is_some());
+        assert!(mem.alloc(LayoutId(1), 2, 2).is_some());
         // One word left, and the smallest object is two.
-        assert_eq!(mem.alloc(id(0), 1, 1), None);
-        assert_eq!(mem.alloc(id(0), 0, 0), Some(STACK_WORDS + 3));
-        assert_eq!(mem.alloc(id(0), 0, 0), None);
+        assert_eq!(mem.alloc(LayoutId(1), 1, 1), None);
+        assert_eq!(mem.alloc(LayoutId(1), 0, 0), Some(STACK_WORDS + 3));
+        assert_eq!(mem.alloc(LayoutId(1), 0, 0), None);
         assert_eq!(mem.heap_words(), 4);
     }
 
     #[test]
     fn a_collection_frees_what_no_root_reaches() {
-        let layouts = table(vec![leaf()]);
+        let mut table = Table::new();
+        let array = leaf(&mut table);
         let mut mem = Memory::new(64);
-        let kept = mem.alloc(id(0), 2, 2).unwrap();
-        let lost = mem.alloc(id(0), 2, 2).unwrap();
+        let kept = alloc(&mut mem, &table, array, 2);
+        let lost = alloc(&mut mem, &table, array, 2);
         mem.set_payload(kept, 0, 41);
         mem.set_payload(lost, 0, 42);
 
-        let done = mem.collect(&layouts, &Held(vec![kept]));
+        let done = mem.collect(table.layouts(), &Held(vec![kept]));
         assert_eq!(done.live_words, 3);
         assert_eq!(done.freed_words, 3);
         assert_eq!(done.collections, 1);
         // Non-moving: the survivor is where it was, with what it held.
-        assert_eq!(mem.object_layout(kept), id(0));
+        assert_eq!(mem.object_layout(kept), array);
         assert_eq!(mem.payload(kept, 0), 41);
         // The reclaimed run is a walkable free block.
         assert_eq!(mem.free, vec![lost]);
@@ -819,17 +1074,18 @@ mod tests {
 
     #[test]
     fn a_freed_block_is_handed_out_again() {
-        let layouts = table(vec![leaf()]);
+        let mut table = Table::new();
+        let array = leaf(&mut table);
         let mut mem = Memory::new(3);
-        let first = mem.alloc(id(0), 2, 2).unwrap();
-        assert_eq!(mem.alloc(id(0), 2, 2), None);
+        let first = alloc(&mut mem, &table, array, 2);
+        assert_eq!(mem.alloc(array, 2, 2), None);
 
         mem.set_payload(first, 1, 0xfeed);
-        mem.collect(&layouts, &Held(vec![]));
+        mem.collect(table.layouts(), &Held(vec![]));
 
         // The retry the `None` above is an invitation to. The block comes back
         // zeroed, because a `Ref` field of the new object must read as null.
-        let second = mem.alloc(id(0), 2, 2).unwrap();
+        let second = alloc(&mut mem, &table, array, 2);
         assert_eq!(second, first);
         assert_eq!(mem.payload(second, 1), 0);
         assert!(mem.free.is_empty());
@@ -837,12 +1093,13 @@ mod tests {
 
     #[test]
     fn a_split_leaves_a_free_block_behind() {
-        let layouts = table(vec![leaf()]);
+        let mut table = Table::new();
+        let array = leaf(&mut table);
         let mut mem = Memory::new(8);
-        let big = mem.alloc(id(0), 4, 4).unwrap();
-        mem.collect(&layouts, &Held(vec![]));
+        let big = alloc(&mut mem, &table, array, 4);
+        mem.collect(table.layouts(), &Held(vec![]));
 
-        let small = mem.alloc(id(0), 1, 1).unwrap();
+        let small = alloc(&mut mem, &table, array, 1);
         assert_eq!(small, big);
         // Three words remain, described by a header of their own so the sweeper
         // can still walk over them.
@@ -853,84 +1110,202 @@ mod tests {
 
     #[test]
     fn adjacent_free_blocks_coalesce() {
-        let layouts = table(vec![leaf()]);
+        let mut table = Table::new();
+        let array = leaf(&mut table);
         let mut mem = Memory::new(64);
-        let a = mem.alloc(id(0), 1, 1).unwrap();
-        let _b = mem.alloc(id(0), 2, 2).unwrap();
-        let _c = mem.alloc(id(0), 1, 1).unwrap();
-        let kept = mem.alloc(id(0), 1, 1).unwrap();
+        let a = alloc(&mut mem, &table, array, 1);
+        let _b = alloc(&mut mem, &table, array, 2);
+        let _c = alloc(&mut mem, &table, array, 1);
+        let kept = alloc(&mut mem, &table, array, 1);
 
-        mem.collect(&layouts, &Held(vec![kept]));
+        mem.collect(table.layouts(), &Held(vec![kept]));
 
         // Three dead objects, one block: 2 + 3 + 2 words, and a request no one
         // of them could have satisfied now fits.
         assert_eq!(mem.free, vec![a]);
         assert_eq!(mem.block_words(a), 7);
-        assert_eq!(mem.alloc(id(0), 6, 6).unwrap(), a);
+        assert_eq!(alloc(&mut mem, &table, array, 6), a);
     }
 
+    /// The simplification the run-of-words model bought the collector.
+    ///
+    /// An enum's payload words have one static map, because the lowering
+    /// assigns case offsets so that every case using a word agrees on its
+    /// `Repr`. So nothing reads the discriminant: `None` and `Some` are
+    /// traced by the same map, and what keeps a `None` from retaining what a
+    /// `Some` left behind is that constructing a case zeroes the region it
+    /// does not fill — a fact about the data rather than a question at
+    /// collection time.
     #[test]
-    fn an_enum_is_traced_by_the_case_it_is_in() {
-        // `Option<T>`: two payload words, one for the case index and one sized
-        // for `Some`, which `None` leaves unused.
-        let option = Shape::Enum {
-            cases: vec![
-                cove_lir::Case {
-                    name: Arc::from("None"),
-                    payload: vec![],
-                },
-                cove_lir::Case {
-                    name: Arc::from("Some"),
-                    payload: vec![Repr::Ref],
-                },
-            ],
-        };
-        let layouts = table(vec![option, leaf()]);
+    fn an_enums_payload_is_traced_by_a_static_map() {
+        let mut table = Table::new();
+        let array = leaf(&mut table);
+        // `enum E { A(Int, String), B(Float) }`: `[disc, Int, Ref, Float]`.
+        let e = table.enumeration("E", &[("A", vec![INT, REF]), ("B", vec![FLOAT])]);
+        assert_eq!(
+            table.layouts()[e.index()].words,
+            vec![Repr::Int, Repr::Int, Repr::Ref, Repr::Float]
+        );
 
-        for (case, live) in [(0, false), (1, true)] {
+        // A boxed `E`, so that there is an object to trace: word 2 of the
+        // payload is the reference whichever case the value is in.
+        for (case, live) in [(0u64, true), (1, false)] {
             let mut mem = Memory::new(64);
-            let target = mem.alloc(id(1), 1, 1).unwrap();
-            let opt = mem.alloc(id(0), 0, 2).unwrap();
-            mem.set_payload(opt, 0, case);
-            // The word `Some` would use, left behind in both runs. In `None` it
-            // is not a reference — the case says so — and the object it names
-            // must not be retained by it.
-            mem.set_payload(opt, 1, target);
+            let target = alloc(&mut mem, &table, array, 1);
+            let held = alloc(&mut mem, &table, e, 0);
+            mem.set_payload(held, 0, case);
+            if live {
+                mem.set_payload(held, 2, target);
+            }
 
-            let done = mem.collect(&layouts, &Held(vec![opt]));
+            let done = mem.collect(table.layouts(), &Held(vec![held]));
             assert_eq!(mem.object_layout(target) != LayoutId::FREE, live);
             assert_eq!(done.freed_words, if live { 0 } else { 2 });
         }
     }
 
+    /// An `Array<Point>` is a run of two-word elements, not a run of
+    /// addresses, and a `Set` of them is the same run kept sorted. The
+    /// collector walks each element's own map at the element's stride.
     #[test]
-    fn a_boxed_word_is_a_reference_only_when_its_tag_says_so() {
-        let layouts = table(vec![Shape::Boxed, leaf()]);
+    fn a_run_of_multiword_elements_is_walked_at_its_stride() {
+        let mut table = Table::new();
+        let array = leaf(&mut table);
+        // `struct Tagged { name: String, count: Int }`: `[Ref, Int]`.
+        let tagged = table.structure("Tagged", &[("name", REF), ("count", INT)]);
+        let of_tagged = table.object(
+            "Array",
+            Shape::Elements {
+                elem: tagged,
+                growable: false,
+            },
+        );
+        assert_eq!(table.payload_words(of_tagged, 3), 6);
 
-        for repr in [Repr::Int, Repr::Ref] {
+        let mut mem = Memory::new(64);
+        let first = alloc(&mut mem, &table, array, 1);
+        let second = alloc(&mut mem, &table, array, 1);
+        let lost = alloc(&mut mem, &table, array, 1);
+        let items = alloc(&mut mem, &table, of_tagged, 3);
+        // Element 0's name, element 2's name, and the counts in between —
+        // which are the words a stride of one would have followed.
+        mem.set_payload(items, 0, first);
+        mem.set_payload(items, 1, lost);
+        mem.set_payload(items, 4, second);
+        mem.set_payload(items, 5, lost);
+
+        mem.collect(table.layouts(), &Held(vec![items]));
+        assert_ne!(mem.object_layout(first), LayoutId::FREE);
+        assert_ne!(mem.object_layout(second), LayoutId::FREE);
+        assert_eq!(
+            mem.object_layout(lost),
+            LayoutId::FREE,
+            "a count is an `Int` however plausible an address it holds"
+        );
+    }
+
+    /// A box holds a `LayoutId` and then the value's words, so a boxed
+    /// multiword value is that value inline rather than a reference to
+    /// somewhere else again.
+    #[test]
+    fn a_box_is_traced_by_the_layout_it_names() {
+        let mut table = Table::new();
+        let array = leaf(&mut table);
+        let tagged = table.structure("Tagged", &[("name", REF), ("count", INT)]);
+        let boxed = table.object("Any", Shape::Boxed);
+        assert_eq!(table.payload_words(boxed, 2), 3);
+
+        for held in [tagged, INT] {
             let mut mem = Memory::new(64);
-            let target = mem.alloc(id(1), 1, 1).unwrap();
-            let boxed = mem.alloc(id(0), 0, 2).unwrap();
-            mem.set_payload(boxed, 0, repr.tag());
-            mem.set_payload(boxed, 1, target);
+            let target = alloc(&mut mem, &table, array, 1);
+            let width = table.layouts()[held.index()].width();
+            let object = alloc(&mut mem, &table, boxed, width);
+            mem.set_payload(object, 0, held.0 as u64);
+            mem.set_payload(object, 1, target);
 
-            mem.collect(&layouts, &Held(vec![boxed]));
-            // The same bits under two tags. An `Int` that happens to equal an
-            // address is not one, and the box is the only thing that knows.
-            assert_eq!(
-                mem.object_layout(target) != LayoutId::FREE,
-                repr == Repr::Ref
-            );
+            mem.collect(table.layouts(), &Held(vec![object]));
+            // The same bits under two layouts. An `Int` that happens to equal
+            // an address is not one, and the box is the only thing that knows.
+            assert_eq!(mem.object_layout(target) != LayoutId::FREE, held == tagged);
         }
+    }
+
+    /// A closure's captures are inline in its environment, each at its own
+    /// width, which is what "a struct inside a closure environment is laid
+    /// out the way a struct in a frame is" means when the collector reads it.
+    #[test]
+    fn a_closures_captures_are_walked_inline() {
+        let mut table = Table::new();
+        let array = leaf(&mut table);
+        let tagged = table.structure("Tagged", &[("name", REF), ("count", INT)]);
+        let closure = table.object(
+            "closure",
+            Shape::Closure {
+                function: cove_lir::FunctionId(0),
+                captures: vec![INT, tagged, REF],
+            },
+        );
+        assert_eq!(table.payload_words(closure, 0), 5);
+
+        let mut mem = Memory::new(64);
+        let name = alloc(&mut mem, &table, array, 1);
+        let last = alloc(&mut mem, &table, array, 1);
+        let lost = alloc(&mut mem, &table, array, 1);
+        let object = alloc(&mut mem, &table, closure, 0);
+        // Payload: [callee, Int, Ref, Int, Ref].
+        mem.set_payload(object, 1, lost);
+        mem.set_payload(object, 2, name);
+        mem.set_payload(object, 3, lost);
+        mem.set_payload(object, 4, last);
+
+        mem.collect(table.layouts(), &Held(vec![object]));
+        assert_ne!(mem.object_layout(name), LayoutId::FREE);
+        assert_ne!(mem.object_layout(last), LayoutId::FREE);
+        assert_eq!(mem.object_layout(lost), LayoutId::FREE);
+    }
+
+    /// A `Map<String, Point>` is a run of three-word entries and only the
+    /// first word of each is a root.
+    #[test]
+    fn a_maps_entries_are_walked_key_then_value() {
+        let mut table = Table::new();
+        let array = leaf(&mut table);
+        let point = table.structure("Point", &[("x", INT), ("y", INT)]);
+        let map = table.object(
+            "Map",
+            Shape::Entries {
+                key: REF,
+                value: point,
+            },
+        );
+        assert_eq!(table.payload_words(map, 2), 6);
+
+        let mut mem = Memory::new(64);
+        let key = alloc(&mut mem, &table, array, 1);
+        let lost = alloc(&mut mem, &table, array, 1);
+        let entries = alloc(&mut mem, &table, map, 2);
+        // Entry 0 is `[key, x, y]` and entry 1 is `[key, x, y]`, so words 1
+        // and 2 are a `Point`'s and nothing follows them however plausible an
+        // address they hold.
+        mem.set_payload(entries, 0, key);
+        mem.set_payload(entries, 1, lost);
+        mem.set_payload(entries, 2, lost);
+        mem.set_payload(entries, 4, lost);
+
+        mem.collect(table.layouts(), &Held(vec![entries]));
+        assert_ne!(mem.object_layout(key), LayoutId::FREE);
+        assert_eq!(mem.object_layout(lost), LayoutId::FREE);
     }
 
     #[test]
     fn an_interior_address_survives_a_collection() {
-        let layouts = table(vec![holder(), leaf()]);
+        let mut table = Table::new();
+        let array = leaf(&mut table);
+        let holder = table.structure("Holder", &[("it", REF)]);
         let mut mem = Memory::new(64);
-        let target = mem.alloc(id(1), 3, 3).unwrap();
-        let base = mem.alloc(id(0), 0, 1).unwrap();
-        let _garbage = mem.alloc(id(1), 3, 3).unwrap();
+        let target = alloc(&mut mem, &table, array, 3);
+        let base = alloc(&mut mem, &table, holder, 0);
+        let _garbage = alloc(&mut mem, &table, array, 3);
         mem.set_payload(base, 0, target);
 
         // What a `var` argument naming an element carries: the address of one
@@ -940,57 +1315,60 @@ mod tests {
         let element = mem.payload_addr(target, 1);
         mem.write(element, 0xc0ffee);
 
-        let done = mem.collect(&layouts, &Held(vec![base]));
+        let done = mem.collect(table.layouts(), &Held(vec![base]));
         assert_eq!(done.freed_words, 4);
         assert_eq!(mem.read(element), 0xc0ffee);
         assert_eq!(mem.payload(target, 1), 0xc0ffee);
-        assert_eq!(mem.object_layout(target), id(1));
+        assert_eq!(mem.object_layout(target), array);
     }
 
     #[test]
     fn a_deep_graph_does_not_recurse() {
         // A linked list is an ordinary value. Marking it must cost heap, not
         // Rust stack.
-        let layouts = table(vec![holder()]);
+        let mut table = Table::new();
+        let holder = table.structure("Node", &[("next", REF)]);
         let mut mem = Memory::new(1 << 20);
-        let head = mem.alloc(id(0), 0, 1).unwrap();
+        let head = alloc(&mut mem, &table, holder, 0);
         let mut tail = head;
         for _ in 0..200_000 {
-            let next = mem.alloc(id(0), 0, 1).unwrap();
+            let next = alloc(&mut mem, &table, holder, 0);
             mem.set_payload(tail, 0, next);
             tail = next;
         }
 
-        let done = mem.collect(&layouts, &Held(vec![head]));
+        let done = mem.collect(table.layouts(), &Held(vec![head]));
         assert_eq!(done.live_words, 200_001 * 2);
         assert_eq!(done.freed_words, 0);
     }
 
     #[test]
     fn a_cycle_is_marked_once() {
-        let layouts = table(vec![holder()]);
+        let mut table = Table::new();
+        let holder = table.structure("Node", &[("next", REF)]);
         let mut mem = Memory::new(64);
-        let a = mem.alloc(id(0), 0, 1).unwrap();
-        let b = mem.alloc(id(0), 0, 1).unwrap();
+        let a = alloc(&mut mem, &table, holder, 0);
+        let b = alloc(&mut mem, &table, holder, 0);
         mem.set_payload(a, 0, b);
         mem.set_payload(b, 0, a);
 
         // Reachable, and the mark bit is what stops the walk. Then unreachable,
         // which is the whole reason a tracing collector is here rather than a
         // reference count.
-        assert_eq!(mem.collect(&layouts, &Held(vec![a])).live_words, 4);
-        assert_eq!(mem.collect(&layouts, &Held(vec![])).freed_words, 4);
+        assert_eq!(mem.collect(table.layouts(), &Held(vec![a])).live_words, 4);
+        assert_eq!(mem.collect(table.layouts(), &Held(vec![])).freed_words, 4);
     }
 
     #[test]
     fn a_null_root_is_ordinary() {
-        let layouts = table(vec![leaf()]);
+        let mut table = Table::new();
+        let array = leaf(&mut table);
         let mut mem = Memory::new(64);
-        let kept = mem.alloc(id(0), 1, 1).unwrap();
+        let kept = alloc(&mut mem, &table, array, 1);
         // A slot that has not been written yet, and one that `Clear` emptied.
-        let done = mem.collect(&layouts, &Held(vec![0, kept, 0]));
+        let done = mem.collect(table.layouts(), &Held(vec![0, kept, 0]));
         assert_eq!(done.live_words, 2);
-        assert_eq!(mem.object_layout(kept), id(0));
+        assert_eq!(mem.object_layout(kept), array);
     }
 
     #[test]
@@ -998,13 +1376,15 @@ mod tests {
         // `may_hold_refs` is what a string costs a collection: a table lookup
         // and no word reads. The payload here is a plausible address, and it is
         // never followed.
-        let layouts = table(vec![Shape::Str, leaf()]);
+        let mut table = Table::new();
+        let array = leaf(&mut table);
+        let text = table.object("String", Shape::Str);
         let mut mem = Memory::new(64);
-        let target = mem.alloc(id(1), 1, 1).unwrap();
-        let text = mem.alloc(id(0), 8, 1).unwrap();
-        mem.set_payload(text, 0, target);
+        let target = alloc(&mut mem, &table, array, 1);
+        let held = alloc(&mut mem, &table, text, 8);
+        mem.set_payload(held, 0, target);
 
-        mem.collect(&layouts, &Held(vec![text]));
+        mem.collect(table.layouts(), &Held(vec![held]));
         assert_eq!(mem.object_layout(target), LayoutId::FREE);
     }
 }

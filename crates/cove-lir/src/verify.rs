@@ -1,12 +1,21 @@
 //! A static check that a lowered program is well formed.
 //!
-//! The machine takes the lowering's word for a great deal: that a slot index
-//! is in the frame, that a jump lands on an instruction, that a call passes
-//! the number of arguments the callee declares, and — the one that matters
-//! most — that a slot's [`Repr`] is what [`Function::refs`] says it is. A
-//! collection walks frames using that map, so a lowering that wrote a
+//! The machine takes the lowering's word for a great deal: that a value
+//! location fits the frame it is in, that a jump lands on an instruction,
+//! that a call passes the layouts the callee declares, and — the one that
+//! matters most — that a slot's [`Repr`] is what [`Function::refs`] says it
+//! is. A collection walks frames using that map, so a lowering that wrote a
 //! reference into a slot the map calls an `Int` would produce a dangling
 //! reference at the next collection and a wrong answer some time after that.
+//!
+//! # A location agrees with its layout, word for word
+//!
+//! Every instruction that moves a value names the layout it is moving, and a
+//! layout is a run of [`Repr`]s. So the check is not "the destination is a
+//! reference" but "the destination's words *are* the layout's words, in
+//! order". That is what makes the one-value-many-slots rule checkable: a
+//! `Copy` of a three-word `Wrapper` into a location whose second word is a
+//! `Float` is a fault here rather than a `Float` traced as a pointer later.
 //!
 //! This is where those assumptions are checked, once, before anything runs.
 //! It is not a type checker: `cove-sema` already did that, and a failure here
@@ -15,6 +24,7 @@
 //! at collection time.
 
 use crate::inst::{Compare, Inst, Len, Num, Slot};
+use crate::layout::LayoutId;
 use crate::program::{Function, FunctionId, Program};
 use crate::repr::{RefMap, Repr};
 
@@ -83,18 +93,24 @@ impl Check<'_> {
         });
     }
 
-    /// The frame's own invariants: the parameters fit, the spans line up, and
-    /// the reference map is the one the reprs imply.
+    /// The frame's own invariants: the parameters fit, the answer's layout
+    /// exists, the spans line up, and the reference map is the one the reprs
+    /// imply.
     fn check_frame(&mut self) {
         let size = self.function.frame_size();
-        if self.function.arity > size {
-            self.fault(
-                None,
-                format!(
-                    "declares {} parameters but a frame of {size} slots",
-                    self.function.arity
-                ),
-            );
+        let mut at = 0;
+        for (index, param) in self.function.params.clone().into_iter().enumerate() {
+            if !self.layout_exists(None, param) {
+                continue;
+            }
+            let width = self.program.layout(param).width();
+            if !self.fits(None, at, param, &format!("parameter {index}")) {
+                return;
+            }
+            at += width;
+        }
+        if !self.layout_exists(None, self.function.returns) {
+            return;
         }
         if self.function.spans.len() != self.function.code.len() {
             self.fault(
@@ -115,25 +131,19 @@ impl Check<'_> {
                     .to_string(),
             );
         }
-        for capture in &self.function.captures {
-            match self.function.repr(capture.slot) {
-                Some(repr) if repr == capture.repr => {}
-                Some(repr) => self.fault(
-                    None,
-                    format!(
-                        "capture `{}` is declared {} but its slot {} holds {repr}",
-                        capture.name, capture.repr, capture.slot
-                    ),
-                ),
-                None => self.fault(
-                    None,
-                    format!(
-                        "capture `{}` names slot {}, outside a frame of {size}",
-                        capture.name, capture.slot
-                    ),
-                ),
+        for capture in self.function.captures.clone() {
+            if !self.layout_exists(None, capture.layout) {
+                continue;
             }
+            let name = capture.name.clone();
+            self.fits(
+                None,
+                capture.slot,
+                capture.layout,
+                &format!("capture `{name}`"),
+            );
         }
+        let _ = size;
     }
 
     /// A function whose last instruction can fall through has nowhere to go.
@@ -163,28 +173,16 @@ impl Check<'_> {
                 self.expect(at, dst, &[Repr::Ref]);
                 self.in_range(at, text.index(), self.program.strings.len(), "string");
             }
-            Inst::Move { dst, src } => {
-                if let (Some(d), Some(s)) = (self.repr(at, dst), self.repr(at, src)) {
-                    if d != s {
-                        self.fault(at, format!("moves {s} into a slot that holds {d}"));
-                    }
+            Inst::Copy { dst, src, layout } => {
+                if self.layout_exists(at, layout) {
+                    self.fits(at, dst, layout, "the destination of a copy");
+                    self.fits(at, src, layout, "the source of a copy");
                 }
             }
-            Inst::Duplicate { dst, src } => {
-                if let (Some(d), Some(s)) = (self.repr(at, dst), self.repr(at, src)) {
-                    if d != s {
-                        self.fault(at, format!("copies {s} into a slot that holds {d}"));
-                    }
+            Inst::Clear { slot, layout } => {
+                if self.layout_exists(at, layout) {
+                    self.fits(at, slot, layout, "what a clear zeroes");
                 }
-            }
-            Inst::Unshare { dst, addr } => {
-                self.expect(at, dst, &[Repr::Ref]);
-                self.expect(at, addr, &[Repr::Addr]);
-            }
-            Inst::Clear { slot } => {
-                // Clearing anything else would be a store of zero into a
-                // scalar, which is a lowering bug rather than a cheap no-op.
-                self.expect(at, slot, &[Repr::Ref, Repr::Addr]);
             }
             Inst::Neg { num, dst, a } => {
                 let want = Self::numeric(num);
@@ -229,6 +227,12 @@ impl Check<'_> {
                 self.target(at, to);
             }
             Inst::Switch { on, table } => {
+                // The discriminant of an enum location is its first word and
+                // is an `Int`; so is the layout id a `dyn` dispatch switches
+                // on. Nothing else is dispatched on, and a slot's `Repr` is
+                // the strongest thing a static check has to say about which
+                // word this is — a location's extent is a fact about the
+                // instruction that produced the word, not about the frame.
                 self.expect(at, on, &[Repr::Int]);
                 if self.in_range(at, table.index(), self.program.tables.len(), "table") {
                     let table = self.program.table(table).clone();
@@ -239,17 +243,22 @@ impl Check<'_> {
             }
             Inst::Return { src } => {
                 let returns = self.function.returns;
-                self.expect(at, src, &[returns]);
+                if self.layout_exists(at, returns) {
+                    self.fits(at, src, returns, "what is returned");
+                }
             }
             Inst::Call { dst, callee, args } => {
                 if !self.in_range(at, callee.index(), self.program.functions.len(), "function") {
                     return;
                 }
                 let target = self.program.function(callee);
-                self.expect(at, dst, &[target.returns]);
-                let expected: Vec<Repr> = target.reprs[..target.arity as usize].to_vec();
+                let returns = target.returns;
+                let params = target.params.clone();
                 let name = target.qualified();
-                self.check_args(at, args, &expected, &name);
+                if self.layout_exists(at, returns) {
+                    self.fits(at, dst, returns, "the destination of a call");
+                }
+                self.check_args(at, args, &params, &name);
             }
             Inst::CallClosure { dst, closure, args } => {
                 self.expect(at, closure, &[Repr::Ref]);
@@ -259,41 +268,67 @@ impl Check<'_> {
             Inst::CallHost { dst, op, args } => {
                 if self.in_range(at, op.index(), self.program.host_ops.len(), "host op") {
                     let result = self.program.host_op(op).result;
-                    self.expect(at, dst, &[result]);
+                    if self.layout_exists(at, result) {
+                        self.fits(at, dst, result, "the answer of a host call");
+                    }
                 }
                 self.each_arg(at, args);
             }
             Inst::CallBuiltin { dst, builtin, args } => {
                 if self.in_range(at, builtin.index(), self.program.builtins.len(), "builtin") {
                     let result = self.program.builtin(builtin).result;
-                    self.expect(at, dst, &[result]);
+                    if self.layout_exists(at, result) {
+                        self.fits(at, dst, result, "the answer of a builtin");
+                    }
                 }
                 self.each_arg(at, args);
             }
             Inst::Alloc { dst, layout, len } => {
                 self.expect(at, dst, &[Repr::Ref]);
-                self.in_range(at, layout.index(), self.program.layouts.len(), "layout");
+                self.layout_exists(at, layout);
                 if let Len::Slot(slot) = len {
                     self.expect(at, slot, &[Repr::Int]);
                 }
             }
-            Inst::GetWord { dst, obj, .. } => {
+            Inst::LoadField {
+                dst, obj, layout, ..
+            } => {
                 self.expect(at, obj, &[Repr::Ref]);
-                self.repr(at, dst);
+                if self.layout_exists(at, layout) {
+                    self.fits(at, dst, layout, "what a field is read into");
+                }
             }
-            Inst::SetWord { obj, src, .. } => {
+            Inst::StoreField {
+                obj, src, layout, ..
+            } => {
                 self.expect(at, obj, &[Repr::Ref]);
-                self.repr(at, src);
+                if self.layout_exists(at, layout) {
+                    self.fits(at, src, layout, "what a field is written from");
+                }
             }
-            Inst::GetElem { dst, obj, index } => {
+            Inst::LoadElem {
+                dst,
+                obj,
+                index,
+                layout,
+            } => {
                 self.expect(at, obj, &[Repr::Ref]);
                 self.expect(at, index, &[Repr::Int]);
-                self.repr(at, dst);
+                if self.layout_exists(at, layout) {
+                    self.fits(at, dst, layout, "what an element is read into");
+                }
             }
-            Inst::SetElem { obj, index, src } => {
+            Inst::StoreElem {
+                obj,
+                index,
+                src,
+                layout,
+            } => {
                 self.expect(at, obj, &[Repr::Ref]);
                 self.expect(at, index, &[Repr::Int]);
-                self.repr(at, src);
+                if self.layout_exists(at, layout) {
+                    self.fits(at, src, layout, "what an element is written from");
+                }
             }
             Inst::Len { dst, obj } => {
                 self.expect(at, obj, &[Repr::Ref]);
@@ -307,30 +342,44 @@ impl Check<'_> {
                 self.expect(at, dst, &[Repr::Addr]);
                 self.repr(at, slot);
             }
-            Inst::AddrOfWord { dst, obj, .. } => {
+            Inst::AddrOfField { dst, obj, .. } => {
                 self.expect(at, dst, &[Repr::Addr]);
                 self.expect(at, obj, &[Repr::Ref]);
             }
-            Inst::AddrOfElem { dst, obj, index } => {
+            Inst::AddrOfElem {
+                dst,
+                obj,
+                index,
+                layout,
+            } => {
                 self.expect(at, dst, &[Repr::Addr]);
                 self.expect(at, obj, &[Repr::Ref]);
                 self.expect(at, index, &[Repr::Int]);
+                self.layout_exists(at, layout);
             }
-            Inst::Load { dst, addr } => {
+            Inst::Load { dst, addr, layout } => {
                 self.expect(at, addr, &[Repr::Addr]);
-                self.repr(at, dst);
+                if self.layout_exists(at, layout) {
+                    self.fits(at, dst, layout, "what a load answers");
+                }
             }
-            Inst::Store { addr, src } => {
+            Inst::Store { addr, src, layout } => {
                 self.expect(at, addr, &[Repr::Addr]);
-                self.repr(at, src);
+                if self.layout_exists(at, layout) {
+                    self.fits(at, src, layout, "what a store writes");
+                }
             }
-            Inst::Box { dst, src, repr } => {
+            Inst::Box { dst, src, layout } => {
                 self.expect(at, dst, &[Repr::Ref]);
-                self.expect(at, src, &[repr]);
+                if self.layout_exists(at, layout) {
+                    self.fits(at, src, layout, "what is boxed");
+                }
             }
-            Inst::Unbox { dst, src, repr } => {
+            Inst::Unbox { dst, src, layout } => {
                 self.expect(at, src, &[Repr::Ref]);
-                self.expect(at, dst, &[repr]);
+                if self.layout_exists(at, layout) {
+                    self.fits(at, dst, layout, "what a box is opened into");
+                }
             }
             Inst::Trap { message } => {
                 self.in_range(at, message.index(), self.program.strings.len(), "string");
@@ -345,6 +394,50 @@ impl Check<'_> {
             Num::Int => &[Repr::Int, Repr::Duration],
             Num::Float => &[Repr::Float],
         }
+    }
+
+    /// Whether `layout` names an entry of the program's layout table.
+    fn layout_exists(&mut self, at: Option<usize>, layout: LayoutId) -> bool {
+        self.in_range(at, layout.index(), self.program.layouts.len(), "layout")
+    }
+
+    /// Whether the location at `slot` is a value of `layout`: it is inside
+    /// the frame, and its words are the layout's words in order.
+    ///
+    /// This is the check the whole representation turns on. A location is a
+    /// base slot and a layout, and the frame's per-slot reprs are what a
+    /// collection reads — so a location whose words disagree with what is
+    /// being moved into it is a reference the collector will miss or a
+    /// scalar it will follow.
+    fn fits(&mut self, at: Option<usize>, slot: Slot, layout: LayoutId, what: &str) -> bool {
+        let words = self.program.layout(layout).words.clone();
+        let name = self.program.layout(layout).name.clone();
+        let size = self.function.frame_size();
+        if slot as u64 + words.len() as u64 > size as u64 {
+            self.fault(
+                at,
+                format!(
+                    "{what} is `{name}`, {} words at slot {slot}, and the frame has {size}",
+                    words.len()
+                ),
+            );
+            return false;
+        }
+        for (offset, want) in words.iter().enumerate() {
+            let found = self.function.reprs[slot as usize + offset];
+            if found != *want {
+                self.fault(
+                    at,
+                    format!(
+                        "{what} is `{name}`, whose word {offset} is {want}, but slot {} holds \
+                         {found}",
+                        slot as usize + offset
+                    ),
+                );
+                return false;
+            }
+        }
+        true
     }
 
     /// What slot `slot` holds, reporting a slot outside the frame.
@@ -391,7 +484,7 @@ impl Check<'_> {
         }
     }
 
-    /// Every argument slot is in the frame, whatever it holds.
+    /// Every argument location is in the frame, whatever it holds.
     fn each_arg(&mut self, at: Option<usize>, args: crate::ArgsId) {
         if !self.in_range(at, args.index(), self.program.args.len(), "argument list") {
             return;
@@ -401,8 +494,15 @@ impl Check<'_> {
         }
     }
 
-    /// Every argument slot holds what the callee's parameter declares.
-    fn check_args(&mut self, at: Option<usize>, args: crate::ArgsId, want: &[Repr], name: &str) {
+    /// Every argument is a location of the layout the callee's parameter
+    /// declares, word for word.
+    fn check_args(
+        &mut self,
+        at: Option<usize>,
+        args: crate::ArgsId,
+        want: &[LayoutId],
+        name: &str,
+    ) {
         if !self.in_range(at, args.index(), self.program.args.len(), "argument list") {
             return;
         }
@@ -418,8 +518,10 @@ impl Check<'_> {
             );
             return;
         }
-        for (slot, repr) in passed.into_iter().zip(want) {
-            self.expect(at, slot, &[*repr]);
+        for (index, (slot, layout)) in passed.into_iter().zip(want).enumerate() {
+            if self.layout_exists(at, *layout) {
+                self.fits(at, slot, *layout, &format!("argument {index} of `{name}`"));
+            }
         }
     }
 }
@@ -430,5 +532,307 @@ impl Check<'_> {
     #[allow(dead_code)]
     fn id(&self) -> FunctionId {
         self.id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use cove_diag::{FileId, Span};
+
+    use super::*;
+    use crate::inst::Inst;
+    use crate::layout::{Layout, Shape};
+    use crate::program::{Function, Table, TableId};
+
+    const INT: LayoutId = LayoutId(0);
+    const STR: LayoutId = LayoutId(1);
+    const POINT: LayoutId = LayoutId(2);
+    /// `[disc: Int, Ref]`, the shape an `Option<String>` has.
+    const ANSWER: LayoutId = LayoutId(3);
+
+    fn layouts() -> Vec<Layout> {
+        vec![
+            Layout::word("Int", Repr::Int),
+            Layout::object("String", Shape::Str),
+            Layout::inline(
+                "Point",
+                Shape::Struct {
+                    fields: Vec::new(),
+                    opaque: false,
+                },
+                vec![Repr::Int, Repr::Int],
+            ),
+            Layout::inline(
+                "Option",
+                Shape::Enum {
+                    cases: Vec::new(),
+                    payload: vec![Repr::Ref],
+                },
+                vec![Repr::Int, Repr::Ref],
+            ),
+        ]
+    }
+
+    fn span() -> Span {
+        Span::new(FileId(0), 0, 0)
+    }
+
+    fn function(reprs: Vec<Repr>, returns: LayoutId, code: Vec<Inst>) -> Function {
+        Function {
+            module: Arc::from("m"),
+            name: Arc::from("f"),
+            params: Vec::new(),
+            spans: vec![span(); code.len()],
+            refs: RefMap::of(&reprs),
+            reprs,
+            returns,
+            captures: Vec::new(),
+            code,
+            span: span(),
+            is_async: false,
+        }
+    }
+
+    fn program(functions: Vec<Function>) -> Program {
+        Program {
+            functions,
+            layouts: layouts(),
+            str_layout: STR,
+            ..Program::default()
+        }
+    }
+
+    fn faults(program: &Program) -> Vec<String> {
+        match verify(program) {
+            Ok(()) => Vec::new(),
+            Err(items) => items.into_iter().map(|item| item.what).collect(),
+        }
+    }
+
+    #[test]
+    fn a_well_formed_function_has_nothing_to_say_about_it() {
+        let f = function(
+            vec![Repr::Int, Repr::Int],
+            POINT,
+            vec![Inst::Return { src: 0 }],
+        );
+        assert_eq!(faults(&program(vec![f])), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_copy_whose_destination_is_not_the_layout_s_words_is_a_fault() {
+        // The whole representation turns on this: a location is a base slot
+        // and a layout, and a copy of the wrong width is a reference the
+        // collector will miss or a scalar it will follow.
+        let f = function(
+            vec![Repr::Int, Repr::Ref, Repr::Int, Repr::Int, Repr::Unit],
+            INT,
+            vec![
+                Inst::Copy {
+                    dst: 0,
+                    src: 2,
+                    layout: POINT,
+                },
+                Inst::Return { src: 4 },
+            ],
+        );
+        assert_eq!(
+            faults(&program(vec![f])),
+            vec![
+                "the destination of a copy is `Point`, whose word 1 is int, but slot 1 holds ref"
+                    .to_string(),
+                "what is returned is `Int`, whose word 0 is int, but slot 4 holds unit".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_location_that_runs_off_the_end_of_the_frame_is_a_fault() {
+        let f = function(
+            vec![Repr::Int, Repr::Int],
+            INT,
+            vec![
+                Inst::Copy {
+                    dst: 1,
+                    src: 0,
+                    layout: POINT,
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        assert_eq!(
+            faults(&program(vec![f])),
+            vec!["the destination of a copy is `Point`, 2 words at slot 1, and the frame has 2"]
+        );
+    }
+
+    #[test]
+    fn a_reference_map_that_disagrees_with_the_reprs_is_a_fault() {
+        // A collection walks frames using the map, so a lowering that wrote
+        // a reference into a slot the map calls an `Int` would produce a
+        // dangling reference at the next collection.
+        let mut f = function(vec![Repr::Ref], STR, vec![Inst::Return { src: 0 }]);
+        f.refs = RefMap::of(&[Repr::Int]);
+        assert_eq!(
+            faults(&program(vec![f])),
+            vec![
+                "reference map disagrees with the frame's reprs, so a collection would scan the \
+                 wrong slots"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_call_whose_arguments_are_not_the_callee_s_parameters_is_a_fault() {
+        let mut callee = function(
+            vec![Repr::Int, Repr::Int, Repr::Int],
+            INT,
+            vec![Inst::Return { src: 2 }],
+        );
+        callee.params = vec![POINT];
+        callee.name = Arc::from("g");
+        let caller = function(
+            vec![Repr::Int, Repr::Ref, Repr::Int],
+            INT,
+            vec![
+                Inst::Call {
+                    dst: 0,
+                    callee: FunctionId(0),
+                    args: crate::ArgsId(0),
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let mut held = program(vec![callee, caller]);
+        held.args = vec![vec![1]];
+        assert_eq!(
+            faults(&held),
+            vec![
+                "argument 0 of `m.g` is `Point`, whose word 0 is int, but slot 1 holds ref"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_call_that_passes_the_wrong_number_of_arguments_is_a_fault() {
+        let mut callee = function(
+            vec![Repr::Int, Repr::Int],
+            INT,
+            vec![Inst::Return { src: 1 }],
+        );
+        callee.params = vec![INT];
+        callee.name = Arc::from("g");
+        let caller = function(
+            vec![Repr::Int],
+            INT,
+            vec![
+                Inst::Call {
+                    dst: 0,
+                    callee: FunctionId(0),
+                    args: crate::ArgsId(0),
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let mut held = program(vec![callee, caller]);
+        held.args = vec![Vec::new()];
+        assert_eq!(
+            faults(&held),
+            vec!["passes 0 arguments to `m.g`, which declares 1"]
+        );
+    }
+
+    #[test]
+    fn a_switch_on_something_that_is_not_a_discriminant_word_is_a_fault() {
+        // The discriminant of an enum location is its first word and is an
+        // `Int`; so is the layout id a `dyn` dispatch switches on. A slot's
+        // `Repr` is the strongest thing a static check has to say about
+        // which word this is.
+        let f = function(
+            vec![Repr::Int, Repr::Ref],
+            ANSWER,
+            vec![
+                Inst::Switch {
+                    on: 1,
+                    table: TableId(0),
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let mut held = program(vec![f]);
+        held.tables = vec![Table {
+            targets: vec![1],
+            default: 1,
+        }];
+        assert_eq!(faults(&held), vec!["slot 1 holds ref, but this wants int"]);
+    }
+
+    #[test]
+    fn a_jump_that_lands_past_the_last_instruction_is_a_fault() {
+        let f = function(
+            vec![Repr::Int],
+            INT,
+            vec![Inst::Jump { to: 9 }, Inst::Return { src: 0 }],
+        );
+        assert_eq!(
+            faults(&program(vec![f])),
+            vec!["jumps to 9, past the 2 instructions"]
+        );
+    }
+
+    #[test]
+    fn an_id_outside_its_table_is_a_fault() {
+        let f = function(
+            vec![Repr::Ref],
+            STR,
+            vec![
+                Inst::Str {
+                    dst: 0,
+                    text: crate::StrId(3),
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        assert_eq!(
+            faults(&program(vec![f])),
+            vec!["names string 3, and there are 0"]
+        );
+    }
+
+    #[test]
+    fn a_body_whose_last_instruction_falls_through_is_a_fault() {
+        let f = function(vec![Repr::Int], INT, vec![Inst::Int { dst: 0, value: 1 }]);
+        assert_eq!(
+            faults(&program(vec![f])),
+            vec!["the last instruction can fall through, and there is nothing after it"]
+        );
+    }
+
+    #[test]
+    fn a_clear_agrees_with_the_layout_it_zeroes() {
+        let f = function(
+            vec![Repr::Int, Repr::Ref, Repr::Unit],
+            INT,
+            vec![
+                Inst::Clear {
+                    slot: 0,
+                    layout: ANSWER,
+                },
+                Inst::Clear {
+                    slot: 1,
+                    layout: ANSWER,
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        // The first is right — `[Int, Ref]` is what an `Option` is — and the
+        // second names the same layout one word along, where it is not.
+        assert_eq!(
+            faults(&program(vec![f])),
+            vec!["what a clear zeroes is `Option`, whose word 0 is int, but slot 1 holds ref"]
+        );
     }
 }

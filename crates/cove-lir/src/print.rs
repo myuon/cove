@@ -1,14 +1,19 @@
 //! A disassembly, for reading a lowering and for a test to assert on.
 //!
 //! The format is one instruction per line, `pc  opcode operands`, with slot
-//! numbers written `s0`, `s1` and annotated with what they hold. A test that
-//! pins a lowering pins this text, so it is written to be diffed: one fact
-//! per line, and no alignment that changes when an unrelated line grows.
+//! numbers written `s0`, `s1` and annotated with what that one word holds.
+//! An instruction that moves a *value* names the layout after its operands,
+//! because a value is a run of words and the layout is what says how many —
+//! `copy s2:int s0:int Point` moves two.
+//!
+//! A test that pins a lowering pins this text, so it is written to be
+//! diffed: one fact per line, and no alignment that changes when an
+//! unrelated line grows.
 
 use std::fmt::Write as _;
 
 use crate::inst::{ArithOp, CmpOp, Compare, Convert, Inst, Len, Num, Slot};
-use crate::layout::Shape;
+use crate::layout::{LayoutId, Shape};
 use crate::program::{Function, FunctionId, Program};
 
 /// Renders every function of `program`.
@@ -23,21 +28,27 @@ pub fn program(program: &Program) -> String {
     out
 }
 
-/// Renders one function: its frame, then its code.
+/// Renders one function: its boundary, its frame, then its code.
 pub fn function(program: &Program, id: FunctionId) -> String {
     let f = program.function(id);
     let mut out = String::new();
+    let params: Vec<String> = f
+        .params
+        .iter()
+        .map(|layout| name_of(program, *layout))
+        .collect();
     let _ = writeln!(
         out,
         "{id} {}({}) -> {}{}",
         f.qualified(),
-        f.arity,
-        f.returns,
+        params.join(" "),
+        name_of(program, f.returns),
         if f.is_async { " async" } else { "" }
     );
+    let taken = f.param_words(&program.layouts);
     let _ = write!(out, "  frame {}:", f.frame_size());
     for (slot, repr) in f.reprs.iter().enumerate() {
-        let role = if (slot as u32) < f.arity { "!" } else { "" };
+        let role = if (slot as u32) < taken { "!" } else { "" };
         let _ = write!(out, " s{slot}{role}:{repr}");
     }
     out.push('\n');
@@ -45,7 +56,9 @@ pub fn function(program: &Program, id: FunctionId) -> String {
         let _ = writeln!(
             out,
             "  capture {} -> s{}:{}",
-            capture.name, capture.slot, capture.repr
+            capture.name,
+            capture.slot,
+            name_of(program, capture.layout)
         );
     }
     for (pc, inst) in f.code.iter().enumerate() {
@@ -60,15 +73,17 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Some(repr) => format!("s{slot}:{repr}"),
         None => format!("s{slot}:?"),
     };
+    let l = |layout: LayoutId| name_of(program, layout);
     match inst {
         Inst::Unit { dst } => format!("unit {}", s(*dst)),
         Inst::Bool { dst, value } => format!("bool {} {value}", s(*dst)),
         Inst::Int { dst, value } => format!("int {} {value}", s(*dst)),
         Inst::Float { dst, bits } => format!("float {} {}", s(*dst), f64::from_bits(*bits)),
         Inst::Str { dst, text } => format!("str {} {:?}", s(*dst), program.string(*text)),
-        Inst::Move { dst, src } => format!("move {} {}", s(*dst), s(*src)),
-        Inst::Duplicate { dst, src } => format!("duplicate {} {}", s(*dst), s(*src)),
-        Inst::Clear { slot } => format!("clear {}", s(*slot)),
+        Inst::Copy { dst, src, layout } => {
+            format!("copy {} {} {}", s(*dst), s(*src), l(*layout))
+        }
+        Inst::Clear { slot, layout } => format!("clear {} {}", s(*slot), l(*layout)),
         Inst::Neg { num, dst, a } => format!("neg.{} {} {}", num_name(*num), s(*dst), s(*a)),
         Inst::Arith { num, op, dst, a, b } => format!(
             "{}.{} {} {} {}",
@@ -143,48 +158,107 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         }
         Inst::Alloc { dst, layout, len } => {
             let shape = &program.layout(*layout).shape;
-            let name = &program.layout(*layout).name;
             let len = match len {
                 Len::Fixed => String::new(),
                 Len::Count(n) => format!(" x{n}"),
                 Len::Slot(slot) => format!(" x{}", s(*slot)),
             };
-            format!("alloc {} {name}<{}>{len}", s(*dst), shape_name(shape))
+            format!(
+                "alloc {} {}<{}>{len}",
+                s(*dst),
+                l(*layout),
+                shape_name(shape)
+            )
         }
-        Inst::GetWord { dst, obj, at } => format!("get-word {} {} +{at}", s(*dst), s(*obj)),
-        Inst::SetWord { obj, at, src } => format!("set-word {} +{at} {}", s(*obj), s(*src)),
-        Inst::GetElem { dst, obj, index } => {
-            format!("get-elem {} {} {}", s(*dst), s(*obj), s(*index))
-        }
-        Inst::SetElem { obj, index, src } => {
-            format!("set-elem {} {} {}", s(*obj), s(*index), s(*src))
-        }
+        Inst::LoadField {
+            dst,
+            obj,
+            at,
+            layout,
+        } => format!("load-field {} {} +{at} {}", s(*dst), s(*obj), l(*layout)),
+        Inst::StoreField {
+            obj,
+            at,
+            src,
+            layout,
+        } => format!("store-field {} +{at} {} {}", s(*obj), s(*src), l(*layout)),
+        Inst::LoadElem {
+            dst,
+            obj,
+            index,
+            layout,
+        } => format!(
+            "load-elem {} {} {} {}",
+            s(*dst),
+            s(*obj),
+            s(*index),
+            l(*layout)
+        ),
+        Inst::StoreElem {
+            obj,
+            index,
+            src,
+            layout,
+        } => format!(
+            "store-elem {} {} {} {}",
+            s(*obj),
+            s(*index),
+            s(*src),
+            l(*layout)
+        ),
         Inst::Len { dst, obj } => format!("len {} {}", s(*dst), s(*obj)),
         Inst::LayoutOf { dst, obj } => format!("layout-of {} {}", s(*dst), s(*obj)),
         Inst::AddrOfSlot { dst, slot } => format!("addr-of-slot {} {}", s(*dst), s(*slot)),
-        Inst::AddrOfWord { dst, obj, at } => format!("addr-of-word {} {} +{at}", s(*dst), s(*obj)),
-        Inst::AddrOfElem { dst, obj, index } => {
-            format!("addr-of-elem {} {} {}", s(*dst), s(*obj), s(*index))
+        Inst::AddrOfField { dst, obj, at } => {
+            format!("addr-of-field {} {} +{at}", s(*dst), s(*obj))
         }
-        Inst::Unshare { dst, addr } => format!("unshare {} {}", s(*dst), s(*addr)),
-        Inst::Load { dst, addr } => format!("load {} {}", s(*dst), s(*addr)),
-        Inst::Store { addr, src } => format!("store {} {}", s(*addr), s(*src)),
-        Inst::Box { dst, src, repr } => format!("box {} {} {repr}", s(*dst), s(*src)),
-        Inst::Unbox { dst, src, repr } => format!("unbox {} {} {repr}", s(*dst), s(*src)),
+        Inst::AddrOfElem {
+            dst,
+            obj,
+            index,
+            layout,
+        } => format!(
+            "addr-of-elem {} {} {} {}",
+            s(*dst),
+            s(*obj),
+            s(*index),
+            l(*layout)
+        ),
+        Inst::Load { dst, addr, layout } => {
+            format!("load {} {} {}", s(*dst), s(*addr), l(*layout))
+        }
+        Inst::Store { addr, src, layout } => {
+            format!("store {} {} {}", s(*addr), s(*src), l(*layout))
+        }
+        Inst::Box { dst, src, layout } => format!("box {} {} {}", s(*dst), s(*src), l(*layout)),
+        Inst::Unbox { dst, src, layout } => {
+            format!("unbox {} {} {}", s(*dst), s(*src), l(*layout))
+        }
         Inst::Trap { message } => format!("trap {:?}", program.string(*message)),
     }
 }
 
+/// What a layout is called in a listing, or its id where the table is too
+/// short to say — a listing is also read while a lowering is being debugged.
+fn name_of(program: &Program, layout: LayoutId) -> String {
+    match program.layouts.get(layout.index()) {
+        Some(held) => held.name.to_string(),
+        None => layout.to_string(),
+    }
+}
+
 fn args_of(program: &Program, f: &Function, args: crate::ArgsId) -> String {
-    program
-        .arg_list(args)
-        .iter()
-        .map(|slot| match f.repr(*slot) {
-            Some(repr) => format!("s{slot}:{repr}"),
-            None => format!("s{slot}:?"),
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    match program.args.get(args.index()) {
+        Some(list) => list
+            .iter()
+            .map(|slot| match f.repr(*slot) {
+                Some(repr) => format!("s{slot}:{repr}"),
+                None => format!("s{slot}:?"),
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        None => args.to_string(),
+    }
 }
 
 fn num_name(num: Num) -> &'static str {
@@ -228,6 +302,7 @@ fn cmp_name(op: CmpOp) -> &'static str {
 fn shape_name(shape: &Shape) -> &'static str {
     match shape {
         Shape::Free => "free",
+        Shape::Word(_) => "word",
         Shape::Str => "str",
         Shape::Struct { .. } => "struct",
         Shape::Enum { .. } => "enum",

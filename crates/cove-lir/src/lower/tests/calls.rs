@@ -1,82 +1,186 @@
-//! Calls, which need no argument buffer: the callee's frame begins where the
-//! caller's ends, so `Call` copies argument slot *i* to callee slot *i*.
+//! Calls, and the frame boundary they have to match.
 
-use super::{checked, listing};
-use crate::lower::lower;
+use super::listing;
 
+/// The machine copies each argument's words into the callee's frame,
+/// which begins where this one ends. Nothing is pushed, permuted or
+/// copied back.
 #[test]
-fn arguments_are_evaluated_in_source_order_into_slots_of_their_own() {
+fn a_call_names_the_arguments_and_the_destination_location() {
     assert_eq!(
         listing(
-            "fn add(a: Int, b: Int) -> Int { a + b }\nfn three() -> Int { add(1, 2) }",
-            "three"
+            "fn add(a: Int, b: Int) -> Int { a + b }\nfn f() -> Int { add(1, 2) }",
+            "f"
         ),
         "\
-fn1 m.three(0) -> int
+fn1 m.f() -> Int
   frame 4: s0:int s1:int s2:int s3:int
      0  int s1:int 1
      1  int s2:int 2
      2  call s3:int m.add (s1:int s2:int)
-     3  move s0:int s3:int
+     3  copy s0:int s3:int Int
      4  return s0:int
 "
     );
 }
 
 #[test]
-fn a_call_answering_unit_still_names_a_destination() {
-    // `Unit` is a value in Cove, so it takes a slot rather than being
-    // absent. That is what keeps the calling convention free of a case for
-    // a function that answers nothing.
-    assert_eq!(
-        listing("fn noop() {}\nfn twice() {\n  noop()\n  noop()\n}", "twice"),
-        "\
-fn1 m.twice(0) -> unit
-  frame 2: s0:unit s1:unit
-     0  call s1:unit m.noop ()
-     1  call s1:unit m.noop ()
-     2  move s0:unit s1:unit
-     3  return s0:unit
-"
-    );
-}
-
-#[test]
-fn a_function_can_call_itself() {
+fn recursion_is_an_ordinary_call() {
     assert_eq!(
         listing(
-            "fn fact(n: Int) -> Int {\n  if n <= 1 { 1 } else { n * fact(n - 1) }\n}",
-            "fact"
+            "fn fib(n: Int) -> Int { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }",
+            "fib"
         ),
         "\
-fn0 m.fact(1) -> int
+fn0 m.fib(Int) -> Int
   frame 7: s0!:int s1:int s2:int s3:int s4:bool s5:int s6:int
-     0  int s3:int 1
-     1  le.int s4:bool s0:int s3:int
-     2  branch-false s4:bool 6
-     3  int s3:int 1
-     4  move s2:int s3:int
-     5  jump 12
-     6  int s5:int 1
-     7  sub.int s6:int s0:int s5:int
-     8  call s5:int m.fact (s6:int)
-     9  mul.int s6:int s0:int s5:int
-    10  move s3:int s6:int
-    11  move s2:int s3:int
-    12  move s1:int s2:int
-    13  return s1:int
+     0  int s3:int 2
+     1  lt.int s4:bool s0:int s3:int
+     2  branch-false s4:bool 5
+     3  copy s2:int s0:int Int
+     4  jump 13
+     5  int s3:int 1
+     6  sub.int s5:int s0:int s3:int
+     7  call s3:int m.fib (s5:int)
+     8  int s5:int 2
+     9  sub.int s6:int s0:int s5:int
+    10  call s5:int m.fib (s6:int)
+    11  add.int s6:int s3:int s5:int
+    12  copy s2:int s6:int Int
+    13  copy s1:int s2:int Int
+    14  return s1:int
+"
+    );
+}
+
+/// `docs/LINEAR_VM.md`'s fifth worked case: a `(Int, Point, Int)` list
+/// occupies slots 0, 1–2 and 3. A mixed list is not sorted into type
+/// groups; there are no type groups.
+#[test]
+fn multiword_parameters_occupy_the_frame_from_slot_zero_in_order() {
+    assert_eq!(
+        listing(
+            "struct Point { x: Int, y: Int }\nfn take(a: Int, p: Point, b: Int) -> Int { a + p.x + p.y + b }",
+            "take"
+        ),
+        "\
+fn0 m.take(Int m.Point Int) -> Int
+  frame 7: s0!:int s1!:int s2!:int s3!:int s4:int s5:int s6:int
+     0  add.int s5:int s0:int s1:int
+     1  add.int s6:int s5:int s2:int
+     2  add.int s5:int s6:int s3:int
+     3  copy s4:int s5:int Int
+     4  return s4:int
 "
     );
 }
 
 #[test]
-fn two_calls_of_the_same_shape_share_one_argument_list() {
-    // The list is a program-wide `ArgsId` rather than something carried in
-    // the instruction, so a repeated call shape costs one list.
-    let program = lower(&checked(
-        "fn add(a: Int, b: Int) -> Int { a + b }\n\
-         fn twice(x: Int, y: Int) -> Int { add(x, y) + add(x, y) }",
-    ))
-    .expect("the program lowers");
-    assert_eq!(program.args, vec![vec![0, 1]]);
+fn a_call_passing_a_multiword_argument_names_its_base_slot() {
+    assert_eq!(
+        listing(
+            "struct Point { x: Int, y: Int }\nfn take(a: Int, p: Point, b: Int) -> Int { a + p.x + p.y + b }\nfn f() -> Int { take(1, Point(x: 2, y: 3), 4) }",
+            "f"
+        ),
+        "\
+fn0 m.f() -> Int
+  frame 6: s0:int s1:int s2:int s3:int s4:int s5:int
+     0  int s1:int 1
+     1  int s2:int 2
+     2  int s3:int 3
+     3  copy s4:int s2:int Int
+     4  copy s5:int s3:int Int
+     5  int s2:int 4
+     6  call s3:int m.take (s1:int s4:int s2:int)
+     7  copy s0:int s3:int Int
+     8  return s0:int
+"
+    );
+}
+
+/// `bump(var total)` writes the caller's own words: the parameter is an
+/// ordinary slot whose `Repr` is `Addr`, and there is no copy back.
+#[test]
+fn a_var_parameter_is_a_slot_holding_an_address() {
+    assert_eq!(
+        listing("fn bump(var n: Int) { n = n + 1 }", "bump"),
+        "\
+fn0 m.bump(<addr>) -> Unit
+  frame 6: s0!:addr s1:unit s2:int s3:int s4:int s5:unit
+     0  load s2:int s0:addr Int
+     1  int s3:int 1
+     2  add.int s4:int s2:int s3:int
+     3  store s0:addr s4:int Int
+     4  unit s5:unit
+     5  copy s1:unit s5:unit Unit
+     6  return s1:unit
+"
+    );
+}
+
+#[test]
+fn a_var_argument_is_the_address_of_the_caller_s_location() {
+    assert_eq!(
+        listing(
+            "fn bump(var n: Int) { n = n + 1 }\nfn f() -> Int {\n  var total = 0\n  bump(var total)\n  total\n}",
+            "f"
+        ),
+        "\
+fn1 m.f() -> Int
+  frame 4: s0:int s1:int s2:addr s3:unit
+     0  int s1:int 0
+     1  addr-of-slot s2:addr s1:int
+     2  call s3:unit m.bump (s2:addr)
+     3  clear s2:addr <addr>
+     4  copy s0:int s1:int Int
+     5  return s0:int
+"
+    );
+}
+
+/// An inline field needs no indirection to name, so the address of
+/// `p.y` is the address of a slot of this frame — one `AddrOfSlot`, and
+/// nothing has to be held alive across the call.
+#[test]
+fn a_var_argument_naming_a_field_is_the_address_of_that_word() {
+    assert_eq!(
+        listing(
+            "struct Point { x: Int, y: Int }\nfn bump(var n: Int) { n = n + 1 }\nfn f() -> Int {\n  var p = Point(x: 1, y: 2)\n  bump(var p.y)\n  p.y\n}",
+            "f"
+        ),
+        "\
+fn1 m.f() -> Int
+  frame 7: s0:int s1:int s2:int s3:int s4:int s5:addr s6:unit
+     0  int s1:int 1
+     1  int s2:int 2
+     2  copy s3:int s1:int Int
+     3  copy s4:int s2:int Int
+     4  addr-of-slot s5:addr s4:int
+     5  call s6:unit m.bump (s5:addr)
+     6  clear s5:addr <addr>
+     7  copy s0:int s4:int Int
+     8  return s0:int
+"
+    );
+}
+
+/// The checker already refused a label out of declaration order, so the
+/// list lines up with the parameters one for one.
+#[test]
+fn a_labelled_argument_is_not_a_permutation() {
+    assert_eq!(
+        listing(
+            "fn scaled(value: Int, by: Int) -> Int { value * by }\nfn f() -> Int { scaled(2, by: 3) }",
+            "f"
+        ),
+        "\
+fn0 m.f() -> Int
+  frame 4: s0:int s1:int s2:int s3:int
+     0  int s1:int 2
+     1  int s2:int 3
+     2  call s3:int m.scaled (s1:int s2:int)
+     3  copy s0:int s3:int Int
+     4  return s0:int
+"
+    );
 }

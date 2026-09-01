@@ -1,21 +1,29 @@
-//! The objects a builtin answers with, and the layouts they are built to.
+//! The values a builtin answers with, and the layouts they are built to.
 //!
 //! A builtin that answers an `Option`, a `Result`, an `Array` or a `Vector`
-//! has to allocate one, and allocating needs a [`LayoutId`] — which
-//! [`cove_lir::Builtin`] does not carry, because it names an operation by its
-//! receiver and its name rather than by the types the checker resolved for
-//! it. So the family is found the way [`crate::lvm::boundary`] finds one: by
-//! searching the program's layout table for the family the answer belongs to.
+//! has to name a family, and [`cove_lir::Builtin`] does not carry one for its
+//! operands — it names an operation by its receiver and its name rather than
+//! by the types the checker resolved for it. So the family is found the way
+//! [`crate::lvm::boundary`] finds one for an erased destination: by searching
+//! the program's layout table.
 //!
 //! The table describes *families*, so the search is exact rather than a
-//! guess. There is one `Option` layout per payload `Repr`, one `Array` layout
-//! per element `Repr`, one `Vector` layout per element `Repr`; and the
-//! element `Repr` a builtin needs is one it can read — out of the receiver's
-//! own layout for `Array.get`, out of the operand's `Repr` for
-//! `Vector.of(1, 2)`, or fixed by the operation for `String.chars`, whose
-//! answer is an `Array<String>` whatever it was called on.
+//! guess. There is one `Option` layout per payload layout, one `Array` layout
+//! per element layout, one `Vector` layout per element layout; and the
+//! element layout a builtin needs is one it can read — out of the receiver's
+//! own layout for `Array.get`, or fixed by the operation for `String.chars`,
+//! whose answer is an `Array<String>` whatever it was called on.
 //!
-//! # Everything here allocates, so everything here roots
+//! # An `Option` is words, not an object
+//!
+//! Under the run-of-words model a fixed-size enum is inline: an
+//! `Option<Int>` is `[disc, Int]`, two words *where the value is*. So the
+//! builders below answer a run of words rather than an address, and a
+//! builtin's result is written into the destination location the same way a
+//! `Copy` writes one. Constructing a case **zeroes the payload region it does
+//! not fill**, which is what makes the region's static reference map safe.
+//!
+//! # Everything that allocates, roots
 //!
 //! An allocation can collect, and a collection walks the frames and the
 //! temporary roots and nothing else. A word this module was handed may name
@@ -26,7 +34,7 @@
 //! came out of an operand instead, the caller's frame is already holding it
 //! and the doc comment says so rather than rooting it twice.
 
-use cove_lir::{Layout, LayoutId, Program, Repr, Shape};
+use cove_lir::{Layout, LayoutId, Program, Shape};
 use cove_schema::builtins::{
     ERROR, ERR_CASE, MAP, MESSAGE_FIELD, NONE_CASE, OK_CASE, OPTION, RESULT, SET, SOME_CASE,
 };
@@ -53,7 +61,7 @@ fn find(program: &Program, wanted: impl Fn(&Layout) -> bool) -> Option<LayoutId>
 /// store becomes and how `push` finds the larger store it grows into.
 pub(super) fn elements(
     program: &Program,
-    elem: Repr,
+    elem: LayoutId,
     growable: bool,
 ) -> Result<LayoutId, RuntimeError> {
     find(program, |layout| {
@@ -63,7 +71,7 @@ pub(super) fn elements(
 }
 
 /// The layout of a `Vector` header over `elem` elements.
-pub(super) fn vector(program: &Program, elem: Repr) -> Result<LayoutId, RuntimeError> {
+pub(super) fn vector(program: &Program, elem: LayoutId) -> Result<LayoutId, RuntimeError> {
     find(
         program,
         |layout| matches!(layout.shape, Shape::Vector { elem: e } if e == elem),
@@ -73,11 +81,11 @@ pub(super) fn vector(program: &Program, elem: Repr) -> Result<LayoutId, RuntimeE
 
 /// The layout of a `Set` of `elem`.
 ///
-/// One layout per element `Repr`, as everywhere else, and it is its own shape
+/// One layout per element layout, as everywhere else, and it is its own shape
 /// rather than an `Elements` with a name because "these words are sorted and
 /// distinct" is an invariant [`super::keyed`] relies on and an array's words
 /// are neither.
-pub(super) fn members(program: &Program, elem: Repr) -> Result<LayoutId, RuntimeError> {
+pub(super) fn members(program: &Program, elem: LayoutId) -> Result<LayoutId, RuntimeError> {
     find(
         program,
         |layout| matches!(layout.shape, Shape::Members { elem: e } if e == elem),
@@ -87,10 +95,14 @@ pub(super) fn members(program: &Program, elem: Repr) -> Result<LayoutId, Runtime
 
 /// The layout of a `Map` from `key` to `value`.
 ///
-/// One layout per *pair* of `Repr`s: a `Map<String, Int>` traces half its
+/// One layout per *pair* of layouts: a `Map<String, Int>` traces half its
 /// words and a `Map<Int, Int>` none of them, and the collector is told which
 /// by the layout rather than by looking.
-pub(super) fn entries(program: &Program, key: Repr, value: Repr) -> Result<LayoutId, RuntimeError> {
+pub(super) fn entries(
+    program: &Program,
+    key: LayoutId,
+    value: LayoutId,
+) -> Result<LayoutId, RuntimeError> {
     find(
         program,
         |layout| matches!(layout.shape, Shape::Entries { key: k, value: v } if k == key && v == value),
@@ -99,6 +111,10 @@ pub(super) fn entries(program: &Program, key: Repr, value: Repr) -> Result<Layou
 }
 
 /// The layout of the builtin `Error` struct.
+///
+/// One `String` field, so a value of it is one inline word: the message's
+/// address. An `Error` is not an object of its own under this model, which is
+/// why nothing below allocates one.
 fn error(program: &Program) -> Result<LayoutId, RuntimeError> {
     find(program, |layout| {
         let Shape::Struct { fields, .. } = &layout.shape else {
@@ -107,53 +123,56 @@ fn error(program: &Program) -> Result<LayoutId, RuntimeError> {
         &*layout.name == ERROR.name
             && fields.len() == 1
             && &*fields[0].name == MESSAGE_FIELD.name
-            && fields[0].repr == Repr::Ref
+            && program.layout(fields[0].layout).is_ref()
     })
     .ok_or_else(|| operand::unknown_family(ERROR.name))
 }
 
-/// The `Option` whose `Some` carries one word of `payload`, and the index of
-/// its `case`.
-fn option(program: &Program, payload: Repr, case: &str) -> Result<(LayoutId, u32), RuntimeError> {
+/// The `Option` whose `Some` carries a `payload`, and the index of its
+/// `case`.
+fn option(
+    program: &Program,
+    payload: LayoutId,
+    case: &str,
+) -> Result<(LayoutId, u32), RuntimeError> {
     two_case(program, OPTION.name, SOME_CASE.name, payload, case)
         .ok_or_else(|| operand::unknown_family(OPTION.name))
 }
 
-/// The `Result` whose `Ok` carries one word of `ok`, and the index of its
-/// `case`.
+/// The `Result` whose `Ok` carries an `ok`, and the index of its `case`.
 ///
 /// The `Err` side is not asked about: every `Result` a builtin answers is a
-/// `Result<T, Error>`, and an `Error` is a reference whatever it holds.
-fn result(program: &Program, ok: Repr, case: &str) -> Result<(LayoutId, u32), RuntimeError> {
+/// `Result<T, Error>`, and an `Error` is one word whatever it holds.
+fn result(program: &Program, ok: LayoutId, case: &str) -> Result<(LayoutId, u32), RuntimeError> {
     two_case(program, RESULT.name, OK_CASE.name, ok, case)
         .ok_or_else(|| operand::unknown_family(RESULT.name))
 }
 
-/// The enum called `name` whose case `carrier` holds one word of `payload`,
-/// and the index of its case `wanted`.
+/// The enum called `name` whose case `carrier` holds one `payload`, and the
+/// index of its case `wanted`.
 ///
 /// The carrier is what tells one instantiation from another — `Option<Int>`
 /// and `Option<String>` are two layouts with one name, and only `Some` is
 /// different between them — so it is matched even when the case being asked
 /// for is the empty one. A `None` built to the wrong `Option` would be the
-/// same word, but the object would answer the wrong layout to everything that
-/// later read it.
+/// same discriminant word, but the payload region would be the wrong width
+/// and everything that later read it would read the wrong words.
 fn two_case(
     program: &Program,
     name: &str,
     carrier: &str,
-    payload: Repr,
+    payload: LayoutId,
     wanted: &str,
 ) -> Option<(LayoutId, u32)> {
     for (at, layout) in program.layouts.iter().enumerate() {
-        let Shape::Enum { cases } = &layout.shape else {
+        let Shape::Enum { cases, .. } = &layout.shape else {
             continue;
         };
         if &*layout.name != name {
             continue;
         }
         let carries = cases.iter().any(|case| {
-            &*case.name == carrier && case.payload.len() == 1 && case.payload[0] == payload
+            &*case.name == carrier && case.parts.len() == 1 && case.parts[0].layout == payload
         });
         if !carries {
             continue;
@@ -167,79 +186,85 @@ fn two_case(
 
 // --- building one ----------------------------------------------------------
 
-/// `None`, as an `Option` whose `Some` would carry one word of `payload`.
-pub(super) fn none(machine: &mut Machine, payload: Repr) -> Result<u64, RuntimeError> {
-    let (id, case) = option(machine.program(), payload, NONE_CASE.name)?;
-    let addr = machine.new_object(id, 0)?;
-    machine.set_payload(addr, 0, case as u64);
-    Ok(addr)
-}
-
-/// `Some(word)`, where `word` is one word of `payload`.
-pub(super) fn some(machine: &mut Machine, payload: Repr, word: u64) -> Result<u64, RuntimeError> {
-    let (id, case) = option(machine.program(), payload, SOME_CASE.name)?;
-    let addr = held(machine, payload, word, id)?;
-    machine.set_payload(addr, 0, case as u64);
-    machine.set_payload(addr, 1, word);
-    Ok(addr)
-}
-
-/// `Ok(word)`, where `word` is one word of `ok`.
-pub(super) fn ok(machine: &mut Machine, ok: Repr, word: u64) -> Result<u64, RuntimeError> {
-    let (id, case) = result(machine.program(), ok, OK_CASE.name)?;
-    let addr = held(machine, ok, word, id)?;
-    machine.set_payload(addr, 0, case as u64);
-    machine.set_payload(addr, 1, word);
-    Ok(addr)
-}
-
-/// `Err(Error(message))`, in a `Result` whose `Ok` would carry one word of
-/// `ok`.
+/// The words of a case of the enum `layout`, with `parts` written into the
+/// payload region and the rest of it zero.
 ///
-/// Three allocations deep — the message, the `Error` that holds it, the
-/// `Result` that holds that — and each one can collect what the last
-/// produced, which is why each is rooted across the next.
-pub(super) fn failed(machine: &mut Machine, ok: Repr, message: &str) -> Result<u64, RuntimeError> {
+/// The zeroing is not tidiness. The payload region has one static reference
+/// map covering every case, so a word this case does not use has to read
+/// null — otherwise a `None` would keep alive whatever a `Some` left in the
+/// word before it.
+fn case_words(
+    machine: &Machine,
+    layout: LayoutId,
+    index: u32,
+    parts: &[&[u64]],
+) -> Result<Vec<u64>, RuntimeError> {
+    let described = machine.program().layout(layout);
+    let Shape::Enum { cases, .. } = &described.shape else {
+        return Err(operand::unknown_family(&described.name));
+    };
+    let case = &cases[index as usize];
+    let mut words = vec![0; described.width() as usize];
+    words[0] = index as u64;
+    for (part, held) in case.parts.iter().zip(parts) {
+        let at = 1 + part.at as usize;
+        words[at..at + held.len()].copy_from_slice(held);
+    }
+    Ok(words)
+}
+
+/// `None`, as an `Option` whose `Some` would carry a `payload`.
+pub(super) fn none(machine: &mut Machine, payload: LayoutId) -> Result<Vec<u64>, RuntimeError> {
+    let (id, case) = option(machine.program(), payload, NONE_CASE.name)?;
+    case_words(machine, id, case, &[])
+}
+
+/// `Some(words)`, where `words` is a value of `payload`.
+pub(super) fn some(
+    machine: &mut Machine,
+    payload: LayoutId,
+    words: &[u64],
+) -> Result<Vec<u64>, RuntimeError> {
+    let (id, case) = option(machine.program(), payload, SOME_CASE.name)?;
+    case_words(machine, id, case, &[words])
+}
+
+/// `Ok(words)`, where `words` is a value of `ok`.
+pub(super) fn ok(
+    machine: &mut Machine,
+    ok: LayoutId,
+    words: &[u64],
+) -> Result<Vec<u64>, RuntimeError> {
+    let (id, case) = result(machine.program(), ok, OK_CASE.name)?;
+    case_words(machine, id, case, &[words])
+}
+
+/// `Err(Error(message))`, in a `Result` whose `Ok` would carry an `ok`.
+///
+/// One allocation — the message — because an `Error` is its one `String`
+/// field inline and a `Result` is words. That is two objects fewer than the
+/// same value cost when every value was an address.
+pub(super) fn failed(
+    machine: &mut Machine,
+    ok: LayoutId,
+    message: &str,
+) -> Result<Vec<u64>, RuntimeError> {
     let (id, case) = result(machine.program(), ok, ERR_CASE.name)?;
     let carried = error_value(machine, message)?;
-    let addr = held(machine, Repr::Ref, carried, id)?;
-    machine.set_payload(addr, 0, case as u64);
-    machine.set_payload(addr, 1, carried);
-    Ok(addr)
+    case_words(machine, id, case, &[&carried])
 }
 
-/// An `Error` carrying `message`.
-fn error_value(machine: &mut Machine, message: &str) -> Result<u64, RuntimeError> {
-    let id = error(machine.program())?;
+/// An `Error` carrying `message`, as its words.
+fn error_value(machine: &mut Machine, message: &str) -> Result<Vec<u64>, RuntimeError> {
+    // The layout is looked up first, so that a program with no `Error` family
+    // is refused before a string is allocated for a value it cannot build.
+    error(machine.program())?;
     let text = machine.new_string(message)?;
-    let addr = held(machine, Repr::Ref, text, id)?;
-    machine.set_payload(addr, 0, text);
-    Ok(addr)
+    Ok(vec![text])
 }
 
-/// A new object of `layout`, allocated with `word` held as a root.
-///
-/// The one line every wrapper above shares, and the reason each of them is a
-/// function rather than a `set_payload` at the call site: between reading
-/// `word` and writing it into the object that will own it there is an
-/// allocation, and a `word` that is a reference nothing else names would not
-/// survive one.
-fn held(
-    machine: &mut Machine,
-    repr: Repr,
-    word: u64,
-    layout: LayoutId,
-) -> Result<u64, RuntimeError> {
-    let mark = machine.temps();
-    if repr.is_ref() {
-        machine.push_temp(word);
-    }
-    let addr = machine.new_object(layout, 0);
-    machine.release_temps(mark);
-    addr
-}
-
-/// An `Array` of `elem` holding `words`.
+/// An `Array` of `elem` holding `words`, which is the elements' words
+/// flattened at `elem`'s width.
 ///
 /// The caller holds `words` rooted: every use of this reads them out of an
 /// operand — the receiver's own elements, or the arguments themselves — and
@@ -247,14 +272,13 @@ fn held(
 /// collector already walks.
 pub(super) fn array_of(
     machine: &mut Machine,
-    elem: Repr,
+    elem: LayoutId,
     words: &[u64],
 ) -> Result<u64, RuntimeError> {
     let id = elements(machine.program(), elem, false)?;
-    let addr = machine.new_object(id, words.len() as u32)?;
-    for (at, word) in words.iter().enumerate() {
-        machine.set_payload(addr, at as u32, *word);
-    }
+    let stride = machine.words_of(elem).max(1) as usize;
+    let addr = machine.new_object(id, (words.len() / stride) as u32)?;
+    machine.set_payload_run(addr, 0, words);
     Ok(addr)
 }
 
@@ -269,7 +293,8 @@ pub(super) fn strings<S: AsRef<str>>(
     machine: &mut Machine,
     parts: &[S],
 ) -> Result<u64, RuntimeError> {
-    let id = elements(machine.program(), Repr::Ref, false)?;
+    let text = machine.program().str_layout;
+    let id = elements(machine.program(), text, false)?;
     let addr = machine.new_object(id, parts.len() as u32)?;
     let mark = machine.temps();
     machine.push_temp(addr);
@@ -291,12 +316,14 @@ pub(super) fn strings<S: AsRef<str>>(
 /// fills.
 pub(super) fn vector_of(
     machine: &mut Machine,
-    elem: Repr,
+    elem: LayoutId,
     words: &[u64],
 ) -> Result<u64, RuntimeError> {
     let store_layout = elements(machine.program(), elem, true)?;
     let header_layout = vector(machine.program(), elem)?;
-    let store = machine.new_object(store_layout, words.len() as u32)?;
+    let stride = machine.words_of(elem).max(1) as usize;
+    let len = words.len() / stride;
+    let store = machine.new_object(store_layout, len as u32)?;
     // The store exists and nothing walks it, and allocating the header can
     // collect. It is released the moment the header exists, because the two
     // writes below cannot allocate and word 1 is what holds it afterwards.
@@ -305,53 +332,70 @@ pub(super) fn vector_of(
     let header = machine.new_object(header_layout, 0);
     machine.release_temps(mark);
     let header = header?;
-    machine.set_payload(header, 0, words.len() as u64);
+    machine.set_payload(header, 0, len as u64);
     machine.set_payload(header, 1, store);
-    for (at, word) in words.iter().enumerate() {
-        machine.set_payload(store, at as u32, *word);
-    }
+    machine.set_payload_run(store, 0, words);
     Ok(header)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lvm::builtins::tests::{case_of, world};
+    use crate::lvm::builtins::tests::{scalar, world};
     use crate::lvm::exec::tests::Build;
-    use cove_lir::Shape;
+    use cove_lir::{Repr, Shape};
 
-    /// One layout per payload `Repr`, so the family a `Some` is built to is
-    /// the one whose `Some` carries that word — and a `None` is built to the
-    /// same family rather than to whichever `Option` came first.
+    /// One layout per payload family, so the `Option` a `Some` is built to is
+    /// the one whose `Some` carries that payload — and a `None` is built to
+    /// the same family rather than to whichever `Option` came first.
     #[test]
     fn an_option_is_built_to_the_family_its_payload_belongs_to() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
+        let ints = scalar(&program, Repr::Int);
+        let text = program.str_layout;
 
-        let text = machine.new_string("x").unwrap();
-        let held = some(&mut machine, Repr::Ref, text).unwrap();
-        let counted = some(&mut machine, Repr::Int, 1).unwrap();
-        assert_ne!(machine.object_layout(held), machine.object_layout(counted));
-        assert_eq!(case_of(&machine, held), ("Some".to_string(), vec![text]));
+        let string = machine.new_string("x").unwrap();
+        let held = some(&mut machine, text, &[string]).unwrap();
+        let counted = some(&mut machine, ints, &[1]).unwrap();
+        assert_eq!(held, vec![1, string]);
+        assert_eq!(counted, vec![1, 1]);
 
-        let empty = none(&mut machine, Repr::Int).unwrap();
-        assert_eq!(machine.object_layout(empty), machine.object_layout(counted));
-        let empty = none(&mut machine, Repr::Ref).unwrap();
-        assert_eq!(machine.object_layout(empty), machine.object_layout(held));
+        // `None` fills nothing, and what it does not fill reads null — which
+        // is what makes one static reference map right for both cases.
+        let empty = none(&mut machine, text).unwrap();
+        assert_eq!(empty, vec![0, 0]);
     }
 
     #[test]
     fn a_failure_carries_an_error_carrying_its_message() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
-        let word = failed(&mut machine, Repr::Int, "it did not").unwrap();
-        let (case, payload) = case_of(&machine, word);
+        let ints = scalar(&program, Repr::Int);
+        let words = failed(&mut machine, ints, "it did not").unwrap();
+        // An `Error` is its one `String` field inline, so the payload word
+        // *is* the message's address — one object where the old model needed
+        // three. Where in the region that word sits is the payload-agreement
+        // rule's answer and not a fixture's, so the case is asked.
+        let (case, payload) = crate::lvm::builtins::tests::result_of(&program, ints, &words);
         assert_eq!(case, "Err");
-        let message = machine.payload(payload[0], 0);
         assert_eq!(
-            String::from_utf8(machine.string_bytes(message)).unwrap(),
+            String::from_utf8(machine.string_bytes(payload[0])).unwrap(),
             "it did not"
         );
+    }
+
+    /// An `Array<Point>` is a run of two-word elements, so the words a
+    /// builder is handed are the elements flattened and the header's length
+    /// is what the stride divides them into.
+    #[test]
+    fn a_run_of_multiword_elements_counts_elements_and_not_words() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 14);
+        let point = crate::lvm::builtins::tests::named(&program, "Point");
+        let addr = array_of(&mut machine, point, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(machine.object_len(addr), 2);
+        assert_eq!(machine.payload_run(addr, 0, 4), vec![1, 2, 3, 4]);
     }
 
     /// A program that never mentions a family has no layout for it. Nothing a
@@ -364,15 +408,16 @@ mod tests {
         let mut build = Build::default();
         let string = build.layout("String", Shape::Str);
         build.program.str_layout = string;
+        let ints = build.word("Int", Repr::Int);
         let program = build.done();
         let mut machine = Machine::new(&program, 1 << 14);
 
-        let error = none(&mut machine, Repr::Int).unwrap_err();
+        let error = none(&mut machine, ints).unwrap_err();
         assert_eq!(
             error.message,
             "this program describes no `Option` for a value of that shape to be built as"
         );
-        let error = array_of(&mut machine, Repr::Int, &[]).unwrap_err();
+        let error = array_of(&mut machine, ints, &[]).unwrap_err();
         assert_eq!(
             error.message,
             "this program describes no `Array` for a value of that shape to be built as"

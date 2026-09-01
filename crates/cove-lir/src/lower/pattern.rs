@@ -2,17 +2,33 @@
 //!
 //! # An enum dispatches; everything else compares
 //!
-//! A `match` over an enum reads the case index out of word 0 of the object
-//! and hands it to [`Inst::Switch`], so an enum with twenty cases costs one
-//! indexed jump rather than twenty comparisons. A `match` over anything else
-//! — an `Int`, a `String`, a `Bool` — is a chain of comparisons, because
-//! there is no index to switch on and the arms' literals are values rather
-//! than a dense numbering.
+//! A `match` over an enum hands word 0 of the value — the discriminant — to
+//! [`Inst::Switch`], so an enum with twenty cases costs one indexed jump
+//! rather than twenty comparisons. The discriminant needs no read: an enum
+//! is inline, so the word is already in the frame and the switch names the
+//! location itself.
+//!
+//! A `match` over anything else — an `Int`, a `String`, a `Bool` — is a
+//! chain of comparisons, because there is no index to switch on and the
+//! arms' literals are values rather than a dense numbering.
 //!
 //! The table has a default even where the checker proved the `match`
-//! exhaustive, because the index came out of a heap object and the machine
-//! does not take the lowering's word for what is in it. The default, and the
-//! end of a comparison chain, is [`Inst::Trap`].
+//! exhaustive, because the machine does not take the lowering's word for
+//! what is in a word. The default, and the end of a comparison chain, is
+//! [`Inst::Trap`].
+//!
+//! # A test reads nothing, so it leaves nothing behind
+//!
+//! A case's payload is *part of the value*: the parts of case `i` are at
+//! `base + 1 + Part::at`, and a sub-pattern is tested against that location
+//! directly. No word is copied out to be looked at, so a failing arm has
+//! nothing to clear on its way to the next one — which is a whole class of
+//! liveness bug the inline representation removes rather than solves.
+//!
+//! What a pattern *binds* is a copy, emitted only after every test has
+//! passed. It has to be a copy: the binding outlives the arm's tests and is
+//! cleared when the arm's scope ends, and clearing a borrowed sub-location
+//! would zero part of the value being matched.
 //!
 //! # An arm's body is emitted once
 //!
@@ -21,25 +37,16 @@
 //! several cases may reach the same arm. A `_` arm is the tail of every
 //! case's chain; an arm for one case is in that case's chain alone, so where
 //! it goes when its payload does not match is a fact known statically.
-//!
-//! # A test leaves nothing behind
-//!
-//! Deciding whether an arm matches can read an object out of a payload word,
-//! and that read is a reference in a slot. An arm that then fails jumps away
-//! without running its body, so the slot is cleared on that path too — which
-//! is what the per-arm failure block below is for. Everything a pattern
-//! *binds* is emitted only after every test has passed, so no binding is
-//! ever live on a path that did not match.
 
 use cove_diag::Span;
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::{MatchArm, Pattern, PatternKind};
 
-use super::frame::Val;
 use super::gap;
 use super::shapes;
-use super::{Body, PENDING};
+use super::{Body, Dest, PENDING};
 use crate::inst::{CmpOp, Compare, Inst, Pc, Slot};
+use crate::layout::LayoutId;
 use crate::program::{Table, TableId};
 use crate::repr::Repr;
 
@@ -57,17 +64,6 @@ enum Reach {
     Case { index: u32 },
 }
 
-/// What deciding one arm left behind: where it branches when it does not
-/// match, and the slots its tests read objects into.
-#[derive(Default)]
-struct Tests {
-    failures: Vec<Pc>,
-    /// Slots holding a reference a test read out of an object. They are dead
-    /// on both paths out of the test, and the failing path is the one that
-    /// would otherwise leave one set.
-    held: Vec<Slot>,
-}
-
 impl Body<'_> {
     /// `match scrutinee { ... }`, with or without an answer.
     pub(super) fn match_expr(
@@ -75,16 +71,16 @@ impl Body<'_> {
         scrutinee: &cove_syntax::ast::Expr,
         arms: &[MatchArm],
         span: Span,
-        dst: Option<Slot>,
+        dst: Option<Dest>,
     ) {
         let Some(ty) = self.owned_ty(scrutinee) else {
             return;
         };
         let subject = self.expr(scrutinee);
         if shapes::enum_cases(self.checked, self.module, &ty).is_some() {
-            self.match_enum(&ty, subject.slot, arms, span, dst);
+            self.match_enum(&ty, subject.slot, subject.layout, arms, span, dst);
         } else {
-            self.match_chain(&ty, subject.slot, arms, span, dst);
+            self.match_chain(&ty, subject.slot, subject.layout, arms, span, dst);
         }
         self.release(subject, span);
     }
@@ -94,9 +90,10 @@ impl Body<'_> {
         &mut self,
         ty: &Ty,
         subject: Slot,
+        layout: LayoutId,
         arms: &[MatchArm],
         span: Span,
-        dst: Option<Slot>,
+        dst: Option<Dest>,
     ) {
         let cases = shapes::enum_cases(self.checked, self.module, ty).expect("an enum-shaped type");
         let mut reach = Vec::with_capacity(arms.len());
@@ -104,23 +101,15 @@ impl Body<'_> {
             reach.push(self.reach_of(ty, &arm.pattern));
         }
 
-        let tag = self.frame.alloc(Repr::Int);
-        self.emit(
-            Inst::GetWord {
-                dst: tag,
-                obj: subject,
-                at: 0,
-            },
-            span,
-        );
+        // The discriminant is word 0 of the value, so the switch reads the
+        // location itself rather than a copy of it.
         let switch = self.emit(
             Inst::Switch {
-                on: tag,
+                on: subject,
                 table: UNPLACED,
             },
             span,
         );
-        self.frame.free(tag);
 
         // Which arms each case may reach, in order. The list stops at the
         // first arm that matches everything, because nothing after it is
@@ -133,7 +122,7 @@ impl Body<'_> {
                         chain.push(index);
                         break;
                     }
-                    Reach::Case { index: at, .. } if *at as usize == case => chain.push(index),
+                    Reach::Case { index: at } if *at as usize == case => chain.push(index),
                     Reach::Case { .. } => {}
                 }
             }
@@ -144,10 +133,10 @@ impl Body<'_> {
         let mut ends = Vec::new();
         for (index, arm) in arms.iter().enumerate() {
             entries[index] = self.here();
-            // The switch has already established which case the object is
+            // The switch has already established which case the value is
             // in, so only the payload is still in question.
             let dispatched = matches!(reach[index], Reach::Case { .. });
-            failures[index] = self.arm(arm, ty, subject, dst, dispatched, &mut ends);
+            failures[index] = self.arm(arm, ty, subject, layout, dst, dispatched, &mut ends);
         }
 
         let trap = self.here();
@@ -155,7 +144,7 @@ impl Body<'_> {
         self.emit(Inst::Trap { message }, span);
 
         for (index, pending) in failures.into_iter().enumerate() {
-            let Reach::Case { index: case, .. } = reach[index] else {
+            let Reach::Case { index: case } = reach[index] else {
                 continue;
             };
             let chain = &chains[case as usize];
@@ -191,13 +180,14 @@ impl Body<'_> {
         &mut self,
         ty: &Ty,
         subject: Slot,
+        layout: LayoutId,
         arms: &[MatchArm],
         span: Span,
-        dst: Option<Slot>,
+        dst: Option<Dest>,
     ) {
         let mut ends = Vec::new();
         for arm in arms {
-            let failures = self.arm(arm, ty, subject, dst, false, &mut ends);
+            let failures = self.arm(arm, ty, subject, layout, dst, false, &mut ends);
             let next = self.here();
             for at in failures {
                 self.patch(at, next);
@@ -217,27 +207,21 @@ impl Body<'_> {
     /// The answer is the jumps still to be patched to whatever comes next
     /// for this arm — which is the next arm in a chain, and the next
     /// candidate for this case under a switch.
+    #[allow(clippy::too_many_arguments)]
     fn arm(
         &mut self,
         arm: &MatchArm,
         ty: &Ty,
         subject: Slot,
-        dst: Option<Slot>,
+        layout: LayoutId,
+        dst: Option<Dest>,
         dispatched: bool,
         ends: &mut Vec<Pc>,
     ) -> Vec<Pc> {
         self.frame.push_scope();
-        let mut tests = Tests::default();
-        self.test(&arm.pattern, subject, ty, dispatched, &mut tests);
-
-        // The tests have passed, so what they read is dead. The same slots
-        // are cleared again on the failing path below, which is the path
-        // that would otherwise leave an object reachable from a frame that
-        // has moved on.
-        let held = tests.held.clone();
-        self.clear(&held, arm.pattern.span);
-
-        self.bind(&arm.pattern, subject, ty, arm.pattern.span);
+        let mut failures = Vec::new();
+        self.test(&arm.pattern, subject, layout, ty, dispatched, &mut failures);
+        self.bind(&arm.pattern, subject, layout, ty, arm.pattern.span);
         match dst {
             Some(dst) => {
                 let value = self.expr(&arm.body);
@@ -249,25 +233,7 @@ impl Body<'_> {
         let clears = self.frame.pop_scope();
         self.clear(&clears, arm.span);
         ends.push(self.emit(Inst::Jump { to: PENDING }, arm.span));
-
-        let pending = if tests.failures.is_empty() || held.is_empty() {
-            tests.failures
-        } else {
-            // One failure block per arm rather than one clear per branch:
-            // every test of this arm leaves the same slots set, and the arm
-            // has one place to go when it does not match.
-            let failing = self.here();
-            self.clear(&held, arm.pattern.span);
-            let onwards = self.emit(Inst::Jump { to: PENDING }, arm.pattern.span);
-            for at in tests.failures {
-                self.patch(at, failing);
-            }
-            vec![onwards]
-        };
-        for slot in held {
-            self.frame.free(slot);
-        }
-        pending
+        failures
     }
 
     /// Which values of a scrutinee of type `ty` an arm's pattern can match.
@@ -333,19 +299,21 @@ impl Body<'_> {
         }
     }
 
-    /// Emits what decides whether `pattern` matches the value in `subject`.
+    /// Emits what decides whether `pattern` matches the value at `subject`.
     ///
     /// `dispatched` says the case has already been established — by the
     /// switch, at the top of an enum `match` — so only the payload is still
     /// in question. Nothing is bound here: bindings come after every test
     /// has passed, so that a failing arm leaves no name holding anything.
+    #[allow(clippy::too_many_arguments)]
     fn test(
         &mut self,
         pattern: &Pattern,
         subject: Slot,
+        layout: LayoutId,
         ty: &Ty,
         dispatched: bool,
-        tests: &mut Tests,
+        failures: &mut Vec<Pc>,
     ) {
         let span = pattern.span;
         match &pattern.kind {
@@ -355,31 +323,34 @@ impl Body<'_> {
                     return;
                 };
                 if !dispatched {
-                    self.test_case(subject, index, span, tests);
+                    self.test_case(subject, index, span, failures);
                 }
             }
             PatternKind::Literal(literal) => {
                 let value = self.expr(literal);
                 let on = compare_of(self.frame.repr(subject));
-                let cond = self.frame.alloc(Repr::Bool);
+                let cond = self.temp(shapes::BOOL);
                 self.emit(
                     Inst::Cmp {
                         on,
                         op: CmpOp::Eq,
-                        dst: cond,
+                        dst: cond.slot,
                         a: subject,
                         b: value.slot,
                     },
                     span,
                 );
                 // The literal is dead the moment it has been compared, on
-                // both paths out of the branch below, so it is ended here
-                // rather than held for the failure block.
+                // both paths out of the branch below.
                 self.release(value, span);
-                tests
-                    .failures
-                    .push(self.emit(Inst::BranchFalse { cond, to: PENDING }, span));
-                self.frame.free(cond);
+                failures.push(self.emit(
+                    Inst::BranchFalse {
+                        cond: cond.slot,
+                        to: PENDING,
+                    },
+                    span,
+                ));
+                self.give_back(cond.slot, cond.layout);
             }
             PatternKind::Variant { path, payload } => {
                 let case = path
@@ -393,144 +364,106 @@ impl Body<'_> {
                     return;
                 };
                 if !dispatched {
-                    self.test_case(subject, index, span, tests);
+                    self.test_case(subject, index, span, failures);
                 }
+                let Some((parts, _)) = self.case_of(layout, index) else {
+                    return;
+                };
                 for (at, sub) in payload.iter().enumerate() {
                     if !self.refutable(sub) {
                         continue;
                     }
-                    let Some(sub_ty) = types.get(at) else {
+                    let (Some(sub_ty), Some(part)) = (types.get(at), parts.get(at)) else {
                         continue;
                     };
-                    let Some(repr) = shapes::word_of(sub_ty) else {
-                        self.errors.push(super::describe(sub_ty, span));
-                        continue;
-                    };
-                    let word = self.frame.alloc(repr);
-                    self.emit(
-                        Inst::GetWord {
-                            dst: word,
-                            obj: subject,
-                            at: 1 + at as u32,
-                        },
-                        span,
-                    );
                     let sub_ty = sub_ty.clone();
-                    self.test(sub, word, &sub_ty, false, tests);
-                    // A payload word that is a reference stays live across
-                    // every branch the sub-pattern emitted, so it is the
-                    // failure block's to clear rather than this line's.
-                    if matches!(repr, Repr::Ref | Repr::Addr) {
-                        tests.held.push(word);
-                    } else {
-                        self.frame.free(word);
-                    }
+                    // The payload is part of the value, so the sub-pattern
+                    // is tested where it already is.
+                    self.test(
+                        sub,
+                        subject + 1 + part.at,
+                        part.layout,
+                        &sub_ty,
+                        false,
+                        failures,
+                    );
                 }
             }
         }
     }
 
     /// The one test an enum case needs: word 0 against the index.
-    fn test_case(&mut self, subject: Slot, index: u32, span: Span, tests: &mut Tests) {
-        let tag = self.frame.alloc(Repr::Int);
-        self.emit(
-            Inst::GetWord {
-                dst: tag,
-                obj: subject,
-                at: 0,
-            },
-            span,
-        );
-        let wanted = self.frame.alloc(Repr::Int);
+    fn test_case(&mut self, subject: Slot, index: u32, span: Span, failures: &mut Vec<Pc>) {
+        let wanted = self.temp(shapes::INT);
         self.emit(
             Inst::Int {
-                dst: wanted,
+                dst: wanted.slot,
                 value: index as i64,
             },
             span,
         );
-        let cond = self.frame.alloc(Repr::Bool);
+        let cond = self.temp(shapes::BOOL);
         self.emit(
             Inst::Cmp {
                 on: Compare::Int,
                 op: CmpOp::Eq,
-                dst: cond,
-                a: tag,
-                b: wanted,
+                dst: cond.slot,
+                a: subject,
+                b: wanted.slot,
             },
             span,
         );
-        self.frame.free(wanted);
-        self.frame.free(tag);
-        tests
-            .failures
-            .push(self.emit(Inst::BranchFalse { cond, to: PENDING }, span));
-        self.frame.free(cond);
+        self.give_back(wanted.slot, wanted.layout);
+        failures.push(self.emit(
+            Inst::BranchFalse {
+                cond: cond.slot,
+                to: PENDING,
+            },
+            span,
+        ));
+        self.give_back(cond.slot, cond.layout);
     }
 
     /// Names what a pattern binds, once every test has passed.
     ///
-    /// A binding's slot belongs to the arm's scope, so it is cleared when
-    /// the arm ends — which is the same event that ends a `let`'s.
-    fn bind(&mut self, pattern: &Pattern, subject: Slot, ty: &Ty, span: Span) {
+    /// A binding is a copy of the words it names. It has to be: the binding
+    /// belongs to the arm's scope and is cleared when that scope ends, and
+    /// clearing a borrowed part of the value being matched would zero the
+    /// value itself.
+    fn bind(&mut self, pattern: &Pattern, subject: Slot, layout: LayoutId, ty: &Ty, span: Span) {
         match &pattern.kind {
             PatternKind::Wildcard | PatternKind::Literal(_) => {}
             PatternKind::Binding(name) => {
                 if self.bare_case(ty, name).is_some() {
                     return;
                 }
-                let repr = self.frame.repr(subject);
-                let slot = self.frame.alloc(repr);
-                self.emit(
-                    Inst::Move {
-                        dst: slot,
-                        src: subject,
-                    },
-                    span,
-                );
-                self.frame.own(slot);
-                self.frame.bind(name, slot);
+                let slot = self.alloc(layout);
+                self.copy(slot, subject, layout, span);
+                let width = self.width(layout);
+                self.frame.own(slot, layout, width);
+                self.frame.bind(name, slot, layout);
             }
             PatternKind::Variant { path, payload } => {
                 let case = path
                     .last()
                     .map(|segment| segment.node.as_str())
                     .unwrap_or("");
-                let Some((_, types)) = shapes::case_at(self.checked, self.module, ty, case) else {
+                let Some((index, types)) = shapes::case_at(self.checked, self.module, ty, case)
+                else {
+                    return;
+                };
+                let Some((parts, _)) = self.case_of(layout, index) else {
                     return;
                 };
                 for (at, sub) in payload.iter().enumerate() {
                     if !self.binds(sub) {
                         continue;
                     }
-                    let Some(sub_ty) = types.get(at).cloned() else {
+                    let (Some(sub_ty), Some(part)) = (types.get(at), parts.get(at)) else {
                         continue;
                     };
-                    let Some(repr) = shapes::word_of(&sub_ty) else {
-                        continue;
-                    };
-                    let word = self.frame.alloc(repr);
-                    self.emit(
-                        Inst::GetWord {
-                            dst: word,
-                            obj: subject,
-                            at: 1 + at as u32,
-                        },
-                        span,
-                    );
-                    match &sub.kind {
-                        // The word the payload holds *is* what the name
-                        // means, so the slot it was read into becomes the
-                        // binding rather than being copied out of.
-                        PatternKind::Binding(name) if self.bare_case(&sub_ty, name).is_none() => {
-                            self.frame.own(word);
-                            self.frame.bind(name, word);
-                        }
-                        _ => {
-                            self.bind(sub, word, &sub_ty, span);
-                            self.release(Val::temp(word), span);
-                        }
-                    }
+                    let sub_ty = sub_ty.clone();
+                    self.bind(sub, subject + 1 + part.at, part.layout, &sub_ty, span);
                 }
             }
         }

@@ -1,186 +1,166 @@
-//! Structs: a layout per declaration, and one word per field.
+//! Structs, which are their fields where the value is.
+//!
+//! The cases here are what the representation was changed for. A struct is
+//! the consecutive words of its fields, so a copy is a copy — two words in,
+//! two words out — and a field is a slot number this lowering computes
+//! rather than an instruction the machine runs.
 
-use std::sync::Arc;
+use super::listing;
 
-use super::{checked, listing};
-use crate::layout::{Field, Shape};
-use crate::lower::lower;
-use crate::repr::Repr;
-
+/// There is no allocation and no indirection: `Point` is two words of the
+/// frame, and building one is two copies. Every field is evaluated before
+/// anything is stored, in source order, because an initializer's arguments
+/// are ordinary expressions and one of them may do something the next one
+/// sees.
 #[test]
-fn a_struct_literal_allocates_and_then_fills() {
-    // Every field is evaluated before anything is stored, because an
-    // initializer's arguments are ordinary expressions and one of them may
-    // do something the next one sees. The object is allocated once they are
-    // all in hand, so nothing is half-built across a call.
+fn a_struct_literal_is_its_fields_written_where_the_value_is() {
     assert_eq!(
         listing(
             "struct Point { x: Int, y: Int }\nfn origin() -> Point { Point(x: 1, y: 2) }",
             "origin"
         ),
         "\
-fn0 m.origin(0) -> ref
-  frame 4: s0:ref s1:int s2:int s3:ref
+fn0 m.origin() -> m.Point
+  frame 6: s0:int s1:int s2:int s3:int s4:int s5:int
+     0  int s2:int 1
+     1  int s3:int 2
+     2  copy s4:int s2:int Int
+     3  copy s5:int s3:int Int
+     4  copy s0:int s4:int m.Point
+     5  return s0:int
+"
+    );
+}
+
+/// This is `docs/LINEAR_VM.md`'s first worked case. `var b = a` is one
+/// `Copy` of two words, `b.x = 7` writes `b`'s first word, and `a.x` is
+/// still slot 3 and was never touched. No bit was set and no protocol ran.
+#[test]
+fn a_two_word_struct_is_copied_by_one_copy() {
+    assert_eq!(
+        listing(
+            "struct Point { x: Int, y: Int }\nfn f() -> Int {\n  var a = Point(x: 1, y: 2)\n  var b = a\n  b.x = 7\n  a.x\n}",
+            "f"
+        ),
+        "\
+fn0 m.f() -> Int
+  frame 7: s0:int s1:int s2:int s3:int s4:int s5:int s6:int
      0  int s1:int 1
      1  int s2:int 2
-     2  alloc s3:ref m.Point<struct>
-     3  set-word s3:ref +0 s1:int
-     4  set-word s3:ref +1 s2:int
-     5  move s0:ref s3:ref
-     6  clear s3:ref
-     7  return s0:ref
+     2  copy s3:int s1:int Int
+     3  copy s4:int s2:int Int
+     4  copy s5:int s3:int m.Point
+     5  int s1:int 7
+     6  copy s5:int s1:int Int
+     7  copy s0:int s3:int Int
+     8  return s0:int
 "
     );
 }
 
+/// `Line` is `[from.x, from.y, to.x, to.y]`, four words with no
+/// indirection in it at all. One `Copy` moves all four, `m.from.x` is
+/// slot + 0 of the copy, and `l.from.x` is slot 0 of the original.
 #[test]
-fn a_field_read_is_one_word_out_of_the_object() {
-    // The field a name denotes is decided from the layout, statically, so
-    // there is nothing to look up at run time; and a field holding a
-    // reference is cleared once the value built out of it is finished with.
+fn a_nested_struct_is_copied_whole() {
     assert_eq!(
         listing(
-            "struct User { name: String, age: Int }\n\
-             fn older(u: User) -> User { User(name: u.name, age: u.age + 1) }",
-            "older"
+            "struct Point { x: Int, y: Int }\nstruct Line { from: Point, to: Point }\nfn f(l: Line) -> Int {\n  var m = l\n  m.from.x = 7\n  l.from.x + m.from.x\n}",
+            "f"
         ),
         "\
-fn0 m.older(1) -> ref
-  frame 7: s0!:ref s1:ref s2:ref s3:int s4:int s5:int s6:ref
-     0  get-word s2:ref s0:ref +0
-     1  get-word s3:int s0:ref +1
-     2  int s4:int 1
-     3  add.int s5:int s3:int s4:int
-     4  alloc s6:ref m.User<struct>
-     5  set-word s6:ref +0 s2:ref
-     6  set-word s6:ref +1 s5:int
-     7  clear s2:ref
-     8  move s1:ref s6:ref
-     9  clear s6:ref
-    10  return s1:ref
+fn0 m.f(m.Line) -> Int
+  frame 10: s0!:int s1!:int s2!:int s3!:int s4:int s5:int s6:int s7:int s8:int s9:int
+     0  copy s5:int s0:int m.Line
+     1  int s9:int 7
+     2  copy s5:int s9:int Int
+     3  add.int s9:int s0:int s5:int
+     4  copy s4:int s9:int Int
+     5  return s4:int
 "
     );
 }
 
+/// `l.to.y` is `base + Field::at + Field::at`, added here rather than read
+/// by two instructions. The whole body is the copy into the answer.
 #[test]
-fn a_field_assignment_is_one_word_in() {
-    // A `var` parameter names the caller's storage, so reading `p` is a
-    // `Load` through the address and writing a field of it is a `SetWord`
-    // into the object that address names. The object is held in a reference
-    // slot for the read and the write, and cleared as soon as the store is
-    // done — not for the rest of the frame.
+fn a_field_of_a_field_is_arithmetic_and_emits_nothing() {
     assert_eq!(
         listing(
-            "struct Point { x: Int, y: Int }\nfn move_x(var p: Point, by: Int) { p.x += by }",
-            "move_x"
+            "struct Point { x: Int, y: Int }\nstruct Line { from: Point, to: Point }\nfn f(l: Line) -> Int { l.to.y }",
+            "f"
         ),
         "\
-fn0 m.move_x(2) -> unit
-  frame 7: s0!:addr s1!:int s2:unit s3:ref s4:int s5:int s6:unit
-     0  load s3:ref s0:addr
-     1  get-word s4:int s3:ref +0
-     2  add.int s5:int s4:int s1:int
-     3  set-word s3:ref +0 s5:int
-     4  clear s3:ref
-     5  unit s6:unit
-     6  move s2:unit s6:unit
-     7  return s2:unit
+fn0 m.f(m.Line) -> Int
+  frame 5: s0!:int s1!:int s2!:int s3!:int s4:int
+     0  copy s4:int s3:int Int
+     1  return s4:int
 "
     );
 }
 
+/// `docs/LINEAR_VM.md`'s third worked case. One `Copy` of three words
+/// makes the `Point` independent — its words were copied — and leaves the
+/// `Vector` shared, because what was copied is its address and a
+/// `Vector`'s storage is shared by the language's own rule. Both answers
+/// fall out of the same copy; neither needs a policy.
 #[test]
-fn an_interior_address_holds_its_base_for_exactly_its_own_live_range() {
-    // This is the case `docs/LINEAR_VM.md` singles out: the object an
-    // interior address points into is kept alive by the lowering rather than
-    // by the collector, which needs no interior-pointer logic and never
-    // moves an object.
-    //
-    // So `s2` holds the object for as long as the address in `s3` can be
-    // used — the `AddrOfWord`, the call, and nothing after it — and both are
-    // cleared together the instant the call returns. Retaining the base for
-    // the rest of the frame instead would hold it across everything a
-    // long-running body does afterwards.
+fn a_struct_holding_a_vector_copies_the_words_and_shares_the_address() {
     assert_eq!(
         listing(
-            "struct Point { x: Int, y: Int }\n\
-             fn bump(var n: Int) { n += 1 }\n\
-             fn go(var p: Point) -> Int {\n  bump(var p.x)\n  p.x\n}",
-            "go"
+            "struct Point { x: Int, y: Int }\nstruct Wrapper { p: Point, v: Vector<Int> }\nfn f(w: Wrapper) -> Bool {\n  var other = w\n  other.p.x = 7\n  other.v is w.v\n}",
+            "f"
         ),
         "\
-fn1 m.go(1) -> int
-  frame 6: s0!:addr s1:int s2:ref s3:addr s4:unit s5:int
-     0  load s2:ref s0:addr
-     1  addr-of-word s3:addr s2:ref +0
-     2  call s4:unit m.bump (s3:addr)
-     3  clear s3:addr
-     4  clear s2:ref
-     5  load s2:ref s0:addr
-     6  get-word s5:int s2:ref +0
-     7  clear s2:ref
-     8  move s1:int s5:int
-     9  return s1:int
+fn0 m.f(m.Wrapper) -> Bool
+  frame 9: s0!:int s1!:int s2!:ref s3:bool s4:int s5:int s6:ref s7:int s8:bool
+     0  copy s4:int s0:int m.Wrapper
+     1  int s7:int 7
+     2  copy s4:int s7:int Int
+     3  eq.identity s8:bool s6:ref s2:ref
+     4  copy s3:bool s8:bool Bool
+     5  clear s4:int m.Wrapper
+     6  return s3:bool
 "
     );
 }
 
+/// There is no place to walk back to, so the base is evaluated and the
+/// field is an offset into the location it left behind.
 #[test]
-fn a_declared_struct_is_one_layout_with_its_fields_in_declaration_order() {
-    // A declaration is a shape rather than a function, so it produces no
-    // code and one entry in the layout table. The name is the type's own,
-    // without the module that declares it, because that is what a value of
-    // it is shown as and what an incoming value is matched to a family by.
-    let program = lower(&checked(
-        "struct Point { x: Int, y: Int }\n\
-         fn a() -> Point { Point(x: 1, y: 2) }\n\
-         fn b() -> Point { Point(x: 3, y: 4) }",
-    ))
-    .expect("the program lowers");
-    let points: Vec<&crate::Layout> = program
-        .layouts
-        .iter()
-        .filter(|layout| &*layout.name == "m.Point")
-        .collect();
-    assert_eq!(points.len(), 1, "two literals of one struct are one layout");
+fn a_field_of_a_call_s_answer_is_copied_out_of_the_temporary() {
     assert_eq!(
-        points[0].shape,
-        Shape::Struct {
-            fields: vec![
-                Field {
-                    name: Arc::from("x"),
-                    repr: Repr::Int,
-                },
-                Field {
-                    name: Arc::from("y"),
-                    repr: Repr::Int,
-                },
-            ],
-            opaque: false,
-        }
+        listing(
+            "struct Point { x: Int, y: Int }\nfn mk() -> Point { Point(x: 1, y: 2) }\nfn f() -> Int { mk().y }",
+            "f"
+        ),
+        "\
+fn0 m.f() -> Int
+  frame 4: s0:int s1:int s2:int s3:int
+     0  call s1:int m.mk ()
+     1  copy s3:int s2:int Int
+     2  copy s0:int s3:int Int
+     3  return s0:int
+"
     );
-    // A struct of scalars is a leaf, so a collection walking one reads no
-    // word of it at all.
-    assert!(!points[0].may_hold_refs());
 }
 
-/// An `export opaque struct` is the same shape as any other; what differs is
-/// the one thing a rendering is allowed to say about it. The layout carries
-/// that because nothing downstream can derive it: by the time a value is a
-/// word, the declaration is gone.
+/// `Function::returns` is a layout, so a return copies as many words as it
+/// says and the caller's destination is a location rather than a slot.
 #[test]
-fn an_opaque_declaration_is_recorded_in_its_layout() {
-    let source = "
-export opaque struct Token { id: Int }
-export fn make(n: Int) -> Token {
-  Token(id: n)
-}
-";
-    let program = lower(&checked(source)).expect("the program lowers");
-    let token = program
-        .layouts
-        .iter()
-        .find(|layout| &*layout.name == "m.Token")
-        .expect("the struct has a layout");
-    assert!(matches!(token.shape, Shape::Struct { opaque: true, .. }));
+fn a_struct_returned_by_value_is_the_answer_location_s_words() {
+    assert_eq!(
+        listing(
+            "struct Point { x: Int, y: Int }\nfn mk(a: Int) -> Point { Point(x: a, y: a) }\nfn f() -> Point { mk(3) }",
+            "f"
+        ),
+        "\
+fn0 m.f() -> m.Point
+  frame 5: s0:int s1:int s2:int s3:int s4:int
+     0  int s2:int 3
+     1  call s3:int m.mk (s2:int)
+     2  copy s0:int s3:int m.Point
+     3  return s0:int
+"
+    );
 }

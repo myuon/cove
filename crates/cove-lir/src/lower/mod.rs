@@ -16,6 +16,16 @@
 //! a construct this crate has not been taught yet — and neither is a
 //! judgement about the program.
 //!
+//! # A value is a run of words, and the lowering is what knows how many
+//!
+//! `docs/LINEAR_VM.md` puts the fields of a struct where the value is, so
+//! `l.from.x` is a slot number this module computes and not an instruction
+//! the machine runs. A field access on an inline value is *arithmetic on a
+//! slot*, and only a field of a heap object is a load. That is why
+//! `Val` is a base slot and a layout rather than a slot and a `Repr`: the
+//! layout is what a copy's width, a location's reference words and a field's
+//! offset are all read off.
+//!
 //! # The shape of a lowered body
 //!
 //! Control flow is flat. There are no basic blocks and no block arguments:
@@ -64,7 +74,7 @@ use crate::program::{
 use crate::repr::{RefMap, Repr};
 
 use frame::{Frame, Val};
-use shapes::{word_of, Shapes};
+use shapes::Shapes;
 
 /// The target of a jump that has been emitted but whose destination is not
 /// known yet.
@@ -74,16 +84,36 @@ use shapes::{word_of, Shapes};
 /// top of the function.
 const PENDING: Pc = Pc::MAX;
 
+/// Where a form assembles its answer: a base slot and the layout that says
+/// how wide it is.
+///
+/// A destination is a *location*, not a slot, because a value may be several
+/// words and both a branch join and a block tail have to write all of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Dest {
+    pub slot: Slot,
+    pub layout: LayoutId,
+}
+
+impl Dest {
+    fn of(val: &Val) -> Dest {
+        Dest {
+            slot: val.slot,
+            layout: val.layout,
+        }
+    }
+}
+
 /// Lowers a checked package.
 ///
 /// The result either runs or names what stopped it. Nothing in between: a
 /// lowered [`Program`] has been through [`crate::verify()`], so a caller that
-/// holds one holds a program whose slots, jumps and calls are all in range
-/// and whose reference map is the one its reprs imply.
+/// holds one holds a program whose locations, jumps and calls are all in
+/// range and whose reference map is the one its reprs imply.
 pub fn lower(checked: &Checked) -> Result<Program, Vec<Diagnostic>> {
     let mut errors = Vec::new();
-    let plan = Plan::build(checked, &mut errors);
     let mut pool = Pool::new();
+    let plan = Plan::build(checked, &mut pool, &mut errors);
     let mut functions = Vec::new();
     for id in 0..plan.decls.len() {
         functions.push(lower_function(checked, &plan, id, &mut pool, &mut errors));
@@ -93,6 +123,7 @@ pub fn lower(checked: &Checked) -> Result<Program, Vec<Diagnostic>> {
         functions,
         layouts: pool.shapes.into_table(),
         str_layout: shapes::STR,
+        boxed_layout: shapes::BOXED,
         strings: pool.strings,
         args: pool.args.lists,
         tables: pool.tables,
@@ -152,29 +183,32 @@ struct Decl<'a> {
     boundary: Option<Boundary>,
 }
 
-/// A declaration's parameters and answer, as words.
+/// A declaration's parameters and answer, as layouts.
 struct Boundary {
-    /// The words a call passes, **receiver first** where the declaration has
-    /// one. There are no type groups and nothing is permuted; a method's
-    /// receiver is slot 0 because it is the first thing a call supplies.
-    params: Vec<Repr>,
-    /// The types those words hold, in the same order.
+    /// The layout of each parameter, **receiver first** where the
+    /// declaration has one. There are no type groups and nothing is
+    /// permuted; a method's receiver is first because it is the first thing
+    /// a call supplies. A `var` parameter's layout is
+    /// [`shapes::ADDR`]: it names the caller's storage rather than holding a
+    /// value.
+    params: Vec<LayoutId>,
+    /// The types those locations hold, in the same order.
     ///
-    /// The word alone is not enough at a call site. A parameter written
-    /// `dyn Trait` and one written `Point` are both a [`Repr::Ref`], and
-    /// only the first is a place where a concrete value is erased — so the
-    /// call site has to read the type the checker settled, not the word this
-    /// lowering derived from it.
+    /// The layout alone is not enough at a call site. A parameter written
+    /// `dyn Trait` and one written `String` are both one [`Repr::Ref`] word,
+    /// and only the first is a place where a concrete value is erased — so
+    /// the call site has to read the type the checker settled, not the
+    /// layout this lowering derived from it.
     types: Vec<Ty>,
-    returns: Repr,
+    returns: LayoutId,
     /// What the declaration answers, as the checker settled it.
     ///
-    /// The word is not enough for `?`, which has to build the enclosing
-    /// function's own `Err` or `None` and therefore needs the layout rather
-    /// than only the fact that it is a reference.
+    /// The layout is not enough for `?`, which has to build the enclosing
+    /// function's own `Err` or `None` and therefore needs to know which of
+    /// the two the answer is.
     ret: Ty,
-    /// Whether slot 0 is the receiver: `self`, or the address `var self`
-    /// names.
+    /// Whether the first parameter is the receiver: `self`, or the address
+    /// `var self` names.
     receiver: bool,
 }
 
@@ -200,7 +234,7 @@ struct Plan<'a> {
 }
 
 impl<'a> Plan<'a> {
-    fn build(checked: &'a Checked, errors: &mut Vec<Diagnostic>) -> Plan<'a> {
+    fn build(checked: &'a Checked, pool: &mut Pool, errors: &mut Vec<Diagnostic>) -> Plan<'a> {
         let mut plan = Plan {
             decls: Vec::new(),
             by_name: BTreeMap::new(),
@@ -211,11 +245,12 @@ impl<'a> Plan<'a> {
             plan.declare_gaps(resolved, errors);
             for (fn_name, entry) in &resolved.functions {
                 let module: Arc<str> = Arc::from(name.as_str());
+                let boundary = boundary_of(checked, name, &entry.decl, pool, errors);
                 let id = plan.declare(
                     module,
                     Arc::from(fn_name.as_str()),
                     entry.decl.as_ref(),
-                    boundary_of(checked, &entry.decl, errors),
+                    boundary,
                 );
                 plan.lookup.insert((name.clone(), fn_name.clone()), id);
             }
@@ -240,7 +275,7 @@ impl<'a> Plan<'a> {
                         ));
                         None
                     }
-                    None => boundary_of(checked, &entry.decl, errors),
+                    None => boundary_of(checked, name, &entry.decl, pool, errors),
                 };
                 let id = plan.declare(module, lowered, entry.decl.as_ref(), boundary);
                 let owner = resolved.owner_of(type_name).unwrap_or(name.as_str());
@@ -272,17 +307,17 @@ impl<'a> Plan<'a> {
 
     /// Reports the declarations that have no code here yet.
     ///
-    /// A `struct` and an `enum` are not among them any more: they declare a
-    /// [`crate::Shape`] rather than a function, and the shape is built where
-    /// a value of the type is met. Neither is a `trait` or an `impl` block:
-    /// a trait declares an interface, and a method is an ordinary lowered
-    /// function whose slot 0 is the receiver.
+    /// A `struct` and an `enum` are not among them: they declare a
+    /// [`crate::Layout`] rather than a function, and the layout is built
+    /// where a value of the type is met. Neither is a `trait` or an `impl`
+    /// block: a trait declares an interface, and a method is an ordinary
+    /// lowered function whose first parameter is the receiver.
     ///
-    /// What is still reported is the declaration whose *shape* this lowering
-    /// cannot build at all — a generic one, whose fields are type parameters
-    /// and so have no word. A type this lowering cannot represent is a gap at
-    /// every use of it as well, but naming the declaration once is what says
-    /// where the work is.
+    /// What is still reported is the declaration whose *layout* this
+    /// lowering cannot build at all — a generic one, whose fields are type
+    /// parameters and so have no words. A type this lowering cannot
+    /// represent is a gap at every use of it as well, but naming the
+    /// declaration once is what says where the work is.
     fn declare_gaps(&self, resolved: &ResolvedModule, errors: &mut Vec<Diagnostic>) {
         for entry in resolved.structs.values() {
             if !entry.decl.generics.is_empty() {
@@ -346,13 +381,10 @@ impl<'a> Plan<'a> {
 
 /// What one call site has to match, held apart from the [`Plan`] so that a
 /// body can read it while it is writing into its own frame.
-///
-/// Not a [`crate::Shape`], which is what a heap object is made of. This is
-/// what a *call* is made of: the words it passes and the word it answers.
 struct CallShape {
-    params: Vec<Repr>,
+    params: Vec<LayoutId>,
     types: Vec<Ty>,
-    returns: Repr,
+    returns: LayoutId,
     receiver: bool,
 }
 
@@ -370,7 +402,13 @@ impl CallShape {
 /// The annotations are names; the signature is what those names resolved to
 /// in the module they were written in, which is the only reading of a
 /// `-> other.Thing` that means the same in both modules.
-fn boundary_of(checked: &Checked, decl: &FnDecl, errors: &mut Vec<Diagnostic>) -> Option<Boundary> {
+fn boundary_of(
+    checked: &Checked,
+    module: &str,
+    decl: &FnDecl,
+    pool: &mut Pool,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<Boundary> {
     let mut ok = true;
     if !decl.generics.is_empty() {
         errors.push(gap::gap("a generic function", decl.span));
@@ -407,13 +445,13 @@ fn boundary_of(checked: &Checked, decl: &FnDecl, errors: &mut Vec<Diagnostic>) -
     // does not have to be inferred from a count.
     if let Some(receiver) = &signature.receiver {
         let span = decl.receiver.map_or(decl.span, |it| it.span);
-        match word_of(receiver) {
+        match pool.shapes.of(checked, module, receiver) {
             // `var self` is a `var` parameter written in the receiver
-            // position: the method names the caller's storage, so slot 0
-            // holds its address and a write to a field of `self` reaches the
-            // caller's object with no copy back.
-            Some(_) if decl.receiver.is_some_and(|it| it.is_var) => params.push(Repr::Addr),
-            Some(repr) => params.push(repr),
+            // position: the method names the caller's storage, so the first
+            // parameter holds its address and a write to a field of `self`
+            // reaches the caller's own words with no copy back.
+            Some(_) if decl.receiver.is_some_and(|it| it.is_var) => params.push(shapes::ADDR),
+            Some(layout) => params.push(layout),
             None => {
                 errors.push(describe(receiver, span));
                 ok = false;
@@ -422,14 +460,14 @@ fn boundary_of(checked: &Checked, decl: &FnDecl, errors: &mut Vec<Diagnostic>) -
         types.push(receiver.clone());
     }
     for (param, ty) in decl.params.iter().zip(&signature.params) {
-        match word_of(ty) {
-            // A `var` parameter is an ordinary slot whose `Repr` is
-            // `Addr`: it names the caller's storage, so the word is the
-            // address of it rather than a copy of what is in it. The
-            // type is still read, because a type with no word is a gap
-            // whichever side of the alias it is on.
-            Some(_) if param.is_var => params.push(Repr::Addr),
-            Some(repr) => params.push(repr),
+        match pool.shapes.of(checked, module, ty) {
+            // A `var` parameter is an ordinary slot whose `Repr` is `Addr`:
+            // it names the caller's storage, so the word is the address of
+            // it rather than a copy of what is in it. The type is still
+            // read, because a type with no layout is a gap whichever side of
+            // the alias it is on.
+            Some(_) if param.is_var => params.push(shapes::ADDR),
+            Some(layout) => params.push(layout),
             None => {
                 errors.push(describe(ty, param.span));
                 ok = false;
@@ -437,13 +475,13 @@ fn boundary_of(checked: &Checked, decl: &FnDecl, errors: &mut Vec<Diagnostic>) -
         }
         types.push(ty.clone());
     }
-    let returns = match word_of(&signature.ret) {
-        Some(repr) => repr,
+    let returns = match pool.shapes.of(checked, module, &signature.ret) {
+        Some(layout) => layout,
         None => {
             let span = decl.return_type.as_ref().map_or(decl.span, |ty| ty.span);
             errors.push(describe(&signature.ret, span));
             ok = false;
-            Repr::Unit
+            shapes::UNIT
         }
     };
 
@@ -456,7 +494,7 @@ fn boundary_of(checked: &Checked, decl: &FnDecl, errors: &mut Vec<Diagnostic>) -
     })
 }
 
-/// Why a type has no word here: the checker settled nothing, or it settled
+/// Why a type has no layout here: the checker settled nothing, or it settled
 /// something this task has not reached.
 fn describe(ty: &Ty, span: Span) -> Diagnostic {
     match ty {
@@ -573,14 +611,14 @@ struct Loop {
     depth: usize,
     /// Jumps emitted by `break` with nowhere to go yet.
     breaks: Vec<Pc>,
-    /// The slot a `for` binds each turn, when it holds a reference.
+    /// The location a `for` binds each turn, when it holds a reference.
     ///
     /// The loop owns it rather than the per-turn scope, because the scope
     /// gives its slots back when it ends and the next turn writes this one
     /// again. That leaves nobody to clear it on the one path that does not
     /// reach the end of a turn, which is what this is: a `break` clears the
     /// element it was holding on its way out.
-    element: Option<Slot>,
+    element: Option<Dest>,
 }
 
 /// The state of lowering one function body.
@@ -596,15 +634,15 @@ struct Body<'a> {
     code: Vec<Inst>,
     spans: Vec<Span>,
     loops: Vec<Loop>,
-    /// The slot the body's answer is assembled in, and the one the trailing
-    /// [`Inst::Return`] names.
-    answer: Slot,
-    /// What this function answers, as a type rather than as a word.
+    /// The location the body's answer is assembled in, and the one the
+    /// trailing [`Inst::Return`] names.
+    answer: Dest,
+    /// What this function answers, as a type rather than as a layout.
     ///
     /// `?` needs it: the value it leaves through is the enclosing
     /// function's own `Err` or `None`, built here, and building one needs
-    /// the layout of *this* function's answer rather than the layout of the
-    /// thing the `?` was applied to.
+    /// to know which of the two *this* function answers rather than what the
+    /// `?` was applied to.
     returns: Ty,
 }
 
@@ -621,12 +659,16 @@ fn lower_function(
     };
 
     let mut frame = Frame::new();
-    for repr in &boundary.params {
-        frame.param(*repr);
+    let mut param_slots = Vec::with_capacity(boundary.params.len());
+    for layout in &boundary.params {
+        param_slots.push(frame.param(pool.shapes.words(*layout)));
     }
-    // The answer word is taken before any temporary, so it is live for the
-    // whole body and never handed to something else.
-    let answer = frame.alloc(boundary.returns);
+    // The answer is taken before any temporary, so it is live for the whole
+    // body and never handed to something else.
+    let answer = Dest {
+        slot: frame.alloc(pool.shapes.words(boundary.returns)),
+        layout: boundary.returns,
+    };
 
     let mut body = Body {
         checked,
@@ -643,29 +685,34 @@ fn lower_function(
     };
 
     body.frame.push_scope();
-    // Slot 0 is the receiver where there is one, so a parameter's slot is
-    // its position shifted past it. Nothing else about a method differs: the
-    // body reads `self` the way it reads any binding, and where slot 0 is an
-    // `Addr` — `var self` — reading it is a `Load` through the word, which
-    // is the same rule a `var` parameter already follows.
+    // The receiver is the first parameter where there is one, so a written
+    // parameter's location is its position shifted past it. Nothing else
+    // about a method differs: the body reads `self` the way it reads any
+    // binding, and where the receiver is an `Addr` — `var self` — reading it
+    // is a `Load` through the word, which is the same rule a `var` parameter
+    // already follows.
     let mut at = 0;
     if boundary.receiver {
-        body.frame.bind("self", 0);
+        body.frame.bind("self", param_slots[0], boundary.params[0]);
         at = 1;
     }
     for (index, param) in decl.decl.params.iter().enumerate() {
-        body.frame.bind(&param.name.node, (at + index) as Slot);
+        body.frame.bind(
+            &param.name.node,
+            param_slots[at + index],
+            boundary.params[at + index],
+        );
     }
     body.block(&decl.decl.body, Some(answer));
     let clears = body.frame.pop_scope();
     body.clear(&clears, decl.decl.body.span);
-    body.emit(Inst::Return { src: answer }, decl.decl.body.span);
+    body.emit(Inst::Return { src: answer.slot }, decl.decl.body.span);
 
     let reprs = body.frame.reprs().to_vec();
     Function {
         module: decl.module.clone(),
         name: decl.name.clone(),
-        arity: boundary.params.len() as u32,
+        params: boundary.params.clone(),
         refs: RefMap::of(&reprs),
         reprs,
         returns: boundary.returns,
@@ -687,10 +734,10 @@ fn stub(decl: &Decl) -> Function {
     Function {
         module: decl.module.clone(),
         name: decl.name.clone(),
-        arity: 0,
+        params: Vec::new(),
         refs: RefMap::of(&reprs),
         reprs,
-        returns: Repr::Unit,
+        returns: shapes::UNIT,
         captures: Vec::new(),
         code: vec![Inst::Return { src: 0 }],
         spans: vec![decl.decl.span],
@@ -724,41 +771,192 @@ impl Body<'_> {
         }
     }
 
-    /// Ends the live range of the reference slots a scope owned.
+    // ---- locations -------------------------------------------------------
+
+    /// The words a value of `layout` occupies.
+    fn words(&self, layout: LayoutId) -> Vec<Repr> {
+        self.pool.shapes.words(layout).to_vec()
+    }
+
+    fn width(&self, layout: LayoutId) -> u32 {
+        self.pool.shapes.width(layout)
+    }
+
+    /// Whether a location of this layout holds anything a collection traces,
+    /// or an address whose live range this lowering ends.
+    fn holds_ref(&self, layout: LayoutId) -> bool {
+        self.pool.shapes.holds_ref(layout)
+    }
+
+    /// A run of the frame wide enough for a value of `layout`.
+    fn alloc(&mut self, layout: LayoutId) -> Slot {
+        let words = self.words(layout);
+        self.frame.alloc(&words)
+    }
+
+    /// A temporary location of `layout`.
+    fn temp(&mut self, layout: LayoutId) -> Val {
+        Val::temp(self.alloc(layout), layout)
+    }
+
+    /// Gives a location's run back without ending anything's live range.
     ///
-    /// A scalar body emits nothing here, because [`Frame::pop_scope`]
-    /// answers an empty list. A body that holds an object emits one store
-    /// per binding, and that store is what keeps a static reference map from
-    /// being a leak: the map says which slots a collection *reads*, and only
-    /// the data can say when the value in one stopped being needed.
-    fn clear(&mut self, slots: &[Slot], span: Span) {
-        for slot in slots {
-            self.emit(Inst::Clear { slot: *slot }, span);
+    /// Every consumer of a *value* calls [`Body::release`] instead; this is
+    /// for a run the lowering allocated and knows holds nothing.
+    fn give_back(&mut self, slot: Slot, layout: LayoutId) {
+        let width = self.width(layout);
+        self.frame.free(slot, width);
+    }
+
+    /// One [`Inst::Copy`]: ADR 0001's field-wise shallow copy, as many words
+    /// as the layout says.
+    fn copy(&mut self, dst: Slot, src: Slot, layout: LayoutId, span: Span) {
+        if dst == src {
+            return;
+        }
+        self.emit(Inst::Copy { dst, src, layout }, span);
+    }
+
+    /// Zeroes a location's words.
+    fn zero(&mut self, slot: Slot, layout: LayoutId, span: Span) {
+        self.emit(Inst::Clear { slot, layout }, span);
+    }
+
+    /// Puts a value in a form a location of `want` can hold.
+    ///
+    /// There is one conversion in the language and it is erasure, so the
+    /// only difference this bridges is a box: a concrete value on its way
+    /// into a `dyn` location, and a value of a type whose layout contained
+    /// itself on its way into the field that broke the cycle.
+    ///
+    /// Anything else is a copy of the wrong width. It is reported as a gap
+    /// rather than emitted, because `lower` answers `Err` before the
+    /// verifier ever sees it — which is the difference between a construct
+    /// this lowering has not been taught and a program in the heap with the
+    /// wrong number of words in it.
+    fn fit(&mut self, value: Val, want: LayoutId, span: Span) -> Val {
+        if value.layout == want {
+            return value;
+        }
+        if self.is_boxed(want) {
+            let dst = self.temp(want);
+            self.emit(
+                Inst::Box {
+                    dst: dst.slot,
+                    src: value.slot,
+                    layout: value.layout,
+                },
+                span,
+            );
+            self.release(value, span);
+            return dst;
+        }
+        let held = self.pool.shapes.layout(value.layout).name.clone();
+        let wanted = self.pool.shapes.layout(want).name.clone();
+        self.errors.push(gap::gap(
+            &format!("a `{held}` where a `{wanted}` goes, which this lowering cannot convert"),
+            span,
+        ));
+        self.release(value, span);
+        self.temp(want)
+    }
+
+    // ---- reading a layout ------------------------------------------------
+
+    /// The field `name` of a struct-shaped layout: its word offset within
+    /// the value and its own layout.
+    ///
+    /// This is where a field access stops being an instruction. `l.from.x`
+    /// is `base + Field::at` twice over, computed here and added to a slot
+    /// number, because the fields of an inline value are *where the value
+    /// is*.
+    fn field_of(&self, layout: LayoutId, name: &str) -> Option<crate::layout::Field> {
+        self.pool.shapes.layout(layout).field(name).cloned()
+    }
+
+    /// The fields of a struct-shaped layout, in declaration order.
+    fn fields_of(&self, layout: LayoutId) -> Option<Vec<crate::layout::Field>> {
+        match &self.pool.shapes.layout(layout).shape {
+            crate::layout::Shape::Struct { fields, .. } => Some(fields.clone()),
+            _ => None,
         }
     }
 
-    /// Ends a temporary's live range, clearing the slot when it held
+    /// The parts of case `index` of an enum-shaped layout, and the payload
+    /// region's own words.
+    ///
+    /// A part's `at` is an offset within the payload region, which begins
+    /// *after* the discriminant, so a part of the value is at
+    /// `base + 1 + at`.
+    fn case_of(
+        &self,
+        layout: LayoutId,
+        index: u32,
+    ) -> Option<(Vec<crate::layout::Part>, Vec<Repr>)> {
+        match &self.pool.shapes.layout(layout).shape {
+            crate::layout::Shape::Enum { cases, payload } => cases
+                .get(index as usize)
+                .map(|case| (case.parts.clone(), payload.clone())),
+            _ => None,
+        }
+    }
+
+    /// Whether a value of this layout is one heap address naming a box.
+    ///
+    /// A `dyn Trait` is the one this lowering builds: erasure is where a
+    /// value stops having a static width, and a heap object is where a value
+    /// without a static width lives.
+    fn is_boxed(&self, layout: LayoutId) -> bool {
+        matches!(
+            self.pool.shapes.layout(layout).shape,
+            crate::layout::Shape::Boxed
+        )
+    }
+
+    /// Whether a value of this layout is one word of scalar bits, which is
+    /// what an instruction rather than a walk can compare.
+    fn is_scalar(&self, layout: LayoutId) -> bool {
+        matches!(
+            self.pool.shapes.layout(layout).shape,
+            crate::layout::Shape::Word(_)
+        )
+    }
+
+    /// Ends the live range of the reference locations a scope owned.
+    ///
+    /// A scalar body emits nothing here, because [`Frame::pop_scope`]
+    /// answers an empty list. A body that holds an object emits one clear
+    /// per binding, and that clear is what keeps a static reference map from
+    /// being a leak: the map says which slots a collection *reads*, and only
+    /// the data can say when the value in one stopped being needed.
+    fn clear(&mut self, locations: &[(Slot, LayoutId)], span: Span) {
+        for (slot, layout) in locations {
+            self.zero(*slot, *layout, span);
+        }
+    }
+
+    /// Ends a temporary's live range, clearing the location when it held
     /// something the collector would otherwise trace.
     ///
-    /// Every consumer of a value calls this rather than
-    /// [`Frame::release`](frame::Frame::release), so a reference a body
-    /// stopped needing is null from that instruction onwards rather than
-    /// until the frame returns. It is unconditional for a `Ref` or an
-    /// `Addr`: the slot goes back on a free list here, and whether some
-    /// later value of the same kind happens to overwrite it is a fact about
-    /// the rest of the body, which this cannot see and must not assume.
+    /// Every consumer of a value calls this rather than freeing the run
+    /// behind it, so a reference a body stopped needing is null from that
+    /// instruction onwards rather than until the frame returns. It is
+    /// unconditional for a location holding a `Ref` or an `Addr`: the run
+    /// goes back on a free list here, and whether some later value of the
+    /// same shape happens to overwrite it is a fact about the rest of the
+    /// body, which this cannot see and must not assume.
     ///
-    /// A borrowed slot is not cleared, because it is not this expression's
-    /// to end: a parameter, a local, or the answer word outlives the
+    /// A borrowed location is not cleared, because it is not this
+    /// expression's to end: a parameter, a local, or the answer outlives the
     /// expression that read it, and the scope that owns it clears it.
     fn release(&mut self, value: Val, span: Span) {
         if !value.temp {
             return;
         }
-        if matches!(self.frame.repr(value.slot), Repr::Ref | Repr::Addr) {
-            self.emit(Inst::Clear { slot: value.slot }, span);
+        if self.holds_ref(value.layout) {
+            self.zero(value.slot, value.layout, span);
         }
-        self.frame.free(value.slot);
+        self.give_back(value.slot, value.layout);
     }
 
     /// A string of the program's pool, added only if it is not already in
@@ -767,8 +965,8 @@ impl Body<'_> {
         self.pool.string(text)
     }
 
-    /// The layout of the objects a value of `ty` names, reporting the type
-    /// this lowering cannot build one for.
+    /// The layout of a value of `ty`, reporting the type this lowering
+    /// cannot build one for.
     fn layout(&mut self, ty: &Ty, span: Span) -> Option<LayoutId> {
         match self.pool.shapes.of(self.checked, self.module, ty) {
             Some(id) => Some(id),
@@ -801,90 +999,81 @@ impl Body<'_> {
         }
     }
 
-    /// The word `expr`'s value occupies, reporting the reason there is none.
+    /// The layout of `expr`'s value, reporting the reason there is none.
     ///
-    /// A reported failure answers `Unit` so that lowering can carry on and
-    /// find the rest of what is wrong in the same run. The answer is never
-    /// acted on: `lower` has an error and will not hand the program back.
-    fn word(&mut self, expr: &Expr) -> Repr {
+    /// A reported failure answers the one-word `Unit` layout so that
+    /// lowering can carry on and find the rest of what is wrong in the same
+    /// run. The answer is never acted on: `lower` has an error and will not
+    /// hand the program back.
+    fn layout_of(&mut self, expr: &Expr) -> LayoutId {
         let Some(ty) = self.ty(expr).cloned() else {
             self.errors.push(gap::gap(
                 "an expression the checker recorded no type for",
                 expr.span,
             ));
-            return Repr::Unit;
+            return shapes::UNIT;
         };
-        match word_of(&ty) {
-            Some(repr) => repr,
-            None => {
-                self.errors.push(describe(&ty, expr.span));
-                Repr::Unit
-            }
-        }
+        self.layout(&ty, expr.span).unwrap_or(shapes::UNIT)
     }
 
     /// Whether this expression leaves rather than answering: a `return`, a
     /// `break`, a `continue`, or a form built out of them.
     ///
     /// What it decides is whether the surrounding form copies the answer.
-    /// Nothing is ever written to a diverging expression's slot, so copying
-    /// from it would move a word that was never produced — and where the
-    /// surrounding form wants a different `Repr`, it would not even be well
-    /// typed.
+    /// Nothing is ever written to a diverging expression's location, so
+    /// copying from it would move words that were never produced — and where
+    /// the surrounding form wants a different layout, it would not even be
+    /// well formed.
     fn diverges(&self, expr: &Expr) -> bool {
         matches!(self.ty(expr), Some(Ty::Never))
     }
 
-    /// Copies an expression's answer into the slot the surrounding form is
-    /// assembling its own in.
+    /// Copies an expression's answer into the location the surrounding form
+    /// is assembling its own in.
     ///
-    /// The one thing this is not is a `Move` in every case. A body whose
+    /// The one thing this is not is a copy in every case. A body whose
     /// declared return type is `dyn Trait` erases its tail on the way into
-    /// the answer word, because a declared return type is a written type and
-    /// that is where the language's one implicit conversion happens. The
-    /// answer word is taken before any temporary and is never handed to
-    /// anything else, so `dst == self.answer` names exactly the function's
-    /// own tail and no nested form's destination.
-    fn store(&mut self, dst: Slot, value: &Val, from: &Expr) {
-        if self.diverges(from) || value.slot == dst {
+    /// the answer, because a declared return type is a written type and that
+    /// is where the language's one implicit conversion happens. The answer
+    /// is taken before any temporary and is never handed to anything else,
+    /// so `dst == self.answer` names exactly the function's own tail and no
+    /// nested form's destination.
+    fn store(&mut self, dst: Dest, value: &Val, from: &Expr) {
+        if self.diverges(from) || value.slot == dst.slot {
             return;
         }
-        if dst == self.answer && self.erases_into(&self.returns.clone(), from) {
-            let repr = self.frame.repr(value.slot);
-            self.emit(
-                Inst::Box {
-                    dst,
-                    src: value.slot,
-                    repr,
-                },
+        // Where the two disagree the value is erased on the way in, and
+        // that is the language's one implicit conversion. `Body::erase`
+        // covers the positions where a `dyn` type is *written*; this covers
+        // the ones where the checker settled `dyn` for an expression whose
+        // value was never put through one — the tail of a body declared
+        // `-> dyn Trait`, an arm of an `if` in a `dyn` position.
+        //
+        // The source is borrowed here whatever it was: whoever called this
+        // still owns it and will end its live range itself.
+        if value.layout != dst.layout {
+            let held = self.fit(
+                Val::borrowed(value.slot, value.layout),
+                dst.layout,
                 from.span,
             );
+            self.copy(dst.slot, held.slot, dst.layout, from.span);
+            self.release(held, from.span);
             return;
         }
-        self.emit(
-            Inst::Move {
-                dst,
-                src: value.slot,
-            },
-            from.span,
-        );
+        self.copy(dst.slot, value.slot, dst.layout, from.span);
     }
 
-    /// Whether a value of `from`'s type is erased on the way into `into`.
-    fn erases_into(&self, into: &Ty, from: &Expr) -> bool {
-        matches!(into, Ty::Dyn(_))
-            && !matches!(self.ty(from), Some(Ty::Dyn(_)) | Some(Ty::Never) | None)
-    }
-
-    /// A slot for a value nothing will produce, so that a diverging
+    /// A location for a value nothing will produce, so that a diverging
     /// expression still answers something the caller can hold.
     fn dead(&mut self, expr: &Expr) -> Val {
-        let repr = self.word(expr);
-        Val::temp(self.frame.alloc(repr))
+        let layout = self.layout_of(expr);
+        self.temp(layout)
     }
 
     /// Reports a construct this lowering has not been taught, answering a
-    /// slot of the right kind so the walk can continue and report the rest.
+    /// location of the right shape so the walk can continue and report the
+    /// rest.
     fn gap(&mut self, what: &str, expr: &Expr) -> Val {
         self.errors.push(gap::gap(what, expr.span));
         self.dead(expr)

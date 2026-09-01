@@ -71,11 +71,11 @@ id!(
 pub struct HostOp {
     pub module: Arc<str>,
     pub operation: Arc<str>,
-    /// What the host's answer is written into a slot as.
+    /// The layout of the value location the host's answer is written into.
     ///
-    /// A schema that declared its result `Any` gives [`Repr::Ref`] and a
-    /// box; anything else gives the word form of the declared type.
-    pub result: Repr,
+    /// A schema that declared its result `Any` gives a boxed layout;
+    /// anything else gives the layout of the declared type.
+    pub result: LayoutId,
 }
 
 /// One builtin a program calls: `Array.length`, `String.split`, `Int.abs`.
@@ -88,7 +88,7 @@ pub struct Builtin {
     /// The type the operation belongs to: `Array`, `String`, `Map`, `Int`.
     pub receiver: Arc<str>,
     pub operation: Arc<str>,
-    pub result: Repr,
+    pub result: LayoutId,
 }
 
 /// Where a [`Inst::Switch`] goes.
@@ -108,13 +108,13 @@ pub struct Table {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Capture {
     pub name: Arc<str>,
-    /// The slot of the closure's own frame the capture is copied into.
+    /// The first slot of the closure frame's value location for it.
     ///
-    /// Captures follow the parameters, so this is always
-    /// `arity + <position in the list>`. It is written down anyway because
-    /// the machine should not have to re-derive an offset it can read.
+    /// Captures follow the parameters, each taking the words its layout
+    /// says. It is written down rather than derived because the machine
+    /// should not have to re-add a run of widths it can read.
     pub slot: Slot,
-    pub repr: Repr,
+    pub layout: LayoutId,
 }
 
 /// One lowered function.
@@ -124,13 +124,14 @@ pub struct Function {
     /// [`Program::function_named`].
     pub module: Arc<str>,
     pub name: Arc<str>,
-    /// How many slots are parameters. They are slots `0..arity`, in
-    /// declaration order.
+    /// The layout of each parameter, in declaration order.
     ///
-    /// Declaration order, not a permutation into type groups: ADR 0034's
+    /// Parameters occupy the frame from slot 0 onward, each taking the words
+    /// its layout says: a `(Int, Point, Int)` list occupies slots 0, 1–2 and
+    /// 3. Declaration order, not a permutation into type groups — ADR 0034's
     /// *"a mixed list such as `(Int, String, Int)` is not permuted into type
     /// regions"*. There are no type regions to permute into.
-    pub arity: u32,
+    pub params: Vec<LayoutId>,
     /// What each slot of the frame holds. `reprs.len()` is the frame size.
     ///
     /// A slot's `Repr` is fixed for the whole function; that is what makes
@@ -141,8 +142,13 @@ pub struct Function {
     pub reprs: Vec<Repr>,
     /// Which slots are references, derived from [`Function::reprs`].
     pub refs: RefMap,
-    /// What the function answers.
-    pub returns: Repr,
+    /// The layout of what the function answers.
+    ///
+    /// [`Inst::Return`] names the base slot of the answer in the callee's
+    /// frame and the caller's [`Inst::Call`] names the base slot of the
+    /// destination location in its own; the machine copies this many words
+    /// between them.
+    pub returns: LayoutId,
     /// The values the enclosing body handed this function, if it is a
     /// lambda. Empty for a declared function.
     pub captures: Vec<Capture>,
@@ -165,6 +171,28 @@ impl Function {
     /// How many words a call to this function occupies on the stack.
     pub fn frame_size(&self) -> u32 {
         self.reprs.len() as u32
+    }
+
+    /// How many parameters the function declares.
+    pub fn arity(&self) -> u32 {
+        self.params.len() as u32
+    }
+
+    /// The first slot of parameter `at`, which is the widths of the ones
+    /// before it.
+    pub fn param_slot(&self, at: usize, layouts: &[Layout]) -> Slot {
+        self.params[..at]
+            .iter()
+            .map(|id| layouts[id.index()].width())
+            .sum()
+    }
+
+    /// How many slots the parameters occupy in total.
+    pub fn param_words(&self, layouts: &[Layout]) -> u32 {
+        self.params
+            .iter()
+            .map(|id| layouts[id.index()].width())
+            .sum()
     }
 
     /// What slot `slot` holds.
@@ -202,6 +230,14 @@ pub struct Program {
     /// answer, and a table it has to check for emptiness first is a branch
     /// on a path that always takes the same side.
     pub str_layout: LayoutId,
+    /// The layout every [`Inst::Box`] allocates its object as.
+    ///
+    /// A program-wide constant for the same reason [`Program::str_layout`]
+    /// is one: every box has the same *object* shape, and what differs — the
+    /// layout of the value inside it — is in the box's first payload word.
+    /// The machine should not have to search a table for a shape that is
+    /// always the same, and a search that fails has to answer something.
+    pub boxed_layout: LayoutId,
     /// `module.name` to id, for an entry point named on a command line.
     pub by_name: BTreeMap<(Arc<str>, Arc<str>), FunctionId>,
 }

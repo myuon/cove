@@ -24,7 +24,7 @@
 //! words, because "should never" is not "cannot" and a silent wrong answer
 //! costs more than the `match` arm that reports one.
 
-use cove_lir::{Repr, Shape};
+use cove_lir::{LayoutId, Repr, Shape};
 
 use crate::error::RuntimeError;
 use crate::lvm::exec::Machine;
@@ -187,22 +187,42 @@ fn object_name(machine: &Machine, addr: u64, depth: usize) -> String {
     if depth >= super::MAX_DEPTH {
         return "a value that nests too deeply to name".to_string();
     }
-    let layout = machine.program().layout(machine.object_layout(addr));
+    let id = machine.object_layout(addr);
+    let layout = machine.program().layout(id);
     match &layout.shape {
+        // Erasure is looked through, because `Value::type_name` is asked of
+        // an `erased()` value everywhere a comparison or a refusal asks it.
+        // Payload word 0 is the layout of what the box holds, so the name is
+        // that layout's — one lookup rather than a tag and a guess.
+        Shape::Boxed => {
+            let held = LayoutId(machine.payload(addr, 0) as u32);
+            match machine.program().layouts.get(held.index()) {
+                Some(_) => layout_name(machine, held, machine.payload(addr, 1), depth + 1),
+                None => "a value of no known type".to_string(),
+            }
+        }
+        _ => layout_name(machine, id, addr, depth),
+    }
+}
+
+/// What a value location of `layout` is called, given its first word.
+///
+/// A family is named by its *shape* wherever the shape decides it — an
+/// `Array` is an `Array` whatever the lowering called the layout — and by the
+/// layout's name for a struct or an enum, where the name is the
+/// declaration's and is the whole of what the reader wants.
+pub(super) fn layout_name(machine: &Machine, layout: LayoutId, first: u64, depth: usize) -> String {
+    let described = machine.program().layout(layout);
+    match &described.shape {
+        Shape::Word(repr) => type_name(machine, *repr, first),
         Shape::Str => "String".to_string(),
-        Shape::Struct { .. } | Shape::Enum { .. } => layout.name.to_string(),
+        Shape::Struct { .. } | Shape::Enum { .. } => described.name.to_string(),
         Shape::Elements { growable, .. } => if *growable { "Vector" } else { "Array" }.to_string(),
         Shape::Vector { .. } => "Vector".to_string(),
         Shape::Members { .. } => "Set".to_string(),
         Shape::Entries { .. } => "Map".to_string(),
         Shape::Closure { .. } => "fn".to_string(),
-        // Erasure is looked through, because `Value::type_name` is asked of
-        // an `erased()` value everywhere a comparison or a refusal asks it.
-        Shape::Boxed => match Repr::from_tag(machine.payload(addr, 0)) {
-            Some(Repr::Ref) => object_name(machine, machine.payload(addr, 1), depth + 1),
-            Some(repr) => type_name(machine, repr, machine.payload(addr, 1)),
-            None => "a value of no known type".to_string(),
-        },
+        Shape::Boxed => object_name(machine, first, depth + 1),
         Shape::Free => "nothing".to_string(),
     }
 }

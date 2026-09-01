@@ -1,112 +1,77 @@
-//! Host calls: the one place in ordinary execution where a `Value` exists.
+//! Calls across the boundary.
 
-use super::{checked, listing};
-use crate::lower::lower;
-use crate::repr::Repr;
+use super::listing;
 
+/// The boundary looks the pair up in the registry exactly as the
+/// interpreter does, and the arguments are the locations in source order.
 #[test]
-fn a_host_call_names_the_module_and_the_operation() {
-    // The boundary looks the pair up in the registry exactly as the
-    // interpreter does, so what the lowering records is the module and the
-    // operation as the source writes them. The argument is an ordinary slot;
-    // materialising it into a `Value` is the boundary's work, and the
-    // string it built is cleared the moment the call has read it.
+fn a_host_call_names_the_module_and_the_operation_as_the_source_writes_them() {
     assert_eq!(
         listing(
-            "use console.println\n\
-             fn say() -> Result<Unit, Error> {\n  println(\"hi\")?\n  Ok(())\n}",
-            "say"
+            "use console.println\nfn f() -> Result<Unit, Error> { println(\"hi\") }",
+            "f"
         ),
         "\
-fn0 m.say(0) -> ref
-  frame 8: s0:ref s1:ref s2:ref s3:int s4:int s5:bool s6:unit s7:ref
-     0  str s1:ref \"hi\"
-     1  call-host s2:ref console.println (s1:ref)
-     2  clear s1:ref
-     3  get-word s3:int s2:ref +0
-     4  int s4:int 0
-     5  eq.int s5:bool s3:int s4:int
-     6  branch-false s5:bool 9
-     7  get-word s6:unit s2:ref +1
-     8  jump 15
-     9  get-word s1:ref s2:ref +1
-    10  alloc s7:ref Result<enum>
-    11  int s3:int 1
-    12  set-word s7:ref +0 s3:int
-    13  set-word s7:ref +1 s1:ref
-    14  return s7:ref
-    15  clear s2:ref
-    16  unit s6:unit
-    17  alloc s2:ref Result<enum>
-    18  int s3:int 0
-    19  set-word s2:ref +0 s3:int
-    20  set-word s2:ref +1 s6:unit
-    21  move s0:ref s2:ref
-    22  clear s2:ref
-    23  return s0:ref
+fn0 m.f() -> Result
+  frame 7: s0:int s1:unit s2:ref s3:ref s4:int s5:unit s6:ref
+     0  str s3:ref \"hi\"
+     1  call-host s4:int console.println (s3:ref)
+     2  clear s3:ref String
+     3  copy s0:int s4:int Result
+     4  clear s4:int Result
+     5  return s0:int
+"
+    );
+}
+
+/// It is read where the checker recorded it rather than out of the schema
+/// a second time: the checker resolved the operation against the schemas
+/// this compilation was given, which includes an embedder's. An
+/// `Option<String>` is two inline words, so the host writes a location
+/// rather than a slot.
+#[test]
+fn the_answer_is_written_into_the_layout_the_schema_declared() {
+    assert_eq!(
+        listing(
+            "use env.get\nfn f(key: String) -> String { get(key).unwrapOr(\"\") }",
+            "f"
+        ),
+        "\
+fn0 m.f(String) -> String
+  frame 8: s0!:ref s1:ref s2:ref s3:int s4:ref s5:ref s6:int s7:bool
+     0  call-host s3:int env.get (s0:ref)
+     1  str s5:ref \"\"
+     2  int s6:int 1
+     3  eq.int s7:bool s3:int s6:int
+     4  branch-false s7:bool 7
+     5  copy s2:ref s4:ref String
+     6  jump 8
+     7  copy s2:ref s5:ref String
+     8  clear s5:ref String
+     9  clear s3:int Option
+    10  copy s1:ref s2:ref String
+    11  clear s2:ref String
+    12  return s1:ref
 "
     );
 }
 
 #[test]
-fn the_result_word_is_what_the_schema_declared() {
-    // `clock.now()` answers a `Duration`, so it answers a word rather than
-    // an object: the boundary writes the host's answer back into a slot the
-    // frame calls a duration, and the arithmetic after it is the ordinary
-    // integer arithmetic nanoseconds add by.
+fn a_host_call_written_through_the_module_reaches_the_same_operation() {
     assert_eq!(
         listing(
-            "use clock\nfn since(start: Duration) -> Duration { clock.now() - start }",
-            "since"
+            "use console\nfn f() -> Result<Unit, Error> { console.println(\"hi\") }",
+            "f"
         ),
         "\
-fn0 m.since(1) -> duration
-  frame 4: s0!:duration s1:duration s2:duration s3:duration
-     0  call-host s2:duration clock.now ()
-     1  sub.int s3:duration s2:duration s0:duration
-     2  move s1:duration s3:duration
-     3  return s1:duration
+fn0 m.f() -> Result
+  frame 7: s0:int s1:unit s2:ref s3:ref s4:int s5:unit s6:ref
+     0  str s3:ref \"hi\"
+     1  call-host s4:int console.println (s3:ref)
+     2  clear s3:ref String
+     3  copy s0:int s4:int Result
+     4  clear s4:int Result
+     5  return s0:int
 "
     );
-}
-
-#[test]
-fn an_operation_named_two_ways_is_one_entry() {
-    // `use console.println` and `use console` reach the same operation, and
-    // a name is not what the boundary looks the operation up by. Two call
-    // sites of one operation are therefore one [`crate::HostOp`], whichever
-    // way each of them was written.
-    let program = lower(&checked(
-        "use console\n\
-         use files\n\
-         fn twice(p: String) -> Result<String, Error> {\n\
-           console.println(\"a\")?\n\
-           console.println(\"b\")?\n\
-           files.read(p)\n\
-         }",
-    ))
-    .expect("the program lowers");
-    let named: Vec<(String, String, Repr)> = program
-        .host_ops
-        .iter()
-        .map(|op| (op.module.to_string(), op.operation.to_string(), op.result))
-        .collect();
-    assert_eq!(
-        named,
-        vec![
-            ("console".to_string(), "println".to_string(), Repr::Ref),
-            ("files".to_string(), "read".to_string(), Repr::Ref),
-        ]
-    );
-}
-
-#[test]
-fn an_unqualified_import_reaches_the_same_operation() {
-    let program = lower(&checked(
-        "use console.println\nfn say() -> Result<Unit, Error> { println(\"hi\") }",
-    ))
-    .expect("the program lowers");
-    assert_eq!(program.host_ops.len(), 1);
-    assert_eq!(&*program.host_ops[0].module, "console");
-    assert_eq!(&*program.host_ops[0].operation, "println");
 }

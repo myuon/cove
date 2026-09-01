@@ -40,8 +40,7 @@
 //! and a resolution rule into the machine — a runtime type universe, which
 //! is what ADR 0034 forbids reconstructing.
 //!
-//! # Erasure is where a type is *written*, and dispatch tolerates a value
-//! # that was never erased
+//! # A `dyn` value is always a box, because a location has one width
 //!
 //! [`Body::erase`] boxes a concrete value where the type it is going into is
 //! a `dyn Trait`: a parameter, a declared return type, a struct field, an
@@ -49,19 +48,17 @@
 //! `Interpreter::coerce` runs, and it is the language's one implicit
 //! conversion.
 //!
-//! It is not exhaustive, and it cannot be, because the checker records the
-//! type it *settled* for an expression rather than the type each position
-//! expected: `if c { p } else { q }` in a `dyn Display` position may be
-//! recorded as `dyn Display` while the slot holds a bare `Point`. The oracle
-//! has the same hole and answers it the same way — `interp::dyn_receiver`
-//! returns `None` for a value that is not wrapped, and the dispatch proceeds
-//! from the value itself. So this looks through a box only when the receiver
-//! *is* one, which costs a handful of instructions at a `dyn` call site and
-//! makes a missed erasure a slower dispatch rather than a wrong one.
+//! The predecessor had to tolerate a value that had missed one of those
+//! points, because every value was one word and a bare `Point` fitted in a
+//! `dyn Display` slot. It does not fit here: a location's width is its
+//! layout's, and a two-word `Point` written into a one-word `dyn` location
+//! is a fault the verifier names. So [`Body::store`] boxes on the way in
+//! wherever the two disagree, and a dispatch can read the concrete layout
+//! out of the box's own first payload word without asking whether there is
+//! one.
 
 use std::sync::Arc;
 
-use cove_diag::Span;
 use cove_sema::facts::MethodTarget;
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Arg, Expr};
@@ -70,10 +67,9 @@ use super::frame::Val;
 use super::pattern::UNPLACED;
 use super::shapes;
 use super::{Body, CallShape, PENDING};
-use crate::inst::{CmpOp, Compare, Inst, Slot};
+use crate::inst::{Inst, Slot};
 use crate::layout::LayoutId;
 use crate::program::{FunctionId, Table};
-use crate::repr::Repr;
 
 impl Body<'_> {
     // ---- a call the checker resolved ------------------------------------
@@ -81,11 +77,11 @@ impl Body<'_> {
     /// A call to a declared function, method or associated function.
     ///
     /// One path for all three, because there is one calling convention: the
-    /// arguments are evaluated in source order into temporaries of their own,
+    /// arguments are evaluated in source order into locations of their own,
     /// every one is held until the call is emitted — the list [`Inst::Call`]
-    /// names has to be live all at once, because the machine copies it into
-    /// the callee's frame — and the receiver, where there is one, is the
-    /// first of them.
+    /// names has to be live all at once, because the machine copies each
+    /// argument's words into the callee's frame — and the receiver, where
+    /// there is one, is the first of them.
     ///
     /// `base` is the receiver's expression, and it is read only when the
     /// callee declares one. `Point.origin()` is written through a name that
@@ -111,13 +107,13 @@ impl Body<'_> {
             return self.gap("a call that leaves a parameter to its default", expr);
         }
 
-        let (held, bases) = self.operands(&shape, base, args);
+        let held = self.operands(&shape, base, args);
         let slots: Vec<Slot> = held.iter().map(|value| value.slot).collect();
         let list = self.pool.args.intern(slots);
-        let dst = self.frame.alloc(shape.returns);
+        let dst = self.temp(shape.returns);
         self.emit(
             Inst::Call {
-                dst,
+                dst: dst.slot,
                 callee: id,
                 args: list,
             },
@@ -126,21 +122,11 @@ impl Body<'_> {
         for value in held.into_iter().rev() {
             self.release(value, expr.span);
         }
-        // The object an interior address points into is kept alive by this
-        // slot for exactly the address's live range, and dies with it. The
-        // heap does not move, so the address stays correct across a
-        // collection for as long as it is live and no longer.
-        for base in bases.into_iter().rev() {
-            self.release(base, expr.span);
-        }
-        Val::temp(dst)
+        dst
     }
 
-    /// The words a call passes, in the order the callee's frame wants them.
-    ///
-    /// The answer's second half is the objects an interior address points
-    /// into: they are held in reference slots for the address's live range
-    /// and released by the caller once the call has returned.
+    /// The locations a call passes, in the order the callee's frame wants
+    /// them.
     ///
     /// # A label is not a permutation
     ///
@@ -151,40 +137,31 @@ impl Body<'_> {
     /// a gap above, on the count. What is left is a list that lines up with
     /// the parameters one for one, which is what a label was already
     /// promising.
-    fn operands(
-        &mut self,
-        shape: &CallShape,
-        base: Option<&Expr>,
-        args: &[Arg],
-    ) -> (Vec<Val>, Vec<Val>) {
+    fn operands(&mut self, shape: &CallShape, base: Option<&Expr>, args: &[Arg]) -> Vec<Val> {
         let mut held = Vec::with_capacity(shape.params.len());
-        let mut bases = Vec::new();
         if let (true, Some(base)) = (shape.receiver, base) {
-            if shape.params[0] == Repr::Addr {
+            if shape.params[0] == shapes::ADDR {
                 // `var self`: the method names the caller's storage, so the
                 // receiver word is its address rather than a copy.
-                let (address, object) = self.address_of(base);
-                held.push(address);
-                bases.extend(object);
+                held.push(self.address_of(base));
             } else {
                 let value = self.expr(base);
                 let value = self.erase(value, base, &shape.types[0]);
-                held.push(value);
+                held.push(self.fit(value, shape.params[0], base.span));
             }
         }
         let first = usize::from(shape.receiver);
         for (index, arg) in args.iter().enumerate() {
+            let want = shape.params[first + index];
             if arg.is_var {
-                let (address, object) = self.address_of(&arg.value);
-                held.push(address);
-                bases.extend(object);
+                held.push(self.address_of(&arg.value));
                 continue;
             }
             let value = self.expr(&arg.value);
             let value = self.erase(value, &arg.value, &shape.types[first + index]);
-            held.push(value);
+            held.push(self.fit(value, want, arg.value.span));
         }
-        (held, bases)
+        held
     }
 
     /// `value.method(...)` or `Type.associated(...)`, where the checker
@@ -218,9 +195,16 @@ impl Body<'_> {
     /// `value.method(...)` where `value` is a `dyn Trait`.
     ///
     /// The static type says which trait the method comes from and nothing
-    /// else, so the implementation is found from the object: its header
-    /// names its layout, and the lowering knows which layout each conforming
-    /// type has because a conformance is declared.
+    /// else, so the implementation is found from the value: it is one
+    /// reference to a box, and the box's first payload word is the
+    /// [`LayoutId`] of what it holds. That word goes straight into an
+    /// [`Inst::Switch`] over a table the lowering builds from the trait's
+    /// declared conformances.
+    ///
+    /// Each arm opens the box into a receiver of *its own* concrete layout,
+    /// because that is what varies between the arms: a conforming `Point` is
+    /// two words and a conforming `Name` is one, and the callee's first
+    /// parameter is whichever the arm is for.
     pub(super) fn call_dyn(
         &mut self,
         expr: &Expr,
@@ -234,9 +218,12 @@ impl Body<'_> {
         else {
             return self.gap("a `dyn` value of a trait this lowering cannot find", expr);
         };
-        let Some(boxed) = self.layout(&Ty::Dyn(Arc::from(trait_name)), expr.span) else {
+        if self
+            .layout(&Ty::Dyn(Arc::from(trait_name)), expr.span)
+            .is_none()
+        {
             return self.dead(expr);
-        };
+        }
         let Some(arms) = self.conformances(&trait_module, &trait_short, method, expr) else {
             return self.dead(expr);
         };
@@ -246,7 +233,7 @@ impl Body<'_> {
         // trap, and then the call site's own recorded type is the answer.
         let shape = arms.first().and_then(|(_, id)| self.plan.shape(*id));
         // A `var self` trait method never arrives here: a dispatch hands the
-        // arm the concrete object, and which storage a trait object names is
+        // arm the concrete value, and which storage a trait object names is
         // a question of its own — which `cove::type::dyn_mutating_method`
         // already refuses to let a program ask.
         if let Some(shape) = &shape {
@@ -256,48 +243,65 @@ impl Body<'_> {
         }
 
         let receiver = self.expr(base);
-        let object = self.frame.alloc(Repr::Ref);
-        let tag = self.look_through(receiver, object, boxed, expr.span);
+        let tag = self.temp(shapes::INT);
+        self.emit(
+            Inst::LoadField {
+                dst: tag.slot,
+                obj: receiver.slot,
+                at: 0,
+                layout: shapes::INT,
+            },
+            expr.span,
+        );
 
-        let (held, bases) = match &shape {
+        let held = match &shape {
             Some(shape) => self.operands(shape, None, args),
-            None => (Vec::new(), Vec::new()),
+            None => Vec::new(),
         };
-        let mut slots: Vec<Slot> = Vec::with_capacity(held.len() + 1);
-        slots.push(object);
-        slots.extend(held.iter().map(|value| value.slot));
-        let list = self.pool.args.intern(slots);
-
         let returns = shape
             .as_ref()
-            .map_or_else(|| self.word(expr), |it| it.returns);
-        let dst = self.frame.alloc(returns);
+            .map_or_else(|| self.layout_of(expr), |it| it.returns);
+        let dst = self.temp(returns);
         let switch = self.emit(
             Inst::Switch {
-                on: tag,
+                on: tag.slot,
                 table: UNPLACED,
             },
             expr.span,
         );
-        self.frame.free(tag);
+        self.give_back(tag.slot, tag.layout);
 
-        // One call per conformance, laid out in one run, and a trap after
+        // One arm per conformance, laid out in one run, and a trap after
         // them. The trap is where the switch sends a layout no conformance
         // claims, and it is not a formality even for a table that covers
         // every declared one: the index came out of a heap object, and the
         // machine does not take the lowering's word for what is in it.
         let mut entries = Vec::with_capacity(arms.len());
         let mut ends = Vec::with_capacity(arms.len());
-        for (_, callee) in &arms {
+        for (layout, callee) in &arms {
             entries.push(self.here());
+            let concrete = self.temp(*layout);
+            self.emit(
+                Inst::Unbox {
+                    dst: concrete.slot,
+                    src: receiver.slot,
+                    layout: *layout,
+                },
+                expr.span,
+            );
+            let mut slots: Vec<Slot> = Vec::with_capacity(held.len() + 1);
+            slots.push(concrete.slot);
+            slots.extend(held.iter().map(|value| value.slot));
+            let list = self.pool.args.intern(slots);
             self.emit(
                 Inst::Call {
-                    dst,
+                    dst: dst.slot,
                     callee: *callee,
                     args: list,
                 },
                 expr.span,
             );
+            self.release(concrete, expr.span);
             ends.push(self.emit(Inst::Jump { to: PENDING }, expr.span));
         }
         let trap = self.here();
@@ -328,101 +332,12 @@ impl Body<'_> {
         for value in held.into_iter().rev() {
             self.release(value, expr.span);
         }
-        for base in bases.into_iter().rev() {
-            self.release(base, expr.span);
-        }
-        // The concrete object is the dispatch's own, whether it came out of a
-        // box or was the receiver itself, and nothing after the answer reads
-        // it.
-        self.emit(Inst::Clear { slot: object }, expr.span);
-        self.frame.free(object);
-        Val::temp(dst)
-    }
-
-    /// Puts the object a dispatch runs against in `object`, and answers the
-    /// slot holding its layout.
-    ///
-    /// A `dyn Trait` value is a [`crate::Shape::Boxed`] object holding the
-    /// concrete one, so the usual answer is payload word 1. The test is there
-    /// because it is not the only answer: the checker types an expression by
-    /// what it settled rather than by what each position expected, so a value
-    /// whose static type is `dyn Trait` may never have been through an
-    /// erasure point and may be the concrete object already. The oracle's
-    /// `interp::dyn_receiver` says the same thing in the same place, and
-    /// dispatching from the value itself is the same answer.
-    fn look_through(&mut self, receiver: Val, object: Slot, boxed: LayoutId, span: Span) -> Slot {
-        let tag = self.frame.alloc(Repr::Int);
-        self.emit(
-            Inst::LayoutOf {
-                dst: tag,
-                obj: receiver.slot,
-            },
-            span,
-        );
-        let wanted = self.frame.alloc(Repr::Int);
-        self.emit(
-            Inst::Int {
-                dst: wanted,
-                value: boxed.0 as i64,
-            },
-            span,
-        );
-        let wrapped = self.frame.alloc(Repr::Bool);
-        self.emit(
-            Inst::Cmp {
-                on: Compare::Int,
-                op: CmpOp::Eq,
-                dst: wrapped,
-                a: tag,
-                b: wanted,
-            },
-            span,
-        );
-        self.frame.free(wanted);
-        let branch = self.emit(
-            Inst::BranchFalse {
-                cond: wrapped,
-                to: PENDING,
-            },
-            span,
-        );
-        self.frame.free(wrapped);
-        self.emit(
-            Inst::GetWord {
-                dst: object,
-                obj: receiver.slot,
-                at: 1,
-            },
-            span,
-        );
-        let skip = self.emit(Inst::Jump { to: PENDING }, span);
-        let bare = self.here();
-        self.patch(branch, bare);
-        self.emit(
-            Inst::Move {
-                dst: object,
-                src: receiver.slot,
-            },
-            span,
-        );
-        let both = self.here();
-        self.patch(skip, both);
-        // The wrapper dies here: from this instruction onwards the dispatch
-        // holds the concrete object, and holding the box as well would retain
-        // it for the rest of the call.
-        self.release(receiver, span);
-        self.emit(
-            Inst::LayoutOf {
-                dst: tag,
-                obj: object,
-            },
-            span,
-        );
-        tag
+        self.release(receiver, expr.span);
+        dst
     }
 
     /// Every type that conforms to `trait_module.trait_name`, as the layout
-    /// its objects carry and the function that answers `method` for it.
+    /// its values have and the function that answers `method` for it.
     ///
     /// ADR 0006 makes conformance explicit and forbids a blanket
     /// implementation, which is what makes this list complete: a trait's
@@ -502,7 +417,7 @@ impl Body<'_> {
     /// oracle's `interp::as_dyn` has, for the same reason.
     ///
     /// A diverging expression is left alone too: nothing was written to its
-    /// slot, so there is no word to put in a box.
+    /// location, so there are no words to put in a box.
     pub(super) fn erase(&mut self, value: Val, from: &Expr, into: &Ty) -> Val {
         if !matches!(into, Ty::Dyn(_)) {
             return value;
@@ -513,21 +428,20 @@ impl Body<'_> {
         // Interning the box's family here is what lets the machine find it:
         // the layout table is where a shape is looked up, and a program that
         // erases a value but never says so declares nowhere to put one.
-        if self.layout(into, from.span).is_none() {
+        let Some(boxed) = self.layout(into, from.span) else {
             return value;
-        }
-        let repr = self.frame.repr(value.slot);
-        let dst = self.frame.alloc(Repr::Ref);
+        };
+        let dst = self.temp(boxed);
         self.emit(
             Inst::Box {
-                dst,
+                dst: dst.slot,
                 src: value.slot,
-                repr,
+                layout: value.layout,
             },
             from.span,
         );
         self.release(value, from.span);
-        Val::temp(dst)
+        dst
     }
 
     /// The `dyn Trait` an annotation writes, when it writes one.

@@ -1,25 +1,46 @@
-//! What a heap object is made of.
+//! What a value is made of.
 //!
-//! A heap object is a header word and a run of payload words:
+//! A [`Layout`] answers three questions about one family of values: how many
+//! words a value of it occupies, what each of those words holds, and where
+//! its parts are. That is all a frame slot, a heap object payload and a
+//! garbage collection need, and it is deliberately one vocabulary for all
+//! three — the stack region and the heap region are regions of one linear
+//! memory, and a struct inside a closure environment is laid out the way a
+//! struct in a frame is.
 //!
-//! ~~~text
-//! +0  header:  [ layout: u32 | len: u32 ]
-//! +1  payload word 0
-//! +2  payload word 1
-//! ...
-//! ~~~
+//! # A value is a run of words
 //!
-//! The header names a [`LayoutId`], and the [`Layout`] is what says how many
-//! payload words there are, which of them are references, and what the
-//! object is called when a boundary has to render it.
+//! [`docs/LINEAR_VM.md`](../../../docs/LINEAR_VM.md) states the rule:
 //!
-//! This is the one table [ADR 0034](../../../docs/adr/0034-one-physical-word-stack.md)
-//! permits: *"Static type/layout tables ... describe or manage values but do
-//! not store general Cove values."* It is not a runtime type universe and it
-//! does not grow a case per corpus refusal. A family of values is described
-//! generally — every `Array<T>` is one [`Shape::Elements`] whatever `T` is —
-//! and what an individual object *is* is answered by the object, at run time,
-//! by reading its own header.
+//! > One slot is one eight-byte word. One value may occupy one or more
+//! > consecutive slots.
+//!
+//! So a `Point { x: Int, y: Int }` is two words *where the value is*, not one
+//! word naming two words somewhere else. That is what makes ADR 0001's
+//! field-wise shallow copy a copy: two words in, two words out. The earlier
+//! design put every struct behind one address, which made an ordinary copy an
+//! alias and then needed a sharing bit and copy-on-write to conceal it —
+//! machinery that existed only to undo the representation choice.
+//!
+//! # What is inline and what is an address
+//!
+//! A value has a static width or it lives in the heap. Scalars, structs and
+//! enums have one; strings, collections, closures, boxed values and
+//! deliberately boxed recursive layouts do not, and a value of one of those
+//! families is a single [`Repr::Ref`] word.
+//!
+//! A heap object's payload is described by a layout in exactly the same way,
+//! so a struct stored in an array element or a closure environment is inline
+//! in that payload, and the collector walks it with the same map.
+//!
+//! # This table describes families, not instantiations
+//!
+//! `Array<String>` and `Array<Point>` are one layout, because a reference is
+//! a reference. `Array<Int>` and `Array<Duration>` are two, because their
+//! words differ and a boundary has to know which. Nothing here grows a case
+//! because a program was refused, and nothing here is a runtime type
+//! universe: what an individual object *is* is a question its own header
+//! answers.
 
 use std::sync::Arc;
 
@@ -50,167 +71,143 @@ impl std::fmt::Display for LayoutId {
     }
 }
 
-/// One field of a struct-shaped object.
+/// One field of a struct, and where it starts.
+///
+/// `at` is a word offset within the struct, so `l.from.x` is a slot number
+/// the lowering computes and not an instruction the machine runs. A field of
+/// an *inline* value costs nothing to reach.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Field {
     pub name: Arc<str>,
-    pub repr: Repr,
+    pub layout: LayoutId,
+    pub at: u32,
 }
 
-/// One case of an enum-shaped object.
+/// One part of an enum case's payload, and where it sits in the payload
+/// region.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Part {
+    pub layout: LayoutId,
+    /// A word offset within the payload region, which begins *after* the
+    /// discriminant word.
+    pub at: u32,
+}
+
+/// One case of an enum.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Case {
     pub name: Arc<str>,
-    /// The payload words of this case, in order. Empty for a case with none.
-    pub payload: Vec<Repr>,
+    /// The parts of this case's payload, in declaration order.
+    pub parts: Vec<Part>,
 }
 
-/// How an object's payload words are arranged.
+/// How a family's words are arranged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shape {
     /// A run of free words. Not a value; see [`LayoutId::FREE`].
     Free,
-    /// UTF-8 bytes, eight to a word, little end first. The header's `len` is
-    /// the byte count, so the payload is `len.div_ceil(8)` words and the
-    /// trailing bytes of the last word are zero.
+    /// One word of the given interpretation.
     ///
-    /// A string holds no references, which is why a program that only moves
-    /// strings around still scans its frames in the time a scalar program
-    /// does.
-    Str,
-    /// A fixed run of named fields.
-    ///
-    /// This is what a declared `struct` is. It is also what the machine uses
-    /// for the few compound values that have a fixed shape and a name of
-    /// their own, such as a range.
+    /// The width-one case of the whole model, and the one every scalar is.
+    Word(Repr),
+    /// Consecutive fields, inline.
     Struct {
         fields: Vec<Field>,
         /// Whether the declaration was `export opaque struct`.
         ///
-        /// The one thing outside this crate that reads it is a rendering: an
-        /// opaque value shows its name and nothing else, because its fields
-        /// are the declaring module's own business and a rendering is read by
-        /// whoever the string reaches. Printing them would publish through
-        /// `println` what the checker refuses to let a caller name, which is
-        /// ADR 0014's whole point.
-        ///
-        /// It is a fact about a *declaration* on a table that otherwise
-        /// describes families, and it is here rather than derived because
-        /// nothing downstream can derive it: by the time a value is a word,
-        /// the declaration is gone.
+        /// A fact about a *declaration* on a table that otherwise describes
+        /// families, and it is here because nothing downstream can derive it:
+        /// by the time a value is a word, the declaration is gone. What reads
+        /// it is a rendering, which shows an opaque value's name and nothing
+        /// else — its fields are the declaring module's business, and a
+        /// rendering is read by whoever the string reaches.
         opaque: bool,
     },
-    /// Payload word 0 is the case index; words `1..` are that case's
-    /// payload.
+    /// Word 0 is the case index; the words after it are the payload region.
     ///
-    /// The object is sized for the widest case, so every case fits and an
-    /// assignment never has to reallocate. Which payload words are
-    /// references therefore depends on which case the object is *in*, and
-    /// the collector reads word 0 to find out. That is a fact about an
-    /// object, answered by the object; it is not a static kind per case.
-    Enum { cases: Vec<Case> },
-    /// The header's `len` elements, each one word of `elem`, contiguous.
+    /// The region is wide enough for every case, and its per-word [`Repr`]s
+    /// are in [`Shape::Enum::payload`]. **Every case that uses a payload word
+    /// agrees on that word's `Repr`** — the lowering assigns offsets under
+    /// that constraint — because one static reference map has to be right
+    /// whatever case a value holds. A word cannot be a reference in one case
+    /// and an integer in another.
+    ///
+    /// Two things follow. Constructing a case zeroes the payload words it
+    /// does not fill, so a reference word belonging to another case reads
+    /// null. And a collection never reads the discriminant: the region's map
+    /// is static, which is one fewer thing that can be wrong.
+    ///
+    /// The cost is a region that can be wider than the widest case. That is
+    /// the price of a static map, paid in words rather than in a run-time
+    /// question.
+    Enum {
+        cases: Vec<Case>,
+        /// The payload region's words, after the discriminant.
+        payload: Vec<Repr>,
+    },
+    /// UTF-8 bytes, eight to a word, little end first. The header's `len` is
+    /// the byte count, so the payload is `len.div_ceil(8)` words and the
+    /// trailing bytes of the last word are zero.
+    Str,
+    /// The header's `len` elements, each `elem`'s words, contiguous.
     ///
     /// One shape covers `Array<T>` for every `T`, and is also what a
     /// [`Shape::Vector`] stores its elements in — `growable` says which of
-    /// the two an object is. That keeps the layout table a description of
-    /// families rather than a list of every instantiation the corpus happens
-    /// to contain.
-    Elements { elem: Repr, growable: bool },
+    /// the two an object is.
+    Elements { elem: LayoutId, growable: bool },
     /// Payload word 0 is the element count; word 1 is a reference to the
     /// [`Shape::Elements`] object holding them.
     ///
     /// The indirection is what a growable value needs and an immutable one
     /// does not. A `Vector`'s identity is observable — `is` is defined for it
     /// and mutation through one copy is visible through every other — so
-    /// growing must not move the object a program is holding a reference to.
-    /// The header stays where it is and the store beneath it is replaced by a
-    /// larger one.
-    ///
-    /// An `Array` needs none of that, and pays none of it: its elements are
-    /// in the object, one indirection nearer.
-    Vector { elem: Repr },
-    /// Payload word 0 is the callee's [`FunctionId`]; words `1..` are the
-    /// captures, in the order [`crate::Function::captures`] lists them.
-    ///
-    /// The function is in the object rather than only in the layout because
-    /// a closure value is called through, and the call needs the id without
-    /// a table lookup. It is in the layout as well because the capture
-    /// reprs come from the callee, and one layout per lowered lambda is one
-    /// per *source* lambda, not one per closure created.
+    /// growing must not move the object a program is holding. The header
+    /// stays where it is and the store beneath it is replaced by a larger
+    /// one. An `Array` needs none of that and pays none of it.
+    Vector { elem: LayoutId },
+    /// The header's `len` members, ascending and distinct.
+    Members { elem: LayoutId },
+    /// The header's `len` entries — key then value — ascending by key.
+    Entries { key: LayoutId, value: LayoutId },
+    /// Payload word 0 is the callee's [`FunctionId`]; the words after it are
+    /// the captures, each inline under its own layout.
     Closure {
         function: FunctionId,
-        captures: Vec<Repr>,
+        captures: Vec<LayoutId>,
     },
-    /// The header's `len` members, one word of `elem` each, in ascending
-    /// order with no duplicates.
+    /// Payload word 0 is a [`LayoutId`]; the words after it are a value of
+    /// that layout, inline.
     ///
-    /// A `Set` is a sorted run rather than a hash table because the language
-    /// says it iterates in ascending order and renders that way, so the order
-    /// is part of the value and not an implementation's leftovers. Membership
-    /// is a binary search, which is what a sorted run is for.
-    ///
-    /// It is a shape of its own rather than an [`Shape::Elements`] with a
-    /// name, because "these words are sorted and distinct" is an invariant a
-    /// builtin may rely on and an array's words are neither.
-    Members { elem: Repr },
-    /// The header's `len` entries, two words each — key then value — in
-    /// ascending key order with no duplicate keys.
-    ///
-    /// The same reasoning as [`Shape::Members`], with a second word per
-    /// entry. A `Map` is ordered by its keys in the language, so a lookup is
-    /// a binary search over the key words and an iteration walks them in
-    /// place.
-    Entries { key: Repr, value: Repr },
-    /// Payload word 0 is a [`Repr`] discriminant; word 1 is the value.
-    ///
-    /// This is what a value whose static type the checker did not settle
-    /// occupies: `dyn Display`, a Host result a schema declared `Any`, an
-    /// expression under `Ty::Unknown`. Boxing costs an allocation on a path
-    /// that was never going to be fast, and it buys one word per value
-    /// everywhere else and a reference map that is one bit per slot.
+    /// This is what an intentionally erased value occupies: `dyn Trait`, a
+    /// Host result a schema declared `Any`, and a recursive layout that had
+    /// to be broken. Erasure is where a value stops having a static width,
+    /// and a heap object is where a value without a static width lives.
     Boxed,
 }
 
-/// What happens to a reference when it is duplicated.
-///
-/// ADR 0001 decides the language rule and issue #240 decides how it is
-/// implemented: *"assignment and ordinary argument passing are field-wise
-/// shallow copies. Primitives, strings, enums, and structs have value
-/// semantics; `Array`, `Map`, and `Set` share their storage, which is
-/// unobservable because none of them can be mutated. `Vector` and `Shared`
-/// share storage that can be mutated, so a copy of either is an alias."*
-///
-/// Three families, three answers, and the policy belongs to the layout so
-/// that one place decides rather than every site that copies a word.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Copy {
-    /// Copy the address. Nothing more is needed, because nothing can write
-    /// to the object: a `String`, an `Array`, a `Map`, a `Set` and a closure
-    /// are the same value however many names reach them.
-    Immutable,
-    /// Copy the address and mark the object possibly shared.
-    ///
-    /// A later write through any path into it copies first, so the two names
-    /// stop being one object at the moment that would have become
-    /// observable. This is `Rc::make_mut` with a one-bit refcount: "exactly
-    /// one holder" against "possibly more".
-    CopyOnWrite,
-    /// Copy the address and keep the identity.
-    ///
-    /// A `Vector` and a `Shared` are *meant* to alias — mutation through one
-    /// copy is visible through every other, and `is` asks which two handles
-    /// are the same storage. Copying one on write would be the bug, not the
-    /// fix.
-    Identity,
-}
-
-/// The description of one family of heap objects.
+/// The description of one family of values.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Layout {
-    /// What a boundary calls an object of this layout.
+    /// What a boundary calls a value of this family.
+    ///
+    /// Qualified for a declared type — `m.geometry.Point` — because a layout
+    /// is an identity and two modules may each declare a `Point`. A rendering
+    /// shortens it, which is what the public `Display` does with the same
+    /// string.
     pub name: Arc<str>,
     pub shape: Shape,
+    /// The words a value of this family occupies in a frame, or inline in a
+    /// heap object's payload.
+    ///
+    /// Cached rather than computed, because computing it means walking the
+    /// layout table and every reader of it is on a path where that would be
+    /// the expensive part: a frame's reference map, a copy's width, a
+    /// collection's walk.
+    ///
+    /// One [`Repr::Ref`] for every family that lives in the heap, which is
+    /// what "a value has a static width or it lives in the heap" means when
+    /// written down.
+    pub words: Vec<Repr>,
 }
 
 impl Layout {
@@ -219,7 +216,46 @@ impl Layout {
         Layout {
             name: Arc::from("<free>"),
             shape: Shape::Free,
+            words: Vec::new(),
         }
+    }
+
+    /// A one-word family.
+    pub fn word(name: impl Into<Arc<str>>, repr: Repr) -> Layout {
+        Layout {
+            name: name.into(),
+            shape: Shape::Word(repr),
+            words: vec![repr],
+        }
+    }
+
+    /// A family that lives in the heap, so a value of it is one reference.
+    pub fn object(name: impl Into<Arc<str>>, shape: Shape) -> Layout {
+        Layout {
+            name: name.into(),
+            shape,
+            words: vec![Repr::Ref],
+        }
+    }
+
+    /// An inline family, whose words the caller has already flattened.
+    pub fn inline(name: impl Into<Arc<str>>, shape: Shape, words: Vec<Repr>) -> Layout {
+        Layout {
+            name: name.into(),
+            shape,
+            words,
+        }
+    }
+
+    /// How many words a value of this family occupies.
+    pub fn width(&self) -> u32 {
+        self.words.len() as u32
+    }
+
+    /// Whether a value of this family is one reference rather than inline
+    /// words.
+    pub fn is_ref(&self) -> bool {
+        self.words.len() == 1 && self.words[0].is_ref()
     }
 
     /// How many payload words an object of this layout with header length
@@ -228,86 +264,65 @@ impl Layout {
     /// `len` means different things to different shapes — a byte count for a
     /// string, an element count for an array, and nothing at all for a
     /// struct — and this is the one place that difference is written down.
-    pub fn payload_words(&self, len: u32) -> u32 {
+    ///
+    /// A `Struct` or an `Enum` answers its own inline words, because a boxed
+    /// value's payload *is* the value.
+    pub fn payload_words(&self, len: u32, layouts: &[Layout]) -> u32 {
         match &self.shape {
             Shape::Free => len,
             Shape::Str => len.div_ceil(8),
-            Shape::Struct { fields, .. } => fields.len() as u32,
-            Shape::Enum { cases } => 1 + Self::widest_case(cases),
-            Shape::Elements { .. } => len,
+            Shape::Word(_) | Shape::Struct { .. } | Shape::Enum { .. } => self.width(),
+            Shape::Elements { elem, .. } => len * layouts[elem.index()].width(),
             Shape::Vector { .. } => 2,
-            Shape::Members { .. } => len,
-            Shape::Entries { .. } => len * 2,
-            Shape::Closure { captures, .. } => 1 + captures.len() as u32,
-            Shape::Boxed => 2,
+            Shape::Members { elem } => len * layouts[elem.index()].width(),
+            Shape::Entries { key, value } => {
+                len * (layouts[key.index()].width() + layouts[value.index()].width())
+            }
+            Shape::Closure { captures, .. } => {
+                1 + captures
+                    .iter()
+                    .map(|id| layouts[id.index()].width())
+                    .sum::<u32>()
+            }
+            // One word of `LayoutId` and then whatever it named, whose width
+            // this layout cannot know: the header's `len` carries it.
+            Shape::Boxed => 1 + len,
         }
-    }
-
-    /// The payload words of the widest case of an enum.
-    fn widest_case(cases: &[Case]) -> u32 {
-        cases
-            .iter()
-            .map(|case| case.payload.len() as u32)
-            .max()
-            .unwrap_or(0)
     }
 
     /// Whether an object of this layout can hold a reference at all.
     ///
     /// The collector uses it to skip an object without looking at any of its
-    /// words: a string, a `Array<Int>` and a boxed scalar are all leaves.
-    pub fn may_hold_refs(&self) -> bool {
+    /// words: a string, an `Array<Int>` and a boxed scalar are all leaves.
+    pub fn may_hold_refs(&self, layouts: &[Layout]) -> bool {
         match &self.shape {
             Shape::Free | Shape::Str => false,
-            Shape::Struct { fields, .. } => fields.iter().any(|field| field.repr.is_ref()),
-            Shape::Enum { cases } => cases
-                .iter()
-                .any(|case| case.payload.iter().any(|repr| repr.is_ref())),
-            Shape::Elements { elem, .. } => elem.is_ref(),
-            // Word 1 is always a reference to the store, whatever the
-            // elements are.
+            Shape::Word(repr) => repr.is_ref(),
+            Shape::Struct { .. } | Shape::Enum { .. } => {
+                self.words.iter().any(|repr| repr.is_ref())
+            }
+            Shape::Elements { elem, .. } | Shape::Members { elem } => {
+                layouts[elem.index()].words.iter().any(|r| r.is_ref())
+            }
+            Shape::Entries { key, value } => {
+                layouts[key.index()].words.iter().any(|r| r.is_ref())
+                    || layouts[value.index()].words.iter().any(|r| r.is_ref())
+            }
+            // Word 1 is always a reference to the store.
             Shape::Vector { .. } => true,
-            Shape::Members { elem } => elem.is_ref(),
-            Shape::Entries { key, value } => key.is_ref() || value.is_ref(),
-            Shape::Closure { captures, .. } => captures.iter().any(|repr| repr.is_ref()),
-            // A boxed word is a reference exactly when its tag says so, and
-            // the tag is in the object. The collector has to look.
+            Shape::Closure { captures, .. } => captures
+                .iter()
+                .any(|id| layouts[id.index()].words.iter().any(|r| r.is_ref())),
+            // What a box holds is named by its own first payload word, so the
+            // collector has to look.
             Shape::Boxed => true,
         }
     }
 
-    /// What happens to a reference to an object of this layout when it is
-    /// duplicated.
-    ///
-    /// Derived from the shape rather than stored beside it, because it *is*
-    /// a fact about the shape and a second field could disagree with the
-    /// first.
-    ///
-    /// An enum is copy-on-write although no instruction writes to one today.
-    /// The cost of being wrong runs one way: a family wrongly called
-    /// immutable turns value semantics into alias semantics silently, and a
-    /// family wrongly called copy-on-write sets a bit nobody reads.
-    pub fn copy(&self) -> Copy {
+    /// The field `name`, if this is a struct-shaped layout.
+    pub fn field(&self, name: &str) -> Option<&Field> {
         match &self.shape {
-            Shape::Struct { .. } | Shape::Enum { .. } => Copy::CopyOnWrite,
-            Shape::Vector { .. } => Copy::Identity,
-            Shape::Free
-            | Shape::Str
-            | Shape::Elements { .. }
-            | Shape::Members { .. }
-            | Shape::Entries { .. }
-            | Shape::Closure { .. }
-            | Shape::Boxed => Copy::Immutable,
-        }
-    }
-
-    /// The field index `name` is at, if this is a struct-shaped layout.
-    pub fn field(&self, name: &str) -> Option<u32> {
-        match &self.shape {
-            Shape::Struct { fields, .. } => fields
-                .iter()
-                .position(|field| &*field.name == name)
-                .map(|at| at as u32),
+            Shape::Struct { fields, .. } => fields.iter().find(|field| &*field.name == name),
             _ => None,
         }
     }
@@ -315,97 +330,253 @@ impl Layout {
     /// The case index `name` is at, if this is an enum-shaped layout.
     pub fn case(&self, name: &str) -> Option<u32> {
         match &self.shape {
-            Shape::Enum { cases } => cases
+            Shape::Enum { cases, .. } => cases
                 .iter()
                 .position(|case| &*case.name == name)
                 .map(|at| at as u32),
             _ => None,
         }
     }
+
+    /// Whether this is an `export opaque struct`.
+    pub fn is_opaque(&self) -> bool {
+        matches!(self.shape, Shape::Struct { opaque: true, .. })
+    }
+}
+
+/// Lays out a struct's fields, answering the fields and the flattened words.
+///
+/// Fields are placed in declaration order with no padding: a word is a word
+/// and there is nothing to align.
+pub fn struct_layout(
+    fields: &[(Arc<str>, LayoutId)],
+    layouts: &[Layout],
+) -> (Vec<Field>, Vec<Repr>) {
+    let mut placed = Vec::with_capacity(fields.len());
+    let mut words = Vec::new();
+    for (name, layout) in fields {
+        placed.push(Field {
+            name: name.clone(),
+            layout: *layout,
+            at: words.len() as u32,
+        });
+        words.extend_from_slice(&layouts[layout.index()].words);
+    }
+    (placed, words)
+}
+
+/// Lays out an enum's payload region, answering the cases and the region's
+/// words.
+///
+/// The one constraint is that **every case that uses a payload word agrees on
+/// that word's `Repr`**, because one static reference map has to be right
+/// whatever case a value holds. Each case's parts are placed greedily into
+/// the lowest run of payload words that is free for this case and either
+/// unassigned or already assigned the same `Repr`s.
+///
+/// A region can therefore be wider than the widest case — `A(Int, String)`
+/// and `B(Float)` need four words between them, not three. That is the price
+/// of a map a collection can read without asking which case a value is in.
+pub fn enum_layout(
+    cases: &[(Arc<str>, Vec<LayoutId>)],
+    layouts: &[Layout],
+) -> (Vec<Case>, Vec<Repr>) {
+    let mut region: Vec<Repr> = Vec::new();
+    let mut placed = Vec::with_capacity(cases.len());
+    for (name, parts) in cases {
+        let mut taken: Vec<bool> = vec![false; region.len()];
+        let mut placed_parts = Vec::with_capacity(parts.len());
+        for id in parts {
+            let want = &layouts[id.index()].words;
+            let at = fit(&mut region, &mut taken, want);
+            placed_parts.push(Part {
+                layout: *id,
+                at: at as u32,
+            });
+        }
+        placed.push(Case {
+            name: name.clone(),
+            parts: placed_parts,
+        });
+    }
+    (placed, region)
+}
+
+/// The lowest offset in `region` where `want` fits: free for this case, and
+/// either unassigned or already the same words. Extends the region if it has
+/// to.
+fn fit(region: &mut Vec<Repr>, taken: &mut Vec<bool>, want: &[Repr]) -> usize {
+    let mut at = 0;
+    'search: loop {
+        for (i, repr) in want.iter().enumerate() {
+            let word = at + i;
+            if word < region.len() && (taken[word] || region[word] != *repr) {
+                at += 1;
+                continue 'search;
+            }
+        }
+        break;
+    }
+    for (i, repr) in want.iter().enumerate() {
+        let word = at + i;
+        if word == region.len() {
+            region.push(*repr);
+            taken.push(false);
+        }
+        taken[word] = true;
+    }
+    at
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn field(name: &str, repr: Repr) -> Field {
-        Field {
-            name: Arc::from(name),
-            repr,
-        }
+    fn table() -> Vec<Layout> {
+        vec![
+            Layout::free(),
+            Layout::word("Int", Repr::Int),
+            Layout::word("Float", Repr::Float),
+            Layout::object("String", Shape::Str),
+        ]
+    }
+
+    const INT: LayoutId = LayoutId(1);
+    const FLOAT: LayoutId = LayoutId(2);
+    const STR: LayoutId = LayoutId(3);
+
+    #[test]
+    fn a_struct_is_the_words_of_its_fields() {
+        let layouts = table();
+        let (fields, words) =
+            struct_layout(&[(Arc::from("x"), INT), (Arc::from("y"), INT)], &layouts);
+        assert_eq!(words, vec![Repr::Int, Repr::Int]);
+        assert_eq!(fields[1].at, 1);
+    }
+
+    #[test]
+    fn nesting_is_inline_and_recursive() {
+        let mut layouts = table();
+        let (fields, words) =
+            struct_layout(&[(Arc::from("x"), INT), (Arc::from("y"), INT)], &layouts);
+        layouts.push(Layout::inline(
+            "Point",
+            Shape::Struct {
+                fields,
+                opaque: false,
+            },
+            words,
+        ));
+        let point = LayoutId(layouts.len() as u32 - 1);
+
+        let (fields, words) = struct_layout(
+            &[(Arc::from("from"), point), (Arc::from("to"), point)],
+            &layouts,
+        );
+        // Four words and no indirection: `l.to.x` is a slot offset.
+        assert_eq!(words, vec![Repr::Int; 4]);
+        assert_eq!(fields[1].at, 2);
+    }
+
+    /// ADR 0001's rule, as a layout: the `Point` words are inline and the
+    /// `Vector` is one address, so one copy makes the first independent and
+    /// leaves the second shared.
+    #[test]
+    fn a_struct_holding_a_vector_is_words_then_an_address() {
+        let mut layouts = table();
+        layouts.push(Layout::object("Vector", Shape::Vector { elem: INT }));
+        let vector = LayoutId(layouts.len() as u32 - 1);
+        let (_, words) = struct_layout(
+            &[
+                (Arc::from("a"), INT),
+                (Arc::from("b"), FLOAT),
+                (Arc::from("v"), vector),
+            ],
+            &layouts,
+        );
+        assert_eq!(words, vec![Repr::Int, Repr::Float, Repr::Ref]);
+    }
+
+    #[test]
+    fn an_enums_payload_words_agree_across_its_cases() {
+        let layouts = table();
+        // `enum E { A(Int, String), B(Float) }`. `B` can use neither of `A`'s
+        // words, so its `Float` takes a third.
+        let (cases, payload) = enum_layout(
+            &[
+                (Arc::from("A"), vec![INT, STR]),
+                (Arc::from("B"), vec![FLOAT]),
+            ],
+            &layouts,
+        );
+        assert_eq!(payload, vec![Repr::Int, Repr::Ref, Repr::Float]);
+        assert_eq!(cases[0].parts[0].at, 0);
+        assert_eq!(cases[0].parts[1].at, 1);
+        assert_eq!(cases[1].parts[0].at, 2);
+    }
+
+    #[test]
+    fn two_cases_of_one_shape_share_their_words() {
+        let layouts = table();
+        let (cases, payload) = enum_layout(
+            &[(Arc::from("Ok"), vec![INT]), (Arc::from("Err"), vec![INT])],
+            &layouts,
+        );
+        assert_eq!(payload, vec![Repr::Int]);
+        assert_eq!(cases[1].parts[0].at, 0);
+    }
+
+    #[test]
+    fn a_case_with_no_payload_costs_nothing() {
+        let layouts = table();
+        let (cases, payload) = enum_layout(
+            &[(Arc::from("None"), vec![]), (Arc::from("Some"), vec![STR])],
+            &layouts,
+        );
+        assert_eq!(payload, vec![Repr::Ref]);
+        assert!(cases[0].parts.is_empty());
+    }
+
+    #[test]
+    fn a_family_that_lives_in_the_heap_is_one_reference() {
+        let layouts = table();
+        assert_eq!(layouts[STR.index()].words, vec![Repr::Ref]);
+        assert!(layouts[STR.index()].is_ref());
+        assert!(!layouts[INT.index()].is_ref());
     }
 
     #[test]
     fn a_string_pays_one_word_per_eight_bytes() {
-        let layout = Layout {
-            name: Arc::from("String"),
-            shape: Shape::Str,
-        };
-        assert_eq!(layout.payload_words(0), 0);
-        assert_eq!(layout.payload_words(1), 1);
-        assert_eq!(layout.payload_words(8), 1);
-        assert_eq!(layout.payload_words(9), 2);
-        assert!(!layout.may_hold_refs());
+        let layouts = table();
+        let str_layout = &layouts[STR.index()];
+        assert_eq!(str_layout.payload_words(0, &layouts), 0);
+        assert_eq!(str_layout.payload_words(9, &layouts), 2);
+        assert!(!str_layout.may_hold_refs(&layouts));
     }
 
     #[test]
-    fn an_enum_is_sized_for_its_widest_case() {
-        // `Result<Str, Str>`: one payload word either way. `Option<T>`: one
-        // for `Some`, none for `None`, and the object is sized for `Some`.
-        let layout = Layout {
-            name: Arc::from("Option"),
-            shape: Shape::Enum {
-                cases: vec![
-                    Case {
-                        name: Arc::from("None"),
-                        payload: vec![],
-                    },
-                    Case {
-                        name: Arc::from("Some"),
-                        payload: vec![Repr::Ref],
-                    },
-                ],
-            },
-        };
-        // One word for the case index, one for the widest payload.
-        assert_eq!(layout.payload_words(0), 2);
-        assert!(layout.may_hold_refs());
-        assert_eq!(layout.case("Some"), Some(1));
-        assert_eq!(layout.case("Nothing"), None);
-    }
-
-    #[test]
-    fn a_scalar_struct_is_a_leaf() {
-        let layout = Layout {
-            name: Arc::from("Point"),
-            shape: Shape::Struct {
-                fields: vec![field("x", Repr::Int), field("y", Repr::Int)],
+    fn an_array_of_multiword_elements_is_len_times_the_width() {
+        let mut layouts = table();
+        let (fields, words) =
+            struct_layout(&[(Arc::from("x"), INT), (Arc::from("y"), INT)], &layouts);
+        layouts.push(Layout::inline(
+            "Point",
+            Shape::Struct {
+                fields,
                 opaque: false,
             },
-        };
-        assert_eq!(layout.payload_words(0), 2);
-        assert!(!layout.may_hold_refs());
-        assert_eq!(layout.field("y"), Some(1));
-    }
-
-    #[test]
-    fn an_array_of_scalars_is_a_leaf_and_an_array_of_refs_is_not() {
-        let ints = Layout {
-            name: Arc::from("Array"),
-            shape: Shape::Elements {
-                elem: Repr::Int,
+            words,
+        ));
+        let point = LayoutId(layouts.len() as u32 - 1);
+        layouts.push(Layout::object(
+            "Array",
+            Shape::Elements {
+                elem: point,
                 growable: false,
             },
-        };
-        let refs = Layout {
-            name: Arc::from("Array"),
-            shape: Shape::Elements {
-                elem: Repr::Ref,
-                growable: false,
-            },
-        };
-        assert_eq!(ints.payload_words(5), 5);
-        assert!(!ints.may_hold_refs());
-        assert!(refs.may_hold_refs());
+        ));
+        let array = &layouts[layouts.len() - 1];
+        assert_eq!(array.payload_words(5, &layouts), 10);
+        assert!(!array.may_hold_refs(&layouts));
     }
 }

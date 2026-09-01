@@ -181,19 +181,26 @@ impl<'a> Machine<'a> {
         self.host_wait
     }
 
-    /// Runs `entry` with `args` already in word form, answering its word.
+    /// Runs `entry` with `args` already in word form, answering the words of
+    /// its result.
     ///
     /// The caller converts: this is below the boundary, and nothing here
-    /// knows what a public `Value` is.
+    /// knows what a public `Value` is. `args` is the parameters' words
+    /// flattened in declaration order — a `(Int, Point, Int)` list is four
+    /// words — because that is what the frame they are written into is.
     pub(crate) fn run(
         &mut self,
         entry: FunctionId,
         args: &[u64],
         budget: &Meter,
-    ) -> Result<u64, RuntimeError> {
+    ) -> Result<Vec<u64>, RuntimeError> {
         let program = self.program;
         let function = program.function(entry);
-        debug_assert_eq!(args.len(), function.arity as usize);
+        debug_assert_eq!(
+            args.len(),
+            function.param_words(&program.layouts) as usize,
+            "an entry is called with its parameters' words"
+        );
 
         let base = self
             .mem
@@ -216,7 +223,7 @@ impl<'a> Machine<'a> {
     /// `function`, `base` and `pc` are kept in locals rather than read out of
     /// the top frame on every instruction, and written back at the two points
     /// where something else looks: a collection, and a failure.
-    fn dispatch(&mut self, budget: &Meter) -> Result<u64, RuntimeError> {
+    fn dispatch(&mut self, budget: &Meter) -> Result<Vec<u64>, RuntimeError> {
         let program = self.program;
         let top = self.frames.last().expect("run pushed a frame");
         let mut id = top.function;
@@ -256,15 +263,24 @@ impl<'a> Machine<'a> {
                         Err(error) => fail!(error),
                     }
                 }
-                Inst::Move { dst, src } => {
-                    let word = self.mem.slot(base, src);
-                    self.mem.set_slot(base, dst, word);
+                // ADR 0001's field-wise shallow copy, and the whole of it.
+                // A value's words are where the value is, so copying one is
+                // copying its run of words: a `Wrapper { p: Point, v: Vector }`
+                // copies three, the `Point` becomes independent and the
+                // `Vector` stays shared, and neither answer needed a policy.
+                Inst::Copy { dst, src, layout } => {
+                    let width = self.width(layout);
+                    self.mem
+                        .copy_words(base + dst as u64, base + src as u64, width);
                 }
                 // The one instruction whose whole purpose is what it stops
                 // happening: a reference the frame no longer needs is not a
                 // root, so the object it named is unreachable now rather
                 // than when this frame returns.
-                Inst::Clear { slot } => self.mem.set_slot(base, slot, 0),
+                Inst::Clear { slot, layout } => {
+                    let width = self.width(layout);
+                    self.mem.clear_words(base + slot as u64, width);
+                }
 
                 // ---- scalar operations ----------------------------------
                 Inst::Neg { num, dst, a } => {
@@ -356,22 +372,35 @@ impl<'a> Machine<'a> {
                     let table = program.table(table);
                     pc = *table.targets.get(index).unwrap_or(&table.default) as usize;
                 }
+                // The words `Function::returns` describes, copied into the
+                // caller's destination *location* — which is a base slot and
+                // a width, like every other value location. The copy happens
+                // before the frame is dropped, because the words are in it.
                 Inst::Return { src } => {
-                    let answer = self.mem.slot(base, src);
-                    self.mem.pop_frame(base);
+                    let width = self.width(program.function(id).returns);
                     // The frame being left is what says where its answer
                     // goes. Keeping the destination with the callee rather
                     // than re-reading the caller's `Call` means a return
                     // touches one instruction, not two.
                     let done = self.frames.pop().expect("a frame is executing");
                     match self.frames.last() {
-                        None => return Ok(answer),
+                        None => {
+                            let answer = self.mem.read_words(base + src as u64, width);
+                            self.mem.pop_frame(base);
+                            return Ok(answer);
+                        }
                         Some(caller) => {
                             id = caller.function;
-                            base = caller.base;
+                            let caller_base = caller.base;
                             pc = caller.pc as usize;
                             code = &program.function(id).code[..];
-                            self.mem.set_slot(base, done.dst, answer);
+                            self.mem.copy_words(
+                                caller_base + done.dst as u64,
+                                base + src as u64,
+                                width,
+                            );
+                            self.mem.pop_frame(base);
+                            base = caller_base;
                         }
                     }
                 }
@@ -380,13 +409,28 @@ impl<'a> Machine<'a> {
                 Inst::Call { dst, callee, args } => {
                     let target = program.function(callee);
                     let list = program.arg_list(args);
+                    if list.len() != target.params.len() {
+                        fail!(wrong_arity(
+                            target.qualified(),
+                            target.params.len(),
+                            list.len()
+                        ));
+                    }
                     let callee_base = match self.mem.push_frame(target.frame_size()) {
                         Ok(base) => base,
                         Err(Overflow) => fail!(self.too_deep_error()),
                     };
-                    for (slot, src) in list.iter().enumerate() {
-                        let word = self.mem.slot(base, *src);
-                        self.mem.set_slot(callee_base, slot as u32, word);
+                    // Parameters occupy the callee's frame from slot 0 in
+                    // declaration order, each taking the words its layout
+                    // says. There is no argument buffer and no permutation
+                    // into type groups: the callee's frame begins where this
+                    // one ends, and the words are copied straight into it.
+                    let mut at = 0;
+                    for (src, layout) in list.iter().zip(&target.params) {
+                        let width = self.width(*layout);
+                        self.mem
+                            .copy_words(callee_base + at as u64, base + *src as u64, width);
+                        at += width;
                     }
                     self.sync(pc);
                     self.frames.push(Frame {
@@ -417,13 +461,23 @@ impl<'a> Machine<'a> {
                     };
                     let target = program.function(callee);
                     let list = program.arg_list(args);
+                    if list.len() != target.params.len() {
+                        fail!(wrong_arity(
+                            target.qualified(),
+                            target.params.len(),
+                            list.len()
+                        ));
+                    }
                     let callee_base = match self.mem.push_frame(target.frame_size()) {
                         Ok(base) => base,
                         Err(Overflow) => fail!(self.too_deep_error()),
                     };
-                    for (slot, src) in list.iter().enumerate() {
-                        let word = self.mem.slot(base, *src);
-                        self.mem.set_slot(callee_base, slot as u32, word);
+                    let mut at = 0;
+                    for (src, layout) in list.iter().zip(&target.params) {
+                        let width = self.width(*layout);
+                        self.mem
+                            .copy_words(callee_base + at as u64, base + *src as u64, width);
+                        at += width;
                     }
                     // The object has to stay reachable across every one of
                     // these reads, and it does, for a reason rather than by
@@ -438,9 +492,20 @@ impl<'a> Machine<'a> {
                     // `arity + at`. The two agree, and the verifier is what
                     // says so: it refuses a capture naming a slot outside the
                     // frame or holding a different `Repr`.
-                    for (at, capture) in target.captures.iter().enumerate() {
-                        let word = self.mem.payload(object, 1 + at as u32);
-                        self.mem.set_slot(callee_base, capture.slot, word);
+                    //
+                    // A capture is stored inline in the environment, each at
+                    // its own width, so where one begins is the widths of the
+                    // ones before it — the same arrangement the parameters
+                    // are under, in a payload instead of a frame.
+                    let mut held = 1;
+                    for capture in &target.captures {
+                        let width = self.width(capture.layout);
+                        self.mem.copy_words(
+                            callee_base + capture.slot as u64,
+                            self.mem.payload_addr(object, held),
+                            width,
+                        );
+                        held += width;
                     }
                     self.sync(pc);
                     self.frames.push(Frame {
@@ -464,7 +529,11 @@ impl<'a> Machine<'a> {
                     self.sync(pc - 1);
                     let span = self.span(id, pc - 1);
                     match self.call_host(id, base, op, args, budget, span) {
-                        Ok(word) => self.mem.set_slot(base, dst, word),
+                        Ok(words) => {
+                            for (at, word) in words.iter().enumerate() {
+                                self.mem.set_slot(base, dst + at as u32, *word);
+                            }
+                        }
                         Err(error) => fail!(error),
                     }
                 }
@@ -474,7 +543,15 @@ impl<'a> Machine<'a> {
                 Inst::CallBuiltin { dst, builtin, args } => {
                     self.sync(pc - 1);
                     match self.call_builtin(id, base, builtin, args) {
-                        Ok(word) => self.mem.set_slot(base, dst, word),
+                        Ok(words) => {
+                            // The answer is a value location like any other:
+                            // `Builtin::result` names its layout, and an
+                            // `Option<Int>` is two words rather than an
+                            // address to two words somewhere else.
+                            for (at, word) in words.iter().enumerate() {
+                                self.mem.set_slot(base, dst + at as u32, *word);
+                            }
+                        }
                         Err(error) => fail!(error),
                     }
                 }
@@ -492,41 +569,81 @@ impl<'a> Machine<'a> {
                         Err(error) => fail!(error),
                     }
                 }
-                Inst::GetWord { dst, obj, at } => {
+                // A field of a *heap object* is a run of words at a static
+                // offset, and its width is the layout the instruction names.
+                // A field of an inline struct is not here at all: it is a
+                // slot number the lowering computed, and reaching it costs
+                // nothing.
+                Inst::LoadField {
+                    dst,
+                    obj,
+                    at,
+                    layout,
+                } => {
                     let addr = self.mem.slot(base, obj);
-                    match self.checked(addr, at) {
-                        Ok(()) => {
-                            let word = self.mem.payload(addr, at);
-                            self.mem.set_slot(base, dst, word);
-                        }
+                    let width = self.width(layout);
+                    match self.checked(addr, at, width) {
+                        Ok(()) => self.mem.copy_words(
+                            base + dst as u64,
+                            self.mem.payload_addr(addr, at),
+                            width,
+                        ),
                         Err(error) => fail!(error),
                     }
                 }
-                Inst::SetWord { obj, at, src } => {
+                Inst::StoreField {
+                    obj,
+                    at,
+                    src,
+                    layout,
+                } => {
                     let addr = self.mem.slot(base, obj);
-                    let word = self.mem.slot(base, src);
-                    match self.checked(addr, at) {
-                        Ok(()) => self.mem.set_payload(addr, at, word),
+                    let width = self.width(layout);
+                    match self.checked(addr, at, width) {
+                        Ok(()) => self.mem.copy_words(
+                            self.mem.payload_addr(addr, at),
+                            base + src as u64,
+                            width,
+                        ),
                         Err(error) => fail!(error),
                     }
                 }
-                Inst::GetElem { dst, obj, index } => {
+                // The stride is the element layout's width, so an
+                // `Array<Point>` is a run of two-word elements rather than a
+                // run of addresses.
+                Inst::LoadElem {
+                    dst,
+                    obj,
+                    index,
+                    layout,
+                } => {
                     let addr = self.mem.slot(base, obj);
                     let at = self.mem.slot(base, index) as i64;
-                    match self.element(addr, at) {
-                        Ok(at) => {
-                            let word = self.mem.payload(addr, at);
-                            self.mem.set_slot(base, dst, word);
-                        }
+                    let width = self.width(layout);
+                    match self.element(addr, at, width) {
+                        Ok(at) => self.mem.copy_words(
+                            base + dst as u64,
+                            self.mem.payload_addr(addr, at),
+                            width,
+                        ),
                         Err(error) => fail!(error),
                     }
                 }
-                Inst::SetElem { obj, index, src } => {
+                Inst::StoreElem {
+                    obj,
+                    index,
+                    src,
+                    layout,
+                } => {
                     let addr = self.mem.slot(base, obj);
                     let at = self.mem.slot(base, index) as i64;
-                    let word = self.mem.slot(base, src);
-                    match self.element(addr, at) {
-                        Ok(at) => self.mem.set_payload(addr, at, word),
+                    let width = self.width(layout);
+                    match self.element(addr, at, width) {
+                        Ok(at) => self.mem.copy_words(
+                            self.mem.payload_addr(addr, at),
+                            base + src as u64,
+                            width,
+                        ),
                         Err(error) => fail!(error),
                     }
                 }
@@ -553,9 +670,9 @@ impl<'a> Machine<'a> {
 
                 // ---- places --------------------------------------------------
                 Inst::AddrOfSlot { dst, slot } => self.mem.set_slot(base, dst, base + slot as u64),
-                Inst::AddrOfWord { dst, obj, at } => {
+                Inst::AddrOfField { dst, obj, at } => {
                     let addr = self.mem.slot(base, obj);
-                    match self.checked(addr, at) {
+                    match self.checked(addr, at, 1) {
                         Ok(()) => {
                             let word = self.mem.payload_addr(addr, at);
                             self.mem.set_slot(base, dst, word);
@@ -563,10 +680,16 @@ impl<'a> Machine<'a> {
                         Err(error) => fail!(error),
                     }
                 }
-                Inst::AddrOfElem { dst, obj, index } => {
+                Inst::AddrOfElem {
+                    dst,
+                    obj,
+                    index,
+                    layout,
+                } => {
                     let addr = self.mem.slot(base, obj);
                     let at = self.mem.slot(base, index) as i64;
-                    match self.element(addr, at) {
+                    let width = self.width(layout);
+                    match self.element(addr, at, width) {
                         Ok(at) => {
                             let word = self.mem.payload_addr(addr, at);
                             self.mem.set_slot(base, dst, word);
@@ -574,42 +697,53 @@ impl<'a> Machine<'a> {
                         Err(error) => fail!(error),
                     }
                 }
-                Inst::Load { dst, addr } => {
+                // A place is the address of the *first word* of a value
+                // location, and its width is static — so a load and a store
+                // through one move the words the layout says, and a nested
+                // write through a `var` parameter updates the destination
+                // words in place with nothing in between.
+                Inst::Load { dst, addr, layout } => {
                     let addr = self.mem.slot(base, addr);
-                    let word = self.mem.read(addr);
-                    self.mem.set_slot(base, dst, word);
+                    let width = self.width(layout);
+                    self.mem.copy_words(base + dst as u64, addr, width);
                 }
-                Inst::Store { addr, src } => {
+                Inst::Store { addr, src, layout } => {
                     let addr = self.mem.slot(base, addr);
-                    let word = self.mem.slot(base, src);
-                    self.mem.write(addr, word);
+                    let width = self.width(layout);
+                    self.mem.copy_words(addr, base + src as u64, width);
                 }
 
                 // ---- erasure ---------------------------------------------------
-                Inst::Box { dst, src, repr } => {
-                    let word = self.mem.slot(base, src);
+                // A box holds the layout of what it carries in payload word
+                // 0 and that value's words after it, so a boxed `Point` is a
+                // two-word payload rather than a reference to somewhere else
+                // again. The header's length carries the width, because a
+                // `Boxed` layout cannot know it.
+                Inst::Box { dst, src, layout } => {
+                    let width = self.width(layout);
                     self.sync(pc - 1);
-                    let boxed = match self.allocate(self.boxed_layout(), 0) {
+                    let boxed = match self.allocate(self.boxed_layout(), width) {
                         Ok(addr) => addr,
                         Err(error) => fail!(error),
                     };
-                    self.mem.set_payload(boxed, 0, repr.tag());
-                    self.mem.set_payload(boxed, 1, word);
+                    self.mem.set_payload(boxed, 0, layout.0 as u64);
+                    self.mem
+                        .copy_words(self.mem.payload_addr(boxed, 1), base + src as u64, width);
                     self.mem.set_slot(base, dst, boxed);
                 }
-                Inst::Unbox { dst, src, repr } => {
+                Inst::Unbox { dst, src, layout } => {
                     let addr = self.mem.slot(base, src);
                     if addr == 0 {
                         fail!(null_object());
                     }
-                    let tag = self.mem.payload(addr, 0);
-                    if Repr::from_tag(tag) != Some(repr) {
+                    if self.mem.payload(addr, 0) != layout.0 as u64 {
                         fail!(RuntimeError::new(
                             "this value is not of the type it is being read as"
                         ));
                     }
-                    let word = self.mem.payload(addr, 1);
-                    self.mem.set_slot(base, dst, word);
+                    let width = self.width(layout);
+                    self.mem
+                        .copy_words(base + dst as u64, self.mem.payload_addr(addr, 1), width);
                 }
 
                 // ---- failure -----------------------------------------------------
@@ -648,9 +782,23 @@ impl<'a> Machine<'a> {
             .with_rule("A recursion that does not terminate is stopped rather than left to run.")
     }
 
+    /// How many words a value of `layout` occupies.
+    ///
+    /// The one question every move in the machine asks now: a value location
+    /// is a base slot and a width, and this is the width. It is a table read
+    /// rather than a walk, because [`cove_lir::Layout`] caches the flattened
+    /// words for exactly the readers that are on this path.
+    #[inline]
+    fn width(&self, layout: LayoutId) -> u32 {
+        self.program.layout(layout).width()
+    }
+
     /// Allocates, collecting once if the first attempt does not fit.
     fn allocate(&mut self, layout: LayoutId, len: u32) -> Result<u64, RuntimeError> {
-        let words = self.program.layout(layout).payload_words(len);
+        let words = self
+            .program
+            .layout(layout)
+            .payload_words(len, &self.program.layouts);
         if let Some(addr) = self.mem.alloc(layout, len, words) {
             return Ok(addr);
         }
@@ -739,17 +887,22 @@ impl<'a> Machine<'a> {
         args: ArgsId,
         budget: &Meter,
         span: Span,
-    ) -> Result<u64, RuntimeError> {
+    ) -> Result<Vec<u64>, RuntimeError> {
         let program = self.program;
         let op = program.host_op(op);
         let function = program.function(id);
         let list = program.arg_list(args);
 
+        // A host operation's *parameters* carry no layout in the IR — only
+        // its result does — so an argument is read as the one word its slot's
+        // `Repr` describes. Every one-word family crosses that way; a
+        // multiword value reaches a host by having been boxed, which is one
+        // `Repr::Ref`. See the module note on `boundary::word_to_value`.
         let mut values = Vec::with_capacity(list.len());
         for slot in list {
             let repr = function.repr(*slot).ok_or_else(|| undeclared_slot(*slot))?;
             let word = self.mem.slot(base, *slot);
-            values.push(boundary::to_value(self, repr, word).map_err(|error| error.at(span))?);
+            values.push(boundary::word_to_value(self, repr, word).map_err(|error| error.at(span))?);
         }
 
         let hosts = self.hosts.ok_or_else(|| {
@@ -763,7 +916,8 @@ impl<'a> Machine<'a> {
         let answer = hosts.call_with(&op.module, &op.operation, values, &mut Back { budget });
         self.host_wait += started.elapsed();
         let answer = answer.map_err(|error| error.at(span))?;
-        boundary::from_value(self, op.result, &answer).map_err(|error| error.at(span))
+        let result = op.result;
+        boundary::from_value(self, result, &answer).map_err(|error| error.at(span))
     }
 
     /// Reads the operand words and their `Repr`s and hands them to the
@@ -773,13 +927,22 @@ impl<'a> Machine<'a> {
     /// the same reason the boundary takes one: a word is untagged, and what
     /// says what it means is the slot it came out of. That is a fact about
     /// this frame, which the builtin has no business knowing about.
+    ///
+    /// An operand is *one* word. `Builtin` names an operation by its receiver
+    /// and its name and carries a layout only for its result, so nothing here
+    /// can say how wide an operand is — the argument list is base slots and
+    /// consecutive ones need not be adjacent. Every family a builtin declares
+    /// a receiver or a parameter of is one word, and a value that is not
+    /// reaches one by having been boxed. The answer is not so restricted:
+    /// `Builtin::result` is a layout, so an `Array.get` answering an inline
+    /// `Option<Point>` writes three words into its destination.
     fn call_builtin(
         &mut self,
         id: FunctionId,
         base: u64,
         builtin: BuiltinId,
         args: ArgsId,
-    ) -> Result<u64, RuntimeError> {
+    ) -> Result<Vec<u64>, RuntimeError> {
         let program = self.program;
         let function = program.function(id);
         let list = program.arg_list(args);
@@ -803,14 +966,15 @@ impl<'a> Machine<'a> {
         Ok(addr)
     }
 
-    /// The layout a [`Inst::Box`] allocates.
+    /// The layout a [`Inst::Box`] allocates its object as.
+    ///
+    /// The program says, rather than this searching for a `Shape::Boxed`.
+    /// A search has to answer something when it fails, and the answer it
+    /// used to give — `LayoutId::FREE` — sized the object by the wrong
+    /// shape, so a box of a two-word value was allocated one word short and
+    /// the copy into it ran off the end of the heap.
     fn boxed_layout(&self) -> LayoutId {
-        self.program
-            .layouts
-            .iter()
-            .position(|layout| matches!(layout.shape, Shape::Boxed))
-            .map(|at| LayoutId(at as u32))
-            .unwrap_or(LayoutId::FREE)
+        self.program.boxed_layout
     }
 
     /// Checks that `addr` is an object with a payload word `at`.
@@ -821,13 +985,13 @@ impl<'a> Machine<'a> {
     /// because "should never" is not "cannot", and reading past an object
     /// into whatever follows it would be a silent wrong answer rather than a
     /// loud one.
-    fn checked(&self, addr: u64, at: u32) -> Result<(), RuntimeError> {
+    fn checked(&self, addr: u64, at: u32, width: u32) -> Result<(), RuntimeError> {
         if addr == 0 {
             return Err(null_object());
         }
         let layout = self.program.layout(self.mem.object_layout(addr));
-        let words = layout.payload_words(self.mem.object_len(addr));
-        if at >= words {
+        let words = layout.payload_words(self.mem.object_len(addr), &self.program.layouts);
+        if at + width > words {
             return Err(RuntimeError::new(format!(
                 "this reads word {at} of a `{}`, which has {words}",
                 layout.name
@@ -888,8 +1052,14 @@ impl<'a> Machine<'a> {
         Ok(callee)
     }
 
-    /// Turns a language-level index into a payload offset.
-    fn element(&self, addr: u64, at: i64) -> Result<u32, RuntimeError> {
+    /// Turns a language-level index into a payload offset, at a stride of
+    /// `width`.
+    ///
+    /// The header's length counts *elements*, not words, so an index is
+    /// checked against it and then multiplied — which is what makes an
+    /// `Array<Point>` a run of two-word elements and an out-of-range index on
+    /// one say the same thing it says on an `Array<Int>`.
+    fn element(&self, addr: u64, at: i64, width: u32) -> Result<u32, RuntimeError> {
         if addr == 0 {
             return Err(null_object());
         }
@@ -900,7 +1070,7 @@ impl<'a> Machine<'a> {
                     .with_rule("An index outside a collection is a broken invariant."),
             );
         }
-        Ok(at as u32)
+        Ok(at as u32 * width)
     }
 
     /// Orders two string objects by their bytes.
@@ -984,6 +1154,37 @@ impl<'a> Machine<'a> {
     /// up. See [`Memory::relabel`].
     pub(crate) fn relabel(&mut self, addr: u64, layout: LayoutId, len: u32, spare: u32) {
         self.mem.relabel(addr, layout, len, spare);
+    }
+
+    /// The `words` payload words of the object at `addr`, from `at`.
+    ///
+    /// What a boundary reads when a value is inline in a payload: an array
+    /// element, a capture, a struct field, the value inside a box. Nothing in
+    /// ordinary execution calls it — a move inside the machine never leaves
+    /// the memory.
+    pub(crate) fn payload_run(&self, addr: u64, at: u32, words: u32) -> Vec<u64> {
+        self.mem.read_words(self.mem.payload_addr(addr, at), words)
+    }
+
+    /// Writes `words` into the payload of the object at `addr`, from `at`.
+    pub(crate) fn set_payload_run(&mut self, addr: u64, at: u32, words: &[u64]) {
+        for (offset, word) in words.iter().enumerate() {
+            self.mem.set_payload(addr, at + offset as u32, *word);
+        }
+    }
+
+    /// How many words a value of `layout` occupies, for a caller outside the
+    /// dispatch loop.
+    pub(crate) fn words_of(&self, layout: LayoutId) -> u32 {
+        self.width(layout)
+    }
+
+    /// How many payload words an object of `layout` with header length `len`
+    /// occupies.
+    pub(crate) fn payload_words(&self, layout: LayoutId, len: u32) -> u32 {
+        self.program
+            .layout(layout)
+            .payload_words(len, &self.program.layouts)
     }
 
     /// A new object of `layout` with header length `len`, collecting once if
@@ -1122,6 +1323,18 @@ fn divided_by_zero(operation: &str) -> RuntimeError {
         .with_rule("Division and remainder by zero are broken invariants.")
 }
 
+/// A call passed a number of arguments the callee does not declare.
+///
+/// The verifier checks it, so this is a lowering bug that got past it. It is
+/// reported rather than assumed because the alternative is a callee whose
+/// remaining parameters hold whatever the frame was zeroed with — which is a
+/// silent wrong answer instead of a loud one.
+fn wrong_arity(callee: String, declared: usize, given: usize) -> RuntimeError {
+    RuntimeError::new(format!(
+        "this call passes {given} argument(s) to `{callee}`, which declares {declared}"
+    ))
+}
+
 /// A call named a slot the function it is in does not have.
 ///
 /// The verifier checks every slot an instruction names against the frame it
@@ -1170,14 +1383,85 @@ pub(crate) mod tests {
             self
         }
 
+        /// A family that lives in the heap, so a value of it is one address.
         pub(crate) fn layout(&mut self, name: &str, shape: Shape) -> LayoutId {
+            self.push(Layout::object(name, shape))
+        }
+
+        /// A one-word family: the width-one case of the whole model.
+        pub(crate) fn word(&mut self, name: &str, repr: Repr) -> LayoutId {
+            self.push(Layout::word(name, repr))
+        }
+
+        /// A struct, laid out inline from its fields' layouts.
+        ///
+        /// The offsets are computed by `cove_lir::struct_layout` rather than
+        /// written out, because they are not a choice a fixture gets to make:
+        /// a fixture free to say where a field is could agree with a machine
+        /// that had it wrong.
+        pub(crate) fn structure(&mut self, name: &str, fields: &[(&str, LayoutId)]) -> LayoutId {
+            let named: Vec<(Arc<str>, LayoutId)> = fields
+                .iter()
+                .map(|(name, id)| (Arc::from(*name), *id))
+                .collect();
+            let (fields, words) = cove_lir::struct_layout(&named, &self.program.layouts);
+            self.push(Layout::inline(
+                name,
+                Shape::Struct {
+                    fields,
+                    opaque: false,
+                },
+                words,
+            ))
+        }
+
+        /// An `export opaque struct`, which renders as its bare name.
+        pub(crate) fn opaque(&mut self, name: &str, fields: &[(&str, LayoutId)]) -> LayoutId {
+            let id = self.structure(name, fields);
+            if let Shape::Struct { opaque, .. } = &mut self.program.layouts[id.index()].shape {
+                *opaque = true;
+            }
+            id
+        }
+
+        /// An enum, laid out under the payload-agreement rule.
+        pub(crate) fn enumeration(
+            &mut self,
+            name: &str,
+            cases: &[(&str, Vec<LayoutId>)],
+        ) -> LayoutId {
+            let named: Vec<(Arc<str>, Vec<LayoutId>)> = cases
+                .iter()
+                .map(|(name, parts)| (Arc::from(*name), parts.clone()))
+                .collect();
+            let (cases, payload) = cove_lir::enum_layout(&named, &self.program.layouts);
+            let mut words = vec![Repr::Int];
+            words.extend_from_slice(&payload);
+            self.push(Layout::inline(name, Shape::Enum { cases, payload }, words))
+        }
+
+        /// The layout a `Box` allocates, reserved the way the lowering
+        /// reserves it: a fixture that had to remember to declare one would
+        /// be a fixture that could forget, and forgetting sizes the object
+        /// by the wrong shape.
+        pub(crate) fn boxed(&mut self) -> LayoutId {
+            self.seed();
+            self.program.boxed_layout
+        }
+
+        /// `LayoutId(0)` is the sweeper's free block and `LayoutId(1)` is the
+        /// box, exactly as `cove_lir::lower` reserves them.
+        fn seed(&mut self) {
             if self.program.layouts.is_empty() {
                 self.program.layouts.push(Layout::free());
+                self.program.layouts.push(Layout::object("Any", Shape::Boxed));
+                self.program.boxed_layout = LayoutId(1);
             }
-            self.program.layouts.push(Layout {
-                name: Arc::from(name),
-                shape,
-            });
+        }
+
+        fn push(&mut self, layout: Layout) -> LayoutId {
+            self.seed();
+            self.program.layouts.push(layout);
             LayoutId(self.program.layouts.len() as u32 - 1)
         }
 
@@ -1197,9 +1481,9 @@ pub(crate) mod tests {
         pub(crate) fn function(
             &mut self,
             name: &str,
-            arity: u32,
+            params: &[LayoutId],
             reprs: &[Repr],
-            returns: Repr,
+            returns: LayoutId,
             code: Vec<Inst>,
         ) -> FunctionId {
             let nowhere = Span::new(cove_diag::FileId(0), 0, 0);
@@ -1207,7 +1491,7 @@ pub(crate) mod tests {
             self.program.functions.push(Function {
                 module: Arc::from("t"),
                 name: Arc::from(name),
-                arity,
+                params: params.to_vec(),
                 reprs: reprs.to_vec(),
                 refs: RefMap::of(reprs),
                 returns,
@@ -1228,28 +1512,38 @@ pub(crate) mod tests {
         ///
         /// The slot each capture lands in is filled in here rather than
         /// written out per fixture, because it is not a choice a fixture gets
-        /// to make: captures follow the parameters, so the slot is
-        /// `arity + <position>`, and a fixture free to say otherwise could
-        /// agree with a machine that had the rule wrong.
+        /// to make: captures follow the parameters, so the first one begins
+        /// where the parameters' words end and each one after it follows at
+        /// its own width, and a fixture free to say otherwise could agree
+        /// with a machine that had the rule wrong.
         pub(crate) fn lambda(
             &mut self,
             name: &str,
-            arity: u32,
+            params: &[LayoutId],
             reprs: &[Repr],
-            returns: Repr,
-            captures: &[Repr],
+            returns: LayoutId,
+            captures: &[LayoutId],
             code: Vec<Inst>,
         ) -> FunctionId {
-            let id = self.function(name, arity, reprs, returns, code);
-            self.program.functions[id.index()].captures = captures
+            let mut slot: Slot = params
+                .iter()
+                .map(|id| self.program.layout(*id).width())
+                .sum();
+            let held: Vec<Capture> = captures
                 .iter()
                 .enumerate()
-                .map(|(at, repr)| Capture {
-                    name: Arc::from(format!("c{at}")),
-                    slot: arity + at as u32,
-                    repr: *repr,
+                .map(|(at, layout)| {
+                    let capture = Capture {
+                        name: Arc::from(format!("c{at}")),
+                        slot,
+                        layout: *layout,
+                    };
+                    slot += self.program.layout(*layout).width();
+                    capture
                 })
                 .collect();
+            let id = self.function(name, params, reprs, returns, code);
+            self.program.functions[id.index()].captures = held;
             id
         }
 
@@ -1270,24 +1564,61 @@ pub(crate) mod tests {
             self.program.str_layout = str_layout;
             self.done()
         }
+
+        /// The one-word layout of `repr`, declared once per fixture.
+        pub(crate) fn scalar(&mut self, repr: Repr) -> LayoutId {
+            if let Some(at) = self
+                .program
+                .layouts
+                .iter()
+                .position(|layout| layout.shape == Shape::Word(repr))
+            {
+                return LayoutId(at as u32);
+            }
+            self.word(repr.name(), repr)
+        }
     }
 
     pub(crate) fn budget() -> Meter {
         crate::budget::Budget::new(crate::budget::Limits::default()).meter()
     }
 
-    fn run(program: &Program, entry: FunctionId, args: &[u64]) -> Result<u64, RuntimeError> {
+    /// The words a run of `entry` answers.
+    ///
+    /// A function answers a *value location*, which is a run of words, so
+    /// this is the general shape of a result and [`run`] is the common case
+    /// of it. A fixture that answers a `Point` reads two words here rather
+    /// than one address naming two words somewhere else.
+    fn run_words(
+        program: &Program,
+        entry: FunctionId,
+        args: &[u64],
+    ) -> Result<Vec<u64>, RuntimeError> {
         Machine::new(program, 1 << 16).run(entry, args, &budget())
+    }
+
+    /// The one word a run of `entry` answers.
+    ///
+    /// Most of what is under test here is one word wide — an `Int`, a `Bool`,
+    /// a reference — and writing `[0]` at every one of those call sites would
+    /// put the same unchecked index in fifty places. The assertion is what
+    /// keeps it honest: a fixture whose answer stopped being one word fails
+    /// here rather than quietly reporting its first word.
+    fn run(program: &Program, entry: FunctionId, args: &[u64]) -> Result<u64, RuntimeError> {
+        let words = run_words(program, entry, args)?;
+        assert_eq!(words.len(), 1, "this fixture answers one word");
+        Ok(words[0])
     }
 
     #[test]
     fn a_constant_comes_back() {
         let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
         let f = build.function(
             "answer",
-            0,
+            &[],
             &[Repr::Int],
-            Repr::Int,
+            int,
             vec![Inst::Int { dst: 0, value: 42 }, Inst::Return { src: 0 }],
         );
         let program = build.done();
@@ -1297,11 +1628,12 @@ pub(crate) mod tests {
     #[test]
     fn arithmetic_reads_and_writes_slots() {
         let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
         let f = build.function(
             "add",
-            2,
+            &[int, int],
             &[Repr::Int, Repr::Int, Repr::Int],
-            Repr::Int,
+            int,
             vec![
                 Inst::Arith {
                     num: Num::Int,
@@ -1329,11 +1661,12 @@ pub(crate) mod tests {
         ];
         for (op, a, b, message) in cases {
             let mut build = Build::default();
+            let int = build.scalar(Repr::Int);
             let f = build.function(
                 "fault",
-                2,
+                &[int, int],
                 &[Repr::Int, Repr::Int, Repr::Int],
-                Repr::Int,
+                int,
                 vec![
                     Inst::Arith {
                         num: Num::Int,
@@ -1356,11 +1689,12 @@ pub(crate) mod tests {
     #[test]
     fn a_duration_overflow_is_named_a_duration_overflow() {
         let mut build = Build::default();
+        let duration = build.scalar(Repr::Duration);
         let f = build.function(
             "late",
-            2,
+            &[duration, duration],
             &[Repr::Duration, Repr::Duration, Repr::Duration],
-            Repr::Duration,
+            duration,
             vec![
                 Inst::Arith {
                     num: Num::Int,
@@ -1380,12 +1714,13 @@ pub(crate) mod tests {
     #[test]
     fn a_branch_takes_one_side() {
         let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
         // fn abs(n) { if n < 0 { -n } else { n } }
         let f = build.function(
             "abs",
-            1,
+            &[int],
             &[Repr::Int, Repr::Int, Repr::Bool],
-            Repr::Int,
+            int,
             vec![
                 Inst::Int { dst: 1, value: 0 },
                 Inst::Cmp {
@@ -1412,12 +1747,13 @@ pub(crate) mod tests {
     #[test]
     fn a_loop_runs_to_its_bound() {
         let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
         // fn sum(n) { var t = 0; var i = 0; while i < n { t = t + i; i = i + 1 }; t }
         let f = build.function(
             "sum",
-            1,
+            &[int],
             &[Repr::Int, Repr::Int, Repr::Int, Repr::Bool, Repr::Int],
-            Repr::Int,
+            int,
             vec![
                 Inst::Int { dst: 1, value: 0 },
                 Inst::Int { dst: 2, value: 0 },
@@ -1458,13 +1794,14 @@ pub(crate) mod tests {
     #[test]
     fn recursion_nests_frames_and_unwinds_them() {
         let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
         let args = build.args(&[3]);
         // fn fact(n) { if n <= 1 { 1 } else { n * fact(n - 1) } }
         let f = build.function(
             "fact",
-            1,
+            &[int],
             &[Repr::Int, Repr::Int, Repr::Bool, Repr::Int, Repr::Int],
-            Repr::Int,
+            int,
             vec![
                 Inst::Int { dst: 1, value: 1 },
                 Inst::Cmp {
@@ -1508,12 +1845,13 @@ pub(crate) mod tests {
     #[test]
     fn an_unbounded_recursion_is_stopped() {
         let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
         let args = build.args(&[0]);
         let f = build.function(
             "forever",
-            1,
+            &[int],
             &[Repr::Int, Repr::Int],
-            Repr::Int,
+            int,
             vec![
                 Inst::Call {
                     dst: 1,
@@ -1528,10 +1866,563 @@ pub(crate) mod tests {
         assert_eq!(error.message, "this call nests too deeply");
     }
 
+    // ---- values that are more than one word ------------------------------
+
+    /// `docs/LINEAR_VM.md` §1, in the IR it writes out.
+    ///
+    /// ~~~cove
+    /// struct Point { x: Int, y: Int }
+    /// var a = Point(x: 1, y: 2)
+    /// var b = a
+    /// b.x = 7
+    /// ~~~
+    ///
+    /// `a` is at slots 0–1 and `b` at 2–3, and `b = a` is one `Copy` of two
+    /// words. `a.x` is slot 0 and nothing touched it — not because a bit said
+    /// the copy was unshared, but because the copy put `b`'s words where `b`
+    /// is. There is no sharing bit, no copy-on-write and no write path to
+    /// unshare; `b.x = 7` writes slot 2 and that is all of it.
+    ///
+    /// The answer is the four slots read as one `Pair`, which is the same
+    /// claim from the other side: a value location is a base slot and a
+    /// layout, so two adjacent `Point`s *are* a four-word value.
+    #[test]
+    fn a_copy_is_the_words_of_the_value() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let point = build.structure("Point", &[("x", int), ("y", int)]);
+        let pair = build.structure("Pair", &[("a", point), ("b", point)]);
+        let f = build.function(
+            "copy",
+            &[],
+            &[Repr::Int, Repr::Int, Repr::Int, Repr::Int, Repr::Int],
+            pair,
+            vec![
+                Inst::Int { dst: 0, value: 1 },
+                Inst::Int { dst: 1, value: 2 },
+                Inst::Copy {
+                    dst: 2,
+                    src: 0,
+                    layout: point,
+                },
+                Inst::Int { dst: 4, value: 7 },
+                // `b.x` is slot 2 + 0: a field of an inline struct is
+                // arithmetic the lowering did, not an instruction.
+                Inst::Copy {
+                    dst: 2,
+                    src: 4,
+                    layout: int,
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let program = build.done();
+        assert_eq!(program.layout(point).words, vec![Repr::Int, Repr::Int]);
+        assert_eq!(run_words(&program, f, &[]).unwrap(), vec![1, 2, 7, 2]);
+    }
+
+    /// `docs/LINEAR_VM.md` §3: `struct Wrapper { p: Point, v: Vector<Int> }`
+    /// is `[p.x: Int, p.y: Int, v: Ref]`, and a copy copies all three words.
+    ///
+    /// Two answers fall out of that one copy and neither needed a policy. The
+    /// `Point` words become independent, so writing `b.p.x` leaves `a.p.x`
+    /// alone. The `Vector` address is duplicated, so both wrappers name one
+    /// vector — which is ADR 0001 verbatim, because a `Vector`'s storage is
+    /// shared and mutable by the language's own rule rather than by anything
+    /// the representation decided.
+    #[test]
+    fn a_copied_wrapper_separates_its_point_and_shares_its_vector() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let point = build.structure("Point", &[("x", int), ("y", int)]);
+        let vector = build.layout("Vector", Shape::Vector { elem: int });
+        let wrapper = build.structure("Wrapper", &[("p", point), ("v", vector)]);
+        let both = build.structure("Both", &[("a", wrapper), ("b", wrapper)]);
+        let f = build.function(
+            "wrap",
+            &[],
+            &[
+                Repr::Int,
+                Repr::Int,
+                Repr::Ref,
+                Repr::Int,
+                Repr::Int,
+                Repr::Ref,
+                Repr::Int,
+            ],
+            both,
+            vec![
+                Inst::Int { dst: 0, value: 1 },
+                Inst::Int { dst: 1, value: 2 },
+                Inst::Alloc {
+                    dst: 2,
+                    layout: vector,
+                    len: Len::Fixed,
+                },
+                Inst::Copy {
+                    dst: 3,
+                    src: 0,
+                    layout: wrapper,
+                },
+                Inst::Int { dst: 6, value: 7 },
+                Inst::Copy {
+                    dst: 3,
+                    src: 6,
+                    layout: int,
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let program = build.done();
+        assert_eq!(
+            program.layout(wrapper).words,
+            vec![Repr::Int, Repr::Int, Repr::Ref]
+        );
+        let words = run_words(&program, f, &[]).unwrap();
+        assert_eq!(words.len(), 6);
+        assert_eq!(&words[..2], &[1, 2], "`a`'s point is where `a` is");
+        assert_eq!(&words[3..5], &[7, 2], "`b`'s point is where `b` is");
+        assert_ne!(words[2], 0, "the vector was allocated");
+        assert_eq!(words[2], words[5], "and both wrappers name that one vector");
+    }
+
+    /// `docs/LINEAR_VM.md` §5: a parameter takes the words its layout says,
+    /// from slot 0 onward in declaration order, so a `(Int, Point, Int)` list
+    /// occupies slots 0, 1–2 and 3. Nothing is permuted into type groups,
+    /// because there are no type groups.
+    ///
+    /// The answer is a `Point` too, and `Return` copies the two words its
+    /// `Function::returns` describes into the caller's destination location.
+    /// Neither direction allocates: a struct crosses a call as its words.
+    #[test]
+    fn a_struct_is_passed_and_returned_as_its_words() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let point = build.structure("Point", &[("x", int), ("y", int)]);
+        // fn shift(n: Int, p: Point, m: Int) -> Point
+        let shift = build.function(
+            "shift",
+            &[int, point, int],
+            &[
+                Repr::Int,
+                Repr::Int,
+                Repr::Int,
+                Repr::Int,
+                Repr::Int,
+                Repr::Int,
+            ],
+            point,
+            vec![
+                Inst::Arith {
+                    num: Num::Int,
+                    op: ArithOp::Add,
+                    dst: 4,
+                    a: 1,
+                    b: 0,
+                },
+                Inst::Arith {
+                    num: Num::Int,
+                    op: ArithOp::Add,
+                    dst: 5,
+                    a: 2,
+                    b: 3,
+                },
+                Inst::Return { src: 4 },
+            ],
+        );
+        let args = build.args(&[0, 1, 3]);
+        let main = build.function(
+            "main",
+            &[],
+            &[
+                Repr::Int,
+                Repr::Int,
+                Repr::Int,
+                Repr::Int,
+                Repr::Int,
+                Repr::Int,
+            ],
+            point,
+            vec![
+                Inst::Int { dst: 0, value: 10 },
+                Inst::Int { dst: 1, value: 1 },
+                Inst::Int { dst: 2, value: 2 },
+                Inst::Int { dst: 3, value: 20 },
+                Inst::Call {
+                    dst: 4,
+                    callee: shift,
+                    args,
+                },
+                Inst::Return { src: 4 },
+            ],
+        );
+        let program = build.done();
+        let target = program.function(shift);
+        assert_eq!(target.param_slot(0, &program.layouts), 0);
+        assert_eq!(target.param_slot(1, &program.layouts), 1);
+        assert_eq!(target.param_slot(2, &program.layouts), 3);
+        assert_eq!(target.param_words(&program.layouts), 4);
+        assert_eq!(run_words(&program, main, &[]).unwrap(), vec![11, 22]);
+    }
+
+    /// An `Array<Point>` is a run of two-word elements rather than a run of
+    /// addresses, and the stride an element instruction uses is the element
+    /// layout's width.
+    ///
+    /// The header's `len` counts *elements*, so an index is checked against
+    /// three and then multiplied — which is why writing element 1 through an
+    /// `AddrOfElem` leaves element 2 alone rather than smearing across it,
+    /// and why index 3 is refused although the object holds six words.
+    #[test]
+    fn an_array_of_points_is_walked_at_a_two_word_stride() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let point = build.structure("Point", &[("x", int), ("y", int)]);
+        let points = build.layout(
+            "Array",
+            Shape::Elements {
+                elem: point,
+                growable: false,
+            },
+        );
+        let two = build.structure("Two", &[("a", point), ("b", point)]);
+        let reprs = &[
+            Repr::Ref,
+            Repr::Int,
+            Repr::Int,
+            Repr::Int,
+            Repr::Int,
+            Repr::Int,
+            Repr::Int,
+            Repr::Int,
+            Repr::Addr,
+        ];
+        let walk = build.function(
+            "walk",
+            &[],
+            reprs,
+            two,
+            vec![
+                Inst::Alloc {
+                    dst: 0,
+                    layout: points,
+                    len: Len::Count(3),
+                },
+                // xs[0] = Point(1, 2)
+                Inst::Int { dst: 1, value: 0 },
+                Inst::Int { dst: 2, value: 1 },
+                Inst::Int { dst: 3, value: 2 },
+                Inst::StoreElem {
+                    obj: 0,
+                    index: 1,
+                    src: 2,
+                    layout: point,
+                },
+                // xs[1] = Point(3, 4)
+                Inst::Int { dst: 1, value: 1 },
+                Inst::Int { dst: 2, value: 3 },
+                Inst::Int { dst: 3, value: 4 },
+                Inst::StoreElem {
+                    obj: 0,
+                    index: 1,
+                    src: 2,
+                    layout: point,
+                },
+                // xs[2] = Point(5, 6)
+                Inst::Int { dst: 1, value: 2 },
+                Inst::Int { dst: 2, value: 5 },
+                Inst::Int { dst: 3, value: 6 },
+                Inst::StoreElem {
+                    obj: 0,
+                    index: 1,
+                    src: 2,
+                    layout: point,
+                },
+                // A place naming element 1, written through: two words at
+                // one address, with nothing between the address and them.
+                Inst::Int { dst: 1, value: 1 },
+                Inst::AddrOfElem {
+                    dst: 8,
+                    obj: 0,
+                    index: 1,
+                    layout: point,
+                },
+                Inst::Int { dst: 2, value: 30 },
+                Inst::Int { dst: 3, value: 40 },
+                Inst::Store {
+                    addr: 8,
+                    src: 2,
+                    layout: point,
+                },
+                Inst::LoadElem {
+                    dst: 4,
+                    obj: 0,
+                    index: 1,
+                    layout: point,
+                },
+                Inst::Int { dst: 1, value: 2 },
+                Inst::LoadElem {
+                    dst: 6,
+                    obj: 0,
+                    index: 1,
+                    layout: point,
+                },
+                Inst::Return { src: 4 },
+            ],
+        );
+        let past = build.function(
+            "past",
+            &[],
+            &[Repr::Ref, Repr::Int, Repr::Int, Repr::Int],
+            int,
+            vec![
+                Inst::Alloc {
+                    dst: 0,
+                    layout: points,
+                    len: Len::Count(3),
+                },
+                Inst::Int { dst: 1, value: 3 },
+                Inst::LoadElem {
+                    dst: 2,
+                    obj: 0,
+                    index: 1,
+                    layout: point,
+                },
+                Inst::Return { src: 2 },
+            ],
+        );
+        let program = build.done();
+        assert_eq!(
+            run_words(&program, walk, &[]).unwrap(),
+            vec![30, 40, 5, 6],
+            "the write through element 1 left element 2 where it was"
+        );
+        let error = run(&program, past, &[]).unwrap_err();
+        assert_eq!(error.message, "index 3 is outside a collection of 3");
+    }
+
+    /// An enum is a discriminant word and a payload region wide enough for
+    /// every case, and the offsets are assigned so that **every case using a
+    /// payload word agrees on its `Repr`**.
+    ///
+    /// `enum Msg { Text(Cell), Count(Int) }` therefore lays out as
+    /// `[disc: Int, Ref, Int]`: `Count`'s `Int` cannot share `Text`'s
+    /// reference word, so it takes a third. Two things follow, and this is
+    /// both of them. Constructing a case zeroes the region it does not fill,
+    /// so `Count`'s reference word reads null rather than whatever `Text`
+    /// left there. And the collector never reads the discriminant to decide
+    /// what to trace — the region's map is static, which is one fewer thing
+    /// that can be wrong.
+    ///
+    /// The heap holds one cell and not two, so the second allocation is the
+    /// question: it succeeds when the value was rebuilt as `Count`, because
+    /// the word naming the first cell was zeroed and nothing reaches it, and
+    /// it fails when the value is still `Text`, because that same word is
+    /// traced and the cell is live.
+    #[test]
+    fn an_enums_payload_is_retained_by_its_static_map() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let cell = build.layout(
+            "Cell",
+            Shape::Elements {
+                elem: int,
+                growable: false,
+            },
+        );
+        let msg = build.enumeration("Msg", &[("Text", vec![cell]), ("Count", vec![int])]);
+        let boolean = build.scalar(Repr::Bool);
+        let f = build.function(
+            "held",
+            &[boolean],
+            &[
+                Repr::Bool,
+                // The `Msg` is at slots 1–3: a discriminant, `Text`'s
+                // reference and `Count`'s integer.
+                Repr::Int,
+                Repr::Ref,
+                Repr::Int,
+                Repr::Ref,
+                Repr::Int,
+            ],
+            int,
+            vec![
+                Inst::Alloc {
+                    dst: 4,
+                    layout: cell,
+                    len: Len::Count(1200),
+                },
+                Inst::Int { dst: 1, value: 0 },
+                Inst::Copy {
+                    dst: 2,
+                    src: 4,
+                    layout: cell,
+                },
+                // The enum's payload word is now the only name for the cell.
+                Inst::Clear {
+                    slot: 4,
+                    layout: cell,
+                },
+                Inst::BranchFalse { cond: 0, to: 8 },
+                // Constructing `Count` zeroes the region it does not fill,
+                // which is what leaves `Text`'s reference word null.
+                Inst::Clear {
+                    slot: 1,
+                    layout: msg,
+                },
+                Inst::Int { dst: 1, value: 1 },
+                Inst::Int { dst: 3, value: 5 },
+                Inst::Alloc {
+                    dst: 4,
+                    layout: cell,
+                    len: Len::Count(1200),
+                },
+                Inst::Int { dst: 5, value: 7 },
+                Inst::Return { src: 5 },
+            ],
+        );
+        let program = build.done();
+        assert_eq!(
+            program.layout(msg).words,
+            vec![Repr::Int, Repr::Ref, Repr::Int]
+        );
+
+        let mut kept = Machine::new(&program, 2048);
+        let error = kept.run(f, &[0], &budget()).unwrap_err();
+        assert_eq!(error.message, "this run has no memory left");
+
+        let mut dropped = Machine::new(&program, 2048);
+        assert_eq!(dropped.run(f, &[1], &budget()).unwrap(), vec![7]);
+        assert!(
+            dropped.collected().collections > 0,
+            "the second cell only fits after the first is reclaimed"
+        );
+    }
+
+    /// A frame's map is a function of its `Repr`s, and a multiword value
+    /// contributes its flattened per-word ones.
+    ///
+    /// `docs/LINEAR_VM.md` §6: a `Wrapper { p: Point, v: Vector }` at slot 5
+    /// contributes `Int, Int, Ref`, so slot 7 is a root and 5 and 6 are not.
+    /// Nothing about the value's *width* reaches the collector — it reads one
+    /// bit per slot, as it did when every value was one word, and a wide
+    /// value is simply several slots' worth of bits.
+    ///
+    /// The other half is that a slot the map does not name cannot hold a
+    /// reference at all: the verifier holds every instruction to the `Repr`
+    /// of the slot it names, so a program that put an address in slot 6 is
+    /// not a program. That is what makes one static bit per slot sound, and
+    /// it is why the dynamic half of this test reaches for `Clear` instead —
+    /// a reference slot the map *does* name, emptied at its last use.
+    #[test]
+    fn a_frames_map_covers_a_multiword_value_word_by_word() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let cell = build.layout(
+            "Cell",
+            Shape::Elements {
+                elem: int,
+                growable: false,
+            },
+        );
+        let point = build.structure("Point", &[("x", int), ("y", int)]);
+        let wrapper = build.structure("Wrapper", &[("p", point), ("v", cell)]);
+        assert_eq!(
+            build.program.layout(wrapper).words,
+            vec![Repr::Int, Repr::Int, Repr::Ref],
+            "three words: the `Point` inline, and the cell's address"
+        );
+
+        // A `Wrapper` at slots 5-7, a scratch reference at slot 8, and the
+        // answer at slot 9.
+        let reprs = vec![
+            Repr::Int,
+            Repr::Int,
+            Repr::Int,
+            Repr::Int,
+            Repr::Int,
+            Repr::Int,
+            Repr::Int,
+            Repr::Ref,
+            Repr::Ref,
+            Repr::Int,
+        ];
+        let f = build.function(
+            "wrapper",
+            &[],
+            &reprs,
+            int,
+            vec![
+                // The wrapper's `v`, which its own slot keeps alive.
+                Inst::Alloc {
+                    dst: 7,
+                    layout: cell,
+                    len: Len::Count(600),
+                },
+                // A second cell, named by a reference slot that is then
+                // cleared — so the map still reads slot 8, and reads null.
+                Inst::Alloc {
+                    dst: 8,
+                    layout: cell,
+                    len: Len::Count(600),
+                },
+                Inst::Clear {
+                    slot: 8,
+                    layout: cell,
+                },
+                Inst::Int { dst: 5, value: 1 },
+                Inst::Int { dst: 6, value: 2 },
+                // A third cell fits only if the second was reclaimed, and the
+                // first must survive to be written through afterwards.
+                Inst::Alloc {
+                    dst: 8,
+                    layout: cell,
+                    len: Len::Count(600),
+                },
+                Inst::Int { dst: 9, value: 0 },
+                Inst::Int {
+                    dst: 4,
+                    value: 4242,
+                },
+                Inst::StoreElem {
+                    obj: 7,
+                    index: 9,
+                    src: 4,
+                    layout: int,
+                },
+                Inst::LoadElem {
+                    dst: 9,
+                    obj: 7,
+                    index: 9,
+                    layout: int,
+                },
+                Inst::Return { src: 9 },
+            ],
+        );
+        let program = build.done();
+
+        // The static half, which is the claim `docs/LINEAR_VM.md` makes.
+        let refs = &program.function(f).refs;
+        assert!(!refs.is_ref(5), "the `Point`'s x is not a root");
+        assert!(!refs.is_ref(6), "the `Point`'s y is not a root");
+        assert!(refs.is_ref(7), "the vector's address is");
+        assert_eq!(refs.iter().collect::<Vec<_>>(), vec![7, 8]);
+
+        // The dynamic half: two cells fit at a time and three do not, so the
+        // run only finishes because the cleared slot stopped being a root —
+        // and it finishes with the wrapper's own cell still there to write.
+        let mut machine = Machine::new(&program, 1600);
+        assert_eq!(machine.run(f, &[], &budget()).unwrap(), vec![4242]);
+        assert!(
+            machine.collected().collections > 0,
+            "the third cell only fits after the cleared one is reclaimed"
+        );
+    }
+
     // ---- closures ------------------------------------------------------
 
     /// The layout of a lambda that reads `captures`.
-    fn closure_layout(build: &mut Build, function: FunctionId, captures: &[Repr]) -> LayoutId {
+    fn closure_layout(build: &mut Build, function: FunctionId, captures: &[LayoutId]) -> LayoutId {
         build.layout(
             "closure",
             Shape::Closure {
@@ -1542,18 +2433,20 @@ pub(crate) mod tests {
     }
 
     /// A closure's frame is a callee's frame with two writes rather than one:
-    /// the arguments into slots `0..arity`, and then the captures into the
-    /// slots `Function::captures` names, which are the ones straight after.
+    /// the arguments into the words the parameters occupy, and then the
+    /// captures into the slots `Function::captures` names, which are the ones
+    /// straight after.
     #[test]
     fn a_closure_call_copies_the_arguments_then_the_captures() {
         let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
         // { it -> it + captured }
         let add = build.lambda(
             "lambda",
-            1,
+            &[int],
             &[Repr::Int, Repr::Int, Repr::Int],
-            Repr::Int,
-            &[Repr::Int],
+            int,
+            &[int],
             vec![
                 Inst::Arith {
                     num: Num::Int,
@@ -1565,13 +2458,13 @@ pub(crate) mod tests {
                 Inst::Return { src: 2 },
             ],
         );
-        let layout = closure_layout(&mut build, add, &[Repr::Int]);
+        let layout = closure_layout(&mut build, add, &[int]);
         let args = build.args(&[3]);
         let main = build.function(
             "main",
-            0,
+            &[],
             &[Repr::Ref, Repr::Int, Repr::Int, Repr::Int, Repr::Int],
-            Repr::Int,
+            int,
             vec![
                 Inst::Alloc {
                     dst: 0,
@@ -1582,16 +2475,18 @@ pub(crate) mod tests {
                     dst: 1,
                     value: add.0 as i64,
                 },
-                Inst::SetWord {
+                Inst::StoreField {
                     obj: 0,
                     at: 0,
                     src: 1,
+                    layout: int,
                 },
                 Inst::Int { dst: 2, value: 10 },
-                Inst::SetWord {
+                Inst::StoreField {
                     obj: 0,
                     at: 1,
                     src: 2,
+                    layout: int,
                 },
                 Inst::Int { dst: 3, value: 5 },
                 Inst::CallClosure {
@@ -1606,9 +2501,9 @@ pub(crate) mod tests {
         assert_eq!(run(&program, main, &[]).unwrap() as i64, 15);
     }
 
-    /// A capture is a `Repr::Ref` slot of the callee's frame, so it is a root
-    /// of that frame like any other — which is what makes a closure need no
-    /// second story for the collector.
+    /// A capture is copied into a `Repr::Ref` slot of the callee's frame, so
+    /// it is a root of that frame like any other — which is what makes a
+    /// closure need no second story for the collector.
     ///
     /// The captured object is reachable from nowhere else by the time the call
     /// happens: the caller cleared its own slot, and it is not a string, so the
@@ -1618,16 +2513,17 @@ pub(crate) mod tests {
     #[test]
     fn a_capture_survives_a_collection_in_the_callee() {
         let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
         let cell = build.layout(
             "Cell",
             Shape::Elements {
-                elem: Repr::Int,
+                elem: int,
                 growable: false,
             },
         );
         let body = build.lambda(
             "lambda",
-            0,
+            &[],
             &[
                 Repr::Ref,
                 Repr::Int,
@@ -1638,8 +2534,8 @@ pub(crate) mod tests {
                 Repr::Int,
                 Repr::Int,
             ],
-            Repr::Int,
-            &[Repr::Ref],
+            int,
+            &[cell],
             vec![
                 Inst::Int { dst: 2, value: 300 },
                 Inst::Int { dst: 1, value: 0 },
@@ -1656,7 +2552,10 @@ pub(crate) mod tests {
                     layout: cell,
                     len: Len::Count(64),
                 },
-                Inst::Clear { slot: 4 },
+                Inst::Clear {
+                    slot: 4,
+                    layout: cell,
+                },
                 Inst::Int { dst: 5, value: 1 },
                 Inst::Arith {
                     num: Num::Int,
@@ -1667,19 +2566,20 @@ pub(crate) mod tests {
                 },
                 Inst::Jump { to: 2 },
                 Inst::Int { dst: 6, value: 0 },
-                Inst::GetElem {
+                Inst::LoadElem {
                     dst: 7,
                     obj: 0,
                     index: 6,
+                    layout: int,
                 },
                 Inst::Return { src: 7 },
             ],
         );
-        let layout = closure_layout(&mut build, body, &[Repr::Ref]);
+        let layout = closure_layout(&mut build, body, &[cell]);
         let none = build.args(&[]);
         let main = build.function(
             "main",
-            0,
+            &[],
             &[
                 Repr::Ref,
                 Repr::Ref,
@@ -1688,7 +2588,7 @@ pub(crate) mod tests {
                 Repr::Int,
                 Repr::Int,
             ],
-            Repr::Int,
+            int,
             vec![
                 Inst::Alloc {
                     dst: 1,
@@ -1700,10 +2600,11 @@ pub(crate) mod tests {
                     dst: 4,
                     value: 4242,
                 },
-                Inst::SetElem {
+                Inst::StoreElem {
                     obj: 1,
                     index: 3,
                     src: 4,
+                    layout: int,
                 },
                 Inst::Alloc {
                     dst: 0,
@@ -1714,17 +2615,22 @@ pub(crate) mod tests {
                     dst: 2,
                     value: body.0 as i64,
                 },
-                Inst::SetWord {
+                Inst::StoreField {
                     obj: 0,
                     at: 0,
                     src: 2,
+                    layout: int,
                 },
-                Inst::SetWord {
+                Inst::StoreField {
                     obj: 0,
                     at: 1,
                     src: 1,
+                    layout: cell,
                 },
-                Inst::Clear { slot: 1 },
+                Inst::Clear {
+                    slot: 1,
+                    layout: cell,
+                },
                 Inst::CallClosure {
                     dst: 5,
                     closure: 0,
@@ -1735,7 +2641,7 @@ pub(crate) mod tests {
         );
         let program = build.done();
         let mut machine = Machine::new(&program, 4096);
-        assert_eq!(machine.run(main, &[], &budget()).unwrap() as i64, 4242);
+        assert_eq!(machine.run(main, &[], &budget()).unwrap(), vec![4242]);
         assert!(
             machine.collected().collections > 0,
             "the body is meant to allocate more than the heap holds"
@@ -1750,13 +2656,18 @@ pub(crate) mod tests {
     #[test]
     fn a_closure_chain_is_bounded_by_the_stack_region() {
         let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        // What the closure captures is the closure, so the capture's layout
+        // is one reference word rather than the callee's own `Int`.
+        let held = build.word("captured", Repr::Ref);
         let none = build.args(&[]);
+        // What it answers is never reached, because it never returns.
         let body = build.lambda(
             "lambda",
-            0,
-            &[Repr::Ref, Repr::Ref],
-            Repr::Ref,
-            &[Repr::Ref],
+            &[],
+            &[Repr::Ref, Repr::Int],
+            int,
+            &[held],
             vec![
                 Inst::CallClosure {
                     dst: 1,
@@ -1766,12 +2677,12 @@ pub(crate) mod tests {
                 Inst::Return { src: 1 },
             ],
         );
-        let layout = closure_layout(&mut build, body, &[Repr::Ref]);
+        let layout = closure_layout(&mut build, body, &[held]);
         let main = build.function(
             "main",
-            0,
-            &[Repr::Ref, Repr::Int, Repr::Ref],
-            Repr::Ref,
+            &[],
+            &[Repr::Ref, Repr::Int, Repr::Int],
+            int,
             vec![
                 Inst::Alloc {
                     dst: 0,
@@ -1782,17 +2693,19 @@ pub(crate) mod tests {
                     dst: 1,
                     value: body.0 as i64,
                 },
-                Inst::SetWord {
+                Inst::StoreField {
                     obj: 0,
                     at: 0,
                     src: 1,
+                    layout: int,
                 },
                 // The closure captures itself, which is the shortest way to
                 // write a call chain with no bound on it.
-                Inst::SetWord {
+                Inst::StoreField {
                     obj: 0,
                     at: 1,
                     src: 0,
+                    layout: held,
                 },
                 Inst::CallClosure {
                     dst: 2,
@@ -1814,11 +2727,12 @@ pub(crate) mod tests {
     /// every safepoint after the first handful is one the closure's own frame
     /// is executing at.
     fn spinning_closure(build: &mut Build) -> FunctionId {
+        let int = build.scalar(Repr::Int);
         let body = build.lambda(
             "lambda",
-            0,
+            &[],
             &[Repr::Int],
-            Repr::Int,
+            int,
             &[],
             vec![Inst::Int { dst: 0, value: 0 }, Inst::Jump { to: 0 }],
         );
@@ -1826,9 +2740,9 @@ pub(crate) mod tests {
         let none = build.args(&[]);
         build.function(
             "main",
-            0,
+            &[],
             &[Repr::Ref, Repr::Int, Repr::Int],
-            Repr::Int,
+            int,
             vec![
                 Inst::Alloc {
                     dst: 0,
@@ -1839,10 +2753,11 @@ pub(crate) mod tests {
                     dst: 1,
                     value: body.0 as i64,
                 },
-                Inst::SetWord {
+                Inst::StoreField {
                     obj: 0,
                     at: 0,
                     src: 1,
+                    layout: int,
                 },
                 Inst::CallClosure {
                     dst: 2,
@@ -1905,22 +2820,14 @@ pub(crate) mod tests {
     #[test]
     fn a_call_through_something_that_is_not_a_closure_is_refused() {
         let mut build = Build::default();
-        let point = build.layout(
-            "Point",
-            Shape::Struct {
-                fields: vec![cove_lir::Field {
-                    name: Arc::from("x"),
-                    repr: Repr::Int,
-                }],
-                opaque: false,
-            },
-        );
+        let int = build.scalar(Repr::Int);
+        let point = build.structure("Point", &[("x", int)]);
         let none = build.args(&[]);
         let main = build.function(
             "main",
-            0,
+            &[],
             &[Repr::Ref, Repr::Int],
-            Repr::Int,
+            int,
             vec![
                 Inst::Alloc {
                     dst: 0,
@@ -1946,22 +2853,23 @@ pub(crate) mod tests {
     #[test]
     fn a_closure_whose_captures_do_not_match_its_callee_is_refused() {
         let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
         let none = build.args(&[]);
         let body = build.lambda(
             "lambda",
-            0,
+            &[],
             &[Repr::Int, Repr::Int],
-            Repr::Int,
-            &[Repr::Int, Repr::Int],
+            int,
+            &[int, int],
             vec![Inst::Return { src: 0 }],
         );
-        // One capture word, against a callee that reads two.
-        let layout = closure_layout(&mut build, body, &[Repr::Int]);
+        // One capture, against a callee that reads two.
+        let layout = closure_layout(&mut build, body, &[int]);
         let main = build.function(
             "main",
-            0,
+            &[],
             &[Repr::Ref, Repr::Int, Repr::Int],
-            Repr::Int,
+            int,
             vec![
                 Inst::Alloc {
                     dst: 0,
@@ -1972,10 +2880,11 @@ pub(crate) mod tests {
                     dst: 1,
                     value: body.0 as i64,
                 },
-                Inst::SetWord {
+                Inst::StoreField {
                     obj: 0,
                     at: 0,
                     src: 1,
+                    layout: int,
                 },
                 Inst::CallClosure {
                     dst: 2,
@@ -1999,14 +2908,21 @@ pub(crate) mod tests {
     #[test]
     fn a_place_writes_the_callers_own_slot() {
         let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let unit = build.scalar(Repr::Unit);
+        let place = build.scalar(Repr::Addr);
         let args = build.args(&[1]);
         let bump = build.function(
             "bump",
-            1,
+            &[place],
             &[Repr::Addr, Repr::Int, Repr::Int, Repr::Unit],
-            Repr::Unit,
+            unit,
             vec![
-                Inst::Load { dst: 1, addr: 0 },
+                Inst::Load {
+                    dst: 1,
+                    addr: 0,
+                    layout: int,
+                },
                 Inst::Int { dst: 2, value: 1 },
                 Inst::Arith {
                     num: Num::Int,
@@ -2015,16 +2931,20 @@ pub(crate) mod tests {
                     a: 1,
                     b: 2,
                 },
-                Inst::Store { addr: 0, src: 1 },
+                Inst::Store {
+                    addr: 0,
+                    src: 1,
+                    layout: int,
+                },
                 Inst::Unit { dst: 3 },
                 Inst::Return { src: 3 },
             ],
         );
         let caller = build.function(
             "main",
-            0,
+            &[],
             &[Repr::Int, Repr::Addr, Repr::Unit],
-            Repr::Int,
+            int,
             vec![
                 Inst::Int { dst: 0, value: 10 },
                 Inst::AddrOfSlot { dst: 1, slot: 0 },
@@ -2040,30 +2960,19 @@ pub(crate) mod tests {
         assert_eq!(run(&program, caller, &[]).unwrap() as i64, 11);
     }
 
+    /// A field of a *heap object* is a load and a store; a field of an inline
+    /// struct is not an instruction at all. This is the first kind, which is
+    /// what a struct reaches by being the payload of an object.
     #[test]
     fn an_object_round_trips_through_its_fields() {
         let mut build = Build::default();
-        let point = build.layout(
-            "Point",
-            Shape::Struct {
-                fields: vec![
-                    cove_lir::Field {
-                        name: Arc::from("x"),
-                        repr: Repr::Int,
-                    },
-                    cove_lir::Field {
-                        name: Arc::from("y"),
-                        repr: Repr::Int,
-                    },
-                ],
-                opaque: false,
-            },
-        );
+        let int = build.scalar(Repr::Int);
+        let point = build.structure("Point", &[("x", int), ("y", int)]);
         let f = build.function(
             "make",
-            0,
+            &[],
             &[Repr::Ref, Repr::Int, Repr::Int],
-            Repr::Int,
+            int,
             vec![
                 Inst::Alloc {
                     dst: 0,
@@ -2071,26 +2980,30 @@ pub(crate) mod tests {
                     len: Len::Fixed,
                 },
                 Inst::Int { dst: 1, value: 3 },
-                Inst::SetWord {
+                Inst::StoreField {
                     obj: 0,
                     at: 0,
                     src: 1,
+                    layout: int,
                 },
                 Inst::Int { dst: 1, value: 4 },
-                Inst::SetWord {
+                Inst::StoreField {
                     obj: 0,
                     at: 1,
                     src: 1,
+                    layout: int,
                 },
-                Inst::GetWord {
+                Inst::LoadField {
                     dst: 1,
                     obj: 0,
                     at: 0,
+                    layout: int,
                 },
-                Inst::GetWord {
+                Inst::LoadField {
                     dst: 2,
                     obj: 0,
                     at: 1,
+                    layout: int,
                 },
                 Inst::Arith {
                     num: Num::Int,
@@ -2111,31 +3024,24 @@ pub(crate) mod tests {
     #[test]
     fn a_field_past_the_object_is_refused() {
         let mut build = Build::default();
-        let one = build.layout(
-            "One",
-            Shape::Struct {
-                fields: vec![cove_lir::Field {
-                    name: Arc::from("x"),
-                    repr: Repr::Int,
-                }],
-                opaque: false,
-            },
-        );
+        let int = build.scalar(Repr::Int);
+        let one = build.structure("One", &[("x", int)]);
         let f = build.function(
             "past",
-            0,
+            &[],
             &[Repr::Ref, Repr::Int],
-            Repr::Int,
+            int,
             vec![
                 Inst::Alloc {
                     dst: 0,
                     layout: one,
                     len: Len::Fixed,
                 },
-                Inst::GetWord {
+                Inst::LoadField {
                     dst: 1,
                     obj: 0,
                     at: 3,
+                    layout: int,
                 },
                 Inst::Return { src: 1 },
             ],
@@ -2150,23 +3056,24 @@ pub(crate) mod tests {
     }
 
     /// The loop allocates in a loop, clearing the slot each turn. Without
-    /// `Clear` the frame would hold every string it ever made; with it the
+    /// `Clear` the frame would hold every object it ever made; with it the
     /// heap stays flat, and this is the test that says so.
     #[test]
     fn clearing_a_slot_lets_the_collector_reclaim() {
         let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
         let cell = build.layout(
             "Cell",
             Shape::Elements {
-                elem: Repr::Int,
+                elem: int,
                 growable: false,
             },
         );
         let f = build.function(
             "churn",
-            1,
+            &[int],
             &[Repr::Int, Repr::Int, Repr::Bool, Repr::Ref, Repr::Int],
-            Repr::Int,
+            int,
             vec![
                 Inst::Int { dst: 1, value: 0 },
                 Inst::Cmp {
@@ -2182,7 +3089,10 @@ pub(crate) mod tests {
                     layout: cell,
                     len: Len::Count(64),
                 },
-                Inst::Clear { slot: 3 },
+                Inst::Clear {
+                    slot: 3,
+                    layout: cell,
+                },
                 Inst::Int { dst: 4, value: 1 },
                 Inst::Arith {
                     num: Num::Int,
@@ -2200,7 +3110,7 @@ pub(crate) mod tests {
         // finishes because each turn's object is unreachable by the next.
         let mut machine = Machine::new(&program, 4096);
         let answer = machine.run(f, &[4000], &budget()).unwrap();
-        assert_eq!(answer as i64, 4000);
+        assert_eq!(answer, vec![4000]);
         assert!(
             machine.collected().collections > 0,
             "the run should have had to collect"
@@ -2210,13 +3120,14 @@ pub(crate) mod tests {
     #[test]
     fn a_string_literal_is_allocated_once() {
         let mut build = Build::default().strings(&["hello"]);
+        let bool_layout = build.scalar(Repr::Bool);
         let str_layout = build.layout("String", Shape::Str);
         build.program.str_layout = str_layout;
         let f = build.function(
             "twice",
-            0,
+            &[],
             &[Repr::Ref, Repr::Ref, Repr::Bool],
-            Repr::Bool,
+            bool_layout,
             vec![
                 Inst::Str {
                     dst: 0,
@@ -2243,13 +3154,14 @@ pub(crate) mod tests {
     #[test]
     fn strings_compare_by_their_bytes() {
         let mut build = Build::default().strings(&["apple", "banana"]);
+        let bool_layout = build.scalar(Repr::Bool);
         let str_layout = build.layout("String", Shape::Str);
         build.program.str_layout = str_layout;
         let f = build.function(
             "order",
-            0,
+            &[],
             &[Repr::Ref, Repr::Ref, Repr::Bool],
-            Repr::Bool,
+            bool_layout,
             vec![
                 Inst::Str {
                     dst: 0,
@@ -2273,63 +3185,153 @@ pub(crate) mod tests {
         assert_eq!(run(&program, f, &[]).unwrap(), 1);
     }
 
+    /// A box carries the *layout* of what it holds in payload word 0, not a
+    /// per-word `Repr`: erasure is where a value stops having a static width,
+    /// so what the box has to record is the thing that says the width.
     #[test]
-    fn a_box_answers_its_tag_and_refuses_another() {
+    fn a_box_answers_the_layout_it_holds_and_refuses_another() {
         let mut build = Build::default();
-        let boxed = build.layout("Any", Shape::Boxed);
-        let _ = boxed;
+        let int = build.scalar(Repr::Int);
+        let boolean = build.scalar(Repr::Bool);
+        build.boxed();
         let good = build.function(
             "round-trip",
-            1,
+            &[int],
             &[Repr::Int, Repr::Ref, Repr::Int],
-            Repr::Int,
+            int,
             vec![
                 Inst::Box {
                     dst: 1,
                     src: 0,
-                    repr: Repr::Int,
+                    layout: int,
                 },
                 Inst::Unbox {
                     dst: 2,
                     src: 1,
-                    repr: Repr::Int,
+                    layout: int,
                 },
                 Inst::Return { src: 2 },
             ],
         );
         let wrong = build.function(
             "wrong-type",
-            1,
+            &[int],
             &[Repr::Int, Repr::Ref, Repr::Bool],
-            Repr::Bool,
+            boolean,
             vec![
                 Inst::Box {
                     dst: 1,
                     src: 0,
-                    repr: Repr::Int,
+                    layout: int,
                 },
                 Inst::Unbox {
                     dst: 2,
                     src: 1,
-                    repr: Repr::Bool,
+                    layout: boolean,
                 },
                 Inst::Return { src: 2 },
             ],
         );
         let program = build.done();
         assert_eq!(run(&program, good, &[7]).unwrap() as i64, 7);
-        assert!(run(&program, wrong, &[7]).is_err());
+        assert_eq!(
+            run(&program, wrong, &[7]).unwrap_err().message,
+            "this value is not of the type it is being read as"
+        );
+    }
+
+    /// A boxed `Point` is a two-word payload rather than a reference to
+    /// somewhere else again: the object holds the `LayoutId` in payload word
+    /// 0 and the value's words after it, and the header's `len` is that
+    /// value's width, because a `Boxed` layout cannot know it.
+    ///
+    /// So an `Unbox` at the wrong layout is refused for the same reason it is
+    /// on a scalar — the word the box carries is a layout and the layouts do
+    /// not match — and nothing about the width had to be guessed.
+    #[test]
+    fn a_box_holds_a_multiword_value_inline() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let point = build.structure("Point", &[("x", int), ("y", int)]);
+        build.boxed();
+        let round_trip = build.function(
+            "round-trip",
+            &[],
+            &[Repr::Int, Repr::Int, Repr::Ref, Repr::Int, Repr::Int],
+            point,
+            vec![
+                Inst::Int { dst: 0, value: 3 },
+                Inst::Int { dst: 1, value: 4 },
+                Inst::Box {
+                    dst: 2,
+                    src: 0,
+                    layout: point,
+                },
+                Inst::Unbox {
+                    dst: 3,
+                    src: 2,
+                    layout: point,
+                },
+                Inst::Return { src: 3 },
+            ],
+        );
+        let width = build.function(
+            "width",
+            &[],
+            &[Repr::Int, Repr::Int, Repr::Ref, Repr::Int],
+            int,
+            vec![
+                Inst::Int { dst: 0, value: 3 },
+                Inst::Int { dst: 1, value: 4 },
+                Inst::Box {
+                    dst: 2,
+                    src: 0,
+                    layout: point,
+                },
+                Inst::Len { dst: 3, obj: 2 },
+                Inst::Return { src: 3 },
+            ],
+        );
+        let wrong = build.function(
+            "wrong-layout",
+            &[],
+            &[Repr::Int, Repr::Int, Repr::Ref, Repr::Int],
+            int,
+            vec![
+                Inst::Int { dst: 0, value: 3 },
+                Inst::Int { dst: 1, value: 4 },
+                Inst::Box {
+                    dst: 2,
+                    src: 0,
+                    layout: point,
+                },
+                Inst::Unbox {
+                    dst: 3,
+                    src: 2,
+                    layout: int,
+                },
+                Inst::Return { src: 3 },
+            ],
+        );
+        let program = build.done();
+        assert_eq!(run_words(&program, round_trip, &[]).unwrap(), vec![3, 4]);
+        assert_eq!(run(&program, width, &[]).unwrap(), 2);
+        assert_eq!(
+            run(&program, wrong, &[]).unwrap_err().message,
+            "this value is not of the type it is being read as"
+        );
     }
 
     #[test]
     fn a_switch_picks_a_case_and_falls_to_its_default() {
         let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
         let table = build.table(&[3, 5], 7);
         let f = build.function(
             "pick",
-            1,
+            &[int],
             &[Repr::Int, Repr::Int],
-            Repr::Int,
+            int,
             vec![
                 Inst::Switch { on: 0, table },
                 Inst::Int { dst: 1, value: 0 },
@@ -2422,18 +3424,19 @@ pub(crate) mod tests {
 
     /// `fn f(n) { probe.double(n) }`, in the IR.
     fn calls_double(build: &mut Build) -> FunctionId {
+        let int = build.scalar(Repr::Int);
         build.program.host_ops.push(cove_lir::HostOp {
             module: Arc::from("probe"),
             operation: Arc::from("double"),
-            result: Repr::Int,
+            result: int,
         });
         let op = cove_lir::HostOpId(build.program.host_ops.len() as u32 - 1);
         let args = build.args(&[0]);
         build.function(
             "f",
-            1,
+            &[int],
             &[Repr::Int, Repr::Int],
-            Repr::Int,
+            int,
             vec![Inst::CallHost { dst: 1, op, args }, Inst::Return { src: 1 }],
         )
     }
@@ -2445,7 +3448,7 @@ pub(crate) mod tests {
         let program = build.done();
         let hosts = probing(true);
         let mut machine = Machine::with_hosts(&program, 1 << 12, Some(&hosts));
-        assert_eq!(machine.run(f, &[21], &budget()).unwrap() as i64, 42);
+        assert_eq!(machine.run(f, &[21], &budget()).unwrap(), vec![42]);
     }
 
     /// A string argument and a string answer, which is the case that
@@ -2458,15 +3461,15 @@ pub(crate) mod tests {
         build.program.host_ops.push(cove_lir::HostOp {
             module: Arc::from("probe"),
             operation: Arc::from("shout"),
-            result: Repr::Ref,
+            result: str_layout,
         });
         let op = cove_lir::HostOpId(0);
         let args = build.args(&[0]);
         let f = build.function(
             "f",
-            0,
+            &[],
             &[Repr::Ref, Repr::Ref],
-            Repr::Ref,
+            str_layout,
             vec![
                 Inst::Str {
                     dst: 0,
@@ -2479,9 +3482,9 @@ pub(crate) mod tests {
         let program = build.done();
         let hosts = probing(true);
         let mut machine = Machine::with_hosts(&program, 1 << 12, Some(&hosts));
-        let word = machine.run(f, &[], &budget()).unwrap();
+        let words = machine.run(f, &[], &budget()).unwrap();
         assert_eq!(
-            String::from_utf8(machine.string_bytes(word)).unwrap(),
+            String::from_utf8(machine.string_bytes(words[0])).unwrap(),
             "hey!"
         );
     }
@@ -2512,18 +3515,19 @@ pub(crate) mod tests {
     #[test]
     fn a_host_call_is_charged_the_way_the_oracle_charges_it() {
         let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
         build.program.host_ops.push(cove_lir::HostOp {
             module: Arc::from("probe"),
             operation: Arc::from("double"),
-            result: Repr::Int,
+            result: int,
         });
         let op = cove_lir::HostOpId(0);
         let args = build.args(&[0]);
         let f = build.function(
             "f",
-            1,
+            &[int],
             &[Repr::Int, Repr::Int],
-            Repr::Int,
+            int,
             vec![
                 Inst::CallHost { dst: 1, op, args },
                 Inst::CallHost { dst: 1, op, args },
@@ -2572,11 +3576,12 @@ pub(crate) mod tests {
     #[test]
     fn a_cancelled_run_stops_at_a_safepoint() {
         let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
         let f = build.function(
             "spin",
-            0,
+            &[],
             &[Repr::Int],
-            Repr::Int,
+            int,
             vec![Inst::Int { dst: 0, value: 0 }, Inst::Jump { to: 0 }],
         );
         let program = build.done();

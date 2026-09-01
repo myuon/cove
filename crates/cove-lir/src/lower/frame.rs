@@ -1,83 +1,99 @@
 //! Where a value lives while a function runs.
 //!
-//! There is one numbering, and everything a body needs a word for is in it:
-//! the parameters first, in declaration order, then the return word, then
-//! every local and every temporary. That is ADR 0034's single slot space
-//! taken as the only place a value can be, which is what removes the
-//! question a predecessor with several stacks had to answer at every step —
-//! *which* store is this value in.
+//! There is one numbering, and everything a body needs words for is in it:
+//! the parameters first, in declaration order, then the answer, then every
+//! local and every temporary. That is ADR 0034's single slot space taken as
+//! the only place a value can be.
 //!
-//! # A slot is reused, and only by its own kind
+//! # A value location is a base slot and a layout
+//!
+//! One slot is one word, and one value may occupy several consecutive ones.
+//! So the frame allocates a *run*: [`Frame::alloc`] is handed the words a
+//! layout describes and answers the slot the first of them is at.
+//!
+//! # A run is reused, and only by one with the same words
 //!
 //! A long body mentions far more temporaries than it holds at once. If each
-//! took a slot of its own the frame would grow with the source rather than
-//! with what is live, and a frame is what a call costs. So a temporary is
-//! given back when it dies and handed to the next value that asks — but only
-//! to one of the same [`Repr`], because [`crate::RefMap`] is one bit per slot
-//! for the whole function and a slot that changed kind would make no single
-//! bit right at every program counter.
+//! took slots of its own the frame would grow with the source rather than
+//! with what is live, and a frame is what a call costs. So a run is given
+//! back when it dies and handed to the next value that asks — but only to
+//! one whose words are the *same, in the same order*, because
+//! [`crate::RefMap`] is one bit per slot for the whole function and a slot
+//! that changed kind would make no single bit right at every program
+//! counter.
 //!
-//! The free list is therefore per `Repr` and the invariant is structural: a
-//! slot is only ever taken from the list its own kind is on, so no
-//! bookkeeping mistake can put a reference where the map says there is an
-//! integer.
+//! The free list is therefore keyed by the run's words and the invariant is
+//! structural: a run is only ever taken from the list its own shape is on,
+//! so no bookkeeping mistake can put a reference where the map says there is
+//! an integer. Two locations of the same width whose words differ — a
+//! `[Int, Ref]` and a `[Ref, Int]` — never share a run.
 //!
-//! # Ownership answers when a slot dies
+//! # Ownership answers when a location dies
 //!
 //! An expression's answer is either a temporary it made — which its consumer
-//! gives back — or a slot that belongs to something else, such as a
-//! parameter or a local. [`Val`] carries which, because freeing a binding's
-//! slot at the end of the expression that read it would let a later
-//! temporary overwrite a variable that is still in scope.
-//!
-//! A local's slot is owned by the scope that declared it, and released when
-//! that scope ends. That is the same event the heap task needs for
-//! [`crate::Inst::Clear`], which is why the scope answers a list of slots
-//! rather than quietly dropping them.
+//! gives back — or a location that belongs to something else, such as a
+//! parameter, a local, or a field of one. [`Val`] carries which, because
+//! freeing a binding's run at the end of the expression that read it would
+//! let a later temporary overwrite a variable that is still in scope.
 
 use std::collections::HashMap;
 
+use crate::layout::LayoutId;
 use crate::{Repr, Slot};
 
-/// Where an expression left its answer.
+/// Where an expression left its answer: a base slot and the layout that says
+/// how many words follow it and what each of them holds.
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Val {
     pub slot: Slot,
-    /// Whether the consumer of this value should give the slot back.
+    pub layout: LayoutId,
+    /// Whether the consumer of this value should give the run back.
     ///
     /// A temporary is the expression's own and dies with its last use. A
-    /// borrowed slot — a parameter, a local, the return word — outlives the
-    /// expression that read it, and giving one back would hand a live
-    /// binding to the next temporary that asked.
+    /// borrowed location — a parameter, a local, a field of one, the answer
+    /// — outlives the expression that read it, and giving one back would
+    /// hand a live binding to the next temporary that asked.
     pub temp: bool,
 }
 
 impl Val {
     /// A temporary this expression allocated.
-    pub fn temp(slot: Slot) -> Val {
-        Val { slot, temp: true }
+    pub fn temp(slot: Slot, layout: LayoutId) -> Val {
+        Val {
+            slot,
+            layout,
+            temp: true,
+        }
     }
 
-    /// A slot that belongs to something longer-lived.
-    pub fn borrowed(slot: Slot) -> Val {
-        Val { slot, temp: false }
+    /// A location that belongs to something longer-lived.
+    pub fn borrowed(slot: Slot, layout: LayoutId) -> Val {
+        Val {
+            slot,
+            layout,
+            temp: false,
+        }
     }
 }
 
-/// One lexical scope: the names it introduced and the slots it must give
-/// back when it ends.
+/// One lexical scope: the names it introduced and the runs it must give back
+/// when it ends.
 #[derive(Default)]
 struct Scope {
     /// Pushed in declaration order and searched backwards, so a shadowing
     /// declaration wins without the earlier one having to be removed — and
-    /// the earlier one's slot stays owned by this scope, which is what a
+    /// the earlier one's run stays owned by this scope, which is what a
     /// shadowed binding still needs.
-    names: Vec<(String, Slot)>,
-    owned: Vec<Slot>,
+    names: Vec<(String, Slot, LayoutId)>,
+    /// The runs the scope gives back when it ends, with the width each one
+    /// occupies. The width is carried rather than looked up, because ending
+    /// a scope must not need the layout table the caller is holding.
+    owned: Vec<(Slot, LayoutId, u32)>,
 }
 
 pub(crate) struct Frame {
     reprs: Vec<Repr>,
-    free: HashMap<Repr, Vec<Slot>>,
+    free: HashMap<Vec<Repr>, Vec<Slot>>,
     scopes: Vec<Scope>,
 }
 
@@ -100,40 +116,40 @@ impl Frame {
         self.reprs[slot as usize]
     }
 
-    /// A slot that is never given back: a parameter.
+    /// Whether the run at `slot` holds anything a collection traces, or an
+    /// address whose live range the lowering ends.
+    pub fn holds_ref(&self, slot: Slot, width: u32) -> bool {
+        (slot..slot + width).any(|at| matches!(self.reprs[at as usize], Repr::Ref | Repr::Addr))
+    }
+
+    /// A run that is never given back: a parameter.
     ///
-    /// Parameters are slots `0..arity` and the caller writes into them, so
-    /// they are taken before anything else asks and never returned to a free
-    /// list.
-    pub fn param(&mut self, repr: Repr) -> Slot {
-        self.push(repr)
+    /// Parameters occupy the frame from slot 0 in declaration order and the
+    /// caller writes into them, so they are taken before anything else asks
+    /// and never returned to a free list.
+    pub fn param(&mut self, words: &[Repr]) -> Slot {
+        self.push(words)
     }
 
-    /// A slot holding one value of `repr`, reusing a dead one when there is
-    /// one of the same kind.
-    pub fn alloc(&mut self, repr: Repr) -> Slot {
-        match self.free.get_mut(&repr).and_then(Vec::pop) {
+    /// A run of `words`, reusing a dead one of exactly that shape when there
+    /// is one.
+    pub fn alloc(&mut self, words: &[Repr]) -> Slot {
+        match self.free.get_mut(words).and_then(Vec::pop) {
             Some(slot) => slot,
-            None => self.push(repr),
+            None => self.push(words),
         }
     }
 
-    fn push(&mut self, repr: Repr) -> Slot {
-        self.reprs.push(repr);
-        (self.reprs.len() - 1) as Slot
+    fn push(&mut self, words: &[Repr]) -> Slot {
+        let at = self.reprs.len() as Slot;
+        self.reprs.extend_from_slice(words);
+        at
     }
 
-    /// Gives a slot back to the list its kind draws from.
-    pub fn free(&mut self, slot: Slot) {
-        let repr = self.repr(slot);
-        self.free.entry(repr).or_default().push(slot);
-    }
-
-    /// Gives back a value's slot if it was the expression's own.
-    pub fn release(&mut self, val: Val) {
-        if val.temp {
-            self.free(val.slot);
-        }
+    /// Gives a run back to the list its shape draws from.
+    pub fn free(&mut self, slot: Slot, width: u32) {
+        let words = self.reprs[slot as usize..(slot + width) as usize].to_vec();
+        self.free.entry(words).or_default().push(slot);
     }
 
     /// How many scopes are open. A loop records this so `break` knows how
@@ -146,64 +162,66 @@ impl Frame {
         self.scopes.push(Scope::default());
     }
 
-    /// Ends the innermost scope, answering the reference slots it owned.
+    /// Ends the innermost scope, answering the locations it owned that hold
+    /// a reference.
     ///
-    /// The slots go back on the free lists here; the answer is what the
+    /// The runs go back on the free lists here; the answer is what the
     /// caller must emit [`crate::Inst::Clear`] for, because a static
     /// reference map cannot say when a value stopped being needed.
-    pub fn pop_scope(&mut self) -> Vec<Slot> {
+    pub fn pop_scope(&mut self) -> Vec<(Slot, LayoutId)> {
         let scope = self.scopes.pop().expect("a scope is open");
         let mut clears = Vec::new();
-        for slot in scope.owned {
-            if matches!(self.repr(slot), Repr::Ref | Repr::Addr) {
-                clears.push(slot);
+        for (slot, layout, width) in scope.owned {
+            if self.holds_ref(slot, width) {
+                clears.push((slot, layout));
             }
-            self.free(slot);
+            self.free(slot, width);
         }
         clears
     }
 
-    /// The reference slots the scopes inside `depth` own.
+    /// The locations the scopes inside `depth` own that hold a reference.
     ///
     /// This is what a `break` or a `continue` has to clear: it leaves those
-    /// scopes without ending them, and the loop it jumps to or out of goes on
-    /// running, so a reference left behind would be retained for the rest of
-    /// the frame rather than for the rest of the turn.
-    pub fn refs_within(&self, depth: usize) -> Vec<Slot> {
+    /// scopes without ending them, and the loop it jumps to or out of goes
+    /// on running, so a reference left behind would be retained for the rest
+    /// of the frame rather than for the rest of the turn.
+    pub fn refs_within(&self, depth: usize) -> Vec<(Slot, LayoutId)> {
         self.scopes[depth..]
             .iter()
             .flat_map(|scope| scope.owned.iter().copied())
-            .filter(|slot| matches!(self.repr(*slot), Repr::Ref | Repr::Addr))
+            .filter(|(slot, _, width)| self.holds_ref(*slot, *width))
+            .map(|(slot, layout, _)| (slot, layout))
             .collect()
     }
 
-    /// Names `slot` in the innermost scope.
-    pub fn bind(&mut self, name: &str, slot: Slot) {
+    /// Names a location in the innermost scope.
+    pub fn bind(&mut self, name: &str, slot: Slot, layout: LayoutId) {
         self.scopes
             .last_mut()
             .expect("a scope is open")
             .names
-            .push((name.to_string(), slot));
+            .push((name.to_string(), slot, layout));
     }
 
-    /// Makes the innermost scope responsible for giving `slot` back.
-    pub fn own(&mut self, slot: Slot) {
+    /// Makes the innermost scope responsible for giving a location back.
+    pub fn own(&mut self, slot: Slot, layout: LayoutId, width: u32) {
         self.scopes
             .last_mut()
             .expect("a scope is open")
             .owned
-            .push(slot);
+            .push((slot, layout, width));
     }
 
-    /// The slot `name` denotes, searching inwards out.
-    pub fn lookup(&self, name: &str) -> Option<Slot> {
+    /// The location `name` denotes, searching inwards out.
+    pub fn lookup(&self, name: &str) -> Option<(Slot, LayoutId)> {
         self.scopes.iter().rev().find_map(|scope| {
             scope
                 .names
                 .iter()
                 .rev()
-                .find(|(bound, _)| bound == name)
-                .map(|(_, slot)| *slot)
+                .find(|(bound, _, _)| bound == name)
+                .map(|(_, slot, layout)| (*slot, *layout))
         })
     }
 }

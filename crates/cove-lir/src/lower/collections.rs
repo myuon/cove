@@ -23,15 +23,26 @@
 //! [`Inst::CallBuiltin`] of `Vector.toArray`, which is the same copy
 //! `items_of` makes when it clones the elements out.
 //!
-//! # The element binding is one slot, and it is cleared
+//! # A range yields what it was written to yield, and never traps doing it
 //!
-//! A loop binds one name per turn, and the value behind it is a reference
-//! whenever the elements are objects. One slot holds it for every turn, and
-//! the slot is cleared at the end of each turn — so a walk over a large array
-//! holds one element at a time rather than every element it has reached.
-//! That is the invariant the whole design was reviewed for, and it is why the
-//! `Clear` is emitted at the end of the body rather than left to the next
-//! turn's overwrite.
+//! An inclusive range is not turned into an exclusive one with a larger end.
+//! `0...Int.MAX` has no exclusive equivalent — the end would be `Int.MAX + 1`
+//! — and normalising it that way made the loop trap on an overflow the
+//! language does not have. So `inclusive` is kept and the *comparison* is
+//! chosen instead: a turn happens at `index` when `index < end`, or when
+//! `index == end` and the range was written inclusive. Nothing adjusts a
+//! bound, and the step is emitted only where `index < end` is already known,
+//! so the counter never passes the end either.
+//!
+//! # The element binding is one location, and it is cleared
+//!
+//! A loop binds one name per turn, and the value behind it holds a reference
+//! whenever the elements do. One location holds it for every turn, and it is
+//! cleared at the end of each turn — so a walk over a large array holds one
+//! element at a time rather than every element it has reached. That is the
+//! invariant the whole design was reviewed for, and it is why the `Clear` is
+//! emitted at the end of the body rather than left to the next turn's
+//! overwrite.
 
 use cove_diag::Span;
 use cove_sema::typeck::Ty;
@@ -39,11 +50,11 @@ use cove_syntax::ast::{Arg, Block, Expr, Ident};
 
 use super::frame::Val;
 use super::gap;
-use super::shapes::{word_of, RANGE_END, RANGE_INCLUSIVE, RANGE_START, VECTOR_LEN, VECTOR_STORE};
-use super::{Body, Loop, PENDING};
-use crate::inst::{ArithOp, CmpOp, Compare, Inst, Len, Num, Slot};
+use super::shapes::{self, RANGE_END, RANGE_INCLUSIVE, RANGE_START, VECTOR_LEN, VECTOR_STORE};
+use super::{Body, Dest, Loop, PENDING};
+use crate::inst::{ArithOp, CmpOp, Compare, Inst, Len, Num, Pc, Slot};
+use crate::layout::LayoutId;
 use crate::program::Builtin;
-use crate::repr::Repr;
 
 impl Body<'_> {
     // ---- literals ---------------------------------------------------------
@@ -53,14 +64,20 @@ impl Body<'_> {
     ///
     /// The elements are in the object rather than behind an indirection,
     /// because an `Array` cannot grow and so needs none of what an
-    /// indirection buys. Every element is evaluated before anything is
-    /// stored, in source order, because an element is an ordinary expression
-    /// and one of them may do something the next one sees.
+    /// indirection buys. A multiword element is inline there too: the stride
+    /// is the element layout's width, so an `Array<Point>` is a run of
+    /// two-word elements rather than a run of addresses.
     pub(super) fn array_literal(&mut self, expr: &Expr, items: &[Expr]) -> Val {
         let Some(ty) = self.owned_ty(expr) else {
             return self.dead(expr);
         };
-        let Some(layout) = self.layout(&ty, expr.span) else {
+        let Ty::Array(element) = ty.clone() else {
+            return self.gap("an array literal of something that is not an `Array`", expr);
+        };
+        let (Some(layout), Some(elem)) = (
+            self.layout(&ty, expr.span),
+            self.layout(&element, expr.span),
+        ) else {
             return self.dead(expr);
         };
 
@@ -68,50 +85,51 @@ impl Body<'_> {
         for item in items {
             held.push(self.expr(item));
         }
-        let dst = self.frame.alloc(Repr::Ref);
+        let dst = self.temp(shapes::REF);
         self.emit(
             Inst::Alloc {
-                dst,
+                dst: dst.slot,
                 layout,
                 len: Len::Count(items.len() as u32),
             },
             expr.span,
         );
-        // One index slot written again rather than one per element: the
+        // One index location written again rather than one per element: the
         // frame should not grow with the length of a literal.
-        let index = self.frame.alloc(Repr::Int);
+        let index = self.temp(shapes::INT);
         for (at, value) in held.iter().enumerate() {
             self.emit(
                 Inst::Int {
-                    dst: index,
+                    dst: index.slot,
                     value: at as i64,
                 },
                 expr.span,
             );
             self.emit(
-                Inst::SetElem {
-                    obj: dst,
-                    index,
+                Inst::StoreElem {
+                    obj: dst.slot,
+                    index: index.slot,
                     src: value.slot,
+                    layout: elem,
                 },
                 expr.span,
             );
         }
-        self.frame.free(index);
+        self.give_back(index.slot, index.layout);
         for value in held.into_iter().rev() {
             self.release(value, expr.span);
         }
-        Val::temp(dst)
+        Val::temp(dst.slot, layout)
     }
 
-    /// `0..<n` and `0..n`: one object with the two bounds and which of them
+    /// `0..<n` and `0..n`: three words with the two bounds and which of them
     /// the end is.
     ///
     /// A range is a value like any other — it can be bound, passed, compared
     /// and iterated later — so it is built here rather than folded into the
-    /// loop that usually consumes it. `docs/LINEAR_VM.md` gives it one layout
-    /// for the whole program, which is what keeps `..` and `..<` one family
-    /// rather than two.
+    /// loop that usually consumes it. `docs/LINEAR_VM.md` gives it one
+    /// layout for the whole program, `Struct { start, end, inclusive }`,
+    /// which is what keeps `..` and `..<` one family rather than two.
     pub(super) fn range_literal(
         &mut self,
         expr: &Expr,
@@ -124,61 +142,28 @@ impl Body<'_> {
         };
         let a = self.expr(start);
         let b = self.expr(end);
-        let dst = self.frame.alloc(Repr::Ref);
-        self.emit(
-            Inst::Alloc {
-                dst,
-                layout,
-                len: Len::Fixed,
-            },
-            expr.span,
-        );
-        self.emit(
-            Inst::SetWord {
-                obj: dst,
-                at: RANGE_START,
-                src: a.slot,
-            },
-            expr.span,
-        );
-        self.emit(
-            Inst::SetWord {
-                obj: dst,
-                at: RANGE_END,
-                src: b.slot,
-            },
-            expr.span,
-        );
-        let flag = self.frame.alloc(Repr::Bool);
+        let dst = self.temp(layout);
+        self.copy(dst.slot + RANGE_START, a.slot, shapes::INT, expr.span);
+        self.copy(dst.slot + RANGE_END, b.slot, shapes::INT, expr.span);
         self.emit(
             Inst::Bool {
-                dst: flag,
+                dst: dst.slot + RANGE_INCLUSIVE,
                 value: inclusive,
             },
             expr.span,
         );
-        self.emit(
-            Inst::SetWord {
-                obj: dst,
-                at: RANGE_INCLUSIVE,
-                src: flag,
-            },
-            expr.span,
-        );
-        self.frame.free(flag);
         self.release(b, expr.span);
         self.release(a, expr.span);
-        Val::temp(dst)
+        dst
     }
 
     /// `Vector.of(a, b, c)`: a store holding the elements, and a header
     /// naming it.
     ///
     /// The two objects are the whole of what a vector is, and both are
-    /// allocated here for the reason a struct literal's object is: the
-    /// lowering knows the layouts and [`Inst::Alloc`] takes one. What the
-    /// machine is asked for is growth, which no instruction expresses — see
-    /// [`Body::vector_method`].
+    /// allocated here because the lowering knows the layouts and
+    /// [`Inst::Alloc`] takes one. What the machine is asked for is growth,
+    /// which no instruction expresses — see [`Body::vector_method`].
     ///
     /// The store is allocated at exactly the length of the literal. A vector
     /// with no spare room is not a special case: the first `push` grows it
@@ -187,14 +172,16 @@ impl Body<'_> {
         let Some(ty) = self.owned_ty(expr) else {
             return self.dead(expr);
         };
-        let Ty::Vector(elem) = ty.clone() else {
+        let Ty::Vector(element) = ty.clone() else {
             return self.gap(
                 "`Vector.of` answering something other than a `Vector`",
                 expr,
             );
         };
-        let (Some(elem), Some(layout)) = (word_of(&elem), self.layout(&ty, expr.span)) else {
-            self.errors.push(super::describe(&ty, expr.span));
+        let (Some(layout), Some(elem)) = (
+            self.layout(&ty, expr.span),
+            self.layout(&element, expr.span),
+        ) else {
             return self.dead(expr);
         };
         if let Some(bad) = self.plain_arguments(args) {
@@ -206,37 +193,38 @@ impl Body<'_> {
         for arg in args {
             held.push(self.expr(&arg.value));
         }
-        let store = self.frame.alloc(Repr::Ref);
+        let store = self.temp(shapes::REF);
         self.emit(
             Inst::Alloc {
-                dst: store,
+                dst: store.slot,
                 layout: store_layout,
                 len: Len::Count(args.len() as u32),
             },
             expr.span,
         );
-        let index = self.frame.alloc(Repr::Int);
+        let index = self.temp(shapes::INT);
         for (at, value) in held.iter().enumerate() {
             self.emit(
                 Inst::Int {
-                    dst: index,
+                    dst: index.slot,
                     value: at as i64,
                 },
                 expr.span,
             );
             self.emit(
-                Inst::SetElem {
-                    obj: store,
-                    index,
+                Inst::StoreElem {
+                    obj: store.slot,
+                    index: index.slot,
                     src: value.slot,
+                    layout: elem,
                 },
                 expr.span,
             );
         }
-        let dst = self.frame.alloc(Repr::Ref);
+        let dst = self.temp(shapes::REF);
         self.emit(
             Inst::Alloc {
-                dst,
+                dst: dst.slot,
                 layout,
                 len: Len::Fixed,
             },
@@ -244,33 +232,35 @@ impl Body<'_> {
         );
         self.emit(
             Inst::Int {
-                dst: index,
+                dst: index.slot,
                 value: args.len() as i64,
             },
             expr.span,
         );
         self.emit(
-            Inst::SetWord {
-                obj: dst,
+            Inst::StoreField {
+                obj: dst.slot,
                 at: VECTOR_LEN,
-                src: index,
+                src: index.slot,
+                layout: shapes::INT,
             },
             expr.span,
         );
         self.emit(
-            Inst::SetWord {
-                obj: dst,
+            Inst::StoreField {
+                obj: dst.slot,
                 at: VECTOR_STORE,
-                src: store,
+                src: store.slot,
+                layout: shapes::REF,
             },
             expr.span,
         );
-        self.frame.free(index);
-        self.release(Val::temp(store), expr.span);
+        self.give_back(index.slot, index.layout);
+        self.release(store, expr.span);
         for value in held.into_iter().rev() {
             self.release(value, expr.span);
         }
-        Val::temp(dst)
+        Val::temp(dst.slot, layout)
     }
 
     // ---- methods -----------------------------------------------------------
@@ -278,7 +268,7 @@ impl Body<'_> {
     /// `items.length()`, `items.isEmpty()`, `items.get(i)`.
     ///
     /// An `Array` keeps its elements in the object, so its length is the
-    /// object's own header length and an element is one [`Inst::GetElem`].
+    /// object's own header length and an element is one [`Inst::LoadElem`].
     /// There is no element assignment beside them: an `Array` is immutable,
     /// and the growable sequence is a `Vector`.
     pub(super) fn array_method(
@@ -292,10 +282,10 @@ impl Body<'_> {
         match (name, args.len()) {
             ("length", 0) | ("isEmpty", 0) => {
                 let obj = self.expr(base);
-                let len = self.frame.alloc(Repr::Int);
+                let len = self.temp(shapes::INT);
                 self.emit(
                     Inst::Len {
-                        dst: len,
+                        dst: len.slot,
                         obj: obj.slot,
                     },
                     expr.span,
@@ -304,18 +294,21 @@ impl Body<'_> {
                 self.length_answer(expr, name, len)
             }
             ("get", 1) => {
+                let Some(element) = self.layout(elem, expr.span) else {
+                    return self.dead(expr);
+                };
                 let obj = self.expr(base);
                 let index = self.expr(&args[0].value);
-                let len = self.frame.alloc(Repr::Int);
+                let len = self.temp(shapes::INT);
                 self.emit(
                     Inst::Len {
-                        dst: len,
+                        dst: len.slot,
                         obj: obj.slot,
                     },
                     expr.span,
                 );
-                let answer = self.element_option(expr, obj.slot, len, index.slot, elem);
-                self.frame.free(len);
+                let answer = self.element_option(expr, obj.slot, len.slot, index.slot, element);
+                self.give_back(len.slot, len.layout);
                 self.release(index, expr.span);
                 self.release(obj, expr.span);
                 answer
@@ -334,8 +327,7 @@ impl Body<'_> {
     /// the two operations that need a *new* object go to the machine:
     /// `push`, which replaces the store with a larger one when the old one is
     /// full, and `toArray`, which builds an immutable copy. Neither is
-    /// something an instruction expresses, and both are one
-    /// [`Inst::CallBuiltin`] whose first operand is the vector.
+    /// something an instruction expresses.
     pub(super) fn vector_method(
         &mut self,
         expr: &Expr,
@@ -347,12 +339,13 @@ impl Body<'_> {
         match (name, args.len()) {
             ("length", 0) | ("isEmpty", 0) => {
                 let obj = self.expr(base);
-                let len = self.frame.alloc(Repr::Int);
+                let len = self.temp(shapes::INT);
                 self.emit(
-                    Inst::GetWord {
-                        dst: len,
+                    Inst::LoadField {
+                        dst: len.slot,
                         obj: obj.slot,
                         at: VECTOR_LEN,
+                        layout: shapes::INT,
                     },
                     expr.span,
                 );
@@ -360,12 +353,15 @@ impl Body<'_> {
                 self.length_answer(expr, name, len)
             }
             ("get", 1) => {
+                let Some(element) = self.layout(elem, expr.span) else {
+                    return self.dead(expr);
+                };
                 let obj = self.expr(base);
                 let index = self.expr(&args[0].value);
                 let (len, store) = self.vector_parts(obj.slot, expr.span);
-                let answer = self.element_option(expr, store, len, index.slot, elem);
-                self.frame.free(len);
-                self.release(Val::temp(store), expr.span);
+                let answer = self.element_option(expr, store.slot, len.slot, index.slot, element);
+                self.give_back(len.slot, len.layout);
+                self.release(store, expr.span);
                 self.release(index, expr.span);
                 self.release(obj, expr.span);
                 answer
@@ -382,56 +378,58 @@ impl Body<'_> {
     /// `isEmpty()` is `length() == 0` and is lowered as one, rather than as
     /// an operation of its own: the two questions differ by a comparison the
     /// instruction set already has.
-    fn length_answer(&mut self, expr: &Expr, name: &str, len: Slot) -> Val {
+    fn length_answer(&mut self, expr: &Expr, name: &str, len: Val) -> Val {
         if name == "length" {
-            return Val::temp(len);
+            return len;
         }
-        let zero = self.frame.alloc(Repr::Int);
+        let zero = self.temp(shapes::INT);
         self.emit(
             Inst::Int {
-                dst: zero,
+                dst: zero.slot,
                 value: 0,
             },
             expr.span,
         );
-        let dst = self.frame.alloc(Repr::Bool);
+        let dst = self.temp(shapes::BOOL);
         self.emit(
             Inst::Cmp {
                 on: Compare::Int,
                 op: CmpOp::Eq,
-                dst,
-                a: len,
-                b: zero,
+                dst: dst.slot,
+                a: len.slot,
+                b: zero.slot,
             },
             expr.span,
         );
-        self.frame.free(zero);
-        self.frame.free(len);
-        Val::temp(dst)
+        self.give_back(zero.slot, zero.layout);
+        self.give_back(len.slot, len.layout);
+        dst
     }
 
     /// The two words a vector header holds: how many elements it has, and
     /// where they are.
     ///
-    /// The store is answered in a reference slot of its own, because reading
-    /// an element is a read of *that* object and the collector has to see it
-    /// held for as long as it is being read from.
-    fn vector_parts(&mut self, obj: Slot, span: Span) -> (Slot, Slot) {
-        let len = self.frame.alloc(Repr::Int);
+    /// The store is answered in a reference location of its own, because
+    /// reading an element is a read of *that* object and the collector has to
+    /// see it held for as long as it is being read from.
+    fn vector_parts(&mut self, obj: Slot, span: Span) -> (Val, Val) {
+        let len = self.temp(shapes::INT);
         self.emit(
-            Inst::GetWord {
-                dst: len,
+            Inst::LoadField {
+                dst: len.slot,
                 obj,
                 at: VECTOR_LEN,
+                layout: shapes::INT,
             },
             span,
         );
-        let store = self.frame.alloc(Repr::Ref);
+        let store = self.temp(shapes::REF);
         self.emit(
-            Inst::GetWord {
-                dst: store,
+            Inst::LoadField {
+                dst: store.slot,
                 obj,
                 at: VECTOR_STORE,
+                layout: shapes::REF,
             },
             span,
         );
@@ -440,20 +438,18 @@ impl Body<'_> {
 
     /// `Some(elements[index])`, or `None` when `index` is outside them.
     ///
-    /// The `None` is the allocation itself. [`Inst::Alloc`] zeroes the
-    /// payload and `None` is case 0 of an `Option`, so an object that nothing
-    /// else is written into is already the answer for a bad index — which is
-    /// also what makes a half-built object safe to meet a collection.
-    ///
-    /// A negative index and an index at or past the length are one case with
-    /// one answer, which is the rule `get`, `set` and `remove` all share.
+    /// The `None` is written first, discriminant and zeroed payload, so an
+    /// index outside the elements falls through to an answer that is already
+    /// there. A negative index and an index at or past the length are one
+    /// case with one answer, which is the rule `get`, `set` and `remove` all
+    /// share.
     fn element_option(
         &mut self,
         expr: &Expr,
         elements: Slot,
         len: Slot,
         index: Slot,
-        elem: &Ty,
+        elem: LayoutId,
     ) -> Val {
         let Some(ty) = self.owned_ty(expr) else {
             return self.dead(expr);
@@ -461,43 +457,39 @@ impl Body<'_> {
         let Some(layout) = self.layout(&ty, expr.span) else {
             return self.dead(expr);
         };
-        let Some(word) = word_of(elem) else {
-            self.errors.push(super::describe(elem, expr.span));
-            return self.dead(expr);
-        };
         let span = expr.span;
 
-        let dst = self.frame.alloc(Repr::Ref);
-        self.emit(
-            Inst::Alloc {
-                dst,
-                layout,
-                len: Len::Fixed,
-            },
-            span,
-        );
-        let bound = self.frame.alloc(Repr::Int);
+        let dst = self.temp(layout);
+        self.write_case(dst.slot, layout, 0, &[], span);
+        let Some((parts, _)) = self.case_of(layout, 1) else {
+            return self.gap("`get` answering something that is not an `Option`", expr);
+        };
+        let Some(part) = parts.first().cloned() else {
+            return self.gap("an `Option` whose `Some` carries nothing", expr);
+        };
+
+        let bound = self.temp(shapes::INT);
         self.emit(
             Inst::Int {
-                dst: bound,
+                dst: bound.slot,
                 value: 0,
             },
             span,
         );
-        let ok = self.frame.alloc(Repr::Bool);
+        let ok = self.temp(shapes::BOOL);
         self.emit(
             Inst::Cmp {
                 on: Compare::Int,
                 op: CmpOp::Ge,
-                dst: ok,
+                dst: ok.slot,
                 a: index,
-                b: bound,
+                b: bound.slot,
             },
             span,
         );
         let below = self.emit(
             Inst::BranchFalse {
-                cond: ok,
+                cond: ok.slot,
                 to: PENDING,
             },
             span,
@@ -506,7 +498,7 @@ impl Body<'_> {
             Inst::Cmp {
                 on: Compare::Int,
                 op: CmpOp::Lt,
-                dst: ok,
+                dst: ok.slot,
                 a: index,
                 b: len,
             },
@@ -514,52 +506,35 @@ impl Body<'_> {
         );
         let above = self.emit(
             Inst::BranchFalse {
-                cond: ok,
+                cond: ok.slot,
                 to: PENDING,
             },
             span,
         );
-        self.frame.free(ok);
+        self.give_back(ok.slot, ok.layout);
 
-        let value = self.frame.alloc(word);
-        self.emit(
-            Inst::GetElem {
-                dst: value,
-                obj: elements,
-                index,
-            },
-            span,
-        );
         self.emit(
             Inst::Int {
-                dst: bound,
+                dst: dst.slot,
                 value: 1,
             },
             span,
         );
         self.emit(
-            Inst::SetWord {
-                obj: dst,
-                at: 0,
-                src: bound,
+            Inst::LoadElem {
+                dst: dst.slot + 1 + part.at,
+                obj: elements,
+                index,
+                layout: elem,
             },
             span,
         );
-        self.emit(
-            Inst::SetWord {
-                obj: dst,
-                at: 1,
-                src: value,
-            },
-            span,
-        );
-        self.frame.free(bound);
-        self.release(Val::temp(value), span);
+        self.give_back(bound.slot, bound.layout);
 
         let rest = self.here();
         self.patch(below, rest);
         self.patch(above, rest);
-        Val::temp(dst)
+        dst
     }
 
     /// An immutable copy of a vector's elements, as an `Array`.
@@ -567,13 +542,12 @@ impl Body<'_> {
     /// This is `Vector.toArray`, and it is what a `for` over a vector walks:
     /// `items_of` clones the elements out before the first turn, so a body
     /// that pushes onto the vector it is walking sees the same elements it
-    /// started with. The result layout is interned here so that the machine
-    /// has one to build the copy as.
-    fn vector_snapshot(&mut self, obj: Slot, elem: &Ty, span: Span) -> Option<Slot> {
+    /// started with.
+    fn vector_snapshot(&mut self, obj: Slot, elem: &Ty, span: Span) -> Option<Val> {
         let array = Ty::Array(Box::new(elem.clone()));
-        self.layout(&array, span)?;
-        let dst = self.frame.alloc(Repr::Ref);
-        self.emit_builtin(dst, "Vector", "toArray", &[obj], Repr::Ref, span);
+        let layout = self.layout(&array, span)?;
+        let dst = self.temp(layout);
+        self.emit_builtin(dst.slot, "Vector", "toArray", &[obj], layout, span);
         Some(dst)
     }
 
@@ -592,16 +566,16 @@ impl Body<'_> {
         let Some(ty) = self.owned_ty(iterable) else {
             return;
         };
-        if matches!(ty, Ty::Array(_) | Ty::Vector(_)) && self.layout(&ty, iterable.span).is_none() {
-            return;
-        }
         match &ty {
             Ty::Range => self.for_range(binding, iterable, body, span),
             Ty::Array(elem) => {
                 let elem = (**elem).clone();
+                let Some(element) = self.layout(&elem, iterable.span) else {
+                    return;
+                };
                 let value = self.expr(iterable);
                 let obj = self.own_iterable(value, span);
-                self.for_elements(obj, &elem, binding, body, span);
+                self.for_elements(obj, element, binding, body, span);
             }
             // The copy is the snapshot, and it is taken before the first
             // turn: the body may push onto the very vector it is walking,
@@ -609,13 +583,16 @@ impl Body<'_> {
             // reason.
             Ty::Vector(elem) => {
                 let elem = (**elem).clone();
+                let Some(element) = self.layout(&elem, iterable.span) else {
+                    return;
+                };
                 let value = self.expr(iterable);
                 let Some(snapshot) = self.vector_snapshot(value.slot, &elem, iterable.span) else {
                     self.release(value, iterable.span);
                     return;
                 };
                 self.release(value, iterable.span);
-                self.for_elements(snapshot, &elem, binding, body, span);
+                self.for_elements(snapshot, element, binding, body, span);
             }
             _ => {
                 self.errors.push(gap::gap(
@@ -627,49 +604,58 @@ impl Body<'_> {
         }
     }
 
-    /// A reference slot the loop owns for as long as it runs.
+    /// A reference location the loop owns for as long as it runs.
     ///
     /// A `for` walks the value the iterable had at the top, so the handle is
     /// copied out of whatever named it: a binding the body reassigns must not
     /// change what the walk is walking. A temporary is already the loop's
     /// own, and taking it over rather than copying it saves a word.
-    fn own_iterable(&mut self, value: Val, span: Span) -> Slot {
+    fn own_iterable(&mut self, value: Val, span: Span) -> Val {
         if value.temp {
-            return value.slot;
+            return value;
         }
-        let slot = self.frame.alloc(Repr::Ref);
-        self.emit(
-            Inst::Move {
-                dst: slot,
-                src: value.slot,
-            },
-            span,
-        );
-        slot
+        let held = self.temp(value.layout);
+        self.copy(held.slot, value.slot, value.layout, span);
+        held
     }
 
     /// A walk over a run of words: `Array`, and the copy a `Vector` is walked
     /// through.
     ///
-    /// The counter and the length are the loop's own slots, so the body can
-    /// do what it likes to the names around it without the walk noticing.
-    fn for_elements(&mut self, obj: Slot, elem: &Ty, binding: &Ident, body: &Block, span: Span) {
-        let Some(word) = word_of(elem) else {
-            self.errors.push(super::describe(elem, span));
-            return;
-        };
-        let count = self.frame.alloc(Repr::Int);
-        self.emit(Inst::Len { dst: count, obj }, span);
-        let index = self.frame.alloc(Repr::Int);
+    /// The counter and the length are the loop's own locations, so the body
+    /// can do what it likes to the names around it without the walk noticing.
+    fn for_elements(
+        &mut self,
+        obj: Val,
+        elem: LayoutId,
+        binding: &Ident,
+        body: &Block,
+        span: Span,
+    ) {
+        let count = self.temp(shapes::INT);
+        self.emit(
+            Inst::Len {
+                dst: count.slot,
+                obj: obj.slot,
+            },
+            span,
+        );
+        let index = self.temp(shapes::INT);
         self.emit(
             Inst::Int {
-                dst: index,
+                dst: index.slot,
                 value: 0,
             },
             span,
         );
-        let one = self.frame.alloc(Repr::Int);
-        self.emit(Inst::Int { dst: one, value: 1 }, span);
+        let one = self.temp(shapes::INT);
+        self.emit(
+            Inst::Int {
+                dst: one.slot,
+                value: 1,
+            },
+            span,
+        );
 
         // The step is above the test so that `continue` has somewhere to jump
         // to that is known before the body is lowered, and the first turn
@@ -681,247 +667,285 @@ impl Body<'_> {
             Inst::Arith {
                 num: Num::Int,
                 op: ArithOp::Add,
-                dst: index,
-                a: index,
-                b: one,
+                dst: index.slot,
+                a: index.slot,
+                b: one.slot,
             },
             span,
         );
         let test = self.here();
         self.patch(enter, test);
-        let more = self.frame.alloc(Repr::Bool);
+        let more = self.temp(shapes::BOOL);
         self.emit(
             Inst::Cmp {
                 on: Compare::Int,
                 op: CmpOp::Lt,
-                dst: more,
-                a: index,
-                b: count,
+                dst: more.slot,
+                a: index.slot,
+                b: count.slot,
             },
             span,
         );
         let branch = self.emit(
             Inst::BranchFalse {
-                cond: more,
+                cond: more.slot,
                 to: PENDING,
             },
             span,
         );
-        self.frame.free(more);
+        self.give_back(more.slot, more.layout);
 
-        let element = self.frame.alloc(word);
+        let element = self.temp(elem);
         self.emit(
-            Inst::GetElem {
-                dst: element,
-                obj,
-                index,
+            Inst::LoadElem {
+                dst: element.slot,
+                obj: obj.slot,
+                index: index.slot,
+                layout: elem,
             },
             span,
         );
-        self.turn(binding, element, body, step, branch, span);
+        self.open_turn(binding, element.slot, elem, step);
+        self.block(body, None);
+        self.close_turn(element.slot, elem, step, body.span, span);
+        self.end_loop(&[branch]);
 
-        self.frame.free(element);
-        self.frame.free(one);
-        self.frame.free(index);
-        self.frame.free(count);
-        self.release(Val::temp(obj), span);
+        self.give_back(element.slot, element.layout);
+        self.give_back(one.slot, one.layout);
+        self.give_back(index.slot, index.layout);
+        self.give_back(count.slot, count.layout);
+        self.release(obj, span);
     }
 
     /// A walk over the integers a range yields.
     ///
-    /// The end is normalised once, at the top: an inclusive range is an
-    /// exclusive one whose end is a step further on, which is
-    /// `RangeBounds::of` written as two instructions. An empty or reversed
-    /// range then iterates zero times without a case of its own, because the
-    /// first test already fails.
+    /// The bound is never adjusted. A turn happens at `index` when
+    /// `index < end`, and — when the range was written inclusive — also when
+    /// `index == end`; the step runs only on the first of those, so the
+    /// counter is incremented only where it is already known to be below the
+    /// end. `0...Int.MAX` therefore yields every value up to `Int.MAX` and
+    /// stops, rather than trapping on an overflow the language does not
+    /// have.
     fn for_range(&mut self, binding: &Ident, iterable: &Expr, body: &Block, span: Span) {
         let value = self.expr(iterable);
         let range = value.slot;
-        let index = self.frame.alloc(Repr::Int);
-        self.emit(
-            Inst::GetWord {
-                dst: index,
-                obj: range,
-                at: RANGE_START,
-            },
-            span,
-        );
-        let limit = self.frame.alloc(Repr::Int);
-        self.emit(
-            Inst::GetWord {
-                dst: limit,
-                obj: range,
-                at: RANGE_END,
-            },
-            span,
-        );
-        let inclusive = self.frame.alloc(Repr::Bool);
-        self.emit(
-            Inst::GetWord {
-                dst: inclusive,
-                obj: range,
-                at: RANGE_INCLUSIVE,
-            },
-            span,
-        );
-        // The bounds are out of the object, so the object itself is done
-        // with: a loop that ran for a long time should not hold it.
+        let index = self.temp(shapes::INT);
+        self.copy(index.slot, range + RANGE_START, shapes::INT, span);
+        let limit = self.temp(shapes::INT);
+        self.copy(limit.slot, range + RANGE_END, shapes::INT, span);
+        let inclusive = self.temp(shapes::BOOL);
+        self.copy(inclusive.slot, range + RANGE_INCLUSIVE, shapes::BOOL, span);
+        // The bounds are out of the value, so the range itself is done with:
+        // a loop that ran for a long time should not hold it.
         self.release(value, span);
 
-        let one = self.frame.alloc(Repr::Int);
-        self.emit(Inst::Int { dst: one, value: 1 }, span);
-        let exclusive = self.emit(
-            Inst::BranchFalse {
-                cond: inclusive,
-                to: PENDING,
-            },
-            span,
-        );
-        self.frame.free(inclusive);
+        let one = self.temp(shapes::INT);
         self.emit(
-            Inst::Arith {
-                num: Num::Int,
-                op: ArithOp::Add,
-                dst: limit,
-                a: limit,
-                b: one,
+            Inst::Int {
+                dst: one.slot,
+                value: 1,
             },
             span,
         );
-        let bounded = self.here();
-        self.patch(exclusive, bounded);
+        let more = self.temp(shapes::BOOL);
 
         let enter = self.emit(Inst::Jump { to: PENDING }, span);
+        // `continue` comes here, and so does the end of every turn. The step
+        // is guarded by the same `index < end` the entry test uses, which is
+        // what keeps the counter from ever passing the end.
         let step = self.here();
-        self.emit(
-            Inst::Arith {
-                num: Num::Int,
-                op: ArithOp::Add,
-                dst: index,
-                a: index,
-                b: one,
-            },
-            span,
-        );
-        let test = self.here();
-        self.patch(enter, test);
-        let more = self.frame.alloc(Repr::Bool);
         self.emit(
             Inst::Cmp {
                 on: Compare::Int,
                 op: CmpOp::Lt,
-                dst: more,
-                a: index,
-                b: limit,
+                dst: more.slot,
+                a: index.slot,
+                b: limit.slot,
             },
             span,
         );
-        let branch = self.emit(
+        let done = self.emit(
             Inst::BranchFalse {
-                cond: more,
+                cond: more.slot,
                 to: PENDING,
             },
             span,
         );
-        self.frame.free(more);
+        self.emit(
+            Inst::Arith {
+                num: Num::Int,
+                op: ArithOp::Add,
+                dst: index.slot,
+                a: index.slot,
+                b: one.slot,
+            },
+            span,
+        );
+        let guard = self.here();
+        self.patch(enter, guard);
+        self.emit(
+            Inst::Cmp {
+                on: Compare::Int,
+                op: CmpOp::Lt,
+                dst: more.slot,
+                a: index.slot,
+                b: limit.slot,
+            },
+            span,
+        );
+        let to_edge = self.emit(
+            Inst::BranchFalse {
+                cond: more.slot,
+                to: PENDING,
+            },
+            span,
+        );
 
         // The counter is the binding: a `for` binding is read-only, so
-        // nothing in the body can move the walk, and a slot copied into
-        // every turn would be a word written for nothing.
-        self.turn(binding, index, body, step, branch, span);
+        // nothing in the body can move the walk, and a location copied into
+        // every turn would be words written for nothing.
+        let body_at = self.here();
+        self.open_turn(binding, index.slot, shapes::INT, step);
+        self.block(body, None);
+        self.close_turn(index.slot, shapes::INT, step, body.span, span);
 
-        self.frame.free(one);
-        self.frame.free(limit);
-        self.frame.free(index);
+        // The one turn `index == end` earns, and only when the range was
+        // written inclusive.
+        let edge = self.here();
+        self.patch(to_edge, edge);
+        let not_inclusive = self.emit(
+            Inst::BranchFalse {
+                cond: inclusive.slot,
+                to: PENDING,
+            },
+            span,
+        );
+        self.emit(
+            Inst::Cmp {
+                on: Compare::Int,
+                op: CmpOp::Eq,
+                dst: more.slot,
+                a: index.slot,
+                b: limit.slot,
+            },
+            span,
+        );
+        let past = self.emit(
+            Inst::BranchFalse {
+                cond: more.slot,
+                to: PENDING,
+            },
+            span,
+        );
+        self.emit(Inst::Jump { to: body_at }, span);
+
+        self.end_loop(&[done, not_inclusive, past]);
+
+        self.give_back(more.slot, more.layout);
+        self.give_back(one.slot, one.layout);
+        self.give_back(inclusive.slot, inclusive.layout);
+        self.give_back(limit.slot, limit.layout);
+        self.give_back(index.slot, index.layout);
     }
 
-    /// One turn of a loop: the binding, the body, and the end of both.
+    /// Opens one turn of a loop: the loop record, the scope the binding
+    /// lives in, and the name.
     ///
     /// `element` already holds this turn's value. It is bound rather than
     /// owned by the scope, because the scope gives its slots back when it
-    /// ends and the next turn writes this one again — so the loop owns the
-    /// slot and the scope owns only the name.
-    ///
-    /// The `Clear` at the end is what keeps a walk over a large collection
-    /// from holding more than one element at a time. It is the loop's own,
-    /// for the same reason: a scope that gave the slot back could not emit
-    /// it, and the next turn's overwrite is not a promise the lowering is
-    /// allowed to rely on.
-    fn turn(
-        &mut self,
-        binding: &Ident,
-        element: Slot,
-        body: &Block,
-        step: crate::inst::Pc,
-        branch: crate::inst::Pc,
-        span: Span,
-    ) {
+    /// ends and the next turn writes them again — so the loop owns the
+    /// location and the scope owns only the name.
+    fn open_turn(&mut self, binding: &Ident, element: Slot, layout: LayoutId, step: Pc) {
+        let holds = self.holds_ref(layout);
         self.loops.push(Loop {
             head: step,
             depth: self.frame.depth(),
             breaks: Vec::new(),
-            element: self.holds_reference(element).then_some(element),
+            element: holds.then_some(Dest {
+                slot: element,
+                layout,
+            }),
         });
         self.frame.push_scope();
-        self.frame.bind(&binding.node, element);
-        self.block(body, None);
+        self.frame.bind(&binding.node, element, layout);
+    }
+
+    /// Closes one turn: the scope's clears, the element's, and the back edge.
+    ///
+    /// The `Clear` is what keeps a walk over a large collection from holding
+    /// more than one element at a time. It is the loop's own: a scope that
+    /// gave the location back could not emit it, and the next turn's
+    /// overwrite is not a promise the lowering is allowed to rely on.
+    fn close_turn(
+        &mut self,
+        element: Slot,
+        layout: LayoutId,
+        step: Pc,
+        body_span: Span,
+        span: Span,
+    ) {
         let clears = self.frame.pop_scope();
-        self.clear(&clears, body.span);
-        if self.holds_reference(element) {
-            self.emit(Inst::Clear { slot: element }, body.span);
+        self.clear(&clears, body_span);
+        if self.holds_ref(layout) {
+            self.zero(element, layout, body_span);
         }
         self.emit(Inst::Jump { to: step }, span);
+    }
 
+    /// Ends a loop: every way out of it lands here.
+    fn end_loop(&mut self, exits: &[Pc]) {
         let end = self.here();
-        self.patch(branch, end);
+        for at in exits {
+            self.patch(*at, end);
+        }
         let finished = self.loops.pop().expect("the loop was pushed above");
         for at in finished.breaks {
             self.patch(at, end);
         }
     }
 
-    /// Whether a slot holds something a collection would trace.
-    pub(super) fn holds_reference(&self, slot: Slot) -> bool {
-        matches!(self.frame.repr(slot), Repr::Ref | Repr::Addr)
-    }
+    // ---- comparing values ----------------------------------------------------
 
-    // ---- comparing objects ----------------------------------------------------
-
-    /// `==` and `!=` between two values that are references.
+    /// `==` and `!=` between two values the instruction set cannot compare
+    /// in one step.
     ///
     /// A `String` compares by its bytes, which is one instruction. Everything
     /// else the language defines `==` for is compared by walking the two
-    /// objects, and that walk is not an instruction: what `==` means for an
+    /// values, and that walk is not an instruction: what `==` means for an
     /// array, a struct, an enum or a vector is a rule of the language, stated
     /// in the language reference, and the IR describes families rather than
     /// carrying a case per family.
     ///
-    /// The receiver is `Any` rather than a type's name, because this is one
-    /// rule over every value the language gives an equality rather than a
-    /// method a type declares — `cove_runtime::builtins` has no entry for it
-    /// either, and the oracle reaches it as an operator.
+    /// # An inline value has to be boxed to be compared
+    ///
+    /// [`Inst::CallBuiltin`] hands the machine slot numbers and nothing else:
+    /// there is no channel on it for the layout of each operand. A reference
+    /// carries its description in the object's own header, so an array or a
+    /// vector needs nothing; an *inline* struct, enum or range is a run of
+    /// words with nothing attached, so it goes into a box that carries its
+    /// layout. That is one allocation per comparison, and it is a
+    /// consequence of the instruction's shape rather than of the
+    /// representation.
     ///
     /// # What the builtin must do
     ///
-    /// `Any.equals` takes two operands and answers whether they are the
-    /// same value, by the rule `Value::eq_value` states for the oracle: two
+    /// `Any.equals` takes two operands and answers whether they are the same
+    /// value, by the rule `Value::eq_value` states for the oracle: two
     /// objects of different layouts are not equal; a string compares by
     /// bytes; a struct field-wise; an enum by case and then payload-wise; an
     /// array element-wise; a vector by the elements its length names; a box
-    /// by what it holds. A scalar word is compared as the `Repr` the layout
-    /// declares for it, so two `Float` words compare as doubles and not as
-    /// bits.
+    /// by what it holds.
     ///
     /// `!=` is the same call and an [`Inst::Not`]: one builtin rather than a
     /// second one that answers the negation.
-    pub(super) fn compare_objects(
+    pub(super) fn compare_values(
         &mut self,
         expr: &Expr,
         equal: bool,
         lhs: &Expr,
         dst: Slot,
-        a: Slot,
-        b: Slot,
+        a: &Val,
+        b: &Val,
     ) {
         if matches!(self.ty(lhs), Some(Ty::Str)) {
             self.emit(
@@ -929,23 +953,52 @@ impl Body<'_> {
                     on: Compare::Str,
                     op: if equal { CmpOp::Eq } else { CmpOp::Ne },
                     dst,
-                    a,
-                    b,
+                    a: a.slot,
+                    b: b.slot,
                 },
                 expr.span,
             );
             return;
         }
+        let left = self.described(a, expr.span);
+        let right = self.described(b, expr.span);
         let builtin = self.pool.builtin(Builtin {
             receiver: "Any".into(),
             operation: "equals".into(),
-            result: Repr::Bool,
+            result: shapes::BOOL,
         });
-        let args = self.pool.args.intern(vec![a, b]);
+        let args = self.pool.args.intern(vec![left.slot, right.slot]);
         self.emit(Inst::CallBuiltin { dst, builtin, args }, expr.span);
         if !equal {
             self.emit(Inst::Not { dst, a: dst }, expr.span);
         }
+        if right.temp {
+            self.release(right, expr.span);
+        }
+        if left.temp {
+            self.release(left, expr.span);
+        }
+    }
+
+    /// The same value, in a form an operand list can carry.
+    ///
+    /// One word is enough on its own; anything wider goes in a box that
+    /// names its layout. The source is left alone, because the caller is
+    /// still holding it.
+    fn described(&mut self, value: &Val, span: Span) -> Val {
+        if self.width(value.layout) == 1 {
+            return Val::borrowed(value.slot, value.layout);
+        }
+        let dst = self.temp(shapes::REF);
+        self.emit(
+            Inst::Box {
+                dst: dst.slot,
+                src: value.slot,
+                layout: value.layout,
+            },
+            span,
+        );
+        dst
     }
 
     /// `a is b`: whether two handles are the same storage.
@@ -958,13 +1011,13 @@ impl Body<'_> {
     pub(super) fn identity(&mut self, expr: &Expr, lhs: &Expr, rhs: &Expr) -> Val {
         let a = self.expr(lhs);
         let b = self.expr(rhs);
-        let dst = self.frame.alloc(Repr::Bool);
+        let dst = self.temp(shapes::BOOL);
         if matches!(self.ty(lhs), Some(Ty::Vector(_))) {
             self.emit(
                 Inst::Cmp {
                     on: Compare::Identity,
                     op: CmpOp::Eq,
-                    dst,
+                    dst: dst.slot,
                     a: a.slot,
                     b: b.slot,
                 },
@@ -978,7 +1031,7 @@ impl Body<'_> {
         }
         self.release(b, expr.span);
         self.release(a, expr.span);
-        Val::temp(dst)
+        dst
     }
 }
 

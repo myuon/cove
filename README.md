@@ -233,6 +233,15 @@ a value whose identity is observable actually lives: `Vector` and `Shared`,
 `Task` and `TaskScope`, and a host `Resource` are three kinds of ownership
 rather than one, they stay outside the VM's own traced heap, and the
 materialisation seam stays one-way.
+[ADR 0034](docs/adr/0034-one-physical-word-stack.md) then decides that every
+Cove runtime value lives in one linear memory, on one word stack, and that
+reaching it is a clean replacement of the executable IR and the VM rather
+than a renovation of them —
+[ADR 0033](docs/adr/0033-an-identity-is-not-a-vm-heap-object.md) is superseded
+by it. [ADR 0035](docs/adr/0035-a-value-type-may-not-contain-itself.md) is the
+one language rule that model needs: a value type may not contain itself, so a
+recursive cycle passes through a reference the declaration can be read to
+have.
 
 Syntax is still provisional and may change.
 

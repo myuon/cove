@@ -17,6 +17,7 @@ mod dispatch;
 mod enums;
 mod gaps;
 mod hosts;
+mod layouts;
 mod methods;
 mod patterns;
 mod slots;

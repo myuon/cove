@@ -24,14 +24,15 @@
 //!
 //! # The instruction set describes families, not cases
 //!
-//! There is one `GetWord`, not one per value kind that has fields; one
+//! There is one `LoadField`, not one per value kind that has fields; one
 //! `Arith`, not one per numeric type; one `Alloc`, not one per collection.
+//! A field of an *inline* value needs no instruction at all — it is a slot
+//! offset the lowering computes.
 //! What an object *is* is a question the object answers at run time, from
 //! its own header. Nothing here grows a case because a corpus program was
 //! refused, because nothing here refuses anything.
 
 use crate::layout::LayoutId;
-use crate::repr::Repr;
 use crate::{ArgsId, BuiltinId, FunctionId, HostOpId, StrId, TableId};
 
 /// A slot in the current frame: `memory[frame_base + slot]`.
@@ -129,35 +130,35 @@ pub enum Inst {
     /// The object is allocated on first use and shared afterwards: a string
     /// literal in a loop allocates once for the run, not once per turn.
     Str { dst: Slot, text: StrId },
-    /// `dst = src`
-    Move { dst: Slot, src: Slot },
-    /// `dst = src`, where `src` stays observable afterwards.
+    /// `dst = src`, for the words `layout` describes.
     ///
-    /// This is the language's copy. ADR 0001 says assignment and ordinary
-    /// argument passing are field-wise shallow copies and that structs and
-    /// enums have value semantics; issue #240 decides how: the machine
-    /// applies the source object's [`Copy`](crate::Copy) policy in one
-    /// place, so a family that copies on write is marked possibly shared
-    /// here and copied at the write that would have made the sharing
-    /// observable.
+    /// This is ADR 0001's field-wise shallow copy, and it is one operation
+    /// because a value's words are where the value is. Copying a
+    /// `Wrapper { p: Point, v: Vector }` copies three words: the `Point`
+    /// becomes independent because its words were copied, and the `Vector`
+    /// stays shared because what was copied is its address. Both answers
+    /// fall out of the same copy and neither needs a policy.
     ///
-    /// [`Inst::Move`] is the other half of the pair and is *not* a language
-    /// operation: it is copy elision, used only where the source is a fresh
-    /// temporary or is cleared as part of the same step, so nothing can
-    /// observe that the address was not copied. Cove has no move semantics;
-    /// the distinction is entirely below the language.
+    /// There is no sharing bit, no copy-on-write and no unsharing of a write
+    /// path. Those were needed only while every struct was one address, and
+    /// they existed to conceal an alias the representation had created.
     ///
-    /// Splitting them is what makes a missed case loud. If one instruction
-    /// did both and the lowering had to remember to mark, a forgotten mark
-    /// would silently turn value semantics into alias semantics — and the
-    /// program that noticed would be one that wrote through a copy, which is
-    /// exactly the program nobody writes a test for.
-    Duplicate { dst: Slot, src: Slot },
-    /// `slot = 0`
+    /// `let` and `var` lower to the same thing: ADR 0001 says they do not
+    /// change expression semantics, and Cove has no move semantics. A
+    /// lowering may elide a copy whose source is a fresh temporary, but that
+    /// is an optimisation — correctness never depends on proving uniqueness,
+    /// and a lowering that cannot tell emits the copy.
+    Copy {
+        dst: Slot,
+        src: Slot,
+        layout: LayoutId,
+    },
+    /// Zeroes the words `layout` describes at `slot`.
     ///
     /// A slot whose value is dead. The lowering emits one at the end of the
     /// scope a binding belonged to, and at a temporary's last use, for every
-    /// slot whose [`Repr`] is [`Repr::Ref`] or [`Repr::Addr`].
+    /// slot whose [`Repr`](crate::Repr) is [`Ref`](crate::Repr::Ref) or
+    /// [`Addr`](crate::Repr::Addr).
     ///
     /// This is what keeps a static reference map from turning into a leak.
     /// The map says which slots the collector *reads*; it cannot say when
@@ -171,7 +172,7 @@ pub enum Inst {
     /// anyway, and it is emitted only where the slot would otherwise retain
     /// something — never for a scalar, and never where the slot is about to
     /// be overwritten.
-    Clear { slot: Slot },
+    Clear { slot: Slot, layout: LayoutId },
 
     // ---- scalar operations --------------------------------------------
     /// `dst = -a`
@@ -269,20 +270,43 @@ pub enum Inst {
         layout: LayoutId,
         len: Len,
     },
-    /// `dst = obj.payload[at]`
+    /// `dst = <the value at payload word `at` of `obj`>`
     ///
     /// One instruction for every fixed-position read there is: a struct
     /// field, an enum's case index (`at == 0`) or payload word, a closure's
     /// capture. The lowering computes `at` from the layout it knows
     /// statically; the machine bounds-checks it against the layout the
     /// object names, because a reference slot carries no layout of its own.
-    GetWord { dst: Slot, obj: Slot, at: u32 },
-    /// `obj.payload[at] = src`
-    SetWord { obj: Slot, at: u32, src: Slot },
-    /// `dst = obj[index]`, for a [`crate::Shape::Elements`] object.
-    GetElem { dst: Slot, obj: Slot, index: Slot },
+    LoadField {
+        dst: Slot,
+        obj: Slot,
+        at: u32,
+        layout: LayoutId,
+    },
+    /// `<payload word `at` of `obj`> = src`
+    StoreField {
+        obj: Slot,
+        at: u32,
+        src: Slot,
+        layout: LayoutId,
+    },
+    /// `dst = obj[index]`, for an object whose elements are `layout` wide.
+    ///
+    /// The stride is the element layout's width, so an `Array<Point>` is a
+    /// run of two-word elements rather than a run of addresses.
+    LoadElem {
+        dst: Slot,
+        obj: Slot,
+        index: Slot,
+        layout: LayoutId,
+    },
     /// `obj[index] = src`
-    SetElem { obj: Slot, index: Slot, src: Slot },
+    StoreElem {
+        obj: Slot,
+        index: Slot,
+        src: Slot,
+        layout: LayoutId,
+    },
     /// `dst = <obj's header length>`: an element count, or a string's bytes.
     Len { dst: Slot, obj: Slot },
     /// `dst = <the [`LayoutId`] in obj's header>`, as an `Int`.
@@ -306,9 +330,9 @@ pub enum Inst {
     ///
     /// A place is one word. There is no place object, no place stack and no
     /// table of places; a `var` parameter is an ordinary slot whose
-    /// [`Repr`] is [`Repr::Addr`].
+    /// [`Repr`](crate::Repr) is [`Addr`](crate::Repr::Addr).
     AddrOfSlot { dst: Slot, slot: Slot },
-    /// `dst = &obj.payload[at]`
+    /// `dst = &<payload word `at` of `obj`>`
     ///
     /// The lowering keeps `obj` in a live reference slot for exactly the
     /// address's live range, and clears that slot with [`Inst::Clear`] when
@@ -317,40 +341,50 @@ pub enum Inst {
     /// does afterwards. The collector therefore needs no interior-pointer
     /// logic, and the heap does not move, so the address stays correct
     /// across a collection for as long as it is live and no longer.
-    AddrOfWord { dst: Slot, obj: Slot, at: u32 },
-    /// `dst = &obj[index]`
-    AddrOfElem { dst: Slot, obj: Slot, index: Slot },
-    /// `dst = <the object at `*addr`, made private to this path>`
+    AddrOfField { dst: Slot, obj: Slot, at: u32 },
+    /// `dst = &obj[index]`, at a stride of `layout`'s width.
+    AddrOfElem {
+        dst: Slot,
+        obj: Slot,
+        index: Slot,
+        layout: LayoutId,
+    },
+    /// `dst = *addr`, for the words `layout` describes.
+    Load {
+        dst: Slot,
+        addr: Slot,
+        layout: LayoutId,
+    },
+    /// `*addr = src`, for the words `layout` describes.
     ///
-    /// Reads the reference at `addr`; if the object it names is copy-on-write
-    /// and possibly shared, copies it, marks the copy's own copy-on-write
-    /// children possibly shared, and **writes the copy's address back through
-    /// `addr`**. Answers the address of the object the caller should carry
-    /// on from, which is the copy when one was made and the original when it
-    /// was not.
-    ///
-    /// This is the write half of value semantics, and it is why a place is a
-    /// one-word address rather than a root and a path. `b.p.x = 7` is one of
-    /// these per level: unshare what `b` names, then unshare what its `p`
-    /// field names, then write `x`. Each step writes its copy back into the
-    /// word above it, so the chain ends with a path that no other name
-    /// reaches — and `a.p.x` is untouched, which is what ADR 0001 requires.
-    Unshare { dst: Slot, addr: Slot },
-    /// `dst = *addr`
-    Load { dst: Slot, addr: Slot },
-    /// `*addr = src`
-    Store { addr: Slot, src: Slot },
+    /// A nested write through a `var` parameter updates the destination words
+    /// in place. There is nothing between the address and the words, which is
+    /// what a place being an address of the *first word* of a value location
+    /// buys.
+    Store {
+        addr: Slot,
+        src: Slot,
+        layout: LayoutId,
+    },
 
     // ---- erasure ----------------------------------------------------------
-    /// `dst = <a box holding `src`, tagged `repr`>`
+    /// `dst = <a box holding the words of `src`, tagged `layout`>`
     ///
     /// What a value becomes when its static type is not known: `dyn Trait`,
     /// a Host result a schema declared `Any`, an expression the checker
     /// declined to type. One word in the slot either way.
-    Box { dst: Slot, src: Slot, repr: Repr },
-    /// `dst = <the word inside the box in `src`>`, trapping if its tag is
-    /// not `repr`.
-    Unbox { dst: Slot, src: Slot, repr: Repr },
+    Box {
+        dst: Slot,
+        src: Slot,
+        layout: LayoutId,
+    },
+    /// `dst = <the value inside the box in `src`>`, trapping if its tag is
+    /// not `layout`.
+    Unbox {
+        dst: Slot,
+        src: Slot,
+        layout: LayoutId,
+    },
 
     // ---- failure ----------------------------------------------------------
     /// Fail the run with `message`.

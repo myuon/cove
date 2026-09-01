@@ -39,11 +39,11 @@ use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Arg, Expr};
 
 use super::frame::Val;
-use super::shapes::{self, word_of};
+use super::shapes;
 use super::{Body, PENDING};
 use crate::inst::{CmpOp, Compare, Inst, Slot};
+use crate::layout::LayoutId;
 use crate::program::Builtin;
-use crate::repr::Repr;
 
 impl Body<'_> {
     /// A method call on a value of a builtin type.
@@ -125,7 +125,7 @@ impl Body<'_> {
     ///
     /// The receiver is the first operand where there is one and the
     /// arguments follow it in source order, which is the one shape every
-    /// operation in the table has. The result is the word the checker
+    /// operation in the table has. The result is the layout the checker
     /// settled for the call.
     ///
     /// # The `Repr` of operand 0 is part of what is emitted
@@ -149,55 +149,52 @@ impl Body<'_> {
         let Some(ty) = self.owned_ty(expr) else {
             return self.dead(expr);
         };
-        let Some(result) = word_of(&ty) else {
-            self.errors.push(super::describe(&ty, expr.span));
+        let Some(result) = self.layout(&ty, expr.span) else {
             return self.dead(expr);
         };
-        if !self.answer_layouts(&ty, result, expr.span) {
+        if !self.answer_layouts(&ty, expr.span) {
             return self.dead(expr);
         }
 
-        let held_receiver = base.map(|base| self.expr(base));
+        let held_receiver = base.map(|base| {
+            let value = self.expr(base);
+            self.describe_itself(value, base.span)
+        });
         let mut held = Vec::with_capacity(args.len());
         for arg in args {
-            held.push(self.expr(&arg.value));
+            let value = self.expr(&arg.value);
+            held.push(self.describe_itself(value, arg.value.span));
         }
         let mut slots = Vec::with_capacity(args.len() + 1);
         slots.extend(held_receiver.iter().map(|value| value.slot));
         slots.extend(held.iter().map(|value| value.slot));
 
-        let dst = self.frame.alloc(result);
-        self.emit_builtin(dst, receiver, operation, &slots, result, expr.span);
+        let dst = self.temp(result);
+        self.emit_builtin(dst.slot, receiver, operation, &slots, result, expr.span);
         for value in held.into_iter().rev() {
             self.release(value, expr.span);
         }
-        // The receiver is a reference wherever the type is an object, and it
-        // dies with the call: nothing after the answer is written reads it.
+        // The receiver dies with the call: nothing after the answer is
+        // written reads it.
         if let Some(value) = held_receiver {
             self.release(value, expr.span);
         }
-        Val::temp(dst)
+        dst
     }
 
     /// Interns the families the machine will look for while it builds this
     /// call's answer.
     ///
-    /// `cove_runtime::lvm::builtins::make` finds a family by searching the
+    /// `cove_runtime::lvm::builtins` finds a family by searching the
     /// program's layout table, so a family the program never otherwise
     /// mentions is a refusal at run time rather than a missing instruction.
-    /// Two of them are needed here and only one is obvious:
-    ///
-    /// - the answer's own family — an `Option<Int>` for `indexOf`, an
-    ///   `Array<String>` for `split`; and
-    /// - the builtin `Error`, when the answer is a `Result`. The machine
-    ///   builds the `Error` carrying a failure's message *itself*, and the
-    ///   `Result` layout describes its `Err` word as a reference without
-    ///   saying what is behind it — so interning the `Result` alone would
-    ///   leave `Int.parse("x")` with nowhere to put the message.
-    fn answer_layouts(&mut self, ty: &Ty, result: Repr, span: Span) -> bool {
-        if result == Repr::Ref && self.layout(ty, span).is_none() {
-            return false;
-        }
+    /// The answer's own layout is interned by the caller; what is left is
+    /// the builtin `Error`, when the answer is a `Result`. The machine
+    /// builds the `Error` carrying a failure's message *itself*, and the
+    /// `Result` layout describes its `Err` words without saying what
+    /// declared them — so interning the `Result` alone would leave
+    /// `Int.parse("x")` with nowhere to put the message.
+    fn answer_layouts(&mut self, ty: &Ty, span: Span) -> bool {
         if let Ty::Result(_, error) = ty {
             if matches!(**error, Ty::Error) && self.layout(error, span).is_none() {
                 return false;
@@ -216,7 +213,7 @@ impl Body<'_> {
         receiver: &str,
         operation: &str,
         args: &[Slot],
-        result: Repr,
+        result: LayoutId,
         span: Span,
     ) {
         let builtin = self.pool.builtin(Builtin {
@@ -249,8 +246,8 @@ impl Body<'_> {
     /// A method of the two enums the language answers a failure with.
     ///
     /// Neither is in the machine's table and neither is added to it: both
-    /// questions are about the object's case index, which is word 0, and the
-    /// instruction set already reads it. See the module docs.
+    /// questions are about the value's discriminant, which is word 0 and is
+    /// already in the frame. See the module docs.
     fn answer_method(
         &mut self,
         expr: &Expr,
@@ -278,49 +275,38 @@ impl Body<'_> {
         }
     }
 
-    /// Whether the object is in the case `case`.
+    /// Whether the value is in the case `case`.
     ///
-    /// The receiver dies at the [`Inst::GetWord`] that reads its case index:
-    /// the answer is an `Int` from that instruction onwards, and holding the
-    /// object past it would retain whatever its payload names.
+    /// The discriminant is word 0 of the value, so the comparison names the
+    /// value's own location and nothing is read out of anything.
     fn case_test(&mut self, expr: &Expr, base: &Expr, ty: &Ty, case: &str) -> Val {
         let Some((index, _)) = shapes::case_at(self.checked, self.module, ty, case) else {
             self.errors.push(super::describe(ty, expr.span));
             return self.dead(expr);
         };
         let obj = self.expr(base);
-        let tag = self.frame.alloc(Repr::Int);
-        self.emit(
-            Inst::GetWord {
-                dst: tag,
-                obj: obj.slot,
-                at: 0,
-            },
-            expr.span,
-        );
-        self.release(obj, expr.span);
-        let wanted = self.frame.alloc(Repr::Int);
+        let wanted = self.temp(shapes::INT);
         self.emit(
             Inst::Int {
-                dst: wanted,
+                dst: wanted.slot,
                 value: index as i64,
             },
             expr.span,
         );
-        let dst = self.frame.alloc(Repr::Bool);
+        let dst = self.temp(shapes::BOOL);
         self.emit(
             Inst::Cmp {
                 on: Compare::Int,
                 op: CmpOp::Eq,
-                dst,
-                a: tag,
-                b: wanted,
+                dst: dst.slot,
+                a: obj.slot,
+                b: wanted.slot,
             },
             expr.span,
         );
-        self.frame.free(wanted);
-        self.frame.free(tag);
-        Val::temp(dst)
+        self.give_back(wanted.slot, wanted.layout);
+        self.release(obj, expr.span);
+        dst
     }
 
     /// `value.unwrapOr(fallback)`: the payload of the carrying case, or the
@@ -344,74 +330,61 @@ impl Body<'_> {
             self.errors.push(super::describe(ty, expr.span));
             return self.dead(expr);
         };
-        let repr = self.word(expr);
-        let dst = self.frame.alloc(repr);
+        let layout = self.layout_of(expr);
+        let dst = self.temp(layout);
         let obj = self.expr(base);
         let other = self.expr(fallback);
+        let Some((parts, _)) = self.case_of(obj.layout, index) else {
+            self.release(other, expr.span);
+            self.release(obj, expr.span);
+            return self.gap("`unwrapOr` on a value that is not an enum here", expr);
+        };
 
-        let tag = self.frame.alloc(Repr::Int);
-        self.emit(
-            Inst::GetWord {
-                dst: tag,
-                obj: obj.slot,
-                at: 0,
-            },
-            expr.span,
-        );
-        let wanted = self.frame.alloc(Repr::Int);
+        let wanted = self.temp(shapes::INT);
         self.emit(
             Inst::Int {
-                dst: wanted,
+                dst: wanted.slot,
                 value: index as i64,
             },
             expr.span,
         );
-        let carries = self.frame.alloc(Repr::Bool);
+        let carries = self.temp(shapes::BOOL);
         self.emit(
             Inst::Cmp {
                 on: Compare::Int,
                 op: CmpOp::Eq,
-                dst: carries,
-                a: tag,
-                b: wanted,
+                dst: carries.slot,
+                a: obj.slot,
+                b: wanted.slot,
             },
             expr.span,
         );
-        self.frame.free(wanted);
-        self.frame.free(tag);
+        self.give_back(wanted.slot, wanted.layout);
         let branch = self.emit(
             Inst::BranchFalse {
-                cond: carries,
+                cond: carries.slot,
                 to: PENDING,
             },
             expr.span,
         );
-        self.frame.free(carries);
+        self.give_back(carries.slot, carries.layout);
 
-        self.emit(
-            Inst::GetWord {
-                dst,
-                obj: obj.slot,
-                at: 1,
-            },
-            expr.span,
-        );
+        match parts.first() {
+            Some(part) => self.copy(dst.slot, obj.slot + 1 + part.at, part.layout, expr.span),
+            None => {
+                self.emit(Inst::Unit { dst: dst.slot }, expr.span);
+            }
+        }
         let carry_on = self.emit(Inst::Jump { to: PENDING }, expr.span);
         let otherwise = self.here();
         self.patch(branch, otherwise);
-        self.emit(
-            Inst::Move {
-                dst,
-                src: other.slot,
-            },
-            expr.span,
-        );
+        self.copy(dst.slot, other.slot, layout, expr.span);
         let end = self.here();
         self.patch(carry_on, end);
 
         self.release(other, expr.span);
         self.release(obj, expr.span);
-        Val::temp(dst)
+        dst
     }
 }
 

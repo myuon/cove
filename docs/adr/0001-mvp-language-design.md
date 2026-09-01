@@ -1,6 +1,8 @@
 # ADR 0001: MVP language design
 
 - Status: Accepted
+- Superseded in part by [ADR 0035](0035-a-value-type-may-not-contain-itself.md),
+  which decides that a value type may not contain itself
 - Date: 2026-08-23, accepted 2026-08-25
 - Amended by: [ADR 0008](0008-concurrent-task-execution.md), which makes
   `Shared<T>` the MVP's only synchronized handle;

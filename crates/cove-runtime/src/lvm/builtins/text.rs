@@ -26,11 +26,11 @@
 //! that, so there is exactly one place either backend could be reading them
 //! differently, and it is this sentence.
 
-use cove_lir::Repr;
+use cove_lir::{LayoutId, Repr, Shape};
 
 use crate::error::RuntimeError;
 use crate::lvm::builtins::operand::Operand;
-use crate::lvm::builtins::{make, operand};
+use crate::lvm::builtins::{make, operand, scalar};
 use crate::lvm::exec::Machine;
 
 /// The text of a `String` receiver.
@@ -104,6 +104,11 @@ pub(super) fn join(machine: &mut Machine, operands: &[Operand]) -> Result<u64, R
         Repr::Ref if items.1 != 0 => elements_of(machine, items.1),
         _ => None,
     };
+    // An `Array<String>` is a run of one-word elements, so an element is an
+    // operand as it stands and the walk is one word at a time. A run of
+    // anything wider is a different family, and is refused as the parameter's
+    // type rather than read a word at a time.
+    let elem = elem.filter(|(elem, _)| machine.words_of(*elem) == 1);
     let Some((elem, len)) = elem else {
         return Err(operand::type_error(
             machine,
@@ -113,6 +118,7 @@ pub(super) fn join(machine: &mut Machine, operands: &[Operand]) -> Result<u64, R
             items,
         ));
     };
+    let repr = machine.program().layout(elem).words[0];
     let mut joined = String::new();
     for at in 0..len {
         if at > 0 {
@@ -123,16 +129,16 @@ pub(super) fn join(machine: &mut Machine, operands: &[Operand]) -> Result<u64, R
             machine,
             "String.join",
             "parts",
-            (elem, word),
+            (repr, word),
         )?);
     }
     machine.new_string(&joined)
 }
 
-/// The element `Repr` and length of the `Array` at `addr`.
-fn elements_of(machine: &Machine, addr: u64) -> Option<(Repr, u32)> {
+/// The element layout and length of the `Array` at `addr`.
+fn elements_of(machine: &Machine, addr: u64) -> Option<(LayoutId, u32)> {
     match machine.program().layout(machine.object_layout(addr)).shape {
-        cove_lir::Shape::Elements {
+        Shape::Elements {
             elem,
             growable: false,
         } => Some((elem, machine.object_len(addr))),
@@ -193,15 +199,24 @@ pub(super) fn ends_with(machine: &mut Machine, operands: &[Operand]) -> Result<u
 }
 
 /// `String.indexOf(text) -> Option<Int>`, in character positions.
-pub(super) fn index_of(machine: &mut Machine, operands: &[Operand]) -> Result<u64, RuntimeError> {
+///
+/// An `Option` is inline, so what this answers is the run of words
+/// `[disc, Int]` rather than an address — and a `None` leaves the payload
+/// word zero, which is what makes the region's one static reference map right
+/// for both cases.
+pub(super) fn index_of(
+    machine: &mut Machine,
+    operands: &[Operand],
+) -> Result<Vec<u64>, RuntimeError> {
     let (self_, args) = operand::method("String.indexOf", operands, 1)?;
     let text = receiver(machine, "indexOf", self_)?;
     let needle = operand::text(machine, "String.indexOf", "text", args[0])?;
+    let int = scalar::word_layout(machine.program(), Repr::Int)?;
     match text.find(&needle) {
         // `find` answers a byte offset; the characters before it are counted
         // to convert that into the character index `length()` counts in.
-        Some(byte) => make::some(machine, Repr::Int, text[..byte].chars().count() as u64),
-        None => make::none(machine, Repr::Int),
+        Some(byte) => make::some(machine, int, &[text[..byte].chars().count() as u64]),
+        None => make::none(machine, int),
     }
 }
 
@@ -246,22 +261,26 @@ pub(super) fn to_lower(machine: &mut Machine, operands: &[Operand]) -> Result<u6
 pub(super) fn from_code_point(
     machine: &mut Machine,
     operands: &[Operand],
-) -> Result<u64, RuntimeError> {
+) -> Result<Vec<u64>, RuntimeError> {
     let args = operand::free("String.fromCodePoint", operands, 1)?;
     let code_point = operand::int(machine, "String.fromCodePoint", "codePoint", args[0])?;
+    let string = machine.program().str_layout;
     if (0xD800..=0xDFFF).contains(&code_point) {
         let message =
             format!("`{code_point}` is a surrogate half, which is not a character on its own");
-        return make::failed(machine, Repr::Ref, &message);
+        return make::failed(machine, string, &message);
     }
     match u32::try_from(code_point).ok().and_then(char::from_u32) {
         Some(character) => {
             let text = machine.new_string(&character.to_string())?;
-            make::ok(machine, Repr::Ref, text)
+            // Nothing allocates between the string and the `Ok` around it,
+            // because a `Result` is words: the case is built out of the
+            // layout table and the word it was just handed.
+            make::ok(machine, string, &[text])
         }
         None => {
             let message = format!("`{code_point}` is not a Unicode code point");
-            make::failed(machine, Repr::Ref, &message)
+            make::failed(machine, string, &message)
         }
     }
 }
@@ -269,7 +288,9 @@ pub(super) fn from_code_point(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lvm::builtins::tests::{case_of, elements, message_of, read, run, words_of, world};
+    use crate::lvm::builtins::tests::{
+        elements, message_of, named, option_of, read, result_of, run, scalar, word, words_of, world,
+    };
 
     /// The parts of an `Array<String>` a builtin answered.
     fn parts(machine: &Machine, addr: u64) -> Vec<String> {
@@ -279,7 +300,17 @@ mod tests {
             .collect()
     }
 
+    /// `text.operation(args)`, for the operations that answer one word.
     fn on(machine: &mut Machine, text: &str, operation: &str, args: &[Operand]) -> u64 {
+        let self_ = machine.new_string(text).unwrap();
+        let mut operands = vec![(Repr::Ref, self_)];
+        operands.extend_from_slice(args);
+        word(machine, "String", operation, &operands).unwrap()
+    }
+
+    /// The same, for the one that answers an `Option<Int>`: an enum is inline
+    /// now, so the answer is a run of words rather than an address.
+    fn words_on(machine: &mut Machine, text: &str, operation: &str, args: &[Operand]) -> Vec<u64> {
         let self_ = machine.new_string(text).unwrap();
         let mut operands = vec![(Repr::Ref, self_)];
         operands.extend_from_slice(args);
@@ -300,7 +331,7 @@ mod tests {
         let text = machine.new_string("héllo").unwrap();
         assert_eq!(machine.object_len(text), 6, "six bytes");
         assert_eq!(
-            run(&mut machine, "String", "length", &[(Repr::Ref, text)]).unwrap(),
+            word(&mut machine, "String", "length", &[(Repr::Ref, text)]).unwrap(),
             5,
             "five characters"
         );
@@ -352,15 +383,15 @@ mod tests {
     fn join_puts_the_receiver_between_the_parts() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
-        let layout = elements(machine.program(), Repr::Ref, false);
+        let layout = elements(&program, program.str_layout, false);
         let items = machine.new_object(layout, 2).unwrap();
         let a = machine.new_string("a").unwrap();
         let b = machine.new_string("b").unwrap();
         machine.set_payload(items, 0, a);
         machine.set_payload(items, 1, b);
 
-        let word = on(&mut machine, ", ", "join", &[(Repr::Ref, items)]);
-        assert_eq!(read(&machine, word), "a, b");
+        let joined = on(&mut machine, ", ", "join", &[(Repr::Ref, items)]);
+        assert_eq!(read(&machine, joined), "a, b");
 
         // Anything that is not an `Array` is refused by the type the schema
         // declares for the parameter.
@@ -375,6 +406,23 @@ mod tests {
         assert_eq!(
             error.message,
             "`String.join` expects `Array<String>` for `parts`, but found `Int`"
+        );
+
+        // And neither is an array of anything wider than a word: the elements
+        // of an `Array<Point>` are two words each, so there is no one word to
+        // read as a `String`.
+        let points = elements(&program, named(&program, "Point"), false);
+        let items = machine.new_object(points, 1).unwrap();
+        let error = run(
+            &mut machine,
+            "String",
+            "join",
+            &[(Repr::Ref, self_), (Repr::Ref, items)],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.message,
+            "`String.join` expects `Array<String>` for `parts`, but found `Array`"
         );
     }
 
@@ -442,13 +490,20 @@ mod tests {
     fn index_of_answers_a_character_position() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
+        let int = scalar(&program, Repr::Int);
         let needle = machine.new_string("l").unwrap();
-        let word = on(&mut machine, "héllo", "indexOf", &[(Repr::Ref, needle)]);
-        assert_eq!(case_of(&machine, word), ("Some".to_string(), vec![2]));
+        let words = words_on(&mut machine, "héllo", "indexOf", &[(Repr::Ref, needle)]);
+        assert_eq!(
+            option_of(&program, int, &words),
+            ("Some".to_string(), vec![2])
+        );
 
         let absent = machine.new_string("z").unwrap();
-        let word = on(&mut machine, "héllo", "indexOf", &[(Repr::Ref, absent)]);
-        assert_eq!(case_of(&machine, word).0, "None");
+        let words = words_on(&mut machine, "héllo", "indexOf", &[(Repr::Ref, absent)]);
+        assert_eq!(option_of(&program, int, &words).0, "None");
+        // `None` fills none of the payload region, and what it does not fill
+        // reads null.
+        assert_eq!(words, vec![0, 0]);
     }
 
     #[test]
@@ -486,6 +541,7 @@ mod tests {
     fn from_code_point_answers_a_character_or_says_why_not() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
+        let string = program.str_layout;
         let of = |machine: &mut Machine, point: i64| {
             run(
                 machine,
@@ -495,21 +551,21 @@ mod tests {
             )
             .unwrap()
         };
-        let word = of(&mut machine, 0x00E9);
-        let (case, payload) = case_of(&machine, word);
+        let words = of(&mut machine, 0x00E9);
+        let (case, payload) = result_of(&program, string, &words);
         assert_eq!(
             (case.as_str(), read(&machine, payload[0]).as_str()),
             ("Ok", "é")
         );
 
-        let word = of(&mut machine, 0xD800);
+        let words = of(&mut machine, 0xD800);
         assert_eq!(
-            message_of(&machine, word),
+            message_of(&machine, string, &words),
             "`55296` is a surrogate half, which is not a character on its own"
         );
-        let word = of(&mut machine, 0x11_0000);
+        let words = of(&mut machine, 0x11_0000);
         assert_eq!(
-            message_of(&machine, word),
+            message_of(&machine, string, &words),
             "`1114112` is not a Unicode code point"
         );
     }
@@ -551,13 +607,13 @@ mod tests {
         }
         let before = machine.collected().collections;
 
-        let word = run(&mut machine, "String", "chars", &[(Repr::Ref, source)]).unwrap();
+        let items = word(&mut machine, "String", "chars", &[(Repr::Ref, source)]).unwrap();
         assert!(
             machine.collected().collections > before,
             "the fixture did not force a collection"
         );
         assert_eq!(
-            parts(&machine, word),
+            parts(&machine, items),
             vec!["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
         );
     }

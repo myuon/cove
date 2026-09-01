@@ -1,11 +1,24 @@
 //! Expressions.
 //!
-//! Every expression answers a slot, and the caller says whether it wants
-//! one: [`Body::expr`] produces a value, [`Body::discard`] runs the
+//! Every expression answers a value location, and the caller says whether it
+//! wants one: [`Body::expr`] produces a value, [`Body::discard`] runs the
 //! expression for its effects. The second is not the first with the answer
 //! thrown away — an `if` with no `else` lowered for its effects writes no
 //! `()` anywhere, and an assignment statement emits nothing beyond the
 //! store.
+//!
+//! # A field is slot arithmetic, not an instruction
+//!
+//! A struct is its fields, in place, so `l.from.x` is `base + Field::at`
+//! twice over and reading it emits *nothing at all*. [`Body::place_of`] is
+//! where that arithmetic is done, and it answers a [`Place`] rather than a
+//! slot because the same walk has to serve a read, a write and a `var`
+//! argument.
+//!
+//! Only two places are not a run of this frame: what a `var` parameter names
+//! — an address, which no instruction can offset, so a write to a field
+//! through one is a load, a write and a store back — and a field of a heap
+//! object, which is what a broken recursive layout needs.
 //!
 //! # Short-circuiting is control flow
 //!
@@ -19,7 +32,7 @@
 //! # A reference's live range ends where the expression does
 //!
 //! Every consumer of a value calls [`Body::release`] rather than freeing the
-//! slot behind it, and that is where [`Inst::Clear`] comes from. A static
+//! run behind it, and that is where [`Inst::Clear`] comes from. A static
 //! reference map says which slots a collection *reads*; only the data can
 //! say when the value in one stopped being needed, so a temporary that held
 //! an object holds null from its last use onwards. Without it a body that
@@ -35,10 +48,58 @@ use super::frame::Val;
 use super::gap;
 use super::methods;
 use super::shapes;
-use super::{Body, Loop, PENDING};
-use crate::inst::{ArithOp, CmpOp, Compare, Inst, Len, Num, Slot};
+use super::{Body, Dest, Loop, PENDING};
+use crate::inst::{ArithOp, CmpOp, Compare, Inst, Num, Slot};
+use crate::layout::LayoutId;
 use crate::program::{Builtin, HostOp};
 use crate::repr::Repr;
+
+/// An assignable location, found by walking a chain of field accesses back
+/// to whatever roots it.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Place {
+    /// A run of the current frame: a local, a parameter, or a field of one.
+    ///
+    /// The whole of a struct's field arithmetic ends here. Nothing is
+    /// emitted to reach one.
+    Here { slot: Slot, layout: LayoutId },
+    /// Words at a linear address, and a field's offset into them.
+    ///
+    /// This is what a `var` parameter names. There is no instruction that
+    /// adds an offset to an address — a place is the address of the *first*
+    /// word of a value location — so a field of one is reached by loading
+    /// the whole value, working on the words, and storing them back.
+    Through {
+        addr: Slot,
+        /// The layout of the whole value the address names.
+        whole: LayoutId,
+        /// The field's word offset within it.
+        at: u32,
+        layout: LayoutId,
+    },
+    /// A field of a heap object: what a broken recursive layout needs.
+    ///
+    /// `obj` holds the reference and `at` is a payload word index. A
+    /// [`Shape::Boxed`](crate::Shape::Boxed) object keeps the value it holds
+    /// inline after one word naming its layout, so a field of a boxed
+    /// `Node` is payload word `1 + Field::at` — the same arithmetic as an
+    /// inline field, done against an object's payload instead of the frame.
+    Field {
+        obj: Slot,
+        at: u32,
+        layout: LayoutId,
+    },
+}
+
+impl Place {
+    fn layout(&self) -> LayoutId {
+        match self {
+            Place::Here { layout, .. }
+            | Place::Through { layout, .. }
+            | Place::Field { layout, .. } => *layout,
+        }
+    }
+}
 
 impl Body<'_> {
     /// Lowers `expr` and answers where its value ended up.
@@ -74,36 +135,33 @@ impl Body<'_> {
                 self.unit_value(span)
             }
             ExprKind::Block(block) => {
-                let repr = self.word(expr);
-                let dst = self.frame.alloc(repr);
-                self.scoped_block(block, Some(dst));
-                Val::temp(dst)
+                let dst = self.answer_of(expr);
+                self.scoped_block(block, Some(Dest::of(&dst)));
+                dst
             }
             ExprKind::If {
                 condition,
                 then_branch,
                 else_branch,
             } => {
-                let repr = self.word(expr);
-                let dst = self.frame.alloc(repr);
+                let dst = self.answer_of(expr);
                 self.if_expr(
                     condition,
                     then_branch,
                     else_branch.as_deref(),
                     span,
-                    Some(dst),
+                    Some(Dest::of(&dst)),
                 );
-                Val::temp(dst)
+                dst
             }
             ExprKind::While { condition, body } => {
                 self.while_expr(condition, body, span);
                 self.unit_value(span)
             }
             ExprKind::Match { scrutinee, arms } => {
-                let repr = self.word(expr);
-                let dst = self.frame.alloc(repr);
-                self.match_expr(scrutinee, arms, span, Some(dst));
-                Val::temp(dst)
+                let dst = self.answer_of(expr);
+                self.match_expr(scrutinee, arms, span, Some(Dest::of(&dst)));
+                dst
             }
             ExprKind::Return(value) => {
                 self.return_expr(value.as_deref(), span);
@@ -187,38 +245,51 @@ impl Body<'_> {
 
     // ---- literals -------------------------------------------------------
 
-    /// A value that is entirely in the instruction: a slot of the right kind
-    /// and one instruction writing it.
+    /// A location of the layout `expr` answers, for a form that assembles
+    /// its value rather than computing it in one instruction.
+    fn answer_of(&mut self, expr: &Expr) -> Val {
+        let layout = self.layout_of(expr);
+        self.temp(layout)
+    }
+
+    /// A value that is entirely in the instruction: a location of the right
+    /// layout and one instruction writing it.
     fn constant(&mut self, expr: &Expr, inst: impl FnOnce(Slot) -> Inst) -> Val {
-        let repr = self.word(expr);
-        let dst = self.frame.alloc(repr);
-        self.emit(inst(dst), expr.span);
-        Val::temp(dst)
+        let dst = self.answer_of(expr);
+        self.emit(inst(dst.slot), expr.span);
+        dst
     }
 
     /// The `()` a form answers when its value was never computed from
     /// anything: an assignment, a loop.
     fn unit_value(&mut self, span: Span) -> Val {
-        let dst = self.frame.alloc(Repr::Unit);
-        self.emit(Inst::Unit { dst }, span);
-        Val::temp(dst)
+        let dst = self.temp(shapes::UNIT);
+        self.emit(Inst::Unit { dst: dst.slot }, span);
+        dst
     }
 
     /// A name: a local, a parameter, or the one case of an enum that is
     /// written as a bare word.
     fn name(&mut self, expr: &Expr, name: &str) -> Val {
-        if let Some(slot) = self.frame.lookup(name) {
+        if let Some((slot, layout)) = self.frame.lookup(name) {
             // A `var` parameter names the caller's storage rather than
             // holding a value, so reading it is a read *through* the word.
             // Nothing else in the frame is an `Addr`, which is what makes
-            // the slot's own kind enough to tell them apart.
-            if self.frame.repr(slot) == Repr::Addr {
-                let repr = self.word(expr);
-                let dst = self.frame.alloc(repr);
-                self.emit(Inst::Load { dst, addr: slot }, expr.span);
-                return Val::temp(dst);
+            // the location's own layout enough to tell them apart.
+            if layout == shapes::ADDR {
+                let want = self.layout_of(expr);
+                let dst = self.temp(want);
+                self.emit(
+                    Inst::Load {
+                        dst: dst.slot,
+                        addr: slot,
+                        layout: want,
+                    },
+                    expr.span,
+                );
+                return dst;
             }
-            return Val::borrowed(slot);
+            return Val::borrowed(slot, layout);
         }
         // `None` is a case, not a name to bind: it is the one case in the
         // language with no payload and no qualifier, so it is written where
@@ -239,7 +310,7 @@ impl Body<'_> {
     /// object behind it is allocated once for the run: a literal in a loop
     /// costs no allocation per turn.
     ///
-    /// An interpolation is where a word has to become text, and that is not
+    /// An interpolation is where a value has to become text, and that is not
     /// something the instruction set should grow a case for — what `{x}`
     /// puts in a string is a rule of the language, stated in the language
     /// reference and not in the IR. So the whole literal becomes one
@@ -249,10 +320,10 @@ impl Body<'_> {
     ///
     /// `String.interpolate` takes any number of operands and answers one new
     /// `String`: each operand rendered as `Display for Value` renders it,
-    /// joined in order. The machine reads each operand's [`Repr`] out of the
-    /// frame, which is why there is one builtin rather than one per kind of
-    /// word — the lowering has nothing to add that the slot table does not
-    /// already say.
+    /// joined in order. Every operand is one word, because an operand that
+    /// is not is boxed on the way in — a builtin receives slots and there is
+    /// no channel on [`Inst::CallBuiltin`] for the layout of each, so a
+    /// value whose width is not one has to carry its own description.
     ///
     /// The runs of literal text are operands too, as `Str` objects, so the
     /// pieces are one list and the join is one call. An empty run is left
@@ -269,9 +340,15 @@ impl Body<'_> {
                 }
             }
             let id = self.string(&text);
-            let dst = self.frame.alloc(Repr::Ref);
-            self.emit(Inst::Str { dst, text: id }, expr.span);
-            return Val::temp(dst);
+            let dst = self.temp(shapes::STR);
+            self.emit(
+                Inst::Str {
+                    dst: dst.slot,
+                    text: id,
+                },
+                expr.span,
+            );
+            return dst;
         }
 
         let mut pieces: Vec<Val> = Vec::with_capacity(parts.len());
@@ -280,11 +357,21 @@ impl Body<'_> {
                 StrPart::Text(literal) if literal.is_empty() => {}
                 StrPart::Text(literal) => {
                     let id = self.string(literal);
-                    let dst = self.frame.alloc(Repr::Ref);
-                    self.emit(Inst::Str { dst, text: id }, expr.span);
-                    pieces.push(Val::temp(dst));
+                    let dst = self.temp(shapes::STR);
+                    self.emit(
+                        Inst::Str {
+                            dst: dst.slot,
+                            text: id,
+                        },
+                        expr.span,
+                    );
+                    pieces.push(dst);
                 }
-                StrPart::Interpolation(inner) => pieces.push(self.expr(inner)),
+                StrPart::Interpolation(inner) => {
+                    let value = self.expr(inner);
+                    let value = self.describe_itself(value, inner.span);
+                    pieces.push(value);
+                }
             }
         }
 
@@ -293,33 +380,73 @@ impl Body<'_> {
         let builtin = self.pool.builtin(Builtin {
             receiver: "String".into(),
             operation: "interpolate".into(),
-            result: Repr::Ref,
+            result: shapes::STR,
         });
-        let dst = self.frame.alloc(Repr::Ref);
-        self.emit(Inst::CallBuiltin { dst, builtin, args }, expr.span);
+        let dst = self.temp(shapes::STR);
+        self.emit(
+            Inst::CallBuiltin {
+                dst: dst.slot,
+                builtin,
+                args,
+            },
+            expr.span,
+        );
         for piece in pieces.into_iter().rev() {
             self.release(piece, expr.span);
         }
-        Val::temp(dst)
+        dst
+    }
+
+    /// Boxes a value that is not one word, so that an operand list can carry
+    /// it.
+    ///
+    /// A builtin is handed slots and nothing else: [`Inst::CallBuiltin`] has
+    /// no place to say how wide each operand is or what its words mean. A
+    /// scalar and a reference are self-describing enough — the slot's own
+    /// `Repr` says which, and an object's header says what it is — but an
+    /// inline struct, enum or range is a run of words with nothing attached,
+    /// so it goes in a box that carries its layout.
+    ///
+    /// This is the one place the model costs an allocation where the
+    /// predecessor did not, and it is a finding rather than a design: the
+    /// alternative is a per-operand layout on the instruction.
+    pub(super) fn describe_itself(&mut self, value: Val, span: Span) -> Val {
+        if self.width(value.layout) == 1 {
+            return value;
+        }
+        let dst = self.temp(shapes::REF);
+        self.emit(
+            Inst::Box {
+                dst: dst.slot,
+                src: value.slot,
+                layout: value.layout,
+            },
+            span,
+        );
+        self.release(value, span);
+        dst
     }
 
     // ---- operators -------------------------------------------------------
 
     fn unary(&mut self, expr: &Expr, op: UnaryOp, operand: &Expr) -> Val {
         let a = self.expr(operand);
-        let repr = self.word(expr);
-        let dst = self.frame.alloc(repr);
+        let dst = self.answer_of(expr);
+        let repr = self.frame.repr(dst.slot);
         let inst = match op {
-            UnaryOp::Not => Inst::Not { dst, a: a.slot },
+            UnaryOp::Not => Inst::Not {
+                dst: dst.slot,
+                a: a.slot,
+            },
             UnaryOp::Neg => Inst::Neg {
                 num: num_of(repr),
-                dst,
+                dst: dst.slot,
                 a: a.slot,
             },
         };
         self.emit(inst, expr.span);
         self.release(a, expr.span);
-        Val::temp(dst)
+        dst
     }
 
     fn binary(&mut self, expr: &Expr, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Val {
@@ -343,23 +470,22 @@ impl Body<'_> {
     fn operator(&mut self, expr: &Expr, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Val {
         let a = self.expr(lhs);
         let b = self.expr(rhs);
-        let operand = self.frame.repr(a.slot);
-        let repr = self.word(expr);
-        let dst = self.frame.alloc(repr);
-        // Two objects are compared by walking them, which is a call rather
-        // than an instruction, so this one case emits its own code and the
-        // rest is one instruction chosen from the operands' kind.
-        if operand == Repr::Ref && arith_of(op).is_none() {
-            self.compare_objects(expr, op == BinaryOp::Eq, lhs, dst, a.slot, b.slot);
+        let dst = self.answer_of(expr);
+        // A value the instruction set cannot compare in one step is compared
+        // by walking it, which is a call rather than an instruction.
+        if arith_of(op).is_none() && !self.is_scalar(a.layout) {
+            let equal = op == BinaryOp::Eq;
+            self.compare_values(expr, equal, lhs, dst.slot, &a, &b);
             self.release(b, expr.span);
             self.release(a, expr.span);
-            return Val::temp(dst);
+            return dst;
         }
+        let operand = self.frame.repr(a.slot);
         let inst = match arith_of(op) {
             Some(op) => Inst::Arith {
                 num: num_of(operand),
                 op,
-                dst,
+                dst: dst.slot,
                 a: a.slot,
                 b: b.slot,
             },
@@ -367,13 +493,13 @@ impl Body<'_> {
             // so the answer is the instruction. Both operands were still
             // evaluated, because either of them may have done something.
             None if operand == Repr::Unit => Inst::Bool {
-                dst,
+                dst: dst.slot,
                 value: op == BinaryOp::Eq,
             },
             None => Inst::Cmp {
                 on: compare_of(operand),
                 op: cmp_of(op),
-                dst,
+                dst: dst.slot,
                 a: a.slot,
                 b: b.slot,
             },
@@ -381,25 +507,25 @@ impl Body<'_> {
         self.emit(inst, expr.span);
         self.release(b, expr.span);
         self.release(a, expr.span);
-        Val::temp(dst)
+        dst
     }
 
     /// `&&` and `||`, which are a branch over the right-hand side.
     ///
     /// Both answer the left-hand side's word when it already settles the
-    /// question, so the answer slot is written before the branch and the
+    /// question, so the answer is written before the branch and the
     /// right-hand side overwrites it only when it runs. `conjunction` says
     /// which way round: `&&` skips the right-hand side when the left is
     /// false, `||` when it is true.
     fn short_circuit(&mut self, expr: &Expr, lhs: &Expr, rhs: &Expr, conjunction: bool) -> Val {
-        let dst = self.frame.alloc(Repr::Bool);
+        let dst = self.temp(shapes::BOOL);
         let a = self.expr(lhs);
-        self.store(dst, &a, lhs);
+        self.store(Dest::of(&dst), &a, lhs);
         self.release(a, lhs.span);
 
         let branch = self.emit(
             Inst::BranchFalse {
-                cond: dst,
+                cond: dst.slot,
                 to: PENDING,
             },
             expr.span,
@@ -418,7 +544,7 @@ impl Body<'_> {
         };
 
         let b = self.expr(rhs);
-        self.store(dst, &b, rhs);
+        self.store(Dest::of(&dst), &b, rhs);
         self.release(b, rhs.span);
 
         let end = self.here();
@@ -426,172 +552,311 @@ impl Body<'_> {
             Some(skip) => self.patch(skip, end),
             None => self.patch(branch, end),
         }
-        Val::temp(dst)
+        dst
+    }
+
+    // ---- places -------------------------------------------------------
+
+    /// The location an assignable expression names, as slot arithmetic.
+    ///
+    /// A field of an inline value is `base + Field::at`, and reaching one
+    /// emits nothing at all. That is what `docs/LINEAR_VM.md` means by *"a
+    /// field access on an inline struct is not an instruction"*.
+    pub(super) fn place_of(&mut self, expr: &Expr) -> Option<Place> {
+        match &expr.kind {
+            ExprKind::Ident(name) => {
+                let (slot, layout) = self.frame.lookup(name)?;
+                if layout == shapes::ADDR {
+                    // A `var` parameter: the words are the caller's, and the
+                    // slot holds where they are.
+                    let whole = self.layout_of(expr);
+                    return Some(Place::Through {
+                        addr: slot,
+                        whole,
+                        at: 0,
+                        layout: whole,
+                    });
+                }
+                Some(Place::Here { slot, layout })
+            }
+            ExprKind::Field { base, name } => {
+                let outer = self.place_of(base)?;
+                // A recursive layout is one reference, and what it names
+                // holds the type's own inline words. Reaching a field of one
+                // is the same offset arithmetic against the object's
+                // payload, which begins one word after the layout the box
+                // records.
+                let held = outer.layout();
+                let (inside, shift) = match self.pool.shapes.unboxed(held) {
+                    Some(inline) => (inline, 1),
+                    None => (held, 0),
+                };
+                let field = match self.field_of(inside, &name.node) {
+                    Some(field) => field,
+                    None => {
+                        let named = self.pool.shapes.layout(held).name.clone();
+                        self.errors.push(gap::gap(
+                            &format!("a field of `{named}`, which is not a struct here"),
+                            expr.span,
+                        ));
+                        return None;
+                    }
+                };
+                Some(match (outer, shift) {
+                    (Place::Here { slot, .. }, 0) => Place::Here {
+                        slot: slot + field.at,
+                        layout: field.layout,
+                    },
+                    (Place::Here { slot, .. }, _) => Place::Field {
+                        obj: slot,
+                        at: 1 + field.at,
+                        layout: field.layout,
+                    },
+                    (
+                        Place::Through {
+                            addr, whole, at, ..
+                        },
+                        0,
+                    ) => Place::Through {
+                        addr,
+                        whole,
+                        at: at + field.at,
+                        layout: field.layout,
+                    },
+                    (Place::Field { obj, at, .. }, 0) => Place::Field {
+                        obj,
+                        at: at + field.at,
+                        layout: field.layout,
+                    },
+                    _ => {
+                        // A box reached through an address, or a box inside
+                        // a box: both need the reference in a slot of its
+                        // own before the field can be named, and finding a
+                        // place must not be the thing that allocates one.
+                        self.errors.push(gap::gap(
+                            "a field of a recursive value reached through another one",
+                            expr.span,
+                        ));
+                        return None;
+                    }
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// The value a place holds.
+    ///
+    /// A run of this frame is answered as it stands, borrowed: the words are
+    /// already there and reading them is not an event. What is behind an
+    /// address has to be brought over, and the whole value comes with it
+    /// because an address cannot be offset.
+    fn read_place(&mut self, place: Place, span: Span) -> Val {
+        match place {
+            Place::Here { slot, layout } => Val::borrowed(slot, layout),
+            Place::Field { obj, at, layout } => {
+                let dst = self.temp(layout);
+                self.emit(
+                    Inst::LoadField {
+                        dst: dst.slot,
+                        obj,
+                        at,
+                        layout,
+                    },
+                    span,
+                );
+                dst
+            }
+            // An address names the *first* word of a value location, so a
+            // field at offset 0 is at the address itself however wide the
+            // whole value is: the load reads the field's words and stops.
+            Place::Through {
+                addr,
+                at: 0,
+                layout,
+                ..
+            } => {
+                let dst = self.temp(layout);
+                self.emit(
+                    Inst::Load {
+                        dst: dst.slot,
+                        addr,
+                        layout,
+                    },
+                    span,
+                );
+                dst
+            }
+            Place::Through {
+                addr,
+                whole,
+                at,
+                layout,
+            } => {
+                let held = self.temp(whole);
+                self.emit(
+                    Inst::Load {
+                        dst: held.slot,
+                        addr,
+                        layout: whole,
+                    },
+                    span,
+                );
+                let dst = self.temp(layout);
+                self.copy(dst.slot, held.slot + at, layout, span);
+                self.release(held, span);
+                dst
+            }
+        }
+    }
+
+    /// Writes a value into a place.
+    ///
+    /// A write through an address updates the caller's own words, which is
+    /// the aliasing `var` specifies and needs no copy back. A write to a
+    /// *field* through one is a load, a write into the words and a store —
+    /// because a place is the address of the first word of a value location
+    /// and no instruction offsets one.
+    fn write_place(&mut self, place: Place, value: &Val, span: Span) {
+        match place {
+            Place::Here { slot, layout } => self.copy(slot, value.slot, layout, span),
+            Place::Field { obj, at, layout } => {
+                self.emit(
+                    Inst::StoreField {
+                        obj,
+                        at,
+                        src: value.slot,
+                        layout,
+                    },
+                    span,
+                );
+            }
+            Place::Through {
+                addr,
+                at: 0,
+                layout,
+                ..
+            } => {
+                self.emit(
+                    Inst::Store {
+                        addr,
+                        src: value.slot,
+                        layout,
+                    },
+                    span,
+                );
+            }
+            Place::Through {
+                addr,
+                whole,
+                at,
+                layout,
+            } => {
+                let held = self.temp(whole);
+                self.emit(
+                    Inst::Load {
+                        dst: held.slot,
+                        addr,
+                        layout: whole,
+                    },
+                    span,
+                );
+                self.copy(held.slot + at, value.slot, layout, span);
+                self.emit(
+                    Inst::Store {
+                        addr,
+                        src: held.slot,
+                        layout: whole,
+                    },
+                    span,
+                );
+                self.release(held, span);
+            }
+        }
     }
 
     // ---- assignment -------------------------------------------------------
 
     fn assign(&mut self, op: Option<BinaryOp>, target: &Expr, value: &Expr, span: Span) {
-        match &target.kind {
-            ExprKind::Ident(name) => self.assign_to_name(op, name, value, span),
-            ExprKind::Field { base, name } => {
-                self.assign_to_field(op, base, &name.node, value, span)
+        let Some(place) = self.place_of(target) else {
+            // A field target has already said what stopped it, and saying
+            // so twice about one assignment buries the sentence that names
+            // the work.
+            if !matches!(target.kind, ExprKind::Field { .. }) {
+                self.errors.push(gap::gap(
+                    "an assignment to something that is not a place",
+                    span,
+                ));
             }
-            _ => {
-                self.errors
-                    .push(gap::gap("an assignment to an element", span));
-                self.discard(value);
-            }
-        }
-    }
-
-    /// `name = value`, and its compound forms.
-    fn assign_to_name(&mut self, op: Option<BinaryOp>, name: &str, value: &Expr, span: Span) {
-        let Some(slot) = self.frame.lookup(name) else {
-            self.errors.push(gap::gap(
-                "an assignment to something outside the frame",
-                span,
-            ));
             self.discard(value);
             return;
         };
-        // A `var` parameter is an alias for the caller's storage, so an
-        // assignment to it is a write *through* the word. That is the whole
-        // of what `var` means at run time, and it needs no copy back.
-        if self.frame.repr(slot) == Repr::Addr {
-            let repr = self.word(value);
-            let source = self.compound(op, value, span, |body| {
-                let dst = body.frame.alloc(repr);
-                body.emit(Inst::Load { dst, addr: slot }, span);
-                Val::temp(dst)
-            });
-            self.emit(
-                Inst::Store {
-                    addr: slot,
-                    src: source.slot,
-                },
-                span,
-            );
-            self.release(source, span);
-            return;
+        // A plain `=` to a run of this frame with an arithmetic operator is
+        // the one shape that writes the destination directly, because the
+        // destination *is* the accumulator: `n += 2` is one instruction
+        // rather than a read, an add and a copy.
+        if let (Some(op), Place::Here { slot, layout }) = (op, place) {
+            if let (Some(arith), 1) = (arith_of(op), self.width(layout)) {
+                let source = self.expr(value);
+                let num = num_of(self.frame.repr(slot));
+                self.emit(
+                    Inst::Arith {
+                        num,
+                        op: arith,
+                        dst: slot,
+                        a: slot,
+                        b: source.slot,
+                    },
+                    span,
+                );
+                self.release(source, span);
+                return;
+            }
         }
-
-        let source = self.expr(value);
-        match op {
+        let source = match op {
             None => {
-                self.store(slot, &source, value);
+                let held = self.expr(value);
+                let into = place.layout();
+                self.fit(held, into, span)
             }
-            Some(op) => match arith_of(op) {
-                Some(op) => {
-                    let num = num_of(self.frame.repr(slot));
-                    self.emit(
-                        Inst::Arith {
-                            num,
-                            op,
-                            dst: slot,
-                            a: slot,
-                            b: source.slot,
-                        },
-                        span,
-                    );
-                }
-                None => self
-                    .errors
-                    .push(gap::gap("a compound assignment with this operator", span)),
-            },
-        }
-        self.release(source, span);
-    }
-
-    /// `place.field = value`, and its compound forms.
-    ///
-    /// The object is evaluated first and held until the store is emitted,
-    /// which is both the language's order — the place, then the value — and
-    /// what keeps the object reachable while the value that is going into it
-    /// is being built.
-    fn assign_to_field(
-        &mut self,
-        op: Option<BinaryOp>,
-        base: &Expr,
-        name: &str,
-        value: &Expr,
-        span: Span,
-    ) {
-        let Some((obj, at, repr)) = self.place_of_field(base, name, span) else {
-            self.discard(value);
-            return;
+            Some(op) => {
+                let Some(arith) = arith_of(op) else {
+                    self.errors
+                        .push(gap::gap("a compound assignment with this operator", span));
+                    let held = self.expr(value);
+                    self.release(held, span);
+                    return;
+                };
+                let held = self.read_place(place, span);
+                let source = self.expr(value);
+                let dst = self.temp(held.layout);
+                let num = num_of(self.frame.repr(held.slot));
+                self.emit(
+                    Inst::Arith {
+                        num,
+                        op: arith,
+                        dst: dst.slot,
+                        a: held.slot,
+                        b: source.slot,
+                    },
+                    span,
+                );
+                self.release(source, span);
+                self.release(held, span);
+                dst
+            }
         };
-        let source = self.compound(op, value, span, |body| {
-            let dst = body.frame.alloc(repr);
-            body.emit(
-                Inst::GetWord {
-                    dst,
-                    obj: obj.slot,
-                    at,
-                },
-                span,
-            );
-            Val::temp(dst)
-        });
-        self.emit(
-            Inst::SetWord {
-                obj: obj.slot,
-                at,
-                src: source.slot,
-            },
-            span,
-        );
+        self.write_place(place, &source, span);
         self.release(source, span);
-        self.release(obj, span);
-    }
-
-    /// The value an assignment stores: the right-hand side, or the operator
-    /// applied to what is already there.
-    ///
-    /// `current` reads the place, and it is called only for a compound
-    /// assignment, so a plain `=` never emits a read of what it is about to
-    /// overwrite.
-    fn compound(
-        &mut self,
-        op: Option<BinaryOp>,
-        value: &Expr,
-        span: Span,
-        current: impl FnOnce(&mut Self) -> Val,
-    ) -> Val {
-        let Some(op) = op else {
-            return self.expr(value);
-        };
-        let Some(arith) = arith_of(op) else {
-            self.errors
-                .push(gap::gap("a compound assignment with this operator", span));
-            return self.expr(value);
-        };
-        let held = current(self);
-        let source = self.expr(value);
-        let num = num_of(self.frame.repr(held.slot));
-        let dst = self.frame.alloc(self.frame.repr(held.slot));
-        self.emit(
-            Inst::Arith {
-                num,
-                op: arith,
-                dst,
-                a: held.slot,
-                b: source.slot,
-            },
-            span,
-        );
-        self.release(source, span);
-        self.release(held, span);
-        Val::temp(dst)
     }
 
     // ---- structs and enums -------------------------------------------------
 
-    /// `base.name`, where `base` is a value: one word out of an object.
+    /// `base.name`, where `base` is a value.
     ///
-    /// Where `base` is not a value it is a namespace — an enum's own name,
-    /// a host module — and the only one of those this lowering has been
-    /// taught is the enum, whose cases are what `E.Case` names.
+    /// Where `base` is not a value it is a namespace — an enum's own name, a
+    /// host module — and the only one of those this lowering has been taught
+    /// is the enum, whose cases are what `E.Case` names.
     fn field(&mut self, expr: &Expr, base: &Expr, name: &str) -> Val {
         if self.is_namespace(base) {
             if let Some(ty) = self.ty(expr).cloned() {
@@ -601,94 +866,87 @@ impl Body<'_> {
             }
             return self.gap("a name reached through a module", expr);
         }
-        let Some(base_ty) = self.owned_ty(base) else {
-            return self.dead(expr);
-        };
-        let Some((at, _)) = shapes::field_at(self.checked, self.module, &base_ty, name) else {
-            self.errors.push(super::describe(&base_ty, base.span));
-            return self.dead(expr);
-        };
+        // A chain of fields rooted at a binding is arithmetic, and reaching
+        // the words it names emits nothing.
+        if let Some(place) = self.place_of(expr) {
+            return self.read_place(place, expr.span);
+        }
+        // Anything else — a field of a call's answer — has to have its base
+        // evaluated first, and then the field is an offset into the
+        // temporary it left behind.
         let obj = self.expr(base);
-        let repr = self.word(expr);
-        let dst = self.frame.alloc(repr);
-        self.emit(
-            Inst::GetWord {
-                dst,
-                obj: obj.slot,
-                at,
-            },
-            expr.span,
-        );
+        let (inside, shift) = match self.pool.shapes.unboxed(obj.layout) {
+            Some(inline) => (inline, 1),
+            None => (obj.layout, 0),
+        };
+        let Some(field) = self.field_of(inside, name) else {
+            let held = self.pool.shapes.layout(obj.layout).name.clone();
+            self.release(obj, expr.span);
+            return self.gap(
+                &format!("a field of `{held}`, which is not a struct here"),
+                expr,
+            );
+        };
+        let dst = self.temp(field.layout);
+        if shift == 0 {
+            self.copy(dst.slot, obj.slot + field.at, field.layout, expr.span);
+        } else {
+            self.emit(
+                Inst::LoadField {
+                    dst: dst.slot,
+                    obj: obj.slot,
+                    at: 1 + field.at,
+                    layout: field.layout,
+                },
+                expr.span,
+            );
+        }
         self.release(obj, expr.span);
-        Val::temp(dst)
+        dst
     }
 
-    /// The object and the word an assignable field names.
-    fn place_of_field(&mut self, base: &Expr, name: &str, span: Span) -> Option<(Val, u32, Repr)> {
-        let base_ty = self.owned_ty(base)?;
-        let Some((at, field_ty)) = shapes::field_at(self.checked, self.module, &base_ty, name)
-        else {
-            self.errors.push(super::describe(&base_ty, span));
-            return None;
-        };
-        let Some(repr) = shapes::word_of(&field_ty) else {
-            self.errors.push(super::describe(&field_ty, span));
-            return None;
-        };
-        Some((self.expr(base), at, repr))
-    }
-
-    /// `Point(x: 1, y: 2)`: an object, then one store per field.
+    /// `Point(x: 1, y: 2)`: the fields, written where the value is.
     ///
-    /// The payload is zeroed by [`Inst::Alloc`], so a reference field of a
-    /// half-built object is null rather than garbage if a collection happens
-    /// between the allocation and the store that fills it.
+    /// Every field is evaluated before anything is stored, in source order,
+    /// because an initializer's arguments are ordinary expressions and one
+    /// of them may do something the next one sees.
     fn struct_literal(&mut self, expr: &Expr, ty: &Ty, args: &[Arg]) -> Val {
-        let Some(fields) = shapes::struct_fields(self.checked, self.module, ty) else {
+        let Some(declared) = shapes::struct_fields(self.checked, self.module, ty) else {
             self.errors.push(super::describe(ty, expr.span));
             return self.dead(expr);
         };
         let Some(layout) = self.layout(ty, expr.span) else {
             return self.dead(expr);
         };
-        let Some(order) = self.labelled(args, &fields, expr) else {
+        let inline = self.pool.shapes.unboxed(layout).unwrap_or(layout);
+        let Some(fields) = self.fields_of(inline) else {
+            return self.gap("an initializer for something that is not a struct", expr);
+        };
+        let Some(order) = self.labelled(args, &declared, expr) else {
             return self.dead(expr);
         };
 
-        // Every field is evaluated before anything is stored, in source
-        // order, because an initializer's arguments are ordinary
-        // expressions and one of them may do something the next one sees.
         let mut held = Vec::with_capacity(args.len());
         for (arg, at) in args.iter().zip(&order) {
             let value = self.expr(&arg.value);
             // A field written `dyn Trait` is where a concrete value is
             // erased, exactly as a parameter written that way is.
-            let value = self.erase(value, &arg.value, &fields[*at as usize].1);
+            let value = self.erase(value, &arg.value, &declared[*at as usize].1);
             held.push(value);
         }
-        let dst = self.frame.alloc(Repr::Ref);
-        self.emit(
-            Inst::Alloc {
-                dst,
-                layout,
-                len: Len::Fixed,
-            },
-            expr.span,
-        );
-        for (value, at) in held.iter().zip(&order) {
-            self.emit(
-                Inst::SetWord {
-                    obj: dst,
-                    at: *at,
-                    src: value.slot,
-                },
-                expr.span,
-            );
+        let mut fitted = Vec::with_capacity(held.len());
+        for (value, at) in held.into_iter().zip(&order) {
+            let field = fields[*at as usize].clone();
+            fitted.push((self.fit(value, field.layout, expr.span), field));
         }
-        for value in held.into_iter().rev() {
+        let dst = self.temp(inline);
+        for (value, field) in &fitted {
+            self.copy(dst.slot + field.at, value.slot, field.layout, expr.span);
+        }
+        for (value, _) in fitted.into_iter().rev() {
             self.release(value, expr.span);
         }
-        Val::temp(dst)
+        self.enclose(dst, layout, expr.span)
     }
 
     /// Which field each argument of an initializer fills.
@@ -730,12 +988,13 @@ impl Body<'_> {
         Some(order)
     }
 
-    /// One case of an enum: the case index, then the payload.
+    /// One case of an enum: the discriminant, then the payload.
     ///
-    /// Word 0 is the index, and words `1..` are that case's payload. The
-    /// object is sized for the widest case, so which of its words are
-    /// references depends on the case it is in — a fact about the object,
-    /// which the collector answers by reading word 0.
+    /// Word 0 is the case index and the words after it are the payload
+    /// region, which is wide enough for every case. The words this case does
+    /// not fill are **zeroed**, so a reference word belonging to another case
+    /// reads null and the collector — which never looks at the discriminant —
+    /// traces nothing from it.
     fn enum_case(&mut self, expr: &Expr, ty: &Ty, case: &str, args: &[Arg]) -> Val {
         let Some((index, payload)) = shapes::case_at(self.checked, self.module, ty, case) else {
             self.errors.push(super::describe(ty, expr.span));
@@ -748,62 +1007,94 @@ impl Body<'_> {
             return self.gap("a case given a payload of another length", expr);
         }
 
+        let inline = self.pool.shapes.unboxed(layout).unwrap_or(layout);
+        let Some((parts, _)) = self.case_of(inline, index) else {
+            return self.gap("a case of something that is not an enum", expr);
+        };
         let mut held = Vec::with_capacity(args.len());
-        for (arg, ty) in args.iter().zip(&payload) {
+        for ((arg, ty), part) in args.iter().zip(&payload).zip(&parts) {
             let value = self.expr(&arg.value);
             let value = self.erase(value, &arg.value, ty);
-            held.push(value);
+            held.push(self.fit(value, part.layout, arg.value.span));
         }
-        let dst = self.frame.alloc(Repr::Ref);
-        self.emit(
-            Inst::Alloc {
-                dst,
-                layout,
-                len: Len::Fixed,
-            },
-            expr.span,
-        );
-        let tag = self.frame.alloc(Repr::Int);
-        self.emit(
-            Inst::Int {
-                dst: tag,
-                value: index as i64,
-            },
-            expr.span,
-        );
-        self.emit(
-            Inst::SetWord {
-                obj: dst,
-                at: 0,
-                src: tag,
-            },
-            expr.span,
-        );
-        self.frame.free(tag);
-        for (at, value) in held.iter().enumerate() {
-            self.emit(
-                Inst::SetWord {
-                    obj: dst,
-                    at: 1 + at as u32,
-                    src: value.slot,
-                },
-                expr.span,
-            );
-        }
+        let dst = self.temp(inline);
+        self.write_case(dst.slot, inline, index, &held, expr.span);
         for value in held.into_iter().rev() {
             self.release(value, expr.span);
         }
-        Val::temp(dst)
+        self.enclose(dst, layout, expr.span)
     }
 
-    /// Builds the enclosing function's own `Err` or `None`, for `?` to
-    /// leave through.
+    /// Puts a freshly built value in the box its layout says it lives in.
+    ///
+    /// A declaration whose layout contained itself is one heap address
+    /// wherever it is mentioned, so the words are built in the frame and
+    /// then moved into an object of the layout the cycle was broken with.
+    /// A declaration that is not recursive is already what it is, and this
+    /// answers it unchanged.
+    fn enclose(&mut self, built: Val, layout: LayoutId, span: Span) -> Val {
+        if built.layout == layout {
+            return built;
+        }
+        let dst = self.temp(layout);
+        self.emit(
+            Inst::Box {
+                dst: dst.slot,
+                src: built.slot,
+                layout: built.layout,
+            },
+            span,
+        );
+        self.release(built, span);
+        dst
+    }
+
+    /// Writes case `index` of an enum-shaped layout into a location: the
+    /// discriminant, then the payload words this case does not fill zeroed,
+    /// then the parts.
+    pub(super) fn write_case(
+        &mut self,
+        dst: Slot,
+        layout: LayoutId,
+        index: u32,
+        parts: &[Val],
+        span: Span,
+    ) {
+        let Some((placed, payload)) = self.case_of(layout, index) else {
+            return;
+        };
+        self.emit(
+            Inst::Int {
+                dst,
+                value: index as i64,
+            },
+            span,
+        );
+        let mut filled = vec![false; payload.len()];
+        for part in &placed {
+            let width = self.width(part.layout);
+            for word in part.at..part.at + width {
+                filled[word as usize] = true;
+            }
+        }
+        for (word, held) in filled.iter().enumerate() {
+            if *held {
+                continue;
+            }
+            self.zero(dst + 1 + word as u32, shapes::scalar(payload[word]), span);
+        }
+        for (part, value) in placed.iter().zip(parts) {
+            self.copy(dst + 1 + part.at, value.slot, part.layout, span);
+        }
+    }
+
+    /// Builds the enclosing function's own `Err` or `None`, for `?` to leave
+    /// through.
     ///
     /// It is built here rather than passed along: the value `?` was applied
     /// to is a `Result` of some other pair of types, and two `Result`s whose
-    /// words differ are two layouts. Reusing the object would hand the
-    /// caller one whose header names the wrong one.
-    pub(super) fn failure(&mut self, payload: Option<Slot>, span: Span) -> Option<Slot> {
+    /// words differ are two layouts.
+    pub(super) fn failure(&mut self, payload: Option<Val>, span: Span) -> Option<Val> {
         let ty = self.returns.clone();
         let case = match &ty {
             Ty::Result(..) => "Err",
@@ -818,42 +1109,9 @@ impl Body<'_> {
         };
         let (index, _) = shapes::case_at(self.checked, self.module, &ty, case)?;
         let layout = self.layout(&ty, span)?;
-        let dst = self.frame.alloc(Repr::Ref);
-        self.emit(
-            Inst::Alloc {
-                dst,
-                layout,
-                len: Len::Fixed,
-            },
-            span,
-        );
-        let tag = self.frame.alloc(Repr::Int);
-        self.emit(
-            Inst::Int {
-                dst: tag,
-                value: index as i64,
-            },
-            span,
-        );
-        self.emit(
-            Inst::SetWord {
-                obj: dst,
-                at: 0,
-                src: tag,
-            },
-            span,
-        );
-        self.frame.free(tag);
-        if let Some(src) = payload {
-            self.emit(
-                Inst::SetWord {
-                    obj: dst,
-                    at: 1,
-                    src,
-                },
-                span,
-            );
-        }
+        let dst = self.temp(layout);
+        let parts: Vec<Val> = payload.into_iter().collect();
+        self.write_case(dst.slot, layout, index, &parts, span);
         Some(dst)
     }
 
@@ -862,10 +1120,9 @@ impl Body<'_> {
     /// `expr?`: the payload of the succeeding case, or the enclosing
     /// function's own failure.
     ///
-    /// The case index is one word of the object, so the question is a read
-    /// and a comparison. `Ok` is case 0 of a `Result` and `Some` is case 1
-    /// of an `Option`, which is why the index being tested is looked up
-    /// rather than written down.
+    /// The discriminant is word 0 of the value, so the question is a
+    /// comparison against the location itself: no read is needed, because
+    /// the words are already in the frame.
     fn try_expr(&mut self, expr: &Expr, inner: &Expr) -> Val {
         let Some(ty) = self.owned_ty(inner) else {
             return self.dead(expr);
@@ -886,55 +1143,46 @@ impl Body<'_> {
         };
 
         let subject = self.expr(inner);
-        let tag = self.frame.alloc(Repr::Int);
-        self.emit(
-            Inst::GetWord {
-                dst: tag,
-                obj: subject.slot,
-                at: 0,
-            },
-            expr.span,
-        );
-        let wanted = self.frame.alloc(Repr::Int);
+        let Some((carrying, _)) = self.case_of(subject.layout, index) else {
+            self.release(subject, expr.span);
+            return self.gap("`?` on a value that is not an enum here", expr);
+        };
+        let wanted = self.temp(shapes::INT);
         self.emit(
             Inst::Int {
-                dst: wanted,
+                dst: wanted.slot,
                 value: index as i64,
             },
             expr.span,
         );
-        let ok = self.frame.alloc(Repr::Bool);
+        let ok = self.temp(shapes::BOOL);
         self.emit(
             Inst::Cmp {
                 on: Compare::Int,
                 op: CmpOp::Eq,
-                dst: ok,
-                a: tag,
-                b: wanted,
+                dst: ok.slot,
+                a: subject.slot,
+                b: wanted.slot,
             },
             expr.span,
         );
-        self.frame.free(wanted);
-        self.frame.free(tag);
+        self.give_back(wanted.slot, wanted.layout);
         let branch = self.emit(
             Inst::BranchFalse {
-                cond: ok,
+                cond: ok.slot,
                 to: PENDING,
             },
             expr.span,
         );
-        self.frame.free(ok);
+        self.give_back(ok.slot, ok.layout);
 
-        let repr = self.word(expr);
-        let dst = self.frame.alloc(repr);
-        self.emit(
-            Inst::GetWord {
-                dst,
-                obj: subject.slot,
-                at: 1,
-            },
-            expr.span,
-        );
+        let layout = self.layout_of(expr);
+        let dst = self.temp(layout);
+        if let Some(part) = carrying.first() {
+            self.copy(dst.slot, subject.slot + 1 + part.at, part.layout, expr.span);
+        } else {
+            self.emit(Inst::Unit { dst: dst.slot }, expr.span);
+        }
         let carry_on = self.emit(Inst::Jump { to: PENDING }, expr.span);
 
         let failing = self.here();
@@ -944,33 +1192,25 @@ impl Body<'_> {
         // frame ends at the `Return`, so nothing here is cleared: a slot
         // whose frame is gone retains nothing.
         let payload = match &ty {
-            Ty::Result(_, err) => {
-                let word = shapes::word_of(err).unwrap_or(Repr::Unit);
-                let held = self.frame.alloc(word);
-                self.emit(
-                    Inst::GetWord {
-                        dst: held,
-                        obj: subject.slot,
-                        at: 1,
-                    },
-                    expr.span,
-                );
-                Some(held)
+            Ty::Result(..) => {
+                let failing_case =
+                    shapes::case_at(self.checked, self.module, &ty, "Err").map(|(at, _)| at);
+                failing_case
+                    .and_then(|at| self.case_of(subject.layout, at))
+                    .and_then(|(parts, _)| parts.first().cloned())
+                    .map(|part| Val::borrowed(subject.slot + 1 + part.at, part.layout))
             }
             _ => None,
         };
         if let Some(answer) = self.failure(payload, expr.span) {
-            self.emit(Inst::Return { src: answer }, expr.span);
-            self.frame.free(answer);
-        }
-        if let Some(payload) = payload {
-            self.frame.free(payload);
+            self.emit(Inst::Return { src: answer.slot }, expr.span);
+            self.give_back(answer.slot, answer.layout);
         }
 
         let rest = self.here();
         self.patch(carry_on, rest);
         self.release(subject, expr.span);
-        Val::temp(dst)
+        dst
     }
 
     // ---- control flow -------------------------------------------------------
@@ -987,10 +1227,10 @@ impl Body<'_> {
         then_branch: &Block,
         else_branch: Option<&Expr>,
         span: Span,
-        dst: Option<Slot>,
+        dst: Option<Dest>,
     ) {
         if let (Some(dst), None) = (dst, else_branch) {
-            self.emit(Inst::Unit { dst }, span);
+            self.emit(Inst::Unit { dst: dst.slot }, span);
         }
 
         let cond = self.expr(condition);
@@ -1018,13 +1258,18 @@ impl Body<'_> {
                 let skip = self.emit(Inst::Jump { to: PENDING }, span);
                 let alternative = self.here();
                 self.patch(branch, alternative);
-                match dst {
-                    Some(dst) => {
+                match (&otherwise.kind, dst) {
+                    // An `else { ... }` writes the destination the `then`
+                    // side writes, rather than assembling its answer
+                    // somewhere else and copying it in. The two sides of a
+                    // join are the same event and cost the same.
+                    (ExprKind::Block(block), _) => self.scoped_block(block, dst),
+                    (_, Some(dst)) => {
                         let value = self.expr(otherwise);
                         self.store(dst, &value, otherwise);
                         self.release(value, otherwise.span);
                     }
-                    None => self.discard(otherwise),
+                    (_, None) => self.discard(otherwise),
                 }
                 let end = self.here();
                 self.patch(skip, end);
@@ -1073,19 +1318,21 @@ impl Body<'_> {
                 let returns = self.returns.clone();
                 let answer = self.erase(answer, value, &returns);
                 // `return return x` leaves through the inner one, and the
-                // outer has no word to name.
+                // outer has nothing to name.
                 if !self.diverges(value) {
                     self.emit(Inst::Return { src: answer.slot }, span);
                 }
-                // The frame ends at the `Return`, so the slot is given back
+                // The frame ends at the `Return`, so the run is given back
                 // without a `Clear`: there is nothing left to retain it.
-                self.frame.release(answer);
+                if answer.temp {
+                    self.give_back(answer.slot, answer.layout);
+                }
             }
             // A bare `return` only checks in a function answering `()`, and
-            // the answer slot holds one: a frame is zeroed on entry and
+            // the answer location holds one: a frame is zeroed on entry and
             // nothing but a `()` is ever written to a `Unit` slot.
             None => {
-                let src = self.answer;
+                let src = self.answer.slot;
                 self.emit(Inst::Return { src }, span);
             }
         }
@@ -1132,17 +1379,17 @@ impl Body<'_> {
     /// of the turn.
     ///
     /// A `for` binding is not in any of those scopes — the loop owns the
-    /// slot, because the scope gives its slots back when it ends and the next
-    /// turn writes this one again — so it is cleared here beside them. A
+    /// location, because the scope gives its slots back when it ends and the
+    /// next turn writes them again — so it is cleared here beside them. A
     /// `continue` clears it too, and not only because the last turn of a loop
     /// may be the one that continues: the rule is that a binding dies when
     /// the turn it belonged to does, and a lowering that relied on the next
     /// turn's overwrite would be relying on there being one.
-    fn leave_turn(&mut self, depth: usize, element: Option<Slot>, span: Span) {
+    fn leave_turn(&mut self, depth: usize, element: Option<Dest>, span: Span) {
         let clears = self.frame.refs_within(depth);
         self.clear(&clears, span);
         if let Some(element) = element {
-            self.emit(Inst::Clear { slot: element }, span);
+            self.zero(element.slot, element.layout, span);
         }
     }
 
@@ -1247,7 +1494,8 @@ impl Body<'_> {
                 return self.enum_case(expr, &ty, name, args);
             }
             // `Vector.of(1, 2)`: an associated function of a builtin type,
-            // written through the type's own name rather than through a value.
+            // written through the type's own name rather than through a
+            // value.
             if name == "of" && collections::namespace_of(head, &ty) {
                 return self.vector_of(expr, args);
             }
@@ -1272,15 +1520,15 @@ impl Body<'_> {
     /// A [`HostOp`] is the module and operation as the source writes them —
     /// `console`.`println`, `files`.`read` — and the boundary looks the pair
     /// up in the registry exactly as the interpreter does. The arguments are
-    /// the slots in source order, materialised into public `Value`s by the
-    /// kind each slot's [`Repr`] declares; a variadic operation is passed
-    /// its arguments one per slot and the boundary is what collects them.
+    /// the locations in source order, materialised into public `Value`s;
+    /// every one is a single word, because an operand that is not is boxed
+    /// on the way in and the box carries its own layout.
     ///
-    /// [`HostOp::result`] is the word the host's answer is written back
-    /// into, and it is the schema's declared result type as the checker
-    /// read it. A schema that declared `Any` gives [`Repr::Ref`]: from that
-    /// call onwards the program holds a value no schema described, so it is
-    /// a box carrying its own tag rather than a bare word.
+    /// [`HostOp::result`] is the layout the host's answer is written back
+    /// into, and it is the schema's declared result type as the checker read
+    /// it. A schema that declared `Any` gives a boxed layout: from that call
+    /// onwards the program holds a value no schema described, so it is a box
+    /// carrying its own description rather than a bare run of words.
     fn call_host(&mut self, expr: &Expr, module: &str, operation: &str, args: &[Arg]) -> Val {
         for arg in args {
             let what = if arg.label.is_some() {
@@ -1305,14 +1553,16 @@ impl Body<'_> {
 
         let mut held = Vec::with_capacity(args.len());
         for arg in args {
-            held.push(self.expr(&arg.value));
+            let value = self.expr(&arg.value);
+            let value = self.describe_itself(value, arg.value.span);
+            held.push(value);
         }
         let slots: Vec<Slot> = held.iter().map(|value| value.slot).collect();
         let list = self.pool.args.intern(slots);
-        let dst = self.frame.alloc(result);
+        let dst = self.temp(result);
         self.emit(
             Inst::CallHost {
-                dst,
+                dst: dst.slot,
                 op,
                 args: list,
             },
@@ -1321,10 +1571,10 @@ impl Body<'_> {
         for value in held.into_iter().rev() {
             self.release(value, expr.span);
         }
-        Val::temp(dst)
+        dst
     }
 
-    /// The word a host operation's answer is written into.
+    /// The layout a host operation's answer is written into.
     ///
     /// It is the schema's result type, read where the checker recorded it
     /// rather than out of the schema a second time: the checker resolved the
@@ -1332,70 +1582,63 @@ impl Body<'_> {
     /// includes an embedder's, and re-reading only the shipped ones would
     /// answer for fewer programs than the checker did.
     ///
-    /// The one type that has no word is the one a schema declared `Any`,
+    /// The one type that has no layout is the one a schema declared `Any`,
     /// which the checker records as an unconstrained unknown. That is
     /// erasure rather than abstention — `docs/LINEAR_VM.md` separates the
-    /// two — and erasure is a `Ref` to a box. Nothing else at a host call
-    /// site is unconstrained, because a host schema has no type parameters
-    /// to leave open.
-    fn host_result(&mut self, expr: &Expr) -> Option<Repr> {
+    /// two — and erasure is a box. Nothing else at a host call site is
+    /// unconstrained, because a host schema has no type parameters to leave
+    /// open.
+    fn host_result(&mut self, expr: &Expr) -> Option<LayoutId> {
         let ty = self.owned_ty(expr)?;
         if matches!(ty, Ty::Unknown(cove_sema::typeck::Unknown::Unconstrained)) {
-            return Some(Repr::Ref);
+            return Some(self.pool.shapes.any());
         }
-        match shapes::word_of(&ty) {
-            Some(repr) => Some(repr),
-            None => {
-                self.errors.push(super::describe(&ty, expr.span));
-                None
-            }
-        }
+        self.layout(&ty, expr.span)
     }
 
-    /// The address a `var` argument passes, and the object that address
-    /// points into if it points into one.
+    /// The address a `var` argument passes.
     ///
-    /// A place is one word. `var total` is the address of a slot of this
-    /// frame; `var point.x` is the address of a word of an object, and the
-    /// object has to be held in a reference slot for as long as the address
-    /// can be used — which the caller does by releasing the second answer
-    /// after the call.
-    pub(super) fn address_of(&mut self, place: &Expr) -> (Val, Option<Val>) {
-        match &place.kind {
-            ExprKind::Ident(name) => match self.frame.lookup(name) {
-                // A `var` parameter is already an address, and passing it on
-                // is passing the same one: the callee writes the storage the
-                // original caller named, which is what makes the alias reach
-                // through however many frames pass it along.
-                Some(slot) if self.frame.repr(slot) == Repr::Addr => (Val::borrowed(slot), None),
-                Some(slot) => {
-                    let dst = self.frame.alloc(Repr::Addr);
-                    self.emit(Inst::AddrOfSlot { dst, slot }, place.span);
-                    (Val::temp(dst), None)
-                }
-                None => (
-                    self.gap("a `var` argument naming something outside the frame", place),
-                    None,
-                ),
-            },
-            ExprKind::Field { base, name } => {
-                let Some((obj, at, _)) = self.place_of_field(base, &name.node, place.span) else {
-                    return (self.dead(place), None);
-                };
-                let dst = self.frame.alloc(Repr::Addr);
+    /// A place is one word. `var total` is the address of a run of this
+    /// frame, and `var point.x` is the address of the word inside it that
+    /// the field arithmetic already found — an inline field needs no
+    /// indirection to name, so both are one [`Inst::AddrOfSlot`].
+    pub(super) fn address_of(&mut self, place: &Expr) -> Val {
+        let Some(found) = self.place_of(place) else {
+            return self.gap("a `var` argument that is not a place", place);
+        };
+        match found {
+            Place::Here { slot, .. } => {
+                let dst = self.temp(shapes::ADDR);
                 self.emit(
-                    Inst::AddrOfWord {
-                        dst,
-                        obj: obj.slot,
+                    Inst::AddrOfSlot {
+                        dst: dst.slot,
+                        slot,
+                    },
+                    place.span,
+                );
+                dst
+            }
+            Place::Field { obj, at, .. } => {
+                let dst = self.temp(shapes::ADDR);
+                self.emit(
+                    Inst::AddrOfField {
+                        dst: dst.slot,
+                        obj,
                         at,
                     },
                     place.span,
                 );
-                (Val::temp(dst), Some(obj))
+                dst
             }
-            _ => (
-                self.gap("a `var` argument that is not a place", place),
-                None,
+            // A `var` parameter passed straight on is the same address: the
+            // callee writes the storage the original caller named, which is
+            // what makes the alias reach through however many frames pass it
+            // along.
+            Place::Through { addr, at: 0, .. } => Val::borrowed(addr, shapes::ADDR),
+            Place::Through { .. } => self.gap(
+                "a `var` argument naming a field of another `var` parameter, \
+                 which would need an address an instruction can offset",
+                place,
             ),
         }
     }

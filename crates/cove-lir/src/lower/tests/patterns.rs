@@ -1,294 +1,162 @@
-//! `match`, and what each kind of pattern costs.
+//! `match`, and the patterns its arms are written with.
 
-use super::{checked, listing};
-use crate::lower::lower;
+use super::listing;
 
+/// A case's payload is part of the value, so a sub-pattern is tested
+/// against `base + 1 + Part::at` directly. Nothing is copied out to be
+/// looked at, which is why a failing arm has nothing to clear on its way
+/// to the next one.
 #[test]
-fn a_match_over_an_enum_dispatches_on_the_case_index() {
-    // One indexed jump rather than one comparison per case: the index is a
-    // word of the object, so the arms are a table. The table has a default
-    // even though the checker proved the `match` exhaustive, because the
-    // index came out of the heap and the machine does not take the
-    // lowering's word for what is in it.
+fn a_nested_pattern_tests_the_payload_where_it_already_is() {
     assert_eq!(
         listing(
-            "enum Verdict { Keep, Drop(String) }\n\
-             fn why(v: Verdict) -> String { match v { Verdict.Keep => \"kept\", Verdict.Drop(reason) => reason } }",
-            "why"
+            "enum E { A(Option<Int>), B }\nfn f(e: E) -> Int {\n  match e {\n    E.A(Some(n)) => n,\n    E.A(None) => -1,\n    E.B => 0,\n  }\n}",
+            "f"
         ),
         "\
-fn0 m.why(1) -> ref
-  frame 5: s0!:ref s1:ref s2:ref s3:int s4:ref
-     0  get-word s3:int s0:ref +0
-     1  switch s3:int [2 6] else 10
-     2  str s4:ref \"kept\"
-     3  move s2:ref s4:ref
-     4  clear s4:ref
-     5  jump 11
-     6  get-word s4:ref s0:ref +1
-     7  move s2:ref s4:ref
-     8  clear s4:ref
-     9  jump 11
-    10  trap \"no `match` arm covers this value\"
-    11  move s1:ref s2:ref
-    12  clear s2:ref
-    13  return s1:ref
+fn0 m.f(m.E) -> Int
+  frame 8: s0!:int s1!:int s2!:int s3:int s4:int s5:int s6:bool s7:int
+     0  switch s0:int [1 14] else 17
+     1  int s5:int 1
+     2  eq.int s6:bool s1:int s5:int
+     3  branch-false s6:bool 7
+     4  copy s5:int s2:int Int
+     5  copy s4:int s5:int Int
+     6  jump 18
+     7  int s5:int 0
+     8  eq.int s6:bool s1:int s5:int
+     9  branch-false s6:bool 17
+    10  int s5:int 1
+    11  neg.int s7:int s5:int
+    12  copy s4:int s7:int Int
+    13  jump 18
+    14  int s7:int 0
+    15  copy s4:int s7:int Int
+    16  jump 18
+    17  trap \"no `match` arm covers this value\"
+    18  copy s3:int s4:int Int
+    19  return s3:int
 "
     );
 }
 
+/// It has to be a copy: the binding belongs to the arm's scope and is
+/// cleared when that scope ends, and clearing a borrowed part of the value
+/// being matched would zero the value itself.
 #[test]
-fn a_payload_binding_is_the_word_it_was_read_into() {
-    // The word the payload holds *is* what the name means, so the slot the
-    // read went into becomes the binding rather than being copied out of —
-    // and it belongs to the arm's scope, so a binding holding a reference is
-    // cleared when the arm ends.
+fn a_binding_is_a_copy_of_the_words_it_names() {
     assert_eq!(
         listing(
-            "fn unwrap(x: Option<String>) -> String { match x { Some(s) => s, None => \"\" } }",
-            "unwrap"
+            "enum Msg { Ping, Text(String) }\nfn f(m: Msg) -> String {\n  match m {\n    Msg.Text(s) => s,\n    Msg.Ping => \"\",\n  }\n}",
+            "f"
         ),
         "\
-fn0 m.unwrap(1) -> ref
-  frame 5: s0!:ref s1:ref s2:ref s3:int s4:ref
-     0  get-word s3:int s0:ref +0
-     1  switch s3:int [6 2] else 10
-     2  get-word s4:ref s0:ref +1
-     3  move s2:ref s4:ref
-     4  clear s4:ref
-     5  jump 11
-     6  str s4:ref \"\"
-     7  move s2:ref s4:ref
-     8  clear s4:ref
-     9  jump 11
-    10  trap \"no `match` arm covers this value\"
-    11  move s1:ref s2:ref
-    12  clear s2:ref
-    13  return s1:ref
+fn0 m.f(m.Msg) -> String
+  frame 5: s0!:int s1!:ref s2:ref s3:ref s4:ref
+     0  switch s0:int [5 1] else 9
+     1  copy s4:ref s1:ref String
+     2  copy s3:ref s4:ref String
+     3  clear s4:ref String
+     4  jump 10
+     5  str s4:ref \"\"
+     6  copy s3:ref s4:ref String
+     7  clear s4:ref String
+     8  jump 10
+     9  trap \"no `match` arm covers this value\"
+    10  copy s2:ref s3:ref String
+    11  clear s3:ref String
+    12  return s2:ref
 "
     );
 }
 
+/// There is no index to switch on, and the arms' literals are values
+/// rather than a dense numbering.
 #[test]
-fn an_arm_that_fails_after_reading_a_payload_clears_what_it_read() {
-    // This is the reason an arm has a failure block of its own. Deciding
-    // whether `Some("a")` matches means reading the payload into a
-    // reference slot, and an arm that then fails jumps to the next candidate
-    // without running its body — so the slot is cleared on that path as well
-    // as on the one that matched.
-    //
-    // The two arms for `Some` are chained: the switch sends every `Some` to
-    // the first, and the first sends what it does not match to the second.
-    // Nothing is emitted twice.
+fn a_match_over_something_that_is_not_an_enum_is_a_chain() {
     assert_eq!(
         listing(
-            "fn label(x: Option<String>) -> String {\n\
-               match x { Some(\"a\") => \"first\", Some(other) => other, None => \"none\" }\n\
-             }",
-            "label"
-        ),
-        "\
-fn0 m.label(1) -> ref
-  frame 7: s0!:ref s1:ref s2:ref s3:int s4:ref s5:ref s6:bool
-     0  get-word s3:int s0:ref +0
-     1  switch s3:int [18 2] else 22
-     2  get-word s4:ref s0:ref +1
-     3  str s5:ref \"a\"
-     4  eq.str s6:bool s4:ref s5:ref
-     5  clear s5:ref
-     6  branch-false s6:bool 12
-     7  clear s4:ref
-     8  str s5:ref \"first\"
-     9  move s2:ref s5:ref
-    10  clear s5:ref
-    11  jump 23
-    12  clear s4:ref
-    13  jump 14
-    14  get-word s4:ref s0:ref +1
-    15  move s2:ref s4:ref
-    16  clear s4:ref
-    17  jump 23
-    18  str s4:ref \"none\"
-    19  move s2:ref s4:ref
-    20  clear s4:ref
-    21  jump 23
-    22  trap \"no `match` arm covers this value\"
-    23  move s1:ref s2:ref
-    24  clear s2:ref
-    25  return s1:ref
-"
-    );
-}
-
-#[test]
-fn a_match_over_anything_else_is_a_chain_of_comparisons() {
-    // There is no index to switch on and the arms' literals are values
-    // rather than a dense numbering, so each arm is a comparison and a
-    // branch to the next.
-    assert_eq!(
-        listing(
-            "fn name(n: Int) -> String { match n { 0 => \"zero\", 1 => \"one\", _ => \"many\" } }",
+            "fn name(n: Int) -> String {\n  match n {\n    0 => \"zero\",\n    1 => \"one\",\n    _ => \"many\",\n  }\n}",
             "name"
         ),
         "\
-fn0 m.name(1) -> ref
+fn0 m.name(Int) -> String
   frame 6: s0!:int s1:ref s2:ref s3:int s4:bool s5:ref
      0  int s3:int 0
      1  eq.int s4:bool s0:int s3:int
      2  branch-false s4:bool 7
      3  str s5:ref \"zero\"
-     4  move s2:ref s5:ref
-     5  clear s5:ref
+     4  copy s2:ref s5:ref String
+     5  clear s5:ref String
      6  jump 19
      7  int s3:int 1
      8  eq.int s4:bool s0:int s3:int
      9  branch-false s4:bool 14
     10  str s5:ref \"one\"
-    11  move s2:ref s5:ref
-    12  clear s5:ref
+    11  copy s2:ref s5:ref String
+    12  clear s5:ref String
     13  jump 19
     14  str s5:ref \"many\"
-    15  move s2:ref s5:ref
-    16  clear s5:ref
+    15  copy s2:ref s5:ref String
+    16  clear s5:ref String
     17  jump 19
     18  trap \"no `match` arm covers this value\"
-    19  move s1:ref s2:ref
-    20  clear s2:ref
+    19  copy s1:ref s2:ref String
+    20  clear s2:ref String
     21  return s1:ref
 "
     );
 }
 
 #[test]
-fn a_binding_over_a_string_holds_a_copy_that_dies_with_its_arm() {
-    // A binding names the scrutinee, and the name is a slot of its own
-    // rather than the scrutinee's: the arm's scope owns it, so it is given
-    // back and cleared when the arm ends. The literal a comparison built is
-    // dead the moment it has been compared, on either path, so it is cleared
-    // there rather than held for the branch.
+fn a_match_over_strings_compares_bytes() {
     assert_eq!(
         listing(
-            "fn rank(s: String) -> Int { match s { \"a\" => 1, other => 2 } }",
-            "rank"
+            "fn score(s: String) -> Int {\n  match s {\n    \"a\" => 1,\n    _ => 0,\n  }\n}",
+            "score"
         ),
         "\
-fn0 m.rank(1) -> int
+fn0 m.score(String) -> Int
   frame 6: s0!:ref s1:int s2:int s3:ref s4:bool s5:int
      0  str s3:ref \"a\"
      1  eq.str s4:bool s0:ref s3:ref
-     2  clear s3:ref
+     2  clear s3:ref String
      3  branch-false s4:bool 7
      4  int s5:int 1
-     5  move s2:int s5:int
-     6  jump 13
-     7  move s3:ref s0:ref
-     8  int s5:int 2
-     9  move s2:int s5:int
-    10  clear s3:ref
-    11  jump 13
-    12  trap \"no `match` arm covers this value\"
-    13  move s1:int s2:int
-    14  return s1:int
+     5  copy s2:int s5:int Int
+     6  jump 11
+     7  int s5:int 0
+     8  copy s2:int s5:int Int
+     9  jump 11
+    10  trap \"no `match` arm covers this value\"
+    11  copy s1:int s2:int Int
+    12  return s1:int
 "
     );
 }
 
+/// A `_` arm is the tail of every case's chain, so nothing after it is
+/// reachable for any of them.
 #[test]
-fn a_pattern_inside_a_pattern_tests_from_the_outside_in() {
-    // A nested case is the same two instructions one level down, and the
-    // object read out of the outer payload is cleared on both ways out of
-    // the test. The two `Ok` arms are one chain: the switch sends every `Ok`
-    // to the first, and the first sends what it does not match to the
-    // second.
+fn an_arm_that_covers_every_case_ends_each_chain() {
     assert_eq!(
         listing(
-            "fn depth(x: Result<Option<Int>, String>) -> Int {\n\
-               match x { Ok(Some(n)) => n, Ok(None) => 0, Err(_) => 0 - 1 }\n\
-             }",
-            "depth"
+            "enum Shape { Dot, Line(Int), Box(Int, Int) }\nfn f(s: Shape) -> Int {\n  match s {\n    Shape.Line(a) => a,\n    _ => 0,\n  }\n}",
+            "f"
         ),
         "\
-fn0 m.depth(1) -> int
-  frame 9: s0!:ref s1:int s2:int s3:int s4:ref s5:int s6:bool s7:ref s8:int
-     0  get-word s3:int s0:ref +0
-     1  switch s3:int [2 26] else 31
-     2  get-word s4:ref s0:ref +1
-     3  get-word s3:int s4:ref +0
-     4  int s5:int 1
-     5  eq.int s6:bool s3:int s5:int
-     6  branch-false s6:bool 13
-     7  clear s4:ref
-     8  get-word s7:ref s0:ref +1
-     9  get-word s3:int s7:ref +1
-    10  clear s7:ref
-    11  move s2:int s3:int
-    12  jump 32
-    13  clear s4:ref
-    14  jump 15
-    15  get-word s4:ref s0:ref +1
-    16  get-word s3:int s4:ref +0
-    17  int s5:int 0
-    18  eq.int s6:bool s3:int s5:int
-    19  branch-false s6:bool 24
-    20  clear s4:ref
-    21  int s3:int 0
-    22  move s2:int s3:int
-    23  jump 32
-    24  clear s4:ref
-    25  jump 31
-    26  int s3:int 0
-    27  int s5:int 1
-    28  sub.int s8:int s3:int s5:int
-    29  move s2:int s8:int
-    30  jump 32
-    31  trap \"no `match` arm covers this value\"
-    32  move s1:int s2:int
-    33  return s1:int
+fn0 m.f(m.Shape) -> Int
+  frame 6: s0!:int s1!:int s2!:int s3:int s4:int s5:int
+     0  switch s0:int [4 1 4] else 7
+     1  copy s5:int s1:int Int
+     2  copy s4:int s5:int Int
+     3  jump 8
+     4  int s5:int 0
+     5  copy s4:int s5:int Int
+     6  jump 8
+     7  trap \"no `match` arm covers this value\"
+     8  copy s3:int s4:int Int
+     9  return s3:int
 "
     );
-}
-
-#[test]
-fn a_scrutinee_that_is_a_temporary_is_cleared_once_every_arm_has_run() {
-    // The scrutinee is live for the whole `match`, because every arm reads
-    // out of it, and dead the instant the answer has been assembled.
-    assert_eq!(
-        listing(
-            "fn one() -> Option<Int> { Some(1) }\n\
-             fn read() -> Int { match one() { Some(n) => n, None => 0 } }",
-            "read"
-        ),
-        "\
-fn1 m.read(0) -> int
-  frame 4: s0:int s1:int s2:ref s3:int
-     0  call s2:ref m.one ()
-     1  get-word s3:int s2:ref +0
-     2  switch s3:int [6 3] else 9
-     3  get-word s3:int s2:ref +1
-     4  move s1:int s3:int
-     5  jump 10
-     6  int s3:int 0
-     7  move s1:int s3:int
-     8  jump 10
-     9  trap \"no `match` arm covers this value\"
-    10  clear s2:ref
-    11  move s0:int s1:int
-    12  return s0:int
-"
-    );
-}
-
-#[test]
-fn an_unmatched_scrutinee_reaches_a_trap() {
-    // The trap is the switch's default and the end of a comparison chain,
-    // and it is the same message on both. It is not a refusal to run the
-    // program: the program ran, and this is what it did.
-    let program = lower(&checked(
-        "fn name(n: Int) -> Int { match n { 0 => 1, _ => 2 } }",
-    ))
-    .expect("the program lowers");
-    assert!(program
-        .strings
-        .iter()
-        .any(|text| &**text == "no `match` arm covers this value"));
 }

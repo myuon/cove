@@ -1,172 +1,177 @@
-//! The frame: one numbering, a fixed kind per slot, and reuse within a kind.
+//! What the frame is made of: reuse, and where a reference's live range
+//! ends.
+//!
+//! Two invariants are pinned here, and both are what keeps a *static*
+//! reference map correct and cheap. A run of slots is handed on only to a
+//! value whose words are the same, word for word — so no single bit of
+//! [`crate::RefMap`](crate::RefMap) is ever wrong at any program counter.
+//! And a location holding a reference is cleared at its last use, so the map
+//! costs no retention beyond a value's live range.
 
-use super::{checked, listing};
-use crate::lower::lower;
-use crate::repr::Repr;
+use super::listing;
 
+/// A long body mentions far more temporaries than it holds at once, so a
+/// frame should grow with what is live rather than with the source. Every
+/// one of the four literals below is the same slot.
 #[test]
-fn two_dead_temporaries_of_the_same_kind_share_a_slot() {
-    // A frame is what a call costs, so a temporary that has died is handed
-    // to the next value of its own kind rather than leaving the frame to
-    // grow with the length of the body. `s1` and `s2` each hold four
-    // different integers here.
+fn a_run_is_reused_by_a_later_value_of_the_same_words() {
     assert_eq!(
-        listing(
-            "fn pair() -> Int {\n  let a = 1 + 2\n  let b = 3 + 4\n  a + b\n}",
-            "pair"
-        ),
+        listing("fn total() -> Int { ((1 + 2) + 3) + 4 }", "total"),
         "\
-fn0 m.pair(0) -> int
-  frame 5: s0:int s1:int s2:int s3:int s4:int
+fn0 m.total() -> Int
+  frame 4: s0:int s1:int s2:int s3:int
      0  int s1:int 1
      1  int s2:int 2
      2  add.int s3:int s1:int s2:int
      3  int s1:int 3
-     4  int s2:int 4
-     5  add.int s4:int s1:int s2:int
-     6  add.int s1:int s3:int s4:int
-     7  move s0:int s1:int
+     4  add.int s2:int s3:int s1:int
+     5  int s3:int 4
+     6  add.int s1:int s2:int s3:int
+     7  copy s0:int s1:int Int
      8  return s0:int
 "
     );
 }
 
+/// The `Int` temporaries and the `Float` ones draw from different lists,
+/// because one bit per slot has to be right for the whole function.
 #[test]
-fn a_slot_is_never_reused_by_a_value_of_another_kind() {
-    // This is what makes one static reference map right at every program
-    // counter, so it is asserted over the frame rather than inferred from a
-    // listing: no slot's kind changes, whatever the free lists did.
-    let program = lower(&checked(
-        "fn mixed(n: Int, f: Float, flag: Bool) -> Int {\n\
-           let a = n + 1\n\
-           let b = f * 2.0\n\
-           let c = flag && true\n\
-           let d = n - 1\n\
-           let e = f / 2.0\n\
-           a + d\n\
-         }",
-    ))
-    .expect("the program lowers");
-    let mixed = program.function(program.function_named("m", "mixed").expect("lowered"));
-    // Every kind the body mentions is present, and a frame of scalars is no
-    // root at all.
-    assert_eq!(mixed.reprs[0], Repr::Int);
-    assert_eq!(mixed.reprs[1], Repr::Float);
-    assert_eq!(mixed.reprs[2], Repr::Bool);
-    assert!(mixed.refs.is_empty());
-}
-
-#[test]
-fn a_scope_that_ends_gives_its_slots_back() {
-    // The two blocks declare a local each, and the second gets the first
-    // one's slot because the first block ended.
+fn a_run_is_never_reused_by_a_value_whose_words_differ() {
     assert_eq!(
         listing(
-            "fn twice() -> Int {\n  { let a = 1\n    a }\n  { let b = 2\n    b }\n}",
-            "twice"
+            "fn mix(a: Int, b: Float) -> Float {\n  let n = a + 1\n  let x = b + 1.0\n  let m = n + 2\n  x\n}",
+            "mix"
         ),
         "\
-fn0 m.twice(0) -> int
-  frame 3: s0:int s1:int s2:int
+fn0 m.mix(Int Float) -> Float
+  frame 8: s0!:int s1!:float s2:float s3:int s4:int s5:float s6:float s7:int
+     0  int s3:int 1
+     1  add.int s4:int s0:int s3:int
+     2  float s5:float 1
+     3  add.float s6:float s1:float s5:float
+     4  int s3:int 2
+     5  add.int s7:int s4:int s3:int
+     6  copy s2:float s6:float Float
+     7  return s2:float
+"
+    );
+}
+
+/// A `[Int, Ref]` and a `[Ref, Int]` are the same width and never share a
+/// run, because the map would then be wrong for one of them.
+#[test]
+fn a_two_word_location_is_reused_only_by_a_two_word_one_of_the_same_shape() {
+    assert_eq!(
+        listing(
+            "struct A { n: Int, s: String }\nstruct B { s: String, n: Int }\nfn f() -> Int {\n  let a = A(n: 1, s: \"x\")\n  let b = B(s: \"y\", n: 2)\n  a.n + b.n\n}",
+            "f"
+        ),
+        "\
+fn0 m.f() -> Int
+  frame 7: s0:int s1:int s2:ref s3:int s4:ref s5:ref s6:int
+     0  int s1:int 1
+     1  str s2:ref \"x\"
+     2  copy s3:int s1:int Int
+     3  copy s4:ref s2:ref String
+     4  clear s2:ref String
+     5  str s2:ref \"y\"
+     6  int s1:int 2
+     7  copy s5:ref s2:ref String
+     8  copy s6:int s1:int Int
+     9  clear s2:ref String
+    10  add.int s1:int s3:int s6:int
+    11  copy s0:int s1:int Int
+    12  clear s3:int m.A
+    13  clear s5:ref m.B
+    14  return s0:int
+"
+    );
+}
+
+/// Without it, a body that built one string per turn would retain every
+/// one of them until it returned.
+#[test]
+fn a_temporary_holding_a_reference_is_cleared_at_its_last_use() {
+    assert_eq!(
+        listing(
+            "fn shout(a: String, b: String) -> Int { \"{a}{b}\".length() }",
+            "shout"
+        ),
+        "\
+fn0 m.shout(String String) -> Int
+  frame 5: s0!:ref s1!:ref s2:int s3:ref s4:int
+     0  call-builtin s3:ref String.interpolate (s0:ref s1:ref)
+     1  call-builtin s4:int String.length (s3:ref)
+     2  clear s3:ref String
+     3  copy s2:int s4:int Int
+     4  return s2:int
+"
+    );
+}
+
+/// The map says which slots a collection *reads*; only the data can say
+/// when the value in one stopped being needed.
+#[test]
+fn a_local_holding_a_reference_is_cleared_when_its_scope_ends() {
+    assert_eq!(
+        listing(
+            "fn f() -> Int {\n  var n = 0\n  {\n    let s = \"held\"\n    n = s.length()\n  }\n  n\n}",
+            "f"
+        ),
+        "\
+fn0 m.f() -> Int
+  frame 4: s0:int s1:int s2:ref s3:int
+     0  int s1:int 0
+     1  str s2:ref \"held\"
+     2  call-builtin s3:int String.length (s2:ref)
+     3  copy s1:int s3:int Int
+     4  clear s2:ref String
+     5  copy s0:int s1:int Int
+     6  return s0:int
+"
+    );
+}
+
+/// It costs one store on a path that was going to leave the value behind
+/// anyway, and it is emitted only where the location would otherwise
+/// retain something.
+#[test]
+fn a_scalar_is_never_cleared() {
+    assert_eq!(
+        listing("fn f() -> Int {\n  let a = 1\n  let b = 2\n  a + b\n}", "f"),
+        "\
+fn0 m.f() -> Int
+  frame 4: s0:int s1:int s2:int s3:int
      0  int s1:int 1
      1  int s2:int 2
-     2  move s1:int s2:int
-     3  move s0:int s1:int
+     2  add.int s3:int s1:int s2:int
+     3  copy s0:int s3:int Int
      4  return s0:int
 "
     );
 }
 
+/// `Clear` takes a layout and zeroes the location's words, so a struct
+/// with a string in it is ended by one instruction rather than by one per
+/// field.
 #[test]
-fn a_scalar_body_emits_no_clear() {
-    // Clearing is what ends a reference's live range, and a body with no
-    // reference in it has none to end: no slot here is a `Ref` or an
-    // `Addr`, so a scalar program pays nothing for the mechanism a body
-    // holding an object needs.
-    let program = lower(&checked(
-        "fn deep(n: Int) -> Int {\n\
-           var total = 0\n\
-           var i = 0\n\
-           while i < n {\n\
-             let step = i * 2\n\
-             total += step\n\
-             i += 1\n\
-           }\n\
-           total\n\
-         }",
-    ))
-    .expect("the program lowers");
-    for function in &program.functions {
-        assert!(!function
-            .code
-            .iter()
-            .any(|inst| matches!(inst, crate::Inst::Clear { .. })));
-        assert!(function.refs.is_empty());
-    }
-}
-
-#[test]
-fn every_lowered_program_is_verified_before_it_is_handed_back() {
-    // `lower` runs the verifier itself and panics on a fault, because a
-    // fault there is a bug in the lowering rather than in the program. What
-    // this pins is that the corpus below reaches that check at all.
-    for source in [
-        "fn a() -> Int { 1 }",
-        "fn b(x: Int, y: Float, z: Bool, d: Duration) -> Bool { z && x > 0 }",
-        "fn c(n: Int) -> Int { if n == 0 { 0 } else { c(n - 1) } }",
-        "fn d() {\n  var i = 0\n  while i < 10 {\n    if i == 5 { break } else { i += 1 }\n  }\n}",
-        "fn e() -> Duration { -1s + 2s }",
-        "fn f(n: Int) -> Int {\n  var total = 0\n  var i = 0\n  while true {\n    i += 1\n    if i > n { break }\n    if i % 2 == 0 { continue }\n    total += i\n  }\n  total\n}",
-        // The heap half of the corpus: a string and its interpolations, a
-        // declared struct and enum, every pattern shape, `?`, a host call,
-        // and a `var` argument naming a field.
-        "fn g(name: String, n: Int) -> String { \"{name} has {n}\" }",
-        "struct Point { x: Int, y: Int }\nfn h(p: Point) -> Int { p.x + p.y }",
-        "struct Point { x: Int, y: Int }\nfn bump(var n: Int) { n += 1 }\n\
-         fn i(var p: Point) -> Int {\n  bump(var p.x)\n  p.x\n}",
-        "enum Verdict { Keep, Drop(String) }\n\
-         fn j(v: Verdict) -> String { match v { Verdict.Keep => \"k\", Verdict.Drop(why) => why } }",
-        "fn k(x: Result<Option<Int>, String>) -> Int {\n\
-           match x { Ok(Some(n)) => n, Ok(None) => 0, Err(_) => 0 - 1 }\n\
-         }",
-        "fn l(x: Result<Int, String>) -> Result<Int, String> {\n  let n = x?\n  Ok(n + 1)\n}",
-        "use console.println\nfn m(n: Int) -> Result<Unit, Error> {\n\
-           var i = 0\n  while i < n {\n    println(\"row {i}\")?\n    i += 1\n  }\n  Ok(())\n}",
-    ] {
-        let program = lower(&checked(source)).expect("the program lowers");
-        crate::verify(&program).expect("a lowered program is well formed");
-    }
-}
-
-#[test]
-fn a_reference_slot_is_never_handed_to_a_value_of_another_kind() {
-    // The invariant `RefMap` rests on, asserted over a body that holds
-    // objects rather than over one that holds only scalars: a slot's kind is
-    // fixed for the whole function, whatever the free lists did, so one
-    // static bitmap is right at every program counter.
-    let program = lower(&checked(
-        "struct User { name: String, age: Int }\n\
-         fn describe(u: User, greeting: String) -> String {\n\
-           let head = \"{greeting}, {u.name}\"\n\
-           let years = \"{u.age}\"\n\
-           match u.age { 0 => head, _ => years }\n\
-         }",
-    ))
-    .expect("the program lowers");
-    let describe = program.function(program.function_named("m", "describe").expect("lowered"));
-    assert_eq!(describe.refs, crate::RefMap::of(&describe.reprs));
-    assert!(!describe.refs.is_empty());
-    // Every slot the map calls a root is a `Ref`, and every `Clear` names a
-    // slot that could hold one.
-    for slot in describe.refs.iter() {
-        assert_eq!(describe.repr(slot), Some(Repr::Ref));
-    }
-    for inst in &describe.code {
-        if let crate::Inst::Clear { slot } = inst {
-            assert!(matches!(
-                describe.repr(*slot),
-                Some(Repr::Ref) | Some(Repr::Addr)
-            ));
-        }
-    }
+fn a_location_with_one_reference_word_among_scalars_is_cleared_whole() {
+    assert_eq!(
+        listing(
+            "struct User { name: String, age: Int }\nfn f() -> Int {\n  let u = User(name: \"a\", age: 1)\n  u.age\n}",
+            "f"
+        ),
+        "\
+fn0 m.f() -> Int
+  frame 5: s0:int s1:ref s2:int s3:ref s4:int
+     0  str s1:ref \"a\"
+     1  int s2:int 1
+     2  copy s3:ref s1:ref String
+     3  copy s4:int s2:int Int
+     4  clear s1:ref String
+     5  copy s0:int s4:int Int
+     6  clear s3:ref m.User
+     7  return s0:int
+"
+    );
 }

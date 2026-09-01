@@ -164,7 +164,7 @@ impl<'a> Lvm<'a> {
     ) -> Result<Value, RuntimeError> {
         let id = self.lookup(module, name)?;
         let function = self.program.function(id);
-        let arguments = match function.arity {
+        let arguments = match function.arity() {
             0 => Vec::new(),
             1 => vec![Value::array(args.into_iter().map(Value::string))],
             other => {
@@ -218,8 +218,8 @@ impl<'a> Lvm<'a> {
         });
 
         let words = self.words_of(function, &args).map_err(|e| e.at(span))?;
-        let word = self.machine.run(id, &words, &self.budget)?;
-        boundary::to_value(&self.machine, returns, word).map_err(|e| e.at(span))
+        let answer = self.machine.run(id, &words, &self.budget)?;
+        boundary::to_value(&self.machine, returns, &answer).map_err(|e| e.at(span))
     }
 
     /// The arguments in word form.
@@ -235,17 +235,28 @@ impl<'a> Lvm<'a> {
     /// which is exactly the retention the static reference map was careful
     /// not to be.
     fn words_of(&mut self, function: &Function, args: &[Value]) -> Result<Vec<u64>, RuntimeError> {
-        let params = &function.reprs[..function.arity as usize];
+        let params = function.params.clone();
         let mark = self.machine.temps();
         let mut words = Vec::with_capacity(args.len());
         let mut failed = None;
-        for (repr, value) in params.iter().zip(args) {
-            match boundary::from_value(&mut self.machine, *repr, value) {
-                Ok(word) => {
-                    if repr.is_ref() {
-                        self.machine.push_temp(word);
+        for (layout, value) in params.iter().zip(args) {
+            // Each argument's own words, in declaration order, because that
+            // is what the callee's frame is: parameters occupy it from slot 0
+            // at their own widths, and a `(Int, Point, Int)` list is four
+            // words rather than three slots.
+            //
+            // `from_value` releases its own temporary roots when it returns,
+            // so every reference among the words is re-taken here and held
+            // until the frame that will own it exists.
+            match boundary::from_value(&mut self.machine, *layout, value) {
+                Ok(written) => {
+                    let reprs = self.program.layout(*layout).words.clone();
+                    for (repr, word) in reprs.iter().zip(&written) {
+                        if repr.is_ref() && *word != 0 {
+                            self.machine.push_temp(*word);
+                        }
                     }
-                    words.push(word);
+                    words.extend_from_slice(&written);
                 }
                 Err(error) => {
                     failed = Some(error);

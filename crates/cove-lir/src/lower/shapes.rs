@@ -1,117 +1,109 @@
-//! What a type is once it is words and objects.
+//! What a type is once it is words.
 //!
-//! Two questions are asked of a type here and nowhere else: which one word a
-//! value of it occupies, and — when that word is a reference — what the
-//! object it names is made of. Everything that allocates, reads a field,
-//! reads a case index or names a payload goes through this module, so a
-//! struct's field order and an enum's case order are decided once.
+//! One question is asked of a type here and nowhere else: which [`Layout`] a
+//! value of it has. Everything downstream — how wide a location is, which of
+//! its words the collector traces, where a field sits, which payload word a
+//! case writes — is read off that answer, so a struct's field order and an
+//! enum's case order are decided once.
+//!
+//! # A value is a run of words, and the layout says how many
+//!
+//! `docs/LINEAR_VM.md` states the rule this module implements:
+//!
+//! > One slot is one eight-byte word. One value may occupy one or more
+//! > consecutive slots.
+//!
+//! So a scalar is one word, a `struct` is the consecutive words of its
+//! fields, an enum is a discriminant word and a payload region, and only the
+//! families whose storage has no static width — a string, a collection, a
+//! closure, an erased value — are a single [`Repr::Ref`].
 //!
 //! # A layout describes a family
 //!
-//! `docs/LINEAR_VM.md` fixes the table: `Array<String>` and `Array<Point>`
-//! are one layout because a reference is a reference, and `Array<Int>` and
-//! `Array<Duration>` are two because their [`Repr`]s differ and the boundary
-//! has to know which. The same rule is why `Option<Int>` and `Option<Float>`
-//! are two layouts and `Option<String>` and `Option<Point>` are one.
+//! `Array<String>` and `Array<Point>` are one layout because a reference is
+//! a reference; `Array<Int>` and `Array<Duration>` are two because their
+//! words differ and a boundary has to know which. [`Shapes`] interns them,
+//! so one shape is one [`LayoutId`] however many times the source writes it.
 //!
-//! [`Shapes`] interns them, so the same shape is the same [`LayoutId`]
-//! however many times the source writes it, and a program's layout table is
-//! as long as the shapes it actually holds rather than as long as its types.
+//! # Recursion is where boxing is decided
+//!
+//! `struct Node { value: Int, next: Option<Node> }` has no finite inline
+//! width. [`Shapes::of`] holds the nominal declarations it is part way
+//! through, and an occurrence of one of those inside its own layout is
+//! answered with a [`Shape::Boxed`] layout — one `Ref` word naming an object
+//! whose payload is the type's own inline words. The cycle is broken at that
+//! occurrence and nowhere else, so nothing about a `Point` changes because a
+//! `Node` exists.
+//!
+//! Which types that happened to is recorded in [`Shapes::boxed`], and
+//! [`Shapes::unboxed`] answers what a box holds — the pair a `Box`/`Unbox`
+//! at a use site is emitted from.
 //!
 //! # It reads the checker's answers
 //!
-//! A struct's fields and an enum's cases are read from the [`Signature`] the
-//! checker recorded for the declaration — for a struct, its fields in
-//! declaration order; for an enum, one record per case holding that case's
-//! payload types. Nothing here re-resolves an annotation, because an
-//! annotation is a name and only the checker knows what the name meant in
-//! the module it was written in.
+//! A struct's fields and an enum's cases are read from the `Signature` the
+//! checker recorded for the declaration. Nothing here re-resolves an
+//! annotation, because an annotation is a name and only the checker knows
+//! what the name meant in the module it was written in.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use cove_sema::resolve::Program as Checked;
 use cove_sema::typeck::Ty;
 
-use crate::layout::{Case, Field, Layout, LayoutId, Shape};
+use crate::layout::{enum_layout, struct_layout, Layout, LayoutId, Shape};
 use crate::repr::Repr;
 
 /// The layout every string object shares.
-///
-/// It is `LayoutId(1)` in every program: `LayoutId(0)` is what the sweeper
-/// writes into a reclaimed run of words, and the string layout is declared
-/// next whether or not the program mentions a string, because the machine
-/// allocates a host's answer as one.
 pub(super) const STR: LayoutId = LayoutId(1);
+pub(super) const UNIT: LayoutId = LayoutId(2);
+pub(super) const BOOL: LayoutId = LayoutId(3);
+pub(super) const INT: LayoutId = LayoutId(4);
+pub(super) const FLOAT: LayoutId = LayoutId(5);
+pub(super) const DURATION: LayoutId = LayoutId(6);
+/// One word that is a reference, with nothing said about what it names.
+///
+/// It is what a payload word of an enum is zeroed as, and what a location
+/// whose family this lowering never had to name is described by. A boundary
+/// never meets it: every value's own layout is one of the ones above or one
+/// built from a declaration.
+pub(super) const REF: LayoutId = LayoutId(7);
+/// One word that is the address of a value location: a `var` parameter.
+pub(super) const ADDR: LayoutId = LayoutId(8);
 
-/// The one word a value of this type occupies.
-///
-/// [`Ty::Never`] answers a word too, and it is `Unit`. A value of that type
-/// is never produced — the expression left the frame or the loop before it
-/// could be — so the slot exists to keep the numbering uniform and nothing
-/// ever writes it.
-///
-/// Every compound value is one [`Repr::Ref`]: what it *is* is a question its
-/// own object answers from its own header, which is what keeps the frame's
-/// reference map one bit per slot. A generic instantiation answers `None`
-/// rather than `Ref`, because the lowering has not been taught generics and
-/// a layout it cannot build is a gap rather than a reference to nothing.
-pub(super) fn word_of(ty: &Ty) -> Option<Repr> {
-    match ty {
-        Ty::Unit | Ty::Never => Some(Repr::Unit),
-        Ty::Bool => Some(Repr::Bool),
-        Ty::Int => Some(Repr::Int),
-        Ty::Float => Some(Repr::Float),
-        Ty::Duration => Some(Repr::Duration),
-        Ty::Str | Ty::Error | Ty::Option(_) | Ty::Result(..) | Ty::Range => Some(Repr::Ref),
-        // A sequence is one reference whatever it holds, but its element's
-        // word is what its layout is keyed by — `Array<Int>` and
-        // `Array<Duration>` are two families — so an element with no word is
-        // a sequence this lowering cannot describe rather than a reference to
-        // an object it could not build.
-        Ty::Array(elem) | Ty::Vector(elem) => word_of(elem).map(|_| Repr::Ref),
-        Ty::Struct(_, args) | Ty::Enum(_, args) if args.is_empty() => Some(Repr::Ref),
-        // A `dyn Trait` is erased on purpose, and erasure is a reference to
-        // an object carrying its own description. That is the one thing
-        // `docs/LINEAR_VM.md` separates from a `Ty::Unknown`, which is the
-        // checker declining and has no word at all.
-        Ty::Dyn(_) => Some(Repr::Ref),
-        _ => None,
+/// The layout a scalar word of this `Repr` has.
+pub(super) fn scalar(repr: Repr) -> LayoutId {
+    match repr {
+        Repr::Unit => UNIT,
+        Repr::Bool => BOOL,
+        Repr::Int => INT,
+        Repr::Float => FLOAT,
+        Repr::Duration => DURATION,
+        Repr::Ref => REF,
+        Repr::Addr => ADDR,
+        Repr::Host => HOST,
     }
 }
 
-/// Payload word 0 of a [`Shape::Vector`] object: how many elements it holds.
+/// An index into the run's host resource table.
+pub(super) const HOST: LayoutId = LayoutId(9);
+
+/// The object every `Box` allocates.
 ///
-/// The count is in the header rather than in the store, because a store is as
-/// long as the last growth made it and the elements past the count are spare
-/// room rather than value.
+/// One shape for every box, because what a box holds is named by its own
+/// first payload word rather than by its object layout. Reserved rather than
+/// interned on demand so that a program that boxes nothing still declares
+/// it: the machine allocates one for a host's answer, and a table it has to
+/// search first is a search that has to answer something when it fails.
+pub(super) const BOXED: LayoutId = LayoutId(10);
+
+/// Payload word 0 of a [`Shape::Vector`] object: how many elements it holds.
 pub(super) const VECTOR_LEN: u32 = 0;
 
-/// Payload word 1 of a [`Shape::Vector`] object: the
-/// [`Shape::Elements`] object holding them.
+/// Payload word 1 of a [`Shape::Vector`] object: the [`Shape::Elements`]
+/// object holding them.
 pub(super) const VECTOR_STORE: u32 = 1;
-
-/// The fields of the one struct-shaped layout a `Range` is.
-///
-/// `docs/LINEAR_VM.md` fixes it as `Struct { start: Int, end: Int,
-/// inclusive: Bool }`, one layout for the program: `..` and `..<` are two
-/// ways of writing one value, and which one a range was written with is a
-/// word of the object rather than two families.
-fn range_fields() -> Vec<Field> {
-    vec![
-        Field {
-            name: Arc::from("start"),
-            repr: Repr::Int,
-        },
-        Field {
-            name: Arc::from("end"),
-            repr: Repr::Int,
-        },
-        Field {
-            name: Arc::from("inclusive"),
-            repr: Repr::Bool,
-        },
-    ]
-}
 
 /// The word a `Range` holds its first value in.
 pub(super) const RANGE_START: u32 = 0;
@@ -126,28 +118,81 @@ pub(super) const RANGE_INCLUSIVE: u32 = 2;
 /// The program's layout table, being built.
 pub(super) struct Shapes {
     layouts: Vec<Layout>,
+    /// The nominal declarations a call to [`Shapes::of`] is part way
+    /// through, innermost last. An occurrence of one of these inside its own
+    /// layout is the cycle, and the place it is broken.
+    building: Vec<String>,
+    /// The boxed layout standing in for each recursive declaration, and the
+    /// inline layout the box holds once it has been built.
+    boxed: HashMap<String, (LayoutId, Option<LayoutId>)>,
 }
 
 impl Shapes {
-    /// The two layouts every program declares whether or not it uses them.
+    /// The layouts every program declares whether or not it uses them.
     ///
     /// `LayoutId(0)` is what the sweeper writes into a reclaimed run of
-    /// words, and the string layout is what the machine allocates a host's
-    /// answer as. A scalar-only program names neither.
+    /// words; the string layout is what the machine allocates a host's
+    /// answer as; and the scalars are there because a one-word value is the
+    /// width-one case of the model rather than a family of its own, so
+    /// naming one should not depend on a program having mentioned it.
     pub(super) fn new() -> Shapes {
+        let layouts = vec![
+            Layout::free(),
+            Layout::object("String", Shape::Str),
+            Layout::word("Unit", Repr::Unit),
+            Layout::word("Bool", Repr::Bool),
+            Layout::word("Int", Repr::Int),
+            Layout::word("Float", Repr::Float),
+            Layout::word("Duration", Repr::Duration),
+            Layout::word("<ref>", Repr::Ref),
+            Layout::word("<addr>", Repr::Addr),
+            Layout::word("<host>", Repr::Host),
+            Layout::object("Any", Shape::Boxed),
+        ];
         Shapes {
-            layouts: vec![
-                Layout::free(),
-                Layout {
-                    name: Arc::from("String"),
-                    shape: Shape::Str,
-                },
-            ],
+            layouts,
+            building: Vec::new(),
+            boxed: HashMap::new(),
         }
     }
 
     pub(super) fn into_table(self) -> Vec<Layout> {
         self.layouts
+    }
+
+    pub(super) fn layout(&self, id: LayoutId) -> &Layout {
+        &self.layouts[id.index()]
+    }
+
+    /// The words a value of `id` occupies.
+    pub(super) fn words(&self, id: LayoutId) -> &[Repr] {
+        &self.layouts[id.index()].words
+    }
+
+    pub(super) fn width(&self, id: LayoutId) -> u32 {
+        self.layouts[id.index()].width()
+    }
+
+    /// Whether a location of this layout holds anything a collection would
+    /// trace, or an address whose live range the lowering ends.
+    pub(super) fn holds_ref(&self, id: LayoutId) -> bool {
+        self.words(id)
+            .iter()
+            .any(|repr| matches!(repr, Repr::Ref | Repr::Addr))
+    }
+
+    /// What a [`Shape::Boxed`] layout built for a recursive declaration
+    /// holds, inline.
+    ///
+    /// `None` for the `Boxed` layout an *erased* value uses: what a `dyn`
+    /// box holds is a question the box answers at run time, and that is the
+    /// whole difference between erasure and a broken cycle. A recursive
+    /// declaration's box holds one known layout, and this is it.
+    pub(super) fn unboxed(&self, id: LayoutId) -> Option<LayoutId> {
+        self.boxed
+            .values()
+            .find(|(boxed, _)| *boxed == id)
+            .and_then(|(_, inline)| *inline)
     }
 
     /// The id of a layout, adding it only if the table does not hold it.
@@ -165,154 +210,225 @@ impl Shapes {
         }
     }
 
-    /// The layout of the objects a value of `ty` names, read as the module
-    /// `module` reads the names in it.
+    /// The layout of a value of `ty`, read as the module `module` reads the
+    /// names in it.
     ///
     /// `None` where the lowering has not been taught the type. Every caller
     /// turns that into a gap naming the type, so the reason a program stops
     /// is written where the type is rather than here.
     pub(super) fn of(&mut self, checked: &Checked, module: &str, ty: &Ty) -> Option<LayoutId> {
-        let name = nominal(checked, module, ty)?;
         match ty {
+            // A value of `Never` is never produced — the expression left the
+            // frame or the loop before it could be — so the location exists
+            // to keep the numbering uniform and nothing ever writes it.
+            Ty::Unit | Ty::Never => Some(UNIT),
+            Ty::Bool => Some(BOOL),
+            Ty::Int => Some(INT),
+            Ty::Float => Some(FLOAT),
+            Ty::Duration => Some(DURATION),
             Ty::Str => Some(STR),
             // One `Boxed` layout for the whole program, whatever trait was
             // written: what is inside is a question the box answers, from
-            // the `Repr` tag in its own payload word 0. A layout per trait
-            // would be a runtime type universe keyed by a static name, which
-            // is exactly the table a family-shaped layout exists to avoid.
-            Ty::Dyn(_) => Some(self.intern(Layout {
-                name,
-                shape: Shape::Boxed,
-            })),
-            Ty::Error | Ty::Struct(..) => {
-                let declared = struct_fields(checked, module, ty)?;
-                let mut fields = Vec::with_capacity(declared.len());
-                for (name, ty) in declared {
-                    fields.push(Field {
-                        name,
-                        repr: word_of(&ty)?,
-                    });
-                }
-                Some(self.intern(Layout {
-                    name,
-                    shape: Shape::Struct {
+            // the `LayoutId` in its own payload word 0. A layout per trait
+            // would be a runtime type universe keyed by a static name.
+            Ty::Dyn(_) => Some(BOXED),
+            Ty::Error => {
+                let (fields, words) = struct_layout(&[(Arc::from("message"), STR)], &self.layouts);
+                Some(self.intern(Layout::inline(
+                    "Error",
+                    Shape::Struct {
                         fields,
-                        opaque: struct_is_opaque(checked, module, ty),
+                        opaque: false,
                     },
-                }))
+                    words,
+                )))
             }
-            Ty::Range => Some(self.intern(Layout {
-                name,
-                shape: Shape::Struct {
-                    fields: range_fields(),
-                    opaque: false,
-                },
-            })),
+            Ty::Range => {
+                let declared = [
+                    (Arc::from("start"), INT),
+                    (Arc::from("end"), INT),
+                    (Arc::from("inclusive"), BOOL),
+                ];
+                let (fields, words) = struct_layout(&declared, &self.layouts);
+                Some(self.intern(Layout::inline(
+                    "Range",
+                    Shape::Struct {
+                        fields,
+                        opaque: false,
+                    },
+                    words,
+                )))
+            }
             Ty::Array(elem) => {
-                let elem = word_of(elem)?;
-                Some(self.intern(Layout {
-                    name,
-                    shape: Shape::Elements {
+                let elem = self.of(checked, module, elem)?;
+                Some(self.intern(Layout::object(
+                    "Array",
+                    Shape::Elements {
                         elem,
                         growable: false,
                     },
-                }))
+                )))
             }
-            // A vector is two layouts, and both are declared here because the
-            // machine has to find the second without being told: growing
-            // replaces the store beneath a header that stays where it is, and
-            // the only thing that says what a new store looks like is this
-            // table. Interning the store beside the header is what makes
-            // `Shape::Vector { elem }` enough to name it.
+            // A vector is two layouts, and both are declared here because
+            // the machine has to find the second without being told:
+            // growing replaces the store beneath a header that stays where
+            // it is, and the only thing that says what a new store looks
+            // like is this table.
             Ty::Vector(elem) => {
-                let elem = word_of(elem)?;
+                let elem = self.of(checked, module, elem)?;
                 self.store_of(elem);
-                Some(self.intern(Layout {
-                    name,
-                    shape: Shape::Vector { elem },
-                }))
+                Some(self.intern(Layout::object("Vector", Shape::Vector { elem })))
             }
-            Ty::Option(_) | Ty::Result(..) | Ty::Enum(..) => {
-                let declared = enum_cases(checked, module, ty)?;
-                let mut cases = Vec::with_capacity(declared.len());
-                for (name, types) in declared {
-                    let mut payload = Vec::with_capacity(types.len());
-                    for ty in types {
-                        payload.push(word_of(&ty)?);
-                    }
-                    cases.push(Case { name, payload });
-                }
-                Some(self.intern(Layout {
-                    name,
-                    shape: Shape::Enum { cases },
-                }))
+            Ty::Option(some) => {
+                let some = self.of(checked, module, some)?;
+                self.enum_of(
+                    "Option",
+                    &[
+                        (Arc::from("None"), Vec::new()),
+                        (Arc::from("Some"), vec![some]),
+                    ],
+                )
             }
+            Ty::Result(ok, err) => {
+                let ok = self.of(checked, module, ok)?;
+                let err = self.of(checked, module, err)?;
+                self.enum_of(
+                    "Result",
+                    &[(Arc::from("Ok"), vec![ok]), (Arc::from("Err"), vec![err])],
+                )
+            }
+            Ty::Struct(name, args) if args.is_empty() => {
+                self.declared_struct(checked, module, name)
+            }
+            Ty::Enum(name, args) if args.is_empty() => self.declared_enum(checked, module, name),
             _ => None,
         }
+    }
+
+    /// The one box an intentionally erased value occupies.
+    ///
+    /// A host schema that declared its result `Any` is the other side of the
+    /// same coin as `dyn Trait`: from that call onwards the program holds a
+    /// value no schema described, so it carries its own layout rather than
+    /// being a run of words the frame claims to know the shape of.
+    pub(super) fn any(&mut self) -> LayoutId {
+        BOXED
     }
 
     /// The layout of the run of words a [`Shape::Vector`] over `elem` keeps
     /// its elements in.
     ///
-    /// It is the same [`Shape::Elements`] an `Array` is, with `growable` set:
-    /// one shape covers both, and the flag is what a reader consults to tell
-    /// an array from the store beneath a vector. It is named `Vector` because
-    /// a store that reached a boundary would be shown as the value it belongs
-    /// to.
-    pub(super) fn store_of(&mut self, elem: Repr) -> LayoutId {
-        self.intern(Layout {
-            name: Arc::from("Vector"),
-            shape: Shape::Elements {
+    /// It is the same [`Shape::Elements`] an `Array` is, with `growable`
+    /// set: one shape covers both, and the flag is what a reader consults to
+    /// tell an array from the store beneath a vector.
+    pub(super) fn store_of(&mut self, elem: LayoutId) -> LayoutId {
+        self.intern(Layout::object(
+            "Vector",
+            Shape::Elements {
                 elem,
                 growable: true,
             },
-        })
+        ))
     }
-}
 
-/// What a boundary calls an object of this type.
-///
-/// It is the type's own name, without the module that declares it, because
-/// that is what a value of it is *shown* as: `Display for Value` writes the
-/// last segment of a struct's qualified type name, and
-/// `cove_runtime::lvm::boundary` matches an incoming value to a family by the
-/// same last segment. A qualified name here would render one way on this
-/// backend and another on the oracle, and would match nothing coming in.
-///
-/// What it costs is that two modules each declaring a `Point` with the same
-/// field words are one layout. Telling them apart needs the layout table to
-/// carry the declaring module and both readers above to ask for it, which is
-/// a change on the other side of the boundary from this one.
-fn nominal(checked: &Checked, module: &str, ty: &Ty) -> Option<Arc<str>> {
-    Some(match ty {
-        Ty::Str => Arc::from("String"),
-        Ty::Error => Arc::from("Error"),
-        Ty::Option(_) => Arc::from("Option"),
-        Ty::Result(..) => Arc::from("Result"),
-        Ty::Range => Arc::from("Range"),
-        Ty::Array(_) => Arc::from("Array"),
-        Ty::Vector(_) => Arc::from("Vector"),
-        // Not the trait's name: one layout describes every erased value, and
-        // naming it after one trait would say a value of another trait is of
-        // a family it is not.
-        Ty::Dyn(_) => Arc::from("Dyn"),
-        // Qualified, and that is what makes a layout an identity rather than
-        // a shape. Two modules may each declare `struct Point { x: Int }`,
-        // and interning them together would be saying they are one type: a
-        // `dyn` dispatch would then reach the wrong conformance, and a
-        // `Map` would order them the way it orders one type with itself.
-        //
-        // This is also the name the oracle carries — `StructValue::type_name`
-        // is qualified — so the boundary can match a value to a layout
-        // exactly rather than by a name two types can share. A rendering
-        // shortens it, which is what `Display for Value` does with the same
-        // string.
-        Ty::Struct(name, args) | Ty::Enum(name, args) if args.is_empty() => {
-            let (owner, short) = declaring(checked, module, name)?;
-            Arc::from(format!("{owner}.{short}"))
+    /// The box that breaks the cycle a declaration's layout contains.
+    ///
+    /// It is created the first time the declaration is met inside its own
+    /// layout, and answered for *every* mention of the type afterwards — the
+    /// top-level ones too. `docs/LINEAR_VM.md`'s table says a recursive
+    /// layout is one word holding a heap address, and a type that were one
+    /// word inside itself and several words outside would be two
+    /// representations of one type, which is the thing a boundary and a
+    /// copy both have to agree about.
+    fn box_for(&mut self, key: &str) -> LayoutId {
+        if let Some((boxed, _)) = self.boxed.get(key) {
+            return *boxed;
         }
-        _ => return None,
-    })
+        let boxed = self.intern(Layout::object(format!("box {key}"), Shape::Boxed));
+        self.boxed.insert(key.to_string(), (boxed, None));
+        boxed
+    }
+
+    fn enum_of(&mut self, name: &str, cases: &[(Arc<str>, Vec<LayoutId>)]) -> Option<LayoutId> {
+        let (cases, payload) = enum_layout(cases, &self.layouts);
+        let mut words = Vec::with_capacity(1 + payload.len());
+        words.push(Repr::Int);
+        words.extend_from_slice(&payload);
+        Some(self.intern(Layout::inline(name, Shape::Enum { cases, payload }, words)))
+    }
+
+    fn declared_struct(&mut self, checked: &Checked, module: &str, name: &str) -> Option<LayoutId> {
+        let (owner, short) = declaring(checked, module, name)?;
+        let key = format!("{owner}.{short}");
+        if self.building.contains(&key) {
+            return Some(self.box_for(&key));
+        }
+        let declared = struct_fields(checked, module, &Ty::Struct(Arc::from(name), Vec::new()))?;
+        self.building.push(key.clone());
+        let mut placed = Vec::with_capacity(declared.len());
+        for (field, ty) in &declared {
+            match self.of(checked, module, ty) {
+                Some(id) => placed.push((field.clone(), id)),
+                None => {
+                    self.building.pop();
+                    return None;
+                }
+            }
+        }
+        self.building.pop();
+        let (fields, words) = struct_layout(&placed, &self.layouts);
+        let opaque = struct_is_opaque(checked, module, name);
+        let id = self.intern(Layout::inline(
+            key.clone(),
+            Shape::Struct { fields, opaque },
+            words,
+        ));
+        Some(self.record_box(&key, id))
+    }
+
+    fn declared_enum(&mut self, checked: &Checked, module: &str, name: &str) -> Option<LayoutId> {
+        let (owner, short) = declaring(checked, module, name)?;
+        let key = format!("{owner}.{short}");
+        if self.building.contains(&key) {
+            return Some(self.box_for(&key));
+        }
+        let declared = enum_cases(checked, module, &Ty::Enum(Arc::from(name), Vec::new()))?;
+        self.building.push(key.clone());
+        let mut placed = Vec::with_capacity(declared.len());
+        for (case, types) in &declared {
+            let mut parts = Vec::with_capacity(types.len());
+            for ty in types {
+                match self.of(checked, module, ty) {
+                    Some(id) => parts.push(id),
+                    None => {
+                        self.building.pop();
+                        return None;
+                    }
+                }
+            }
+            placed.push((case.clone(), parts));
+        }
+        self.building.pop();
+        let id = self.enum_of(&key, &placed)?;
+        Some(self.record_box(&key, id))
+    }
+
+    /// Records what the box built for `key` holds, once the inline layout it
+    /// stands in for exists, and answers what a mention of the type is.
+    ///
+    /// A declaration whose layout did not contain itself is its own inline
+    /// words. One that did is the box: nothing about a `Point` changes
+    /// because a `Node` exists, and everything about a `Node` is decided
+    /// once.
+    fn record_box(&mut self, key: &str, inline: LayoutId) -> LayoutId {
+        match self.boxed.get_mut(key) {
+            Some(entry) => {
+                entry.1 = Some(inline);
+                entry.0
+            }
+            None => inline,
+        }
+    }
 }
 
 /// The module that declares `name`, and the name within it.
@@ -361,15 +477,8 @@ pub(super) fn struct_fields(
     }
 }
 
-/// Whether `ty` was declared `export opaque struct`.
-///
-/// A type this cannot find an entry for is not opaque, which is the safe
-/// reading for the one thing that consults it: a rendering. `Error` is a
-/// builtin and never opaque, and a rendering of it has its own rule.
-fn struct_is_opaque(checked: &Checked, module: &str, ty: &Ty) -> bool {
-    let Ty::Struct(name, _) = ty else {
-        return false;
-    };
+/// Whether `name` was declared `export opaque struct`.
+fn struct_is_opaque(checked: &Checked, module: &str, name: &str) -> bool {
     let Some((owner, short)) = declaring(checked, module, name) else {
         return false;
     };
@@ -413,17 +522,7 @@ pub(super) fn enum_cases(
     }
 }
 
-/// Where a field sits in a struct-shaped object's payload, and what it holds.
-pub(super) fn field_at(checked: &Checked, module: &str, ty: &Ty, name: &str) -> Option<(u32, Ty)> {
-    let fields = struct_fields(checked, module, ty)?;
-    fields
-        .into_iter()
-        .enumerate()
-        .find(|(_, (field, _))| &**field == name)
-        .map(|(at, (_, ty))| (at as u32, ty))
-}
-
-/// A case's index and the types of its payload words.
+/// A case's index and the types of its payload, if `ty` has a case `name`.
 pub(super) fn case_at(
     checked: &Checked,
     module: &str,

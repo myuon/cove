@@ -1,4 +1,5 @@
-//! The order a `Map` and a `Set` are kept in, over words and heap objects.
+//! The order a `Map` and a `Set` are kept in, over runs of words and heap
+//! objects.
 //!
 //! A `Set` iterates and renders in ascending element order and a `Map` in
 //! ascending key order, so the order is *part of the value* rather than an
@@ -15,6 +16,21 @@
 //! `MapKey`'s own `Ord` on the way out: a disagreement shows up as an order
 //! that changed while crossing.
 //!
+//! # A value is a run of words, and an operand is one of them
+//!
+//! [`docs/LINEAR_VM.md`](../../../../docs/LINEAR_VM.md) says one slot is one
+//! eight-byte word and one value may occupy several, so a struct and an enum
+//! are inline: a `Point` member of a `Set<Point>` is two words *where the
+//! member is*. Everything below therefore compares a [`Key`], which is either
+//! the run of words a known layout describes or one operand word.
+//!
+//! The two halves exist because a [`cove_lir::Builtin`] carries no layout for
+//! its operands and an argument list is base slots that need not be adjacent,
+//! so the machine cannot know how wide an operand is and an operand stays one
+//! word. A set's member and a map's key are not so restricted — the receiver's
+//! own layout says what they are — which is why a search compares a value of a
+//! known layout against an operand rather than two operands.
+//!
 //! # The order between families is the order the variants are declared in
 //!
 //! A derived `Ord` compares the discriminant first, so `MapKey`'s *declaration
@@ -29,18 +45,18 @@
 //! | 2 | `Int` | a `Repr::Int` word |
 //! | 3 | `Duration` | a `Repr::Duration` word |
 //! | 4 | `Str` | a [`Shape::Str`] object |
-//! | 5 | `EnumCase` | a [`Shape::Enum`] object |
-//! | 6 | `Struct` | a [`Shape::Struct`] object that is not the `Range` |
+//! | 5 | `EnumCase` | the inline words of a [`Shape::Enum`] |
+//! | 6 | `Struct` | the inline words of a [`Shape::Struct`] that is not the `Range` |
 //! | 7 | `Array` | a [`Shape::Elements`] object that cannot grow |
 //! | 8 | `Set` | a [`Shape::Members`] object |
 //! | 9 | `Map` | a [`Shape::Entries`] object |
 //! | 10 | `Range` | the program's `Range` struct |
 //!
 //! Two of those are worth saying out loud, because the representation would
-//! suggest otherwise. A `Range` is a struct in the heap and sorts *after*
-//! every other family rather than among the structs, because `MapKey` declares
-//! it last. An `Int` and a `Duration` are the same sixty-four bits and are
-//! never compared as numbers: every `Int` sorts before every `Duration`.
+//! suggest otherwise. A `Range` is a three-word struct and sorts *after* every
+//! other family rather than among the structs, because `MapKey` declares it
+//! last. An `Int` and a `Duration` are the same sixty-four bits and are never
+//! compared as numbers: every `Int` sorts before every `Duration`.
 //!
 //! # A name here is the layout's, and the oracle's is the declaration's
 //!
@@ -61,18 +77,18 @@
 //! change while a collection holds it. So a `Vector` and everything that holds
 //! one is refused, and a `Float` is refused for the unrelated reason that
 //! `NaN` is not equal to itself, which breaks the total order every key needs.
-//! [`check`] is that question asked of a word, and its refusals are
+//! [`check`] is that question asked of a value, and its refusals are
 //! [`crate::builtins`]' word for word, path included.
 
 use std::cmp::Ordering;
 use std::fmt::Write as _;
 
-use cove_lir::{Repr, Shape};
+use cove_lir::{Field, LayoutId, Part, Program, Repr, Shape};
 
 use crate::error::RuntimeError;
 use crate::lvm::boundary::is_range;
 use crate::lvm::builtins::operand::{self, Operand};
-use crate::lvm::builtins::{equal, render};
+use crate::lvm::builtins::{equal, render_value};
 use crate::lvm::exec::Machine;
 
 /// What a `Map`'s key argument is called in a refusal.
@@ -80,6 +96,41 @@ pub(super) const MAP_KEY: &str = "map key";
 
 /// What a `Set`'s element argument is called in one.
 pub(super) const SET_ELEMENT: &str = "set element";
+
+/// A value on its way through the order.
+///
+/// The two halves are the two ways a builtin ever meets one. A member of a
+/// set, a key of a map, a field of a struct and an element of an array all
+/// arrive as [`Key::Held`]: a layout that says the width and the parts, and
+/// the run of words the value occupies. An argument arrives as [`Key::Word`],
+/// because that is all an operand can be.
+#[derive(Clone, Copy)]
+enum Key<'w> {
+    /// One operand word, described only by the `Repr` of the slot it came out
+    /// of.
+    Word(Repr, u64),
+    /// A value of a known layout, as the run of words it occupies.
+    Held(LayoutId, &'w [u64]),
+}
+
+/// One step further in towards a family the order has an arm for.
+///
+/// Owned rather than borrowed because two of the three steps read words out
+/// of the heap: what is inside a box, and what a struct-shaped object holds.
+/// The caller keeps the run alive for exactly the recursive call it makes.
+enum Step {
+    Word(Repr, u64),
+    Held(LayoutId, Vec<u64>),
+}
+
+impl Step {
+    fn key(&self) -> Key<'_> {
+        match self {
+            Step::Word(repr, word) => Key::Word(*repr, *word),
+            Step::Held(layout, words) => Key::Held(*layout, words),
+        }
+    }
+}
 
 /// Whether `operand` may be a key or an element of a set at all.
 ///
@@ -93,21 +144,151 @@ pub(super) fn check(
     role: &str,
     operand: Operand,
 ) -> Result<(), RuntimeError> {
-    admits(machine, method, role, None, operand, 0)
+    admits(
+        machine,
+        method,
+        role,
+        None,
+        Key::Word(operand.0, operand.1),
+        0,
+    )
 }
 
-/// Where `a` sorts relative to `b`.
+/// The same, of a value that arrived as the words of a known layout.
+///
+/// What `Map.of` asks of the key it read out of a `MapEntry`: a key that is a
+/// struct is a run of words rather than an address, so there is no operand to
+/// ask about and the layout is what says which words are what.
+pub(super) fn check_value(
+    machine: &Machine,
+    method: &str,
+    role: &str,
+    layout: LayoutId,
+    words: &[u64],
+) -> Result<(), RuntimeError> {
+    admits(machine, method, role, None, Key::Held(layout, words), 0)
+}
+
+/// Where the value `a` sorts relative to the value `b`, both of `layout`.
 ///
 /// Both are keys: every word that reaches this either passed [`check`] or was
 /// written into a sorted run by something that did.
-pub(super) fn compare(machine: &Machine, a: Operand, b: Operand) -> Result<Ordering, RuntimeError> {
-    order(machine, a, b, 0)
+pub(super) fn cmp_value(
+    machine: &Machine,
+    layout: LayoutId,
+    a: &[u64],
+    b: &[u64],
+) -> Result<Ordering, RuntimeError> {
+    order(machine, Key::Held(layout, a), Key::Held(layout, b), 0)
+}
+
+/// Where the stored value `held`, of `layout`, sorts relative to the operand
+/// `wanted`.
+///
+/// The shape a binary search over a run has: what is in the run is a value of
+/// the run's element layout and what is being looked for is one operand word,
+/// and the two are compared without either being made into the other. Reading
+/// the operand *as* the element layout would be the wrong answer wherever the
+/// two disagree — a boxed `Int` looked for in a `Set<Int>` is one address and
+/// one integer, and comparing them as integers would compare a heap address
+/// with a number.
+pub(super) fn cmp_held(
+    machine: &Machine,
+    layout: LayoutId,
+    held: &[u64],
+    wanted: Operand,
+) -> Result<Ordering, RuntimeError> {
+    order(
+        machine,
+        Key::Held(layout, held),
+        Key::Word(wanted.0, wanted.1),
+        0,
+    )
+}
+
+// --- looking through a description -----------------------------------------
+
+/// The value `key` names, one description in, or `None` when it is already a
+/// family the order has an arm for.
+///
+/// Three things reduce, and each of them costs a depth so that a graph that
+/// holds itself stops rather than running out of native stack.
+///
+/// A value of a family that *lives in* the heap is one word — a `String`, an
+/// `Array`, a `Set`, a `Map` — so a layout that describes one reduces to the
+/// address it holds. An address naming a struct-shaped or enum-shaped object
+/// reduces the other way: those families are inline, so the object's payload
+/// *is* the value's words, which is how a `Map.of` entry the lowering
+/// allocated is read. And a box reduces to what it was given: payload word 0
+/// is the [`LayoutId`] of what it holds and the words after it are that
+/// value, inline.
+///
+/// Erasure is looked through before anything else, and by
+/// [`super::equal::unboxed`] rather than by a second reading of a box here:
+/// two values `==` calls equal have to be usable as one key, and one rule
+/// written once is what makes that so.
+fn inward(machine: &Machine, key: Key) -> Result<Option<Step>, RuntimeError> {
+    Ok(match key {
+        Key::Held(layout, words) => {
+            let described = machine.program().layout(layout);
+            let Some(first) = words.first().copied() else {
+                return Ok(None);
+            };
+            match described.shape {
+                Shape::Word(repr) => Some(Step::Word(repr, first)),
+                _ if described.is_ref() => Some(Step::Word(Repr::Ref, first)),
+                _ => None,
+            }
+        }
+        Key::Word(Repr::Ref, addr) if addr != 0 => {
+            if let Some((held, words)) = equal::unboxed(machine, (Repr::Ref, addr))? {
+                return Ok(Some(Step::Held(held, words)));
+            }
+            let id = machine.object_layout(addr);
+            let described = machine.program().layout(id);
+            match &described.shape {
+                Shape::Struct { .. } | Shape::Enum { .. } => Some(Step::Held(
+                    id,
+                    machine.payload_run(addr, 0, described.width()),
+                )),
+                _ => None,
+            }
+        }
+        _ => None,
+    })
+}
+
+/// The words of one field of a struct, as the value they are.
+fn field_of<'w>(program: &Program, words: &'w [u64], field: &Field) -> Key<'w> {
+    let width = program.layout(field.layout).width();
+    Key::Held(field.layout, run(words, field.at, width))
+}
+
+/// The words of one part of an enum case's payload, as the value they are.
+///
+/// `part.at` is an offset within the *payload region*, which begins after the
+/// discriminant, so within the whole value it is `1 + part.at`.
+fn part_of<'w>(program: &Program, words: &'w [u64], part: &Part) -> Key<'w> {
+    let width = program.layout(part.layout).width();
+    Key::Held(part.layout, run(words, 1 + part.at, width))
+}
+
+/// `words[at..at + width]`, or nothing when the run is shorter than the
+/// layout says.
+///
+/// Empty rather than a panic. A run that does not hold the words its layout
+/// describes is a lowering bug, and a comparison is a bad place to discover
+/// one by unwinding: an empty run reaches [`family`] and is refused there,
+/// with a message, like every other value that cannot be a key.
+fn run(words: &[u64], at: u32, width: u32) -> &[u64] {
+    let (at, width) = (at as usize, width as usize);
+    words.get(at..at + width).unwrap_or(&[])
 }
 
 // --- admitting a key -------------------------------------------------------
 
-/// `anchor` is the path to this operand from the value that was asked about,
-/// so that a refusal several levels down names the part that is wrong rather
+/// `anchor` is the path to this value from the one that was asked about, so
+/// that a refusal several levels down names the part that is wrong rather
 /// than blaming the whole struct. `None` at the root: a bare value has no name
 /// to anchor a path to, and a struct or an enum invents one from its own type
 /// name the first time a path is needed.
@@ -116,34 +297,40 @@ fn admits(
     method: &str,
     role: &str,
     anchor: Option<&str>,
-    operand: Operand,
+    key: Key,
     depth: usize,
 ) -> Result<(), RuntimeError> {
     if depth >= super::MAX_DEPTH {
         return Err(equal::too_deep());
     }
     let deeper = depth + 1;
-    // Erasure is looked through before anything else, as `MapKey::convert`
-    // looks through `value.erased()` first: two values `==` calls equal have
-    // to be usable as one key, and equality already looks through a `dyn`.
-    if let Some(inner) = equal::unboxed(machine, operand) {
-        return admits(machine, method, role, anchor, inner, deeper);
+    if let Some(step) = inward(machine, key)? {
+        return admits(machine, method, role, anchor, step.key(), deeper);
     }
-    let (repr, word) = operand;
-    match repr {
-        Repr::Unit | Repr::Bool | Repr::Int | Repr::Duration => Ok(()),
-        Repr::Ref => admits_object(machine, method, role, anchor, word, deeper),
-        // Every other `Repr` is refused by the name the language gives it,
-        // which for a `Float` is the one rejection with a rule of its own.
-        _ => Err(refused(
-            method,
-            role,
-            anchor,
-            &operand::type_name(machine, repr, word),
-        )),
+    match key {
+        Key::Word(repr, word) => match repr {
+            Repr::Unit | Repr::Bool | Repr::Int | Repr::Duration => Ok(()),
+            Repr::Ref => admits_object(machine, method, role, anchor, word, deeper),
+            // Every other `Repr` is refused by the name the language gives it,
+            // which for a `Float` is the one rejection with a rule of its own.
+            _ => Err(refused(
+                method,
+                role,
+                anchor,
+                &operand::type_name(machine, repr, word),
+            )),
+        },
+        Key::Held(layout, words) => {
+            admits_value(machine, method, role, anchor, layout, words, deeper)
+        }
     }
 }
 
+/// Whether the object at `addr` may be a key.
+///
+/// Only the families that *live in* the heap reach this. A struct and an enum
+/// are inline, so [`inward`] has already turned an address naming one into
+/// the words it holds.
 fn admits_object(
     machine: &Machine,
     method: &str,
@@ -159,38 +346,6 @@ fn admits_object(
     match &layout.shape {
         Shape::Str => Ok(()),
         Shape::Free => Err(operand::reclaimed()),
-        // A `Range` is an immutable value with a stable equality, so it is a
-        // key like any other and there is nothing inside it to walk.
-        Shape::Struct { fields, .. } if is_range(&layout.name, fields) => Ok(()),
-        Shape::Struct { fields, .. } => {
-            let base = path(anchor, || layout.name.to_string());
-            for (at, field) in fields.iter().enumerate() {
-                let word = machine.payload(addr, at as u32);
-                let anchor = format!("{base}.{}", field.name);
-                admits(
-                    machine,
-                    method,
-                    role,
-                    Some(&anchor),
-                    (field.repr, word),
-                    depth,
-                )?;
-            }
-            Ok(())
-        }
-        Shape::Enum { cases } => {
-            let index = machine.payload(addr, 0);
-            let case = cases
-                .get(index as usize)
-                .ok_or_else(|| wrong_case(&layout.name))?;
-            let base = path(anchor, || format!("{}.{}", layout.name, case.name));
-            for (at, repr) in case.payload.iter().enumerate() {
-                let word = machine.payload(addr, 1 + at as u32);
-                let anchor = format!("{base}({at})");
-                admits(machine, method, role, Some(&anchor), (*repr, word), depth)?;
-            }
-            Ok(())
-        }
         // An array is fixed-length and immutable, so its equality cannot
         // change and every element decides for itself. A growable run is a
         // `Vector`'s store, and refusing it is refusing the vector.
@@ -200,9 +355,16 @@ fn admits_object(
         } => {
             let base = path(anchor, String::new);
             for at in 0..machine.object_len(addr) {
-                let word = machine.payload(addr, at);
+                let words = element(machine, addr, *elem, at);
                 let anchor = format!("{base}[{at}]");
-                admits(machine, method, role, Some(&anchor), (*elem, word), depth)?;
+                admits(
+                    machine,
+                    method,
+                    role,
+                    Some(&anchor),
+                    Key::Held(*elem, &words),
+                    depth,
+                )?;
             }
             Ok(())
         }
@@ -213,13 +375,22 @@ fn admits_object(
         // asking, and the first one that cannot be is why nesting a `Map` as
         // a key can still fail. The path names the entry by its key, exactly
         // as the key would render anywhere else.
-        Shape::Entries { key, value } => {
+        Shape::Entries { .. } => {
+            let pairs = pairs_of(machine, addr);
             let base = path(anchor, String::new);
             for at in 0..machine.object_len(addr) {
-                let shown = render(machine, *key, machine.payload(addr, at * 2), 0)?;
-                let word = machine.payload(addr, at * 2 + 1);
+                let key = pairs.key_words(machine, addr, at);
+                let shown = render_value(machine, pairs.key, &key, 0)?;
+                let value = pairs.value_words(machine, addr, at);
                 let anchor = format!("{base}[{shown}]");
-                admits(machine, method, role, Some(&anchor), (*value, word), depth)?;
+                admits(
+                    machine,
+                    method,
+                    role,
+                    Some(&anchor),
+                    Key::Held(pairs.value, &value),
+                    depth,
+                )?;
             }
             Ok(())
         }
@@ -228,6 +399,74 @@ fn admits_object(
             role,
             anchor,
             &operand::type_name(machine, Repr::Ref, addr),
+        )),
+    }
+}
+
+/// Whether the value `words`, read as `layout`, may be a key.
+///
+/// Only the inline families reach this: a layout that describes a value
+/// living in the heap has already reduced to the address it holds.
+fn admits_value(
+    machine: &Machine,
+    method: &str,
+    role: &str,
+    anchor: Option<&str>,
+    layout: LayoutId,
+    words: &[u64],
+    depth: usize,
+) -> Result<(), RuntimeError> {
+    let program = machine.program();
+    let described = program.layout(layout);
+    match &described.shape {
+        // A `Range` is an immutable value with a stable equality, so it is a
+        // key like any other and there is nothing inside it to walk.
+        Shape::Struct { .. } if is_range(program, described) => Ok(()),
+        Shape::Struct { fields, .. } => {
+            let base = path(anchor, || described.name.to_string());
+            for field in fields {
+                let anchor = format!("{base}.{}", field.name);
+                admits(
+                    machine,
+                    method,
+                    role,
+                    Some(&anchor),
+                    field_of(program, words, field),
+                    depth,
+                )?;
+            }
+            Ok(())
+        }
+        Shape::Enum { cases, .. } => {
+            let index = words.first().copied().unwrap_or_default();
+            let case = cases
+                .get(index as usize)
+                .ok_or_else(|| wrong_case(&described.name))?;
+            let base = path(anchor, || format!("{}.{}", described.name, case.name));
+            for (at, part) in case.parts.iter().enumerate() {
+                let anchor = format!("{base}({at})");
+                admits(
+                    machine,
+                    method,
+                    role,
+                    Some(&anchor),
+                    part_of(program, words, part),
+                    depth,
+                )?;
+            }
+            Ok(())
+        }
+        Shape::Free => Err(operand::reclaimed()),
+        _ => Err(refused(
+            method,
+            role,
+            anchor,
+            &operand::layout_name(
+                machine,
+                layout,
+                words.first().copied().unwrap_or_default(),
+                depth,
+            ),
         )),
     }
 }
@@ -243,21 +482,16 @@ fn path(anchor: Option<&str>, own: impl FnOnce() -> String) -> String {
 
 // --- ordering two keys -----------------------------------------------------
 
-fn order(
-    machine: &Machine,
-    a: Operand,
-    b: Operand,
-    depth: usize,
-) -> Result<Ordering, RuntimeError> {
+fn order(machine: &Machine, a: Key, b: Key, depth: usize) -> Result<Ordering, RuntimeError> {
     if depth >= super::MAX_DEPTH {
         return Err(equal::too_deep());
     }
     let deeper = depth + 1;
-    if let Some(inner) = equal::unboxed(machine, a) {
-        return order(machine, inner, b, deeper);
+    if let Some(step) = inward(machine, a)? {
+        return order(machine, step.key(), b, deeper);
     }
-    if let Some(inner) = equal::unboxed(machine, b) {
-        return order(machine, a, inner, deeper);
+    if let Some(step) = inward(machine, b)? {
+        return order(machine, a, step.key(), deeper);
     }
     let (x, y) = (family(machine, a)?, family(machine, b)?);
     match x.rank().cmp(&y.rank()) {
@@ -265,30 +499,29 @@ fn order(
         other => return Ok(other),
     }
     let program = machine.program();
-    Ok(match (x, y) {
-        (Family::Unit, Family::Unit) => Ordering::Equal,
-        (Family::Bool(a), Family::Bool(b)) => a.cmp(&b),
-        (Family::Int(a), Family::Int(b)) => a.cmp(&b),
-        (Family::Duration(a), Family::Duration(b)) => a.cmp(&b),
+    match (x, y) {
+        (Family::Unit, Family::Unit) => Ok(Ordering::Equal),
+        (Family::Bool(a), Family::Bool(b)) => Ok(a.cmp(&b)),
+        (Family::Int(a), Family::Int(b)) => Ok(a.cmp(&b)),
+        (Family::Duration(a), Family::Duration(b)) => Ok(a.cmp(&b)),
         // Byte-wise, which is what `String`'s own `Ord` is.
-        (Family::Str(a), Family::Str(b)) => machine.string_bytes(a).cmp(&machine.string_bytes(b)),
+        (Family::Str(a), Family::Str(b)) => {
+            Ok(machine.string_bytes(a).cmp(&machine.string_bytes(b)))
+        }
         // Type name, then case name, then payload — and the case is read out
-        // of the object, because which payload words are anything at all
-        // depends on the case it is in.
-        (Family::Case(a), Family::Case(b)) => {
-            let (left, right) = (
-                program.layout(machine.object_layout(a)),
-                program.layout(machine.object_layout(b)),
-            );
-            let (Shape::Enum { cases: x }, Shape::Enum { cases: y }) = (&left.shape, &right.shape)
+        // of word 0, because which of the payload words are anything at all
+        // depends on the case the value is in.
+        (Family::Case(x, a), Family::Case(y, b)) => {
+            let (left, right) = (program.layout(x), program.layout(y));
+            let (Shape::Enum { cases: ones, .. }, Shape::Enum { cases: others, .. }) =
+                (&left.shape, &right.shape)
             else {
-                unreachable!("`family` answers `Case` for an enum-shaped object");
+                unreachable!("`family` answers `Case` for an enum-shaped value");
             };
-            let one = x
-                .get(machine.payload(a, 0) as usize)
-                .ok_or_else(|| wrong_case(&left.name))?;
-            let other = y
-                .get(machine.payload(b, 0) as usize)
+            let index = |words: &[u64]| words.first().copied().unwrap_or_default() as usize;
+            let one = ones.get(index(a)).ok_or_else(|| wrong_case(&left.name))?;
+            let other = others
+                .get(index(b))
                 .ok_or_else(|| wrong_case(&right.name))?;
             match (*left.name)
                 .cmp(&right.name)
@@ -297,163 +530,210 @@ fn order(
                 Ordering::Equal => {}
                 ordered => return Ok(ordered),
             }
-            let words = |addr: u64, case: &cove_lir::Case| -> Vec<Operand> {
-                case.payload
-                    .iter()
-                    .enumerate()
-                    .map(|(at, repr)| (*repr, machine.payload(addr, 1 + at as u32)))
-                    .collect()
-            };
-            return runs(machine, &words(a, one), &words(b, other), deeper);
-        }
-        // Type name, then the fields as pairs of name and value, then how
-        // many there are, then whether the declaration was opaque. That is
-        // `MapKey::Struct`'s derived order field for field: it carries
-        // `(String, Vec<(String, MapKey)>, bool)` and compares them in that
-        // order.
-        (Family::Struct(a), Family::Struct(b)) => {
-            let (left, right) = (
-                program.layout(machine.object_layout(a)),
-                program.layout(machine.object_layout(b)),
-            );
-            let (
-                Shape::Struct {
-                    fields: x,
-                    opaque: a_opaque,
-                },
-                Shape::Struct {
-                    fields: y,
-                    opaque: b_opaque,
-                },
-            ) = (&left.shape, &right.shape)
-            else {
-                unreachable!("`family` answers `Struct` for a struct-shaped object");
-            };
-            match (*left.name).cmp(&right.name) {
-                Ordering::Equal => {}
-                ordered => return Ok(ordered),
-            }
-            for (at, (one, other)) in x.iter().zip(y).enumerate() {
-                let at = at as u32;
-                match (*one.name).cmp(&other.name) {
-                    Ordering::Equal => {}
-                    ordered => return Ok(ordered),
-                }
+            for (part, counterpart) in one.parts.iter().zip(&other.parts) {
                 match order(
                     machine,
-                    (one.repr, machine.payload(a, at)),
-                    (other.repr, machine.payload(b, at)),
+                    part_of(program, a, part),
+                    part_of(program, b, counterpart),
                     deeper,
                 )? {
                     Ordering::Equal => {}
                     ordered => return Ok(ordered),
                 }
             }
-            x.len().cmp(&y.len()).then(a_opaque.cmp(b_opaque))
+            Ok(one.parts.len().cmp(&other.parts.len()))
         }
-        (Family::Array(a), Family::Array(b)) => {
-            return runs(
-                machine,
-                &elements(machine, a),
-                &elements(machine, b),
-                deeper,
-            )
+        // Type name, then the fields as pairs of name and value, then how
+        // many there are, then whether the declaration was opaque. That is
+        // `MapKey::Struct`'s derived order field for field: it carries
+        // `(String, Vec<(String, MapKey)>, bool)` and compares them in that
+        // order.
+        (Family::Struct(x, a), Family::Struct(y, b)) => {
+            let (left, right) = (program.layout(x), program.layout(y));
+            let (
+                Shape::Struct {
+                    fields: ones,
+                    opaque: a_opaque,
+                },
+                Shape::Struct {
+                    fields: others,
+                    opaque: b_opaque,
+                },
+            ) = (&left.shape, &right.shape)
+            else {
+                unreachable!("`family` answers `Struct` for a struct-shaped value");
+            };
+            match (*left.name).cmp(&right.name) {
+                Ordering::Equal => {}
+                ordered => return Ok(ordered),
+            }
+            for (one, other) in ones.iter().zip(others) {
+                match (*one.name).cmp(&other.name) {
+                    Ordering::Equal => {}
+                    ordered => return Ok(ordered),
+                }
+                match order(
+                    machine,
+                    field_of(program, a, one),
+                    field_of(program, b, other),
+                    deeper,
+                )? {
+                    Ordering::Equal => {}
+                    ordered => return Ok(ordered),
+                }
+            }
+            Ok(ones.len().cmp(&others.len()).then(a_opaque.cmp(b_opaque)))
         }
-        // A set's members are already ascending, so two sets compare member
-        // for member — which is what `BTreeSet`'s `Ord` does with the same
-        // two runs.
-        (Family::Set(a), Family::Set(b)) => {
-            return runs(
-                machine,
-                &elements(machine, a),
-                &elements(machine, b),
-                deeper,
-            )
+        // An array compares element for element, and a set does the same over
+        // members that are already ascending — which is what `BTreeSet`'s
+        // `Ord` does with the same two runs.
+        (Family::Array(a), Family::Array(b)) | (Family::Set(a), Family::Set(b)) => {
+            sequences(machine, a, b, deeper)
         }
         // And a map compares entry for entry, key before value, which is
         // `BTreeMap`'s `Ord` over its ascending pairs.
-        (Family::Map(a), Family::Map(b)) => {
-            return runs(machine, &pairs(machine, a), &pairs(machine, b), deeper)
-        }
+        (Family::Map(a), Family::Map(b)) => maps(machine, a, b, deeper),
         // The bounds as they were written, in the order `MapKey::Range`
         // declares its fields: an inclusive range sorts after the exclusive
         // one with the same two numbers, because `false < true`.
         (Family::Range(a), Family::Range(b)) => {
-            let word = |addr: u64, at: u32| machine.payload(addr, at) as i64;
-            word(a, 0)
+            let word = |words: &[u64], at: usize| words.get(at).copied().unwrap_or_default() as i64;
+            Ok(word(a, 0)
                 .cmp(&word(b, 0))
                 .then_with(|| word(a, 1).cmp(&word(b, 1)))
-                .then_with(|| (word(a, 2) != 0).cmp(&(word(b, 2) != 0)))
+                .then_with(|| (word(a, 2) != 0).cmp(&(word(b, 2) != 0))))
         }
         _ => unreachable!("two families of one rank are one family"),
-    })
+    }
 }
 
 /// Lexicographic order over two runs, the shorter first when one is a prefix
 /// of the other — which is `Vec`'s own `Ord` and therefore every `MapKey`
 /// variant that holds one.
-fn runs(
-    machine: &Machine,
-    left: &[Operand],
-    right: &[Operand],
-    depth: usize,
-) -> Result<Ordering, RuntimeError> {
-    for (a, b) in left.iter().zip(right) {
-        match order(machine, *a, *b, depth)? {
+///
+/// The elements are read one at a time rather than collected first, because
+/// an element is a run of words: a `Set<Point>` is a run of two-word members,
+/// and materialising both whole runs to answer a question about their fronts
+/// would be paying for the length to compare the head.
+fn sequences(machine: &Machine, a: u64, b: u64, depth: usize) -> Result<Ordering, RuntimeError> {
+    let (x, y) = (elem_of(machine, a), elem_of(machine, b));
+    let (left, right) = (machine.object_len(a), machine.object_len(b));
+    for at in 0..left.min(right) {
+        let one = element(machine, a, x, at);
+        let other = element(machine, b, y, at);
+        match order(machine, Key::Held(x, &one), Key::Held(y, &other), depth)? {
             Ordering::Equal => {}
             ordered => return Ok(ordered),
         }
     }
-    Ok(left.len().cmp(&right.len()))
+    Ok(left.cmp(&right))
 }
 
-/// The elements of an array or the members of a set, as operands.
-fn elements(machine: &Machine, addr: u64) -> Vec<Operand> {
-    let elem = match machine.program().layout(machine.object_layout(addr)).shape {
+/// The same, entry for entry and key before value.
+fn maps(machine: &Machine, a: u64, b: u64, depth: usize) -> Result<Ordering, RuntimeError> {
+    let (x, y) = (pairs_of(machine, a), pairs_of(machine, b));
+    let (left, right) = (machine.object_len(a), machine.object_len(b));
+    for at in 0..left.min(right) {
+        let (one, other) = (x.key_words(machine, a, at), y.key_words(machine, b, at));
+        match order(
+            machine,
+            Key::Held(x.key, &one),
+            Key::Held(y.key, &other),
+            depth,
+        )? {
+            Ordering::Equal => {}
+            ordered => return Ok(ordered),
+        }
+        let (one, other) = (x.value_words(machine, a, at), y.value_words(machine, b, at));
+        match order(
+            machine,
+            Key::Held(x.value, &one),
+            Key::Held(y.value, &other),
+            depth,
+        )? {
+            Ordering::Equal => {}
+            ordered => return Ok(ordered),
+        }
+    }
+    Ok(left.cmp(&right))
+}
+
+/// The element layout of an `Array` or the member layout of a `Set`.
+fn elem_of(machine: &Machine, addr: u64) -> LayoutId {
+    match machine.program().layout(machine.object_layout(addr)).shape {
         Shape::Elements { elem, .. } | Shape::Members { elem } => elem,
         _ => unreachable!("`family` answers a run for a run-shaped object"),
-    };
-    (0..machine.object_len(addr))
-        .map(|at| (elem, machine.payload(addr, at)))
-        .collect()
+    }
 }
 
-/// The entries of a map, key before value, in the ascending order it holds
-/// them in.
-fn pairs(machine: &Machine, addr: u64) -> Vec<Operand> {
+/// Element `at` of the run at `addr`, as the words it occupies.
+///
+/// The header's `len` counts elements and not words, so the offset is the
+/// index times the element layout's width.
+fn element(machine: &Machine, addr: u64, elem: LayoutId, at: u32) -> Vec<u64> {
+    let width = machine.words_of(elem);
+    machine.payload_run(addr, at * width, width)
+}
+
+/// How a map keeps the two halves of an entry: key words then value words, at
+/// their two layouts' widths.
+struct Pairs {
+    key: LayoutId,
+    value: LayoutId,
+    keys: u32,
+    values: u32,
+}
+
+impl Pairs {
+    /// The words of entry `at`'s key.
+    fn key_words(&self, machine: &Machine, addr: u64, at: u32) -> Vec<u64> {
+        machine.payload_run(addr, at * self.stride(), self.keys)
+    }
+
+    /// The words of entry `at`'s value, which begin at the key's width.
+    fn value_words(&self, machine: &Machine, addr: u64, at: u32) -> Vec<u64> {
+        machine.payload_run(addr, at * self.stride() + self.keys, self.values)
+    }
+
+    fn stride(&self) -> u32 {
+        self.keys + self.values
+    }
+}
+
+fn pairs_of(machine: &Machine, addr: u64) -> Pairs {
     let Shape::Entries { key, value } = machine.program().layout(machine.object_layout(addr)).shape
     else {
         unreachable!("`family` answers `Map` for an entries-shaped object");
     };
-    (0..machine.object_len(addr))
-        .flat_map(|at| {
-            [
-                (key, machine.payload(addr, at * 2)),
-                (value, machine.payload(addr, at * 2 + 1)),
-            ]
-        })
-        .collect()
+    Pairs {
+        key,
+        value,
+        keys: machine.words_of(key),
+        values: machine.words_of(value),
+    }
 }
 
 /// Which of the eleven shapes a key may take this one is.
 ///
-/// The scalars carry their value because the word is the whole of them; the
-/// rest carry the object, because what they hold is read out of it.
-enum Family {
+/// The scalars carry their value because the word is the whole of them; a
+/// family that lives in the heap carries its object, because what it holds is
+/// read out of it; and an inline family carries its layout and its words,
+/// because those *are* it.
+enum Family<'w> {
     Unit,
     Bool(bool),
     Int(i64),
     Duration(i64),
     Str(u64),
-    Case(u64),
-    Struct(u64),
+    Case(LayoutId, &'w [u64]),
+    Struct(LayoutId, &'w [u64]),
     Array(u64),
     Set(u64),
     Map(u64),
-    Range(u64),
+    Range(&'w [u64]),
 }
 
-impl Family {
+impl Family<'_> {
     /// Where this family sits in the one order. See the table in [`self`].
     fn rank(&self) -> u8 {
         match self {
@@ -462,8 +742,8 @@ impl Family {
             Family::Int(_) => 2,
             Family::Duration(_) => 3,
             Family::Str(_) => 4,
-            Family::Case(_) => 5,
-            Family::Struct(_) => 6,
+            Family::Case(..) => 5,
+            Family::Struct(..) => 6,
             Family::Array(_) => 7,
             Family::Set(_) => 8,
             Family::Map(_) => 9,
@@ -472,33 +752,48 @@ impl Family {
     }
 }
 
-fn family(machine: &Machine, operand: Operand) -> Result<Family, RuntimeError> {
-    let (repr, word) = operand;
-    match repr {
-        Repr::Unit => return Ok(Family::Unit),
-        Repr::Bool => return Ok(Family::Bool(word != 0)),
-        Repr::Int => return Ok(Family::Int(word as i64)),
-        Repr::Duration => return Ok(Family::Duration(word as i64)),
-        Repr::Ref => {}
-        _ => return Err(not_a_key()),
+/// Which family `key` belongs to, asked only of a key [`inward`] has nothing
+/// left to look through on.
+fn family<'w>(machine: &Machine, key: Key<'w>) -> Result<Family<'w>, RuntimeError> {
+    match key {
+        Key::Word(repr, word) => match repr {
+            Repr::Unit => Ok(Family::Unit),
+            Repr::Bool => Ok(Family::Bool(word != 0)),
+            Repr::Int => Ok(Family::Int(word as i64)),
+            Repr::Duration => Ok(Family::Duration(word as i64)),
+            Repr::Ref => {
+                if word == 0 {
+                    return Err(operand::null_value());
+                }
+                match machine.program().layout(machine.object_layout(word)).shape {
+                    Shape::Str => Ok(Family::Str(word)),
+                    Shape::Free => Err(operand::reclaimed()),
+                    Shape::Elements {
+                        growable: false, ..
+                    } => Ok(Family::Array(word)),
+                    Shape::Members { .. } => Ok(Family::Set(word)),
+                    Shape::Entries { .. } => Ok(Family::Map(word)),
+                    _ => Err(not_a_key()),
+                }
+            }
+            _ => Err(not_a_key()),
+        },
+        Key::Held(layout, words) => {
+            let program = machine.program();
+            let described = program.layout(layout);
+            match &described.shape {
+                Shape::Struct { .. } if is_range(program, described) => Ok(Family::Range(words)),
+                Shape::Struct { .. } => Ok(Family::Struct(layout, words)),
+                Shape::Enum { .. } => Ok(Family::Case(layout, words)),
+                Shape::Free => Err(operand::reclaimed()),
+                // Every remaining shape describes a value that lives in the
+                // heap, which `inward` reduced to its address — so what is
+                // left is a run too short to hold the words its layout
+                // describes.
+                _ => Err(not_a_key()),
+            }
+        }
     }
-    if word == 0 {
-        return Err(operand::null_value());
-    }
-    let layout = machine.program().layout(machine.object_layout(word));
-    Ok(match &layout.shape {
-        Shape::Str => Family::Str(word),
-        Shape::Free => return Err(operand::reclaimed()),
-        Shape::Struct { fields, .. } if is_range(&layout.name, fields) => Family::Range(word),
-        Shape::Struct { .. } => Family::Struct(word),
-        Shape::Enum { .. } => Family::Case(word),
-        Shape::Elements {
-            growable: false, ..
-        } => Family::Array(word),
-        Shape::Members { .. } => Family::Set(word),
-        Shape::Entries { .. } => Family::Map(word),
-        _ => return Err(not_a_key()),
-    })
 }
 
 // --- refusals --------------------------------------------------------------
@@ -536,10 +831,10 @@ fn refused(method: &str, role: &str, anchor: Option<&str>, type_name: &str) -> R
     RuntimeError::new(message).with_rule(rule).with_help(help)
 }
 
-/// An object in a case its layout does not have.
+/// A value in a case its layout does not have.
 ///
 /// [`super::equal`] answers the same event in the same words: a case index is
-/// read out of the object, and one the table cannot name is a lowering bug.
+/// read out of word 0, and one the table cannot name is a lowering bug.
 fn wrong_case(name: &str) -> RuntimeError {
     RuntimeError::new(format!("this `{name}` is in a case it does not have"))
 }
@@ -559,79 +854,87 @@ fn not_a_key() -> RuntimeError {
 mod tests {
     use super::*;
     use crate::lvm::builtins::make;
-    use crate::lvm::builtins::tests::{elements as array_layout, named, world};
+    use crate::lvm::builtins::tests::{elements as array_layout, named, scalar, two_case, world};
     use crate::lvm::exec::tests::Build;
-    use cove_lir::{Field, LayoutId, Shape};
-    use std::sync::Arc;
 
     fn machine(program: &cove_lir::Program) -> Machine<'_> {
         Machine::new(program, 1 << 14)
     }
 
-    /// An object of `layout` holding `words`.
-    fn object(machine: &mut Machine, layout: LayoutId, words: &[u64]) -> u64 {
+    /// A run object of `layout` holding `words`, whose header counts the
+    /// elements the stride divides them into.
+    fn run_of(machine: &mut Machine, layout: LayoutId, elem: LayoutId, words: &[u64]) -> u64 {
+        let stride = machine.words_of(elem).max(1) as usize;
+        let addr = machine
+            .new_object(layout, (words.len() / stride) as u32)
+            .expect("the fixture's heap is large enough");
+        machine.set_payload_run(addr, 0, words);
+        addr
+    }
+
+    fn array(machine: &mut Machine, elem: LayoutId, words: &[u64]) -> u64 {
+        let layout = array_layout(machine.program(), elem, false);
+        run_of(machine, layout, elem, words)
+    }
+
+    fn set(machine: &mut Machine, elem: LayoutId, words: &[u64]) -> u64 {
+        let layout = make::members(machine.program(), elem).expect("the fixture declares a `Set`");
+        run_of(machine, layout, elem, words)
+    }
+
+    fn map(machine: &mut Machine, key: LayoutId, value: LayoutId, words: &[u64]) -> u64 {
+        let layout =
+            make::entries(machine.program(), key, value).expect("the fixture declares a `Map`");
+        let stride = machine.words_of(key) + machine.words_of(value);
+        let addr = machine
+            .new_object(layout, words.len() as u32 / stride)
+            .expect("the fixture's heap is large enough");
+        machine.set_payload_run(addr, 0, words);
+        addr
+    }
+
+    /// A `Boxed` object holding the words of a value of `held`.
+    ///
+    /// Payload word 0 is the layout and the words after it are the value
+    /// inline, and the header's length is the width — which the `Boxed`
+    /// layout itself cannot know.
+    fn boxed(machine: &mut Machine, held: LayoutId, words: &[u64]) -> u64 {
+        let layout = named(machine.program(), "Boxed");
         let addr = machine
             .new_object(layout, words.len() as u32)
             .expect("the fixture's heap is large enough");
-        for (at, word) in words.iter().enumerate() {
-            machine.set_payload(addr, at as u32, *word);
-        }
+        machine.set_payload(addr, 0, held.0 as u64);
+        machine.set_payload_run(addr, 1, words);
         addr
     }
 
-    fn array(machine: &mut Machine, elem: Repr, words: &[u64]) -> u64 {
-        let layout = array_layout(machine.program(), elem, false);
-        object(machine, layout, words)
-    }
-
-    fn set(machine: &mut Machine, elem: Repr, words: &[u64]) -> u64 {
-        let layout = make::members(machine.program(), elem).expect("the fixture declares a `Set`");
-        object(machine, layout, words)
-    }
-
-    fn map(machine: &mut Machine, key: Repr, value: Repr, words: &[u64]) -> u64 {
-        let layout =
-            make::entries(machine.program(), key, value).expect("the fixture declares a `Map`");
-        let addr = machine
-            .new_object(layout, words.len() as u32 / 2)
-            .expect("the fixture's heap is large enough");
-        for (at, word) in words.iter().enumerate() {
-            machine.set_payload(addr, at as u32, *word);
-        }
-        addr
-    }
-
-    fn point(machine: &mut Machine, x: i64, y: i64) -> u64 {
-        let layout = named(machine.program(), "Point");
-        object(machine, layout, &[x as u64, y as u64])
-    }
-
-    fn range(machine: &mut Machine, start: i64, end: i64, inclusive: bool) -> u64 {
-        let layout = named(machine.program(), "Range");
-        object(
-            machine,
-            layout,
-            &[start as u64, end as u64, inclusive as u64],
-        )
-    }
-
+    /// Two operands, which is what an argument and an argument are.
     fn cmp(machine: &Machine, a: Operand, b: Operand) -> Ordering {
-        compare(machine, a, b).expect("both are keys")
+        order(machine, Key::Word(a.0, a.1), Key::Word(b.0, b.1), 0).expect("both are keys")
     }
 
     /// The ranks, in the order [`self`]'s table gives them, each family
     /// against each of the ones it must sort before.
+    ///
+    /// The three inline families are compared as values of a known layout,
+    /// because that is the only way one can be reached: a struct, an enum and
+    /// a `Range` are runs of words rather than addresses.
     #[test]
     fn a_family_sorts_where_its_variant_is_declared() {
         let program = world();
         let mut machine = machine(&program);
+        let int = scalar(&program, Repr::Int);
+        let point = named(&program, "Point");
+        let range = named(&program, "Range");
+        let option = two_case(&program, "Option", "Some", int);
+
         let text = machine.new_string("a").unwrap();
-        let some = make::some(&mut machine, Repr::Int, 1).unwrap();
-        let structure = point(&mut machine, 1, 2);
-        let items = array(&mut machine, Repr::Int, &[1]);
-        let members = set(&mut machine, Repr::Int, &[1]);
-        let entries = map(&mut machine, Repr::Int, Repr::Int, &[1, 2]);
-        let bounds = range(&mut machine, 0, 3, false);
+        let some = boxed(&mut machine, option, &[1, 1]);
+        let structure = boxed(&mut machine, point, &[1, 2]);
+        let items = array(&mut machine, int, &[1]);
+        let members = set(&mut machine, int, &[1]);
+        let entries = map(&mut machine, int, int, &[1, 2]);
+        let bounds = boxed(&mut machine, range, &[0, 3, 0]);
 
         let ordered = [
             (Repr::Unit, 0),
@@ -720,25 +1023,36 @@ mod tests {
     /// A case is ordered by the enum's name, then the case's, then the
     /// payload — so `None` sorts before `Some` because `"None" < "Some"`,
     /// and not because of where the layout lists them.
+    ///
+    /// An enum is inline, so what is compared is two runs of words read as
+    /// the `Option` they belong to.
     #[test]
     fn an_enum_orders_by_name_then_case_then_payload() {
         let program = world();
         let mut machine = machine(&program);
-        let none = make::none(&mut machine, Repr::Int).unwrap();
-        let one = make::some(&mut machine, Repr::Int, 1).unwrap();
-        let two = make::some(&mut machine, Repr::Int, 2).unwrap();
-        let ok = make::ok(&mut machine, Repr::Int, 1).unwrap();
+        let int = scalar(&program, Repr::Int);
+        let option = two_case(&program, "Option", "Some", int);
+        let result = two_case(&program, "Result", "Ok", int);
+
+        let none = make::none(&mut machine, int).unwrap();
+        let one = make::some(&mut machine, int, &[1]).unwrap();
+        let two = make::some(&mut machine, int, &[2]).unwrap();
         assert_eq!(
-            cmp(&machine, (Repr::Ref, none), (Repr::Ref, one)),
+            cmp_value(&machine, option, &none, &one).unwrap(),
             Ordering::Less
         );
         assert_eq!(
-            cmp(&machine, (Repr::Ref, one), (Repr::Ref, two)),
+            cmp_value(&machine, option, &one, &two).unwrap(),
             Ordering::Less
         );
-        // `"Option" < "Result"`, whatever either carries.
+
+        // `"Option" < "Result"`, whatever either carries — and the two are
+        // different layouts, so this is the comparison a box makes.
+        let ok = make::ok(&mut machine, int, &[1]).unwrap();
+        let held = boxed(&mut machine, option, &two);
+        let other = boxed(&mut machine, result, &ok);
         assert_eq!(
-            cmp(&machine, (Repr::Ref, two), (Repr::Ref, ok)),
+            cmp(&machine, (Repr::Ref, held), (Repr::Ref, other)),
             Ordering::Less
         );
     }
@@ -746,20 +1060,18 @@ mod tests {
     #[test]
     fn a_struct_orders_by_name_then_field_by_field() {
         let program = world();
-        let mut machine = machine(&program);
-        let origin = point(&mut machine, 0, 0);
-        let up = point(&mut machine, 0, 1);
-        let over = point(&mut machine, 1, 0);
+        let machine = machine(&program);
+        let point = named(&program, "Point");
         assert_eq!(
-            cmp(&machine, (Repr::Ref, origin), (Repr::Ref, up)),
+            cmp_value(&machine, point, &[0, 0], &[0, 1]).unwrap(),
             Ordering::Less
         );
         assert_eq!(
-            cmp(&machine, (Repr::Ref, up), (Repr::Ref, over)),
+            cmp_value(&machine, point, &[0, 1], &[1, 0]).unwrap(),
             Ordering::Less
         );
         assert_eq!(
-            cmp(&machine, (Repr::Ref, origin), (Repr::Ref, origin)),
+            cmp_value(&machine, point, &[0, 0], &[0, 0]).unwrap(),
             Ordering::Equal
         );
     }
@@ -770,9 +1082,10 @@ mod tests {
     fn a_sequence_orders_element_by_element_and_then_by_length() {
         let program = world();
         let mut machine = machine(&program);
-        let short = array(&mut machine, Repr::Int, &[1]);
-        let long = array(&mut machine, Repr::Int, &[1, 0]);
-        let larger = array(&mut machine, Repr::Int, &[2]);
+        let int = scalar(&program, Repr::Int);
+        let short = array(&mut machine, int, &[1]);
+        let long = array(&mut machine, int, &[1, 0]);
+        let larger = array(&mut machine, int, &[2]);
         assert_eq!(
             cmp(&machine, (Repr::Ref, short), (Repr::Ref, long)),
             Ordering::Less
@@ -784,17 +1097,39 @@ mod tests {
 
         // A set and a map are the same comparison over the runs they keep in
         // ascending order.
-        let one = set(&mut machine, Repr::Int, &[1]);
-        let both = set(&mut machine, Repr::Int, &[1, 2]);
+        let one = set(&mut machine, int, &[1]);
+        let both = set(&mut machine, int, &[1, 2]);
         assert_eq!(
             cmp(&machine, (Repr::Ref, one), (Repr::Ref, both)),
             Ordering::Less
         );
-        let low = map(&mut machine, Repr::Int, Repr::Int, &[1, 1]);
-        let high = map(&mut machine, Repr::Int, Repr::Int, &[1, 2]);
+        let low = map(&mut machine, int, int, &[1, 1]);
+        let high = map(&mut machine, int, int, &[1, 2]);
         assert_eq!(
             cmp(&machine, (Repr::Ref, low), (Repr::Ref, high)),
             Ordering::Less
+        );
+    }
+
+    /// An element is a run of words at the element layout's width, so a
+    /// two-word member is compared as a `Point` and not as the two integers
+    /// it is made of.
+    #[test]
+    fn a_run_of_multiword_elements_is_walked_at_its_stride() {
+        let program = world();
+        let mut machine = machine(&program);
+        let point = named(&program, "Point");
+        let low = array(&mut machine, point, &[1, 2, 9, 9]);
+        let high = array(&mut machine, point, &[1, 3, 0, 0]);
+        assert_eq!(
+            cmp(&machine, (Repr::Ref, low), (Repr::Ref, high)),
+            Ordering::Less
+        );
+        // The second element decides only when the first does not.
+        let same = array(&mut machine, point, &[1, 2, 9, 9]);
+        assert_eq!(
+            cmp(&machine, (Repr::Ref, low), (Repr::Ref, same)),
+            Ordering::Equal
         );
     }
 
@@ -803,37 +1138,50 @@ mod tests {
     #[test]
     fn a_range_orders_by_the_bounds_it_was_written_with() {
         let program = world();
-        let mut machine = machine(&program);
-        let exclusive = range(&mut machine, 1, 3, false);
-        let inclusive = range(&mut machine, 1, 3, true);
-        let later = range(&mut machine, 2, 3, false);
+        let machine = machine(&program);
+        let range = named(&program, "Range");
         assert_eq!(
-            cmp(&machine, (Repr::Ref, exclusive), (Repr::Ref, inclusive)),
+            cmp_value(&machine, range, &[1, 3, 0], &[1, 3, 1]).unwrap(),
             Ordering::Less
         );
         assert_eq!(
-            cmp(&machine, (Repr::Ref, inclusive), (Repr::Ref, later)),
+            cmp_value(&machine, range, &[1, 3, 1], &[2, 3, 0]).unwrap(),
             Ordering::Less
         );
     }
 
     /// Erasure is looked through on either side, so where the checker put a
-    /// `dyn` wrapper is not something the order can tell.
+    /// `dyn` wrapper is not something the order can tell — and a box records
+    /// the *layout* of what it holds, so a boxed `Point` is two words rather
+    /// than an address to two more.
     #[test]
     fn a_box_orders_as_what_it_holds() {
         let program = world();
         let mut machine = machine(&program);
-        let layout = named(machine.program(), "Boxed");
-        let boxed = object(&mut machine, layout, &[Repr::Int.tag(), 3]);
+        let int = scalar(&program, Repr::Int);
+        let point = named(&program, "Point");
+        let held = boxed(&mut machine, int, &[3]);
         assert_eq!(
-            cmp(&machine, (Repr::Ref, boxed), (Repr::Int, 4)),
+            cmp(&machine, (Repr::Ref, held), (Repr::Int, 4)),
             Ordering::Less
         );
         assert_eq!(
-            cmp(&machine, (Repr::Int, 3), (Repr::Ref, boxed)),
+            cmp(&machine, (Repr::Int, 3), (Repr::Ref, held)),
             Ordering::Equal
         );
-        check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, boxed)).unwrap();
+        check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, held)).unwrap();
+
+        // A boxed `Point` is a `Point`, so it sorts among the structs and a
+        // member of a `Set<Point>` finds it.
+        let structure = boxed(&mut machine, point, &[1, 2]);
+        assert_eq!(
+            cmp_held(&machine, point, &[1, 2], (Repr::Ref, structure)).unwrap(),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp_held(&machine, point, &[1, 1], (Repr::Ref, structure)).unwrap(),
+            Ordering::Less
+        );
     }
 
     /// A `Float` is refused with the rule that is its own, and a `Vector`
@@ -842,6 +1190,7 @@ mod tests {
     fn a_float_and_a_vector_are_refused_in_the_oracles_words() {
         let program = world();
         let mut machine = machine(&program);
+        let int = scalar(&program, Repr::Int);
         let error = check(
             &machine,
             "Set.of",
@@ -858,7 +1207,7 @@ mod tests {
             Some("A `Float` cannot be a map key or set element: `NaN` is not equal to itself, which breaks the total order every key needs.")
         );
 
-        let items = make::vector_of(&mut machine, Repr::Int, &[1]).unwrap();
+        let items = make::vector_of(&mut machine, int, &[1]).unwrap();
         let error = check(&machine, "Map.get", MAP_KEY, (Repr::Ref, items)).unwrap_err();
         assert_eq!(
             error.message,
@@ -879,80 +1228,58 @@ mod tests {
         let mut build = Build::default();
         let string = build.layout("String", Shape::Str);
         build.program.str_layout = string;
-        build.layout(
-            "Held",
-            Shape::Struct {
-                fields: vec![
-                    Field {
-                        name: Arc::from("tag"),
-                        repr: Repr::Int,
-                    },
-                    Field {
-                        name: Arc::from("weight"),
-                        repr: Repr::Float,
-                    },
-                ],
-                opaque: false,
-            },
-        );
+        let int = build.word("Int", Repr::Int);
+        let float = build.word("Float", Repr::Float);
+        let held = build.structure("Held", &[("tag", int), ("weight", float)]);
         build.layout(
             "Array",
             Shape::Elements {
-                elem: Repr::Ref,
+                elem: held,
                 growable: false,
             },
         );
-        build.layout(
-            "Option",
-            Shape::Enum {
-                cases: vec![
-                    cove_lir::Case {
-                        name: Arc::from("None"),
-                        payload: vec![],
-                    },
-                    cove_lir::Case {
-                        name: Arc::from("Some"),
-                        payload: vec![Repr::Float],
-                    },
-                ],
-            },
-        );
+        let option = build.enumeration("Option", &[("None", vec![]), ("Some", vec![float])]);
         build.layout(
             "Map",
             Shape::Entries {
-                key: Repr::Int,
-                value: Repr::Float,
+                key: int,
+                value: float,
             },
         );
         let program = build.done();
         let mut machine = machine(&program);
 
-        let held = object(
-            &mut machine,
-            named(&program, "Held"),
+        let error = check_value(
+            &machine,
+            "Set.of",
+            SET_ELEMENT,
+            held,
             &[1, 1.5f64.to_bits()],
-        );
-        let error = check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, held)).unwrap_err();
+        )
+        .unwrap_err();
         assert_eq!(
             error.message,
             "`Set.of` cannot use a `Float` inside `Held.weight` as a set element"
         );
 
         // An array at the root anchors on nothing, so the path is the index
-        // alone — and a struct inside it extends that.
-        let items = object(&mut machine, named(&program, "Array"), &[held]);
+        // alone — and a struct inside it extends that. The elements are
+        // inline, at the `Held` layout's width.
+        let items = array(&mut machine, held, &[1, 1.5f64.to_bits()]);
         let error = check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, items)).unwrap_err();
         assert_eq!(
             error.message,
             "`Set.of` cannot use a `Float` inside `[0].weight` as a set element"
         );
 
-        let some = object(
-            &mut machine,
-            named(&program, "Option"),
+        let error = check_value(
+            &machine,
+            "Map.inserted",
+            MAP_KEY,
+            option,
             &[1, 1.5f64.to_bits()],
-        );
-        let error = check(&machine, "Map.inserted", MAP_KEY, (Repr::Ref, some)).unwrap_err();
+        )
+        .unwrap_err();
         assert_eq!(
             error.message,
             "`Map.inserted` cannot use a `Float` inside `Option.Some(0)` as a map key"
@@ -960,9 +1287,7 @@ mod tests {
 
         // A map's *values* are what nesting one as a key still asks about,
         // and the entry is named by the key as it renders.
-        let entries = machine.new_object(named(&program, "Map"), 1).unwrap();
-        machine.set_payload(entries, 0, 7);
-        machine.set_payload(entries, 1, 1.5f64.to_bits());
+        let entries = map(&mut machine, int, float, &[7, 1.5f64.to_bits()]);
         let error = check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, entries)).unwrap_err();
         assert_eq!(
             error.message,
@@ -976,9 +1301,10 @@ mod tests {
     fn a_nested_set_is_admitted_without_walking_it() {
         let program = world();
         let mut machine = machine(&program);
-        let members = set(&mut machine, Repr::Int, &[1, 2]);
+        let int = scalar(&program, Repr::Int);
+        let members = set(&mut machine, int, &[1, 2]);
         check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, members)).unwrap();
-        let entries = map(&mut machine, Repr::Int, Repr::Int, &[1, 2]);
+        let entries = map(&mut machine, int, int, &[1, 2]);
         check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, entries)).unwrap();
     }
 
@@ -988,13 +1314,20 @@ mod tests {
     fn a_cycle_stops_rather_than_recursing_forever() {
         let program = world();
         let mut machine = machine(&program);
-        let a = array(&mut machine, Repr::Ref, &[0]);
+        let text = program.str_layout;
+        let a = array(&mut machine, text, &[0]);
         machine.set_payload(a, 0, a);
-        let b = array(&mut machine, Repr::Ref, &[0]);
+        let b = array(&mut machine, text, &[0]);
         machine.set_payload(b, 0, b);
         let error = check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, a)).unwrap_err();
         assert_eq!(error.message, "this value nests too deeply to compare");
-        let error = compare(&machine, (Repr::Ref, a), (Repr::Ref, b)).unwrap_err();
+        let error = order(
+            &machine,
+            Key::Word(Repr::Ref, a),
+            Key::Word(Repr::Ref, b),
+            0,
+        )
+        .unwrap_err();
         assert_eq!(error.message, "this value nests too deeply to compare");
     }
 
@@ -1003,14 +1336,21 @@ mod tests {
     fn a_null_or_reclaimed_reference_is_refused() {
         let program = world();
         let mut machine = machine(&program);
+        let int = scalar(&program, Repr::Int);
         let error = check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, 0)).unwrap_err();
         assert_eq!(error.message, "this value was read before it was given one");
 
-        let dead = array(&mut machine, Repr::Int, &[]);
+        let dead = array(&mut machine, int, &[]);
         machine.relabel(dead, LayoutId::FREE, 0, 0);
         let error = check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, dead)).unwrap_err();
         assert_eq!(error.message, "this value was read after it was reclaimed");
-        let error = compare(&machine, (Repr::Ref, dead), (Repr::Ref, dead)).unwrap_err();
+        let error = order(
+            &machine,
+            Key::Word(Repr::Ref, dead),
+            Key::Word(Repr::Ref, dead),
+            0,
+        )
+        .unwrap_err();
         assert_eq!(error.message, "this value was read after it was reclaimed");
     }
 }
