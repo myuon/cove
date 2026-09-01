@@ -36,6 +36,8 @@
 mod expr;
 mod frame;
 mod gap;
+mod pattern;
+mod shapes;
 mod stmt;
 
 #[cfg(test)]
@@ -50,11 +52,15 @@ use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Expr, FnDecl};
 
 use crate::inst::{Inst, Pc, Slot};
-use crate::layout::{Layout, LayoutId, Shape};
-use crate::program::{ArgsId, Function, FunctionId, Program};
+use crate::layout::LayoutId;
+use crate::program::{
+    ArgsId, Builtin, BuiltinId, Function, FunctionId, HostOp, HostOpId, Program, StrId, Table,
+    TableId,
+};
 use crate::repr::{RefMap, Repr};
 
 use frame::{Frame, Val};
+use shapes::{word_of, Shapes};
 
 /// The target of a jump that has been emitted but whose destination is not
 /// known yet.
@@ -73,31 +79,21 @@ const PENDING: Pc = Pc::MAX;
 pub fn lower(checked: &Checked) -> Result<Program, Vec<Diagnostic>> {
     let mut errors = Vec::new();
     let plan = Plan::build(checked, &mut errors);
-    let mut args = Args::default();
+    let mut pool = Pool::new();
     let mut functions = Vec::new();
     for id in 0..plan.decls.len() {
-        functions.push(lower_function(checked, &plan, id, &mut args, &mut errors));
+        functions.push(lower_function(checked, &plan, id, &mut pool, &mut errors));
     }
 
     let program = Program {
         functions,
-        // Two layouts every program declares whether or not it uses them:
-        // `LayoutId(0)` is what the sweeper writes into a reclaimed run of
-        // words, and the string layout is what the machine allocates a
-        // host's answer as. A scalar-only program names neither.
-        layouts: vec![
-            Layout::free(),
-            Layout {
-                name: Arc::from("String"),
-                shape: Shape::Str,
-            },
-        ],
-        str_layout: LayoutId(1),
-        strings: Vec::new(),
-        args: args.lists,
-        tables: Vec::new(),
-        host_ops: Vec::new(),
-        builtins: Vec::new(),
+        layouts: pool.shapes.into_table(),
+        str_layout: shapes::STR,
+        strings: pool.strings,
+        args: pool.args.lists,
+        tables: pool.tables,
+        host_ops: pool.host_ops,
+        builtins: pool.builtins,
         by_name: plan.by_name,
     };
 
@@ -156,6 +152,12 @@ struct Decl<'a> {
 struct Boundary {
     params: Vec<Repr>,
     returns: Repr,
+    /// What the declaration answers, as the checker settled it.
+    ///
+    /// The word is not enough for `?`, which has to build the enclosing
+    /// function's own `Err` or `None` and therefore needs the layout rather
+    /// than only the fact that it is a reference.
+    ret: Ty,
 }
 
 /// Every declaration the package will have a [`Function`] for, numbered.
@@ -196,16 +198,26 @@ impl<'a> Plan<'a> {
         plan
     }
 
-    /// Reports the declarations that are not functions and so have no code
-    /// here yet. A type this lowering cannot represent is a gap at every use
-    /// of it as well, but naming the declaration once is what says where the
-    /// work is.
+    /// Reports the declarations that have no code here yet.
+    ///
+    /// A `struct` and an `enum` are not among them any more: they declare a
+    /// [`crate::Shape`] rather than a function, and the shape is built where
+    /// a value of the type is met. What is still reported is the declaration
+    /// whose *shape* this lowering cannot build at all — a generic one,
+    /// whose fields are type parameters and so have no word — and the ones
+    /// that would need code of their own. A type this lowering cannot
+    /// represent is a gap at every use of it as well, but naming the
+    /// declaration once is what says where the work is.
     fn declare_gaps(&self, resolved: &ResolvedModule, errors: &mut Vec<Diagnostic>) {
         for entry in resolved.structs.values() {
-            errors.push(gap::gap("a `struct` declaration", entry.decl.span));
+            if !entry.decl.generics.is_empty() {
+                errors.push(gap::gap("a generic `struct` declaration", entry.decl.span));
+            }
         }
         for entry in resolved.enums.values() {
-            errors.push(gap::gap("an `enum` declaration", entry.decl.span));
+            if !entry.decl.generics.is_empty() {
+                errors.push(gap::gap("a generic `enum` declaration", entry.decl.span));
+            }
         }
         for entry in resolved.traits.values() {
             errors.push(gap::gap("a `trait` declaration", entry.decl.span));
@@ -256,9 +268,7 @@ fn boundary_of(checked: &Checked, decl: &FnDecl, errors: &mut Vec<Diagnostic>) -
         ok = false;
     }
     for param in &decl.params {
-        let what = if param.is_var {
-            "a `var` parameter"
-        } else if param.variadic {
+        let what = if param.variadic {
             "a variadic parameter"
         } else if param.default.is_some() {
             "a parameter with a default"
@@ -280,6 +290,12 @@ fn boundary_of(checked: &Checked, decl: &FnDecl, errors: &mut Vec<Diagnostic>) -
     let mut params = Vec::new();
     for (param, ty) in decl.params.iter().zip(&signature.params) {
         match word_of(ty) {
+            // A `var` parameter is an ordinary slot whose `Repr` is
+            // `Addr`: it names the caller's storage, so the word is the
+            // address of it rather than a copy of what is in it. The
+            // type is still read, because a type with no word is a gap
+            // whichever side of the alias it is on.
+            Some(_) if param.is_var => params.push(Repr::Addr),
             Some(repr) => params.push(repr),
             None => {
                 errors.push(describe(ty, param.span));
@@ -297,25 +313,11 @@ fn boundary_of(checked: &Checked, decl: &FnDecl, errors: &mut Vec<Diagnostic>) -
         }
     };
 
-    ok.then_some(Boundary { params, returns })
-}
-
-/// The one word a value of this type occupies, for the types this task
-/// lowers.
-///
-/// [`Ty::Never`] answers a word too, and it is `Unit`. A value of that type
-/// is never produced — the expression left the frame or the loop before it
-/// could be — so the slot exists to keep the numbering uniform and nothing
-/// ever writes it.
-fn word_of(ty: &Ty) -> Option<Repr> {
-    match ty {
-        Ty::Unit | Ty::Never => Some(Repr::Unit),
-        Ty::Bool => Some(Repr::Bool),
-        Ty::Int => Some(Repr::Int),
-        Ty::Float => Some(Repr::Float),
-        Ty::Duration => Some(Repr::Duration),
-        _ => None,
-    }
+    ok.then_some(Boundary {
+        params,
+        returns,
+        ret: signature.ret.clone(),
+    })
 }
 
 /// Why a type has no word here: the checker settled nothing, or it settled
@@ -352,6 +354,77 @@ impl Args {
     }
 }
 
+/// Everything a [`Program`] holds once for the whole package, being built.
+///
+/// It is one struct rather than a parameter each because every one of them
+/// is written from inside a body and read only when the program is
+/// assembled: a body that meets a string literal, a `match`, a host call or
+/// a struct is adding to a table that outlives the function it is in.
+///
+/// Each table interns. Two call sites of the same shape share one argument
+/// list, two `"{n}"`s share one string, and two `Option<Int>`s share one
+/// layout — which is what keeps these tables as long as the shapes a program
+/// has rather than as long as the expressions that mention them.
+struct Pool {
+    args: Args,
+    strings: Vec<Arc<str>>,
+    tables: Vec<Table>,
+    host_ops: Vec<HostOp>,
+    builtins: Vec<Builtin>,
+    shapes: Shapes,
+}
+
+impl Pool {
+    fn new() -> Pool {
+        Pool {
+            args: Args::default(),
+            strings: Vec::new(),
+            tables: Vec::new(),
+            host_ops: Vec::new(),
+            builtins: Vec::new(),
+            shapes: Shapes::new(),
+        }
+    }
+
+    fn string(&mut self, text: &str) -> StrId {
+        match self.strings.iter().position(|held| &**held == text) {
+            Some(at) => StrId(at as u32),
+            None => {
+                self.strings.push(Arc::from(text));
+                StrId((self.strings.len() - 1) as u32)
+            }
+        }
+    }
+
+    /// A jump table. Not interned: a `match`'s targets are program counters
+    /// of the function it is in, so two tables that happen to agree agree by
+    /// accident.
+    fn table(&mut self, table: Table) -> TableId {
+        self.tables.push(table);
+        TableId((self.tables.len() - 1) as u32)
+    }
+
+    fn host_op(&mut self, op: HostOp) -> HostOpId {
+        match self.host_ops.iter().position(|held| *held == op) {
+            Some(at) => HostOpId(at as u32),
+            None => {
+                self.host_ops.push(op);
+                HostOpId((self.host_ops.len() - 1) as u32)
+            }
+        }
+    }
+
+    fn builtin(&mut self, builtin: Builtin) -> BuiltinId {
+        match self.builtins.iter().position(|held| *held == builtin) {
+            Some(at) => BuiltinId(at as u32),
+            None => {
+                self.builtins.push(builtin);
+                BuiltinId((self.builtins.len() - 1) as u32)
+            }
+        }
+    }
+}
+
 // --------------------------------------------------------------- one body
 
 /// A loop being lowered, and what it owes its `break`s.
@@ -370,7 +443,7 @@ struct Loop {
 struct Body<'a> {
     checked: &'a Checked,
     plan: &'a Plan<'a>,
-    args: &'a mut Args,
+    pool: &'a mut Pool,
     errors: &'a mut Vec<Diagnostic>,
     /// The module the body is written in, which is what an unqualified name
     /// in it is resolved against.
@@ -382,13 +455,20 @@ struct Body<'a> {
     /// The slot the body's answer is assembled in, and the one the trailing
     /// [`Inst::Return`] names.
     answer: Slot,
+    /// What this function answers, as a type rather than as a word.
+    ///
+    /// `?` needs it: the value it leaves through is the enclosing
+    /// function's own `Err` or `None`, built here, and building one needs
+    /// the layout of *this* function's answer rather than the layout of the
+    /// thing the `?` was applied to.
+    returns: Ty,
 }
 
 fn lower_function(
     checked: &Checked,
     plan: &Plan,
     id: usize,
-    args: &mut Args,
+    pool: &mut Pool,
     errors: &mut Vec<Diagnostic>,
 ) -> Function {
     let decl = &plan.decls[id];
@@ -407,7 +487,7 @@ fn lower_function(
     let mut body = Body {
         checked,
         plan,
-        args,
+        pool,
         errors,
         module: &decl.module,
         frame,
@@ -415,6 +495,7 @@ fn lower_function(
         spans: Vec::new(),
         loops: Vec::new(),
         answer,
+        returns: boundary.ret.clone(),
     };
 
     body.frame.push_scope();
@@ -491,15 +572,56 @@ impl Body<'_> {
 
     /// Ends the live range of the reference slots a scope owned.
     ///
-    /// Empty today, and deliberately still here: no slot in a scalar-only
-    /// body is `Ref` or `Addr`, so [`Frame::pop_scope`] answers an empty
-    /// list and nothing is emitted. What the mechanism is for is the moment
-    /// the heap arrives, when the alternative — a static reference map with
-    /// no way to say a value died — retains every object a frame ever
-    /// touched until the frame returns.
+    /// A scalar body emits nothing here, because [`Frame::pop_scope`]
+    /// answers an empty list. A body that holds an object emits one store
+    /// per binding, and that store is what keeps a static reference map from
+    /// being a leak: the map says which slots a collection *reads*, and only
+    /// the data can say when the value in one stopped being needed.
     fn clear(&mut self, slots: &[Slot], span: Span) {
         for slot in slots {
             self.emit(Inst::Clear { slot: *slot }, span);
+        }
+    }
+
+    /// Ends a temporary's live range, clearing the slot when it held
+    /// something the collector would otherwise trace.
+    ///
+    /// Every consumer of a value calls this rather than
+    /// [`Frame::release`](frame::Frame::release), so a reference a body
+    /// stopped needing is null from that instruction onwards rather than
+    /// until the frame returns. It is unconditional for a `Ref` or an
+    /// `Addr`: the slot goes back on a free list here, and whether some
+    /// later value of the same kind happens to overwrite it is a fact about
+    /// the rest of the body, which this cannot see and must not assume.
+    ///
+    /// A borrowed slot is not cleared, because it is not this expression's
+    /// to end: a parameter, a local, or the answer word outlives the
+    /// expression that read it, and the scope that owns it clears it.
+    fn release(&mut self, value: Val, span: Span) {
+        if !value.temp {
+            return;
+        }
+        if matches!(self.frame.repr(value.slot), Repr::Ref | Repr::Addr) {
+            self.emit(Inst::Clear { slot: value.slot }, span);
+        }
+        self.frame.free(value.slot);
+    }
+
+    /// A string of the program's pool, added only if it is not already in
+    /// it.
+    fn string(&mut self, text: &str) -> StrId {
+        self.pool.string(text)
+    }
+
+    /// The layout of the objects a value of `ty` names, reporting the type
+    /// this lowering cannot build one for.
+    fn layout(&mut self, ty: &Ty, span: Span) -> Option<LayoutId> {
+        match self.pool.shapes.of(self.checked, self.module, ty) {
+            Some(id) => Some(id),
+            None => {
+                self.errors.push(describe(ty, span));
+                None
+            }
         }
     }
 
@@ -508,6 +630,21 @@ impl Body<'_> {
     /// The type the checker settled for `expr`.
     fn ty(&self, expr: &Expr) -> Option<&Ty> {
         self.checked.facts.ty(expr.span.file, expr.id)
+    }
+
+    /// The same, owned, for a caller that goes on to write into the frame
+    /// while it holds the answer.
+    fn owned_ty(&mut self, expr: &Expr) -> Option<Ty> {
+        match self.ty(expr).cloned() {
+            Some(ty) => Some(ty),
+            None => {
+                self.errors.push(gap::gap(
+                    "an expression the checker recorded no type for",
+                    expr.span,
+                ));
+                None
+            }
+        }
     }
 
     /// The word `expr`'s value occupies, reporting the reason there is none.

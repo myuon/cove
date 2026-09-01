@@ -30,10 +30,6 @@ fn a_declaration_this_lowering_has_no_frame_for_is_named_once() {
     // not walked at all: repeating the same news at every expression inside
     // it would bury the one line that says where the work is.
     assert_eq!(
-        refused("fn greet() -> String { \"hi\" }"),
-        vec!["not yet lowered: a value of type `String`"]
-    );
-    assert_eq!(
         refused("fn same<T>(value: T) -> T { value }"),
         vec![
             "not yet lowered: a generic function",
@@ -45,29 +41,56 @@ fn a_declaration_this_lowering_has_no_frame_for_is_named_once() {
         refused("fn apply(f: fn(Int) -> Int, n: Int) -> Int { f(n) }"),
         vec!["not yet lowered: a value of type `fn(Int) -> Int`"]
     );
-}
-
-#[test]
-fn a_declared_type_is_the_heap_task() {
     assert_eq!(
-        refused("struct Point { x: Int, y: Int }\nfn origin() -> Int { 0 }"),
-        vec!["not yet lowered: a `struct` declaration"]
-    );
-    assert_eq!(
-        refused("enum Verdict { Keep, Drop }\nfn origin() -> Int { 0 }"),
-        vec!["not yet lowered: an `enum` declaration"]
+        refused("fn hold(items: Vector<Int>) -> Int { 0 }"),
+        vec!["not yet lowered: a value of type `Vector<Int>`"]
     );
 }
 
 #[test]
-fn a_test_is_lowered_like_any_declaration_and_its_return_type_is_what_stops_it() {
+fn a_declared_type_is_a_shape_rather_than_a_declaration_to_lower() {
+    // A `struct` and an `enum` produce no code: they say what an object is
+    // made of, and the layout is built where a value of the type is met. So
+    // a declaration on its own stops nothing.
+    let program = lower(&checked(
+        "struct Point { x: Int, y: Int }\n\
+         enum Verdict { Keep, Drop }\n\
+         fn origin() -> Int { 0 }",
+    ))
+    .expect("a declared type is not a gap");
+    // And it is built only where it is used, so a program that declares one
+    // and never names a value of it declares no layout for it either.
+    assert!(!program
+        .layouts
+        .iter()
+        .any(|layout| &*layout.name == "Point" || &*layout.name == "Verdict"));
+}
+
+#[test]
+fn a_generic_declaration_is_what_is_left_of_the_declared_types() {
+    // A generic declaration's fields are type parameters, and a type
+    // parameter has no word — so there is no shape to build until there are
+    // generics.
+    assert_eq!(
+        refused("struct Holder<T> { value: T }\nfn origin() -> Int { 0 }"),
+        vec!["not yet lowered: a generic `struct` declaration"]
+    );
+    assert_eq!(
+        refused("enum Maybe<T> { Yes(T), No }\nfn origin() -> Int { 0 }"),
+        vec!["not yet lowered: a generic `enum` declaration"]
+    );
+}
+
+#[test]
+fn a_test_is_lowered_like_any_declaration() {
     // `test fn` needs nothing of its own here: it is a declaration of its
-    // module and its body is checked like any other. What is not here yet is
-    // the `Result` the language fixes as a test's answer.
-    assert_eq!(
-        refused("test fn works() -> Result<Unit, Error> {\n  Ok(())\n}"),
-        vec!["not yet lowered: a value of type `Result<(), Error>`"]
-    );
+    // module, its body is checked like any other, and the `Result` the
+    // language fixes as a test's answer is an enum like any other.
+    let program = lower(&checked(
+        "test fn works() -> Result<Unit, Error> {\n  Ok(())\n}",
+    ))
+    .expect("a test lowers like any declaration");
+    assert!(program.function_named("m", "works").is_some());
 }
 
 #[test]
@@ -85,5 +108,23 @@ fn the_forms_this_task_left_out_say_so_one_by_one() {
     assert_eq!(
         refused("fn nap() -> Int {\n  let g = 1\n  fn inner() -> Int { 2 }\n  g\n}"),
         vec!["not yet lowered: a declaration inside a body"]
+    );
+    assert_eq!(
+        refused("fn first() -> Int {\n  let items = [1, 2]\n  1\n}"),
+        vec!["not yet lowered: an array literal"]
+    );
+    assert_eq!(
+        refused(
+            "struct P { x: Int }\nimpl P {\n  fn get(self) -> Int { self.x }\n}\n\
+             fn read(p: P) -> Int { p.get() }"
+        ),
+        vec![
+            "not yet lowered: a method or associated function",
+            "not yet lowered: a method call",
+        ]
+    );
+    assert_eq!(
+        refused("struct P { x: Int }\nfn same(a: P, b: P) -> Bool { a == b }"),
+        vec!["not yet lowered: a comparison of two heap values"]
     );
 }

@@ -12,8 +12,13 @@
 
 mod calls;
 mod control;
+mod enums;
 mod gaps;
+mod hosts;
+mod patterns;
 mod slots;
+mod strings;
+mod structs;
 mod values;
 
 use std::collections::BTreeMap;

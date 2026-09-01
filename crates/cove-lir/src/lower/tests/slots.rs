@@ -79,10 +79,10 @@ fn0 m.twice(0) -> int
 
 #[test]
 fn a_scalar_body_emits_no_clear() {
-    // The mechanism is in place — a scope's exit clears the reference slots
-    // it owned — and there is nothing for it to clear: no slot in a
-    // scalar-only body is a `Ref` or an `Addr`. The heap task is what makes
-    // this assertion change.
+    // Clearing is what ends a reference's live range, and a body with no
+    // reference in it has none to end: no slot here is a `Ref` or an
+    // `Addr`, so a scalar program pays nothing for the mechanism a body
+    // holding an object needs.
     let program = lower(&checked(
         "fn deep(n: Int) -> Int {\n\
            var total = 0\n\
@@ -117,8 +117,56 @@ fn every_lowered_program_is_verified_before_it_is_handed_back() {
         "fn d() {\n  var i = 0\n  while i < 10 {\n    if i == 5 { break } else { i += 1 }\n  }\n}",
         "fn e() -> Duration { -1s + 2s }",
         "fn f(n: Int) -> Int {\n  var total = 0\n  var i = 0\n  while true {\n    i += 1\n    if i > n { break }\n    if i % 2 == 0 { continue }\n    total += i\n  }\n  total\n}",
+        // The heap half of the corpus: a string and its interpolations, a
+        // declared struct and enum, every pattern shape, `?`, a host call,
+        // and a `var` argument naming a field.
+        "fn g(name: String, n: Int) -> String { \"{name} has {n}\" }",
+        "struct Point { x: Int, y: Int }\nfn h(p: Point) -> Int { p.x + p.y }",
+        "struct Point { x: Int, y: Int }\nfn bump(var n: Int) { n += 1 }\n\
+         fn i(var p: Point) -> Int {\n  bump(var p.x)\n  p.x\n}",
+        "enum Verdict { Keep, Drop(String) }\n\
+         fn j(v: Verdict) -> String { match v { Verdict.Keep => \"k\", Verdict.Drop(why) => why } }",
+        "fn k(x: Result<Option<Int>, String>) -> Int {\n\
+           match x { Ok(Some(n)) => n, Ok(None) => 0, Err(_) => 0 - 1 }\n\
+         }",
+        "fn l(x: Result<Int, String>) -> Result<Int, String> {\n  let n = x?\n  Ok(n + 1)\n}",
+        "use console.println\nfn m(n: Int) -> Result<Unit, Error> {\n\
+           var i = 0\n  while i < n {\n    println(\"row {i}\")?\n    i += 1\n  }\n  Ok(())\n}",
     ] {
         let program = lower(&checked(source)).expect("the program lowers");
         crate::verify(&program).expect("a lowered program is well formed");
+    }
+}
+
+#[test]
+fn a_reference_slot_is_never_handed_to_a_value_of_another_kind() {
+    // The invariant `RefMap` rests on, asserted over a body that holds
+    // objects rather than over one that holds only scalars: a slot's kind is
+    // fixed for the whole function, whatever the free lists did, so one
+    // static bitmap is right at every program counter.
+    let program = lower(&checked(
+        "struct User { name: String, age: Int }\n\
+         fn describe(u: User, greeting: String) -> String {\n\
+           let head = \"{greeting}, {u.name}\"\n\
+           let years = \"{u.age}\"\n\
+           match u.age { 0 => head, _ => years }\n\
+         }",
+    ))
+    .expect("the program lowers");
+    let describe = program.function(program.function_named("m", "describe").expect("lowered"));
+    assert_eq!(describe.refs, crate::RefMap::of(&describe.reprs));
+    assert!(!describe.refs.is_empty());
+    // Every slot the map calls a root is a `Ref`, and every `Clear` names a
+    // slot that could hold one.
+    for slot in describe.refs.iter() {
+        assert_eq!(describe.repr(slot), Some(Repr::Ref));
+    }
+    for inst in &describe.code {
+        if let crate::Inst::Clear { slot } = inst {
+            assert!(matches!(
+                describe.repr(*slot),
+                Some(Repr::Ref) | Some(Repr::Addr)
+            ));
+        }
     }
 }

@@ -39,7 +39,7 @@ impl Body<'_> {
             (Some(tail), Some(dst)) => {
                 let value = self.expr(tail);
                 self.store(dst, &value, tail);
-                self.frame.release(value);
+                self.release(value, tail.span);
             }
             (Some(tail), None) => self.discard(tail),
             (None, Some(dst)) => {
