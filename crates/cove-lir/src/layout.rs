@@ -111,10 +111,25 @@ pub enum Shape {
     Enum { cases: Vec<Case> },
     /// The header's `len` elements, each one word of `elem`, contiguous.
     ///
-    /// One shape covers `Array<T>` and `Vector<T>` for every `T`, which is
-    /// what keeps the layout table a description of families rather than a
-    /// list of every instantiation the corpus happens to contain.
+    /// One shape covers `Array<T>` for every `T`, and is also what a
+    /// [`Shape::Vector`] stores its elements in — `growable` says which of
+    /// the two an object is. That keeps the layout table a description of
+    /// families rather than a list of every instantiation the corpus happens
+    /// to contain.
     Elements { elem: Repr, growable: bool },
+    /// Payload word 0 is the element count; word 1 is a reference to the
+    /// [`Shape::Elements`] object holding them.
+    ///
+    /// The indirection is what a growable value needs and an immutable one
+    /// does not. A `Vector`'s identity is observable — `is` is defined for it
+    /// and mutation through one copy is visible through every other — so
+    /// growing must not move the object a program is holding a reference to.
+    /// The header stays where it is and the store beneath it is replaced by a
+    /// larger one.
+    ///
+    /// An `Array` needs none of that, and pays none of it: its elements are
+    /// in the object, one indirection nearer.
+    Vector { elem: Repr },
     /// Payload word 0 is the callee's [`FunctionId`]; words `1..` are the
     /// captures, in the order [`crate::Function::captures`] lists them.
     ///
@@ -167,6 +182,7 @@ impl Layout {
             Shape::Struct { fields, .. } => fields.len() as u32,
             Shape::Enum { cases } => 1 + Self::widest_case(cases),
             Shape::Elements { .. } => len,
+            Shape::Vector { .. } => 2,
             Shape::Closure { captures, .. } => 1 + captures.len() as u32,
             Shape::Boxed => 2,
         }
@@ -193,6 +209,9 @@ impl Layout {
                 .iter()
                 .any(|case| case.payload.iter().any(|repr| repr.is_ref())),
             Shape::Elements { elem, .. } => elem.is_ref(),
+            // Word 1 is always a reference to the store, whatever the
+            // elements are.
+            Shape::Vector { .. } => true,
             Shape::Closure { captures, .. } => captures.iter().any(|repr| repr.is_ref()),
             // A boxed word is a reference exactly when its tag says so, and
             // the tag is in the object. The collector has to look.

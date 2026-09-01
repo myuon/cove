@@ -212,11 +212,18 @@ to know which. The lowering interns layouts, so the same shape is the same
 | `Option<T>` | `Enum`, cases `None`, `Some` | payload `Repr` |
 | `Result<T, E>` | `Enum`, cases `Ok`, `Err` | payload `Repr` pair |
 | `Array<T>` | `Elements { growable: false }` | element `Repr` |
-| `Vector<T>` | `Elements { growable: true }` | element `Repr` |
+| `Vector<T>` | `Vector`, payload `[len, store]`, over an `Elements { growable: true }` store | element `Repr` |
 | `Range` | `Struct { start: Int, end: Int, inclusive: Bool }` | the program |
 | `MapEntry<K, V>` | `Struct { key, value }` | field `Repr` pair |
 | a lambda | `Closure` | lowered lambda |
 | `dyn`, `Any` | `Boxed` | the program |
+
+A `Vector` is the one family with an indirection, and it earns it: its
+identity is observable — `is` is defined for it, and mutation through one copy
+is visible through every other — so growing must not move the object a program
+is holding. The header stays put and the store beneath it is replaced. An
+`Array` cannot grow, so it needs none of that and pays none of it: its elements
+are in the object, one indirection nearer.
 
 An enum object is one word of case index followed by the payload of the case
 it is in, sized for the widest case. Which of those words are references

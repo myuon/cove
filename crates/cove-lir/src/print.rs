@@ -231,7 +231,8 @@ fn shape_name(shape: &Shape) -> &'static str {
         Shape::Elements {
             growable: false, ..
         } => "array",
-        Shape::Elements { growable: true, .. } => "vector",
+        Shape::Elements { growable: true, .. } => "store",
+        Shape::Vector { .. } => "vector",
         Shape::Closure { .. } => "closure",
         Shape::Boxed => "boxed",
     }

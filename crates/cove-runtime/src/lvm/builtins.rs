@@ -187,8 +187,29 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
                 out.push(')');
             }
         }
-        // An `Array` and a `Vector` render alike, which is why one shape
-        // covers both.
+        // A vector renders like an array, because the indirection is what
+        // lets it grow without moving and is not a fact about the value:
+        // `[1, 2]` is what a program that wrote `Vector.of(1, 2)` sees.
+        //
+        // The length comes from the vector and not from the store, which is
+        // the whole reason the two are separate: a store is as long as the
+        // last growth made it, and the elements past the length are the
+        // spare room, not the value.
+        Shape::Vector { elem } => {
+            let len = machine.payload(addr, 0);
+            let store = machine.payload(addr, 1);
+            out.push('[');
+            for at in 0..len {
+                if at > 0 {
+                    out.push_str(", ");
+                }
+                let word = machine.payload(store, at as u32);
+                out.push_str(&render(machine, *elem, word, deeper)?);
+            }
+            out.push(']');
+        }
+        // An `Array` and a vector's store render alike, which is why one
+        // shape covers both.
         Shape::Elements { elem, .. } => {
             out.push('[');
             for at in 0..machine.object_len(addr) {

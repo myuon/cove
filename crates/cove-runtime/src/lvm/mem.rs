@@ -488,6 +488,10 @@ impl Memory {
                     }
                 }
             }
+            // Word 0 is the length and word 1 is the store, whose own layout
+            // says what its elements are. A vector's header is a leaf apart
+            // from the one reference that makes it growable.
+            Shape::Vector { .. } => self.enqueue(self.payload(addr, 1), work),
             Shape::Closure { captures, .. } => {
                 for (at, repr) in captures.iter().enumerate() {
                     if repr.is_ref() {
