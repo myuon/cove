@@ -27,15 +27,16 @@
 //! [`crate::lvm::exec`]'s arithmetic messages are under, and for the same
 //! reason.
 //!
-//! Two renderings the oracle makes are not reproduced, because the layout
-//! table does not carry what they need: an `export opaque struct` renders as
-//! its bare name, and an `Error` renders as its `message` field. Both are
-//! facts about a *declaration*, and a [`Layout`](cove_lir::Layout) describes a
-//! family. They arrive when the lowering has something to put them in.
+//! One rendering the oracle makes is not reproduced, because the layout table
+//! does not carry what it needs: an `export opaque struct` renders as its bare
+//! name rather than as its fields. That is a fact about a *declaration*, and a
+//! [`Layout`](cove_lir::Layout) describes a family. It arrives when the
+//! lowering has somewhere to put it.
 
 use std::fmt::Write as _;
 
 use cove_lir::{Builtin, Repr, Shape};
+use cove_schema::builtins::{ERROR, MESSAGE_FIELD};
 
 use crate::error::RuntimeError;
 use crate::lvm::exec::Machine;
@@ -131,6 +132,20 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
     let mut out = String::new();
     match &layout.shape {
         Shape::Str => out.push_str(&string_of(machine, addr)?),
+        // A builtin `Error` renders as the message it carries, not as the
+        // struct it happens to be. The oracle special-cases it in
+        // `Display for Value` for the reason this one does: a program that
+        // prints an error is printing what went wrong, and `Error(message: x)`
+        // says the same thing twice. Recognising it by the layout's name is
+        // sound because the name is the checker's, and `Error` is a builtin
+        // type a module cannot redeclare.
+        Shape::Struct { fields }
+            if &*layout.name == ERROR.name
+                && fields.first().map(|field| &*field.name) == Some(MESSAGE_FIELD.name) =>
+        {
+            let word = machine.payload(addr, 0);
+            out.push_str(&render(machine, fields[0].repr, word, deeper)?);
+        }
         Shape::Struct { fields } => {
             write!(out, "{}(", layout.name).expect("a string never fails to be written to");
             for (at, field) in fields.iter().enumerate() {

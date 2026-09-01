@@ -509,3 +509,192 @@ export fn f(n: Int) -> Int { n }
         "the refusal names the declared type: {message}"
     );
 }
+
+#[test]
+fn a_string_literal_agrees() {
+    let source = r#"
+export fn f() -> String {
+  "hello"
+}
+"#;
+    assert_eq!(
+        agree(source, "f", vec![]),
+        Answer::Value("hello".to_string())
+    );
+}
+
+#[test]
+fn interpolation_agrees() {
+    let source = r#"
+export fn f(n: Int, x: Float, b: Bool) -> String {
+  "n={n} x={x} b={b} done"
+}
+"#;
+    agree(
+        source,
+        "f",
+        vec![Value::int(-3), Value::float(2.5), Value::bool(true)],
+    );
+}
+
+/// An `Error` renders as the message it carries rather than as the struct it
+/// happens to be, on both backends. The two say so in two places — the
+/// oracle in `Display for Value`, the machine in `lvm::builtins` — because
+/// one reads a materialised tree and the other reads the heap, and this is
+/// what keeps the two copies in step.
+#[test]
+fn an_error_renders_as_its_message() {
+    let source = r#"
+export fn f() -> String {
+  let e = Error("boom")
+  "{e}"
+}
+"#;
+    assert_eq!(
+        agree(source, "f", vec![]),
+        Answer::Value("boom".to_string())
+    );
+}
+
+#[test]
+fn a_struct_field_agrees() {
+    let source = "
+struct Point { x: Int, y: Int }
+export fn f(a: Int, b: Int) -> Int {
+  let p = Point(x: a, y: b)
+  p.x * p.y
+}
+";
+    assert_eq!(
+        agree(source, "f", vec![Value::int(6), Value::int(7)]),
+        Answer::Value("42".to_string())
+    );
+}
+
+#[test]
+fn a_struct_renders_the_same_way() {
+    let source = r#"
+struct Point { x: Int, y: Int }
+export fn f() -> String {
+  "{Point(x: 1, y: 2)}"
+}
+"#;
+    agree(source, "f", vec![]);
+}
+
+#[test]
+fn an_option_agrees() {
+    let source = "
+export fn f(n: Int) -> Int {
+  let found = if n > 0 { Some(n * 2) } else { None }
+  match found {
+    Some(v) => v
+    None => -1
+  }
+}
+";
+    for n in [-1, 0, 21] {
+        agree(source, "f", vec![Value::int(n)]);
+    }
+}
+
+#[test]
+fn a_declared_enum_agrees() {
+    let source = r#"
+enum Shape {
+  Dot
+  Line(Int)
+  Box(Int, Int)
+}
+export fn area(n: Int) -> Int {
+  let s = if n == 0 { Shape.Dot } else if n == 1 { Shape.Line(4) } else { Shape.Box(3, n) }
+  match s {
+    Shape.Dot => 0
+    Shape.Line(len) => len
+    Shape.Box(w, h) => w * h
+  }
+}
+"#;
+    for n in [0, 1, 5] {
+        agree(source, "area", vec![Value::int(n)]);
+    }
+}
+
+#[test]
+fn a_nested_pattern_agrees() {
+    let source = "
+export fn f(n: Int) -> Int {
+  let v = if n > 0 { Some(Some(n)) } else { Some(None) }
+  match v {
+    Some(Some(x)) => x
+    Some(None) => 0
+    None => -1
+  }
+}
+";
+    for n in [-1, 3] {
+        agree(source, "f", vec![Value::int(n)]);
+    }
+}
+
+#[test]
+fn propagation_agrees() {
+    let source = "
+fn half(n: Int) -> Result<Int, Error> {
+  if n % 2 == 0 {
+    Ok(n / 2)
+  } else {
+    Err(Error(\"odd\"))
+  }
+}
+export fn f(n: Int) -> Result<Int, Error> {
+  let a = half(n)?
+  let b = half(a)?
+  Ok(b)
+}
+";
+    for n in [8, 6, 3] {
+        agree(source, "f", vec![Value::int(n)]);
+    }
+}
+
+/// A `var` parameter names the caller's own binding. `two(var x, var x)`
+/// answering 11 rather than 10 is the observable difference, and only
+/// aliasing gives that answer.
+#[test]
+fn a_var_parameter_aliases_the_caller() {
+    let source = "
+fn bump(var n: Int) {
+  n = n + 1
+}
+export fn f() -> Int {
+  var total = 10
+  bump(var total)
+  total
+}
+";
+    assert_eq!(agree(source, "f", vec![]), Answer::Value("11".to_string()));
+}
+
+/// A loop that builds a string a turn, in a heap far too small to hold every
+/// one of them. It finishes only because the lowering clears the slot each
+/// turn, so a turn's string is unreachable by the next.
+#[test]
+fn a_loop_that_allocates_agrees() {
+    let source = r#"
+export fn f(n: Int) -> Int {
+  var i = 0
+  var last = 0
+  while i < n {
+    let text = "turn {i} of {n}"
+    last = i
+    i = i + 1
+  }
+  last
+}
+"#;
+    assert_eq!(
+        agree(source, "f", vec![Value::int(500)]),
+        Answer::Value("499".to_string())
+    );
+}
