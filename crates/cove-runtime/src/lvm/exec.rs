@@ -20,15 +20,26 @@
 //! buffer, no spill area and no fallback path, which is what ADR 0034 asks
 //! for and what the predecessor could not say.
 
+use std::time::{Duration, Instant};
+
 use cove_diag::Span;
 use cove_lir::{
-    ArithOp, CmpOp, Compare, Convert, FunctionId, Inst, LayoutId, Len, Num, Program, Repr, Shape,
-    Slot, StrId,
+    ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Convert, FunctionId, HostOpId, Inst, LayoutId, Len,
+    Num, Program, Repr, Shape, Slot, StrId,
 };
 
-use crate::budget::Budget;
+use crate::budget::{Cancellation, Meter};
 use crate::error::RuntimeError;
+use crate::host::{HostRegistry, Reentry};
 use crate::lvm::mem::{Collected, Memory, Overflow, Roots};
+use crate::lvm::{boundary, builtins};
+use crate::runtime::ENTRY_TASK;
+// The one import of the public `Value` outside `boundary`, and the one thing
+// ADR 0034 allows it for: a host call's arguments and its answer exist as
+// `Value`s for the length of the call and nowhere else. Nothing here stores
+// one, and the two places it is named — the vector handed to the boundary,
+// and the callee a way back is offered — are both in transit.
+use crate::value::Value;
 
 /// How many instructions run between two budget checks.
 ///
@@ -75,6 +86,14 @@ impl Roots for Held<'_> {
 /// One task's execution over one linear memory.
 pub(crate) struct Machine<'a> {
     program: &'a Program,
+    /// The boundary a [`Inst::CallHost`] calls through, if this run has one.
+    ///
+    /// `None` is a machine with no host behind it — what a test that runs
+    /// arithmetic drives, and the same state [`crate::host::NoReentry`]
+    /// exists for on the other side of the boundary. A program that reaches
+    /// a host call from one is told what is missing rather than being given a
+    /// registry that answers nothing.
+    hosts: Option<&'a HostRegistry>,
     mem: Memory,
     frames: Vec<Frame>,
     /// The string object for each [`StrId`], allocated on first use.
@@ -85,21 +104,54 @@ pub(crate) struct Machine<'a> {
     /// That is the right trade for a *literal*, which the program named
     /// statically and can name again.
     interned: Vec<u64>,
+    /// Objects a boundary conversion is holding and no frame names yet.
+    ///
+    /// A frame is a root because a static map says which of its slots are
+    /// references. A half-built object is not: it is reachable only from a
+    /// Rust local, which nothing walks, and the next allocation the
+    /// conversion makes could collect it out from under itself. So the
+    /// conversion says so, explicitly, for exactly as long as that is true —
+    /// [`Machine::push_temp`] to take a root, [`Machine::release_temps`] to
+    /// give every root back that was taken since a mark.
+    ///
+    /// It is a stack rather than a set because the discipline is lexical: a
+    /// conversion that recurses takes a mark on the way in and releases to it
+    /// on the way out, so nothing has to remember which root was whose.
+    temps: Vec<u64>,
     /// Reused across collections so a collection does not allocate.
     roots: Vec<u64>,
     instructions: u64,
+    /// How long this machine has spent inside host calls.
+    ///
+    /// The oracle charges the same measurement against every open timing
+    /// context so that a run can separate its own work from what it spent
+    /// waiting; this machine has one context, which is the run.
+    host_wait: Duration,
     collected: Collected,
 }
 
 impl<'a> Machine<'a> {
+    /// A machine with no host boundary, for a program that calls none.
     pub(crate) fn new(program: &'a Program, heap_words: usize) -> Machine<'a> {
+        Machine::with_hosts(program, heap_words, None)
+    }
+
+    /// A machine that calls hosts through `hosts`.
+    pub(crate) fn with_hosts(
+        program: &'a Program,
+        heap_words: usize,
+        hosts: Option<&'a HostRegistry>,
+    ) -> Machine<'a> {
         Machine {
             program,
+            hosts,
             mem: Memory::new(heap_words),
             frames: Vec::new(),
             interned: vec![0; program.strings.len()],
+            temps: Vec::new(),
             roots: Vec::new(),
             instructions: 0,
+            host_wait: Duration::ZERO,
             collected: Collected::default(),
         }
     }
@@ -114,6 +166,21 @@ impl<'a> Machine<'a> {
         self.collected
     }
 
+    /// Words the heap region occupies, free blocks included.
+    pub(crate) fn heap_words(&self) -> u64 {
+        self.mem.heap_words()
+    }
+
+    /// Words handed out over the whole run, reuse counted each time.
+    pub(crate) fn allocated_words(&self) -> u64 {
+        self.mem.allocated_words()
+    }
+
+    /// How long this machine has waited on hosts.
+    pub(crate) fn host_wait(&self) -> Duration {
+        self.host_wait
+    }
+
     /// Runs `entry` with `args` already in word form, answering its word.
     ///
     /// The caller converts: this is below the boundary, and nothing here
@@ -122,7 +189,7 @@ impl<'a> Machine<'a> {
         &mut self,
         entry: FunctionId,
         args: &[u64],
-        budget: &Budget,
+        budget: &Meter,
     ) -> Result<u64, RuntimeError> {
         let program = self.program;
         let function = program.function(entry);
@@ -149,7 +216,7 @@ impl<'a> Machine<'a> {
     /// `function`, `base` and `pc` are kept in locals rather than read out of
     /// the top frame on every instruction, and written back at the two points
     /// where something else looks: a collection, and a failure.
-    fn dispatch(&mut self, budget: &Budget) -> Result<u64, RuntimeError> {
+    fn dispatch(&mut self, budget: &Meter) -> Result<u64, RuntimeError> {
         let program = self.program;
         let top = self.frames.last().expect("run pushed a frame");
         let mut id = top.function;
@@ -333,10 +400,34 @@ impl<'a> Machine<'a> {
                     pc = 0;
                     code = &program.function(id).code[..];
                 }
-                Inst::CallClosure { .. } | Inst::CallHost { .. } | Inst::CallBuiltin { .. } => {
+                Inst::CallClosure { .. } => {
                     fail!(RuntimeError::new(
                         "this call is not lowered by the linear-memory backend yet"
                     ))
+                }
+                // The one instruction that leaves the machine. Everything it
+                // needs to read out of the frame is read before the call, so
+                // that the frames are consistent for the length of it: a host
+                // may collect through the boundary, and a boundary that had
+                // been handed a stale program counter would walk this frame
+                // to a slot the loop had already moved past.
+                Inst::CallHost { dst, op, args } => {
+                    self.sync(pc - 1);
+                    let span = self.span(id, pc - 1);
+                    match self.call_host(id, base, op, args, budget, span) {
+                        Ok(word) => self.mem.set_slot(base, dst, word),
+                        Err(error) => fail!(error),
+                    }
+                }
+                // Not a boundary. A builtin reads the words and the objects
+                // the machine already holds, and answers one word; nothing
+                // here is materialised into a `Value` on the way.
+                Inst::CallBuiltin { dst, builtin, args } => {
+                    self.sync(pc - 1);
+                    match self.call_builtin(id, base, builtin, args) {
+                        Ok(word) => self.mem.set_slot(base, dst, word),
+                        Err(error) => fail!(error),
+                    }
                 }
 
                 // ---- the heap ----------------------------------------------
@@ -523,8 +614,120 @@ impl<'a> Machine<'a> {
             }
         }
         roots.extend(self.interned.iter().copied().filter(|addr| *addr != 0));
+        roots.extend(self.temps.iter().copied().filter(|addr| *addr != 0));
         self.collected = self.mem.collect(&program.layouts, &Held(&roots));
         self.roots = roots;
+    }
+
+    /// How many temporary roots are held, for a caller about to take more.
+    ///
+    /// The mark to hand back to [`Machine::release_temps`]. Taking it and
+    /// releasing to it is the whole discipline: a conversion that recurses
+    /// nests marks, and a conversion that fails releases on the way out
+    /// because the caller that took the mark is the one that releases it.
+    pub(crate) fn temps(&self) -> usize {
+        self.temps.len()
+    }
+
+    /// Holds `addr` as a root until the mark it was taken after is released.
+    ///
+    /// What this is for is the window in which an object exists and nothing
+    /// the collector walks names it: between the allocation of a struct and
+    /// the write of its last field, the object is reachable only from a Rust
+    /// local, and building one of those fields can allocate. Without a root
+    /// here the collector would be right to free it, and the write that
+    /// followed would land in a free block.
+    pub(crate) fn push_temp(&mut self, addr: u64) {
+        self.temps.push(addr);
+    }
+
+    /// Releases every temporary root taken since `mark`.
+    ///
+    /// The object is not freed by this; it stops being a root, which is what
+    /// a root has to do the moment something else names it. Releasing rather
+    /// than leaving them is what keeps this from becoming the retention the
+    /// static reference map was careful not to be.
+    pub(crate) fn release_temps(&mut self, mark: usize) {
+        self.temps.truncate(mark);
+    }
+
+    /// Materialises the arguments, calls the host, and writes its answer
+    /// back as a word.
+    ///
+    /// This follows [`crate::interp::Interpreter::call_host`] rather than
+    /// inventing an order of its own, because what a host call does is a fact
+    /// about the language and not about a backend. The registry is what
+    /// charges [`crate::Budget::charge_host_call`], refuses an ungranted
+    /// capability, holds the arguments and the answer to the operation's
+    /// schema, and writes the `HostCall` trace event; a backend that repeated
+    /// any of that would be a second opinion about a question that already has
+    /// one. What is left for the machine is the three things only it can do:
+    /// read the words out as the `Repr`s of the slots they came from, wait,
+    /// and write the answer back.
+    ///
+    /// The run's own cancellation is not checked here. The oracle checks a
+    /// *task's* flag and the flag of every bounded call its thread is inside,
+    /// neither of which this machine has yet; the run's flag is read inside
+    /// the boundary by `charge_host_call`, which is where it is read on every
+    /// backend.
+    fn call_host(
+        &mut self,
+        id: FunctionId,
+        base: u64,
+        op: HostOpId,
+        args: ArgsId,
+        budget: &Meter,
+        span: Span,
+    ) -> Result<u64, RuntimeError> {
+        let program = self.program;
+        let op = program.host_op(op);
+        let function = program.function(id);
+        let list = program.arg_list(args);
+
+        let mut values = Vec::with_capacity(list.len());
+        for slot in list {
+            let repr = function.repr(*slot).ok_or_else(|| undeclared_slot(*slot))?;
+            let word = self.mem.slot(base, *slot);
+            values.push(boundary::to_value(self, repr, word).map_err(|error| error.at(span))?);
+        }
+
+        let hosts = self.hosts.ok_or_else(|| {
+            RuntimeError::new(format!(
+                "`{}.{}` cannot be called, because this run has no host boundary",
+                op.module, op.operation
+            ))
+            .at(span)
+        })?;
+        let started = Instant::now();
+        let answer = hosts.call_with(&op.module, &op.operation, values, &mut Back { budget });
+        self.host_wait += started.elapsed();
+        let answer = answer.map_err(|error| error.at(span))?;
+        boundary::from_value(self, op.result, &answer).map_err(|error| error.at(span))
+    }
+
+    /// Reads the operand words and their `Repr`s and hands them to the
+    /// builtin.
+    ///
+    /// The `Repr`s are read here rather than in [`crate::lvm::builtins`] for
+    /// the same reason the boundary takes one: a word is untagged, and what
+    /// says what it means is the slot it came out of. That is a fact about
+    /// this frame, which the builtin has no business knowing about.
+    fn call_builtin(
+        &mut self,
+        id: FunctionId,
+        base: u64,
+        builtin: BuiltinId,
+        args: ArgsId,
+    ) -> Result<u64, RuntimeError> {
+        let program = self.program;
+        let function = program.function(id);
+        let list = program.arg_list(args);
+        let mut operands = Vec::with_capacity(list.len());
+        for slot in list {
+            let repr = function.repr(*slot).ok_or_else(|| undeclared_slot(*slot))?;
+            operands.push((repr, self.mem.slot(base, *slot)));
+        }
+        builtins::call(self, program.builtin(builtin), &operands)
     }
 
     /// The string object for `text`, allocated the first time it is asked for.
@@ -647,6 +850,82 @@ impl<'a> Machine<'a> {
     pub(crate) fn object_layout(&self, addr: u64) -> LayoutId {
         self.mem.object_layout(addr)
     }
+
+    /// The length field of the object at `addr`: elements, or a string's
+    /// bytes.
+    pub(crate) fn object_len(&self, addr: u64) -> u32 {
+        self.mem.object_len(addr)
+    }
+
+    /// Payload word `at` of the object at `addr`.
+    pub(crate) fn payload(&self, addr: u64, at: u32) -> u64 {
+        self.mem.payload(addr, at)
+    }
+
+    /// Writes payload word `at` of the object at `addr`.
+    pub(crate) fn set_payload(&mut self, addr: u64, at: u32, word: u64) {
+        self.mem.set_payload(addr, at, word);
+    }
+
+    /// A new object of `layout` with header length `len`, collecting once if
+    /// the first attempt does not fit.
+    ///
+    /// The payload is zeroed, so a reference field reads as null until it is
+    /// written — which is what makes a half-built object safe to collect
+    /// *through* once [`Machine::push_temp`] has made it safe to collect
+    /// *around*.
+    pub(crate) fn new_object(&mut self, layout: LayoutId, len: u32) -> Result<u64, RuntimeError> {
+        self.allocate(layout, len)
+    }
+}
+
+/// The way back a host is offered while the linear-memory backend runs.
+///
+/// A host that was handed a Cove callback calls it through this. This machine
+/// has no closures yet — [`Inst::CallClosure`] is not implemented — so no
+/// callback can reach a host from here and the call arm says what is missing
+/// rather than pretending. What the other three answers are worth is not
+/// conditional on that: a host that waits reads them to decide whether to keep
+/// waiting, and answering "no limit, not cancelled" from a run that has both
+/// would be worse than answering nothing.
+struct Back<'m> {
+    budget: &'m Meter,
+}
+
+impl Reentry for Back<'_> {
+    fn call(&mut self, callee: &Value, _args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Err(RuntimeError::new(format!(
+            "this host call cannot run {}, because the linear-memory backend does not run closures yet",
+            callee.type_name()
+        )))
+    }
+
+    fn call_until(
+        &mut self,
+        callee: &Value,
+        args: Vec<Value>,
+        _stop: &Cancellation,
+    ) -> Result<Value, RuntimeError> {
+        self.call(callee, args)
+    }
+
+    /// The run's own flag. A task's and a bounded call's belong to a thread,
+    /// and this machine runs one body on one thread with neither.
+    fn is_cancelled(&self) -> bool {
+        self.budget.is_cancelled()
+    }
+
+    fn time_left(&self) -> Option<Duration> {
+        self.budget
+            .limits()
+            .deadline
+            .map(|deadline| deadline.saturating_sub(self.budget.elapsed()))
+    }
+
+    /// There is one task here, and it is the entry's.
+    fn task(&self) -> u64 {
+        ENTRY_TASK
+    }
 }
 
 fn compare(op: CmpOp, ordering: std::cmp::Ordering) -> bool {
@@ -721,6 +1000,18 @@ fn divided_by_zero(operation: &str) -> RuntimeError {
         .with_rule("Division and remainder by zero are broken invariants.")
 }
 
+/// A call named a slot the function it is in does not have.
+///
+/// The verifier checks every slot an instruction names against the frame it
+/// names it in, so this is a lowering bug that got past it rather than
+/// anything a program can do. It is reported instead of assumed because the
+/// alternative is reading a word that belongs to the next frame.
+fn undeclared_slot(slot: Slot) -> RuntimeError {
+    RuntimeError::new(format!(
+        "this call names slot {slot}, which this frame has not"
+    ))
+}
+
 /// A reference slot held null where an object was needed.
 ///
 /// This is not a language-level `nil`: Cove has none. It is a lowering bug
@@ -730,7 +1021,7 @@ fn null_object() -> RuntimeError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use cove_lir::{ArgsId, Capture, Function, Layout, RefMap, Table, TableId};
     use std::sync::Arc;
@@ -741,18 +1032,23 @@ mod tests {
     /// under test here is the machine, so its programs are written in the IR
     /// directly: a failure is then unambiguously the loop's, and a change to
     /// the lowering cannot quietly stop exercising an instruction.
+    ///
+    /// `pub(crate)` so that the boundary's and the builtins' tests write
+    /// their fixtures the same way. A hand-written program is the only kind
+    /// any of them uses, and having one builder is what keeps a fixture from
+    /// being the thing under test.
     #[derive(Default)]
-    struct Build {
-        program: Program,
+    pub(crate) struct Build {
+        pub(crate) program: Program,
     }
 
     impl Build {
-        fn strings(mut self, texts: &[&str]) -> Build {
+        pub(crate) fn strings(mut self, texts: &[&str]) -> Build {
             self.program.strings = texts.iter().map(|text| Arc::from(*text)).collect();
             self
         }
 
-        fn layout(&mut self, name: &str, shape: Shape) -> LayoutId {
+        pub(crate) fn layout(&mut self, name: &str, shape: Shape) -> LayoutId {
             if self.program.layouts.is_empty() {
                 self.program.layouts.push(Layout::free());
             }
@@ -763,12 +1059,12 @@ mod tests {
             LayoutId(self.program.layouts.len() as u32 - 1)
         }
 
-        fn args(&mut self, slots: &[Slot]) -> ArgsId {
+        pub(crate) fn args(&mut self, slots: &[Slot]) -> ArgsId {
             self.program.args.push(slots.to_vec());
             ArgsId(self.program.args.len() as u32 - 1)
         }
 
-        fn table(&mut self, targets: &[u32], default: u32) -> TableId {
+        pub(crate) fn table(&mut self, targets: &[u32], default: u32) -> TableId {
             self.program.tables.push(Table {
                 targets: targets.to_vec(),
                 default,
@@ -776,7 +1072,7 @@ mod tests {
             TableId(self.program.tables.len() as u32 - 1)
         }
 
-        fn function(
+        pub(crate) fn function(
             &mut self,
             name: &str,
             arity: u32,
@@ -808,14 +1104,25 @@ mod tests {
 
         /// Checks the program the way the lowering must, so a malformed test
         /// fixture fails as a fixture rather than as a machine bug.
-        fn done(self) -> Program {
+        pub(crate) fn done(self) -> Program {
             cove_lir::verify(&self.program).expect("a hand-written test program is well formed");
             self.program
         }
+
+        /// A program of layouts and strings and no functions.
+        ///
+        /// What a boundary or a builtin test needs: both of them convert or
+        /// read values rather than running code, and a function written only
+        /// so that a program has one would be a fixture nothing reads.
+        pub(crate) fn bare(mut self) -> Program {
+            let str_layout = self.layout("String", Shape::Str);
+            self.program.str_layout = str_layout;
+            self.done()
+        }
     }
 
-    fn budget() -> Budget {
-        Budget::new(crate::budget::Limits::default())
+    pub(crate) fn budget() -> Meter {
+        crate::budget::Budget::new(crate::budget::Limits::default()).meter()
     }
 
     fn run(program: &Program, entry: FunctionId, args: &[u64]) -> Result<u64, RuntimeError> {
@@ -1423,6 +1730,225 @@ mod tests {
         assert_eq!(run(&program, f, &[9]).unwrap() as i64, 30);
     }
 
+    // ---- the host boundary -------------------------------------------
+
+    /// A host with one operation of each kind of argument the boundary has
+    /// to move: a scalar in and out, and a string in and out.
+    ///
+    /// Written here rather than reused from a shipped module because what is
+    /// under test is the *instruction*: `console.println` would drag in a
+    /// grant table, an output stream and a schema written for a different
+    /// purpose, and a failure would take a paragraph to attribute.
+    struct Probe;
+
+    static PROBE_OPS: &[cove_schema::OperationSchema] = &[
+        cove_schema::OperationSchema {
+            name: "double",
+            params: &[cove_schema::HostType::Int],
+            variadic: false,
+            result: cove_schema::HostType::Int,
+            capability: "probe",
+            effect: cove_schema::Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        cove_schema::OperationSchema {
+            name: "shout",
+            params: &[cove_schema::HostType::String],
+            variadic: false,
+            result: cove_schema::HostType::String,
+            capability: "probe",
+            effect: cove_schema::Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+    ];
+
+    impl crate::host::HostApi for Probe {
+        fn module_schema(&self) -> cove_schema::ModuleSchema {
+            cove_schema::ModuleSchema {
+                name: "probe",
+                capability: "probe",
+                operations: PROBE_OPS,
+                types: &[],
+                resources: &[],
+            }
+        }
+
+        fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+            match op {
+                "double" => Ok(Value::int(
+                    args[0].as_int().expect("the schema holds it") * 2,
+                )),
+                "shout" => Ok(Value::string(format!(
+                    "{}!",
+                    args[0].as_str().expect("the schema holds it")
+                ))),
+                other => Err(RuntimeError::new(format!("no `{other}` here"))),
+            }
+        }
+    }
+
+    fn probing(granted: bool) -> crate::host::HostRegistry {
+        let grants = if granted {
+            crate::host::Grants::new(["probe"])
+        } else {
+            crate::host::Grants::new(Vec::<String>::new())
+        };
+        let mut hosts = crate::host::HostRegistry::new(grants);
+        hosts.register(Box::new(Probe));
+        hosts
+    }
+
+    /// `fn f(n) { probe.double(n) }`, in the IR.
+    fn calls_double(build: &mut Build) -> FunctionId {
+        build.program.host_ops.push(cove_lir::HostOp {
+            module: Arc::from("probe"),
+            operation: Arc::from("double"),
+            result: Repr::Int,
+        });
+        let op = cove_lir::HostOpId(build.program.host_ops.len() as u32 - 1);
+        let args = build.args(&[0]);
+        build.function(
+            "f",
+            1,
+            &[Repr::Int, Repr::Int],
+            Repr::Int,
+            vec![Inst::CallHost { dst: 1, op, args }, Inst::Return { src: 1 }],
+        )
+    }
+
+    #[test]
+    fn a_host_call_moves_a_word_out_and_the_answer_back() {
+        let mut build = Build::default();
+        let f = calls_double(&mut build);
+        let program = build.done();
+        let hosts = probing(true);
+        let mut machine = Machine::with_hosts(&program, 1 << 12, Some(&hosts));
+        assert_eq!(machine.run(f, &[21], &budget()).unwrap() as i64, 42);
+    }
+
+    /// A string argument and a string answer, which is the case that
+    /// allocates on both sides of the boundary.
+    #[test]
+    fn a_host_call_carries_strings_in_and_out() {
+        let mut build = Build::default().strings(&["hey"]);
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
+        build.program.host_ops.push(cove_lir::HostOp {
+            module: Arc::from("probe"),
+            operation: Arc::from("shout"),
+            result: Repr::Ref,
+        });
+        let op = cove_lir::HostOpId(0);
+        let args = build.args(&[0]);
+        let f = build.function(
+            "f",
+            0,
+            &[Repr::Ref, Repr::Ref],
+            Repr::Ref,
+            vec![
+                Inst::Str {
+                    dst: 0,
+                    text: StrId(0),
+                },
+                Inst::CallHost { dst: 1, op, args },
+                Inst::Return { src: 1 },
+            ],
+        );
+        let program = build.done();
+        let hosts = probing(true);
+        let mut machine = Machine::with_hosts(&program, 1 << 12, Some(&hosts));
+        let word = machine.run(f, &[], &budget()).unwrap();
+        assert_eq!(
+            String::from_utf8(machine.string_bytes(word)).unwrap(),
+            "hey!"
+        );
+    }
+
+    /// The boundary refuses an ungranted capability, and it is the boundary
+    /// that does it: the machine passes the call on and reports what came
+    /// back, classification included.
+    #[test]
+    fn an_ungranted_call_is_refused_at_the_boundary() {
+        let mut build = Build::default();
+        let f = calls_double(&mut build);
+        let program = build.done();
+        let hosts = probing(false);
+        let mut machine = Machine::with_hosts(&program, 1 << 12, Some(&hosts));
+        let error = machine.run(f, &[1], &budget()).unwrap_err();
+        assert!(
+            error.message.contains("probe"),
+            "the refusal names the capability: {}",
+            error.message
+        );
+        assert_eq!(error.denied_capability.as_deref(), Some("probe"));
+        assert_eq!(error.outcome, crate::trace::RunOutcome::HostBoundary);
+    }
+
+    /// The host-call limit is charged inside the boundary, which is where the
+    /// oracle charges it too — `Budget::charge_host_call`, once per call,
+    /// before the host is reached.
+    #[test]
+    fn a_host_call_is_charged_the_way_the_oracle_charges_it() {
+        let mut build = Build::default();
+        build.program.host_ops.push(cove_lir::HostOp {
+            module: Arc::from("probe"),
+            operation: Arc::from("double"),
+            result: Repr::Int,
+        });
+        let op = cove_lir::HostOpId(0);
+        let args = build.args(&[0]);
+        let f = build.function(
+            "f",
+            1,
+            &[Repr::Int, Repr::Int],
+            Repr::Int,
+            vec![
+                Inst::CallHost { dst: 1, op, args },
+                Inst::CallHost { dst: 1, op, args },
+                Inst::Return { src: 1 },
+            ],
+        );
+        let program = build.done();
+        let mut hosts = probing(true);
+        let limits = crate::budget::Limits {
+            max_host_calls: Some(1),
+            ..Default::default()
+        };
+        let budget = crate::budget::Budget::new(limits);
+        let meter = budget.meter();
+        hosts.set_budget(budget);
+        let mut machine = Machine::with_hosts(&program, 1 << 12, Some(&hosts));
+        let error = machine.run(f, &[2], &meter).unwrap_err();
+        assert_eq!(
+            error.message,
+            "execution stopped: host-call limit of 1 exceeded"
+        );
+        // Two, not one: the boundary counts the call it is about to make
+        // and then refuses it for being past the limit. That is the shared
+        // counter doing what it does for every backend, which is the point —
+        // nothing here keeps a count of its own.
+        assert_eq!(hosts.with_budget(|budget| budget.host_calls()), Some(2));
+    }
+
+    /// A machine with no host behind it says what is missing rather than
+    /// answering as if the call had happened.
+    #[test]
+    fn a_host_call_with_no_boundary_says_what_is_missing() {
+        let mut build = Build::default();
+        let f = calls_double(&mut build);
+        let program = build.done();
+        let mut machine = Machine::new(&program, 1 << 12);
+        let error = machine.run(f, &[1], &budget()).unwrap_err();
+        assert_eq!(
+            error.message,
+            "`probe.double` cannot be called, because this run has no host boundary"
+        );
+    }
+
     /// A run that will not stop on its own is stopped by its budget, and the
     /// stride is what bounds how long that takes.
     #[test]
@@ -1436,12 +1962,14 @@ mod tests {
             vec![Inst::Int { dst: 0, value: 0 }, Inst::Jump { to: 0 }],
         );
         let program = build.done();
-        let cancellation = crate::budget::Cancellation::new();
-        let budget =
-            Budget::with_cancellation(crate::budget::Limits::default(), cancellation.clone());
+        let cancellation = Cancellation::new();
+        let budget = crate::budget::Budget::with_cancellation(
+            crate::budget::Limits::default(),
+            cancellation.clone(),
+        );
         cancellation.cancel();
         let mut machine = Machine::new(&program, 1 << 12);
-        assert!(machine.run(f, &[], &budget).is_err());
+        assert!(machine.run(f, &[], &budget.meter()).is_err());
         assert!(machine.instructions() <= SAFEPOINT_STRIDE + 1);
     }
 }

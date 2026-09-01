@@ -195,6 +195,35 @@ API call's arguments and result, an entry's answer, a trace capture. Cove
 calling Cove never builds one. There is no `Vec<Value>` operand area,
 argument buffer, spill area or fallback path anywhere in the machine.
 
+## The layout of each value family
+
+A layout describes a *family*, not an instantiation. `Array<String>` and
+`Array<Point>` are one layout, because a reference is a reference and what an
+element actually is is a question its own object answers. `Array<Int>` and
+`Array<Duration>` are two, because their `Repr`s differ and the boundary has
+to know which. The lowering interns layouts, so the same shape is the same
+`LayoutId` however many times the source writes it.
+
+| value | shape | one layout per |
+|---|---|---|
+| `String` | `Str` | the program (`Program::str_layout`) |
+| `struct T` | `Struct` | declared struct, fields in declaration order |
+| `enum E` | `Enum` | declared enum, cases in declaration order |
+| `Option<T>` | `Enum`, cases `None`, `Some` | payload `Repr` |
+| `Result<T, E>` | `Enum`, cases `Ok`, `Err` | payload `Repr` pair |
+| `Array<T>` | `Elements { growable: false }` | element `Repr` |
+| `Vector<T>` | `Elements { growable: true }` | element `Repr` |
+| `Range` | `Struct { start: Int, end: Int, inclusive: Bool }` | the program |
+| `MapEntry<K, V>` | `Struct { key, value }` | field `Repr` pair |
+| a lambda | `Closure` | lowered lambda |
+| `dyn`, `Any` | `Boxed` | the program |
+
+An enum object is one word of case index followed by the payload of the case
+it is in, sized for the widest case. Which of those words are references
+therefore depends on the case, and the collector reads word 0 to find out.
+That is a fact about an object, answered by the object; it is not a static
+kind per case, and no case is added because a program was refused.
+
 ## Ownership: what is in the heap and what is not
 
 There is **one object heap per run**, shared by the run's task threads, not one

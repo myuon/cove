@@ -27,11 +27,9 @@ use cove_sema::config::Config;
 use cove_sema::package::{Module, Package, Unit};
 use cove_sema::resolve::Program as Checked;
 
-use crate::budget::{Budget, Limits};
 use crate::host::{Grants, HostRegistry};
 use crate::interp::Interpreter;
-use crate::lvm::boundary;
-use crate::lvm::exec::Machine;
+use crate::lvm::Lvm;
 use crate::runtime::Runtime;
 use crate::value::Value;
 
@@ -90,16 +88,44 @@ fn on_the_oracle(source: &str, name: &str, args: Vec<Value>) -> Answer {
     let (sources, program) = checked(source);
     let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
     let runtime = Runtime::new(program.clone(), sources, hosts.clone());
-    match Interpreter::new(&runtime).invoke("m", name, args) {
-        Ok(value) => Answer::Value(format!("{value}")),
-        Err(error) => Answer::Failed(error.message),
-    }
+    said(Interpreter::new(&runtime).invoke("m", name, args))
 }
 
 /// Runs `m.<name>` on the linear-memory machine.
+///
+/// Through [`Lvm`] rather than through [`crate::lvm::exec::Machine`], because
+/// the question this file asks is about the language and the language's
+/// answer includes the boundary: the same argument check, the same
+/// materialisation, the same terminal event. A comparison that skipped them
+/// would be comparing the loop against the whole of the oracle.
 fn on_the_machine(source: &str, name: &str, args: Vec<Value>) -> Answer {
-    let (_sources, checked) = checked(source);
-    let program = match cove_lir::lower(&checked) {
+    let (sources, checked) = checked(source);
+    let program = lowered(&checked);
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(checked.clone(), sources, hosts.clone());
+    said(Lvm::new(&runtime, &hosts, &program).invoke("m", name, args))
+}
+
+/// Runs `m.<name>` as an entry on the interpreter, with no process
+/// arguments.
+fn entry_on_the_oracle(source: &str, name: &str) -> Answer {
+    let (sources, program) = checked(source);
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(program.clone(), sources, hosts.clone());
+    said(Interpreter::new(&runtime).run_entry("m", name, Vec::new()))
+}
+
+/// Runs `m.<name>` as an entry on the linear-memory machine.
+fn entry_on_the_machine(source: &str, name: &str) -> Answer {
+    let (sources, checked) = checked(source);
+    let program = lowered(&checked);
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(checked.clone(), sources, hosts.clone());
+    said(Lvm::new(&runtime, &hosts, &program).run_entry("m", name, Vec::new()))
+}
+
+fn lowered(checked: &Checked) -> cove_lir::Program {
+    match cove_lir::lower(checked) {
         Ok(program) => program,
         Err(items) => panic!(
             "the program lowers:\n{}",
@@ -109,27 +135,13 @@ fn on_the_machine(source: &str, name: &str, args: Vec<Value>) -> Answer {
                 .collect::<Vec<_>>()
                 .join("\n")
         ),
-    };
-    let entry = program
-        .function_named("m", name)
-        .unwrap_or_else(|| panic!("`{name}` was lowered"));
-    let function = program.function(entry);
-    let returns = function.returns;
-    let params: Vec<cove_lir::Repr> = function.reprs[..function.arity as usize].to_vec();
-
-    let mut machine = Machine::new(&program, 1 << 16);
-    let mut words = Vec::new();
-    for (repr, value) in params.iter().zip(&args) {
-        match boundary::from_value(&mut machine, *repr, value) {
-            Ok(word) => words.push(word),
-            Err(error) => return Answer::Failed(error.message),
-        }
     }
-    match machine.run(entry, &words, &Budget::new(Limits::default())) {
-        Ok(word) => match boundary::to_value(&machine, returns, word) {
-            Ok(value) => Answer::Value(format!("{value}")),
-            Err(error) => Answer::Failed(error.message),
-        },
+}
+
+/// What a backend said, in the form the two can be compared in.
+fn said(outcome: Result<Value, crate::error::RuntimeError>) -> Answer {
+    match outcome {
+        Ok(value) => Answer::Value(format!("{value}")),
         Err(error) => Answer::Failed(error.message),
     }
 }
@@ -182,6 +194,30 @@ fn agree(source: &str, name: &str, args: Vec<Value>) -> Answer {
     assert_eq!(
         machine, oracle,
         "the machine and the interpreter do not agree about `{name}`"
+    );
+    oracle
+}
+
+/// Asserts that the two backends answer the entry `m.<name>` the same way.
+///
+/// The other way in, and it is a different question: [`agree`] compares what
+/// a *host* gets when it invokes a declaration, and this compares what a
+/// *command* gets when it runs an entry. The entry-shape rule — no
+/// parameters, or one `Array<String>` — is the language's, so the two must
+/// refuse the same shapes in the same words.
+#[track_caller]
+fn entry_agrees(source: &str, name: &str) -> Answer {
+    let oracle = {
+        let (source, name) = (source.to_string(), name.to_string());
+        on_a_deep_stack(move || entry_on_the_oracle(&source, &name))
+    };
+    let machine = {
+        let (source, name) = (source.to_string(), name.to_string());
+        on_a_deep_stack(move || entry_on_the_machine(&source, &name))
+    };
+    assert_eq!(
+        machine, oracle,
+        "the machine and the interpreter do not agree about the entry `{name}`"
     );
     oracle
 }
@@ -407,5 +443,69 @@ export fn f(n: Int) -> Int { a(n) + b(n) + c(n) }
         agree(source, "f", vec![Value::int(10)]),
         // c(10) = 7, b(10) = 14, a(10) = 15.
         Answer::Value("36".to_string())
+    );
+}
+
+/// The way a command speaks to a program, on both backends.
+#[test]
+fn an_entry_that_takes_no_arguments_agrees() {
+    let source = "
+export fn main() -> Int {
+  var total = 0
+  var i = 0
+  while i < 5 {
+    total = total + i * i
+    i = i + 1
+  }
+  total
+}
+";
+    assert_eq!(
+        entry_agrees(source, "main"),
+        Answer::Value("30".to_string())
+    );
+}
+
+/// The entry-shape rule is the language's, so both refuse in the same words.
+#[test]
+fn an_entry_of_the_wrong_shape_is_refused_the_same_way() {
+    let source = "
+export fn main(a: Int, b: Int) -> Int { a + b }
+";
+    assert_eq!(
+        entry_agrees(source, "main"),
+        Answer::Failed("entry `m.main` declares 2 parameters".to_string())
+    );
+}
+
+/// A declaration the package does not have, asked for both ways.
+#[test]
+fn a_name_the_package_does_not_declare_is_refused_the_same_way() {
+    let source = "
+export fn f(n: Int) -> Int { n }
+";
+    assert_eq!(
+        entry_agrees(source, "g"),
+        Answer::Failed("this package does not declare `m.g`".to_string())
+    );
+    assert_eq!(
+        agree(source, "g", vec![Value::int(1)]),
+        Answer::Failed("this package does not declare `m.g`".to_string())
+    );
+}
+
+/// An invocation is held to the declaration before anything runs, by the
+/// check both backends share.
+#[test]
+fn an_argument_the_declaration_does_not_admit_is_refused_the_same_way() {
+    let source = "
+export fn f(n: Int) -> Int { n }
+";
+    let Answer::Failed(message) = agree(source, "f", vec![Value::float(1.5)]) else {
+        panic!("a `Float` is not an `Int`");
+    };
+    assert!(
+        message.contains("Int"),
+        "the refusal names the declared type: {message}"
     );
 }
