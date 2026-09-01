@@ -1,6 +1,8 @@
 # ADR 0027: A place and a capture name a slot, not a stack
 
-- Status: Accepted. Its open question about a single physical frame is decided by
+- Status: Superseded by [ADR 0034](0034-one-physical-word-stack.md). Its
+  historical measurements remain useful, but its runtime Place representation
+  and parallel physical stacks are no longer architectural decisions.
   [ADR 0034](0034-one-physical-word-stack.md); the place and capture decisions
   remain in force
 - Date: 2026-08-30
