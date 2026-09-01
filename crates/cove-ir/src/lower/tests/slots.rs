@@ -1,5 +1,8 @@
 use super::*;
 
+use cove_sema::typeck::{Ty, Unknown};
+
+use crate::lower::convention::slot_kind_of;
 use crate::Scalar;
 
 // -------------------------------------------------------------- slots
@@ -100,12 +103,19 @@ fn the_slot_table_names_each_parameters_kind_at_the_number_the_convention_gives_
     let function = &program.functions[0];
     assert_eq!(
         function.params,
-        vec![SlotKind::Scalar(Scalar::Int), SlotKind::Value]
+        vec![
+            SlotKind::Scalar(Scalar::Int),
+            SlotKind::Value(ValueKind::Str)
+        ]
     );
     // `a` is declared first, so it takes slot 0; `b` is declared second, so
-    // it takes slot 1 — regardless of which stack each lives on.
+    // it takes slot 1 — regardless of which stack each lives on. `b`'s own
+    // kind names `ValueKind::Str`, not merely `SlotKind::Value`: `String` is
+    // the one refinement this table carries today, so the checker's answer
+    // for `b`'s declared type survives into the layout rather than being
+    // thrown away at the value/scalar split the way it was before.
     assert_eq!(function.slots[0], SlotKind::Scalar(Scalar::Int));
-    assert_eq!(function.slots[1], SlotKind::Value);
+    assert_eq!(function.slots[1], SlotKind::Value(ValueKind::Str));
 }
 
 /// The motivating case: a parameter's slot is where its argument physically
@@ -130,7 +140,7 @@ fn mixed_kind_parameters_take_slots_in_declaration_order() {
         function.params,
         vec![
             SlotKind::Scalar(Scalar::Int),
-            SlotKind::Value,
+            SlotKind::Value(ValueKind::Str),
             SlotKind::Scalar(Scalar::Int),
         ]
     );
@@ -206,4 +216,91 @@ fn slot_count_is_the_three_frame_sizes_summed_over_the_examples_package() {
             function.name
         );
     }
+}
+
+// -------------------------------------------------- what a value slot says
+
+/// A settled `String` binding's slot names [`ValueKind::Str`] — the
+/// refinement `Body::slot_kind` and every other caller of `slot_kind_of`
+/// read off the checker's own settlement, which is the one place this
+/// information can come from: nothing later re-derives it.
+#[test]
+fn a_settled_string_binding_gets_the_refined_value_kind() {
+    assert_eq!(slot_kind_of(&Ty::Str), SlotKind::Value(ValueKind::Str));
+}
+
+/// An unsettled binding — the checker declining, `Ty::Unknown` — keeps the
+/// representation every slot had before `ValueKind` existed:
+/// `SlotKind::Value(ValueKind::Unknown)`, not a refusal and not a guess.
+/// `Ty::Unknown(Unknown::Recovery)` stands for any of `Unknown`'s cases
+/// here, because `slot_kind_of` does not look inside one — an abstention is
+/// an abstention whichever reason produced it.
+#[test]
+fn an_unsettled_binding_does_not_get_the_refined_value_kind() {
+    assert_eq!(
+        slot_kind_of(&Ty::Unknown(Unknown::Recovery)),
+        SlotKind::Value(ValueKind::Unknown)
+    );
+}
+
+/// A declared struct's own type is not further refined either.
+/// [`ValueKind::Str`] is the one case this backend distinguishes today, and
+/// everything else a non-scalar type can be — settled or not — folds into
+/// the same [`ValueKind::Unknown`] an abstention gets, exactly as
+/// `crate::lib`'s own doc comment on `ValueKind` argues: nothing downstream
+/// reads a `StructId` or an `EnumId` out of this refinement yet, so
+/// `slot_kind_of` does not carry one.
+#[test]
+fn a_declared_structs_type_does_not_get_the_refined_value_kind() {
+    assert_eq!(
+        slot_kind_of(&Ty::Struct("m.Cell".into(), Vec::new())),
+        SlotKind::Value(ValueKind::Unknown)
+    );
+}
+
+/// A closure's capture carries the same refinement its binding's slot does
+/// — `Body::make_closure`'s capture-kind arm forwards the binding's own
+/// `ValueKind` rather than widening it back to `Unknown` — so a captured
+/// `String` is provably one inside the closure's own body, the same as a
+/// parameter of that type would be.
+#[test]
+fn a_closures_string_capture_carries_the_refined_value_kind() {
+    let source = "fn labelling(label: String) -> fn(Int) -> String {\n  fn(n: Int) {\n    \"{label}: {n}\"\n  }\n}\n";
+    let program = lower(&checked(source)).expect("it lowers");
+    validate(&program).expect("it holds the VM's invariants");
+    let closure = program
+        .functions
+        .iter()
+        .find(|function| function.name.starts_with("<closure"))
+        .expect("the lambda lowers to a function of its own");
+    assert_eq!(closure.captures.len(), 1);
+    let capture = &closure.captures[0];
+    assert_eq!(&*capture.name, "label");
+    assert_eq!(capture.kind, SlotKind::Value(ValueKind::Str));
+    assert!(
+        closure.code.contains(&Inst::LoadLocal(capture.slot)),
+        "the body reads `label` at the slot its capture records: {:?}",
+        closure.code
+    );
+}
+
+/// The value region's own version of
+/// `a_scalar_number_reused_for_an_int_and_then_a_bool_widens_the_frame_by_one`:
+/// a `String` and a struct sharing a sibling number cannot, because
+/// `Function::slots` cannot name two `ValueKind`s for one number any more
+/// than it can name two `Scalar`s for one — `Body::allocate`'s skip rule is
+/// one rule over all three regions, and this is the value region actually
+/// needing it for the first time. One extra slot, once, is the price: two
+/// same-`ValueKind` sibling blocks would have shared the number instead.
+#[test]
+fn a_value_number_reused_for_a_string_and_then_a_struct_widens_the_frame_by_one() {
+    let source = "struct Cell {\n  at: Int\n}\n\nfn f() -> Int {\n  {\n    let a = \"x\"\n    \
+                  a\n  }\n  {\n    let b = Cell(at: 1)\n    b.at\n  }\n}\n";
+    let program = lower(&checked(source)).expect("it lowers");
+    validate(&program).expect("it holds the VM's invariants");
+    let function = &program.functions[0];
+    assert_eq!(function.value_frame_size, 2);
+    assert_eq!(function.slots.len(), 2);
+    assert_eq!(function.slots[0], SlotKind::Value(ValueKind::Str));
+    assert_eq!(function.slots[1], SlotKind::Value(ValueKind::Unknown));
 }

@@ -43,9 +43,9 @@ use cove_syntax::ast::{
     Type,
 };
 
-use crate::{BinaryOp, Const, EnumId, Inst, IntOp, Scalar, SlotKind, Unsupported};
+use crate::{BinaryOp, Const, EnumId, Inst, IntOp, Scalar, SlotKind, Unsupported, ValueKind};
 
-use super::convention::scalar_of_ty;
+use super::convention::{scalar_of_ty, slot_kind_of};
 use super::index::{Key, Lowering};
 use super::validate::{stack_shape, Shape};
 
@@ -342,7 +342,7 @@ impl<'a, 'l> Body<'a, 'l> {
         Body {
             outer,
             module,
-            returns: SlotKind::Value,
+            returns: SlotKind::Value(ValueKind::Unknown),
             dyn_return: None,
             generics: &[],
             self_bound: None,
@@ -441,7 +441,7 @@ impl<'a, 'l> Body<'a, 'l> {
         for (at, kind) in params.iter().enumerate() {
             match kind {
                 SlotKind::Scalar(_) => scalar_params.push(at as u32),
-                SlotKind::Value => value_params.push(at as u32),
+                SlotKind::Value(_) => value_params.push(at as u32),
                 SlotKind::Place => place_params.push(at as u32),
             }
         }
@@ -488,7 +488,7 @@ impl<'a, 'l> Body<'a, 'l> {
         }
 
         let total = (scalar_frame_size + value_frame_size + place_frame_size) as usize;
-        let mut slots = vec![SlotKind::Value; total];
+        let mut slots = vec![SlotKind::Value(ValueKind::Unknown); total];
         let mut offsets = vec![0u32; total];
         for (j, kind) in self.scalar_layout.iter().enumerate() {
             let slot = permute_scalar(j as u32) as usize;
@@ -561,7 +561,7 @@ impl<'a, 'l> Body<'a, 'l> {
     /// [`validate`]: crate::lower::validate
     pub(super) fn emit_final_return(&mut self, span: Span) {
         let (inst, arrival) = match self.returns {
-            SlotKind::Value => (
+            SlotKind::Value(_) => (
                 Inst::Return,
                 Depth {
                     values: 1,
@@ -656,7 +656,7 @@ impl<'a, 'l> Body<'a, 'l> {
         slot: u32,
         in_slot: bool,
     ) {
-        if param.variadic || !matches!(kind, SlotKind::Value) {
+        if param.variadic || !matches!(kind, SlotKind::Value(_)) {
             return;
         }
         let Some(ty) = &param.ty else {
@@ -779,12 +779,21 @@ impl<'a, 'l> Body<'a, 'l> {
     /// bindings of different kinds: `{ let a: Int = 1 }` followed by a
     /// sibling `{ let b: Bool = true }` both start counting their scalars
     /// from the same number, and the first records that number a
-    /// `Scalar(Int)` while the second would want it a `Scalar(Bool)`. Only
-    /// the scalar region can actually disagree with itself this way today —
-    /// the value region never declares anything but `SlotKind::Value` and
-    /// the place region never declares anything but `SlotKind::Place` — but
-    /// the rule below is written once, over all three regions, rather than
-    /// singled out for the one that needs it.
+    /// `Scalar(Int)` while the second would want it a `Scalar(Bool)`.
+    ///
+    /// The place region cannot disagree with itself this way — it never
+    /// declares anything but `SlotKind::Place` — but the other two both can.
+    /// The value region used to be the scalar region's example of a region
+    /// that could not: every binding it held was `SlotKind::Value` and
+    /// nothing else, so two scopes reusing a value-region number always
+    /// agreed. [`ValueKind`](crate::ValueKind) is what ended that: `{ let a:
+    /// String = "x" }` followed by a sibling `{ let b: Junk = j }` both start
+    /// counting their value slots from the same number, and the first
+    /// records that number `Value(Str)` while the second would want it
+    /// `Value(Unknown)` — the scalar region's `Int`-then-`Bool` shape, over
+    /// the value region's own two cases. So the rule below is written once,
+    /// over all three regions, and it is no longer singled out for the one
+    /// that needs it — both of the other two do now.
     ///
     /// [`Function::slots`](crate::Function::slots) names one [`SlotKind`]
     /// per number, so it has no way to record a number that meant two
@@ -808,7 +817,7 @@ impl<'a, 'l> Body<'a, 'l> {
     /// holds.
     pub(super) fn allocate(&mut self, kind: SlotKind) -> u32 {
         match kind {
-            SlotKind::Value => {
+            SlotKind::Value(_) => {
                 Self::allocate_in(&mut self.next_value, &mut self.value_layout, kind)
             }
             SlotKind::Scalar(_) => {
@@ -889,7 +898,7 @@ impl<'a, 'l> Body<'a, 'l> {
         let binding = self.binding(name)?;
         match binding.kind {
             SlotKind::Scalar(what) => Some((binding.slot, what)),
-            SlotKind::Value | SlotKind::Place => None,
+            SlotKind::Value(_) | SlotKind::Place => None,
         }
     }
 
@@ -938,7 +947,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 };
                 let (slot, kind) = (binding.slot, binding.kind);
                 match kind {
-                    SlotKind::Value => self.emit(Inst::PlaceLocal(slot), expr.span),
+                    SlotKind::Value(_) => self.emit(Inst::PlaceLocal(slot), expr.span),
                     SlotKind::Place => self.emit(Inst::LoadPlace(slot), expr.span),
                     // A place names a slot, and a slot is a region and a
                     // number in it. So a binding the checker settled as
@@ -1070,11 +1079,16 @@ impl<'a, 'l> Body<'a, 'l> {
     /// The same question again, because a binding's storage and an operand's
     /// storage are settled by the same fact: a slot the checker proved holds
     /// an `Int` holds an integer word, and a slot it said nothing about holds
-    /// what every slot used to.
+    /// what every slot used to. [`slot_kind_of`] is the one rule that answers
+    /// it — the same one a parameter's, a field's, and a case's payload go
+    /// through — asked here of `expr`'s own settled type, so a `let s =
+    /// "hello"` binding a `String` names [`ValueKind::Str`] exactly as a
+    /// `String`-typed parameter does, and every other settlement, `None`
+    /// included, keeps the binding on the value stack as [`ValueKind::Unknown`].
     pub(super) fn slot_kind(&self, expr: &Expr) -> SlotKind {
-        match self.scalar_of(expr) {
-            Some(what) => SlotKind::Scalar(what),
-            None => SlotKind::Value,
+        match self.settled(expr) {
+            Some(ty) => slot_kind_of(ty),
+            None => SlotKind::Value(ValueKind::Unknown),
         }
     }
 

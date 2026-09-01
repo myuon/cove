@@ -24,7 +24,7 @@ use std::sync::Arc;
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::Param;
 
-use crate::{Capture, Function, Inst, Scalar, SlotKind, Unsupported};
+use crate::{Capture, Function, Inst, Scalar, SlotKind, Unsupported, ValueKind};
 
 use super::body::{Body, Position};
 use super::fuel::block_fuel;
@@ -80,7 +80,7 @@ impl<'a> Lowering<'a> {
         let is_async = site.is_async;
 
         let mut body = Body::new(self, module);
-        body.returns = SlotKind::Value;
+        body.returns = SlotKind::Value(ValueKind::Unknown);
 
         let mut params: Vec<SlotKind> = Vec::with_capacity(decl_params.len());
         let mut slots: Vec<u32> = Vec::with_capacity(decl_params.len());
@@ -115,8 +115,8 @@ impl<'a> Lowering<'a> {
                     param.span,
                 ));
             }
-            params.push(SlotKind::Value);
-            slots.push(body.allocate(SlotKind::Value));
+            params.push(SlotKind::Value(ValueKind::Unknown));
+            slots.push(body.allocate(SlotKind::Value(ValueKind::Unknown)));
         }
         // Each capture is allocated a region-local number right after this
         // lambda's own parameters of that same kind — dense within its
@@ -157,7 +157,7 @@ impl<'a> Lowering<'a> {
                 kind: *kind,
                 slot: match kind {
                     SlotKind::Scalar(_) => finished.scalar_slot_of[*region_local as usize],
-                    SlotKind::Value => finished.value_slot_of[*region_local as usize],
+                    SlotKind::Value(_) => finished.value_slot_of[*region_local as usize],
                     // `Function::captures` is never `SlotKind::Place`: a
                     // closure captures the value a place names and never the
                     // place, so nothing ever allocates a capture one.
@@ -179,7 +179,7 @@ impl<'a> Lowering<'a> {
             offsets: finished.offsets,
             arity: params.len() as u32,
             params,
-            returns: SlotKind::Value,
+            returns: SlotKind::Value(ValueKind::Unknown),
             has_receiver: false,
             // An `async` lambda answers a settled task exactly as an `async
             // fn` does, and for the same reason: `Interpreter::call_target` reads
@@ -230,8 +230,10 @@ impl<'a> Lowering<'a> {
             // whatever it declared, because what a call to one answers is a
             // task and a task is a value: `async fn f() -> Int` hands back a
             // `Task<Int>`, and only `await` produces the `Int`.
-            true => SlotKind::Value,
-            false => signature.map_or(SlotKind::Value, |signature| slot_kind_of(&signature.ret)),
+            true => SlotKind::Value(ValueKind::Unknown),
+            false => signature.map_or(SlotKind::Value(ValueKind::Unknown), |signature| {
+                slot_kind_of(&signature.ret)
+            }),
         };
         if as_value {
             // The three shapes a closure has no way to express, and each is
@@ -279,7 +281,7 @@ impl<'a> Lowering<'a> {
         // Read before the body borrows the lowering, because a name has to
         // be interned to carry it and interning is the lowering's.
         let dyn_return = match (returns, &decl.return_type) {
-            (SlotKind::Value, Some(ty)) => match self.dyn_conversion(module, ty) {
+            (SlotKind::Value(_), Some(ty)) => match self.dyn_conversion(module, ty) {
                 Some((trait_name, depth)) => {
                     let trait_name = self.name(&trait_name);
                     Some(Inst::MakeDyn { trait_name, depth })
@@ -312,11 +314,11 @@ impl<'a> Lowering<'a> {
                 // on today is scalar — a trait is implemented for a struct
                 // or an enum — so this states the convention rather than
                 // changing where a receiver goes.
-                SlotKind::Value
+                SlotKind::Value(ValueKind::Unknown)
             } else {
                 signature
                     .and_then(|signature| signature.receiver.as_ref())
-                    .map_or(SlotKind::Value, slot_kind_of)
+                    .map_or(SlotKind::Value(ValueKind::Unknown), slot_kind_of)
             };
             params.push(kind);
             body.declare(Some("self"), kind);
@@ -344,11 +346,11 @@ impl<'a> Lowering<'a> {
                 // nothing.
                 SlotKind::Place
             } else if param.variadic || as_value {
-                SlotKind::Value
+                SlotKind::Value(ValueKind::Unknown)
             } else {
                 signature
                     .and_then(|signature| signature.params.get(at))
-                    .map_or(SlotKind::Value, slot_kind_of)
+                    .map_or(SlotKind::Value(ValueKind::Unknown), slot_kind_of)
             });
         }
 
@@ -387,7 +389,7 @@ impl<'a> Lowering<'a> {
                 });
                 match kinds[at] {
                     SlotKind::Scalar(_) => body.expr_scalar(default)?,
-                    SlotKind::Value => body.expr(default)?,
+                    SlotKind::Value(_) => body.expr(default)?,
                     SlotKind::Place => unreachable!("a default does not produce a place"),
                 }
                 body.coerce_param(module, param, kinds[at], slots[at], false);
@@ -459,11 +461,25 @@ pub(super) fn scalar_of_ty(ty: &Ty) -> Option<Scalar> {
 }
 
 /// Where a slot of this type lives, which is [`scalar_of_ty`] read as a
-/// place rather than as a representation.
+/// place rather than as a representation, refined by [`ValueKind`] where the
+/// type is not a scalar.
+///
+/// [`ValueKind::Str`] for `Ty::Str`, so that a `String` binding, parameter,
+/// field, or payload position is provably one wherever this rule settles its
+/// slot — the one place that information can come from, since nothing later
+/// re-derives what the checker already proved. [`ValueKind::Unknown`] for
+/// everything else a non-scalar type can be: a struct, an enum, an array, a
+/// type parameter, and every abstention `scalar_of_ty` already folds into
+/// `None`. That is not a narrower answer than `SlotKind::Value` gave before
+/// this refinement existed — it is the same answer, spelled out as one of
+/// two cases rather than one.
 pub(super) fn slot_kind_of(ty: &Ty) -> SlotKind {
     match scalar_of_ty(ty) {
         Some(what) => SlotKind::Scalar(what),
-        None => SlotKind::Value,
+        None => SlotKind::Value(match ty {
+            Ty::Str => ValueKind::Str,
+            _ => ValueKind::Unknown,
+        }),
     }
 }
 
@@ -471,7 +487,7 @@ pub(super) fn slot_kind_of(ty: &Ty) -> SlotKind {
 /// of this kind wants it.
 fn position_of(kind: SlotKind) -> Position {
     match kind {
-        SlotKind::Value => Position::Value,
+        SlotKind::Value(_) => Position::Value,
         SlotKind::Scalar(_) => Position::Scalar,
         // Only a function's `returns` is asked this, and `slot_kind_of`
         // never answers `Place` about a return type: a place is what a
@@ -483,7 +499,7 @@ fn position_of(kind: SlotKind) -> Position {
 /// The instruction that writes a slot, which is decided by where the slot is.
 pub(super) fn store_slot(kind: SlotKind, slot: u32) -> Inst {
     match kind {
-        SlotKind::Value => Inst::StoreLocal(slot),
+        SlotKind::Value(_) => Inst::StoreLocal(slot),
         SlotKind::Scalar(_) => Inst::StoreScalar(slot),
         // A place slot is filled by the calling convention and never
         // written: a `var` parameter is the one thing that has one, and

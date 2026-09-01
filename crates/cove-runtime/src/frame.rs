@@ -539,27 +539,39 @@
 //! `crate::slot::string_bytes` and compares them the same way, so the six
 //! operators `==`, `!=`, `<`, `<=`, `>` and `>=` agree with `interp::binary`
 //! and with `Vm` exactly, ordering across a difference in length or across a
-//! multi-byte character included. [`admits`] requires at least one operand to
-//! be a statically provable `Kind::Str` — a literal or a `concat`'s answer —
-//! and the other to be `Kind::Str` or `Kind::Reference`, never a scalar.
+//! multi-byte character included. [`admits`] requires both operands to be a
+//! statically provable `Kind::Str`.
 //!
-//! **That second case is deliberately not "provably a `String`, too", and the
-//! reason is checked against the compiler rather than assumed.** `cove_sema`
-//! refuses any `==` and its neighbours whose two sides are not one type —
-//! diagnostic `cove::type::operator`, "`==` means value equality between
-//! values of the same type" — and it refuses that for a declared type
-//! (`String` against a struct) and for a type parameter (`String` against a
-//! `T`) exactly alike. So a `Kind::Reference` word standing across a
-//! comparison from a proven `String` *is* a `String`, by the program's own
-//! type, whether or not this backend's own weak analysis of a loaded local or
-//! a read field can show it — this backend just has no static proof of it,
-//! the way it has none for an arbitrary struct either. A narrower rule that
-//! required both sides provably `Kind::Str` would refuse `a == b` over two
-//! locals, which is most of the comparisons a program actually writes, and it
-//! would not buy any safety back: `FrameVm::compare_string_handles`'s
-//! `debug_assert` is what turns the appeal to the checker into something a
-//! debug build actually checks, the same "two answers, not one trusted" shape
-//! `Inst::GetFieldAt`'s already keeps for a field's reference bit.
+//! **That used to require only one side provably `Kind::Str` and the other
+//! merely `Kind::Reference`, and the reason was checked against the compiler
+//! rather than assumed.** `cove_sema` refuses any `==` and its neighbours
+//! whose two sides are not one type — diagnostic `cove::type::operator`,
+//! "`==` means value equality between values of the same type" — so a
+//! `Kind::Reference` word standing across a comparison from a proven
+//! `String` *is* a `String`, by the program's own type, whether or not this
+//! backend's own analysis of a loaded local or a read field could show it.
+//! What made that the right call at the time was that a loaded local's or a
+//! read field's own analysis stopped at "some heap value" — `cove_ir::SlotKind::Value`
+//! carried nothing past that — so a narrower rule requiring both sides
+//! provably `Kind::Str` would have refused `a == b` over two `String` locals,
+//! most of the comparisons a program actually writes.
+//!
+//! `cove_ir::ValueKind` is what closed that gap, over `String` specifically:
+//! a slot, a field, or a payload position the checker settled as `String`
+//! now carries that answer forward, so `pushed_kind` reads `Kind::Str` off
+//! `Inst::LoadLocal`, `Inst::GetFieldAt` and `Inst::GetPayload` the same way
+//! it always read one off a `String` constant or a `concat`'s answer. So
+//! `a == b` over two `String` locals is provably `Kind::Str` on both sides
+//! now, and the asymmetric rule is not needed to admit it. What is still not
+//! provable this way is a `String` this refinement does not reach — a call's
+//! direct answer, a sequence element, a field or payload typed by a generic
+//! parameter — so a comparison against one of those is refused exactly as a
+//! comparison between two unprovable references always was, and there is no
+//! program left where both sides are unprovable but the type system still
+//! guarantees `String`. `FrameVm::compare_string_handles`'s `debug_assert`
+//! remains, over the stronger claim: the same "two answers, not one trusted"
+//! shape `Inst::GetFieldAt`'s reference bit keeps, checking the tightened
+//! proof rather than the relaxed one.
 //! Everything else `Inst::Binary` could be — arithmetic, `is`, or a
 //! comparison over anything this backend cannot show is two `String`s —
 //! stays refused by the catch-all, as "an operator over a general value".
@@ -586,7 +598,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use cove_diag::Span;
-use cove_ir::{Const, FunctionId, Inst, Program, Scalar, SlotKind};
+use cove_ir::{Const, FunctionId, Inst, Program, Scalar, SlotKind, ValueKind};
 use cove_schema::builtins::{free_builtin, FreeBuiltinKind};
 
 use crate::budget::Meter;
@@ -800,7 +812,7 @@ fn leaves_a_boundary_value(program: &Program, function: &cove_ir::Function, pc: 
         // `pushed_kind` is the one description of which sites do which,
         // asked the same way [`FrameVm::execute`] asks it.
         Some(inst @ (Inst::MakeBuiltin { .. } | Inst::CallHost { .. })) => {
-            pushed_kind(program, *inst) != Some(Kind::Enum)
+            pushed_kind(program, function, *inst) != Some(Kind::Enum)
         }
         // `try` used to be unconditional here too, and for the same reason
         // the two above are not: a `?` over a payload the checker settled as
@@ -809,7 +821,7 @@ fn leaves_a_boundary_value(program: &Program, function: &cove_ir::Function, pc: 
         // `payload` field is what makes that a static fact rather than
         // something only the object popped at run time could answer, and
         // `pushed_kind` reads it the same way it reads every other site's.
-        Some(inst @ Inst::Try { .. }) => pushed_kind(program, *inst).is_none(),
+        Some(inst @ Inst::Try { .. }) => pushed_kind(program, function, *inst).is_none(),
         Some(Inst::Call {
             function: target, ..
         }) => !matches!(program.function(*target).returns, SlotKind::Scalar(_)),
@@ -1249,27 +1261,50 @@ fn walk_function<S: Sink>(
                     ))?;
                 }
             }
-            // A comparison between two `String`s. Admitted where at least one
-            // side is a definite `Kind::Str` -- a literal or a `concat`'s
-            // answer -- and the other is `Kind::Str` or `Kind::Reference`,
-            // never a scalar. The reason the second case is not required to
-            // be provably a `String` too: `cove_sema` refuses any `==` and
-            // its neighbours whose two sides are not one type -- diagnostic
-            // `cove::type::operator`, "`==` means value equality between
-            // values of the same type" -- and it refuses that for a declared
-            // type (`String` against a struct) and for a type parameter
-            // (`String` against a `T`) exactly alike. So a `Kind::Reference`
-            // word standing across a comparison from a proven `String` *is* a
-            // `String`, by the program's own type, whether or not this
-            // backend's own weak analysis of a loaded local or a read field
-            // can show it -- this backend just has no static proof of it, the
-            // way it has none for an arbitrary struct either. A narrower rule
-            // that required both sides provably `Kind::Str` would refuse
-            // `a == b` over two locals, which is most of the comparisons a
-            // program actually writes, and would not buy any safety back:
-            // `FrameVm::execute` asks the object itself beside this, under
-            // `debug_assert`, the same "two answers, not one trusted" shape
-            // `Inst::GetFieldAt` already keeps.
+            // A comparison between two `String`s. Admitted where both sides
+            // are a definite `Kind::Str`.
+            //
+            // This used to admit a `Kind::Reference` on either side, as long
+            // as the other was a proven `Kind::Str`: `cove_sema` refuses any
+            // `==` and its neighbours whose two sides are not one type --
+            // diagnostic `cove::type::operator`, "`==` means value equality
+            // between values of the same type" -- so a `Kind::Reference`
+            // word standing across a comparison from a proven `String` *is*
+            // a `String`, by the program's own type, whether or not this
+            // backend's own analysis of a loaded local or a read field could
+            // show it. That relaxation existed because this backend's
+            // analysis of a local, a field, or a payload used to stop at
+            // "some heap value" -- `cove_ir::SlotKind::Value` carried no
+            // further answer -- so `a == b` over two `String` locals, most of
+            // the comparisons a program actually writes, had a `Kind::Reference`
+            // on both sides and a narrower rule would have refused it outright.
+            //
+            // `cove_ir::ValueKind` closed that gap: a slot, a field, or a
+            // payload position the checker settled as `String` now carries
+            // that answer into `cove_ir::SlotKind::Value(ValueKind::Str)`,
+            // and `pushed_kind` reads it off `Inst::LoadLocal`, `Inst::GetFieldAt`
+            // and `Inst::GetPayload` the same way it always read a `String`
+            // constant or a `concat`'s answer. So `a == b` over two `String`
+            // locals is provably `Kind::Str` on both sides now, and the
+            // relaxation that admitted it by asymmetry is no longer needed
+            // for that case -- and every rooting proof in this file that
+            // compares a string held in a slot, a field, or a bound payload
+            // is exactly that case: both sides are loaded back out of
+            // storage this table now names, so both are provably `Kind::Str`.
+            //
+            // What is **not** provable this way is a `String` this refinement
+            // does not reach: the direct answer of a call (`Inst::Call` pushes
+            // no `Kind` at all, so `f() == "x"` is refused unless `f()`'s
+            // answer is stored in a slot first), an element read out of an
+            // `Array` or a `Vector` (`Inst::CallBuiltin`'s `get` is not one of
+            // `pushed_kind`'s arms), and a field or a payload position typed
+            // by a generic parameter rather than `String` literally (a
+            // generic slot is always `ValueKind::Unknown`, because
+            // `slot_kind_of` cannot know the instantiation). A comparison
+            // over one of those and a proven `String` is refused now exactly
+            // as a comparison between two unprovable references always was;
+            // there is no case left where both sides are unprovable but the
+            // program's own type still guarantees `String`.
             //
             // Every other `Inst::Binary` -- arithmetic, `is`, or a comparison
             // this backend cannot show is over two `String`s -- falls to the
@@ -1285,10 +1320,9 @@ fn walk_function<S: Sink>(
                         | cove_ir::BinaryOp::Le
                         | cove_ir::BinaryOp::Gt
                         | cove_ir::BinaryOp::Ge
-                ) && operands.top(pc, 2).is_some_and(|kinds| {
-                    (kinds[0] == Kind::Str || kinds[1] == Kind::Str)
-                        && kinds.iter().all(|kind| kind.is_reference())
-                }) => {}
+                ) && operands
+                    .top(pc, 2)
+                    .is_some_and(|kinds| kinds.iter().all(|kind| *kind == Kind::Str)) => {}
             Inst::Call {
                 function: target,
                 value_argc,
@@ -1859,8 +1893,11 @@ struct FrameMap {
     width: u32,
     /// One bit per slot of the one numbering, packed the way [`Bitmap`]
     /// packs its own limbs: bit `i % 64` of limb `i / 64` is set exactly when
-    /// `cove_ir::Function::slots[i]` is `SlotKind::Value`. Built relative to
-    /// slot 0 — this function's own frame base — and shifted into place by
+    /// `cove_ir::Function::slots[i]` is `SlotKind::Value` — whichever
+    /// `cove_ir::ValueKind` refines it, since every one of them is a
+    /// `Handle` physically and this bitmap is only ever asked "is this word
+    /// a reference", never which kind of reference. Built relative to slot 0
+    /// — this function's own frame base — and shifted into place by
     /// [`Bitmap::write_frame`] on every call, because the same function opens
     /// at a different `base` each time it is called.
     template: Vec<u64>,
@@ -1872,7 +1909,7 @@ impl FrameMap {
         let width = function.slot_count();
         let mut template = vec![0u64; (width as usize).div_ceil(64)];
         for (slot, kind) in function.slots.iter().enumerate() {
-            if matches!(kind, SlotKind::Value) {
+            if matches!(kind, SlotKind::Value(_)) {
                 template[slot / 64] |= 1u64 << (slot % 64);
             }
         }
@@ -1924,7 +1961,7 @@ fn struct_parts(program: &Program) -> Vec<Vec<Part>> {
                 .fields
                 .iter()
                 .map(|field| match field.kind {
-                    SlotKind::Value => Part::Nested,
+                    SlotKind::Value(_) => Part::Nested,
                     SlotKind::Scalar(Scalar::Int) => Part::Int,
                     SlotKind::Scalar(Scalar::Bool) => Part::Bool,
                     SlotKind::Place => unreachable!(
@@ -1961,7 +1998,7 @@ fn enum_parts(program: &Program) -> Vec<Vec<Vec<Part>>> {
                     case.payload
                         .iter()
                         .map(|kind| match kind {
-                            SlotKind::Value => Part::Nested,
+                            SlotKind::Value(_) => Part::Nested,
                             SlotKind::Scalar(Scalar::Int) => Part::Int,
                             SlotKind::Scalar(Scalar::Bool) => Part::Bool,
                             SlotKind::Place => unreachable!(
@@ -2283,17 +2320,20 @@ fn register_enum_site(
 /// The two are told apart only where it matters, which is *what a word may
 /// become at decision 5's boundary*: a `String` constant and a `concat` both
 /// push a word this backend knows, statically, names a `crate::slot::Shape::Str`
-/// object, because nothing but those two instructions can produce one. A
-/// struct field read or a loaded local stays `Kind::Reference` -- it might be
-/// a string too, but nothing here proves it -- and `Kind::Reference` alone
-/// never crosses the boundary. Two strings compared, where one side is a
-/// `Kind::Str` literal and the other is a loaded `Kind::Reference`, are still
-/// admitted: decision 5 does not need every string in a running program to be
-/// provably a string by this backend's own weak analysis, only the
-/// *particular* word it is about to read as one, and the object's own
-/// `crate::slot::Shape` is asked beside the static answer at that read -- the
-/// same "two answers, not one trusted" discipline `Inst::GetFieldAt` already
-/// keeps.
+/// object, because nothing but those two instructions can produce one --
+/// and so does a struct field, a payload, or a loaded local whose
+/// `cove_ir::SlotKind` the layout itself names `cove_ir::ValueKind::Str`,
+/// because the checker settled that binding's, field's, or payload
+/// position's type as `String` and `cove_ir::lower::convention::slot_kind_of`
+/// carried the answer into the layout rather than throwing it away. A
+/// struct field read or a loaded local whose slot is
+/// `cove_ir::ValueKind::Unknown` stays `Kind::Reference` -- it might be a
+/// string too, this backend just has no static proof of it, the way it has
+/// none for an arbitrary struct either -- and `Kind::Reference` alone never
+/// crosses the boundary. `crate::slot::Shape` is still asked beside the
+/// static answer at every read, under `debug_assert`, whichever route
+/// proved `Kind::Str` -- the same "two answers, not one trusted" discipline
+/// `Inst::GetFieldAt` already keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     Unit,
@@ -2462,7 +2502,14 @@ impl Operands {
 /// only knowable at run time — a call, a `?`, an operator over general values
 /// — is one this backend refuses anyway, so the abstention costs nothing it
 /// would otherwise have.
-fn pushed_kind(program: &Program, inst: Inst) -> Held {
+///
+/// `function` is asked only by [`Inst::LoadLocal`], and only for the
+/// [`cove_ir::ValueKind`] refinement of the slot it loads: a struct field
+/// read and a payload read already carry the type they were read off (a
+/// [`cove_ir::StructId`] or a [`cove_ir::EnumId`]) in the instruction
+/// itself, so `program` alone answers those, but a loaded local names a slot
+/// *of this function* and nothing else says which function that is.
+fn pushed_kind(program: &Program, function: &cove_ir::Function, inst: Inst) -> Held {
     match inst {
         Inst::Const(id) => match program.constant(id) {
             Const::Unit => Some(Kind::Unit),
@@ -2497,7 +2544,19 @@ fn pushed_kind(program: &Program, inst: Inst) -> Held {
             | cove_ir::BinaryOp::Gt
             | cove_ir::BinaryOp::Ge,
         ) => Some(Kind::Bool),
-        Inst::LoadLocal(_) | Inst::MakeStruct(_) | Inst::SetField(_) => Some(Kind::Reference),
+        // **Static because the layout names what the slot holds.** A slot
+        // the checker settled as `String` — `cove_ir::ValueKind::Str`, read
+        // off `function.slots` rather than off the instruction that last
+        // stored into it — is provably `Kind::Str` here, the same static
+        // proof a `String` constant and a `concat`'s answer already had.
+        // Everything else this table can say about a value slot is
+        // `cove_ir::ValueKind::Unknown`, which answers `Kind::Reference`
+        // exactly as an unrefined `SlotKind::Value` always did.
+        Inst::LoadLocal(slot) => Some(match function.slots.get(slot as usize) {
+            Some(SlotKind::Value(ValueKind::Str)) => Kind::Str,
+            _ => Kind::Reference,
+        }),
+        Inst::MakeStruct(_) | Inst::SetField(_) => Some(Kind::Reference),
         // A declared enum's case is not a `Kind::Enum`: only `Result` and
         // `Option` cross decision 5's boundary, because only their case names
         // have `'static` storage -- see `Kind::Enum`'s doc comment. So this
@@ -2538,7 +2597,12 @@ fn pushed_kind(program: &Program, inst: Inst) -> Held {
         // field's slot kind is a static fact.
         Inst::GetFieldAt { of, at } => match program.struct_type(of).fields.get(at as usize) {
             Some(field) => match field.kind {
-                SlotKind::Value => Some(Kind::Reference),
+                // A field declared `String` is provably one for the same
+                // reason a loaded local is: the type names it, not the
+                // instruction that built the particular struct standing
+                // here.
+                SlotKind::Value(ValueKind::Str) => Some(Kind::Str),
+                SlotKind::Value(ValueKind::Unknown) => Some(Kind::Reference),
                 SlotKind::Scalar(Scalar::Int) => Some(Kind::Int),
                 SlotKind::Scalar(Scalar::Bool) => Some(Kind::Bool),
                 SlotKind::Place => None,
@@ -2570,7 +2634,12 @@ fn pushed_kind(program: &Program, inst: Inst) -> Held {
             .get(case as usize)
             .and_then(|declared| declared.payload.get(at as usize))
         {
-            Some(SlotKind::Value) => Some(Kind::Reference),
+            // A payload declared `String` is provably one, the same way a
+            // field is: `of` names the declared case, so the payload's own
+            // type is a static fact rather than something only the object
+            // built at this particular site could answer.
+            Some(SlotKind::Value(ValueKind::Str)) => Some(Kind::Str),
+            Some(SlotKind::Value(ValueKind::Unknown)) => Some(Kind::Reference),
             Some(SlotKind::Scalar(Scalar::Int)) => Some(Kind::Int),
             Some(SlotKind::Scalar(Scalar::Bool)) => Some(Kind::Bool),
             Some(SlotKind::Place) | None => None,
@@ -2652,7 +2721,7 @@ fn simulate(program: &Program, function: &cove_ir::Function) -> Operands {
         }
         let put = match copied {
             Some(held) => held,
-            None => pushed_kind(program, inst),
+            None => pushed_kind(program, function, inst),
         };
         for _ in 0..left {
             stack.push(put);
@@ -4084,7 +4153,7 @@ impl<'a> FrameVm<'a> {
                                     };
                                     self.push_scalar(Word::of_bool(flag));
                                 }
-                                SlotKind::Value | SlotKind::Place => {
+                                SlotKind::Value(_) | SlotKind::Place => {
                                     self.boundary.push(answer);
                                 }
                             }
@@ -4621,8 +4690,8 @@ impl<'a> FrameVm<'a> {
         debug_assert!(
             matches!(self.heap.shape_of(lhs), Shape::Str)
                 && matches!(self.heap.shape_of(rhs), Shape::Str),
-            "`admits` proved at least one side of a comparison is a `String`; the object the \
-             other side names says otherwise"
+            "`admits` proved both sides of a comparison are `Kind::Str`; an object one of them \
+             names says otherwise"
         );
         let lhs_bytes = string_bytes(self.heap.word(lhs, 0), self.heap.tail_range(lhs), |at| {
             self.heap.word(lhs, at)

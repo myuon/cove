@@ -87,7 +87,7 @@ fn a_function_used_as_a_value_is_a_closure_over_nothing() {
         .functions
         .iter()
         .position(|function| {
-            &*function.name == "twice" && matches!(function.returns, SlotKind::Value)
+            &*function.name == "twice" && matches!(function.returns, SlotKind::Value(_))
         })
         .expect("`twice` is lowered a second time, as a value");
     assert_eq!(
@@ -259,7 +259,7 @@ fn every_literal_loads_one_constant() {
 fn an_interpolated_string_renders_its_parts_left_to_right() {
     assert_eq!(
         listing("fn f(n: Int) -> String {\n  \"tick {n}!\"\n}\n", "f"),
-        "fn m.f arity=1 frame=1/0 params=[Int] -> value\n\
+        "fn m.f arity=1 frame=1/0 params=[Int] -> String\n\
          \x20  0  const Str(\"tick \")\n\
          \x20  1  load-scalar 0\n\
          \x20  2  scalar-to-value Int\n\
@@ -273,7 +273,7 @@ fn an_interpolated_string_renders_its_parts_left_to_right() {
 fn a_string_with_nothing_interpolated_is_one_constant() {
     assert_eq!(
         listing("fn f() -> String {\n  \"tick\"\n}\n", "f"),
-        "fn m.f arity=0 frame=0/0 -> value\n\
+        "fn m.f arity=0 frame=0/0 -> String\n\
          \x20  0  const Str(\"tick\")\n\
          \x20  1  return\n"
     );
@@ -990,7 +990,7 @@ fn a_label_may_skip_a_parameter_that_has_a_default() {
     let source = "fn measure(value: Int, unit: String = \"m\", prefix: String = \"length\") -> String {\n  \"{prefix}: {value}{unit}\"\n}\n\nfn f() -> String {\n  measure(3, prefix: \"d\")\n}\n";
     assert_eq!(
         listing(source, "f"),
-        "fn m.f arity=0 frame=0/0 -> value\n\
+        "fn m.f arity=0 frame=0/0 -> String\n\
          \x20  0  scalar-const 3\n\
          \x20  1  const Str(\"d\")\n\
          \x20  2  call m.measure argc=1/1\n\
@@ -998,7 +998,7 @@ fn a_label_may_skip_a_parameter_that_has_a_default() {
     );
     assert_eq!(
         specialisation(source, "measure", 2),
-        "fn m.measure arity=2 frame=1/2 params=[Int, value] -> value\n\
+        "fn m.measure arity=2 frame=1/2 params=[Int, String] -> String\n\
          \x20  0  const Str(\"m\")\n\
          \x20  1  store 2\n\
          \x20  2  load 1\n\
@@ -1363,13 +1363,13 @@ fn an_argument_travels_on_the_stack_its_own_type_names() {
     let source = "fn g(n: Int, tag: String, k: Int) -> String {\n  tag\n}\n\nfn f() -> String {\n  g(1, \"a\", 2)\n}\n";
     assert_eq!(
         listing(source, "g"),
-        "fn m.g arity=3 frame=2/1 params=[Int, value, Int] -> value\n\
+        "fn m.g arity=3 frame=2/1 params=[Int, String, Int] -> String\n\
          \x20  0  load 1\n\
          \x20  1  return\n"
     );
     assert_eq!(
         listing(source, "f"),
-        "fn m.f arity=0 frame=0/0 -> value\n\
+        "fn m.f arity=0 frame=0/0 -> String\n\
          \x20  0  scalar-const 1\n\
          \x20  1  const Str(\"a\")\n\
          \x20  2  scalar-const 2\n\
@@ -1415,7 +1415,7 @@ fn a_scalar_answer_crosses_only_where_a_value_reads_it() {
         "fn g() -> Int {\n  1\n}\n\nfn f() -> String {\n  g()\n  let n = g() + 1\n  \"{g()}\"\n}\n";
     assert_eq!(
         listing(source, "f"),
-        "fn m.f arity=0 frame=1/0 -> value\n\
+        "fn m.f arity=0 frame=1/0 -> String\n\
          \x20  0  call m.g argc=0/0 -> scalar\n\
          \x20  1  scalar-pop\n\
          \x20  2  call m.g argc=0/0 -> scalar\n\
@@ -1600,7 +1600,7 @@ fn a_resource_operation_takes_its_handle_below_its_arguments() {
             "use files\n\nfn f(line: String) -> Result<Unit, Error> {\n  let writer = files.create(\"notes.txt\")?\n  writer.writeLine(line)\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=0/2 params=[value] -> value\n\
+        "fn m.f arity=1 frame=0/2 params=[String] -> value\n\
          \x20  0  const Str(\"notes.txt\")\n\
          \x20  1  call-host files.create argc=1\n\
          \x20  2  try\n\
@@ -1798,7 +1798,9 @@ fn one_lambda_reached_from_two_conventions_keeps_one_capture_layout() {
     let as_value = program
         .functions
         .iter()
-        .position(|function| &*function.name == "adder" && function.params == [SlotKind::Value])
+        .position(|function| {
+            &*function.name == "adder" && function.params == [SlotKind::Value(ValueKind::Unknown)]
+        })
         .map(|index| FunctionId(index as u32))
         .expect("`adder` was lowered under the general convention too");
     assert_eq!(

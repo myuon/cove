@@ -20,11 +20,11 @@ use cove_syntax::ast::{
     PatternKind, Stmt, StmtKind, StrPart, UnaryOp as SourceUnary,
 };
 
-use crate::{BinaryOp, Const, Inst, Scalar, SlotKind, UnaryOp, Unsupported};
+use crate::{BinaryOp, Const, Inst, Scalar, SlotKind, UnaryOp, Unsupported, ValueKind};
 
 use super::body::{binary_op, branch_on, int_result, Body, Depth, LoopFrame, Position};
 use super::call::Args;
-use super::convention::store_slot;
+use super::convention::{slot_kind_of, store_slot};
 use super::index::{dyn_shape, reject_dyn, Instance, LambdaSite};
 use super::scan::mentioned_names;
 
@@ -92,12 +92,12 @@ impl<'a, 'l> Body<'a, 'l> {
                 // was.
                 let converts = ty.as_ref().is_some_and(|ty| dyn_shape(ty).is_some());
                 let kind = match converts {
-                    true => SlotKind::Value,
+                    true => SlotKind::Value(ValueKind::Unknown),
                     false => self.slot_kind(value),
                 };
                 match kind {
                     SlotKind::Scalar(_) => self.expr_scalar(value)?,
-                    SlotKind::Value => self.expr(value)?,
+                    SlotKind::Value(_) => self.expr(value)?,
                     // `slot_kind` answers about a type and never says
                     // `Place`.
                     SlotKind::Place => unreachable!("a `let` does not declare a place"),
@@ -384,12 +384,12 @@ impl<'a, 'l> Body<'a, 'l> {
                 // lowering it as the untyped one rather than inventing a
                 // scalar is what makes `validate` refuse the pair and say so
                 // instead of the VM reading a word that was never written.
-                (SlotKind::Scalar(_), None) | (SlotKind::Value, None) => {
+                (SlotKind::Scalar(_), None) | (SlotKind::Value(_), None) => {
                     self.constant(Const::Unit, span);
                     self.emit_dyn_return(span);
                     self.emit(Inst::Return, span);
                 }
-                (SlotKind::Value, Some(value)) => {
+                (SlotKind::Value(_), Some(value)) => {
                     self.expr(value)?;
                     self.emit_dyn_return(span);
                     self.emit(Inst::Return, span);
@@ -663,11 +663,13 @@ impl<'a, 'l> Body<'a, 'l> {
             match kind {
                 // The value the place names, not the place: `Env::captures`
                 // calls `place.read`. What the callee gets is a value, so
-                // that is the kind recorded for it.
+                // that is the kind recorded for it. Nothing here says what
+                // the place's own referent is refined as, so this is
+                // `ValueKind::Unknown` rather than a guess.
                 SlotKind::Place => {
                     self.emit(Inst::LoadPlace(slot), span);
                     self.emit(Inst::PlaceRead, span);
-                    capture_kinds.push(SlotKind::Value);
+                    capture_kinds.push(SlotKind::Value(ValueKind::Unknown));
                 }
                 // A capture travels as a `Value` whatever it will land in,
                 // because a closure holds `(name, Value)` pairs on both
@@ -679,9 +681,14 @@ impl<'a, 'l> Body<'a, 'l> {
                     self.emit(Inst::ScalarToValue(what), span);
                     capture_kinds.push(SlotKind::Scalar(what));
                 }
-                SlotKind::Value => {
+                // The binding's own `ValueKind` travels with it — a
+                // captured `String` is recorded as one, not widened back to
+                // `Unknown`, so `Inst::LoadLocal` of the capture's slot in
+                // the closure's own body is provably a `String` the same
+                // way any other `String` slot is.
+                SlotKind::Value(value_kind) => {
                     self.emit(Inst::LoadLocal(slot), span);
-                    capture_kinds.push(SlotKind::Value);
+                    capture_kinds.push(SlotKind::Value(value_kind));
                 }
             }
         }
@@ -917,7 +924,7 @@ impl<'a, 'l> Body<'a, 'l> {
         match op {
             None => match kind {
                 SlotKind::Scalar(_) => self.expr_scalar(value)?,
-                SlotKind::Value => self.expr(value)?,
+                SlotKind::Value(_) => self.expr(value)?,
                 SlotKind::Place => {
                     unreachable!("a place binding is written by `assign_through_place`")
                 }
@@ -947,14 +954,14 @@ impl<'a, 'l> Body<'a, 'l> {
                         self.emit(inst, span);
                         self.emit(Inst::ValueToScalar, span);
                     }
-                    (SlotKind::Value, Inst::IntBinary(typed)) => {
+                    (SlotKind::Value(_), Inst::IntBinary(typed)) => {
                         self.emit(Inst::LoadLocal(slot), target.span);
                         self.emit(Inst::ValueToScalar, target.span);
                         self.expr_scalar(value)?;
                         self.emit(inst, span);
                         self.emit(Inst::ScalarToValue(int_result(typed)), span);
                     }
-                    (SlotKind::Value, _) => {
+                    (SlotKind::Value(_), _) => {
                         self.emit(Inst::LoadLocal(slot), target.span);
                         self.expr(value)?;
                         self.emit(inst, span);
@@ -1217,8 +1224,8 @@ impl<'a, 'l> Body<'a, 'l> {
                 end,
                 inclusive_end,
             } => {
-                let cursor = self.declare(None, SlotKind::Value);
-                let limit = self.declare(None, SlotKind::Value);
+                let cursor = self.declare(None, SlotKind::Value(ValueKind::Unknown));
+                let limit = self.declare(None, SlotKind::Value(ValueKind::Unknown));
                 self.expr(start)?;
                 self.emit(Inst::StoreLocal(cursor), start.span);
                 self.expr(end)?;
@@ -1232,9 +1239,9 @@ impl<'a, 'l> Body<'a, 'l> {
                 )
             }
             _ => {
-                let sequence = self.declare(None, SlotKind::Value);
-                let length = self.declare(None, SlotKind::Value);
-                let cursor = self.declare(None, SlotKind::Value);
+                let sequence = self.declare(None, SlotKind::Value(ValueKind::Unknown));
+                let length = self.declare(None, SlotKind::Value(ValueKind::Unknown));
+                let cursor = self.declare(None, SlotKind::Value(ValueKind::Unknown));
                 self.expr(iterable)?;
                 self.emit(Inst::IterItems, iterable.span);
                 self.emit(Inst::StoreLocal(sequence), iterable.span);
@@ -1252,7 +1259,7 @@ impl<'a, 'l> Body<'a, 'l> {
         // block opens a scope inside this one.
         // A `for` binding is read-only, which is what the interpreter
         // declares one as.
-        let element = self.declare(Some(binding), SlotKind::Value);
+        let element = self.declare(Some(binding), SlotKind::Value(ValueKind::Unknown));
 
         let top = self.label();
         let next = self.label();
@@ -1300,7 +1307,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 // for the sequence's element type.
                 self.emit(
                     Inst::Try {
-                        payload: SlotKind::Value,
+                        payload: SlotKind::Value(ValueKind::Unknown),
                     },
                     span,
                 );
@@ -1592,9 +1599,9 @@ impl<'a, 'l> Body<'a, 'l> {
     }
 
     /// Declares `name` and stores the value stack's top under it, choosing
-    /// the region the same rule chooses every other binding's: the
-    /// checker's settlement of its type, through `slot_kind_of`'s cousin for
-    /// the two scalar types.
+    /// the region the same rule chooses every other binding's: `slot_kind_of`,
+    /// the checker's settlement of its type read through the one function
+    /// every other binding's kind comes from.
     ///
     /// `subject_ty` is `Some(Ty::Int)` or `Some(Ty::Bool)` only where the
     /// checker settled the bound value's own type as one of them — a
@@ -1606,9 +1613,11 @@ impl<'a, 'l> Body<'a, 'l> {
     /// [`Inst::StoreScalar`], exactly [`Inst::ValueToScalar`]'s own doc
     /// comment: "what a scalar binding declared from something the value
     /// path computed lowers to". Every other settlement, `None` included,
-    /// keeps the binding on the value stack: an abstained type is not a
-    /// scalar, the rule `crate::lower::index::Lowering::struct_type`'s own
-    /// doc argues, and a reference is never one.
+    /// keeps the binding on the value stack — `slot_kind_of` never answers a
+    /// scalar for anything but `Ty::Int` and `Ty::Bool` — refined by
+    /// `ValueKind` exactly as a `let` binding's is: a bound `Ty::Str`
+    /// payload names `ValueKind::Str`, and everything else, `None` included,
+    /// is `ValueKind::Unknown`.
     fn bind_top(&mut self, name: &'a str, subject_ty: Option<&Ty>, span: Span) {
         match subject_ty {
             Some(Ty::Int) => {
@@ -1621,9 +1630,17 @@ impl<'a, 'l> Body<'a, 'l> {
                 let slot = self.declare(Some(name), SlotKind::Scalar(Scalar::Bool));
                 self.emit(Inst::StoreScalar(slot), span);
             }
+            // Neither scalar type: the same [`slot_kind_of`] every other
+            // binding's kind comes through, asked of the bound value's own
+            // settled type where there is one — so a bound `String` payload
+            // names [`ValueKind::Str`] here exactly as a `let` or a
+            // parameter of that type does, and `None` keeps the binding on
+            // the value stack as [`ValueKind::Unknown`], the abstention
+            // this arm always fell back to before that distinction existed.
             _ => {
-                let slot = self.declare(Some(name), SlotKind::Value);
-                self.emit(Inst::StoreLocal(slot), span);
+                let kind = subject_ty.map_or(SlotKind::Value(ValueKind::Unknown), slot_kind_of);
+                let slot = self.declare(Some(name), kind);
+                self.emit(store_slot(kind, slot), span);
             }
         }
     }

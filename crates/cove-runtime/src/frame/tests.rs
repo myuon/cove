@@ -2484,12 +2484,184 @@ fn an_interpolated_string_renders_a_string_an_int_a_bool_and_a_float() {
     ));
 }
 
+// -------------------------------------------------- what a value slot says
+
+/// **The refinement that makes this admitted at all.** Interpolating a
+/// `String` *variable* used to be refused with everything else this backend
+/// could not show was a `String` — only a literal or a `concat`'s own
+/// answer crossed decision 5's boundary. `s`'s slot is settled `String`, so
+/// `cove_ir::ValueKind::Str` names it in `cove_ir::Function::slots` and
+/// `Inst::LoadLocal` is now provably `Kind::Str` the same way `Inst::Const`
+/// always was.
+#[test]
+fn interpolation_over_a_string_variable_is_admitted_and_agrees() {
+    agree(
+        "export fn main() -> String {\n  \
+         let s = \"a variable\"\n  \
+         \"{s}\"\n\
+         }\n",
+    );
+}
+
+/// The same, over a `String` *parameter* rather than a local — `params`
+/// carries the same refined kind a local's slot does, because both come
+/// from `slot_kind_of` asked of the same settled type.
+#[test]
+fn interpolation_over_a_string_parameter_is_admitted_and_agrees() {
+    agree(
+        "fn greet(name: String) -> String {\n  \"hi {name}\"\n}\n\n\
+         export fn main() -> String {\n  greet(\"world\")\n}\n",
+    );
+}
+
+/// The same, over a `String` struct field read by `Inst::GetFieldAt` —
+/// `cove_ir::StructField::kind` carries the refinement the same way a
+/// local's slot does, so the field read is provably `Kind::Str` without
+/// this backend ever seeing the struct's own construction.
+#[test]
+fn interpolation_over_a_string_struct_field_is_admitted_and_agrees() {
+    agree(
+        "struct Holder {\n  label: String\n}\n\n\
+         export fn main() -> String {\n  \
+         let h = Holder(label: \"a field\")\n  \
+         \"{h.label}\"\n\
+         }\n",
+    );
+}
+
+/// The same, over a `String` bound out of a declared enum's payload by a
+/// `match` arm — `cove_ir::EnumCase::payload` carries the refinement, so
+/// `t`'s slot is provably `Kind::Str` once `Inst::GetPayload` and
+/// `Inst::StoreLocal` have put it there.
+#[test]
+fn interpolation_over_a_bound_string_payload_is_admitted_and_agrees() {
+    agree(
+        "enum Boxed {\n  Full(String)\n}\n\n\
+         export fn main() -> String {\n  \
+         match Boxed.Full(\"a payload\") {\n    \
+         Boxed.Full(t) => \"{t}\",\n    \
+         _ => \"\",\n  \
+         }\n}\n",
+    );
+}
+
+/// A variable and a literal segment interpolated together, so the same
+/// `concat` proves two operands two different ways: the literal is
+/// `Kind::Str` from `Inst::Const`, the way it always was, and the variable
+/// is `Kind::Str` from the slot's own settled type — the new route standing
+/// beside the old one rather than replacing it.
+#[test]
+fn interpolation_mixing_a_variable_and_a_literal_is_admitted_and_agrees() {
+    agree(
+        "export fn main() -> String {\n  \
+         let name = \"world\"\n  \
+         \"hello {name}!\"\n\
+         }\n",
+    );
+}
+
+/// A comparison over two `String` *variables*, neither a literal nor a
+/// `concat`'s answer — the case the relaxed `Inst::Binary` rule used to need
+/// an asymmetry for, and the case that made a narrower rule too costly to
+/// write before this refinement existed. Both slots are settled `String`,
+/// so both sides are provably `Kind::Str` and the tightened rule admits it
+/// outright.
+#[test]
+fn a_comparison_over_two_string_variables_is_admitted_and_agrees() {
+    agree(
+        "export fn main() -> Bool {\n  \
+         let a = \"same text\"\n  \
+         let b = \"same text\"\n  \
+         a == b\n\
+         }\n",
+    );
+}
+
+/// **The refinement doing work rather than being vacuous.** A struct-typed
+/// local and a `String`-typed local stand in the same function, one slot
+/// apart: the struct's slot stays `ValueKind::Unknown` — nothing refines a
+/// declared struct further — and the `String`'s slot is `ValueKind::Str`,
+/// so the two are told apart by the frame's own layout rather than only by
+/// which instruction happened to build the word standing in them this turn.
+#[test]
+fn a_struct_in_a_slot_beside_a_string_in_a_slot_is_admitted_and_agrees() {
+    agree(
+        "struct Cell {\n  at: Int\n}\n\n\
+         export fn main() -> String {\n  \
+         let cell = Cell(at: 5)\n  \
+         let label = \"a string\"\n  \
+         if cell.at == 5 { \"{label}\" } else { \"\" }\n\
+         }\n",
+    );
+}
+
+/// **The abstention this refinement leaves alone.** A generic parameter's
+/// slot is `ValueKind::Unknown` on every instantiation —
+/// `cove_ir::StructType`'s own doc comment argues the same rule for a
+/// generic field — so a `String` handed through `fn identity<T>(x: T) -> T`
+/// is refused for interpolation exactly as it was refused before this
+/// refinement existed, although the word standing in the slot at run time
+/// really is a `String`. The checker settled *something* here — `Ty::Param`,
+/// not an abstention in `cove_sema`'s own sense — but `slot_kind_of` folds
+/// it into the same `ValueKind::Unknown` an outright abstention gets, and
+/// this is the coverage that says the fold does not quietly narrow into a
+/// wrong admission: a slot the checker settled nothing this refinement acts
+/// on lowers and behaves exactly as it did before `ValueKind` existed.
+#[test]
+fn a_generic_slot_stays_unrefined_and_interpolating_it_is_still_refused() {
+    let ready = ready(
+        "fn identity<T>(x: T) -> T {\n  x\n}\n\n\
+         export fn main() -> String {\n  \
+         let s = identity(\"a string\")\n  \
+         \"{s}\"\n\
+         }\n",
+    );
+    let refused = match ready.admitted() {
+        Ok(id) => panic!(
+            "interpolating a generic slot holding a `String` is refused, and it admitted {id:?}"
+        ),
+        Err(refused) => refused,
+    };
+    assert!(
+        refused.what.contains("a heap object") || refused.what.contains("unshowable"),
+        "it was refused for `{}`, and a heap-object/unshowable refusal was expected",
+        refused.what
+    );
+}
+
+/// **Still refused, and the refusal names what it saw.** `g()`'s answer is
+/// `String`, but nothing routes a call's direct answer through a slot this
+/// table can read: `pushed_kind` has no arm for `Inst::Call` at all, so the
+/// operand is `None` rather than `Some(Kind::Reference)` — "an operand the
+/// 8-byte frame cannot show the kind of" instead of "a heap object this
+/// backend cannot show is a `String`" — and interpolating it before it ever
+/// reaches a local is refused the same way it always was.
+#[test]
+fn interpolation_over_a_calls_direct_answer_is_still_refused() {
+    let ready = ready(
+        "fn g() -> String {\n  \"hi\"\n}\n\n\
+         export fn main() -> String {\n  \"{g()}\"\n}\n",
+    );
+    let refused = match ready.admitted() {
+        Ok(id) => {
+            panic!("interpolating a call's direct answer is refused, and it admitted {id:?}")
+        }
+        Err(refused) => refused,
+    };
+    assert!(
+        refused.what.contains("cannot show the kind of"),
+        "it was refused for `{}`, and an unshowable-kind refusal was expected",
+        refused.what
+    );
+}
+
 /// A `String` survives a call that is a safepoint, held in a frame slot the
 /// whole time, and the comparison at the end is what proves it rather than
-/// merely running to completion: the left side is `Kind::Reference`, loaded
-/// back out of the slot, and the right side is a fresh `Kind::Str` literal --
-/// exactly the asymmetric case `Inst::Binary`'s admission and its
-/// `debug_assert` both exist for.
+/// merely running to completion: `s`'s slot is settled `String`, so both the
+/// left side, loaded back out of the slot, and the right side, a fresh
+/// literal, are a provable `Kind::Str` -- `Inst::Binary`'s admission no
+/// longer needs the two sides to differ, and its `debug_assert` checks the
+/// stronger claim.
 #[test]
 fn a_string_held_in_a_frame_slot_across_a_call_survives_and_compares_equal() {
     agree(

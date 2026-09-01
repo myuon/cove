@@ -12,7 +12,7 @@
 use cove_diag::Span;
 use cove_syntax::ast::{Block, Expr, ExprKind};
 
-use crate::{Inst, Scalar, SlotKind, Unsupported};
+use crate::{Inst, Scalar, SlotKind, Unsupported, ValueKind};
 
 use super::body::{Body, Position};
 use super::call::{plain_arguments, Args};
@@ -57,7 +57,10 @@ impl<'a, 'l> Body<'a, 'l> {
         let mark = self.scope();
         let named = self.outer.name(name.node.as_str());
         self.emit(Inst::EnterScope(named), span);
-        let slot = self.declare(Some(name.node.as_str()), SlotKind::Value);
+        let slot = self.declare(
+            Some(name.node.as_str()),
+            SlotKind::Value(ValueKind::Unknown),
+        );
         self.emit(Inst::StoreLocal(slot), span);
         self.open_scopes += 1;
         let lowered = self.block_at(body, Position::Value);
@@ -70,7 +73,7 @@ impl<'a, 'l> Body<'a, 'l> {
         // `for`-loop's own `Try` carries for its `element` slot.
         self.emit(
             Inst::Try {
-                payload: SlotKind::Value,
+                payload: SlotKind::Value(ValueKind::Unknown),
             },
             span,
         );
