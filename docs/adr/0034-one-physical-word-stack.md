@@ -3,9 +3,19 @@
 - Status: Accepted
 - Date: 2026-09-01
 - Supersedes in part:
+  [ADR 0027](0027-a-place-and-a-capture-name-a-slot.md), only its runtime
+  representation of a place as a stack-discriminated root plus a stored path.
+  Assignable-expression semantics and mutable-reference aliasing remain;
+  lowering represents them as one-word logical addresses
+- Supersedes in part:
   [ADR 0028](0028-five-representations-and-one-is-public.md), only where
   decision 1 leaves the physical arrangement open and permits physically split
   regions. All other decisions in ADR 0028 remain in force
+- Supersedes in part:
+  [ADR 0033](0033-an-identity-is-not-a-vm-heap-object.md), decisions 2 through
+  4 only for Vector and Shared. Cove-owned identity does not create another
+  value store: those objects live in the VM heap. Task and TaskScope remain
+  scheduler control state and Resource remains Host-owned
 - Decides:
   [ADR 0027](0027-a-place-and-a-capture-name-a-slot.md)'s open item
   "A single physical frame" and issue #162's physical realization
@@ -57,6 +67,32 @@ physical representation permanently undecided.
 
 ## Decision
 
+### Exactly two stores hold Cove-owned runtime values
+
+The production runtime has exactly two stores for Cove-owned values:
+
+1. one contiguous stack of eight-byte words;
+2. one VM-owned object heap.
+
+A new Cove value kind must use one of these stores. Identity, mutability,
+variable size, boundary crossing, rooting convenience or an incomplete
+migration do not justify an identity store, boundary value store, side heap or
+other third value store.
+
+Static type/layout tables, instruction metadata, GC mark bits and allocator
+bookkeeping describe or manage values but do not store general Cove values.
+Scheduler control structures and Host-owned resource registries are not Cove
+value stores and must not become fallback storage for ordinary values.
+
+Strings, closures, structs, enums, arrays, maps, sets, vectors and Shared cells
+live in the VM object heap when represented by the production VM. Observable
+identity changes whether materialisation may copy an object; it does not
+change which heap owns the object.
+
+Adding another runtime value store requires a later ADR that explicitly
+supersedes this rule and demonstrates why stack plus heap cannot implement the
+required semantics.
+
 ### One physical stack
 
 The production VM stores frames and operands in one contiguous stack of
@@ -101,6 +137,23 @@ A place remains ADR 0027's root plus path. Its root names a slot in the one
 numbering; it does not name one of several physical stacks. A place is not
 itself an additional GC root.
 
+### A place is an address, not a store or object
+
+A place remains a compiler concept for an assignable expression. It is not a
+third runtime representation. Lowering turns a place into a one-word logical
+address into the stack or VM heap.
+
+The production runtime has no place stack, no allocated root-plus-path object
+and no table of places. Field and element operations compute an address from a
+base address or heap handle plus lowered offsets. A mutable parameter carries
+that address in an ordinary eight-byte slot. Stack-address escape and
+invalidation by growable collections are rejected or constrained by the type
+and borrowing rules; they are not repaired by allocating a Place object.
+
+The concrete address encoding is private runtime detail. It may distinguish
+stack and heap in its bits or use one VM word-address namespace, but it must
+not require another value store.
+
 ### Heap-backed values and the boundary
 
 A struct, string, array, VM-owned enum or other VM-owned heap-backed value is a
@@ -108,10 +161,16 @@ handle in one word, under ADR 0028 and the ownership corrections of ADRs 0031
 and 0033.
 
 The materialized public Value remains the host/oracle boundary representation.
-A Vec<Value> may exist while entering or leaving that boundary, but it is not
-an internal operand stack, call buffer, spill area or fallback execution path.
-VM execution converts at explicit boundaries and otherwise operates on words
-and VM heap objects.
+A Vec<Value> may exist transiently while entering or leaving that boundary,
+but it is not an internal operand stack, call buffer, spill area or fallback
+execution path. VM execution converts at explicit boundaries and otherwise
+operates on words and VM heap objects.
+
+Mutable Vector or Shared identity crossing a Host boundary must not be
+implemented by moving the value to another store. A later boundary decision
+may reject that crossing, expose an immutable Array snapshot, or define an
+explicit rooted borrow or handle; the ordinary runtime storage remains the VM
+heap in every case.
 
 ### Migration completes rather than adding a backend
 
@@ -123,14 +182,18 @@ The migration is complete only when:
 
 1. production execution uses the one word stack for frames and operands;
 2. the old independent value/scalar/place stacks and their bases are removed;
-3. internal boundary Vec<Value> storage is limited to explicit host/oracle
+3. runtime Place root/path objects and place storage are removed; compiler
+   place analysis lowers to one-word addresses;
+4. Vector, Shared and every other Cove-owned object use the one VM heap rather
+   than an identity or side store;
+5. internal boundary Vec<Value> storage is limited to explicit host/oracle
    materialization and is absent from ordinary Cove-to-Cove execution;
-4. the experimental FrameVm, duplicate dispatch loop and admission fallback
+6. the experimental FrameVm, duplicate dispatch loop and admission fallback
    are removed or folded into the production implementation;
-5. the differential corpus, GC stress tests, recursion, closures, mutable
+7. the differential corpus, GC stress tests, recursion, closures, mutable
    places, tasks, cancellation, host reentry, tracing and runtime errors pass
    on the production path;
-6. the existing representative performance gates show no order-of-magnitude
+8. the existing representative performance gates show no order-of-magnitude
    or repeated multi-fold regression.
 
 Coverage measurements may identify missing lowering or layout facts. They do
@@ -147,7 +210,7 @@ metadata.
   descriptions that no longer travel in each slot.
 - GC correctness depends on precise lowered reference maps and explicit
   temporary roots. The tests built for FrameVm become production invariants.
-- The old three-store implementation and FrameVm cannot remain as permanent
+- The old multi-store implementation and FrameVm cannot remain as permanent
   alternatives. Maintaining both would violate this decision even if both are
   correct.
 - Small benchmark movement is accepted as the price of one maintainable
@@ -161,6 +224,7 @@ metadata.
 ## What this does not decide
 
 - the concrete heap allocator or garbage-collection algorithm;
+- the exact Host API for passing or borrowing mutable Vector and Shared values;
 - a moving collector;
 - the final layout of every enum, Option or Result;
 - whether the dispatch loop is later replaced by threaded dispatch, JIT or
