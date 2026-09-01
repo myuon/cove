@@ -23,7 +23,7 @@ fn0 m.origin(0) -> ref
   frame 4: s0:ref s1:int s2:int s3:ref
      0  int s1:int 1
      1  int s2:int 2
-     2  alloc s3:ref Point<struct>
+     2  alloc s3:ref m.Point<struct>
      3  set-word s3:ref +0 s1:int
      4  set-word s3:ref +1 s2:int
      5  move s0:ref s3:ref
@@ -51,7 +51,7 @@ fn0 m.older(1) -> ref
      1  get-word s3:int s0:ref +1
      2  int s4:int 1
      3  add.int s5:int s3:int s4:int
-     4  alloc s6:ref User<struct>
+     4  alloc s6:ref m.User<struct>
      5  set-word s6:ref +0 s2:ref
      6  set-word s6:ref +1 s5:int
      7  clear s2:ref
@@ -140,7 +140,7 @@ fn a_declared_struct_is_one_layout_with_its_fields_in_declaration_order() {
     let points: Vec<&crate::Layout> = program
         .layouts
         .iter()
-        .filter(|layout| &*layout.name == "Point")
+        .filter(|layout| &*layout.name == "m.Point")
         .collect();
     assert_eq!(points.len(), 1, "two literals of one struct are one layout");
     assert_eq!(
@@ -180,7 +180,7 @@ export fn make(n: Int) -> Token {
     let token = program
         .layouts
         .iter()
-        .find(|layout| &*layout.name == "Token")
+        .find(|layout| &*layout.name == "m.Token")
         .expect("the struct has a layout");
     assert!(matches!(token.shape, Shape::Struct { opaque: true, .. }));
 }

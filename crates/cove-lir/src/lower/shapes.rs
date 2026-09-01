@@ -296,9 +296,20 @@ fn nominal(checked: &Checked, module: &str, ty: &Ty) -> Option<Arc<str>> {
         // naming it after one trait would say a value of another trait is of
         // a family it is not.
         Ty::Dyn(_) => Arc::from("Dyn"),
+        // Qualified, and that is what makes a layout an identity rather than
+        // a shape. Two modules may each declare `struct Point { x: Int }`,
+        // and interning them together would be saying they are one type: a
+        // `dyn` dispatch would then reach the wrong conformance, and a
+        // `Map` would order them the way it orders one type with itself.
+        //
+        // This is also the name the oracle carries — `StructValue::type_name`
+        // is qualified — so the boundary can match a value to a layout
+        // exactly rather than by a name two types can share. A rendering
+        // shortens it, which is what `Display for Value` does with the same
+        // string.
         Ty::Struct(name, args) | Ty::Enum(name, args) if args.is_empty() => {
-            let (_, short) = declaring(checked, module, name)?;
-            Arc::from(short)
+            let (owner, short) = declaring(checked, module, name)?;
+            Arc::from(format!("{owner}.{short}"))
         }
         _ => return None,
     })

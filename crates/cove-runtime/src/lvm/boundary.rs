@@ -322,7 +322,9 @@ fn object_from_value(
         ValueView::Duration(ns) => boxed(machine, Repr::Duration, ns as u64),
         ValueView::Str(text) => machine.new_string(text),
         ValueView::Struct(view) => {
-            let name = short(view.type_name());
+            // The qualified name on both sides, so two modules each
+            // declaring a `Point` cannot be matched to each other's layout.
+            let name = view.type_name();
             let id = layout_for_struct(program, name, &view)?;
             let Shape::Struct { fields, .. } = &program.layout(id).shape else {
                 unreachable!("`layout_for_struct` answers a struct-shaped layout");
@@ -347,7 +349,7 @@ fn object_from_value(
             filled.map(|()| addr)
         }
         ValueView::Enum(view) => {
-            let name = short(view.type_name());
+            let name = view.type_name();
             let (id, index) = layout_for_enum(program, name, view.case(), view.payload())?;
             let Shape::Enum { cases } = &program.layout(id).shape else {
                 unreachable!("`layout_for_enum` answers an enum-shaped layout");
@@ -800,11 +802,11 @@ fn fits(repr: Repr, value: &Value) -> bool {
 /// The declared name without its module: `rules.policy.Decision` is a
 /// `Decision`.
 ///
-/// A `Value` carries the qualified name the checker resolved and a
-/// [`Layout`] carries the name the declaration wrote, which is what a
-/// rendering of the object shows. Comparing the two means dropping the
-/// qualification, exactly as the public `Display` does.
-fn short(name: &str) -> &str {
+/// A `Value` and a [`Layout`] both carry the qualified name, so a match
+/// between them needs none of this. What needs it is a *rendering*, which
+/// shows a type by the name its declaration wrote — exactly as the public
+/// `Display` does with the same string.
+pub(crate) fn short(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
@@ -875,8 +877,10 @@ mod tests {
     #[test]
     fn a_struct_round_trips_with_its_name_and_its_fields() {
         let mut build = Build::default();
+        // Qualified, as the lowering names it and as a `Value` carries it: a
+        // layout is an identity, and two modules may each declare a `Point`.
         build.layout(
-            "Point",
+            "m.geometry.Point",
             Shape::Struct {
                 fields: vec![field("x", Repr::Int), field("y", Repr::Ref)],
                 opaque: false,
@@ -891,7 +895,8 @@ mod tests {
         );
         let word = from_value(&mut machine, Repr::Ref, &value).unwrap();
         let back = to_value(&machine, Repr::Ref, word).unwrap();
-        assert_eq!(back.declared_type(), Some("Point"));
+        assert_eq!(back.declared_type(), Some("m.geometry.Point"));
+        // A rendering shows the name the declaration wrote.
         assert_eq!(back.to_string(), "Point(x: 3, y: up)");
     }
 

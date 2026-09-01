@@ -29,7 +29,7 @@ fn1 m.Point.scaled(2) -> ref
      1  mul.int s4:int s3:int s1:int
      2  get-word s3:int s0:ref +1
      3  mul.int s5:int s3:int s1:int
-     4  alloc s6:ref Point<struct>
+     4  alloc s6:ref m.Point<struct>
      5  set-word s6:ref +0 s4:int
      6  set-word s6:ref +1 s5:int
      7  move s2:ref s6:ref
@@ -192,7 +192,7 @@ fn a_concrete_value_is_erased_where_a_dyn_type_is_written() {
 fn0 m.go(0) -> ref
   frame 4: s0:ref s1:int s2:ref s3:ref
      0  int s1:int 1
-     1  alloc s2:ref Point<struct>
+     1  alloc s2:ref m.Point<struct>
      2  set-word s2:ref +0 s1:int
      3  box s3:ref s2:ref ref
      4  clear s2:ref
@@ -214,7 +214,7 @@ fn a_struct_field_written_dyn_erases_what_is_stored_in_it() {
 fn0 m.wrap(1) -> ref
   frame 4: s0!:ref s1:ref s2:ref s3:ref
      0  box s2:ref s0:ref ref
-     1  alloc s3:ref Row<struct>
+     1  alloc s3:ref m.Row<struct>
      2  set-word s3:ref +0 s2:ref
      3  clear s2:ref
      4  move s1:ref s3:ref
@@ -301,8 +301,10 @@ fn a_dispatch_declares_every_implementors_layout() {
     let source = format!("{DISPLAY}fn show(it: dyn Display) -> String {{ it.describe() }}");
     let program = lower(&checked(&source)).expect("the program lowers");
     let names: Vec<&str> = program.layouts.iter().map(|layout| &*layout.name).collect();
-    assert!(names.contains(&"Point"), "{names:?}");
-    assert!(names.contains(&"Verdict"), "{names:?}");
+    // Qualified, because a layout is an identity and two modules may each
+    // declare a `Point`.
+    assert!(names.contains(&"m.Point"), "{names:?}");
+    assert!(names.contains(&"m.Verdict"), "{names:?}");
 }
 
 #[test]

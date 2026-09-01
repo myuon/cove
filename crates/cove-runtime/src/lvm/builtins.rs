@@ -38,7 +38,7 @@ use std::fmt::Write as _;
 use cove_lir::{Builtin, Repr, Shape};
 use cove_schema::builtins::{ERROR, MESSAGE_FIELD};
 
-use crate::lvm::boundary::is_range;
+use crate::lvm::boundary::{is_range, short};
 
 use crate::error::RuntimeError;
 use crate::lvm::exec::Machine;
@@ -274,7 +274,7 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
         // through `println` what the checker refuses to let a caller name.
         // That is ADR 0014's whole point, and it is why the layout carries
         // the flag rather than this deriving it.
-        Shape::Struct { opaque: true, .. } => out.push_str(&layout.name),
+        Shape::Struct { opaque: true, .. } => out.push_str(short(&layout.name)),
         // A `Range` renders as the operator it was written with: `1..3` and
         // `1..<4` cover the same values and are two different renderings,
         // because they are two different values — `==` on ranges compares the
@@ -290,7 +290,10 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
             write!(out, "{start}{operator}{end}").expect("a string never fails to be written to");
         }
         Shape::Struct { fields, .. } => {
-            write!(out, "{}(", layout.name).expect("a string never fails to be written to");
+            // The declared name without its module, which is what the
+            // public `Display` shows. The layout carries the qualified one
+            // because a layout is an identity.
+            write!(out, "{}(", short(&layout.name)).expect("a string never fails to be written to");
             for (at, field) in fields.iter().enumerate() {
                 if at > 0 {
                     out.push_str(", ");

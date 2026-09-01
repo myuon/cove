@@ -1046,3 +1046,75 @@ export fn f(n: Int) -> Int {
         agree(source, "f", vec![Value::int(n)]);
     }
 }
+
+/// A layout is an identity, not a shape. Two modules each declaring a
+/// same-shaped `Point` are two types, and a dispatch that treated them as one
+/// would reach the wrong conformance. The name a layout carries is qualified
+/// for that reason, and a rendering shortens it — which is what the oracle
+/// does with the same string.
+#[test]
+fn two_modules_may_each_declare_a_point() {
+    let source = r#"
+struct Point { x: Int }
+export fn f() -> String {
+  "{Point(x: 1)}"
+}
+"#;
+    assert_eq!(
+        agree(source, "f", vec![]),
+        Answer::Value("Point(x: 1)".to_string())
+    );
+}
+
+#[test]
+fn a_method_agrees() {
+    let source = "
+struct Counter { n: Int }
+impl Counter {
+  fn doubled(self) -> Int {
+    self.n * 2
+  }
+  fn make(n: Int) -> Counter {
+    Counter(n: n)
+  }
+}
+export fn f(n: Int) -> Int {
+  Counter.make(n).doubled()
+}
+";
+    assert_eq!(
+        agree(source, "f", vec![Value::int(21)]),
+        Answer::Value("42".to_string())
+    );
+}
+
+#[test]
+fn dynamic_dispatch_agrees() {
+    let source = r#"
+trait Describe {
+  fn describe(self) -> String
+}
+struct Dot { n: Int }
+struct Tag { name: String }
+impl Describe for Dot {
+  fn describe(self) -> String { "dot {self.n}" }
+}
+impl Describe for Tag {
+  fn describe(self) -> String { "tag {self.name}" }
+}
+fn show(it: dyn Describe) -> String {
+  it.describe()
+}
+export fn f(pick: Bool) -> String {
+  if pick { show(Dot(n: 3)) } else { show(Tag(name: "x")) }
+}
+"#;
+    for pick in [true, false] {
+        agree(source, "f", vec![Value::bool(pick)]);
+    }
+}
+
+// `Set` and `Map` cases wait on the lowering. The machine implements both —
+// construction, lookup, the immutable updates and the ordering — and nothing
+// emits the calls yet, so a case here would fail on the gap rather than on a
+// disagreement and would say nothing about either half.

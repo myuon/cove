@@ -17,7 +17,7 @@ fn a_case_with_no_payload_is_an_index_and_nothing_else() {
         "\
 fn0 m.keep(0) -> ref
   frame 3: s0:ref s1:ref s2:int
-     0  alloc s1:ref Verdict<enum>
+     0  alloc s1:ref m.Verdict<enum>
      1  int s2:int 0
      2  set-word s1:ref +0 s2:int
      3  move s0:ref s1:ref
@@ -44,7 +44,7 @@ fn0 m.unit_square(0) -> ref
   frame 5: s0:ref s1:int s2:int s3:ref s4:int
      0  int s1:int 1
      1  int s2:int 1
-     2  alloc s3:ref Shape<enum>
+     2  alloc s3:ref m.Shape<enum>
      3  int s4:int 1
      4  set-word s3:ref +0 s4:int
      5  set-word s3:ref +1 s1:int
