@@ -1,6 +1,9 @@
 # ADR 0033: An identity is not a VM heap object, and the seam stays one-way
 
-- Status: Accepted
+- Status: Superseded by [ADR 0034](0034-one-physical-word-stack.md).
+  Cove-owned Vector and Shared values live in the VM heap region rather than
+  an identity store. Task control state and Host-owned resources remain
+  externally owned as restated by ADR 0034.
 - Date: 2026-08-31
 - Supersedes:
   [ADR 0028](0028-five-representations-and-one-is-public.md)'s **answer to
