@@ -618,3 +618,34 @@ fn0 m.f(Map) -> Int
 "
     );
 }
+
+/// An empty collection literal is an `Alloc`, not a call.
+///
+/// The machine refuses `Set.of()` with no operands, and is right to: a word
+/// says nothing about its family, and the element layout is what the
+/// collector traces a run by, so an empty one has to be built where the
+/// layout is known. The lowering is where that is.
+///
+/// This case waited on the *checker* rather than on the lowering. `Set.of()`
+/// with its element type stated by a return type, an annotation or a
+/// parameter was recorded as `Set<_>`, and a backend that needs a static
+/// layout cannot lower a family it was never told. The tree-walking oracle
+/// never noticed, because a value carries its type at run time.
+#[test]
+fn an_empty_collection_literal_is_allocated_where_its_layout_is_known() {
+    for source in [
+        "export fn f() -> Set<Int> { Set.of() }",
+        "export fn f() -> Map<String, Int> { Map.of() }",
+        "export fn f() -> Vector<Int> { Vector.of() }",
+    ] {
+        let text = listing(source, "f");
+        assert!(
+            text.contains("alloc "),
+            "an empty literal is built rather than called:\n{text}"
+        );
+        assert!(
+            !text.contains("call-builtin"),
+            "and it is not the call the machine refuses:\n{text}"
+        );
+    }
+}

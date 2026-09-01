@@ -131,7 +131,7 @@ use support::{Case, ModuleIndex, Prepared};
 /// of those lower and run, and 50 of the 53 answer what the oracle answers.
 /// See the report this test prints for which they are, for the three that do
 /// not, and for what the other 65 are blocked on.
-const AGREEING_FLOOR: usize = 50;
+const AGREEING_FLOOR: usize = 54;
 
 /// The code `cove_lir` raises a gap under.
 ///
@@ -167,14 +167,6 @@ const KNOWN_DISAGREEMENTS: &[&str] = &[
     // printed every line up to the `freeze`.
     "examples:values",
     "tests/e2e:coll_array",
-    // `sorted` over `["pear", "apple", "fig"]` answers `[fig, apple, pear]`
-    // where the oracle answers `[apple, fig, pear]`, and the same program's
-    // `sorted` over `Int`s is right. A string is one word naming a heap
-    // object here, so a comparison that reads the word rather than the
-    // characters behind it orders by something that is not the value — and
-    // the answer it gave is by ascending length, which is what a wrong
-    // comparison would look like.
-    "tests/e2e:coll_sorted",
 ];
 
 #[test]

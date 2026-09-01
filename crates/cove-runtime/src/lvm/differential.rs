@@ -1184,3 +1184,22 @@ export fn f(pick: Bool) -> String {
 // construction, lookup, the immutable updates and the ordering — and nothing
 // emits the calls yet, so a case here would fail on the gap rather than on a
 // disagreement and would say nothing about either half.
+
+/// `"a" < "b"` compares bytes. It used to compare *nothing*: an ordering
+/// operator on a value the instruction set cannot compare in one step was
+/// routed to the structural-equality walk, which answers whether two values
+/// are the same, so `<` came out as `!=` and `sorted` over strings returned
+/// its input reversed. A wrong answer is worse than a gap.
+#[test]
+fn strings_order_by_their_bytes() {
+    let source = r#"
+export fn f() -> String {
+  let strings = ["pear", "apple", "fig"]
+  "{strings.sorted(by: fn(a, b) { a < b })} {"a" < "b"} {"b" <= "a"} {"a" >= "a"}"
+}
+"#;
+    assert_eq!(
+        agree(source, "f", vec![]),
+        Answer::Value("[apple, fig, pear] true false true".to_string())
+    );
+}

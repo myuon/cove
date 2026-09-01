@@ -1053,6 +1053,18 @@ impl Body<'_> {
         )
     }
 
+    /// Whether `layout` is the string family.
+    ///
+    /// A `String` is the one heap value the language orders: `a < b` on two
+    /// of them compares their bytes. Every other heap value the checker
+    /// admits an operator on admits only `==` and `!=`.
+    fn is_text(&self, layout: LayoutId) -> bool {
+        matches!(
+            self.pool.shapes.layout(layout).shape,
+            crate::layout::Shape::Str
+        )
+    }
+
     /// Ends the live range of the reference locations a scope owned.
     ///
     /// A scalar body emits nothing here, because [`Frame::pop_scope`]

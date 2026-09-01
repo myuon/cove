@@ -455,50 +455,6 @@ mod tests {
         }
     }
 
-
-    #[test]
-    fn zz_probe() {
-        let src = r#"struct Box { items: Vector<Int> }
-
-fn take(v: Set<Int>) -> Int { v.length() }
-
-fn f() -> Set<Int> { Set.of() }
-
-fn g() -> Map<String, Int> { Map.of() }
-
-fn h() -> Int {
-  let v: Vector<Int> = Vector.of()
-  v.length()
-}
-
-fn p() -> Int { take(Set.of()) }
-
-fn s() -> Box { Box(items: Vector.of()) }
-
-fn m(n: Int) -> Vector<Int> {
-  match n {
-    0 => Vector.of()
-    _ => Vector.of(1)
-  }
-}
-
-fn keep() -> Int {
-  let v = Vector.of(1, 2)
-  v.length()
-}
-"#;
-        let checked = compile(&[("main", src)]);
-        for name in ["Set.of()", "Map.of()", "Vector.of()", "take(Set.of())", "Box(items: Vector.of())", "Vector.of(1, 2)", "Vector.of(1)"] {
-            let mut found = Vec::new();
-            for expr in collect(checked.unit("main")) {
-                if checked.text("main", &expr) == name {
-                    found.push(format!("{}", checked.facts.ty(checked.file("main"), expr.id).map(|t| t.to_string()).unwrap_or("<none>".into())));
-                }
-            }
-            eprintln!("{name} => {found:?}");
-        }
-    }
-
     /// Resolves and checks modules written inline, the way the pipeline
     /// does, so the facts under test are the ones a consumer receives.
     #[track_caller]
@@ -731,6 +687,62 @@ export fn apply(n: Int) -> Int {
     #[test]
     fn a_struct_field_read_records_the_field_s_type() {
         assert_eq!(reporting().ty("main", "moved.y"), &Ty::Float);
+    }
+
+    /// An empty collection literal records the element type the place that
+    /// holds it states, because a backend needing a static layout reads the
+    /// recorded type and nothing else: `Vector<_>` has no layout, and the
+    /// annotation, the return type or the field that says what it holds is
+    /// already there to be read.
+    #[test]
+    fn an_empty_collection_literal_records_the_type_its_place_states() {
+        let source = r#"/// Doc.
+export struct Basket {
+  items: Vector<Int>
+}
+
+/// Doc.
+export fn taking(names: Set<String>) -> Int {
+  names.length()
+}
+
+/// Doc.
+export fn returned() -> Map<String, Int> {
+  Map.of()
+}
+
+/// Doc.
+export fn annotated() -> Int {
+  let items: Vector<Int> = Vector.of()
+  items.length()
+}
+
+/// Doc.
+export fn passed() -> Int {
+  taking(Set.of())
+}
+
+/// Doc.
+export fn built() -> Basket {
+  Basket(items: Vector.of())
+}
+"#;
+        let checked = compile(&[("main", source)]);
+        assert_eq!(
+            checked.ty("main", "Map.of()"),
+            &Ty::Map(Box::new(Ty::Str), Box::new(Ty::Int))
+        );
+        assert_eq!(checked.ty("main", "Set.of()"), &Ty::Set(Box::new(Ty::Str)));
+        // Both `Vector.of()` are written the same way, so they are named by
+        // the declaration they sit in rather than by their text.
+        for expr in collect(checked.unit("main")) {
+            if checked.text("main", &expr) == "Vector.of()" {
+                assert_eq!(
+                    checked.facts.ty(checked.file("main"), expr.id),
+                    Some(&Ty::Vector(Box::new(Ty::Int)))
+                );
+            }
+        }
     }
 
     #[test]

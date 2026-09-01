@@ -60,34 +60,6 @@ fn an_async_function_value_is_a_gap_of_its_own() {
     );
 }
 
-/// An empty collection literal stops here, and what stops it is the
-/// *checker*: `Set.of()` and `Map.of()` — and `Vector.of()`, which has been
-/// this way since the family was taught — are typed `Set<_>`, with the
-/// element type left an unresolved variable even where an annotation, a
-/// parameter or a field states it.
-///
-/// The lowering has already been taught what to do with one: an empty
-/// literal is [`crate::Inst::Alloc`] rather than a call, because the machine
-/// refuses `Set.of()` with no operands — a word says nothing about its family
-/// and the element layout is what the collector traces by, so the empty one
-/// has to be built where the layout is known. What is missing is the layout,
-/// and only the checker can settle it.
-///
-/// It is named here rather than left to be met at a call site because
-/// `docs/LINEAR_VM.md` says every valid checked program lowers, and this is a
-/// valid checked program that does not.
-#[test]
-fn an_empty_collection_literal_waits_on_the_checker_for_its_element_type() {
-    assert_eq!(
-        refused("fn f() -> Set<Int> { Set.of() }"),
-        vec!["not yet lowered: a value of type `Set<_>`"]
-    );
-    assert_eq!(
-        refused("fn f() -> Map<String, Int> { Map.of() }"),
-        vec!["not yet lowered: a value of type `Map<_, _>`"]
-    );
-}
-
 #[test]
 fn a_generic_declaration_names_itself_once_and_its_uses_after() {
     assert_eq!(

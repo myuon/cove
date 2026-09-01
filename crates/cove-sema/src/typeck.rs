@@ -6030,22 +6030,15 @@ impl<'a> Checker<'a> {
         // nothing did, and every element-typed operation on the value after
         // this point is unchecked — the same hole an empty array literal
         // leaves, named the same way rather than left silent.
-        let unsettled = sig.generics.iter().any(|g| !subst.contains_key(g));
-        if unsettled
-            && args.is_empty()
-            && trailing.is_none()
-            && !Checker::accounted_for(expected)
-        {
-            let example = Checker::example_of(&sig, &subst);
-            self.diagnostics.push(unconstrained(
-                format!("nothing says what this empty `{type_name}` holds"),
-                format!(
-                    "write the type on the place that holds it, as in `let value: {example} = {type_name}.{}()`",
-                    name.node
-                ),
-                span,
-            ));
-        }
+        //
+        // No diagnostic here yet, deliberately. `var log = Vector.of()`
+        // followed by `log.push(text)` is idiomatic and appears sixty-one
+        // times in this repository's own programs, so warning about it is a
+        // change to what Cove asks an author to write rather than a report
+        // about a program — and the answer may be to infer from the later
+        // use instead, which is a change to inference. Raised in issue #240;
+        // until it is settled the type stays unconstrained and silent, which
+        // is what it was before this inference existed.
         self.open(&sig.ret, &sig.generics, &subst)
     }
 
@@ -6083,28 +6076,6 @@ impl<'a> Checker<'a> {
         if unify(&sig.ret, &expected.ty, &generics, &mut found, &self.view()) {
             *subst = found;
         }
-    }
-
-    /// The type an unsettled empty literal's diagnostic suggests writing.
-    ///
-    /// It is this signature's own result with a type in each parameter it
-    /// still has no binding for, so the correction reads back as the thing
-    /// the program would have written: `Vector<Int>`, `Set<Int>`,
-    /// `Map<String, Int>`. A key is a `String` because that is what a map
-    /// keyed by anything else is the exception to.
-    fn example_of(sig: &BuiltinSig, subst: &BTreeMap<Arc<str>, Ty>) -> Ty {
-        let example: BTreeMap<Arc<str>, Ty> = sig
-            .generics
-            .iter()
-            .map(|g| {
-                let ty = subst.get(g).cloned().unwrap_or(match g.as_ref() {
-                    "K" => Ty::Str,
-                    _ => Ty::Int,
-                });
-                (g.clone(), ty)
-            })
-            .collect();
-        sig.ret.substitute(&example)
     }
 
     /// `MapEntry(key: ..., value: ...)`: a synthesized labeled call, exactly
@@ -12654,6 +12625,106 @@ export fn main() -> Result<Unit, Error> {
             "  let missing: Option<Int> = None\n  println(\"{missing.isNone()}\")?"
         ))
         .is_empty());
+    }
+
+    // ---- the empty collection literals
+
+    // `Vector.of()`, `Set.of()` and `Map.of()` are the empty collection
+    // literals, and they read their element types the same way the empty
+    // array literal above reads its own: off the place the value is given
+    // to. What differs is only that they arrive as calls, so what states
+    // the type is the result of a signature rather than a literal's own
+    // shape.
+
+    #[test]
+    fn an_empty_collection_literal_settles_from_a_declared_return_type() {
+        for source in [
+            "fn f() -> Vector<Int> {\n  Vector.of()\n}\n",
+            "fn f() -> Set<Int> {\n  Set.of()\n}\n",
+            "fn f() -> Map<String, Int> {\n  Map.of()\n}\n",
+        ] {
+            accepts(source);
+            assert!(
+                warnings_of(source).is_empty(),
+                "the return type says what it holds: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_collection_literal_settles_from_a_let_annotation() {
+        accepts_body("  let empty: Vector<Int> = Vector.of()\n  println(\"{empty.length()}\")?");
+        assert!(warnings_of(&in_main(
+            "  let empty: Vector<Int> = Vector.of()\n  println(\"{empty.length()}\")?"
+        ))
+        .is_empty());
+        // And the element type it settled on is the one the annotation
+        // wrote, not an unknown that would have accepted anything.
+        let error = rejects_body("  var empty: Vector<Int> = Vector.of()\n  empty.push(\"one\")");
+        assert_eq!(error.message, "expected `Int`, found `String`");
+    }
+
+    #[test]
+    fn an_empty_collection_literal_settles_from_a_parameter_s_default() {
+        let source = "\
+fn count(items: Vector<Int> = Vector.of()) -> Int {
+  items.length()
+}
+
+fn run() -> Int {
+  count()
+}
+";
+        accepts(source);
+        assert!(warnings_of(source).is_empty());
+    }
+
+    #[test]
+    fn an_empty_collection_literal_settles_from_the_argument_position() {
+        let source = "\
+fn count(items: Set<Int>) -> Int {
+  items.length()
+}
+
+fn run() -> Int {
+  count(Set.of())
+}
+";
+        accepts(source);
+        assert!(warnings_of(source).is_empty());
+    }
+
+    #[test]
+    fn an_empty_collection_literal_settles_from_a_struct_field() {
+        let source = "\
+struct Basket {
+  items: Vector<Int>
+}
+
+fn empty() -> Basket {
+  Basket(items: Vector.of())
+}
+";
+        accepts(source);
+        assert!(warnings_of(source).is_empty());
+    }
+
+    /// A literal with items has always read its type off them, and the
+    /// expectation is still only consulted for what they left unsettled: a
+    /// disagreement between the two is the same mismatch on the whole
+    /// value it always was, reported once.
+    #[test]
+    fn a_collection_literal_with_items_still_reads_them_and_not_the_place() {
+        accepts_body("  let items = Vector.of(1, 2)\n  println(\"{items.length()}\")?");
+        assert!(warnings_of(&in_main(
+            "  let items = Vector.of(1, 2)\n  println(\"{items.length()}\")?"
+        ))
+        .is_empty());
+        let error = rejects("fn f() -> Vector<String> {\n  Vector.of(1, 2)\n}\n");
+        assert_eq!(
+            error.message,
+            "expected `Vector<String>`, found `Vector<Int>`"
+        );
     }
 
     // ---- recovery: everything has already been said

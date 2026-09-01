@@ -443,12 +443,31 @@ impl Body<'_> {
         let dst = self.answer_of(expr);
         // A value the instruction set cannot compare in one step is compared
         // by walking it, which is a call rather than an instruction.
-        if arith_of(op).is_none() && !self.is_scalar(a.layout) {
+        //
+        // Only `==` and `!=` come here. A walk answers whether two values are
+        // the same and cannot answer which is smaller, so an ordering
+        // operator that reached it would be answered as an equality — and
+        // this is written as a guard rather than assumed because it *was*
+        // assumed: `"a" < "b"` lowered to `ne.str` and `sorted` over strings
+        // quietly returned its input reversed. A wrong answer is worse than a
+        // gap, so an ordering the instruction set cannot give is named.
+        let ordering = matches!(
+            op,
+            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+        );
+        if arith_of(op).is_none() && !self.is_scalar(a.layout) && !ordering {
             let equal = op == BinaryOp::Eq;
             self.compare_values(expr, equal, lhs, dst.slot, &a, &b);
             self.release(b, expr.span);
             self.release(a, expr.span);
             return dst;
+        }
+        // A `String` is the one heap value the language orders, and it is
+        // ordered by its bytes.
+        if ordering && !self.is_scalar(a.layout) && !self.is_text(a.layout) {
+            self.release(b, expr.span);
+            self.release(a, expr.span);
+            return self.gap("an ordering comparison of two heap values", expr);
         }
         let operand = self.frame.repr(a.slot);
         let inst = match arith_of(op) {
