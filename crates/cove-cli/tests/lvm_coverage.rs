@@ -237,7 +237,7 @@ use support::{Case, ModuleIndex, Prepared};
 /// it runs. The second is the one worth naming: four tasks allocating at once
 /// over one collector, each keeping a vector nothing else can reach, which is
 /// where a collection that reached across a task's roots would show.
-const AGREEING_FLOOR: usize = 89;
+const AGREEING_FLOOR: usize = 96;
 
 /// The code `cove_lir` raises a gap under.
 ///

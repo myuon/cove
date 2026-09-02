@@ -323,9 +323,10 @@ let metrics = Shared(Metrics(requests: 0, failures: 0))
 metrics.lock(fn(var value) { value.record(failed) })
 ```
 
-`Shared` ownership must stay acyclic. A cell may not come to hold a handle to
-itself; `lock` rejects a closure that would leave the cell reachable from its
-own new value. A cycle through two or more cells is not detected and leaks.
+A cycle through one or more `Shared` cells is an ordinary cycle in the object
+graph, and is collected when it becomes unreachable. Locking a cell this task
+already holds is still rejected rather than made to wait — that is a live
+lock-state error, which no collector can answer.
 
 Memory is managed by a precise, non-moving mark-and-sweep collector, whose
 allocation, live-heap, peak-heap, and pause-time numbers are observable but not

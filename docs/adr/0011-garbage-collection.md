@@ -7,7 +7,9 @@
   [ADR 0002](0002-implementation-language-and-backend.md), which deferred a
   collector until "cyclic structures and tasks exist"
 - Amended by: this ADR's own "Amendment (2026-08-25): a policy for cycles among
-  cells" below, which decides what "What this leaves uncollected" defers, and
+  cells" below, which decides what "What this leaves uncollected" defers and is
+  itself superseded by
+  [ADR 0037](0037-a-cycle-through-a-cell-is-an-ordinary-cycle.md), and
   this ADR's own "Amendment (2026-08-25): the memory budget is removed" below,
   which retracts the memory budget the "Budgets" section below gives `Limits`
   and leaves the collector's measurements as observability rather than an

@@ -93,19 +93,7 @@ impl Body<'_> {
         if is_async {
             return self.gap("an `async` function value", expr);
         }
-        for param in params {
-            // ADR 0032 already refuses the variadic one in the checker, so a
-            // valid program never brings one here; the other two are this
-            // lowering's own work, and each is named as the source writes it.
-            let what = if param.is_var {
-                "a function value with a `var` parameter"
-            } else if param.variadic {
-                "a function value with a variadic parameter"
-            } else if param.default.is_some() {
-                "a function value with a parameter default"
-            } else {
-                continue;
-            };
+        if let Some(what) = written_as_a_value(params) {
             return self.gap(what, expr);
         }
         let Some(Ty::Fn(func)) = self.settled_ty(expr) else {
@@ -120,7 +108,7 @@ impl Body<'_> {
         let Some((param_layouts, returns)) = self.signature(&func, expr.span) else {
             return self.dead(expr);
         };
-        let Some(captured) = self.captured_by(body, expr) else {
+        let Some(captured) = self.captured_by(body, expr.span) else {
             return self.dead(expr);
         };
 
@@ -152,6 +140,121 @@ impl Body<'_> {
             self.release(value, expr.span);
         }
         dst
+    }
+
+    /// `fn double(n: Int) -> Int { ... }` written inside a body: the closure
+    /// that body makes, and the name it binds to it.
+    ///
+    /// A local `fn` being a closure is not an inference about how one could
+    /// be lowered. `cove_sema::resolve` says it in as many words; the checker
+    /// declares the name with the signature's `as_value()` and pushes a
+    /// capture floor over the block, so the names around it are captures and
+    /// a capture is read-only; and the oracle reaches
+    /// `Interpreter::make_closure` for one and declares what comes back.
+    /// This is the fourth record of one decision rather than a fifth
+    /// decision.
+    ///
+    /// # Its boundary is the recorded signature, not a settled type
+    ///
+    /// That is the whole of what it does not share with [`Body::lambda`]. A
+    /// lambda's parameters and answer are read off the function type the
+    /// checker settled *at the expression*, and a declaration is not an
+    /// expression — there is no place for a type to have been settled at.
+    /// `Checker::record_signature` is called for a local `fn` for exactly
+    /// this reason, so the boundary is read the way every other
+    /// declaration's is: [`Facts::signature`](cove_sema::Facts::signature),
+    /// keyed by the declaration's own span.
+    ///
+    /// # It is named after the body that wrote it
+    ///
+    /// `main#0`, as a lambda written in the same place would be, rather than
+    /// `double`. Two blocks of one body may each declare a `fn` of one name,
+    /// so the declaration's own name is not an identity here — and a
+    /// synthesised name that can collide is worse than one that does not read
+    /// as the source.
+    ///
+    /// # Recursion is not arranged, because the oracle does not arrange it
+    ///
+    /// `make_closure` reads the captures out of the environment *before* the
+    /// name is declared in it, so a local `fn` that calls itself does not find
+    /// itself. [`Body::captured_by`] runs against this frame at the same
+    /// moment, before the binding below, and answers the same way.
+    pub(super) fn local_fn(&mut self, decl: &FnDecl) {
+        let span = decl.span;
+        // A declaration inside a body is still a declaration, and these are
+        // the two things a declaration can say that a function *value* has no
+        // way to carry: which body an `async` call suspends in, and which
+        // instantiation a generic stands for. Neither is a local `fn`'s own
+        // question — `Body::lambda` and `Body::function_value` name the same
+        // two — so each is named as the source writes it.
+        if decl.is_async {
+            self.errors
+                .push(gap::gap("an `async` function declared inside a body", span));
+            return;
+        }
+        if !decl.generics.is_empty() {
+            self.errors
+                .push(gap::gap("a generic function declared inside a body", span));
+            return;
+        }
+        if let Some(what) = written_as_a_value(&decl.params) {
+            self.errors.push(gap::gap(what, span));
+            return;
+        }
+        // Read out of the facts rather than through `self`, because the walk
+        // below writes into this body while it is still holding the
+        // signature — and the facts outlive both.
+        let checked = self.checked;
+        let Some(signature) = checked.facts.signature(span.file, span) else {
+            self.errors.push(gap::gap(
+                "a function declared inside a body the checker recorded no signature for",
+                span,
+            ));
+            return;
+        };
+        let func = FnTy {
+            is_async: false,
+            params: signature.params.clone(),
+            ret: signature.ret.clone(),
+        };
+        let Some((param_layouts, returns)) = self.signature(&func, span) else {
+            return;
+        };
+        let Some(captured) = self.captured_by(&decl.body, span) else {
+            return;
+        };
+
+        let at = self.pool.appended.len();
+        let id = FunctionId((self.plan.decls.len() + at) as u32);
+        self.pool.appended.push(None);
+        let name: Arc<str> = Arc::from(format!("{}#{}", self.name, self.lambdas));
+        self.lambdas += 1;
+
+        let lowered = self.lambda_body(
+            name,
+            &param_layouts,
+            returns,
+            &func,
+            &decl.params,
+            &decl.body,
+            &captured,
+        );
+        self.pool.appended[at] = Some(lowered);
+        let value = self.close_over(id, &captured, span);
+        for (_, held) in captured.into_iter().rev() {
+            self.release(held, span);
+        }
+
+        // The environment is a temporary until the name is given to it, and
+        // then it is the scope's: the same handover a `let` makes of an
+        // initialiser's run, for the same reason — nothing else can observe
+        // the temporary, so the binding is the value rather than a copy of
+        // it.
+        let layout = value.layout;
+        self.forget(value.slot);
+        let width = self.width(layout);
+        self.frame.own(value.slot, layout, width);
+        self.frame.bind(&decl.name.node, value.slot, layout);
     }
 
     /// A declared function written where a value goes.
@@ -311,7 +414,7 @@ impl Body<'_> {
     /// be deciding a language question that belongs to the checker. If the
     /// sentence is to be enforced it is `cove-sema` that has to enforce it,
     /// and then this arm becomes unreachable rather than wrong.
-    fn captured_by(&mut self, body: &Block, expr: &Expr) -> Option<Vec<Captured>> {
+    fn captured_by(&mut self, body: &Block, span: Span) -> Option<Vec<Captured>> {
         let mut mentioned = BTreeSet::new();
         mention_block(body, &mut mentioned);
         let mut held = Vec::new();
@@ -330,7 +433,7 @@ impl Body<'_> {
                 // — which was reported where the boundary was read.
                 self.errors.push(gap::gap(
                     &format!("a function value capturing `{name}`, whose type has no layout"),
-                    expr.span,
+                    span,
                 ));
                 return None;
             };
@@ -341,7 +444,7 @@ impl Body<'_> {
                     addr: slot,
                     layout: behind,
                 },
-                expr.span,
+                span,
             );
             held.push((name, value));
         }
@@ -561,6 +664,30 @@ impl Body<'_> {
             }
         }
     }
+}
+
+/// What stops a written parameter list from becoming a closure's, if
+/// anything does.
+///
+/// One answer for a lambda and for a local `fn`, because what a closure's
+/// frame can hold is a fact about the closure rather than about which of the
+/// two spellings wrote it. ADR 0032 already refuses the variadic one in the
+/// checker, so a valid program never brings one here; the other two are this
+/// lowering's own work, and each is named as the source writes it.
+fn written_as_a_value(params: &[Param]) -> Option<&'static str> {
+    for param in params {
+        let what = if param.is_var {
+            "a function value with a `var` parameter"
+        } else if param.variadic {
+            "a function value with a variadic parameter"
+        } else if param.default.is_some() {
+            "a function value with a parameter default"
+        } else {
+            continue;
+        };
+        return Some(what);
+    }
+    None
 }
 
 // ------------------------------------------------------------ free names

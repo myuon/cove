@@ -816,6 +816,13 @@ impl Body<'_> {
     /// host module — and the only one of those this lowering has been taught
     /// is the enum, whose cases are what `E.Case` names.
     fn field(&mut self, expr: &Expr, base: &Expr, name: &str) -> Val {
+        // `http.Method.Get` is reached through two names that are neither of
+        // them values, and is asked before the one-name case below for that
+        // reason: `Body::is_namespace` answers for a single name, and this is
+        // the one shape in the language written with two.
+        if let Some(value) = self.host_case(expr, base, name) {
+            return value;
+        }
         if self.is_namespace(base) {
             if let Some(ty) = self.ty(expr) {
                 if shapes::case_at(self.checked, self.module, &ty, name).is_some() {
@@ -852,8 +859,16 @@ impl Body<'_> {
     /// Every field is evaluated before anything is stored, in source order,
     /// because an initializer's arguments are ordinary expressions and one
     /// of them may do something the next one sees.
+    ///
+    /// `http.Route(method: ..., path: ..., handler: ...)` is the same
+    /// lowering, and that is not a convenience: `interp::init_host_type` is
+    /// `interp::init_struct` "with the fields read from a schema instead of
+    /// from a declaration", and a host type is ordinary data with no
+    /// representation of its own. What the two spellings differ in is where
+    /// the field names and types are read from, which is
+    /// [`Body::initializer_fields`] and nothing else.
     fn struct_literal(&mut self, expr: &Expr, ty: &Ty, args: &[Arg]) -> Val {
-        let Some(declared) = shapes::struct_fields(self.checked, self.module, ty) else {
+        let Some(declared) = self.initializer_fields(ty) else {
             self.report(ty, expr.span);
             return self.dead(expr);
         };
@@ -888,6 +903,59 @@ impl Body<'_> {
             self.release(value, expr.span);
         }
         dst
+    }
+
+    /// The fields an initializer fills, whoever declared them.
+    ///
+    /// A module's declaration and a host's schema are two records of one
+    /// thing — a name and a type per field, in the order an initializer
+    /// writes them — and this is the one place a caller has to know which of
+    /// the two it is holding.
+    fn initializer_fields(&mut self, ty: &Ty) -> Option<Vec<(std::sync::Arc<str>, Ty)>> {
+        if let Ty::Host(qualified) = ty {
+            return self.pool.shapes.host_fields(qualified);
+        }
+        shapes::struct_fields(self.checked, self.module, ty)
+    }
+
+    /// `http.Method.Get`: a case of an enum a host module declares.
+    ///
+    /// The oracle reaches it in two steps and this reads both of them at
+    /// once. `http.Method` evaluates to a `Repr::Type` there, because the
+    /// schema declares a type of that name and a type is not a value; and a
+    /// field of a `Repr::Type` whose owner is a host module is
+    /// `interp::host_enum_case`. Neither step is a fact about the frame, so
+    /// there is nothing here to evaluate: the two names are read out of the
+    /// syntax and the schema answers.
+    ///
+    /// What comes out is one discriminant word, because a schema gives its
+    /// cases no payload to carry — the same word a declared case with an
+    /// empty payload is, at the index
+    /// [`Shapes::host_case`](super::shapes::Shapes::host_case) counts from
+    /// the schema and [`Shapes::host_type`](super::shapes::Shapes::host_type)
+    /// built the layout in.
+    fn host_case(&mut self, expr: &Expr, base: &Expr, name: &str) -> Option<Val> {
+        let ExprKind::Field {
+            base: head,
+            name: declared,
+        } = &base.kind
+        else {
+            return None;
+        };
+        let ExprKind::Ident(module) = &head.kind else {
+            return None;
+        };
+        // A binding of this frame shadows a module, exactly as it does
+        // wherever else a name in front of a `.` is read.
+        if self.frame.lookup(module).is_some() || !self.is_host_module(module) {
+            return None;
+        }
+        let qualified = format!("{module}.{}", declared.node);
+        let index = self.pool.shapes.host_case(&qualified, name)?;
+        let layout = self.layout(&Ty::Host(qualified.into()), expr.span)?;
+        let dst = self.temp(layout);
+        self.write_case(dst.slot, layout, index, &[], expr.span);
+        Some(dst)
     }
 
     /// Which field each argument of an initializer fills.
@@ -1524,6 +1592,28 @@ impl Body<'_> {
             return self.gap("a call reached through an expression", expr);
         };
         if self.is_host_module(head) {
+            // `http.Route(method: ..., path: ...)` initializes a type the
+            // host declares; anything else is one of its operations. The
+            // oracle asks in that order and for the reason it gives: a type
+            // is not callable, so the two cannot be confused — and a schema
+            // is the only thing that says which of them a name is.
+            //
+            // Asked before the boundary rather than at it, because an
+            // initializer never reaches the boundary. Its labels are field
+            // names, its answer is a run of words this side lays out, and
+            // `Body::crossable` — which refuses a label, since a host
+            // operation's parameters have positions and no names — was
+            // refusing a call that was never a host call.
+            if let Some(ty) = self.ty(expr) {
+                if self
+                    .pool
+                    .shapes
+                    .host_fields(&format!("{head}.{name}"))
+                    .is_some()
+                {
+                    return self.struct_literal(expr, &ty, args);
+                }
+            }
             return self.call_host(expr, head, name, args);
         }
         if let Some(ty) = self.ty(expr) {
@@ -1540,6 +1630,34 @@ impl Body<'_> {
             // which the machine performs rather than the instruction set.
             if methods::associated(head, name, &ty) {
                 return self.call_associated(expr, head, name, args);
+            }
+        }
+        // `forager.decide(view, observation)`, `lib.Box(item: ...)`: a module
+        // `use` imported whole, reached through the name it is visible under.
+        // `ResolvedModule::module_imports` is the fact, and this is the last
+        // of the four consumers of it to be written: the checker reads it in
+        // `typeck::qualified_key`, the oracle in `interp::imported_module`,
+        // and the predecessor in `cove_ir::lower::index`.
+        //
+        // Its two halves are the oracle's two: an exported function, then an
+        // exported struct's initializer. Whether the owner exports the name
+        // is not asked again — resolution refused a qualified reach for one
+        // it does not — so this is `Plan::resolve` and `Body::struct_literal`
+        // exactly as an unqualified call to either would be.
+        if let Some(owner) = self
+            .checked
+            .modules
+            .get(self.module)
+            .and_then(|resolved| resolved.module_imports.get(head))
+            .cloned()
+        {
+            if let Some(id) = self.plan.resolve(self.checked, &owner, name) {
+                return self.call_declared(expr, id, args);
+            }
+            if let Some(ty) = self.ty(expr) {
+                if matches!(ty, Ty::Struct(..)) {
+                    return self.struct_literal(expr, &ty, args);
+                }
             }
         }
         self.gap("a call to a method or an associated function", expr)

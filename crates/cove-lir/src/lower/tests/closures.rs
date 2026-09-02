@@ -271,3 +271,64 @@ fn1 m.f#0() -> Int
 "
     );
 }
+
+// ---- a `fn` declared inside a body -------------------------------------
+
+/// A local `fn` is the closure the enclosing body writes, and the name is a
+/// binding of the enclosing scope.
+///
+/// Nothing about the environment or the call says which of the two spellings
+/// made it: `fn double(n: Int) -> Int { n * 2 }` and
+/// `let double = fn(n: Int) { n * 2 }` are one lowering, which is what the
+/// checker, the resolver and the oracle all already say a local `fn` is.
+/// Binding the name is also what makes `double(21)` a call: the frame
+/// answers before any of the arms that resolve a declaration do.
+#[test]
+fn a_local_fn_is_the_closure_the_body_wrote_and_a_binding_of_its_scope() {
+    let source = "fn f() -> Int {\n  fn double(n: Int) -> Int { n * 2 }\n  double(21)\n}";
+    assert_eq!(
+        listing(source, "f"),
+        "\
+fn0 m.f() -> Int
+  frame 4: s0:int s1:ref s2:int s3:int
+     0  alloc s1:ref closure m.f#0<closure>
+     1  int s2:int 1
+     2  store-field s1:ref +0 s2:int Int
+     3  int s2:int 21
+     4  call-closure s3:int s1:ref (s2:Int)
+     5  copy s0:int s3:int Int
+     6  clear s1:ref fn
+     7  return s0:int
+"
+    );
+    assert_eq!(
+        listing(source, "f#0"),
+        "\
+fn1 m.f#0(Int) -> Int
+  frame 4: s0!:int s1:int s2:int s3:int
+     0  int s2:int 2
+     1  mul.int s3:int s0:int s2:int
+     2  copy s1:int s3:int Int
+     3  return s1:int
+"
+    );
+}
+
+/// It captures what the body around it binds, by value and at creation time,
+/// exactly as a lambda written in its place would.
+#[test]
+fn a_local_fn_captures_the_bindings_around_it() {
+    let source =
+        "fn f(base: Int) -> Int {\n  fn shifted(n: Int) -> Int { n + base }\n  shifted(1)\n}";
+    assert_eq!(
+        listing(source, "f#0"),
+        "\
+fn1 m.f#0(Int) -> Int
+  frame 4: s0!:int s1:int s2:int s3:int
+  capture base -> s1:Int
+     0  add.int s3:int s0:int s1:int
+     1  copy s2:int s3:int Int
+     2  return s2:int
+"
+    );
+}

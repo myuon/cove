@@ -351,3 +351,79 @@ fn0 m.f(<host> ledger.Entry) -> Result
 "
     );
 }
+
+// ---- initializing one --------------------------------------------------
+
+/// `http.Route(method: ..., path: ..., handler: ...)` is a struct literal,
+/// and its labels are field names rather than anything the boundary sees.
+///
+/// The oracle asks the schema for a type of that name before it asks for an
+/// operation, and `interp::init_host_type` is `interp::init_struct` "with the
+/// fields read from a schema instead of from a declaration". So this emits no
+/// `call-host` at all: an initializer never crosses the boundary, and the
+/// labelled argument that used to be refused as one was refused for a call
+/// that was never a host call.
+#[test]
+fn a_host_type_is_initialized_with_labels_and_never_crosses_the_boundary() {
+    assert_eq!(
+        listing_with(
+            "use ledger\nfn f() -> ledger.Entry { ledger.Entry(amount: 1, memo: \"rent\") }",
+            &ledger(),
+            "f"
+        ),
+        "\
+fn0 m.f() -> ledger.Entry
+  frame 6: s0:int s1:ref s2:int s3:ref s4:int s5:ref
+     0  int s2:int 1
+     1  str s3:ref \"rent\"
+     2  copy s4:int s2:int Int
+     3  copy s5:ref s3:ref String
+     4  clear s3:ref String
+     5  copy s0:int s4:int ledger.Entry
+     6  clear s4:int ledger.Entry
+     7  return s0:int
+"
+    );
+}
+
+/// A field the schema declared `Any` is where the erasure happens, and a case
+/// of a host enum written into one is the discriminant it always was.
+///
+/// `http.Route`'s `handler` is one boxed word. What goes into it is a
+/// declared function used as a value — an environment naming it and holding
+/// nothing — and it is boxed on the way in exactly as a concrete value
+/// written into a `dyn Trait` field of a declared struct is, because
+/// `docs/LINEAR_VM.md` gives the two one representation.
+///
+/// `http.Method.Get` is `int 0`, the case index the schema counts, and it
+/// reaches the field with no allocation and no boundary crossing at all.
+#[test]
+fn a_host_field_declared_any_is_boxed_on_the_way_in() {
+    assert_eq!(
+        listing(
+            "use http\nfn health(r: http.Request) -> http.Response { http.json(200, 1) }\n\
+             fn f() -> http.Route \
+             { http.Route(method: http.Method.Get, path: \"/health\", handler: health) }",
+            "f"
+        ),
+        "\
+fn0 m.f() -> http.Route
+  frame 11: s0:int s1:ref s2:ref s3:int s4:ref s5:ref s6:int s7:ref s8:int s9:ref s10:ref
+     0  int s3:int 0
+     1  str s4:ref \"/health\"
+     2  alloc s5:ref closure m.health<closure>
+     3  int s6:int 1
+     4  store-field s5:ref +0 s6:int Int
+     5  box s7:ref s5:ref fn
+     6  clear s5:ref fn
+     7  copy s8:int s3:int http.Method
+     8  copy s9:ref s4:ref String
+     9  copy s10:ref s7:ref Any
+    10  clear s7:ref Any
+    11  clear s4:ref String
+    12  copy s0:int s8:int http.Route
+    13  clear s8:int http.Route
+    14  return s0:int
+"
+    );
+}

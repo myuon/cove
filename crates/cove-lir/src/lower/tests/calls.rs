@@ -453,3 +453,70 @@ fn0 m.f() -> Int
 "
     );
 }
+
+// ---- a module imported whole ------------------------------------------
+
+/// `use forager` then `forager.decide(...)`: a call reached through the name
+/// a module is visible under.
+///
+/// `ResolvedModule::module_imports` is the fact, and it is read here the way
+/// every other consumer of it reads it — the checker's `qualified_key`, the
+/// oracle's `imported_module`, the predecessor's index. What comes out is an
+/// ordinary [`crate::Inst::Call`] naming the declaration in the module that
+/// exports it: a qualified name is a way of writing a name, not a second
+/// calling convention.
+#[test]
+fn a_call_through_a_module_imported_whole_names_the_declaration_it_exports() {
+    assert_eq!(
+        super::listing_in(
+            &[
+                ("greet", "export fn twice(n: Int) -> Int { n * 2 }\n"),
+                ("app", "use greet\nfn f() -> Int { greet.twice(21) }\n"),
+            ],
+            "app",
+            "f",
+        ),
+        "\
+fn0 app.f() -> Int
+  frame 3: s0:int s1:int s2:int
+     0  int s1:int 21
+     1  call s2:int greet.twice (s1:Int)
+     2  copy s0:int s2:int Int
+     3  return s0:int
+"
+    );
+}
+
+/// The other half of the same name: a struct the module exports, initialized
+/// through it.
+///
+/// The oracle asks the two in this order — `exported_function`, then an
+/// exported struct's `init_struct` — and a qualified initializer is the
+/// unqualified one with the fields read in the declaring module's
+/// vocabulary, which is where they were already being read.
+#[test]
+fn an_initializer_through_a_module_imported_whole_is_an_ordinary_one() {
+    assert_eq!(
+        super::listing_in(
+            &[
+                ("shape", "export struct Point { x: Int, y: Int }\n"),
+                (
+                    "app",
+                    "use shape\nfn f() -> shape.Point { shape.Point(x: 1, y: 2) }\n"
+                ),
+            ],
+            "app",
+            "f",
+        ),
+        "\
+fn0 app.f() -> shape.Point
+  frame 6: s0:int s1:int s2:int s3:int s4:int s5:int
+     0  int s2:int 1
+     1  int s3:int 2
+     2  copy s4:int s2:int Int
+     3  copy s5:int s3:int Int
+     4  copy s0:int s4:int shape.Point
+     5  return s0:int
+"
+    );
+}

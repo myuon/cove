@@ -4,7 +4,7 @@
 //! when a local's run of slots goes back on the free list and when the
 //! references in it are cleared. Nothing else in the lowering creates one.
 
-use cove_syntax::ast::{Block, Stmt, StmtKind};
+use cove_syntax::ast::{Block, ItemKind, Stmt, StmtKind};
 
 use super::gap;
 use super::shapes;
@@ -101,9 +101,15 @@ impl Body<'_> {
                 self.frame.bind(&name.node, slot, layout);
             }
             StmtKind::Expr(expr) => self.discard(expr),
-            StmtKind::Item(_) => self
-                .errors
-                .push(gap::gap("a declaration inside a body", stmt.span)),
+            // A local `fn` is an ordinary closure the body writes, and the
+            // name it declares is a binding of this scope like any other:
+            // see [`Body::local_fn`]. Nothing else can stand here yet.
+            StmtKind::Item(item) => match &item.kind {
+                ItemKind::Fn(decl) => self.local_fn(decl),
+                _ => self
+                    .errors
+                    .push(gap::gap("a declaration inside a body", stmt.span)),
+            },
         }
     }
 }

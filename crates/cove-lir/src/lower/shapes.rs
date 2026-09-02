@@ -563,6 +563,63 @@ impl Shapes {
             .is_some_and(|schema| schema.resource(name).is_some())
     }
 
+    /// The fields `module.name` is initialized with, where the host declares
+    /// it as plain data rather than as an enum or as something it keeps.
+    ///
+    /// This is [`struct_fields`] for a host type, and it answers the same
+    /// pair for the same reason: a label is a field's name, and a field's
+    /// declared type is where a value written into it is erased. The names
+    /// are `TypeSchema::fields[..].name`, which is what
+    /// `interp::init_host_type` reads to line an initializer's arguments up
+    /// with the fields — a host struct is initialized with labels exactly as
+    /// a declared one is, and `TypeSchema`'s own documentation says so.
+    ///
+    /// The types are the schema's, translated by [`host_ty`], so a field the
+    /// schema declared `Any` — `http.Route`'s `handler` — reads as erasure
+    /// here and is boxed on the way in, rather than as an unknown the
+    /// checker declined to settle.
+    ///
+    /// `None` for an enum, for a resource, and for a name no schema this
+    /// compilation was given declares: none of the three is initialized with
+    /// fields, and a caller that meets one has something else to do with it.
+    pub(super) fn host_fields(&self, qualified: &str) -> Option<Vec<(Arc<str>, Ty)>> {
+        let (module, short) = qualified.rsplit_once('.')?;
+        let declared = self.schemas.module(module)?.declared_type(short)?;
+        if declared.is_enum() {
+            return None;
+        }
+        Some(
+            declared
+                .fields
+                .iter()
+                .map(|field| (Arc::from(field.name), host_ty(&field.ty)))
+                .collect(),
+        )
+    }
+
+    /// Which case of a host module's enum `case` is, if it names one.
+    ///
+    /// This is [`case_at`] for a host type, and the answer is an index alone
+    /// rather than an index and a payload because a host's cases carry none:
+    /// a schema writes `cases: &["Get", "Post"]` and gives them nothing.
+    /// `interp::host_enum_case` is the oracle, and it is a function of its
+    /// own there for the same reason this is one here — a host's enum has a
+    /// [`TypeSchema`](cove_schema::TypeSchema) rather than a declaration, so
+    /// there is nothing to read a case's payload arity from.
+    ///
+    /// The order is the schema's, which is the order [`Shapes::host_type`]
+    /// built the layout's cases in, so an index means the same thing on both
+    /// sides.
+    pub(super) fn host_case(&self, qualified: &str, case: &str) -> Option<u32> {
+        let (module, short) = qualified.rsplit_once('.')?;
+        let declared = self.schemas.module(module)?.declared_type(short)?;
+        declared
+            .cases
+            .iter()
+            .position(|name| *name == case)
+            .map(|at| at as u32)
+    }
+
     /// The layout of a value a host schema declared, wherever the schema
     /// declares one: a field of a host struct, or an operation's result.
     ///
