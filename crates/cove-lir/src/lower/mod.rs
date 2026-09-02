@@ -393,10 +393,24 @@ struct Decl<'a> {
     boundary: Option<Boundary>,
     /// The trait whose default body this method is, when it is one.
     ///
-    /// Read by [`Plan::boundaries`], which is where the gap for one is
-    /// raised: a default body belongs to the trait and has no per-type
-    /// declaration to read a boundary off.
+    /// What it decides is which substitution the body is lowered under. The
+    /// checker walks a default body **once**, with `self` typed as a rigid
+    /// `Ty::Param("Self")` bounded by the trait, so every fact recorded
+    /// inside it is written in terms of `Self` — which is the same situation
+    /// a generic declaration is in, one parameter at a time. See
+    /// [`Decl::substitution`].
     from_trait_default: Option<String>,
+    /// The type this is a method of, as the receiver's own type.
+    ///
+    /// `None` for a free function, and for a method of a *generic* type,
+    /// whose receiver's width depends on a type argument this does not have —
+    /// see [`Decl::on_generic_type`].
+    ///
+    /// It is written in the package's own vocabulary — `m.Booking` rather
+    /// than `Booking` — because a conformance may be declared in the module
+    /// that declares the *trait* (ADR 0006's orphan rule), and then the
+    /// type's bare name means nothing where the body is lowered.
+    receiver_ty: Option<Ty>,
     /// The generic type this is a method of, when it is one.
     ///
     /// A method of `Cell<T>` has no boundary of its own for the same reason a
@@ -408,6 +422,39 @@ struct Decl<'a> {
     /// letting it fail as "a value of type `Cell<T>`", which says where the
     /// trouble is and not what is owed.
     on_generic_type: Option<String>,
+}
+
+/// The one type parameter a trait's default body is written in terms of.
+const SELF: &str = "Self";
+
+impl Decl<'_> {
+    /// The type parameters this declaration's facts are recorded in terms
+    /// of, and what this lowering puts in their place.
+    ///
+    /// Empty for almost everything, and then the substitution is the
+    /// identity. A **trait method's default body** is the one declaration
+    /// that is neither generic nor ordinary: `resolve::conform` synthesises
+    /// one `FnDecl` per conforming type, all of them carrying the *trait
+    /// method's* span, and `Checker::check_trait_defaults` records one
+    /// `Signature` at that span with the receiver typed `Ty::Param("Self")`.
+    ///
+    /// So a default body is a generic declaration with one parameter, and
+    /// this is what says which. Nothing else is needed: the boundary is
+    /// [`boundary_of`] under this substitution, the body is [`lower_body`]
+    /// under it, and a call the body makes on `self` finds the conforming
+    /// type's own implementation through [`Body::conformance`] — which is
+    /// the path a bounded generic already takes, for the same reason. One
+    /// recorded walk serves every conformance.
+    ///
+    /// A default body on a *generic* type would need `Self` to stand for an
+    /// instantiation rather than for a declaration, so it is left to
+    /// [`Plan::boundaries`]'s earlier arm.
+    fn substitution(&self) -> (Vec<Arc<str>>, Vec<Ty>) {
+        match (&self.from_trait_default, &self.receiver_ty) {
+            (Some(_), Some(ty)) => (vec![Arc::from(SELF)], vec![ty.clone()]),
+            _ => (Vec::new(), Vec::new()),
+        }
+    }
 }
 
 /// A declaration's parameters and answer, as layouts.
@@ -517,6 +564,8 @@ impl<'a> Plan<'a> {
                 let owner = resolved.owner_of(type_name).unwrap_or(name.as_str());
                 if is_generic_type(checked, owner, type_name) {
                     plan.decls[id.index()].on_generic_type = Some(type_name.clone());
+                } else {
+                    plan.decls[id.index()].receiver_ty = receiver_ty(checked, owner, type_name);
                 }
                 plan.methods
                     .insert((owner.to_string(), type_name.clone(), method.clone()), id);
@@ -547,21 +596,23 @@ impl<'a> Plan<'a> {
             }
             let decl = &self.decls[at];
             let module = decl.module.to_string();
-            let boundary = if let Some(trait_name) = &decl.from_trait_default {
-                // A default body belongs to the trait, and the checker checks
-                // it once there rather than once per conformance — so there
-                // is no per-type declaration to read a boundary off, and the
-                // trait method has none recorded either.
-                let named = format!("`{trait_name}.{}`", short_name(&decl.name));
-                errors.push(gap::gap(
-                    &format!("{named}, a trait method's default body"),
-                    decl.decl.span,
-                ));
-                None
-            } else if let Some(type_name) = &decl.on_generic_type {
+            let (generics, args) = decl.substitution();
+            let boundary = if let Some(type_name) = &decl.on_generic_type {
                 let named = format!("`{type_name}.{}`", short_name(&decl.name));
                 errors.push(gap::gap(
                     &format!("{named}, a method of a generic type"),
+                    decl.decl.span,
+                ));
+                None
+            } else if decl.from_trait_default.is_some() && generics.is_empty() {
+                // A default body whose conforming type this lowering could
+                // not name. Nothing in the corpus reaches it — a conformance
+                // is declared for a type of the package — and it is named
+                // rather than left out because the alternative is a stub that
+                // answers `()`.
+                let named = format!("`{}`", decl.name);
+                errors.push(gap::gap(
+                    &format!("{named}, a trait method's default body on a type with no layout"),
                     decl.decl.span,
                 ));
                 None
@@ -574,7 +625,7 @@ impl<'a> Plan<'a> {
                 // stands here is a stub nothing names.
                 None
             } else {
-                boundary_of(checked, &module, decl.decl, &[], &[], pool, errors)
+                boundary_of(checked, &module, decl.decl, &generics, &args, pool, errors)
             };
             self.decls[at].boundary = boundary;
         }
@@ -590,6 +641,7 @@ impl<'a> Plan<'a> {
             decl,
             boundary: None,
             from_trait_default: None,
+            receiver_ty: None,
             on_generic_type: None,
         });
         id
@@ -739,6 +791,33 @@ impl CallShape {
     fn ty(&self, at: usize) -> &Ty {
         &self.types[usize::from(self.receiver) + at]
     }
+}
+
+/// The type a method of `owner`'s declaration of `name` receives, written
+/// the way the package names it.
+///
+/// `m.Booking` rather than `Booking`, because a conformance may be written
+/// in the module that declares the *trait* — ADR 0006's orphan rule — and
+/// the type's bare name means nothing there. It is the same reason
+/// [`shapes::qualified`] exists, and `shapes::declaring` reads a qualified
+/// name back apart.
+///
+/// A method's receiver is otherwise read off the checker's `Signature`, and
+/// this is not a second answer to that: it is asked only where a signature
+/// records `Ty::Param("Self")` and something has to say what `Self` is.
+///
+/// A declaration this cannot place — a conformance on a type the package
+/// does not declare — answers `None`, and a default body on one is a gap.
+fn receiver_ty(checked: &Checked, owner: &str, name: &str) -> Option<Ty> {
+    let resolved = checked.modules.get(owner)?;
+    let qualified: Arc<str> = Arc::from(format!("{owner}.{name}"));
+    if resolved.structs.contains_key(name) {
+        return Some(Ty::Struct(qualified, Vec::new()));
+    }
+    if resolved.enums.contains_key(name) {
+        return Some(Ty::Enum(qualified, Vec::new()));
+    }
+    None
 }
 
 /// Whether `owner`'s declaration of `name` binds type parameters.
@@ -1156,18 +1235,12 @@ fn lower_function(
         return stub(decl);
     };
     let name = decl.name.clone();
+    // The same substitution the boundary was read under, so that a fact
+    // recorded in terms of `Self` completes to the same type in the frame
+    // and in the body.
+    let (generics, args) = decl.substitution();
     lower_body(
-        checked,
-        sources,
-        plan,
-        decl,
-        boundary,
-        name,
-        &[],
-        &[],
-        pool,
-        errors,
-        wanted,
+        checked, sources, plan, decl, boundary, name, &generics, &args, pool, errors, wanted,
     )
 }
 

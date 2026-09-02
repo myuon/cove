@@ -423,3 +423,33 @@ fn0 m.f(m.P) -> Int
 "
     );
 }
+
+/// `f(x) { ... }` is sugar and nothing more.
+///
+/// The parser has already built the block as a parameterless lambda, and
+/// `interp::eval_args` pushes it on the end of the written arguments —
+/// unlabelled, not `var`, not spread. So the closure lands in the parameter
+/// a written argument would have filled, and no path in this lowering knows
+/// which spelling it arrived in.
+#[test]
+fn a_trailing_lambda_is_the_call_s_last_argument() {
+    assert_eq!(
+        listing(
+            "fn twice(n: Int, f: fn() -> Int) -> Int { n + f() }\n\
+             fn f() -> Int { twice(1) { 2 } }",
+            "f"
+        ),
+        "\
+fn0 m.f() -> Int
+  frame 4: s0:int s1:int s2:ref s3:int
+     0  int s1:int 1
+     1  alloc s2:ref closure m.f#0<closure>
+     2  int s3:int 2
+     3  store-field s2:ref +0 s3:int Int
+     4  call s3:int m.twice (s1:Int s2:fn)
+     5  clear s2:ref fn
+     6  copy s0:int s3:int Int
+     7  return s0:int
+"
+    );
+}

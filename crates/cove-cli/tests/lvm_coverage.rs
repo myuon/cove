@@ -165,7 +165,32 @@ use support::{Case, ModuleIndex, Prepared};
 /// `tests/e2e:fail_freeze_aliased` is the one down: it used to agree because
 /// both sides refused it at run time, and it is now refused by `cove check`,
 /// so it has no checked program to lower and has left this survey entirely.
-const AGREEING_FLOOR: usize = 70;
+///
+/// 70 to 76, and it is three families rather than one.
+///
+/// **A type a host module declares has a layout.** A resource handle is one
+/// `Repr::Host` word — ADR 0013's "the host keeps what it is and Cove holds
+/// the name of it" is the whole of the representation — and a type the host
+/// hands over is its fields inline or its cases, exactly as a declared one
+/// is. That was the largest cluster on the ranked list, because every type
+/// built on one failed with it: `Result<files.Reader, Error>` and the `?` on
+/// it, `enum Sink { Console, File(files.Writer) }`, `Array<http.Route>`.
+/// `tests/e2e:fail_database_connect_denied` and
+/// `tests/e2e:fail_http_no_capability` are the two it runs on its own.
+///
+/// **A trailing lambda is the call's last argument**, which is what
+/// `interp::eval_args` makes it, plus `Result.mapError` — the one thing in
+/// the corpus a trailing lambda is written on that neither crosses the
+/// boundary nor needs a task. `examples:config` is what those two run.
+///
+/// **A trait method's default body is lowered once per conforming type**,
+/// under the substitution `Self := the conforming type`. It needed no
+/// machinery of its own: the checker records one `Signature` at the trait
+/// method's span with the receiver typed `Ty::Param("Self")`, so it is a
+/// generic declaration with one parameter and the monomorphisation path
+/// already there completes it. `tests/e2e:type_trait`,
+/// `tests/e2e:module_conformance` and `examples:traits` are the three.
+const AGREEING_FLOOR: usize = 76;
 
 /// The code `cove_lir` raises a gap under.
 ///

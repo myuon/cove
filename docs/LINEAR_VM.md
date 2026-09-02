@@ -176,6 +176,7 @@ rather than reconstructed.
 | `Vector`, `Shared` | one word: a heap address, **identity** storage |
 | a closure | one word: a heap address of its environment |
 | `dyn`, `Any` | one word: a heap address of a boxed value |
+| a Host resource | one word: a name in the run's resource table |
 
 A `Vector` and a `Shared` are the two families whose storage is both shared
 and mutable, so ADR 0001 makes a copy of either an alias — and their rule
@@ -509,6 +510,42 @@ contributes `Int, Int, Ref`, so slot 7 is a root and 5 and 6 are not.
 A heap object's payload map is the same function of the same kind of layout.
 An enum inline anywhere is static because of the payload-agreement rule, so
 nothing has to read a discriminant during a collection.
+
+## A Host resource is a name, not an object
+
+`Repr::Host` is one word, and it is neither inline data nor an address into
+this memory. It indexes a run-owned table of `ResourceHandle`s.
+
+[ADR 0031](adr/0031-a-host-handle-is-not-a-vm-handle.md) is why it cannot be
+an object: a heap object is storage this runtime allocated and manages, and
+making a resource one would put a collection in charge of a lifetime
+[ADR 0013](adr/0013-host-resource-handles.md) gives to the host. The run
+would be sweeping something whose `close` the program never wrote.
+
+It is not a second value store either — ADR 0034 names "Host-owned resource
+registries" among the things that are not one — because the table holds
+*names*, and nothing that wanted to dodge a heap representation can be put in
+it.
+
+Three rules the lowering has to know:
+
+- **The word is one past the index, so zero is no resource.** Frames are
+  zeroed on entry, so a `Host` slot nothing has written reads zero; indexing
+  straight by the word would make an unwritten slot name whichever resource
+  happened to be first. Zero earns the same refusal a null reference does.
+- **A resource is interned.** ADR 0013 makes two handles equal when they name
+  the same resource, so one resource is one word — otherwise comparing the
+  words would not be comparing the resources.
+- **Nothing is ever removed.** ADR 0013 keeps a closed resource's handle
+  alive as a name and never reuses an identity, so the refusal a stale handle
+  earns is the *host's* and is reached by handing the host the name. The cost
+  is one name per distinct resource, which is the size of the table the host
+  keeps anyway.
+
+The collector cannot reach one, and that is a property of the same predicate
+everything else rests on: tracing enqueues on `Repr::is_ref`, and
+`Repr::Host` is not a reference. The table holds no addresses at all, so a
+mark would have nothing to follow.
 
 ## A builtin never calls back into Cove
 

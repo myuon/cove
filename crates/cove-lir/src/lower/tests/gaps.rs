@@ -87,22 +87,6 @@ fn an_async_declaration_is_a_gap_rather_than_a_refusal() {
 }
 
 #[test]
-fn a_trait_method_s_default_body_is_named_where_it_is_written() {
-    // A default body belongs to the trait, and the checker checks it once
-    // there rather than once per conformance — so there is no per-type
-    // declaration to read a boundary off.
-    assert_eq!(
-        refused(
-            "trait T { fn a(self) -> Int\n  fn b(self) -> Int { 0 } }\n\
-             struct P { x: Int }\n\
-             impl T for P { fn a(self) -> Int { self.x } }\n\
-             fn f(p: P) -> Int { p.b() }"
-        ),
-        vec!["not yet lowered: `T.b`, a trait method's default body"]
-    );
-}
-
-#[test]
 fn an_unsettled_type_is_a_compile_error_rather_than_a_gap() {
     // A `Ty::Unknown` is the checker declining, and a program the checker
     // declined about should not have reached a backend at all. That is not
@@ -124,6 +108,60 @@ fn a_declaration_taking_a_var_parameter_cannot_be_used_as_a_function_value() {
     assert_eq!(
         refused("fn bump(var n: Int) { n = n + 1 }\nfn f() -> Int {\n  let g = bump\n  0\n}"),
         vec!["not yet lowered: `bump`, which takes a `var` parameter, used as a function value"]
+    );
+}
+
+/// A resource's operations belong to the host that issued the handle, and
+/// the handle is what routes them.
+///
+/// `Inst::CallHost` addresses a module and an operation; a resource call
+/// addresses a *handle*, which `HostRegistry::call_resource` reads the
+/// module and the resource kind off. So the work is an instruction, its
+/// verifier arm and the boundary that routes it — and the gap names the
+/// operation rather than saying "a method call", because the message is what
+/// says where the next piece of work is.
+#[test]
+fn an_operation_of_a_host_resource_is_named_as_the_source_writes_it() {
+    assert_eq!(
+        refused(
+            "use files\nfn f() -> Result<Unit, Error> {\n  \
+             let reader = files.open(\"a.txt\")?\n  reader.close()?\n  Ok(())\n}"
+        ),
+        vec!["not yet lowered: `files.Reader.close`, an operation of a host resource"]
+    );
+}
+
+/// A trailing lambda on a host operation lowers as far as the call and stops
+/// at the boundary.
+///
+/// `clock.timeout(500ms) { ... }` is an ordinary last argument here — that
+/// part is done — but a public closure carries a body a host's callback
+/// would go looking for, and only the backend that made one can run it. The
+/// machine refuses to materialise one, so a call emitted here would run and
+/// answer a failure the oracle does not. A wrong answer is worse than a gap.
+#[test]
+fn a_function_value_handed_to_a_host_operation_stops_at_the_boundary() {
+    assert_eq!(
+        refused("use clock\nfn f() -> Result<Int, Error> { clock.timeout(1s) { 1 } }"),
+        vec!["not yet lowered: a function value passed to a host operation"]
+    );
+}
+
+/// A handle is neither a scalar the machine computes with nor an address it
+/// can trace, and no comparison instruction admits one.
+///
+/// The word is an index into the run's resource table, and whether two
+/// indices being equal is two handles naming one resource is that table's
+/// question rather than an instruction's. The verifier says as much, so this
+/// names the work instead of emitting a `Cmp` that would be a fault.
+#[test]
+fn a_comparison_of_two_host_resource_handles_is_named_rather_than_emitted() {
+    assert_eq!(
+        refused(
+            "use files\nfn f() -> Result<Bool, Error> {\n  \
+             let a = files.open(\"a\")?\n  let b = files.open(\"b\")?\n  Ok(a == b)\n}"
+        ),
+        vec!["not yet lowered: a comparison of two host resource handles"]
     );
 }
 

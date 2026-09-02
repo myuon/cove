@@ -123,3 +123,89 @@ fn0 m.f() -> String
 "
     );
 }
+
+/// A trait's default body is one function per conforming type, and it is
+/// the monomorphisation machinery that makes it one.
+///
+/// The checker walks the body **once**, with `self` typed as a rigid
+/// `Ty::Param("Self")` bounded by the trait, and `resolve::conform`
+/// synthesises one `FnDecl` per conforming type carrying the trait method's
+/// own span — so every fact in the body is recorded in terms of `Self` and
+/// the substitution `Self := m.Receipt` completes it. That is exactly what a
+/// generic declaration's `Ty::Param` needs, one parameter instead of
+/// several.
+///
+/// `self.summarize()` inside it costs one ordinary [`crate::Inst::Call`]:
+/// the checker recorded no target — which implementation it reaches is
+/// decided by the type — and this body is lowered for *one* type, so the
+/// bounded-call path finds `m.Receipt.summarize` statically. No dictionary,
+/// no vtable.
+#[test]
+fn a_trait_method_s_default_body_is_lowered_once_per_conforming_type() {
+    let source = "/// t\nexport trait Summary {\n  /// s\n  fn summarize(self) -> String\n\n  \
+                  /// l\n  fn line(self) -> String {\n    \"- {self.summarize()}\"\n  }\n}\n\
+                  /// b\nexport struct Booking { id: Int }\n\
+                  /// r\nexport struct Receipt { cents: Int }\n\
+                  impl Summary for Booking {\n  /// s\n  fn summarize(self) -> String { \"booking {self.id}\" }\n}\n\
+                  impl Summary for Receipt {\n  /// s\n  fn summarize(self) -> String { \"receipt\" }\n}\n\
+                  /// f\nexport fn f(b: Booking, r: Receipt) -> String { \"{b.line()}{r.line()}\" }\n";
+    assert_eq!(
+        listing(source, "Booking.line"),
+        "\
+fn1 m.Booking.line(m.Booking) -> String
+  frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
+     0  str s2:ref \"- \"
+     1  call s3:ref m.Booking.summarize (s0:m.Booking)
+     2  call-builtin s4:ref String.interpolate (s2:String s3:String)
+     3  clear s3:ref String
+     4  clear s2:ref String
+     5  copy s1:ref s4:ref String
+     6  clear s4:ref String
+     7  return s1:ref
+"
+    );
+    assert_eq!(
+        listing(source, "Receipt.line"),
+        "\
+fn3 m.Receipt.line(m.Receipt) -> String
+  frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
+     0  str s2:ref \"- \"
+     1  call s3:ref m.Receipt.summarize (s0:m.Receipt)
+     2  call-builtin s4:ref String.interpolate (s2:String s3:String)
+     3  clear s3:ref String
+     4  clear s2:ref String
+     5  copy s1:ref s4:ref String
+     6  clear s4:ref String
+     7  return s1:ref
+"
+    );
+}
+
+/// A conformance that supplies its own body keeps it, and only the ones that
+/// did not get the trait's.
+#[test]
+fn a_conformance_that_writes_its_own_body_does_not_get_the_default() {
+    assert_eq!(
+        listing(
+            "/// t\nexport trait Summary {\n  /// s\n  fn summarize(self) -> String\n\n  \
+             /// l\n  fn line(self) -> String {\n    \"- {self.summarize()}\"\n  }\n}\n\
+             /// r\nexport struct Receipt { cents: Int }\n\
+             impl Summary for Receipt {\n  /// s\n  fn summarize(self) -> String { \"receipt\" }\n\n  \
+             /// l\n  fn line(self) -> String { \"  $ {self.summarize()}\" }\n}\n\
+             /// f\nexport fn f(r: Receipt) -> String { r.line() }\n",
+            "Receipt.line"
+        ),
+        "\
+fn1 m.Receipt.line(m.Receipt) -> String
+  frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
+     0  str s2:ref \"  $ \"
+     1  call s3:ref m.Receipt.summarize (s0:m.Receipt)
+     2  call-builtin s4:ref String.interpolate (s2:String s3:String)
+     3  clear s3:ref String
+     4  clear s2:ref String
+     5  copy s1:ref s4:ref String
+     6  clear s4:ref String
+     7  return s1:ref
+"
+    );
+}

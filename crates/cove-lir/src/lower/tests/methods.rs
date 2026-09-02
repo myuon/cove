@@ -176,3 +176,92 @@ fn0 m.Point.bump(<addr>) -> Unit
 "
     );
 }
+
+/// `mapError` is a branch and one call through a closure.
+///
+/// The module docs above named it as the one `Result` method that is not a
+/// question about the discriminant: it takes a callback, and
+/// `docs/LINEAR_VM.md` says a builtin never calls back into Cove — so what
+/// runs the callback is an ordinary [`crate::Inst::CallClosure`] frame here.
+///
+/// The two `Result`s are two layouts, which is why the `Ok` is copied rather
+/// than passed along: `Int.parse` answers a `Result<Int, Error>` and this
+/// answers a `Result<Int, m.E>`. The closure is built before the branch,
+/// because it is an ordinary argument and the language evaluates a call's
+/// arguments before the call.
+#[test]
+fn map_error_is_a_branch_and_one_call_through_a_closure() {
+    assert_eq!(
+        super::listing(
+            "enum E { Bad(String) }\n\
+             fn f(t: String) -> Result<Int, E> { Int.parse(t).mapError { E.Bad(t) } }",
+            "f"
+        ),
+        "\
+fn0 m.f(String) -> Result
+  frame 15: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:ref s7:int s8:int s9:ref s10:ref s11:int s12:int s13:ref s14:bool
+     0  call-builtin s7:int Int.parse (s0:String)
+     1  alloc s10:ref closure m.f#0<closure>
+     2  int s11:int 1
+     3  store-field s10:ref +0 s11:int Int
+     4  store-field s10:ref +1 s0:ref String
+     5  int s11:int 0
+     6  eq.int s14:bool s7:int s11:int
+     7  branch-false s14:bool 12
+     8  int s4:int 0
+     9  clear s6:ref <ref>
+    10  copy s5:int s8:int Int
+    11  jump 15
+    12  call-closure s12:int s10:ref ()
+    13  int s4:int 1
+    14  copy s5:int s12:int m.E
+    15  clear s12:int m.E
+    16  clear s10:ref fn
+    17  clear s7:int Result
+    18  copy s1:int s4:int Result
+    19  clear s4:int Result
+    20  return s1:int
+"
+    );
+}
+
+/// Whether the callback is handed the error it replaces is read off the
+/// function type the checker settled, not off the syntax.
+///
+/// The oracle asks `Host::arity`, and `Checker::map_error` accepts a
+/// callback written either way — so the settled type is the one place both
+/// spellings have already agreed.
+#[test]
+fn map_error_passes_the_failure_to_a_callback_that_takes_one() {
+    assert_eq!(
+        super::listing(
+            "enum E { Bad(String) }\n\
+             fn f(t: String) -> Result<Int, E> { Int.parse(t).mapError(fn(e) { E.Bad(\"{e}\") }) }",
+            "f"
+        ),
+        "\
+fn0 m.f(String) -> Result
+  frame 15: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:ref s7:int s8:int s9:ref s10:ref s11:int s12:int s13:ref s14:bool
+     0  call-builtin s7:int Int.parse (s0:String)
+     1  alloc s10:ref closure m.f#0<closure>
+     2  int s11:int 1
+     3  store-field s10:ref +0 s11:int Int
+     4  int s11:int 0
+     5  eq.int s14:bool s7:int s11:int
+     6  branch-false s14:bool 11
+     7  int s4:int 0
+     8  clear s6:ref <ref>
+     9  copy s5:int s8:int Int
+    10  jump 14
+    11  call-closure s12:int s10:ref (s9:Error)
+    12  int s4:int 1
+    13  copy s5:int s12:int m.E
+    14  clear s12:int m.E
+    15  clear s10:ref fn
+    16  clear s7:int Result
+    17  copy s1:int s4:int Result
+    18  clear s4:int Result
+    19  return s1:int
+"
+    );
+}

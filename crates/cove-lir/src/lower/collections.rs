@@ -85,7 +85,16 @@ impl Body<'_> {
 
         let mut held = Vec::with_capacity(items.len());
         for item in items {
-            held.push(self.expr(item));
+            // `[booking, receipt]` written where an `Array<dyn Summary>` goes
+            // is the language's one implicit conversion at each element: the
+            // element type is written, so this is one of the positions
+            // [`Body::erase`] covers. Without it a two-word `Booking` would
+            // be stored into a one-word element and the run of words would be
+            // the wrong length — which the verifier names rather than the
+            // machine discovering it.
+            let value = self.expr(item);
+            let value = self.erase(value, item, &element);
+            held.push(self.fit(value, elem, item.span));
         }
         let dst = self.temp(shapes::REF);
         self.emit(

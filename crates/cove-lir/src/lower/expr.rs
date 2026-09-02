@@ -167,7 +167,7 @@ impl Body<'_> {
                 args,
                 trailing,
                 ..
-            } => self.call(expr, callee, args, trailing.is_some()),
+            } => self.call(expr, callee, args, trailing.as_deref()),
             ExprKind::Field { base, name } => self.field(expr, base, &name.node),
             ExprKind::Try(inner) => self.try_expr(expr, inner),
 
@@ -471,6 +471,18 @@ impl Body<'_> {
             return self.gap("an ordering comparison of two heap values", expr);
         }
         let operand = self.frame.repr(a.slot);
+        // A host resource handle is the one word that is neither a scalar the
+        // machine computes with nor an address it can trace: it is an index
+        // into the run's resource table, and whether two indices being equal
+        // is two handles naming one resource is that table's question rather
+        // than an instruction's. So no [`Inst::Cmp`] admits one — the
+        // verifier says as much — and this names the work instead of emitting
+        // one that would be a fault.
+        if operand == Repr::Host {
+            self.release(b, expr.span);
+            self.release(a, expr.span);
+            return self.gap("a comparison of two host resource handles", expr);
+        }
         let inst = match arith_of(op) {
             Some(op) => Inst::Arith {
                 num: num_of(operand),
@@ -1282,7 +1294,38 @@ impl Body<'_> {
 
     // ---- calls -------------------------------------------------------------
 
-    /// A call, whatever it turns out to be a call to.
+    /// A call, and the one thing a trailing lambda is.
+    ///
+    /// `f(x) { ... }` and `tasks.spawn { ... }` are sugar. The parser has
+    /// already built the block as a parameterless [`ExprKind::Lambda`], and
+    /// `interp::eval_args` evaluates the written arguments in source order
+    /// and then pushes that one on the end — unlabelled, not `var`, not
+    /// spread. So the whole of it here is appending an [`Arg`] and lowering
+    /// the call it was written on: [`Body::call_written`] sees an ordinary
+    /// argument list and no path in it needs a rule for the shape the
+    /// argument arrived in.
+    ///
+    /// It is done once, in front of that walk, rather than in each of its
+    /// arms: which callee may take a trailing lambda is the checker's
+    /// question and it has already answered it, so a second list of the
+    /// forms that take one would be a second answer that could drift.
+    fn call(&mut self, expr: &Expr, callee: &Expr, args: &[Arg], trailing: Option<&Expr>) -> Val {
+        let Some(closure) = trailing else {
+            return self.call_written(expr, callee, args);
+        };
+        let mut written = args.to_vec();
+        written.push(Arg {
+            label: None,
+            is_var: false,
+            spread: false,
+            value: closure.clone(),
+            span: closure.span,
+        });
+        self.call_written(expr, callee, &written)
+    }
+
+    /// A call whose arguments are all written out, whatever it turns out to
+    /// be a call to.
     ///
     /// Which declaration a name reaches was settled twice over — by
     /// resolution, and by the checker recording the call's type — so this
@@ -1298,10 +1341,7 @@ impl Body<'_> {
     /// already applied, so which instantiation the call reaches is read off
     /// the facts rather than off the annotation —
     /// see [`Body::instantiation`].
-    fn call(&mut self, expr: &Expr, callee: &Expr, args: &[Arg], trailing: bool) -> Val {
-        if trailing {
-            return self.gap("a call with a trailing lambda", expr);
-        }
+    fn call_written(&mut self, expr: &Expr, callee: &Expr, args: &[Arg]) -> Val {
         // A callee the checker gave a function type to is a value, and a call
         // through one is an [`Inst::CallClosure`] whatever its shape. The
         // question is asked of the *checker's* answer rather than of the
@@ -1457,6 +1497,19 @@ impl Body<'_> {
                 "a `var` argument to a host operation"
             } else if arg.spread {
                 "a spread argument to a host operation"
+            } else if matches!(self.ty(&arg.value), Some(Ty::Fn(_))) {
+                // `clock.timeout(500ms) { ... }`. The closure is an ordinary
+                // last argument here and lowers like one, but the *boundary*
+                // refuses to materialise a function value: a host handed one
+                // may call it back, and only the backend that made a closure
+                // can run its body. Lowering the call anyway would be a
+                // program that runs and answers a failure the oracle does
+                // not, which is worse than saying so.
+                //
+                // The work this names is in `cove_runtime::value`, not here:
+                // a `ClosureBody` that can name a `cove-lir` function is what
+                // lets both sides of that boundary stop refusing.
+                "a function value passed to a host operation"
             } else {
                 continue;
             };

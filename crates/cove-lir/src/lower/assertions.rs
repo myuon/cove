@@ -182,6 +182,21 @@ impl Body<'_> {
                 },
                 expr.span,
             );
+        } else if repr == Repr::Host {
+            // No comparison instruction admits a host resource handle. See
+            // `Body::operator`, which names the same work at `==`; a
+            // `assertEqual` is that comparison and stops for that reason.
+            self.errors.push(gap::gap(
+                "an `assertEqual` of two host resource handles",
+                expr.span,
+            ));
+            self.emit(
+                Inst::Bool {
+                    dst: dst.slot,
+                    value: true,
+                },
+                expr.span,
+            );
         } else {
             self.emit(
                 Inst::Cmp {

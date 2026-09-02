@@ -36,6 +36,18 @@
 //! declaration's own, completed with [`Ty::instantiate`], because the checker
 //! records a declaration's shape once in terms of the parameters it binds.
 //!
+//! # A type a host module declares is one of three things
+//!
+//! `Ty::Host` is written the same way whichever it is — `http.Response`,
+//! which the host hands over, reads like `http.Server`, which it keeps — so
+//! the name says nothing about the words and the schema says everything. A
+//! **resource** is one [`Repr::Host`] word, an index into the run's host
+//! resource table, and it is the one word that is neither a scalar nor an
+//! address into this run's memory: ADR 0013 says the host keeps what the
+//! handle names, so there is nothing on this side for a collection to trace.
+//! A host **enum** is a discriminant, and a host **struct** is its fields
+//! inline, both exactly as a declared one is. See [`Shapes::host_type`].
+//!
 //! # Recursion is finite exactly when it passes through a reference
 //!
 //! `struct Node { value: Int, next: Option<Node> }` has no finite inline
@@ -82,6 +94,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use cove_schema::builtins::MAP_ENTRY;
+use cove_schema::HostType;
 use cove_sema::resolve::Program as Checked;
 use cove_sema::typeck::Ty;
 
@@ -120,7 +133,14 @@ pub(super) fn scalar(repr: Repr) -> LayoutId {
     }
 }
 
-/// An index into the run's host resource table.
+/// An index into the run's host resource table: a `files.Reader`, an
+/// `http.Server`, a `database.Connection`.
+///
+/// One layout for every resource a host declares, the way [`STR`] is one for
+/// every string: a handle is a handle, and which resource an index names is
+/// the table's business rather than the layout's. ADR 0013 is what makes
+/// that enough — the host keeps whatever the thing really is, and Cove holds
+/// only the name of it.
 pub(super) const HOST: LayoutId = LayoutId(9);
 
 /// The object every `Box` allocates.
@@ -407,8 +427,109 @@ impl Shapes {
             Ty::Fn(_) => Some(self.function_value()),
             Ty::Struct(name, args) => self.declared_struct(checked, module, name, args),
             Ty::Enum(name, args) => self.declared_enum(checked, module, name, args),
+            Ty::Host(qualified) => self.host_type(checked, module, qualified),
             _ => None,
         }
+    }
+
+    /// The layout of a value of a type a host module declares.
+    ///
+    /// [`Ty::Host`] is written the same way whichever kind of type a schema
+    /// declares — `http.Response`, which the host hands over, reads like
+    /// `http.Server`, which it keeps — so the name alone does not say what
+    /// the words are. The schema does, and it says one of three things.
+    ///
+    /// A **resource** is one [`Repr::Host`] word: an index into the run's
+    /// host resource table. ADR 0013 is what makes that the whole of it — a
+    /// handle is an identity and never state, the host owns what it names,
+    /// and Cove holds only the name. So it is neither a scalar the program
+    /// computes with nor an object in the heap, and it is *not a root*: a
+    /// collection traces nothing through one because there is nothing on
+    /// this side to trace. Every resource shares [`HOST`], the way every
+    /// `Array` shares one word of `Repr::Ref`, because a handle is a handle
+    /// and which resource it names is the table's business.
+    ///
+    /// A host **enum** is a discriminant and nothing else: a schema writes
+    /// `cases: &["Get", "Post"]` and gives them no payload to carry.
+    ///
+    /// A host **struct** is its fields, inline, exactly as a declared one is
+    /// — `TypeSchema`'s own documentation says a host type is ordinary data
+    /// and needs no representation of its own. The layout's name is the
+    /// qualified one the source writes, which is what the boundary
+    /// materialises a `Value::Struct` under and what it compares an incoming
+    /// one against.
+    ///
+    /// # It reads the shipped schemas
+    ///
+    /// A type an embedder's schema declares answers `None` and is a gap
+    /// naming the type. That is a smaller answer than the checker gave —
+    /// it resolved against the schemas *this compilation* was given — and it
+    /// is the same place the predecessor reads from (`Body::resource_op`).
+    /// Closing it means carrying the `HostSchemas` a compilation was given
+    /// through to here, which is a change to what `lower` is handed.
+    fn host_type(&mut self, checked: &Checked, module: &str, qualified: &str) -> Option<LayoutId> {
+        let (host, short) = qualified.rsplit_once('.')?;
+        let schema = cove_schema::hosts::module(host)?;
+        if schema.resource(short).is_some() {
+            return Some(HOST);
+        }
+        let declared = schema.declared_type(short)?;
+        if declared.is_enum() {
+            let cases: Vec<(Arc<str>, Vec<LayoutId>)> = declared
+                .cases
+                .iter()
+                .map(|case| (Arc::from(*case), Vec::new()))
+                .collect();
+            return self.enum_of(qualified, &cases);
+        }
+        // Reserved before the fields are resolved for the reason a
+        // declaration's id is: a field may name another host type, and
+        // nothing says a schema's types cannot refer to one another.
+        if let Some(answer) = self.reached(qualified, qualified) {
+            return answer;
+        }
+        let id = self.reserve(qualified);
+        let mut placed = Vec::with_capacity(declared.fields.len());
+        for field in declared.fields {
+            match self.host_field(checked, module, &field.ty) {
+                Some(held) => placed.push((Arc::from(field.name), held)),
+                None => {
+                    self.building.pop();
+                    return None;
+                }
+            }
+        }
+        self.building.pop();
+        let (fields, words) = struct_layout(&placed, &self.layouts);
+        let layout = Layout::inline(
+            qualified,
+            Shape::Struct {
+                fields,
+                opaque: false,
+            },
+            words,
+        );
+        Some(self.settle(qualified, id, layout))
+    }
+
+    /// The layout of one field of a host struct.
+    ///
+    /// A schema's `Any` is erasure rather than abstention — it is the same
+    /// answer [`Shapes::any`] gives a host operation's result — so it is a
+    /// box carrying its own description. Everything else is a Cove type
+    /// written in the schema's vocabulary, and [`host_ty`] is that
+    /// vocabulary read as this one.
+    fn host_field(
+        &mut self,
+        checked: &Checked,
+        module: &str,
+        declared: &HostType,
+    ) -> Option<LayoutId> {
+        if matches!(declared, HostType::Any) {
+            return Some(self.any());
+        }
+        let ty = host_ty(declared)?;
+        self.of(checked, module, &ty)
     }
 
     /// The one box an intentionally erased value occupies.
@@ -612,6 +733,39 @@ impl Shapes {
         let layout = self.enum_shape(&key, &placed);
         Some(self.settle(&key, id, layout))
     }
+}
+
+/// A schema's vocabulary read as the checker's.
+///
+/// The same translation `Checker::host_ty` makes, with one difference that
+/// is the whole reason it is written again rather than shared:
+/// [`HostType::Any`] has no [`Ty`] here. The checker answers an
+/// unconstrained unknown for it, and `docs/LINEAR_VM.md` separates an
+/// unknown — the checker declining, which is a compile error — from
+/// erasure, which is a box. So `Any` is answered *before* this is reached,
+/// by [`Shapes::host_field`], and a nested one is `None` rather than a
+/// silent unknown.
+///
+/// Nothing in the shipped schemas nests one. When something does, the answer
+/// is to give the erased position a layout at the place it is met, not to
+/// let an unknown through here.
+fn host_ty(declared: &HostType) -> Option<Ty> {
+    let one = |ty: &HostType| host_ty(ty).map(Box::new);
+    Some(match declared {
+        HostType::Unit => Ty::Unit,
+        HostType::Bool => Ty::Bool,
+        HostType::Int => Ty::Int,
+        HostType::String => Ty::Str,
+        HostType::Duration => Ty::Duration,
+        HostType::Error => Ty::Error,
+        HostType::Array(item) => Ty::Array(one(item)?),
+        HostType::Set(item) => Ty::Set(one(item)?),
+        HostType::Map(key, value) => Ty::Map(one(key)?, one(value)?),
+        HostType::Option(some) => Ty::Option(one(some)?),
+        HostType::Result(ok, error) => Ty::Result(one(ok)?, one(error)?),
+        HostType::Named(name) => Ty::Host((*name).into()),
+        HostType::Any => return None,
+    })
 }
 
 /// What a declaration's layout is named by at one instantiation.

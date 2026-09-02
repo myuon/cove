@@ -649,3 +649,42 @@ fn an_empty_collection_literal_is_allocated_where_its_layout_is_known() {
         );
     }
 }
+
+/// An element type that is written is a position the one implicit
+/// conversion happens at.
+///
+/// `[booking, receipt]` where an `Array<dyn Summary>` goes boxes each
+/// element on the way in. Without it a two-word `Booking` would be stored
+/// into a one-word element and the run of words would be the wrong length —
+/// which is a fault the verifier names rather than something the machine
+/// discovers by reading the wrong words.
+#[test]
+fn an_array_literal_erases_each_element_the_written_type_erases() {
+    assert_eq!(
+        super::listing(
+            "/// t\nexport trait S {\n  /// s\n  fn sum(self) -> String\n}\n\
+             /// b\nexport struct B { id: Int }\n\
+             impl S for B {\n  /// s\n  fn sum(self) -> String { \"b\" }\n}\n\
+             /// r\nexport fn r(xs: Array<dyn S>) -> Int { xs.length() }\n\
+             /// f\nexport fn f(b: B) -> Int { r([b, b]) }\n",
+            "f"
+        ),
+        "\
+fn0 m.f(m.B) -> Int
+  frame 6: s0!:int s1:int s2:ref s3:ref s4:ref s5:int
+     0  box s2:ref s0:int m.B
+     1  box s3:ref s0:int m.B
+     2  alloc s4:ref Array<array> x2
+     3  int s5:int 0
+     4  store-elem s4:ref s5:int s2:ref Any
+     5  int s5:int 1
+     6  store-elem s4:ref s5:int s3:ref Any
+     7  clear s3:ref Any
+     8  clear s2:ref Any
+     9  call s5:int m.r (s4:Array)
+    10  clear s4:ref Array
+    11  copy s1:int s5:int Int
+    12  return s1:int
+"
+    );
+}

@@ -20,6 +20,7 @@
 //! buffer, no spill area and no fallback path, which is what ADR 0034 asks
 //! for and what the predecessor could not say.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cove_diag::Span;
@@ -30,7 +31,7 @@ use cove_lir::{
 
 use crate::budget::{Cancellation, Meter};
 use crate::error::RuntimeError;
-use crate::host::{HostRegistry, Reentry};
+use crate::host::{HostRegistry, Reentry, ResourceHandle};
 use crate::lvm::builtins::operand::Operand;
 use crate::lvm::mem::{Collected, Memory, Overflow, Roots};
 use crate::lvm::{boundary, builtins};
@@ -105,6 +106,50 @@ pub(crate) struct Machine<'a> {
     /// That is the right trade for a *literal*, which the program named
     /// statically and can name again.
     interned: Vec<u64>,
+    /// The host resources this run has been handed, in the table a
+    /// [`Repr::Host`] word indexes.
+    ///
+    /// [`Repr::Host`]'s own documentation is what fixes the shape — *an index
+    /// into the run's host resource table* — and this is that table. It is
+    /// here and not in the heap because
+    /// [ADR 0031](../../../../docs/adr/0031-a-host-handle-is-not-a-vm-handle.md)
+    /// draws exactly this line: a host resource handle is a name the *host*
+    /// minted for something the host owns, and a heap object is a reference
+    /// into storage this run allocated. Only the second is the VM's. Making a
+    /// resource an object in the traced heap would put a collection in charge
+    /// of a lifetime [ADR 0013](../../../../docs/adr/0013-host-resource-handles.md)
+    /// gives to the host, and would mean sweeping something whose `close` the
+    /// program had not written.
+    ///
+    /// It is not a second value store either, which is the other thing
+    /// ADR 0034 and ADR 0031 forbid. Nothing a Cove program can write down
+    /// may be put in it: an entry is an [`Arc`] of a [`ResourceHandle`] — a
+    /// module, a type name, a number and a flag — and the only two operations
+    /// over it are [`Machine::resource`] and [`Machine::resource_word`],
+    /// neither of which can be handed a Cove value. A value that wanted to
+    /// avoid having a heap representation could not hide here.
+    ///
+    /// **The word is one past the index, so zero is no resource.** Frames are
+    /// zeroed on entry, so a `Host` slot that has not been written yet reads
+    /// zero exactly as a `Ref` slot reads null; a table indexed straight by
+    /// the word would answer an unwritten slot with whichever resource
+    /// happened to be first.
+    ///
+    /// Nothing is ever removed. ADR 0013 says a closed resource's handle
+    /// survives as a name for something that is gone, and that a host never
+    /// reuses an identity — so an entry that outlived its resource is still
+    /// the right answer to give, because the refusal a later call earns is
+    /// the *host's* and can only be reached by handing the host the name.
+    /// What that costs is one name per distinct resource this run was handed,
+    /// which is the size of the table the host is keeping anyway.
+    ///
+    /// It is a field of the machine, which today is the run: a run has one
+    /// machine as it has one [`Memory`]. When a run has task threads this
+    /// moves where the object heap moves, and for the reason ADR 0013 gives
+    /// rather than by analogy — a resource is owned by the *run*, not by the
+    /// task or the scope that opened it, so a handle one task was given is a
+    /// name every task of the run may hold.
+    resources: Vec<Arc<ResourceHandle>>,
     /// Objects a boundary conversion is holding and no frame names yet.
     ///
     /// A frame is a root because a static map says which of its slots are
@@ -159,6 +204,7 @@ impl<'a> Machine<'a> {
             mem: Memory::new(heap_words),
             frames: Vec::new(),
             interned: vec![0; program.strings.len()],
+            resources: Vec::new(),
             temps: Vec::new(),
             roots: Vec::new(),
             instructions: 0,
@@ -888,6 +934,11 @@ impl<'a> Machine<'a> {
         }
         roots.extend(self.interned.iter().copied().filter(|addr| *addr != 0));
         roots.extend(self.temps.iter().copied().filter(|addr| *addr != 0));
+        // The host resource table is not among them and could not be. It
+        // holds names rather than addresses, so there is nothing in it for a
+        // mark to follow — and a `Repr::Host` word in a frame is not gathered
+        // above, because `Function::refs` is `RefMap::of` the `Repr`s and
+        // `Repr::Host::is_ref` is false.
         self.collected = self.mem.collect(&program.layouts, &Held(&roots));
         self.roots = roots;
     }
@@ -922,6 +973,46 @@ impl<'a> Machine<'a> {
     /// static reference map was careful not to be.
     pub(crate) fn release_temps(&mut self, mark: usize) {
         self.temps.truncate(mark);
+    }
+
+    /// The resource a [`Repr::Host`] word names, or `None` for a word that
+    /// names none.
+    ///
+    /// `None` is two things, and the caller is what tells them apart: the
+    /// zero a frame's own zeroing leaves in a slot nothing has written, and a
+    /// word from somewhere that is not this table. Both are questions about a
+    /// value crossing rather than about the machine, so both are reported by
+    /// [`crate::lvm::boundary`] and neither is decided here.
+    pub(crate) fn resource(&self, word: u64) -> Option<&Arc<ResourceHandle>> {
+        self.resources.get(word.checked_sub(1)? as usize)
+    }
+
+    /// The word naming `handle`, writing it into the table the first time
+    /// this run is handed it.
+    ///
+    /// Interned rather than appended, so that one resource is one word for
+    /// the length of a run. ADR 0013 says two handles are equal when they
+    /// name the same resource, and a table that gave one resource two words
+    /// would be a table on which comparing the words was not comparing the
+    /// resources — which is the one thing an untagged word naming a resource
+    /// has to get right. `task_safe` is not part of the comparison for the
+    /// same reason it is not part of [`ResourceHandle::names_same`]: it is a
+    /// fact about the kind, copied onto every handle of it, so two handles
+    /// naming one resource cannot disagree about it.
+    ///
+    /// The scan is linear over the resources this run has been handed. That
+    /// is the table the host is keeping too, at the size the host keeps it.
+    pub(crate) fn resource_word(&mut self, handle: &ResourceHandle) -> u64 {
+        if let Some(at) = self
+            .resources
+            .iter()
+            .position(|held| held.names_same(handle))
+        {
+            return at as u64 + 1;
+        }
+        self.resources.push(Arc::new(handle.clone()));
+        // One past the index, because a zeroed slot has to mean no resource.
+        self.resources.len() as u64
     }
 
     /// Materialises the arguments, calls the host, and writes its answer
@@ -3655,6 +3746,282 @@ pub(crate) mod tests {
         assert_eq!(
             error.message,
             "`probe.double` cannot be called, because this run has no host boundary"
+        );
+    }
+
+    // ---- host resources ------------------------------------------------
+
+    /// A host that issues a resource and takes one back.
+    ///
+    /// The two directions a `Repr::Host` word has to move, and nothing else:
+    /// `open` answers a handle the way `files.open(path)` answers a
+    /// `files.Reader`, and `read` is handed one back the way
+    /// `files.read(reader)` is. It counts what it has opened, so two readers
+    /// are two resources and `read` answering the id says which one arrived.
+    #[derive(Default)]
+    struct Vault {
+        opened: std::sync::atomic::AtomicU64,
+    }
+
+    static VAULT_RESOURCES: &[cove_schema::ResourceSchema] = &[cove_schema::ResourceSchema {
+        name: "Reader",
+        task_safe: true,
+        operations: &[],
+    }];
+
+    static VAULT_OPS: &[cove_schema::OperationSchema] = &[
+        cove_schema::OperationSchema {
+            name: "open",
+            params: &[],
+            variadic: false,
+            result: cove_schema::HostType::Named("vault.Reader"),
+            capability: "vault",
+            effect: cove_schema::Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        cove_schema::OperationSchema {
+            name: "read",
+            params: &[cove_schema::HostType::Named("vault.Reader")],
+            variadic: false,
+            result: cove_schema::HostType::Int,
+            capability: "vault",
+            effect: cove_schema::Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+    ];
+
+    impl crate::host::HostApi for Vault {
+        fn module_schema(&self) -> cove_schema::ModuleSchema {
+            cove_schema::ModuleSchema {
+                name: "vault",
+                capability: "vault",
+                operations: VAULT_OPS,
+                types: &[],
+                resources: VAULT_RESOURCES,
+            }
+        }
+
+        fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+            match op {
+                // Counting upward and never reusing, which is the rule
+                // ADR 0013 puts on an identity.
+                "open" => {
+                    let id = self
+                        .opened
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
+                    Ok(Value::from_resource(ResourceHandle::new(
+                        "vault",
+                        &VAULT_RESOURCES[0],
+                        id,
+                    )))
+                }
+                // The host recognises its own resource, which is the whole
+                // point of the name crossing back: nothing about the word
+                // reached here.
+                "read" => Ok(Value::int(
+                    args[0].resource().expect("the schema holds it").id as i64,
+                )),
+                other => Err(RuntimeError::new(format!("no `{other}` here"))),
+            }
+        }
+    }
+
+    fn vault() -> crate::host::HostRegistry {
+        let mut hosts = crate::host::HostRegistry::new(crate::host::Grants::new(["vault"]));
+        hosts.register(Box::new(Vault::default()));
+        hosts
+    }
+
+    /// The two host operations, and the one-word family a handle occupies.
+    fn vault_ops(build: &mut Build) -> (LayoutId, cove_lir::HostOpId, cove_lir::HostOpId) {
+        let int = build.scalar(Repr::Int);
+        let reader = build.word("vault.Reader", Repr::Host);
+        build.program.host_ops.push(cove_lir::HostOp {
+            module: Arc::from("vault"),
+            operation: Arc::from("open"),
+            result: reader,
+        });
+        build.program.host_ops.push(cove_lir::HostOp {
+            module: Arc::from("vault"),
+            operation: Arc::from("read"),
+            result: int,
+        });
+        let ops = build.program.host_ops.len() as u32;
+        (
+            reader,
+            cove_lir::HostOpId(ops - 2),
+            cove_lir::HostOpId(ops - 1),
+        )
+    }
+
+    /// A host operation whose result is a resource writes the word, not a
+    /// boxed value: the answer is a value location of one `Repr::Host` slot,
+    /// and `Inst::CallHost` copies its words into the frame exactly as it
+    /// does for an `Int`. Nothing about the instruction knows a resource is
+    /// different.
+    #[test]
+    fn a_host_call_answering_a_resource_writes_the_word() {
+        let mut build = Build::default();
+        let (reader, open, _) = vault_ops(&mut build);
+        let args = build.args(&[]);
+        let f = build.function(
+            "f",
+            &[],
+            &[Repr::Host],
+            reader,
+            vec![
+                Inst::CallHost {
+                    dst: 0,
+                    op: open,
+                    args,
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let program = build.done();
+        let hosts = vault();
+        let mut machine = Machine::with_hosts(&program, 1 << 12, Some(&hosts));
+
+        let answer = machine.run(f, &[], &budget()).unwrap();
+        assert_eq!(
+            answer.len(),
+            1,
+            "a handle is a name, and a name is one word"
+        );
+        assert_eq!(
+            machine
+                .resource(answer[0])
+                .map(|handle| handle.to_string())
+                .as_deref(),
+            Some("vault.Reader#1"),
+            "the word indexes the run's table, and the table holds the name"
+        );
+        assert_eq!(
+            machine.allocated_words(),
+            0,
+            "a resource is not an object, so nothing was allocated to hold one"
+        );
+    }
+
+    /// A resource goes back to the host that issued it, by the name it was
+    /// issued under. The host is what recognises it; the word never left.
+    #[test]
+    fn a_resource_goes_back_to_the_host_that_issued_it() {
+        let mut build = Build::default();
+        let (reader, open, read) = vault_ops(&mut build);
+        let int = build.scalar(Repr::Int);
+        let none = build.args(&[]);
+        let one = build.args(&[(0, reader)]);
+        let f = build.function(
+            "f",
+            &[],
+            &[Repr::Host, Repr::Host, Repr::Int],
+            int,
+            vec![
+                Inst::CallHost {
+                    dst: 0,
+                    op: open,
+                    args: none,
+                },
+                // A second resource, so that an answer of `1` is the first
+                // reader rather than whatever the table happened to hold.
+                Inst::CallHost {
+                    dst: 1,
+                    op: open,
+                    args: none,
+                },
+                Inst::CallHost {
+                    dst: 2,
+                    op: read,
+                    args: one,
+                },
+                Inst::Return { src: 2 },
+            ],
+        );
+        let program = build.done();
+        let hosts = vault();
+        let mut machine = Machine::with_hosts(&program, 1 << 12, Some(&hosts));
+        assert_eq!(machine.run(f, &[], &budget()).unwrap(), vec![1]);
+    }
+
+    /// A frame holding a resource across a collection keeps it, and the
+    /// collector never sees it.
+    ///
+    /// Both halves are the claim. The static one is that `Function::refs` —
+    /// which is `RefMap::of` the frame's `Repr`s — does not name the `Host`
+    /// slot, so the one pass the collector makes over a frame does not read
+    /// it. The dynamic one is that the run still gets the right resource back
+    /// afterwards: the word is untouched, the table is not swept, and the
+    /// handle it indexes is the one the host issued.
+    #[test]
+    fn a_resource_in_a_frame_survives_a_collection_and_is_not_a_root() {
+        let mut build = Build::default();
+        let (reader, open, read) = vault_ops(&mut build);
+        let int = build.scalar(Repr::Int);
+        let cell = build.layout(
+            "Cell",
+            Shape::Elements {
+                elem: int,
+                growable: false,
+            },
+        );
+        let none = build.args(&[]);
+        let one = build.args(&[(0, reader)]);
+        let f = build.function(
+            "f",
+            &[],
+            &[Repr::Host, Repr::Ref, Repr::Ref, Repr::Int],
+            int,
+            vec![
+                Inst::CallHost {
+                    dst: 0,
+                    op: open,
+                    args: none,
+                },
+                Inst::Alloc {
+                    dst: 1,
+                    layout: cell,
+                    len: Len::Count(600),
+                },
+                // The cell's last use. A second one fits only if this one is
+                // reclaimed, which is what makes the collection happen with
+                // the resource live in slot 0.
+                Inst::Clear {
+                    slot: 1,
+                    layout: cell,
+                },
+                Inst::Alloc {
+                    dst: 2,
+                    layout: cell,
+                    len: Len::Count(600),
+                },
+                Inst::CallHost {
+                    dst: 3,
+                    op: read,
+                    args: one,
+                },
+                Inst::Return { src: 3 },
+            ],
+        );
+        let program = build.done();
+
+        // The static half: the collector's one question about a slot, asked
+        // of the map it actually reads.
+        let refs = &program.function(f).refs;
+        assert!(!refs.is_ref(0), "a host word is not a root");
+        assert_eq!(refs.iter().collect::<Vec<_>>(), vec![1, 2]);
+
+        let hosts = vault();
+        let mut machine = Machine::with_hosts(&program, 1000, Some(&hosts));
+        assert_eq!(machine.run(f, &[], &budget()).unwrap(), vec![1]);
+        assert!(
+            machine.collected().collections > 0,
+            "the second cell only fits after the first is reclaimed"
         );
     }
 

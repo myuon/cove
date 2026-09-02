@@ -45,6 +45,28 @@
 //! never mentions a `Point` has no `Point` layout, and a host that hands it
 //! one is handing it a type it does not have.
 //!
+//! # A host resource crosses as a name
+//!
+//! A [`Repr::Host`] word is an index into the run's host resource table, and
+//! what crosses at one is the [`crate::host::ResourceHandle`] that table
+//! holds. [ADR 0013](../../../../docs/adr/0013-host-resource-handles.md)
+//! makes a handle a *name* — the host keeps the resource and Cove holds an
+//! identity that addresses it, and there is no field for state because the
+//! state is not here — so both directions are a lookup and neither is a
+//! materialisation. Going out reads the name the word indexes; coming in
+//! writes the name down when the run has not been handed it before.
+//!
+//! [ADR 0031](../../../../docs/adr/0031-a-host-handle-is-not-a-vm-handle.md)
+//! is why that table is not the heap. A handle the host owns and a handle the
+//! VM owns share a noun and nothing else: only the second is a reference into
+//! storage this run allocated, and only the second is a thing a collection
+//! may decide the lifetime of. So a resource is never an object here, never a
+//! root, and never reachable from one — `Machine::resources` says the rest.
+//!
+//! [`Repr::Addr`] is refused in both directions and stays refused, for a
+//! reason that is not the same one: an address names a word of *this run's*
+//! memory and means nothing outside it.
+//!
 //! # Building a value is not atomic
 //!
 //! [`from_value`] allocates, and an allocation can collect. A word it has
@@ -156,11 +178,23 @@ fn word_out(machine: &Machine, repr: Repr, word: u64, depth: usize) -> Result<Va
         Repr::Float => Value::float(f64::from_bits(word)),
         Repr::Duration => Value::duration(word as i64),
         Repr::Ref => return object_to_value(machine, word, depth),
-        // Neither can leave the machine. An address names a word of this
-        // run's memory and means nothing outside it, and a host handle is
-        // the host's to hand out — a boundary that received one back would
-        // be receiving its own bookkeeping.
-        Repr::Addr | Repr::Host => {
+        // The name the word indexes, which is the whole of what a resource is
+        // on this side. The host is being handed back something it minted.
+        Repr::Host => {
+            return match machine.resource(word) {
+                Some(handle) => Ok(Value::from_resource(handle.clone())),
+                // A frame is zeroed on entry, so a `Host` slot nothing has
+                // written reads zero — the same state a `Ref` slot is in when
+                // it reads null, reported in the same words.
+                None if word == 0 => Err(null_value()),
+                None => Err(no_such_resource()),
+            };
+        }
+        // An address cannot leave the machine. It names a word of *this*
+        // run's memory — a slot of a live frame, or a field inside an object
+        // this heap placed — and means nothing outside it, so a host that was
+        // handed one would be holding this run's own bookkeeping.
+        Repr::Addr => {
             return Err(RuntimeError::new(
                 "this value cannot cross the boundary as it is represented",
             ))
@@ -497,6 +531,22 @@ fn word_into(
                 boxed(machine, id, layout, &held)
             }
         }
+        // A handle is a name, and the table is where this run keeps the
+        // names it has been given, so crossing in is a lookup that writes the
+        // name down when it is new. Nothing here allocates: a resource is not
+        // an object, so there is no window in which a half-built thing needs
+        // rooting and no collection this can provoke.
+        //
+        // The refusal is unreachable from a host that answered its schema.
+        // `HostRegistry` holds an operation to the type it declared before
+        // this runs, and a `HostType::Named` is admitted only by a handle
+        // whose qualified type is that name.
+        Repr::Host => match value.resource() {
+            Some(handle) => Ok(machine.resource_word(handle)),
+            None => Err(RuntimeError::new(
+                "this value is not the host resource that was expected here",
+            )),
+        },
         _ => Err(mismatch()),
     }
 }
@@ -751,6 +801,16 @@ fn layout_for(program: &Program, value: &Value) -> Result<LayoutId, RuntimeError
         }
         ValueView::Range(_) => find(program, |layout| is_range(program, layout))
             .ok_or_else(|| unknown_family(RANGE.name)),
+        // One family for every kind of resource, because a `Repr::Host` word
+        // is a `Repr::Host` word — the same reason `Array<String>` and
+        // `Array<Point>` are one layout. What the refusal names is the *kind*
+        // the host handed over, which is what a reader who has to go and
+        // find out needs; the program is missing the word, and the handle is
+        // how it would have come by one.
+        ValueView::Resource(handle) => {
+            layout_of(program, |shape| shape == &Shape::Word(Repr::Host))
+                .ok_or_else(|| unknown_family(&handle.qualified_type()))
+        }
         other => Err(RuntimeError::new(format!(
             "a `{}` cannot cross the boundary into the linear-memory backend yet",
             named(&other)
@@ -872,26 +932,23 @@ fn fits(program: &Program, layout: LayoutId, value: &Value) -> bool {
         Shape::Word(Repr::Int) => value.as_int().is_some(),
         Shape::Word(Repr::Float) => value.as_float().is_some(),
         Shape::Word(Repr::Duration) => value.as_duration_nanos().is_some(),
-        // What a boundary may put behind a reference, which is every family
-        // a `Value` carries and nothing this run owns for itself.
-        Shape::Word(Repr::Ref) | Shape::Boxed => matches!(
-            value.view(),
-            ValueView::Unit
-                | ValueView::Bool(_)
-                | ValueView::Int(_)
-                | ValueView::Float(_)
-                | ValueView::Duration(_)
-                | ValueView::Str(_)
-                | ValueView::Array(_)
-                | ValueView::Vector(_)
-                | ValueView::Set(_)
-                | ValueView::Map(_)
-                | ValueView::Struct(_)
-                | ValueView::Enum(_)
-                | ValueView::Range(_)
-        ),
-        // Neither is a value a host holds. See `word_out`.
-        Shape::Word(Repr::Addr) | Shape::Word(Repr::Host) | Shape::Free => false,
+        // What a boundary may put behind a reference: every family a `Value`
+        // carries and nothing this run owns for itself.
+        Shape::Word(Repr::Ref) => materialisable(&value.view()),
+        // A box holds the words of what it was given, and a host word is one
+        // of them — so an erased resource is a box over one word that is not
+        // a root, and the collector reads its held layout's map and finds
+        // nothing to follow. What a resource may *not* be is the thing behind
+        // a `Repr::Ref`: it is no object this run allocated, so there would be
+        // nothing at the far end of the address.
+        Shape::Boxed => {
+            let view = value.view();
+            materialisable(&view) || matches!(view, ValueView::Resource(_))
+        }
+        // The one word a host is on both ends of. See `word_out`.
+        Shape::Word(Repr::Host) => matches!(value.view(), ValueView::Resource(_)),
+        // Not a value a host holds. See `word_out`.
+        Shape::Word(Repr::Addr) | Shape::Free => false,
         Shape::Str => matches!(value.view(), ValueView::Str(_)),
         Shape::Struct { fields, .. } if is_range(program, described) => {
             matches!(value.view(), ValueView::Range(_)) && fields.len() == 3
@@ -949,6 +1006,33 @@ fn fits(program: &Program, layout: LayoutId, value: &Value) -> bool {
         },
         Shape::Closure { .. } => false,
     }
+}
+
+/// Whether a value is one of the families this backend can build in the heap.
+///
+/// The question a reference location asks, and it is about the `Value` and
+/// not about a layout: a `Repr::Ref` word names an object, and these are the
+/// values an object can be made of. What is missing from the list is what
+/// this run owns for itself or does not own at all — a closure, a task, a
+/// task scope, a host module, a host operation, a type, a `Shared`, and a
+/// resource, which is the host's and is one word rather than an object.
+fn materialisable(view: &ValueView<'_>) -> bool {
+    matches!(
+        view,
+        ValueView::Unit
+            | ValueView::Bool(_)
+            | ValueView::Int(_)
+            | ValueView::Float(_)
+            | ValueView::Duration(_)
+            | ValueView::Str(_)
+            | ValueView::Array(_)
+            | ValueView::Vector(_)
+            | ValueView::Set(_)
+            | ValueView::Map(_)
+            | ValueView::Struct(_)
+            | ValueView::Enum(_)
+            | ValueView::Range(_)
+    )
 }
 
 /// The declared name without its module: `rules.policy.Decision` is a
@@ -1054,6 +1138,18 @@ fn as_key(value: &Value) -> Result<MapKey, RuntimeError> {
 
 fn too_deep() -> RuntimeError {
     RuntimeError::new("this value nests too deeply to cross the boundary")
+}
+
+/// A `Repr::Host` word that indexes nothing.
+///
+/// Not something a program can bring about. The word was written by this file
+/// from a handle the host had already given, and the table it indexes only
+/// grows, so a word past its end came from somewhere that is not this run —
+/// a lowering that reused a slot at a `Repr` it was not fixed at, or a word
+/// read as a `Host` that was never written as one. Reporting it is what keeps
+/// that from being answered with whichever resource the number landed on.
+fn no_such_resource() -> RuntimeError {
+    RuntimeError::new("this value names a host resource this run was never handed")
 }
 
 fn null_value() -> RuntimeError {
@@ -1684,5 +1780,164 @@ mod tests {
             "this value nests too deeply to cross the boundary"
         );
         let _ = world;
+    }
+
+    // ---- host resources ------------------------------------------------
+
+    /// A handle a host issued, written out rather than minted through
+    /// `ResourceHandle::new` so that a fixture needs no `ResourceSchema` to
+    /// name one resource. Every field is part of the name (ADR 0013).
+    fn issued(id: u64) -> crate::host::ResourceHandle {
+        crate::host::ResourceHandle {
+            module: "vault".to_string(),
+            type_name: "Reader".to_string(),
+            id,
+            task_safe: true,
+        }
+    }
+
+    /// A fixture whose one family is the host word.
+    fn vault() -> World {
+        World::new(|build, _, _, _| {
+            build.word("vault.Reader", Repr::Host);
+        })
+    }
+
+    /// A resource crosses out as the name the host gave it, and as nothing
+    /// else: the host keeps the state, so there is nothing else to hand over.
+    #[test]
+    fn a_resource_crosses_out_as_the_name_the_host_gave_it() {
+        let world = vault();
+        let reader = world.named("vault.Reader");
+        let mut machine = world.machine();
+        let handle = issued(7);
+        let word = machine.resource_word(&handle);
+
+        let value = to_value(&machine, reader, &[word]).unwrap();
+        assert_eq!(value.to_string(), "<vault.Reader#7>");
+        assert!(
+            value
+                .resource()
+                .is_some_and(|named| named.names_same(&handle)),
+            "the same resource, by every field of the name"
+        );
+        assert!(
+            matches!(value.view(), ValueView::Resource(_)),
+            "a host reads it as the resource it is"
+        );
+    }
+
+    /// A `Host` slot a frame's own zeroing left alone reads as no resource,
+    /// and says so in the words a null reference says it in. Zero cannot be
+    /// an index, which is why the word is one past one.
+    #[test]
+    fn an_unwritten_host_slot_names_no_resource() {
+        let world = vault();
+        let reader = world.named("vault.Reader");
+        let mut machine = world.machine();
+        assert_ne!(machine.resource_word(&issued(1)), 0, "zero is no resource");
+
+        let error = to_value(&machine, reader, &[0]).unwrap_err();
+        assert_eq!(error.message, "this value was read before it was given one");
+        let error = to_value(&machine, reader, &[99]).unwrap_err();
+        assert_eq!(
+            error.message,
+            "this value names a host resource this run was never handed"
+        );
+    }
+
+    /// A resource crosses in as one word, and one resource is one word: two
+    /// handles that name the same resource index the same entry, so comparing
+    /// the words is comparing the resources.
+    #[test]
+    fn a_resource_crosses_in_as_one_word_for_one_resource() {
+        let world = vault();
+        let reader = world.named("vault.Reader");
+        let mut machine = world.machine();
+
+        let one = from_value(&mut machine, reader, &Value::from_resource(issued(1))).unwrap();
+        assert_eq!(one.len(), 1, "a handle is a name, and a name is one word");
+        assert_ne!(one[0], 0);
+        let again = from_value(&mut machine, reader, &Value::from_resource(issued(1))).unwrap();
+        assert_eq!(again, one, "the same resource is the same word");
+        let other = from_value(&mut machine, reader, &Value::from_resource(issued(2))).unwrap();
+        assert_ne!(other, one, "another resource is another word");
+
+        // Nothing was allocated, because a resource is not an object. This is
+        // the whole of ADR 0031's distinction, measured: the heap does not
+        // know a resource crossed.
+        assert_eq!(machine.allocated_words(), 0);
+        assert_eq!(
+            to_value(&machine, reader, &one).unwrap().to_string(),
+            "<vault.Reader#1>"
+        );
+    }
+
+    /// A value that is not a resource is refused where one was declared.
+    ///
+    /// Unreachable from a host that answered its schema — `HostRegistry`
+    /// holds an operation to the type it declared, and a `HostType::Named` is
+    /// admitted only by a handle whose qualified type is that name.
+    #[test]
+    fn a_value_that_is_not_a_resource_is_refused_at_a_host_word() {
+        let world = vault();
+        let reader = world.named("vault.Reader");
+        let mut machine = world.machine();
+        let error = from_value(&mut machine, reader, &Value::int(1)).unwrap_err();
+        assert_eq!(
+            error.message,
+            "this value is not the host resource that was expected here"
+        );
+    }
+
+    /// An erased resource is a box over one word that is not a root, so a
+    /// collection reads the held layout's map and finds nothing to follow.
+    #[test]
+    fn an_erased_resource_is_a_box_over_a_word_the_collector_cannot_follow() {
+        let world = World::new(|build, _, _, _| {
+            build.word("vault.Reader", Repr::Host);
+            build.boxed();
+        });
+        let reader = world.named("vault.Reader");
+        let any = world.program.boxed_layout;
+        let mut machine = world.machine();
+
+        let words = from_value(&mut machine, any, &Value::from_resource(issued(3))).unwrap();
+        let addr = words[0];
+        assert_eq!(machine.payload(addr, 0), reader.0 as u64, "what it holds");
+        assert!(
+            !world
+                .program
+                .layout(reader)
+                .may_hold_refs(&world.program.layouts),
+            "a host word is not a reference, so the box traces nothing"
+        );
+        // A reader looks through the box, exactly as it looks through a `dyn`.
+        assert_eq!(
+            to_value(&machine, any, &words).unwrap().to_string(),
+            "<vault.Reader#3>"
+        );
+    }
+
+    /// An address is refused in both directions and stays refused: it names a
+    /// word of this run's memory and means nothing outside it.
+    #[test]
+    fn an_address_cannot_cross_the_boundary() {
+        let world = World::new(|build, _, _, _| {
+            build.word("place", Repr::Addr);
+        });
+        let place = world.named("place");
+        let mut machine = world.machine();
+        let error = to_value(&machine, place, &[16]).unwrap_err();
+        assert_eq!(
+            error.message,
+            "this value cannot cross the boundary as it is represented"
+        );
+        // And nothing a host can build is admitted by one either.
+        let error = from_value(&mut machine, place, &Value::int(16)).unwrap_err();
+        assert_eq!(
+            error.message,
+            "this value is not the `addr` that was expected here"
+        );
     }
 }
