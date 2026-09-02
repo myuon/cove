@@ -24,7 +24,7 @@ export fn main() -> Result<Unit, Error> {
   }
   println("iterated total {total}")?
 
-  let empty = Map.of()
+  let empty: Map<String, Int> = Map.of()
   println("empty {empty} {empty.isEmpty()} {empty.length()}")?
 
   let same = Map.of(

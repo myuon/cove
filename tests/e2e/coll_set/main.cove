@@ -20,7 +20,7 @@ export fn main() -> Result<Unit, Error> {
   }
   println("iterated {joined}")?
 
-  let empty = Set.of()
+  let empty: Set<String> = Set.of()
   println("empty {empty} {empty.isEmpty()} {empty.length()}")?
 
   let same = Set.of("c", "b", "a")

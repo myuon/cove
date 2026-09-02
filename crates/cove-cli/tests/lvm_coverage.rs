@@ -221,7 +221,7 @@ use support::{Case, ModuleIndex, Prepared};
 /// rather than the shipped tables, so a type an embedder's module declares
 /// has a layout. No corpus program is an embedding, so it moves no number
 /// here — the cases for it are `cove-lir`'s own.
-const AGREEING_FLOOR: usize = 81;
+const AGREEING_FLOOR: usize = 83;
 
 /// The code `cove_lir` raises a gap under.
 ///
