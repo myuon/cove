@@ -17,6 +17,38 @@
 //! representation that leaves the crate is one that cannot be changed
 //! without changing somebody else's code.
 //!
+//! # What a run owns, and what each of its tasks owns
+//!
+//! Issue #240's Q1 answers this and [`docs/LINEAR_VM.md`](../../../../docs/LINEAR_VM.md)'s
+//! "Ownership" section writes it out. Five things, and which of them is a
+//! value store is the whole of what ADR 0034 cares about:
+//!
+//! | | belongs to | where it is | a value store? |
+//! |---|---|---|---|
+//! | the object heap | the **run** | [`mem::Space`], one per run, behind an `Arc` | **yes**, and the only one |
+//! | a stack segment | a **task** | `[k * SEGMENT_WORDS, (k+1) * SEGMENT_WORDS)` of the same address space | yes, and it is part of the same one |
+//! | a `Shared` cell | the **run**'s heap | an ordinary object; its lock is one of its words ([`cell`]) | no — it *is* an object in the heap |
+//! | a host resource | the **host** | [`exec::Machine`]'s resource table, which holds names | no — see ADR 0031 |
+//! | a `Task`, a `TaskScope` | the **scheduler** | a run-owned table of control state | no |
+//!
+//! The last row is the one that has to be argued rather than asserted, because
+//! a `Task` is a value a Cove program writes down. Its word is **one past an
+//! index into a run-owned table**, the way a `Repr::Host` word is, and the
+//! entry it names holds a task id, a scope name, a `Cancellation`, a
+//! `JoinHandle` and — once the task has settled — the *address* of the heap
+//! object holding its answer. Every one of those but the last is scheduler
+//! bookkeeping that no Cove value could be hidden in. The last is an address,
+//! which makes the table a **root provider** and not a second store: the
+//! answer's words are in the run's heap, allocated by the task that produced
+//! them, and the table names one the way `Machine::interned` names a string
+//! literal. Nothing that wanted to dodge a heap representation could be put
+//! there, which is the test ADR 0034 actually applies.
+//!
+//! What that table cannot be given, and what the IR still owes it, is written
+//! down in [`cell`]'s docs and in the report that accompanied this change:
+//! there is no `Repr` for a `Task` or a `TaskScope` word yet, and no
+//! `Shape::Shared`, so the lowering round is where those land.
+//!
 //! The dead-code allowance stays, and what it now covers is narrower than
 //! what it covered before: not "nothing reaches this module" but "several
 //! items below it are reached only from their own `#[cfg(test)]` code" —
@@ -50,6 +82,7 @@ use crate::value::Value;
 
 pub(crate) mod boundary;
 pub(crate) mod builtins;
+pub(crate) mod cell;
 #[cfg(test)]
 mod differential;
 pub(crate) mod exec;

@@ -125,7 +125,7 @@ fn entry_on_the_machine(source: &str, name: &str) -> Answer {
 }
 
 fn lowered(sources: &SourceMap, checked: &Checked) -> cove_lir::Program {
-    match cove_lir::lower(checked, sources) {
+    match cove_lir::lower(checked, sources, &cove_schema::HostSchemas::new()) {
         Ok(program) => program,
         Err(items) => panic!(
             "the program lowers:\n{}",

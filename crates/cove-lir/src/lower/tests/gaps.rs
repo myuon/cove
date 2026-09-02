@@ -6,6 +6,8 @@
 //! program the backend declines. Every case below names one, and each is
 //! scheduled to be removed by a later task.
 
+use cove_schema::HostSchemas;
+
 use super::refused;
 
 #[test]
@@ -42,17 +44,6 @@ fn a_function_value_with_a_var_parameter_names_the_parameter_rather_than_the_lam
 }
 
 #[test]
-fn a_closure_capturing_a_var_parameter_names_the_binding() {
-    // The oracle captures the *value* behind a `var` parameter, and the word
-    // this frame holds is an address — so the capture would be a load, of a
-    // layout the frame does not record for an `Addr` slot.
-    assert_eq!(
-        refused("fn f(var n: Int) -> Int {\n  let g = fn() { n + 1 }\n  g()\n}"),
-        vec!["not yet lowered: a function value capturing `n`, a `var` parameter"]
-    );
-}
-
-#[test]
 fn an_async_function_value_is_a_gap_of_its_own() {
     assert_eq!(
         refused("fn f() -> Int {\n  let g = async fn() { 1 }\n  0\n}"),
@@ -70,7 +61,8 @@ fn an_async_function_value_is_a_gap_of_its_own() {
 #[test]
 fn a_generic_nothing_instantiates_costs_no_function() {
     let (sources, checked) = super::checked("fn id<T>(x: T) -> T { x }");
-    let program = crate::lower(&checked, &sources).expect("the program lowers");
+    let program =
+        crate::lower(&checked, &sources, &HostSchemas::new()).expect("the program lowers");
     assert_eq!(program.function_named("m", "id"), None);
     assert!(
         !program.functions.iter().any(|f| f.name.contains('<')),
@@ -108,26 +100,6 @@ fn a_declaration_taking_a_var_parameter_cannot_be_used_as_a_function_value() {
     assert_eq!(
         refused("fn bump(var n: Int) { n = n + 1 }\nfn f() -> Int {\n  let g = bump\n  0\n}"),
         vec!["not yet lowered: `bump`, which takes a `var` parameter, used as a function value"]
-    );
-}
-
-/// A resource's operations belong to the host that issued the handle, and
-/// the handle is what routes them.
-///
-/// `Inst::CallHost` addresses a module and an operation; a resource call
-/// addresses a *handle*, which `HostRegistry::call_resource` reads the
-/// module and the resource kind off. So the work is an instruction, its
-/// verifier arm and the boundary that routes it — and the gap names the
-/// operation rather than saying "a method call", because the message is what
-/// says where the next piece of work is.
-#[test]
-fn an_operation_of_a_host_resource_is_named_as_the_source_writes_it() {
-    assert_eq!(
-        refused(
-            "use files\nfn f() -> Result<Unit, Error> {\n  \
-             let reader = files.open(\"a.txt\")?\n  reader.close()?\n  Ok(())\n}"
-        ),
-        vec!["not yet lowered: `files.Reader.close`, an operation of a host resource"]
     );
 }
 
@@ -203,7 +175,7 @@ fn the_shapes_these_families_are_written_in_all_lower() {
     let mut bad = Vec::new();
     for src in cases {
         let (sources, checked) = super::checked(src);
-        if let Err(items) = crate::lower(&checked, &sources) {
+        if let Err(items) = crate::lower(&checked, &sources, &HostSchemas::new()) {
             bad.push(format!(
                 "{src}\n  -> {:?}",
                 items.iter().map(|i| i.message.clone()).collect::<Vec<_>>()

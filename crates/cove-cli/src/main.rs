@@ -24,6 +24,7 @@ use cove_sema::package::Package;
 use cove_sema::resolve::{
     AliasEntry, EnumEntry, FnEntry, Program, ResolvedModule, StructEntry, TraitEntry,
 };
+use cove_sema::HostSchemas;
 use cove_syntax::ast::ItemKind;
 
 mod api;
@@ -1181,7 +1182,11 @@ pub(crate) fn execute_entry(
         // of the same package is no longer a reason this one cannot run.
         Backend::Lvm => {
             let started = Instant::now();
-            let ir = cove_lir::lower_entry(program, sources, module, entry)
+            // The shipped schemas and no others, which is the set
+            // `cove_sema::Compiler::new()` checked this package against —
+            // a `cove` command registers the hosts it ships and nothing
+            // else, and the lowering has to read what the checker read.
+            let ir = cove_lir::lower_entry(program, sources, &HostSchemas::new(), module, entry)
                 .map_err(ExecuteError::NotLowered)?;
             Some(Lowered {
                 program: Executable::Linear(Arc::new(ir)),

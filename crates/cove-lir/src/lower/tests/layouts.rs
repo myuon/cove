@@ -5,6 +5,8 @@
 //! source writes it. These cases pin what a family is, which is the question
 //! every width, every reference map and every field offset is answered from.
 
+use cove_schema::HostSchemas;
+
 use super::checked;
 use crate::layout::{Layout, Shape};
 use crate::lower::lower;
@@ -13,7 +15,7 @@ use crate::repr::Repr;
 /// Every layout of a lowered program, by name and words.
 fn layouts(source: &str) -> Vec<Layout> {
     let (sources, checked) = checked(source);
-    lower(&checked, &sources)
+    lower(&checked, &sources, &HostSchemas::new())
         .expect("the program lowers")
         .layouts
         .clone()
@@ -268,5 +270,40 @@ fn a_map_entry_is_the_key_s_words_then_the_value_s() {
             "MapEntry"
         ),
         vec![Repr::Ref, Repr::Int]
+    );
+}
+
+/// A declaration's fields are read in the vocabulary of the module that
+/// *declares* it, not of the module that mentions it.
+///
+/// The checker records a struct's field types once, at the declaration, and
+/// a module's own name is written bare there and qualified everywhere else.
+/// So `Tile`'s `kind: Kind` says `Kind` — a name `app` never imported and
+/// cannot resolve — and resolving it where `Tile` was mentioned would give a
+/// type the package plainly declares no layout at all. It is resolved where
+/// it was written; a type argument is qualified before it becomes part of an
+/// instantiation's name, so the two halves of a `Cell<app.Thing>` are still
+/// both readable from `shape`.
+#[test]
+fn a_field_s_type_is_read_where_the_declaration_wrote_it() {
+    assert_eq!(
+        super::listing_in(
+            &[
+                (
+                    "shape",
+                    "export enum Kind { Round, Square }\n\
+                     export struct Tile { kind: Kind, size: Int }\n"
+                ),
+                ("app", "use shape.Tile\nfn f(t: Tile) -> Int { t.size }\n"),
+            ],
+            "app",
+            "f",
+        ),
+        "\
+fn0 app.f(shape.Tile) -> Int
+  frame 3: s0!:int s1!:int s2:int
+     0  copy s2:int s1:int Int
+     1  return s2:int
+"
     );
 }

@@ -113,6 +113,7 @@ use cove_runtime::trace::RunOutcome;
 use cove_runtime::value::Value;
 use cove_runtime::Lvm;
 use cove_sema::config::RunConfig;
+use cove_sema::HostSchemas;
 
 #[path = "support/mod.rs"]
 mod support;
@@ -190,7 +191,37 @@ use support::{Case, ModuleIndex, Prepared};
 /// generic declaration with one parameter and the monomorphisation path
 /// already there completes it. `tests/e2e:type_trait`,
 /// `tests/e2e:module_conformance` and `examples:traits` are the three.
-const AGREEING_FLOOR: usize = 76;
+///
+/// 76 to 81, and it is again three families — the ones that between them
+/// blocked the corpus's I/O programs.
+///
+/// **An operation of a host resource is the boundary, addressed to a
+/// handle.** `Inst::CallResource` names the receiver as an operand of its
+/// own rather than as an argument, because ADR 0013 makes a handle the thing
+/// a call is *addressed to* and `HostRegistry::call_resource` hands the host
+/// only what follows it. It was the largest cluster left:
+/// `files.Writer.writeLine`, both `close`s, `files.Reader.readLine`,
+/// `http.Server.port`. `tests/e2e:fail_http_stale_handle`,
+/// `tests/e2e:host_files_streaming` and `tests/e2e:host_http_resource` are
+/// what it runs on its own.
+///
+/// **A capture of a `var` parameter is the value behind the address.** The
+/// oracle's `Env::captures` reads every binding through `Place::read`, so the
+/// environment holds a copy and the load is the one instruction the
+/// difference costs. With the resource operations it is what runs
+/// `examples:cq` and `examples:cqSample`.
+///
+/// **A field's type is read where the declaration wrote it.** The checker
+/// records a struct's fields once, in the vocabulary of the module that
+/// declares them, and resolving one where the *use* was written asked a
+/// module about a name it never imported. Nothing in this survey runs on it
+/// alone; it is what took `examples:life` down to a single gap.
+///
+/// The lowering also now reads the [`HostSchemas`] a compilation was given
+/// rather than the shipped tables, so a type an embedder's module declares
+/// has a layout. No corpus program is an embedding, so it moves no number
+/// here — the cases for it are `cove-lir`'s own.
+const AGREEING_FLOOR: usize = 81;
 
 /// The code `cove_lir` raises a gap under.
 ///
@@ -339,7 +370,10 @@ fn lower(
     checked: &cove_sema::resolve::Program,
     sources: &cove_diag::SourceMap,
 ) -> Result<cove_lir::Program, Vec<Gap>> {
-    match std::panic::catch_unwind(AssertUnwindSafe(|| cove_lir::lower(checked, sources))) {
+    let schemas = HostSchemas::new();
+    match std::panic::catch_unwind(AssertUnwindSafe(|| {
+        cove_lir::lower(checked, sources, &schemas)
+    })) {
         Ok(Ok(program)) => Ok(program),
         Ok(Err(items)) => Err(items
             .iter()

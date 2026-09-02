@@ -33,13 +33,18 @@ The machine owns one logical linear memory addressed in **words** of eight
 bytes. A *linear address* is a word index into it. Two regions divide it:
 
 ~~~text
-word 0                    STACK_WORDS                        ...
-|-------- stack region --------|--------- heap region ---------|
+word 0                                  STACK_WORDS            ...
+|--------------- stack region ---------------|---- heap region ----|
+| seg 0 | seg 1 | seg 2 | …                   |
 ~~~
 
-- `STACK_WORDS` is a compile-time constant of the runtime. The stack region is
-  reserved, not committed: the backing store grows on demand, but no heap
-  object is ever placed below `STACK_WORDS`.
+The stack region divides into one segment per task; see "Each task has a
+stack segment of its own" below.
+
+- `STACK_WORDS` is a compile-time constant of the runtime, and is
+  `SEGMENT_WORDS × SEGMENTS`. The stack region is reserved, not committed:
+  a segment's backing store grows on demand and no heap object is ever
+  placed below `STACK_WORDS`.
 - A linear address below `STACK_WORDS` names a stack word. One at or above it
   names a heap word.
 
@@ -177,6 +182,7 @@ rather than reconstructed.
 | a closure | one word: a heap address of its environment |
 | `dyn`, `Any` | one word: a heap address of a boxed value |
 | a Host resource | one word: a name in the run's resource table |
+| a `Task`, a `TaskScope` | one word: a name in the run's scheduler table |
 
 A `Vector` and a `Shared` are the two families whose storage is both shared
 and mutable, so ADR 0001 makes a copy of either an alias — and their rule
@@ -563,7 +569,9 @@ program did anything.
 So a closure-taking sequence method **lowers to a loop in the IR**. `map`
 allocates the result and calls the closure per element with an ordinary
 `CallClosure`; `filter` and `fold` are the same shape with a different body, and
-`sorted` is the same idea over two runs. Three things follow, and all three are the reason:
+`sorted` is the same idea over two runs. `Shared.lock` is the same shape
+again: acquire, call, release, with the release an obligation on every exit
+path exactly as `Clear` is. Three things follow, and all three are the reason:
 
 - `builtins` stays a library over words with no reentry and no knowledge of
   frames. Nothing in it can call anything.
@@ -580,8 +588,43 @@ reach the same cell without a second value store. Allocation is synchronised
 where correctness requires it; the single-task path is not optimised ahead of
 a measurement that says it needs to be.
 
-Each task may have a stack segment of its own. Every segment and the object
-heap belong to the run's one logical linear address space.
+Each task has a stack segment of its own, and it **must** — two tasks whose
+stacks were each addressed from zero would form the same addresses for
+different words. The reserved stack region divides into `SEGMENTS` segments
+of `SEGMENT_WORDS` each, task *k* owns segment *k*, and a frame that would
+leave its segment is a stack overflow.
+
+The region decoder does not change: `addr < STACK_WORDS` is still the whole
+of it, and *which* segment an address is in is a question only the task that
+owns one ever asks. The ranges are disjoint by construction, so an address
+formed in one task is not an address in another — arithmetic rather than a
+convention anyone has to keep.
+
+Every segment and the object heap belong to the run's one logical linear
+address space.
+
+### What synchronises a word
+
+**Nothing, except one word of a `Shared` cell.** Every ordinary load and
+store in the memory is relaxed, which on every target this runs on is a
+plain load and store.
+
+That is sound because of what the language already forbids. A value that is
+not task-safe cannot cross a task boundary, so two tasks can only reach one
+value through a `Shared`, and a `Shared`'s lock word is a release/acquire
+pair. Acquiring it publishes everything the previous holder wrote — the
+cell's own words *and* every object it allocated and stored into them.
+
+Paying for ordering on every word would be paying in every program for
+something the task-safety rule has already ruled out.
+
+The heap's allocator synchronises handing out words and stopping the world.
+It does not synchronise a value, and those two are kept apart deliberately.
+
+**A task that blocks must still count as being at a safepoint.** A waiter on
+a cell, and a task inside a Host call, publish their roots and park; without
+that a collector waits for a task that waits for a task that waits for the
+collector.
 
 Two things are named by a word but are not Cove-owned objects, and ADR 0034
 carves out both: `Task` and `TaskScope` name **scheduler control state**, and
@@ -745,8 +788,9 @@ payload region is packed within that rule is not.
 
 ## The stack limit is not a language fact
 
-The stack region is reserved, so "too deep" is
-`frame_base + frame_size >= STACK_WORDS`. The constant is an implementation
+The stack region is reserved and divided into segments, so "too deep" is a
+frame that would leave *its own* segment — one task is not stopped because a
+sibling is deep. The constant is an implementation
 choice and is deliberately not part of the language, the IR or any public API:
 the tree-walking oracle and this machine represent a frame differently and will
 reach a limit at different depths, and requiring them to agree on a number

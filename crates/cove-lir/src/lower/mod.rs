@@ -83,6 +83,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use cove_diag::{Diagnostic, SourceMap, Span};
+use cove_schema::HostSchemas;
 use cove_sema::facts::MethodTarget;
 use cove_sema::resolve::{FnKey, Node, Program as Checked};
 use cove_sema::typeck::Ty;
@@ -140,20 +141,35 @@ impl Dest {
 /// has to read the bytes an argument's span covers. See this module's
 /// `assertions` submodule for why they are lowered rather than performed.
 ///
+/// `schemas` is the set of host modules this compilation was given, and it
+/// must be the set the *checker* was given. A type a host module declares has
+/// a layout — a `files.Reader` is one [`Repr::Host`] word and an
+/// `http.Response` is its fields inline — and the schema is the only thing
+/// that says which of the two a name is. Reading `cove_schema::hosts` here
+/// instead would describe the shipped modules and no others, so a program
+/// that names a type an embedding registered would lower for fewer types than
+/// it checked against: a backend refusing a program the language admits,
+/// rather than a gap somebody can build. `HostApi` is a trait, and an
+/// embedder's module is not a lesser kind of host.
+///
 /// [`lower_roots`] is the same lowering over what a named set of roots
 /// reaches, and it is what a command that runs a program should use — a
 /// command names the roots it is about to run and this crate works out the
 /// slice. This one is what a whole-package listing means — everything the
 /// package declares is part of it — and it is what the lowering's own tests
 /// and the corpus survey ask for.
-pub fn lower(checked: &Checked, sources: &SourceMap) -> Result<Program, Vec<Diagnostic>> {
+pub fn lower(
+    checked: &Checked,
+    sources: &SourceMap,
+    schemas: &HostSchemas,
+) -> Result<Program, Vec<Diagnostic>> {
     let mut plan = Plan::index(checked);
     let everything: HashSet<FunctionId> = (0..plan.decls.len())
         .map(|at| FunctionId(at as u32))
         .collect();
     let Lowering {
         program, errors, ..
-    } = emit(checked, sources, &mut plan, &everything);
+    } = emit(checked, sources, schemas, &mut plan, &everything);
     finish(program, errors)
 }
 
@@ -217,6 +233,7 @@ pub fn lower(checked: &Checked, sources: &SourceMap) -> Result<Program, Vec<Diag
 pub fn lower_roots(
     checked: &Checked,
     sources: &SourceMap,
+    schemas: &HostSchemas,
     roots: &[(&str, &str)],
 ) -> Result<Program, Vec<Diagnostic>> {
     let mut plan = Plan::index(checked);
@@ -226,7 +243,7 @@ pub fn lower_roots(
             program,
             errors,
             wanted,
-        } = emit(checked, sources, &mut plan, &reach);
+        } = emit(checked, sources, schemas, &mut plan, &reach);
         if wanted.is_empty() {
             return finish(program, errors);
         }
@@ -245,10 +262,11 @@ pub fn lower_roots(
 pub fn lower_entry(
     checked: &Checked,
     sources: &SourceMap,
+    schemas: &HostSchemas,
     module: &str,
     name: &str,
 ) -> Result<Program, Vec<Diagnostic>> {
-    lower_roots(checked, sources, &[(module, name)])
+    lower_roots(checked, sources, schemas, &[(module, name)])
 }
 
 /// One pass of the lowering over one set of declarations.
@@ -266,12 +284,13 @@ struct Lowering {
 fn emit<'a>(
     checked: &'a Checked,
     sources: &SourceMap,
+    schemas: &HostSchemas,
     plan: &mut Plan<'a>,
     reach: &HashSet<FunctionId>,
 ) -> Lowering {
     let mut errors = Vec::new();
     let mut wanted = HashSet::new();
-    let mut pool = Pool::new();
+    let mut pool = Pool::new(schemas.clone());
     plan.boundaries(checked, reach, &mut pool, &mut errors);
     let mut functions = Vec::new();
     for id in 0..plan.decls.len() {
@@ -1066,14 +1085,14 @@ struct Instance {
 }
 
 impl Pool {
-    fn new() -> Pool {
+    fn new(schemas: HostSchemas) -> Pool {
         Pool {
             args: Args::default(),
             strings: Vec::new(),
             tables: Vec::new(),
             host_ops: Vec::new(),
             builtins: Vec::new(),
-            shapes: Shapes::new(),
+            shapes: Shapes::new(schemas),
             appended: Vec::new(),
             instances: HashMap::new(),
             instance_ids: HashMap::new(),
@@ -1218,6 +1237,21 @@ struct Body<'a> {
     /// conformance a bounded call reaches — falls out of that one
     /// substitution rather than out of a rule per construct.
     args: Vec<Ty>,
+    /// The layout of the value behind each [`shapes::ADDR`] slot: what a
+    /// `var` parameter, or a `var self`, names in the caller's frame.
+    ///
+    /// A slot's [`Repr`] is all a frame records, and `Addr` says only that
+    /// the word is an address. Almost nothing needs more, because every
+    /// *read* of a `var` parameter is at the layout the checker settled for
+    /// the expression doing the reading — [`Body::name`] and
+    /// [`Body::place_of`] both take it from there.
+    ///
+    /// A capture is the one place with no such expression: `Body::captured_by`
+    /// holds a name and a slot and nothing the checker recorded a type for.
+    /// So the parameter's own layout is written down where the boundary was
+    /// read, which is the only place it is known without asking a second
+    /// time.
+    aliases: HashMap<Slot, LayoutId>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1273,6 +1307,19 @@ fn lower_body(
     for layout in &boundary.params {
         param_slots.push(frame.param(pool.shapes.words(*layout)));
     }
+    // What each `var` parameter names, at the width the parameter was
+    // declared. `boundary_of` resolved that type to a layout before it chose
+    // `ADDR` for the slot, so this asks the interned table for an answer it
+    // already holds.
+    let mut aliases = HashMap::new();
+    for (at, layout) in boundary.params.iter().enumerate() {
+        if *layout != shapes::ADDR {
+            continue;
+        }
+        if let Some(held) = pool.shapes.of(checked, &decl.module, &boundary.types[at]) {
+            aliases.insert(param_slots[at], held);
+        }
+    }
     // The answer is taken before any temporary, so it is live for the whole
     // body and never handed to something else.
     let answer = Dest {
@@ -1299,6 +1346,7 @@ fn lower_body(
         returns: boundary.ret.clone(),
         generics: generics.to_vec(),
         args: args.to_vec(),
+        aliases,
     };
 
     body.frame.push_scope();

@@ -249,6 +249,32 @@ pub enum Inst {
         op: HostOpId,
         args: ArgsId,
     },
+    /// `dst = <host op>(*receiver, args...)`, addressed to the resource
+    /// the [`Repr::Host`](crate::Repr::Host) word in `receiver` names.
+    ///
+    /// The same boundary [`Inst::CallHost`] is, reached the other way a
+    /// callee can be found. `Call` and `CallClosure` are already that pair
+    /// on this side of the boundary — a callee named statically, and a
+    /// callee in a slot — and a host resource's operations are the same
+    /// distinction one boundary further out: ADR 0013 gives the *host* the
+    /// table of what is open, so `files.Writer.writeLine` is dispatched on
+    /// the handle and not on the module the source wrote in front of it.
+    ///
+    /// The receiver is an operand of its own rather than `args[0]`, and that
+    /// is the difference that decides there are two instructions here rather
+    /// than a flag on one. An [`crate::Arg`] is a value location the
+    /// boundary *materialises*, and the registry does not take the handle as
+    /// an argument — `HostRegistry::call_resource` takes it as the thing
+    /// being addressed and hands the host only what follows. So putting it
+    /// in the list would mean materialising a name into a `Value` in order
+    /// to take it apart again, and the argument list would no longer be the
+    /// arguments.
+    CallResource {
+        dst: Slot,
+        receiver: Slot,
+        op: HostOpId,
+        args: ArgsId,
+    },
     /// `dst = <builtin>(args...)`
     ///
     /// A builtin operates on words and heap objects directly. It is not a

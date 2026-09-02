@@ -8,13 +8,15 @@
 //! the two instantiations really are two — different frames, different
 //! widths — rather than one function that happens to be called twice.
 
+use cove_schema::HostSchemas;
+
 use super::{checked, listing, refused};
 use crate::lower::lower;
 
 /// The name of every function a program lowered to, in order.
 fn functions(source: &str) -> Vec<String> {
     let (sources, held) = checked(source);
-    lower(&held, &sources)
+    lower(&held, &sources, &HostSchemas::new())
         .expect("the program lowers")
         .functions
         .iter()
@@ -25,7 +27,7 @@ fn functions(source: &str) -> Vec<String> {
 /// The name and words of every layout of a declaration, by its short name.
 fn instances(source: &str, declaration: &str) -> Vec<(String, usize)> {
     let (sources, held) = checked(source);
-    lower(&held, &sources)
+    lower(&held, &sources, &HostSchemas::new())
         .expect("the program lowers")
         .layouts
         .iter()
@@ -268,7 +270,7 @@ fn5 m.headline<m.Note>(m.Note) -> String
 #[test]
 fn each_conformance_receives_its_own_width() {
     let (sources, held) = checked(SUMMARY);
-    let program = lower(&held, &sources).expect("the program lowers");
+    let program = lower(&held, &sources, &HostSchemas::new()).expect("the program lowers");
     let width = |name: &str| {
         let id = program
             .function_named("m", name)
@@ -330,7 +332,7 @@ fn the_depth_refusal_is_not_one_of_the_lowerings_gaps() {
          fn f<T>(x: T) -> Int { f(Cell(it: x)) }\n\
          fn g() -> Int { f(1) }",
     );
-    let items = lower(&held, &sources).expect_err("the program is refused");
+    let items = lower(&held, &sources, &HostSchemas::new()).expect_err("the program is refused");
     assert_eq!(items[0].code, super::super::gap::INSTANTIATION_DEPTH);
 }
 

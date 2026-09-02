@@ -94,7 +94,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use cove_schema::builtins::MAP_ENTRY;
-use cove_schema::HostType;
+use cove_schema::{HostSchemas, HostType};
 use cove_sema::resolve::Program as Checked;
 use cove_sema::typeck::Ty;
 
@@ -179,6 +179,17 @@ pub(super) const RANGE_INCLUSIVE: u32 = 2;
 /// The program's layout table, being built.
 pub(super) struct Shapes {
     layouts: Vec<Layout>,
+    /// The host modules this compilation was given, which is the same set
+    /// the checker read.
+    ///
+    /// It is carried rather than read from [`cove_schema::hosts`] because
+    /// those are the *shipped* modules alone, and an embedder's are not a
+    /// lesser kind: `HostApi` is a trait, `Compiler::with_host_schema` is how
+    /// a run's own module is described, and a lowering that read the shipped
+    /// tables would answer for fewer programs than the checker accepted —
+    /// which is a backend refusing a program the language admits. See
+    /// [`Shapes::host_type`].
+    schemas: HostSchemas,
     /// The nominal declarations a call to [`Shapes::of`] is part way
     /// through, innermost last: the key, the [`LayoutId`] reserved for it,
     /// and how many reference-shaped families the walk was inside when it
@@ -213,7 +224,7 @@ impl Shapes {
     /// answer as; and the scalars are there because a one-word value is the
     /// width-one case of the model rather than a family of its own, so
     /// naming one should not depend on a program having mentioned it.
-    pub(super) fn new() -> Shapes {
+    pub(super) fn new(schemas: HostSchemas) -> Shapes {
         let layouts = vec![
             Layout::free(),
             Layout::object("String", Shape::Str),
@@ -229,6 +240,7 @@ impl Shapes {
         ];
         Shapes {
             layouts,
+            schemas,
             building: Vec::new(),
             behind: 0,
             named: HashMap::new(),
@@ -459,17 +471,17 @@ impl Shapes {
     /// materialises a `Value::Struct` under and what it compares an incoming
     /// one against.
     ///
-    /// # It reads the shipped schemas
+    /// # It reads the schemas this compilation was given
     ///
-    /// A type an embedder's schema declares answers `None` and is a gap
-    /// naming the type. That is a smaller answer than the checker gave —
-    /// it resolved against the schemas *this compilation* was given — and it
-    /// is the same place the predecessor reads from (`Body::resource_op`).
-    /// Closing it means carrying the `HostSchemas` a compilation was given
-    /// through to here, which is a change to what `lower` is handed.
+    /// [`Shapes::schemas`] and not [`cove_schema::hosts`], so a type an
+    /// embedder's module declares is described exactly as a shipped one is.
+    /// The checker resolved the name against the same set; a lowering that
+    /// read only the shipped tables would answer for fewer programs than the
+    /// checker accepted, which is a backend refusing a program the language
+    /// admits rather than a gap anybody can build.
     fn host_type(&mut self, checked: &Checked, module: &str, qualified: &str) -> Option<LayoutId> {
         let (host, short) = qualified.rsplit_once('.')?;
-        let schema = cove_schema::hosts::module(host)?;
+        let schema = self.schemas.module(host)?;
         if schema.resource(short).is_some() {
             return Some(HOST);
         }
@@ -510,6 +522,19 @@ impl Shapes {
             words,
         );
         Some(self.settle(qualified, id, layout))
+    }
+
+    /// Whether the host module `module` keeps `name` rather than handing it
+    /// over: a `files.Writer`, not a `http.Response`.
+    ///
+    /// It is the one question that decides whether a method written on a
+    /// value of a host type is an operation the host answers on a handle,
+    /// and it is asked of the same schemas [`Shapes::host_type`] read the
+    /// layout out of.
+    pub(super) fn is_resource(&self, module: &str, name: &str) -> bool {
+        self.schemas
+            .module(module)
+            .is_some_and(|schema| schema.resource(name).is_some())
     }
 
     /// The layout of one field of a host struct.
@@ -685,7 +710,7 @@ impl Shapes {
         let id = self.reserve(&key);
         let mut placed = Vec::with_capacity(declared.len());
         for (field, ty) in &declared {
-            match self.of(checked, module, ty) {
+            match self.of(checked, &owner, ty) {
                 Some(held) => placed.push((field.clone(), held)),
                 None => {
                     self.building.pop();
@@ -719,7 +744,7 @@ impl Shapes {
         for (case, types) in &declared {
             let mut parts = Vec::with_capacity(types.len());
             for ty in types {
-                match self.of(checked, module, ty) {
+                match self.of(checked, &owner, ty) {
                     Some(held) => parts.push(held),
                     None => {
                         self.building.pop();

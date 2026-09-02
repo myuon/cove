@@ -139,10 +139,24 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::CallHost { dst, op, args } => {
             let op = program.host_op(*op);
             format!(
-                "call-host {} {}.{} ({})",
+                "call-host {} {} ({})",
                 s(*dst),
-                op.module,
-                op.operation,
+                op.qualified(),
+                args_of(program, *args)
+            )
+        }
+        Inst::CallResource {
+            dst,
+            receiver,
+            op,
+            args,
+        } => {
+            let op = program.host_op(*op);
+            format!(
+                "call-resource {} {} {} ({})",
+                s(*dst),
+                s(*receiver),
+                op.qualified(),
                 args_of(program, *args)
             )
         }

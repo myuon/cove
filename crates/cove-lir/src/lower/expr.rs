@@ -1490,6 +1490,126 @@ impl Body<'_> {
     /// onwards the program holds a value no schema described, so it is a box
     /// carrying its own description rather than a bare run of words.
     fn call_host(&mut self, expr: &Expr, module: &str, operation: &str, args: &[Arg]) -> Val {
+        if let Some(bad) = self.crossable(args) {
+            return self.gap(bad, expr);
+        }
+        let Some(result) = self.host_result(expr) else {
+            return self.dead(expr);
+        };
+        let op = self.pool.host_op(HostOp {
+            module: module.into(),
+            operation: operation.into(),
+            resource: None,
+            result,
+        });
+
+        let mut held = Vec::with_capacity(args.len());
+        for arg in args {
+            held.push(self.expr(&arg.value));
+        }
+        let list = self.pool.args.intern(held.iter().map(Val::arg).collect());
+        let dst = self.temp(result);
+        self.emit(
+            Inst::CallHost {
+                dst: dst.slot,
+                op,
+                args: list,
+            },
+            expr.span,
+        );
+        for value in held.into_iter().rev() {
+            self.release(value, expr.span);
+        }
+        dst
+    }
+
+    /// `writer.writeLine(line)`: a call across the boundary addressed to a
+    /// resource the host keeps.
+    ///
+    /// # Why the receiver is not an argument
+    ///
+    /// ADR 0013 makes a handle a *name* and gives the host the only record of
+    /// what is open, so which resource answers is decided by the word in the
+    /// receiver and never by the module the source wrote in front of it.
+    /// `HostRegistry::call_resource` says the same shape: it takes the handle
+    /// as the thing being addressed and hands the host only what follows.
+    /// So [`Inst::CallResource`] names the receiver as an operand of its own
+    /// — an [`crate::Arg`] is a location the boundary materialises, and
+    /// materialising a name into a `Value` in order to take it apart again
+    /// would make the argument list something other than the arguments.
+    ///
+    /// Everything else is [`Body::call_host`]. The operation is one entry of
+    /// the same table, carrying the resource kind so that `files.write` and
+    /// `files.Writer.write` are two entries; the result layout is the one the
+    /// checker settled; and the arguments have to cross the boundary under
+    /// the same rules, because the boundary is the same boundary.
+    pub(super) fn call_resource(
+        &mut self,
+        expr: &Expr,
+        base: &Expr,
+        qualified: &str,
+        operation: &str,
+        args: &[Arg],
+    ) -> Val {
+        // A host type that is plain *data* has fields rather than
+        // operations, and the checker has already refused a method call on
+        // one — but which of the two a name is is the schema's answer and
+        // not this lowering's, so it is read rather than assumed.
+        let named = format!("`{qualified}.{operation}`");
+        let Some((module, kind)) = qualified.rsplit_once('.') else {
+            return self.gap(
+                &format!("{named}, an operation of a host type with no module"),
+                expr,
+            );
+        };
+        if !self.pool.shapes.is_resource(module, kind) {
+            return self.gap(
+                &format!("{named}, an operation of a host type the host does not keep"),
+                expr,
+            );
+        }
+        if let Some(bad) = self.crossable(args) {
+            return self.gap(bad, expr);
+        }
+        let Some(result) = self.host_result(expr) else {
+            return self.dead(expr);
+        };
+        let op = self.pool.host_op(HostOp {
+            module: module.into(),
+            operation: operation.into(),
+            resource: Some(kind.into()),
+            result,
+        });
+
+        let receiver = self.expr(base);
+        let mut held = Vec::with_capacity(args.len());
+        for arg in args {
+            held.push(self.expr(&arg.value));
+        }
+        let list = self.pool.args.intern(held.iter().map(Val::arg).collect());
+        let dst = self.temp(result);
+        self.emit(
+            Inst::CallResource {
+                dst: dst.slot,
+                receiver: receiver.slot,
+                op,
+                args: list,
+            },
+            expr.span,
+        );
+        for value in held.into_iter().rev() {
+            self.release(value, expr.span);
+        }
+        self.release(receiver, expr.span);
+        dst
+    }
+
+    /// What stops an argument from crossing the boundary, if anything does.
+    ///
+    /// One answer for both directions a host call is addressed, because what
+    /// may cross is a fact about the boundary rather than about which of the
+    /// two found the callee.
+    fn crossable(&mut self, args: &[Arg]) -> Option<&'static str> {
         for arg in args {
             let what = if arg.label.is_some() {
                 "a labelled argument to a host operation"
@@ -1513,35 +1633,9 @@ impl Body<'_> {
             } else {
                 continue;
             };
-            return self.gap(what, expr);
+            return Some(what);
         }
-        let Some(result) = self.host_result(expr) else {
-            return self.dead(expr);
-        };
-        let op = self.pool.host_op(HostOp {
-            module: module.into(),
-            operation: operation.into(),
-            result,
-        });
-
-        let mut held = Vec::with_capacity(args.len());
-        for arg in args {
-            held.push(self.expr(&arg.value));
-        }
-        let list = self.pool.args.intern(held.iter().map(Val::arg).collect());
-        let dst = self.temp(result);
-        self.emit(
-            Inst::CallHost {
-                dst: dst.slot,
-                op,
-                args: list,
-            },
-            expr.span,
-        );
-        for value in held.into_iter().rev() {
-            self.release(value, expr.span);
-        }
-        dst
+        None
     }
 
     /// The layout a host operation's answer is written into.

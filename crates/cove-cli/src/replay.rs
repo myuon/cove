@@ -608,11 +608,16 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
         // reports every gap in what the entry reaches rather than the first;
         // a replay that cannot be run is still a replay that reads no tape.
         Backend::Lvm => {
-            let ir = cove_lir::lower_entry(&program, &sources, module, entry).map_err(|items| {
-                CliError::Diagnostics {
-                    items,
-                    sources: Arc::clone(&sources),
-                }
+            let ir = cove_lir::lower_entry(
+                &program,
+                &sources,
+                &cove_sema::HostSchemas::new(),
+                module,
+                entry,
+            )
+            .map_err(|items| CliError::Diagnostics {
+                items,
+                sources: Arc::clone(&sources),
             })?;
             Some(Executable::Linear(Arc::new(ir)))
         }

@@ -52,6 +52,7 @@ use cove_runtime::vm::Vm;
 use cove_runtime::Lvm;
 use cove_sema::capability::open_reasons;
 use cove_sema::resolve::DeclaredTest;
+use cove_sema::HostSchemas;
 
 use crate::{load, Backend, CliError, Executable};
 
@@ -226,7 +227,13 @@ fn run_test(
     // test's gap is no longer every test's.
     let lowered = match backend {
         Backend::Ast => None,
-        Backend::Lvm => match cove_lir::lower_entry(program, sources, test.module, test.name) {
+        Backend::Lvm => match cove_lir::lower_entry(
+            program,
+            sources,
+            &HostSchemas::new(),
+            test.module,
+            test.name,
+        ) {
             Ok(ir) => Some(Executable::Linear(Arc::new(ir))),
             Err(items) => {
                 return Some(

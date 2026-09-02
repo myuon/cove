@@ -53,7 +53,7 @@
 //! read, and it is what makes `xs.map(double)` and `xs.map(fn(x) { ... })` the
 //! same lowering.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use cove_diag::Span;
@@ -70,9 +70,14 @@ use crate::layout::LayoutId;
 use crate::program::{Capture, Function, FunctionId};
 use crate::repr::RefMap;
 
-/// One captured binding: the name the body reads it by, where it is in the
-/// frame that is making the closure, and what it is.
-type Captured = (Arc<str>, Slot, LayoutId);
+/// One captured binding: the name the body reads it by, and the location in
+/// the frame that is making the closure whose words go into the environment.
+///
+/// A location rather than a slot and a layout, because one of them is a
+/// temporary this lowering made: the value behind a `var` parameter has to be
+/// loaded out of the caller's storage before it can be stored, and whoever
+/// asked for the list is what ends its live range.
+type Captured = (Arc<str>, Val);
 
 impl Body<'_> {
     // ---- making one -------------------------------------------------------
@@ -138,7 +143,15 @@ impl Body<'_> {
             &captured,
         );
         self.pool.appended[at] = Some(lowered);
-        self.close_over(id, &captured, expr.span)
+        let dst = self.close_over(id, &captured, expr.span);
+        // The loads a `var` capture needed are done with once the environment
+        // holds their words. Every other capture is a binding of this frame
+        // and is not this expression's to end, which is what `Val::temp`
+        // records and `Body::release` reads.
+        for (_, value) in captured.into_iter().rev() {
+            self.release(value, expr.span);
+        }
+        dst
     }
 
     /// A declared function written where a value goes.
@@ -200,7 +213,7 @@ impl Body<'_> {
     /// of this frame and so is a root of it, and the environment itself is in
     /// a `Repr::Ref` slot from the allocation onwards.
     fn close_over(&mut self, id: FunctionId, captured: &[Captured], span: Span) -> Val {
-        let layouts: Vec<LayoutId> = captured.iter().map(|(_, _, layout)| *layout).collect();
+        let layouts: Vec<LayoutId> = captured.iter().map(|(_, held)| held.layout).collect();
         let named = self.callee_name(id);
         let object = self.pool.shapes.closure_of(&named, id, layouts);
         let held = self.pool.shapes.function_value();
@@ -232,17 +245,17 @@ impl Body<'_> {
         );
         self.give_back(word.slot, word.layout);
         let mut at = CLOSURE_CAPTURES;
-        for (_, slot, layout) in captured {
+        for (_, held) in captured {
             self.emit(
                 Inst::StoreField {
                     obj: dst.slot,
                     at,
-                    src: *slot,
-                    layout: *layout,
+                    src: held.slot,
+                    layout: held.layout,
                 },
                 span,
             );
-            at += self.width(*layout);
+            at += self.width(held.layout);
         }
         dst
     }
@@ -275,11 +288,29 @@ impl Body<'_> {
     /// frame a binding happens to sit is what makes two lowerings of one
     /// program agree.
     ///
-    /// A `var` parameter is the one binding that cannot be captured here. The
-    /// oracle captures the *value* behind one, and the word this frame holds
-    /// is an address — so the capture would have to be a load, of a layout
-    /// the frame does not record for an `Addr` slot. It is named rather than
-    /// approximated.
+    /// A `var` parameter is captured as the **value behind the address**, at
+    /// the layout the parameter was declared at.
+    ///
+    /// The oracle is what fixes that: `Env::captures` calls `Place::read` on
+    /// every binding it captures, and reading an alias place is reading the
+    /// storage it names. So the environment holds a copy taken at creation
+    /// time, exactly as it does for an ordinary binding, and the load is the
+    /// one instruction that difference costs.
+    ///
+    /// # ADR 0001 and the oracle disagree about whether this is a program
+    ///
+    /// ADR 0001 says *"a `var` parameter cannot be stored or captured beyond
+    /// the call"*, and nothing enforces the second half: the checker accepts
+    /// `scan.word("true").mapError { scan.fail(...) }` and the oracle runs
+    /// it. What the oracle runs, though, is a *copy* — no alias outlives the
+    /// call, because the address was read through before the closure existed
+    /// — so the rule's purpose holds even where its letter does not.
+    ///
+    /// This lowers what the oracle runs. ADR 0012 puts the oracle above a
+    /// backend, and a backend that refused a program the oracle answers would
+    /// be deciding a language question that belongs to the checker. If the
+    /// sentence is to be enforced it is `cove-sema` that has to enforce it,
+    /// and then this arm becomes unreachable rather than wrong.
     fn captured_by(&mut self, body: &Block, expr: &Expr) -> Option<Vec<Captured>> {
         let mut mentioned = BTreeSet::new();
         mention_block(body, &mut mentioned);
@@ -288,14 +319,31 @@ impl Body<'_> {
             let Some((slot, layout)) = self.frame.lookup(name) else {
                 continue;
             };
-            if layout == shapes::ADDR {
+            let name: Arc<str> = Arc::from(name.as_str());
+            if layout != shapes::ADDR {
+                held.push((name, Val::borrowed(slot, layout)));
+                continue;
+            }
+            let Some(behind) = self.aliases.get(&slot).copied() else {
+                // Nothing else in a frame is an `Addr` a name is bound to, so
+                // this is a `var` parameter whose declared type had no layout
+                // — which was reported where the boundary was read.
                 self.errors.push(gap::gap(
-                    &format!("a function value capturing `{name}`, a `var` parameter"),
+                    &format!("a function value capturing `{name}`, whose type has no layout"),
                     expr.span,
                 ));
                 return None;
-            }
-            held.push((Arc::from(name.as_str()), slot, layout));
+            };
+            let value = self.temp(behind);
+            self.emit(
+                Inst::Load {
+                    dst: value.slot,
+                    addr: slot,
+                    layout: behind,
+                },
+                expr.span,
+            );
+            held.push((name, value));
         }
         Some(held)
     }
@@ -325,12 +373,12 @@ impl Body<'_> {
             param_slots.push(frame.param(&words));
         }
         let mut held = Vec::with_capacity(captured.len());
-        for (capture, _, layout) in captured {
-            let words = self.pool.shapes.words(*layout).to_vec();
+        for (capture, value) in captured {
+            let words = self.pool.shapes.words(value.layout).to_vec();
             held.push(Capture {
                 name: capture.clone(),
                 slot: frame.param(&words),
-                layout: *layout,
+                layout: value.layout,
             });
         }
         let answer = Dest {
@@ -364,6 +412,11 @@ impl Body<'_> {
             // own facts are recorded in their terms.
             generics: self.generics.clone(),
             args: self.args.clone(),
+            // A lambda binds no `var` parameter — `Body::lambda` names one as
+            // a gap — and a capture *of* one is a copy by the time the body
+            // reads it, so nothing in this frame is an address a name is
+            // bound to.
+            aliases: HashMap::new(),
         };
         inner.frame.push_scope();
         // The captures are bound first, so a parameter or a `let` of the same

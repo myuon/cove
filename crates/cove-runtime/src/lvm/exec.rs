@@ -612,6 +612,27 @@ impl<'a> Machine<'a> {
                         Err(error) => fail!(error),
                     }
                 }
+                // The same boundary, addressed to a handle rather than to a
+                // module. ADR 0013 gives the host the only record of what is
+                // open, so which resource answers is the word in `receiver`
+                // and nothing static.
+                Inst::CallResource {
+                    dst,
+                    receiver,
+                    op,
+                    args,
+                } => {
+                    self.sync(pc - 1);
+                    let span = self.span(id, pc - 1);
+                    match self.call_resource(base, receiver, op, args, budget, span) {
+                        Ok(words) => {
+                            for (at, word) in words.iter().enumerate() {
+                                self.mem.set_slot(base, dst + at as u32, *word);
+                            }
+                        }
+                        Err(error) => fail!(error),
+                    }
+                }
                 // Not a boundary. A builtin reads the words and the objects
                 // the machine already holds, and answers one word; nothing
                 // here is materialised into a `Value` on the way.
@@ -1071,6 +1092,72 @@ impl<'a> Machine<'a> {
         })?;
         let started = Instant::now();
         let answer = hosts.call_with(&op.module, &op.operation, values, &mut Back { budget });
+        self.host_wait += started.elapsed();
+        let answer = answer.map_err(|error| error.at(span))?;
+        let result = op.result;
+        boundary::from_value(self, result, &answer).map_err(|error| error.at(span))
+    }
+
+    /// The same, addressed to the resource the [`Repr::Host`] word in
+    /// `receiver` names.
+    ///
+    /// Everything [`Machine::call_host`] does, through the one seam that
+    /// differs: `HostRegistry::call_resource` rather than
+    /// `HostRegistry::call_with`. The grant, the schema on both sides, the
+    /// budget and the trace are the registry's on this path too — a resource
+    /// operation is a Host API call and is charged and recorded as one — and
+    /// this follows `crate::interp::Interpreter::call_host_resource`, which
+    /// is the same three lines around the same call.
+    ///
+    /// The handle is looked up rather than materialised. ADR 0013 makes it a
+    /// name the host minted, `Machine::resource` is the table that word
+    /// indexes, and the registry takes it as the thing being addressed — so
+    /// it is never one of `args`, and the arguments are what the host is
+    /// handed.
+    ///
+    /// A zero word is refused rather than read through. `docs/LINEAR_VM.md`
+    /// is explicit that the word is one past the index so that a slot nothing
+    /// has written names no resource, and that zero *"earns the same refusal
+    /// a null reference does"* — which is this one, because a `Host` slot
+    /// read before it was given a handle is the same lowering bug reaching
+    /// the machine.
+    fn call_resource(
+        &mut self,
+        base: u64,
+        receiver: Slot,
+        op: HostOpId,
+        args: ArgsId,
+        budget: &Meter,
+        span: Span,
+    ) -> Result<Vec<u64>, RuntimeError> {
+        let program = self.program;
+        let op = program.host_op(op);
+        let list = program.arg_list(args);
+
+        let word = self.mem.slot(base, receiver);
+        let Some(handle) = self.resource(word).cloned() else {
+            return Err(null_object().at(span));
+        };
+
+        let mut values = Vec::with_capacity(list.len());
+        for arg in list {
+            let words = self
+                .mem
+                .read_words(base + arg.slot as u64, self.width(arg.layout));
+            values.push(
+                boundary::to_value(self, arg.layout, &words).map_err(|error| error.at(span))?,
+            );
+        }
+
+        let hosts = self.hosts.ok_or_else(|| {
+            RuntimeError::new(format!(
+                "`{}` cannot be called, because this run has no host boundary",
+                op.qualified()
+            ))
+            .at(span)
+        })?;
+        let started = Instant::now();
+        let answer = hosts.call_resource(&handle, &op.operation, values, &mut Back { budget });
         self.host_wait += started.elapsed();
         let answer = answer.map_err(|error| error.at(span))?;
         let result = op.result;
@@ -3604,6 +3691,7 @@ pub(crate) mod tests {
     fn calls_double(build: &mut Build) -> FunctionId {
         let int = build.scalar(Repr::Int);
         build.program.host_ops.push(cove_lir::HostOp {
+            resource: None,
             module: Arc::from("probe"),
             operation: Arc::from("double"),
             result: int,
@@ -3637,6 +3725,7 @@ pub(crate) mod tests {
         let str_layout = build.layout("String", Shape::Str);
         build.program.str_layout = str_layout;
         build.program.host_ops.push(cove_lir::HostOp {
+            resource: None,
             module: Arc::from("probe"),
             operation: Arc::from("shout"),
             result: str_layout,
@@ -3695,6 +3784,7 @@ pub(crate) mod tests {
         let mut build = Build::default();
         let int = build.scalar(Repr::Int);
         build.program.host_ops.push(cove_lir::HostOp {
+            resource: None,
             module: Arc::from("probe"),
             operation: Arc::from("double"),
             result: int,
@@ -3842,11 +3932,13 @@ pub(crate) mod tests {
         let int = build.scalar(Repr::Int);
         let reader = build.word("vault.Reader", Repr::Host);
         build.program.host_ops.push(cove_lir::HostOp {
+            resource: None,
             module: Arc::from("vault"),
             operation: Arc::from("open"),
             result: reader,
         });
         build.program.host_ops.push(cove_lir::HostOp {
+            resource: None,
             module: Arc::from("vault"),
             operation: Arc::from("read"),
             result: int,

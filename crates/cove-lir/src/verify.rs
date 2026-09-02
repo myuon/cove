@@ -199,7 +199,7 @@ impl Check<'_> {
                     unknown(&mut seen, dst, width);
                 }
                 Inst::CallClosure { dst, .. } => unknown(&mut seen, dst, 1),
-                Inst::CallHost { dst, op, .. } => {
+                Inst::CallHost { dst, op, .. } | Inst::CallResource { dst, op, .. } => {
                     let width = match self.program.host_ops.get(op.index()) {
                         Some(op) => words(op.result),
                         None => 1,
@@ -403,6 +403,36 @@ impl Check<'_> {
                     let result = self.program.host_op(op).result;
                     if self.layout_exists(at, result) {
                         self.fits(at, dst, result, "the answer of a host call");
+                    }
+                }
+                self.each_arg(at, args);
+            }
+            // The receiver is a `Repr::Host` word and never an argument: the
+            // registry takes the handle as the thing being addressed and the
+            // host is handed only what follows it. Whether the word names a
+            // resource this run holds is the machine's question, because a
+            // handle is a name the *host* minted and nothing static can say
+            // which one a slot will hold.
+            Inst::CallResource {
+                dst,
+                receiver,
+                op,
+                args,
+            } => {
+                self.expect(at, receiver, &[Repr::Host]);
+                if self.in_range(at, op.index(), self.program.host_ops.len(), "host op") {
+                    let held = self.program.host_op(op).clone();
+                    if held.resource.is_none() {
+                        let named = held.qualified();
+                        self.fault(
+                            at,
+                            format!(
+                                "is addressed to a resource, but `{named}` names no resource kind"
+                            ),
+                        );
+                    }
+                    if self.layout_exists(at, held.result) {
+                        self.fits(at, dst, held.result, "the answer of a host call");
                     }
                 }
                 self.each_arg(at, args);
@@ -798,7 +828,8 @@ mod tests {
     use super::*;
     use crate::inst::Inst;
     use crate::layout::{Layout, Shape};
-    use crate::program::{Arg, Function, Table, TableId};
+    use crate::program::{Arg, Function, HostOp, Table, TableId};
+    use crate::{ArgsId, HostOpId};
 
     const INT: LayoutId = LayoutId(0);
     const STR: LayoutId = LayoutId(1);
@@ -877,6 +908,71 @@ mod tests {
             Ok(()) => Vec::new(),
             Err(items) => items.into_iter().map(|item| item.what).collect(),
         }
+    }
+
+    /// A resource operation is addressed to a `Repr::Host` word, and the
+    /// operation it names has to be one a resource answers.
+    ///
+    /// Neither is a fact about the *handle*: which resource a word names is
+    /// the host's business and nothing static can say it. What is static is
+    /// that the receiver holds a name at all and that the call site settled a
+    /// resource kind, and both are lowering bugs rather than program faults.
+    #[test]
+    fn a_resource_call_is_addressed_to_a_host_word_and_names_a_resource() {
+        let mut held = program(vec![function(
+            vec![Repr::Int, Repr::Int],
+            INT,
+            vec![
+                Inst::CallResource {
+                    dst: 0,
+                    receiver: 1,
+                    op: HostOpId(0),
+                    args: ArgsId(0),
+                },
+                Inst::Return { src: 0 },
+            ],
+        )]);
+        held.args.push(Vec::new());
+        held.host_ops.push(HostOp {
+            module: Arc::from("files"),
+            operation: Arc::from("write"),
+            resource: None,
+            result: INT,
+        });
+        assert_eq!(
+            faults(&held),
+            vec![
+                "slot 1 holds int, but this wants host".to_string(),
+                "is addressed to a resource, but `files.write` names no resource kind".to_string(),
+            ]
+        );
+    }
+
+    /// The same call, well formed.
+    #[test]
+    fn a_resource_call_that_names_a_kind_and_a_handle_is_well_formed() {
+        let mut held = program(vec![function(
+            vec![Repr::Int, Repr::Host],
+            INT,
+            vec![
+                Inst::CallResource {
+                    dst: 0,
+                    receiver: 1,
+                    op: HostOpId(0),
+                    args: ArgsId(0),
+                },
+                Inst::Return { src: 0 },
+            ],
+        )]);
+        held.args.push(Vec::new());
+        held.host_ops.push(HostOp {
+            module: Arc::from("files"),
+            operation: Arc::from("write"),
+            resource: Some(Arc::from("Writer")),
+            result: INT,
+        });
+        assert_eq!(faults(&held), Vec::<String>::new());
+        assert_eq!(held.host_op(HostOpId(0)).qualified(), "files.Writer.write");
     }
 
     #[test]

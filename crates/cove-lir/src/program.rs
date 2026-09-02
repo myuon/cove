@@ -91,16 +91,43 @@ pub struct Arg {
     pub layout: LayoutId,
 }
 
-/// One host operation a program calls: `console.log`, `files.read`.
+/// One host operation a program calls: `console.log`, `files.read`,
+/// `files.Writer.writeLine`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostOp {
     pub module: Arc<str>,
     pub operation: Arc<str>,
+    /// The resource kind the operation belongs to, for one addressed to a
+    /// handle rather than to the module: `Writer` in
+    /// `files.Writer.writeLine`.
+    ///
+    /// It is what [`Inst::CallResource`] names and what
+    /// [`Inst::CallHost`] does not, so one table holds both and the two
+    /// namings cannot collide: a module's `files.write` and a resource's
+    /// `files.Writer.write` are two entries rather than one.
+    ///
+    /// Nothing dispatches on it. Which resource an operation reaches is the
+    /// business of the handle the receiver names — ADR 0013 gives the host
+    /// the only record of what is open — and this is what the call site
+    /// settled, kept for the disassembly and for a diagnostic that has to
+    /// say what was being called.
+    pub resource: Option<Arc<str>>,
     /// The layout of the value location the host's answer is written into.
     ///
     /// A schema that declared its result `Any` gives a boxed layout;
     /// anything else gives the layout of the declared type.
     pub result: LayoutId,
+}
+
+impl HostOp {
+    /// The operation as the source writes it: `console.println`, or
+    /// `files.Writer.writeLine` for one addressed to a resource.
+    pub fn qualified(&self) -> String {
+        match &self.resource {
+            Some(kind) => format!("{}.{kind}.{}", self.module, self.operation),
+            None => format!("{}.{}", self.module, self.operation),
+        }
+    }
 }
 
 /// One builtin a program calls: `Array.length`, `String.split`, `Int.abs`.

@@ -98,19 +98,14 @@ impl Body<'_> {
             // A host resource's operations belong to the host that issued
             // the handle, and the handle is what routes them:
             // `HostRegistry::call_resource` reads the module and the resource
-            // kind off it rather than off the call site. There is no
-            // instruction here that addresses one — [`Inst::CallHost`] names
-            // a module and an operation, and this names a *handle* — so the
-            // work is an instruction, its verifier arm, and the boundary that
-            // routes it, and naming the operation is what says so.
-            //
-            // A host type that is plain *data* never arrives: it has fields
-            // rather than operations, and the checker has already refused a
-            // method call on one.
-            Ty::Host(qualified) => self.gap(
-                &format!("`{qualified}.{name}`, an operation of a host resource"),
-                expr,
-            ),
+            // kind off it rather than off the call site. So this is not a
+            // builtin at all — it is the boundary, addressed the other way —
+            // and `Body::call_resource` is where it is lowered, beside the
+            // host call it shares a boundary with.
+            Ty::Host(qualified) => {
+                let qualified = qualified.to_string();
+                self.call_resource(expr, base, &qualified, name, args)
+            }
             _ => {
                 let Some(receiver) = receiver_name(&ty) else {
                     // A declared type's methods do not come here: the
