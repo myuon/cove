@@ -9,8 +9,11 @@
 //! anything else in `lvm` ever needs `Value`, it has to say so by importing
 //! it, and the import is the thing to argue with.
 //!
-//! Three things cross here and nothing else does: a Host call's arguments and
-//! answer, an entry's arguments and answer, and a trace capture.
+//! Four things cross here and nothing else does: a Host call's arguments and
+//! answer, an entry's arguments and answer, a trace capture, and a host
+//! callback's arguments and answer — which is the first of those crossed the
+//! other way round, and is converted by the same two functions rather than by
+//! a path of its own.
 //!
 //! # A value is a run of words, so a conversion takes a layout
 //!
@@ -85,7 +88,7 @@ use cove_schema::builtins::{MAP, RANGE, SET};
 
 use crate::error::RuntimeError;
 use crate::lvm::exec::Machine;
-use crate::value::{MapKey, Value, ValueView, VectorStorage};
+use crate::value::{Closure, ClosureBody, LinearClosure, MapKey, Value, ValueView, VectorStorage};
 
 /// How deep a value may nest as it crosses.
 ///
@@ -293,10 +296,7 @@ fn object_to_value(machine: &Machine, addr: u64, depth: usize) -> Result<Value, 
         // restriction.
         Shape::Entries { key, value } => {
             let (key, value) = (*key, *value);
-            let widths = (
-                program.layout(key).width(),
-                program.layout(value).width(),
-            );
+            let widths = (program.layout(key).width(), program.layout(value).width());
             let stride = widths.0 + widths.1;
             let len = machine.object_len(addr);
             let mut entries = Vec::with_capacity(len as usize);
@@ -333,28 +333,45 @@ fn object_to_value(machine: &Machine, addr: u64, depth: usize) -> Result<Value, 
             let words = machine.payload_run(addr, 1, described.width());
             out(machine, held, &words, deeper)
         }
-        // The one family this backend can make and cannot hand over.
+        // A closure crosses as itself, and what makes that answerable is
+        // that [`crate::value::ClosureBody`] can now name a `cove-lir`
+        // function. It could not before: the only lowered variant named the
+        // *predecessor's* program, so building one here would have answered a
+        // closure whose body a host's callback would go looking for in a
+        // program this run does not have — a wrong answer rather than a
+        // missing one.
         //
-        // A public closure is a `Value::Closure` carrying a
-        // `crate::value::ClosureBody`, and the only lowered variant of one
-        // names a function of the *predecessor's* program. Building that here
-        // would mean answering a closure whose body a host's callback would go
-        // looking for in a program this run does not have — a wrong answer
-        // rather than a missing one. `ClosureView` does not rescue it: a host
-        // reads a closure's arity and whether it is `async`, but what it reads
-        // them *for* is deciding whether to call it, and a callback it cannot
-        // call is worth less than a refusal that says so.
+        // Three things are read off the object and nothing is copied out of
+        // it. The callee is payload word 0, exactly as `Inst::CallClosure`
+        // reads it. `Closure::arity` and `is_async` are the callee's own,
+        // because a host reads them to decide whether and how to call — and
+        // `Closure::captures` stays empty, because a `cove-lir` closure's
+        // captures are inline in this object at the widths its layout says,
+        // and copying them into a `Vec<(name, Value)>` would materialise
+        // values nothing asked for and lose the storage they came from.
         //
-        // So this refuses, and `Back::call` refuses on the other side for the
-        // same reason. It stops being true when `ClosureBody` can name a
-        // `cove-lir` function, which is a change to `value.rs` and not to this
-        // file.
-        Shape::Closure { .. } => Err(RuntimeError::new(
-            "a closure cannot cross the boundary out of the linear-memory backend",
-        )
-        .with_rule(
-            "A host that is handed a closure may call it back, and only the backend that made one can run it.",
-        )),
+        // The object is pinned rather than left to the frame that built it.
+        // The lowering ends a temporary's live range at its last use, which
+        // for a closure handed to a host is the instruction after the call,
+        // and the `Reentry` contract says a host may keep a callback for
+        // later. So the value roots the object for as long as it exists; see
+        // [`crate::lvm::mem::Rooted`].
+        Shape::Closure { .. } => {
+            let callee = machine.callee_of(addr)?;
+            let target = program.function(callee);
+            Ok(Value(crate::value::Repr::Closure(std::rc::Rc::new(
+                Closure {
+                    is_async: target.is_async,
+                    arity: target.params.len(),
+                    module: std::rc::Rc::from(&*target.module),
+                    captures: Vec::new(),
+                    body: ClosureBody::Linear(LinearClosure {
+                        function: callee,
+                        env: machine.pin(addr),
+                    }),
+                },
+            ))))
+        }
         Shape::Free => Err(reclaimed()),
     }
 }
@@ -529,6 +546,14 @@ fn word_into(
         // `struct Error { message: String }` is one `Repr::Ref` word wide and
         // is an inline struct, not a reference to an `Error` somewhere.
         Repr::Ref => {
+            // A closure this run made, handed back. It is already an object
+            // in this heap, so the word is its address and there is nothing
+            // to materialise: `layout_for` below could not answer for it in
+            // any case, because what family a closure belongs to is the
+            // callee's business rather than a value's.
+            if let Some(addr) = linear_closure(machine, value)? {
+                return Ok(addr);
+            }
             let layout = layout_for(machine.program(), value)?;
             let held = into(machine, layout, value, depth)?;
             if one_address(machine.program(), layout) && held.len() == 1 {
@@ -1013,6 +1038,74 @@ fn fits(program: &Program, layout: LayoutId, value: &Value) -> bool {
         },
         Shape::Closure { .. } => false,
     }
+}
+
+/// Which function a host's callback runs, and the environment it reads its
+/// captures out of.
+///
+/// Both come off the value rather than one off the value and one out of the
+/// object: naming a `cove-lir` function is the whole of what
+/// [`ClosureBody::Linear`] added, and a way back that went looking for the
+/// callee in the object again would be reading a word to answer a question
+/// the value already answers. The object is still what the captures are read
+/// from, because that is where they are.
+///
+/// The refusal is [`crate::host::NoReentry`]'s sentence with this run named
+/// in place of the missing program, because it is the same situation from the
+/// host's side: what it is holding is not something the run it is inside can
+/// call.
+pub(crate) fn callback_target(
+    machine: &Machine,
+    callee: &Value,
+) -> Result<(cove_lir::FunctionId, u64), RuntimeError> {
+    let Value(crate::value::Repr::Closure(closure)) = callee.erased() else {
+        return Err(not_a_callback(callee));
+    };
+    let ClosureBody::Linear(body) = &closure.body else {
+        return Err(not_a_callback(callee));
+    };
+    if !machine.holds(&body.env) {
+        return Err(RuntimeError::new(
+            "this closure belongs to another run and cannot be called back into this one",
+        ));
+    }
+    if body.function.index() >= machine.program().functions.len() {
+        return Err(RuntimeError::new(
+            "this closure names a function this program does not have",
+        ));
+    }
+    Ok((body.function, body.env.addr()))
+}
+
+fn not_a_callback(callee: &Value) -> RuntimeError {
+    RuntimeError::new(format!(
+        "this host call cannot run {}, because it is not a callback of this run",
+        callee.type_name()
+    ))
+}
+
+/// The environment object of a closure *this* run made, if `value` is one.
+///
+/// `Ok(None)` is "not a closure at all", which is the ordinary case and the
+/// caller's to go on from. The refusals are the two ways a closure can be the
+/// wrong one: a body only the other backend can run, and an object of another
+/// run's address space — where the same number names a different object, so
+/// reading through it would be a wrong answer rather than a missing one.
+fn linear_closure(machine: &Machine, value: &Value) -> Result<Option<u64>, RuntimeError> {
+    let Value(crate::value::Repr::Closure(closure)) = value.erased() else {
+        return Ok(None);
+    };
+    let ClosureBody::Linear(body) = &closure.body else {
+        return Err(RuntimeError::new(
+            "this closure was made by another backend and cannot cross into the linear-memory one",
+        ));
+    };
+    if !machine.holds(&body.env) {
+        return Err(RuntimeError::new(
+            "this closure belongs to another run and cannot cross into this one",
+        ));
+    }
+    Ok(Some(body.env.addr()))
 }
 
 /// Whether a value is one of the families this backend can build in the heap.
@@ -1565,30 +1658,161 @@ mod tests {
         assert!(!exclusive.eq_value(&inclusive));
     }
 
-    /// A closure is the one value family this backend makes and cannot hand
-    /// over: a public `Value::Closure` carries a body a host may ask to be
-    /// called back, and this backend has no way to name one that a host's
-    /// callback would find. So it refuses by name rather than answering a
-    /// closure nothing could run.
-    #[test]
-    fn a_closure_is_refused_on_its_way_out() {
-        let world = World::new(|build, int, _, _| {
+    /// A world holding one lambda, a closure layout over it, and the one-word
+    /// family a location holding a function value has.
+    ///
+    /// `fn(n: Int) -> Int { n }`, with one capture — a body nothing here
+    /// runs, because what these tests are about is the value that names it.
+    /// The `Fn` layout is `Word(Ref)` for the reason `docs/LINEAR_VM.md`
+    /// gives: the location holding a function value is one reference word
+    /// under one layout for every signature, and which environment that word
+    /// names is the object header's business.
+    fn with_a_lambda() -> World {
+        World::new(|build, int, _, _| {
+            let lambda = build.lambda(
+                "lambda",
+                &[int],
+                &[Repr::Int, Repr::Int],
+                int,
+                &[int],
+                vec![cove_lir::Inst::Return { src: 0 }],
+            );
+            build.word("Fn", Repr::Ref);
             build.layout(
                 "closure",
                 Shape::Closure {
-                    function: cove_lir::FunctionId(0),
+                    function: lambda,
                     captures: vec![int],
                 },
             );
-        });
+        })
+    }
+
+    /// An environment object of `world`'s closure layout, holding `capture`.
+    fn an_environment(machine: &mut Machine<'_>, closure: LayoutId, capture: u64) -> u64 {
+        let addr = machine.new_object(closure, 0).unwrap();
+        // Payload word 0 is the callee, and the captures follow it inline.
+        machine.set_payload(addr, 0, 0);
+        machine.set_payload(addr, 1, capture);
+        addr
+    }
+
+    /// A closure crosses out as a closure, carrying what a host reads of one.
+    ///
+    /// It could not before: the only lowered `ClosureBody` named a function
+    /// of the *predecessor's* program, so answering one here would have been
+    /// a callback whose body a host would go looking for in a program this
+    /// run does not have. `ClosureBody::Linear` is what names this one, and
+    /// the arity and the `async` flag are the callee's own, because deciding
+    /// whether and how to call is what a host reads them for.
+    #[test]
+    fn a_closure_crosses_out_as_a_closure() {
+        let world = with_a_lambda();
         let closure = world.named("closure");
         let mut machine = world.machine();
-        let addr = machine.new_object(closure, 0).unwrap();
+        let addr = an_environment(&mut machine, closure, 7);
 
-        let error = to_value(&machine, closure, &[addr]).unwrap_err();
+        let value = to_value(&machine, closure, &[addr]).unwrap();
+        let ValueView::Closure(view) = value.view() else {
+            panic!("a closure crosses as a closure: {value:?}");
+        };
+        assert_eq!(view.arity(), 1, "the callee's own parameter count");
+        assert!(!view.is_async());
+    }
+
+    /// And back in as the address it already is.
+    ///
+    /// A closure is an object of this heap, so nothing is materialised on the
+    /// way in: the word is the address it went out as, and a host that hands
+    /// a callback back is handing back the thing rather than a copy of it.
+    #[test]
+    fn a_closure_crosses_back_in_as_the_object_it_is() {
+        let world = with_a_lambda();
+        let (closure, reference) = (world.named("closure"), world.named("Fn"));
+        let mut machine = world.machine();
+        let addr = an_environment(&mut machine, closure, 7);
+
+        let value = to_value(&machine, closure, &[addr]).unwrap();
+        assert_eq!(
+            from_value(&mut machine, reference, &value).unwrap(),
+            vec![addr]
+        );
+    }
+
+    /// The value keeps its object alive, and nothing in a frame does.
+    ///
+    /// This is the whole of the rooting question. The lowering ends a
+    /// temporary's live range at its last use — for a closure handed to a
+    /// host, the instruction after the call — and the `Reentry` contract says
+    /// a host may keep the callback for later. So a collection with no frame
+    /// on the stack at all must still find the object, and must stop finding
+    /// it once the value is dropped.
+    #[test]
+    fn a_closure_a_host_holds_survives_a_collection() {
+        let world = with_a_lambda();
+        let closure = world.named("closure");
+        let mut machine = world.machine();
+        let addr = an_environment(&mut machine, closure, 4242);
+        let value = to_value(&machine, closure, &[addr]).unwrap();
+
+        machine.collect();
+        assert_eq!(machine.object_layout(addr), closure);
+        assert_eq!(
+            machine.payload(addr, 1),
+            4242,
+            "the value is the only thing naming it, and it is enough"
+        );
+
+        drop(value);
+        machine.collect();
+        assert_eq!(
+            machine.object_layout(addr),
+            cove_lir::LayoutId::FREE,
+            "and the object goes when the last holder does"
+        );
+    }
+
+    /// Two holders are two claims, so the first to go does not take the
+    /// object with it.
+    #[test]
+    fn a_cloned_closure_value_keeps_its_own_claim() {
+        let world = with_a_lambda();
+        let closure = world.named("closure");
+        let mut machine = world.machine();
+        let addr = an_environment(&mut machine, closure, 11);
+        let value = to_value(&machine, closure, &[addr]).unwrap();
+        let copy = value.clone();
+
+        drop(value);
+        machine.collect();
+        assert_eq!(machine.object_layout(addr), closure);
+        drop(copy);
+        machine.collect();
+        assert_eq!(machine.object_layout(addr), cove_lir::LayoutId::FREE);
+    }
+
+    /// A closure of another run is refused rather than read through.
+    ///
+    /// An address is a word index into one address space, and the same number
+    /// names a different object in the next one. Two runs in one process is
+    /// an ordinary thing for an embedder to do, so this is asked rather than
+    /// assumed.
+    #[test]
+    fn a_closure_of_another_run_cannot_cross_in() {
+        let world = with_a_lambda();
+        let (closure, reference) = (world.named("closure"), world.named("Fn"));
+
+        let value = {
+            let mut elsewhere = world.machine();
+            let addr = an_environment(&mut elsewhere, closure, 1);
+            to_value(&elsewhere, closure, &[addr]).unwrap()
+        };
+
+        let mut machine = world.machine();
+        let error = from_value(&mut machine, reference, &value).unwrap_err();
         assert_eq!(
             error.message,
-            "a closure cannot cross the boundary out of the linear-memory backend"
+            "this closure belongs to another run and cannot cross into this one"
         );
     }
 

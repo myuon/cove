@@ -1827,20 +1827,14 @@ impl Body<'_> {
                 "a `var` argument to a host operation"
             } else if arg.spread {
                 "a spread argument to a host operation"
-            } else if matches!(self.ty(&arg.value), Some(Ty::Fn(_))) {
-                // `clock.timeout(500ms) { ... }`. The closure is an ordinary
-                // last argument here and lowers like one, but the *boundary*
-                // refuses to materialise a function value: a host handed one
-                // may call it back, and only the backend that made a closure
-                // can run its body. Lowering the call anyway would be a
-                // program that runs and answers a failure the oracle does
-                // not, which is worse than saying so.
-                //
-                // The work this names is in `cove_runtime::value`, not here:
-                // a `ClosureBody` that can name a `cove-lir` function is what
-                // lets both sides of that boundary stop refusing.
-                "a function value passed to a host operation"
             } else {
+                // A function value is *not* refused here. `clock.timeout(500ms)
+                // { ... }` lowers as an ordinary last argument: the location is
+                // one `Repr::Ref` word naming the closure's environment, and
+                // the boundary follows the word rather than copying anything
+                // out of it. A host that keeps the callback keeps the object
+                // alive itself, so this lowering's ordinary clear at the
+                // argument's last use is right whichever order they happen in.
                 continue;
             };
             return Some(what);

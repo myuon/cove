@@ -638,6 +638,44 @@ pub enum ClosureBody {
     /// one run cannot be called by another, which is true of the tree form
     /// as well: both name something a particular run owns.
     Lowered(cove_ir::FunctionId),
+    /// The lowered function `cove_runtime::lvm` runs, addressed in the
+    /// [`cove_lir::Program`] that run was given, together with the
+    /// environment object it closes over.
+    ///
+    /// Additive beside [`ClosureBody::Lowered`] rather than a replacement for
+    /// it: the two backends have two programs and two `FunctionId` types, and
+    /// an id into the one this run does not have would send a host's callback
+    /// looking for a body that is not there. Which of them a `Closure` holds
+    /// is the same question it always was — *which backend made this* — and
+    /// [`crate::host::Reentry`] is still the only thing that asks it.
+    ///
+    /// The environment is here and the captures are not, which is the one
+    /// structural difference from the predecessor's form. A `cove-lir`
+    /// closure's captures are inline in a heap object, at the widths its
+    /// layout says, and copying them out into [`Closure::captures`] would be
+    /// materialising a value nothing asked for and losing the identity of the
+    /// storage they came from. So the object crosses instead, as a
+    /// [`LinearClosure`], and [`Closure::captures`] is empty.
+    Linear(LinearClosure),
+}
+
+/// A closure the linear-memory backend made: which function runs, and the
+/// environment object it reads its captures out of.
+///
+/// **It roots the object it names.** A frame is a root because a static map
+/// says which of its slots are references, and the lowering clears a
+/// temporary's slot at its last use — which for a closure handed to a host is
+/// the instruction after the call. The [`crate::host::Reentry`] contract says
+/// a host may keep a callback for later, so the value has to keep the object
+/// alive by itself, and the handle inside this is what does it. Nothing in a
+/// frame need name the object while a host holds one, and after the call
+/// nothing does.
+#[derive(Clone, Debug)]
+pub struct LinearClosure {
+    /// The body, in the program that run was given.
+    pub(crate) function: cove_lir::FunctionId,
+    /// The environment object, and the claim that keeps it a root.
+    pub(crate) env: crate::lvm::mem::Rooted,
 }
 
 /// A value usable as a `Map` key or `Set` element.

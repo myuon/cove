@@ -128,22 +128,6 @@ fn a_declaration_taking_a_var_parameter_cannot_be_used_as_a_function_value() {
     );
 }
 
-/// A trailing lambda on a host operation lowers as far as the call and stops
-/// at the boundary.
-///
-/// `clock.timeout(500ms) { ... }` is an ordinary last argument here — that
-/// part is done — but a public closure carries a body a host's callback
-/// would go looking for, and only the backend that made one can run it. The
-/// machine refuses to materialise one, so a call emitted here would run and
-/// answer a failure the oracle does not. A wrong answer is worse than a gap.
-#[test]
-fn a_function_value_handed_to_a_host_operation_stops_at_the_boundary() {
-    assert_eq!(
-        refused("use clock\nfn f() -> Result<Int, Error> { clock.timeout(1s) { 1 } }"),
-        vec!["not yet lowered: a function value passed to a host operation"]
-    );
-}
-
 /// A handle is neither a scalar the machine computes with nor an address it
 /// can trace, and no comparison instruction admits one.
 ///

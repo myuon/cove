@@ -427,3 +427,26 @@ fn0 m.f() -> http.Route
 "
     );
 }
+
+/// A trailing lambda on a host operation is an ordinary last argument.
+///
+/// It used to stop at the boundary: a public closure carried a body only the
+/// predecessor could run, so a host handed one would have gone looking for
+/// something this run does not have. Now the location is one reference naming
+/// the closure's environment and the boundary follows the word, so the call
+/// lowers like any other and the host may call it back.
+#[test]
+fn a_trailing_lambda_reaches_a_host_operation() {
+    let text = listing(
+        "use clock\nexport fn f() -> Result<Int, Error> {\n  let v = clock.timeout(1s) { 1 }?\n  Ok(v + 1)\n}",
+        "f",
+    );
+    assert!(
+        text.contains("call-host") && text.contains("alloc"),
+        "the closure is built and the call is emitted:\n{text}"
+    );
+    assert!(
+        !text.contains("not yet lowered"),
+        "and nothing is refused:\n{text}"
+    );
+}

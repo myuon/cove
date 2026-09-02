@@ -2730,7 +2730,11 @@ impl<'a> Vm<'a> {
                         Some(SlotKind::Place)
                     )
                 }
-                ClosureBody::Tree { .. } => false,
+                // A body this VM cannot run answers `false` and is refused a
+                // moment later, in that refusal's own words. `Linear` is the
+                // other backend's and joins the tree form here for the same
+                // reason: this question is about a closure *this* one made.
+                ClosureBody::Tree { .. } | ClosureBody::Linear(_) => false,
             },
             _ => false,
         };

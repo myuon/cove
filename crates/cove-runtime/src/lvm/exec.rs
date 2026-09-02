@@ -35,7 +35,7 @@ use crate::error::RuntimeError;
 use crate::host::{HostRegistry, Reentry, ResourceHandle};
 use crate::interp::stopped_here;
 use crate::lvm::builtins::operand::Operand;
-use crate::lvm::mem::{Collected, Memory, NoSegment, Overflow, Roots};
+use crate::lvm::mem::{Collected, Memory, NoSegment, Overflow, Parked, Rooted, Roots};
 use crate::lvm::{boundary, builtins};
 use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::task;
@@ -43,8 +43,10 @@ use crate::trace::TraceEvent;
 // The one import of the public `Value` outside `boundary`, and the one thing
 // ADR 0034 allows it for: a host call's arguments and its answer exist as
 // `Value`s for the length of the call and nowhere else. Nothing here stores
-// one, and the two places it is named — the vector handed to the boundary,
-// and the callee a way back is offered — are both in transit.
+// one, and the three places it is named are all in transit — the vector
+// handed to the boundary, the callee a way back is offered, and a callback's
+// arguments and answer, which are the same boundary crossed the other way
+// round and are converted by the same file.
 use crate::value::Value;
 
 /// How many instructions run between two budget checks.
@@ -351,6 +353,27 @@ pub(crate) struct Machine<'a> {
     /// *thread* owns are read, and it is the oracle's own function so that
     /// neither backend can drift from the other's answer.
     cancellation: Option<Cancellation>,
+    /// The flags of the bounded host calls this thread is inside, innermost
+    /// last.
+    ///
+    /// [`crate::host::Reentry::call_until`] pushes one: `clock.timeout` bounds
+    /// its body, and *"`stop` bounds this call and everything inside it,
+    /// including a further host call the body makes and any callback that host
+    /// runs in turn"*. So a safepoint reads these beside this task's own flag,
+    /// which is what makes a timeout a timeout rather than a measurement taken
+    /// afterwards. [`crate::interp::stopped_here`] is the oracle's own
+    /// function and asks both, so neither backend can drift from the other's
+    /// answer about which of the two stopped the work.
+    stops: Vec<Cancellation>,
+    /// How many host calls running a Cove callback are stacked on this
+    /// thread.
+    ///
+    /// A Cove call adds no native frame here — that is what the dispatch loop
+    /// is for — but a *reentry* does: the host is a Rust frame, and running
+    /// its callback puts another turn of [`Machine::dispatch`] below it. So
+    /// this is bounded exactly as the oracle bounds it, by
+    /// [`crate::interp::MAX_REENTRY_DEPTH`], and for the same reason.
+    reentry_depth: usize,
     /// Which task this machine is running, for a trace and for the way back
     /// a host is offered.
     task: u64,
@@ -414,6 +437,8 @@ impl<'a> Machine<'a> {
             scopes: Vec::new(),
             children: Vec::new(),
             cancellation: None,
+            stops: Vec::new(),
+            reentry_depth: 0,
             task: ENTRY_TASK,
             next_task: 1,
             instructions: 0,
@@ -461,6 +486,8 @@ impl<'a> Machine<'a> {
             scopes: Vec::new(),
             children: Vec::new(),
             cancellation: Some(cancellation),
+            stops: Vec::new(),
+            reentry_depth: 0,
             task,
             next_task: 1,
             instructions: 0,
@@ -560,7 +587,7 @@ impl<'a> Machine<'a> {
     fn drive(&mut self, budget: &Meter) -> Result<Vec<u64>, RuntimeError> {
         std::thread::scope(|threads| {
             let mut running: Vec<Option<ScopedJoinHandle<'_, Outcome>>> = Vec::new();
-            let answer = self.dispatch(budget, threads, &mut running);
+            let answer = self.dispatch(budget, threads, &mut running, 0);
             debug_assert!(
                 answer.is_err() || !self.anything_running(),
                 "a body that answered left every scope it opened, so nothing is still running"
@@ -624,6 +651,7 @@ impl<'a> Machine<'a> {
         budget: &Meter,
         threads: &'s Scope<'s, 'a>,
         running: &mut Vec<Option<ScopedJoinHandle<'s, Outcome>>>,
+        floor: usize,
     ) -> Result<Vec<u64>, RuntimeError> {
         let program = self.program;
         let top = self.frames.last().expect("run pushed a frame");
@@ -636,15 +664,14 @@ impl<'a> Machine<'a> {
             self.instructions += 1;
             if self.instructions.is_multiple_of(SAFEPOINT_STRIDE) {
                 self.sync(pc);
-                // This task's own flag first, then the run's accounting, in
-                // the order `Interpreter::charge_safepoint` asks them: a
-                // cancelled task is cancelled and not out of fuel, whichever
-                // of the two also happens to be true.
-                if let Some(flag) = &self.cancellation {
-                    if flag.is_cancelled() {
-                        return Err(crate::interp::task_cancelled(self.span(id, pc)));
-                    }
-                }
+                // This task's own flag and every bounded call this thread is
+                // inside first, then the run's accounting, in the order
+                // `Interpreter::charge_safepoint` asks them: a cancelled task
+                // is cancelled and not out of fuel, whichever of the two also
+                // happens to be true. `stopped_here` is the oracle's own
+                // function, so the two backends cannot disagree about which
+                // of the two stopped the work.
+                stopped_here(self.cancellation.as_ref(), &self.stops, self.span(id, pc))?;
                 if let Err(stopped) = budget.safepoint(SAFEPOINT_STRIDE) {
                     return Err(budget.to_runtime_error(stopped).at(self.span(id, pc)));
                 }
@@ -799,7 +826,14 @@ impl<'a> Machine<'a> {
                     // than re-reading the caller's `Call` means a return
                     // touches one instruction, not two.
                     let done = self.frames.pop().expect("a frame is executing");
-                    match self.frames.last() {
+                    // The floor is where this turn of the loop was entered,
+                    // and returning to it is what ends it. It is zero for a
+                    // whole task's body and the caller's depth for a host
+                    // callback, whose caller is a Rust frame rather than an
+                    // instruction — so what is below the floor is left
+                    // standing, and the answer's words are handed back in
+                    // Rust.
+                    match self.frames.last().filter(|_| self.frames.len() > floor) {
                         None => {
                             let answer = self.mem.read_words(base + src as u64, width);
                             self.mem.pop_frame(base);
@@ -953,7 +987,7 @@ impl<'a> Machine<'a> {
                 Inst::CallHost { dst, op, args } => {
                     self.sync(pc - 1);
                     let span = self.span(id, pc - 1);
-                    match self.call_host(base, op, args, budget, span) {
+                    match self.call_host(base, op, args, budget, span, threads, running) {
                         Ok(words) => {
                             for (at, word) in words.iter().enumerate() {
                                 self.mem.set_slot(base, dst + at as u32, *word);
@@ -974,7 +1008,9 @@ impl<'a> Machine<'a> {
                 } => {
                     self.sync(pc - 1);
                     let span = self.span(id, pc - 1);
-                    match self.call_resource(base, receiver, op, args, budget, span) {
+                    match self
+                        .call_resource(base, receiver, op, args, budget, span, threads, running)
+                    {
                         Ok(words) => {
                             for (at, word) in words.iter().enumerate() {
                                 self.mem.set_slot(base, dst + at as u32, *word);
@@ -1392,7 +1428,7 @@ impl<'a> Machine<'a> {
     /// `RefMap::of` the `Repr`s and `Repr::Host::is_ref` is false. A
     /// `Repr::Task` and a `Repr::Scope` are outside it for the same reason,
     /// and what a task's table *does* name is reached through [`Live`].
-    fn collect(&mut self) {
+    pub(crate) fn collect(&mut self) {
         let done = self.mem.collect(&self.program.layouts, &Live(self));
         self.collected = done;
     }
@@ -1502,13 +1538,16 @@ impl<'a> Machine<'a> {
     /// neither of which this machine has yet; the run's flag is read inside
     /// the boundary by `charge_host_call`, which is where it is read on every
     /// backend.
-    fn call_host(
+    #[allow(clippy::too_many_arguments)]
+    fn call_host<'s>(
         &mut self,
         base: u64,
         op: HostOpId,
         args: ArgsId,
         budget: &Meter,
         span: Span,
+        threads: &'s Scope<'s, 'a>,
+        running: &mut Vec<Option<ScopedJoinHandle<'s, Outcome>>>,
     ) -> Result<Vec<u64>, RuntimeError> {
         let program = self.program;
         let op = program.host_op(op);
@@ -1537,26 +1576,18 @@ impl<'a> Machine<'a> {
             ))
             .at(span)
         })?;
-        stopped_here(self.cancellation.as_ref(), &[], span)?;
+        stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
         let started = Instant::now();
         let answer = {
             // A task inside a host call is not running Cove and its frames do
             // not change, so the snapshot it leaves stays true for the whole
             // call — and a collection that waited for it instead would be
-            // waiting for something outside the run altogether.
-            let parked = self.mem.blocking(&Live(self));
-            let answer = hosts.call_with(
-                &op.module,
-                &op.operation,
-                values,
-                &mut Back {
-                    budget,
-                    task: self.task,
-                    cancellation: self.cancellation.clone(),
-                },
-            );
-            drop(parked);
-            answer
+            // waiting for something outside the run altogether. A callback is
+            // the exception, and [`Back::call`] is where it says so: the
+            // moment Cove runs again the snapshot stops being true, so the
+            // park is dropped for exactly as long as the callback runs.
+            let mut back = Back::parked(self, budget, span, threads, running);
+            hosts.call_with(&op.module, &op.operation, values, &mut back)
         };
         self.host_wait += started.elapsed();
         let answer = answer.map_err(|error| error.at(span))?;
@@ -1587,7 +1618,8 @@ impl<'a> Machine<'a> {
     /// a null reference does"* — which is this one, because a `Host` slot
     /// read before it was given a handle is the same lowering bug reaching
     /// the machine.
-    fn call_resource(
+    #[allow(clippy::too_many_arguments)]
+    fn call_resource<'s>(
         &mut self,
         base: u64,
         receiver: Slot,
@@ -1595,6 +1627,8 @@ impl<'a> Machine<'a> {
         args: ArgsId,
         budget: &Meter,
         span: Span,
+        threads: &'s Scope<'s, 'a>,
+        running: &mut Vec<Option<ScopedJoinHandle<'s, Outcome>>>,
     ) -> Result<Vec<u64>, RuntimeError> {
         let program = self.program;
         let op = program.host_op(op);
@@ -1622,22 +1656,11 @@ impl<'a> Machine<'a> {
             ))
             .at(span)
         })?;
-        stopped_here(self.cancellation.as_ref(), &[], span)?;
+        stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
         let started = Instant::now();
         let answer = {
-            let parked = self.mem.blocking(&Live(self));
-            let answer = hosts.call_resource(
-                &handle,
-                &op.operation,
-                values,
-                &mut Back {
-                    budget,
-                    task: self.task,
-                    cancellation: self.cancellation.clone(),
-                },
-            );
-            drop(parked);
-            answer
+            let mut back = Back::parked(self, budget, span, threads, running);
+            hosts.call_resource(&handle, &op.operation, values, &mut back)
         };
         self.host_wait += started.elapsed();
         let answer = answer.map_err(|error| error.at(span))?;
@@ -1747,7 +1770,7 @@ impl<'a> Machine<'a> {
     /// The id comes from the object rather than from the layout, which carries
     /// one too. They agree — a layout is one per lowered lambda — and the
     /// object's word is the one [`Inst::CallClosure`] is defined in terms of.
-    fn callee_of(&self, addr: u64) -> Result<FunctionId, RuntimeError> {
+    pub(crate) fn callee_of(&self, addr: u64) -> Result<FunctionId, RuntimeError> {
         if addr == 0 {
             return Err(null_object());
         }
@@ -2351,6 +2374,206 @@ impl<'a> Machine<'a> {
         Ok(())
     }
 
+    /// Publishes this task's roots and stands at a safepoint until the
+    /// answer is dropped.
+    ///
+    /// [`crate::lvm::mem::Parked`] rather than the borrowed guard, because
+    /// the one caller that needs it is [`Back`], which holds this machine
+    /// mutably and so cannot also hold a guard borrowing its memory.
+    fn park(&self) -> Parked {
+        self.mem.park(&Live(self))
+    }
+
+    /// Runs a Cove callable from outside the dispatch loop, which is what a
+    /// host callback needs and the only thing that does.
+    ///
+    /// # The convention
+    ///
+    /// **The call opens its frame at the top of the stack region as it
+    /// stands, and leaves it exactly as it found it.** The callee's frame
+    /// begins where the deepest live one ends, which is what
+    /// [`Memory::push_frame`] answers and what an [`Inst::Call`] would have
+    /// got; the arguments are written into it as the parameters' words, the
+    /// captures follow them out of the environment object, and the frame is
+    /// popped by the return that answers. The frame stack grows above the
+    /// frame the interrupted instruction belongs to and comes back down to
+    /// it, which is what `floor` means in [`Machine::dispatch`].
+    ///
+    /// That the outer frames are *left* rather than unwound is the whole
+    /// reason this is another turn of the loop rather than a jump: the
+    /// instruction that made the host call has not finished, and its frame's
+    /// slots are live — including, in every case that matters, the slot
+    /// holding the closure that is being called.
+    ///
+    /// # What a failure leaves
+    ///
+    /// Nothing. A host may catch what a callback failed with and carry on —
+    /// `clock.timeout` is written to — so the frames, the stack region, the
+    /// task scopes the callback opened and the tasks it spawned are all put
+    /// back the way they were found. The outer run has no unwinding because
+    /// an abandoned frame's slots stay on the stack until the run ends, which
+    /// is sound only because the run is ending, and that reasoning does not
+    /// reach here.
+    ///
+    /// # What is still accounted
+    ///
+    /// Everything the loop accounts, because it is the loop. Fuel is charged
+    /// every [`SAFEPOINT_STRIDE`] instructions, a frame that would leave this
+    /// task's stack segment is a stack overflow, and every safepoint the
+    /// callee reaches asks what a safepoint asks — including
+    /// [`Machine::stops`], which [`Reentry::call_until`] pushes onto.
+    ///
+    /// [`Reentry::call_until`]: crate::host::Reentry::call_until
+    fn call_from_host<'s>(
+        &mut self,
+        callee: &Value,
+        args: Vec<Value>,
+        budget: &Meter,
+        span: Span,
+        threads: &'s Scope<'s, 'a>,
+        running: &mut Vec<Option<ScopedJoinHandle<'s, Outcome>>>,
+    ) -> Result<Value, RuntimeError> {
+        // Raised for as long as the callback runs and dropped when it
+        // returns, so a host that runs its callback twice pays for one level
+        // twice over rather than for two levels at once. What is bounded is
+        // how many are stacked on this thread, because that is what is
+        // spending the native stack.
+        if self.reentry_depth >= crate::interp::MAX_REENTRY_DEPTH {
+            return Err(crate::interp::reentry_too_deep(span));
+        }
+        let (target_id, object) =
+            boundary::callback_target(self, callee).map_err(|error| error.at(span))?;
+        let program = self.program;
+        let target = program.function(target_id);
+        if args.len() != target.params.len() {
+            return Err(wrong_arity(target.qualified(), target.params.len(), args.len()).at(span));
+        }
+
+        let floor = self.frames.len();
+        let children = self.children.len();
+        let scopes = self.scopes.len();
+        let base = self
+            .mem
+            .push_frame(target.frame_size())
+            .map_err(|Overflow| self.too_deep(span))?;
+        // The frame is on the stack *before* an argument is converted, and
+        // that is what roots the ones already converted: a `Repr::Ref` slot
+        // of a live frame is a root, `boundary::from_value` allocates, and a
+        // value built into a Rust vector first would have been named by
+        // nothing the collector walks while the next one was built.
+        self.frames.push(Frame {
+            function: target_id,
+            base,
+            pc: 0,
+            dst: 0,
+        });
+        let answer = self.enter_callback(
+            object, target_id, args, base, floor, budget, threads, running, span,
+        );
+        match answer {
+            Ok(words) => {
+                // Nothing between here and the conversion allocates, so the
+                // objects these words name are still the ones they named when
+                // the frame that produced them was popped — the same reason
+                // `Machine::run` may carry an answer out of a frame.
+                let returns = self.program.function(target_id).returns;
+                boundary::to_value(self, returns, &words).map_err(|error| error.at(span))
+            }
+            Err(error) => {
+                self.unwind_to(floor, children, scopes, base, running);
+                Err(error)
+            }
+        }
+    }
+
+    /// The callback's frame, filled and run. See [`Machine::call_from_host`].
+    #[allow(clippy::too_many_arguments)]
+    fn enter_callback<'s>(
+        &mut self,
+        object: u64,
+        target_id: FunctionId,
+        args: Vec<Value>,
+        base: u64,
+        floor: usize,
+        budget: &Meter,
+        threads: &'s Scope<'s, 'a>,
+        running: &mut Vec<Option<ScopedJoinHandle<'s, Outcome>>>,
+        span: Span,
+    ) -> Result<Vec<u64>, RuntimeError> {
+        let program = self.program;
+        let mut at = 0;
+        for (value, layout) in args.iter().zip(&program.function(target_id).params) {
+            let layout = *layout;
+            let words = boundary::from_value(self, layout, value).map_err(|e| e.at(span))?;
+            self.mem.write_words(base + at as u64, &words);
+            at += self.width(layout);
+        }
+        // The captures, out of the environment object and into the slots
+        // `Function::captures` names — the same read `Inst::CallClosure`
+        // makes, of the same object, at the same widths.
+        let mut held = 1;
+        for capture in &program.function(target_id).captures {
+            let width = self.width(capture.layout);
+            self.mem.copy_words(
+                base + capture.slot as u64,
+                self.mem.payload_addr(object, held),
+                width,
+            );
+            held += width;
+        }
+        self.reentry_depth += 1;
+        let answer = self.dispatch(budget, threads, running, floor);
+        self.reentry_depth -= 1;
+        answer
+    }
+
+    /// Puts the frames, the stack region, the scopes and the tasks back the
+    /// way a failed callback found them.
+    ///
+    /// The children first and while their frames still stand: cancelling and
+    /// joining blocks, a task that blocks publishes its roots, and roots that
+    /// named frames this had already truncated would be addresses of words
+    /// nothing owns.
+    fn unwind_to(
+        &mut self,
+        frames: usize,
+        children: usize,
+        scopes: usize,
+        base: u64,
+        running: &mut [Option<ScopedJoinHandle<'_, Outcome>>],
+    ) {
+        for child in &self.children[children..] {
+            if matches!(child.state, ChildState::Running) {
+                child.cancellation.cancel();
+            }
+        }
+        for at in children..self.children.len() {
+            self.join(at, running);
+        }
+        // A scope the callback opened and did not leave is closed here rather
+        // than at the end of the run, for the reason its children were joined
+        // here: its threads would otherwise outlive every frame that could
+        // name them.
+        for scope in &mut self.scopes[scopes..] {
+            scope.closed = true;
+        }
+        self.frames.truncate(frames);
+        self.mem.pop_frame(base);
+    }
+
+    /// Whether `rooted` names an object of this run's memory.
+    pub(crate) fn holds(&self, rooted: &Rooted) -> bool {
+        self.mem.is_mine(rooted)
+    }
+
+    /// Makes the object at `addr` a root for as long as the answer lives.
+    ///
+    /// The one thing a `Value` crossing out of here can need that a frame
+    /// cannot give it. See [`crate::lvm::mem::Rooted`].
+    pub(crate) fn pin(&self, addr: u64) -> Rooted {
+        self.mem.pin(addr)
+    }
+
     /// A new object of `layout` with header length `len`, collecting once if
     /// the first attempt does not fit.
     /// A new object of `layout` with header length `len`, collecting once if
@@ -2367,54 +2590,156 @@ impl<'a> Machine<'a> {
 
 /// The way back a host is offered while the linear-memory backend runs.
 ///
-/// A host that was handed a Cove callback calls it through this. This machine
-/// runs closures — [`Inst::CallClosure`] pushes a frame like any other call —
-/// but it hands none of them out: a `Shape::Closure` object is refused on its
-/// way across [`boundary::to_value`], because a public `Value` has no way to
-/// carry a body this backend could be asked to run. So a host is never holding
-/// one of this machine's closures, and the call arm says what is missing
-/// rather than pretending. What the other three answers are worth is not
-/// conditional on that: a host that waits reads them to decide whether to keep
-/// waiting, and answering "no limit, not cancelled" from a run that has both
-/// would be worse than answering nothing.
-struct Back<'m> {
+/// A host that was handed a Cove callback calls it through this. The callback
+/// is an ordinary frame of this machine — [`Machine::call_from_host`] pushes
+/// it exactly as [`Inst::CallClosure`] would — and the difference from a call
+/// the loop made is only in who is waiting for it: a Rust frame rather than
+/// an instruction. So it holds the machine mutably, which is what makes the
+/// rest of [`Reentry`]'s contract true rather than merely stated. There can
+/// be one of these per host call and it cannot be moved to another thread, so
+/// a host cannot use its way back concurrently; it borrows the machine, so a
+/// host cannot keep it; and every level of nesting is another one further
+/// down the same native stack, which is what
+/// [`crate::interp::MAX_REENTRY_DEPTH`] counts.
+///
+/// # What re-entry costs here, and why the bound is the oracle's
+///
+/// `docs/LINEAR_VM.md` says **a builtin never calls back into Cove**, and the
+/// reason it gives is the property the loop exists to have: how deep a Cove
+/// program may nest is decided by the reserved stack region and not by how
+/// large a Rust frame the interpreter compiled to. A builtin that ran a
+/// closure itself would put a Rust frame under every Cove frame the closure
+/// made, so a `map` over a `map` over a `map` would be three Rust frames deep
+/// before the program did anything — and a builtin has an alternative, which
+/// is to be lowered to a loop in the IR.
+///
+/// A host callback is the other case, and it differs in both halves. The host
+/// is *already* a Rust frame: it was reached through
+/// `HostRegistry::dispatch`, which the machine called, and nothing about
+/// lowering anything would remove it. And the reentry is the language's own —
+/// ADR 0013 gives the host the resource and the `Reentry` contract gives it
+/// the callback — so there is no loop to lower it to. `clock.timeout(500ms)
+/// { .. }` cannot become a `CallClosure` in the caller's body, because what
+/// decides whether the body runs at all, and what stops it, is on the host's
+/// side.
+///
+/// So the rule holds where it was aimed and does not reach this. What it
+/// leaves is that one thing is no longer bounded by the stack region: between
+/// the callback's frame and the frame that called the host sit
+/// `HostRegistry::dispatch`, however much native stack the host itself uses,
+/// and one more turn of [`Machine::dispatch`]. That is exactly the situation
+/// [`crate::interp::MAX_REENTRY_DEPTH`] was calibrated for, in the oracle,
+/// where its documentation says the depth limit's promise *"holds for Cove
+/// calling Cove and stops holding exactly where a third party controls the
+/// multiplier"*. The sentence is true of this backend word for word — it is
+/// true of it *more* narrowly, because Cove calling Cove costs no native
+/// stack here at all — so the bound is the same bound and the refusal is the
+/// oracle's own, from [`crate::interp::reentry_too_deep`].
+///
+/// [`Reentry`]: crate::host::Reentry
+struct Back<'m, 's, 'a> {
+    machine: &'m mut Machine<'a>,
     budget: &'m Meter,
-    /// Which task the call is being made by, which is what the boundary
-    /// records it against.
-    task: u64,
-    /// The calling task's own flag, so that a host that waits reads the same
-    /// three answers a safepoint would.
-    cancellation: Option<Cancellation>,
+    /// Where the host call that is running this was written, so a failure
+    /// inside it points at the call rather than at nothing.
+    span: Span,
+    /// The thread scope a `spawn` inside a callback starts its children in.
+    ///
+    /// The *caller's*, not one of this call's own. A callback is a frame of
+    /// this machine and its tasks are this machine's tasks: they go into
+    /// [`Machine::children`] at indices `running` is parallel to, and a scope
+    /// of this call's own would have made those two disagree — a task the
+    /// outer level spawned would be at an index a nested `running` had no
+    /// handle at. One scope per task, which is what [`Machine::drive`] opens,
+    /// is also what bounds every thread of the task to the task.
+    threads: &'s Scope<'s, 'a>,
+    running: &'m mut Vec<Option<ScopedJoinHandle<'s, Outcome>>>,
+    /// The safepoint the calling task stands at while the host runs.
+    ///
+    /// Taken here and dropped for exactly as long as a callback runs. A task
+    /// inside a host call is not running Cove, so the roots it published stay
+    /// true and a collection need not wait for it; a task running a callback
+    /// *is* running Cove, its frames change between two instructions, and a
+    /// snapshot left standing would be telling the collector to trace a frame
+    /// that has moved.
+    parked: Option<Parked>,
 }
 
-impl Reentry for Back<'_> {
-    fn call(&mut self, callee: &Value, _args: Vec<Value>) -> Result<Value, RuntimeError> {
-        Err(RuntimeError::new(format!(
-            "this host call cannot run {}, because the linear-memory backend hands no callback across the boundary",
-            callee.type_name()
-        )))
+impl<'m, 's, 'a> Back<'m, 's, 'a> {
+    /// The way back for one host call, with the calling task parked.
+    fn parked(
+        machine: &'m mut Machine<'a>,
+        budget: &'m Meter,
+        span: Span,
+        threads: &'s Scope<'s, 'a>,
+        running: &'m mut Vec<Option<ScopedJoinHandle<'s, Outcome>>>,
+    ) -> Back<'m, 's, 'a> {
+        let parked = machine.park();
+        Back {
+            machine,
+            budget,
+            span,
+            threads,
+            running,
+            parked: Some(parked),
+        }
     }
 
+    /// Runs `callee`, off the safepoint and back onto it.
+    fn run(&mut self, callee: &Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        drop(self.parked.take());
+        let answer = self.machine.call_from_host(
+            callee,
+            args,
+            self.budget,
+            self.span,
+            self.threads,
+            self.running,
+        );
+        // Whatever the callback did, this task is inside a host call again
+        // and the host may go on to wait, to call again, or to answer.
+        self.parked = Some(self.machine.park());
+        answer
+    }
+}
+
+impl Reentry for Back<'_, '_, '_> {
+    fn call(&mut self, callee: &Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        self.run(callee, args)
+    }
+
+    /// The same call, with `stop` added to what its safepoints stop on.
+    ///
+    /// The flag bounds this call *and everything inside it*, which is why it
+    /// stands on the machine rather than being handed to the frame: a further
+    /// host call the body makes, and any callback that host runs in turn, are
+    /// reached through the same [`Machine::stops`].
     fn call_until(
         &mut self,
         callee: &Value,
         args: Vec<Value>,
-        _stop: &Cancellation,
+        stop: &Cancellation,
     ) -> Result<Value, RuntimeError> {
-        self.call(callee, args)
+        self.machine.stops.push(stop.clone());
+        let result = self.run(callee, args);
+        self.machine.stops.pop();
+        result
     }
 
     /// Everything a safepoint would stop on, asked from outside the loop.
     ///
     /// A host that is waiting is standing where a safepoint would be, so it
-    /// is owed the same answer one gets: the calling task's own flag and the
-    /// run's cancellation. `Callback::is_cancelled` in the oracle asks a
-    /// third — the flags of the bounded calls the thread is inside — and this
-    /// machine hands no callback across the boundary, so it is inside none.
+    /// is owed the same answer one gets: the calling task's own flag, the
+    /// flags of the bounded calls this thread is inside, and the run's
+    /// cancellation. The middle one is what tells a host blocked inside a
+    /// `clock.timeout` body that something is wrong, and it could not be
+    /// answered until a callback could run here at all.
     fn is_cancelled(&self) -> bool {
-        self.cancellation
+        self.machine
+            .cancellation
             .as_ref()
             .is_some_and(Cancellation::is_cancelled)
+            || self.machine.stops.iter().any(Cancellation::is_cancelled)
             || self.budget.is_cancelled()
     }
 
@@ -2428,7 +2753,7 @@ impl Reentry for Back<'_> {
     /// The task whose stack this call is standing on, which is the task the
     /// boundary records the call against.
     fn task(&self) -> u64 {
-        self.task
+        self.machine.task
     }
 }
 
@@ -5794,5 +6119,542 @@ pub(crate) mod tests {
         // Zero would be the location as the frame was zeroed, which is what
         // a `ScopeLeave` that had not noticed would leave there.
         assert_eq!(run(&program, main, &[]).unwrap() as i64, 9);
+    }
+
+    // ---- a host runs a Cove callback ------------------------------------
+
+    /// A host that runs the callback it was handed.
+    ///
+    /// Three shapes, which are the three the shipped hosts have: `apply`
+    /// calls once, as `http.Server.handle` does; `twice` calls more than
+    /// once, as `clock.every` does; and `bounded` bounds the body with a flag
+    /// it raises first, as `clock.timeout` does, and turns the stop into its
+    /// own answer rather than passing the error on.
+    struct Runner;
+
+    static RUNNER_OPS: &[cove_schema::OperationSchema] = &[
+        cove_schema::OperationSchema {
+            name: "apply",
+            params: &[cove_schema::HostType::Any],
+            variadic: false,
+            result: cove_schema::HostType::Int,
+            capability: "runner",
+            effect: cove_schema::Effect::Read,
+            cancellable: false,
+            recordable: false,
+            result_is_task_safe: true,
+        },
+        cove_schema::OperationSchema {
+            name: "twice",
+            params: &[cove_schema::HostType::Any],
+            variadic: false,
+            result: cove_schema::HostType::Int,
+            capability: "runner",
+            effect: cove_schema::Effect::Read,
+            cancellable: false,
+            recordable: false,
+            result_is_task_safe: true,
+        },
+        cove_schema::OperationSchema {
+            name: "bounded",
+            params: &[cove_schema::HostType::Any],
+            variadic: false,
+            result: cove_schema::HostType::Int,
+            capability: "runner",
+            effect: cove_schema::Effect::Read,
+            cancellable: true,
+            recordable: false,
+            result_is_task_safe: true,
+        },
+        cove_schema::OperationSchema {
+            name: "caught",
+            params: &[cove_schema::HostType::Any],
+            variadic: false,
+            result: cove_schema::HostType::Int,
+            capability: "runner",
+            effect: cove_schema::Effect::Read,
+            cancellable: false,
+            recordable: false,
+            result_is_task_safe: true,
+        },
+    ];
+
+    impl crate::host::HostApi for Runner {
+        fn module_schema(&self) -> cove_schema::ModuleSchema {
+            cove_schema::ModuleSchema {
+                name: "runner",
+                capability: "runner",
+                operations: RUNNER_OPS,
+                types: &[],
+                resources: &[],
+            }
+        }
+
+        fn call_with(
+            &self,
+            op: &str,
+            args: Vec<Value>,
+            back: &mut dyn Reentry,
+        ) -> Result<Value, RuntimeError> {
+            match op {
+                "apply" => back.call(&args[0], Vec::new()),
+                "twice" => {
+                    let one = back.call(&args[0], Vec::new())?.as_int().unwrap_or(0);
+                    let other = back.call(&args[0], Vec::new())?.as_int().unwrap_or(0);
+                    Ok(Value::int(one + other))
+                }
+                // The `clock.timeout` shape: the flag is raised before the
+                // body runs, so the body stops at its first safepoint and the
+                // host answers its own bound rather than passing the error on.
+                "bounded" => {
+                    let stop = Cancellation::new();
+                    stop.cancel();
+                    match back.call_until(&args[0], Vec::new(), &stop) {
+                        Ok(_) => Ok(Value::int(0)),
+                        Err(_) if stop.is_cancelled() => Ok(Value::int(-1)),
+                        Err(error) => Err(error),
+                    }
+                }
+                // A host that catches what a callback failed with and carries
+                // on, which is what makes restoring the frames this call
+                // grew a requirement rather than a tidiness.
+                "caught" => match back.call(&args[0], Vec::new()) {
+                    Ok(value) => Ok(value),
+                    Err(_) => Ok(Value::int(-2)),
+                },
+                other => Err(RuntimeError::new(format!("no `{other}` here"))),
+            }
+        }
+
+        fn call(&self, op: &str, _args: Vec<Value>) -> Result<Value, RuntimeError> {
+            Err(RuntimeError::new(format!("`{op}` needs a way back")))
+        }
+    }
+
+    fn running() -> crate::host::HostRegistry {
+        let mut hosts = crate::host::HostRegistry::new(crate::host::Grants::new(["runner"]));
+        hosts.register(Box::new(Runner));
+        hosts
+    }
+
+    /// A program whose entry hands `runner.<op>` a closure over `depth`.
+    ///
+    /// The lambda is the recursion the reentry bound is about:
+    ///
+    /// ~~~text
+    /// fn step() -> Int {          // captures d
+    ///   if d == 0 { return 0 }
+    ///   runner.apply(fn() { ... d - 1 ... }) + 1
+    /// }
+    /// ~~~
+    ///
+    /// So `step` at `d` makes one host call, which runs `step` at `d - 1`,
+    /// and the answer counts the levels — which is what makes a wrong bound
+    /// visible as a wrong number rather than only as a missing error.
+    fn a_reentering_program(op: &str, depth: i64) -> Program {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let reference = build.word("Fn", Repr::Ref);
+        build.program.host_ops.push(cove_lir::HostOp {
+            resource: None,
+            module: Arc::from("runner"),
+            operation: Arc::from(op),
+            result: int,
+        });
+        let call = cove_lir::HostOpId(build.program.host_ops.len() as u32 - 1);
+        let args = build.args(&[(0, reference)]);
+        let inner = build.args(&[(3, reference)]);
+
+        // The lambda is at the index it will be pushed to, which is what lets
+        // its own body name it: a closure over `step` is what `step` builds.
+        let step_id = FunctionId(build.program.functions.len() as u32);
+        let closure = build.layout(
+            "closure",
+            Shape::Closure {
+                function: step_id,
+                captures: vec![int],
+            },
+        );
+        let step = build.lambda(
+            "step",
+            &[],
+            &[
+                Repr::Int,  // 0: the capture, `d`
+                Repr::Int,  // 1: zero
+                Repr::Bool, // 2: d != 0
+                Repr::Ref,  // 3: the closure over d - 1
+                Repr::Int,  // 4: the callee's id
+                Repr::Int,  // 5: d - 1
+                Repr::Int,  // 6: the answer
+                Repr::Int,  // 7: one
+            ],
+            int,
+            &[int],
+            vec![
+                Inst::Int { dst: 1, value: 0 },
+                Inst::Cmp {
+                    on: Compare::Int,
+                    op: CmpOp::Ne,
+                    dst: 2,
+                    a: 0,
+                    b: 1,
+                },
+                Inst::BranchFalse { cond: 2, to: 11 },
+                Inst::Alloc {
+                    dst: 3,
+                    layout: closure,
+                    len: Len::Fixed,
+                },
+                Inst::Int {
+                    dst: 4,
+                    value: step_id.0 as i64,
+                },
+                Inst::StoreField {
+                    obj: 3,
+                    at: 0,
+                    src: 4,
+                    layout: int,
+                },
+                Inst::Int { dst: 7, value: 1 },
+                Inst::Arith {
+                    num: Num::Int,
+                    op: ArithOp::Sub,
+                    dst: 5,
+                    a: 0,
+                    b: 7,
+                },
+                Inst::StoreField {
+                    obj: 3,
+                    at: 1,
+                    src: 5,
+                    layout: int,
+                },
+                Inst::CallHost {
+                    dst: 6,
+                    op: call,
+                    args: inner,
+                },
+                Inst::Arith {
+                    num: Num::Int,
+                    op: ArithOp::Add,
+                    dst: 6,
+                    a: 6,
+                    b: 7,
+                },
+                // The frame is zeroed, so the `d == 0` arm answers the zero
+                // that is already standing there.
+                Inst::Return { src: 6 },
+            ],
+        );
+        assert_eq!(step, step_id, "the lambda is where its own body says");
+
+        build.function(
+            "main",
+            &[],
+            &[Repr::Ref, Repr::Int, Repr::Int, Repr::Int],
+            int,
+            vec![
+                Inst::Alloc {
+                    dst: 0,
+                    layout: closure,
+                    len: Len::Fixed,
+                },
+                Inst::Int {
+                    dst: 1,
+                    value: step_id.0 as i64,
+                },
+                Inst::StoreField {
+                    obj: 0,
+                    at: 0,
+                    src: 1,
+                    layout: int,
+                },
+                Inst::Int {
+                    dst: 2,
+                    value: depth,
+                },
+                Inst::StoreField {
+                    obj: 0,
+                    at: 1,
+                    src: 2,
+                    layout: int,
+                },
+                Inst::CallHost {
+                    dst: 3,
+                    op: call,
+                    args,
+                },
+                Inst::Return { src: 3 },
+            ],
+        );
+        build.done()
+    }
+
+    /// The entry of [`a_reentering_program`], run.
+    fn reentering(op: &str, depth: i64) -> Result<i64, RuntimeError> {
+        let program = a_reentering_program(op, depth);
+        let entry = program.functions.len() as u32 - 1;
+        let hosts = running();
+        let mut machine = Machine::with_hosts(&program, 1 << 14, Some(&hosts));
+        machine
+            .run(FunctionId(entry), &[], &budget())
+            .map(|words| words[0] as i64)
+    }
+
+    /// A closure reaches a host, and the host runs it.
+    ///
+    /// The whole of what was missing. The boundary refused to materialise one
+    /// and `Back::call` refused on the other side, so a program that wrote
+    /// `clock.timeout(500ms) { .. }` did not lower at all.
+    #[test]
+    fn a_host_runs_the_callback_it_was_handed() {
+        assert_eq!(reentering("apply", 1).unwrap(), 1);
+    }
+
+    /// A host may call the callback as many times as its operation means, and
+    /// each one is a call the run pays for in full.
+    #[test]
+    fn a_host_may_call_its_callback_more_than_once() {
+        // Each round answers 1, so a host that ran it twice answers 2 — and
+        // one that reused a frame instead of opening a second would not.
+        assert_eq!(reentering("twice", 1).unwrap(), 2);
+    }
+
+    /// A callback that fails leaves the machine exactly as it found it.
+    ///
+    /// `clock.timeout` catches what the body failed with and answers its own
+    /// bound, so the frames the callback grew, the words its frames occupied
+    /// and the scopes it opened must all be back where they were — the outer
+    /// run has no unwinding, and the reasoning that makes that sound (the run
+    /// is ending) does not reach a host that carries on.
+    #[test]
+    fn a_failed_callback_leaves_the_frames_it_grew() {
+        // The body divides by zero at the first level and the host catches
+        // it; the entry then returns through frames that have to be intact.
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let reference = build.word("Fn", Repr::Ref);
+        build.program.host_ops.push(cove_lir::HostOp {
+            resource: None,
+            module: Arc::from("runner"),
+            operation: Arc::from("caught"),
+            result: int,
+        });
+        let op = cove_lir::HostOpId(0);
+        let args = build.args(&[(0, reference)]);
+        let step_id = FunctionId(build.program.functions.len() as u32);
+        let closure = build.layout(
+            "closure",
+            Shape::Closure {
+                function: step_id,
+                captures: vec![],
+            },
+        );
+        let step = build.lambda(
+            "step",
+            &[],
+            &[Repr::Int, Repr::Int, Repr::Int],
+            int,
+            &[],
+            vec![
+                Inst::Int { dst: 0, value: 1 },
+                Inst::Int { dst: 1, value: 0 },
+                Inst::Arith {
+                    num: Num::Int,
+                    op: ArithOp::Div,
+                    dst: 2,
+                    a: 0,
+                    b: 1,
+                },
+                Inst::Return { src: 2 },
+            ],
+        );
+        assert_eq!(step, step_id);
+        let main = build.function(
+            "main",
+            &[],
+            &[Repr::Ref, Repr::Int, Repr::Int],
+            int,
+            vec![
+                Inst::Alloc {
+                    dst: 0,
+                    layout: closure,
+                    len: Len::Fixed,
+                },
+                Inst::Int {
+                    dst: 1,
+                    value: step_id.0 as i64,
+                },
+                Inst::StoreField {
+                    obj: 0,
+                    at: 0,
+                    src: 1,
+                    layout: int,
+                },
+                Inst::CallHost { dst: 2, op, args },
+                Inst::Return { src: 2 },
+            ],
+        );
+        let program = build.done();
+        let hosts = running();
+        let mut machine = Machine::with_hosts(&program, 1 << 13, Some(&hosts));
+        let before = machine.mem.stack_words();
+        assert_eq!(
+            machine.run(main, &[], &budget()).unwrap(),
+            vec![-2i64 as u64]
+        );
+        assert_eq!(
+            machine.mem.stack_words(),
+            before,
+            "the callback's frame went back where it came from"
+        );
+        assert!(machine.frames.is_empty());
+    }
+
+    /// A bounded call's flag stops the body at its next safepoint.
+    ///
+    /// `Reentry::call_until` says `stop` *"bounds this call and everything
+    /// inside it"*, and until a callback could run here at all there was
+    /// nothing for it to bound: `Machine::stops` was `&[]` at every safepoint
+    /// and at the boundary. The body here is a loop long enough to reach a
+    /// safepoint, and what stops it is the oracle's own `stopped_here`.
+    #[test]
+    fn a_bounded_callback_stops_at_a_safepoint() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let reference = build.word("Fn", Repr::Ref);
+        build.program.host_ops.push(cove_lir::HostOp {
+            resource: None,
+            module: Arc::from("runner"),
+            operation: Arc::from("bounded"),
+            result: int,
+        });
+        let op = cove_lir::HostOpId(0);
+        let args = build.args(&[(0, reference)]);
+        let step_id = FunctionId(build.program.functions.len() as u32);
+        let closure = build.layout(
+            "closure",
+            Shape::Closure {
+                function: step_id,
+                captures: vec![],
+            },
+        );
+        // `var i = 0; while i < 100000 { i += 1 }; i`
+        let step = build.lambda(
+            "step",
+            &[],
+            &[Repr::Int, Repr::Int, Repr::Bool, Repr::Int],
+            int,
+            &[],
+            vec![
+                Inst::Int { dst: 0, value: 0 },
+                Inst::Int {
+                    dst: 1,
+                    value: 100_000,
+                },
+                Inst::Int { dst: 3, value: 1 },
+                Inst::Cmp {
+                    on: Compare::Int,
+                    op: CmpOp::Lt,
+                    dst: 2,
+                    a: 0,
+                    b: 1,
+                },
+                Inst::BranchFalse { cond: 2, to: 6 },
+                Inst::Arith {
+                    num: Num::Int,
+                    op: ArithOp::Add,
+                    dst: 0,
+                    a: 0,
+                    b: 3,
+                },
+                Inst::Jump { to: 3 },
+                Inst::Return { src: 0 },
+            ],
+        );
+        assert_eq!(step, step_id);
+        let main = build.function(
+            "main",
+            &[],
+            &[Repr::Ref, Repr::Int, Repr::Int],
+            int,
+            vec![
+                Inst::Alloc {
+                    dst: 0,
+                    layout: closure,
+                    len: Len::Fixed,
+                },
+                Inst::Int {
+                    dst: 1,
+                    value: step_id.0 as i64,
+                },
+                Inst::StoreField {
+                    obj: 0,
+                    at: 0,
+                    src: 1,
+                    layout: int,
+                },
+                Inst::CallHost { dst: 2, op, args },
+                Inst::Return { src: 2 },
+            ],
+        );
+        let program = build.done();
+        let hosts = running();
+        let mut machine = Machine::with_hosts(&program, 1 << 13, Some(&hosts));
+        // The host turned the stop into its own answer, which it could only
+        // do because the body stopped.
+        assert_eq!(
+            machine.run(main, &[], &budget()).unwrap(),
+            vec![-1i64 as u64]
+        );
+        // And the flag went with the call that raised it.
+        assert!(machine.stops.is_empty());
+    }
+
+    // ---- how deep a reentry may nest ------------------------------------
+
+    /// Host → Cove → Host → Cove, as deep as the bound allows.
+    ///
+    /// This is the case that decides what `docs/LINEAR_VM.md`'s *"a builtin
+    /// never calls back into Cove"* means here. Cove calling Cove adds no
+    /// native frame in this backend, so the reserved stack region is the
+    /// whole of the depth question — but a *host* callback is not Cove
+    /// calling Cove: the host is already a Rust frame, and running its
+    /// callback puts `HostRegistry::dispatch`, the host's own frames, and
+    /// another turn of `Machine::dispatch` under every Cove frame the
+    /// callback makes. So the bound is the oracle's `MAX_REENTRY_DEPTH`,
+    /// which exists for exactly that.
+    #[test]
+    fn a_reentry_may_nest_up_to_the_bound() {
+        // One host call per level, `MAX_REENTRY_DEPTH` of them stacked at the
+        // deepest point, and the answer counts them.
+        let depth = crate::interp::MAX_REENTRY_DEPTH as i64 - 1;
+        assert_eq!(reentering("apply", depth).unwrap(), depth);
+    }
+
+    /// And no deeper: the run stops, rather than the process.
+    #[test]
+    fn a_reentry_past_the_bound_stops_the_run_rather_than_the_process() {
+        let depth = crate::interp::MAX_REENTRY_DEPTH as i64;
+        let error = reentering("apply", depth).unwrap_err();
+        assert_eq!(
+            error.message,
+            format!(
+                "reentry depth limit of {} reached while a host ran a Cove callback",
+                crate::interp::MAX_REENTRY_DEPTH
+            ),
+            "the refusal is the oracle's own, word for word"
+        );
+    }
+
+    /// A host that runs its callback twice pays for one level twice over
+    /// rather than for two levels at once.
+    #[test]
+    fn calling_a_callback_twice_is_one_level_twice() {
+        // Deep enough that two levels at once would be past the bound, and
+        // `twice` at every level, so a count that did not come back down
+        // would refuse long before this answers.
+        let depth = crate::interp::MAX_REENTRY_DEPTH as i64 - 1;
+        assert!(reentering("twice", depth).is_ok());
     }
 }

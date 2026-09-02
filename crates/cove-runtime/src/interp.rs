@@ -233,7 +233,7 @@ pub fn on_cove_stack<T: Send>(body: impl FnOnce() -> T + Send) -> std::io::Resul
 /// before it reenters can still overflow at the first level, and no counter
 /// here can know that; what this removes is the case where a *host* decides
 /// how many times the multiplier applies.
-const MAX_REENTRY_DEPTH: usize = 8;
+pub(crate) const MAX_REENTRY_DEPTH: usize = 8;
 
 /// Fuel charged at every safepoint: a loop back edge, a function call, or an
 /// `await`.
@@ -2460,7 +2460,7 @@ impl<'a> Interpreter<'a> {
         // shape `Vm::run_locked` has for the reverse case.
         let wants_alias = match &closure.body {
             ClosureBody::Tree { params, .. } => params.first().is_some_and(|param| param.is_var),
-            ClosureBody::Lowered(_) => false,
+            ClosureBody::Lowered(_) | ClosureBody::Linear(_) => false,
         };
         Ok(cell.lock(span, |value| {
             let place = Place::binding(value);
@@ -4191,12 +4191,7 @@ impl Callback<'_, '_> {
         // bounded is how many are stacked on this thread, because that is
         // what is spending the native stack.
         if self.interpreter.reentry_depth >= MAX_REENTRY_DEPTH {
-            return Err(RuntimeError::new(format!(
-                "reentry depth limit of {MAX_REENTRY_DEPTH} reached while a host ran a Cove callback"
-            ))
-            .at(span)
-            .with_rule("A host runs a Cove callback on the calling task's own stack, and how deep that may nest is a runtime control.")
-            .with_help("a callback is Cove code and may call a host that is handed work of its own; that nesting is what this bounds"));
+            return Err(reentry_too_deep(span));
         }
         let args: Vec<EvaluatedArg> = args
             .into_iter()
@@ -4337,6 +4332,23 @@ pub(crate) fn stopped_here(
         return Err(work_stopped(span));
     }
     Ok(())
+}
+
+/// A host tried to run a Cove callback more levels deep than the runtime
+/// allows.
+///
+/// Here rather than beside either caller because both backends raise it and
+/// it is one fact about the run: `MAX_REENTRY_DEPTH` bounds how many host
+/// calls running a callback may be stacked on one thread, and its
+/// documentation is where the reasoning is. A backend that wrote these words
+/// out for itself would be a second copy of a sentence that has to match.
+pub(crate) fn reentry_too_deep(span: Span) -> RuntimeError {
+    RuntimeError::new(format!(
+        "reentry depth limit of {MAX_REENTRY_DEPTH} reached while a host ran a Cove callback"
+    ))
+    .at(span)
+    .with_rule("A host runs a Cove callback on the calling task's own stack, and how deep that may nest is a runtime control.")
+    .with_help("a callback is Cove code and may call a host that is handed work of its own; that nesting is what this bounds")
 }
 
 /// Work a host call bounded, stopped at a safepoint because the bound was

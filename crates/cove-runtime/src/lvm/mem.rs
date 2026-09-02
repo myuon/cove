@@ -465,6 +465,31 @@ pub(crate) struct Space {
     /// a change no caller sees.
     waiting: Mutex<()>,
     woken: Condvar,
+    /// The objects a public [`crate::value::Value`] outside this run's frames
+    /// names, one entry per holder.
+    ///
+    /// A frame is a root because a static map says which of its slots are
+    /// references, and that is the whole of what keeps an object alive — so a
+    /// closure a host was handed would be swept the moment the frame that
+    /// built it cleared its slot, which is the instruction after the call
+    /// that handed it over. The host is allowed to keep it: the [`Reentry`]
+    /// contract says a host that wants work done later *"keeps the callback —
+    /// a `Value` is an ordinary owned value"*, and `http.Server.handle` is
+    /// written that way.
+    ///
+    /// So a `Value` that names an object says so here for as long as it
+    /// exists, and [`Space::collect`] reads this beside the roots the tasks
+    /// published. It is a multiset rather than a set because a `Value` is
+    /// cloned like any other: two holders of one object are two entries, and
+    /// the object stops being a root when the second one goes.
+    ///
+    /// It is not a second value store, by the test ADR 0034 applies: an entry
+    /// is an address of an object in the run's one heap, and nothing that
+    /// wanted to dodge a heap representation could be put in it. It is a root
+    /// provider, exactly as the scheduler table is.
+    ///
+    /// [`Reentry`]: crate::host::Reentry
+    pinned: Mutex<Vec<u64>>,
 }
 
 impl Space {
@@ -496,6 +521,30 @@ impl Space {
             turn: Condvar::new(),
             waiting: Mutex::new(()),
             woken: Condvar::new(),
+            pinned: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Takes the pinned table's lock, recovering from a poisoned one for the
+    /// reason [`Space::allocator`] gives.
+    fn pinned(&self) -> MutexGuard<'_, Vec<u64>> {
+        self.pinned.lock().unwrap_or_else(|held| held.into_inner())
+    }
+
+    /// Makes `addr` a root for as long as the [`Rooted`] this is taken for
+    /// lives.
+    fn pin(&self, addr: u64) {
+        self.pinned().push(addr);
+    }
+
+    /// Gives back one holder's claim on `addr`.
+    ///
+    /// One occurrence, not every one: the table is a multiset, so a second
+    /// holder of the same object keeps it alive after the first has gone.
+    fn unpin(&self, addr: u64) {
+        let mut held = self.pinned();
+        if let Some(at) = held.iter().rposition(|kept| *kept == addr) {
+            held.swap_remove(at);
         }
     }
 
@@ -808,6 +857,11 @@ impl Space {
                 roots.extend_from_slice(published);
             }
         }
+        // And what is named from outside every frame: an object a public
+        // `Value` a host is holding points at. A task's roots are its frames,
+        // and a host's callback is deliberately not in one — see
+        // [`Space::pinned`].
+        roots.extend_from_slice(&self.pinned());
 
         let done = {
             let mut alloc = self.allocator();
@@ -1067,10 +1121,33 @@ impl Space {
     /// collector. A blocked task is not running, so its frames do not change
     /// and the snapshot it leaves stays true for as long as it is blocked.
     fn blocking<'s>(&'s self, me: u32, roots: &dyn Roots) -> Blocking<'s> {
+        self.arrive(me, roots);
+        Blocking { space: self, me }
+    }
+
+    /// Publishes `roots` for `me` and says so, without waiting for anything.
+    ///
+    /// The half of a park that both guards share. [`Blocking`] borrows the
+    /// space and [`Parked`] owns a handle on it, and neither difference is
+    /// about what arriving and leaving *are*.
+    fn arrive(&self, me: u32, roots: &dyn Roots) {
         let mut stw = self.world();
         stw.parties[me as usize].at = Some(gather(roots));
         self.turn.notify_all();
-        Blocking { space: self, me }
+    }
+
+    /// Leaves the safepoint, waiting out a collection that has already begun.
+    ///
+    /// Waiting is what makes the published snapshot honest: a task that
+    /// resumed while the collector was still reading its roots would be
+    /// changing the answer to a question already asked.
+    fn depart(&self, me: u32) {
+        let mut stw = self.world();
+        while stw.collecting {
+            stw = self.turn.wait(stw).unwrap_or_else(|held| held.into_inner());
+        }
+        stw.parties[me as usize].at = None;
+        self.turn.notify_all();
     }
 
     /// Blocks until [`Space::wake`] names `addr` and the word is no longer
@@ -1140,22 +1217,79 @@ pub(crate) struct Blocking<'s> {
 }
 
 impl Drop for Blocking<'_> {
-    /// Leaves the safepoint, waiting out a collection that has already begun.
-    ///
-    /// Waiting is what makes the published snapshot honest: a task that
-    /// resumed while the collector was still reading its roots would be
-    /// changing the answer to a question already asked.
     fn drop(&mut self) {
-        let mut stw = self.space.world();
-        while stw.collecting {
-            stw = self
-                .space
-                .turn
-                .wait(stw)
-                .unwrap_or_else(|held| held.into_inner());
+        self.space.depart(self.me);
+    }
+}
+
+/// The same park, held by something that cannot borrow the memory.
+///
+/// [`Blocking`] borrows the [`Space`], which is what a caller with the
+/// [`Memory`] in scope wants and what a caller *inside* a host call cannot
+/// have: the way back a host is handed holds the machine mutably, so a guard
+/// borrowing the same machine's memory could not exist beside it. This owns a
+/// handle on the space instead, which is what an `Arc` is for, and does
+/// exactly what the borrowed one does.
+///
+/// A callback drops it and takes another, in that order. A task running a
+/// host's callback is running Cove again — its frames change between two
+/// instructions — so the snapshot it published on the way into the host call
+/// stops being true for exactly as long as the callback runs, and a task that
+/// left it standing would be telling the collector to trace a frame that has
+/// moved.
+pub(crate) struct Parked {
+    space: Arc<Space>,
+    me: u32,
+}
+
+impl Drop for Parked {
+    fn drop(&mut self) {
+        self.space.depart(self.me);
+    }
+}
+
+/// An object a public [`crate::value::Value`] names, kept a root for as long
+/// as that value lives.
+///
+/// See [`Space::pinned`] for why a frame cannot answer this. Cloning takes a
+/// second claim rather than sharing one, so a `Value` that was cloned and a
+/// `Value` that was dropped each account for themselves.
+pub(crate) struct Rooted {
+    space: Arc<Space>,
+    addr: u64,
+}
+
+impl Rooted {
+    /// The object's address, which is what the machine calls it.
+    pub(crate) fn addr(&self) -> u64 {
+        self.addr
+    }
+}
+
+impl Clone for Rooted {
+    fn clone(&self) -> Rooted {
+        self.space.pin(self.addr);
+        Rooted {
+            space: Arc::clone(&self.space),
+            addr: self.addr,
         }
-        stw.parties[self.me as usize].at = None;
-        self.space.turn.notify_all();
+    }
+}
+
+impl Drop for Rooted {
+    fn drop(&mut self) {
+        self.space.unpin(self.addr);
+    }
+}
+
+/// Prints as the address it is, and not as the run it belongs to.
+///
+/// A [`Space`] has no useful rendering and a whole heap's worth of one, so a
+/// `Debug` that derived through the handle would print the run rather than
+/// the object.
+impl std::fmt::Debug for Rooted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Rooted({})", self.addr)
     }
 }
 
@@ -1412,6 +1546,26 @@ impl Memory {
         }
     }
 
+    /// Writes `words` over the run at `addr`.
+    ///
+    /// The mirror of [`Memory::read_words`] and it has the one caller that
+    /// direction has: a host's answer, or a callback's argument, converted
+    /// out of a `Value` into the words of a value location. A copy that never
+    /// leaves the memory is [`Memory::copy_words`].
+    pub(crate) fn write_words(&mut self, addr: u64, words: &[u64]) {
+        debug_assert!(
+            self.holds(addr, words.len() as u32),
+            "a {}-word write at {addr} stays inside the words that exist",
+            words.len()
+        );
+        if is_stack(addr) {
+            let at = self.stack.at(addr);
+            self.stack.words[at..at + words.len()].copy_from_slice(words);
+        } else {
+            self.space.write_from(addr, words);
+        }
+    }
+
     /// Whether the run of `words` words at `addr` is inside its region.
     ///
     /// A `debug_assert` rather than a check, because what makes it true is
@@ -1610,6 +1764,35 @@ impl Memory {
     /// memory and is written in terms of it.
     pub(crate) fn blocking(&self, roots: &dyn Roots) -> Blocking<'_> {
         self.space.blocking(self.at, roots)
+    }
+
+    /// The same park, in a guard that borrows nothing. See [`Parked`].
+    pub(crate) fn park(&self, roots: &dyn Roots) -> Parked {
+        self.space.arrive(self.at, roots);
+        Parked {
+            space: Arc::clone(&self.space),
+            me: self.at,
+        }
+    }
+
+    /// Makes `addr` a root for as long as the answer lives. See [`Rooted`].
+    pub(crate) fn pin(&self, addr: u64) -> Rooted {
+        self.space.pin(addr);
+        Rooted {
+            space: Arc::clone(&self.space),
+            addr,
+        }
+    }
+
+    /// Whether `rooted` names an object of *this* memory.
+    ///
+    /// A closure built by one run cannot be called by another, and this is
+    /// what says so rather than a convention: an address is a word index into
+    /// one address space, and the same number names a different object in the
+    /// next one. Two runs in one process is an ordinary thing for an embedder
+    /// to do, so the question is asked rather than assumed.
+    pub(crate) fn is_mine(&self, rooted: &Rooted) -> bool {
+        Arc::ptr_eq(&self.space, &rooted.space)
     }
 
     // --- waiting on a word --------------------------------------------------
