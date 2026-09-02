@@ -529,7 +529,7 @@ impl Shapes {
         let id = self.reserve(qualified);
         let mut placed = Vec::with_capacity(declared.fields.len());
         for field in declared.fields {
-            match self.host_field(checked, module, &field.ty) {
+            match self.host_layout(checked, module, &field.ty) {
                 Some(held) => placed.push((Arc::from(field.name), held)),
                 None => {
                     self.building.pop();
@@ -563,24 +563,49 @@ impl Shapes {
             .is_some_and(|schema| schema.resource(name).is_some())
     }
 
-    /// The layout of one field of a host struct.
+    /// The layout of a value a host schema declared, wherever the schema
+    /// declares one: a field of a host struct, or an operation's result.
     ///
-    /// A schema's `Any` is erasure rather than abstention — it is the same
-    /// answer [`Shapes::any`] gives a host operation's result — so it is a
-    /// box carrying its own description. Everything else is a Cove type
-    /// written in the schema's vocabulary, and [`host_ty`] is that
-    /// vocabulary read as this one.
-    fn host_field(
+    /// A schema's `Any` is erasure rather than abstention, so it is a box
+    /// carrying its own description — and it is read from the *schema*
+    /// rather than from the type the checker settled because the two are not
+    /// the same fact. The checker spells a schema's `Any` and a type
+    /// parameter nothing settled with one value, `Unknown(Unconstrained)`;
+    /// the schema still holds them apart, and this is the side of the
+    /// boundary where it can be asked. See [`host_ty`].
+    ///
+    /// The whole declared type rather than its head, because a schema nests
+    /// one: `clock.timeout` declares `Result<Any, Error>`, whose `Ok`
+    /// carries an erased value and whose `Err` does not.
+    pub(super) fn host_layout(
         &mut self,
         checked: &Checked,
         module: &str,
         declared: &HostType,
     ) -> Option<LayoutId> {
-        if matches!(declared, HostType::Any) {
-            return Some(self.any());
-        }
-        let ty = host_ty(declared)?;
+        let ty = host_ty(declared);
         self.of(checked, module, &ty)
+    }
+
+    /// The type a host operation's schema declares its result to be, as the
+    /// schema writes it.
+    ///
+    /// `resource` names the kind a call is addressed to — `files.Writer` —
+    /// and `None` is an operation of the module itself. Both are looked up
+    /// in [`Shapes::schemas`], which is the set this compilation was given
+    /// and so the set the checker resolved the call against.
+    pub(super) fn declared_result(
+        &self,
+        module: &str,
+        resource: Option<&str>,
+        operation: &str,
+    ) -> Option<&'static HostType> {
+        let schema = self.schemas.module(module)?;
+        let found = match resource {
+            Some(kind) => schema.resource(kind)?.operation(operation)?,
+            None => schema.operation(operation)?,
+        };
+        Some(&found.result)
     }
 
     /// The one box an intentionally erased value occupies.
@@ -790,34 +815,49 @@ impl Shapes {
 ///
 /// The same translation `Checker::host_ty` makes, with one difference that
 /// is the whole reason it is written again rather than shared:
-/// [`HostType::Any`] has no [`Ty`] here. The checker answers an
-/// unconstrained unknown for it, and `docs/LINEAR_VM.md` separates an
-/// unknown — the checker declining, which is a compile error — from
-/// erasure, which is a box. So `Any` is answered *before* this is reached,
-/// by [`Shapes::host_field`], and a nested one is `None` rather than a
-/// silent unknown.
+/// [`HostType::Any`] is [`Ty::Dyn`] here and an unconstrained unknown there.
 ///
-/// Nothing in the shipped schemas nests one. When something does, the answer
-/// is to give the erased position a layout at the place it is met, not to
-/// let an unknown through here.
-fn host_ty(declared: &HostType) -> Option<Ty> {
-    let one = |ty: &HostType| host_ty(ty).map(Box::new);
-    Some(match declared {
+/// The checker is not wrong. `Any` in a *parameter* is a promise that every
+/// value is accepted, and an unknown equal to every type is exactly that
+/// promise — [ADR 0016](../../../../docs/adr/0016-four-kinds-of-unknown.md)
+/// says so. What the checker's answer loses is the difference between that
+/// promise and a type parameter nothing settled, because it spells both
+/// `Unknown(Unconstrained)`. A backend cannot recover the difference from
+/// the type; it can only ask the schema, which is what this reads.
+///
+/// [`Ty::Dyn`] rather than a marker of its own, because there is nothing to
+/// distinguish. `docs/LINEAR_VM.md` names one representation for both — "a
+/// value whose type is *intentionally* erased — `dyn Trait`, a Host result a
+/// schema declared `Any` — is one `Ref` word naming a `Boxed` object" — so a
+/// schema's `Any` and a written `dyn` reach [`Shapes::of`] as the same thing
+/// and leave it as the same [`BOXED`]. The name is [`ERASED`], because no
+/// trait was written; nothing reads it, since every `Ty::Dyn` has a layout
+/// and so no diagnostic is ever built from one.
+fn host_ty(declared: &HostType) -> Ty {
+    let one = |ty: &HostType| Box::new(host_ty(ty));
+    match declared {
         HostType::Unit => Ty::Unit,
         HostType::Bool => Ty::Bool,
         HostType::Int => Ty::Int,
         HostType::String => Ty::Str,
         HostType::Duration => Ty::Duration,
         HostType::Error => Ty::Error,
-        HostType::Array(item) => Ty::Array(one(item)?),
-        HostType::Set(item) => Ty::Set(one(item)?),
-        HostType::Map(key, value) => Ty::Map(one(key)?, one(value)?),
-        HostType::Option(some) => Ty::Option(one(some)?),
-        HostType::Result(ok, error) => Ty::Result(one(ok)?, one(error)?),
+        HostType::Array(item) => Ty::Array(one(item)),
+        HostType::Set(item) => Ty::Set(one(item)),
+        HostType::Map(key, value) => Ty::Map(one(key), one(value)),
+        HostType::Option(some) => Ty::Option(one(some)),
+        HostType::Result(ok, error) => Ty::Result(one(ok), one(error)),
         HostType::Named(name) => Ty::Host((*name).into()),
-        HostType::Any => return None,
-    })
+        HostType::Any => Ty::Dyn(Arc::from(ERASED)),
+    }
 }
+
+/// The trait name an erased Host value is written under when there is none.
+///
+/// A schema's `Any` names no trait, and [`Ty::Dyn`] carries one. This is what
+/// stands in it: one string, never rendered, and the same one every time so
+/// that two erased positions read as one type.
+const ERASED: &str = "Any";
 
 /// What a declaration's layout is named by at one instantiation.
 ///

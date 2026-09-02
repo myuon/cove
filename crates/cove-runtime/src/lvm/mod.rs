@@ -103,6 +103,8 @@ pub(crate) mod builtins;
 pub(crate) mod cell;
 #[cfg(test)]
 mod differential;
+#[cfg(test)]
+mod erasure;
 pub(crate) mod exec;
 pub(crate) mod mem;
 

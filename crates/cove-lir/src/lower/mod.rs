@@ -1558,8 +1558,10 @@ impl Body<'_> {
     /// Puts a value in a form a location of `want` can hold.
     ///
     /// There is one conversion in the language and it is erasure, so the
-    /// only difference this bridges is a box: a concrete value on its way
-    /// into a `dyn` location.
+    /// only difference this bridges is a box — and a box has two directions.
+    /// A concrete value on its way into a `dyn` or an `Any` location is
+    /// boxed; an erased value on its way into a location whose type is
+    /// written is opened, which is [`Body::unbox`].
     ///
     /// Anything else is a copy of the wrong width. It is reported as a gap
     /// rather than emitted, because `lower` answers `Err` before the
@@ -1583,6 +1585,9 @@ impl Body<'_> {
             self.release(value, span);
             return dst;
         }
+        if self.is_boxed(value.layout) {
+            return self.unbox(value, want, span);
+        }
         let held = self.pool.shapes.layout(value.layout).name.clone();
         let wanted = self.pool.shapes.layout(want).name.clone();
         self.errors.push(gap::gap(
@@ -1591,6 +1596,33 @@ impl Body<'_> {
         ));
         self.release(value, span);
         self.temp(want)
+    }
+
+    /// Opens an erased value at the layout the place using it names.
+    ///
+    /// Where `want` comes from is the whole of what this depends on, and it
+    /// is never invented here: it is a type the source *wrote* at the place
+    /// the value is being used — a declared parameter, a declared return
+    /// type, a field's declared type — or, for an operator, the layout of
+    /// the operand beside it. A use where nothing says is a gap raised by
+    /// the caller rather than a layout guessed here.
+    ///
+    /// The trap is [`Inst::Unbox`]'s: a box carries the [`LayoutId`] of what
+    /// was put in it, and reading it as something else fails the run rather
+    /// than reinterpreting the words. That is what makes erasure safe
+    /// without the checker having proved anything about it.
+    fn unbox(&mut self, value: Val, want: LayoutId, span: Span) -> Val {
+        let dst = self.temp(want);
+        self.emit(
+            Inst::Unbox {
+                dst: dst.slot,
+                src: value.slot,
+                layout: want,
+            },
+            span,
+        );
+        self.release(value, span);
+        dst
     }
 
     // ---- reading a layout ------------------------------------------------

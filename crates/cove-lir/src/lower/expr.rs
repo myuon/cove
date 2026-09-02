@@ -403,6 +403,15 @@ impl Body<'_> {
     fn unary(&mut self, expr: &Expr, op: UnaryOp, operand: &Expr) -> Val {
         let a = self.expr(operand);
         let dst = self.answer_of(expr);
+        // `!` and `-` answer the type they were given, so the answer's own
+        // layout is what an erased operand is opened to. Nothing is invented:
+        // the destination came from the type the checker settled for the
+        // whole expression, which is a type something written said.
+        let a = if self.is_boxed(a.layout) && !self.is_boxed(dst.layout) {
+            self.unbox(a, dst.layout, expr.span)
+        } else {
+            a
+        };
         let repr = self.frame.repr(dst.slot);
         let inst = match op {
             UnaryOp::Not => Inst::Not {
@@ -441,6 +450,7 @@ impl Body<'_> {
     fn operator(&mut self, expr: &Expr, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Val {
         let a = self.expr(lhs);
         let b = self.expr(rhs);
+        let (a, b) = self.opened(a, b, expr.span);
         let dst = self.answer_of(expr);
         // A value the instruction set cannot compare in one step is compared
         // by walking it, which is a call rather than an instruction.
@@ -510,6 +520,44 @@ impl Body<'_> {
         self.release(b, expr.span);
         self.release(a, expr.span);
         dst
+    }
+
+    /// Opens an erased operand of a binary operator, at the type the other
+    /// operand is.
+    ///
+    /// An operator compares or combines *words*, and an erased value is one
+    /// address to an object that carries its own layout — so a box cannot be
+    /// an operand and something has to say what is inside it. The operand
+    /// beside it is what says. `v % 7` where `v` came back from a schema that
+    /// declared `Any` is a remainder of two `Int`s or it is nothing, and the
+    /// `7` is where that is written down.
+    ///
+    /// Where *both* are erased, nothing says, and this leaves them alone: the
+    /// paths below answer for two references or name the gap, which is the
+    /// right answer to "nothing here states a type" — and inventing one would
+    /// be picking a type for a program that did not.
+    ///
+    /// The trap is [`Inst::Unbox`]'s. A box holding something else fails the
+    /// run at this instruction, where the oracle fails at the operator with
+    /// `` `%` is not defined for `String` and `Int` ``. Both stop, and the
+    /// two do not say the same words: the machine knows which layout it
+    /// found and not which operator asked, and `Inst::Trap` carries a static
+    /// message. It is written down here rather than left to be discovered.
+    fn opened(&mut self, a: Val, b: Val, span: Span) -> (Val, Val) {
+        if a.layout == b.layout {
+            return (a, b);
+        }
+        match (self.is_boxed(a.layout), self.is_boxed(b.layout)) {
+            (true, false) => {
+                let a = self.unbox(a, b.layout, span);
+                (a, b)
+            }
+            (false, true) => {
+                let b = self.unbox(b, a.layout, span);
+                (a, b)
+            }
+            _ => (a, b),
+        }
     }
 
     /// `&&` and `||`, which are a branch over the right-hand side.
@@ -1044,13 +1092,26 @@ impl Body<'_> {
         );
         self.give_back(ok.slot, ok.layout);
 
-        let layout = self.layout_of(expr);
-        let dst = self.temp(layout);
-        if let Some(part) = carrying.first() {
-            self.copy(dst.slot, subject.slot + 1 + part.at, part.layout, expr.span);
-        } else {
-            self.emit(Inst::Unit { dst: dst.slot }, expr.span);
-        }
+        // The answer's layout is the payload's own, read off the case this
+        // is unwrapping rather than off the type the checker settled for the
+        // whole `?`. They are the same run of words wherever the checker
+        // settled anything, and the case is the one that still answers where
+        // it did not: `clock.timeout` declares `Result<Any, Error>`, so its
+        // `Ok` carries a box and the checker records the `?` as an
+        // unconstrained unknown. What is copied decides how wide the
+        // destination is, and what is copied is the part.
+        let dst = match carrying.first() {
+            Some(part) => {
+                let dst = self.temp(part.layout);
+                self.copy(dst.slot, subject.slot + 1 + part.at, part.layout, expr.span);
+                dst
+            }
+            None => {
+                let dst = self.temp(shapes::UNIT);
+                self.emit(Inst::Unit { dst: dst.slot }, expr.span);
+                dst
+            }
+        };
         let carry_on = self.emit(Inst::Jump { to: PENDING }, expr.span);
 
         let failing = self.here();
@@ -1506,12 +1567,12 @@ impl Body<'_> {
     /// onwards the program holds a value no schema described, so it is a box
     /// carrying its own description rather than a bare run of words.
     fn call_host(&mut self, expr: &Expr, module: &str, operation: &str, args: &[Arg]) -> Val {
-        if let Some(bad) = self.crossable(args) {
-            return self.gap(bad, expr);
-        }
-        let Some(result) = self.host_result(expr) else {
+        let Some(result) = self.host_result(expr, module, None, operation) else {
             return self.dead(expr);
         };
+        if let Some(bad) = self.crossable(args) {
+            return self.refused(bad, expr, result);
+        }
         let op = self.pool.host_op(HostOp {
             module: module.into(),
             operation: operation.into(),
@@ -1584,12 +1645,12 @@ impl Body<'_> {
                 expr,
             );
         }
-        if let Some(bad) = self.crossable(args) {
-            return self.gap(bad, expr);
-        }
-        let Some(result) = self.host_result(expr) else {
+        let Some(result) = self.host_result(expr, module, Some(kind), operation) else {
             return self.dead(expr);
         };
+        if let Some(bad) = self.crossable(args) {
+            return self.refused(bad, expr, result);
+        }
         let op = self.pool.host_op(HostOp {
             module: module.into(),
             operation: operation.into(),
@@ -1618,6 +1679,21 @@ impl Body<'_> {
         }
         self.release(receiver, expr.span);
         dst
+    }
+
+    /// A host call this lowering will not emit, answering a location of the
+    /// layout the call would have written.
+    ///
+    /// The layout matters even though nothing is emitted. A gap answers a
+    /// value the rest of the walk goes on reading, and answering the wrong
+    /// width makes every form built over it raise a second complaint about
+    /// the first one's consequence — `timeout(1s) { .. }?` used to report
+    /// the closure, then that `?` had no enum, then that the `let` had no
+    /// type. One mistake is one diagnostic, and the schema still says what
+    /// the answer would have been.
+    fn refused(&mut self, what: &str, expr: &Expr, result: LayoutId) -> Val {
+        self.errors.push(gap::gap(what, expr.span));
+        self.temp(result)
     }
 
     /// What stops an argument from crossing the boundary, if anything does.
@@ -1656,19 +1732,49 @@ impl Body<'_> {
 
     /// The layout a host operation's answer is written into.
     ///
-    /// It is the schema's result type, read where the checker recorded it
-    /// rather than out of the schema a second time: the checker resolved the
-    /// operation against the schemas this compilation was given, which
-    /// includes an embedder's, and re-reading only the shipped ones would
-    /// answer for fewer programs than the checker did.
+    /// It is the schema's result type, read **out of the schema**, because
+    /// the type the checker recorded cannot say the one thing this has to
+    /// know. `cove_schema::HostType::Any` becomes an unconstrained unknown
+    /// there, and so does a type parameter nothing settled: one value for
+    /// two facts, and only one of them is a value with a representation.
+    /// `docs/LINEAR_VM.md` separates them — "a value whose type is
+    /// *intentionally* erased ... is one `Ref` word naming a `Boxed`
+    /// object", and "a `Ty::Unknown` is not that" — so the erased one is a
+    /// box and the other is a compile error. The schema is where the
+    /// difference still exists, and
+    /// [`Shapes::host_layout`](super::shapes::Shapes::host_layout) is what
+    /// reads it.
     ///
-    /// The one type that has no layout is the one a schema declared `Any`,
-    /// which the checker records as an unconstrained unknown. That is
-    /// erasure rather than abstention — `docs/LINEAR_VM.md` separates the
-    /// two — and erasure is a box. Nothing else at a host call site is
-    /// unconstrained, because a host schema has no type parameters to leave
-    /// open.
-    fn host_result(&mut self, expr: &Expr) -> Option<LayoutId> {
+    /// Which schemas: the ones this compilation was given, which is the set
+    /// the checker resolved the call against and includes an embedder's. A
+    /// call this lowering cannot find a schema for is not refused on that
+    /// account — the checker settled a type for it, and that type is the
+    /// answer, exactly as it was before there was anything else to ask. The
+    /// one way that happens is an embedding that handed the lowering a
+    /// smaller set than the checker read, and there the unconstrained
+    /// unknown is taken at face value and boxed: a host call site is the
+    /// only place in this lowering where an unknown is anything but an
+    /// error, and a *host call* is what this is.
+    fn host_result(
+        &mut self,
+        expr: &Expr,
+        module: &str,
+        resource: Option<&str>,
+        operation: &str,
+    ) -> Option<LayoutId> {
+        if let Some(declared) = self
+            .pool
+            .shapes
+            .declared_result(module, resource, operation)
+        {
+            if let Some(id) = self
+                .pool
+                .shapes
+                .host_layout(self.checked, self.module, declared)
+            {
+                return Some(id);
+            }
+        }
         let ty = self.settled_ty(expr)?;
         if matches!(ty, Ty::Unknown(cove_sema::typeck::Unknown::Unconstrained)) {
             return Some(self.pool.shapes.any());

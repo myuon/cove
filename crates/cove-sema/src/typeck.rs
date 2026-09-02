@@ -3815,6 +3815,15 @@ impl<'a> Checker<'a> {
                 if let ItemKind::Fn(decl) = &item.kind {
                     let outer_params = self.type_params.clone();
                     let sig = self.fn_sig(decl, None);
+                    // A local `fn` is a declaration like any other, and a
+                    // consumer holding one needs its boundary. `check_body`
+                    // records that for every declaration it walks and never
+                    // reaches this one, because a local `fn` is a statement
+                    // rather than an item of a module — so the one kind of
+                    // declaration written inside a body was the one kind
+                    // whose parameters and answer nothing could read. The
+                    // signature was already computed and thrown away.
+                    self.record_signature(decl, &sig);
                     self.declare(&decl.name.node, sig.as_value(), false);
                     let outer_ret = std::mem::replace(&mut self.ret, sig.ret.clone());
                     let outer_span = std::mem::replace(&mut self.ret_span, sig.ret_span);
