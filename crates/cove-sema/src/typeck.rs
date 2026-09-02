@@ -197,6 +197,58 @@
 //! [`Ty::Scope`], a type the language gives no name to but this pass knows
 //! exactly.
 //!
+//! # Inference variables
+//!
+//! One of those unknowns carries a number. [`Unknown::Var`] is an
+//! unconstrained unknown with an identity, and the identity is what lets the
+//! *uses* of a local binding settle a type its initializer left open:
+//!
+//! ```text
+//! var log = Vector.of()      // Vector<a>
+//! log.push(text)             // a = String
+//! ```
+//!
+//! `Checker::open_result` mints one wherever a call's result mentions a type
+//! parameter that neither its arguments nor its call site settled. A `let`
+//! or a `var` with no written type gives every variable in the type it takes
+//! to that binding (`Checker::attach`). Every comparison of a found type
+//! with an expected one is read for what it says about them
+//! (`Checker::constrain`, reached from `Checker::expect` and
+//! `Checker::check_argument`), so a method call, an argument position, an
+//! assignment and a declared return type are one rule and not four. And the
+//! end of the body writes the answers back (`Checker::finish_inference`).
+//!
+//! Issue #240 decided this, and drew the boundaries around it:
+//!
+//! - only a *local binding* holds one. A parameter, a return type, and
+//!   everything else a declaration publishes state their types where they
+//!   are written, and none of them reaches this;
+//! - two uses that disagree are an error ([`INFERENCE_CONFLICT`]) naming
+//!   both, rather than the first one quietly winning;
+//! - a binding whose variable nothing settled is asked for the annotation
+//!   ([`UNCONSTRAINED`]), in the same shape the empty array literal is;
+//! - the scope ends with the body. A variable never outlives the
+//!   declaration that minted it, so no use in one declaration settles a type
+//!   in another, and nothing downstream of the checker sees one: what
+//!   reaches [`Facts`] is the settled type, or the plain unconstrained
+//!   unknown that a variable nothing settled was all along.
+//!
+//! It is one mechanism and not a rule per collection: `Vector.of()`,
+//! `Set.of()`, `Map.of()`, a generic declaration of the package's own, a
+//! generic enum case, and every builtin method whose result mentions an
+//! unsettled parameter all reach `open_result`. Two nearby gaps are
+//! deliberately *not* on it, because both report where they are written
+//! rather than carrying a type forward: an empty array literal and an
+//! unannotated lambda parameter. Moving them onto this would move their
+//! diagnostics as well, which is a decision about where those warnings
+//! belong rather than one about inference.
+//!
+//! What a constraint cannot say, it does not say. A use whose own type still
+//! holds a variable settles nothing — `v.push(v)` asks for a `Vector` of
+//! itself, and no annotation writes that either — so the variable is carried
+//! as an ordinary unconstrained unknown and no annotation is demanded for a
+//! type that could not be written. `TyVar::spoken_for` is that case.
+//!
 //! # What a clean check guarantees
 //!
 //! `cove check` reporting nothing at all means every type the package wrote
@@ -474,6 +526,9 @@ pub const LAMBDA_RETURN: &str = "cove::type::lambda_return";
 /// parameter no field mentions, in a place that expects nothing in
 /// particular (warning).
 pub const UNCONSTRAINED: &str = "cove::type::unconstrained";
+/// Two uses of a local binding ask for different types where its initializer
+/// left one open.
+pub const INFERENCE_CONFLICT: &str = "cove::type::inference_conflict";
 
 /// The Language Card sentence a task-safety diagnostic quotes.
 ///
@@ -835,6 +890,18 @@ pub enum Unknown {
     /// `HostType::Any`, or a type parameter no argument, annotation, or
     /// expected type settles.
     Unconstrained,
+    /// An unconstrained unknown carrying an identity, so that a later use
+    /// can say what it is.
+    ///
+    /// This is not a fifth kind of not-knowing. It is the *same* fact as
+    /// [`Unknown::Unconstrained`] — a type parameter nothing read so far
+    /// settles — with a number attached, and the number is what lets the
+    /// uses of a local binding after its initializer settle the type its
+    /// initializer left open. See the module documentation under
+    /// "Inference variables": one never leaves the body that minted it, and
+    /// what is left in [`Facts`] is either the type its uses settled or a
+    /// plain unconstrained unknown.
+    Var(u32),
     /// A position no reachable program observes.
     ///
     /// This is not a classification of a program's type. It marks the
@@ -997,6 +1064,13 @@ impl Ty {
         Ty::Unknown(Unknown::Unconstrained)
     }
 
+    /// A fresh inference variable, which
+    /// [`Checker::open_result`] mints and [`Checker::finish_inference`]
+    /// settles.
+    fn var(id: u32) -> Ty {
+        Ty::Unknown(Unknown::Var(id))
+    }
+
     /// An unknown no program type is read from.
     ///
     /// This is not a fourth kind of not-knowing. It marks the few positions
@@ -1054,6 +1128,98 @@ impl Ty {
             }
             Ty::Fn(f) => f.params.iter().any(Ty::holds_placeholder) || f.ret.holds_placeholder(),
             _ => false,
+        }
+    }
+
+    /// Calls `f` with the identity of every inference variable inside this
+    /// type.
+    ///
+    /// One walk answers all three questions asked of a variable: whether a
+    /// type still holds one, which binding a type's variables belong to, and
+    /// which facts have to be rewritten once they are settled.
+    fn each_var<F: FnMut(u32)>(&self, f: &mut F) {
+        match self {
+            Ty::Unknown(Unknown::Var(id)) => f(*id),
+            Ty::Array(inner)
+            | Ty::Vector(inner)
+            | Ty::Set(inner)
+            | Ty::Option(inner)
+            | Ty::Task(inner)
+            | Ty::Shared(inner) => inner.each_var(f),
+            Ty::Map(k, v) | Ty::MapEntry(k, v) | Ty::Result(k, v) => {
+                k.each_var(f);
+                v.each_var(f);
+            }
+            Ty::Struct(_, args) | Ty::Enum(_, args) => {
+                for arg in args {
+                    arg.each_var(f);
+                }
+            }
+            Ty::Fn(func) => {
+                for param in &func.params {
+                    param.each_var(f);
+                }
+                func.ret.each_var(f);
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether an inference variable is anywhere inside this type.
+    ///
+    /// This is what marks a type as not final yet: a fact recorded while a
+    /// variable was still open is rewritten at the end of the body, and a
+    /// binding holding one is a binding its uses may still settle.
+    fn holds_var(&self) -> bool {
+        let mut found = false;
+        self.each_var(&mut |_| found = true);
+        found
+    }
+
+    /// The identities of the inference variables inside this type.
+    fn vars(&self) -> Vec<u32> {
+        let mut found = Vec::new();
+        self.each_var(&mut |id| found.push(id));
+        found
+    }
+
+    /// This type with every inference variable replaced by what settled it.
+    ///
+    /// A variable nothing settled becomes [`Ty::unconstrained`], which is
+    /// what it would have been had this pass never opened it — so a type
+    /// that leaves the checker is a type a reader of [`Facts`] can already
+    /// read, and the inference is invisible to everything downstream except
+    /// where it succeeded.
+    fn settled(&self, vars: &[TyVar]) -> Ty {
+        match self {
+            Ty::Unknown(Unknown::Var(id)) => vars
+                .get(*id as usize)
+                .and_then(|var| var.solved.as_ref())
+                .map(|(ty, _)| ty.clone())
+                .unwrap_or_else(Ty::unconstrained),
+            Ty::Array(inner) => Ty::Array(Box::new(inner.settled(vars))),
+            Ty::Vector(inner) => Ty::Vector(Box::new(inner.settled(vars))),
+            Ty::Set(inner) => Ty::Set(Box::new(inner.settled(vars))),
+            Ty::Option(inner) => Ty::Option(Box::new(inner.settled(vars))),
+            Ty::Task(inner) => Ty::Task(Box::new(inner.settled(vars))),
+            Ty::Shared(inner) => Ty::Shared(Box::new(inner.settled(vars))),
+            Ty::Map(k, v) => Ty::Map(Box::new(k.settled(vars)), Box::new(v.settled(vars))),
+            Ty::MapEntry(k, v) => {
+                Ty::MapEntry(Box::new(k.settled(vars)), Box::new(v.settled(vars)))
+            }
+            Ty::Result(k, v) => Ty::Result(Box::new(k.settled(vars)), Box::new(v.settled(vars))),
+            Ty::Struct(name, args) => {
+                Ty::Struct(name.clone(), args.iter().map(|a| a.settled(vars)).collect())
+            }
+            Ty::Enum(name, args) => {
+                Ty::Enum(name.clone(), args.iter().map(|a| a.settled(vars)).collect())
+            }
+            Ty::Fn(func) => Ty::func(
+                func.is_async,
+                func.params.iter().map(|p| p.settled(vars)).collect(),
+                func.ret.settled(vars),
+            ),
+            other => other.clone(),
         }
     }
 
@@ -1493,6 +1659,59 @@ struct Binding {
     mutable: bool,
 }
 
+/// One inference variable: a type a call's result left open, which the uses
+/// of the binding holding it may settle.
+///
+/// A variable is minted where a call's result mentions a type parameter
+/// nothing settled ([`Checker::open_result`]), given to a binding where a
+/// `let` or a `var` with no written type holds it ([`Checker::attach`]),
+/// settled where a use of that binding meets a type ([`Checker::constrain`]),
+/// and read back into [`Facts`] when the body ends
+/// ([`Checker::finish_inference`]). Nothing outside that span of a single
+/// body ever sees one.
+#[derive(Debug)]
+struct TyVar {
+    /// The binding that holds this variable: its name, where that name was
+    /// written, and the type it was given — which still holds this variable,
+    /// so a diagnostic can show the whole type with the hole in it rather
+    /// than the hole alone.
+    ///
+    /// `None` is a variable no binding took — the result of a call written
+    /// in the middle of an expression — and one of those is settled where it
+    /// can be and carried silently where it cannot, exactly as an
+    /// unconstrained unknown was before any of this existed. The boundary
+    /// the language draws is around a *local binding*, so it is the presence
+    /// of an owner that decides whether the checker has anything to say.
+    owner: Option<Owned>,
+    /// The type a use settled this variable to, and the use that did it.
+    solved: Option<(Ty, Span)>,
+    /// Whether two uses have already been reported as disagreeing, so a
+    /// third one does not report the same disagreement again.
+    conflicted: bool,
+    /// Whether a use said what this variable is in terms this pass cannot
+    /// keep.
+    ///
+    /// A constraint whose own type still holds a variable settles nothing:
+    /// `var v = Vector.of()` followed by `v.push(v)` asks for a `Vector` of
+    /// itself, which is a type no annotation can be written for either. The
+    /// program did say what it holds, so the silence is not the program's,
+    /// and asking for an annotation there would be asking for something
+    /// unwritable — the variable is carried as an unconstrained unknown
+    /// instead, which is what it was before any of this existed.
+    spoken_for: bool,
+}
+
+/// The binding an inference variable belongs to.
+#[derive(Clone, Debug)]
+struct Owned {
+    name: String,
+    /// Where the name was written, which is where a diagnostic about the
+    /// type nothing settled belongs: the correction is an annotation there.
+    span: Span,
+    /// The binding's type as the initializer left it, variables and all.
+    ty: Ty,
+}
+
 /// Where an expectation came from, so a mismatch can point at the
 /// declaration that imposed it as well as the expression that broke it.
 #[derive(Clone, Debug)]
@@ -1617,6 +1836,22 @@ struct Checker<'a> {
     /// It is written to and never read by the walk, which is what makes it
     /// unable to change a diagnostic. [`Facts`] says who reads it and why.
     facts: Facts,
+    /// The inference variables minted while checking the body in hand.
+    ///
+    /// Indexed by the identity [`Unknown::Var`] carries. It is emptied at
+    /// the end of every body, which is what makes the inference *local*: a
+    /// use in one declaration can never settle a variable another
+    /// declaration's binding holds, because the two are never in this table
+    /// at the same time.
+    vars: Vec<TyVar>,
+    /// Every expression whose recorded type still held a variable when it
+    /// was recorded.
+    ///
+    /// A fact is written as the walk settles it, and a variable is settled
+    /// after that, so these are the facts that have to be written a second
+    /// time. Keeping the list is what keeps the rewrite proportional to the
+    /// expressions that actually held one rather than to the file.
+    open_facts: Vec<(cove_diag::FileId, ExprId)>,
 }
 
 impl<'a> Checker<'a> {
@@ -1654,6 +1889,8 @@ impl<'a> Checker<'a> {
             ret_stated: false,
             probing: false,
             facts: Facts::default(),
+            vars: Vec::new(),
+            open_facts: Vec::new(),
         }
     }
 
@@ -2060,6 +2297,10 @@ impl<'a> Checker<'a> {
             self.check_body(&decl, &sig);
         }
         self.check_trait_defaults();
+        // Every body settles its own variables above; this is the promise
+        // that nothing at all leaves this checker holding one, whatever is
+        // walked here later.
+        self.finish_inference();
     }
 
     /// Checks every trait's default method bodies, once each, with `self`
@@ -2148,6 +2389,7 @@ impl<'a> Checker<'a> {
                     );
                     self.block(body, Some(&expected));
                 }
+                self.finish_inference();
                 self.scopes.pop();
                 self.type_params.clear();
                 self.bounds.clear();
@@ -2374,6 +2616,9 @@ impl<'a> Checker<'a> {
             },
         );
         self.block(&decl.body, Some(&expected));
+        // The body is over, so every use a binding could have had, it has
+        // had. See `Checker::finish_inference`.
+        self.finish_inference();
         self.scopes.pop();
         self.type_params.clear();
         self.bounds.clear();
@@ -3545,6 +3790,11 @@ impl<'a> Checker<'a> {
                         }
                     }
                 };
+                // A binding with no written type is the one place a type may
+                // still be settled by what comes after it. Whatever its
+                // initializer left open is now this binding's, and its uses
+                // are what say what it is; see `Checker::attach`.
+                self.attach(&bound, &name.node, name.span);
                 self.declare(&name.node, bound, *is_var);
             }
             StmtKind::Expr(expr) => {
@@ -3616,6 +3866,13 @@ impl<'a> Checker<'a> {
             expr.span
         );
         self.facts.record_ty(expr.span.file, expr.id, &ty);
+        // A type still holding an inference variable is not this
+        // expression's final answer: the uses that come after it may say
+        // what the variable is, and `Checker::finish_inference` writes the
+        // fact again once they have.
+        if ty.holds_var() {
+            self.open_facts.push((expr.span.file, expr.id));
+        }
         ty
     }
 
@@ -3796,6 +4053,12 @@ impl<'a> Checker<'a> {
     /// Reports a type that does not match what the surrounding form asked
     /// for, pointing at the expression and labelling what imposed it.
     fn expect(&mut self, found: &Ty, expected: &Expected, span: Span) {
+        // The comparison this pass was going to make anyway is also where a
+        // local binding's open type meets a stated one, so it is read for
+        // what it says about the variables on either side before it is
+        // judged. It happens first because an unknown matches everything:
+        // by the line below there is nothing left to read.
+        self.constrain(found, &expected.ty, span);
         if found.matches(&expected.ty) || coerces(found, &expected.ty, &self.view()) {
             return;
         }
@@ -4295,7 +4558,7 @@ impl<'a> Checker<'a> {
         for arg in args.iter().skip(found.payload.len()) {
             self.expr(&arg.value, None);
         }
-        self.open(&ty, &sig.generics, &subst)
+        self.open_result(&ty, &sig.generics, &subst)
     }
 
     fn unary(&mut self, op: UnaryOp, operand: &Expr, span: Span) -> Ty {
@@ -5160,7 +5423,21 @@ impl<'a> Checker<'a> {
         self.scopes.pop();
         self.capture_floor = outer_floor;
 
-        let value = Ty::func(is_async, param_types, declared_ret.unwrap_or(body_ty));
+        // What the place holding this value said about its result stands,
+        // and what it left open the body answers: a callback passed to
+        // `retry<T>` is given the place's `Result<_, Error>` and produces a
+        // `Result<Booking, Error>`, and the value's type is both. Where the
+        // two disagree about a type the place *did* state, `Ty::join` keeps
+        // the place's and the disagreement is already reported against the
+        // body.
+        let value = Ty::func(
+            is_async,
+            param_types,
+            match declared_ret {
+                Some(declared) => declared.join(&body_ty),
+                None => body_ty,
+            },
+        );
         // A function value given to a place that is not a function type is a
         // mismatch like any other, and this is where it is reported.
         // `Checker::expr` hands the expectation to this method rather than
@@ -6026,20 +6303,16 @@ impl<'a> Checker<'a> {
         self.settle_from_expectation(&sig, &mut subst, expected);
         // `Vector.of()`, `Set.of()` and `Map.of()` are the empty collection
         // literals, and an empty one has no argument to read its element
-        // type off. If the place that holds it did not say either, then
-        // nothing did, and every element-typed operation on the value after
-        // this point is unchecked — the same hole an empty array literal
-        // leaves, named the same way rather than left silent.
-        //
-        // No diagnostic here yet, deliberately. `var log = Vector.of()`
-        // followed by `log.push(text)` is idiomatic and appears sixty-one
-        // times in this repository's own programs, so warning about it is a
-        // change to what Cove asks an author to write rather than a report
-        // about a program — and the answer may be to infer from the later
-        // use instead, which is a change to inference. Raised in issue #240;
-        // until it is settled the type stays unconstrained and silent, which
-        // is what it was before this inference existed.
-        self.open(&sig.ret, &sig.generics, &subst)
+        // type off. If the place that holds it did not say either, the
+        // *uses* of the binding that holds it do — `var log = Vector.of()`
+        // followed by `log.push(text)` is a `Vector<String>` — and a
+        // variable is what carries the question that far. Issue #240
+        // decided it there rather than here, so this is not a rule about
+        // empty collections: it is `Checker::open_result`, which every call
+        // whose result mentions a type parameter nothing settled goes
+        // through. A binding whose uses settle nothing is reported once, at
+        // the binding, by `Checker::finish_inference`.
+        self.open_result(&sig.ret, &sig.generics, &subst)
     }
 
     /// The type parameters the place holding this value settles, for the
@@ -6213,7 +6486,7 @@ impl<'a> Checker<'a> {
             "the parameter",
         );
         self.check_bounds(sig, &subst, what, span);
-        let ret = self.open(&sig.ret, &sig.generics, &subst);
+        let ret = self.open_result(&sig.ret, &sig.generics, &subst);
         if sig.is_async {
             // An `async fn` is called like any other function and produces a
             // task; its value is reachable only through `await`.
@@ -6534,6 +6807,10 @@ impl<'a> Checker<'a> {
         subst: &mut BTreeMap<Arc<str>, Ty>,
         role: &str,
     ) {
+        // The other half of `Checker::expect`: a variadic argument and a
+        // trailing closure are checked here and nowhere else, so this is
+        // where a use of that shape says what a binding's open type is.
+        self.constrain(found, hint, span);
         let unified = unify(expected, found, generics, subst, &self.view());
         if !unified && found.matches(hint) {
             let expected = expected.substitute(subst);
@@ -6565,6 +6842,266 @@ impl<'a> Checker<'a> {
             })
             .collect();
         ty.substitute(&map)
+    }
+
+    // ------------------------------------------------- local inference
+
+    /// A *call's result*, with every type parameter neither the arguments
+    /// nor the call site settled replaced by a fresh inference variable.
+    ///
+    /// This is [`Checker::open`] with an identity kept for each hole, and
+    /// the difference between the two is the difference between a place
+    /// being checked *now* and a type being carried *forward*. An argument
+    /// checked against an opened parameter is finished with the moment the
+    /// argument is walked, so nothing would ever read a variable back out of
+    /// it. A call's result is what a binding holds and what every later use
+    /// of that binding is checked against, so it is the one position where
+    /// leaving the hole open costs nothing and closing it costs the rest of
+    /// the body: `Vector.of()` is a `Vector<a>` until `log.push(text)` says
+    /// what `a` is.
+    ///
+    /// It is used at the four places a call produces a value —
+    /// [`Checker::call_signature`], [`Checker::call_builtin`],
+    /// [`Checker::builtin_associated`] and [`Checker::enum_case`] — so a
+    /// generic declaration, a builtin method, a builtin associated function
+    /// and a generic enum case all reach the same inference rather than each
+    /// getting one.
+    fn open_result(
+        &mut self,
+        ty: &Ty,
+        generics: &[Arc<str>],
+        subst: &BTreeMap<Arc<str>, Ty>,
+    ) -> Ty {
+        if generics.is_empty() {
+            return ty.clone();
+        }
+        let map: BTreeMap<Arc<str>, Ty> = generics
+            .iter()
+            .map(|generic| {
+                let ty = match subst.get(generic) {
+                    Some(settled) => settled.clone(),
+                    None => self.fresh_var(),
+                };
+                (generic.clone(), ty)
+            })
+            .collect();
+        ty.substitute(&map)
+    }
+
+    /// A variable nothing has said anything about yet.
+    fn fresh_var(&mut self) -> Ty {
+        self.vars.push(TyVar {
+            owner: None,
+            solved: None,
+            conflicted: false,
+            spoken_for: false,
+        });
+        Ty::var((self.vars.len() - 1) as u32)
+    }
+
+    /// Gives every variable in `ty` to the binding that now holds it.
+    ///
+    /// This is the boundary the language draws. A `let` or a `var` with no
+    /// written type is the one place a type may still be settled by what
+    /// comes *after* it; a parameter, a return type, and a public
+    /// declaration state their types where they are written, and none of
+    /// them reaches here. A variable already owned keeps its first owner, so
+    /// `var a = Vector.of()` followed by `var b = a` names `a` when nothing
+    /// settles the type the two of them share.
+    fn attach(&mut self, ty: &Ty, name: &str, span: Span) {
+        // A probe walks a tree and throws away what it reported; a binding
+        // it declares is walked again for real straight after. Giving a
+        // probe's variable an owner would leave a second, unsettled claim
+        // on the same `let`, and the report at the end of the body cannot
+        // tell it from the real one.
+        if self.probing {
+            return;
+        }
+        for id in ty.vars() {
+            if let Some(var) = self.vars.get_mut(id as usize) {
+                if var.owner.is_none() {
+                    var.owner = Some(Owned {
+                        name: name.to_string(),
+                        span,
+                        ty: ty.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Reads what a use says about the variables in the type it meets.
+    ///
+    /// Every place a found type is compared with an expected one runs
+    /// through here first, so `log.push(text)`, `takesLines(log)`,
+    /// `log = other` and `return log` are one rule and not four: the
+    /// comparison the checker was going to make anyway is walked in
+    /// parallel, and wherever a variable stands opposite a type that is not
+    /// itself a variable or an unknown, that is what the variable is.
+    ///
+    /// A variable standing opposite another variable settles nothing. Two
+    /// open types meeting say only that they are the same, which is a fact
+    /// this pass has nowhere to keep and no program yet needs — a union
+    /// would be the general answer, and the day one is needed the shape of
+    /// it is [`TyVar::solved`] pointing at another variable rather than at a
+    /// type.
+    fn constrain(&mut self, found: &Ty, expected: &Ty, span: Span) {
+        // A probe walks a tree to find one type out and its diagnostics are
+        // thrown away; what it reads about a variable would not be, so it
+        // reads nothing.
+        if self.vars.is_empty() || self.probing {
+            return;
+        }
+        match (found, expected) {
+            (Ty::Unknown(Unknown::Var(id)), other) | (other, Ty::Unknown(Unknown::Var(id))) => {
+                self.settle_var(*id, other, span)
+            }
+            (Ty::Array(a), Ty::Array(b))
+            | (Ty::Vector(a), Ty::Vector(b))
+            | (Ty::Set(a), Ty::Set(b))
+            | (Ty::Option(a), Ty::Option(b))
+            | (Ty::Task(a), Ty::Task(b))
+            | (Ty::Shared(a), Ty::Shared(b)) => self.constrain(a, b, span),
+            (Ty::Map(ak, av), Ty::Map(bk, bv))
+            | (Ty::MapEntry(ak, av), Ty::MapEntry(bk, bv))
+            | (Ty::Result(ak, av), Ty::Result(bk, bv)) => {
+                self.constrain(ak, bk, span);
+                self.constrain(av, bv, span);
+            }
+            (Ty::Struct(a, aargs), Ty::Struct(b, bargs))
+            | (Ty::Enum(a, aargs), Ty::Enum(b, bargs))
+                if a == b && aargs.len() == bargs.len() =>
+            {
+                for (a, b) in aargs.iter().zip(bargs) {
+                    self.constrain(a, b, span);
+                }
+            }
+            (Ty::Fn(a), Ty::Fn(b))
+                if a.is_async == b.is_async && a.params.len() == b.params.len() =>
+            {
+                for (a, b) in a.params.iter().zip(&b.params) {
+                    self.constrain(a, b, span);
+                }
+                self.constrain(&a.ret, &b.ret, span);
+            }
+            _ => {}
+        }
+    }
+
+    /// Settles one variable, or reports the use that disagrees with what
+    /// settled it first.
+    ///
+    /// Nothing is read off an unknown or a `Never`, which say nothing, or
+    /// off a type that still holds a variable of its own, which would make
+    /// one open type stand for another. The first use to say something wins
+    /// and every later one is checked against it, so which use is *named* as
+    /// the settling one is the first in source order — the same order the
+    /// program is read in.
+    fn settle_var(&mut self, id: u32, ty: &Ty, span: Span) {
+        if ty.is_wild() {
+            return;
+        }
+        if ty.holds_var() {
+            if let Some(var) = self.vars.get_mut(id as usize) {
+                var.spoken_for = true;
+            }
+            return;
+        }
+        let Some(var) = self.vars.get(id as usize) else {
+            return;
+        };
+        let Some((settled, first)) = var.solved.clone() else {
+            self.vars[id as usize].solved = Some((ty.clone(), span));
+            return;
+        };
+        if settled.matches(ty) || var.conflicted {
+            return;
+        }
+        // A variable no binding took is one the language says nothing about:
+        // it was an unconstrained unknown before this inference existed, and
+        // an unconstrained unknown agrees with everything. Only a binding's
+        // own type is a claim two uses can be held to.
+        let Some(owner) = var.owner.clone() else {
+            self.vars[id as usize].conflicted = true;
+            return;
+        };
+        self.vars[id as usize].conflicted = true;
+        // Both constraints are shown as the whole type the binding would
+        // have, because that is the type the program is arguing about: the
+        // variable on its own is an element type or a payload, and a
+        // diagnostic naming `String` against `Int` would not say where in
+        // `log` they sit.
+        let holds = owner.ty.settled(&self.vars);
+        self.vars[id as usize].solved = Some((ty.clone(), span));
+        let needs = owner.ty.settled(&self.vars);
+        self.vars[id as usize].solved = Some((settled, first));
+        let name = owner.name;
+        self.diagnostics.push(
+            Diagnostic::error(
+                INFERENCE_CONFLICT,
+                format!("`{name}` was settled as `{holds}`, but this use needs `{needs}`"),
+            )
+            .at(span)
+            .label(first, format!("settled as `{holds}` here"))
+            .label(owner.span, format!("`{name}` is declared with no written type"))
+            .rule("A binding whose initializer leaves a type open takes that type from its uses, and every use of it means the same type.")
+            .help(format!(
+                "write the type on the binding, as in `{name}: {holds}`, and correct whichever use disagrees"
+            )),
+        );
+    }
+
+    /// Settles every variable the body just checked minted, and writes the
+    /// facts that were recorded while they were still open.
+    ///
+    /// The end of a body is the end of the inference scope, and it is the
+    /// last moment a use could have arrived: a binding is gone by then and a
+    /// declaration that comes after cannot see it. So a variable a binding
+    /// holds and nothing settled is where the program left a type nobody
+    /// stated, said in the same shape the empty array literal says it, and
+    /// every other variable becomes the unconstrained unknown it would have
+    /// been anyway.
+    ///
+    /// Every fact is written again from here rather than left as it was,
+    /// which is what the promise in [`Facts`] rests on: a consumer reading a
+    /// type after the check finished sees what the uses settled, and never a
+    /// variable.
+    fn finish_inference(&mut self) {
+        // One report per binding, not one per variable: `Map.of()` leaves
+        // two open and a reader is missing one annotation, not two.
+        let mut reported: BTreeSet<(cove_diag::FileId, u32)> = BTreeSet::new();
+        for var in &self.vars {
+            let Some(owner) = &var.owner else {
+                continue;
+            };
+            if var.solved.is_some() || var.conflicted || var.spoken_for {
+                continue;
+            }
+            if !reported.insert((owner.span.file, owner.span.start)) {
+                continue;
+            }
+            let shown = owner.ty.settled(&self.vars);
+            let name = &owner.name;
+            self.diagnostics.push(unconstrained(
+                format!("nothing says what the `_` in `{name}: {shown}` is"),
+                format!(
+                    "write the type on the binding, as in `{name}: {shown}` with the `_` filled in, or use `{name}` in a way that says what it holds"
+                ),
+                owner.span,
+            ));
+        }
+        for (file, id) in std::mem::take(&mut self.open_facts) {
+            let Some(ty) = self.facts.ty(file, id).cloned() else {
+                continue;
+            };
+            let settled = ty.settled(&self.vars);
+            debug_assert!(
+                !settled.holds_var(),
+                "an inference variable escaped into a fact: `{settled}`"
+            );
+            self.facts.record_ty(file, id, &settled);
+        }
+        self.vars.clear();
     }
 
     /// One argument passed to a variadic parameter, which is an `Array<T>`
@@ -7258,7 +7795,7 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> Ty {
         let subst = self.builtin_arguments(sig, what, args, trailing, span);
-        self.open(&sig.ret, &sig.generics, &subst)
+        self.open_result(&sig.ret, &sig.generics, &subst)
     }
 
     /// The arguments of a builtin call, checked against the parameters, and
@@ -8770,6 +9307,289 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
         // depend on the element type still work and the rest is unchecked.
         // The gap is a warning of its own, pinned with the other unknowns.
         accepts_body("  let empty = []\n  println(\"{empty.length()} {empty.isEmpty()}\")?");
+    }
+
+    #[test]
+    fn a_later_method_call_settles_what_an_empty_collection_holds() {
+        // `Vector.of()` has nothing to read an element type off, and
+        // `push` is what says it. The declared return type proves the
+        // element type reached the rest of the body: `Array<_>` agreed with
+        // every declaration before this existed, and `Array<String>`
+        // disagrees with `Array<Int>`.
+        accepts(
+            "\
+fn build(text: String) -> Array<String> {
+  var log = Vector.of()
+  log.push(text)
+  log.freeze()
+}
+",
+        );
+        let error = rejects(
+            "\
+fn build(text: String) -> Array<Int> {
+  var log = Vector.of()
+  log.push(text)
+  log.freeze()
+}
+",
+        );
+        // The return type is a use as much as the `push` is, and the two
+        // disagree, so the report is about the binding rather than about
+        // the last expression that touched it.
+        assert_eq!(error.code, INFERENCE_CONFLICT);
+        assert_eq!(
+            error.message,
+            "`log` was settled as `Vector<String>`, but this use needs `Vector<Int>`"
+        );
+    }
+
+    #[test]
+    fn every_empty_collection_takes_its_type_from_its_uses() {
+        // One mechanism, not one rule per collection: `Set`, `Map` and a
+        // generic declaration of the package's own reach the same
+        // inference, because each is a call whose result mentions a type
+        // parameter its arguments did not settle.
+        accepts(
+            "\
+fn build(text: String, n: Int) -> Int {
+  var names = Set.of()
+  names = names.inserted(text)
+  var counts = Map.of()
+  counts = counts.inserted(text, n)
+  names.length() + counts.length()
+}
+",
+        );
+        accepts(
+            "\
+fn empty<T>() -> Vector<T> {
+  Vector.of()
+}
+
+fn build(text: String) -> Array<String> {
+  var log = empty()
+  log.push(text)
+  log.freeze()
+}
+",
+        );
+    }
+
+    #[test]
+    fn an_argument_position_settles_what_a_binding_holds() {
+        accepts(
+            "\
+fn count(lines: Vector<String>) -> Int {
+  lines.length()
+}
+
+fn build(text: String) -> Int {
+  var log = Vector.of()
+  count(log)
+  log.push(text)
+  count(log)
+}
+",
+        );
+        let error = rejects(
+            "\
+fn count(lines: Vector<String>) -> Int {
+  lines.length()
+}
+
+fn build(n: Int) -> Int {
+  var log = Vector.of()
+  count(log)
+  log.push(n)
+  0
+}
+",
+        );
+        assert_eq!(error.code, INFERENCE_CONFLICT);
+        assert_eq!(
+            error.message,
+            "`log` was settled as `Vector<String>`, but this use needs `Vector<Int>`"
+        );
+    }
+
+    #[test]
+    fn an_assignment_settles_what_a_binding_holds() {
+        accepts(
+            "\
+fn build(lines: Vector<String>) -> Array<String> {
+  var log = Vector.of()
+  log = lines
+  log.freeze()
+}
+",
+        );
+        let error = rejects(
+            "\
+fn build(lines: Vector<String>) -> Array<Int> {
+  var log = Vector.of()
+  log = lines
+  log.freeze()
+}
+",
+        );
+        assert_eq!(error.code, INFERENCE_CONFLICT);
+        assert_eq!(
+            error.message,
+            "`log` was settled as `Vector<String>`, but this use needs `Vector<Int>`"
+        );
+    }
+
+    #[test]
+    fn two_uses_that_disagree_are_an_error_naming_both() {
+        let error = rejects(
+            "\
+fn build(text: String, n: Int) -> Int {
+  var log = Vector.of()
+  log.push(text)
+  log.push(n)
+  log.length()
+}
+",
+        );
+        assert_eq!(error.code, INFERENCE_CONFLICT);
+        assert_eq!(
+            error.message,
+            "`log` was settled as `Vector<String>`, but this use needs `Vector<Int>`"
+        );
+        assert_eq!(error.rule.unwrap(), "A binding whose initializer leaves a type open takes that type from its uses, and every use of it means the same type.");
+        assert_eq!(
+            error.help.unwrap(),
+            "write the type on the binding, as in `log: Vector<String>`, and correct whichever use disagrees"
+        );
+        // Both constraints are pointed at, and the binding that has neither.
+        assert_eq!(error.labels.len(), 2);
+    }
+
+    #[test]
+    fn a_third_use_does_not_report_the_same_disagreement_again() {
+        let errors = errors_of(
+            "\
+fn build(text: String, n: Int) -> Int {
+  var log = Vector.of()
+  log.push(text)
+  log.push(n)
+  log.push(n)
+  log.length()
+}
+",
+        );
+        assert_eq!(errors.len(), 1, "found: {errors:?}");
+    }
+
+    #[test]
+    fn a_binding_nothing_settles_asks_for_the_annotation() {
+        let warning = warns(
+            "\
+fn build() -> Int {
+  var log = Vector.of()
+  log.length()
+}
+",
+        );
+        assert_eq!(warning.code, UNCONSTRAINED);
+        assert_eq!(
+            warning.message,
+            "nothing says what the `_` in `log: Vector<_>` is"
+        );
+        assert_eq!(warning.rule.unwrap(), "A type the checker infers is inferred from something written: a value, an annotation, or the type of the place the value is given to.");
+        assert_eq!(
+            warning.help.unwrap(),
+            "write the type on the binding, as in `log: Vector<_>` with the `_` filled in, or use `log` in a way that says what it holds"
+        );
+    }
+
+    #[test]
+    fn a_written_annotation_settles_it_without_any_use() {
+        // The other half of the rule: what the program states, it states,
+        // and the inference has nothing left to do.
+        assert!(warnings_of(
+            "\
+fn build() -> Int {
+  var log: Vector<String> = Vector.of()
+  log.length()
+}
+"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn inference_does_not_reach_across_a_declaration() {
+        // Two bindings of the same name in two declarations are two
+        // variables, settled apart. Were they one, the second `push` would
+        // disagree with the first.
+        accepts(
+            "\
+fn first(text: String) -> Int {
+  var log = Vector.of()
+  log.push(text)
+  log.length()
+}
+
+fn second(n: Int) -> Int {
+  var log = Vector.of()
+  log.push(n)
+  log.length()
+}
+",
+        );
+        assert!(warnings_of(
+            "\
+fn first(text: String) -> Int {
+  var log = Vector.of()
+  log.push(text)
+  log.length()
+}
+
+fn second(n: Int) -> Int {
+  var log = Vector.of()
+  log.push(n)
+  log.length()
+}
+"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn a_vector_that_holds_itself_is_asked_for_no_annotation() {
+        // `v.push(v)` says what `v` holds in terms of `v` itself, and no
+        // annotation writes that type either. The program did say
+        // something, so nothing is demanded of it and the element type is
+        // carried as the unknown it was before any of this existed —
+        // `tests/e2e/gc_cycles` builds exactly this on purpose.
+        let source = "\
+fn churn() {
+  var v = Vector.of()
+  v.push(v)
+}
+";
+        accepts(source);
+        assert!(warnings_of(source).is_empty(), "{:?}", warnings_of(source));
+    }
+
+    #[test]
+    fn a_use_inside_a_nested_block_settles_the_binding() {
+        // The inference scope is the body, not the statement: a use inside
+        // a loop, an `if`, or any other nested block is a use like any
+        // other, and this is the shape the corpus is written in.
+        accepts(
+            "\
+fn build(lines: Array<String>) -> Array<String> {
+  var log = Vector.of()
+  for line in lines {
+    log.push(line)
+  }
+  log.freeze()
+}
+",
+        );
     }
 
     #[test]

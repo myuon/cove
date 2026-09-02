@@ -745,6 +745,31 @@ export fn built() -> Basket {
         }
     }
 
+    /// And an empty collection whose place says nothing records what the
+    /// *uses* of the binding holding it settled, which is the other half of
+    /// the same promise: a backend reading a fact after the check finished
+    /// reads a type it can lay out, never the variable the checker carried
+    /// while it was still deciding.
+    #[test]
+    fn an_empty_collection_literal_records_the_type_its_uses_settle() {
+        let source = r#"/// Doc.
+export fn built(text: String) -> Array<String> {
+  var log = Vector.of()
+  log.push(text)
+  log.freeze()
+}
+"#;
+        let checked = compile(&[("main", source)]);
+        assert_eq!(
+            checked.ty("main", "Vector.of()"),
+            &Ty::Vector(Box::new(Ty::Str))
+        );
+        assert_eq!(
+            checked.ty("main", "log.freeze()"),
+            &Ty::Array(Box::new(Ty::Str))
+        );
+    }
+
     #[test]
     fn a_call_records_what_it_produces() {
         let checked = reporting();

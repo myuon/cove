@@ -154,7 +154,7 @@ use support::{Case, ModuleIndex, Prepared};
 /// has the reasoning for leaving this test in the ordinary suite, but the
 /// cost is no longer negligible and the next family this backend learns will
 /// add to it rather than replace it.
-const AGREEING_FLOOR: usize = 62;
+const AGREEING_FLOOR: usize = 67;
 
 /// The code `cove_lir` raises a gap under.
 ///
@@ -190,6 +190,14 @@ const KNOWN_DISAGREEMENTS: &[&str] = &[
     // printed every line up to the `freeze`.
     "examples:values",
     "tests/e2e:coll_array",
+    // The same fault again, and they are here rather than merged into the
+    // note above because the set is a list of programs and a reader looking
+    // one up should find it. Both reached a `freeze()` only once the checker
+    // learned to settle an empty collection's element type from its later
+    // uses — which is the ratchet working: teaching one thing surfaced a
+    // fault that was always there in two more programs.
+    "benches:callback",
+    "tests/e2e:coll_freeze",
 ];
 
 #[test]

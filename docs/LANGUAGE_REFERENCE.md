@@ -147,6 +147,17 @@ statement is one of:
   has no type to give and the binding becomes unknown. `let` makes a
   read-only place and `var` a mutable one, which `cove check` enforces: a
   write to a read-only place is `cove::type::read_only_place`.
+
+  Where the initializer leaves a type parameter open, the binding's own
+  **uses** settle it: `var log = Vector.of()` followed by `log.push(text)` is
+  a `Vector<String>`, and so is one settled by passing it to a declared
+  parameter, by assigning a value to it, or by the return type it is finally
+  given to. This is the only inference that reads what comes *after* the
+  place it settles, and it reaches nothing but a local binding — a
+  declaration's parameters and return type are written, never inferred. Two
+  uses that need different types are `cove::type::inference_conflict`, which
+  names both; a binding nothing settles is `cove::type::unconstrained`, which
+  asks for the annotation.
 - **An expression.** Evaluated for its effects; its value is discarded and its
   type is unconstrained. A non-`()` expression in statement position is not an
   error.
@@ -668,7 +679,9 @@ The checker produces *unknown* deliberately, never as a shrug, and only here:
 - a type or a module used as a value: `Vector` in `Vector.of(1, 2)` is
   understood as part of the call, but a bare `Vector` is not a form with a
   type;
-- a type parameter no argument at the call site constrains;
+- a type parameter that neither an argument at the call site, the place the
+  value is given to, nor — for a local binding — a later use of that binding
+  constrains;
 - an empty array literal's element type, and a bare `None` with no expectation
   to take an argument from;
 - a lambda's `return` when the lambda has no expected type, because there is
