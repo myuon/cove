@@ -108,9 +108,18 @@ fn listing(source: &str, name: &str) -> String {
 /// than from the whole package: what a slice leaves out is a stub, so a
 /// listing is what says whether a declaration was lowered or stood in for.
 fn sliced(source: &str, entry: &str, name: &str) -> String {
+    sliced_to(source, &[entry], name)
+}
+
+/// The same listing, from a lowering sliced to several roots at once.
+///
+/// [`sliced`] is the one-root case of this, exactly as [`crate::lower_entry`]
+/// is the one-root case of [`crate::lower_roots`].
+fn sliced_to(source: &str, entries: &[&str], name: &str) -> String {
     let (sources, checked) = checked(source);
+    let roots: Vec<(&str, &str)> = entries.iter().map(|entry| ("m", *entry)).collect();
     let program =
-        crate::lower_entry(&checked, &sources, "m", entry).expect("the entry's program lowers");
+        crate::lower_roots(&checked, &sources, &roots).expect("the roots' program lowers");
     let id = program
         .functions
         .iter()

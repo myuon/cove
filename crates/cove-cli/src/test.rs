@@ -198,12 +198,22 @@ fn run_test(
         );
     }
 
-    // A test is an entry, so it is lowered as one: the unit a lowering
-    // measures is what an entry reaches, and a suite is many entries rather
-    // than one. Lowering per test is what keeps a construct a backend cannot
-    // run from refusing the tests that do not reach it -- and lowering runs
-    // once per test against an execution that runs for as long as the test
-    // does, which is the ratio ADR 0019 allows the lowering to be slow on.
+    // A test is an entry, so it is lowered as one: this names the test as
+    // the root and the lowering works out what it reaches. Selecting a root
+    // is all a command does; reachability lives in `cove_lir`, which is
+    // where the fixed point that closes a slice against what the lowering
+    // emits already is.
+    //
+    // One root per lowering rather than the whole suite in one, and that is
+    // the decision rather than an omission. `cove_lir::lower_roots` takes as
+    // many roots as a caller has, but its answer is one answer for the set:
+    // the gaps come back together with no telling which root each belongs
+    // to, so a suite lowered in one call would turn one unlowerable test
+    // into every test's refusal. Lowering per test is what keeps a construct
+    // a backend cannot run from refusing the tests that do not reach it, and
+    // lowering runs once per test against an execution that runs for as long
+    // as the test does, which is the ratio ADR 0019 allows the lowering to be
+    // slow on.
     //
     // The refusal is reported as this test's failure rather than as the
     // command's, for the same reason: the other tests still ran, and a
@@ -266,16 +276,13 @@ fn run_test(
                 .map(|(span, message)| (span, message.to_string()));
             (outcome, assertion)
         }
-        // No recorded assertion, and none is invented: the linear-memory
-        // machine does not keep the span of the last assertion that failed,
-        // so a failure on it is reported at the test's own name rather than
-        // at a position taken from somewhere else. What the test said is
-        // unaffected; where the report points is weaker, and saying so is
-        // better than pointing confidently at the wrong line.
         Some(Executable::Linear(ir)) => {
             let mut lvm = Lvm::new(&runtime, runtime.hosts(), ir);
             let outcome = lvm.run_entry(test.module, test.name, Vec::new());
-            (outcome, None)
+            let assertion = lvm
+                .assertion_failure()
+                .map(|(span, message)| (span, message.to_string()));
+            (outcome, assertion)
         }
         None => {
             let mut interpreter = Interpreter::new(&runtime);
@@ -551,6 +558,15 @@ mod tests {
         );
     }
 
+    /// Every backend, because where a failure points is part of what a
+    /// suite reports and a backend that pointed somewhere else would be
+    /// reporting something else.
+    ///
+    /// An `Err` carries a message and no position, so each evaluator has to
+    /// record the assertion it saw: the oracle and the predecessor keep the
+    /// span of the call they performed, and the replacement is told by the
+    /// `AssertFailed` its failing arm was lowered with. Three mechanisms,
+    /// and this is the one line that says they answer the same thing.
     #[test]
     fn a_failing_assertion_points_at_the_assertion_it_failed_in() {
         let source = "test fn fails() -> Result<Unit, Error> {\n  assert(1 == 2)?\n  Ok(())\n}\n";
@@ -558,17 +574,61 @@ mod tests {
         let (sources, _, program) = check_fixture(dir.path());
         let (sources, program) = (Arc::new(sources), Arc::new(program));
         let test = program.tests()[0];
-        let diagnostic = run_test(
-            &test,
-            dir.path(),
-            &BTreeSet::new(),
-            &sources,
-            &program,
-            Backend::Vm,
-        )
-        .expect("the test fails");
-        let rendered = render(&sources, &diagnostic);
-        assert!(rendered.contains("unit.cove:2:3"), "{rendered}");
+        for backend in [Backend::Ast, Backend::Vm, Backend::Lvm] {
+            let diagnostic = run_test(
+                &test,
+                dir.path(),
+                &BTreeSet::new(),
+                &sources,
+                &program,
+                backend,
+            )
+            .expect("the test fails");
+            let rendered = render(&sources, &diagnostic);
+            assert!(
+                rendered.contains("unit.cove:2:3"),
+                "{backend:?}: {rendered}"
+            );
+        }
+    }
+
+    /// An assertion that failed and was then handled is not where a later,
+    /// unrelated failure is reported.
+    ///
+    /// The record survives the assertion — every evaluator keeps the last
+    /// one it saw — so what stops it being read is that the message does not
+    /// match the `Err` the test answered with. Every backend has to make
+    /// that distinction, and a backend that recorded a span and no message
+    /// could not.
+    #[test]
+    fn a_handled_assertion_is_not_where_a_later_failure_is_reported() {
+        let source = "test fn fails() -> Result<Unit, Error> {\n  \
+                      let handled = assert(1 == 2)\n  \
+                      Err(Error(\"something else\"))\n}\n";
+        let dir = package("assert-handled", "", source);
+        let (sources, _, program) = check_fixture(dir.path());
+        let (sources, program) = (Arc::new(sources), Arc::new(program));
+        let test = program.tests()[0];
+        for backend in [Backend::Ast, Backend::Vm, Backend::Lvm] {
+            let diagnostic = run_test(
+                &test,
+                dir.path(),
+                &BTreeSet::new(),
+                &sources,
+                &program,
+                backend,
+            )
+            .expect("the test fails");
+            let rendered = render(&sources, &diagnostic);
+            assert!(
+                rendered.contains("something else"),
+                "{backend:?}: {rendered}"
+            );
+            assert!(
+                rendered.contains("unit.cove:1:9"),
+                "{backend:?}: {rendered}"
+            );
+        }
     }
 
     #[test]

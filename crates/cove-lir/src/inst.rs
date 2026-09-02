@@ -413,8 +413,27 @@ pub enum Inst {
     // ---- failure ----------------------------------------------------------
     /// Fail the run with `message`.
     ///
-    /// This is what an `assert` that did not hold, an exhausted `match` and
-    /// a failed `Unbox` reach. It is not a refusal to run the program: the
-    /// program ran, and this is what it did.
+    /// This is what an exhausted `match` and a failed `Unbox` reach. It is
+    /// not a refusal to run the program: the program ran, and this is what
+    /// it did.
     Trap { message: StrId },
+
+    /// Record that an assertion failed here, carrying the `String` in
+    /// `message`.
+    ///
+    /// The one instruction that writes nothing a program can read. An
+    /// assertion is lowered rather than performed — see this crate's
+    /// `lower::assertions` — so by the time the failing arm runs, the
+    /// `Err(Error("assertion failed: ..."))` is an ordinary value and the
+    /// only thing left that the machine knows and the value does not is
+    /// *where it was written*. A test runner points at the assertion the way
+    /// every other error points at source, and this is how it is told.
+    ///
+    /// The span is the instruction's own, which is the assertion call's, so
+    /// nothing has to be threaded through the program to carry it. The
+    /// message is a slot rather than a [`StrId`] because `assertEqual`
+    /// renders the two values it compared and that string is built at run
+    /// time; a runner compares it against the `Err` it is holding, so that a
+    /// later unrelated failure is not reported at this assertion.
+    AssertFailed { message: Slot },
 }

@@ -30,6 +30,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use cove_diag::Span;
 use cove_lir::{Function, FunctionId, Program};
 
 use crate::budget::{Budget, Limits, Meter};
@@ -165,6 +166,20 @@ impl<'a> Lvm<'a> {
     /// How long this run has spent inside host calls.
     pub(crate) fn host_wait(&self) -> Duration {
         self.machine.host_wait()
+    }
+
+    /// Where the most recent failed assertion was written, together with the
+    /// message it produced, or `None` when no assertion has failed.
+    ///
+    /// The same answer [`crate::interp::Interpreter::assertion_failure`]
+    /// gives, and it is here for the same caller: a test runner points at
+    /// the assertion the way every other error points at source. An
+    /// assertion that failed and was then handled inside the program is
+    /// still recorded, which is why the message is part of the answer — a
+    /// caller reports at this span only when the failure it is holding is
+    /// this one.
+    pub fn assertion_failure(&self) -> Option<(Span, &str)> {
+        self.machine.assertion_failure()
     }
 
     /// The process arguments as the one value an entry may take them as.

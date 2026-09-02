@@ -224,6 +224,18 @@ impl Body<'_> {
         let Some(message) = self.assertion_message(expr, schema, args, held) else {
             return;
         };
+        // Where it failed, said once, to the only party that knows. The
+        // `Err` this arm goes on to build carries the message and no
+        // position — which is the right shape for the language, because a
+        // test propagates it with `?` like any other expected failure — so
+        // the span is recorded here instead, on the instruction that has it.
+        // See [`Inst::AssertFailed`].
+        self.emit(
+            Inst::AssertFailed {
+                message: message.slot,
+            },
+            expr.span,
+        );
         let Some(error) = self.error_value(expr, message) else {
             return;
         };

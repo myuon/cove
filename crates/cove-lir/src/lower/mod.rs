@@ -120,11 +120,12 @@ impl Dest {
 /// has to read the bytes an argument's span covers. See this module's
 /// `assertions` submodule for why they are lowered rather than performed.
 ///
-/// [`lower_entry`] is the same lowering over one entry's reachable set, and
-/// it is what a command that runs a program should use. This one is what a
-/// whole-package listing means — everything the package declares is part of
-/// it — and it is what the lowering's own tests and the corpus survey ask
-/// for.
+/// [`lower_roots`] is the same lowering over what a named set of roots
+/// reaches, and it is what a command that runs a program should use — a
+/// command names the roots it is about to run and this crate works out the
+/// slice. This one is what a whole-package listing means — everything the
+/// package declares is part of it — and it is what the lowering's own tests
+/// and the corpus survey ask for.
 pub fn lower(checked: &Checked, sources: &SourceMap) -> Result<Program, Vec<Diagnostic>> {
     let mut plan = Plan::index(checked);
     let everything: HashSet<FunctionId> = (0..plan.decls.len())
@@ -136,13 +137,34 @@ pub fn lower(checked: &Checked, sources: &SourceMap) -> Result<Program, Vec<Diag
     finish(program, errors)
 }
 
-/// Lowers only the declarations `module.name` can reach.
+/// Lowers only the declarations `roots` can reach.
 ///
 /// A package holds programs that have nothing to do with each other —
 /// `benches/` is nine of them and `tests/e2e/` is a hundred — and a gap in
-/// one of them is not a reason to refuse the others. So a command that runs
-/// *one* entry lowers what that entry reaches and leaves the rest as a stub
-/// nothing names.
+/// one of them is not a reason to refuse the others. So a command lowers
+/// what it is about to run and leaves the rest as a stub nothing names.
+///
+/// A root is a `(module, name)` pair naming a declaration the way the
+/// checker's own tables do, and the slice is what *any* of them reaches.
+/// That is the whole of the API a command needs: it selects roots — the
+/// entry it was asked for, the test it is about to run, the entries a
+/// package configures — and reachability stays here. A caller that walked
+/// the call graph itself would be a second answer to a question this
+/// module already has to answer, and the two would drift.
+///
+/// A root that names nothing this package declares contributes nothing. It
+/// is not an error here, because what a name denotes is the checker's
+/// question and every caller has already asked it: `run_entry` answers
+/// "this package does not declare `m.f`" better than a lowering could, and
+/// it answers it about the program that was actually going to run.
+///
+/// # One answer for the whole set
+///
+/// The gaps this returns are the gaps of everything `roots` reaches,
+/// together, and there is no telling which root a gap came from. So a
+/// caller that needs one root's failure to be one root's failure passes
+/// one root — which is what [`lower_entry`] is, and why `cove test` lowers
+/// each test rather than the suite.
 ///
 /// # What "reachable" is, and how this is sure of it
 ///
@@ -172,14 +194,13 @@ pub fn lower(checked: &Checked, sources: &SourceMap) -> Result<Program, Vec<Diag
 /// The call graph is what makes that one round rather than one per level of
 /// the call tree: seeded with nothing, each round could only discover the
 /// callees of what the round before it lowered.
-pub fn lower_entry(
+pub fn lower_roots(
     checked: &Checked,
     sources: &SourceMap,
-    module: &str,
-    name: &str,
+    roots: &[(&str, &str)],
 ) -> Result<Program, Vec<Diagnostic>> {
     let mut plan = Plan::index(checked);
-    let mut reach = plan.reachable_from(checked, module, name);
+    let mut reach = plan.reachable_from(checked, roots);
     loop {
         let Lowering {
             program,
@@ -191,6 +212,23 @@ pub fn lower_entry(
         }
         reach.extend(wanted);
     }
+}
+
+/// Lowers only the declarations `module.name` can reach.
+///
+/// The one-root case of [`lower_roots`], which is where everything this
+/// does is written down. It has a name of its own because one root is what
+/// almost every caller has — `cove run` has the entry it was asked for,
+/// `cove replay` has the entry the tape was recorded from, `cove test` has
+/// the test it is about to run — and because a set of one is the only set
+/// whose gaps belong to a single root.
+pub fn lower_entry(
+    checked: &Checked,
+    sources: &SourceMap,
+    module: &str,
+    name: &str,
+) -> Result<Program, Vec<Diagnostic>> {
+    lower_roots(checked, sources, &[(module, name)])
 }
 
 /// One pass of the lowering over one set of declarations.
@@ -507,19 +545,21 @@ impl<'a> Plan<'a> {
         id
     }
 
-    /// The declarations `module.name` can reach, as the checker's call graph
-    /// answers it.
+    /// The declarations any of `roots` can reach, as the checker's call
+    /// graph answers it.
     ///
-    /// A seed rather than a verdict: see [`lower_entry`] for what the graph
+    /// A seed rather than a verdict: see [`lower_roots`] for what the graph
     /// cannot see and what closes the gap.
-    fn reachable_from(
-        &self,
-        checked: &'a Checked,
-        module: &str,
-        name: &str,
-    ) -> HashSet<FunctionId> {
+    ///
+    /// One walk over every root rather than one walk each, because the
+    /// answer is a union and `seen` is what makes a shared callee cost the
+    /// walk once no matter how many roots reach it.
+    fn reachable_from(&self, checked: &'a Checked, roots: &[(&str, &str)]) -> HashSet<FunctionId> {
         let mut seen: BTreeSet<Node> = BTreeSet::new();
-        let mut stack = vec![(module.to_string(), FnKey::Fn(name.to_string()))];
+        let mut stack: Vec<Node> = roots
+            .iter()
+            .map(|(module, name)| (module.to_string(), FnKey::Fn(name.to_string())))
+            .collect();
         while let Some(node) = stack.pop() {
             if !seen.insert(node.clone()) {
                 continue;

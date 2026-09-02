@@ -5,14 +5,14 @@
 //! slice is the set of declarations one entry needs. Neither is a fact the
 //! IR carries.
 
-use super::{listing, refused, sliced};
+use super::{listing, refused, sliced, sliced_to};
 
 /// `assert` is a branch over the two cases of the answer it declares.
 ///
-/// The failing arm is one interned string, because the message names the
-/// condition and nothing else. Nothing here is a call: `Ok(())` and
-/// `Err(Error(...))` are a case and an initializer, both written where the
-/// value is.
+/// The failing arm is one interned string and the record of where it
+/// failed, because the message names the condition and nothing else.
+/// Nothing here is a call: `Ok(())` and `Err(Error(...))` are a case and an
+/// initializer, both written where the value is.
 #[test]
 fn an_assertion_is_a_branch_over_the_two_cases_it_answers() {
     assert_eq!(
@@ -30,17 +30,18 @@ fn0 m.f(Int) -> Result
      4  int s4:int 0
      5  clear s6:ref <ref>
      6  copy s5:unit s9:unit Unit
-     7  jump 15
+     7  jump 16
      8  str s10:ref \"assertion failed: `n > 0`\"
-     9  copy s11:ref s10:ref String
-    10  clear s10:ref String
-    11  int s4:int 1
-    12  clear s5:unit Unit
-    13  copy s6:ref s11:ref Error
-    14  clear s11:ref Error
-    15  copy s1:int s4:int Result
-    16  clear s4:int Result
-    17  return s1:int
+     9  assert.failed s10:ref
+    10  copy s11:ref s10:ref String
+    11  clear s10:ref String
+    12  int s4:int 1
+    13  clear s5:unit Unit
+    14  copy s6:ref s11:ref Error
+    15  clear s11:ref Error
+    16  copy s1:int s4:int Result
+    17  clear s4:int Result
+    18  return s1:int
 "
     );
 }
@@ -186,4 +187,51 @@ fn every_conformance_a_dyn_dispatch_can_reach_is_in_the_slice() {
         let listed = sliced(source, "main", conformance);
         assert!(listed.contains("str "), "{conformance}: {listed}");
     }
+}
+
+/// Several roots slice to the union of what they reach, and to nothing else.
+///
+/// This is what a command with more than one thing to run asks for: the
+/// entries it selected, together, without it having to know that `left` and
+/// `right` share `common` or that `wide` is reached by neither.
+#[test]
+fn a_slice_over_several_roots_is_the_union_of_what_they_reach() {
+    let source = "fn wide<T>(x: T) -> T { x }\n\
+                  fn common() -> Int { 1 }\n\
+                  fn left() -> Int { common() }\n\
+                  fn right() -> Int { common() + 1 }";
+    for reached in ["left", "right", "common"] {
+        let listed = sliced_to(source, &["left", "right"], reached);
+        assert!(!listed.contains("-> Unit"), "{reached}: {listed}");
+    }
+    assert_eq!(
+        sliced_to(source, &["left", "right"], "wide"),
+        "\
+fn3 m.wide() -> Unit
+  frame 1: s0:unit
+     0  return s0:unit
+"
+    );
+}
+
+/// A root that names nothing this package declares contributes nothing, and
+/// is not an error here.
+///
+/// What a name denotes is the checker's question, and the caller has already
+/// asked it: `run_entry` says "this package does not declare `m.f`" about
+/// the program that was going to run, which is a better answer than a
+/// lowering could give.
+#[test]
+fn a_root_that_names_nothing_contributes_nothing() {
+    let source = "fn main() -> Int { 1 }";
+    assert_eq!(
+        sliced_to(source, &["main", "nowhere"], "main"),
+        "\
+fn0 m.main() -> Int
+  frame 2: s0:int s1:int
+     0  int s1:int 1
+     1  copy s0:int s1:int Int
+     2  return s0:int
+"
+    );
 }

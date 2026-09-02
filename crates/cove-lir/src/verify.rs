@@ -162,6 +162,9 @@ impl Check<'_> {
                 Inst::Box { dst, .. } => allocates(&mut seen, dst, self.program.boxed_layout),
                 Inst::Clear { .. } | Inst::Jump { .. } | Inst::BranchFalse { .. } => {}
                 Inst::Switch { .. } | Inst::Return { .. } | Inst::Trap { .. } => {}
+                // Writes nothing a program can read: what it writes is the
+                // run's report of where an assertion failed.
+                Inst::AssertFailed { .. } => {}
                 Inst::Store { .. } | Inst::StoreField { .. } | Inst::StoreElem { .. } => {}
                 Inst::Unit { dst } | Inst::Bool { dst, .. } => unknown(&mut seen, dst, 1),
                 Inst::Int { dst, .. } | Inst::Float { dst, .. } => unknown(&mut seen, dst, 1),
@@ -553,6 +556,9 @@ impl Check<'_> {
             }
             Inst::Trap { message } => {
                 self.in_range(at, message.index(), self.program.strings.len(), "string");
+            }
+            Inst::AssertFailed { message } => {
+                self.expect(at, message, &[Repr::Ref]);
             }
         }
     }

@@ -238,6 +238,7 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             format!("unbox {} {} {}", s(*dst), s(*src), l(*layout))
         }
         Inst::Trap { message } => format!("trap {:?}", program.string(*message)),
+        Inst::AssertFailed { message } => format!("assert.failed {}", s(*message)),
     }
 }
 

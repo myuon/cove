@@ -51,7 +51,7 @@ pub mod verify;
 
 pub use inst::{ArithOp, CmpOp, Compare, Convert, Inst, Len, Num, Pc, Slot};
 pub use layout::{enum_layout, struct_layout, Case, Field, Layout, LayoutId, Part, Shape};
-pub use lower::{lower, lower_entry};
+pub use lower::{lower, lower_entry, lower_roots};
 pub use program::{
     Arg, ArgsId, Builtin, BuiltinId, Capture, Function, FunctionId, HostOp, HostOpId, Program,
     StrId, Table, TableId,

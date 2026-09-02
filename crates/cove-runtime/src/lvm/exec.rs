@@ -129,6 +129,16 @@ pub(crate) struct Machine<'a> {
     /// waiting; this machine has one context, which is the run.
     host_wait: Duration,
     collected: Collected,
+    /// Where the most recent assertion failed, and the message it produced.
+    ///
+    /// Written only by [`Inst::AssertFailed`], which the failing arm of a
+    /// lowered assertion carries. A failed assertion is an ordinary `Err`
+    /// from here on — the machine does not stop, and a program that handles
+    /// it goes on running — so this is a record of what was seen and not a
+    /// state the run is in. A test runner reads it to point at the assertion
+    /// rather than at the test, and keeps the message so that it can tell
+    /// the `Err` it is holding from a later, unrelated one.
+    assertion_failure: Option<(Span, String)>,
 }
 
 impl<'a> Machine<'a> {
@@ -154,6 +164,7 @@ impl<'a> Machine<'a> {
             instructions: 0,
             host_wait: Duration::ZERO,
             collected: Collected::default(),
+            assertion_failure: None,
         }
     }
 
@@ -180,6 +191,14 @@ impl<'a> Machine<'a> {
     /// How long this machine has waited on hosts.
     pub(crate) fn host_wait(&self) -> Duration {
         self.host_wait
+    }
+
+    /// Where the most recent failed assertion was written, and the message
+    /// it produced, or `None` when none has failed.
+    pub(crate) fn assertion_failure(&self) -> Option<(Span, &str)> {
+        self.assertion_failure
+            .as_ref()
+            .map(|(span, message)| (*span, message.as_str()))
     }
 
     /// Runs `entry` with `args` already in word form, answering the words of
@@ -770,6 +789,31 @@ impl<'a> Machine<'a> {
                 Inst::Trap { message } => {
                     let message = program.string(message).to_string();
                     fail!(RuntimeError::new(message))
+                }
+                // The only instruction that changes nothing the program can
+                // read. `message` is the `String` the failing arm just
+                // built, and it is read here rather than carried out in the
+                // `Err`, because the `Err` is a value like any other and
+                // this is the last moment anything knows which assertion it
+                // came from.
+                //
+                // The bytes are copied. A run goes on after a failed
+                // assertion — `?` propagates it, a test catches it — and the
+                // object holding them is unreachable as soon as the arm
+                // clears its slot, so a reference kept here would be a root
+                // nothing walks.
+                //
+                // Lossily, which is the one place this crate reads a string
+                // that way. Every string in the heap was written from valid
+                // UTF-8, so bytes that are not are a bug in this machine;
+                // the boundary answers that with an error because it is
+                // handing the value to a program, and this is a report about
+                // a failure that already happened. Stopping a run over the
+                // rendering of its own diagnostic would lose the diagnostic.
+                Inst::AssertFailed { message } => {
+                    let addr = self.mem.slot(base, message);
+                    let text = String::from_utf8_lossy(&self.string_bytes(addr)).into_owned();
+                    self.assertion_failure = Some((self.span(id, pc - 1), text));
                 }
             }
         }
