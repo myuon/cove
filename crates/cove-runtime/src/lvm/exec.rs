@@ -1227,7 +1227,8 @@ impl<'a> Machine<'a> {
     /// Re-labels the object at `addr`, releasing the `spare` words it gives
     /// up. See [`Memory::relabel`].
     pub(crate) fn relabel(&mut self, addr: u64, layout: LayoutId, len: u32, spare: u32) {
-        self.mem.relabel(addr, layout, len, spare);
+        let payload = self.payload_words(layout, len);
+        self.mem.relabel(addr, layout, len, payload, spare);
     }
 
     /// The `words` payload words of the object at `addr`, from `at`.

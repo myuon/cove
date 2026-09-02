@@ -154,7 +154,18 @@ use support::{Case, ModuleIndex, Prepared};
 /// has the reasoning for leaving this test in the ordinary suite, but the
 /// cost is no longer negligible and the next family this backend learns will
 /// add to it rather than replace it.
-const AGREEING_FLOOR: usize = 67;
+///
+/// 67 to 70, and the arithmetic is worth writing out because it is four up
+/// and one down. `Vector.freeze()` is the four:
+/// [issue #240](https://github.com/myuon/cove/issues/240) moved the
+/// uniqueness proof out of the run and into `cove_sema::unique`, where ADR
+/// 0001 always said it lived, so this machine consumes the store instead of
+/// refusing and `tests/e2e:coll_array`, `tests/e2e:coll_freeze`,
+/// `examples:values` and `benches:callback` answer what the oracle answers.
+/// `tests/e2e:fail_freeze_aliased` is the one down: it used to agree because
+/// both sides refused it at run time, and it is now refused by `cove check`,
+/// so it has no checked program to lower and has left this survey entirely.
+const AGREEING_FLOOR: usize = 70;
 
 /// The code `cove_lir` raises a gap under.
 ///
@@ -181,23 +192,13 @@ const NOT_YET_LOWERED: &str = "cove::lower::not_yet_lowered";
 /// machine then ran to a different answer than the language's own definition
 /// of what it means. Removing a line happens in the change that fixes it.
 const KNOWN_DISAGREEMENTS: &[&str] = &[
-    // One fault, twice: `freeze()` refuses because this backend cannot
-    // establish that the vector's storage is uniquely owned where the oracle
-    // can, so a program that freezes a vector it has just built stops with an
-    // invariant error instead of answering. It is ADR 0001's conservative
-    // uniqueness rule being conservative about the wrong thing, and it is the
-    // machine's rather than the lowering's — both programs lowered, ran, and
-    // printed every line up to the `freeze`.
-    "examples:values",
-    "tests/e2e:coll_array",
-    // The same fault again, and they are here rather than merged into the
-    // note above because the set is a list of programs and a reader looking
-    // one up should find it. Both reached a `freeze()` only once the checker
-    // learned to settle an empty collection's element type from its later
-    // uses — which is the ratchet working: teaching one thing surfaced a
-    // fault that was always there in two more programs.
-    "benches:callback",
-    "tests/e2e:coll_freeze",
+    // Empty, and that is the state to keep it in: everything this backend
+    // lowers and runs answers what the tree-walking oracle answers. The four
+    // that used to be here were one fault — `freeze()` refused because a
+    // handle is a word and words are not counted — and
+    // [issue #240](https://github.com/myuon/cove/issues/240) settled it by
+    // establishing uniqueness in the checker rather than asking the machine
+    // to. See [`AGREEING_FLOOR`].
 ];
 
 #[test]

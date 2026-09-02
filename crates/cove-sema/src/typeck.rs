@@ -378,7 +378,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
-use cove_diag::{Diagnostic, FileId, Span};
+use cove_diag::{Diagnostic, FileId, Severity, Span};
 use cove_schema::builtins::{
     BuiltinSchema, BuiltinType, FreeBuiltinKind, FreeBuiltinSchema, MethodSchema, ParamSchema,
     MAP_ENTRY, NONE_CASE, SCOPE,
@@ -602,6 +602,16 @@ pub fn check_facts(
     let mut facts = Facts::default();
     for (_, checker) in checked {
         facts.merge(checker.facts);
+    }
+    // The uniqueness proof `freeze()` needs runs last and only over a program
+    // that type-checked. It reads the types this walk settled, so a body the
+    // checker gave up on would give it a `Vector` it is not sure about; and a
+    // reader holding a type error has a first thing to fix that is not this.
+    if !diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == Severity::Error)
+    {
+        diagnostics.extend(crate::unique::check(program, &facts));
     }
     (diagnostics, facts)
 }
@@ -9361,6 +9371,10 @@ fn build(text: String, n: Int) -> Int {
 }
 ",
         );
+        // `toArray()` rather than `freeze()` because the two questions are
+        // separate: what settles `log`'s element type is the same either
+        // way, and `cove_sema::unique` will not let a `freeze()` consume
+        // storage a *call* produced, however fresh that call's answer is.
         accepts(
             "\
 fn empty<T>() -> Vector<T> {
@@ -9370,7 +9384,7 @@ fn empty<T>() -> Vector<T> {
 fn build(text: String) -> Array<String> {
   var log = empty()
   log.push(text)
-  log.freeze()
+  log.toArray()
 }
 ",
         );
@@ -9415,12 +9429,16 @@ fn build(n: Int) -> Int {
 
     #[test]
     fn an_assignment_settles_what_a_binding_holds() {
+        // `toArray()`, because `log = lines` gives `log` storage the caller
+        // is still holding and `cove_sema::unique` refuses to `freeze()`
+        // that — correctly, and for a reason that has nothing to do with
+        // what this test is about.
         accepts(
             "\
 fn build(lines: Vector<String>) -> Array<String> {
   var log = Vector.of()
   log = lines
-  log.freeze()
+  log.toArray()
 }
 ",
         );

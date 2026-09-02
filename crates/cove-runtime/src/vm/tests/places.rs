@@ -130,8 +130,15 @@ fn writing_through_a_place_leaves_a_copy_of_the_struct_alone() {
 
 /// `freeze` consumes uniquely owned storage, so it has to see the
 /// caller's own handle exactly once — which is what taking the place
-/// rather than a read of it arranges. Both backends answer the array,
-/// and both refuse when a second alias exists.
+/// rather than a read of it arranges. Both backends answer the array.
+///
+/// The aliased half is [`agree_unchecked`] for the reason that helper
+/// exists: since [issue #240](https://github.com/myuon/cove/issues/240)
+/// the compiler establishes uniqueness, so `cove::unique::not_unique`
+/// refuses that program and neither backend is ever handed it. This
+/// runtime check is therefore unreachable through a checked program —
+/// and it is still what these two do when they are handed one, which is
+/// worth pinning for as long as they exist.
 #[test]
 fn freeze_through_a_place_consumes_the_storage_it_names() {
     assert_eq!(
@@ -141,7 +148,7 @@ fn freeze_through_a_place_consumes_the_storage_it_names() {
         .value(),
         "Str(\"[a, b]\")"
     );
-    let aliased = agree(
+    let aliased = agree_unchecked(
         "export fn main() -> String {\n  var v = Vector.of(\"a\")\n  let other = v\n  let frozen = v.freeze()\n  \"{frozen}\"\n}\n",
     );
     assert!(

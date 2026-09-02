@@ -17,6 +17,7 @@ pub mod facts;
 pub mod package;
 pub mod resolve;
 pub mod typeck;
+pub mod unique;
 
 pub use capability::{open_reasons, Capability, OpenCall};
 pub use compile::Compiler;

@@ -1,0 +1,3 @@
+[run.fail_freeze_aliased]
+entry = "main.main"
+allow = ["console"]

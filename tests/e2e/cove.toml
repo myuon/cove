@@ -64,10 +64,6 @@ allow = ["files", "console"]
 entry = "fail_files_no_capability.main"
 allow = ["console"]
 
-[run.fail_freeze_aliased]
-entry = "fail_freeze_aliased.main"
-allow = ["console"]
-
 [run.fail_invalid_map_key]
 entry = "fail_invalid_map_key.main"
 allow = ["console"]

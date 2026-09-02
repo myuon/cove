@@ -635,6 +635,55 @@ implicit deep copy; `vector.freeze()` and `vector.toArray()` produce an
 independent array, and any other independent copy is an explicit
 `impl Snapshot for Type`.
 
+The two differ in what they cost and in what they ask of the program.
+`toArray()` copies the elements in O(n) and asks nothing: the vector is
+usable afterwards and any number of handles may exist. `freeze()` costs O(1)
+because it *takes* the storage rather than copying it — so the vector is
+consumed, reading it afterwards is an error, and the compiler must be able to
+prove that the handle it is given is the only one. That proof is a
+conservative, local one (`cove::unique::not_unique`), and it is made where
+the `freeze()` is written:
+
+- the vector originates at a creation in the same function — `Vector.of(...)`,
+  `array.toVector()`, `snapshot()`, or a field of a struct literal initialised
+  by one;
+- no `let`, `var` or assignment made a second handle from it;
+- it did not escape: nothing captured it in a closure, returned it, stored it
+  in another value, or passed it to a call that could keep it — which a call
+  can only do through its result, through a `var` argument, or by writing it
+  into another argument, because a `Vector` is not task-safe and cannot be
+  held by a host;
+- the site does not run twice, so a `freeze()` in a loop or a closure body
+  needs the vector to be created there too;
+- nothing reads the vector afterwards (`cove::unique::used_after_freeze`).
+
+Reading through the handle is not an escape. Calling a method on it,
+interpolating it into a string, and iterating it all leave the proof intact.
+
+One obligation crosses a call, and only one. A method with a `var self`
+receiver, written in a plain `impl` block, may `freeze()` a vector field of
+its own receiver:
+
+```cove
+impl RouterBuilder {
+  fn finish(var self) -> Router {
+    Router(routes: self.routes.freeze())
+  }
+}
+```
+
+Such a method *demands a uniquely owned receiver*, and the same proof is then
+made at each of its call sites, on the receiver's place. A `freeze()` rooted
+anywhere else the caller owns — an ordinary `var` parameter, a captured name,
+the receiver of a trait method — is refused, because a call through a trait
+bound or through `dyn` names no declaration for the obligation to be
+discharged at.
+
+The proof is deliberately conservative rather than complete: storage a call
+produced (`var log = build()`) or an assignment brought in (`log = lines`) is
+refused even where it happens to be unique. The correction is always the
+same, and the diagnostic gives it — call `toArray()` and pay the copy.
+
 A value type may not contain itself. A `struct` or an `enum` whose layout
 would hold its own value — directly, through another declaration, or through
 an `Option` or a `Result` — is refused by the checker

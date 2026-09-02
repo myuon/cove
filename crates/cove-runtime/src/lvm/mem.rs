@@ -464,7 +464,10 @@ impl Memory {
     /// disappear. The caller must pass exactly the words the new object gives
     /// up — `1 + payload_words(before)` less `1 + payload_words(after)` — and
     /// a disagreement makes the heap unwalkable in the same way a wrong
-    /// `payload_words` at [`Memory::alloc`] does.
+    /// `payload_words` at [`Memory::alloc`] does. `payload` is the new
+    /// object's own payload words, which is where the released block begins;
+    /// it is not `len`, because a header's length counts *elements* and one
+    /// element of an `Array<Point>` is two words.
     ///
     /// `Vector.freeze()` is what needs it: a growable store becomes the
     /// immutable array it is already holding, in place, so that the one O(1)
@@ -475,12 +478,19 @@ impl Memory {
     /// The released block does not join [`Memory::free`]: the next sweep
     /// walks the heap and rebuilds that list, and until then the words are
     /// neither reachable nor handed out.
-    pub(crate) fn relabel(&mut self, addr: u64, layout: LayoutId, len: u32, spare: u32) {
+    pub(crate) fn relabel(
+        &mut self,
+        addr: u64,
+        layout: LayoutId,
+        len: u32,
+        payload: u32,
+        spare: u32,
+    ) {
         self.write(addr, header(layout, len));
         if spare > 0 {
             // The block is a header and `spare - 1` payload words, which is
             // the smallest thing a free run can be when `spare` is one.
-            self.write(addr + 1 + len as u64, header(LayoutId::FREE, spare - 1));
+            self.write(addr + 1 + payload as u64, header(LayoutId::FREE, spare - 1));
         }
     }
 

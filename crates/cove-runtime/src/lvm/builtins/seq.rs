@@ -53,14 +53,14 @@
 //! the value went, and there is nothing to write back to the receiver's own
 //! slot.
 //!
-//! # `freeze()` is the one that refuses
+//! # `freeze()` is the one that consumes
 //!
-//! It consumes storage the caller must uniquely own, and uniqueness is not a
-//! question this backend can answer: a handle is a word and words are not
-//! counted. [`vector_freeze`] says so in the oracle's own words rather than
-//! consuming anyway. The receiver check stays in front of it, because a
-//! header whose store word is null is still a state the machine has to be
-//! able to read.
+//! It takes the store away from the header and hands it back as an `Array`,
+//! in place and in O(1). That is only sound where the caller holds the only
+//! handle, and uniqueness is not a question this backend can answer — a
+//! handle is a word and words are not counted. It does not have to: the
+//! checker proves it before the program runs. [`vector_freeze`] says which
+//! pass, and why trusting it is the right shape rather than a shortcut.
 //!
 //! # Growth
 //!
@@ -144,10 +144,6 @@ struct Growable {
 /// oracle asks it once, at the top of its `Vector` arm, before it looks at
 /// the method name at all — so a consumed vector answers the same thing to
 /// `length()` as to `push()`, and the message names whichever was called.
-///
-/// Nothing in this backend consumes a vector any more — see
-/// [`vector_freeze`] — but a header whose store word is null is still a state
-/// the machine can be handed, and reading one has to have an answer.
 fn vector(
     machine: &Machine,
     method: &str,
@@ -664,52 +660,60 @@ pub(super) fn vector_to_array(
     make::array_of(machine, items.elem, &words)
 }
 
-/// `Vector.freeze() -> Array<T>`, which this backend refuses.
+/// `Vector.freeze() -> Array<T>`, consuming the store in place.
 ///
-/// `freeze()` is O(1) because it does not copy: it takes the storage away
-/// from the vector and hands it back as an `Array`. That is only sound if the
-/// caller holds the only handle to that storage, which is what the oracle
-/// checks — it counts the handles to an `Rc` and refuses when there is more
-/// than one.
+/// The one O(1) sequence conversion the language has, and O(1) here: the
+/// store is *already* the run of elements an `Array` is, so nothing is
+/// copied. [`Memory::relabel`](crate::lvm::mem::Memory::relabel) rewrites its
+/// header from the growable family to the fixed one and shortens it from the
+/// capacity to the length, and the spare room the vector had grown into
+/// becomes a free block the next sweep folds back in. The address does not
+/// move, so the array this answers is the store the vector was holding.
 ///
-/// **This machine cannot ask that question.** A handle here is a word, and
-/// words are not counted: a `Vector` is one `Repr::Ref` in a slot, a copy of
-/// it is the same word in another slot, and nothing anywhere records how many
-/// there are. Local uniqueness is a static property of a program, and
-/// establishing it is its own piece of work — a uniqueness analysis in the
-/// lowering — not something a builtin can recover from the heap.
+/// Then the vector is emptied — length zero, store null — because `freeze()`
+/// *consumes*. There is no second handle to see that happen: which is the
+/// whole point, and it is a fact this machine is told rather than one it
+/// works out.
 ///
-/// So the choice is between refusing every `freeze()` and consuming on every
-/// `freeze()`, and only one of those is the safe side. Consuming anyway would
-/// admit exactly the programs the oracle refuses, which are the programs where
-/// another alias is still watching — and each of those aliases would then find
-/// its vector emptied underneath it by an operation the language says is
-/// checked. That is a divergence in the unsound direction, and
-/// [issue #240](https://github.com/myuon/cove/issues/240) is where it was
-/// decided that it must not stand.
+/// # Who proved it
 ///
-/// Refusing is the sound direction. It is not a happy answer — a program the
-/// oracle admits is refused here — but the message is the oracle's own, and
-/// what it points at is the fallback the language already offers: `toArray()`,
-/// which copies the elements in O(n) and asks nothing about who else is
-/// holding the vector.
+/// [ADR 0001](../../../../docs/adr/0001-mvp-language-design.md) always
+/// said the compiler does: *"the compiler only performs conservative, local
+/// uniqueness checking for this explicit transition"*. The tree-walking
+/// oracle answered it a different way, by counting `Rc` handles at run time,
+/// and this machine cannot answer it at all — a handle here is a word and
+/// words are not counted. So [issue #240](https://github.com/myuon/cove/issues/240)
+/// put the proof where the ADR always had it, in
+/// [`cove_sema::unique`](../../../../crates/cove-sema/src/unique.rs), and
+/// this arm trusts it.
 ///
-/// The receiver check comes first because a header whose store word is null
-/// is still a state the machine may be handed, and it answers
-/// [`operand::frozen`] for it — the same thing it answers `length()`.
+/// Trusting is the right shape rather than a shortcut. The alternatives are
+/// a sharing bit, a reference count or a uniqueness table, and #240 rules out
+/// all three; what is left is a check the machine cannot perform and a proof
+/// the checker can. A user-facing runtime error for something the compiler
+/// guarantees would report a compiler bug in the vocabulary of a program bug.
+///
+/// What stays is [`vector`]'s own liveness check, which every `Vector` method
+/// shares: a header whose store word is null answers [`operand::frozen`].
+/// For a checked program that state is unreachable — a read after a
+/// `freeze()` is `cove::unique::used_after_freeze` — so reaching it means the
+/// proof let one through, and an internal invariant that reports is better
+/// than one that reads a null store as a sequence.
 pub(super) fn vector_freeze(
     machine: &mut Machine,
     operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("freeze", operands, 0)?;
-    vector(machine, "freeze", receiver)?;
-    Err(RuntimeError::new(
-        "`freeze()` needs uniquely owned vector storage, but another alias observes this vector",
-    )
-    .with_rule("`freeze()` consumes a locally unique vector and returns an immutable array in O(1).")
-    .with_help(
-        "call `toArray()` instead, which copies the elements in O(n), or drop the other alias before calling `freeze()`",
-    ))
+    let items = vector(machine, "freeze", receiver)?;
+    let array = make::elements(machine.program(), items.elem, false)?;
+    // The store is allocated to its capacity and holds its length, so what it
+    // gives up is the room in between — in words, because that is what a free
+    // block is measured in.
+    let spare = (items.capacity - items.len) * items.stride;
+    machine.relabel(items.store, array, items.len, spare);
+    machine.set_payload(items.header, 0, 0);
+    machine.set_payload(items.header, 1, 0);
+    Ok(items.store)
 }
 
 #[cfg(test)]
@@ -1301,43 +1305,76 @@ mod tests {
         ));
     }
 
-    /// `freeze()` refuses, in the oracle's own words, and leaves the vector
-    /// exactly as it found it.
+    /// `freeze()` hands back the store it was already holding, and empties
+    /// the vector.
     ///
-    /// The oracle refuses when another alias observes the vector. This backend
-    /// cannot tell whether one does — a handle is a word and words are not
-    /// counted — so it refuses always, which is the sound side of that
-    /// question rather than the permissive one.
+    /// The array's address *is* the store's, which is the whole of what makes
+    /// this O(1): nothing was copied, the header was rewritten from the
+    /// growable family to the fixed one, and every element stayed where it
+    /// was.
     #[test]
-    fn freeze_refuses_because_uniqueness_is_not_a_question_a_word_can_answer() {
+    fn freeze_takes_the_store_and_hands_it_back_as_an_array() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
         let items = growable(&mut machine, &[1, 2]);
         let store = machine.payload(items, 1);
 
-        let error = word(&mut machine, "Vector", "freeze", &[(Repr::Ref, items)]).unwrap_err();
-        assert_eq!(
-            error.message,
-            "`freeze()` needs uniquely owned vector storage, but another alias observes this vector"
-        );
-        assert_eq!(
-            error.rule.as_deref(),
-            Some("`freeze()` consumes a locally unique vector and returns an immutable array in O(1).")
-        );
-        assert_eq!(
-            error.help.as_deref(),
-            Some("call `toArray()` instead, which copies the elements in O(n), or drop the other alias before calling `freeze()`")
-        );
+        let frozen = word(&mut machine, "Vector", "freeze", &[(Repr::Ref, items)]).unwrap();
+        assert_eq!(frozen, store);
+        assert_eq!(words_of(&machine, frozen), vec![1, 2]);
+        assert!(matches!(
+            machine
+                .program()
+                .layout(machine.object_layout(frozen))
+                .shape,
+            Shape::Elements {
+                growable: false,
+                ..
+            }
+        ));
 
-        // Nothing was consumed, so the vector is still a vector — and the
-        // help's `toArray()` is a call a program can go on to make.
-        assert_eq!(machine.payload(items, 1), store);
-        assert_eq!(
-            word(&mut machine, "Vector", "length", &[(Repr::Ref, items)]).unwrap(),
-            2
-        );
-        let back = word(&mut machine, "Vector", "toArray", &[(Repr::Ref, items)]).unwrap();
-        assert_eq!(words_of(&machine, back), vec![1, 2]);
+        // Consumed: the header stays where it is and answers that it has no
+        // storage, which is the state a checked program cannot reach.
+        assert_eq!(machine.payload(items, 1), 0);
+        let error = word(&mut machine, "Vector", "length", &[(Repr::Ref, items)]).unwrap_err();
+        assert!(error.message.contains("freeze"), "{}", error.message);
+    }
+
+    /// A `push` grows the store past the length, and what `freeze()` answers
+    /// is the length rather than the capacity.
+    ///
+    /// The words in between are given back as a free block, which the sweep
+    /// has to be able to walk over: an object whose header says two elements
+    /// sitting in room for four would otherwise leave two words that belong
+    /// to nothing.
+    #[test]
+    fn freeze_gives_back_the_room_the_vector_grew_into() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 14);
+        let items = growable(&mut machine, &[1]);
+        word(
+            &mut machine,
+            "Vector",
+            "push",
+            &[(Repr::Ref, items), (Repr::Int, 2)],
+        )
+        .unwrap();
+        let store = machine.payload(items, 1);
+        assert_eq!(machine.object_len(store), MIN_CAPACITY);
+
+        let frozen = word(&mut machine, "Vector", "freeze", &[(Repr::Ref, items)]).unwrap();
+        assert_eq!(frozen, store);
+        assert_eq!(words_of(&machine, frozen), vec![1, 2]);
+
+        // The heap is still walkable, which a collection is the way to ask:
+        // the sweep walks every object from the first to the bump pointer,
+        // and a released run that is not a free block of its own is where
+        // that walk would leave the sequence.
+        machine.push_temp(frozen);
+        while machine.collected().collections == 0 {
+            growable(&mut machine, &[3, 4, 5, 6, 7, 8, 9, 10]);
+        }
+        assert_eq!(words_of(&machine, frozen), vec![1, 2]);
     }
 
     /// A header whose store word is null is still a state the machine can be

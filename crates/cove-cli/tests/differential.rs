@@ -561,7 +561,20 @@ use support::{Case, ModuleIndex, Prepared};
 /// two backends could disagree about it undetected until issue #168 wrote
 /// the program by hand. `tests/e2e/fail_variadic_lambda` is that program,
 /// and it joins the cases that do not check rather than the ones that lower.
-const LOWERED_FLOOR: usize = 97;
+///
+/// 97 to 96, and it is the one direction this number is not supposed to
+/// move, so it is worth saying exactly what left and why that is not a
+/// regression. `tests/e2e:fail_freeze_aliased` used to lower, run, and be
+/// refused *by both backends at run time*, because `builtins::freeze`
+/// counted `Rc` handles and found two.
+/// [Issue #240](https://github.com/myuon/cove/issues/240) moved that proof
+/// to where ADR 0001 always said it lived — `cove_sema`'s conservative
+/// local uniqueness pass — so the program is now refused by `cove check`
+/// and there is nothing left to lower. It joins the cases that do not
+/// check, exactly as `fail_variadic_lambda` did when its construct became a
+/// diagnostic, and for the same reason: a rule that moved from the run to
+/// the check takes its program with it.
+const LOWERED_FLOOR: usize = 96;
 
 /// Every refusal the corpus is allowed to hold: the case, and the construct
 /// the lowering named when it refused it.
