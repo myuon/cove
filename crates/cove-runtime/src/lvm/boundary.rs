@@ -65,7 +65,9 @@
 //!
 //! [`Repr::Addr`] is refused in both directions and stays refused, for a
 //! reason that is not the same one: an address names a word of *this run's*
-//! memory and means nothing outside it.
+//! memory and means nothing outside it. [`Repr::Task`] and [`Repr::Scope`]
+//! are refused beside it, on the narrower ground that the task-safety rule
+//! already keeps either from leaving the task that formed it.
 //!
 //! # Building a value is not atomic
 //!
@@ -194,7 +196,12 @@ fn word_out(machine: &Machine, repr: Repr, word: u64, depth: usize) -> Result<Va
         // run's memory — a slot of a live frame, or a field inside an object
         // this heap placed — and means nothing outside it, so a host that was
         // handed one would be holding this run's own bookkeeping.
-        Repr::Addr => {
+        //
+        // A task handle and a task scope are refused the same way and for a
+        // reason of their own: neither may cross a *task* boundary, so
+        // neither can cross this one either, and what the word indexes is
+        // the scheduler table of one task of one run.
+        Repr::Addr | Repr::Task | Repr::Scope => {
             return Err(RuntimeError::new(
                 "this value cannot cross the boundary as it is represented",
             ))
@@ -948,7 +955,7 @@ fn fits(program: &Program, layout: LayoutId, value: &Value) -> bool {
         // The one word a host is on both ends of. See `word_out`.
         Shape::Word(Repr::Host) => matches!(value.view(), ValueView::Resource(_)),
         // Not a value a host holds. See `word_out`.
-        Shape::Word(Repr::Addr) | Shape::Free => false,
+        Shape::Word(Repr::Addr | Repr::Task | Repr::Scope) | Shape::Free => false,
         Shape::Str => matches!(value.view(), ValueView::Str(_)),
         Shape::Struct { fields, .. } if is_range(program, described) => {
             matches!(value.view(), ValueView::Range(_)) && fields.len() == 3

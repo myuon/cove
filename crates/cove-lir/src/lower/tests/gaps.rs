@@ -27,6 +27,31 @@ fn a_shared_stops_at_the_boundary_rather_than_at_its_lock() {
     );
 }
 
+/// A `scope` in a function that answers no `Result` has nowhere to pass a
+/// failing child's error, and that is a gap rather than an invention.
+///
+/// `crate::task::wait_for_children` answers `ChildFailure::Returned(err)` for
+/// a child whose value was `Err(...)`, and the oracle returns it from the
+/// enclosing function whatever that function's type is — a `Value::err` out
+/// of a body typed `Unit`, which nothing downstream can read as what it is.
+/// The linear model cannot do that: a return copies the words
+/// `Function::returns` describes, and a `Unit` is one word that is not an
+/// enum. So the shape is named rather than guessed at, and if the sentence is
+/// meant to be a program it is `cove-sema` that has to say what it means.
+///
+/// `examples/covecheck/runner_test.cove`'s `counting` is the one program in
+/// the repository that writes it, and it is blocked by several other things.
+#[test]
+fn a_scope_in_a_function_that_answers_no_result_has_no_failure_to_pass_on() {
+    let items = refused("fn f() {\n  scope tasks {\n    let n = 1\n  }\n}");
+    assert!(
+        items.iter().any(|item| item.starts_with(
+            "not yet lowered: a `scope` in a function that does not answer a `Result`"
+        )),
+        "{items:?}"
+    );
+}
+
 #[test]
 fn a_function_value_with_a_var_parameter_names_the_parameter_rather_than_the_lambda() {
     // ADR 0032 fixes a closure's parameter list, and a function type names

@@ -20,7 +20,8 @@
 //! buffer, no spill area and no fallback path, which is what ADR 0034 asks
 //! for and what the predecessor could not say.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::thread::{Scope, ScopedJoinHandle};
 use std::time::{Duration, Instant};
 
 use cove_diag::Span;
@@ -32,10 +33,13 @@ use cove_lir::{
 use crate::budget::{Cancellation, Meter};
 use crate::error::RuntimeError;
 use crate::host::{HostRegistry, Reentry, ResourceHandle};
+use crate::interp::stopped_here;
 use crate::lvm::builtins::operand::Operand;
-use crate::lvm::mem::{Collected, Memory, Overflow, Roots};
+use crate::lvm::mem::{Collected, Memory, NoSegment, Overflow, Roots};
 use crate::lvm::{boundary, builtins};
-use crate::runtime::ENTRY_TASK;
+use crate::runtime::{Runtime, ENTRY_TASK};
+use crate::task;
+use crate::trace::TraceEvent;
 // The one import of the public `Value` outside `boundary`, and the one thing
 // ADR 0034 allows it for: a host call's arguments and its answer exist as
 // `Value`s for the length of the call and nowhere else. Nothing here stores
@@ -69,25 +73,179 @@ struct Frame {
     dst: Slot,
 }
 
-/// The frames of one task, as the collector sees them.
+/// What one task is holding, read where the collector asks rather than
+/// gathered in advance.
 ///
-/// A snapshot of addresses rather than a live view, because a collection
-/// takes `&mut Memory` and reading a slot takes `&Memory`. Gathering first
-/// costs one pass over the reference slots — which the collector was going to
-/// make anyway — and keeps [`Memory`] free of any idea of what a frame is.
-struct Held<'a>(&'a [u64]);
+/// A safepoint runs every [`SAFEPOINT_STRIDE`] instructions and a collection
+/// is rare, so the walk has to cost nothing when the answer is that nothing
+/// is pending — and [`Memory::poll`] answers that with one relaxed load,
+/// *before* it asks for roots. Gathering into a `Vec` first would have paid
+/// for a pass over every reference slot of every live frame on the common
+/// path in order to save nothing on the rare one.
+///
+/// It borrows the machine immutably and reads its own memory, which is why
+/// every reader of it takes `&self`: a collection and a park are both things
+/// a task asks for about itself, and neither changes a frame.
+struct Live<'m, 'a>(&'m Machine<'a>);
 
-impl Roots for Held<'_> {
+impl Roots for Live<'_, '_> {
     fn each_root(&self, f: &mut dyn FnMut(u64)) {
-        for &addr in self.0 {
-            f(addr);
+        let machine = self.0;
+        let program = machine.program;
+        for frame in &machine.frames {
+            let function = program.function(frame.function);
+            for slot in function.refs.iter() {
+                let word = machine.mem.slot(frame.base, slot);
+                if word != 0 {
+                    f(word);
+                }
+            }
+        }
+        for &addr in &machine.interned {
+            if addr != 0 {
+                f(addr);
+            }
+        }
+        for &addr in &machine.temps {
+            if addr != 0 {
+                f(addr);
+            }
+        }
+        // The scheduler table is a *root provider*, which is the whole of
+        // what keeps it from being the second value store ADR 0034 forbids:
+        // it holds the address of the object a task's answer goes into, and
+        // the object and its words are in the run's one heap like anything
+        // else. Nothing that wanted to dodge a heap representation could be
+        // put here, because an address is all there is room for.
+        for child in &machine.children {
+            if child.answer != 0 {
+                f(child.answer);
+            }
+            if child.closure != 0 {
+                f(child.closure);
+            }
         }
     }
+}
+
+/// What a task thread hands back: nothing, or why it stopped.
+///
+/// Nothing, because the value is not carried out — the parent allocated the
+/// object it goes into before the thread existed, and the child wrote its
+/// words there. Handing the words back through the join would have left them
+/// in a Rust `Vec`, which nothing the collector walks names, for as long as
+/// the join took.
+type Outcome = Result<(), RuntimeError>;
+
+/// What a spawned task has done so far.
+///
+/// [`crate::task::TaskState`] is the oracle's, and the four are the same
+/// four: a task ends by finishing, by failing, by being cancelled, or by
+/// breaking an invariant in its own thread — and the last is reported as the
+/// third or the second, exactly as [`crate::task::Task::join`] reports it.
+enum ChildState {
+    /// The body is running on its own thread, which has not been joined.
+    Running,
+    /// The body produced a value, and it is in the answer object.
+    Settled,
+    /// The body raised. Awaiting again raises the same error.
+    Failed(RuntimeError),
+    /// The task's own flag was raised and it stopped at a safepoint rather
+    /// than finishing. Awaiting a cancelled task is an error.
+    Cancelled,
+}
+
+/// One task this machine spawned, and everything about it that is not the
+/// thread.
+///
+/// The thread is not here, and cannot be: a scoped join handle borrows the
+/// scope it was started in, and that is a lifetime one turn of the dispatch
+/// loop owns rather than a field the machine can hold. So the handles live
+/// beside this list, at the same indices, for the length of one
+/// [`Machine::drive`].
+struct Child {
+    /// Trace identity, unique across the run.
+    id: u64,
+    /// Where in its scope's spawn order it is, counting from one.
+    position: usize,
+    /// The name of the scope that owns it.
+    ///
+    /// Both are here for one reason: a diagnostic says *task 2 of scope
+    /// `requests`*, and [`crate::task::describe`] is where both backends read
+    /// that sentence from.
+    scope: Arc<str>,
+    /// The flag the body reads at its own safepoints.
+    cancellation: Cancellation,
+    /// The closure environment the body runs, until it has been joined.
+    ///
+    /// Held as a root, and it has to be. The lowering ends the closure
+    /// temporary's live range at the `spawn` — correctly: the value is a
+    /// temporary and the instruction consumed it — so the moment the
+    /// `Inst::Clear` after the `Inst::Spawn` runs, nothing in the parent's
+    /// frame names the environment. The child has not necessarily read it
+    /// yet: ADR 0008's amendment says a `spawn` orders nothing, so whether
+    /// the thread has run an instruction by then is the operating system's
+    /// answer, and one allocation in the parent could otherwise free the
+    /// object the child is about to enter.
+    ///
+    /// The oracle has no such window because the closure crosses as a
+    /// `Transfer` — a copy the receiving thread owns outright. Here what
+    /// crosses is an address into a heap both tasks share, so the *table*
+    /// holds it, and this is the second thing that makes the scheduler table
+    /// a root provider.
+    ///
+    /// It is dropped at the join rather than at the child's first
+    /// instruction, because that is the earliest moment the parent can know
+    /// the child is done with it — and it retains nothing the child was not
+    /// already retaining, since the captures were copied into the child's
+    /// own frame.
+    closure: u64,
+    /// The object this task's answer is written into.
+    ///
+    /// Allocated by **this** task, before the thread existed, and a root of
+    /// this task from that moment. A child that allocated its own would have
+    /// left it named by nothing the collector walks between its own last
+    /// safepoint and the parent's next one.
+    answer: u64,
+    /// What the words inside that object are.
+    layout: LayoutId,
+    state: ChildState,
+}
+
+impl Child {
+    /// How a diagnostic names this task.
+    fn describe(&self) -> String {
+        task::describe(self.position, &self.scope)
+    }
+}
+
+/// One task scope this machine has entered.
+///
+/// The scope owns every task spawned into it, which is what lets leaving it
+/// wait for or cancel them. It is never removed: a `Repr::Scope` word is an
+/// index, and an index that could be reused would name two scopes over one
+/// run.
+struct ScopeEntry {
+    name: Arc<str>,
+    /// Indices into [`Machine::children`], in spawn order.
+    tasks: Vec<usize>,
+    /// Set once the scope has been left. A handle that outlived its scope can
+    /// no longer spawn into it.
+    closed: bool,
 }
 
 /// One task's execution over one linear memory.
 pub(crate) struct Machine<'a> {
     program: &'a Program,
+    /// What every thread of this run shares: the trace, and the counter task
+    /// ids are drawn from.
+    ///
+    /// `None` is a machine with no run around it — what this module's own
+    /// tests drive — and it costs exactly two things, both of which are
+    /// reporting rather than execution: nothing is traced, and task ids are
+    /// drawn from a counter of this machine's own. A program still spawns,
+    /// awaits and cancels.
+    runtime: Option<&'a Runtime>,
     /// The boundary a [`Inst::CallHost`] calls through, if this run has one.
     ///
     /// `None` is a machine with no host behind it — what a test that runs
@@ -149,7 +307,15 @@ pub(crate) struct Machine<'a> {
     /// rather than by analogy — a resource is owned by the *run*, not by the
     /// task or the scope that opened it, so a handle one task was given is a
     /// name every task of the run may hold.
-    resources: Vec<Arc<ResourceHandle>>,
+    ///
+    /// Shared by every task of the run, behind a lock, and that is not an
+    /// economy: a task-safe resource **crosses** a task boundary, and what
+    /// crosses is the word. A table of this task's own would make that word
+    /// an index into a list the receiving task does not have — so a handle a
+    /// parent opened would name whatever the child happened to open first,
+    /// or nothing. ADR 0013 says a resource is the *run's*, and this is what
+    /// that sentence costs.
+    resources: Arc<Mutex<Vec<Arc<ResourceHandle>>>>,
     /// Objects a boundary conversion is holding and no frame names yet.
     ///
     /// A frame is a root because a static map says which of its slots are
@@ -164,8 +330,36 @@ pub(crate) struct Machine<'a> {
     /// conversion that recurses takes a mark on the way in and releases to it
     /// on the way out, so nothing has to remember which root was whose.
     temps: Vec<u64>,
-    /// Reused across collections so a collection does not allocate.
-    roots: Vec<u64>,
+    /// The task scopes this machine has entered, in the order it entered
+    /// them. A `Repr::Scope` word is one past an index into this.
+    ///
+    /// This machine's, not the run's, and that is what the task-safety rule
+    /// buys: neither a `TaskScope` nor a `Task` may cross a task boundary, so
+    /// a word formed here is only ever read here. Two tasks cannot form one
+    /// another's handles, which is the same disjointness by construction that
+    /// keeps two stack segments apart.
+    scopes: Vec<ScopeEntry>,
+    /// The tasks this machine spawned, in spawn order across every scope. A
+    /// `Repr::Task` word is one past an index into this.
+    children: Vec<Child>,
+    /// This task's own cancellation flag, or `None` for the entry, which has
+    /// none.
+    ///
+    /// Separate from the run's, which lives in the [`Meter`] every task
+    /// shares: cancelling one task stops that task, and cancelling the run
+    /// stops everything. [`crate::interp::stopped_here`] is where the two a
+    /// *thread* owns are read, and it is the oracle's own function so that
+    /// neither backend can drift from the other's answer.
+    cancellation: Option<Cancellation>,
+    /// Which task this machine is running, for a trace and for the way back
+    /// a host is offered.
+    task: u64,
+    /// Where the next task id comes from when there is no [`Runtime`] to ask.
+    ///
+    /// Only a test reaches it. A run draws ids from one counter for the whole
+    /// run, because a task id is a trace identity and two tasks spawned at
+    /// the same time on two threads must not share one.
+    next_task: u64,
     instructions: u64,
     /// How long this machine has spent inside host calls.
     ///
@@ -192,21 +386,83 @@ impl<'a> Machine<'a> {
         Machine::with_hosts(program, heap_words, None)
     }
 
-    /// A machine that calls hosts through `hosts`.
+    /// A machine that calls hosts through `hosts`, with nothing above it.
     pub(crate) fn with_hosts(
         program: &'a Program,
         heap_words: usize,
         hosts: Option<&'a HostRegistry>,
     ) -> Machine<'a> {
+        Machine::for_run(program, heap_words, hosts, None)
+    }
+
+    /// The entry task of one run.
+    pub(crate) fn for_run(
+        program: &'a Program,
+        heap_words: usize,
+        hosts: Option<&'a HostRegistry>,
+        runtime: Option<&'a Runtime>,
+    ) -> Machine<'a> {
         Machine {
             program,
+            runtime,
             hosts,
             mem: Memory::new(heap_words),
             frames: Vec::new(),
             interned: vec![0; program.strings.len()],
-            resources: Vec::new(),
+            resources: Arc::new(Mutex::new(Vec::new())),
             temps: Vec::new(),
-            roots: Vec::new(),
+            scopes: Vec::new(),
+            children: Vec::new(),
+            cancellation: None,
+            task: ENTRY_TASK,
+            next_task: 1,
+            instructions: 0,
+            host_wait: Duration::ZERO,
+            collected: Collected::default(),
+            assertion_failure: None,
+        }
+    }
+
+    /// A machine for a spawned task, over a stack segment of its own and the
+    /// run's one heap.
+    ///
+    /// Everything a run owns is shared and everything a task owns is fresh,
+    /// and the split is the whole of ADR 0008 here. Shared: the program, the
+    /// hosts, the trace, the heap, the run's budget, the resource table.
+    /// Fresh: the stack segment, the frames, the string objects this task
+    /// allocates for its own literals, and the scheduler table it spawns its
+    /// own children into.
+    ///
+    /// The interned strings are the one that looks like an economy and is
+    /// not. A literal is an *object*, and an object belongs to the heap both
+    /// tasks address; interning it twice costs one object per literal per
+    /// task and buys a table with no lock on the path a literal in a loop
+    /// takes. Sharing it would put a lock between every `Inst::Str` and its
+    /// answer.
+    #[allow(clippy::too_many_arguments)]
+    fn for_task(
+        program: &'a Program,
+        hosts: Option<&'a HostRegistry>,
+        runtime: Option<&'a Runtime>,
+        resources: Arc<Mutex<Vec<Arc<ResourceHandle>>>>,
+        mem: Memory,
+        cancellation: Cancellation,
+        task: u64,
+    ) -> Machine<'a> {
+        Machine {
+            program,
+            runtime,
+            hosts,
+            mem,
+            frames: Vec::new(),
+            interned: vec![0; program.strings.len()],
+            resources,
+            temps: Vec::new(),
+            scopes: Vec::new(),
+            children: Vec::new(),
+            cancellation: Some(cancellation),
+            task,
+            next_task: 1,
             instructions: 0,
             host_wait: Duration::ZERO,
             collected: Collected::default(),
@@ -281,7 +537,81 @@ impl<'a> Machine<'a> {
             pc: 0,
             dst: 0,
         });
-        self.dispatch(budget)
+        self.drive(budget)
+    }
+
+    /// Runs the frame already on the stack, inside the thread scope its
+    /// `spawn`s start their children in.
+    ///
+    /// The scope is here rather than around the whole run because it is what
+    /// bounds a task's threads to a task: nothing this body starts can outlive
+    /// this call, so the borrow a child holds of the program, the hosts and
+    /// the run is a borrow the compiler can check rather than one this module
+    /// has to promise. A child that spawns children of its own opens a scope
+    /// of its own, nested, and leaves it before it answers.
+    ///
+    /// Whatever the body did, no thread leaves here with work to do. A
+    /// runtime error is not a jump the lowering emits, so there is no
+    /// `ScopeCancel` on that path and nothing would otherwise cancel the
+    /// children of a scope the error left — and `std::thread::scope` would
+    /// then wait for a task that is waiting for nobody. [`Machine::stop_all`]
+    /// is that path, and on the ordinary one it has nothing to do because
+    /// every scope was already left where it was written.
+    fn drive(&mut self, budget: &Meter) -> Result<Vec<u64>, RuntimeError> {
+        std::thread::scope(|threads| {
+            let mut running: Vec<Option<ScopedJoinHandle<'_, Outcome>>> = Vec::new();
+            let answer = self.dispatch(budget, threads, &mut running);
+            debug_assert!(
+                answer.is_err() || !self.anything_running(),
+                "a body that answered left every scope it opened, so nothing is still running"
+            );
+            self.stop_all(&mut running);
+            answer
+        })
+    }
+
+    /// Runs the body of a spawned closure, which is this machine's whole
+    /// task.
+    ///
+    /// The closure takes no parameters — `scope.spawn { ... }` is written
+    /// with none and an `async fn`'s handle carries none — so its frame is
+    /// its captures and its locals. The captures are copied out of the
+    /// environment exactly as [`Inst::CallClosure`] copies them, because it
+    /// is the same object read the same way; what differs is only that the
+    /// caller is a thread rather than an instruction.
+    fn enter_closure(
+        &mut self,
+        object: u64,
+        budget: &Meter,
+        span: Span,
+    ) -> Result<Vec<u64>, RuntimeError> {
+        let program = self.program;
+        let callee = self.callee_of(object)?;
+        let target = program.function(callee);
+        if !target.params.is_empty() {
+            return Err(wrong_arity(target.qualified(), target.params.len(), 0).at(span));
+        }
+        let base = self
+            .mem
+            .push_frame(target.frame_size())
+            .map_err(|Overflow| self.too_deep(span))?;
+        let mut held = 1;
+        for capture in &target.captures {
+            let width = program.layout(capture.layout).width();
+            self.mem.copy_words(
+                base + capture.slot as u64,
+                self.mem.payload_addr(object, held),
+                width,
+            );
+            held += width;
+        }
+        self.frames.push(Frame {
+            function: callee,
+            base,
+            pc: 0,
+            dst: 0,
+        });
+        self.drive(budget)
     }
 
     /// The loop.
@@ -289,7 +619,12 @@ impl<'a> Machine<'a> {
     /// `function`, `base` and `pc` are kept in locals rather than read out of
     /// the top frame on every instruction, and written back at the two points
     /// where something else looks: a collection, and a failure.
-    fn dispatch(&mut self, budget: &Meter) -> Result<Vec<u64>, RuntimeError> {
+    fn dispatch<'s>(
+        &mut self,
+        budget: &Meter,
+        threads: &'s Scope<'s, 'a>,
+        running: &mut Vec<Option<ScopedJoinHandle<'s, Outcome>>>,
+    ) -> Result<Vec<u64>, RuntimeError> {
         let program = self.program;
         let top = self.frames.last().expect("run pushed a frame");
         let mut id = top.function;
@@ -300,10 +635,25 @@ impl<'a> Machine<'a> {
         loop {
             self.instructions += 1;
             if self.instructions.is_multiple_of(SAFEPOINT_STRIDE) {
+                self.sync(pc);
+                // This task's own flag first, then the run's accounting, in
+                // the order `Interpreter::charge_safepoint` asks them: a
+                // cancelled task is cancelled and not out of fuel, whichever
+                // of the two also happens to be true.
+                if let Some(flag) = &self.cancellation {
+                    if flag.is_cancelled() {
+                        return Err(crate::interp::task_cancelled(self.span(id, pc)));
+                    }
+                }
                 if let Err(stopped) = budget.safepoint(SAFEPOINT_STRIDE) {
-                    self.sync(pc);
                     return Err(budget.to_runtime_error(stopped).at(self.span(id, pc)));
                 }
+                // And the run's: a collection is stop-the-world, so a task
+                // that never published its roots would be a task the
+                // collector waits for while it waits for the collector. The
+                // question costs one relaxed load when nothing is pending,
+                // which is every time but the rare one.
+                self.mem.poll(&Live(self));
             }
 
             let inst = &code[pc];
@@ -852,6 +1202,98 @@ impl<'a> Machine<'a> {
                         .copy_words(base + dst as u64, self.mem.payload_addr(addr, 1), width);
                 }
 
+                // ---- tasks ---------------------------------------------------
+                Inst::ScopeEnter { dst, name } => {
+                    let named = program.string(name).clone();
+                    self.scopes.push(ScopeEntry {
+                        name: named,
+                        tasks: Vec::new(),
+                        closed: false,
+                    });
+                    // One past the index, so a `Repr::Scope` slot a zeroed
+                    // frame has not written names no scope.
+                    self.mem.set_slot(base, dst, self.scopes.len() as u64);
+                }
+                // The body reached its end, so this is the exit that waits.
+                // The oracle is `crate::task::wait_for_children`, and what it
+                // answers about a failing child is a value here rather than
+                // control flow: the lowering knows which `Err` to build and
+                // what to return, and this does not.
+                Inst::ScopeLeave {
+                    scope,
+                    failed,
+                    error,
+                    layout,
+                } => {
+                    self.sync(pc - 1);
+                    let span = self.span(id, pc - 1);
+                    let word = self.mem.slot(base, scope);
+                    match self.leave_scope(word, running, span) {
+                        Ok(None) => self.mem.set_slot(base, failed, 0),
+                        Ok(Some(child)) => {
+                            match self.write_child_error(child, base + error as u64, layout) {
+                                Ok(()) => self.mem.set_slot(base, failed, 1),
+                                Err(error) => fail!(error),
+                            }
+                        }
+                        Err(error) => fail!(error),
+                    }
+                }
+                // The other exit, and the one a jump takes. Nothing is
+                // answered: a scope being left early is already leaving with
+                // something to say, and a child's failure found on the way
+                // out would replace it with an unrelated one.
+                Inst::ScopeCancel { scope } => {
+                    self.sync(pc - 1);
+                    let word = self.mem.slot(base, scope);
+                    match self.scope_at(word, self.span(id, pc - 1)) {
+                        Ok(at) => self.cancel_scope(at, running),
+                        Err(error) => fail!(error),
+                    }
+                }
+                Inst::Spawn {
+                    dst,
+                    scope,
+                    closure,
+                    answer,
+                } => {
+                    self.sync(pc - 1);
+                    let span = self.span(id, pc - 1);
+                    let scope_word = self.mem.slot(base, scope);
+                    let object = self.mem.slot(base, closure);
+                    match self.spawn(scope_word, object, answer, budget, span, threads, running) {
+                        Ok(word) => self.mem.set_slot(base, dst, word),
+                        Err(error) => fail!(error),
+                    }
+                }
+                Inst::Await { dst, task, answer } => {
+                    self.sync(pc - 1);
+                    let span = self.span(id, pc - 1);
+                    let word = self.mem.slot(base, task);
+                    match self.settle(word, answer, running, span) {
+                        Ok(words) => {
+                            for (at, held) in words.iter().enumerate() {
+                                self.mem.set_slot(base, dst + at as u32, *held);
+                            }
+                        }
+                        Err(error) => fail!(error),
+                    }
+                }
+                // Asking is all it does. Whether the task stopped or had
+                // already finished is known only where something waits for
+                // it, which is why `TaskCancelled` is traced at the join.
+                Inst::Cancel { task } => {
+                    let word = self.mem.slot(base, task);
+                    match self.child_at(word, self.span(id, pc - 1)) {
+                        Ok(at) => {
+                            if matches!(self.children[at].state, ChildState::Running) {
+                                self.children[at].cancellation.cancel();
+                            }
+                        }
+                        Err(error) => fail!(error),
+                    }
+                }
+
                 // ---- failure -----------------------------------------------------
                 Inst::Trap { message } => {
                     let message = program.string(message).to_string();
@@ -939,29 +1381,20 @@ impl<'a> Machine<'a> {
             .ok_or_else(|| RuntimeError::new("this run has no memory left"))
     }
 
-    /// Marks from every live frame and every interned string, then sweeps.
+    /// Stops the world and reclaims what nothing this run's tasks hold
+    /// reaches.
+    ///
+    /// This task's own roots are [`Live`]; every other task's are what it
+    /// published at the safepoint it parked at. The host resource table is
+    /// among neither and could not be: it holds names rather than addresses,
+    /// so there is nothing in it for a mark to follow — and a `Repr::Host`
+    /// word in a frame is not gathered either, because `Function::refs` is
+    /// `RefMap::of` the `Repr`s and `Repr::Host::is_ref` is false. A
+    /// `Repr::Task` and a `Repr::Scope` are outside it for the same reason,
+    /// and what a task's table *does* name is reached through [`Live`].
     fn collect(&mut self) {
-        let program = self.program;
-        let mut roots = std::mem::take(&mut self.roots);
-        roots.clear();
-        for frame in &self.frames {
-            let function = program.function(frame.function);
-            for slot in function.refs.iter() {
-                let word = self.mem.slot(frame.base, slot);
-                if word != 0 {
-                    roots.push(word);
-                }
-            }
-        }
-        roots.extend(self.interned.iter().copied().filter(|addr| *addr != 0));
-        roots.extend(self.temps.iter().copied().filter(|addr| *addr != 0));
-        // The host resource table is not among them and could not be. It
-        // holds names rather than addresses, so there is nothing in it for a
-        // mark to follow — and a `Repr::Host` word in a frame is not gathered
-        // above, because `Function::refs` is `RefMap::of` the `Repr`s and
-        // `Repr::Host::is_ref` is false.
-        self.collected = self.mem.collect(&program.layouts, &Held(&roots));
-        self.roots = roots;
+        let done = self.mem.collect(&self.program.layouts, &Live(self));
+        self.collected = done;
     }
 
     /// How many temporary roots are held, for a caller about to take more.
@@ -1004,8 +1437,25 @@ impl<'a> Machine<'a> {
     /// word from somewhere that is not this table. Both are questions about a
     /// value crossing rather than about the machine, so both are reported by
     /// [`crate::lvm::boundary`] and neither is decided here.
-    pub(crate) fn resource(&self, word: u64) -> Option<&Arc<ResourceHandle>> {
-        self.resources.get(word.checked_sub(1)? as usize)
+    pub(crate) fn resource(&self, word: u64) -> Option<Arc<ResourceHandle>> {
+        self.held_resources()
+            .get(word.checked_sub(1)? as usize)
+            .cloned()
+    }
+
+    /// The run's resource table, recovering from a lock a panicking task
+    /// left poisoned.
+    ///
+    /// A table of names is not a state anything recovers *from*: what it held
+    /// before the panic is exactly what it holds after, because nothing here
+    /// is ever removed. Refusing every later resource operation of the run
+    /// because one task panicked would turn a task's failure into the run's,
+    /// which is the opposite of what a task boundary is for — the same
+    /// reasoning `Space::allocator` gives about the heap's own lock.
+    fn held_resources(&self) -> std::sync::MutexGuard<'_, Vec<Arc<ResourceHandle>>> {
+        self.resources
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
     }
 
     /// The word naming `handle`, writing it into the table the first time
@@ -1024,16 +1474,13 @@ impl<'a> Machine<'a> {
     /// The scan is linear over the resources this run has been handed. That
     /// is the table the host is keeping too, at the size the host keeps it.
     pub(crate) fn resource_word(&mut self, handle: &ResourceHandle) -> u64 {
-        if let Some(at) = self
-            .resources
-            .iter()
-            .position(|held| held.names_same(handle))
-        {
+        let mut held = self.held_resources();
+        if let Some(at) = held.iter().position(|kept| kept.names_same(handle)) {
             return at as u64 + 1;
         }
-        self.resources.push(Arc::new(handle.clone()));
+        held.push(Arc::new(handle.clone()));
         // One past the index, because a zeroed slot has to mean no resource.
-        self.resources.len() as u64
+        held.len() as u64
     }
 
     /// Materialises the arguments, calls the host, and writes its answer
@@ -1090,8 +1537,27 @@ impl<'a> Machine<'a> {
             ))
             .at(span)
         })?;
+        stopped_here(self.cancellation.as_ref(), &[], span)?;
         let started = Instant::now();
-        let answer = hosts.call_with(&op.module, &op.operation, values, &mut Back { budget });
+        let answer = {
+            // A task inside a host call is not running Cove and its frames do
+            // not change, so the snapshot it leaves stays true for the whole
+            // call — and a collection that waited for it instead would be
+            // waiting for something outside the run altogether.
+            let parked = self.mem.blocking(&Live(self));
+            let answer = hosts.call_with(
+                &op.module,
+                &op.operation,
+                values,
+                &mut Back {
+                    budget,
+                    task: self.task,
+                    cancellation: self.cancellation.clone(),
+                },
+            );
+            drop(parked);
+            answer
+        };
         self.host_wait += started.elapsed();
         let answer = answer.map_err(|error| error.at(span))?;
         let result = op.result;
@@ -1135,7 +1601,7 @@ impl<'a> Machine<'a> {
         let list = program.arg_list(args);
 
         let word = self.mem.slot(base, receiver);
-        let Some(handle) = self.resource(word).cloned() else {
+        let Some(handle) = self.resource(word) else {
             return Err(null_object().at(span));
         };
 
@@ -1156,8 +1622,23 @@ impl<'a> Machine<'a> {
             ))
             .at(span)
         })?;
+        stopped_here(self.cancellation.as_ref(), &[], span)?;
         let started = Instant::now();
-        let answer = hosts.call_resource(&handle, &op.operation, values, &mut Back { budget });
+        let answer = {
+            let parked = self.mem.blocking(&Live(self));
+            let answer = hosts.call_resource(
+                &handle,
+                &op.operation,
+                values,
+                &mut Back {
+                    budget,
+                    task: self.task,
+                    cancellation: self.cancellation.clone(),
+                },
+            );
+            drop(parked);
+            answer
+        };
         self.host_wait += started.elapsed();
         let answer = answer.map_err(|error| error.at(span))?;
         let result = op.result;
@@ -1440,6 +1921,438 @@ impl<'a> Machine<'a> {
             .payload_words(len, &self.program.layouts)
     }
 
+    // ---- the scheduler -----------------------------------------------------
+
+    /// The scope a `Repr::Scope` word names.
+    fn scope_at(&self, word: u64, span: Span) -> Result<usize, RuntimeError> {
+        word.checked_sub(1)
+            .map(|at| at as usize)
+            .filter(|at| *at < self.scopes.len())
+            .ok_or_else(|| no_such_handle("task scope").at(span))
+    }
+
+    /// The task a `Repr::Task` word names.
+    fn child_at(&self, word: u64, span: Span) -> Result<usize, RuntimeError> {
+        word.checked_sub(1)
+            .map(|at| at as usize)
+            .filter(|at| *at < self.children.len())
+            .ok_or_else(|| no_such_handle("task").at(span))
+    }
+
+    /// `scope.spawn { ... }`: a thread for the closure, and the handle the
+    /// scope now owns.
+    ///
+    /// This follows `crate::task::spawn_into` step for step, because what a
+    /// `spawn` decides is a fact about the language rather than about a
+    /// backend: the scope has to still be open, the run's concurrency limit
+    /// is charged **before** the task is given an id, an event or a thread,
+    /// the trace records the spawn before the thread starts so that a task is
+    /// never seen completing before it was seen spawning, and a place charged
+    /// for a task that never got a thread goes back.
+    ///
+    /// What differs is the two things only this backend can do. The answer's
+    /// object is allocated here, before the thread exists, so that it is a
+    /// root of this task from the moment it can hold anything; and the child
+    /// is handed a [`Memory`] over a stack segment of its own and the run's
+    /// one heap, which is the whole of issue #240's Q1.
+    ///
+    /// It returns once the thread exists and orders nothing else. ADR 0008's
+    /// amendment refuses a rendezvous here, and so does this.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn<'s>(
+        &mut self,
+        scope_word: u64,
+        object: u64,
+        answer: LayoutId,
+        budget: &Meter,
+        span: Span,
+        threads: &'s Scope<'s, 'a>,
+        running: &mut Vec<Option<ScopedJoinHandle<'s, Outcome>>>,
+    ) -> Result<u64, RuntimeError> {
+        let at = self.scope_at(scope_word, span)?;
+        if self.scopes[at].closed {
+            return Err(task::scope_already_left(&self.scopes[at].name, span));
+        }
+        if object == 0 {
+            return Err(null_object().at(span));
+        }
+        // Charged before this task is given an id, an event or a thread: a
+        // thread that has started is a resource already taken, which no later
+        // safepoint could refuse.
+        if let Some(hosts) = self.hosts {
+            if let Some(Err(error)) = hosts.with_budget(|held| {
+                held.charge_task()
+                    .map_err(|stopped| held.to_runtime_error(stopped))
+            }) {
+                return Err(error.at(span));
+            }
+        }
+
+        match self.launch(at, object, answer, budget, span, threads, running) {
+            Ok(word) => Ok(word),
+            Err(error) => {
+                // A task the machine refused is not a task the run holds, so
+                // the place charged for it above goes back.
+                if let Some(hosts) = self.hosts {
+                    hosts.with_budget(|held| held.release_task());
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Everything after the concurrency limit has been charged.
+    ///
+    /// Split out so that every way of failing after the charge gives the
+    /// place back, in one place rather than at each way out.
+    #[allow(clippy::too_many_arguments)]
+    fn launch<'s>(
+        &mut self,
+        at: usize,
+        object: u64,
+        answer: LayoutId,
+        budget: &Meter,
+        span: Span,
+        threads: &'s Scope<'s, 'a>,
+        running: &mut Vec<Option<ScopedJoinHandle<'s, Outcome>>>,
+    ) -> Result<u64, RuntimeError> {
+        // The segment first, because taking one can wait: a task joining a
+        // run whose collection has already begun waits it out, and a task
+        // that waited without publishing its roots would be a task the
+        // collector waits for while it waits for the collector. So this task
+        // parks for the length of the wait, exactly as it does around a host
+        // call and around a join.
+        let segment = {
+            let parked = self.mem.blocking(&Live(self));
+            let taken = self.mem.for_task();
+            drop(parked);
+            taken
+        };
+        let segment = segment
+            .map_err(|NoSegment| no_segment_left().at(span).with_rule(crate::budget::RULE))?;
+
+        // Then the answer's home, allocated before the thread exists so that
+        // it is a root of this task from the moment it can hold anything. The
+        // closure is in a `Repr::Ref` slot of a live frame, so a collection
+        // here finds it — which is the one thing this allocation could
+        // otherwise have taken away.
+        let width = self.width(answer);
+        let home = self.allocate(self.boxed_layout(), width)?;
+        self.mem.set_payload(home, 0, answer.0 as u64);
+
+        let id = match self.runtime {
+            Some(runtime) => runtime.next_task_id(),
+            None => {
+                self.next_task += 1;
+                self.next_task - 1
+            }
+        };
+        let scope = self.scopes[at].name.clone();
+        let position = self.scopes[at].tasks.len() + 1;
+        // Traced before the thread starts, so a task is never seen completing
+        // before it was seen spawning.
+        if let Some(runtime) = self.runtime {
+            runtime.trace(TraceEvent::TaskSpawned {
+                id,
+                parent: (self.task != ENTRY_TASK).then_some(self.task),
+                scope: scope.to_string(),
+            });
+        }
+
+        let cancellation = Cancellation::new();
+        let program = self.program;
+        let hosts = self.hosts;
+        let runtime = self.runtime;
+        let resources = Arc::clone(&self.resources);
+        let meter = budget.clone();
+        let flag = cancellation.clone();
+        let handle = threads.spawn(move || {
+            run_task(
+                program, hosts, runtime, resources, segment, meter, flag, id, object, home, span,
+            )
+        });
+
+        let index = self.children.len();
+        self.children.push(Child {
+            id,
+            position,
+            scope,
+            cancellation,
+            closure: object,
+            answer: home,
+            layout: answer,
+            state: ChildState::Running,
+        });
+        running.push(Some(handle));
+        self.scopes[at].tasks.push(index);
+        // One past the index, because a zeroed slot has to mean no task.
+        Ok(index as u64 + 1)
+    }
+
+    /// `await task`: waits for the thread and answers the words its body
+    /// produced.
+    ///
+    /// A body runs at most once and is waited for at most once, so awaiting
+    /// the same handle twice answers the same value and repeats no effect —
+    /// which falls out of the state rather than being arranged, exactly as it
+    /// does in `crate::task::settle`.
+    fn settle(
+        &mut self,
+        word: u64,
+        answer: LayoutId,
+        running: &mut [Option<ScopedJoinHandle<'_, Outcome>>],
+        span: Span,
+    ) -> Result<Vec<u64>, RuntimeError> {
+        let at = self.child_at(word, span)?;
+        // A task blocked on an `await` is standing where a safepoint would
+        // be, so it is owed the answer one gives: a cancelled task does not
+        // wait for a sibling it will never read.
+        stopped_here(self.cancellation.as_ref(), &[], span)?;
+        self.join(at, running);
+        match &self.children[at].state {
+            ChildState::Settled => {
+                let width = self.width(answer);
+                let home = self.children[at].answer;
+                Ok(self.mem.read_words(self.mem.payload_addr(home, 1), width))
+            }
+            ChildState::Failed(error) => Err(error.clone()),
+            ChildState::Cancelled => Err(task::awaiting_a_cancelled(
+                &self.children[at].describe(),
+                span,
+            )),
+            ChildState::Running => {
+                unreachable!("joining a task leaves it settled, failed, or cancelled")
+            }
+        }
+    }
+
+    /// Waits for one task's thread and records what it produced.
+    ///
+    /// This is `crate::task::join` and `crate::task::Task::join` together,
+    /// and the three things they decide are decided here in the same order: a
+    /// task that stopped after its own cancellation was requested is
+    /// *cancelled* rather than failed, because that is the stop the program
+    /// asked for; the place it held under the concurrency limit goes back at
+    /// the join rather than on the task's own thread, so that what a `spawn`
+    /// is refused for does not depend on how quickly a sibling finished; and
+    /// `TaskCancelled` is traced here, because this is the only place that
+    /// knows a cancellation stopped work rather than arriving after it.
+    fn join(&mut self, at: usize, running: &mut [Option<ScopedJoinHandle<'_, Outcome>>]) {
+        if !matches!(self.children[at].state, ChildState::Running) {
+            return;
+        }
+        let Some(handle) = running[at].take() else {
+            return;
+        };
+        let outcome = {
+            // Published for the whole wait. A task waiting for a sibling
+            // cannot reach a safepoint of its own, and a collector that
+            // waited for it would be waiting for a task that is waiting for a
+            // task that is waiting for the collector.
+            let parked = self.mem.blocking(&Live(self));
+            let outcome = handle.join();
+            drop(parked);
+            outcome
+        };
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            // A panic is a broken invariant in the task's own thread. The
+            // message has already reached stderr; what this task needs is an
+            // error rather than a value that never arrived.
+            Err(_) => Err(task::broken_invariant(&self.children[at].describe())),
+        };
+        let cancelled = self.children[at].cancellation.is_cancelled();
+        self.children[at].state = match outcome {
+            Ok(()) => ChildState::Settled,
+            Err(_) if cancelled => ChildState::Cancelled,
+            Err(error) => ChildState::Failed(error),
+        };
+        // The body is over, so the environment it was entered through is no
+        // longer anything's to keep: the captures it held were copied into
+        // the child's frame before its first instruction.
+        self.children[at].closure = 0;
+        if let Some(hosts) = self.hosts {
+            hosts.with_budget(|held| held.release_task());
+        }
+        if matches!(self.children[at].state, ChildState::Cancelled) {
+            if let Some(runtime) = self.runtime {
+                runtime.trace(TraceEvent::TaskCancelled {
+                    id: self.children[at].id,
+                });
+            }
+        }
+    }
+
+    /// Waits for every child of a scope the body reached the end of, and
+    /// answers the first that failed in a way the enclosing function has to
+    /// pass on.
+    ///
+    /// `crate::task::wait_for_children` is the oracle and this is its
+    /// translation. Waiting is in spawn order, which is an order of
+    /// *observation* only — the tasks ran at the same time on threads of
+    /// their own — and a task the program itself cancelled is neither a
+    /// failure nor a success, because the program asked for that stop.
+    ///
+    /// `Ok(Some(child))` is a child whose value was `Err(...)`; `Err` is a
+    /// child that raised, which propagates as itself. Either way the tasks
+    /// still running are cancelled and waited for before this answers.
+    fn leave_scope(
+        &mut self,
+        word: u64,
+        running: &mut [Option<ScopedJoinHandle<'_, Outcome>>],
+        span: Span,
+    ) -> Result<Option<usize>, RuntimeError> {
+        let at = self.scope_at(word, span)?;
+        let mut index = 0;
+        let mut failure = None;
+        let mut raised = None;
+        // Read by index rather than from a snapshot, so a scope that grew
+        // while it was being left is still waited for to the end.
+        while let Some(&child) = self.scopes[at].tasks.get(index) {
+            index += 1;
+            self.join(child, running);
+            match &self.children[child].state {
+                ChildState::Settled => {
+                    if self.child_failed(child) {
+                        failure = Some(child);
+                        break;
+                    }
+                }
+                ChildState::Failed(error) => {
+                    raised = Some(error.clone());
+                    break;
+                }
+                ChildState::Cancelled | ChildState::Running => {}
+            }
+        }
+        if failure.is_some() || raised.is_some() {
+            self.cancel_scope(at, running);
+        }
+        self.scopes[at].closed = true;
+        match raised {
+            Some(error) => Err(error),
+            None => Ok(failure),
+        }
+    }
+
+    /// Cancels every running child of a scope and waits for it to stop.
+    ///
+    /// Every child is asked first and waited for afterwards, so they stop at
+    /// the same time rather than one after another —
+    /// `crate::task::cancel_children`, in the same two passes.
+    fn cancel_scope(&mut self, at: usize, running: &mut [Option<ScopedJoinHandle<'_, Outcome>>]) {
+        for &child in &self.scopes[at].tasks {
+            if matches!(self.children[child].state, ChildState::Running) {
+                self.children[child].cancellation.cancel();
+            }
+        }
+        let mut index = 0;
+        while let Some(&child) = self.scopes[at].tasks.get(index) {
+            index += 1;
+            self.join(child, running);
+        }
+        self.scopes[at].closed = true;
+    }
+
+    /// Whether any task this machine spawned has not been joined.
+    ///
+    /// Asked only by a debug assertion, and what it is asserting is the
+    /// reason the answer's words are safe to carry out of the frame that
+    /// produced them: [`Machine::stop_all`] can block, and a task that blocks
+    /// publishes its roots — which no longer name a popped frame. On the path
+    /// that answers words there is nothing to block for, because every scope
+    /// was left where it was written and leaving one joins its children.
+    fn anything_running(&self) -> bool {
+        self.children
+            .iter()
+            .any(|child| matches!(child.state, ChildState::Running))
+    }
+
+    /// Cancels and joins every task still running, whatever scope it is in.
+    ///
+    /// The unwind path, and the one exit a scope has that the lowering cannot
+    /// write: a runtime error is not a jump, so no `ScopeCancel` stands
+    /// between it and the end of the run. Without this the thread scope would
+    /// wait for a task nothing had asked to stop.
+    ///
+    /// On the ordinary path it has nothing to do, because every scope was
+    /// left where it was written.
+    fn stop_all(&mut self, running: &mut [Option<ScopedJoinHandle<'_, Outcome>>]) {
+        for child in &self.children {
+            if matches!(child.state, ChildState::Running) {
+                child.cancellation.cancel();
+            }
+        }
+        for at in 0..self.children.len() {
+            self.join(at, running);
+        }
+    }
+
+    /// Whether a settled child's value was `Err(...)`.
+    ///
+    /// The answer object holds the layout of what it carries in its first
+    /// payload word and the value's words after it, so the discriminant is
+    /// the second. A child whose answer is not an enum with an `Err` case did
+    /// not fail this way and cannot: `crate::task::failure_of` asks the same
+    /// question of a materialised value and answers `None` for the same
+    /// values.
+    fn child_failed(&self, at: usize) -> bool {
+        self.err_part(at)
+            .is_some_and(|(index, _, _)| self.mem.payload(self.children[at].answer, 1) == index)
+    }
+
+    /// Where a child's `Err` payload is in its answer object: the case index,
+    /// the payload word it begins at, and its layout.
+    fn err_part(&self, at: usize) -> Option<(u64, u32, LayoutId)> {
+        let layout = self.program.layout(self.children[at].layout);
+        let Shape::Enum { cases, .. } = &layout.shape else {
+            return None;
+        };
+        let index = cases.iter().position(|case| &*case.name == "Err")?;
+        let part = cases[index].parts.first()?;
+        // Word 0 of the object is the held layout and word 1 is the value's
+        // discriminant, so the payload region begins at word 2.
+        Some((index as u64, 2 + part.at, part.layout))
+    }
+
+    /// Copies a failing child's `Err` payload into the location the enclosing
+    /// function will wrap and return.
+    ///
+    /// The two layouts are held to being one. They are not the same fact —
+    /// one is what the child answered and the other is what the function the
+    /// scope was written in fails with — and the checker never had to unify
+    /// them, because the oracle wraps whatever it finds in a `Value::err` and
+    /// asks nothing. Here a run of words copied at the wrong width is the one
+    /// fault this backend must not have quietly, so a disagreement is
+    /// reported rather than truncated.
+    fn write_child_error(
+        &mut self,
+        at: usize,
+        into: u64,
+        layout: LayoutId,
+    ) -> Result<(), RuntimeError> {
+        let Some((_, word, held)) = self.err_part(at) else {
+            return Err(RuntimeError::new(
+                "this task failed with a value that is not an error the enclosing function can \
+                 answer with",
+            ));
+        };
+        if held != layout {
+            let found = self.program.layout(held).name.clone();
+            let wanted = self.program.layout(layout).name.clone();
+            return Err(RuntimeError::new(format!(
+                "this task failed with a `{found}`, and the function its scope was written in \
+                 answers a `{wanted}`"
+            )));
+        }
+        let width = self.width(layout);
+        let from = self.mem.payload_addr(self.children[at].answer, word);
+        self.mem.copy_words(into, from, width);
+        Ok(())
+    }
+
+    /// A new object of `layout` with header length `len`, collecting once if
+    /// the first attempt does not fit.
     /// A new object of `layout` with header length `len`, collecting once if
     /// the first attempt does not fit.
     ///
@@ -1466,6 +2379,12 @@ impl<'a> Machine<'a> {
 /// would be worse than answering nothing.
 struct Back<'m> {
     budget: &'m Meter,
+    /// Which task the call is being made by, which is what the boundary
+    /// records it against.
+    task: u64,
+    /// The calling task's own flag, so that a host that waits reads the same
+    /// three answers a safepoint would.
+    cancellation: Option<Cancellation>,
 }
 
 impl Reentry for Back<'_> {
@@ -1485,10 +2404,18 @@ impl Reentry for Back<'_> {
         self.call(callee, args)
     }
 
-    /// The run's own flag. A task's and a bounded call's belong to a thread,
-    /// and this machine runs one body on one thread with neither.
+    /// Everything a safepoint would stop on, asked from outside the loop.
+    ///
+    /// A host that is waiting is standing where a safepoint would be, so it
+    /// is owed the same answer one gets: the calling task's own flag and the
+    /// run's cancellation. `Callback::is_cancelled` in the oracle asks a
+    /// third — the flags of the bounded calls the thread is inside — and this
+    /// machine hands no callback across the boundary, so it is inside none.
     fn is_cancelled(&self) -> bool {
-        self.budget.is_cancelled()
+        self.cancellation
+            .as_ref()
+            .is_some_and(Cancellation::is_cancelled)
+            || self.budget.is_cancelled()
     }
 
     fn time_left(&self) -> Option<Duration> {
@@ -1498,10 +2425,75 @@ impl Reentry for Back<'_> {
             .map(|deadline| deadline.saturating_sub(self.budget.elapsed()))
     }
 
-    /// There is one task here, and it is the entry's.
+    /// The task whose stack this call is standing on, which is the task the
+    /// boundary records the call against.
     fn task(&self) -> u64 {
-        ENTRY_TASK
+        self.task
     }
+}
+
+/// One spawned task's thread, from the closure in to the answer written.
+///
+/// `crate::interp::run_task` is the oracle's, and the shape is the same: an
+/// evaluator of the receiving task's own, the body, and then the trace event
+/// a finished task writes. What is not here is the conversion. ADR 0008 says
+/// *"the runtime's `Rc`-based value representation is not `Send`, so the
+/// values that cross must be converted at the boundary"* — and in this model
+/// there is nothing to convert, because a crossing value is a run of words in
+/// a heap both tasks already address. The closure crossed as its address, and
+/// the answer goes back into an object the parent allocated.
+///
+/// A task stopped by its own cancellation did not run to completion, so it is
+/// **not** traced as completed here; it is traced as cancelled by whoever
+/// waits for it, which is the only place that knows it stopped rather than
+/// finished. That is `crate::task::finished`'s rule, kept.
+#[allow(clippy::too_many_arguments)]
+fn run_task(
+    program: &Program,
+    hosts: Option<&HostRegistry>,
+    runtime: Option<&Runtime>,
+    resources: Arc<Mutex<Vec<Arc<ResourceHandle>>>>,
+    segment: Memory,
+    budget: Meter,
+    cancellation: Cancellation,
+    id: u64,
+    closure: u64,
+    answer: u64,
+    span: Span,
+) -> Outcome {
+    let mut machine = Machine::for_task(
+        program,
+        hosts,
+        runtime,
+        resources,
+        segment,
+        cancellation.clone(),
+        id,
+    );
+    let started = Instant::now();
+    let result = machine.enter_closure(closure, &budget, span);
+    if !(result.is_err() && cancellation.is_cancelled()) {
+        if let Some(runtime) = runtime {
+            runtime.trace(TraceEvent::TaskCompleted {
+                id,
+                // What the body spent rather than what the clock did: a task
+                // that waited on a host was not working while it waited, and
+                // a trace that could not tell the two apart is what ADR 0008
+                // lists as the thing phase 1 could not validate.
+                cpu: started.elapsed().saturating_sub(machine.host_wait()),
+            });
+        }
+    }
+    let words = result?;
+    // Into the object the parent allocated, whose address it has held as a
+    // root since before this thread existed. Nothing between here and the
+    // last frame's `Return` allocates or reaches a safepoint, so no
+    // collection can run in the window where these words are only in a Rust
+    // `Vec`.
+    for (at, word) in words.iter().enumerate() {
+        machine.mem.set_payload(answer, 1 + at as u32, *word);
+    }
+    Ok(())
 }
 
 fn compare(op: CmpOp, ordering: std::cmp::Ordering) -> bool {
@@ -1594,6 +2586,34 @@ fn wrong_arity(callee: String, declared: usize, given: usize) -> RuntimeError {
 /// reaching the machine, reported rather than read through.
 fn null_object() -> RuntimeError {
     RuntimeError::new("this value was read before it was given one")
+}
+
+/// A `Repr::Task` or `Repr::Scope` word that names no entry of this task's
+/// scheduler table.
+///
+/// Zero is what a zeroed frame leaves in a slot nothing has written, which is
+/// the same lowering bug a null reference is and earns the same refusal.
+fn no_such_handle(what: &str) -> RuntimeError {
+    RuntimeError::new(format!("this {what} was read before it was given one"))
+}
+
+/// A `spawn` this run has no stack segment left for.
+///
+/// The reserved stack region divides into a fixed number of segments and a
+/// task owns one, so a run with more tasks executing at once than there are
+/// segments has nowhere to put the next one's frames. It is reported as what
+/// it is — a limit on how many tasks may run at once — rather than as a
+/// second, differently worded ceiling standing beside the one
+/// `[run.*] max_tasks` configures, because a program that hits either has hit
+/// the same wall.
+///
+/// The tree-walking oracle has no equivalent: it puts a task's frames on a
+/// thread's own stack and is bounded by what the operating system will give
+/// it. Every corpus program stays far below both.
+fn no_segment_left() -> RuntimeError {
+    RuntimeError::new(
+        "execution stopped: this run has no stack segment left for another task, so no more          tasks may run at once",
+    )
 }
 
 #[cfg(test)]
@@ -4140,5 +5160,639 @@ pub(crate) mod tests {
         let mut machine = Machine::new(&program, 1 << 12);
         assert!(machine.run(f, &[], &budget.meter()).is_err());
         assert!(machine.instructions() <= SAFEPOINT_STRIDE + 1);
+    }
+    // ---- tasks ---------------------------------------------------------------
+
+    /// A `Repr::Scope` slot, a `Repr::Task` slot, and the three scratch words
+    /// every fixture below wants.
+    ///
+    /// Written once because what is under test is the scheduler and not the
+    /// arithmetic around it: every one of these programs opens a scope,
+    /// builds a closure environment, spawns it, and leaves the scope, and the
+    /// only thing that differs is what the body does.
+    fn counter(build: &mut Build) -> LayoutId {
+        let int = build.scalar(Repr::Int);
+        build.structure("Counter", &[("n", int)])
+    }
+
+    /// The instructions that fill a closure environment naming `body` and
+    /// capturing the object in `held`, into slot `dst`, using `scratch`.
+    fn close_over(
+        build: &mut Build,
+        layout: LayoutId,
+        body: FunctionId,
+        dst: Slot,
+        scratch: Slot,
+        held: Option<Slot>,
+    ) -> Vec<Inst> {
+        let int = build.scalar(Repr::Int);
+        let word = build.scalar(Repr::Ref);
+        let mut code = vec![
+            Inst::Alloc {
+                dst,
+                layout,
+                len: Len::Fixed,
+            },
+            Inst::Int {
+                dst: scratch,
+                value: body.0 as i64,
+            },
+            Inst::StoreField {
+                obj: dst,
+                at: 0,
+                src: scratch,
+                layout: int,
+            },
+        ];
+        if let Some(src) = held {
+            code.push(Inst::StoreField {
+                obj: dst,
+                at: 1,
+                src,
+                layout: word,
+            });
+        }
+        code
+    }
+
+    /// Leaving a scope waits for a task the body never awaited.
+    ///
+    /// The Language Card's sentence, measured the only way a machine can
+    /// measure it: the child spends fifty thousand turns before it writes,
+    /// and the parent reads the write. A `ScopeLeave` that did not join would
+    /// read the zero the allocation left.
+    #[test]
+    fn leaving_a_scope_waits_for_a_task_the_body_never_awaited() {
+        let mut build = Build::default().strings(&["tasks"]);
+        let int = build.scalar(Repr::Int);
+        let word = build.scalar(Repr::Ref);
+        let held = counter(&mut build);
+        let body = build.lambda(
+            "body",
+            &[],
+            &[Repr::Ref, Repr::Int, Repr::Int, Repr::Bool, Repr::Int],
+            int,
+            &[word],
+            vec![
+                Inst::Int { dst: 1, value: 0 },
+                Inst::Int {
+                    dst: 2,
+                    value: 50_000,
+                },
+                Inst::Int { dst: 4, value: 1 },
+                Inst::Cmp {
+                    on: Compare::Int,
+                    op: CmpOp::Lt,
+                    dst: 3,
+                    a: 1,
+                    b: 2,
+                },
+                Inst::BranchFalse { cond: 3, to: 7 },
+                Inst::Arith {
+                    num: Num::Int,
+                    op: ArithOp::Add,
+                    dst: 1,
+                    a: 1,
+                    b: 4,
+                },
+                Inst::Jump { to: 3 },
+                Inst::Int { dst: 1, value: 7 },
+                Inst::StoreField {
+                    obj: 0,
+                    at: 0,
+                    src: 1,
+                    layout: int,
+                },
+                Inst::Return { src: 1 },
+            ],
+        );
+        let environment = closure_layout(&mut build, body, &[word]);
+        let mut code = vec![
+            Inst::Alloc {
+                dst: 0,
+                layout: held,
+                len: Len::Fixed,
+            },
+            Inst::Int { dst: 6, value: 0 },
+            Inst::StoreField {
+                obj: 0,
+                at: 0,
+                src: 6,
+                layout: int,
+            },
+            Inst::ScopeEnter {
+                dst: 1,
+                name: StrId(0),
+            },
+        ];
+        code.extend(close_over(&mut build, environment, body, 2, 6, Some(0)));
+        code.extend([
+            Inst::Spawn {
+                dst: 3,
+                scope: 1,
+                closure: 2,
+                answer: int,
+            },
+            Inst::ScopeLeave {
+                scope: 1,
+                failed: 4,
+                error: 5,
+                layout: int,
+            },
+            Inst::LoadField {
+                dst: 6,
+                obj: 0,
+                at: 0,
+                layout: int,
+            },
+            Inst::Return { src: 6 },
+        ]);
+        let main = build.function(
+            "main",
+            &[],
+            &[
+                Repr::Ref,
+                Repr::Scope,
+                Repr::Ref,
+                Repr::Task,
+                Repr::Bool,
+                Repr::Int,
+                Repr::Int,
+            ],
+            int,
+            code,
+        );
+        let program = build.done();
+        assert_eq!(run(&program, main, &[]).unwrap() as i64, 7);
+    }
+
+    /// A body runs at most once and is waited for at most once, so awaiting
+    /// the same handle twice answers the same value and repeats no effect.
+    ///
+    /// The counter is what says "no effect twice": it is incremented by the
+    /// body and read after both awaits, and the answer is the product, so a
+    /// second run would double it.
+    #[test]
+    fn awaiting_the_same_handle_twice_runs_the_body_once() {
+        let mut build = Build::default().strings(&["tasks"]);
+        let int = build.scalar(Repr::Int);
+        let word = build.scalar(Repr::Ref);
+        let held = counter(&mut build);
+        let body = build.lambda(
+            "body",
+            &[],
+            &[Repr::Ref, Repr::Int, Repr::Int],
+            int,
+            &[word],
+            vec![
+                Inst::LoadField {
+                    dst: 1,
+                    obj: 0,
+                    at: 0,
+                    layout: int,
+                },
+                Inst::Int { dst: 2, value: 1 },
+                Inst::Arith {
+                    num: Num::Int,
+                    op: ArithOp::Add,
+                    dst: 1,
+                    a: 1,
+                    b: 2,
+                },
+                Inst::StoreField {
+                    obj: 0,
+                    at: 0,
+                    src: 1,
+                    layout: int,
+                },
+                Inst::Int { dst: 1, value: 7 },
+                Inst::Return { src: 1 },
+            ],
+        );
+        let environment = closure_layout(&mut build, body, &[word]);
+        let mut code = vec![
+            Inst::Alloc {
+                dst: 0,
+                layout: held,
+                len: Len::Fixed,
+            },
+            Inst::Int { dst: 8, value: 0 },
+            Inst::StoreField {
+                obj: 0,
+                at: 0,
+                src: 8,
+                layout: int,
+            },
+            Inst::ScopeEnter {
+                dst: 1,
+                name: StrId(0),
+            },
+        ];
+        code.extend(close_over(&mut build, environment, body, 2, 8, Some(0)));
+        code.extend([
+            Inst::Spawn {
+                dst: 3,
+                scope: 1,
+                closure: 2,
+                answer: int,
+            },
+            Inst::Await {
+                dst: 4,
+                task: 3,
+                answer: int,
+            },
+            Inst::Await {
+                dst: 5,
+                task: 3,
+                answer: int,
+            },
+            Inst::ScopeLeave {
+                scope: 1,
+                failed: 6,
+                error: 7,
+                layout: int,
+            },
+            Inst::LoadField {
+                dst: 8,
+                obj: 0,
+                at: 0,
+                layout: int,
+            },
+            Inst::Arith {
+                num: Num::Int,
+                op: ArithOp::Add,
+                dst: 4,
+                a: 4,
+                b: 5,
+            },
+            Inst::Arith {
+                num: Num::Int,
+                op: ArithOp::Mul,
+                dst: 8,
+                a: 8,
+                b: 4,
+            },
+            Inst::Return { src: 8 },
+        ]);
+        let main = build.function(
+            "main",
+            &[],
+            &[
+                Repr::Ref,
+                Repr::Scope,
+                Repr::Ref,
+                Repr::Task,
+                Repr::Int,
+                Repr::Int,
+                Repr::Bool,
+                Repr::Int,
+                Repr::Int,
+            ],
+            int,
+            code,
+        );
+        let program = build.done();
+        // One run of the body, and 7 from each of the two awaits.
+        assert_eq!(run(&program, main, &[]).unwrap() as i64, 14);
+    }
+
+    /// A task the program cancelled has no value to await, in the words the
+    /// oracle uses.
+    ///
+    /// The body cannot end any other way — it is an unbounded loop — so what
+    /// is being measured is that the flag reached a safepoint and that the
+    /// join told a stop from a finish.
+    #[test]
+    fn awaiting_a_cancelled_task_is_refused() {
+        let mut build = Build::default().strings(&["tasks"]);
+        let int = build.scalar(Repr::Int);
+        let body = build.lambda(
+            "body",
+            &[],
+            &[Repr::Int],
+            int,
+            &[],
+            vec![Inst::Int { dst: 0, value: 0 }, Inst::Jump { to: 0 }],
+        );
+        let environment = closure_layout(&mut build, body, &[]);
+        let mut code = vec![Inst::ScopeEnter {
+            dst: 0,
+            name: StrId(0),
+        }];
+        code.extend(close_over(&mut build, environment, body, 1, 6, None));
+        code.extend([
+            Inst::Spawn {
+                dst: 2,
+                scope: 0,
+                closure: 1,
+                answer: int,
+            },
+            Inst::Cancel { task: 2 },
+            Inst::Await {
+                dst: 3,
+                task: 2,
+                answer: int,
+            },
+            Inst::ScopeLeave {
+                scope: 0,
+                failed: 4,
+                error: 5,
+                layout: int,
+            },
+            Inst::Return { src: 3 },
+        ]);
+        let main = build.function(
+            "main",
+            &[],
+            &[
+                Repr::Scope,
+                Repr::Ref,
+                Repr::Task,
+                Repr::Int,
+                Repr::Bool,
+                Repr::Int,
+                Repr::Int,
+            ],
+            int,
+            code,
+        );
+        let program = build.done();
+        let error = run(&program, main, &[]).unwrap_err();
+        assert_eq!(
+            error.message,
+            "task 1 of scope `tasks` was cancelled, so it has no value to await"
+        );
+    }
+
+    /// A child that raised propagates as itself out of the scope it was in.
+    ///
+    /// Not as a value: a runtime error is not something a Cove expression can
+    /// hold, so `ScopeLeave` fails with it rather than answering it. That is
+    /// the difference `crate::task::ChildFailure` draws, kept.
+    #[test]
+    fn a_child_that_raises_leaves_the_scope_with_its_own_error() {
+        let mut build = Build::default().strings(&["tasks", "the child said so"]);
+        let int = build.scalar(Repr::Int);
+        let body = build.lambda(
+            "body",
+            &[],
+            &[Repr::Int],
+            int,
+            &[],
+            vec![Inst::Trap { message: StrId(1) }],
+        );
+        let environment = closure_layout(&mut build, body, &[]);
+        let mut code = vec![Inst::ScopeEnter {
+            dst: 0,
+            name: StrId(0),
+        }];
+        code.extend(close_over(&mut build, environment, body, 1, 5, None));
+        code.extend([
+            Inst::Spawn {
+                dst: 2,
+                scope: 0,
+                closure: 1,
+                answer: int,
+            },
+            Inst::ScopeLeave {
+                scope: 0,
+                failed: 3,
+                error: 4,
+                layout: int,
+            },
+            Inst::Return { src: 4 },
+        ]);
+        let main = build.function(
+            "main",
+            &[],
+            &[
+                Repr::Scope,
+                Repr::Ref,
+                Repr::Task,
+                Repr::Bool,
+                Repr::Int,
+                Repr::Int,
+            ],
+            int,
+            code,
+        );
+        let program = build.done();
+        let error = run(&program, main, &[]).unwrap_err();
+        assert_eq!(error.message, "the child said so");
+    }
+
+    /// Two tasks allocating at once over one heap, and an object only the
+    /// parent's frame names.
+    ///
+    /// This is the whole of issue #240's Q1 as a test. The two children churn
+    /// far past the heap's budget, so the collections are theirs; the parent
+    /// is parked in a join for all of them, holding one object no child can
+    /// reach. A collection that read a stale snapshot of the parent's frame,
+    /// or that did not wait for a task at all, frees it.
+    #[test]
+    fn a_collection_a_sibling_ran_keeps_what_the_parent_holds() {
+        let mut build = Build::default().strings(&["tasks"]);
+        let int = build.scalar(Repr::Int);
+        let held = counter(&mut build);
+        let body = build.lambda(
+            "body",
+            &[],
+            &[Repr::Ref, Repr::Int, Repr::Int, Repr::Bool, Repr::Int],
+            int,
+            &[],
+            vec![
+                Inst::Int { dst: 1, value: 0 },
+                Inst::Int {
+                    dst: 2,
+                    value: 20_000,
+                },
+                Inst::Int { dst: 4, value: 1 },
+                Inst::Cmp {
+                    on: Compare::Int,
+                    op: CmpOp::Lt,
+                    dst: 3,
+                    a: 1,
+                    b: 2,
+                },
+                Inst::BranchFalse { cond: 3, to: 8 },
+                Inst::Alloc {
+                    dst: 0,
+                    layout: held,
+                    len: Len::Fixed,
+                },
+                Inst::Arith {
+                    num: Num::Int,
+                    op: ArithOp::Add,
+                    dst: 1,
+                    a: 1,
+                    b: 4,
+                },
+                Inst::Jump { to: 3 },
+                Inst::Return { src: 1 },
+            ],
+        );
+        let environment = closure_layout(&mut build, body, &[]);
+        let mut code = vec![
+            Inst::Alloc {
+                dst: 0,
+                layout: held,
+                len: Len::Fixed,
+            },
+            Inst::Int { dst: 9, value: 42 },
+            Inst::StoreField {
+                obj: 0,
+                at: 0,
+                src: 9,
+                layout: int,
+            },
+            Inst::ScopeEnter {
+                dst: 1,
+                name: StrId(0),
+            },
+        ];
+        code.extend(close_over(&mut build, environment, body, 2, 9, None));
+        code.extend([
+            Inst::Spawn {
+                dst: 3,
+                scope: 1,
+                closure: 2,
+                answer: int,
+            },
+            Inst::Spawn {
+                dst: 4,
+                scope: 1,
+                closure: 2,
+                answer: int,
+            },
+            Inst::Await {
+                dst: 5,
+                task: 3,
+                answer: int,
+            },
+            Inst::Await {
+                dst: 6,
+                task: 4,
+                answer: int,
+            },
+            Inst::ScopeLeave {
+                scope: 1,
+                failed: 7,
+                error: 8,
+                layout: int,
+            },
+            // The two children's turns, plus the word the parent held from
+            // before the first collection to after the last.
+            Inst::Arith {
+                num: Num::Int,
+                op: ArithOp::Add,
+                dst: 5,
+                a: 5,
+                b: 6,
+            },
+            Inst::LoadField {
+                dst: 9,
+                obj: 0,
+                at: 0,
+                layout: int,
+            },
+            Inst::Arith {
+                num: Num::Int,
+                op: ArithOp::Add,
+                dst: 9,
+                a: 9,
+                b: 5,
+            },
+            Inst::Return { src: 9 },
+        ]);
+        let main = build.function(
+            "main",
+            &[],
+            &[
+                Repr::Ref,
+                Repr::Scope,
+                Repr::Ref,
+                Repr::Task,
+                Repr::Task,
+                Repr::Int,
+                Repr::Int,
+                Repr::Bool,
+                Repr::Int,
+                Repr::Int,
+            ],
+            int,
+            code,
+        );
+        let program = build.done();
+        assert_eq!(run(&program, main, &[]).unwrap() as i64, 42 + 40_000);
+    }
+    /// A child whose *value* was `Err(...)` leaves that error where the
+    /// enclosing function can return it.
+    ///
+    /// The other half of what a failing child can be, and the half the corpus
+    /// does not reach: `scope s { s.spawn { f()? } }` means the failure
+    /// reaches the caller rather than sitting unread in a handle nobody
+    /// awaited, and `crate::task::ChildFailure::Returned` is where the oracle
+    /// says so. Here the answer is a run of words in the object the parent
+    /// allocated, and what `ScopeLeave` copies out of it is the `Err` case's
+    /// payload — at the layout the instruction names, which is the
+    /// *enclosing* function's failure and not the child's answer.
+    #[test]
+    fn a_child_whose_value_failed_leaves_the_scope_with_its_payload() {
+        let mut build = Build::default().strings(&["tasks"]);
+        let int = build.scalar(Repr::Int);
+        let answer = build.enumeration("Result", &[("Ok", vec![int]), ("Err", vec![int])]);
+        let body = build.lambda(
+            "body",
+            &[],
+            &[Repr::Int, Repr::Int],
+            answer,
+            &[],
+            vec![
+                // `Err(9)`: the case index, then the payload word the case
+                // was placed at.
+                Inst::Int { dst: 0, value: 1 },
+                Inst::Int { dst: 1, value: 9 },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let environment = closure_layout(&mut build, body, &[]);
+        let mut code = vec![Inst::ScopeEnter {
+            dst: 0,
+            name: StrId(0),
+        }];
+        code.extend(close_over(&mut build, environment, body, 1, 5, None));
+        code.extend([
+            Inst::Spawn {
+                dst: 2,
+                scope: 0,
+                closure: 1,
+                answer,
+            },
+            Inst::ScopeLeave {
+                scope: 0,
+                failed: 3,
+                error: 4,
+                layout: int,
+            },
+            Inst::Return { src: 4 },
+        ]);
+        let main = build.function(
+            "main",
+            &[],
+            &[
+                Repr::Scope,
+                Repr::Ref,
+                Repr::Task,
+                Repr::Bool,
+                Repr::Int,
+                Repr::Int,
+            ],
+            int,
+            code,
+        );
+        let program = build.done();
+        // Zero would be the location as the frame was zeroed, which is what
+        // a `ScopeLeave` that had not noticed would leave there.
+        assert_eq!(run(&program, main, &[]).unwrap() as i64, 9);
     }
 }

@@ -95,6 +95,13 @@ impl Body<'_> {
             Ty::Set(_) => self.set_method(expr, base, name, args),
             Ty::Map(..) => self.map_method(expr, base, name, args),
             Ty::Option(_) | Ty::Result(..) => self.answer_method(expr, base, &ty, name, args),
+            // A scope and a task handle are the two values whose operations
+            // are the scheduler's rather than the heap's, so they are
+            // instructions rather than builtins: `cove_lir::lower::tasks` is
+            // where the Language Card's sentence about a scope is taken
+            // apart.
+            Ty::Scope => self.scope_method(expr, base, name, args),
+            Ty::Task(_) => self.task_method(expr, base, name, args),
             // A host resource's operations belong to the host that issued
             // the handle, and the handle is what routes them:
             // `HostRegistry::call_resource` reads the module and the resource

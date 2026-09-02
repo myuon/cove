@@ -61,6 +61,34 @@ pub enum Repr {
     /// object in the heap and not a root. The word names it; the host owns
     /// its lifetime.
     Host,
+    /// A task handle: one past an index into the task's scheduler table, or
+    /// `0` for none.
+    ///
+    /// Not a root, and for the same reason [`Repr::Host`] is not: what the
+    /// word names is not storage this collector allocated. A task is a
+    /// thread, a cancellation flag and a place to put an answer, and none of
+    /// those is a Cove value. The answer *is* an object in the run's heap,
+    /// and the table names its address — which makes the table a provider of
+    /// roots rather than a second place to keep a value, because nothing a
+    /// program can write down could be put in one.
+    ///
+    /// One past the index, so that a slot a zeroed frame has not written
+    /// names no task. That is [`Repr::Host`]'s rule, kept because the reason
+    /// for it is the same one.
+    Task,
+    /// A task scope: one past an index into the task's scheduler table, or
+    /// `0` for none.
+    ///
+    /// The other half of what [`Repr::Task`] names, under the same rules. A
+    /// scope owns the tasks spawned into it, which is what lets leaving one
+    /// wait for or cancel them, and it holds nothing else.
+    ///
+    /// Neither of these two crosses a task boundary — the task-safety rule
+    /// says so — so the table they index is the *task's* own and never a
+    /// second task's. Two tasks cannot form one another's handles, which is
+    /// the same disjointness by construction that keeps two stack segments
+    /// apart.
+    Scope,
 }
 
 impl Repr {
@@ -82,6 +110,8 @@ impl Repr {
             Repr::Ref => "ref",
             Repr::Addr => "addr",
             Repr::Host => "host",
+            Repr::Task => "task",
+            Repr::Scope => "scope",
         }
     }
 }
@@ -209,6 +239,18 @@ mod tests {
         assert!(!Repr::Addr.is_ref());
         assert!(!Repr::Host.is_ref());
         assert!(Repr::Ref.is_ref());
+    }
+
+    /// A task and a scope name scheduler state, which is not storage this
+    /// collector allocated. What a settled task's answer *is* — an object in
+    /// the run's heap — is reached through the table rather than through the
+    /// word.
+    #[test]
+    fn scheduler_state_is_not_a_root() {
+        assert!(!Repr::Task.is_ref());
+        assert!(!Repr::Scope.is_ref());
+        let map = RefMap::of(&[Repr::Task, Repr::Ref, Repr::Scope]);
+        assert_eq!(map.iter().collect::<Vec<_>>(), vec![1]);
     }
 
     #[test]

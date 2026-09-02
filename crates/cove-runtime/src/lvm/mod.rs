@@ -28,31 +28,49 @@
 //! | the object heap | the **run** | [`mem::Space`], one per run, behind an `Arc` | **yes**, and the only one |
 //! | a stack segment | a **task** | `[k * SEGMENT_WORDS, (k+1) * SEGMENT_WORDS)` of the same address space | yes, and it is part of the same one |
 //! | a `Shared` cell | the **run**'s heap | an ordinary object; its lock is one of its words ([`cell`]) | no — it *is* an object in the heap |
-//! | a host resource | the **host** | [`exec::Machine`]'s resource table, which holds names | no — see ADR 0031 |
-//! | a `Task`, a `TaskScope` | the **scheduler** | a run-owned table of control state | no |
+//! | a host resource | the **host** | a table of names, shared by every task | no — see ADR 0031 |
+//! | a `Task`, a `TaskScope` | the **scheduler** | a table of control state, one per task | no |
 //!
 //! The last row is the one that has to be argued rather than asserted, because
 //! a `Task` is a value a Cove program writes down. Its word is **one past an
-//! index into a run-owned table**, the way a `Repr::Host` word is, and the
-//! entry it names holds a task id, a scope name, a `Cancellation`, a
-//! `JoinHandle` and — once the task has settled — the *address* of the heap
-//! object holding its answer. Every one of those but the last is scheduler
-//! bookkeeping that no Cove value could be hidden in. The last is an address,
-//! which makes the table a **root provider** and not a second store: the
-//! answer's words are in the run's heap, allocated by the task that produced
-//! them, and the table names one the way `Machine::interned` names a string
+//! index into a scheduler table**, the way a `Repr::Host` word is, and the
+//! entry it names holds a task id, a scope name and position, a
+//! `Cancellation`, and the *address* of the heap object holding its answer.
+//! Every one of those but the last is scheduler bookkeeping that no Cove value
+//! could be hidden in. The last is an address, which makes the table a **root
+//! provider** and not a second store: the answer's words are in the run's
+//! heap, in an object the spawning task allocated before the thread existed,
+//! and the table names one the way `Machine::interned` names a string
 //! literal. Nothing that wanted to dodge a heap representation could be put
 //! there, which is the test ADR 0034 actually applies.
 //!
-//! What that table cannot be given, and what the IR still owes it, is written
-//! down in [`cell`]'s docs and in the report that accompanied this change:
-//! there is no `Repr` for a `Task` or a `TaskScope` word yet, and no
-//! `Shape::Shared`, so the lowering round is where those land.
+//! # The scheduler's table is a *task's*, and the host's is the *run's*
+//!
+//! The two look alike — a word one past an index into a table of names — and
+//! they are owned differently, for a reason each states about itself rather
+//! than by analogy.
+//!
+//! A `Task` and a `TaskScope` may not cross a task boundary; the task-safety
+//! rule says so, and `cove_sema`'s `task_safe_offender` is where it is
+//! enforced. So a word formed in one task is only ever read in that task, the
+//! tables are disjoint by construction, and there is nothing to share. That is
+//! the same arithmetic that keeps two stack segments apart, and it is why
+//! [`exec::Machine`] holds its own.
+//!
+//! A **host resource** does cross: ADR 0013 gives the host the record of what
+//! is open, a resource declares its own task-safety in its schema, and a
+//! task-safe one is copied into a spawned closure like any other value — as
+//! its word. A table of one task's own would make that word an index into a
+//! list the receiving task does not have. So the resource table is the run's,
+//! behind a lock, and one resource is one word for the length of the run,
+//! which is what ADR 0013's *"two handles are equal when they name the same
+//! resource"* costs once there is more than one thread.
 //!
 //! The dead-code allowance stays, and what it now covers is narrower than
 //! what it covered before: not "nothing reaches this module" but "several
 //! items below it are reached only from their own `#[cfg(test)]` code" —
-//! `Machine::new`, the collection counters a test asserts over, and
+//! `Machine::new`, `cell`'s whole surface until the lowering reaches
+//! `Shared`, the collection counters a test asserts over, and
 //! [`Lvm::collected`] and [`Lvm::host_wait`], the two figures this type can
 //! report that nothing outside asks for yet. It is one line in one place
 //! rather than an attribute per item, so that removing it is a single edit
@@ -136,7 +154,7 @@ impl<'a> Lvm<'a> {
         Lvm {
             runtime,
             program,
-            machine: Machine::with_hosts(program, DEFAULT_HEAP_WORDS, Some(hosts)),
+            machine: Machine::for_run(program, DEFAULT_HEAP_WORDS, Some(hosts), Some(runtime)),
             budget: hosts
                 .budget_meter()
                 .unwrap_or_else(|| Budget::new(Limits::default()).meter()),

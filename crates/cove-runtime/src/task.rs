@@ -160,10 +160,7 @@ impl Task {
             // A panic is a broken invariant in the task's own thread. The
             // panic message has already reached stderr; what the spawning
             // task needs is an error rather than a value that never arrived.
-            Err(_) => Err(RuntimeError::new(format!(
-                "{} ended in a broken invariant",
-                self.describe()
-            ))),
+            Err(_) => Err(broken_invariant(&self.describe())),
         };
         *self.state.borrow_mut() = match outcome {
             Ok(value) => TaskState::Settled(value.into_value()),
@@ -176,12 +173,40 @@ impl Task {
 
     /// How this task is named in diagnostics.
     pub fn describe(&self) -> String {
-        if self.position == 0 {
-            "this task".to_string()
-        } else {
-            format!("task {} of scope `{}`", self.position, self.scope)
-        }
+        describe(self.position, &self.scope)
     }
+}
+
+/// How a task is named in a diagnostic: `task 2 of scope `requests``.
+///
+/// A free function rather than a method, because the linear-memory backend
+/// holds a task's identity in a scheduler table rather than in a [`Task`] and
+/// still has to name one in the same words. Two backends wording the same
+/// sentence twice is exactly what the differential corpus catches after the
+/// fact and what one function prevents.
+///
+/// Position zero is a task that never ran as one — an `async fn` whose handle
+/// was settled on creation — and has no place in a scope to name.
+pub(crate) fn describe(position: usize, scope: &str) -> String {
+    if position == 0 {
+        "this task".to_string()
+    } else {
+        format!("task {position} of scope `{scope}`")
+    }
+}
+
+/// A `spawn` into a scope that has already been left.
+pub(crate) fn scope_already_left(name: &str, span: Span) -> RuntimeError {
+    RuntimeError::new(format!(
+        "scope `{name}` has already been left, so it can take no more tasks"
+    ))
+    .at(span)
+    .with_rule("Leaving a task scope waits for or cancels its child tasks.")
+}
+
+/// A task whose own thread ended in a panic.
+pub(crate) fn broken_invariant(described: &str) -> RuntimeError {
+    RuntimeError::new(format!("{described} ended in a broken invariant"))
 }
 
 /// A task shows as what it is, never as the value it will produce: that value
@@ -313,12 +338,7 @@ pub(crate) fn spawn_into<H: Tasking>(
     run: impl FnOnce(Runtime, u64, Cancellation, Transfer, Span) -> TaskOutcome + Send + 'static,
 ) -> Result<Value, RuntimeError> {
     if scope.is_closed() {
-        return Err(RuntimeError::new(format!(
-            "scope `{}` has already been left, so it can take no more tasks",
-            scope.name
-        ))
-        .at(span)
-        .with_rule("Leaving a task scope waits for or cancels its child tasks."));
+        return Err(scope_already_left(&scope.name, span));
     }
     if !matches!(body, Value(Repr::Closure(_))) {
         return Err(RuntimeError::new(format!(
@@ -550,9 +570,13 @@ fn failure_of(value: &Value) -> Option<Value> {
 }
 
 fn awaiting_a_cancelled_task(task: &Task, span: Span) -> RuntimeError {
+    awaiting_a_cancelled(&task.describe(), span)
+}
+
+/// `await` on a task the program cancelled, in the words both backends use.
+pub(crate) fn awaiting_a_cancelled(described: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!(
-        "{} was cancelled, so it has no value to await",
-        task.describe()
+        "{described} was cancelled, so it has no value to await"
     ))
     .at(span)
     .with_rule("Leaving a task scope waits for or cancels its child tasks, and a cancelled task never runs.")

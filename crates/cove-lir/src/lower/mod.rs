@@ -74,6 +74,7 @@ mod methods;
 mod pattern;
 mod shapes;
 mod stmt;
+mod tasks;
 mod walks;
 
 #[cfg(test)]
@@ -1170,6 +1171,19 @@ struct Loop {
     element: Option<Dest>,
 }
 
+/// A task scope being lowered, and what leaving it early owes it.
+struct OpenScope {
+    /// The `Repr::Scope` slot the [`Inst::ScopeEnter`] wrote.
+    slot: Slot,
+    /// How many loops were open outside this scope.
+    ///
+    /// What it decides is which of the two directions a jump is going. A
+    /// `break` leaves every scope opened *inside* its own loop and none
+    /// opened outside it, and that is the same question `Loop::depth` asks
+    /// about lexical scopes, asked the other way round.
+    loops: usize,
+}
+
 /// The state of lowering one function body.
 struct Body<'a> {
     checked: &'a Checked,
@@ -1200,6 +1214,16 @@ struct Body<'a> {
     code: Vec<Inst>,
     spans: Vec<Span>,
     loops: Vec<Loop>,
+    /// The task scopes this body has open, outermost first.
+    ///
+    /// A scope is left by waiting for or cancelling its children, and there
+    /// are two ways out of one: the body reaches its end, which is
+    /// [`Inst::ScopeLeave`], or control leaves through a `return`, a `?`, a
+    /// `break` or a `continue`, which is [`Inst::ScopeCancel`]. Only the
+    /// first is written where the `scope` is. The second is an obligation on
+    /// every exit path, exactly as [`Inst::Clear`] is, and this is the list
+    /// that says which scopes a given jump is leaving.
+    scopes: Vec<OpenScope>,
     /// The temporaries this body is holding that a collection would trace,
     /// innermost last.
     ///
@@ -1341,6 +1365,7 @@ fn lower_body(
         code: Vec::new(),
         spans: Vec::new(),
         loops: Vec::new(),
+        scopes: Vec::new(),
         held: Vec::new(),
         answer,
         returns: boundary.ret.clone(),

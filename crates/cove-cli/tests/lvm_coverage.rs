@@ -221,7 +221,23 @@ use support::{Case, ModuleIndex, Prepared};
 /// rather than the shipped tables, so a type an embedder's module declares
 /// has a layout. No corpus program is an embedding, so it moves no number
 /// here — the cases for it are `cove-lir`'s own.
-const AGREEING_FLOOR: usize = 83;
+///
+/// 83 to 87 is one family: **a task scope, and the three things a program
+/// does with one.** `scope name { ... }` is `cove_lir::Inst::ScopeEnter` and
+/// the two ways of leaving it — the one written where the `scope` is, and the
+/// one a `return`, a `?`, a `break` or a `continue` owes it. `spawn`, `await`
+/// and `cancel` are one instruction each. `cove_runtime::lvm::exec` grew the
+/// scheduler table those words index, a thread per task over a stack segment
+/// of its own and the run's one heap, a per-task `Cancellation` the safepoint
+/// reads, and the two places a task that is not running Cove still has to
+/// count as being at a safepoint: a host call, and a join.
+///
+/// `tests/e2e:tasks_scope`, `tests/e2e:gc_tasks`,
+/// `tests/e2e:tasks_host_order` and `tests/e2e:fail_max_tasks` are the four
+/// it runs. The second is the one worth naming: four tasks allocating at once
+/// over one collector, each keeping a vector nothing else can reach, which is
+/// where a collection that reached across a task's roots would show.
+const AGREEING_FLOOR: usize = 87;
 
 /// The code `cove_lir` raises a gap under.
 ///

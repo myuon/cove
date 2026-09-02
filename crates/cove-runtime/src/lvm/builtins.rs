@@ -239,10 +239,11 @@ fn render(machine: &Machine, repr: Repr, word: u64, depth: usize) -> Result<Stri
         Repr::Float => float(f64::from_bits(word)),
         Repr::Duration => duration(word as i64),
         Repr::Ref => return render_object(machine, word, depth),
-        // Neither is a value: an address is a place and a handle is the
-        // host's. Interpolating one would be putting this run's bookkeeping
-        // into a string a program prints.
-        Repr::Addr | Repr::Host => {
+        // None of them is a value: an address is a place, a handle is the
+        // host's, and a task or a scope is the scheduler's. Interpolating one
+        // would be putting this run's bookkeeping into a string a program
+        // prints.
+        Repr::Addr | Repr::Host | Repr::Task | Repr::Scope => {
             return Err(RuntimeError::new("this value has no text of its own"))
         }
     })

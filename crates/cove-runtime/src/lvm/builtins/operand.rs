@@ -265,6 +265,8 @@ pub(super) fn type_name(machine: &Machine, repr: Repr, word: u64) -> String {
         // which is a lowering bug, and saying so is more use than a type.
         Repr::Addr => "a place".to_string(),
         Repr::Host => "a host resource".to_string(),
+        Repr::Task => "a task".to_string(),
+        Repr::Scope => "a task scope".to_string(),
     }
 }
 

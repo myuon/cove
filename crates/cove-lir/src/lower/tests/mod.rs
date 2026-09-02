@@ -26,6 +26,7 @@ mod patterns;
 mod slots;
 mod strings;
 mod structs;
+mod tasks;
 mod values;
 mod walks;
 

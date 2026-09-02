@@ -186,13 +186,13 @@ impl Body<'_> {
                 self.unit_value(span)
             }
 
-            ExprKind::Await(_) => self.gap("`await`", expr),
+            ExprKind::Await(inner) => self.settle(expr, inner),
             ExprKind::Lambda {
                 is_async,
                 params,
                 body,
             } => self.lambda(expr, *is_async, params, body),
-            ExprKind::Scope { .. } => self.gap("`scope`", expr),
+            ExprKind::Scope { name, body } => self.scope_expr(expr, name, body),
         }
     }
 
@@ -253,7 +253,7 @@ impl Body<'_> {
 
     /// The `()` a form answers when its value was never computed from
     /// anything: an assignment, a loop.
-    fn unit_value(&mut self, span: Span) -> Val {
+    pub(super) fn unit_value(&mut self, span: Span) -> Val {
         let dst = self.temp(shapes::UNIT);
         self.emit(Inst::Unit { dst: dst.slot }, span);
         dst
@@ -1071,6 +1071,7 @@ impl Body<'_> {
             _ => None,
         };
         if let Some(answer) = self.failure(payload, expr.span) {
+            self.leave_open_scopes(0, expr.span);
             self.emit(Inst::Return { src: answer.slot }, expr.span);
             self.give_back(answer.slot, answer.layout);
         }
@@ -1189,6 +1190,12 @@ impl Body<'_> {
                 // `return return x` leaves through the inner one, and the
                 // outer has nothing to name.
                 if !self.diverges(value) {
+                    // Leaving a scope waits for or cancels its children
+                    // whichever way it is left, and a `return` is one of the
+                    // ways. The answer is evaluated first, because that is
+                    // where the oracle evaluates it: `eval_scope` is handed a
+                    // `Control::Return` that already carries a value.
+                    self.leave_open_scopes(0, span);
                     self.emit(Inst::Return { src: answer.slot }, span);
                 }
                 // The frame ends at the `Return`, so the run is given back
@@ -1202,6 +1209,7 @@ impl Body<'_> {
             // nothing but a `()` is ever written to a `Unit` slot.
             None => {
                 let src = self.answer.slot;
+                self.leave_open_scopes(0, span);
                 self.emit(Inst::Return { src }, span);
             }
         }
@@ -1279,6 +1287,14 @@ impl Body<'_> {
     /// They are cleared before the bindings, which is the reverse of the
     /// order they were made in.
     fn leave_turn(&mut self, depth: usize, held: usize, element: Option<Dest>, span: Span) {
+        // A scope this turn opened is left the same way a `return` leaves
+        // one, and for the same reason: the jump is about to land somewhere
+        // the scope's name no longer reaches, and leaving a scope waits for
+        // or cancels its children whichever way it is left. Only the turn's
+        // own scopes — one opened outside the loop is still open after the
+        // `break` lands.
+        let outside = self.scopes_outside_this_loop();
+        self.leave_open_scopes(outside, span);
         let temporaries: Vec<(Slot, LayoutId)> = self.held[held.min(self.held.len())..]
             .iter()
             .rev()

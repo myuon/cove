@@ -130,6 +130,8 @@ pub(super) fn scalar(repr: Repr) -> LayoutId {
         Repr::Ref => REF,
         Repr::Addr => ADDR,
         Repr::Host => HOST,
+        Repr::Task => TASK,
+        Repr::Scope => SCOPE,
     }
 }
 
@@ -151,6 +153,19 @@ pub(super) const HOST: LayoutId = LayoutId(9);
 /// it: the machine allocates one for a host's answer, and a table it has to
 /// search first is a search that has to answer something when it fails.
 pub(super) const BOXED: LayoutId = LayoutId(10);
+
+/// A task handle: one past an index into the task's scheduler table.
+///
+/// One layout for every `Task<T>`, whatever `T` is, and that is not the
+/// [`STR`] argument in disguise — a handle names an *entry*, and what the
+/// entry holds the address of is a fact about the task rather than about the
+/// word. Which layout the answer has is carried by the instructions that
+/// need it, [`crate::Inst::Spawn`] and [`crate::Inst::Await`], because those
+/// are the two places a value crosses between the table and a frame.
+pub(super) const TASK: LayoutId = LayoutId(11);
+
+/// A task scope: one past an index into the same table.
+pub(super) const SCOPE: LayoutId = LayoutId(12);
 
 /// Payload word 0 of a [`Shape::Closure`] object: the callee's `FunctionId`.
 pub(super) const CLOSURE_CALLEE: u32 = 0;
@@ -237,6 +252,8 @@ impl Shapes {
             Layout::word("<addr>", Repr::Addr),
             Layout::word("<host>", Repr::Host),
             Layout::object("Any", Shape::Boxed),
+            Layout::word("Task", Repr::Task),
+            Layout::word("TaskScope", Repr::Scope),
         ];
         Shapes {
             layouts,
@@ -437,6 +454,15 @@ impl Shapes {
             // captured are facts about the *object*, in the
             // [`Shape::Closure`] layout its own header names.
             Ty::Fn(_) => Some(self.function_value()),
+            // A task handle and a task scope name **scheduler state**, which
+            // ADR 0034 carves out of what a value store is: one word, one
+            // past an index into the task's own table, and the same for
+            // every `T` because what the entry holds the address of is a
+            // fact about the task rather than about the word. Neither may
+            // cross a task boundary, so the table one indexes is always the
+            // indexing task's.
+            Ty::Task(_) => Some(TASK),
+            Ty::Scope => Some(SCOPE),
             Ty::Struct(name, args) => self.declared_struct(checked, module, name, args),
             Ty::Enum(name, args) => self.declared_enum(checked, module, name, args),
             Ty::Host(qualified) => self.host_type(checked, module, qualified),

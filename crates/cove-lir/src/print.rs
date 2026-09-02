@@ -251,6 +251,38 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::Unbox { dst, src, layout } => {
             format!("unbox {} {} {}", s(*dst), s(*src), l(*layout))
         }
+        Inst::ScopeEnter { dst, name } => {
+            format!("scope.enter {} {:?}", s(*dst), program.string(*name))
+        }
+        Inst::ScopeLeave {
+            scope,
+            failed,
+            error,
+            layout,
+        } => format!(
+            "scope.leave {} {} {} {}",
+            s(*scope),
+            s(*failed),
+            s(*error),
+            l(*layout)
+        ),
+        Inst::ScopeCancel { scope } => format!("scope.cancel {}", s(*scope)),
+        Inst::Spawn {
+            dst,
+            scope,
+            closure,
+            answer,
+        } => format!(
+            "spawn {} {} {} {}",
+            s(*dst),
+            s(*scope),
+            s(*closure),
+            l(*answer)
+        ),
+        Inst::Await { dst, task, answer } => {
+            format!("await {} {} {}", s(*dst), s(*task), l(*answer))
+        }
+        Inst::Cancel { task } => format!("cancel {}", s(*task)),
         Inst::Trap { message } => format!("trap {:?}", program.string(*message)),
         Inst::AssertFailed { message } => format!("assert.failed {}", s(*message)),
     }

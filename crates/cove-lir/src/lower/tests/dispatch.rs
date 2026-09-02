@@ -49,7 +49,7 @@ fn a_dyn_call_switches_on_the_layout_the_box_records() {
 fn0 m.take(Any) -> String
   frame 7: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:int
      0  load-field s2:int s0:ref +0 Int
-     1  switch s2:int [9 9 9 9 9 9 9 9 9 9 9 2 6] else 9
+     1  switch s2:int [9 9 9 9 9 9 9 9 9 9 9 9 9 2 6] else 9
      2  unbox s4:ref s0:ref m.Name
      3  call s3:ref m.Name.show (s4:m.Name)
      4  clear s4:ref m.Name
@@ -107,7 +107,7 @@ fn0 m.f() -> String
      5  copy s2:ref s1:ref Any
      6  clear s1:ref Any
      7  load-field s3:int s2:ref +0 Int
-     8  switch s3:int [16 16 16 16 16 16 16 16 16 16 16 9 13] else 16
+     8  switch s3:int [16 16 16 16 16 16 16 16 16 16 16 16 16 9 13] else 16
      9  unbox s4:ref s2:ref m.Name
     10  call s1:ref m.Name.show (s4:m.Name)
     11  clear s4:ref m.Name

@@ -162,6 +162,22 @@ impl Check<'_> {
                 Inst::Box { dst, .. } => allocates(&mut seen, dst, self.program.boxed_layout),
                 Inst::Clear { .. } | Inst::Jump { .. } | Inst::BranchFalse { .. } => {}
                 Inst::Switch { .. } | Inst::Return { .. } | Inst::Trap { .. } => {}
+                // Scheduler state, not objects. A `Repr::Task` and a
+                // `Repr::Scope` word name a table entry, so there is no
+                // layout for one of these to claim.
+                Inst::ScopeEnter { dst, .. } => unknown(&mut seen, dst, 1),
+                Inst::Spawn { dst, .. } => unknown(&mut seen, dst, 1),
+                Inst::ScopeCancel { .. } | Inst::Cancel { .. } => {}
+                Inst::ScopeLeave {
+                    failed,
+                    error,
+                    layout,
+                    ..
+                } => {
+                    unknown(&mut seen, failed, 1);
+                    unknown(&mut seen, error, words(layout));
+                }
+                Inst::Await { dst, answer, .. } => unknown(&mut seen, dst, words(answer)),
                 // Writes nothing a program can read: what it writes is the
                 // run's report of where an assertion failed.
                 Inst::AssertFailed { .. } => {}
@@ -584,6 +600,50 @@ impl Check<'_> {
                     self.fits(at, dst, layout, "what a box is opened into");
                 }
             }
+            // ---- tasks ---------------------------------------------------
+            Inst::ScopeEnter { dst, name } => {
+                self.expect(at, dst, &[Repr::Scope]);
+                self.in_range(at, name.index(), self.program.strings.len(), "string");
+            }
+            Inst::ScopeCancel { scope } => self.expect(at, scope, &[Repr::Scope]),
+            // The error location is the *enclosing* function's `Err`
+            // payload, not the child's answer: what a failing child gives
+            // the scope is a value to pass on, and where it goes is decided
+            // by the function the scope was written in. The machine holds
+            // the child's own layout to this one and refuses a disagreement,
+            // because a run of words copied at the wrong width is the one
+            // fault this crate exists to make loud.
+            Inst::ScopeLeave {
+                scope,
+                failed,
+                error,
+                layout,
+            } => {
+                self.expect(at, scope, &[Repr::Scope]);
+                self.expect(at, failed, &[Repr::Bool]);
+                if self.layout_exists(at, layout) {
+                    self.fits(at, error, layout, "what a failing child leaves");
+                }
+            }
+            Inst::Spawn {
+                dst,
+                scope,
+                closure,
+                answer,
+            } => {
+                self.expect(at, dst, &[Repr::Task]);
+                self.expect(at, scope, &[Repr::Scope]);
+                self.expect(at, closure, &[Repr::Ref]);
+                self.layout_exists(at, answer);
+            }
+            Inst::Await { dst, task, answer } => {
+                self.expect(at, task, &[Repr::Task]);
+                if self.layout_exists(at, answer) {
+                    self.fits(at, dst, answer, "what an await answers");
+                }
+            }
+            Inst::Cancel { task } => self.expect(at, task, &[Repr::Task]),
+
             Inst::Trap { message } => {
                 self.in_range(at, message.index(), self.program.strings.len(), "string");
             }

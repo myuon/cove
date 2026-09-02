@@ -436,6 +436,89 @@ pub enum Inst {
         layout: LayoutId,
     },
 
+    // ---- tasks -------------------------------------------------------------
+    /// `dst = <a new task scope, open>`
+    ///
+    /// `scope name { ... }` binds one of these, and everything the Language
+    /// Card says about a scope is a fact about the two instructions that
+    /// leave it rather than about this one: *concurrent work belongs to a
+    /// task scope, and leaving the scope waits for or cancels its child
+    /// tasks.*
+    ///
+    /// `name` is what the source bound it to. It is carried because a
+    /// diagnostic quotes it — *task 2 of scope `requests`* — and by the time
+    /// a scope is a word there is nothing else left that knows.
+    ScopeEnter { dst: Slot, name: StrId },
+    /// Leave the scope in `scope` the way the body reached its end: wait for
+    /// every child, and say whether one of them failed in a way the
+    /// enclosing function has to pass on.
+    ///
+    /// `failed` is a `Bool`. When it is true, `error` holds the `Err`
+    /// payload of the first child whose value was one, at `layout` — and the
+    /// lowering wraps it in the enclosing function's own `Err` and returns
+    /// it, which is exactly what `?` would have done. A child that *raised*
+    /// is not that: a runtime error is not a value, so this instruction
+    /// fails with it and the two ways a child can end stay two things.
+    ///
+    /// A discriminated outcome rather than an instruction carrying control
+    /// flow, because where the failure goes is a fact about the function the
+    /// scope was written in — which `Err` to build, and what to return — and
+    /// the lowering is what holds those.
+    ScopeLeave {
+        scope: Slot,
+        failed: Slot,
+        error: Slot,
+        layout: LayoutId,
+    },
+    /// Cancel every child of the scope in `scope` and wait for it to stop.
+    ///
+    /// What an *early* exit from a scope's body reaches: a `return`, a `?`,
+    /// a `break` or a `continue` that leaves it. Leaving a scope waits for
+    /// or cancels its children whichever way it is left, so this is an
+    /// obligation on every exit path exactly as [`Inst::Clear`] is, and the
+    /// lowering emits one per open scope the jump leaves.
+    ///
+    /// It answers nothing. A scope being left early is already leaving with
+    /// something to say, and a child's failure discovered on the way out
+    /// would replace it with an unrelated one.
+    ScopeCancel { scope: Slot },
+    /// `dst = scope.spawn(closure)`, on a thread of its own.
+    ///
+    /// `answer` is the layout of the value the body produces, and it is here
+    /// because the answer needs somewhere to be *before* the thread exists:
+    /// the machine allocates an object of that width and records its address
+    /// in the scope's table, so the answer is an object in the run's one heap
+    /// and a root of this task from the moment it can hold anything. Handing
+    /// the words back through the thread instead would leave them in no
+    /// store the collector walks for as long as the join took.
+    ///
+    /// This returns once the thread exists and orders nothing else. ADR
+    /// 0008's amendment is explicit that whether the child has run an
+    /// instruction by the time the next one here does is the operating
+    /// system's answer.
+    Spawn {
+        dst: Slot,
+        scope: Slot,
+        closure: Slot,
+        answer: LayoutId,
+    },
+    /// `dst = await task`, for the words `answer` describes.
+    ///
+    /// Waits for the task's thread and answers the value its body produced.
+    /// A body runs at most once and is waited for at most once, so awaiting
+    /// the same handle twice answers the same value and repeats no effect.
+    Await {
+        dst: Slot,
+        task: Slot,
+        answer: LayoutId,
+    },
+    /// `task.cancel()`: ask the task to stop at its next safepoint.
+    ///
+    /// Asking is all it does. Whether the task stopped or had already
+    /// finished is known only where something waits for it, which is why
+    /// `TaskCancelled` is traced at the join and not here.
+    Cancel { task: Slot },
+
     // ---- failure ----------------------------------------------------------
     /// Fail the run with `message`.
     ///

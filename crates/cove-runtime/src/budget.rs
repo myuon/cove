@@ -16,7 +16,12 @@ use crate::error::RuntimeError;
 use crate::trace::RunOutcome;
 
 /// The rule this module implements, quoted for every error it raises.
-const RULE: &str =
+///
+/// Visible to the crate because the limits are not all in one place: the
+/// linear-memory backend's reserved stack region bounds how many tasks may
+/// run at once as well, and a second wording of the same rule beside it would
+/// be a second answer that could drift.
+pub(crate) const RULE: &str =
     "ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.";
 
 /// How many [`Budget::safepoint`] calls pass between checks of the wall clock

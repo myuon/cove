@@ -1582,7 +1582,13 @@ impl Memory {
     // --- mark and sweep -----------------------------------------------------
 
     /// Stops the world and collects. See [`Space::collect`].
-    pub(crate) fn collect(&mut self, layouts: &[Layout], roots: &dyn Roots) -> Collected {
+    ///
+    /// `&self`, and that is not an oversight about what a collection does to
+    /// the heap: the heap is behind an `Arc` shared by every task of the run,
+    /// so a collection was never this task's exclusive access to anything.
+    /// What it buys the caller is that the same borrow can carry its roots —
+    /// which are its own frames, read out of this same memory.
+    pub(crate) fn collect(&self, layouts: &[Layout], roots: &dyn Roots) -> Collected {
         self.space.collect(self.at, layouts, roots)
     }
 
