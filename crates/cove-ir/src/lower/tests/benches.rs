@@ -220,7 +220,7 @@ fn push_through_a_var_struct_field_lowers() {
 fn freeze_takes_the_place_and_not_a_read_of_it() {
     assert_eq!(
         listing(
-            "fn f() -> Int {\n  var v = Vector.of()\n  let frozen = v.freeze()\n  frozen.length()\n}\n",
+            "fn f() -> Int {\n  var v: Vector<Int> = Vector.of()\n  let frozen = v.freeze()\n  frozen.length()\n}\n",
             "f"
         ),
         "fn m.f arity=0 frame=0/2 -> Int\n\

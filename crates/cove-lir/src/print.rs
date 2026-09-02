@@ -283,6 +283,9 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             format!("await {} {} {}", s(*dst), s(*task), l(*answer))
         }
         Inst::Cancel { task } => format!("cancel {}", s(*task)),
+        Inst::Settled { dst, src, answer } => {
+            format!("settled {} {} {}", s(*dst), s(*src), l(*answer))
+        }
         Inst::SharedLock { cell } => format!("shared.lock {}", s(*cell)),
         Inst::SharedUnlock { cell } => format!("shared.unlock {}", s(*cell)),
         Inst::Trap { message } => format!("trap {:?}", program.string(*message)),

@@ -517,6 +517,22 @@ struct Boundary {
     /// refused a variadic parameter anywhere but last — `cove::type::
     /// variadic_position` — and refused one written with a default.
     variadic: bool,
+    /// Whether the declaration was written `async fn`.
+    ///
+    /// It changes nothing about the function and everything about the call.
+    /// `returns` above is the layout of `T` and not of `Task<T>`, because
+    /// the checker's `Signature::ret` is `T` and because the oracle's
+    /// `Interpreter::invoke_body` produces a `T` — the task is made *around*
+    /// the answer, by the caller, after the body has already run. So the
+    /// declaration is lowered as an ordinary function and every Cove call
+    /// site follows its [`Inst::Call`] with an [`Inst::Settled`].
+    ///
+    /// The three places that reach a body from outside Cove — an entry, a
+    /// host `invoke`, and a host calling a Cove callback — all *await* what
+    /// they get in the oracle, and awaiting a settled task is the value.
+    /// Here they get the value, because no task was made. That is the same
+    /// answer arrived at by not building the thing that would be undone.
+    is_async: bool,
 }
 
 /// Every declaration the package will have a [`Function`] for, numbered.
@@ -775,6 +791,7 @@ impl Boundary {
             returns: self.returns,
             receiver: self.receiver,
             variadic: self.variadic,
+            is_async: self.is_async,
         }
     }
 }
@@ -787,6 +804,7 @@ struct CallShape {
     returns: LayoutId,
     receiver: bool,
     variadic: bool,
+    is_async: bool,
 }
 
 impl CallShape {
@@ -886,10 +904,6 @@ fn boundary_of(
     errors: &mut Vec<Diagnostic>,
 ) -> Option<Boundary> {
     let mut ok = true;
-    if decl.is_async {
-        errors.push(gap::gap("an `async fn`", decl.span));
-        ok = false;
-    }
     let Some(signature) = checked.facts.signature(decl.span.file, decl.span) else {
         errors.push(gap::gap(
             "a declaration the checker recorded no signature for",
@@ -964,6 +978,10 @@ fn boundary_of(
     ok.then_some(Boundary {
         receiver: signature.receiver.is_some(),
         variadic: decl.params.last().is_some_and(|param| param.variadic),
+        // The signature's `ret` is `T` for an `async fn`, so `returns` above
+        // is the layout of the value the body produces and the handle is the
+        // call site's to make. See `Boundary::is_async`.
+        is_async: decl.is_async,
         params,
         types,
         returns,

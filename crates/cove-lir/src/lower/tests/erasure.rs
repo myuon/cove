@@ -253,29 +253,28 @@ fn a_schema_s_any_and_a_written_dyn_are_the_same_box() {
     assert_eq!(opened, vec!["m.Tag", "m.Tag", "Int"]);
 }
 
-/// A type parameter nothing settles is still a compile error, and this is
-/// the case that says the two kinds of not-knowing did not become one.
+/// A type the checker never settled is still a gap, and this is the case
+/// that says the two kinds of not-knowing did not become one.
 ///
-/// `Vector.of()` whose element type nothing states, and `Ok(1)` in a place
-/// expecting no `Result`, are both `Unknown::Unconstrained` — the same value
-/// a schema's `Any` produces. ADR 0016 names the second as one of the two
-/// silences a clean check does not cover, and neither is erasure: nothing
-/// said "any value", something failed to say anything. A lowering that
-/// boxed an unknown rather than reading the schema would run these.
+/// It used to be written with `Vector.of()` whose element nothing states and
+/// with a bare `Ok(1)`. Both are *compile errors* now, under
+/// [ADR 0038](../../../../docs/adr/0038-a-type-nothing-settles-is-not-a-program.md):
+/// a type nothing settles is not a program, so the lowering never sees one.
+///
+/// What is left is the one silence that ADR deliberately keeps — a host
+/// module this build ships no schema for. That is a fact about the *build*
+/// rather than about the program, so no edit to the call fixes it and the
+/// checker is right to stay quiet. The lowering still has nothing to lay out,
+/// and says so rather than boxing it: a schema's `Any` is a promise that a
+/// value is there, and this is the absence of a promise.
 #[test]
-fn a_type_parameter_nothing_settles_is_not_erasure() {
-    assert_eq!(
-        refused("fn f() { var v = Vector.of()\n  v.push(v) }"),
-        vec![
-            "not yet lowered: a value of type `Vector<_>`".to_string(),
-            "the type of this expression was never settled, so it cannot be lowered: `_`"
-                .to_string(),
-            "not yet lowered: a value of type `Vector<_>`".to_string(),
-        ]
-    );
-    assert_eq!(
-        refused("fn f() -> Int {\n  let ok = Ok(1)\n  2\n}"),
-        vec!["not yet lowered: a value of type `Result<Int, _>`".to_string()]
+fn a_type_the_checker_never_settled_is_not_erasure() {
+    let refusals = refused("use sensors\nfn f() -> Int {\n  let v = sensors.read()\n  1\n}");
+    assert!(
+        refusals
+            .iter()
+            .any(|it| it.contains("never settled") || it.contains("a value of type")),
+        "a dynamic boundary is a gap rather than a box: {refusals:?}"
     );
 }
 

@@ -236,16 +236,28 @@ fn a_range_value_takes_its_bounds_off_the_scalar_stack() {
 /// as a zero `length()`.
 #[test]
 fn an_empty_collection_is_walked_zero_times() {
-    let cases: &[&str] = &["[]", "Vector.of()", "Set.of()", "Map.of()", "0..<0"];
-    for iterable in cases {
-        assert_eq!(
-            agree_main(
-                "Int",
-                &format!(
-                    "  var seen = 0\n  for item in {iterable} {{\n    seen += 1\n  }}\n  seen"
-                )
+    // Each empty collection is written with the type it holds. An empty
+    // literal states no element type of its own and the `for` that walks it
+    // states none either, so what settles one is the place holding it --
+    // `cove::type::unconstrained` is what asks for it otherwise. A range is
+    // the one case with nothing open, so it is walked as written.
+    let cases: &[(&str, &str)] = &[
+        ("Array<Int>", "[]"),
+        ("Vector<Int>", "Vector.of()"),
+        ("Set<Int>", "Set.of()"),
+        ("Map<String, Int>", "Map.of()"),
+        ("", "0..<0"),
+    ];
+    for (ty, iterable) in cases {
+        let walked = if ty.is_empty() {
+            format!("  var seen = 0\n  for item in {iterable} {{\n    seen += 1\n  }}\n  seen")
+        } else {
+            format!(
+                "  let empty: {ty} = {iterable}\n  var seen = 0\n  for item in empty {{\n    seen += 1\n  }}\n  seen"
             )
-            .value(),
+        };
+        assert_eq!(
+            agree_main("Int", &walked).value(),
             "Int(0)",
             "for `{iterable}`"
         );

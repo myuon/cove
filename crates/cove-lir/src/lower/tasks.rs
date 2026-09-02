@@ -256,6 +256,50 @@ impl Body<'_> {
         }
     }
 
+    /// The handle a call to an `async fn` answers, around the value the call
+    /// already produced.
+    ///
+    /// # Where the task starts, and what joins it
+    ///
+    /// It starts and finishes at the [`Inst::Call`] above this one, on this
+    /// task's own stack, before this instruction runs — and nothing joins it,
+    /// because there is nothing to join. `Interpreter::call_target` is the
+    /// oracle and it says so in as many words: the body runs at the call
+    /// site, and the handle it hands back is settled on creation.
+    ///
+    /// So an `async fn` belongs to **no scope**. That is not a gap ADR 0008
+    /// left open — it is what the ADR decides, in the sentence that gives a
+    /// thread to `spawn` "which is where the language says concurrency
+    /// begins". A scope waits for or cancels its children, and a call that
+    /// has already finished has nothing for either to do.
+    ///
+    /// What is left over is the *handle*, and it is a value: it can be stored
+    /// in a `Vector<Task<T>>`, returned, or awaited twice. So it needs a name
+    /// the machine can hold, and the scheduler table is where a `Repr::Task`
+    /// word's name lives whether a thread ever existed or not.
+    ///
+    /// # Why the call is not folded into an immediate `await`
+    ///
+    /// `await f()` could skip the handle entirely, and the answer would be
+    /// the same one — an `await` of a settled task is the value. It is not
+    /// done, because then a call would be lowered two ways depending on what
+    /// its result was written next to, and the two would have to be shown to
+    /// agree at every other place a call can appear. One shape is what makes
+    /// `let t = f()` and `await f()` the same thing said twice.
+    pub(super) fn as_task(&mut self, value: Val, span: Span) -> Val {
+        let dst = self.temp(shapes::TASK);
+        self.emit(
+            Inst::Settled {
+                dst: dst.slot,
+                src: value.slot,
+                answer: value.layout,
+            },
+            span,
+        );
+        self.release(value, span);
+        dst
+    }
+
     /// `await task`, and the postfix `task.await()` that means the same
     /// thing.
     pub(super) fn settle(&mut self, expr: &Expr, task: &Expr) -> Val {

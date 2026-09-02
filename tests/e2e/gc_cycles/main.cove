@@ -2,6 +2,13 @@ use console.println
 
 /// A node that reaches its own container, so a `Node` inside `next` is a
 /// cycle: the vector holds the struct, and the struct holds the vector.
+///
+/// This is the smallest cycle the language can write. A vector holding
+/// *itself* would be smaller, and is not writable: its type is a
+/// `μX. Vector<X>` — regular, finitely representable, and with no surface
+/// syntax, because recursion here is nominal and inference is structural —
+/// so `cove::type::recursive_type` refuses it. What that costs this case is
+/// written under `main`.
 struct Node {
   next: Vector<Node>
 }
@@ -16,15 +23,21 @@ fn churn(count: Int) {
   }
 }
 
-/// Builds cycles of every shape the value model allows, abandons them, and
-/// shows that everything still named survives the collections that reclaimed
-/// them.
+/// Builds cycles of every shape the value model allows *and the language can
+/// write*, abandons them, and shows that everything still named survives the
+/// collections that reclaimed them.
+///
+/// Those two are no longer the same set, and the difference is one shape:
+/// a single object that reaches itself. The value model allows it — a
+/// vector is a handle and pushing that handle into the vector it names is
+/// one object with a reference to itself — and no type can be written for
+/// it, so the checker refuses it. What remains here is every cycle of two
+/// objects or more: through a struct field, and through a closure capture.
+/// A collector that reclaimed those two and not a self-reference would be a
+/// collector this case no longer catches; the shape is still reachable from
+/// a host that builds a value directly, and nothing here covers that.
 export fn main() -> Result<Unit, Error> {
   var kept = Vector.of(1, 2, 3)
-
-  var direct = Vector.of()
-  direct.push(direct)
-  println("a vector that holds itself has length {direct.length()}")?
 
   var through: Vector<Node> = Vector.of()
   through.push(Node(next: through))

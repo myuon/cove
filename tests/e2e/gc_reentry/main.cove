@@ -1,12 +1,24 @@
 use clock.timeout
 use console.println
 
+/// A node that reaches its own container, so a `Node` inside `next` is a
+/// cycle: the vector holds the struct, and the struct holds the vector.
+///
+/// This is the smallest cycle the language can write. A vector that holds
+/// *itself* is a `μX. Vector<X>` — regular, finitely representable, and
+/// with no surface syntax, because recursion here is nominal and inference
+/// is structural — so `cove::type::recursive_type` refuses it and a
+/// declared type is how a cycle is written instead.
+struct Node {
+  next: Vector<Node>
+}
+
 /// Builds and abandons `count` cycles, which is what makes a collection run.
 fn churn(count: Int) {
   var i = 0
   while i < count {
-    var v = Vector.of()
-    v.push(v)
+    var v: Vector<Node> = Vector.of()
+    v.push(Node(next: v))
     i += 1
   }
 }

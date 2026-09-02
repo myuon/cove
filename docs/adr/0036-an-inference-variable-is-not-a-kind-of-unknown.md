@@ -1,6 +1,11 @@
 # ADR 0036: An inference variable is not a kind of unknown
 
 - Status: Accepted
+- Superseded in part by [ADR 0038](0038-a-type-nothing-settles-is-not-a-program.md),
+  in property 2 only: a variable nothing settles is still reported as
+  `Unconstrained` is reported, and `Unconstrained` is an error rather than a
+  warning now. The rest stands, and the claim that an inference variable
+  never escapes the body that minted it is what ADR 0038 generalises
 - Date: 2026-09-02
 - Supersedes: nothing. [ADR 0016](0016-four-kinds-of-unknown.md)'s four kinds
   stand exactly as written; this says why `Unknown` has a fifth variant

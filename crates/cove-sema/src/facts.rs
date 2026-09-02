@@ -244,6 +244,24 @@ impl Facts {
         self.signatures.get(&(file, decl.start))
     }
 
+    /// Every expression the checker settled a type for, in file and then
+    /// expression order.
+    ///
+    /// The tables are indexed rather than keyed, so a reader that wants
+    /// *every* answer rather than one has no key to ask with. This is that
+    /// reader's way in, and it exists for one: the invariant that a package
+    /// which checked without error carries no unresolved type. Asking that
+    /// question of one expression at a time would need the question to know
+    /// which expressions there are, which is exactly what only this table
+    /// knows.
+    pub fn types(&self) -> impl Iterator<Item = (FileId, ExprId, &Ty)> {
+        self.files.iter().enumerate().flat_map(|(file, held)| {
+            held.types.iter().enumerate().filter_map(move |(id, ty)| {
+                Some((FileId(file as u32), ExprId(id as u32), ty.as_ref()?))
+            })
+        })
+    }
+
     /// Records the type the checker settled for one expression.
     ///
     /// A later record for the same id replaces an earlier one. That is what

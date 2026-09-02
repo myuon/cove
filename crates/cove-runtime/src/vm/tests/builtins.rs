@@ -112,7 +112,12 @@ fn an_array_is_built_left_to_right() {
         expression("String", "\"{[1 + 1, 2 + 2, 3 + 3]}\""),
         "Str(\"[2, 4, 6]\")"
     );
-    assert_eq!(expression("Int", "[].length()"), "Int(0)");
+    // An empty literal has no element type of its own, so the place that
+    // holds it is what states one -- `cove::type::unconstrained` otherwise.
+    assert_eq!(
+        agree_main("Int", "  let empty: Array<Int> = []\n  empty.length()").value(),
+        "Int(0)"
+    );
 }
 
 // ------------------------------------------------------ assertions
@@ -134,7 +139,14 @@ fn a_holding_assertion_answers_ok_on_both() {
 #[test]
 fn builtin_associated_functions_answer_what_the_interpreter_answers() {
     assert_eq!(expression("Int", "Vector.of(1, 2, 3).length()"), "Int(3)");
-    assert_eq!(expression("Int", "Vector.of().length()"), "Int(0)");
+    assert_eq!(
+        agree_main(
+            "Int",
+            "  let empty: Vector<Int> = Vector.of()\n  empty.length()"
+        )
+        .value(),
+        "Int(0)"
+    );
     assert_eq!(expression("Int", "Set.of(3, 1, 2).length()"), "Int(3)");
     assert_eq!(
         expression("Int", "Map.of(MapEntry(key: \"a\", value: 1)).length()"),

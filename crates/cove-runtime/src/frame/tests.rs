@@ -2877,13 +2877,13 @@ fn ok_err_some_and_none_are_built_and_returned() {
 fn ok_and_err_are_built_and_matched() {
     agree(
         "export fn main() -> Int {\n  \
-         let r = Ok(5)\n  \
+         let r: Result<Int, Error> = Ok(5)\n  \
          match r {\n    Ok(_) => 1,\n    _ => 0,\n  }\n\
          }\n",
     );
     agree(
         "export fn main() -> Int {\n  \
-         let r = Err(9)\n  \
+         let r: Result<Int, Int> = Err(9)\n  \
          match r {\n    Ok(_) => 1,\n    _ => 0,\n  }\n\
          }\n",
     );
@@ -2923,10 +2923,15 @@ fn try_over_a_word_built_ok_and_a_word_built_err_agrees() {
          Ok(1)\n\
          }\n",
     );
+    // The failure type comes from the function and the success type from
+    // the place the `?` hands its value to; an `Err` says neither on its
+    // own, and `cove::type::unconstrained` is what asks. Written as a
+    // binding so that the `?` is still over a directly built `Err`, which
+    // is what this case is about.
     agree(
         "export fn main() -> Result<Int, String> {\n  \
-         Err(\"boom\")?\n  \
-         Ok(1)\n\
+         let n: Int = Err(\"boom\")?\n  \
+         Ok(n)\n\
          }\n",
     );
 }
@@ -3351,7 +3356,8 @@ export fn main() -> Int {
 fn an_ok_string_payload_bound_by_a_match_arm_is_still_refused_and_names_the_value_slot() {
     let ready = ready(
         "export fn main() -> Bool {\n  \
-         match Ok(\"hi\") {\n    \
+         let r: Result<String, Error> = Ok(\"hi\")\n  \
+         match r {\n    \
          Ok(s) => s == \"hi\",\n    \
          _ => false,\n  \
          }\n}\n",

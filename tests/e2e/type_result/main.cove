@@ -19,7 +19,11 @@ fn parseOrFail(text: String) -> Result<Int, ParseError> {
 /// Prints `Result` construction, queries, unwrapping, mapping, and
 /// propagation.
 export fn main() -> Result<Unit, Error> {
-  let ok = Ok(1)
+  // `Ok(1)` says what the value is and nothing says what the failure would
+  // have been, and `Result` is generic in both — `parseOrFail` below answers
+  // a `ParseError`. So the error type is written here rather than guessed:
+  // `cove::type::unconstrained` is what asks for it.
+  let ok: Result<Int, Error> = Ok(1)
   let failed = Err(Error("broken"))
   println("values {ok} {failed}")?
   println("isOk {ok.isOk()} {failed.isOk()}")?

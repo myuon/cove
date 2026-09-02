@@ -337,7 +337,13 @@ impl Shapes {
             // written: what is inside is a question the box answers, from
             // the `LayoutId` in its own payload word 0. A layout per trait
             // would be a runtime type universe keyed by a static name.
-            Ty::Dyn(_) => Some(BOXED),
+            // `Any` and `dyn Trait` are one erased representation and two
+            // types. Mapping several types onto one layout is what this
+            // function is for; keeping them apart in `Ty` is what keeps a
+            // `dyn Display` from answering everything, and is why
+            // `cove-sema` gives `Any` a variant of its own rather than a
+            // reserved trait name.
+            Ty::Any | Ty::Dyn(_) => Some(BOXED),
             Ty::Error => {
                 let (fields, words) = struct_layout(&[(Arc::from("message"), STR)], &self.layouts);
                 Some(self.intern(Layout::inline(

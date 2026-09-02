@@ -518,6 +518,32 @@ pub enum Inst {
     /// finished is known only where something waits for it, which is why
     /// `TaskCancelled` is traced at the join and not here.
     Cancel { task: Slot },
+    /// `dst = <a task already settled with the words at `src`>`.
+    ///
+    /// What a **call to an `async fn`** answers. The body ran at the call
+    /// site, on this task's stack, as [`Inst::Call`]; this is the handle the
+    /// call hands back, and there is no thread anywhere in it.
+    ///
+    /// That is the oracle's reading rather than an invention here.
+    /// `Interpreter::call_target` runs the body and wraps what it produced in
+    /// `crate::task::Task::settled`, and `crate::task::Task::settled`'s own
+    /// documentation says why: ADR 0008 gives a thread to `spawn`, which is
+    /// where the language says concurrency begins, so nothing may depend on
+    /// *when* an `async fn` body ran — only on the value an `await` produces.
+    /// A call that is never awaited has still run.
+    ///
+    /// So this task belongs to no scope and nothing joins it. It is
+    /// `position` zero of `crate::task::describe`, which is the case that
+    /// spelling exists for: *this task*, with no place in a spawn order to
+    /// name. The words are copied into an object of the same shape a
+    /// spawned task's answer goes into, because an `await` reads the two the
+    /// same way and a second arrangement would be a second thing to get
+    /// right.
+    Settled {
+        dst: Slot,
+        src: Slot,
+        answer: LayoutId,
+    },
 
     // ---- cells ---------------------------------------------------------------
     /// Take the [`crate::Shape::Shared`] cell in `cell`, waiting for whoever

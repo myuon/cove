@@ -263,7 +263,7 @@ use support::{Case, ModuleIndex, Prepared};
 /// the amendment never refused and called an accepted leak; that it is
 /// reclaimed rather than leaked is `cove_runtime::lvm::cell`'s to show,
 /// because only a test that runs the collection itself can say so.
-const AGREEING_FLOOR: usize = 107;
+const AGREEING_FLOOR: usize = 115;
 
 /// The code `cove_lir` raises a gap under.
 ///

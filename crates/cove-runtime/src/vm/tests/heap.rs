@@ -153,16 +153,25 @@ fn heaps_of(source: &str) -> (HeapRun, HeapRun) {
 const CHURN: usize = 200;
 
 /// A loop that builds one cycle per turn and abandons it.
+///
+/// The cycle is a vector holding a struct holding the vector, which is the
+/// smallest one the language can write: a vector holding *itself* has the
+/// type `μX. Vector<X>`, which has no surface syntax, and
+/// `cove::type::recursive_type` refuses it. [`CYCLE`] is the declaration
+/// this needs, and [`collecting`] writes it beside `main`.
 fn churn(count: usize) -> String {
     format!(
-        "  var i = 0\n  while i < {count} {{\n    var v = Vector.of()\n    v.push(v)\n    i += 1\n  }}\n"
+        "  var i = 0\n  while i < {count} {{\n    var v: Vector<Node> = Vector.of()\n    v.push(Node(next: v))\n    i += 1\n  }}\n"
     )
 }
+
+/// The declaration [`churn`] builds its cycle out of.
+const CYCLE: &str = "struct Node {\n  next: Vector<Node>\n}\n\n";
 
 /// `m.main`, returning `Result<Unit, Error>`, around `body`.
 fn collecting(body: &str) -> String {
     format!(
-        "use console.println\n\nexport fn main() -> Result<Unit, Error> {{\n{body}  Ok(())\n}}\n"
+        "use console.println\n\n{CYCLE}export fn main() -> Result<Unit, Error> {{\n{body}  Ok(())\n}}\n"
     )
 }
 
@@ -293,7 +302,7 @@ fn a_slot_a_standing_frame_holds_survives_every_collection() {
 #[test]
 fn a_closure_capture_is_the_only_root_and_is_enough() {
     let (ast, vm) = heaps_of(&format!(
-        "use console.println\n\nfn hidden() -> fn() -> Int {{\n  var counted = Vector.of(1, 2, 3, 4, 5)\n  fn() {{\n    counted.length()\n  }}\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  let count = hidden()\n{}  println(\"{{count()}}\")?\n  Ok(())\n}}\n",
+        "use console.println\n\n{CYCLE}fn hidden() -> fn() -> Int {{\n  var counted = Vector.of(1, 2, 3, 4, 5)\n  fn() {{\n    counted.length()\n  }}\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  let count = hidden()\n{}  println(\"{{count()}}\")?\n  Ok(())\n}}\n",
         churn(CHURN)
     ));
     assert_eq!(vm.output, "5\n");
@@ -313,7 +322,7 @@ fn a_closure_capture_is_the_only_root_and_is_enough() {
 #[test]
 fn a_live_operand_above_nested_frames_survives_a_collection() {
     let (ast, vm) = heaps_of(&format!(
-        "use console.println\n\nfn made(n: Int) -> Vector<Int> {{\n  var v = Vector.of()\n  var i = 0\n  while i < n {{\n    v.push(i)\n    i += 1\n  }}\n  v\n}}\n\nfn afterChurn(n: Int) -> Vector<Int> {{\n{}  made(n)\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  let both: Vector<Vector<Int>> = Vector.of(made(3), afterChurn(4))\n  println(\"{{both}}\")?\n  Ok(())\n}}\n",
+        "use console.println\n\n{CYCLE}fn made(n: Int) -> Vector<Int> {{\n  var v = Vector.of()\n  var i = 0\n  while i < n {{\n    v.push(i)\n    i += 1\n  }}\n  v\n}}\n\nfn afterChurn(n: Int) -> Vector<Int> {{\n{}  made(n)\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  let both: Vector<Vector<Int>> = Vector.of(made(3), afterChurn(4))\n  println(\"{{both}}\")?\n  Ok(())\n}}\n",
         churn(CHURN)
     ));
     assert_eq!(vm.output, "[[0, 1, 2], [0, 1, 2, 3]]\n");
@@ -329,7 +338,7 @@ fn a_live_operand_above_nested_frames_survives_a_collection() {
 #[test]
 fn a_var_place_is_written_through_across_a_collection() {
     let (ast, vm) = heaps_of(&format!(
-        "use console.println\n\nfn fill(var output: Vector<Int>, upTo: Int) {{\n  var n = 0\n  while n < upTo {{\n    output.push(n)\n{}    n += 1\n  }}\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  var output = Vector.of()\n  fill(var output, upTo: 4)\n  println(\"{{output}}\")?\n  Ok(())\n}}\n",
+        "use console.println\n\n{CYCLE}fn fill(var output: Vector<Int>, upTo: Int) {{\n  var n = 0\n  while n < upTo {{\n    output.push(n)\n{}    n += 1\n  }}\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  var output = Vector.of()\n  fill(var output, upTo: 4)\n  println(\"{{output}}\")?\n  Ok(())\n}}\n",
         churn(80)
     ));
     assert_eq!(vm.output, "[0, 1, 2, 3]\n");
@@ -350,7 +359,7 @@ fn a_var_place_is_written_through_across_a_collection() {
 #[test]
 fn a_scalar_var_place_is_written_through_across_a_collection() {
     let (ast, vm) = heaps_of(&format!(
-        "use console.println\n\nfn count(var total: Int, upTo: Int) {{\n  var n = 0\n  while n < upTo {{\n    total += n\n{}    n += 1\n  }}\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  var total = 0\n  var held = Vector.of(1, 2, 3)\n  count(var total, upTo: 4)\n  println(\"{{total}} {{held.length()}}\")?\n  Ok(())\n}}\n",
+        "use console.println\n\n{CYCLE}fn count(var total: Int, upTo: Int) {{\n  var n = 0\n  while n < upTo {{\n    total += n\n{}    n += 1\n  }}\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  var total = 0\n  var held = Vector.of(1, 2, 3)\n  count(var total, upTo: 4)\n  println(\"{{total}} {{held.length()}}\")?\n  Ok(())\n}}\n",
         churn(80)
     ));
     assert_eq!(vm.output, "6 3\n");
@@ -371,7 +380,7 @@ fn a_scalar_var_place_is_written_through_across_a_collection() {
 #[test]
 fn a_closure_over_a_scalar_and_a_reference_survives_a_collection() {
     let (ast, vm) = heaps_of(&format!(
-        "use console.println\n\nexport fn main() -> Result<Unit, Error> {{\n  let step = 2\n  let label = \"n\"\n  let f: fn(Int) -> String = fn(k) {{\n    \"{{label}}{{k + step}}\"\n  }}\n  var seen = \"\"\n  var turn = 0\n  while turn < 4 {{\n{}    seen = \"{{seen}}{{f(turn)}}\"\n    turn += 1\n  }}\n  println(\"{{seen}}\")?\n  Ok(())\n}}\n",
+        "use console.println\n\n{CYCLE}export fn main() -> Result<Unit, Error> {{\n  let step = 2\n  let label = \"n\"\n  let f: fn(Int) -> String = fn(k) {{\n    \"{{label}}{{k + step}}\"\n  }}\n  var seen = \"\"\n  var turn = 0\n  while turn < 4 {{\n{}    seen = \"{{seen}}{{f(turn)}}\"\n    turn += 1\n  }}\n  println(\"{{seen}}\")?\n  Ok(())\n}}\n",
         churn(60)
     ));
     assert_eq!(vm.output, "n2n3n4n5\n");
@@ -388,7 +397,7 @@ fn a_closure_over_a_scalar_and_a_reference_survives_a_collection() {
 #[test]
 fn a_collection_inside_host_reentry_keeps_what_the_host_is_holding() {
     let (ast, vm) = heaps_of(&format!(
-        "use clock.timeout\nuse console.println\n\nexport fn main() -> Result<Unit, Error> {{\n  var kept = Vector.of(1, 2, 3)\n  let answered = timeout(60s) {{\n{}    kept.length()\n  }}?\n  println(\"{{answered}} {{kept}}\")?\n  Ok(())\n}}\n",
+        "use clock.timeout\nuse console.println\n\n{CYCLE}export fn main() -> Result<Unit, Error> {{\n  var kept = Vector.of(1, 2, 3)\n  let answered = timeout(60s) {{\n{}    kept.length()\n  }}?\n  println(\"{{answered}} {{kept}}\")?\n  Ok(())\n}}\n",
         churn(CHURN)
     ));
     assert_eq!(vm.output, "3 [1, 2, 3]\n");
@@ -404,7 +413,7 @@ fn a_collection_inside_host_reentry_keeps_what_the_host_is_holding() {
 #[test]
 fn each_spawned_task_collects_its_own_heap() {
     let (ast, vm) = heaps_of(&format!(
-        "use console.println\n\nfn work(mark: Int) -> Int {{\n  var kept = Vector.of(mark, mark, mark)\n{}  kept.length() * 100 + mark\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  scope tasks {{\n    let one = tasks.spawn {{ work(1) }}\n    let two = tasks.spawn {{ work(2) }}\n    println(\"{{one.await()}} {{two.await()}}\")?\n  }}\n  Ok(())\n}}\n",
+        "use console.println\n\n{CYCLE}fn work(mark: Int) -> Int {{\n  var kept = Vector.of(mark, mark, mark)\n{}  kept.length() * 100 + mark\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  scope tasks {{\n    let one = tasks.spawn {{ work(1) }}\n    let two = tasks.spawn {{ work(2) }}\n    println(\"{{one.await()}} {{two.await()}}\")?\n  }}\n  Ok(())\n}}\n",
         churn(CHURN)
     ));
     assert_eq!(vm.output, "301 302\n");

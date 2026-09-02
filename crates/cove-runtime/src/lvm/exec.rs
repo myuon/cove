@@ -1347,6 +1347,18 @@ impl<'a> Machine<'a> {
                         Err(error) => fail!(error),
                     }
                 }
+                // A call to an `async fn` already ran, here, on this stack.
+                // What is left is the handle, and the table is where a
+                // `Repr::Task` word's name lives whether a thread ever
+                // existed or not.
+                Inst::Settled { dst, src, answer } => {
+                    self.sync(pc - 1);
+                    let words = self.mem.read_words(base + src as u64, self.width(answer));
+                    match self.settled(&words, answer, running) {
+                        Ok(word) => self.mem.set_slot(base, dst, word),
+                        Err(error) => fail!(error),
+                    }
+                }
                 // Asking is all it does. Whether the task stopped or had
                 // already finished is known only where something waits for
                 // it, which is why `TaskCancelled` is traced at the join.
@@ -2176,6 +2188,67 @@ impl<'a> Machine<'a> {
         running.push(Some(handle));
         self.scopes[at].tasks.push(index);
         // One past the index, because a zeroed slot has to mean no task.
+        Ok(index as u64 + 1)
+    }
+
+    /// The handle a call to an `async fn` answers, around words the call has
+    /// already produced.
+    ///
+    /// [`crate::task::Task::settled`] is the oracle and this is the same
+    /// thing in a table: a task with no thread, whose value is known before
+    /// the handle exists. Everything downstream then works without being
+    /// told which kind it has — [`Machine::join`] returns at once because the
+    /// state is not `Running`, [`Machine::settle`] reads the answer object
+    /// the way it reads a spawned task's, and an `Inst::Cancel` does nothing
+    /// to a task that is not running, exactly as `Task::cancel` does nothing.
+    ///
+    /// Three things it deliberately does not do, each because the oracle does
+    /// not do it either. It takes **no place under the concurrency limit**:
+    /// nothing was started, and a limit on how many tasks run at once is not
+    /// a limit on how many `async fn` calls a program makes. It is **not put
+    /// in any scope**, so leaving a scope neither waits for it nor cancels
+    /// it — there is nothing left to wait for. And it is **not traced**: it
+    /// is `id` zero, the identity `crate::task::Task` gives a handle that
+    /// "never appears in a trace because it never ran as a task".
+    ///
+    /// What it costs is one table entry and one object, kept for the rest of
+    /// the run. That is the price of a `Repr::Task` word being a name rather
+    /// than an address: the collector reads a static per-slot map and never
+    /// inspects a word, so the answer object has to be reachable from
+    /// somewhere the collector walks, and the table is that somewhere. The
+    /// oracle's `Rc<Task>` is freed when the last handle goes; a handle here
+    /// can be inside a `Vector<Task<T>>` or a struct field, and no static map
+    /// can say when the last one died.
+    fn settled(
+        &mut self,
+        words: &[u64],
+        answer: LayoutId,
+        running: &mut Vec<Option<ScopedJoinHandle<'_, Outcome>>>,
+    ) -> Result<u64, RuntimeError> {
+        // The same object a spawned task's answer goes into, so that
+        // `Machine::settle` reads one shape rather than two.
+        let home = self.allocate(self.boxed_layout(), words.len() as u32)?;
+        self.mem.set_payload(home, 0, answer.0 as u64);
+        for (at, word) in words.iter().enumerate() {
+            self.mem.set_payload(home, 1 + at as u32, *word);
+        }
+        let index = self.children.len();
+        self.children.push(Child {
+            // Position zero and this name are what `crate::task::describe`
+            // renders as *this task*: a handle with no place in a spawn
+            // order, because there was no spawn.
+            id: 0,
+            position: 0,
+            scope: Arc::from("this call"),
+            cancellation: Cancellation::new(),
+            closure: 0,
+            answer: home,
+            layout: answer,
+            state: ChildState::Settled,
+        });
+        // The two lists are one list at two indices, so a task with no thread
+        // still takes its place in both.
+        running.push(None);
         Ok(index as u64 + 1)
     }
 
@@ -5955,6 +6028,235 @@ pub(crate) mod tests {
         assert_eq!(
             error.message,
             "task 1 of scope `tasks` was cancelled, so it has no value to await"
+        );
+    }
+
+    /// A call to an `async fn` is a call and a handle, and the handle can be
+    /// awaited twice.
+    ///
+    /// No `ScopeEnter`, no `Spawn` and no thread: an `async fn` runs at its
+    /// call site and `Inst::Settled` is the handle around what it produced.
+    /// Awaiting twice answers the same words, which falls out of the state
+    /// rather than being arranged — the same way it does for a spawned task,
+    /// and the same way `crate::task::settle` gets it.
+    #[test]
+    fn a_settled_task_answers_the_call_s_words_however_often_it_is_awaited() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let none = build.args(&[]);
+        let body = build.function(
+            "body",
+            &[],
+            &[Repr::Int],
+            int,
+            vec![Inst::Int { dst: 0, value: 7 }, Inst::Return { src: 0 }],
+        );
+        let main = build.function(
+            "main",
+            &[],
+            &[Repr::Int, Repr::Task, Repr::Int, Repr::Int],
+            int,
+            vec![
+                Inst::Call {
+                    dst: 0,
+                    callee: body,
+                    args: none,
+                },
+                Inst::Settled {
+                    dst: 1,
+                    src: 0,
+                    answer: int,
+                },
+                Inst::Await {
+                    dst: 2,
+                    task: 1,
+                    answer: int,
+                },
+                Inst::Await {
+                    dst: 3,
+                    task: 1,
+                    answer: int,
+                },
+                Inst::Arith {
+                    num: Num::Int,
+                    op: ArithOp::Add,
+                    dst: 2,
+                    a: 2,
+                    b: 3,
+                },
+                Inst::Return { src: 2 },
+            ],
+        );
+        let program = build.done();
+        assert_eq!(run(&program, main, &[]).unwrap() as i64, 14);
+    }
+
+    /// Cancelling a settled task does nothing, so awaiting it still answers.
+    ///
+    /// `crate::task::Task::cancel` asks a task that is *running* to stop, and
+    /// a task whose body already ran is not one: cancellation stops work that
+    /// has not happened, it does not undo work that has. An `async fn`'s
+    /// handle is the extreme case of that, because its work was over before
+    /// the handle existed.
+    #[test]
+    fn cancelling_a_settled_task_does_not_take_its_value_away() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let none = build.args(&[]);
+        let body = build.function(
+            "body",
+            &[],
+            &[Repr::Int],
+            int,
+            vec![Inst::Int { dst: 0, value: 7 }, Inst::Return { src: 0 }],
+        );
+        let main = build.function(
+            "main",
+            &[],
+            &[Repr::Int, Repr::Task, Repr::Int],
+            int,
+            vec![
+                Inst::Call {
+                    dst: 0,
+                    callee: body,
+                    args: none,
+                },
+                Inst::Settled {
+                    dst: 1,
+                    src: 0,
+                    answer: int,
+                },
+                Inst::Cancel { task: 1 },
+                Inst::Await {
+                    dst: 2,
+                    task: 1,
+                    answer: int,
+                },
+                Inst::Return { src: 2 },
+            ],
+        );
+        let program = build.done();
+        assert_eq!(run(&program, main, &[]).unwrap() as i64, 7);
+    }
+
+    /// A settled task's answer is a root of the task that made it.
+    ///
+    /// The words go into a heap object the scheduler table names, and the
+    /// slot the call left them in is cleared at once — which is what the
+    /// lowering emits, because the `Inst::Settled` consumed the temporary.
+    /// So from that instruction onwards the table is the only thing that
+    /// names the object, and the loop below allocates far more than the heap
+    /// holds to say so: without the table among the roots the sweep would
+    /// take the answer and the `await` would read a reclaimed word.
+    #[test]
+    fn a_settled_task_s_answer_survives_a_collection() {
+        let mut build = Build::default().strings(&["kept"]);
+        let int = build.scalar(Repr::Int);
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
+        let cell = build.layout(
+            "Cell",
+            Shape::Elements {
+                elem: int,
+                growable: false,
+            },
+        );
+        let none = build.args(&[]);
+        let body = build.function(
+            "body",
+            &[],
+            &[Repr::Ref],
+            str_layout,
+            vec![
+                Inst::Str {
+                    dst: 0,
+                    text: StrId(0),
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        // s0 the call's answer, s1 the handle, s2 the counter, s3 the bound,
+        // s4 the test, s5 the churn, s6 the step, s7 what the await answers,
+        // s8 the length that is returned.
+        let main = build.function(
+            "main",
+            &[],
+            &[
+                Repr::Ref,
+                Repr::Task,
+                Repr::Int,
+                Repr::Int,
+                Repr::Bool,
+                Repr::Ref,
+                Repr::Int,
+                Repr::Ref,
+                Repr::Int,
+            ],
+            int,
+            vec![
+                Inst::Call {
+                    dst: 0,
+                    callee: body,
+                    args: none,
+                },
+                Inst::Settled {
+                    dst: 1,
+                    src: 0,
+                    answer: str_layout,
+                },
+                Inst::Clear {
+                    slot: 0,
+                    layout: str_layout,
+                },
+                Inst::Int { dst: 2, value: 0 },
+                Inst::Int {
+                    dst: 3,
+                    value: 4000,
+                },
+                Inst::Int { dst: 6, value: 1 },
+                Inst::Cmp {
+                    on: Compare::Int,
+                    op: CmpOp::Lt,
+                    dst: 4,
+                    a: 2,
+                    b: 3,
+                },
+                Inst::BranchFalse { cond: 4, to: 12 },
+                Inst::Alloc {
+                    dst: 5,
+                    layout: cell,
+                    len: Len::Count(64),
+                },
+                Inst::Clear {
+                    slot: 5,
+                    layout: cell,
+                },
+                Inst::Arith {
+                    num: Num::Int,
+                    op: ArithOp::Add,
+                    dst: 2,
+                    a: 2,
+                    b: 6,
+                },
+                Inst::Jump { to: 6 },
+                Inst::Await {
+                    dst: 7,
+                    task: 1,
+                    answer: str_layout,
+                },
+                Inst::Len { dst: 8, obj: 7 },
+                Inst::Return { src: 8 },
+            ],
+        );
+        let program = build.done();
+        // A heap far smaller than 4000 objects of 65 words, so the run only
+        // reaches the `await` by collecting several times on the way.
+        let mut machine = Machine::new(&program, 4096);
+        // `kept` is four bytes, and it is still four bytes.
+        assert_eq!(machine.run(main, &[], &budget()).unwrap(), vec![4]);
+        assert!(
+            machine.collected().collections > 0,
+            "the run should have had to collect"
         );
     }
 

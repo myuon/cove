@@ -1,6 +1,13 @@
 # ADR 0016: Four kinds of unknown
 
 - Status: Accepted
+- Superseded in part by [ADR 0038](0038-a-type-nothing-settles-is-not-a-program.md),
+  which makes an unconstrained unknown an error rather than a warning, moves
+  a schema's `HostType::Any` out of the unknowns into a type of its own, and
+  closes the second of the two silences named under "What a clean check
+  guarantees". The four kinds, the rule that every kind compares equal to
+  every type, the silence of a dynamic boundary, and `Any` being a note and
+  never a warning all stand
 - Date: 2026-08-26
 - Supersedes: [ADR 0004](0004-static-type-checking.md)'s "Two types no program
   can write", which decided that `Unknown` is one thing — "a Host API call, or

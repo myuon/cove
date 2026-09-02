@@ -83,16 +83,20 @@ impl Body<'_> {
     // ---- making one -------------------------------------------------------
 
     /// `fn(x) { ... }`: a `Function` of its own, and an environment naming it.
-    pub(super) fn lambda(
-        &mut self,
-        expr: &Expr,
-        is_async: bool,
-        params: &[Param],
-        body: &Block,
-    ) -> Val {
-        if is_async {
-            return self.gap("an `async` function value", expr);
-        }
+    pub(super) fn lambda(&mut self, expr: &Expr, params: &[Param], body: &Block) -> Val {
+        // The `async` a lambda was written with is not read here, and there
+        // is no parameter for it: it is on the function type the checker
+        // settled at this expression, which `Body::lambda_of` reads for
+        // everything else about the boundary too. `FnTy::ret` is `R` rather
+        // than `Task<R>`, so the body becomes a `Function` answering `R`
+        // exactly as a declared `async fn` does, and `Body::call_value` is
+        // what makes the task. See `Boundary::is_async`.
+        //
+        // The one caller that makes no task is a **host**. A Cove callback a
+        // host runs is awaited by the oracle before its value reaches the
+        // host, so a host handed `R` has been handed what the oracle would
+        // have handed it — which is why an `async` handler stored in an
+        // `http.Route` needs nothing said about it here.
         if let Some(what) = written_as_a_value(params) {
             return self.gap(what, expr);
         }
@@ -248,17 +252,16 @@ impl Body<'_> {
     /// moment, before the binding below, and answers the same way.
     pub(super) fn local_fn(&mut self, decl: &FnDecl) {
         let span = decl.span;
-        // A declaration inside a body is still a declaration, and these are
-        // the two things a declaration can say that a function *value* has no
-        // way to carry: which body an `async` call suspends in, and which
-        // instantiation a generic stands for. Neither is a local `fn`'s own
-        // question — `Body::lambda` and `Body::function_value` name the same
-        // two — so each is named as the source writes it.
-        if decl.is_async {
-            self.errors
-                .push(gap::gap("an `async` function declared inside a body", span));
-            return;
-        }
+        // A declaration inside a body is still a declaration, and this is the
+        // one thing a declaration can say that a function *value* has no way
+        // to carry: which instantiation a generic stands for. It is not a
+        // local `fn`'s own question — `Body::lambda` and
+        // `Body::function_value` name it too — so it is named as the source
+        // writes it.
+        //
+        // `async` was here and is not: a local `async fn` is a function value
+        // whose *type* carries the `async`, and a call through the value is
+        // where the task is made. See `Body::lambda`.
         if !decl.generics.is_empty() {
             self.errors
                 .push(gap::gap("a generic function declared inside a body", span));
@@ -279,8 +282,12 @@ impl Body<'_> {
             ));
             return;
         };
+        // The `async` is carried so that `Body::lambda_body` can record it,
+        // and for nothing else: `Body::signature` asks this type only for
+        // widths, and the flag a *call* reads is the one on the type the
+        // checker settled at the call site.
         let func = FnTy {
-            is_async: false,
+            is_async: decl.is_async,
             params: signature.params.clone(),
             ret: signature.ret.clone(),
         };
@@ -633,7 +640,15 @@ impl Body<'_> {
             code: inner.code,
             spans: inner.spans,
             span: body.span,
-            is_async: false,
+            // A record of how it was written, as `Function::is_async` is
+            // for a declaration. The dispatch loop never reads it — what a
+            // body does is not changed by the word, and the flag a call site
+            // reads is the one on the function type it holds — but the
+            // *boundary* does: `lvm::boundary` builds a `Closure` value from
+            // this field, so a host asking a callback whether it is `async`
+            // is told what the source said. Leaving it `false` here was
+            // harmless only while no lambda could be one.
+            is_async: func.is_async,
         }
     }
 
@@ -654,9 +669,6 @@ impl Body<'_> {
         let Some(Ty::Fn(func)) = self.settled_ty(callee) else {
             return self.dead(expr);
         };
-        if func.is_async {
-            return self.gap("a call through an `async` function value", expr);
-        }
         for arg in args {
             let what = if arg.spread {
                 "a spread argument to a function value"
@@ -700,6 +712,13 @@ impl Body<'_> {
             self.release(value, expr.span);
         }
         self.release(closure, expr.span);
+        // A call through an `async` function value answers a settled task,
+        // for the same reason a call to a declared `async fn` does and by the
+        // same route: `Interpreter::call_closure` hands the closure's own
+        // `is_async` to `call_target`, which wraps what the body produced.
+        if func.is_async {
+            return self.as_task(dst, expr.span);
+        }
         dst
     }
 

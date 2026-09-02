@@ -187,11 +187,10 @@ impl Body<'_> {
             }
 
             ExprKind::Await(inner) => self.settle(expr, inner),
-            ExprKind::Lambda {
-                is_async,
-                params,
-                body,
-            } => self.lambda(expr, *is_async, params, body),
+            // The `async` is on the function type the checker settled here,
+            // and a call through the value is what reads it. See
+            // `Body::lambda`.
+            ExprKind::Lambda { params, body, .. } => self.lambda(expr, params, body),
             ExprKind::Scope { name, body } => self.scope_expr(expr, name, body),
         }
     }

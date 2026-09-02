@@ -167,6 +167,7 @@ impl Check<'_> {
                 // layout for one of these to claim.
                 Inst::ScopeEnter { dst, .. } => unknown(&mut seen, dst, 1),
                 Inst::Spawn { dst, .. } => unknown(&mut seen, dst, 1),
+                Inst::Settled { dst, .. } => unknown(&mut seen, dst, 1),
                 Inst::ScopeCancel { .. } | Inst::Cancel { .. } => {}
                 // Neither writes a slot: what they change is the cell's own
                 // lock word, which is not a location this frame numbers.
@@ -646,6 +647,16 @@ impl Check<'_> {
                 }
             }
             Inst::Cancel { task } => self.expect(at, task, &[Repr::Task]),
+            // The words go into an object of the same shape a spawned
+            // task's answer goes into, so the same question is asked of
+            // them: that the location they are read out of is as wide as
+            // the layout says.
+            Inst::Settled { dst, src, answer } => {
+                self.expect(at, dst, &[Repr::Task]);
+                if self.layout_exists(at, answer) {
+                    self.fits(at, src, answer, "what a settled task answers");
+                }
+            }
 
             // ---- cells ---------------------------------------------------
             // A cell is an ordinary object in the run's heap, so the operand

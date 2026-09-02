@@ -150,6 +150,13 @@ impl Body<'_> {
         for value in held.into_iter().rev() {
             self.release(value, expr.span);
         }
+        // An `async fn` is called like any other function — that is the whole
+        // of what the oracle does — and what a call to one *answers* is a
+        // settled task rather than the value. The body has already run, here,
+        // on this stack. See `Body::as_task`.
+        if shape.is_async {
+            return self.as_task(dst, expr.span);
+        }
         dst
     }
 
@@ -1171,6 +1178,12 @@ impl Body<'_> {
             self.release(value, expr.span);
         }
         self.release(receiver, expr.span);
+        // Every conformance implements the trait's own signature, so whether
+        // the method is `async` is the trait's answer and not an arm's: the
+        // shape read above is the first arm's for exactly that reason.
+        if shape.is_some_and(|shape| shape.is_async) {
+            return self.as_task(dst, expr.span);
+        }
         dst
     }
 

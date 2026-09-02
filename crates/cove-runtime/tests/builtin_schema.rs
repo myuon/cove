@@ -612,11 +612,14 @@ struct FreeExercise {
 static FREE_EXERCISES: &[FreeExercise] = &[
     FreeExercise {
         name: "Ok",
-        body: "  let outcome = Ok(1)\n  0",
+        // The failure type is written, because an `Ok` says only what it
+        // carries and this exercise gives it nowhere to learn the rest:
+        // `cove::type::unconstrained` is what asks for it.
+        body: "  let outcome: Result<Int, Error> = Ok(1)\n  0",
     },
     FreeExercise {
         name: "Err",
-        body: "  let outcome = Err(Error(\"boom\"))\n  0",
+        body: "  let outcome: Result<Int, Error> = Err(Error(\"boom\"))\n  0",
     },
     FreeExercise {
         name: "Some",

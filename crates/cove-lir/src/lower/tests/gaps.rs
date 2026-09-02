@@ -5,6 +5,11 @@
 //! meets and cannot emit code for is a hole in this crate rather than a
 //! program the backend declines. Every case below names one, and each is
 //! scheduled to be removed by a later task.
+//!
+//! Two cases left this file rather than this repository: an `async fn` and an
+//! `async` function value were gaps here and are listings in
+//! [`super::tasks`], which is where a construct's case belongs once there is
+//! a construct rather than a refusal to describe.
 
 use cove_schema::HostSchemas;
 
@@ -75,14 +80,6 @@ fn a_var_parameter_is_admitted_by_the_lock_path_and_not_by_the_lambda() {
     );
 }
 
-#[test]
-fn an_async_function_value_is_a_gap_of_its_own() {
-    assert_eq!(
-        refused("fn f() -> Int {\n  let g = async fn() { 1 }\n  0\n}"),
-        vec!["not yet lowered: an `async` function value"]
-    );
-}
-
 /// A generic declaration is not one function, and one nothing instantiates
 /// is not any.
 ///
@@ -99,14 +96,6 @@ fn a_generic_nothing_instantiates_costs_no_function() {
     assert!(
         !program.functions.iter().any(|f| f.name.contains('<')),
         "nothing asked for an instantiation"
-    );
-}
-
-#[test]
-fn an_async_declaration_is_a_gap_rather_than_a_refusal() {
-    assert_eq!(
-        refused("async fn g() -> Int { 1 }"),
-        vec!["not yet lowered: an `async fn`"]
     );
 }
 

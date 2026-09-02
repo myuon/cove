@@ -1336,3 +1336,127 @@ export fn f() -> Int {
         Answer::Value("8".to_string())
     );
 }
+
+// ---- `async fn` -----------------------------------------------------------
+
+/// An `async fn` is called like any other function, and `await` is what
+/// reads its value.
+#[test]
+fn an_async_call_and_its_await_agree() {
+    let source = r#"
+async fn answer() -> Int { 7 }
+export fn f() -> Int {
+  await answer()
+}
+"#;
+    assert_eq!(agree(source, "f", vec![]), Answer::Value("7".to_string()));
+}
+
+/// The body runs **at the call**, so a call nobody awaited has still run.
+///
+/// This is the sentence `crate::task::Task::settled` is written around, and
+/// it is the one an implementation could most easily get wrong in the
+/// direction of laziness: nothing here reads the handle, and the effect has
+/// happened all the same.
+#[test]
+fn an_async_call_that_is_never_awaited_has_still_run() {
+    let source = r#"
+async fn bump(cell: Shared<Int>) -> Int {
+  cell.lock(fn(var n) {
+    n = n + 1
+    n
+  })
+}
+export fn f() -> Int {
+  let cell = Shared(0)
+  let ignored = bump(cell)
+  cell.lock(fn(n) { n })
+}
+"#;
+    assert_eq!(agree(source, "f", vec![]), Answer::Value("1".to_string()));
+}
+
+/// A body runs at most once and is awaited at most once, so awaiting the same
+/// handle twice answers the same value and repeats no effect.
+#[test]
+fn awaiting_an_async_call_twice_repeats_no_effect() {
+    let source = r#"
+async fn bump(cell: Shared<Int>) -> Int {
+  cell.lock(fn(var n) {
+    n = n + 1
+    n
+  })
+}
+export fn f() -> Int {
+  let cell = Shared(0)
+  let handle = bump(cell)
+  let a = await handle
+  let b = await handle
+  a + b + cell.lock(fn(n) { n })
+}
+"#;
+    assert_eq!(agree(source, "f", vec![]), Answer::Value("3".to_string()));
+}
+
+/// A body that raises fails at the call, not at an `await` that never came.
+///
+/// The other half of "the body runs at the call": nothing here awaits, and
+/// the fault still leaves the enclosing function — because there is no thread
+/// and no deferral for it to be waiting in.
+#[test]
+fn an_async_body_that_raises_fails_at_the_call() {
+    let source = r#"
+async fn boom(n: Int) -> Int { 1 / n }
+export fn f() -> Int {
+  let ignored = boom(0)
+  7
+}
+"#;
+    assert_eq!(
+        agree(source, "f", vec![]),
+        Answer::Failed("`Int` division by zero".to_string())
+    );
+}
+
+/// An `async` lambda is a function value like any other, and a call through
+/// it answers a task.
+#[test]
+fn a_call_through_an_async_function_value_agrees() {
+    let source = r#"
+export fn f() -> Int {
+  let g = async fn(n: Int) { n * 2 }
+  await g(4)
+}
+"#;
+    assert_eq!(agree(source, "f", vec![]), Answer::Value("8".to_string()));
+}
+
+/// And a declared `async fn` used as one behaves the same, which is what
+/// makes the two spellings one thing.
+#[test]
+fn a_declared_async_fn_used_as_a_value_agrees() {
+    let source = r#"
+async fn twice(n: Int) -> Int { n * 2 }
+export fn f() -> Int {
+  let g = twice
+  await g(4)
+}
+"#;
+    assert_eq!(agree(source, "f", vec![]), Answer::Value("8".to_string()));
+}
+
+/// An `async fn` entry answers its value rather than a handle, because the
+/// host awaits the entry it chose.
+///
+/// It is the one place `Function::returns` being `T` rather than `Task<T>`
+/// is visible from outside: no task is ever made, and the value that comes
+/// out is the one the oracle produces by settling the handle it made.
+#[test]
+fn an_async_entry_answers_its_value() {
+    let source = r#"
+export async fn main() -> Int {
+  7
+}
+"#;
+    assert_eq!(entry_agrees(source, "main"), Answer::Value("7".to_string()));
+}

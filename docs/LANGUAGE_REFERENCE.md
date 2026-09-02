@@ -753,9 +753,20 @@ lambda `return` with no expected type become errors
 (`cove::type::unresolved_name`, `cove::type::unknown_name`,
 `cove::type::unknown_type`, `cove::type::lambda_return`), a type or module
 used as a value becomes `cove::type::not_a_value`, and an empty array literal
-or a bare `None` with nothing to take an argument from warns
-(`cove::type::unconstrained`). This section is rewritten against that model
-when PR #82 lands, rather than amended twice into something that is neither.
+or a bare `None` with nothing to take an argument from is an **error**
+(`cove::type::unconstrained`).
+
+That last one was a warning until
+[ADR 0038](adr/0038-a-type-nothing-settles-is-not-a-program.md), on the
+grounds that the value was still usable. That was true of a tree walker,
+which carried a type with every value; under
+[ADR 0034](adr/0034-one-physical-word-stack.md) a value is placed in a slot
+of a width its type decides, so a `Vector<_>` is not a value with one
+unchecked operation but a value with no location.
+
+The one silence that remains is a host module this build ships no schema
+for — a fact about the build rather than about the program, which no edit to
+the call would fix.
 
 One more type is not unknown but has no name either: the value a `scope`
 binds. Its only operation is `spawn`, which is typed, and there is nothing

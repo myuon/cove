@@ -114,14 +114,21 @@ fn a_package_that_declares_its_own_assert_gets_its_own() {
 /// listing means everything the package declares is part of it.
 #[test]
 fn a_gap_the_entry_does_not_reach_does_not_stop_it() {
-    let source = "async fn wide() -> Int { 1 }\n\
+    // `bump` used as a value is a gap in `wide`'s body: a function type
+    // drops `var`, so a call through the value would copy a word into a
+    // parameter the callee reads as an address.
+    let source = "fn bump(var n: Int) { n = n + 1 }\n\
+                  fn wide() -> Int {\n  let g = bump\n  0\n}\n\
                   fn helper() -> Int { 1 }\n\
                   fn main() -> Int { helper() }";
-    assert_eq!(refused(source), ["not yet lowered: an `async fn`"]);
+    assert_eq!(
+        refused(source),
+        ["not yet lowered: `bump`, which takes a `var` parameter, used as a function value"]
+    );
     assert_eq!(
         sliced(source, "main", "main"),
         "\
-fn1 m.main() -> Int
+fn2 m.main() -> Int
   frame 2: s0:int s1:int
      0  call s1:int m.helper ()
      1  copy s0:int s1:int Int

@@ -523,8 +523,11 @@ static RULES: &[Rule] = &[
         foreign: "Int",
     },
     // Where the checker abstains it abstains about a sub-expression, not
-    // about the whole body: these two name a method on something it has no
-    // type for, and still owe the reference the type and value below.
+    // about the whole body: these two name a method on something whose
+    // element type it was told rather than inferred, and still owe the
+    // reference the type and value below. The element type is written,
+    // because a collection nothing settles is `cove::type::unconstrained`
+    // and no longer a program.
     Rule {
         section: "Where the checker abstains",
         decls: "",
@@ -536,7 +539,7 @@ static RULES: &[Rule] = &[
     Rule {
         section: "Where the checker abstains",
         decls: "",
-        body: "let empty = []\nempty.length()",
+        body: "let empty: Array<Int> = []\nempty.length()",
         ty: "Int",
         value: "0",
         foreign: "Bool",
