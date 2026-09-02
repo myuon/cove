@@ -197,6 +197,23 @@
 //! [`Ty::Scope`], a type the language gives no name to but this pass knows
 //! exactly.
 //!
+//! # What a `scope` asks of the function it is written in
+//!
+//! Leaving a `scope` waits for every task nothing awaited, and a task whose
+//! value is `Err(error)` returns that error from the enclosing function,
+//! exactly as `?` would — that is `cove_runtime::task::wait_for_children`,
+//! and it is the whole reason this pass has anything to say about a scope.
+//!
+//! So a `scope` constrains its function only where one of its children can
+//! produce a Cove `Err`. A scope of `Unit`-answering children asks nothing,
+//! and stays at home in a function that answers nothing. `Checker::spawned`,
+//! `Checker::handle_awaited` and `Checker::leaving_scope` are the three
+//! points of that: what was spawned, what the program settled itself, and
+//! what is left for the scope to return. A child that *raises* — fuel, an
+//! invariant, a Host-boundary failure — is not part of it: that travels as a
+//! runtime fault rather than as the function's value, so it depends on no
+//! Cove return type.
+//!
 //! # Inference variables
 //!
 //! One of those unknowns carries a number. [`Unknown::Var`] is an
@@ -453,6 +470,9 @@ pub const TRY_OPERAND: &str = "cove::type::try_operand";
 pub const TRY_RETURN: &str = "cove::type::try_return";
 /// `await` was applied to something that is not a `Task`.
 pub const AWAIT_OPERAND: &str = "cove::type::await_operand";
+/// A task nothing awaits can leave a `scope` as `Err`, and the function the
+/// scope was written in does not answer a `Result` that can carry it.
+pub const SCOPE_CHILD_FAILURE: &str = "cove::type::scope_child_failure";
 /// `for` was given something it cannot iterate.
 pub const ITERABLE: &str = "cove::type::iterable";
 /// A call was made to something that is not a function.
@@ -536,6 +556,12 @@ pub const INFERENCE_CONFLICT: &str = "cove::type::inference_conflict";
 /// not depend on the runtime, so the sentence appears in both places, and it
 /// is the card's own words in both.
 const TASK_SAFETY_RULE: &str = "Immutable task-safe values such as arrays may cross task boundaries. A vector cannot cross, even through `let`; finish it as an array or wrap mutable state in `Shared` or another synchronized type. Closures are task-safe only when every capture is.";
+
+/// What `cove_runtime::task::wait_for_children` does, said the way a reader
+/// has to act on it: the failure of a task nothing awaited is not lost at
+/// scope exit, it is returned, and that is why a scope constrains what its
+/// function answers.
+const SCOPE_CHILD_RULE: &str = "Leaving a `scope` waits for every task nothing awaited, and a task whose value is `Err` returns that failure from the function the scope was written in, exactly as `?` would.";
 
 /// The one sentence ADR 0035 decides, said the way a reader has to act on
 /// it: the rejection is what makes every finite value copy by word range,
@@ -1862,6 +1888,51 @@ struct Checker<'a> {
     /// time. Keeping the list is what keeps the rewrite proportional to the
     /// expressions that actually held one rather than to the file.
     open_facts: Vec<(cove_diag::FileId, ExprId)>,
+    /// One frame per `scope` being checked, innermost last, holding the
+    /// tasks spawned into it whose value is a `Result`.
+    ///
+    /// A frame is emptied at the `scope` that opened it, which is where the
+    /// question is decided: the waiting happens there, so that is where a
+    /// child nothing awaited is measured against what the function answers.
+    open_scopes: Vec<OpenScope>,
+}
+
+/// A `scope` being checked, and the children of it that could fail.
+struct OpenScope {
+    /// The name the program gave the scope, for a spawn whose receiver is
+    /// not a bare name to be described by.
+    name: String,
+    children: Vec<SpawnedChild>,
+}
+
+/// A task spawned into a `scope`, whose value is a `Result`.
+///
+/// Only these are recorded, because only these carry a Cove `Err` for scope
+/// exit to propagate. A child answering `Unit`, an `Int`, or anything else
+/// that is not a `Result` leaves a scope with nothing to return, so a `scope`
+/// full of them is at home in a function that answers `Unit` — which is what
+/// `examples/covecheck/runner_test.cove`'s `counting` relies on. A child that
+/// *raises* is a runtime error and does not travel as the function's value at
+/// all, so it is not this pass's to decide either.
+struct SpawnedChild {
+    /// Where the `spawn` was written.
+    span: Span,
+    /// The scope the task was spawned into, as the program named it.
+    scope: String,
+    /// The name a `let` or `var` gave the handle, when one did. It is what
+    /// the diagnostic calls the child.
+    binding: Option<String>,
+    /// What scope exit would return from the enclosing function.
+    error: Ty,
+    /// Whether the checker saw an `await` applied to the handle.
+    ///
+    /// This is a syntactic reading and it is deliberately the permissive
+    /// one: an `await` reached on only some paths still counts, because the
+    /// alternative is to reject `if stop { t.cancel() } else { t.await() }`,
+    /// which runs. What a miss costs is a lowering that refuses the scope,
+    /// which is where such a program stands today; what a false positive
+    /// would cost is a working program the compiler stops accepting.
+    awaited: bool,
 }
 
 impl<'a> Checker<'a> {
@@ -1901,6 +1972,7 @@ impl<'a> Checker<'a> {
             facts: Facts::default(),
             vars: Vec::new(),
             open_facts: Vec::new(),
+            open_scopes: Vec::new(),
         }
     }
 
@@ -3775,6 +3847,11 @@ impl<'a> Checker<'a> {
                 ty,
                 value,
             } => {
+                // The children this initializer spawns are the ones this
+                // binding names. Frames are pushed and popped by `scope`
+                // within one statement, so the frame on top afterwards is
+                // the one that was on top before.
+                let spawned_before = self.open_scopes.last().map_or(0, |o| o.children.len());
                 let bound = match ty {
                     Some(written) => {
                         let declared = self.resolve(written);
@@ -3804,6 +3881,11 @@ impl<'a> Checker<'a> {
                 // still be settled by what comes after it. Whatever its
                 // initializer left open is now this binding's, and its uses
                 // are what say what it is; see `Checker::attach`.
+                if let Some(open) = self.open_scopes.last_mut() {
+                    for child in open.children.iter_mut().skip(spawned_before) {
+                        child.binding = Some(name.node.clone());
+                    }
+                }
                 self.attach(&bound, &name.node, name.span);
                 self.declare(&name.node, bound, *is_var);
             }
@@ -4019,7 +4101,14 @@ impl<'a> Checker<'a> {
             ExprKind::Scope { name, body } => {
                 self.scopes.push(BTreeMap::new());
                 self.declare(&name.node, Ty::Scope, false);
+                self.open_scopes.push(OpenScope {
+                    name: name.node.clone(),
+                    children: Vec::new(),
+                });
                 let ty = self.block(body, expected);
+                if let Some(open) = self.open_scopes.pop() {
+                    self.leaving_scope(open);
+                }
                 self.scopes.pop();
                 return ty;
             }
@@ -4918,8 +5007,130 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Records `scope.spawn { ... }` when what the task answers is a
+    /// `Result`.
+    ///
+    /// The receiver is read for the scope's name rather than the innermost
+    /// frame, because a `spawn` may name an outer scope from inside an inner
+    /// one. Which frame it is filed under does not change the answer — every
+    /// scope in a body leaves through the same function — but which scope
+    /// the diagnostic names does.
+    fn spawned(&mut self, receiver: &Expr, ty: &Ty, span: Span) {
+        let Ty::Task(settled) = ty else { return };
+        let Ty::Result(_, error) = &**settled else {
+            return;
+        };
+        let error = (**error).clone();
+        let Some(open) = self.open_scopes.last_mut() else {
+            return;
+        };
+        let scope = match &receiver.kind {
+            ExprKind::Ident(name) => name.clone(),
+            _ => open.name.clone(),
+        };
+        open.children.push(SpawnedChild {
+            span,
+            scope,
+            binding: None,
+            error,
+            awaited: false,
+        });
+    }
+
+    /// Marks the child `handle` names as one the program itself settles.
+    ///
+    /// An awaited task is joined where the `await` is written, so scope exit
+    /// finds it no longer running and passes over it — the failure is the
+    /// awaiting expression's, and a `?` or a `match` on it is ordinary code.
+    ///
+    /// Every open frame is searched, not just the innermost, because a
+    /// handle spawned into an outer scope may be awaited inside an inner
+    /// one. A handle awaited where it was spawned is matched by span, which
+    /// is what makes `await tasks.spawn { ... }` count.
+    fn handle_awaited(&mut self, handle: &Expr) {
+        let named = match &handle.kind {
+            ExprKind::Ident(name) => Some(name.as_str()),
+            _ => None,
+        };
+        let span = handle.span;
+        for open in &mut self.open_scopes {
+            for child in &mut open.children {
+                let by_name = named.is_some() && child.binding.as_deref() == named;
+                let by_span = child.span.file == span.file
+                    && child.span.start >= span.start
+                    && child.span.end <= span.end;
+                if by_name || by_span {
+                    child.awaited = true;
+                }
+            }
+        }
+    }
+
+    /// Reports every child of a `scope` being left that nothing awaits and
+    /// whose failure the enclosing function cannot answer.
+    ///
+    /// A `cancel()` is not a settling: cancellation stops work that has not
+    /// happened and does not undo work that has, so a task that finished
+    /// with an `Err` before the request reached it is still waited for at
+    /// scope exit and still returns. Only an `await` takes a child out of
+    /// this.
+    fn leaving_scope(&mut self, open: OpenScope) {
+        for child in open.children {
+            if child.awaited {
+                continue;
+            }
+            let subject = match &child.binding {
+                Some(name) => format!("`{name}`"),
+                None => "this task".to_string(),
+            };
+            let SpawnedChild {
+                span, scope, error, ..
+            } = child;
+            let diagnostic = match self.ret.clone() {
+                // Nothing written says what this body answers, so there is
+                // no failure type to disagree with.
+                Ty::Unknown(_) | Ty::Never => continue,
+                Ty::Result(_, ret_error) if error.matches(&ret_error) => continue,
+                Ty::Result(ret_ok, ret_error) => Diagnostic::error(
+                    SCOPE_CHILD_FAILURE,
+                    format!(
+                        "nothing awaits {subject}, so leaving `{scope}` propagates its `{error}`, but this function returns `{ret_error}` as its failure"
+                    ),
+                )
+                .at(span)
+                .label(
+                    self.ret_span,
+                    format!("the declared failure type is `{ret_error}`"),
+                )
+                .rule(SCOPE_CHILD_RULE)
+                .help(format!(
+                    "map the failure inside the task, as in `{scope}.spawn {{ ... .mapError {{ ... }} }}`, or declare this function `-> Result<{ret_ok}, {error}>`"
+                )),
+                other => Diagnostic::error(
+                    SCOPE_CHILD_FAILURE,
+                    format!(
+                        "nothing awaits {subject}, so leaving `{scope}` propagates its `{error}`, but this function returns `{other}`"
+                    ),
+                )
+                .at(span)
+                .label(
+                    self.ret_span,
+                    format!("the declared return type is `{other}`"),
+                )
+                .rule(SCOPE_CHILD_RULE)
+                .help(format!(
+                    "declare this function `-> Result<{other}, {error}>`, or await {subject} and answer its `Err` here"
+                )),
+            };
+            self.diagnostics.push(diagnostic);
+        }
+    }
+
     fn await_expr(&mut self, inner: &Expr, span: Span) -> Ty {
         let ty = self.expr(inner, None);
+        if matches!(ty, Ty::Task(_)) {
+            self.handle_awaited(inner);
+        }
         match &ty {
             Ty::Unknown(_) | Ty::Never => Ty::recovery(),
             Ty::Task(inner_ty) => (**inner_ty).clone(),
@@ -5514,7 +5725,19 @@ impl<'a> Checker<'a> {
                 }
                 let receiver = self.expr(base, None);
                 self.mutating_receiver(&receiver, name, base, span);
-                self.method_call(id, &receiver, name, args, trailing, span)
+                // `handle.await()` and `await handle` mean the same thing,
+                // and they unwrap a `Task` through two different paths, so
+                // both have to say so. `Scope.spawn` is read on the way out
+                // instead, because what it answers is what decides whether
+                // there is anything to record.
+                if matches!(receiver, Ty::Task(_)) && name.node == "await" {
+                    self.handle_awaited(base);
+                }
+                let ty = self.method_call(id, &receiver, name, args, trailing, span);
+                if matches!(receiver, Ty::Scope) && name.node == "spawn" {
+                    self.spawned(base, &ty, span);
+                }
+                ty
             }
             _ => {
                 let callee_ty = self.expr(callee, None);
@@ -12346,6 +12569,204 @@ async fn run() -> Result<Int, Error> {
     let first = tasks.spawn { 1 }
     let value = await first
     Ok(value)
+  }
+}
+",
+        );
+    }
+
+    /// The case the rule must not break, taken from
+    /// `examples/covecheck/runner_test.cove`'s `counting`: a `scope` whose
+    /// children answer `Unit` has nothing for scope exit to return, so it is
+    /// at home in a function that answers nothing.
+    #[test]
+    fn a_scope_of_unit_children_is_at_home_in_a_unit_function() {
+        accepts(
+            "\
+fn counting(turns: Shared<Int>, stop: Bool) {
+  scope work {
+    let task = work.spawn {
+      var at = 0
+      while at < 10 {
+        turns.lock(fn(var it) {
+          it += 1
+        })
+        at += 1
+      }
+    }
+    if stop {
+      task.cancel()
+    } else {
+      task.await()
+    }
+  }
+}
+",
+        );
+    }
+
+    #[test]
+    fn an_unawaited_failing_child_needs_a_function_that_can_return_its_failure() {
+        let error = rejects(
+            "\
+fn work() -> Result<Int, Error> {
+  Ok(1)
+}
+
+fn run() {
+  scope tasks {
+    let job = tasks.spawn { work() }
+  }
+}
+",
+        );
+        assert_eq!(error.code, SCOPE_CHILD_FAILURE);
+        assert_eq!(
+            error.message,
+            "nothing awaits `job`, so leaving `tasks` propagates its `Error`, but this function returns `()`"
+        );
+        assert_eq!(
+            error.help.unwrap(),
+            "declare this function `-> Result<(), Error>`, or await `job` and answer its `Err` here"
+        );
+    }
+
+    /// The same program, awaited. An awaited task is joined where the
+    /// `await` is written, so scope exit passes over it and the failure is
+    /// the awaiting expression's.
+    #[test]
+    fn awaiting_a_failing_child_leaves_the_enclosing_function_alone() {
+        accepts(
+            "\
+fn work() -> Result<Int, Error> {
+  Ok(1)
+}
+
+fn run() -> Int {
+  scope tasks {
+    let job = tasks.spawn { work() }
+    job.await().unwrapOr(0)
+  }
+}
+",
+        );
+        accepts(
+            "\
+fn work() -> Result<Int, Error> {
+  Ok(1)
+}
+
+fn run() -> Int {
+  scope tasks {
+    (await tasks.spawn { work() }).unwrapOr(0)
+  }
+}
+",
+        );
+    }
+
+    /// A `cancel()` is not a settling. Cancellation stops work that has not
+    /// happened and does not undo work that has, so a child that finished
+    /// with an `Err` before the request reached it is still waited for at
+    /// scope exit and still returns.
+    #[test]
+    fn cancelling_a_failing_child_does_not_settle_it() {
+        let error = rejects(
+            "\
+fn work() -> Result<Int, Error> {
+  Ok(1)
+}
+
+fn run() -> Int {
+  scope tasks {
+    let job = tasks.spawn { work() }
+    job.cancel()
+    0
+  }
+}
+",
+        );
+        assert_eq!(error.code, SCOPE_CHILD_FAILURE);
+        assert_eq!(
+            error.message,
+            "nothing awaits `job`, so leaving `tasks` propagates its `Error`, but this function returns `Int`"
+        );
+    }
+
+    /// A function that already answers a `Result` answers this one too, so
+    /// nothing is asked of it — which is what `examples/callbacks/main.cove`
+    /// relies on, where a timer that answers `Result<Unit, Error>` is
+    /// cancelled and never awaited.
+    #[test]
+    fn a_result_returning_function_carries_its_children_s_failures() {
+        accepts(
+            "\
+fn work() -> Result<Int, Error> {
+  Ok(1)
+}
+
+fn run() -> Result<Unit, Error> {
+  scope tasks {
+    let job = tasks.spawn { work() }
+    job.cancel()
+  }
+  Ok(())
+}
+",
+        );
+    }
+
+    /// Two unhandled children whose failures differ cannot both be the
+    /// function's, so the one that does not fit is named. Each child is
+    /// measured against the declared failure type, which is the unification
+    /// the language already has.
+    #[test]
+    fn failures_of_several_children_must_fit_one_declared_failure() {
+        let error = rejects(
+            "\
+struct Wrong {
+  why: String
+}
+
+fn fails() -> Result<Int, Wrong> {
+  Err(Wrong(why: \"no\"))
+}
+
+fn run() -> Result<Unit, Error> {
+  scope tasks {
+    let job = tasks.spawn { fails() }
+  }
+  Ok(())
+}
+",
+        );
+        assert_eq!(error.code, SCOPE_CHILD_FAILURE);
+        assert_eq!(
+            error.message,
+            "nothing awaits `job`, so leaving `tasks` propagates its `Wrong`, but this function returns `Error` as its failure"
+        );
+        assert_eq!(
+            error.help.unwrap(),
+            "map the failure inside the task, as in `tasks.spawn { ... .mapError { ... } }`, or declare this function `-> Result<(), Wrong>`"
+        );
+    }
+
+    /// A handle spawned into an outer scope and awaited inside an inner one
+    /// is awaited, so every open frame is searched rather than the innermost.
+    #[test]
+    fn a_child_awaited_inside_a_nested_scope_is_awaited() {
+        accepts(
+            "\
+fn work() -> Result<Int, Error> {
+  Ok(1)
+}
+
+fn run() -> Int {
+  scope outer {
+    let job = outer.spawn { work() }
+    scope inner {
+      job.await().unwrapOr(0)
+    }
   }
 }
 ",
