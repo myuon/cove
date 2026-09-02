@@ -77,6 +77,20 @@ impl std::fmt::Display for LayoutId {
     }
 }
 
+/// The payload word a [`Shape::Shared`] object keeps its lock in.
+///
+/// Zero is "no task holds this cell", which is what a freshly allocated cell's
+/// zeroed payload already says — the same reason a `Repr::Host` word is one
+/// past its index.
+pub const SHARED_STATE: u32 = 0;
+
+/// The payload word a [`Shape::Shared`] object's wrapped value begins at.
+///
+/// Named here rather than in either side because both need it and they must
+/// agree: the lowering forms the address of this word to hand a `lock`'s
+/// closure, and the collector traces the value's run of words from it.
+pub const SHARED_VALUE: u32 = 1;
+
 /// One field of a struct, and where it starts.
 ///
 /// `at` is a word offset within the struct, so `l.from.x` is a slot number
@@ -181,6 +195,28 @@ pub enum Shape {
         function: FunctionId,
         captures: Vec<LayoutId>,
     },
+    /// Payload word 0 is the cell's lock; the words after it are the wrapped
+    /// value, inline under `value`'s own layout.
+    ///
+    /// [ADR 0008](../../../docs/adr/0008-concurrent-task-execution.md) makes
+    /// `Shared<T>` the one handle that crosses a task boundary by *sharing*
+    /// rather than by copying, and this is where that sharing is: an ordinary
+    /// object in the run's one heap, whose lock is one of its own words rather
+    /// than an entry in a table keyed by address. So there is nothing to
+    /// reclaim when a cell dies and no second lifetime running beside the
+    /// collector's — a cell is swept like anything else.
+    ///
+    /// The value is **inline** for the reason a struct's fields are: a value's
+    /// words are where the value is. What that buys here is that `lock` hands
+    /// its closure the address of [`SHARED_VALUE`] — the ordinary `var` alias
+    /// the language already describes — and nothing is copied in or out.
+    ///
+    /// One layout per wrapped-value layout, interned the way `Array<T>` is.
+    /// The lock word is an `Int` in the flattened map, so a collection traces
+    /// nothing from it; the arrangement is [`Shape::Closure`]'s — one untraced
+    /// word, then a value inline — which is why it needs no idea the collector
+    /// did not already have.
+    Shared { value: LayoutId },
     /// Payload word 0 is a [`LayoutId`]; the words after it are a value of
     /// that layout, inline.
     ///
@@ -337,6 +373,10 @@ impl Layout {
             // inline words, because a boxed value's payload *is* the value.
             Shape::Word(_) | Shape::Struct { .. } | Shape::Enum { .. } => Some(self.width()),
             Shape::Vector { .. } => Some(2),
+            // The lock word and then the value, inline. A fact about the
+            // layout alone, which is what lets [`mod@crate::verify`] bound the
+            // address a `lock` forms without a header to read.
+            Shape::Shared { value } => Some(SHARED_VALUE + layouts[value.index()].width()),
             Shape::Closure { captures, .. } => Some(
                 1 + captures
                     .iter()
@@ -372,6 +412,9 @@ impl Layout {
             }
             // Word 1 is always a reference to the store.
             Shape::Vector { .. } => true,
+            // The lock word is never one, so a `Shared<Int>` is a leaf and a
+            // `Shared<Metrics>` is whatever `Metrics` is.
+            Shape::Shared { value } => layouts[value.index()].words.iter().any(|r| r.is_ref()),
             Shape::Closure { captures, .. } => captures
                 .iter()
                 .any(|id| layouts[id.index()].words.iter().any(|r| r.is_ref())),
@@ -636,6 +679,38 @@ mod tests {
         assert_eq!(str_layout.payload_words(0, &layouts), 0);
         assert_eq!(str_layout.payload_words(9, &layouts), 2);
         assert!(!str_layout.may_hold_refs(&layouts));
+    }
+
+    /// A cell is a lock word and the value, inline — and both halves of that
+    /// are answers a reader takes without a header: the width, and whether a
+    /// collection has anything to follow.
+    #[test]
+    fn a_cell_is_a_lock_word_and_the_value_inline() {
+        let mut layouts = table();
+        let (fields, words) =
+            struct_layout(&[(Arc::from("x"), INT), (Arc::from("y"), STR)], &layouts);
+        layouts.push(Layout::inline(
+            "Metrics",
+            Shape::Struct {
+                fields,
+                opaque: false,
+            },
+            words,
+        ));
+        let metrics = LayoutId(layouts.len() as u32 - 1);
+
+        let scalar = Layout::object("Shared", Shape::Shared { value: INT });
+        assert_eq!(scalar.fixed_payload_words(&layouts), Some(2));
+        assert_eq!(scalar.payload_words(0, &layouts), 2);
+        // The lock word is not a reference and neither is an `Int`, so a
+        // collection skips the object without reading a word of it.
+        assert!(!scalar.may_hold_refs(&layouts));
+        // And a value of one is one address, whatever it wraps.
+        assert!(scalar.is_one_address());
+
+        let held = Layout::object("Shared", Shape::Shared { value: metrics });
+        assert_eq!(held.fixed_payload_words(&layouts), Some(3));
+        assert!(held.may_hold_refs(&layouts));
     }
 
     #[test]

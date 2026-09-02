@@ -1,8 +1,0 @@
-error[cove::runtime]: this `lock` would leave the cell holding a handle to itself, and no collector reclaims that cycle
-  --> <e2e>/fail_shared_cycle/main.cove:12:3
-   |
-12 |   n.lock(fn(var value) {
-   |   ^^^^^^^^^^^^^^^^^^^^^^
-  rule: `Shared` ownership must stay acyclic. A cell may not come to hold a handle to itself; `lock` rejects a closure that would leave the cell reachable from its own new value. A cycle through two or more cells is not detected and leaks.
-  help: keep the reference outside the cell, or restructure so the value never stores a handle back to its own `Shared`
-1 error(s)

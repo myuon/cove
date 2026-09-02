@@ -285,6 +285,7 @@ and reference maps.
 | `Map<K, V>` | `Entries`, sorted by key | key/value layout pair |
 | `MapEntry<K, V>` | `Struct { key, value }`, inline | key/value layout pair |
 | `Range` | `Struct { start: Int, end: Int, inclusive: Bool }` | the program |
+| `Shared<T>` | `Shared`, a lock word then the value inline | wrapped-value layout |
 | a function value | one `Ref` word, `Word(Ref)` | the program |
 | a closure environment | `Closure`, captures inline | lowered lambda |
 | `dyn`, `Any` | `Boxed` | the program |

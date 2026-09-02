@@ -372,6 +372,21 @@ fn object_to_value(machine: &Machine, addr: u64, depth: usize) -> Result<Value, 
                 },
             ))))
         }
+        // A cell does not cross, and this is a refusal rather than a gap
+        // waiting to be filled. A public `Value`'s `Shared` is an
+        // `Arc<SharedCell>` holding a `Transfer` — one cell — and this one is
+        // an object of this run's heap. Building the first from the second
+        // would build a *second* cell holding a copy of the words, and a
+        // `Shared` whose identity is not the identity it was made with is not
+        // the value the language describes. What crosses in every program that
+        // asks is what `lock` hands its closure, which is an ordinary value.
+        Shape::Shared { .. } => Err(RuntimeError::new(
+            "a `Shared` names one cell of this run's heap, so it cannot be handed out as a value",
+        )
+        .with_rule(
+            "`lock` is a `Shared`'s only operation: every access to the value it holds is scoped, so there is no `get` and no `set`.",
+        )
+        .with_help("hand out what a `lock` reads rather than the cell")),
         Shape::Free => Err(reclaimed()),
     }
 }
@@ -1036,7 +1051,10 @@ fn fits(program: &Program, layout: LayoutId, value: &Value) -> bool {
             }),
             _ => false,
         },
-        Shape::Closure { .. } => false,
+        // Neither of the two a `Value` cannot be turned into words: a
+        // closure's environment is this run's object graph, and a cell's
+        // identity is a place in this run's heap.
+        Shape::Closure { .. } | Shape::Shared { .. } => false,
     }
 }
 

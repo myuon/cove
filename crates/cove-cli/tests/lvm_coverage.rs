@@ -237,7 +237,33 @@ use support::{Case, ModuleIndex, Prepared};
 /// it runs. The second is the one worth naming: four tasks allocating at once
 /// over one collector, each keeping a vector nothing else can reach, which is
 /// where a collection that reached across a task's roots would show.
-const AGREEING_FLOOR: usize = 105;
+///
+/// 105 to 107 is **`Shared`**, which is ADR 0008's other half: the one value
+/// two tasks reach by sharing rather than by copying. It is an ordinary
+/// object in the run's one heap whose lock is one of its own words, so
+/// `Shared(value)` is an `alloc` and a `store-field` and needs no instruction
+/// at all; `lock` is `shared.lock`, an ordinary `call-closure`, and
+/// `shared.unlock`, because **a builtin never calls back into Cove** and the
+/// release is an obligation on every exit path exactly as `Clear` is.
+///
+/// `tests/e2e:tasks_shared` is one of the two, and it is the whole point of
+/// the type: two tasks counting into one cell, where a read-modify-write that
+/// raced would lose a count.
+///
+/// `tests/e2e:shared_cycle` is the other, and it is new. It replaces
+/// `tests/e2e:fail_shared_cycle`, which pinned a refusal
+/// [ADR 0037](../../../docs/adr/0037-a-cycle-through-a-cell-is-an-ordinary-cycle.md)
+/// removed: a cycle through one or more cells is an ordinary object-graph
+/// cycle now, because a cell is an object in the traced heap and the
+/// collector ADR 0011's amendment deferred is the collector that is running.
+/// The old case could not stay — the oracle and the frozen predecessor still
+/// make that refusal until they are deleted, so a corpus program that closed
+/// a cycle *directly* would lower, run, and be told it disagreed. What a
+/// corpus case can show without that is a cycle through **two** cells, which
+/// the amendment never refused and called an accepted leak; that it is
+/// reclaimed rather than leaked is `cove_runtime::lvm::cell`'s to show,
+/// because only a test that runs the collection itself can say so.
+const AGREEING_FLOOR: usize = 107;
 
 /// The code `cove_lir` raises a gap under.
 ///

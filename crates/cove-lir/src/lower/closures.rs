@@ -96,6 +96,65 @@ impl Body<'_> {
         if let Some(what) = written_as_a_value(params) {
             return self.gap(what, expr);
         }
+        self.lambda_of(expr, params, body, None)
+    }
+
+    /// `cell.lock(fn(var value) { ... })`: the one lambda whose first
+    /// parameter may be written `var`.
+    ///
+    /// `behind` is the layout of the value the parameter aliases, which is
+    /// what the cell wraps. The parameter's slot is a [`shapes::ADDR`] word
+    /// holding the address of the cell's own value words, so the body writes
+    /// where the value lies and nothing is copied in or out.
+    ///
+    /// # Why this does not weaken the refusal above
+    ///
+    /// [`written_as_a_value`] refuses a `var` parameter because a function
+    /// *type* drops `var` — `Signature::as_value` turns `fn bump(var n: Int)`
+    /// into `fn(Int)` — so a call *through a value* would copy a word into a
+    /// parameter the callee reads as an address. The two would disagree about
+    /// what a word is.
+    ///
+    /// There is no such call here. The environment this allocates is consumed
+    /// by the [`Inst::CallClosure`] the `lock` lowering emits in the same
+    /// breath, and that call site is the one that formed the address it
+    /// passes. The closure never becomes a value some other call reaches
+    /// through, so the disagreement the refusal exists to prevent has nowhere
+    /// to happen — and every other question a function value's parameter list
+    /// is asked is still asked here, of every parameter including this one.
+    pub(super) fn aliasing_lambda(
+        &mut self,
+        expr: &Expr,
+        params: &[Param],
+        body: &Block,
+        behind: LayoutId,
+    ) -> Val {
+        let Some((first, rest)) = params.split_first() else {
+            return self.gap("a `lock` closure that takes no parameter", expr);
+        };
+        if let Some(what) = written_as_a_value(rest) {
+            return self.gap(what, expr);
+        }
+        if first.variadic {
+            return self.gap(A_VARIADIC_PARAMETER, expr);
+        }
+        if first.default.is_some() {
+            return self.gap(A_PARAMETER_DEFAULT, expr);
+        }
+        self.lambda_of(expr, params, body, Some(behind))
+    }
+
+    /// The whole of a lambda, once its parameter list has been admitted.
+    ///
+    /// `alias` is `Some` for the one list that admits a `var` first
+    /// parameter; see [`Body::aliasing_lambda`].
+    fn lambda_of(
+        &mut self,
+        expr: &Expr,
+        params: &[Param],
+        body: &Block,
+        alias: Option<LayoutId>,
+    ) -> Val {
         let Some(Ty::Fn(func)) = self.settled_ty(expr) else {
             return self.gap("a function value the checker gave no function type", expr);
         };
@@ -105,9 +164,16 @@ impl Body<'_> {
                 expr,
             );
         }
-        let Some((param_layouts, returns)) = self.signature(&func, expr.span) else {
+        let Some((mut param_layouts, returns)) = self.signature(&func, expr.span) else {
             return self.dead(expr);
         };
+        // A `var` parameter is an address, and the function type the checker
+        // settled does not say so — it says what a call *passes*. The written
+        // list is what says, and the `lock` path is the only one that reads
+        // it, so this is where the two are put back together.
+        if alias.is_some() {
+            param_layouts[0] = shapes::ADDR;
+        }
         let Some(captured) = self.captured_by(body, expr.span) else {
             return self.dead(expr);
         };
@@ -129,6 +195,7 @@ impl Body<'_> {
             params,
             body,
             &captured,
+            alias,
         );
         self.pool.appended[at] = Some(lowered);
         let dst = self.close_over(id, &captured, expr.span);
@@ -238,6 +305,7 @@ impl Body<'_> {
             &decl.params,
             &decl.body,
             &captured,
+            None,
         );
         self.pool.appended[at] = Some(lowered);
         let value = self.close_over(id, &captured, span);
@@ -468,12 +536,21 @@ impl Body<'_> {
         params: &[Param],
         body: &Block,
         captured: &[Captured],
+        alias: Option<LayoutId>,
     ) -> Function {
         let mut frame = Frame::new();
         let mut param_slots = Vec::with_capacity(param_layouts.len());
         for layout in param_layouts {
             let words = self.pool.shapes.words(*layout).to_vec();
             param_slots.push(frame.param(&words));
+        }
+        // What the aliasing parameter names, at the width it was declared —
+        // the same record a declaration's `var` parameter leaves, and for the
+        // same reader: a capture is the one place with no expression the
+        // checker recorded a type at.
+        let mut aliased = HashMap::new();
+        if let (Some(behind), Some(slot)) = (alias, param_slots.first()) {
+            aliased.insert(*slot, behind);
         }
         let mut held = Vec::with_capacity(captured.len());
         for (capture, value) in captured {
@@ -519,8 +596,10 @@ impl Body<'_> {
             // A lambda binds no `var` parameter — `Body::lambda` names one as
             // a gap — and a capture *of* one is a copy by the time the body
             // reads it, so nothing in this frame is an address a name is
-            // bound to.
-            aliases: HashMap::new(),
+            // bound to. The one exception is the closure a `Shared.lock`
+            // runs, whose first parameter aliases the cell's value; see
+            // [`Body::aliasing_lambda`].
+            aliases: aliased,
         };
         inner.frame.push_scope();
         // The captures are bound first, so a parameter or a `let` of the same
@@ -677,11 +756,11 @@ impl Body<'_> {
 fn written_as_a_value(params: &[Param]) -> Option<&'static str> {
     for param in params {
         let what = if param.is_var {
-            "a function value with a `var` parameter"
+            A_VAR_PARAMETER
         } else if param.variadic {
-            "a function value with a variadic parameter"
+            A_VARIADIC_PARAMETER
         } else if param.default.is_some() {
-            "a function value with a parameter default"
+            A_PARAMETER_DEFAULT
         } else {
             continue;
         };
@@ -689,6 +768,16 @@ fn written_as_a_value(params: &[Param]) -> Option<&'static str> {
     }
     None
 }
+
+/// The three refusals, written once.
+///
+/// [`Body::aliasing_lambda`] asks two of them of a parameter the list above
+/// would have refused for the third, so the words have to be the same words:
+/// a reader who meets one of these has met the same sentence wherever it came
+/// from.
+const A_VAR_PARAMETER: &str = "a function value with a `var` parameter";
+const A_VARIADIC_PARAMETER: &str = "a function value with a variadic parameter";
+const A_PARAMETER_DEFAULT: &str = "a function value with a parameter default";
 
 // ------------------------------------------------------------ free names
 

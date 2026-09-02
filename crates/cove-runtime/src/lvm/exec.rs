@@ -36,7 +36,7 @@ use crate::host::{HostRegistry, Reentry, ResourceHandle};
 use crate::interp::stopped_here;
 use crate::lvm::builtins::operand::Operand;
 use crate::lvm::mem::{Collected, Memory, NoSegment, Overflow, Parked, Rooted, Roots};
-use crate::lvm::{boundary, builtins};
+use crate::lvm::{boundary, builtins, cell};
 use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::task;
 use crate::trace::TraceEvent;
@@ -112,6 +112,17 @@ impl Roots for Live<'_, '_> {
             if addr != 0 {
                 f(addr);
             }
+        }
+        // A cell this task is inside. It is already named by a `Repr::Ref`
+        // slot of the frame the lock region belongs to — the lowering holds
+        // the receiver for the whole region — so this adds nothing to what is
+        // reachable. What it adds is that the claim does not have to be made:
+        // [`Machine::give_cells_back`] *writes* the lock word of every one of
+        // these, on a path taken after the loop has stopped, and a word
+        // written into a run the sweep reclaimed would be a word of whatever
+        // is allocated there next.
+        for &addr in &machine.held {
+            f(addr);
         }
         // The scheduler table is a *root provider*, which is the whole of
         // what keeps it from being the second value store ADR 0034 forbids:
@@ -391,6 +402,20 @@ pub(crate) struct Machine<'a> {
     /// waiting; this machine has one context, which is the run.
     host_wait: Duration,
     collected: Collected,
+    /// The `Shared` cells this task is inside, innermost last.
+    ///
+    /// `lock` is two instructions with a call between them, and the release is
+    /// an obligation on every exit path — which the lowering discharges on the
+    /// one it can write. This is the other one: a runtime error is not a jump
+    /// the lowering emits, so a cell a failing task never gave back would be a
+    /// cell no task could ever take again. It is the same division
+    /// [`Machine::stop_all`] is under for a task scope, and it costs a push
+    /// and a pop per `lock`.
+    ///
+    /// A `Vec` rather than a set because the discipline is lexical: two cells
+    /// nest, the refusal is per cell rather than per task, and the lowering
+    /// leaves the regions in the order it entered them.
+    held: Vec<u64>,
     /// Where the most recent assertion failed, and the message it produced.
     ///
     /// Written only by [`Inst::AssertFailed`], which the failing arm of a
@@ -444,6 +469,7 @@ impl<'a> Machine<'a> {
             instructions: 0,
             host_wait: Duration::ZERO,
             collected: Collected::default(),
+            held: Vec::new(),
             assertion_failure: None,
         }
     }
@@ -493,6 +519,7 @@ impl<'a> Machine<'a> {
             instructions: 0,
             host_wait: Duration::ZERO,
             collected: Collected::default(),
+            held: Vec::new(),
             assertion_failure: None,
         }
     }
@@ -592,6 +619,11 @@ impl<'a> Machine<'a> {
                 answer.is_err() || !self.anything_running(),
                 "a body that answered left every scope it opened, so nothing is still running"
             );
+            debug_assert!(
+                answer.is_err() || self.held.is_empty(),
+                "a body that answered left every cell it took"
+            );
+            self.give_cells_back(0);
             self.stop_all(&mut running);
             answer
         })
@@ -1328,6 +1360,41 @@ impl<'a> Machine<'a> {
                         }
                         Err(error) => fail!(error),
                     }
+                }
+
+                // ---- cells -------------------------------------------------------
+                // Acquire, and then an ordinary `CallClosure` and an
+                // `Inst::SharedUnlock` the lowering emitted around it. The
+                // roots are published for the length of the wait, because a
+                // task waiting for a cell cannot reach a safepoint of its own
+                // and a collector that waited for it would be waiting for a
+                // task that is waiting for the collector.
+                Inst::SharedLock { cell: slot } => {
+                    let addr = self.mem.slot(base, slot);
+                    if addr == 0 {
+                        fail!(null_object());
+                    }
+                    self.sync(pc - 1);
+                    match cell::lock(&self.mem, addr, &Live(self)) {
+                        // Recorded so that the machine can give it back on the
+                        // one exit path the lowering cannot write. See
+                        // [`Machine::held`].
+                        Ok(()) => self.held.push(addr),
+                        Err(cell::Reentrant) => fail!(reentrant_lock()),
+                    }
+                }
+                Inst::SharedUnlock { cell: slot } => {
+                    let addr = self.mem.slot(base, slot);
+                    if addr == 0 {
+                        fail!(null_object());
+                    }
+                    cell::unlock(&self.mem, addr);
+                    debug_assert_eq!(
+                        self.held.last().copied(),
+                        Some(addr),
+                        "a lock region is left in the order it was entered"
+                    );
+                    self.held.pop();
                 }
 
                 // ---- failure -----------------------------------------------------
@@ -2311,6 +2378,24 @@ impl<'a> Machine<'a> {
         }
     }
 
+    /// Gives back every cell this task took above `mark`, innermost first.
+    ///
+    /// The unwind path for a `lock`, and the exact analogue of
+    /// [`Machine::stop_all`]: a runtime error is not a jump, so no
+    /// `Inst::SharedUnlock` stands between it and the end of the run, and a
+    /// cell nobody gave back is a cell no task can ever take. On the ordinary
+    /// path it has nothing to do, because every lock region was left where it
+    /// was written.
+    ///
+    /// Innermost first, because that is the order the regions would have
+    /// ended in.
+    fn give_cells_back(&mut self, mark: usize) {
+        while self.held.len() > mark {
+            let addr = self.held.pop().expect("the length is above the mark");
+            cell::unlock(&self.mem, addr);
+        }
+    }
+
     /// Whether a settled child's value was `Err(...)`.
     ///
     /// The answer object holds the layout of what it carries in its first
@@ -2452,6 +2537,7 @@ impl<'a> Machine<'a> {
         let floor = self.frames.len();
         let children = self.children.len();
         let scopes = self.scopes.len();
+        let cells = self.held.len();
         let base = self
             .mem
             .push_frame(target.frame_size())
@@ -2480,7 +2566,7 @@ impl<'a> Machine<'a> {
                 boundary::to_value(self, returns, &words).map_err(|error| error.at(span))
             }
             Err(error) => {
-                self.unwind_to(floor, children, scopes, base, running);
+                self.unwind_to(floor, children, scopes, cells, base, running);
                 Err(error)
             }
         }
@@ -2539,9 +2625,15 @@ impl<'a> Machine<'a> {
         frames: usize,
         children: usize,
         scopes: usize,
+        cells: usize,
         base: u64,
         running: &mut [Option<ScopedJoinHandle<'_, Outcome>>],
     ) {
+        // Before anything is joined or truncated: a host that catches what a
+        // callback failed with carries on, and a cell the callback took and
+        // this did not give back would be held for the rest of the run by a
+        // frame that no longer exists.
+        self.give_cells_back(cells);
         for child in &self.children[children..] {
             if matches!(child.state, ChildState::Running) {
                 child.cancellation.cancel();
@@ -2911,6 +3003,23 @@ fn wrong_arity(callee: String, declared: usize, given: usize) -> RuntimeError {
 /// reaching the machine, reported rather than read through.
 fn null_object() -> RuntimeError {
     RuntimeError::new("this value was read before it was given one")
+}
+
+/// A `lock` taken by a task that already holds the same cell.
+///
+/// The oracle's, word for word: `crate::shared::reentrant_lock` is where these
+/// three sentences are written, and a program refused by one backend and not
+/// the other in different words would be two languages. What
+/// [ADR 0037](../../../../docs/adr/0037-a-cycle-through-a-cell-is-an-ordinary-cycle.md)
+/// removed is the *other* refusal `lock` used to make; this one it kept, and
+/// gave the reason: locking the same cell twice from one task is a live lock
+/// state, and no collector can answer one.
+fn reentrant_lock() -> RuntimeError {
+    RuntimeError::new("this task already holds this `Shared`, so `lock` would wait for itself")
+        .with_rule(
+            "`lock` holds the value for the whole of the closure it is given, so a `lock` on the same `Shared` inside it can never be granted.",
+        )
+        .with_help("do the whole read-modify-write in one `lock`")
 }
 
 /// A `Repr::Task` or `Repr::Scope` word that names no entry of this task's
@@ -6656,5 +6765,147 @@ pub(crate) mod tests {
         // would refuse long before this answers.
         let depth = crate::interp::MAX_REENTRY_DEPTH as i64 - 1;
         assert!(reentering("twice", depth).is_ok());
+    }
+
+    // ---- cells ---------------------------------------------------------
+
+    /// A cell taken and given back leaves nothing held.
+    ///
+    /// The pair the lowering emits, on its own, so that a failure here is the
+    /// machine's arms and not a lowering that emitted the wrong pair.
+    #[test]
+    fn a_cell_is_taken_and_given_back_by_the_pair_of_instructions() {
+        let mut build = Build::default();
+        let int = build.word("Int", Repr::Int);
+        let held = build.layout("Shared", Shape::Shared { value: int });
+        let main = build.function(
+            "main",
+            &[],
+            &[Repr::Int, Repr::Ref],
+            int,
+            vec![
+                Inst::Alloc {
+                    dst: 1,
+                    layout: held,
+                    len: Len::Fixed,
+                },
+                Inst::SharedLock { cell: 1 },
+                Inst::Int { dst: 0, value: 7 },
+                Inst::StoreField {
+                    obj: 1,
+                    at: cove_lir::SHARED_VALUE,
+                    src: 0,
+                    layout: int,
+                },
+                Inst::SharedUnlock { cell: 1 },
+                Inst::LoadField {
+                    dst: 0,
+                    obj: 1,
+                    at: cove_lir::SHARED_VALUE,
+                    layout: int,
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let program = build.done();
+        let mut machine = Machine::new(&program, 1 << 12);
+        assert_eq!(machine.run(main, &[], &budget()).unwrap(), vec![7]);
+        assert!(machine.held.is_empty());
+    }
+
+    /// A run that fails inside a `lock` gives back every cell it was holding.
+    ///
+    /// The release is an obligation on every exit path, and a runtime error is
+    /// the one path the lowering cannot write: it is not a jump, so no
+    /// `Inst::SharedUnlock` stands between it and the end of the run. Without
+    /// this a cell a failing task never gave back would be a cell no task
+    /// could ever take — and *no task* is the point, because the heap and the
+    /// cells in it belong to the run rather than to the task that failed.
+    ///
+    /// Two cells, because they nest and the refusal is per cell: giving back
+    /// only the innermost would leave the other held.
+    #[test]
+    fn a_failing_run_gives_back_every_cell_it_held() {
+        let mut build = Build::default().strings(&["stop"]);
+        let int = build.word("Int", Repr::Int);
+        let held = build.layout("Shared", Shape::Shared { value: int });
+        let main = build.function(
+            "main",
+            &[],
+            &[Repr::Int, Repr::Ref, Repr::Ref],
+            int,
+            vec![
+                Inst::Alloc {
+                    dst: 1,
+                    layout: held,
+                    len: Len::Fixed,
+                },
+                Inst::Alloc {
+                    dst: 2,
+                    layout: held,
+                    len: Len::Fixed,
+                },
+                Inst::SharedLock { cell: 1 },
+                Inst::SharedLock { cell: 2 },
+                Inst::Trap {
+                    message: cove_lir::StrId(0),
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let program = build.done();
+        let mut machine = Machine::new(&program, 1 << 12);
+        let error = machine.run(main, &[], &budget()).unwrap_err();
+        assert_eq!(error.message, "stop");
+
+        assert!(machine.held.is_empty());
+        // The frames are left standing by a failed run, so the two cells are
+        // still where the fixture put them and can be asked.
+        let base = machine.frames[0].base;
+        for slot in [1, 2] {
+            let addr = machine.mem.slot(base, slot);
+            assert_eq!(
+                cell::holder(&machine.mem, addr),
+                0,
+                "a cell a failing task took is free again"
+            );
+        }
+    }
+
+    /// A task that already holds a cell is refused rather than made to wait,
+    /// and the refusal does not take the cell.
+    #[test]
+    fn a_reentrant_lock_is_refused_and_leaves_the_cell_held_once() {
+        let mut build = Build::default();
+        let int = build.word("Int", Repr::Int);
+        let held = build.layout("Shared", Shape::Shared { value: int });
+        let main = build.function(
+            "main",
+            &[],
+            &[Repr::Int, Repr::Ref],
+            int,
+            vec![
+                Inst::Alloc {
+                    dst: 1,
+                    layout: held,
+                    len: Len::Fixed,
+                },
+                Inst::SharedLock { cell: 1 },
+                Inst::SharedLock { cell: 1 },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let program = build.done();
+        let mut machine = Machine::new(&program, 1 << 12);
+        let error = machine.run(main, &[], &budget()).unwrap_err();
+        assert_eq!(
+            error.message,
+            "this task already holds this `Shared`, so `lock` would wait for itself"
+        );
+        // The refusal did not take the cell a second time, so the unwind gives
+        // it back exactly once.
+        assert!(machine.held.is_empty());
+        let addr = machine.mem.slot(machine.frames[0].base, 1);
+        assert_eq!(cell::holder(&machine.mem, addr), 0);
     }
 }

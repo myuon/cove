@@ -1203,3 +1203,136 @@ export fn f() -> String {
         Answer::Value("[apple, fig, pear] true false true".to_string())
     );
 }
+
+// ---- `Shared` -------------------------------------------------------------
+
+/// A `lock` whose closure wrote `var` mutates the value where it lies.
+#[test]
+fn a_lock_that_aliases_agrees() {
+    let source = r#"
+struct Metrics { requests: Int, failures: Int }
+impl Metrics {
+  fn record(var self, failed: Bool) {
+    self.requests += 1
+    if failed { self.failures += 1 }
+  }
+}
+export fn f() -> String {
+  let metrics = Shared(Metrics(requests: 0, failures: 0))
+  metrics.lock(fn(var value) { value.record(true) })
+  metrics.lock(fn(var value) { value.record(false) })
+  metrics.lock(fn(value) { "{value.requests} {value.failures}" })
+}
+"#;
+    assert_eq!(agree(source, "f", vec![]), Answer::Value("2 1".to_string()));
+}
+
+/// A `lock` whose closure did not write `var` is handed a copy, and what it
+/// does to the copy is not stored back.
+///
+/// `Interpreter::call_shared_method` reads the same question off the same
+/// place — the written lambda's first parameter — so the two backends have to
+/// answer it the same way, and this is where that is asked.
+#[test]
+fn a_lock_that_copies_agrees() {
+    let source = r#"
+struct Counter { n: Int }
+export fn f() -> Int {
+  let cell = Shared(Counter(n: 1))
+  cell.lock(fn(value) { value })
+  cell.lock(fn(value) { value.n })
+}
+"#;
+    assert_eq!(agree(source, "f", vec![]), Answer::Value("1".to_string()));
+}
+
+/// A cell wrapping a scalar, and a `lock` that answers a value of its own.
+#[test]
+fn a_lock_answering_a_value_agrees() {
+    let source = r#"
+export fn f() -> Int {
+  let cell = Shared(1)
+  cell.lock(fn(var value) { value = value + 41 })
+  cell.lock(fn(value) { value })
+}
+"#;
+    assert_eq!(agree(source, "f", vec![]), Answer::Value("42".to_string()));
+}
+
+/// A cell inside a cell nests, which is why the reentrancy refusal is per
+/// cell rather than per task.
+#[test]
+fn two_cells_nest_and_agree() {
+    let source = r#"
+export fn f() -> Int {
+  let outer = Shared(1)
+  let inner = Shared(2)
+  outer.lock(fn(var a) {
+    inner.lock(fn(var b) {
+      b = b + a
+    })
+    a = 10
+  })
+  outer.lock(fn(a) { a }) + inner.lock(fn(b) { b })
+}
+"#;
+    assert_eq!(agree(source, "f", vec![]), Answer::Value("13".to_string()));
+}
+
+/// A task that asks for a cell it is already inside is refused, in the
+/// oracle's words.
+///
+/// [ADR 0037](../../../../docs/adr/0037-a-cycle-through-a-cell-is-an-ordinary-cycle.md)
+/// kept this rule and said why: a cycle in the heap is the collector's, and a
+/// live lock state is nobody's. So it is one of the two questions `lock` used
+/// to answer together, and the only one still answered here.
+#[test]
+fn a_reentrant_lock_is_refused_in_the_same_words() {
+    let source = r#"
+export fn f() -> Int {
+  let cell = Shared(1)
+  cell.lock(fn(var a) {
+    cell.lock(fn(var b) { b = b + 1 })
+    a
+  })
+}
+"#;
+    assert_eq!(
+        agree(source, "f", vec![]),
+        Answer::Failed(
+            "this task already holds this `Shared`, so `lock` would wait for itself".to_string()
+        )
+    );
+}
+
+/// A cell that comes to hold a handle to itself runs, and is an ordinary
+/// object-graph cycle.
+///
+/// This is the one case here that is **not** `agree`, and the reason is
+/// [ADR 0037](../../../../docs/adr/0037-a-cycle-through-a-cell-is-an-ordinary-cycle.md).
+/// The ADR replaced ADR 0011's amendment, which had `lock` refuse the one
+/// cycle it could see; the oracle and the frozen predecessor still make that
+/// refusal and keep it until they are deleted, and this backend does not. So
+/// asking the two to agree would be asking the machine to reconstruct a walk
+/// the ADR says not to reconstruct.
+///
+/// What is reclaimed and when is `cove_runtime::lvm::cell`'s to show, because
+/// it can run the collection; what this shows is that the program *runs*,
+/// which is the half a source-level test can see.
+#[test]
+fn a_cell_may_come_to_hold_itself() {
+    let source = r#"
+struct Node { cell: Option<Shared<Node>>, n: Int }
+export fn f() -> Int {
+  let n = Shared(Node(cell: None, n: 7))
+  n.lock(fn(var value) {
+    value = Node(cell: Some(n), n: 8)
+  })
+  n.lock(fn(value) { value.n })
+}
+"#;
+    assert_eq!(
+        on_a_deep_stack(move || on_the_machine(source, "f", vec![])),
+        Answer::Value("8".to_string())
+    );
+}

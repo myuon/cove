@@ -1560,6 +1560,14 @@ impl Body<'_> {
             if matches!(ty, Ty::Struct(..) | Ty::Error | Ty::MapEntry(..)) {
                 return self.struct_literal(expr, &ty, args);
             }
+            // `Shared(value)`, which is an initializer of a type the language
+            // declares rather than a free builtin — the same arm the three
+            // above are, with the one difference that a cell's payload is one
+            // unlabelled value and its object carries a lock word in front of
+            // it.
+            if matches!(ty, Ty::Shared(_)) {
+                return self.shared_new(expr, &ty, args);
+            }
         }
         if let Some(module) = self.host_module_of(name) {
             return self.call_host(expr, &module, name, args);

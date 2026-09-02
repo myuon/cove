@@ -401,6 +401,21 @@ impl Shapes {
                 let value = self.element(checked, module, value)?;
                 Some(self.intern(Layout::object("Map", Shape::Entries { key, value })))
             }
+            // The one handle that crosses a task boundary by sharing rather
+            // than by copying, and an ordinary object in the run's one heap:
+            // a lock word, then the wrapped value inline. One layout per
+            // wrapped-value layout, because what the value's words are is
+            // what a collection and a `lock`'s address both read.
+            //
+            // Reached through `element`, so a cycle that passes through a cell
+            // is finite the way one through an `Array` is — a cell's own
+            // layout is one `Repr::Ref` word whatever it holds, which is the
+            // sentence `cove-sema` quotes when it lists `Shared<T>` among the
+            // references a recursive declaration may pass through.
+            Ty::Shared(inner) => {
+                let value = self.element(checked, module, inner)?;
+                Some(self.intern(Layout::object("Shared", Shape::Shared { value })))
+            }
             // The pair a `Map` is built from and iterated as, and it is an
             // ordinary inline struct: the entry a `Map.of` literal writes is
             // the run of words its two fields occupy, and one entry of a

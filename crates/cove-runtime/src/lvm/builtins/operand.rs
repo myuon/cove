@@ -313,6 +313,9 @@ pub(super) fn layout_name(machine: &Machine, layout: LayoutId, first: u64, depth
         Shape::Members { .. } => "Set".to_string(),
         Shape::Entries { .. } => "Map".to_string(),
         Shape::Closure { .. } => "fn".to_string(),
+        // `Value::type_name`'s word for one. A cell is a handle, and what it
+        // holds is reachable only under a `lock`, so the name is the handle's.
+        Shape::Shared { .. } => "Shared".to_string(),
         Shape::Boxed => object_name(machine, first, depth + 1),
         Shape::Free => "nothing".to_string(),
     }

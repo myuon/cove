@@ -283,6 +283,8 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             format!("await {} {} {}", s(*dst), s(*task), l(*answer))
         }
         Inst::Cancel { task } => format!("cancel {}", s(*task)),
+        Inst::SharedLock { cell } => format!("shared.lock {}", s(*cell)),
+        Inst::SharedUnlock { cell } => format!("shared.unlock {}", s(*cell)),
         Inst::Trap { message } => format!("trap {:?}", program.string(*message)),
         Inst::AssertFailed { message } => format!("assert.failed {}", s(*message)),
     }
@@ -365,6 +367,7 @@ fn shape_name(shape: &Shape) -> &'static str {
         Shape::Members { .. } => "set",
         Shape::Entries { .. } => "map",
         Shape::Closure { .. } => "closure",
+        Shape::Shared { .. } => "shared",
         Shape::Boxed => "boxed",
     }
 }

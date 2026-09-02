@@ -519,6 +519,45 @@ pub enum Inst {
     /// `TaskCancelled` is traced at the join and not here.
     Cancel { task: Slot },
 
+    // ---- cells ---------------------------------------------------------------
+    /// Take the [`crate::Shape::Shared`] cell in `cell`, waiting for whoever
+    /// holds it.
+    ///
+    /// ADR 0008 makes `lock` the whole of a `Shared`'s access: there is no
+    /// `get` and no `set`, so a read-modify-write cannot be written as two
+    /// operations that race. What that means here is an ordinary
+    /// [`Inst::CallClosure`] between this and [`Inst::SharedUnlock`], with the
+    /// address of the cell's value as the closure's argument — the same shape
+    /// `map` is lowered to, and for the same reason `docs/LINEAR_VM.md` gives:
+    /// **a builtin never calls back into Cove**. A builtin that ran the
+    /// closure itself would put a Rust frame under every Cove frame it made.
+    ///
+    /// So `lock` is *two* instructions rather than one that calls, and what
+    /// the second one costs is an obligation: **the release belongs to every
+    /// exit path**, exactly as [`Inst::Clear`] and [`Inst::ScopeCancel`] do.
+    /// The lowering emits it on the path that finished, and a runtime error —
+    /// which is not a jump the lowering can emit — is the machine's to answer,
+    /// once, for every cell the task was holding.
+    ///
+    /// A task that asks for a cell it already holds is refused rather than
+    /// made to wait, and that rule is untouched by
+    /// [ADR 0037](../../../docs/adr/0037-a-cycle-through-a-cell-is-an-ordinary-cycle.md):
+    /// waiting would be waiting for itself, and no collector can answer a live
+    /// lock state. What the ADR did remove is the *other* refusal — a closure
+    /// that leaves the cell holding a handle to itself is an ordinary
+    /// object-graph cycle now, collected when it becomes unreachable, so
+    /// nothing here inspects what the closure left.
+    SharedLock { cell: Slot },
+    /// Give the cell in `cell` back, publishing everything written while it
+    /// was held.
+    ///
+    /// The lock word *is* the publication: it is taken with `Acquire` and
+    /// released with `Release`, and every other word of the machine's memory
+    /// is relaxed and is allowed to be. Acquiring a cell therefore makes
+    /// visible not only its own words but every object the previous holder
+    /// allocated and stored into them.
+    SharedUnlock { cell: Slot },
+
     // ---- failure ----------------------------------------------------------
     /// Fail the run with `message`.
     ///

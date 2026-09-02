@@ -84,10 +84,6 @@ allow = ["console"]
 entry = "fail_sort_callback.main"
 allow = ["console"]
 
-[run.fail_shared_cycle]
-entry = "fail_shared_cycle.main"
-allow = ["console"]
-
 [run.flow_bindings]
 entry = "flow_bindings.main"
 allow = ["console"]
@@ -222,6 +218,10 @@ allow = ["console"]
 
 [run.module_opaque]
 entry = "module_opaque.main"
+allow = ["console"]
+
+[run.shared_cycle]
+entry = "shared_cycle.main"
 allow = ["console"]
 
 [run.tasks_host_order]

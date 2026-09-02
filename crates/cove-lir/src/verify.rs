@@ -168,6 +168,9 @@ impl Check<'_> {
                 Inst::ScopeEnter { dst, .. } => unknown(&mut seen, dst, 1),
                 Inst::Spawn { dst, .. } => unknown(&mut seen, dst, 1),
                 Inst::ScopeCancel { .. } | Inst::Cancel { .. } => {}
+                // Neither writes a slot: what they change is the cell's own
+                // lock word, which is not a location this frame numbers.
+                Inst::SharedLock { .. } | Inst::SharedUnlock { .. } => {}
                 Inst::ScopeLeave {
                     failed,
                     error,
@@ -643,6 +646,16 @@ impl Check<'_> {
                 }
             }
             Inst::Cancel { task } => self.expect(at, task, &[Repr::Task]),
+
+            // ---- cells ---------------------------------------------------
+            // A cell is an ordinary object in the run's heap, so the operand
+            // is an ordinary `Repr::Ref` word. That the two come in pairs is
+            // not checked here: which cells a path is holding is a fact about
+            // control flow, and this is a fact about one instruction — the
+            // same limit `Inst::ScopeCancel` is under.
+            Inst::SharedLock { cell } | Inst::SharedUnlock { cell } => {
+                self.expect(at, cell, &[Repr::Ref])
+            }
 
             Inst::Trap { message } => {
                 self.in_range(at, message.index(), self.program.strings.len(), "string");

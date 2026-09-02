@@ -114,6 +114,11 @@ impl Body<'_> {
             // apart.
             Ty::Scope => self.scope_method(expr, base, name, args),
             Ty::Task(_) => self.task_method(expr, base, name, args),
+            // A `Shared` is the third: `lock` is two instructions and a call
+            // between them rather than a builtin, because a builtin never
+            // calls back into Cove. `cove_lir::lower::cells` is where it and
+            // the cell's constructor live.
+            Ty::Shared(_) => self.shared_method(expr, base, name, args),
             // A host resource's operations belong to the host that issued
             // the handle, and the handle is what routes them:
             // `HostRegistry::call_resource` reads the module and the resource

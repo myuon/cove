@@ -10,23 +10,6 @@ use cove_schema::HostSchemas;
 
 use super::refused;
 
-#[test]
-fn a_shared_stops_at_the_boundary_rather_than_at_its_lock() {
-    // `Shared.lock` is not a call through a closure that happens to be
-    // missing, and this is the sentence that says so: `Shared` has no layout
-    // in this backend at all, so a declaration that mentions one has no
-    // boundary and its body is never walked. Reaching the `lock` would need
-    // the family represented first — and then the mutual exclusion, and then
-    // a closure whose parameter is `var`, which a function type does not
-    // carry.
-    assert_eq!(
-        refused(
-            "fn f(cell: Shared<Int>) -> Int { cell.lock(fn(var value) { value = value + 1\n 0 }) }"
-        ),
-        vec!["not yet lowered: a value of type `Shared<Int>`"]
-    );
-}
-
 /// A `scope` in a function that answers no `Result` has nowhere to pass a
 /// failing child's error, and that is a gap rather than an invention.
 ///
@@ -57,9 +40,33 @@ fn a_function_value_with_a_var_parameter_names_the_parameter_rather_than_the_lam
     // ADR 0032 fixes a closure's parameter list, and a function type names
     // what a call passes but not whether it aliases. So a `var` on a lambda
     // is work this lowering has not done rather than a shape it refuses.
+    //
+    // `Shared.lock` admits exactly this parameter and does not weaken this:
+    // there the closure never becomes a value some other call reaches
+    // through, because the environment is built and consumed by the same
+    // instruction sequence — and that sequence is the one that formed the
+    // address it passes. Here the closure is bound to a name and called
+    // through it, which is the case the refusal is about.
     let items = refused(
         "fn f() -> Int {\n  let g = fn(var n: Int) { n = 1\n 0 }\n  var x = 0\n  g(var x)\n}",
     );
+    assert!(
+        items
+            .iter()
+            .any(|item| item == "not yet lowered: a function value with a `var` parameter"),
+        "{items:?}"
+    );
+}
+
+/// The same lambda written where a `lock` does not take it is still refused.
+///
+/// A `var` first parameter is admitted on one path — the argument of a
+/// `Shared.lock` — and this is the sentence that says the admission is about
+/// the *path* and not about the lambda: the identical closure, handed to
+/// `Array.map`, meets the general refusal in the general refusal's words.
+#[test]
+fn a_var_parameter_is_admitted_by_the_lock_path_and_not_by_the_lambda() {
+    let items = refused("fn f() -> Array<Int> {\n  [1].map(fn(var n: Int) { n = 1\n 0 })\n}");
     assert!(
         items
             .iter()
@@ -180,6 +187,9 @@ fn the_shapes_these_families_are_written_in_all_lower() {
         "fn each(xs: Array<Int>, extra: Int = xs.length()) -> Int { extra }\nfn f(a: Array<Int>) -> Int { each(a) }",
         "fn f(m: Map<String, Int>, n: Map<String, Int>) -> Bool { m == n }",
         "fn f(s: Set<Int>) -> String { \"{s}\" }",
+        "fn f(cell: Shared<Array<Int>>) -> Int { cell.lock(fn(v) { v.length() }) }",
+        "struct Node { cell: Option<Shared<Node>>, n: Int }\nfn f() -> Int {\n  let n = Shared(Node(cell: None, n: 1))\n  n.lock(fn(var v) { v = Node(cell: Some(n), n: 2) })\n  n.lock(fn(v) { v.n })\n}",
+        "fn f(cell: Shared<Int>, other: Shared<Int>) -> Int {\n  cell.lock(fn(var a) { other.lock(fn(var b) { b = a }) })\n  0\n}",
     ];
     let mut bad = Vec::new();
     for src in cases {

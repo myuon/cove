@@ -64,16 +64,26 @@
 //! change, and the snapshot it left is true until it is woken. The collector
 //! counts it as arrived and goes ahead.
 //!
-//! # What the IR still owes this
+//! # A cycle through a cell is an ordinary cycle
 //!
-//! There is no `Shape::Shared { value: LayoutId }` in `cove-lir` yet, and the
-//! lowering round is where it lands. Everything below is written against the
-//! *layout*, not against a particular variant, so what that shape has to
-//! provide is exactly this: a heap object whose payload is one non-reference
-//! word followed by one value of a named layout, inline. `Shape::Closure`
-//! already has that arrangement — a callee word, then captures inline — which
-//! is why the fixtures here can be built and why adding the variant is a
-//! match arm in the collector and nothing else.
+//! [ADR 0037](../../../../docs/adr/0037-a-cycle-through-a-cell-is-an-ordinary-cycle.md)
+//! decides it, and this module is most of the argument for why it could be
+//! decided: a cell is an object in the traced heap, the values reachable
+//! through it are objects in the same heap, and the collector ADR 0011's
+//! amendment deferred is the collector that is running. So a cell that comes
+//! to hold a handle to itself is collected when it becomes unreachable, and
+//! nothing on the `lock` path inspects what a closure left.
+//!
+//! Reentrant locking is the other question and is unchanged: [`Reentrant`] is
+//! a live lock state, and no collector can answer one.
+//!
+//! # The layout is `cove-lir`'s
+//!
+//! [`Shape::Shared`](cove_lir::Shape::Shared) is the variant, and
+//! [`cove_lir::SHARED_STATE`] and [`cove_lir::SHARED_VALUE`] are the two
+//! offsets — read from there rather than written again, because the lowering
+//! forms the address of the value word and this reads the lock word, and the
+//! two are the same object.
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -81,10 +91,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::lvm::mem::{Memory, Roots};
 
 /// The payload word holding a cell's lock.
-pub(crate) const STATE: u32 = 0;
+pub(crate) const STATE: u32 = cove_lir::SHARED_STATE;
 
 /// The payload word the wrapped value begins at.
-pub(crate) const VALUE: u32 = 1;
+pub(crate) const VALUE: u32 = cove_lir::SHARED_VALUE;
 
 /// What the state word holds when no task is inside `lock`.
 const UNLOCKED: u64 = 0;
@@ -195,32 +205,41 @@ pub(crate) fn unlock(mem: &Memory, cell: u64) {
 mod tests {
     use super::*;
     use crate::lvm::mem::NoRoots;
-    use cove_lir::{FunctionId, Layout, LayoutId, Repr, Shape};
+    use cove_lir::{Layout, LayoutId, Repr, Shape};
     use std::sync::Barrier;
 
     const FREE: LayoutId = LayoutId(0);
     const INT: LayoutId = LayoutId(1);
     const CELL: LayoutId = LayoutId(2);
+    const REF: LayoutId = LayoutId(3);
+    /// A cell wrapping a reference, which is what a cycle needs: the value
+    /// word is a `Repr::Ref`, so the collector traces it.
+    const RING: LayoutId = LayoutId(4);
 
-    /// A layout table holding one cell family.
+    /// A layout table holding two cell families.
     ///
-    /// `Shape::Closure` stands in for the `Shape::Shared { value }` the
-    /// lowering round adds, and it stands in exactly: a heap object whose
-    /// payload is one word the collector does not trace followed by one value
-    /// inline under its own layout. That correspondence is the argument that
-    /// the new variant is a match arm and not a mechanism.
+    /// `CELL` wraps an `Int` and is a leaf; `RING` wraps a one-word reference
+    /// and is what a cycle among cells is built out of.
     fn table() -> Vec<Layout> {
         vec![
             Layout::free(),
             Layout::word("Int", Repr::Int),
-            Layout::object(
-                "Shared",
-                Shape::Closure {
-                    function: FunctionId(0),
-                    captures: vec![INT],
-                },
-            ),
+            Layout::object("Shared", Shape::Shared { value: INT }),
+            Layout::word("<ref>", Repr::Ref),
+            Layout::object("Shared", Shape::Shared { value: REF }),
         ]
+    }
+
+    /// The objects a task says it is holding, for a collection that has to be
+    /// told rather than able to read a frame.
+    struct Held(Vec<u64>);
+
+    impl Roots for Held {
+        fn each_root(&self, f: &mut dyn FnMut(u64)) {
+            for &addr in &self.0 {
+                f(addr);
+            }
+        }
     }
 
     /// A cell holding one `Int`, set to `start`.
@@ -324,15 +343,6 @@ mod tests {
     /// task that collects, so the wait cannot end until the collection does.
     #[test]
     fn a_collection_runs_while_a_task_waits_for_a_cell() {
-        struct Held(Vec<u64>);
-        impl Roots for Held {
-            fn each_root(&self, f: &mut dyn FnMut(u64)) {
-                for &addr in &self.0 {
-                    f(addr);
-                }
-            }
-        }
-
         let layouts = table();
         let mut first = Memory::new(1 << 12);
         let mut second = first.for_task().unwrap();
@@ -368,6 +378,61 @@ mod tests {
         assert_eq!(first.object_layout(theirs), CELL);
         assert_eq!(first.payload(theirs, VALUE), 5);
         assert_eq!(first.payload(it, VALUE), 1);
+    }
+
+    /// A cell that holds a handle to itself is collected once nothing else
+    /// names it.
+    ///
+    /// This is the case
+    /// [ADR 0011](../../../../docs/adr/0011-garbage-collection.md)'s amendment
+    /// refused and
+    /// [ADR 0037](../../../../docs/adr/0037-a-cycle-through-a-cell-is-an-ordinary-cycle.md)
+    /// made ordinary, and the test does not depend on when a collection runs
+    /// because it runs one: what is asserted is that the cycle is *reclaimable*,
+    /// which is exactly what the amendment said no collector could answer.
+    #[test]
+    fn a_cell_holding_itself_is_collected() {
+        let layouts = table();
+        let mut mem = Memory::new(1 << 12);
+        let it = mem.alloc(RING, 0, 2).expect("the fixture has room");
+        // What a `lock` whose closure stored the cell back into itself leaves:
+        // the value word naming the cell it is a word of.
+        mem.set_payload(it, VALUE, it);
+
+        // Still named, so still there — and the collector followed the cycle
+        // without being asked to stop, which is the other half of the claim.
+        mem.collect(&layouts, &Held(vec![it]));
+        assert_eq!(mem.object_layout(it), RING);
+        assert_eq!(mem.payload(it, VALUE), it);
+
+        mem.collect(&layouts, &NoRoots);
+        assert_eq!(mem.object_layout(it), FREE);
+    }
+
+    /// So is a cycle through two of them, which the amendment left as an
+    /// accepted, documented leak.
+    ///
+    /// Nothing about the collector knows there are cells in it. That is the
+    /// substance of ADR 0037: the leak is gone rather than merely undetected,
+    /// because the question was never a `Shared` question.
+    #[test]
+    fn a_cycle_through_two_cells_is_collected() {
+        let layouts = table();
+        let mut mem = Memory::new(1 << 12);
+        let one = mem.alloc(RING, 0, 2).expect("the fixture has room");
+        let other = mem.alloc(RING, 0, 2).expect("the fixture has room");
+        mem.set_payload(one, VALUE, other);
+        mem.set_payload(other, VALUE, one);
+        let words = 2 * (1 + 2);
+
+        // What the sweep reports rather than what each header says, because
+        // adjacent free objects are written back as *one* free block: only
+        // the first of a run keeps a header a reader can ask, and the run is
+        // the whole heap here.
+        let done = mem.collect(&layouts, &NoRoots);
+        assert_eq!(done.freed_words, words);
+        assert_eq!(done.live_words, 0);
+        assert_eq!(mem.object_layout(one), FREE);
     }
 
     /// What a cell publishes is not only its own words.

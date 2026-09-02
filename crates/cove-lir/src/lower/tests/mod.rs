@@ -12,6 +12,7 @@
 
 mod assertions;
 mod calls;
+mod cells;
 mod closures;
 mod collections;
 mod control;

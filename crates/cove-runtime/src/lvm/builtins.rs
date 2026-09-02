@@ -387,6 +387,11 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
             let words = machine.payload_run(addr, 0, layout.width());
             return render_value(machine, id, &words, depth);
         }
+        // A cell shows as the handle it is rather than as what it currently
+        // holds, which is `Display for Value`'s answer for the same value:
+        // its contents are reachable only under a `lock`, and rendering one
+        // would be reading it without taking it.
+        Shape::Shared { .. } => out.push_str("<shared>"),
         // A vector renders like an array, because the indirection is what
         // lets it grow without moving and is not a fact about the value:
         // `[1, 2]` is what a program that wrote `Vector.of(1, 2)` sees.

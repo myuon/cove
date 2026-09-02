@@ -137,7 +137,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
-use cove_lir::{Layout, LayoutId, Repr, Shape};
+use cove_lir::{Layout, LayoutId, Repr, Shape, SHARED_VALUE};
 
 /// The words one task's stack segment reserves.
 ///
@@ -966,6 +966,17 @@ impl Space {
                     self.trace_run(alloc, addr, at * stride, &key.words, work);
                     self.trace_run(alloc, addr, at * stride + key.width(), &value.words, work);
                 }
+            }
+            // Word 0 is the lock and the value follows it, inline. So a
+            // cell is traced the way a closure environment is, and a cycle
+            // that passes through one is an ordinary object-graph cycle —
+            // which is the whole of what
+            // [ADR 0037](../../../../docs/adr/0037-a-cycle-through-a-cell-is-an-ordinary-cycle.md)
+            // costs here. The lock word is an `Int` in the map, so nothing
+            // follows it.
+            Shape::Shared { value } => {
+                let value = &layouts[value.index()];
+                self.trace_run(alloc, addr, SHARED_VALUE, &value.words, work)
             }
             // Word 0 is the callee. The captures follow it, each inline under
             // its own layout, which is how a captured struct is stored where

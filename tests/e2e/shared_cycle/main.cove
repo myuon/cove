@@ -1,0 +1,49 @@
+use console.println
+
+/// A ring of `Shared` cells, each holding a handle to the next.
+///
+/// [ADR 0037](../../../docs/adr/0037-a-cycle-through-a-cell-is-an-ordinary-cycle.md)
+/// decides that a cycle through one or more cells is an ordinary object-graph
+/// cycle, collected when it becomes unreachable. So this is an ordinary
+/// program: the ring is built, walked, and left, and nothing about `lock`
+/// inspects what a closure stores.
+///
+/// It replaces `fail_shared_cycle`, which pinned the refusal the ADR removed.
+/// What a corpus case can show is that the program *runs* on the backend that
+/// runs it; that the ring is reclaimed once nothing names it is
+/// `cove_runtime::lvm::cell`'s to show, because only a test that runs the
+/// collection itself can say so without depending on when one runs.
+struct Node {
+  next: Option<Shared<Node>>
+  label: String
+}
+
+export fn main() -> Result<Unit, Error> {
+  let first = Shared(Node(next: None, label: "first"))
+  let second = Shared(Node(next: None, label: "second"))
+
+  first.lock(fn(var value) {
+    value = Node(next: Some(second), label: "first")
+  })
+  second.lock(fn(var value) {
+    value = Node(next: Some(first), label: "second")
+  })
+
+  println("one step: {step(first)}")?
+  println("two steps: {step(second)}")?
+  Ok(())
+}
+
+/// The label of the cell `cell` points at.
+///
+/// Two cells nest, which is why the reentrancy rule is per cell rather than
+/// per task: this holds `cell` for the whole of the `lock` it takes on the
+/// next one.
+fn step(cell: Shared<Node>) -> String {
+  cell.lock(fn(value) {
+    match value.next {
+      Some(next) => next.lock(fn(held) { held.label })
+      None => "nothing"
+    }
+  })
+}
