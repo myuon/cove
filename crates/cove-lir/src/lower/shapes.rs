@@ -25,6 +25,17 @@
 //! words differ and a boundary has to know which. [`Shapes`] interns them,
 //! so one shape is one [`LayoutId`] however many times the source writes it.
 //!
+//! # A *declaration* is one layout per instantiation
+//!
+//! A generic `struct` is the other side of that rule. `Cell<Int>` is one word
+//! and `Cell<Point>` is two, so they are not one family and cannot be one
+//! layout: a frame's per-slot `Repr` map is static and it is what the
+//! collector's reference map is derived from. So a declaration's key carries
+//! the arguments it was reached at — `m.Cell<Int>` and `m.Cell<m.Point>` —
+//! and two instantiations are two layouts with two names. The fields are the
+//! declaration's own, completed with [`Ty::instantiate`], because the checker
+//! records a declaration's shape once in terms of the parameters it binds.
+//!
 //! # Recursion is finite exactly when it passes through a reference
 //!
 //! `struct Node { value: Int, next: Option<Node> }` has no finite inline
@@ -394,10 +405,8 @@ impl Shapes {
             // captured are facts about the *object*, in the
             // [`Shape::Closure`] layout its own header names.
             Ty::Fn(_) => Some(self.function_value()),
-            Ty::Struct(name, args) if args.is_empty() => {
-                self.declared_struct(checked, module, name)
-            }
-            Ty::Enum(name, args) if args.is_empty() => self.declared_enum(checked, module, name),
+            Ty::Struct(name, args) => self.declared_struct(checked, module, name, args),
+            Ty::Enum(name, args) => self.declared_enum(checked, module, name, args),
             _ => None,
         }
     }
@@ -538,13 +547,20 @@ impl Shapes {
         Some(self.intern(layout))
     }
 
-    fn declared_struct(&mut self, checked: &Checked, module: &str, name: &str) -> Option<LayoutId> {
+    fn declared_struct(
+        &mut self,
+        checked: &Checked,
+        module: &str,
+        name: &str,
+        args: &[Ty],
+    ) -> Option<LayoutId> {
         let (owner, short) = declaring(checked, module, name)?;
-        let key = format!("{owner}.{short}");
+        let args = qualify_all(checked, module, args);
+        let key = instance_key(&owner, &short, &args);
         if let Some(answer) = self.reached(&key, name) {
             return answer;
         }
-        let declared = struct_fields(checked, module, &Ty::Struct(Arc::from(name), Vec::new()))?;
+        let declared = struct_fields(checked, module, &Ty::Struct(Arc::from(name), args))?;
         let id = self.reserve(&key);
         let mut placed = Vec::with_capacity(declared.len());
         for (field, ty) in &declared {
@@ -563,13 +579,20 @@ impl Shapes {
         Some(self.settle(&key, id, layout))
     }
 
-    fn declared_enum(&mut self, checked: &Checked, module: &str, name: &str) -> Option<LayoutId> {
+    fn declared_enum(
+        &mut self,
+        checked: &Checked,
+        module: &str,
+        name: &str,
+        args: &[Ty],
+    ) -> Option<LayoutId> {
         let (owner, short) = declaring(checked, module, name)?;
-        let key = format!("{owner}.{short}");
+        let args = qualify_all(checked, module, args);
+        let key = instance_key(&owner, &short, &args);
         if let Some(answer) = self.reached(&key, name) {
             return answer;
         }
-        let declared = enum_cases(checked, module, &Ty::Enum(Arc::from(name), Vec::new()))?;
+        let declared = enum_cases(checked, module, &Ty::Enum(Arc::from(name), args))?;
         let id = self.reserve(&key);
         let mut placed = Vec::with_capacity(declared.len());
         for (case, types) in &declared {
@@ -589,6 +612,97 @@ impl Shapes {
         let layout = self.enum_shape(&key, &placed);
         Some(self.settle(&key, id, layout))
     }
+}
+
+/// What a declaration's layout is named by at one instantiation.
+///
+/// The declaration alone for a declaration that binds no type parameters,
+/// and the declaration with the arguments written after it for one that
+/// does. A layout's name is an identity, and `m.Cell<Int>` and
+/// `m.Cell<m.Point>` are two identities because they are two widths — which
+/// is the whole reason monomorphisation is the only representation that fits
+/// this machine.
+///
+/// The arguments are [`qualified`] first, so that a `Cell<Point>` written in
+/// the module that declares `Point` and a `Cell<m.Point>` written anywhere
+/// else are one key and therefore one [`LayoutId`]. Two ids for one shape
+/// would be two arms of a `dyn` dispatch table for one type.
+fn instance_key(owner: &str, short: &str, args: &[Ty]) -> String {
+    if args.is_empty() {
+        return format!("{owner}.{short}");
+    }
+    let written: Vec<String> = args.iter().map(Ty::to_string).collect();
+    format!("{owner}.{short}<{}>", written.join(", "))
+}
+
+/// The type parameters `name`'s declaration binds, in declaration order.
+///
+/// Empty for a declaration that binds none, which is what makes
+/// [`Ty::instantiate`] the identity for one.
+fn generics_of(checked: &Checked, owner: &str, short: &str) -> Vec<Arc<str>> {
+    let Some(resolved) = checked.modules.get(owner) else {
+        return Vec::new();
+    };
+    let generics = match (resolved.structs.get(short), resolved.enums.get(short)) {
+        (Some(entry), _) => &entry.decl.generics,
+        (_, Some(entry)) => &entry.decl.generics,
+        _ => return Vec::new(),
+    };
+    generics
+        .iter()
+        .map(|param| Arc::from(param.name.node.as_str()))
+        .collect()
+}
+
+/// The same type with every declared name written the way the package names
+/// it: `main.Article` rather than `Article`.
+///
+/// A type the checker settled is spelled in the vocabulary of the module it
+/// was settled in — a module's own declaration is a bare name there and a
+/// qualified one everywhere else. That is exactly what a monomorphisation's
+/// identity must not depend on: two modules passing one type to one generic
+/// declaration ask for one instantiation, and the body they get is lowered
+/// in the *declaring* module, where the call site's bare name means nothing.
+///
+/// So a type argument is written out once, here, before it becomes part of an
+/// instantiation's name or of a layout's. Nothing is resolved: `declaring` is
+/// the checker's own `owner_of` table, and a name it cannot place is left as
+/// it was written.
+pub(super) fn qualified(checked: &Checked, module: &str, ty: &Ty) -> Ty {
+    let named = |name: &Arc<str>| match declaring(checked, module, name) {
+        Some((owner, short)) => Arc::from(format!("{owner}.{short}")),
+        None => name.clone(),
+    };
+    let each = |args: &[Ty]| -> Vec<Ty> {
+        args.iter()
+            .map(|arg| qualified(checked, module, arg))
+            .collect()
+    };
+    let one = |ty: &Ty| Box::new(qualified(checked, module, ty));
+    match ty {
+        Ty::Struct(name, args) => Ty::Struct(named(name), each(args)),
+        Ty::Enum(name, args) => Ty::Enum(named(name), each(args)),
+        // A trait's name is spelled the two ways a type's is, and one written
+        // both ways would be two keys naming one box.
+        Ty::Dyn(name) => Ty::Dyn(named(name)),
+        Ty::Array(elem) => Ty::Array(one(elem)),
+        Ty::Vector(elem) => Ty::Vector(one(elem)),
+        Ty::Set(elem) => Ty::Set(one(elem)),
+        Ty::Option(some) => Ty::Option(one(some)),
+        Ty::Task(inner) => Ty::Task(one(inner)),
+        Ty::Shared(inner) => Ty::Shared(one(inner)),
+        Ty::Map(key, value) => Ty::Map(one(key), one(value)),
+        Ty::MapEntry(key, value) => Ty::MapEntry(one(key), one(value)),
+        Ty::Result(ok, err) => Ty::Result(one(ok), one(err)),
+        other => other.clone(),
+    }
+}
+
+/// [`qualified`] over a list.
+fn qualify_all(checked: &Checked, module: &str, args: &[Ty]) -> Vec<Ty> {
+    args.iter()
+        .map(|arg| qualified(checked, module, arg))
+        .collect()
 }
 
 /// The module that declares `name`, and the name within it.
@@ -612,6 +726,13 @@ pub(super) fn declaring(checked: &Checked, module: &str, name: &str) -> Option<(
 /// be a second description of the same object. `MapEntry` is the second one
 /// the language declares rather than a module, and its two fields are the
 /// labels `MapEntry(key:, value:)` is written with.
+///
+/// A generic declaration's fields are recorded once, in terms of the
+/// parameters it binds — `Cell<T>`'s field is a `T` however many `Cell<Int>`s
+/// a program holds — so a use of it completes them with
+/// [`Ty::instantiate`]. That is the checker's own note on
+/// [`Signature`](cove_sema::facts::Signature) followed rather than a second
+/// reading of the declaration.
 pub(super) fn struct_fields(
     checked: &Checked,
     module: &str,
@@ -623,19 +744,25 @@ pub(super) fn struct_fields(
             (Arc::from(MAP_ENTRY.fields[0].name), (**key).clone()),
             (Arc::from(MAP_ENTRY.fields[1].name), (**value).clone()),
         ]),
-        Ty::Struct(name, args) if args.is_empty() => {
+        Ty::Struct(name, args) => {
             let (owner, short) = declaring(checked, module, name)?;
             let entry = checked.modules.get(&owner)?.structs.get(&short)?;
             let signature = checked
                 .facts
                 .signature(entry.decl.span.file, entry.decl.span)?;
+            let generics = generics_of(checked, &owner, &short);
             Some(
                 entry
                     .decl
                     .fields
                     .iter()
                     .zip(&signature.params)
-                    .map(|(field, ty)| (Arc::from(field.name.node.as_str()), ty.clone()))
+                    .map(|(field, ty)| {
+                        (
+                            Arc::from(field.name.node.as_str()),
+                            ty.instantiate(&generics, args),
+                        )
+                    })
                     .collect(),
             )
         }
@@ -674,13 +801,19 @@ pub(super) fn enum_cases(
             (Arc::from("Ok"), vec![(**ok).clone()]),
             (Arc::from("Err"), vec![(**err).clone()]),
         ]),
-        Ty::Enum(name, args) if args.is_empty() => {
+        Ty::Enum(name, args) => {
             let (owner, short) = declaring(checked, module, name)?;
             let entry = checked.modules.get(&owner)?.enums.get(&short)?;
+            let generics = generics_of(checked, &owner, &short);
             let mut cases = Vec::with_capacity(entry.decl.cases.len());
             for case in &entry.decl.cases {
                 let signature = checked.facts.signature(case.span.file, case.span)?;
-                cases.push((Arc::from(case.name.node.as_str()), signature.params.clone()));
+                let payload = signature
+                    .params
+                    .iter()
+                    .map(|ty| ty.instantiate(&generics, args))
+                    .collect();
+                cases.push((Arc::from(case.name.node.as_str()), payload));
             }
             Some(cases)
         }

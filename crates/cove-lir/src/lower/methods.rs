@@ -61,7 +61,7 @@ impl Body<'_> {
         name: &str,
         args: &[Arg],
     ) -> Val {
-        let Some(ty) = self.owned_ty(base) else {
+        let Some(ty) = self.settled_ty(base) else {
             return self.dead(expr);
         };
         if let Some(bad) = self.plain_arguments(args) {
@@ -157,7 +157,7 @@ impl Body<'_> {
         operation: &str,
         args: &[Arg],
     ) -> Val {
-        let Some(ty) = self.owned_ty(expr) else {
+        let Some(ty) = self.settled_ty(expr) else {
             return self.dead(expr);
         };
         let Some(result) = self.layout(&ty, expr.span) else {

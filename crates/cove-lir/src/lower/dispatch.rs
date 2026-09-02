@@ -57,10 +57,11 @@
 //! out of the box's own first payload word without asking whether there is
 //! one.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use cove_diag::Span;
-use cove_sema::facts::MethodTarget;
+use cove_sema::facts::{MethodTarget, Signature};
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Arg, Expr, FnDecl};
 
@@ -115,7 +116,18 @@ impl Body<'_> {
         if !self.reached(id) {
             return self.dead(expr);
         }
-        let Some(shape) = self.plan.shape(id) else {
+        // A generic declaration is not a function. Which one this call runs
+        // is decided by what its type parameters stand for here, and that is
+        // read off the call rather than off the declaration.
+        let id = if self.plan.decls[id.index()].decl.generics.is_empty() {
+            id
+        } else {
+            match self.instantiation(expr, id, base, args) {
+                Some(id) => id,
+                None => return self.dead(expr),
+            }
+        };
+        let Some(shape) = self.shape(id) else {
             // The declaration itself is a gap, already reported where it is
             // written. Saying so again at every call site would bury it.
             return self.dead(expr);
@@ -242,8 +254,42 @@ impl Body<'_> {
     /// calls one through here: a call through a value is
     /// [`Body::call_value`], whose parameters a function type describes and
     /// which therefore has neither a default nor a variadic to read.
+    ///
+    /// An instantiation is also numbered past them and *does* have one: its
+    /// labels, its defaults and its body are the generic declaration's. See
+    /// [`Body::origin`].
     fn declaration(&self, callee: FunctionId) -> Option<&FnDecl> {
-        declared(self.plan, callee)
+        declared(self.plan, self.origin(callee))
+    }
+
+    /// The declaration a [`FunctionId`] was lowered from.
+    ///
+    /// Itself for a declaration, and the generic declaration for an
+    /// instantiation of one. Everything a call site reads out of the syntax —
+    /// a parameter's name, a parameter's default — is the declaration's, and
+    /// an instantiation changes what its types mean and nothing about how it
+    /// was written.
+    pub(super) fn origin(&self, callee: FunctionId) -> FunctionId {
+        match self.pool.instances.get(&callee) {
+            Some(instance) => instance.decl,
+            None => callee,
+        }
+    }
+
+    /// What a call to `callee` passes and answers.
+    ///
+    /// [`Plan::shape`] for a declaration and the instantiation's own boundary
+    /// for an instantiation, which is the one place the two are told apart: a
+    /// generic declaration has no boundary of its own, so there is nothing
+    /// for the plan to answer with.
+    pub(super) fn shape(&self, callee: FunctionId) -> Option<CallShape> {
+        if let Some(shape) = self.plan.shape(callee) {
+            return Some(shape);
+        }
+        self.pool
+            .instances
+            .get(&callee)
+            .map(|instance| instance.boundary.shape())
     }
 
     /// The names the declaration gives its written parameters, which are what
@@ -290,6 +336,12 @@ impl Body<'_> {
     ///   `Body::layout`, `Plan::resolve` and the host-module questions all
     ///   answer as they would inside the declaration.
     ///
+    /// A default of a *generic* declaration is walked under the callee's
+    /// instantiation as well as under its module, and for the same reason:
+    /// `= Cell(0)` written in a body whose parameter is a `T` records facts
+    /// in the declaration's terms, and this call site is where they are
+    /// completed.
+    ///
     /// An extra frame would have been the other way, and it would have cost a
     /// call per omitted argument and a synthesised `Function` per defaulted
     /// parameter for exactly this.
@@ -314,7 +366,12 @@ impl Body<'_> {
         // below writes into this body while it is still holding the callee's
         // syntax — and the syntax outlives both.
         let plan = self.plan;
-        let Some(decl) = declared(plan, callee) else {
+        let origin = self.origin(callee);
+        let (generics, args) = match self.pool.instances.get(&callee) {
+            Some(instance) => (instance.generics.clone(), instance.args.clone()),
+            None => (Vec::new(), Vec::new()),
+        };
+        let Some(decl) = declared(plan, origin) else {
             self.errors.push(gap::gap(
                 "a default of a declaration this lowering cannot read",
                 span,
@@ -332,9 +389,11 @@ impl Body<'_> {
             .take(at)
             .map(|param| param.name.node.as_str())
             .collect();
-        let module: &str = &plan.decls[callee.index()].module;
+        let module: &str = &plan.decls[origin.index()].module;
 
         let outer = std::mem::replace(&mut self.module, module);
+        let held_generics = std::mem::replace(&mut self.generics, generics);
+        let held_args = std::mem::replace(&mut self.args, args);
         self.frame.push_isolated_scope();
         if let (true, Some(value)) = (shape.receiver, receiver) {
             self.frame.bind("self", value.slot, value.layout);
@@ -351,6 +410,8 @@ impl Body<'_> {
         let clears = self.frame.pop_scope();
         self.clear(&clears, default.span);
         self.module = outer;
+        self.generics = held_generics;
+        self.args = held_args;
         value
     }
 
@@ -418,6 +479,264 @@ impl Body<'_> {
             passed.push(value.expect("every parameter was filled, defaulted or collected"));
         }
         passed
+    }
+
+    // ---- monomorphisation ---------------------------------------------------
+
+    /// The function this call site's type arguments name, lowering it if this
+    /// is the first call site to ask for it.
+    ///
+    /// The arguments are not written down anywhere. What is written down is
+    /// what the checker settled — the type of every operand of this call and
+    /// the type of the call itself — and the declaration's `Signature`, whose
+    /// types are the declaration's own and therefore hold the `Ty::Param`s the
+    /// arguments go in place of. Walking a declared type and a settled one
+    /// together is what reads one off the other, and it is a *reading* rather
+    /// than an inference: the checker already unified these two, which is why
+    /// this call was accepted at all.
+    ///
+    /// The call's own answer is walked first, because it is the one position
+    /// that carries a type argument nothing else mentions —
+    /// `fn empty<T>() -> Array<T>` says what `T` is only in what it hands
+    /// back.
+    ///
+    /// **An explicit type argument needs nothing of its own.** `f<Int>(x)`
+    /// was resolved by the checker before this crate saw it, and every type it
+    /// settled at the call site is settled *with the argument applied*. What
+    /// this cannot read is a type parameter that appears in neither the
+    /// parameters nor the answer, because then the written argument is the
+    /// only place it exists and no fact records it — see the gap below.
+    fn instantiation(
+        &mut self,
+        expr: &Expr,
+        decl: FunctionId,
+        base: Option<&Expr>,
+        args: &[Arg],
+    ) -> Option<FunctionId> {
+        // Both are `&'a` borrows of things that outlive this body, taken out
+        // first so that the walk below can write into the frame while it is
+        // still holding the callee's signature.
+        let checked = self.checked;
+        let plan = self.plan;
+        let held = &plan.decls[decl.index()];
+        let Some(signature) = checked.facts.signature(held.decl.span.file, held.decl.span) else {
+            self.errors.push(gap::gap(
+                "a call to a declaration the checker recorded no signature for",
+                expr.span,
+            ));
+            return None;
+        };
+
+        let mut found: BTreeMap<Arc<str>, Ty> = BTreeMap::new();
+        if let Some(ty) = self.ty(expr) {
+            read_off(&signature.ret, &ty, &mut found);
+        }
+        if let (Some(receiver), Some(base)) = (&signature.receiver, base) {
+            if let Some(ty) = self.ty(base) {
+                read_off(receiver, &ty, &mut found);
+            }
+        }
+        self.read_off_arguments(held.decl, signature, args, &mut found);
+
+        // The call site's module, because that is the vocabulary the types
+        // that were just read off are spelled in: a type this module declares
+        // is a bare name here and a qualified one everywhere else.
+        let module = self.module.to_string();
+        let mut settled = Vec::with_capacity(held.decl.generics.len());
+        for param in &held.decl.generics {
+            let name = param.name.node.as_str();
+            let Some(ty) = found.get(name) else {
+                // Nothing the checker recorded mentions this parameter, so
+                // there is nothing here to complete the declaration with. It
+                // is reported rather than guessed at, because the answer
+                // exists — the call wrote it — and it is a fact `cove-sema`
+                // does not keep.
+                self.errors.push(gap::gap(
+                    &format!(
+                        "a call to `{}.{}` whose type argument `{name}` appears in neither its \
+                         parameters nor its answer, so no recorded fact says what it is",
+                        held.module, held.name
+                    ),
+                    expr.span,
+                ));
+                return None;
+            };
+            // Written out in the package's own vocabulary, so that two call
+            // sites in two modules passing one type ask for one
+            // instantiation — and so that the body, which is lowered in the
+            // *declaring* module, can read the name it is handed.
+            settled.push(shapes::qualified(checked, &module, ty));
+        }
+        self.instantiate(expr, decl, settled)
+    }
+
+    /// Reads the type arguments a call's written arguments carry.
+    ///
+    /// Which parameter each argument fills is [`Body::assignment`]'s
+    /// question, and it is not asked here: that walk needs a `CallShape`,
+    /// which needs the layouts, which is what this is on the way to. So the
+    /// lining-up is done again in the small — a label names its parameter, a
+    /// positional argument fills the next one, and a variadic takes the rest —
+    /// and it is allowed to be approximate. An argument this cannot place
+    /// contributes nothing, and the checker has already agreed with every one
+    /// it can.
+    fn read_off_arguments(
+        &self,
+        decl: &FnDecl,
+        signature: &Signature,
+        args: &[Arg],
+        found: &mut BTreeMap<Arc<str>, Ty>,
+    ) {
+        let written = decl.params.len();
+        let variadic = decl
+            .params
+            .last()
+            .is_some_and(|param| param.variadic)
+            .then(|| written - 1);
+        let mut next = 0usize;
+        for arg in args {
+            let at = match &arg.label {
+                Some(label) => match decl
+                    .params
+                    .iter()
+                    .position(|param| param.name.node == label.node)
+                {
+                    Some(at) => at,
+                    None => continue,
+                },
+                None if variadic.is_some_and(|at| next >= at) => written - 1,
+                None if next < written => next,
+                None => continue,
+            };
+            next = at + 1;
+            let Some(declared) = signature.params.get(at) else {
+                continue;
+            };
+            let Some(ty) = self.ty(&arg.value) else {
+                continue;
+            };
+            // A variadic parameter's declared type is its *element* type, and
+            // a spread argument is the sequence rather than one of them. So
+            // what lines up with the declaration is what the sequence holds.
+            let ty = match (arg.spread, &ty) {
+                (true, Ty::Array(elem) | Ty::Vector(elem)) => (**elem).clone(),
+                (true, _) => continue,
+                (false, _) => ty,
+            };
+            read_off(declared, &ty, found);
+        }
+    }
+
+    /// The function `decl` lowers to when its type parameters stand for
+    /// `args`, lowering it if nothing has asked for it before.
+    ///
+    /// The number is taken and recorded **before** the body is lowered, which
+    /// is what makes a recursive generic terminate: `fn f<T>(x: T) { f(x) }`
+    /// asks for `f<Int>` from inside `f<Int>` and finds the number rather
+    /// than starting again. What that does *not* stop is a generic whose call
+    /// to itself grows the type — `f(Cell(x))` asks for `f<Cell<Int>>`, which
+    /// is a different key every time — so the chain is bounded as well. See
+    /// [`gap::MAX_DEPTH`] for the bound and why it is where it is.
+    ///
+    /// The memo is keyed by the arguments as they are *written* rather than
+    /// by the types themselves, because that string is the instantiation's
+    /// name and one key is better than two things that have to agree. A `Ty`
+    /// is not hashable and the rendering is only lossy for a `Ty::Unknown`,
+    /// which is a compile error before it can reach here.
+    fn instantiate(&mut self, expr: &Expr, decl: FunctionId, args: Vec<Ty>) -> Option<FunctionId> {
+        let plan = self.plan;
+        let held = &plan.decls[decl.index()];
+        let written: Vec<String> = args.iter().map(Ty::to_string).collect();
+        let written = written.join(", ");
+        let key = (decl, written.clone());
+        if let Some(id) = self.pool.instance_ids.get(&key) {
+            return Some(*id);
+        }
+
+        // The name a diagnostic and `Program::function_named` read. A
+        // declaration cannot be called `f<Int>`, because `<` is not a name
+        // character, so an instantiation's name cannot collide with one — and
+        // it reads at a call site the way the source would have written it.
+        let name: Arc<str> = Arc::from(format!("{}<{written}>", held.name));
+        let chain = format!("{}.{name}", held.module);
+        if self.pool.open.len() >= gap::MAX_DEPTH {
+            let mut steps = self.pool.open.clone();
+            steps.push(chain);
+            self.errors.push(gap::too_deep(&steps, expr.span));
+            return None;
+        }
+
+        let generics: Vec<Arc<str>> = held
+            .decl
+            .generics
+            .iter()
+            .map(|param| Arc::from(param.name.node.as_str()))
+            .collect();
+        let module = held.module.to_string();
+        let boundary = super::boundary_of(
+            self.checked,
+            &module,
+            held.decl,
+            &generics,
+            &args,
+            self.pool,
+            self.errors,
+        )?;
+
+        let at = self.pool.appended.len();
+        let id = FunctionId((plan.decls.len() + at) as u32);
+        self.pool.appended.push(None);
+        self.pool.instance_ids.insert(key, id);
+        self.pool.instances.insert(
+            id,
+            super::Instance {
+                decl,
+                generics: generics.clone(),
+                args: args.clone(),
+                boundary: boundary.clone(),
+            },
+        );
+        self.pool.open.push(chain);
+        let lowered = super::lower_body(
+            self.checked,
+            self.sources,
+            plan,
+            held,
+            &boundary,
+            name,
+            &generics,
+            &args,
+            self.pool,
+            self.errors,
+            self.wanted,
+        );
+        self.pool.open.pop();
+        self.pool.appended[at] = Some(lowered);
+        Some(id)
+    }
+
+    /// The declaration a method call through a bounded type parameter
+    /// reaches.
+    ///
+    /// Inside `fn headline<T: Summary>(entry: T)` the checker recorded no
+    /// target for `entry.summary()`, and that is the right answer about the
+    /// *declaration*: which implementation it reaches is decided by the
+    /// argument, not by the source. Monomorphisation is what turns it into an
+    /// ordinary [`Inst::Call`] — this body is lowered for one type, so there
+    /// is one implementation and it is found the way a `Type.method` call
+    /// finds one.
+    ///
+    /// A receiver whose settled type is a builtin answers `None` and falls
+    /// through to the builtin path, because `T: Ordered` may be satisfied by
+    /// an `Int` and an `Int`'s operations belong to the language rather than
+    /// to a declaration.
+    pub(super) fn conformance(&mut self, base: &Expr, method: &str) -> Option<FunctionId> {
+        let named = match self.ty(base)? {
+            Ty::Struct(name, _) | Ty::Enum(name, _) => name,
+            _ => return None,
+        };
+        let (owner, short) = shapes::declaring(self.checked, self.module, &named)?;
+        self.plan.method_of(&owner, &short, method)
     }
 
     // ---- a variadic parameter ---------------------------------------------
@@ -582,7 +901,7 @@ impl Body<'_> {
     /// what is spread is the elements the vector had, and one object to walk
     /// is one walk to write.
     fn spread_source(&mut self, value: Val, from: &Expr) -> Val {
-        let Some(Ty::Vector(elem)) = self.ty(from).cloned() else {
+        let Some(Ty::Vector(elem)) = self.ty(from) else {
             return value;
         };
         let Some(array) = self.vector_snapshot(&value, &elem, from.span) else {
@@ -1001,4 +1320,67 @@ impl Body<'_> {
 /// body can read the callee's syntax while it is writing into its own frame.
 fn declared<'a>(plan: &'a super::Plan<'a>, callee: FunctionId) -> Option<&'a FnDecl> {
     plan.decls.get(callee.index()).map(|decl| decl.decl)
+}
+
+/// Reads a declaration's type parameters off one use of it.
+///
+/// `declared` is written in the declaration's own terms and holds the
+/// [`Ty::Param`]s; `actual` is what the checker settled at the use. Walking
+/// the two together is what says what each parameter stands for.
+///
+/// The **first** answer for a parameter is kept. The checker has already made
+/// every position of one call agree, so a second walk can only confirm what
+/// the first found — except where the position says nothing, and that is what
+/// keeping the first is protecting against.
+///
+/// Two names are not compared where the heads are nominal. A signature is
+/// written in the declaring module's vocabulary, where a local type is a bare
+/// name, and a use site holds whatever its own module calls it; the checker
+/// unified the two before this crate saw them, which is why the call was
+/// accepted, so the heads agree whatever they are spelled.
+fn read_off(declared: &Ty, actual: &Ty, found: &mut BTreeMap<Arc<str>, Ty>) {
+    match (declared, actual) {
+        (Ty::Param(name), _) => {
+            if settles(actual) {
+                found.entry(name.clone()).or_insert_with(|| actual.clone());
+            }
+        }
+        (Ty::Array(a), Ty::Array(b))
+        | (Ty::Vector(a), Ty::Vector(b))
+        | (Ty::Set(a), Ty::Set(b))
+        | (Ty::Option(a), Ty::Option(b))
+        | (Ty::Task(a), Ty::Task(b))
+        | (Ty::Shared(a), Ty::Shared(b)) => read_off(a, b, found),
+        (Ty::Map(a, b), Ty::Map(c, d))
+        | (Ty::MapEntry(a, b), Ty::MapEntry(c, d))
+        | (Ty::Result(a, b), Ty::Result(c, d)) => {
+            read_off(a, c, found);
+            read_off(b, d, found);
+        }
+        (Ty::Struct(_, a), Ty::Struct(_, b)) | (Ty::Enum(_, a), Ty::Enum(_, b))
+            if a.len() == b.len() =>
+        {
+            for (declared, actual) in a.iter().zip(b) {
+                read_off(declared, actual, found);
+            }
+        }
+        (Ty::Fn(a), Ty::Fn(b)) if a.params.len() == b.params.len() => {
+            for (declared, actual) in a.params.iter().zip(&b.params) {
+                read_off(declared, actual, found);
+            }
+            read_off(&a.ret, &b.ret, found);
+        }
+        _ => {}
+    }
+}
+
+/// Whether a settled type says enough to be an instantiation's argument.
+///
+/// A diverging position says which copy of a body a call reaches only by
+/// accident — `f(if c { 1 } else { return })` would read `T` as `!` from the
+/// arm and `Int` from the answer — and an unknown is a compile error the
+/// lowering reports elsewhere. Both are skipped so that a position that does
+/// say something is the one that is read.
+fn settles(ty: &Ty) -> bool {
+    !matches!(ty, Ty::Never | Ty::Unknown(_))
 }

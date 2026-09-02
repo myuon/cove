@@ -30,6 +30,24 @@
 //! own beyond the shared one: a per-construct refusal code is what a
 //! consumer starts matching on, and then the temporary thing has become an
 //! interface.
+//!
+//! # An unbounded instantiation is neither
+//!
+//! There is a third code here and it is deliberately not a gap, because a
+//! later task does not remove it. `fn f<T>(x: T) { f(Cell(x)) }` checks —
+//! [ADR 0035](../../../../docs/adr/0035-a-value-type-may-not-contain-itself.md)
+//! is about a *declaration*'s layout and `Cell<Cell<Int>>` is finite — and it
+//! asks for `f<Int>`, `f<Cell<Int>>`, `f<Cell<Cell<Int>>>` and so on without
+//! end. Every one of them is a different width, so monomorphisation cannot
+//! answer with one copy, and `docs/LINEAR_VM.md` says why nothing else can
+//! answer at all: a frame's per-slot `Repr` map is static.
+//!
+//! So this is a program the backend declines, and it is the one thing in this
+//! crate that is. It is written down as its own code rather than as a gap
+//! because a reader who meets it has something to do about it — the language
+//! already has `dyn Trait` for the case where one copy of the code is
+//! wanted — and because a compiler that does not terminate is worse than one
+//! that refuses.
 
 use cove_diag::{Diagnostic, Span};
 use cove_sema::typeck::Ty;
@@ -47,6 +65,46 @@ pub(crate) fn gap(what: &str, span: Span) -> Diagnostic {
         .at(span)
         .rule("Every valid checked program lowers; a construct this backend has not been taught is a gap in the backend.")
         .help("this is an internal gap in the linear-memory lowering, not a fault in the program")
+}
+
+/// A generic that instantiates itself at a type built from its own
+/// parameter, which has no finite monomorphisation.
+pub(crate) const INSTANTIATION_DEPTH: &str = "cove::lower::instantiation_depth";
+
+/// How many instantiations may be open at once.
+///
+/// The bound exists because monomorphisation is the only representation this
+/// machine admits and a chain that grows a type at every step has no fixed
+/// point. Where to put it is a judgement rather than a derivation, and this
+/// is the one made: **eight**, because an instantiation asked for from inside
+/// an instantiation asked for from inside an instantiation is already a shape
+/// no program in the corpus writes — the deepest chain there is one — and
+/// eight leaves that room several times over while still answering a runaway
+/// in the time it takes to lower eight functions.
+///
+/// The number is not part of the language, the IR or any public API, for the
+/// reason `docs/LINEAR_VM.md` gives about the stack limit: it is what this
+/// implementation can afford, and a program that depends on it is depending
+/// on the wrong thing.
+pub(crate) const MAX_DEPTH: usize = 8;
+
+/// The instantiation chain ran past [`MAX_DEPTH`], named step by step.
+///
+/// The chain rather than the count, because the count says only that
+/// something grew and the chain says what grew it: the first line a reader
+/// needs is which call made the type one deeper than the one that called it.
+pub(crate) fn too_deep(chain: &[String], span: Span) -> Diagnostic {
+    Diagnostic::error(
+        INSTANTIATION_DEPTH,
+        format!(
+            "this call instantiates a generic more than {MAX_DEPTH} deep, so there is no finite \
+             set of functions to lower it to:\n  {}",
+            chain.join("\n  ")
+        ),
+    )
+    .at(span)
+    .rule("A generic is lowered to one function per instantiation, because a value's width depends on its type argument and a frame's reference map is static.")
+    .help("break the chain, or take the argument as a `dyn Trait`, which is one function for every type that conforms to it")
 }
 
 /// The checker declined to type this expression, and a backend cannot make

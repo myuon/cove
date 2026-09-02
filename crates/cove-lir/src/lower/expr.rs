@@ -42,7 +42,7 @@
 use cove_diag::Span;
 use cove_schema::builtins::FreeBuiltinKind;
 use cove_sema::typeck::Ty;
-use cove_syntax::ast::{Arg, BinaryOp, Block, Expr, ExprKind, StrPart, Type, UnaryOp};
+use cove_syntax::ast::{Arg, BinaryOp, Block, Expr, ExprKind, StrPart, UnaryOp};
 
 use super::collections;
 use super::frame::Val;
@@ -164,10 +164,10 @@ impl Body<'_> {
             }
             ExprKind::Call {
                 callee,
-                generics,
                 args,
                 trailing,
-            } => self.call(expr, callee, generics, args, trailing.is_some()),
+                ..
+            } => self.call(expr, callee, args, trailing.is_some()),
             ExprKind::Field { base, name } => self.field(expr, base, &name.node),
             ExprKind::Try(inner) => self.try_expr(expr, inner),
 
@@ -285,7 +285,7 @@ impl Body<'_> {
         // `None` is a case, not a name to bind: it is the one case in the
         // language with no payload and no qualifier, so it is written where
         // a name would be.
-        if let Some(ty) = self.ty(expr).cloned() {
+        if let Some(ty) = self.ty(expr) {
             if shapes::case_at(self.checked, self.module, &ty, name).is_some() {
                 return self.enum_case(expr, &ty, name, &[]);
             }
@@ -757,7 +757,7 @@ impl Body<'_> {
     /// is the enum, whose cases are what `E.Case` names.
     fn field(&mut self, expr: &Expr, base: &Expr, name: &str) -> Val {
         if self.is_namespace(base) {
-            if let Some(ty) = self.ty(expr).cloned() {
+            if let Some(ty) = self.ty(expr) {
                 if shapes::case_at(self.checked, self.module, &ty, name).is_some() {
                     return self.enum_case(expr, &ty, name, &[]);
                 }
@@ -980,7 +980,7 @@ impl Body<'_> {
     /// comparison against the location itself: no read is needed, because
     /// the words are already in the frame.
     fn try_expr(&mut self, expr: &Expr, inner: &Expr) -> Val {
-        let Some(ty) = self.owned_ty(inner) else {
+        let Some(ty) = self.settled_ty(inner) else {
             return self.dead(expr);
         };
         let carries = match &ty {
@@ -1291,17 +1291,14 @@ impl Body<'_> {
     /// initializer or a case of an enum, then a host operation. That order
     /// is the interpreter's, and it is what keeps a local named `println`
     /// from becoming a host call.
-    fn call(
-        &mut self,
-        expr: &Expr,
-        callee: &Expr,
-        generics: &[Type],
-        args: &[Arg],
-        trailing: bool,
-    ) -> Val {
-        if !generics.is_empty() {
-            return self.gap("a call with explicit type arguments", expr);
-        }
+    ///
+    /// The type arguments a call *writes* are not among what this reads, and
+    /// that is not an omission. The checker resolved `f<Int>(x)` before this
+    /// crate saw it and settled every type at the call site with the argument
+    /// already applied, so which instantiation the call reaches is read off
+    /// the facts rather than off the annotation —
+    /// see [`Body::instantiation`].
+    fn call(&mut self, expr: &Expr, callee: &Expr, args: &[Arg], trailing: bool) -> Val {
         if trailing {
             return self.gap("a call with a trailing lambda", expr);
         }
@@ -1340,8 +1337,19 @@ impl Body<'_> {
         }
         // A `dyn Trait` receiver names no declaration, because which one it
         // reaches is a fact about the value rather than about the source.
-        if let Some(Ty::Dyn(trait_name)) = self.ty(base).cloned() {
+        if let Some(Ty::Dyn(trait_name)) = self.ty(base) {
             return self.call_dyn(expr, base, &trait_name, name, args);
+        }
+        // A receiver the declaration wrote as a bounded type parameter names
+        // no declaration either, and for the same reason — but this body is
+        // lowered for one type argument, so there is exactly one
+        // implementation and it is found statically. That is the whole of
+        // what a bound costs here: no dictionary, no vtable, and one
+        // `Inst::Call`.
+        if matches!(self.raw_ty(base), Some(Ty::Param(_))) {
+            if let Some(id) = self.conformance(base, name) {
+                return self.call_target(expr, id, Some(base), args);
+            }
         }
         if self.is_namespace(base) {
             return self.call_qualified(expr, base, name, args);
@@ -1354,7 +1362,7 @@ impl Body<'_> {
         if let Some(id) = self.plan.resolve(self.checked, self.module, name) {
             return self.call_declared(expr, id, args);
         }
-        if let Some(ty) = self.ty(expr).cloned() {
+        if let Some(ty) = self.ty(expr) {
             // `Ok(v)`, `Err(e)`, `Some(v)`: the language's own cases, which
             // are written unqualified because there is nothing else they
             // could name.
@@ -1401,7 +1409,7 @@ impl Body<'_> {
         if self.is_host_module(head) {
             return self.call_host(expr, head, name, args);
         }
-        if let Some(ty) = self.ty(expr).cloned() {
+        if let Some(ty) = self.ty(expr) {
             if shapes::case_at(self.checked, self.module, &ty, name).is_some() {
                 return self.enum_case(expr, &ty, name, args);
             }
@@ -1498,7 +1506,7 @@ impl Body<'_> {
     /// unconstrained, because a host schema has no type parameters to leave
     /// open.
     fn host_result(&mut self, expr: &Expr) -> Option<LayoutId> {
-        let ty = self.owned_ty(expr)?;
+        let ty = self.settled_ty(expr)?;
         if matches!(ty, Ty::Unknown(cove_sema::typeck::Unknown::Unconstrained)) {
             return Some(self.pool.shapes.any());
         }

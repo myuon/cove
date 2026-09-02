@@ -73,7 +73,7 @@ impl Body<'_> {
         span: Span,
         dst: Option<Dest>,
     ) {
-        let Some(ty) = self.owned_ty(scrutinee) else {
+        let Some(ty) = self.settled_ty(scrutinee) else {
             return;
         };
         let subject = self.expr(scrutinee);

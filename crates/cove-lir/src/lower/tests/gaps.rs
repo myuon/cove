@@ -60,15 +60,21 @@ fn an_async_function_value_is_a_gap_of_its_own() {
     );
 }
 
+/// A generic declaration is not one function, and one nothing instantiates
+/// is not any.
+///
+/// It used to be three gaps — the declaration, and its parameter's type
+/// twice. There is nothing to report now and nothing to lower: a `T` has no
+/// words, so the only thing that can have words is an instantiation, and
+/// nothing here asks for one.
 #[test]
-fn a_generic_declaration_names_itself_once_and_its_uses_after() {
-    assert_eq!(
-        refused("fn id<T>(x: T) -> T { x }"),
-        vec![
-            "not yet lowered: a generic function",
-            "not yet lowered: a value of type `T`",
-            "not yet lowered: a value of type `T`",
-        ]
+fn a_generic_nothing_instantiates_costs_no_function() {
+    let (sources, checked) = super::checked("fn id<T>(x: T) -> T { x }");
+    let program = crate::lower(&checked, &sources).expect("the program lowers");
+    assert_eq!(program.function_named("m", "id"), None);
+    assert!(
+        !program.functions.iter().any(|f| f.name.contains('<')),
+        "nothing asked for an instantiation"
     );
 }
 

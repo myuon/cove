@@ -70,7 +70,7 @@ impl Body<'_> {
     /// is the element layout's width, so an `Array<Point>` is a run of
     /// two-word elements rather than a run of addresses.
     pub(super) fn array_literal(&mut self, expr: &Expr, items: &[Expr]) -> Val {
-        let Some(ty) = self.owned_ty(expr) else {
+        let Some(ty) = self.settled_ty(expr) else {
             return self.dead(expr);
         };
         let Ty::Array(element) = ty.clone() else {
@@ -185,7 +185,7 @@ impl Body<'_> {
     /// is here. That is the rule [`Body::vector_of`] already follows, said of
     /// the two families whose emptiness a call could not describe.
     fn keyed_of(&mut self, expr: &Expr, args: &[Arg], what: &str) -> Val {
-        let Some(ty) = self.owned_ty(expr) else {
+        let Some(ty) = self.settled_ty(expr) else {
             return self.dead(expr);
         };
         let Some(layout) = self.layout(&ty, expr.span) else {
@@ -231,7 +231,7 @@ impl Body<'_> {
     /// with no spare room is not a special case: the first `push` grows it
     /// like any other full one.
     pub(super) fn vector_of(&mut self, expr: &Expr, args: &[Arg]) -> Val {
-        let Some(ty) = self.owned_ty(expr) else {
+        let Some(ty) = self.settled_ty(expr) else {
             return self.dead(expr);
         };
         let Ty::Vector(element) = ty.clone() else {
@@ -576,7 +576,7 @@ impl Body<'_> {
         index: Slot,
         elem: LayoutId,
     ) -> Val {
-        let Some(ty) = self.owned_ty(expr) else {
+        let Some(ty) = self.settled_ty(expr) else {
             return self.dead(expr);
         };
         let Some(layout) = self.layout(&ty, expr.span) else {
@@ -699,7 +699,7 @@ impl Body<'_> {
     /// new objects. Only a `Vector` shares its storage, and only a `Vector`
     /// is copied first.
     pub(super) fn for_expr(&mut self, binding: &Ident, iterable: &Expr, body: &Block, span: Span) {
-        let Some(ty) = self.owned_ty(iterable) else {
+        let Some(ty) = self.settled_ty(iterable) else {
             return;
         };
         match &ty {

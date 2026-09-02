@@ -26,6 +26,26 @@
 //! layout is what a copy's width, a location's reference words and a field's
 //! offset are all read off.
 //!
+//! # A generic is one function per instantiation
+//!
+//! `docs/LINEAR_VM.md` says why there was no choice: a slot's `Repr` is fixed
+//! for the whole function, that is what makes one static reference map
+//! correct at every program counter, and a generic value's width is a fact
+//! about the type argument — `Cell<Int>` is one word and `Cell<Point>` is
+//! two. Carrying layouts at run time would make widths dynamic and take the
+//! map with them; boxing every generic value would allocate on `f(1)` and
+//! make a type parameter mean what `dyn Trait` already means. So `f<Int>` and
+//! `f<Point>` are two functions and two frames, and a generic `struct` at two
+//! instantiations is two layouts.
+//!
+//! It costs one substitution and no second walk. The checker walked the
+//! generic body once with its type parameters rigid, so every fact in it is
+//! recorded in terms of them, and `Body::ty` completes one as it is read.
+//! Which arguments a call site asks for is read off the facts the checker
+//! settled there — `Body::instantiation` is that reading, and it is also why
+//! an explicit type argument needs no path of its own: the checker applied
+//! it before this crate saw anything.
+//!
 //! # The shape of a lowered body
 //!
 //! Control flow is flat. There are no basic blocks and no block arguments:
@@ -64,7 +84,7 @@ use std::sync::Arc;
 
 use cove_diag::{Diagnostic, SourceMap, Span};
 use cove_sema::facts::MethodTarget;
-use cove_sema::resolve::{FnKey, Node, Program as Checked, ResolvedModule};
+use cove_sema::resolve::{FnKey, Node, Program as Checked};
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Expr, FnDecl};
 
@@ -269,15 +289,16 @@ fn emit<'a>(
             stub(&plan.decls[id])
         });
     }
-    // A lambda is a `Function` of its own, numbered after every declaration
-    // and discovered while a body is being walked rather than by the plan. A
-    // nested lambda is appended while its enclosing one is being lowered, so
-    // this list is complete only once the loop above has finished — which is
-    // why it is drained here and not built beside `plan.decls`.
+    // A lambda and an instantiation are `Function`s of their own, numbered
+    // after every declaration and discovered while a body is being walked
+    // rather than by the plan. Either may be appended while the body that
+    // asked for it is still being lowered, so this list is complete only once
+    // the loop above has finished — which is why it is drained here and not
+    // built beside `plan.decls`.
     functions.extend(
-        pool.lambdas
+        pool.appended
             .drain(..)
-            .map(|held| held.expect("every reserved lambda was lowered into its own slot")),
+            .map(|held| held.expect("every reserved function was lowered into its own slot")),
     );
 
     let program = Program {
@@ -294,10 +315,17 @@ fn emit<'a>(
         // an entry point that resolved to one would run and say nothing
         // rather than saying it was not there — and `run_entry` already has
         // a good answer for a name a program does not carry.
+        //
+        // A generic declaration is a stub for the same reason and is left out
+        // for the same reason. What a program carries is its
+        // instantiations — `f<Int>` — and there is no entry point among them:
+        // a command names a declaration, and which instantiation of a generic
+        // one it meant is not a question a command line can answer.
         by_name: plan
             .by_name
             .iter()
             .filter(|(_, id)| reach.contains(id))
+            .filter(|(_, id)| plan.decls[id.index()].decl.generics.is_empty())
             .map(|(key, id)| (key.clone(), *id))
             .collect(),
     };
@@ -369,9 +397,25 @@ struct Decl<'a> {
     /// raised: a default body belongs to the trait and has no per-type
     /// declaration to read a boundary off.
     from_trait_default: Option<String>,
+    /// The generic type this is a method of, when it is one.
+    ///
+    /// A method of `Cell<T>` has no boundary of its own for the same reason a
+    /// generic function has none — its receiver's width depends on `T` — and
+    /// it needs one thing more than a generic function does: the parameters
+    /// are the *type*'s rather than the declaration's, so which arguments a
+    /// call settles is read off the receiver rather than off the signature.
+    /// That is not built, and this is what names it as the work rather than
+    /// letting it fail as "a value of type `Cell<T>`", which says where the
+    /// trouble is and not what is owed.
+    on_generic_type: Option<String>,
 }
 
 /// A declaration's parameters and answer, as layouts.
+///
+/// A generic declaration has one of these per instantiation rather than one
+/// of its own, so it is cloned into [`Instance`] and read from there at a
+/// call site — see [`Body::shape`].
+#[derive(Clone)]
 struct Boundary {
     /// The layout of each parameter, **receiver first** where the
     /// declaration has one. There are no type groups and nothing is
@@ -471,6 +515,9 @@ impl<'a> Plan<'a> {
                 let id = plan.declare(module, lowered, entry.decl.as_ref());
                 plan.decls[id.index()].from_trait_default = entry.from_trait_default.clone();
                 let owner = resolved.owner_of(type_name).unwrap_or(name.as_str());
+                if is_generic_type(checked, owner, type_name) {
+                    plan.decls[id.index()].on_generic_type = Some(type_name.clone());
+                }
                 plan.methods
                     .insert((owner.to_string(), type_name.clone(), method.clone()), id);
             }
@@ -493,18 +540,6 @@ impl<'a> Plan<'a> {
         errors: &mut Vec<Diagnostic>,
     ) {
         self.lowered = reach.clone();
-        for (name, resolved) in &checked.modules {
-            // A declaration whose *layout* cannot be built is reported once,
-            // where it is written, rather than at every use — but only for a
-            // module this pass is lowering something out of. A module the
-            // slice does not enter declares nothing this entry can hold.
-            if reach
-                .iter()
-                .any(|id| &*self.decls[id.index()].module == name)
-            {
-                declare_gaps(resolved, errors);
-            }
-        }
         for at in 0..self.decls.len() {
             let id = FunctionId(at as u32);
             if !reach.contains(&id) {
@@ -512,20 +547,34 @@ impl<'a> Plan<'a> {
             }
             let decl = &self.decls[at];
             let module = decl.module.to_string();
-            let boundary = match &decl.from_trait_default {
-                // A default body belongs to the trait, and the checker
-                // checks it once there rather than once per conformance —
-                // so there is no per-type declaration to read a boundary
-                // off, and the trait method has none recorded either.
-                Some(trait_name) => {
-                    let named = format!("`{trait_name}.{}`", short_name(&decl.name));
-                    errors.push(gap::gap(
-                        &format!("{named}, a trait method's default body"),
-                        decl.decl.span,
-                    ));
-                    None
-                }
-                None => boundary_of(checked, &module, decl.decl, pool, errors),
+            let boundary = if let Some(trait_name) = &decl.from_trait_default {
+                // A default body belongs to the trait, and the checker checks
+                // it once there rather than once per conformance — so there
+                // is no per-type declaration to read a boundary off, and the
+                // trait method has none recorded either.
+                let named = format!("`{trait_name}.{}`", short_name(&decl.name));
+                errors.push(gap::gap(
+                    &format!("{named}, a trait method's default body"),
+                    decl.decl.span,
+                ));
+                None
+            } else if let Some(type_name) = &decl.on_generic_type {
+                let named = format!("`{type_name}.{}`", short_name(&decl.name));
+                errors.push(gap::gap(
+                    &format!("{named}, a method of a generic type"),
+                    decl.decl.span,
+                ));
+                None
+            } else if !decl.decl.generics.is_empty() {
+                // A generic declaration has no one boundary. Its parameters'
+                // widths depend on what its type parameters stand for —
+                // `Cell<Int>` is one word and `Cell<Point>` is two — so the
+                // boundary belongs to an instantiation and
+                // [`Body::instantiate`] reads one per set of arguments. What
+                // stands here is a stub nothing names.
+                None
+            } else {
+                boundary_of(checked, &module, decl.decl, &[], &[], pool, errors)
             };
             self.decls[at].boundary = boundary;
         }
@@ -541,6 +590,7 @@ impl<'a> Plan<'a> {
             decl,
             boundary: None,
             from_trait_default: None,
+            on_generic_type: None,
         });
         id
     }
@@ -635,15 +685,24 @@ impl<'a> Plan<'a> {
 
     /// What a call to `id` passes and answers, as owned values: a call site
     /// reads this while it is still holding the body it is lowering.
+    ///
+    /// `None` for an id past the declarations — a lambda or an instantiation
+    /// — which [`Body::shape`] answers instead.
     fn shape(&self, id: FunctionId) -> Option<CallShape> {
-        let boundary = self.decls[id.index()].boundary.as_ref()?;
-        Some(CallShape {
-            params: boundary.params.clone(),
-            types: boundary.types.clone(),
-            returns: boundary.returns,
-            receiver: boundary.receiver,
-            variadic: boundary.variadic,
-        })
+        Some(self.decls.get(id.index())?.boundary.as_ref()?.shape())
+    }
+}
+
+impl Boundary {
+    /// What one call site has to match, as owned values.
+    fn shape(&self) -> CallShape {
+        CallShape {
+            params: self.params.clone(),
+            types: self.types.clone(),
+            returns: self.returns,
+            receiver: self.receiver,
+            variadic: self.variadic,
+        }
     }
 }
 
@@ -682,30 +741,20 @@ impl CallShape {
     }
 }
 
-/// Reports the declarations of one module that have no code here yet.
-///
-/// A `struct` and an `enum` are not among them: they declare a
-/// [`crate::Layout`] rather than a function, and the layout is built where a
-/// value of the type is met. Neither is a `trait` or an `impl` block: a trait
-/// declares an interface, and a method is an ordinary lowered function whose
-/// first parameter is the receiver.
-///
-/// What is still reported is the declaration whose *layout* this lowering
-/// cannot build at all — a generic one, whose fields are type parameters and
-/// so have no words. A type this lowering cannot represent is a gap at every
-/// use of it as well, but naming the declaration once is what says where the
-/// work is.
-fn declare_gaps(resolved: &ResolvedModule, errors: &mut Vec<Diagnostic>) {
-    for entry in resolved.structs.values() {
-        if !entry.decl.generics.is_empty() {
-            errors.push(gap::gap("a generic `struct` declaration", entry.decl.span));
-        }
-    }
-    for entry in resolved.enums.values() {
-        if !entry.decl.generics.is_empty() {
-            errors.push(gap::gap("a generic `enum` declaration", entry.decl.span));
-        }
-    }
+/// Whether `owner`'s declaration of `name` binds type parameters.
+fn is_generic_type(checked: &Checked, owner: &str, name: &str) -> bool {
+    let Some(resolved) = checked.modules.get(owner) else {
+        return false;
+    };
+    let generic = |generics: &[cove_syntax::ast::GenericParam]| !generics.is_empty();
+    resolved
+        .structs
+        .get(name)
+        .is_some_and(|entry| generic(&entry.decl.generics))
+        || resolved
+            .enums
+            .get(name)
+            .is_some_and(|entry| generic(&entry.decl.generics))
 }
 
 /// The method half of a `Type.method` declaration name.
@@ -719,18 +768,24 @@ fn short_name(name: &str) -> &str {
 /// The annotations are names; the signature is what those names resolved to
 /// in the module they were written in, which is the only reading of a
 /// `-> other.Thing` that means the same in both modules.
+///
+/// `generics` and `args` are the declaration's type parameters and what this
+/// instantiation puts in their place, and they are empty for a declaration
+/// that binds none. A generic declaration has a boundary *per instantiation*
+/// and no boundary of its own: `fn f<T>(x: T)` says how many parameters there
+/// are and nothing about how wide one is, and a width is what a frame is made
+/// of.
+#[allow(clippy::too_many_arguments)]
 fn boundary_of(
     checked: &Checked,
     module: &str,
     decl: &FnDecl,
+    generics: &[Arc<str>],
+    args: &[Ty],
     pool: &mut Pool,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<Boundary> {
     let mut ok = true;
-    if !decl.generics.is_empty() {
-        errors.push(gap::gap("a generic function", decl.span));
-        ok = false;
-    }
     if decl.is_async {
         errors.push(gap::gap("an `async fn`", decl.span));
         ok = false;
@@ -750,6 +805,7 @@ fn boundary_of(
     // does not have to be inferred from a count.
     if let Some(receiver) = &signature.receiver {
         let span = decl.receiver.map_or(decl.span, |it| it.span);
+        let receiver = &receiver.instantiate(generics, args);
         match pool.shapes.of(checked, module, receiver) {
             // `var self` is a `var` parameter written in the receiver
             // position: the method names the caller's storage, so the first
@@ -765,6 +821,7 @@ fn boundary_of(
         types.push(receiver.clone());
     }
     for (param, ty) in decl.params.iter().zip(&signature.params) {
+        let ty = &ty.instantiate(generics, args);
         // A variadic parameter is an immutable `Array<T>` inside the body
         // whatever stands in front of it, and the signature records the
         // element type `T` rather than the array — so the location the callee
@@ -793,11 +850,12 @@ fn boundary_of(
         }
         types.push(ty.clone());
     }
-    let returns = match pool.shapes.of(checked, module, &signature.ret) {
+    let ret = signature.ret.instantiate(generics, args);
+    let returns = match pool.shapes.of(checked, module, &ret) {
         Some(layout) => layout,
         None => {
             let span = decl.return_type.as_ref().map_or(decl.span, |ty| ty.span);
-            errors.push(describe(&pool.shapes, &signature.ret, span));
+            errors.push(describe(&pool.shapes, &ret, span));
             ok = false;
             shapes::UNIT
         }
@@ -809,7 +867,7 @@ fn boundary_of(
         params,
         types,
         returns,
-        ret: signature.ret.clone(),
+        ret,
     })
 }
 
@@ -875,15 +933,57 @@ struct Pool {
     host_ops: Vec<HostOp>,
     builtins: Vec<Builtin>,
     shapes: Shapes,
-    /// The functions the lambdas lowered to, numbered after every
-    /// declaration.
+    /// The functions numbered after every declaration: the body a lambda
+    /// lowered to, and the body one instantiation of a generic declaration
+    /// lowered to.
     ///
-    /// A slot is reserved — `None` — before the lambda's body is lowered,
-    /// because that body may make a closure of its own and the inner one has
-    /// to be numbered after the outer. So the entry is filled in on the way
-    /// back out, and a `None` left at the end would be a lowering that
-    /// reserved a number and never used it.
-    lambdas: Vec<Option<Function>>,
+    /// A slot is reserved — `None` — before the body is lowered, because
+    /// that body may close over a lambda or ask for an instantiation of its
+    /// own and the inner one has to be numbered after the outer. So the
+    /// entry is filled in on the way back out, and a `None` left at the end
+    /// would be a lowering that reserved a number and never used it.
+    ///
+    /// The two kinds share one list because they share the one thing that
+    /// matters about it — a number past the declarations, taken before the
+    /// body is known — and two lists would have to agree on which of them a
+    /// given number was from.
+    appended: Vec<Option<Function>>,
+    /// What each instantiation is, keyed by the id it was given.
+    ///
+    /// A call site reads a boundary and a declaration off this the way it
+    /// reads them off [`Plan`] for an ordinary declaration.
+    instances: HashMap<FunctionId, Instance>,
+    /// The id one declaration at one set of type arguments was given.
+    ///
+    /// This is what makes a generic instantiated twice at one type cost one
+    /// function, and it is also what makes a *recursive* generic terminate:
+    /// the id is recorded before the body is lowered, so a call the body
+    /// makes to itself finds the number rather than starting again.
+    instance_ids: HashMap<(FunctionId, String), FunctionId>,
+    /// The instantiations being lowered right now, outermost first.
+    ///
+    /// A chain rather than a count, because what a program that exceeds the
+    /// bound needs told is which instantiation asked for which — see
+    /// [`Body::instantiate`].
+    open: Vec<String>,
+}
+
+/// One monomorphisation: which declaration it lowers, and for what.
+///
+/// A generic declaration is not a function here. `fn f<T>(x: T)` says how
+/// many parameters there are and nothing about how wide one is, and a width
+/// is what a frame is made of — so what is lowered is one `Function` per set
+/// of type arguments, and this is what says which one.
+struct Instance {
+    /// The generic declaration in [`Plan::decls`], which is where the labels,
+    /// the defaults and the syntax of the body are read from.
+    decl: FunctionId,
+    /// The type parameters the declaration binds, in declaration order.
+    generics: Vec<Arc<str>>,
+    /// What this instantiation puts in their place, in the same order.
+    args: Vec<Ty>,
+    /// The boundary those arguments settle.
+    boundary: Boundary,
 }
 
 impl Pool {
@@ -895,7 +995,10 @@ impl Pool {
             host_ops: Vec::new(),
             builtins: Vec::new(),
             shapes: Shapes::new(),
-            lambdas: Vec::new(),
+            appended: Vec::new(),
+            instances: HashMap::new(),
+            instance_ids: HashMap::new(),
+            open: Vec::new(),
         }
     }
 
@@ -1024,6 +1127,18 @@ struct Body<'a> {
     /// to know which of the two *this* function answers rather than what the
     /// `?` was applied to.
     returns: Ty,
+    /// The type parameters the declaration this body lowers binds, in
+    /// declaration order. Empty for a declaration that binds none.
+    generics: Vec<Arc<str>>,
+    /// What this instantiation puts in their place, in the same order.
+    ///
+    /// The checker walked a generic body **once**, with its parameters rigid,
+    /// so every fact recorded inside it is written in terms of `generics`.
+    /// This is what completes one: [`Body::ty`] answers `m.Article` where the
+    /// fact says `T`, and everything downstream — a layout, a width, which
+    /// conformance a bounded call reaches — falls out of that one
+    /// substitution rather than out of a rule per construct.
+    args: Vec<Ty>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1040,7 +1155,46 @@ fn lower_function(
     let Some(boundary) = &decl.boundary else {
         return stub(decl);
     };
+    let name = decl.name.clone();
+    lower_body(
+        checked,
+        sources,
+        plan,
+        decl,
+        boundary,
+        name,
+        &[],
+        &[],
+        pool,
+        errors,
+        wanted,
+    )
+}
 
+/// Lowers one declaration's body, at one instantiation of its type
+/// parameters.
+///
+/// `generics` and `args` are empty for an ordinary declaration, and then the
+/// substitution is the identity and this is exactly what it always was. For a
+/// generic declaration they are what the call site asked for, and they are
+/// carried on the [`Body`] rather than applied to the syntax: the checker
+/// walked the body once, so the facts are recorded once in terms of the
+/// parameters, and completing a fact as it is read is what makes one recorded
+/// walk serve every instantiation.
+#[allow(clippy::too_many_arguments)]
+fn lower_body(
+    checked: &Checked,
+    sources: &SourceMap,
+    plan: &Plan,
+    decl: &Decl,
+    boundary: &Boundary,
+    name: Arc<str>,
+    generics: &[Arc<str>],
+    args: &[Ty],
+    pool: &mut Pool,
+    errors: &mut Vec<Diagnostic>,
+    wanted: &mut HashSet<FunctionId>,
+) -> Function {
     let mut frame = Frame::new();
     let mut param_slots = Vec::with_capacity(boundary.params.len());
     for layout in &boundary.params {
@@ -1061,7 +1215,7 @@ fn lower_function(
         errors,
         wanted,
         module: &decl.module,
-        name: decl.name.clone(),
+        name: name.clone(),
         lambdas: 0,
         frame,
         code: Vec::new(),
@@ -1070,6 +1224,8 @@ fn lower_function(
         held: Vec::new(),
         answer,
         returns: boundary.ret.clone(),
+        generics: generics.to_vec(),
+        args: args.to_vec(),
     };
 
     body.frame.push_scope();
@@ -1099,7 +1255,7 @@ fn lower_function(
     let reprs = body.frame.reprs().to_vec();
     Function {
         module: decl.module.clone(),
-        name: decl.name.clone(),
+        name,
         params: boundary.params.clone(),
         refs: RefMap::of(&reprs),
         reprs,
@@ -1114,17 +1270,25 @@ fn lower_function(
 
 /// What stands in for a declaration this pass did not lower.
 ///
-/// Two kinds reach it, and they end differently.
+/// Three kinds reach it, and they end differently.
 ///
 /// One is a declaration this lowering reported a gap about, and nothing ever
 /// runs that: a gap is an error and the program is not handed back.
 ///
-/// The other is a declaration [`lower_entry`]'s slice left out, and that one
+/// The second is a declaration [`lower_entry`]'s slice left out, and that one
 /// is in a program that *does* run. Nothing can name it: no call was emitted
 /// to it — the fixed point is what makes that true — and it is left out of
 /// [`Program::by_name`], so it is not an entry point either. It exists so
 /// that function ids stay dense, which is what lets a set of ids gathered by
 /// one pass mean the same thing in the next.
+///
+/// The third is a **generic declaration**, and it is in a program that runs
+/// and is not an error. It is not a stand-in for anything: a generic
+/// declaration is not one function, so there is nothing here for it to be.
+/// What the program carries instead is its instantiations, each a function
+/// of its own numbered past the declarations. This holds its number for the
+/// same reason the second kind does, and is left out of
+/// [`Program::by_name`] for the same reason too.
 fn stub(decl: &Decl) -> Function {
     let reprs = vec![Repr::Unit];
     Function {
@@ -1431,15 +1595,40 @@ impl Body<'_> {
 
     // ---- reading the checker's answers -----------------------------------
 
-    /// The type the checker settled for `expr`.
-    fn ty(&self, expr: &Expr) -> Option<&Ty> {
+    /// The type the checker settled for `expr`, in the terms the declaration
+    /// was written in.
+    ///
+    /// Inside a generic body that is a `Ty::Param`, because the checker
+    /// walked the body once with its type parameters rigid. Almost nothing
+    /// wants that: [`Body::ty`] is what a lowering asks, and this is for the
+    /// two questions that are about the *declaration* rather than about the
+    /// value — whether a receiver is a bounded type parameter, and whether an
+    /// expression diverges.
+    fn raw_ty(&self, expr: &Expr) -> Option<&Ty> {
         self.checked.facts.ty(expr.span.file, expr.id)
     }
 
-    /// The same, owned, for a caller that goes on to write into the frame
-    /// while it holds the answer.
-    fn owned_ty(&mut self, expr: &Expr) -> Option<Ty> {
-        match self.ty(expr).cloned() {
+    /// The type the checker settled for `expr`, as this instantiation
+    /// settles it.
+    ///
+    /// Owned rather than borrowed because a body of a generic declaration is
+    /// lowered once per set of type arguments and the answer is built from
+    /// the fact rather than being the fact. For a declaration that binds no
+    /// type parameters the substitution is the identity and this is a clone.
+    fn ty(&self, expr: &Expr) -> Option<Ty> {
+        self.raw_ty(expr).map(|ty| self.complete(ty))
+    }
+
+    /// A type written in the declaration's own terms, as this instantiation
+    /// settles it.
+    fn complete(&self, ty: &Ty) -> Ty {
+        ty.instantiate(&self.generics, &self.args)
+    }
+
+    /// The same as [`Body::ty`], reporting an expression the checker recorded
+    /// nothing for.
+    fn settled_ty(&mut self, expr: &Expr) -> Option<Ty> {
+        match self.ty(expr) {
             Some(ty) => Some(ty),
             None => {
                 self.errors.push(gap::gap(
@@ -1458,7 +1647,7 @@ impl Body<'_> {
     /// run. The answer is never acted on: `lower` has an error and will not
     /// hand the program back.
     fn layout_of(&mut self, expr: &Expr) -> LayoutId {
-        let Some(ty) = self.ty(expr).cloned() else {
+        let Some(ty) = self.ty(expr) else {
             self.errors.push(gap::gap(
                 "an expression the checker recorded no type for",
                 expr.span,
@@ -1476,8 +1665,12 @@ impl Body<'_> {
     /// copying from it would move words that were never produced — and where
     /// the surrounding form wants a different layout, it would not even be
     /// well formed.
+    ///
+    /// The fact is read as it was recorded. `Ty::Never` holds no type
+    /// parameter, so no instantiation can turn one into it or it into
+    /// anything else, and this is asked once per stored value.
     fn diverges(&self, expr: &Expr) -> bool {
-        matches!(self.ty(expr), Some(Ty::Never))
+        matches!(self.raw_ty(expr), Some(Ty::Never))
     }
 
     /// Copies an expression's answer into the location the surrounding form

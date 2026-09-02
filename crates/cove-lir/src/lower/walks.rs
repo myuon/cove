@@ -118,7 +118,7 @@ impl Body<'_> {
     /// receiver has — which is what `map` answering one element per element
     /// means, and what makes the loop a store rather than an append.
     fn walk_map(&mut self, expr: &Expr, obj: Val, elem: &Ty, callback: &Expr) -> Val {
-        let Some(answer) = self.owned_ty(expr) else {
+        let Some(answer) = self.settled_ty(expr) else {
             self.release(obj, expr.span);
             return self.dead(expr);
         };
@@ -201,7 +201,7 @@ impl Body<'_> {
     /// count are the zeroes the allocation left, so a reference among them
     /// reads null and the collector traces nothing from one.
     fn walk_filter(&mut self, expr: &Expr, obj: Val, elem: &Ty, callback: &Expr) -> Val {
-        let Some(answer) = self.owned_ty(expr) else {
+        let Some(answer) = self.settled_ty(expr) else {
             self.release(obj, expr.span);
             return self.dead(expr);
         };
@@ -335,7 +335,7 @@ impl Body<'_> {
         initial: &Expr,
         callback: &Expr,
     ) -> Val {
-        let Some(answer) = self.owned_ty(expr) else {
+        let Some(answer) = self.settled_ty(expr) else {
             self.release(obj, expr.span);
             return self.dead(expr);
         };
@@ -445,7 +445,7 @@ impl Body<'_> {
     /// sequence must hold two elements at a time rather than every element it
     /// has compared.
     fn walk_sorted(&mut self, expr: &Expr, obj: Val, elem: &Ty, callback: &Expr) -> Val {
-        let Some(answer) = self.owned_ty(expr) else {
+        let Some(answer) = self.settled_ty(expr) else {
             self.release(obj, expr.span);
             return self.dead(expr);
         };

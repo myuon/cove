@@ -93,7 +93,7 @@ impl Body<'_> {
                 expr,
             );
         }
-        let Some(ty) = self.owned_ty(expr) else {
+        let Some(ty) = self.settled_ty(expr) else {
             return self.dead(expr);
         };
         let Some(layout) = self.layout(&ty, expr.span) else {

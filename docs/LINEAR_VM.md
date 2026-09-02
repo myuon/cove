@@ -249,6 +249,12 @@ A layout describes a *family*, not an instantiation: `Array<String>` and
 lowering interns them, so one shape is one `LayoutId` however many times the
 source writes it.
 
+A *declared* generic type is the other side of that rule and not an exception
+to it. `Cell<Int>` is one word and `Cell<Point>` is two, so they are not one
+family and cannot be one layout — see "Generics are monomorphised" below.
+What decides which of the two a declaration falls under is the same question
+as everywhere else here: whether the argument changes the words.
+
 A heap object's payload is a word array described by a layout in the same
 way a frame's value location is. A struct inside a closure environment, an
 array element or a boxed value is **inline in that payload**, and the
@@ -261,8 +267,8 @@ and reference maps.
 | value | shape | one layout per |
 |---|---|---|
 | a scalar | `Word(Repr)` | `Repr` |
-| `struct T` | `Struct`, fields inline | declared struct |
-| `enum E` | `Enum`, discriminant then payload | declared enum |
+| `struct T` | `Struct`, fields inline | declared struct, per instantiation |
+| `enum E` | `Enum`, discriminant then payload | declared enum, per instantiation |
 | `Option<T>` | `Enum`, cases `None`, `Some` | payload layout |
 | `Result<T, E>` | `Enum`, cases `Ok`, `Err` | payload layout pair |
 | `String` | `Str` | the program |
@@ -568,6 +574,129 @@ program lowers*, not *every checker abstention becomes runtime dispatch*.
 
 There is therefore **no `Unsupported`, no admission predicate and no lowering
 floor**. A construct the lowering has not been taught is a bug in the lowering.
+
+## Generics are monomorphised, and the value model is what decides it
+
+A generic declaration is lowered to **one function per instantiation**, and a
+generic `struct` or `enum` to **one layout per instantiation**. `f<Int>` and
+`f<Point>` are two functions with two frames; `Cell<Int>` and `Cell<Point>`
+are two layouts, one word and two.
+
+This is not a choice between three reasonable implementations. The model
+above rules out the other two, and it is worth writing down which sentence
+does it.
+
+**The sentence is "a slot's `Repr` is fixed for the whole function".** That is
+what makes one static bitmap correct at every program counter, and the
+bitmap is what the collector reads instead of inspecting a word. Everything
+else here — that a value is a run of words, that a copy is a word-range copy,
+that a field is arithmetic on a slot number — is downstream of a location's
+width being a static fact.
+
+A generic value's width is **not** a fact about the generic declaration. It
+is a fact about the type argument:
+
+~~~cove
+struct Cell<T> { it: T }
+~~~
+
+`Cell<Int>` is one word. `Cell<Point>` is two. `Cell<String>` is one word and
+that word is a `Ref`, so it is a root; `Cell<Int>`'s is not. The width, the
+offsets and the reference map all move with `T`.
+
+So:
+
+- **Dictionary passing** — carrying a layout at run time and reading widths
+  out of it — makes a frame's slot numbering depend on a value the callee is
+  handed. Then a slot's `Repr` is no longer a function of the function, the
+  static bitmap is no longer correct at every program counter, and the
+  collector is back to inspecting words to decide what is a pointer. The
+  foundation goes with it. There is no version of this that keeps the
+  reference map static, because the map's whole content is widths and kinds
+  and those are exactly what the dictionary would be carrying.
+
+- **A uniform boxed representation** — every generic value one `Ref` to a
+  heap object — keeps the map static and pays for it somewhere worse. It
+  allocates on every call that passes a generic value, including
+  `f(1)`. And it contradicts the model's own claim that a value's words are
+  where the value is: an `Int` that is an inline word in every other position
+  becomes an address because the function it was passed to was written with a
+  type parameter. The language already has a name for "one copy of the code,
+  and the value carries its own description", and it is `dyn Trait` — which
+  the erasure section above says is where allocating is the right answer
+  because the type was *intentionally* erased. Making a type parameter mean
+  the same thing would erase what the program did not ask to erase, and would
+  leave `dyn` and `<T>` two spellings of one mechanism.
+
+- **Monomorphisation** is what is left, and it is not a consolation. If two
+  instantiations have different widths, different offsets and different
+  reference maps, they are genuinely different code, and lowering them to
+  different code is describing the situation rather than working around it.
+
+The checker is what makes it cheap. It walks a generic body **once**, with
+its type parameters rigid, and records a type for every expression in that
+body in terms of them. The lowering does not re-check anything per
+instantiation: it carries the substitution and completes each recorded fact
+as it reads it, which is `Ty::instantiate` — the same operation the checker's
+own `Signature` documentation points a consumer at. One recorded walk serves
+every instantiation.
+
+### Which instantiation a call site asks for
+
+Nothing records it, and nothing needs to. What is recorded is the type of
+every operand of the call and the type of the call itself, all settled with
+the type arguments already applied — a call written `f<Int>(x)` and one
+written `f(x)` are indistinguishable by then, which is why an explicit type
+argument needs no separate path. The declaration's `Signature` still holds
+the `Ty::Param`s, so walking a declared type and a settled one together reads
+one off the other. It is a reading rather than an inference: the checker
+unified these two before the lowering saw them, which is why the call was
+accepted at all.
+
+The one thing it cannot read is a type parameter that appears in neither the
+parameters nor the answer, because then the written argument is the only place
+it exists and no fact carries it. That is reported rather than guessed at.
+
+### A bound is dispatched statically, and costs nothing
+
+~~~cove
+fn headline<T: Summary>(entry: T) -> String { entry.summary() }
+~~~
+
+The checker records no target for `entry.summary()`, and that is the right
+answer *about the declaration*: which implementation it reaches is decided by
+the argument. But this body is lowered for one argument. ADR 0006 makes
+conformance explicit, so that argument names exactly one implementation, and
+the call is an ordinary `Call` found the way a `Type.method` call finds one.
+No dictionary, no vtable, no indirect jump. A bound is free at run time and
+costs one function per type it is used at.
+
+### The instantiation depth is bounded
+
+~~~cove
+fn f<T>(x: T) { f(Cell(x)) }
+~~~
+
+This checks. [ADR 0035](adr/0035-a-value-type-may-not-contain-itself.md) is
+about a *declaration*'s layout containing itself, and `Cell<Cell<Int>>` is
+finite, so nothing rejects it. It asks for `f<Int>`, `f<Cell<Int>>`,
+`f<Cell<Cell<Int>>>` and so on without end, and every one of them is a
+different width, so there is no finite set of functions to lower it to.
+
+A recursive generic at *one* type is not this: the id is recorded before the
+body is lowered, so `fn f<T>(x: T) { f(x) }` finds the number it already
+took. What has no fixed point is a chain that grows the type at every step.
+
+So the lowering caps the depth of the chain and reports a diagnostic naming
+it step by step. It is a **refusal**, not one of the lowering's gaps: no later
+task removes it, because monomorphisation is what the model admits and this
+program has no monomorphisation. A reader who meets it has something to do —
+take the argument as a `dyn Trait`, which is one function for every type that
+conforms. And a compiler that does not terminate is worse than one that
+refuses.
+
+Where the cap goes is a judgement, and the number is not part of the
+language, the IR or any public API, for the same reason `STACK_WORDS` is not.
 
 ## What is not decided here
 

@@ -114,17 +114,10 @@ fn a_package_that_declares_its_own_assert_gets_its_own() {
 /// listing means everything the package declares is part of it.
 #[test]
 fn a_gap_the_entry_does_not_reach_does_not_stop_it() {
-    let source = "fn wide<T>(x: T) -> T { x }\n\
+    let source = "async fn wide() -> Int { 1 }\n\
                   fn helper() -> Int { 1 }\n\
                   fn main() -> Int { helper() }";
-    assert_eq!(
-        refused(source),
-        [
-            "not yet lowered: a generic function",
-            "not yet lowered: a value of type `T`",
-            "not yet lowered: a value of type `T`",
-        ]
-    );
+    assert_eq!(refused(source), ["not yet lowered: an `async fn`"]);
     assert_eq!(
         sliced(source, "main", "main"),
         "\

@@ -103,7 +103,7 @@ impl Body<'_> {
             };
             return self.gap(what, expr);
         }
-        let Some(Ty::Fn(func)) = self.owned_ty(expr) else {
+        let Some(Ty::Fn(func)) = self.settled_ty(expr) else {
             return self.gap("a function value the checker gave no function type", expr);
         };
         if func.params.len() != params.len() {
@@ -122,9 +122,9 @@ impl Body<'_> {
         // The number is taken before the body is lowered, because that body
         // may make a closure of its own and the inner one has to be numbered
         // after the outer.
-        let at = self.pool.lambdas.len();
+        let at = self.pool.appended.len();
         let id = FunctionId((self.plan.decls.len() + at) as u32);
-        self.pool.lambdas.push(None);
+        self.pool.appended.push(None);
         let name: Arc<str> = Arc::from(format!("{}#{}", self.name, self.lambdas));
         self.lambdas += 1;
 
@@ -137,7 +137,7 @@ impl Body<'_> {
             body,
             &captured,
         );
-        self.pool.lambdas[at] = Some(lowered);
+        self.pool.appended[at] = Some(lowered);
         self.close_over(id, &captured, expr.span)
     }
 
@@ -151,6 +151,24 @@ impl Body<'_> {
         // this is one of the places a slice learns it was too small.
         if !self.reached(id) {
             return self.dead(expr);
+        }
+        // A generic declaration is not one function, so there is not one
+        // environment to name it with either. Which instantiation a value
+        // stands for is decided where the value is *made*, and the function
+        // type the place states is what would say — a reading this lowering
+        // has not been taught, and one nothing in the corpus asks for.
+        //
+        // Nothing reaches it today: `cove::type::mismatch` refuses
+        // `let g: fn(Int) -> Int = id`, because `id`'s type is `fn(T) -> T`.
+        // It is named rather than left out because the alternative below is
+        // `dead(expr)` with nothing reported, and a silent wrong answer is
+        // the one outcome this crate must not have.
+        if !self.plan.decls[id.index()].decl.generics.is_empty() {
+            let named = self.plan.decls[id.index()].name.clone();
+            return self.gap(
+                &format!("`{named}`, a generic declaration used as a function value"),
+                expr,
+            );
         }
         let Some(shape) = self.plan.shape(id) else {
             // The declaration itself is a gap, already reported where it is
@@ -241,7 +259,7 @@ impl Body<'_> {
         if let Some(decl) = self.plan.decls.get(at) {
             return format!("{}.{}", decl.module, decl.name);
         }
-        match &self.pool.lambdas[at - self.plan.decls.len()] {
+        match &self.pool.appended[at - self.plan.decls.len()] {
             Some(held) => format!("{}.{}", held.module, held.name),
             // Only reachable from a lambda naming itself before its own body
             // has been lowered, which nothing does: the body is lowered
@@ -340,6 +358,12 @@ impl Body<'_> {
             held: Vec::new(),
             answer,
             returns: func.ret.clone(),
+            // A lambda written inside a generic body is lowered once per
+            // instantiation of it, so it is inside the same substitution: its
+            // captures may be of the enclosing body's type parameters and its
+            // own facts are recorded in their terms.
+            generics: self.generics.clone(),
+            args: self.args.clone(),
         };
         inner.frame.push_scope();
         // The captures are bound first, so a parameter or a `let` of the same
@@ -391,7 +415,7 @@ impl Body<'_> {
     /// is a word, and which body it names is not known until the machine
     /// reads it.
     pub(super) fn call_value(&mut self, expr: &Expr, callee: &Expr, args: &[Arg]) -> Val {
-        let Some(Ty::Fn(func)) = self.owned_ty(callee) else {
+        let Some(Ty::Fn(func)) = self.settled_ty(callee) else {
             return self.dead(expr);
         };
         if func.is_async {
@@ -472,7 +496,7 @@ impl Body<'_> {
 
     /// The function type of a callback argument, as the checker settled it.
     pub(super) fn callback(&mut self, arg: &Expr) -> Option<Arc<FnTy>> {
-        match self.owned_ty(arg)? {
+        match self.settled_ty(arg)? {
             Ty::Fn(func) => Some(func),
             other => {
                 self.errors.push(gap::gap(
