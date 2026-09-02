@@ -158,7 +158,8 @@ fn the_shapes_these_families_are_written_in_all_lower() {
     ];
     let mut bad = Vec::new();
     for src in cases {
-        if let Err(items) = crate::lower(&super::checked(src)) {
+        let (sources, checked) = super::checked(src);
+        if let Err(items) = crate::lower(&checked, &sources) {
             bad.push(format!(
                 "{src}\n  -> {:?}",
                 items.iter().map(|i| i.message.clone()).collect::<Vec<_>>()

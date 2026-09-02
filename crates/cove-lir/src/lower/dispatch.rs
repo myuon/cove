@@ -109,6 +109,12 @@ impl Body<'_> {
         base: Option<&Expr>,
         args: &[Arg],
     ) -> Val {
+        // A slice that left the callee out is this crate's mistake and not
+        // the program's, so it is recorded and corrected rather than
+        // reported: see `Body::reached`.
+        if !self.reached(id) {
+            return self.dead(expr);
+        }
         let Some(shape) = self.plan.shape(id) else {
             // The declaration itself is a gap, already reported where it is
             // written. Saying so again at every call site would bury it.
@@ -888,7 +894,27 @@ impl Body<'_> {
 
         let mut arms = Vec::with_capacity(conforming.len());
         for (type_module, type_name) in conforming {
-            let callee = self.plan.method_of(&type_module, &type_name, method)?;
+            let Some(callee) = self.plan.method_of(&type_module, &type_name, method) else {
+                // A conformance the package declares and no declaration
+                // answers. Named rather than passed over silently: a
+                // dispatch table with a hole in it is a `Switch` whose arm
+                // traps, and this is the one place that could build one.
+                self.errors.push(gap::gap(
+                    &format!(
+                        "`{type_module}.{type_name}.{method}`, a conformance this lowering \
+                         has no function for"
+                    ),
+                    expr.span,
+                ));
+                return None;
+            };
+            // A dispatch is where the slice is widest: which conformance
+            // runs is decided by the value, so every one of them is
+            // reachable and none of them is named by a call site the
+            // checker's graph could follow.
+            if !self.reached(callee) {
+                return None;
+            }
             // An implementation that is itself a gap — a trait method's
             // default body, today — leaves the table with an arm that
             // cannot be called. The gap was reported where the declaration

@@ -12,7 +12,8 @@ use crate::repr::Repr;
 
 /// Every layout of a lowered program, by name and words.
 fn layouts(source: &str) -> Vec<Layout> {
-    lower(&checked(source))
+    let (sources, checked) = checked(source);
+    lower(&checked, &sources)
         .expect("the program lowers")
         .layouts
         .clone()

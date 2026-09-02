@@ -10,6 +10,7 @@
 //! lowering that emitted a well-read but ill-formed program would otherwise
 //! be caught only when something ran it.
 
+mod assertions;
 mod calls;
 mod closures;
 mod collections;
@@ -45,7 +46,7 @@ use super::lower;
 /// from one would say nothing about the rule that chose the instruction.
 ///
 /// The module is called `m`, so a listing reads `fn m.something`.
-fn checked(source: &str) -> Checked {
+fn checked(source: &str) -> (SourceMap, Checked) {
     let mut sources = SourceMap::new();
     let file = sources.add("m/main.cove", source.to_string());
     let ast = match cove_syntax::parse_file(&sources, file) {
@@ -69,7 +70,7 @@ fn checked(source: &str) -> Checked {
         )]),
     };
     match cove_sema::Compiler::new().compile(&package) {
-        Ok(program) => program,
+        Ok(program) => (sources, program),
         Err(items) => panic!("the source checks:\n{}", rendered(&sources, &items)),
     }
 }
@@ -90,7 +91,8 @@ fn rendered(sources: &SourceMap, items: &[cove_diag::Diagnostic]) -> String {
 /// `f#0` — and it takes captures, so nothing outside the program that made it
 /// could name it on a command line.
 fn listing(source: &str, name: &str) -> String {
-    let program = lower(&checked(source)).expect("the program lowers");
+    let (sources, checked) = checked(source);
+    let program = lower(&checked, &sources).expect("the program lowers");
     let id = program
         .functions
         .iter()
@@ -100,9 +102,28 @@ fn listing(source: &str, name: &str) -> String {
     crate::print::function(&program, id)
 }
 
+/// The disassembly of one function of a lowering sliced to `entry`.
+///
+/// The same listing [`listing`] takes, from [`crate::lower_entry`] rather
+/// than from the whole package: what a slice leaves out is a stub, so a
+/// listing is what says whether a declaration was lowered or stood in for.
+fn sliced(source: &str, entry: &str, name: &str) -> String {
+    let (sources, checked) = checked(source);
+    let program =
+        crate::lower_entry(&checked, &sources, "m", entry).expect("the entry's program lowers");
+    let id = program
+        .functions
+        .iter()
+        .position(|f| &*f.module == "m" && &*f.name == name)
+        .map(|at| crate::FunctionId(at as u32))
+        .unwrap_or_else(|| panic!("`{name}` is in the program"));
+    crate::print::function(&program, id)
+}
+
 /// What stopped a lowering, in the words it reported.
 fn refused(source: &str) -> Vec<String> {
-    match lower(&checked(source)) {
+    let (sources, checked) = checked(source);
+    match lower(&checked, &sources) {
         Ok(_) => panic!("the program lowered, and this case is about what stops one"),
         Err(items) => items.into_iter().map(|item| item.message).collect(),
     }

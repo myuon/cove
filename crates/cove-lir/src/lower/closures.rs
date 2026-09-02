@@ -146,6 +146,12 @@ impl Body<'_> {
     /// An environment naming it and holding nothing, which is what makes a
     /// call through it the same instruction a lambda's call is.
     pub(super) fn function_value(&mut self, expr: &Expr, id: FunctionId) -> Val {
+        // A declaration named where a value goes is exactly what the
+        // checker's call graph does not record — there is no call site — so
+        // this is one of the places a slice learns it was too small.
+        if !self.reached(id) {
+            return self.dead(expr);
+        }
         let Some(shape) = self.plan.shape(id) else {
             // The declaration itself is a gap, already reported where it is
             // written.
@@ -319,9 +325,11 @@ impl Body<'_> {
 
         let mut inner = Body {
             checked: self.checked,
+            sources: self.sources,
             plan: self.plan,
             pool: &mut *self.pool,
             errors: &mut *self.errors,
+            wanted: &mut *self.wanted,
             module: self.module,
             name,
             lambdas: 0,

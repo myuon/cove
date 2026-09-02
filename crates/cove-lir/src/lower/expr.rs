@@ -40,6 +40,7 @@
 //! returned.
 
 use cove_diag::Span;
+use cove_schema::builtins::FreeBuiltinKind;
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Arg, BinaryOp, Block, Expr, ExprKind, StrPart, Type, UnaryOp};
 
@@ -1370,6 +1371,21 @@ impl Body<'_> {
         if let Some(module) = self.host_module_of(name) {
             return self.call_host(expr, &module, name, args);
         }
+        // The builtins that are called on nothing, asked of the shared table
+        // once and asked last, which is where the interpreter asks: a
+        // declaration, a case, an initializer and a host item all win over
+        // one of these names, so a package that declares its own `assert`
+        // gets its own.
+        //
+        // Only the assertions are here. The constructors — `Ok`, `Err`,
+        // `Some`, `Error`, `Shared` — are cases and initializers of types the
+        // language declares, and the arms above already build them from the
+        // type the checker settled, which is where a case belongs.
+        if let Some(schema) = cove_schema::builtins::free_builtin(name) {
+            if schema.kind == FreeBuiltinKind::Assertion {
+                return self.assertion(expr, schema, args);
+            }
+        }
         self.gap(
             "a call to a declaration that is not a function of this package",
             expr,
@@ -1565,7 +1581,11 @@ fn num_of(repr: Repr) -> Num {
     }
 }
 
-fn compare_of(repr: Repr) -> Compare {
+/// Which reading a one-word comparison gives its operands.
+///
+/// Read by [`Body::assertion`] too: `assertEqual` compares the way `==`
+/// does, and one function is what says so.
+pub(super) fn compare_of(repr: Repr) -> Compare {
     match repr {
         Repr::Float => Compare::Float,
         Repr::Bool => Compare::Bool,

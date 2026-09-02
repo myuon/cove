@@ -105,24 +105,6 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
     let sources = Arc::new(sources);
     let program = Arc::new(program);
 
-    // The replacement lowers the package, not the entry, so the suite gets
-    // one lowering rather than one per test — and a gap in it stops the
-    // command rather than the test that reached it. That is the opposite of
-    // what `--backend vm` does below, and it is not a choice made here:
-    // `cove_lir::lower` has no reachable-set slice because its target is that
-    // every valid checked program lowers, so there is no per-test refusal for
-    // this command to report. Until that target is met, one test's gap is
-    // every test's.
-    let linear = match backend {
-        Backend::Lvm => Some(Arc::new(cove_lir::lower(&program).map_err(|items| {
-            CliError::Diagnostics {
-                items,
-                sources: Arc::clone(&sources),
-            }
-        })?)),
-        Backend::Ast | Backend::Vm => None,
-    };
-
     let all = program.tests();
     let selected = select(&all, filter);
 
@@ -136,7 +118,6 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
             &sources,
             &program,
             backend,
-            linear.as_ref(),
         ) {
             None => println!("{}", result_line("ok", &name)),
             Some(diagnostic) => {
@@ -183,7 +164,6 @@ fn run_test(
     sources: &Arc<SourceMap>,
     program: &Arc<cove_sema::resolve::Program>,
     backend: Backend,
-    linear: Option<&Arc<cove_lir::Program>>,
 ) -> Option<Diagnostic> {
     let required: Vec<&str> = test
         .entry
@@ -218,9 +198,9 @@ fn run_test(
         );
     }
 
-    // A test is an entry, so it is lowered as one: the unit `cove_ir::lower`
+    // A test is an entry, so it is lowered as one: the unit a lowering
     // measures is what an entry reaches, and a suite is many entries rather
-    // than one. Lowering per test is what keeps a construct the VM cannot
+    // than one. Lowering per test is what keeps a construct a backend cannot
     // run from refusing the tests that do not reach it -- and lowering runs
     // once per test against an execution that runs for as long as the test
     // does, which is the ratio ADR 0019 allows the lowering to be slow on.
@@ -229,16 +209,33 @@ fn run_test(
     // command's, for the same reason: the other tests still ran, and a
     // suite that stopped at the first unlowerable test would report nothing
     // about them.
+    //
+    // Both lowered backends do this now. `--backend lvm` used to lower the
+    // package once for the whole command, because `cove_lir` had no
+    // reachable-set slice; `cove_lir::lower_entry` is that slice, so one
+    // test's gap is no longer every test's.
     let lowered = match backend {
         Backend::Ast => None,
-        // Lowered once for the whole suite, by `cmd_test`, for the reason it
-        // gives there. Missing it is this file's own bug and not a reason to
-        // run the test somewhere else: ADR 0019's no-silent-fallback rule
-        // covers a backend that was asked for and never arrived, so this
-        // fails loudly rather than reporting a pass the interpreter earned.
-        Backend::Lvm => Some(Executable::Linear(Arc::clone(
-            linear.expect("`cmd_test` lowers the package before any test runs on `lvm`"),
-        ))),
+        Backend::Lvm => match cove_lir::lower_entry(program, sources, test.module, test.name) {
+            Ok(ir) => Some(Executable::Linear(Arc::new(ir))),
+            Err(items) => {
+                return Some(
+                    Diagnostic::error(
+                        FAILED,
+                        format!(
+                            "test `{}` could not be lowered: {}",
+                            test.qualified_name(),
+                            items
+                                .iter()
+                                .map(|item| item.message.clone())
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        ),
+                    )
+                    .at(test.entry.decl.name.span),
+                )
+            }
+        },
         Backend::Vm => match cove_ir::lower::lower_entry(program, test.module, test.name) {
             Ok(lowered) => match cove_ir::lower::validate(&lowered.program) {
                 Ok(()) => Some(Executable::Vm(Arc::new(lowered.program))),
@@ -505,7 +502,7 @@ mod tests {
             .tests()
             .iter()
             .map(|test| {
-                let outcome = run_test(test, root, &allow_real, &sources, &program, backend, None);
+                let outcome = run_test(test, root, &allow_real, &sources, &program, backend);
                 (
                     test.qualified_name(),
                     outcome.map(|diagnostic| diagnostic.message),
@@ -568,7 +565,6 @@ mod tests {
             &sources,
             &program,
             Backend::Vm,
-            None,
         )
         .expect("the test fails");
         let rendered = render(&sources, &diagnostic);
@@ -706,7 +702,6 @@ test fn describesThroughDynDispatch() -> Result<Unit, Error> {
             &sources,
             &program,
             Backend::Vm,
-            None,
         )
         .expect("the boundary refuses the call");
         assert!(

@@ -605,12 +605,14 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
         }
         // The same place, for the same reason. What arrives is a list of
         // diagnostics rather than one refusal, because the replacement
-        // lowers the package and reports every gap in it; a replay that
-        // cannot be run is still a replay that reads no tape.
+        // reports every gap in what the entry reaches rather than the first;
+        // a replay that cannot be run is still a replay that reads no tape.
         Backend::Lvm => {
-            let ir = cove_lir::lower(&program).map_err(|items| CliError::Diagnostics {
-                items,
-                sources: Arc::clone(&sources),
+            let ir = cove_lir::lower_entry(&program, &sources, module, entry).map_err(|items| {
+                CliError::Diagnostics {
+                    items,
+                    sources: Arc::clone(&sources),
+                }
             })?;
             Some(Executable::Linear(Arc::new(ir)))
         }

@@ -100,7 +100,7 @@ fn on_the_oracle(source: &str, name: &str, args: Vec<Value>) -> Answer {
 /// would be comparing the loop against the whole of the oracle.
 fn on_the_machine(source: &str, name: &str, args: Vec<Value>) -> Answer {
     let (sources, checked) = checked(source);
-    let program = lowered(&checked);
+    let program = lowered(&sources, &checked);
     let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
     let runtime = Runtime::new(checked.clone(), sources, hosts.clone());
     said(Lvm::new(&runtime, &hosts, &program).invoke("m", name, args))
@@ -118,14 +118,14 @@ fn entry_on_the_oracle(source: &str, name: &str) -> Answer {
 /// Runs `m.<name>` as an entry on the linear-memory machine.
 fn entry_on_the_machine(source: &str, name: &str) -> Answer {
     let (sources, checked) = checked(source);
-    let program = lowered(&checked);
+    let program = lowered(&sources, &checked);
     let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
     let runtime = Runtime::new(checked.clone(), sources, hosts.clone());
     said(Lvm::new(&runtime, &hosts, &program).run_entry("m", name, Vec::new()))
 }
 
-fn lowered(checked: &Checked) -> cove_lir::Program {
-    match cove_lir::lower(checked) {
+fn lowered(sources: &SourceMap, checked: &Checked) -> cove_lir::Program {
+    match cove_lir::lower(checked, sources) {
         Ok(program) => program,
         Err(items) => panic!(
             "the program lowers:\n{}",

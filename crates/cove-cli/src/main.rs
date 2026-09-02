@@ -89,13 +89,12 @@ lowering is judged by, because wall time moves for many reasons and that
 moves for one.
 
 `cove run --backend lvm` runs the entry on the linear-memory backend ADR 0034
-decides, while it is being built. It is opt-in and nothing defaults to it. Two
-things about it differ from `vm` and both are temporary: it lowers the whole
-package rather than what the entry reaches, so a construct it has not been
-taught stops every entry of that package and not only the ones reaching it;
-and what stops it is a compile error naming the gap rather than a refusal,
-because it has no admission predicate to answer. `cove build` does not offer
-it: a built binary embeds its backend, and this one is not embeddable yet.
+decides, while it is being built. It is opt-in and nothing defaults to it. It
+lowers what the entry reaches, exactly as `vm` does, so a construct it has not
+been taught stops only the entries that reach it. What differs is what stops
+it: a compile error naming the gap rather than a refusal, because it has no
+admission predicate to answer. `cove build` does not offer it: a built binary
+embeds its backend, and this one is not embeddable yet.
 
 `cove test` runs every `test fn` in the package, reports each one, and exits
 non-zero when any failed. `--filter` runs only the tests whose qualified name
@@ -1114,8 +1113,8 @@ pub(crate) enum ExecuteError {
     /// because that is what they are — including the ones whose text says
     /// the fault is the backend's.
     ///
-    /// A `Vec`, because a whole package is lowered at once and one run of it
-    /// finds every gap rather than the first.
+    /// A `Vec`, because one lowering finds every gap in what the entry
+    /// reaches rather than stopping at the first.
     NotLowered(Vec<Diagnostic>),
 }
 
@@ -1175,17 +1174,15 @@ pub(crate) fn execute_entry(
                 validate: Some(started.elapsed()),
             })
         }
-        // The replacement lowers the *package*, not the entry: `cove_lir`
-        // has no reachable-set slice and needs none, since its target is
-        // that every valid checked program lowers rather than that every
-        // entry avoids what the backend cannot run. The consequence is
-        // visible here and nowhere else: a gap anywhere in the package stops
-        // every entry of it, where a refusal stops only the entries that
-        // reach one. That is the price of not having an admission predicate,
-        // and it is temporary in the way the gaps are.
+        // The replacement lowers what this entry reaches, exactly as the
+        // line above does. That it can is recent: `cove_lir::lower_entry`
+        // slices by the checker's own call graph and closes the slice
+        // against what the lowering names, so a gap in another `[run.<name>]`
+        // of the same package is no longer a reason this one cannot run.
         Backend::Lvm => {
             let started = Instant::now();
-            let ir = cove_lir::lower(program).map_err(ExecuteError::NotLowered)?;
+            let ir = cove_lir::lower_entry(program, sources, module, entry)
+                .map_err(ExecuteError::NotLowered)?;
             Some(Lowered {
                 program: Executable::Linear(Arc::new(ir)),
                 lower: started.elapsed(),

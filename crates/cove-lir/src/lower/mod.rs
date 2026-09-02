@@ -43,6 +43,7 @@
 //! would mean tracking which pending patches point past the end, which is
 //! more machinery than the word is worth.
 
+mod assertions;
 mod closures;
 mod collections;
 mod dispatch;
@@ -58,12 +59,12 @@ mod walks;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use cove_diag::{Diagnostic, Span};
+use cove_diag::{Diagnostic, SourceMap, Span};
 use cove_sema::facts::MethodTarget;
-use cove_sema::resolve::{Program as Checked, ResolvedModule};
+use cove_sema::resolve::{FnKey, Node, Program as Checked, ResolvedModule};
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Expr, FnDecl};
 
@@ -106,19 +107,129 @@ impl Dest {
     }
 }
 
-/// Lowers a checked package.
+/// Lowers a checked package: every declaration it has, whether or not
+/// anything reaches it.
 ///
 /// The result either runs or names what stopped it. Nothing in between: a
 /// lowered [`Program`] has been through [`crate::verify()`], so a caller that
 /// holds one holds a program whose locations, jumps and calls are all in
 /// range and whose reference map is the one its reprs imply.
-pub fn lower(checked: &Checked) -> Result<Program, Vec<Diagnostic>> {
+///
+/// `sources` is the package's own text, and it is here for one reason:
+/// `assert` and `assertEqual` quote the code that failed, so the lowering
+/// has to read the bytes an argument's span covers. See this module's
+/// `assertions` submodule for why they are lowered rather than performed.
+///
+/// [`lower_entry`] is the same lowering over one entry's reachable set, and
+/// it is what a command that runs a program should use. This one is what a
+/// whole-package listing means — everything the package declares is part of
+/// it — and it is what the lowering's own tests and the corpus survey ask
+/// for.
+pub fn lower(checked: &Checked, sources: &SourceMap) -> Result<Program, Vec<Diagnostic>> {
+    let mut plan = Plan::index(checked);
+    let everything: HashSet<FunctionId> = (0..plan.decls.len())
+        .map(|at| FunctionId(at as u32))
+        .collect();
+    let Lowering {
+        program, errors, ..
+    } = emit(checked, sources, &mut plan, &everything);
+    finish(program, errors)
+}
+
+/// Lowers only the declarations `module.name` can reach.
+///
+/// A package holds programs that have nothing to do with each other —
+/// `benches/` is nine of them and `tests/e2e/` is a hundred — and a gap in
+/// one of them is not a reason to refuse the others. So a command that runs
+/// *one* entry lowers what that entry reaches and leaves the rest as a stub
+/// nothing names.
+///
+/// # What "reachable" is, and how this is sure of it
+///
+/// The seed is [`Program::call_graph`](cove_sema::resolve::Program::call_graph),
+/// which the checker already derived: for each declaration, every declaration
+/// it may call. Both precisions are followed, because
+/// [`CallPrecision::Approximate`](cove_sema::resolve::CallPrecision) is a
+/// superset of what may run and a slice has to hold everything that might.
+///
+/// The seed is not the answer, though, and the graph itself says why: a
+/// callee that is a *value* — `xs.map(double)`, a conformance a `dyn`
+/// dispatch picks, a `Snapshot` implementation nothing writes a call to —
+/// contributes no edge, because there is no call site naming it. A
+/// declaration missing from the slice is not a gap the person holding the
+/// source can act on; it is a stub that answers `()` where a call was meant
+/// to go.
+///
+/// So the slice is closed against the lowering rather than against the
+/// graph. Every place that turns a name into a [`FunctionId`] asks whether
+/// this pass lowered it first, and a body that names a declaration this
+/// slice left out records it rather than emitting a call to a stub. What was
+/// recorded is added to the slice and the package is lowered again,
+/// until a round wants nothing — which is a fixed point over *what this
+/// lowering emits references to*, not over what a second reachability
+/// analysis believes.
+///
+/// The call graph is what makes that one round rather than one per level of
+/// the call tree: seeded with nothing, each round could only discover the
+/// callees of what the round before it lowered.
+pub fn lower_entry(
+    checked: &Checked,
+    sources: &SourceMap,
+    module: &str,
+    name: &str,
+) -> Result<Program, Vec<Diagnostic>> {
+    let mut plan = Plan::index(checked);
+    let mut reach = plan.reachable_from(checked, module, name);
+    loop {
+        let Lowering {
+            program,
+            errors,
+            wanted,
+        } = emit(checked, sources, &mut plan, &reach);
+        if wanted.is_empty() {
+            return finish(program, errors);
+        }
+        reach.extend(wanted);
+    }
+}
+
+/// One pass of the lowering over one set of declarations.
+struct Lowering {
+    program: Program,
+    errors: Vec<Diagnostic>,
+    /// The declarations a body named that this pass had left out.
+    ///
+    /// Empty for a whole-package lowering, because nothing is left out.
+    /// For a sliced one it is the correction: see [`lower_entry`].
+    wanted: HashSet<FunctionId>,
+}
+
+/// Lowers `reach` and stubs the rest.
+fn emit<'a>(
+    checked: &'a Checked,
+    sources: &SourceMap,
+    plan: &mut Plan<'a>,
+    reach: &HashSet<FunctionId>,
+) -> Lowering {
     let mut errors = Vec::new();
+    let mut wanted = HashSet::new();
     let mut pool = Pool::new();
-    let plan = Plan::build(checked, &mut pool, &mut errors);
+    plan.boundaries(checked, reach, &mut pool, &mut errors);
     let mut functions = Vec::new();
     for id in 0..plan.decls.len() {
-        functions.push(lower_function(checked, &plan, id, &mut pool, &mut errors));
+        functions.push(if reach.contains(&FunctionId(id as u32)) {
+            lower_function(
+                checked,
+                sources,
+                plan,
+                id,
+                &mut pool,
+                &mut errors,
+                &mut wanted,
+            )
+        } else {
+            stub(&plan.decls[id])
+        });
     }
     // A lambda is a `Function` of its own, numbered after every declaration
     // and discovered while a body is being walked rather than by the plan. A
@@ -141,9 +252,27 @@ pub fn lower(checked: &Checked) -> Result<Program, Vec<Diagnostic>> {
         tables: pool.tables,
         host_ops: pool.host_ops,
         builtins: pool.builtins,
-        by_name: plan.by_name,
+        // Only what this pass lowered is nameable. A stub answers `()`, so
+        // an entry point that resolved to one would run and say nothing
+        // rather than saying it was not there — and `run_entry` already has
+        // a good answer for a name a program does not carry.
+        by_name: plan
+            .by_name
+            .iter()
+            .filter(|(_, id)| reach.contains(id))
+            .map(|(key, id)| (key.clone(), *id))
+            .collect(),
     };
+    Lowering {
+        program,
+        errors,
+        wanted,
+    }
+}
 
+/// The lowered program, or what stopped it — and the verifier's word that
+/// the first of the two is well formed.
+fn finish(program: Program, errors: Vec<Diagnostic>) -> Result<Program, Vec<Diagnostic>> {
     if !errors.is_empty() {
         return Err(only_once(errors));
     }
@@ -189,10 +318,19 @@ struct Decl<'a> {
     module: Arc<str>,
     name: Arc<str>,
     decl: &'a FnDecl,
-    /// `None` for a declaration outside this lowering's scope. A gap has
-    /// already been reported for it, so the stub that takes its place is
-    /// never seen: `lower` answers `Err` before the program leaves.
+    /// `None` for a declaration outside this lowering's scope, and for one
+    /// this pass never asked about. A gap has already been reported for the
+    /// first, so the stub that takes its place is never seen: `lower`
+    /// answers `Err` before the program leaves. The second is a declaration
+    /// the slice left out, and [`Plan::reached`] is what tells the two
+    /// apart.
     boundary: Option<Boundary>,
+    /// The trait whose default body this method is, when it is one.
+    ///
+    /// Read by [`Plan::boundaries`], which is where the gap for one is
+    /// raised: a default body belongs to the trait and has no per-type
+    /// declaration to read a boundary off.
+    from_trait_default: Option<String>,
 }
 
 /// A declaration's parameters and answer, as layouts.
@@ -250,27 +388,38 @@ struct Plan<'a> {
     /// so this is keyed by what a call site holds rather than by where the
     /// code ended up.
     methods: HashMap<(String, String, String), FunctionId>,
+    /// The declarations this pass is lowering rather than stubbing.
+    ///
+    /// It is the whole numbering for [`lower`] and one entry's reachable set
+    /// for [`lower_entry`]. [`Plan::reached`] is what reads it, and every
+    /// place that names a declaration asks before it emits a call.
+    lowered: HashSet<FunctionId>,
 }
 
 impl<'a> Plan<'a> {
-    fn build(checked: &'a Checked, pool: &mut Pool, errors: &mut Vec<Diagnostic>) -> Plan<'a> {
+    /// Numbers every declaration the package has.
+    ///
+    /// The numbering is over the whole package whether or not a slice will
+    /// use all of it, and that is what makes a [`FunctionId`] mean the same
+    /// thing in every pass [`lower_entry`] runs: a set of ids gathered by one
+    /// round names the same declarations in the next.
+    ///
+    /// Nothing here reads a signature or builds a layout. What a call to a
+    /// declaration passes is [`Plan::boundaries`], which is asked only about
+    /// the declarations a pass is actually lowering — so a slice pays for the
+    /// types it reaches and not for the package's.
+    fn index(checked: &'a Checked) -> Plan<'a> {
         let mut plan = Plan {
             decls: Vec::new(),
             by_name: BTreeMap::new(),
             lookup: HashMap::new(),
             methods: HashMap::new(),
+            lowered: HashSet::new(),
         };
         for (name, resolved) in &checked.modules {
-            plan.declare_gaps(resolved, errors);
             for (fn_name, entry) in &resolved.functions {
                 let module: Arc<str> = Arc::from(name.as_str());
-                let boundary = boundary_of(checked, name, &entry.decl, pool, errors);
-                let id = plan.declare(
-                    module,
-                    Arc::from(fn_name.as_str()),
-                    entry.decl.as_ref(),
-                    boundary,
-                );
+                let id = plan.declare(module, Arc::from(fn_name.as_str()), entry.decl.as_ref());
                 plan.lookup.insert((name.clone(), fn_name.clone()), id);
             }
             for ((type_name, method), entry) in &resolved.methods {
@@ -281,22 +430,8 @@ impl<'a> Plan<'a> {
                 // name character, so the two namings cannot collide and
                 // `m.Point.scaled` reads in a diagnostic as it is written.
                 let lowered: Arc<str> = Arc::from(format!("{type_name}.{method}"));
-                let boundary = match &entry.from_trait_default {
-                    // A default body belongs to the trait, and the checker
-                    // checks it once there rather than once per conformance
-                    // — so there is no per-type declaration to read a
-                    // boundary off, and the trait method has none recorded
-                    // either. See `Plan::declare_gaps`.
-                    Some(trait_name) => {
-                        errors.push(gap::gap(
-                            &format!("`{trait_name}.{method}`, a trait method's default body"),
-                            entry.decl.span,
-                        ));
-                        None
-                    }
-                    None => boundary_of(checked, name, &entry.decl, pool, errors),
-                };
-                let id = plan.declare(module, lowered, entry.decl.as_ref(), boundary);
+                let id = plan.declare(module, lowered, entry.decl.as_ref());
+                plan.decls[id.index()].from_trait_default = entry.from_trait_default.clone();
                 let owner = resolved.owner_of(type_name).unwrap_or(name.as_str());
                 plan.methods
                     .insert((owner.to_string(), type_name.clone(), method.clone()), id);
@@ -305,49 +440,122 @@ impl<'a> Plan<'a> {
         plan
     }
 
-    /// Numbers one declaration and records the name it answers to.
-    fn declare(
+    /// Reads the boundary of every declaration in `reach`, and reports what
+    /// stopped one.
+    ///
+    /// This is where a pass's errors about *declarations* come from, and
+    /// restricting it to the slice is most of what slicing is worth: a
+    /// generic function or an `async fn` in a module the entry never enters
+    /// is not work this entry is waiting on.
+    fn boundaries(
         &mut self,
-        module: Arc<str>,
-        name: Arc<str>,
-        decl: &'a FnDecl,
-        boundary: Option<Boundary>,
-    ) -> FunctionId {
+        checked: &'a Checked,
+        reach: &HashSet<FunctionId>,
+        pool: &mut Pool,
+        errors: &mut Vec<Diagnostic>,
+    ) {
+        self.lowered = reach.clone();
+        for (name, resolved) in &checked.modules {
+            // A declaration whose *layout* cannot be built is reported once,
+            // where it is written, rather than at every use — but only for a
+            // module this pass is lowering something out of. A module the
+            // slice does not enter declares nothing this entry can hold.
+            if reach
+                .iter()
+                .any(|id| &*self.decls[id.index()].module == name)
+            {
+                declare_gaps(resolved, errors);
+            }
+        }
+        for at in 0..self.decls.len() {
+            let id = FunctionId(at as u32);
+            if !reach.contains(&id) {
+                continue;
+            }
+            let decl = &self.decls[at];
+            let module = decl.module.to_string();
+            let boundary = match &decl.from_trait_default {
+                // A default body belongs to the trait, and the checker
+                // checks it once there rather than once per conformance —
+                // so there is no per-type declaration to read a boundary
+                // off, and the trait method has none recorded either.
+                Some(trait_name) => {
+                    let named = format!("`{trait_name}.{}`", short_name(&decl.name));
+                    errors.push(gap::gap(
+                        &format!("{named}, a trait method's default body"),
+                        decl.decl.span,
+                    ));
+                    None
+                }
+                None => boundary_of(checked, &module, decl.decl, pool, errors),
+            };
+            self.decls[at].boundary = boundary;
+        }
+    }
+
+    /// Numbers one declaration and records the name it answers to.
+    fn declare(&mut self, module: Arc<str>, name: Arc<str>, decl: &'a FnDecl) -> FunctionId {
         let id = FunctionId(self.decls.len() as u32);
         self.by_name.insert((module.clone(), name.clone()), id);
         self.decls.push(Decl {
             module,
             name,
             decl,
-            boundary,
+            boundary: None,
+            from_trait_default: None,
         });
         id
     }
 
-    /// Reports the declarations that have no code here yet.
+    /// The declarations `module.name` can reach, as the checker's call graph
+    /// answers it.
     ///
-    /// A `struct` and an `enum` are not among them: they declare a
-    /// [`crate::Layout`] rather than a function, and the layout is built
-    /// where a value of the type is met. Neither is a `trait` or an `impl`
-    /// block: a trait declares an interface, and a method is an ordinary
-    /// lowered function whose first parameter is the receiver.
+    /// A seed rather than a verdict: see [`lower_entry`] for what the graph
+    /// cannot see and what closes the gap.
+    fn reachable_from(
+        &self,
+        checked: &'a Checked,
+        module: &str,
+        name: &str,
+    ) -> HashSet<FunctionId> {
+        let mut seen: BTreeSet<Node> = BTreeSet::new();
+        let mut stack = vec![(module.to_string(), FnKey::Fn(name.to_string()))];
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node.clone()) {
+                continue;
+            }
+            let Some(edges) = checked.call_graph.get(&node) else {
+                continue;
+            };
+            stack.extend(edges.keys().cloned());
+        }
+        seen.iter().filter_map(|node| self.id_of(node)).collect()
+    }
+
+    /// The declaration a call-graph node names.
+    fn id_of(&self, node: &Node) -> Option<FunctionId> {
+        let (module, key) = node;
+        match key {
+            FnKey::Fn(name) => self.lookup.get(&(module.clone(), name.clone())).copied(),
+            FnKey::Method(type_name, method) => self
+                .by_name
+                .get(&(
+                    Arc::from(module.as_str()),
+                    Arc::from(format!("{type_name}.{method}")),
+                ))
+                .copied(),
+        }
+    }
+
+    /// Whether this pass lowered `id` rather than stubbing it.
     ///
-    /// What is still reported is the declaration whose *layout* this
-    /// lowering cannot build at all — a generic one, whose fields are type
-    /// parameters and so have no words. A type this lowering cannot
-    /// represent is a gap at every use of it as well, but naming the
-    /// declaration once is what says where the work is.
-    fn declare_gaps(&self, resolved: &ResolvedModule, errors: &mut Vec<Diagnostic>) {
-        for entry in resolved.structs.values() {
-            if !entry.decl.generics.is_empty() {
-                errors.push(gap::gap("a generic `struct` declaration", entry.decl.span));
-            }
-        }
-        for entry in resolved.enums.values() {
-            if !entry.decl.generics.is_empty() {
-                errors.push(gap::gap("a generic `enum` declaration", entry.decl.span));
-            }
-        }
+    /// Every place that turns a name into a [`FunctionId`] asks this before
+    /// it emits anything naming one, because a stub answers `()` and a call
+    /// to it would be a wrong answer rather than a refusal. What a caller
+    /// does with a `false` is [`Body::reached`]: record the declaration and
+    /// let the next pass lower it.
+    fn reached(&self, id: FunctionId) -> bool {
+        self.lowered.contains(&id)
     }
 
     /// The declaration `name` denotes where the module `from` can see it.
@@ -432,6 +640,37 @@ impl CallShape {
     fn ty(&self, at: usize) -> &Ty {
         &self.types[usize::from(self.receiver) + at]
     }
+}
+
+/// Reports the declarations of one module that have no code here yet.
+///
+/// A `struct` and an `enum` are not among them: they declare a
+/// [`crate::Layout`] rather than a function, and the layout is built where a
+/// value of the type is met. Neither is a `trait` or an `impl` block: a trait
+/// declares an interface, and a method is an ordinary lowered function whose
+/// first parameter is the receiver.
+///
+/// What is still reported is the declaration whose *layout* this lowering
+/// cannot build at all — a generic one, whose fields are type parameters and
+/// so have no words. A type this lowering cannot represent is a gap at every
+/// use of it as well, but naming the declaration once is what says where the
+/// work is.
+fn declare_gaps(resolved: &ResolvedModule, errors: &mut Vec<Diagnostic>) {
+    for entry in resolved.structs.values() {
+        if !entry.decl.generics.is_empty() {
+            errors.push(gap::gap("a generic `struct` declaration", entry.decl.span));
+        }
+    }
+    for entry in resolved.enums.values() {
+        if !entry.decl.generics.is_empty() {
+            errors.push(gap::gap("a generic `enum` declaration", entry.decl.span));
+        }
+    }
+}
+
+/// The method half of a `Type.method` declaration name.
+fn short_name(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(_, method)| method)
 }
 
 /// What a call to this declaration passes and answers, read off the
@@ -693,9 +932,20 @@ struct Loop {
 /// The state of lowering one function body.
 struct Body<'a> {
     checked: &'a Checked,
+    /// The package's own text, which `assert` and `assertEqual` quote.
+    ///
+    /// Nothing else in this crate reads it: a lowering answers what the
+    /// checker settled, and source text is not one of those answers. The two
+    /// assertions are the exception the language itself makes — their failure
+    /// message names the condition in the words the test was written in, and
+    /// only the compiler has them.
+    sources: &'a SourceMap,
     plan: &'a Plan<'a>,
     pool: &'a mut Pool,
     errors: &'a mut Vec<Diagnostic>,
+    /// The declarations this body named that the pass had left out of its
+    /// slice. See [`lower_entry`].
+    wanted: &'a mut HashSet<FunctionId>,
     /// The module the body is written in, which is what an unqualified name
     /// in it is resolved against.
     module: &'a str,
@@ -736,12 +986,15 @@ struct Body<'a> {
     returns: Ty,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_function(
     checked: &Checked,
+    sources: &SourceMap,
     plan: &Plan,
     id: usize,
     pool: &mut Pool,
     errors: &mut Vec<Diagnostic>,
+    wanted: &mut HashSet<FunctionId>,
 ) -> Function {
     let decl = &plan.decls[id];
     let Some(boundary) = &decl.boundary else {
@@ -762,9 +1015,11 @@ fn lower_function(
 
     let mut body = Body {
         checked,
+        sources,
         plan,
         pool,
         errors,
+        wanted,
         module: &decl.module,
         name: decl.name.clone(),
         lambdas: 0,
@@ -817,11 +1072,19 @@ fn lower_function(
     }
 }
 
-/// What stands in for a declaration this lowering reported a gap about.
+/// What stands in for a declaration this pass did not lower.
 ///
-/// It exists so that function ids stay dense and a call site that names one
-/// still has something to name. Nothing ever runs it: a gap is an error, and
-/// `lower` answers `Err` rather than handing the program back.
+/// Two kinds reach it, and they end differently.
+///
+/// One is a declaration this lowering reported a gap about, and nothing ever
+/// runs that: a gap is an error and the program is not handed back.
+///
+/// The other is a declaration [`lower_entry`]'s slice left out, and that one
+/// is in a program that *does* run. Nothing can name it: no call was emitted
+/// to it — the fixed point is what makes that true — and it is left out of
+/// [`Program::by_name`], so it is not an entry point either. It exists so
+/// that function ids stay dense, which is what lets a set of ids gathered by
+/// one pass mean the same thing in the next.
 fn stub(decl: &Decl) -> Function {
     let reprs = vec![Repr::Unit];
     Function {
@@ -1218,6 +1481,37 @@ impl Body<'_> {
     fn dead(&mut self, expr: &Expr) -> Val {
         let layout = self.layout_of(expr);
         self.temp(layout)
+    }
+
+    /// Whether `id` is a declaration this pass lowered, recording it for the
+    /// next one when it is not.
+    ///
+    /// A `false` is not a gap and is deliberately silent: it says the slice
+    /// [`lower_entry`] took was too small, which is this crate's mistake to
+    /// correct rather than the program's to answer for. The caller emits
+    /// nothing naming `id`, the errors of this pass are thrown away, and the
+    /// pass after it has the declaration.
+    ///
+    /// A whole-package lowering never sees one, because nothing is left out.
+    fn reached(&mut self, id: FunctionId) -> bool {
+        if self.plan.reached(id) {
+            return true;
+        }
+        self.wanted.insert(id);
+        false
+    }
+
+    /// The source text a span covers, which is what an assertion quotes.
+    ///
+    /// `?` for a span the map does not hold, exactly as the oracle's own
+    /// reader answers, so a message worded here and one worded there cannot
+    /// differ even in the case neither expects.
+    fn source_text(&self, span: Span) -> &str {
+        self.sources
+            .files()
+            .find(|file| file.id == span.file)
+            .and_then(|file| file.text.get(span.start as usize..span.end as usize))
+            .unwrap_or("?")
     }
 
     /// Reports a construct this lowering has not been taught, answering a

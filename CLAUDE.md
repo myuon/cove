@@ -26,6 +26,10 @@ was refused. The sixth is `crates/cove-cli/tests/admits_coverage.rs`, which
 compiles every program in the repository and reports which ones the eight-byte
 frame admits and what the refusals say — the roadmap for what to build next,
 and a ratchet that fails if a change admits fewer than the last one did.
+`crates/cove-cli/tests/lvm_coverage.rs` is the same instrument for the
+linear-memory backend and is ignored for the same reason and one more: it
+*runs* what it lowers, on both backends, and the benchmark rows are two
+million turns each.
 
 Before pushing, the full gate is what CI runs: `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
