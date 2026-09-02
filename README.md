@@ -241,7 +241,10 @@ than a renovation of them —
 by it. [ADR 0035](docs/adr/0035-a-value-type-may-not-contain-itself.md) is the
 one language rule that model needs: a value type may not contain itself, so a
 recursive cycle passes through a reference the declaration can be read to
-have.
+have. [ADR 0036](docs/adr/0036-an-inference-variable-is-not-a-kind-of-unknown.md)
+keeps ADR 0016's four kinds of unknown intact while local inference gained a
+fifth variant: an inference variable is a transient state inside one body's
+check and never escapes it.
 
 Syntax is still provisional and may change.
 
