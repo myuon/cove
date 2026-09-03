@@ -6,7 +6,7 @@
 //! list of strings: `run_entry` takes the process arguments an entry may
 //! declare, so `evaluate(pr: PullRequest) -> Decision` — the signature a rule
 //! engine actually wants — was not callable from Rust at all. That is issue
-//! #150, and `Interpreter::invoke` and `Lvm::invoke` are the answer.
+//! #150, and `Interpreter::invoke` and `Vm::invoke` are the answer.
 //!
 //! Every case runs on **both backends** and asserts they agree, because the
 //! differential harness cannot reach this path: it runs entries the way `cove
@@ -17,7 +17,7 @@
 //! The refusals are held to as tightly as the successes. A host that hands
 //! over the wrong thing must be told which argument, what was expected there,
 //! and what arrived — before the first instruction runs, and identically on
-//! either backend. Where that matters most is `Lvm`: the lowering has spent
+//! either backend. Where that matters most is `Vm`: the lowering has spent
 //! the checker's answer by the time a parameter is a slot, so a `String`
 //! placed in a slot the lowering made scalar is not a wrong answer but a
 //! panic. The check is what makes `invoke` a `Result`.
@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use cove_diag::SourceMap;
 use cove_runtime::interp::Interpreter;
 use cove_runtime::trace::{RunOutcome, TraceEvent, TraceSink};
-use cove_runtime::{Grants, HostRegistry, Lvm, Runtime, RuntimeError, Value};
+use cove_runtime::{Grants, HostRegistry, Runtime, RuntimeError, Value, Vm};
 use cove_sema::package::{Module, Package, Unit};
 use cove_sema::resolve::Program;
 use cove_sema::{Compiler, Config};
@@ -73,7 +73,7 @@ export fn describe(note: Note, prefix: String) -> String {
   \"{prefix}:{note.id}:{note.weight}\"
 }
 
-/// One `Int`, which is the case `Lvm` lowers to a scalar slot.
+/// One `Int`, which is the case `Vm` lowers to a scalar slot.
 export fn doubled(n: Int) -> Int {
   n * 2
 }
@@ -127,11 +127,11 @@ export fn unbox(boxed: Boxed<Int>) -> Int {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Backend {
     Ast,
-    Lvm,
+    Vm,
 }
 
 /// Both of them, for the cases that assert the two agree.
-const BOTH: [Backend; 2] = [Backend::Ast, Backend::Lvm];
+const BOTH: [Backend; 2] = [Backend::Ast, Backend::Vm];
 
 /// What a case gets back: what the invocation answered, and every terminal
 /// event the run wrote.
@@ -195,7 +195,7 @@ fn packaged(text: &str) -> (SourceMap, Package) {
 /// beside every terminal event the run wrote.
 ///
 /// The whole package is lowered rather than one entry, because a case invokes
-/// several functions through one `Lvm` and `lower_entry` lowers what one entry
+/// several functions through one `Vm` and `lower_entry` lowers what one entry
 /// reaches. What that costs is a lowering of `identity`, `bump` and `joined`
 /// as well, which is worth having: it says the three are refused by the check
 /// and not by the lowering failing to produce them.
@@ -223,9 +223,9 @@ fn on(
     // and should take the thread `Interpreter::run_entry` documents.
     let answer = match backend {
         Backend::Ast => Interpreter::new(&runtime).invoke("m", name, args),
-        Backend::Lvm => {
+        Backend::Vm => {
             let lowered = Arc::new(
-                cove_lir::lower(&program, &sources, &cove_sema::HostSchemas::new()).unwrap_or_else(
+                cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new()).unwrap_or_else(
                     |items| {
                         panic!(
                             "the fixture lowers:\n{}",
@@ -238,7 +238,7 @@ fn on(
                     },
                 ),
             );
-            Lvm::new(&runtime, &hosts, &lowered).invoke("m", name, args)
+            Vm::new(&runtime, &hosts, &lowered).invoke("m", name, args)
         }
     };
     let events = ended.0.lock().unwrap().clone();
@@ -364,7 +364,7 @@ fn a_struct_of_another_declared_type_is_refused_by_name() {
 /// this is the case that has to be refused rather than merely reported.
 ///
 /// The lowering reads a declared struct's field by index, so a value carrying
-/// nine of ten fields would have `Lvm` read past its end and a value carrying
+/// nine of ten fields would have `Vm` read past its end and a value carrying
 /// ten in another order would answer the wrong one silently. Neither is a
 /// mistake a host would be told about by running.
 #[test]
@@ -655,7 +655,7 @@ fn a_refused_invocation_still_ends_the_run_it_never_started() {
 fn a_run_lowered_for_one_entry_says_which_of_the_two_is_missing() {
     let (sources, program) = checked();
     let lowered = Arc::new(
-        cove_lir::lower_entry(
+        cove_ir::lower_entry(
             &program,
             &sources,
             &cove_sema::HostSchemas::new(),
@@ -676,7 +676,7 @@ fn a_run_lowered_for_one_entry_says_which_of_the_two_is_missing() {
     let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
     let runtime = Runtime::new(program, sources, hosts.clone());
     let answer =
-        Lvm::new(&runtime, &hosts, &lowered).invoke("m", "judge", vec![note("n-5", &["a"], 1)]);
+        Vm::new(&runtime, &hosts, &lowered).invoke("m", "judge", vec![note("n-5", &["a"], 1)]);
 
     let (message, _, help) = refusal(answer);
     assert_eq!(message, "this run's lowering does not include `m.judge`");
@@ -760,8 +760,8 @@ fn both_backends_answer_one_invocation_the_same_way() {
     ];
     for (name, args) in calls {
         let ast = described(invoke(Backend::Ast, name, args.clone()).0);
-        let lvm = described(invoke(Backend::Lvm, name, args).0);
-        assert_eq!(ast, lvm, "the two backends disagree about `m.{name}`");
+        let vm = described(invoke(Backend::Vm, name, args).0);
+        assert_eq!(ast, vm, "the two backends disagree about `m.{name}`");
     }
 }
 

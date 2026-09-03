@@ -19,7 +19,7 @@ and the `#[ignore]`d cases, which together are more than half of a warm
 `cargo test --workspace` and which CI runs in steps of their own.
 
 Run the ignored ones by hand: `cargo test --workspace --lib --tests -- --ignored`.
-There is one, and it is the roadmap: `crates/cove-cli/tests/lvm_coverage.rs`
+There is one, and it is the roadmap: `crates/cove-cli/tests/vm_coverage.rs`
 runs every program in the repository on the linear-memory backend and sorts
 the answers into agrees, *disagrees*, and does not lower. It is ignored
 because it runs what it lowers, and the benchmark rows are two million turns

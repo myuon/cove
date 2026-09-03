@@ -15,7 +15,7 @@
 //!
 //! # Which backend a replay runs on
 //!
-//! Whichever `--backend <ast|lvm>` names, and when nobody names one, the
+//! Whichever `--backend <ast|vm>` names, and when nobody names one, the
 //! backend the trace says recorded it. ADR 0023 gave this command the flag
 //! and ADR 0026 gave the file the answer; what follows is what the two mean
 //! together here.
@@ -83,8 +83,8 @@ use cove_runtime::runtime::Runtime;
 use cove_runtime::schema::ModuleSchema;
 use cove_runtime::Transfer;
 use cove_runtime::{
-    value_to_json, Budget, Cancellation, Grants, Limits, Lvm, RecordingBackend, ResourceHandle,
-    RunOutcome, RuntimeError, Value, ValueCapture,
+    value_to_json, Budget, Cancellation, Grants, Limits, RecordingBackend, ResourceHandle,
+    RunOutcome, RuntimeError, Value, ValueCapture, Vm,
 };
 
 use crate::trace::{self, Outcome, Trace};
@@ -498,7 +498,7 @@ impl HostApi for ReplayHost {
     }
 }
 
-/// `cove replay <trace> <run-name> [--backend <ast|lvm>]`.
+/// `cove replay <trace> <run-name> [--backend <ast|vm>]`.
 pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
     // `--backend` comes out first, by the one function `cove generate` reads
     // it with, so the flag means the same thing and refuses an unknown value
@@ -588,8 +588,8 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
     // reads no tape.
     let lowered = match backend {
         Backend::Ast => None,
-        Backend::Lvm => {
-            let ir = cove_lir::lower_entry(
+        Backend::Vm => {
+            let ir = cove_ir::lower_entry(
                 &program,
                 &sources,
                 &cove_sema::HostSchemas::new(),
@@ -643,7 +643,7 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
     // which evaluator is built; the tape they read is the same object,
     // reached through the one `HostApi` boundary both share.
     let outcome = match &lowered {
-        Some(ir) => Lvm::new(&runtime, runtime.hosts(), ir).run_entry(module, entry, program_args),
+        Some(ir) => Vm::new(&runtime, runtime.hosts(), ir).run_entry(module, entry, program_args),
         None => Interpreter::new(&runtime).run_entry(module, entry, program_args),
     };
 
@@ -731,7 +731,7 @@ mod tests {
     use crate::trace::Missing;
     use cove_runtime::host::Console;
 
-    const HEADER: &str = r#"{"event":"trace_header","version":4,"backend":"lvm","values":"full","entry":"a.b","args":[]}"#;
+    const HEADER: &str = r#"{"event":"trace_header","version":4,"backend":"vm","values":"full","entry":"a.b","args":[]}"#;
 
     /// A `console.println("hi")` that answered `Ok(())`.
     fn println_line(text: &str) -> String {

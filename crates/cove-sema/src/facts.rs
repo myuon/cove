@@ -140,7 +140,7 @@ pub struct Signature {
     /// here. Inside the body `items` is the `Array<Int>` the callee made of
     /// them, and nothing in this struct says so. A consumer that needs the
     /// binding's type reads `variadic` off the declaration's own `Param` and
-    /// wraps — which is what `cove_lir::lower` does too, after first asking
+    /// wraps — which is what `cove_ir::lower` does too, after first asking
     /// this field and being told `Int`.
     ///
     /// A `var` parameter needs no such note: it names the caller's storage,

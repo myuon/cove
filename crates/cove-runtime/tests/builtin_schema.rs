@@ -1839,7 +1839,7 @@ fn an_alias_observes_a_removal() {
 ///
 /// `for` asks for the elements once and walks what it was given, so all
 /// three are visited even though the body empties the vector as it goes.
-/// That rule already existed — it is `cove_lir::lower`'s, which reads a
+/// That rule already existed — it is `cove_ir::lower`'s, which reads a
 /// sequence's length once with `Inst::Len` before a `for` walks it — and
 /// removal is checked against it here rather than assumed under it, since a
 /// body that shrinks the receiver is the case that would have found it

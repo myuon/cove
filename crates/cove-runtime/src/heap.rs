@@ -57,7 +57,7 @@
 //!
 //! The linear-memory backend does not implement this trait at all. Its heap
 //! belongs to the run rather than to a task, and it finds its roots from a
-//! frame's static reference map instead — `crate::lvm::mem`'s own `Roots`
+//! frame's static reference map instead — `crate::vm::mem`'s own `Roots`
 //! describes that on its own terms. Adding that backend cost this module
 //! nothing, which is the walk-not-a-list design paying for itself a second
 //! time: the point was never only the two shapes that existed when it was
@@ -191,7 +191,7 @@ const GROWTH_FACTOR: u64 = 2;
 /// and it was not taken, because it would put every backend's root
 /// representation in this module and make adding another an edit here
 /// rather than there — which is exactly what let the linear-memory backend
-/// add a third kind of root, in `crate::lvm::mem`'s own `Roots`, without
+/// add a third kind of root, in `crate::vm::mem`'s own `Roots`, without
 /// touching this file at all.
 ///
 /// # What an implementation owes
@@ -1563,8 +1563,8 @@ mod tests {
     /// was missing, so this passes today. It is here because nothing checked
     /// it: `Value::Closure` was reached by exactly one test in this module
     /// and that test asks about survival rather than about bytes, and before
-    /// ADR 0034 `vm::tests::heap`'s `same_heap` compared the interpreter
-    /// against the predecessor VM rather than against an absolute, so an
+    /// ADR 0034 the predecessor's own `vm::tests::heap`'s `same_heap` compared
+    /// the interpreter against it rather than against an absolute, so an
     /// error made identically on both would have gone unseen there too.
     #[test]
     fn a_closure_shared_by_two_live_paths_reports_its_bytes_once() {

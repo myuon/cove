@@ -74,7 +74,7 @@ fn built_hello() -> &'static Path {
         let (out, summary) = build("examples", "hello");
         assert!(
             summary.contains("entry:   hello.main")
-                && summary.contains("backend: lvm")
+                && summary.contains("backend: vm")
                 && summary.contains("grants:  console"),
             "the build must report the boundary it baked in:\n{summary}"
         );

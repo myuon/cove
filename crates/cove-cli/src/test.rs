@@ -48,7 +48,7 @@ use cove_runtime::interp::Interpreter;
 use cove_runtime::process::{Process, ProcessLog};
 use cove_runtime::runtime::Runtime;
 use cove_runtime::value::Value;
-use cove_runtime::Lvm;
+use cove_runtime::Vm;
 use cove_sema::capability::open_reasons;
 use cove_sema::resolve::DeclaredTest;
 use cove_sema::HostSchemas;
@@ -61,7 +61,7 @@ const FAILED: &str = "cove::test::failed";
 /// reported as.
 const NO_HOST: &str = "cove::test::no_host";
 
-/// Runs `cove test [path] [--filter <substring>] [--backend <ast|vm|lvm>]`.
+/// Runs `cove test [path] [--filter <substring>] [--backend <ast|vm>]`.
 pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
     let mut filter: Option<&str> = None;
     let mut path: Option<&Path> = None;
@@ -200,12 +200,12 @@ fn run_test(
 
     // A test is an entry, so it is lowered as one: this names the test as
     // the root and the lowering works out what it reaches. Selecting a root
-    // is all a command does; reachability lives in `cove_lir`, which is
+    // is all a command does; reachability lives in `cove_ir`, which is
     // where the fixed point that closes a slice against what the lowering
     // emits already is.
     //
     // One root per lowering rather than the whole suite in one, and that is
-    // the decision rather than an omission. `cove_lir::lower_roots` takes as
+    // the decision rather than an omission. `cove_ir::lower_roots` takes as
     // many roots as a caller has, but its answer is one answer for the set:
     // the gaps come back together with no telling which root each belongs
     // to, so a suite lowered in one call would turn one unlowerable test
@@ -220,7 +220,7 @@ fn run_test(
     // stopped at the first unlowerable test would report nothing about them.
     let lowered = match backend {
         Backend::Ast => None,
-        Backend::Lvm => match cove_lir::lower_entry(
+        Backend::Vm => match cove_ir::lower_entry(
             program,
             sources,
             &HostSchemas::new(),
@@ -251,9 +251,9 @@ fn run_test(
     let runtime = Runtime::new(Arc::clone(program), Arc::clone(sources), Arc::new(hosts));
     let (outcome, assertion) = match &lowered {
         Some(ir) => {
-            let mut lvm = Lvm::new(&runtime, runtime.hosts(), ir);
-            let outcome = lvm.run_entry(test.module, test.name, Vec::new());
-            let assertion = lvm
+            let mut vm = Vm::new(&runtime, runtime.hosts(), ir);
+            let outcome = vm.run_entry(test.module, test.name, Vec::new());
+            let assertion = vm
                 .assertion_failure()
                 .map(|(span, message)| (span, message.to_string()));
             (outcome, assertion)
@@ -461,7 +461,7 @@ mod tests {
     /// more than either — that a suite reports the same thing whichever
     /// evaluator ran it.
     fn run_all(root: &Path, allow_real: &[&str]) -> Vec<(String, Option<String>)> {
-        let on_the_backend = run_all_on(root, allow_real, Backend::Lvm);
+        let on_the_backend = run_all_on(root, allow_real, Backend::Vm);
         let on_the_oracle = run_all_on(root, allow_real, Backend::Ast);
         assert_eq!(
             on_the_backend, on_the_oracle,
@@ -548,7 +548,7 @@ mod tests {
         let (sources, _, program) = check_fixture(dir.path());
         let (sources, program) = (Arc::new(sources), Arc::new(program));
         let test = program.tests()[0];
-        for backend in [Backend::Ast, Backend::Lvm] {
+        for backend in [Backend::Ast, Backend::Vm] {
             let diagnostic = run_test(
                 &test,
                 dir.path(),
@@ -583,7 +583,7 @@ mod tests {
         let (sources, _, program) = check_fixture(dir.path());
         let (sources, program) = (Arc::new(sources), Arc::new(program));
         let test = program.tests()[0];
-        for backend in [Backend::Ast, Backend::Lvm] {
+        for backend in [Backend::Ast, Backend::Vm] {
             let diagnostic = run_test(
                 &test,
                 dir.path(),
@@ -735,7 +735,7 @@ test fn describesThroughDynDispatch() -> Result<Unit, Error> {
             &BTreeSet::new(),
             &sources,
             &program,
-            Backend::Lvm,
+            Backend::Vm,
         )
         .expect("the boundary refuses the call");
         assert!(

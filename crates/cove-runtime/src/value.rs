@@ -586,7 +586,7 @@ pub struct Closure {
 /// **The declaration is part of the body, not part of the closure.** The
 /// parameters an interpreted call binds against and the return type it
 /// coerces to are syntax, and syntax is one backend's form of a body: a
-/// lowered function has neither, because `cove_lir::lower` spent both when it
+/// lowered function has neither, because `cove_ir::lower` spent both when it
 /// chose the slots and emitted the conversions. Keeping them beside the
 /// `Arc<Block>` they came from is what lets every field of a [`Closure`]
 /// outside this enum be a fact both backends state the same way, so that
@@ -624,13 +624,13 @@ pub enum ClosureBody {
         ///
         /// Read for the written return type: a `dyn Trait` in it is what
         /// tells the interpreter to wrap what the body produced. The lowered
-        /// form needs no equivalent, because `cove_lir::lower` boxes what a
+        /// form needs no equivalent, because `cove_ir::lower` boxes what a
         /// function declared as erased returns, so the answer that leaves a
         /// lowered body is already wrapped.
         decl: Option<Arc<FnDecl>>,
     },
-    /// The lowered function `cove_runtime::lvm` runs, addressed in the
-    /// [`cove_lir::Program`] that run was given, together with the
+    /// The lowered function `cove_runtime::vm` runs, addressed in the
+    /// [`cove_ir::Program`] that run was given, together with the
     /// environment object it closes over.
     ///
     /// A closure built by one run cannot be called by another, which is true
@@ -638,7 +638,7 @@ pub enum ClosureBody {
     /// Which of the two a `Closure` holds is the question *which backend made
     /// this*, and [`crate::host::Reentry`] is the only thing that asks it.
     ///
-    /// The environment is here and the captures are not. A `cove-lir`
+    /// The environment is here and the captures are not. A `cove-ir`
     /// closure's captures are inline in a heap object, at the widths its
     /// layout says, and copying them out into [`Closure::captures`] would be
     /// materialising a value nothing asked for and losing the identity of the
@@ -661,9 +661,9 @@ pub enum ClosureBody {
 #[derive(Clone, Debug)]
 pub struct LinearClosure {
     /// The body, in the program that run was given.
-    pub(crate) function: cove_lir::FunctionId,
+    pub(crate) function: cove_ir::FunctionId,
     /// The environment object, and the claim that keeps it a root.
-    pub(crate) env: crate::lvm::mem::Rooted,
+    pub(crate) env: crate::vm::mem::Rooted,
 }
 
 /// A value usable as a `Map` key or `Set` element.
@@ -1020,7 +1020,7 @@ impl Value {
     /// boundary both check against.
     ///
     /// This exists so that a host building an argument for
-    /// [`Lvm::invoke`](crate::Lvm::invoke) does not have to name
+    /// [`Vm::invoke`](crate::Vm::invoke) does not have to name
     /// [`StructValue`]'s layout to do it — the `Rc`, the field vector, and in
     /// particular `opaque`, which records that the *declaration* said `export
     /// opaque struct` (ADR 0014) and is therefore not a thing a caller has an

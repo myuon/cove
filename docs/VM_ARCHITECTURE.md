@@ -2,11 +2,18 @@
 
 > **The backend this describes has been deleted.**
 > [ADR 0034](adr/0034-one-physical-word-stack.md) replaced it, and at the
-> cutover commit `cove-ir`, `Vm`, `FrameVm`, the `admits` predicate and the
-> duplicate heap went with it. What runs a Cove program now is the
-> linear-memory backend, and [docs/LINEAR_VM.md](LINEAR_VM.md) is its design.
-> Read that one for how the machine works; read this one for what was
-> measured on the way here.
+> cutover commit the crate then called `cove-ir`, its `Vm` and `FrameVm`, the
+> `admits` predicate and the duplicate heap went with it. What runs a Cove
+> program now is the linear-memory backend, and
+> [docs/LINEAR_VM.md](LINEAR_VM.md) is its design. Read that one for how the
+> machine works; read this one for what was measured on the way here.
+>
+> **`cove-ir`, `vm` and `Vm` below are the deleted backend's, not today's.**
+> The replacement was built beside it under the transitional names `cove-lir`
+> and `lvm`, and took the plain ones in the commit after the deletion. Every
+> occurrence of them in this document predates that and has been left alone:
+> nothing here has been reattributed to the backend that now answers to these
+> names.
 >
 > It is kept, unrewritten, for two reasons.
 >

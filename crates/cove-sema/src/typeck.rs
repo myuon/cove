@@ -81,7 +81,7 @@
 //!   a `Ty::Unknown`, because a promise and an absence are different facts
 //!   and a reader of [`Facts`] has to be able to tell them apart. The two
 //!   share one erased representation in the backends, which is
-//!   `cove_lir`'s `Shapes` to decide and not this pass's.
+//!   `cove_ir`'s `Shapes` to decide and not this pass's.
 //!
 //! # The four kinds of unknown
 //!
@@ -1046,7 +1046,7 @@ pub enum Ty {
     /// unknown standing here used to do, and the reason this change moves
     /// no diagnostic. What it is *not* is a `dyn Trait`: the two share one
     /// erased representation (`docs/LINEAR_VM.md`), and sharing a
-    /// representation is what `cove_lir`'s `Shapes` is for. As types they
+    /// representation is what `cove_ir`'s `Shapes` is for. As types they
     /// are opposites — a `dyn Display` accepts only a conforming value and
     /// answers only the trait's methods, an `Any` accepts every value and
     /// answers everything at run time — so writing one as the other would

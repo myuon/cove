@@ -4,7 +4,10 @@
 #
 # **None of these patches applies any more.** Every one of them is written
 # against `crates/cove-runtime/src/vm.rs`, and ADR 0034's cutover deleted that
-# file along with the rest of the backend it belonged to. They are kept
+# file along with the rest of the backend it belonged to. Every `Vm` and every
+# `src/vm` path named below is that backend's; the replacement took the name
+# in the commit after the deletion and has no `vm.rs`, no `Vm::charge` and no
+# ablation of its own. They are kept
 # because `docs/VM_ARCHITECTURE.md` is kept, and for the same reason: that
 # document records what each mechanism was measured to cost, six accepted ADRs
 # cite its sections, and a table whose method has been thrown away is a table

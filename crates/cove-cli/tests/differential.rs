@@ -11,12 +11,12 @@
 //! table of every `cove.toml` there — is lowered, run on both against the
 //! same deterministic fakes, and compared.
 //!
-//! # Why this stands beside `lvm_coverage.rs`
+//! # Why this stands beside `vm_coverage.rs`
 //!
 //! Two harnesses walk this corpus and they ask different questions, so
 //! neither is the other's superset.
 //!
-//! `lvm_coverage.rs` is the roadmap and the ratchet. It takes `benches/` in
+//! `vm_coverage.rs` is the roadmap and the ratchet. It takes `benches/` in
 //! as well, so it covers more programs, and it compares what both evaluators
 //! can be asked for cheaply — the value or the failure's message, both
 //! console streams, how the run ended, and the files the run wrote. It
@@ -77,7 +77,7 @@
 //! each pinning a check-time diagnostic, and a package holding one of those
 //! does not check as a whole.
 //!
-//! Lowering is sliced by reachability: `cove_lir::lower_entry` lowers what
+//! Lowering is sliced by reachability: `cove_ir::lower_entry` lowers what
 //! the entry can reach and nothing else, so what is measured here is the
 //! program that entry is. This is the same call `cove run` makes, with the
 //! same entry and the same `cove_sema::HostSchemas`, so what this harness
@@ -97,7 +97,7 @@
 //!
 //! An error's source position is compared exactly, and this is the claim in
 //! this file that most had to be re-established rather than inherited.
-//! `cove_runtime::lvm::differential` compares messages and not spans, saying
+//! `cove_runtime::vm::differential` compares messages and not spans, saying
 //! the two evaluators "legitimately differ in the span they attach to a fault
 //! today". Over this corpus they do not: twelve cases fail with a span and
 //! all twelve name the same file and the same two byte offsets on both sides.
@@ -180,7 +180,7 @@ use cove_runtime::trace::{
     JsonlSink, RecordingBackend, RunOutcome, TraceHeader, TraceSink, ValueCapture,
 };
 use cove_runtime::value::Value;
-use cove_runtime::Lvm;
+use cove_runtime::Vm;
 use cove_sema::config::RunConfig;
 use cove_sema::HostSchemas;
 
@@ -200,7 +200,7 @@ fn the_backend_and_the_oracle_agree_over_the_whole_corpus() {
     // Everything happens on the stack the runtime sizes: the interpreter is
     // a recursive tree walker, a test thread's stack is not one it chose, and
     // every `Value` either evaluator builds belongs to the thread that built
-    // it. The lowered program could cross — a `cove_lir::Program` is shared
+    // it. The lowered program could cross — a `cove_ir::Program` is shared
     // by every thread of a run, which is what lets a spawned task run one —
     // but it has no reason to, since what it is for is on the far side. Only
     // the report comes back out.
@@ -264,7 +264,7 @@ fn run_the_corpus() -> Report {
         // before it answers — and no admission predicate to consult, so a
         // program that checks and does not lower is a bug reported as
         // diagnostics rather than a refusal to be counted.
-        let program = match cove_lir::lower_entry(
+        let program = match cove_ir::lower_entry(
             &prepared.checked,
             &prepared.sources,
             &HostSchemas::new(),
@@ -287,7 +287,7 @@ fn run_the_corpus() -> Report {
         report.lowered.push(case.name.clone());
 
         let oracle = run_on_ast(&case, &prepared, module, entry);
-        let backend = run_on_lvm(&case, &prepared, &program, module, entry);
+        let backend = run_on_vm(&case, &prepared, &program, module, entry);
         if !oracle.trace.cancelled.is_empty() || !backend.trace.cancelled.is_empty() {
             report.races.push(case.name.clone());
         }
@@ -304,7 +304,7 @@ fn run_the_corpus() -> Report {
 //
 // `Case`, `ModuleIndex` and `Prepared` — discovering a `[run.<name>]` case
 // and parsing and checking the modules its entry reaches — are
-// `tests/support/mod.rs`'s, shared with `lvm_coverage.rs` so that there is
+// `tests/support/mod.rs`'s, shared with `vm_coverage.rs` so that there is
 // one description of how a corpus case is loaded rather than two that could
 // drift.
 
@@ -328,13 +328,13 @@ fn run_the_corpus() -> Report {
 /// whole corpus is under thirty seconds.
 ///
 /// The coverage did not go anywhere. `cove-bench` runs every benchmark on
-/// `ast` and on `lvm` and each row asserts its own answer, so an evaluator
+/// `ast` and on `vm` and each row asserts its own answer, so an evaluator
 /// that disagreed would fail the assertion on the side that was wrong — and
 /// it runs them optimized, on every push. What is given up is the console
 /// comparison this harness makes and that one does not, and a benchmark
 /// writes almost nothing to the console.
 ///
-/// `lvm_coverage.rs` makes the opposite choice, and it costs it: those two
+/// `vm_coverage.rs` makes the opposite choice, and it costs it: those two
 /// million turns are eighty seconds of its run. It pays them because what it
 /// measures is how much of the corpus this backend runs at all, and a
 /// benchmark it has never executed end to end is where a fault in the
@@ -410,20 +410,20 @@ fn run_on_ast(case: &Case, prepared: &Prepared, module: &str, entry: &str) -> Ra
 /// Runs the same case on the linear-memory backend, over the program it was
 /// lowered to.
 ///
-/// Through [`Lvm`] rather than through anything below it, because what is
+/// Through [`Vm`] rather than through anything below it, because what is
 /// being compared is what the language says and the language's answer
 /// includes the boundary: the same entry-shape check, the same
 /// materialisation of the answer, the same terminal trace events. Comparing
 /// the dispatch loop against the whole of the oracle would be comparing two
 /// different things.
-fn run_on_lvm(
+fn run_on_vm(
     case: &Case,
     prepared: &Prepared,
-    program: &cove_lir::Program,
+    program: &cove_ir::Program,
     module: &str,
     entry: &str,
 ) -> Ran {
-    let (fakes, hosts) = Fakes::build(case, module, entry, RecordingBackend::Lvm);
+    let (fakes, hosts) = Fakes::build(case, module, entry, RecordingBackend::Vm);
     let sink = Arc::clone(&fakes.sink);
     let hosts = Arc::new(hosts);
     let runtime = Runtime::new(
@@ -432,7 +432,7 @@ fn run_on_lvm(
         hosts.clone(),
     )
     .with_trace(sink);
-    let answer = Lvm::new(&runtime, &hosts, program).run_entry(module, entry, arguments(case));
+    let answer = Vm::new(&runtime, &hosts, program).run_entry(module, entry, arguments(case));
     fakes.observed(answer)
 }
 
@@ -616,7 +616,7 @@ fn disagreement(name: &str, oracle: &Ran, backend: &Ran) -> String {
         }
     };
     side("ast (the oracle)", oracle);
-    side("lvm", backend);
+    side("vm", backend);
     out
 }
 
@@ -663,7 +663,7 @@ impl Trace {
     ///
     /// The event says when a collection happened and what it found, and only
     /// one of the two evaluators writes it: `cove_runtime::interp` records
-    /// one per sweep of its `Rc`-ed object heap, and `cove_runtime::lvm`
+    /// one per sweep of its `Rc`-ed object heap, and `cove_runtime::vm`
     /// records none, ever. Its four figures are objects allocated, objects
     /// freed, objects live and bytes live, which is a vocabulary the
     /// linear-memory heap does not have — its heap is a run of eight-byte
@@ -705,7 +705,7 @@ impl Trace {
     /// that heap's own unit, and the two heaps are different sizes in
     /// different units. Measured over this corpus, the linear-memory backend
     /// reports `"collections":0` for every one of the ninety-seven cases,
-    /// because `cove_runtime::lvm`'s `DEFAULT_HEAP_WORDS` is four mebiwords
+    /// because `cove_runtime::vm`'s `DEFAULT_HEAP_WORDS` is four mebiwords
     /// and nothing in the corpus fills it, while the interpreter reports
     /// between one and thirty-two. Thirty of the ninety-seven differ and the
     /// other sixty-seven agree only in reporting nothing. Comparing it would

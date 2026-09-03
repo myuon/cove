@@ -1,7 +1,7 @@
 //! Holding a host's arguments to the declaration it is calling.
 //!
 //! [`Interpreter::invoke`](crate::interp::Interpreter::invoke) and
-//! [`Lvm::invoke`](crate::Lvm::invoke) let a host call an exported function
+//! [`Vm::invoke`](crate::Vm::invoke) let a host call an exported function
 //! with values it built, which
 //! [`run_entry`](crate::interp::Interpreter::run_entry) cannot: that one takes
 //! the process arguments an entry may declare, so what a host could say to a
@@ -22,7 +22,7 @@
 //! # Why the check is not optional
 //!
 //! It would be tempting to let the backend discover a wrong argument on its
-//! own. It can, now: `cove_lir::lower` spends the checker's answer when it
+//! own. It can, now: `cove_ir::lower` spends the checker's answer when it
 //! chooses each parameter's `Repr`, and the boundary that turns a `Value`
 //! into words for the call already refuses one of the wrong shape before the
 //! first instruction runs. But it refuses from inside its own reading of one
@@ -114,7 +114,7 @@ pub(crate) fn check(
     // The declaration's parameter *types* are the checker's answer rather than
     // the source's, so they come from the facts table and not from
     // `decl.params[i].ty`: `-> module.Thing` written in one module and read in
-    // another is a name only the checker resolved. `cove_lir::lower` reads the
+    // another is a name only the checker resolved. `cove_ir::lower` reads the
     // same table through the same key.
     let Some(signature) = program.facts.signature(decl.span.file, decl.span) else {
         return Err(RuntimeError::new(format!(
@@ -362,7 +362,7 @@ fn mismatched(declared: &Ty, value: &Value, module: &str) -> Wrong {
 /// read *by name* wherever a program reads one, so a value that is missing
 /// one is told so.
 ///
-/// A type this package declares is not read that way. `cove_lir::lower` spends
+/// A type this package declares is not read that way. `cove_ir::lower` spends
 /// the checker's answer and emits a `LoadField` at the payload word offset
 /// the declaration's field order lays out, because every value of a declared
 /// type is built by the lowering and stands in that order. A host's is not: a

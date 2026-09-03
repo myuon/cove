@@ -891,7 +891,7 @@ const SLICE: MethodSchema = MethodSchema {
 // shares its storage, so the walk has to settle what it walks rather than
 // read the receiver as it goes; the elements are copied out first, so what
 // is walked and what comes back are both settled before the first call.
-// That is the same rule `cove_lir::lower` applies to a `for` — it reads a
+// That is the same rule `cove_ir::lower` applies to a `for` — it reads a
 // sequence's length once, with `Inst::Len`, and walks a snapshot — applied
 // where the same question arises, and not a second answer to it.
 //
@@ -1089,7 +1089,7 @@ pub const ARRAY: BuiltinSchema = BuiltinSchema {
         // The `...` spread is not that expression: it fills a *declared*
         // function's variadic parameter and nothing else, so `Vector.of` —
         // an associated function of a builtin — collects nothing from one,
-        // and `cove_lir` refuses to lower a `...` written there.
+        // and `cove_ir` refuses to lower a `...` written there.
         MethodSchema {
             name: "toVector",
             generics: &[],

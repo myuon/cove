@@ -1,0 +1,11 @@
+[package]
+name = "cove-ir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cove-diag = { workspace = true }
+cove-schema = { workspace = true }
+cove-sema = { workspace = true }
+cove-syntax = { workspace = true }

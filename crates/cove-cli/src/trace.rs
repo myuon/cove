@@ -274,7 +274,7 @@ fn parse_header(line: &str) -> Result<Header, String> {
         // `read_str` returns an error the instant it sees this `version`
         // disagree, before this `Header` is ever wrapped in a `Trace` and
         // handed to a caller — so `backend` here is never read. There is no
-        // honest value to put in it: `Ast` and `Lvm` are both real backends
+        // honest value to put in it: `Ast` and `Vm` are both real backends
         // a trace of a version this build does not read could have been
         // recorded on, and the field has no third case to name "unknown"
         // with. Making it `Option` to give this arm a `None` would carry
@@ -293,7 +293,7 @@ fn parse_header(line: &str) -> Result<Header, String> {
     }
     let backend = string_field(&json, "backend")?;
     let backend = RecordingBackend::parse(&backend)
-        .ok_or_else(|| format!("`backend` must be `ast` or `lvm`, found `{backend}`"))?;
+        .ok_or_else(|| format!("`backend` must be `ast` or `vm`, found `{backend}`"))?;
     let values = string_field(&json, "values")?;
     let values = ValueCapture::parse(&values)
         .ok_or_else(|| format!("`values` must be `full` or `redacted`, found `{values}`"))?;
@@ -1354,7 +1354,7 @@ pub(crate) fn cmd_trace(args: &[String]) -> Result<(), CliError> {
 mod tests {
     use super::*;
 
-    const HEADER: &str = r#"{"event":"trace_header","version":4,"backend":"lvm","values":"full","entry":"restricted.main","args":[]}"#;
+    const HEADER: &str = r#"{"event":"trace_header","version":4,"backend":"vm","values":"full","entry":"restricted.main","args":[]}"#;
 
     fn read(lines: &[&str]) -> Trace {
         Trace::read_str(&lines.join("\n")).expect("the trace reads")
@@ -1375,7 +1375,7 @@ mod tests {
             r#"{"event":"host_call","task":0,"module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[{"type":"string","value":"input"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"string","value":"text"}]}}}"#,
         ]);
         assert_eq!(trace.header.version, 4);
-        assert_eq!(trace.header.backend, RecordingBackend::Lvm);
+        assert_eq!(trace.header.backend, RecordingBackend::Vm);
         assert_eq!(trace.header.values, ValueCapture::Full);
         assert_eq!(trace.header.entry, "restricted.main");
         assert_eq!(trace.events.len(), 2);
@@ -1436,7 +1436,7 @@ mod tests {
             r#"{"event":"trace_header","version":4,"backend":"jit","values":"full","entry":"a.b","args":[]}"#,
         ]);
         assert!(
-            message.contains("`backend` must be `ast` or `lvm`, found `jit`"),
+            message.contains("`backend` must be `ast` or `vm`, found `jit`"),
             "{message}"
         );
     }
@@ -1444,10 +1444,7 @@ mod tests {
     /// Every backend a header may name reads back as itself.
     #[test]
     fn a_header_reads_back_the_backend_that_recorded_it() {
-        for (name, backend) in [
-            ("ast", RecordingBackend::Ast),
-            ("lvm", RecordingBackend::Lvm),
-        ] {
+        for (name, backend) in [("ast", RecordingBackend::Ast), ("vm", RecordingBackend::Vm)] {
             let header = format!(
                 r#"{{"event":"trace_header","version":4,"backend":"{name}","values":"full","entry":"a.b","args":[]}}"#
             );
@@ -1501,7 +1498,7 @@ mod tests {
     #[test]
     fn a_redacted_value_reads_back_as_missing_rather_than_as_a_value() {
         let trace = read(&[
-            r#"{"event":"trace_header","version":4,"backend":"lvm","values":"redacted","entry":"a.b","args":[]}"#,
+            r#"{"event":"trace_header","version":4,"backend":"vm","values":"redacted","entry":"a.b","args":[]}"#,
             r#"{"event":"host_call","task":0,"module":"env","op":"get","capability":"env","wait_ns":0,"granted":true,"args":[{"type":"redacted","of":"String"}],"outcome":{"kind":"value","value":{"type":"redacted","of":"Option"}}}"#,
         ]);
         let call = trace.dispatched_calls()[0];
@@ -1883,7 +1880,7 @@ mod tests {
     #[test]
     fn a_redacted_trace_says_it_cannot_be_replayed() {
         let trace = read(&[
-            r#"{"event":"trace_header","version":4,"backend":"lvm","values":"redacted","entry":"a.b","args":[]}"#,
+            r#"{"event":"trace_header","version":4,"backend":"vm","values":"redacted","entry":"a.b","args":[]}"#,
         ]);
         let text = render_summary(Path::new("t.jsonl"), &trace);
         assert!(text.contains("cannot be replayed"), "{text}");

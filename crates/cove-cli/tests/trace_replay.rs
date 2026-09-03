@@ -187,7 +187,7 @@ fn record_on_the_interpreter(path: &Path) -> String {
 #[test]
 fn a_recording_replays_on_either_backend_from_either_backend() {
     let dir = TempDir::new("cross-backend");
-    let on_the_backend = dir.join("lvm.jsonl");
+    let on_the_backend = dir.join("vm.jsonl");
     let on_the_interpreter = dir.join("ast.jsonl");
     let recorded = record(&on_the_backend);
     let oracle = record_on_the_interpreter(&on_the_interpreter);
@@ -206,7 +206,7 @@ fn a_recording_replays_on_either_backend_from_either_backend() {
         // of them naming a backend. The recording is the default backend's;
         // since ADR 0026 the replay is that one's *because the file says so*
         // rather than because both defaults happen to agree.
-        ("lvm", &on_the_backend, None, "lvm"),
+        ("vm", &on_the_backend, None, "vm"),
         // The case ADR 0026 is for, and the one no flag could express before
         // it: an interpreter recording, replayed with no flag, runs on the
         // interpreter. Under ADR 0023 this same command line crossed
@@ -214,11 +214,11 @@ fn a_recording_replays_on_either_backend_from_either_backend() {
         ("ast", &on_the_interpreter, None, "ast"),
         // The direction ADR 0023 added, spelled out rather than defaulted —
         // and now a crossing the command can see and name.
-        ("ast", &on_the_interpreter, Some("lvm"), "lvm"),
+        ("ast", &on_the_interpreter, Some("vm"), "vm"),
         // The direction that worked before ADR 0023, which must keep working.
-        ("lvm", &on_the_backend, Some("ast"), "ast"),
+        ("vm", &on_the_backend, Some("ast"), "ast"),
         ("ast", &on_the_interpreter, Some("ast"), "ast"),
-        ("lvm", &on_the_backend, Some("lvm"), "lvm"),
+        ("vm", &on_the_backend, Some("vm"), "vm"),
     ] {
         let path = trace.display().to_string();
         let mut args = vec!["replay", path.as_str(), "restricted"];
@@ -279,7 +279,7 @@ fn a_recording_replays_on_either_backend_from_either_backend() {
 /// bare replay — naming no backend, so reading the one the file says
 /// recorded it — reaches the same limit for the same reason. Both are beside
 /// the point being pinned here, which is what happens on the backend that
-/// cannot even start: a replay of this recording with `--backend lvm` never
+/// cannot even start: a replay of this recording with `--backend vm` never
 /// reaches the tape, because the lowering refuses first.
 #[test]
 fn a_replay_of_a_program_the_lowering_can_never_accept_is_refused_before_the_tape() {
@@ -317,7 +317,7 @@ fn a_replay_of_a_program_the_lowering_can_never_accept_is_refused_before_the_tap
         stderr(&bare)
     );
 
-    let refused = cove_in(&root, &["replay", &trace, "app", "--backend", "lvm"]);
+    let refused = cove_in(&root, &["replay", &trace, "app", "--backend", "vm"]);
     assert!(
         !refused.status.success(),
         "a replay on a backend that cannot lower this program must refuse"
@@ -367,7 +367,7 @@ fn the_backend_flag_is_spelled_as_it_is_everywhere_else() {
         "an unknown backend must be refused rather than defaulted"
     );
     assert!(
-        stderr(&nonsense).contains("`--backend` must be `ast` or `lvm`, found `jit`"),
+        stderr(&nonsense).contains("`--backend` must be `ast` or `vm`, found `jit`"),
         "{}",
         stderr(&nonsense)
     );
@@ -375,7 +375,7 @@ fn the_backend_flag_is_spelled_as_it_is_everywhere_else() {
     let bare = cove(&["replay", &trace, "restricted", "--backend"]);
     assert!(!bare.status.success(), "`--backend` needs a value");
     assert!(
-        stderr(&bare).contains("`--backend` needs a value: `ast` or `lvm`"),
+        stderr(&bare).contains("`--backend` needs a value: `ast` or `vm`"),
         "{}",
         stderr(&bare)
     );
@@ -417,7 +417,7 @@ fn without_wall_clock(trace: &str) -> String {
     out.push_str(rest);
     without_heap(
         &out.replace(r#""backend":"ast","#, r#""backend":"<either>","#)
-            .replace(r#""backend":"lvm","#, r#""backend":"<either>","#),
+            .replace(r#""backend":"vm","#, r#""backend":"<either>","#),
     )
 }
 
@@ -456,7 +456,7 @@ fn a_recorded_run_reads_back_and_replays() {
     let path = dir.join("t.jsonl");
     let recorded = record(&path);
     assert!(
-        recorded.starts_with(r#"{"event":"trace_header","version":4,"backend":"lvm","values":"full","entry":"restricted.main","args":[]}"#),
+        recorded.starts_with(r#"{"event":"trace_header","version":4,"backend":"vm","values":"full","entry":"restricted.main","args":[]}"#),
         "{recorded}"
     );
 
@@ -522,7 +522,7 @@ fn a_program_that_asks_for_a_different_call_diverges() {
         // No flag was given, so the replay ran on the backend the file names,
         // and the report says the strong thing ADR 0023 could not say: this
         // divergence is the program's.
-        "this replay ran on `lvm`, which is the backend that",
+        "this replay ran on `vm`, which is the backend that",
         "recorded the trace, so a divergence is the program's rather",
     ] {
         assert!(report.contains(expected), "missing `{expected}`:\n{report}");
@@ -560,7 +560,7 @@ fn a_cross_backend_divergence_says_the_two_backends_could_be_the_difference() {
     for expected in [
         "divergence: the program asked for a different host call",
         "this replay ran on `ast` and the trace was recorded on",
-        "`lvm`, so a divergence here could be the two backends'",
+        "`vm`, so a divergence here could be the two backends'",
     ] {
         assert!(report.contains(expected), "missing `{expected}`:\n{report}");
     }
@@ -572,7 +572,7 @@ fn a_cross_backend_divergence_says_the_two_backends_could_be_the_difference() {
 fn a_summary_names_the_backend_that_recorded_the_trace() {
     let dir = TempDir::new("summary-backend");
     for (name, record_it, expected) in [
-        ("lvm.jsonl", record as fn(&Path) -> String, "lvm"),
+        ("vm.jsonl", record as fn(&Path) -> String, "vm"),
         (
             "ast.jsonl",
             record_on_the_interpreter as fn(&Path) -> String,

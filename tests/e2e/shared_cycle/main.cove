@@ -11,7 +11,7 @@ use console.println
 /// It replaces `fail_shared_cycle`, which pinned the refusal the ADR removed.
 /// What a corpus case can show is that the program *runs* on the backend that
 /// runs it; that the ring is reclaimed once nothing names it is
-/// `cove_runtime::lvm::cell`'s to show, because only a test that runs the
+/// `cove_runtime::vm::cell`'s to show, because only a test that runs the
 /// collection itself can say so without depending on when one runs.
 struct Node {
   next: Option<Shared<Node>>

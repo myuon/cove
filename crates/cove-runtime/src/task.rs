@@ -285,7 +285,7 @@ impl TaskScope {
 /// contexts a wait is charged against left for an implementor to answer. The
 /// linear-memory backend was written clean-room rather than as a renovation
 /// of that VM, and it keeps its own task and scope bookkeeping in
-/// `crate::lvm` — see that module's docs — instead of implementing this
+/// `crate::vm` — see that module's docs — instead of implementing this
 /// trait. What still holds the two backends to one answer is the
 /// differential corpus rather than shared Rust code: a task-safety rule, a
 /// budget charge, or a trace event that drifted between them is exactly what
@@ -683,7 +683,7 @@ pub struct TransferClosure {
     /// inside it does: an `Arc<Block>` is immutable, so two threads reading
     /// one observe nothing about each other, and the parameters beside it are
     /// copied like any other owned syntax. [`ClosureBody::Linear`] is a
-    /// [`crate::value::LinearClosure`] naming a function in *one run's* `cove_lir::Program`
+    /// [`crate::value::LinearClosure`] naming a function in *one run's* `cove_ir::Program`
     /// and the heap object it closes over, so what its `FunctionId` means
     /// depends on which program the receiving task is running against — and
     /// the answer is that every task of a run runs against the same one,

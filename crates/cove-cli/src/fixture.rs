@@ -67,7 +67,7 @@ pub(crate) fn load_fixture(root: &Path) -> (SourceMap, Package, Program) {
 /// Which is what a fixture that will be executed needs, and what
 /// [`load_fixture`] is not. The difference never showed while the
 /// interpreter was the only backend, because a tree walk reads no type it
-/// was not handed. `cove_lir::lower` reads several — ADR 0019 makes the IR a
+/// was not handed. `cove_ir::lower` reads several — ADR 0019 makes the IR a
 /// recording of the checker's answers rather than a second derivation of
 /// them — so a fixture that skipped the checker made the lowering refuse a
 /// program the real CLI lowers without complaint, which is a fixture

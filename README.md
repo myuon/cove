@@ -66,7 +66,7 @@ $ cove generate --check
 $ cove build hello
 built `hello` from 29 file(s) into `target/hello`
   entry:   hello.main
-  backend: lvm
+  backend: vm
   grants:  console
   limits:  (none)
 $ cp target/hello /tmp && cd /tmp && ./hello

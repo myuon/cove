@@ -1045,7 +1045,7 @@ fn duration_unit(name: &str) -> Option<i64> {
 /// `map`, `filter`, `fold`, and `sorted`, which are the same four operations
 /// on an `Array` and on a `Vector`, as the interpreter runs them: the
 /// linear-memory backend lowers each of the four to its own loop instead —
-/// see `crates/cove-lir/src/lower/walks.rs`, which calls this file's version
+/// see `crates/cove-ir/src/lower/walks.rs`, which calls this file's version
 /// the oracle it has to agree with.
 ///
 /// `elements` is already the caller's own copy — the `Array`'s elements, or

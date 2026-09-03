@@ -1,11 +1,11 @@
-//! The corpus-walking machinery `differential.rs` and `lvm_coverage.rs` both
+//! The corpus-walking machinery `differential.rs` and `vm_coverage.rs` both
 //! need: what a `[run.<name>]` case is, which package's `cove.toml` holds it,
 //! and — the part that takes the most care — parsing and type-checking
 //! exactly the modules that case's entry reaches, and nothing else.
 //!
 //! This lives apart from either test so that there is one description of
 //! "load this corpus case and check it" rather than two that could drift.
-//! `lvm_coverage.rs` walks the whole corpus and reports what lowers, runs and
+//! `vm_coverage.rs` walks the whole corpus and reports what lowers, runs and
 //! agrees; `differential.rs` walks the part of it that does not need a
 //! benchmark's two million turns and compares the two runs far more closely,
 //! down to the source span of a failure and the trace the run wrote. Neither

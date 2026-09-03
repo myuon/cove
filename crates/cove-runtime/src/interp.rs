@@ -909,7 +909,7 @@ impl<'a> Interpreter<'a> {
     /// which the entry's result already allowed, so this is the way in
     /// catching up with the way out. See issue #150.
     ///
-    /// [`Lvm::invoke`](crate::Lvm::invoke) takes the same three things and
+    /// [`Vm::invoke`](crate::Vm::invoke) takes the same three things and
     /// answers the same way, exactly as the two `run_entry`s do.
     ///
     /// # What holds the arguments to anything
@@ -1068,7 +1068,7 @@ impl<'a> Interpreter<'a> {
     /// The process arguments as the one value an entry may take them as.
     ///
     /// The entry-shape rule is the language's and not a backend's, so this and
-    /// [`crate::Lvm`]'s copy of it refuse in the same words.
+    /// [`crate::Vm`]'s copy of it refuse in the same words.
     fn enter(
         &mut self,
         module: &str,
@@ -2280,7 +2280,7 @@ impl<'a> Interpreter<'a> {
     /// The waiting, the order it happens in, and what a failed child does are
     /// [`crate::task::wait_for_children`]'s. Before ADR 0034 that was also
     /// the code the predecessor VM left a scope through; the linear-memory
-    /// backend keeps its own version of the same rules in `crate::lvm`
+    /// backend keeps its own version of the same rules in `crate::vm`
     /// instead, so what holds the two to the same answer now is the
     /// differential corpus rather than one shared function. What is here is
     /// the translation into this
@@ -2466,7 +2466,7 @@ impl<'a> Interpreter<'a> {
         //
         // The parameter is the tree body's to state, which is why this reads
         // it there. The linear-memory backend never asks this question at
-        // all: `cove_lir::lower`'s own `shared_lock` reads whether the
+        // all: `cove_ir::lower`'s own `shared_lock` reads whether the
         // callback's first parameter is `var` at lowering time, while it is
         // still syntax, and lowers the call one way or the other. A closure
         // whose body is lowered cannot reach this evaluator to run in the
@@ -3455,7 +3455,7 @@ impl Callable for Interpreter<'_> {
 /// A declared function used as a value: a closure over nothing.
 ///
 /// `Env::captures` is not consulted, because a declaration reads no
-/// environment — the same fact `cove_lir::lower`'s own `close_over` states
+/// environment — the same fact `cove_ir::lower`'s own `close_over` states
 /// when it lowers a function used as a value: an environment object with no
 /// captures at all, rather than a list of names to read.
 ///
@@ -3501,7 +3501,7 @@ fn conformable(value: &Value) -> bool {
 /// exactly one place it does this, so that neither builds a different dyn
 /// value in a second place by accident: the interpreter reaches it from
 /// [`Interpreter::coerce`], which walks the written type at the moment of
-/// the conversion, and `cove_lir::lower`'s own `Body::erase` walks the same
+/// the conversion, and `cove_ir::lower`'s own `Body::erase` walks the same
 /// written type at lowering time instead — this function is what it calls
 /// `interp::as_dyn` in its own words.
 ///
@@ -3524,7 +3524,7 @@ pub(crate) fn as_dyn(value: Value, trait_name: &Rc<str>) -> Value {
 /// and answers everything else unchanged.
 ///
 /// One step into a container whose elements a written type says are `dyn`
-/// too — the interpreter's own version of a rule `cove_lir::lower` applies at
+/// too — the interpreter's own version of a rule `cove_ir::lower` applies at
 /// lowering time instead. `Array<dyn Display>` and `Option<dyn Display>` are
 /// the two forms of it, and nothing else is reached: a `Vector` is a shared
 /// handle whose elements cannot be rewritten behind its other aliases, and a
@@ -3757,7 +3757,7 @@ pub(crate) fn unary(op: UnaryOp, value: Value, span: Span) -> Result<Value, Runt
 /// A free function because the interpreter builds a declared enum's value
 /// by looking its case up by name at every evaluation — walking syntax does
 /// not resolve a case to a fixed position the way lowering does.
-/// `cove_lir::lower` needs no runtime equivalent of this: it resolves the
+/// `cove_ir::lower` needs no runtime equivalent of this: it resolves the
 /// case statically and lowers straight to the words a value of it holds,
 /// since `cove-sema` refuses a missing case or a wrong-length payload before
 /// either backend runs.
@@ -3834,7 +3834,7 @@ fn known_members(program: &Program, module: &str, decl: &Arc<EnumDecl>) -> Strin
 /// Static exhaustiveness checking is future work; until then a `match` that
 /// covers no case fails rather than silently producing a value. Both
 /// backends refuse for the same rule — it is one and not two — though not
-/// always in the same words: `cove_lir::lower` emits a fixed trap message at
+/// always in the same words: `cove_ir::lower` emits a fixed trap message at
 /// the point a `match` has no arm left, because formatting the actual value
 /// there would mean calling back into a builtin from an instruction that is
 /// already failing. This is the oracle's fuller version of the same refusal.
@@ -3885,7 +3885,7 @@ fn init_map_entry(args: Vec<EvaluatedArg>, span: Span) -> Result<Value, RuntimeE
 /// The out-of-order refusal below is one `cove-sema` reports before the run
 /// (ADR 0021), so no checked program reaches it. It stays because this is
 /// the oracle's own statement of the evaluation-order rule the linear-memory
-/// backend's calling convention is built on too — `cove_lir::lower` lowers
+/// backend's calling convention is built on too — `cove_ir::lower` lowers
 /// every argument in source order at each call site rather than through one
 /// shared matching step — and a rule two backends both rely on is better
 /// stated twice than assumed twice.
@@ -4437,8 +4437,8 @@ fn unsupported(what: &str, span: Span) -> RuntimeError {
 /// backends: the predecessor VM once lowered a sequence to a
 /// `length()`/`get(i)` index walk, and a `Map` answers neither shape — it
 /// walks as the `MapEntry` of each pair, and a `Set` in ascending order.
-/// `cove_lir::lower`'s own walk states the same order independently now
-/// (`crates/cove-lir/src/lower/walks.rs`), and the differential corpus is
+/// `cove_ir::lower`'s own walk states the same order independently now
+/// (`crates/cove-ir/src/lower/walks.rs`), and the differential corpus is
 /// what keeps the two agreeing.
 pub(crate) fn items_of(value: Value, span: Span) -> Result<Vec<Value>, RuntimeError> {
     // Iteration reads a snapshot of the elements; rejecting structural

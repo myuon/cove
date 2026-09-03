@@ -29,7 +29,7 @@
 //! A **VM heap handle** is a reference into storage `cove-runtime` allocated
 //! and manages: today a linear address (a bare `u64`) into the run's heap,
 //! rooted for as long as anything outside the machine needs it by
-//! `crate::lvm::mem::Rooted`, a `pub(crate) struct`. It is part of
+//! `crate::vm::mem::Rooted`, a `pub(crate) struct`. It is part of
 //! representation 3 and is never public.
 //!
 //! A **host resource handle** is not one. ADR 0013 decided that it is a
@@ -59,7 +59,7 @@
 //! which is where this has always looked. The reason is the visibility
 //! column the rule comes from: representations 2, 3 and 4 — `Slot`,
 //! `HeapObject`, `Dynamic` — are listed as *private to `cove-runtime`*, and
-//! `Value` is listed as the one public thing. `cove-lir` names slots publicly
+//! `Value` is listed as the one public thing. `cove-ir` names slots publicly
 //! and always has, deliberately: ADR 0019's "Slots, not names" and ADR
 //! 0027's places are the *lowering's* vocabulary, decided before ADR 0028
 //! and untouched by it, and a lowered program is not something an embedder
@@ -403,8 +403,9 @@ fn read(path: &Path) -> String {
 /// Every file of `cove-runtime` that is part of its public surface, which is
 /// every file `lib.rs` does not declare private.
 ///
-/// There is no path exclusion here and there was one until the cutover: a
-/// `src/vm/tests/` directory that no longer exists. Nothing replaced it,
+/// There is no path exclusion here and there was one until the cutover: the
+/// deleted backend's `src/vm/tests/` directory, which the `src/vm/` of today
+/// has no counterpart to. Nothing replaced it,
 /// because nothing needs to. The rule this file runs is about what a `pub fn`
 /// or a `pub trait` method may name, a module `lib.rs` declares with a bare
 /// `mod` publishes nothing whatever its items say, and `private_modules`

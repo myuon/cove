@@ -196,7 +196,7 @@ struct Accounting {
 /// "whatever budget the registry holds now". `Budget::restart` gives its
 /// budget fresh accounting, so a `Meter` taken before a restart charges the
 /// run that ended. Both backends therefore take theirs where a run begins:
-/// `Lvm::new` and `Interpreter::new` take one, and `invoke_within` and
+/// `Vm::new` and `Interpreter::new` take one, and `invoke_within` and
 /// `run_entry_within` take another immediately after installing the budget
 /// they were handed. A registry's budget cannot be replaced by any other
 /// route — `set_budget` needs `&mut HostRegistry` and a backend holds the

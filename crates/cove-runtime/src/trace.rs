@@ -22,7 +22,7 @@
 //! that changes silently breaks whatever reads it:
 //!
 //! ```text
-//! {"event":"trace_header","version":<u32>,"backend":"ast"|"lvm","values":"full"|"redacted","entry":<string>,"args":[<string>...]}
+//! {"event":"trace_header","version":<u32>,"backend":"ast"|"vm","values":"full"|"redacted","entry":<string>,"args":[<string>...]}
 //! {"event":"task_spawned","id":<u64>,"parent":<u64|null>,"scope":<string>}
 //! {"event":"task_completed","id":<u64>,"cpu_ns":<u64>}
 //! {"event":"task_cancelled","id":<u64>}
@@ -139,14 +139,18 @@ pub enum RecordingBackend {
     Ast,
     /// The linear-memory backend of ADR 0034, which is what runs a program.
     ///
-    /// The spelling is transitional and `docs/LINEAR_VM.md` says so: the
-    /// backend takes the name `vm` once there is nothing left to distinguish
-    /// it from. A file written before that names a backend spelled one way
-    /// and read by a toolchain that spells it another, which is a window
-    /// measured in commits and a trade issue #240 took deliberately — the
-    /// alternative was doing the rename first, while a `vm` that meant
-    /// something else was still in the tree.
-    Lvm,
+    /// Between ADR 0034's cutover and the rename that followed it, this
+    /// backend was spelled `lvm` here, and a trace recorded in that window
+    /// says so. Such a file is not read: [`RecordingBackend::parse`] refuses
+    /// `lvm` the way it refuses any other name, and `cove replay` reports it
+    /// as a header it cannot read. That is the trade issue #240 took
+    /// deliberately when it chose to delete the predecessor first and rename
+    /// second — the window is measured in commits, the format version had
+    /// already moved to 4 in the same cutover, and a trace is a recording of
+    /// a run that can be taken again. Nothing was built to accept the old
+    /// spelling: an alias would make a name that is scheduled to mean
+    /// nothing readable forever.
+    Vm,
 }
 
 impl RecordingBackend {
@@ -155,7 +159,7 @@ impl RecordingBackend {
     pub fn as_str(self) -> &'static str {
         match self {
             RecordingBackend::Ast => "ast",
-            RecordingBackend::Lvm => "lvm",
+            RecordingBackend::Vm => "vm",
         }
     }
 
@@ -163,7 +167,7 @@ impl RecordingBackend {
     pub fn parse(text: &str) -> Option<RecordingBackend> {
         match text {
             "ast" => Some(RecordingBackend::Ast),
-            "lvm" => Some(RecordingBackend::Lvm),
+            "vm" => Some(RecordingBackend::Vm),
             _ => None,
         }
     }
@@ -972,7 +976,7 @@ mod tests {
 
     fn header(values: ValueCapture) -> TraceHeader {
         TraceHeader {
-            backend: RecordingBackend::Lvm,
+            backend: RecordingBackend::Vm,
             values,
             entry: "hello.main".to_string(),
             args: Vec::new(),
@@ -1023,7 +1027,7 @@ mod tests {
         let sink = JsonlSink::new(
             Buffer(Vec::new()),
             TraceHeader {
-                backend: RecordingBackend::Lvm,
+                backend: RecordingBackend::Vm,
                 values: ValueCapture::Full,
                 entry: "restricted.main".to_string(),
                 args: vec!["one".to_string(), "two".to_string()],
@@ -1031,7 +1035,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(sink.writer.into_inner().unwrap().0).unwrap(),
-            "{\"event\":\"trace_header\",\"version\":4,\"backend\":\"lvm\",\"values\":\"full\",\"entry\":\"restricted.main\",\"args\":[\"one\",\"two\"]}\n"
+            "{\"event\":\"trace_header\",\"version\":4,\"backend\":\"vm\",\"values\":\"full\",\"entry\":\"restricted.main\",\"args\":[\"one\",\"two\"]}\n"
         );
     }
 
@@ -1062,7 +1066,7 @@ mod tests {
     /// parses back to what wrote it.
     #[test]
     fn a_recording_backend_round_trips_through_its_name() {
-        for backend in [RecordingBackend::Ast, RecordingBackend::Lvm] {
+        for backend in [RecordingBackend::Ast, RecordingBackend::Vm] {
             assert_eq!(RecordingBackend::parse(backend.as_str()), Some(backend));
         }
         assert_eq!(RecordingBackend::parse("jit"), None);

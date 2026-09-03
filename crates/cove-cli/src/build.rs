@@ -74,7 +74,7 @@ flags:
                         `documents/` there for the `documents` host
   --allow-exec <path>   an absolute path `process.run` may start; repeat to
                         allow more, and omit to allow none
-  --backend <ast|lvm>   which backend the binary runs on: `lvm`, the
+  --backend <ast|vm>    which backend the binary runs on: `vm`, the
                         linear-memory backend of ADR 0034 and the default, or
                         `ast`, the tree-walking interpreter
 
@@ -366,7 +366,7 @@ fn lower_what_the_binary_will_lower(
     program: &Program,
     sources: &SourceMap,
 ) -> Result<(), Vec<Diagnostic>> {
-    if plan.backend != Backend::Lvm {
+    if plan.backend != Backend::Vm {
         return Ok(());
     }
     // `plan` was built from an entry `lookup_entry` already validated, so
@@ -377,7 +377,7 @@ fn lower_what_the_binary_will_lower(
     };
     // The shipped schemas and no others, which is the set `crate::load`
     // checked this package against and the set the binary will lower with.
-    cove_lir::lower_entry(
+    cove_ir::lower_entry(
         program,
         sources,
         &cove_sema::HostSchemas::new(),
@@ -590,7 +590,7 @@ fn main() -> std::process::ExitCode {{
         ),
         backend = match plan.backend {
             Backend::Ast => "Ast",
-            Backend::Lvm => "Lvm",
+            Backend::Vm => "Vm",
         },
     )
 }
@@ -961,7 +961,7 @@ export fn main() -> Result<Unit, Error> {
             "{summary}"
         );
         assert!(summary.contains("entry:   app.main"), "{summary}");
-        assert!(summary.contains("backend: lvm"), "{summary}");
+        assert!(summary.contains("backend: vm"), "{summary}");
         assert!(summary.contains("grants:  console"), "{summary}");
         assert!(summary.contains("limits:  fuel 10"), "{summary}");
     }

@@ -1,16 +1,21 @@
 # The linear-memory VM
 
 This is the design [ADR 0034](adr/0034-one-physical-word-stack.md) decides,
-written out at the level an implementer needs. It describes `cove-lir` — the
-executable IR — and `cove_runtime::lvm` — the virtual machine that runs it.
+written out at the level an implementer needs. It describes `cove-ir` — the
+executable IR — and `cove_runtime::vm` — the virtual machine that runs it.
+"Linear" in this document's title and filename describes the memory model,
+not the IR, which is a register IR; the crate and the module carry the plain
+names, since there is nothing left to distinguish them from.
 
-It is a clean-room design. Nothing here was derived from the predecessor
-`cove-ir`, `Vm` or `FrameVm`, and no instruction, storage region or naming
-convention was carried over from them for compatibility. Where this document
-and the predecessor agreed, they agreed by arriving at the same place. The
-predecessor was deleted at the cutover ADR 0034's eighth completion condition
-asks for; `docs/VM_ARCHITECTURE.md` is what remains of it, kept for the
-measurements taken on the way here and for the ADRs that cite them.
+It is a clean-room design. Nothing here was derived from the predecessor,
+which held the names `cove-ir`, `Vm` and `FrameVm` before this one did, and
+no instruction, storage region or naming convention was carried over from it
+for compatibility. Where this document and the predecessor agreed, they
+agreed by arriving at the same place. The predecessor was deleted at the
+cutover ADR 0034's eighth completion condition asks for, and its names were
+handed over in the commit after; `docs/VM_ARCHITECTURE.md` is what remains of
+it, kept for the measurements taken on the way here and for the ADRs that
+cite them, and every `Vm` it names is the predecessor's.
 
 The design was reviewed in [issue #240](https://github.com/myuon/cove/issues/240);
 its answers are folded in here rather than left in the thread. One of them
@@ -851,20 +856,3 @@ would be requiring one of them to represent a frame the other's way.
 
 What both must do is fail the same *way*: a stack-overflow runtime error, with
 a useful span, deterministically, within the run's configured memory budget.
-
-## Naming
-
-`cove-lir` and `cove_runtime::lvm` are transitional names. The predecessor
-`cove-ir`, `Vm` and `FrameVm` were deleted at the cutover commit — ADR 0034's
-eighth completion condition — and what is left is to give this one their
-names: `cove-lir` becomes `cove-ir` and `lvm` becomes `vm`, along with
-`--backend lvm`, `RecordingBackend::Lvm` and the `Lvm` type.
-
-That is a change of its own and deliberately not part of the cutover. A commit
-that deleted a `Vm` and created a different one in the same breath would be a
-commit no reader could review: every `Vm` in the diff would have to be read
-twice to find out which one it was. Doing the deletion first leaves a tree
-where `vm` means nothing, and the rename that follows is then mechanical.
-
-"Linear" describes the memory model, not the IR, which is a register IR. It is
-not a name worth keeping once there is nothing to distinguish it from.

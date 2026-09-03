@@ -277,7 +277,7 @@ fn study(turns: u64) {
     let subject: PullRequest = cove_rules::samples()
         .remove("req-2")
         .expect("the sample exists");
-    header("paid per invocation, one Lvm serving all of them");
+    header("paid per invocation, one Vm serving all of them");
     for (what, module, entry, way, grants, trace) in [
         (
             "floor: an entry that does nothing",
@@ -399,7 +399,7 @@ fn study(turns: u64) {
         }
     });
     Row {
-        what: "decide, a new Runtime and Lvm each",
+        what: "decide, a new Runtime and Vm each",
         turns,
         cost: rebuilt,
         instructions: None,

@@ -8,12 +8,6 @@ use console.println
 /// and the same output as an interpreted run, reached by asking for the
 /// backend by name.
 ///
-/// The flag's value is spelled `lvm` and the directory is spelled
-/// `backend_vm`, and the two agree again once the rename `docs/LINEAR_VM.md`
-/// schedules has happened — the backend takes the name `vm` when there is
-/// nothing left to distinguish it from. Renaming the case twice to bridge a
-/// window measured in commits would be churn for its own sake.
-///
 /// It is its own package because it names a command of its own, which is how
 /// a case opts out of the both-backends comparison the shared package's cases
 /// get.

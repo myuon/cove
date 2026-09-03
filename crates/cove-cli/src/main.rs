@@ -14,8 +14,8 @@ use cove_runtime::embed::{register_hosts, HostSetup};
 use cove_runtime::host::HostRegistry;
 use cove_runtime::interp::Interpreter;
 use cove_runtime::{
-    create_trace_file, Budget, Cancellation, HeapStats, JsonlSink, Limits, Lvm, NullSink,
-    RecordingBackend, Runtime, TraceEvent, TraceHeader, TraceSink, ValueCapture,
+    create_trace_file, Budget, Cancellation, HeapStats, JsonlSink, Limits, NullSink,
+    RecordingBackend, Runtime, TraceEvent, TraceHeader, TraceSink, ValueCapture, Vm,
 };
 use cove_sema::capability::open_reasons;
 use cove_sema::config::RunConfig;
@@ -90,8 +90,8 @@ moves for one.
 
 `cove test` runs every `test fn` in the package, reports each one, and exits
 non-zero when any failed. `--filter` runs only the tests whose qualified name
-contains the given substring, and `--backend <ast|lvm>` chooses which
-backend runs them, defaulting to `lvm` as `cove run` does. Each test is
+contains the given substring, and `--backend <ast|vm>` chooses which
+backend runs them, defaulting to `vm` as `cove run` does. Each test is
 lowered on its own, so a gap in the lowering fails that test and not the
 suite. Each test is granted exactly the
 capabilities its call graph requires, with each host's fake implementation,
@@ -124,8 +124,8 @@ generate: `cove generate` is the only command that runs project code besides
 an explicit `run`. `cove generate --check` regenerates every run that sets
 `generates` into memory, compares it against what is on disk, and exits
 non-zero on the first file that differs, which is the form to run in CI.
-`--backend <ast|lvm>` chooses the backend a generator runs on, defaulting
-to `lvm`; it is the only `cove run` flag `cove generate` takes, because every
+`--backend <ast|vm>` chooses the backend a generator runs on, defaulting
+to `vm`; it is the only `cove run` flag `cove generate` takes, because every
 other budget is `[run.<name>]`'s.
 
 `cove trace` reads a JSONL trace written by `cove run --trace` and prints a
@@ -138,7 +138,7 @@ program's own computation runs for real; only the Host API boundary is canned,
 so no host is called and nothing outside the process changes. A replay exits
 non-zero when it diverges: the program asked for a call the trace does not
 have, asked for a different one, or stopped before using them all.
-`--backend <ast|lvm>` chooses which backend replays it, defaulting since
+`--backend <ast|vm>` chooses which backend replays it, defaulting since
 ADR 0026 to the one the trace says recorded it rather than to `cove run`'s
 default, so an ordinary replay is a same-backend replay and is one by reading
 the file. Naming the flag replays across backends deliberately, which stays
@@ -154,7 +154,7 @@ literal `--` is a program argument, even if it looks like a flag):
   --trace <path>        write a JSONL trace to <path>, or `-` for stderr
   --trace-values <mode> `full` (the default) records each host call's arguments and result, which is what `cove replay` needs; `redacted` records only their types
   --max-tasks <n>       stop the run when it would hold more than <n> tasks at once
-  --backend <ast|lvm>   which backend runs the entry: `lvm`, the linear-memory backend of ADR 0034 and the default, or `ast`, the tree-walking interpreter and the semantic oracle
+  --backend <ast|vm>    which backend runs the entry: `vm`, the linear-memory backend of ADR 0034 and the default, or `ast`, the tree-walking interpreter and the semantic oracle
   --stats               print the backend's lowering and execution times and the instructions it executed, then fuel spent, host calls, irreversible writes, elapsed time, host-call wait, and the heap, to stderr
   --files-root <path>   the one directory the `files` host may reach; defaults to `files/` in the package
   --allow-exec <path>   an absolute path `process.run` may start; repeat to allow more, and omit to allow none
@@ -1076,7 +1076,7 @@ pub(crate) enum ExecuteError {
     /// The backend met something its lowering could not emit code for.
     ///
     /// Diagnostics rather than a refusal, and that is what ADR 0034 decides:
-    /// `cove-lir` has no admission predicate to answer, so what stops it is
+    /// `cove-ir` has no admission predicate to answer, so what stops it is
     /// either a gap in the lowering or a type the checker never settled, and
     /// both are already `cove_diag::Diagnostic`s pointing at source. The CLI
     /// renders them exactly as it renders a compile error, because that is
@@ -1115,19 +1115,19 @@ pub(crate) fn execute_entry(
     // What is lowered is what this entry reaches, which is the program this
     // command was asked to run. A package holds as many programs as it has
     // `[run.<name>]` tables, and a closure in one of the others is not a
-    // reason this one cannot run: `cove_lir::lower_entry` slices by the
+    // reason this one cannot run: `cove_ir::lower_entry` slices by the
     // checker's own call graph and closes the slice against what the lowering
     // names. The coverage harness lowers a case the same way, so the two
     // agree about what an entry's program is.
     let lowered = match flags.backend {
         Backend::Ast => None,
-        Backend::Lvm => {
+        Backend::Vm => {
             let started = Instant::now();
             // The shipped schemas and no others, which is the set
             // `cove_sema::Compiler::new()` checked this package against —
             // a `cove` command registers the hosts it ships and nothing
             // else, and the lowering has to read what the checker read.
-            let ir = cove_lir::lower_entry(program, sources, &HostSchemas::new(), module, entry)
+            let ir = cove_ir::lower_entry(program, sources, &HostSchemas::new(), module, entry)
                 .map_err(ExecuteError::NotLowered)?;
             Some(Lowered {
                 program: Arc::new(ir),
@@ -1235,15 +1235,15 @@ pub(crate) fn execute_entry(
     let started = Instant::now();
     let (outcome, memory, instructions) = match lowered.as_ref().map(|l| &l.program) {
         Some(ir) => {
-            let mut lvm = Lvm::new(&runtime, runtime.hosts(), ir);
-            let outcome = lvm.run_entry(module, entry, program_args);
+            let mut vm = Vm::new(&runtime, runtime.hosts(), ir);
+            let outcome = vm.run_entry(module, entry, program_args);
             (
                 outcome,
                 Memory::Words {
-                    held: lvm.heap_words(),
-                    handed_out: lvm.allocated_words(),
+                    held: vm.heap_words(),
+                    handed_out: vm.allocated_words(),
                 },
-                Some(lvm.instructions()),
+                Some(vm.instructions()),
             )
         }
         None => {
@@ -1273,10 +1273,10 @@ pub(crate) fn execute_entry(
 /// lowered rather than what the package happened to hold beside it.
 ///
 /// There is no verification time beside it, and that is not an omission:
-/// `cove_lir::lower` verifies what it emitted before it answers, so there is
+/// `cove_ir::lower` verifies what it emitted before it answers, so there is
 /// no second phase to time.
 struct Lowered {
-    program: Arc<cove_lir::Program>,
+    program: Arc<cove_ir::Program>,
     lower: Duration,
 }
 
@@ -1352,9 +1352,10 @@ fn print_backend_stats(
 #[derive(Clone)]
 pub(crate) struct RunFlags {
     /// Which backend runs the entry. `vm` is the default: issue #111's gate
-    /// was passed and ADR 0022 records the decision. `ast` remains what a
-    /// disagreement is decided by, which is a different job from running a
-    /// program.
+    /// was passed and ADR 0022 records the decision for the backend of the
+    /// day, and ADR 0034 kept the arrangement when it replaced that backend
+    /// with this one. `ast` remains what a disagreement is decided by, which
+    /// is a different job from running a program.
     backend: Backend,
     fuel: Option<u64>,
     deadline: Option<Duration>,
@@ -1417,13 +1418,14 @@ impl RunFlags {
 pub(crate) enum Backend {
     /// The tree-walking interpreter.
     Ast,
-    /// The linear-memory backend of ADR 0034, over `cove-lir`.
+    /// The linear-memory backend of ADR 0034, over `cove-ir`.
     ///
-    /// `docs/LINEAR_VM.md` calls this name transitional: it takes the name
-    /// `vm` once there is nothing left to distinguish it from. Nothing is
-    /// built here to make `lvm` permanent — no alias, no deprecation path, no
-    /// second spelling — because the spelling is scheduled to disappear.
-    Lvm,
+    /// It ran under the transitional spelling `lvm` between ADR 0034's
+    /// cutover and the rename that followed, and nothing was built to keep
+    /// that spelling alive — no alias, no deprecation path, no second
+    /// spelling. `--backend lvm` is refused the way any other unknown value
+    /// is.
+    Vm,
 }
 
 impl Backend {
@@ -1437,13 +1439,13 @@ impl Backend {
     /// four places, and a toolchain whose commands disagreed about which
     /// backend runs a program would be a mixture nobody asked for.
     pub(crate) fn default_for_a_run() -> Backend {
-        Backend::Lvm
+        Backend::Vm
     }
 
     pub(crate) fn parse(value: &str) -> Option<Backend> {
         match value {
             "ast" => Some(Backend::Ast),
-            "lvm" => Some(Backend::Lvm),
+            "vm" => Some(Backend::Vm),
             _ => None,
         }
     }
@@ -1454,8 +1456,8 @@ impl Backend {
     /// [`Backend::default_for_a_run`] is one function: the set of names is
     /// one fact, five commands refuse an unknown one, and a list written out
     /// five times is a list that can be extended in four places. It is also
-    /// what makes renaming `lvm` a single edit.
-    pub(crate) const NAMES: &'static str = "`ast` or `lvm`";
+    /// what made renaming the backend a single edit.
+    pub(crate) const NAMES: &'static str = "`ast` or `vm`";
 
     /// This backend as a trace header names it.
     ///
@@ -1467,7 +1469,7 @@ impl Backend {
     pub(crate) fn recording(self) -> RecordingBackend {
         match self {
             Backend::Ast => RecordingBackend::Ast,
-            Backend::Lvm => RecordingBackend::Lvm,
+            Backend::Vm => RecordingBackend::Vm,
         }
     }
 
@@ -1479,12 +1481,12 @@ impl Backend {
     pub(crate) fn of_recording(backend: RecordingBackend) -> Backend {
         match backend {
             RecordingBackend::Ast => Backend::Ast,
-            RecordingBackend::Lvm => Backend::Lvm,
+            RecordingBackend::Vm => Backend::Vm,
         }
     }
 }
 
-/// Splits `--backend <ast|vm|lvm>` out of a command's arguments, leaving the
+/// Splits `--backend <ast|vm>` out of a command's arguments, leaving the
 /// rest in the order they were written.
 ///
 /// It may appear anywhere, exactly as it may on `cove run`: one flag spelled
@@ -1539,7 +1541,7 @@ impl std::fmt::Display for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Backend::Ast => "ast",
-            Backend::Lvm => "lvm",
+            Backend::Vm => "vm",
         })
     }
 }
@@ -2278,14 +2280,14 @@ module auth
     /// ADR 0010's one-seam rule exists to prevent.
     #[test]
     fn a_run_that_names_no_backend_gets_the_default() {
-        assert_eq!(flags(&["input.txt"]).backend, Backend::Lvm);
-        assert_eq!(RunFlags::none().backend, Backend::Lvm);
+        assert_eq!(flags(&["input.txt"]).backend, Backend::Vm);
+        assert_eq!(RunFlags::none().backend, Backend::Vm);
     }
 
     #[test]
     fn the_backend_is_read_from_anywhere_after_the_name() {
-        let chosen = flags(&["first", "--backend", "lvm", "second"]);
-        assert_eq!(chosen.backend, Backend::Lvm);
+        let chosen = flags(&["first", "--backend", "vm", "second"]);
+        assert_eq!(chosen.backend, Backend::Vm);
         assert_eq!(chosen.program_args, ["first", "second"]);
         assert_eq!(flags(&["--backend", "ast"]).backend, Backend::Ast);
     }
@@ -2300,7 +2302,7 @@ module auth
             .expect("an unknown backend should be refused");
         match error {
             CliError::Message(message) => {
-                assert_eq!(message, "`--backend` must be `ast` or `lvm`, found `jit`")
+                assert_eq!(message, "`--backend` must be `ast` or `vm`, found `jit`")
             }
             _ => panic!("expected a message"),
         }
@@ -2334,11 +2336,11 @@ module auth
         for (given, expected) in [
             (
                 vec!["--backend", "jit"],
-                "`--backend` must be `ast` or `lvm`, found `jit`",
+                "`--backend` must be `ast` or `vm`, found `jit`",
             ),
             (
                 vec!["--backend"],
-                "`--backend` needs a value: `ast` or `lvm`",
+                "`--backend` needs a value: `ast` or `vm`",
             ),
         ] {
             let Err(CliError::Message(message)) = split_backend(&args(&given)) else {
@@ -2366,24 +2368,24 @@ module auth
         assert_eq!(rest, ["t.jsonl", "restricted"]);
 
         let Ok((backend, _)) =
-            split_backend_if_named(&args(&["--backend", "lvm", "t.jsonl", "restricted"]))
+            split_backend_if_named(&args(&["--backend", "vm", "t.jsonl", "restricted"]))
         else {
             panic!("the flag parses");
         };
-        assert_eq!(backend, Some(Backend::Lvm));
+        assert_eq!(backend, Some(Backend::Vm));
 
         let Err(CliError::Message(message)) = split_backend_if_named(&args(&["--backend", "jit"]))
         else {
             panic!("an unknown backend should be refused with a message");
         };
-        assert_eq!(message, "`--backend` must be `ast` or `lvm`, found `jit`");
+        assert_eq!(message, "`--backend` must be `ast` or `vm`, found `jit`");
     }
 
     /// A backend and the name a trace header writes it under are the same two
     /// things named twice, and the two crates that name them agree.
     #[test]
     fn a_backend_survives_the_trip_through_a_trace_header() {
-        for backend in [Backend::Ast, Backend::Lvm] {
+        for backend in [Backend::Ast, Backend::Vm] {
             assert_eq!(Backend::of_recording(backend.recording()), backend);
             assert_eq!(backend.recording().as_str(), backend.to_string());
         }

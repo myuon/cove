@@ -47,7 +47,7 @@ use crate::process::Process;
 use crate::runtime::Runtime;
 use crate::trace::create_trace_file;
 use crate::value::Repr;
-use crate::Lvm;
+use crate::Vm;
 use crate::{
     Budget, Cancellation, JsonlSink, Limits, NullSink, RecordingBackend, TraceHeader, TraceSink,
     Value, ValueCapture,
@@ -165,7 +165,7 @@ pub enum EmbeddedBackend {
     Ast,
     /// The linear-memory backend of ADR 0034, which is what a run runs on
     /// unless the build asked otherwise.
-    Lvm,
+    Vm,
 }
 
 /// A whole program: the sources a built binary carries, the run it carries
@@ -263,7 +263,7 @@ impl Embedded {
                     items,
                 })?
             }
-            EmbeddedBackend::Lvm => {
+            EmbeddedBackend::Vm => {
                 cove_sema::Compiler::new()
                     .compile(&package)
                     .map_err(|items| Failure::Diagnostics {
@@ -288,10 +288,10 @@ impl Embedded {
         // with itself between the two, rather than a program anybody wrote.
         let lowered = match self.backend {
             EmbeddedBackend::Ast => None,
-            EmbeddedBackend::Lvm => {
+            EmbeddedBackend::Vm => {
                 // The shipped schemas and no others, which is the set the
                 // `Compiler::new()` above checked this package against.
-                let ir = cove_lir::lower_entry(
+                let ir = cove_ir::lower_entry(
                     &program,
                     &sources,
                     &cove_sema::HostSchemas::new(),
@@ -347,7 +347,7 @@ impl Embedded {
         let runtime =
             Runtime::new(Arc::new(program), sources.clone(), Arc::new(hosts)).with_trace(sink);
         let outcome = match &lowered {
-            Some(ir) => Lvm::new(&runtime, runtime.hosts(), ir).run_entry(module, entry, args),
+            Some(ir) => Vm::new(&runtime, runtime.hosts(), ir).run_entry(module, entry, args),
             None => Interpreter::new(&runtime).run_entry(module, entry, args),
         };
         match outcome {
@@ -434,7 +434,7 @@ impl Embedded {
             // ran.
             backend: match self.backend {
                 EmbeddedBackend::Ast => RecordingBackend::Ast,
-                EmbeddedBackend::Lvm => RecordingBackend::Lvm,
+                EmbeddedBackend::Vm => RecordingBackend::Vm,
             },
             values: ValueCapture::Full,
             entry: self.run.entry.to_string(),
@@ -514,7 +514,7 @@ export fn main() -> Result<Unit, Error> {
     /// A binary built for `entry`, on the backend `cove build` would have
     /// chosen for it.
     fn embedded(sources: &'static [EmbeddedSource], entry: &'static str) -> Embedded {
-        embedded_on(sources, entry, EmbeddedBackend::Lvm)
+        embedded_on(sources, entry, EmbeddedBackend::Vm)
     }
 
     fn embedded_on(
