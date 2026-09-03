@@ -18,7 +18,7 @@
 //! the whole exec-to-exit span, because process creation and binary loading
 //! are exactly what an in-process measurement cannot see.
 //!
-//! # Three backends
+//! # Four backends
 //!
 //! [ADR 0019](../../../docs/adr/0019-executable-ir-and-vm.md) says every
 //! number this harness reports must say which backend produced it, and
@@ -47,12 +47,31 @@
 //! it is a measurement vehicle rather than a third permanent evaluator, and
 //! `cove run` cannot select it.
 //!
+//! The fourth is `lvm`, the linear-memory backend
+//! [ADR 0034](../../../docs/adr/0034-one-physical-word-stack.md) decides, and
+//! it is here for the same reason and one more. The reason is ADR 0029's:
+//! its completion condition 9 — *"representative performance gates show no
+//! order-of-magnitude or repeated multi-fold regression"* — is a ratio
+//! against the backend it replaces, and a ratio is evidence only inside one
+//! build. The one more is that ADR 0034 makes it the *production* path once
+//! the replacement lands, so unlike `frame` it is not an experiment with an
+//! admission predicate: `cove_lir` refuses nothing on purpose, and a
+//! benchmark it cannot lower is a gap in the replacement rather than a
+//! program a subset declines. **An `lvm` refusal fails the suite**, where a
+//! `frame` refusal does not.
+//!
 //! `cove_ir::lower` lowers a whole package and refuses all of it for one
 //! construct anywhere in it, which is exactly what `cove run --backend vm`
 //! does, so that is what is measured here: one lowering of `benches/`, timed
 //! apart from every execution, because lowering happens once per program and
 //! execution happens for as long as the program does. That separation is the
 //! compile/lower breakdown #111 asks for.
+//!
+//! `cove_lir::lower_entry` slices by reachability instead, which is what
+//! `cove run --backend lvm` does, so the `lvm` lowering is timed once **per
+//! benchmark** and reported under that benchmark's name rather than under
+//! `benches`. The two lowering figures are a slice against a package and are
+//! not each other's baseline.
 //!
 //! # Output
 //!
@@ -62,16 +81,28 @@
 //!
 //! ```text
 //! {"benchmark":"benches","kind":"lowering","backend":"vm","iterations":<u32>,"wall_ns":<series>,"functions":<usize>,"ok":<bool>}
-//! {"benchmark":"pure","kind":"interpreter","backend":"ast","iterations":<u32>,"wall_ns":<series>,"fuel_spent":<u64>,"fuel_per_sec":<f64>,"heap_peak_bytes":<summary>,"host_calls":<u64>,"irreversible_writes":<u64>,"ok":<bool>}
+//! {"benchmark":"pure","kind":"lowering","backend":"lvm", ...the same fields...}
+//! ... and one `lvm` lowering line for each of the other benchmarks
+//! {"benchmark":"pure","kind":"interpreter","backend":"ast","iterations":<u32>,"wall_ns":<series>,"fuel_spent":<u64>,"fuel_per_sec":<f64>,"heap_peak_bytes":<summary>,"host_calls":<u64>,"irreversible_writes":<u64>,"instructions":<u64|null>,"ok":<bool>}
 //! {"benchmark":"pure","kind":"vm","backend":"vm", ...the same fields...}
+//! {"benchmark":"pure","kind":"lvm","backend":"lvm", ...the same fields...}
 //! {"benchmark":"pure","kind":"trace_overhead","backend":"ast","untraced_wall_ns":<u64>,"traced_wall_ns":<u64>,"overhead_ratio":<f64>}
 //! {"benchmark":"pure","kind":"trace_overhead","backend":"vm", ...the same fields...}
-//! {"benchmark":"hostheavy", ...the same four lines...}
-//! ... and the same four for each of `arith`, `arrayget`, `field`, `method`,
+//! {"benchmark":"pure","kind":"trace_overhead","backend":"lvm", ...the same fields...}
+//! {"benchmark":"hostheavy", ...the same lines...}
+//! ... and the same for each of `arith`, `arrayget`, `field`, `method`,
 //! `call`, `chars`, and `callback`
 //! {"benchmark":"startup","kind":"process","backend":"ast","iterations":<u32>,"wall_ns":<series>,"ok":<bool>}
 //! {"benchmark":"startup","kind":"process","backend":"vm", ...the same fields...}
+//! {"benchmark":"startup","kind":"process","backend":"lvm", ...the same fields...}
 //! ```
+//!
+//! `instructions` is how many instructions the run executed, and `null` on
+//! the interpreter, which has none. It is beside the wall time because ADR
+//! 0029 makes an exact count repeatable where an absolute is not, and ADR
+//! 0034 asks for instruction counts by name when a gate is argued about: a
+//! backend that is slower per instruction and one that runs more of them are
+//! two different findings, and the ratio alone cannot tell them apart.
 //!
 //! where `<summary>` and `<series>` are
 //!
@@ -102,16 +133,20 @@
 //! ```text
 //! {"benchmark":"pure","kind":"unsupported","backend":"vm","what":"<the construct>","ok":false}
 //! {"benchmark":"field","kind":"unsupported","backend":"frame","what":"<the construct>","ok":false}
+//! {"benchmark":"chars","kind":"unsupported","backend":"lvm","what":"<what the lowering said>","ok":false}
 //! ```
 //!
 //! The first fails the suite and the second does not: one means no backend
 //! but the interpreter can run the benchmark at all, and the other means an
-//! experiment's subset has not reached it yet.
+//! experiment's subset has not reached it yet. The third fails it, and is a
+//! third fact again: the replacement has no subset to fall short of, so a
+//! benchmark it cannot lower is a gap in the backend ADR 0034 makes the
+//! production one.
 //!
 //! `kind` keeps the value it has always had for the interpreter's rows, so a
 //! reader of the older format still finds exactly the rows it was reading and
 //! does not silently start counting the others. `backend` is what now says
-//! which of the three produced a number.
+//! which of the four produced a number.
 //!
 //! `ok` is `false` when a benchmark's entry returned `Err`, a backend itself
 //! failed, the lowering was refused, or (for `startup`) the spawned process
@@ -220,6 +255,7 @@
 //! ./target/release/cove-bench --iterations 1      # what CI runs, for correctness
 //! ./target/release/cove-bench --iterations 15     # a real local measurement
 //! ./target/release/cove-bench --iterations 15 --sample-order blocked
+//! ./target/release/cove-bench --matrix --backend vm,lvm --iterations 9
 //! ```
 //!
 //! **`--release` is the profile to measure under.** The workspace also defines
@@ -260,7 +296,12 @@
 //! Reading one backend against another is what the output is arranged for:
 //! the `wall_ns` medians of one benchmark are the comparison, and the
 //! `fuel_spent` beside them is not, because ADR 0019 makes fuel
-//! backend-specific and says so.
+//! backend-specific and says so. Nor is `instructions`, across an IR
+//! boundary: `vm` and `lvm` count instructions of two different instruction
+//! sets, so a `lvm`/`vm` count ratio prices *the same program in two
+//! languages* and is a decomposition of the wall-clock ratio rather than a
+//! second measurement of it. What it is good for is dividing one into the
+//! other: nanoseconds per instruction is a number about a dispatch loop.
 //!
 //! The `vm` and `frame` rows are the one pair where `fuel_spent` *is*
 //! comparable, and that is a fact about them rather than an exception to ADR
@@ -283,11 +324,12 @@ use cove_runtime::interp::Interpreter;
 use cove_runtime::vm::Vm;
 use cove_runtime::{
     Budget, Cancellation, Clock, Console, Database, Documents, Env, Files, Grants, HeapStats,
-    HostRegistry, JsonlSink, Limits, NullSink, Process, ProcessLog, RecordingBackend, Runtime,
+    HostRegistry, JsonlSink, Limits, Lvm, NullSink, Process, ProcessLog, RecordingBackend, Runtime,
     TraceHeader, TraceSink, Value, ValueCapture, VirtualTime,
 };
 use cove_sema::package::Package;
 use cove_sema::resolve::Program;
+use cove_sema::HostSchemas;
 
 mod stats;
 
@@ -443,6 +485,53 @@ fn bench() -> ExitCode {
         Err(why) => eprintln!("cove-bench: the VM cannot run `benches/`: {why}"),
     }
 
+    // One linear-memory lowering per benchmark, for the reason there is one
+    // `cove_ir` lowering of the package: `cove_lir::lower_entry` lowers what
+    // one entry reaches, which is what `cove run --backend lvm` lowers, and
+    // lowering is paid once per program rather than once per run. Every one
+    // of them happens before any execution is timed.
+    let mut linear: Vec<LinearLowering> = Vec::new();
+    for name in BENCHMARKS {
+        let (module, entry) = match entry_for(&package, &program, name) {
+            Ok((module, entry, _)) => (module, entry),
+            // Reported once, by the loop below that resolves every row of
+            // every backend against the same lookup.
+            Err(_) => continue,
+        };
+        match bench_linear_lowering(&program, &sources, name, module, entry, iterations) {
+            Ok(report) => {
+                println!("{}", report.to_json());
+                compare(
+                    baseline.as_ref(),
+                    &mut compared,
+                    name,
+                    "lowering",
+                    "lvm",
+                    &report.wall_ns,
+                );
+                linear.push(report);
+            }
+            Err(diagnostics) => {
+                let what = diagnostics
+                    .first()
+                    .map(|d| d.message.clone())
+                    .unwrap_or_else(|| "the lowering failed and said nothing".to_string());
+                println!(
+                    "{}",
+                    NotLowered {
+                        benchmark: name,
+                        what: &what
+                    }
+                    .to_json()
+                );
+                eprintln!("cove-bench: `benches/{name}` does not lower to the linear IR: {what}");
+                // A gap in the backend ADR 0034 makes the production one,
+                // and not an experiment declining a program: it fails.
+                ok = false;
+            }
+        }
+    }
+
     // Every row this run will time, resolved before any of them is timed.
     // An entry that does not exist, or a benchmark the lowering refused, is
     // a fact about the suite rather than about the machine, and finding it
@@ -450,12 +539,29 @@ fn bench() -> ExitCode {
     // series.
     let mut rows: Vec<Row> = Vec::new();
     for name in BENCHMARKS {
-        for backend in [Backend::Ast, Backend::Vm, Backend::Frame] {
+        for backend in [Backend::Ast, Backend::Vm, Backend::Frame, Backend::Lvm] {
+            // The linear-memory program this row runs, and `None` for every
+            // other backend. An `lvm` row whose lowering failed was already
+            // reported above, so it is skipped here rather than reported
+            // twice.
+            let lir = match backend {
+                Backend::Lvm => {
+                    let Some(lowering) = linear.iter().find(|lowering| lowering.benchmark == name)
+                    else {
+                        continue;
+                    };
+                    Some(&lowering.program)
+                }
+                _ => None,
+            };
             // A benchmark the lowering refused is reported as refused rather
             // than skipped: a missing row reads as a benchmark nobody ran,
             // and that is a different fact from one the VM cannot run.
             let ir = match (backend, &lowered) {
-                (Backend::Ast, _) => None,
+                // Neither of these reads `cove_ir`: the interpreter runs the
+                // checked program and `lvm` runs its own lowering, so a
+                // refusal over there is not their row's business.
+                (Backend::Ast, _) | (Backend::Lvm, _) => None,
                 (_, Ok(report)) => Some(&report.ir),
                 (_, Err(why)) => {
                     println!("{}", Unsupported::new(name, why).to_json());
@@ -466,7 +572,7 @@ fn bench() -> ExitCode {
                     continue;
                 }
             };
-            match Row::resolve(&package, &program, name, backend, ir) {
+            match Row::resolve(&package, &program, name, backend, ir, lir) {
                 Ok(row) => rows.push(row),
                 Err(message) => {
                     eprintln!("cove-bench: benchmark `{name}` on {backend}: {message}");
@@ -535,7 +641,7 @@ fn bench() -> ExitCode {
         }
     }
 
-    for backend in [Backend::Ast, Backend::Vm] {
+    for backend in [Backend::Ast, Backend::Vm, Backend::Lvm] {
         match bench_startup(iterations, backend) {
             Ok(report) => {
                 ok &= report.ok;
@@ -593,6 +699,23 @@ enum Backend {
     /// It runs a closed scalar subset and refuses the rest, so most rows have
     /// no `frame` line and say so. See `cove_runtime::frame`.
     Frame,
+    /// The linear-memory backend of ADR 0034, over `cove_lir`.
+    ///
+    /// The one that is meant to survive. ADR 0034 replaces the executable IR,
+    /// the lowering and the VM rather than renovating them, and its
+    /// completion condition 9 — "representative performance gates show no
+    /// order-of-magnitude or repeated multi-fold regression" — is a statement
+    /// about *these* rows against the `vm` rows beside them. So it is a row
+    /// here for exactly the reason `frame` is: ADR 0029 says a ratio within
+    /// one build is repeatable and a cross-build absolute is not, and two
+    /// rows of one run share whatever layout that binary has.
+    ///
+    /// It has no admission predicate. `cove_lir` refuses nothing on purpose —
+    /// a construct it has not been taught is a gap in the lowering rather
+    /// than a program the backend declines — so an `lvm` row that is missing
+    /// is a bug, and this harness reports one as a failure rather than as an
+    /// experiment's subset not having reached it yet.
+    Lvm,
 }
 
 impl Backend {
@@ -604,6 +727,19 @@ impl Backend {
             Backend::Ast => "interpreter",
             Backend::Vm => "vm",
             Backend::Frame => "frame",
+            Backend::Lvm => "lvm",
+        }
+    }
+
+    /// The name `--backend` accepts for this backend, and the one a row is
+    /// reported under.
+    fn parse(name: &str) -> Option<Backend> {
+        match name {
+            "ast" => Some(Backend::Ast),
+            "vm" => Some(Backend::Vm),
+            "frame" => Some(Backend::Frame),
+            "lvm" => Some(Backend::Lvm),
+            _ => None,
         }
     }
 }
@@ -614,6 +750,7 @@ impl std::fmt::Display for Backend {
             Backend::Ast => "ast",
             Backend::Vm => "vm",
             Backend::Frame => "frame",
+            Backend::Lvm => "lvm",
         })
     }
 }
@@ -671,6 +808,79 @@ fn bench_lowering(
     })
 }
 
+/// What lowering one benchmark to `cove_lir` cost, and the program every
+/// `lvm` measurement of that benchmark runs.
+///
+/// One per benchmark rather than one for the package, because the two
+/// lowerings do not slice the same way and this harness measures what the
+/// command does. `cove_ir::lower` takes a whole package and refuses all of it
+/// for one construct anywhere in it, which is what `cove run --backend vm`
+/// asks for. `cove_lir::lower_entry` lowers what one entry reaches and stubs
+/// the rest, which is what `cove run --backend lvm` asks for. So the `lvm`
+/// lowering row is named for the benchmark it lowered and the `vm` one is
+/// named `benches`, and a reader comparing the two figures is comparing a
+/// slice against a package on purpose.
+struct LinearLowering {
+    benchmark: &'static str,
+    iterations: u32,
+    wall_ns: Stats,
+    /// How many entries the function table has.
+    ///
+    /// Not the same figure as the `vm` lowering row's, and it should not be
+    /// read as one: a slice still gives every declaration of the package a
+    /// table entry, and the ones it did not reach are stubs. What the two
+    /// rows share is that each is the count for the thing that was timed.
+    functions: usize,
+    program: Arc<cove_lir::Program>,
+}
+
+impl LinearLowering {
+    fn to_json(&self) -> String {
+        format!(
+            "{{\"benchmark\":\"{}\",\"kind\":\"lowering\",\"backend\":\"lvm\",\"iterations\":{},\"wall_ns\":{},\"functions\":{},\"ok\":true}}",
+            self.benchmark,
+            self.iterations,
+            self.wall_ns.to_json_with_samples(),
+            self.functions,
+        )
+    }
+}
+
+/// Lowers one benchmark's entry to `cove_lir` `iterations` times.
+///
+/// The same shape as [`bench_lowering`] and for the same reason: lowering is
+/// paid once per program and execution for as long as the program runs, so
+/// the two are timed apart. The schemas are the shipped ones and no others,
+/// which is the set `cove_sema::Compiler::new()` checked this package
+/// against — `cove run` passes the same, and a lowering that read a different
+/// set would be lowering a different program.
+fn bench_linear_lowering(
+    program: &Program,
+    sources: &SourceMap,
+    benchmark: &'static str,
+    module: &str,
+    entry: &str,
+    iterations: u32,
+) -> Result<LinearLowering, Vec<cove_diag::Diagnostic>> {
+    let schemas = HostSchemas::new();
+    let mut wall_ns = Vec::with_capacity(iterations as usize);
+    let mut last = None;
+    for _ in 0..iterations {
+        let started = Instant::now();
+        let lowered = cove_lir::lower_entry(program, sources, &schemas, module, entry)?;
+        wall_ns.push(started.elapsed().as_nanos() as u64);
+        last = Some(lowered);
+    }
+    let lowered = last.expect("`--iterations` is a positive integer, so one lowering happened");
+    Ok(LinearLowering {
+        benchmark,
+        iterations,
+        wall_ns: Stats::of(&wall_ns),
+        functions: lowered.functions.len(),
+        program: Arc::new(lowered),
+    })
+}
+
 /// One benchmark the VM cannot run, and what stopped it.
 struct Unsupported<'a> {
     benchmark: &'static str,
@@ -707,6 +917,30 @@ impl FrameRefusal<'_> {
     fn to_json(&self) -> String {
         format!(
             "{{\"benchmark\":\"{}\",\"kind\":\"unsupported\",\"backend\":\"frame\",\"what\":\"{}\",\"ok\":false}}",
+            self.benchmark,
+            escape(self.what),
+        )
+    }
+}
+
+/// One benchmark the linear-memory lowering could not lower, and what it said.
+///
+/// The same shape as the two above and a third fact again. `cove_lir` has no
+/// admission predicate and no `Unsupported` type — its module docs say a
+/// construct it has not been taught is a bug in the lowering rather than a
+/// program it declines — so this row is neither an experiment's subset
+/// falling short nor a whole-package lowering refusing one construct. It is a
+/// gap in the backend ADR 0034 makes the production one, and it **fails the
+/// suite** for that reason.
+struct NotLowered<'a> {
+    benchmark: &'static str,
+    what: &'a str,
+}
+
+impl NotLowered<'_> {
+    fn to_json(&self) -> String {
+        format!(
+            "{{\"benchmark\":\"{}\",\"kind\":\"unsupported\",\"backend\":\"lvm\",\"what\":\"{}\",\"ok\":false}}",
             self.benchmark,
             escape(self.what),
         )
@@ -955,24 +1189,82 @@ const MATRIX_TURNS: u64 = 2_000_000;
 /// Runs the matrix and prints it as a table.
 ///
 /// A table rather than the JSON the rest of this harness emits, because this
-/// is a diagnostic somebody reads rather than a gate something compares. It
-/// runs on the VM alone for the same reason: what it measures is a calling
-/// convention, and the interpreter does not have one -- it has an
-/// environment chain, which is a different thing and not the question.
+/// is a diagnostic somebody reads rather than a gate something compares.
+///
+/// It ran on the VM alone until ADR 0034, and the reason it gave still holds
+/// for the interpreter: what it measures is a calling convention, and the
+/// interpreter does not have one -- it has an environment chain, which is a
+/// different thing. What changed is that there is now a second backend that
+/// *does* have one, and ADR 0034's completion condition 9 is a question about
+/// it. So `--backend` takes a comma-separated list, the default is `vm` and
+/// nothing about a default run has moved, and `--backend vm,lvm` measures the
+/// two conventions against each other **in one run** -- which is the only
+/// place ADR 0029 says such a ratio may be read.
 ///
 /// This does not run under `cove-bench` with no arguments, and that is
 /// deliberate: eight two-million-turn loops on top of the suite would double
 /// what every push waits for, to answer a question nobody asked on that push.
-/// One row of the calling-convention matrix, and the samples taken of it.
+/// One row of the calling-convention matrix on one backend, and the samples
+/// taken of it.
 struct MatrixRow<'a> {
     name: &'static str,
     what: &'static str,
+    backend: Backend,
     module: &'a str,
     entry: &'a str,
     allow: Vec<String>,
+    ir: Option<&'a Arc<cove_ir::Program>>,
+    lir: Option<&'a Arc<cove_lir::Program>>,
     samples: Vec<u64>,
     instructions: u64,
     ok: bool,
+}
+
+/// Reads `--backend <list>` for the matrix, defaulting to the VM alone.
+///
+/// A value it does not recognize is an error rather than a fallback, for the
+/// reason `--sample-order` gives: a run that silently measured something else
+/// is a measurement of the wrong thing under the right name. `frame` is
+/// refused by name rather than ignored -- the eight-byte frame has an
+/// admission predicate and the matrix is written out of closures, captures
+/// and a Host callback, so what it would report is mostly refusals.
+fn parse_matrix_backends() -> Result<Vec<Backend>, String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--backend" {
+            let Some(list) = args.get(i + 1) else {
+                return Err("`--backend` needs a comma-separated list of backends".to_string());
+            };
+            let mut backends = Vec::new();
+            for name in list.split(',') {
+                match Backend::parse(name) {
+                    Some(Backend::Frame) => {
+                        return Err(
+                            "the matrix has no `frame` column: that backend admits a closed \
+scalar subset and every row here is a call"
+                                .to_string(),
+                        )
+                    }
+                    Some(backend) if backends.contains(&backend) => {
+                        return Err(format!("`{backend}` is named twice in `--backend`"))
+                    }
+                    Some(backend) => backends.push(backend),
+                    None => {
+                        return Err(format!(
+                            "`--backend` takes `ast`, `vm` or `lvm`, not `{name}`"
+                        ))
+                    }
+                }
+            }
+            if backends.is_empty() {
+                return Err("`--backend` needs at least one backend".to_string());
+            }
+            return Ok(backends);
+        }
+        i += 1;
+    }
+    Ok(vec![Backend::Vm])
 }
 
 fn matrix(
@@ -982,22 +1274,27 @@ fn matrix(
     iterations: u32,
     order: SampleOrder,
 ) -> ExitCode {
-    let lowered = match cove_ir::lower::lower(program) {
-        Ok(lowered) => Arc::new(lowered),
-        Err(why) => {
-            eprintln!("cove-bench: the VM cannot run `benches/`: {}", why.what);
+    let backends = match parse_matrix_backends() {
+        Ok(backends) => backends,
+        Err(message) => {
+            eprintln!("cove-bench: {message}");
             return ExitCode::FAILURE;
         }
     };
 
-    println!(
-        "the calling-convention matrix, VM backend, {iterations} iteration(s) \
-of {MATRIX_TURNS} turns each"
-    );
-    println!(
-        "row                 median       min       max  spread vs base   \
-instructions per turn   ns/turn  what"
-    );
+    // Only what a named backend needs is lowered, so a `--backend ast` run
+    // does not fail on a lowering nothing in it was going to execute.
+    let lowered = if backends.contains(&Backend::Vm) {
+        match cove_ir::lower::lower(program) {
+            Ok(lowered) => Some(Arc::new(lowered)),
+            Err(why) => {
+                eprintln!("cove-bench: the VM cannot run `benches/`: {}", why.what);
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
 
     // A row name after `--matrix` runs that row alone, which is what a
     // profiler wants: `samply record -- cove-bench --matrix conv_host`
@@ -1006,16 +1303,59 @@ instructions per turn   ns/turn  what"
         .skip_while(|argument| argument != "--matrix")
         .nth(1)
         .filter(|argument| !argument.starts_with("--"));
+    let wanted = |name: &str| only.as_deref().is_none_or(|only| only == name);
+
+    // One linear-memory lowering per row, because that is the unit
+    // `cove_lir::lower_entry` lowers. All of them before anything is timed.
+    let mut linear: Vec<(&'static str, Arc<cove_lir::Program>)> = Vec::new();
+    if backends.contains(&Backend::Lvm) {
+        for (name, _) in MATRIX.iter() {
+            if !wanted(name) {
+                continue;
+            }
+            let (module, entry, _) = match entry_for(package, program, name) {
+                Ok(found) => found,
+                Err(message) => {
+                    eprintln!("cove-bench: {message}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match cove_lir::lower_entry(program, sources, &HostSchemas::new(), module, entry) {
+                Ok(lowered) => linear.push((name, Arc::new(lowered))),
+                Err(diagnostics) => {
+                    let what = diagnostics
+                        .first()
+                        .map(|d| d.message.as_str())
+                        .unwrap_or("the lowering failed and said nothing");
+                    eprintln!("cove-bench: `{name}` does not lower to the linear IR: {what}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    }
+
+    println!(
+        "the calling-convention matrix, {} backend(s), {iterations} iteration(s) \
+of {MATRIX_TURNS} turns each",
+        backends
+            .iter()
+            .map(Backend::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
 
     // The matrix is read as ratios *between* its rows, so the order it takes
     // its samples in matters to it more than it does to the suite: a row
     // measured minutes after the row it is divided by carries whatever the
     // machine did in between into the quotient. So it obeys `--sample-order`
     // too, which is why every row is opened before any of them is timed and
-    // nothing is printed until all of them are finished.
+    // nothing is printed until all of them are finished. With more than one
+    // backend the same argument covers the ratio between two backends of one
+    // row, which is what interleaves them here rather than running a backend
+    // at a time.
     let mut rows: Vec<MatrixRow> = Vec::new();
     for (name, what) in MATRIX.iter() {
-        if only.as_deref().is_some_and(|wanted| wanted != *name) {
+        if !wanted(name) {
             continue;
         }
         let (module, entry, allow) = match entry_for(package, program, name) {
@@ -1025,16 +1365,30 @@ instructions per turn   ns/turn  what"
                 return ExitCode::FAILURE;
             }
         };
-        rows.push(MatrixRow {
-            name,
-            what,
-            module,
-            entry,
-            allow,
-            samples: Vec::with_capacity(iterations as usize),
-            instructions: 0,
-            ok: true,
-        });
+        for &backend in &backends {
+            rows.push(MatrixRow {
+                name,
+                what,
+                backend,
+                module,
+                entry,
+                allow: allow.clone(),
+                ir: match backend {
+                    Backend::Vm => lowered.as_ref(),
+                    _ => None,
+                },
+                lir: match backend {
+                    Backend::Lvm => linear
+                        .iter()
+                        .find(|(row, _)| row == name)
+                        .map(|(_, program)| program),
+                    _ => None,
+                },
+                samples: Vec::with_capacity(iterations as usize),
+                instructions: 0,
+                ok: true,
+            });
+        }
     }
 
     let sample = |row: &mut MatrixRow| {
@@ -1045,15 +1399,16 @@ instructions per turn   ns/turn  what"
             row.entry,
             &row.allow,
             Arc::new(NullSink),
-            Backend::Vm,
-            Some(&lowered),
+            row.backend,
+            row.ir,
+            row.lir,
         );
         row.samples.push(measurement.wall.as_nanos() as u64);
         row.instructions = measurement.instructions.unwrap_or(0);
         if let Some(message) = measurement.failure {
             eprintln!(
-                "cove-bench: matrix row `{}` did not pass: {message}",
-                row.name
+                "cove-bench: matrix row `{}` on {} did not pass: {message}",
+                row.name, row.backend
             );
             row.ok = false;
         }
@@ -1076,39 +1431,49 @@ instructions per turn   ns/turn  what"
     }
 
     let mut ok = true;
-    let mut baseline = 0.0f64;
-    for (index, row) in rows.iter_mut().enumerate() {
-        let (name, what, instructions) = (row.name, row.what, row.instructions);
-        ok &= row.ok;
-        let samples = &mut row.samples;
-        samples.sort_unstable();
-
-        let median = stats::quantile(samples, 0.5) / 1e6;
-        let min = samples[0] as f64 / 1e6;
-        let max = samples[samples.len() - 1] as f64 / 1e6;
-        if index == 0 {
-            baseline = median;
-        }
-        // A single row asked for by name has no baseline beside it, and a
-        // ratio against a row that did not run would be a number made up.
-        let against = if baseline > 0.0 {
-            format!("{:.2}x", median / baseline)
-        } else {
-            "-".to_string()
-        };
+    // One block per backend, so that a default run reads exactly as it always
+    // has and a two-backend run is two tables rather than one table whose
+    // neighbouring lines are not comparable.
+    for &backend in &backends {
+        println!("\n{backend}:");
         println!(
-            "{:<14} {:>8.2}ms {:>8.2}ms {:>8.2}ms {:>6.1}% {:>7} {:>14} {:>8.1} {:>8.1}  {}",
-            name,
-            median,
-            min,
-            max,
-            100.0 * (max - min) / median,
-            against,
-            instructions,
-            instructions as f64 / MATRIX_TURNS as f64,
-            median * 1e6 / MATRIX_TURNS as f64,
-            what
+            "row                 median       min       max  spread vs base   \
+instructions per turn   ns/turn  what"
         );
+        let mut baseline = 0.0f64;
+        for row in rows.iter_mut().filter(|row| row.backend == backend) {
+            let (name, what, instructions) = (row.name, row.what, row.instructions);
+            ok &= row.ok;
+            let samples = &mut row.samples;
+            samples.sort_unstable();
+
+            let median = stats::quantile(samples, 0.5) / 1e6;
+            let min = samples[0] as f64 / 1e6;
+            let max = samples[samples.len() - 1] as f64 / 1e6;
+            if baseline == 0.0 && name == MATRIX[0].0 {
+                baseline = median;
+            }
+            // A single row asked for by name has no baseline beside it, and a
+            // ratio against a row that did not run would be a number made up.
+            let against = if baseline > 0.0 {
+                format!("{:.2}x", median / baseline)
+            } else {
+                "-".to_string()
+            };
+            println!(
+                "{:<14} {:>8.2}ms {:>8.2}ms {:>8.2}ms {:>6.1}% {:>7} {:>14} {:>8.1} {:>8.1}  {}",
+                name,
+                median,
+                min,
+                max,
+                100.0 * (max - min) / median,
+                against,
+                instructions,
+                instructions as f64 / MATRIX_TURNS as f64,
+                median * 1e6 / MATRIX_TURNS as f64,
+                what
+            );
+        }
     }
 
     if ok {
@@ -1208,9 +1573,16 @@ struct RunMeasurement {
     host_calls: u64,
     irreversible_writes: u64,
     heap: HeapStats,
-    /// How many instructions the run executed, on the VM. `None` on the
-    /// interpreter, which has none -- the same distinction `cove run
+    /// How many instructions the run executed, on a lowered backend. `None`
+    /// on the interpreter, which has none -- the same distinction `cove run
     /// --stats` makes, and for the same reason.
+    ///
+    /// The figure a rebuild cannot move, which is why it is reported beside
+    /// the wall time rather than only inside `--matrix`: ADR 0029 makes an
+    /// exact count repeatable where an absolute is not, and ADR 0034 asks for
+    /// instruction counts by name if a gate fails. A ratio with a count
+    /// beside it says whether a backend was slower per instruction or simply
+    /// ran more of them.
     instructions: Option<u64>,
     /// `Some(message)` when the entry returned `Err` or the interpreter
     /// itself failed; `None` when it passed.
@@ -1234,6 +1606,7 @@ fn run_once(
     trace: Arc<dyn TraceSink>,
     backend: Backend,
     ir: Option<&Arc<cove_ir::Program>>,
+    lir: Option<&Arc<cove_lir::Program>>,
 ) -> RunMeasurement {
     let mut hosts = fake_hosts(allow.to_vec());
     hosts.set_budget(Budget::with_cancellation(
@@ -1247,6 +1620,26 @@ fn run_once(
         Runtime::new(Arc::clone(program), Arc::clone(sources), hosts.clone()).with_trace(trace);
 
     let started = Instant::now();
+    // The linear backend is matched first because what selects it is a
+    // different program: `ir` is `cove_ir`'s and `lir` is `cove_lir`'s, and a
+    // row carries the one its backend runs.
+    if backend == Backend::Lvm {
+        let lir = lir.expect("an `lvm` row was resolved against the linear lowering");
+        let mut lvm = Lvm::new(&runtime, &hosts, lir);
+        let outcome = lvm.run_entry(module, entry, Vec::<Rc<str>>::new());
+        // `heap_words` is the heap region's size, free blocks included, and
+        // not the peak live set the object heaps report. The two answer
+        // different questions and this harness does not pretend otherwise:
+        // see [`ExecutionReport::heap_peak_bytes`].
+        let heap = HeapStats {
+            peak_bytes: lvm.heap_words() * 8,
+            allocated_bytes: lvm.allocated_words() * 8,
+            ..HeapStats::default()
+        };
+        let instructions = Some(lvm.instructions());
+        let wall = started.elapsed();
+        return finish(&runtime, wall, heap, instructions, outcome);
+    }
     let (outcome, heap, instructions) = match (backend, ir) {
         (Backend::Vm, Some(ir)) => {
             let mut vm = Vm::new(&runtime, &hosts, ir);
@@ -1267,7 +1660,20 @@ fn run_once(
         }
     };
     let wall = started.elapsed();
+    finish(&runtime, wall, heap, instructions, outcome)
+}
 
+/// Reads the counters a run leaves behind and says whether it passed.
+///
+/// Shared by every backend, so that what a measurement is made of does not
+/// depend on which evaluator produced it.
+fn finish(
+    runtime: &Runtime,
+    wall: Duration,
+    heap: HeapStats,
+    instructions: Option<u64>,
+    outcome: Result<Value, cove_runtime::RuntimeError>,
+) -> RunMeasurement {
     let (fuel_spent, host_calls) = runtime
         .hosts()
         .with_budget(|budget| (budget.fuel_spent(), budget.host_calls()))
@@ -1317,16 +1723,28 @@ struct ExecutionReport {
     wall_ns: Stats,
     fuel_spent: u64,
     fuel_per_sec: f64,
+    /// The largest live set a collection measured, on the backends that
+    /// collect an object heap.
+    ///
+    /// **On `lvm` this is a different statistic under the same name**, and
+    /// there is no honest way to make it the same one: that backend has no
+    /// object heap to take a live set of, it has a heap *region*, and what it
+    /// can answer is how many words of it the run held. So the `lvm` row
+    /// reports the region's size in bytes — free blocks included — and the
+    /// `ast`, `vm` and `frame` rows report what they always did. Read the
+    /// `lvm` figure against itself and not against the row above it.
     heap_peak_bytes: Stats,
     host_calls: u64,
     irreversible_writes: u64,
+    /// How many instructions the run executed, or `None` on the interpreter.
+    instructions: Option<u64>,
     ok: bool,
 }
 
 impl ExecutionReport {
     fn to_json(&self) -> String {
         format!(
-            "{{\"benchmark\":\"{}\",\"kind\":\"{}\",\"backend\":\"{}\",\"iterations\":{},\"wall_ns\":{},\"fuel_spent\":{},\"fuel_per_sec\":{:.1},\"heap_peak_bytes\":{},\"host_calls\":{},\"irreversible_writes\":{},\"ok\":{}}}",
+            "{{\"benchmark\":\"{}\",\"kind\":\"{}\",\"backend\":\"{}\",\"iterations\":{},\"wall_ns\":{},\"fuel_spent\":{},\"fuel_per_sec\":{:.1},\"heap_peak_bytes\":{},\"host_calls\":{},\"irreversible_writes\":{},\"instructions\":{},\"ok\":{}}}",
             self.benchmark,
             self.backend.kind(),
             self.backend,
@@ -1337,6 +1755,10 @@ impl ExecutionReport {
             self.heap_peak_bytes.to_json(),
             self.host_calls,
             self.irreversible_writes,
+            match self.instructions {
+                Some(instructions) => instructions.to_string(),
+                None => "null".to_string(),
+            },
             self.ok,
         )
     }
@@ -1355,11 +1777,15 @@ struct Row<'a> {
     entry: &'a str,
     allow: Vec<String>,
     ir: Option<&'a Arc<cove_ir::Program>>,
+    /// The linear-memory program this row runs, on an `lvm` row and nowhere
+    /// else. Lowered per entry, because that is what `cove_lir` lowers.
+    lir: Option<&'a Arc<cove_lir::Program>>,
     wall_ns: Vec<u64>,
     heap_peak: Vec<u64>,
     fuel_spent: u64,
     host_calls: u64,
     irreversible_writes: u64,
+    instructions: Option<u64>,
     ok: bool,
 }
 
@@ -1371,6 +1797,7 @@ impl<'a> Row<'a> {
         name: &'static str,
         backend: Backend,
         ir: Option<&'a Arc<cove_ir::Program>>,
+        lir: Option<&'a Arc<cove_lir::Program>>,
     ) -> Result<Row<'a>, String> {
         let (module, entry, allow) = entry_for(package, program, name)?;
         Ok(Row {
@@ -1380,11 +1807,13 @@ impl<'a> Row<'a> {
             entry,
             allow,
             ir,
+            lir,
             wall_ns: Vec::new(),
             heap_peak: Vec::new(),
             fuel_spent: 0,
             host_calls: 0,
             irreversible_writes: 0,
+            instructions: None,
             ok: true,
         })
     }
@@ -1406,12 +1835,14 @@ impl<'a> Row<'a> {
             Arc::new(NullSink),
             self.backend,
             self.ir,
+            self.lir,
         );
         self.wall_ns.push(measurement.wall.as_nanos() as u64);
         self.heap_peak.push(measurement.heap.peak_bytes);
         self.fuel_spent = measurement.fuel_spent;
         self.host_calls = measurement.host_calls;
         self.irreversible_writes = measurement.irreversible_writes;
+        self.instructions = measurement.instructions;
         if let Some(message) = measurement.failure {
             eprintln!(
                 "cove-bench: benchmark `{}` on {} did not pass: {message}",
@@ -1439,6 +1870,7 @@ impl<'a> Row<'a> {
             heap_peak_bytes: Stats::of(&self.heap_peak),
             host_calls: self.host_calls,
             irreversible_writes: self.irreversible_writes,
+            instructions: self.instructions,
             ok: self.ok,
         }
     }
@@ -1513,7 +1945,7 @@ fn bench_trace_overhead(
     row: &Row<'_>,
     iterations: u32,
 ) -> TraceOverheadReport {
-    let (module, entry, allow, ir) = (row.module, row.entry, &row.allow, row.ir);
+    let (module, entry, allow, ir, lir) = (row.module, row.entry, &row.allow, row.ir, row.lir);
 
     let mut untraced = Vec::with_capacity(iterations as usize);
     for _ in 0..iterations {
@@ -1526,6 +1958,7 @@ fn bench_trace_overhead(
             Arc::new(NullSink),
             row.backend,
             ir,
+            lir,
         );
         untraced.push(m.wall.as_nanos() as u64);
     }
@@ -1537,6 +1970,7 @@ fn bench_trace_overhead(
             // recording would have been made on had it been kept.
             backend: match row.backend {
                 Backend::Ast => RecordingBackend::Ast,
+                Backend::Lvm => RecordingBackend::Lvm,
                 // Unreachable for `Backend::Frame`: `bench` does not ask for
                 // a trace-overhead row of one. ADR 0026 makes a recording
                 // name the backend that made it, and there is no
@@ -1559,6 +1993,7 @@ fn bench_trace_overhead(
             sink,
             row.backend,
             ir,
+            lir,
         );
         traced.push(m.wall.as_nanos() as u64);
     }
