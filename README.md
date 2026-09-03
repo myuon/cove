@@ -249,6 +249,11 @@ have. [ADR 0036](docs/adr/0036-an-inference-variable-is-not-a-kind-of-unknown.md
 keeps ADR 0016's four kinds of unknown intact while local inference gained a
 fifth variant: an inference variable is a transient state inside one body's
 check and never escapes it.
+[ADR 0039](docs/adr/0039-a-name-in-an-adr-is-read-at-its-date.md) is how to
+read the ten older ADRs that ADR 0034's replacement left behind: the new
+backend took the deleted one's names, so `cove-ir`, `cove_runtime::vm` and
+`--backend vm` still resolve but no longer mean what those ADRs meant by
+them, and a name in an accepted ADR is read at that ADR's date.
 
 Syntax is still provisional and may change.
 
