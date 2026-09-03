@@ -15,15 +15,16 @@
 //!
 //! # Which backend a replay runs on
 //!
-//! Whichever `--backend <ast|vm|lvm>` names, and when nobody names one, the
+//! Whichever `--backend <ast|lvm>` names, and when nobody names one, the
 //! backend the trace says recorded it. ADR 0023 gave this command the flag
 //! and ADR 0026 gave the file the answer; what follows is what the two mean
 //! together here.
 //!
-//! Until ADR 0026 the default was the VM, because an ordinary recording is
-//! the VM's — but that was an inference about how the file was probably
-//! produced rather than a fact read out of it, and ADR 0023 said so in as
-//! many words. A trace header now carries a
+//! Until ADR 0026 the default was whichever backend `cove run` ran a program
+//! on, because an ordinary recording is that one's — but that was an
+//! inference about how the file was probably produced rather than a fact read
+//! out of it, and ADR 0023 said so in as many words. A trace header now
+//! carries a
 //! [`cove_runtime::RecordingBackend`], so the inference is gone: a replay
 //! that names no backend runs on the backend that recorded, whichever one
 //! that was, and **an ordinary replay is a same-backend replay because the
@@ -31,40 +32,38 @@
 //! happened to agree.
 //!
 //! The flag still wins over the file. Replaying an interpreter recording on
-//! the VM is what issue #140 called the interesting direction — driven by a
-//! file rather than by a host, does this backend ask for the same calls, in
-//! the same order, with the same arguments? — and a file that could forbid it
-//! would take that question away. What the file buys instead is that the
-//! crossing is now visible: [`provenance`] names both backends, in the
-//! summary and at the end of every divergence report, and says whether they
-//! are one backend or two.
+//! the lowered backend is what issue #140 called the interesting direction —
+//! driven by a file rather than by a host, does this backend ask for the same
+//! calls, in the same order, with the same arguments? — and a file that could
+//! forbid it would take that question away. What the file buys instead is
+//! that the crossing is now visible: [`provenance`] names both evaluators, in
+//! the summary and at the end of every divergence report, and says whether
+//! they are one or two.
 //!
 //! That distinction is the whole reason the field is worth a format version.
-//! Nothing is known to diverge across the two backends — `tests/differential.rs`
+//! Nothing is known to diverge across the two — `tests/differential.rs`
 //! compares the same tape, every host call's module, operation, arguments and
-//! outcome, over every case that lowers — but "nothing is known to diverge"
-//! is a weaker sentence than "these two ran the same way", and a replay that
-//! can read the recording backend is finally able to say the second one.
+//! outcome, over the whole corpus — but "nothing is known to diverge" is a
+//! weaker sentence than "these two ran the same way", and a replay that can
+//! read the recording backend is finally able to say the second one.
 //!
 //! What the tape does when it runs out did not need deciding: it was decided
 //! already, and by the tape. [`Divergence`] is a property of this module
 //! rather than of an evaluator — `Unexpected` is "the program made a call
 //! after the trace ran out of them", and `Tape::answer` produces it from what
 //! the trace holds and what it was asked for, with no evaluator involved.
-//! Both backends reach the tape through the one [`HostApi`] boundary they
-//! share, so a VM replay that runs off the end of the tape gets the answer an
-//! interpreter replay already got.
+//! Both evaluators reach the tape through the one [`HostApi`] boundary they
+//! share, so a lowered replay that runs off the end of the tape gets the
+//! answer an interpreted replay already got.
 //!
-//! ADR 0019's rule that a VM run either finishes on the VM or fails before
-//! any side effect applies here in the only form it can. A replay makes no
-//! host call at all, so it has no side effect for a refusal to come before;
-//! what it has instead is a verdict, and the verdict is the whole output. A
-//! replay that quietly finished on the interpreter would be reporting
-//! "replayed", or a divergence, about a backend nobody asked for — which is
-//! the mixture the rule exists to prevent, arrived at by a different road. So
-//! `--backend vm` lowers the entry before the tape is built, and a construct
-//! the lowering does not cover refuses the command, by name, pointing at
-//! `--backend ast`.
+//! The rule that a run either finishes on the backend it named or fails
+//! before any side effect applies here in the only form it can. A replay
+//! makes no host call at all, so it has no side effect for a failure to come
+//! before; what it has instead is a verdict, and the verdict is the whole
+//! output. A replay that quietly finished on the interpreter would be
+//! reporting "replayed", or a divergence, about a backend nobody asked for.
+//! So the lowering happens before the tape is built, and a gap in it stops
+//! the command with the gap pointed at in source.
 //!
 //! One order is not the program's to choose. ADR 0008 runs each spawned task
 //! on a thread of its own, so the order in which two concurrent tasks reach
@@ -82,7 +81,6 @@ use cove_runtime::host::{HostApi, HostRegistry};
 use cove_runtime::interp::Interpreter;
 use cove_runtime::runtime::Runtime;
 use cove_runtime::schema::ModuleSchema;
-use cove_runtime::vm::Vm;
 use cove_runtime::Transfer;
 use cove_runtime::{
     value_to_json, Budget, Cancellation, Grants, Limits, Lvm, RecordingBackend, ResourceHandle,
@@ -90,7 +88,7 @@ use cove_runtime::{
 };
 
 use crate::trace::{self, Outcome, Trace};
-use crate::{Backend, CliError, Executable};
+use crate::{Backend, CliError};
 
 /// One recorded call a replay can answer.
 struct Step {
@@ -500,7 +498,7 @@ impl HostApi for ReplayHost {
     }
 }
 
-/// `cove replay <trace> <run-name> [--backend <ast|vm|lvm>]`.
+/// `cove replay <trace> <run-name> [--backend <ast|lvm>]`.
 pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
     // `--backend` comes out first, by the one function `cove generate` reads
     // it with, so the flag means the same thing and refuses an unknown value
@@ -580,33 +578,16 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
     let sources = Arc::new(sources);
     let program = Arc::new(program);
 
-    // `--backend vm` lowers here, before the tape exists and before a host is
+    // The lowering happens here, before the tape exists and before a host is
     // registered — the same place `crate::execute_entry` lowers, for the same
-    // reason read across to a command that calls no host: a refusal must be
+    // reason read across to a command that calls no host: a failure must be
     // the command's whole answer, not a footnote under a verdict about the
-    // other backend. A construct the lowering does not cover stops the replay
-    // with the construct named and `--backend ast` offered, and this command
-    // never quietly reads the tape on the interpreter instead.
+    // program. What arrives is a list of diagnostics rather than one refusal,
+    // because the lowering reports every gap in what the entry reaches rather
+    // than the first; a replay that cannot be run is still a replay that
+    // reads no tape.
     let lowered = match backend {
         Backend::Ast => None,
-        Backend::Vm => {
-            let ir = cove_ir::lower::lower_entry(&program, module, entry)
-                .map_err(|why| CliError::Diagnostics {
-                    items: vec![crate::unsupported_by_backend(&why)],
-                    sources: Arc::clone(&sources),
-                })?
-                .program;
-            // The VM trusts what it is handed, so what hands it anything
-            // checks first, exactly as a run does.
-            cove_ir::lower::validate(&ir).map_err(|why| {
-                CliError::Message(format!("the lowering of this program is not valid: {why}"))
-            })?;
-            Some(Executable::Vm(Arc::new(ir)))
-        }
-        // The same place, for the same reason. What arrives is a list of
-        // diagnostics rather than one refusal, because the replacement
-        // reports every gap in what the entry reaches rather than the first;
-        // a replay that cannot be run is still a replay that reads no tape.
         Backend::Lvm => {
             let ir = cove_lir::lower_entry(
                 &program,
@@ -619,7 +600,7 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
                 items,
                 sources: Arc::clone(&sources),
             })?;
-            Some(Executable::Linear(Arc::new(ir)))
+            Some(Arc::new(ir))
         }
     };
 
@@ -656,19 +637,13 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
     let ending = Arc::new(EndingSink::default());
     let runtime = Runtime::new(Arc::clone(&program), sources.clone(), Arc::new(hosts))
         .with_trace(ending.clone());
-    // One entry, one backend of several, and the same three arguments
-    // whichever it is: `run_entry` is the seam ADR 0019 puts them behind, and
-    // a replay reaches it exactly as a run does. What differs between two
-    // replays is which evaluator is built; the tape they read is the same
-    // object, reached through the one `HostApi` boundary every backend
-    // shares.
+    // One entry, one backend of two, and the same three arguments whichever
+    // it is: `run_entry` is the seam both are reached through, and a replay
+    // reaches it exactly as a run does. What differs between two replays is
+    // which evaluator is built; the tape they read is the same object,
+    // reached through the one `HostApi` boundary both share.
     let outcome = match &lowered {
-        Some(Executable::Vm(ir)) => {
-            Vm::new(&runtime, runtime.hosts(), ir).run_entry(module, entry, program_args)
-        }
-        Some(Executable::Linear(ir)) => {
-            Lvm::new(&runtime, runtime.hosts(), ir).run_entry(module, entry, program_args)
-        }
+        Some(ir) => Lvm::new(&runtime, runtime.hosts(), ir).run_entry(module, entry, program_args),
         None => Interpreter::new(&runtime).run_entry(module, entry, program_args),
     };
 
@@ -756,7 +731,7 @@ mod tests {
     use crate::trace::Missing;
     use cove_runtime::host::Console;
 
-    const HEADER: &str = r#"{"event":"trace_header","version":3,"backend":"vm","values":"full","entry":"a.b","args":[]}"#;
+    const HEADER: &str = r#"{"event":"trace_header","version":4,"backend":"lvm","values":"full","entry":"a.b","args":[]}"#;
 
     /// A `console.println("hi")` that answered `Ok(())`.
     fn println_line(text: &str) -> String {

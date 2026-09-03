@@ -1,0 +1,5 @@
+# A package whose one run cannot be lowered, so that `cove build` has
+# something to refuse. See `crates/cove-cli/tests/build.rs`.
+[run.app]
+entry = "app.main"
+allow = []

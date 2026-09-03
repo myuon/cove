@@ -46,27 +46,27 @@
 //! — `cove test`, for instance. Such a case needs no `[run.<case>]` table,
 //! since nothing looks one up.
 //!
-//! # Both backends, for a case that names neither
+//! # Both evaluators, for a case that names neither
 //!
-//! ADR 0022 makes the VM what `cove run` runs a program on, so a case
-//! invoked the default way is a VM run and the golden files below are the
-//! VM's answer. That would have quietly retired this suite's coverage of the
-//! interpreter — the same programs, the same real binary, the same real
-//! hosts — so every such case is run a second time with `--backend ast` and
-//! the two runs must agree on stdout, on stderr, and on the exit status.
+//! ADR 0034's linear-memory backend is what `cove run` runs a program on, so
+//! a case invoked the default way is a run on that backend and the golden
+//! files below are its answer. That would have quietly retired this suite's
+//! coverage of the interpreter — the same programs, the same real binary, the
+//! same real hosts — so every such case is run a second time with
+//! `--backend ast` and the two runs must agree on stdout, on stderr, and on
+//! the exit status.
 //!
 //! This is not the differential harness a second time.
-//! `crates/cove-cli/tests/differential.rs` compares the two backends in
-//! process, against fake hosts, on the value and the console and the trace.
-//! What is compared here is what a person at a terminal sees: the rendered
+//! `crates/cove-cli/tests/differential.rs` compares the two in process,
+//! against fake hosts, on the value and the console and the trace. What is
+//! compared here is what a person at a terminal sees: the rendered
 //! diagnostic, the exit code, and the output of a real host. Those are
-//! rendered by code neither backend owns, which is exactly why an assertion
+//! rendered by code neither evaluator owns, which is exactly why an assertion
 //! that they do not move is cheap to hold and worth holding.
 //!
 //! A case with a `command` file names its own invocation and is run once.
-//! That is how a case that is *about* one backend — `backend_vm`,
-//! `backend_unsupported`, `backend_ast` — says so, and it is the only way to
-//! opt out.
+//! That is how a case that is *about* one of them — `backend_vm`,
+//! `backend_ast` — says so, and it is the only way to opt out.
 //!
 //! The rules this harness enforces:
 //!
@@ -184,7 +184,7 @@ impl Actual {
         if self.code != oracle.code || self.success != oracle.success {
             let _ = writeln!(
                 report,
-                "  the interpreter exited with {:?} and the VM with {:?}",
+                "  the interpreter exited with {:?} and the backend with {:?}",
                 oracle.code, self.code
             );
         }
@@ -241,16 +241,15 @@ fn every_case_matches_its_golden_files() {
             case.write_goldens(&actual);
         }
         case.check(&actual, &mut failures);
-        // The golden files above are the default backend's answer, which is
-        // the VM's since ADR 0022. This is the interpreter's, and the two
-        // must be one answer: the oracle is what a disagreement is decided
-        // by, so a difference here is reported as the VM's fault whichever
-        // side of it looks stranger.
+        // The golden files above are the default backend's answer. This is
+        // the interpreter's, and the two must be one answer: the oracle is
+        // what a disagreement is decided by, so a difference here is reported
+        // as the backend's fault whichever side of it looks stranger.
         if case.compares_both_backends() {
             let oracle = case.run_with(&root, &["--backend", "ast"]);
             if let Some(difference) = actual.differs_from(&oracle) {
                 failures.push(format!(
-                    "case `{name}`: the VM and the interpreter do not agree\n{difference}"
+                    "case `{name}`: the backend and the interpreter do not agree\n{difference}"
                 ));
             }
         }

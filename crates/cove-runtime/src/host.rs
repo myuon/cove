@@ -688,7 +688,7 @@ impl HostRegistry {
     /// come through. It is not what an embedding that invokes one compiled
     /// program many times wants, because there the limits of every request
     /// would add up over the life of the process:
-    /// [`Vm::invoke_within`](crate::vm::Vm::invoke_within) and its three
+    /// [`Lvm::invoke_within`](crate::Lvm::invoke_within) and its three
     /// siblings are how a single invocation is bounded instead.
     pub fn set_budget(&mut self, budget: Budget) {
         *self
@@ -715,7 +715,7 @@ impl HostRegistry {
     /// holds over a run, and a budget that could be swapped while the run it
     /// bounds is executing would make every one of those bounds a claim about
     /// a thing that had changed underneath it. So the only doors to this are
-    /// [`Vm::invoke_within`](crate::vm::Vm::invoke_within) and its three
+    /// [`Lvm::invoke_within`](crate::Lvm::invoke_within) and its three
     /// siblings, each of which takes `&mut self` on the backend: a backend
     /// running an invocation is mutably borrowed for its whole duration, so a
     /// second invocation on it cannot begin, and the shape rather than a rule
@@ -738,9 +738,10 @@ impl HostRegistry {
     ///
     /// It is *not* how a safepoint charges. That used to be exactly what this
     /// was for, and issue #182 measured the mutex at 36% of `benches/call`
-    /// against `Vm::execute`'s 46%, because every call and every return is a
-    /// safepoint. [`HostRegistry::budget_meter`] is what a backend takes once
-    /// per run instead, and [`Meter`] is where the argument for it is.
+    /// against the predecessor's `execute` at 46%, because every call and
+    /// every return is a safepoint. [`HostRegistry::budget_meter`] is what a
+    /// backend takes once per run instead, and [`Meter`] is where the
+    /// argument for it is.
     pub fn with_budget<R>(&self, f: impl FnOnce(&Budget) -> R) -> Option<R> {
         let budget = self
             .budget

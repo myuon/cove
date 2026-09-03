@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 cove-diag.workspace = true
-cove-ir.workspace = true
 cove-lir.workspace = true
 cove-schema.workspace = true
 cove-syntax.workspace = true

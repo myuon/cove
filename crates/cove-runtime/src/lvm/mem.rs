@@ -1629,6 +1629,18 @@ impl Memory {
         self.stack.words.truncate(at);
     }
 
+    /// Drops every frame this segment holds.
+    ///
+    /// What a top-level call begins with, and it has to be said rather than
+    /// assumed: a call that was stopped where it stood — a budget that ran
+    /// out, a raised cancellation, a host that failed — left its frames on the
+    /// stack, because a runtime error is not a jump the lowering emits and
+    /// nothing unwound them. The next top-level call on the same machine must
+    /// not be built on top of them.
+    pub(crate) fn reset_stack(&mut self) {
+        self.stack.words.clear();
+    }
+
     /// The word at `slot` of the frame based at `base`.
     #[inline]
     pub(crate) fn slot(&self, base: u64, slot: u32) -> u64 {

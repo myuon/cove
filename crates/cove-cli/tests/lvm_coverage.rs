@@ -3,19 +3,20 @@
 //!
 //! [ADR 0034](../../../docs/adr/0034-one-physical-word-stack.md) makes the
 //! replacement's completion conditional on running the corpus and agreeing
-//! with the oracle. This is where that condition is measured. It is the same
-//! job `admits_coverage.rs` does for the predecessor and it exists for the
-//! same two reasons: it is **the roadmap for what to build next**, and it is
-//! a **ratchet**, so that a change which quietly runs fewer programs than the
+//! with the oracle. This is where that condition is measured. It exists for
+//! two reasons: it is **the roadmap for what to build next**, and it is a
+//! **ratchet**, so that a change which quietly runs fewer programs than the
 //! last one did fails instead of passing.
 //!
-//! The difference is what the two can ask. The predecessor answers an
-//! admission predicate, so `admits_coverage.rs` can ask "would you run this?"
-//! without running anything. `docs/LINEAR_VM.md` deletes that question —
-//! there is no `Unsupported`, no admission predicate and no lowering floor,
-//! and the target is that *every valid checked program lowers* — so the only
-//! honest way to ask this backend what it covers is to run the program and
-//! compare. That is what this does.
+//! The predecessor had a file of its own doing this job, and it could ask a
+//! question this one cannot: that backend answered an admission predicate, so
+//! "would you run this?" could be asked without running anything.
+//! `docs/LINEAR_VM.md` deletes that question — there is no `Unsupported`, no
+//! admission predicate and no lowering floor, and the target is that *every
+//! valid checked program lowers* — so the only honest way to ask this backend
+//! what it covers is to run the program and compare. That is what this does,
+//! and it is why the predecessor's file went with the predecessor rather than
+//! being repointed.
 //!
 //! # The three answers
 //!
@@ -43,44 +44,40 @@
 //!
 //! The value or the structured failure, both console streams, how the run
 //! ended, and the files the run wrote. Not the trace, and not the error's
-//! span: `differential.rs` compares both of those for the predecessor and
-//! this will too, once the number of programs that reach a comparison at all
-//! is large enough for the answer to mean something. Adding them now would
-//! report the same programs as disagreeing for a second reason and would say
-//! nothing new about which family to build next.
+//! span. `differential.rs` compares both of those, over the same corpus less
+//! `benches/`, and comparing them here as well would report the same programs
+//! as disagreeing for a second reason and would say nothing new about which
+//! family to build next. What this file is for is the count; what that one is
+//! for is the depth.
 //!
 //! Nothing is dropped from the comparison because it differed. A
 //! disagreement is the finding, and a comparison weakened until it passes has
 //! destroyed the finding rather than fixed it.
 //!
-//! # Why the benchmarks are in, and why this is not `#[ignore]`d
+//! # Why the benchmarks are in, and why this is `#[ignore]`d
 //!
 //! `differential.rs` leaves `benches/` out because running a benchmark's two
 //! million turns twice, unoptimized, cost it 78 of 340 seconds and told it
-//! nothing the first turn had not. That reasoning does not reach here yet:
+//! nothing the first turn had not. That reasoning does not reach here:
 //! `benches/` is nine more programs of the corpus, and what this measures is
-//! how much of the corpus lowers at all. A benchmark that does not lower
-//! costs a lowering and no turns whatsoever, and one that does lower is a
-//! program this backend has never run before.
+//! how much of the corpus lowers and runs at all. A benchmark that does not
+//! lower costs a lowering and no turns whatsoever, and one that does lower is
+//! a program worth having run at that size, because it is where a regression
+//! in the dispatch loop shows first.
 //!
-//! Which is what decides the other question. The whole survey — a hundred and
-//! forty-nine programs discovered, a hundred and eighteen checked, every one
-//! of those lowered, and everything that lowered run twice — was half a
-//! second of CPU while almost none of it reached a run, which is the same
-//! class as `admits_coverage.rs` and is why it is in the ordinary suite where
-//! a roadmap can be read without being asked for.
+//! The nine were nearly free while almost none of them reached a run, and
+//! they are not now: everything in the corpus lowers, so a benchmark's two
+//! million turns happen twice, and the survey costs minutes rather than the
+//! half second it began at. That is what decides the other question. This
+//! test is `#[ignore]`d and CI runs it with
+//! `cargo test --workspace --lib --tests -- --ignored`, which is where the
+//! repository puts a case whose cost is measured in minutes and whose value
+//! is measured once per change rather than once per `cargo t`.
 //!
-//! That moment has arrived. Teaching the lowering `assert` and `assertEqual`
-//! let eight benchmarks run, and eight benchmarks' two million turns, twice
-//! each and unoptimized, is eighty seconds. It is still here, and it is a
-//! deliberate answer rather than an omission: those eight are the only
-//! programs this backend has ever executed end to end at that size, they are
-//! where a regression in the dispatch loop would show first, and the
-//! alternative — running them at a size chosen for a test rather than for a
-//! benchmark — would measure something other than what `benches/` is. The
-//! next family this backend learns will add to the eighty rather than
-//! replace it, and that is the point at which `#[ignore]` or a smaller
-//! workload has to be argued for on its own.
+//! Running them at a size chosen for a test rather than for a benchmark was
+//! the alternative, and it would measure something other than what `benches/`
+//! is. The next family this backend learns will add to the minutes rather
+//! than replace them.
 //!
 //! # Reading the report
 //!
@@ -122,19 +119,17 @@ use support::{Case, ModuleIndex, Prepared};
 /// How many corpus programs lowered *and* agreed with the oracle the last
 /// time this number was raised.
 ///
-/// A floor, not a target, and the same ratchet `differential.rs`'s
-/// `LOWERED_FLOOR` and `admits_coverage.rs`'s `ACCEPTED_FLOOR` are: a family
-/// this backend learns raises it, and nothing may lower it, because a program
-/// that stopped running is coverage lost silently and the whole reason to
-/// count is that it cannot be.
+/// A floor, not a target: a family this backend learns raises it, and nothing
+/// may lower it, because a program that stopped running is coverage lost
+/// silently and the whole reason to count is that it cannot be.
 ///
 /// It counts agreement rather than lowering, which is the one place it
-/// differs from the floor it is modelled on. The predecessor's floor could
-/// count what lowered, because everything that lowered agreed — a
-/// disagreement failed the suite outright. Here a disagreement is a recorded
-/// finding rather than a stopped build, so a floor over what lowers would
-/// rise for a program that lowers and answers the wrong thing, which is the
-/// opposite of what a coverage ratchet is for.
+/// differs from the floors it was modelled on. Those could count what
+/// lowered, because everything that lowered agreed — a disagreement failed
+/// the suite outright. Here a disagreement is a recorded finding rather than
+/// a stopped build, so a floor over what lowers would rise for a program that
+/// lowers and answers the wrong thing, which is the opposite of what a
+/// coverage ratchet is for.
 ///
 /// 50 is where it stood when the CLI was first wired to this backend, which
 /// is the first time the corpus could be run against it at all: of the 149
@@ -256,9 +251,9 @@ use support::{Case, ModuleIndex, Prepared};
 /// removed: a cycle through one or more cells is an ordinary object-graph
 /// cycle now, because a cell is an object in the traced heap and the
 /// collector ADR 0011's amendment deferred is the collector that is running.
-/// The old case could not stay — the oracle and the frozen predecessor still
-/// make that refusal until they are deleted, so a corpus program that closed
-/// a cycle *directly* would lower, run, and be told it disagreed. What a
+/// The old case could not stay — the oracle still makes that refusal, so a
+/// corpus program that closed a cycle *directly* would lower, run, and be
+/// told it disagreed. What a
 /// corpus case can show without that is a cycle through **two** cells, which
 /// the amendment never refused and called an accepted leak; that it is
 /// reclaimed rather than leaked is `cove_runtime::lvm::cell`'s to show,
@@ -289,7 +284,36 @@ use support::{Case, ModuleIndex, Prepared};
 /// decision: a child the body awaited has already handed its value to the
 /// program, so reporting it again at the scope exit would overwrite whatever
 /// the body did with it. `Machine::leave_scope` now skips it too.
-const AGREEING_FLOOR: usize = 117;
+///
+/// 117 to 116, and it is the one direction this number is not supposed to
+/// move, so it is worth saying exactly what left and why it is not coverage
+/// lost. ADR 0034's cutover deleted `tests/e2e/backend_unsupported`. That
+/// case existed to pin the *predecessor* refusing a construct — a function
+/// declared inside a function body — and its own doc comment said it would
+/// have to move the day a backend covered the construct. This backend covers
+/// it, and it answers no admission predicate at all, so there is no refusal
+/// left for the case to be about.
+///
+/// Its **program** did not stop running. `tests/e2e/backend_ast` holds the
+/// same program, byte for byte but for the comment above it, and is one of
+/// the 116: the construct is lowered, run and agreed on exactly as it was
+/// yesterday. What left the survey is a duplicate that was carrying a
+/// different job, and the job is gone. `differential.rs`'s own floor moved
+/// 97 to 96 for the same shape of reason and wrote it down the same way.
+///
+/// The property the deleted case pinned — that a program the backend will
+/// not accept stops the command before anything happens, rather than quietly
+/// finishing on the interpreter — is not lost either, and is not this
+/// survey's to hold. It is pinned by
+/// `crates/cove-cli/tests/build.rs`'s `a_program_that_cannot_be_lowered_is_refused_before_a_binary_is_written`
+/// and by `crates/cove-cli/tests/trace_replay.rs`, both over
+/// `crates/cove-cli/tests/fixtures/instantiation_depth`. That fixture lives
+/// outside `tests/e2e/`, `examples/` and `benches/` deliberately: it is a
+/// program that cannot be lowered, this survey counts such a program as a gap
+/// to be filled, and the monomorphisation depth cap is a **refusal** that no
+/// later task removes. Teaching this file to tell a permanent refusal from a
+/// gap is the work that would let it come back into the corpus.
+const AGREEING_FLOOR: usize = 116;
 
 /// The code `cove_lir` raises a gap under.
 ///
@@ -308,7 +332,9 @@ const NOT_YET_LOWERED: &str = "cove::lower::not_yet_lowered";
 /// new disagreement from an old one: a change that teaches this backend one
 /// family and breaks another raises the count of what agrees while
 /// introducing a program that lowers and lies. So the set is compared as a
-/// whole, exactly as `differential.rs` compares its registered refusals.
+/// whole rather than as a bound, so that a disagreement which quietly stopped
+/// being one fails this too: a program that started agreeing is a claim
+/// somebody should have written down.
 ///
 /// A line here is a bug that has been *seen*, not a bug that has been
 /// allowed. Adding one is meant to be awkward: what reaches this list is a
@@ -470,8 +496,9 @@ struct Gap {
 /// Every entry point of the repository, in a fixed order.
 ///
 /// `tests/e2e/`, the packages of its own that some of its cases bring,
-/// `examples/` and `benches/` — the full set `admits_coverage.rs` walks, for
-/// the reason this file's module docs give.
+/// `examples/` and `benches/` — every program the repository keeps, for the
+/// reason this file's module docs give. `differential.rs` walks all of it but
+/// `benches/`, and its own docs say why.
 fn discover() -> Vec<Case> {
     let root = support::repo_root();
     let mut roots = vec![root.join("tests/e2e")];
@@ -614,12 +641,12 @@ fn disagreement(oracle: &Ran, machine: &Ran) -> String {
 /// `files/` — so nothing here reaches the network or a real clock and every
 /// answer is the same on every machine.
 ///
-/// They are built here rather than shared with `differential.rs` because that
-/// harness is the predecessor's gate and this one outlives it: at the cutover
-/// `differential.rs` and the backend it measures are deleted together, and a
-/// shared fixture would have to be moved out of the file being deleted in the
-/// same commit. `tests/support/mod.rs` holds what the two genuinely share,
-/// which is how a corpus case is found and checked.
+/// They are built here rather than shared with `differential.rs` because the
+/// two harnesses observe different things: that one records a trace through
+/// its fakes and compares it, and this one does not. A shared fixture would
+/// have to carry the union and let each read the half it wanted.
+/// `tests/support/mod.rs` holds what the two genuinely share, which is how a
+/// corpus case is found and checked.
 struct Fakes {
     console: Buffer,
     diagnostics: Buffer,
@@ -688,11 +715,9 @@ impl Fakes {
 /// The budgets a case runs under.
 ///
 /// Everything `[run.<name>]` sets except fuel and the deadline, for
-/// `differential.rs`'s reason: fuel is backend-specific by ADR 0019 — an
-/// instruction is not an AST node, and the two backends' instructions are not
-/// each other's either — and a deadline is wall-clock, so either would make
-/// the two sides stop at different points by construction rather than by
-/// fault.
+/// `differential.rs`'s reason: fuel is backend-specific — an instruction is
+/// not an AST node — and a deadline is wall-clock, so either would make the
+/// two sides stop at different points by construction rather than by fault.
 fn limits(run: &RunConfig) -> Limits {
     Limits {
         fuel: None,

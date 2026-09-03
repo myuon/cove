@@ -273,23 +273,27 @@ impl TaskScope {
     }
 }
 
-// ------------------------------------------------------- both backends
+// ------------------------------------------------ the interpreter's tasking
 
 /// What an evaluator has to answer for a task to be spawned into a scope,
 /// waited for, and charged for.
 ///
-/// Everything below this trait is the same on both backends by construction
-/// rather than by agreement. A task-safety rule, a budget charge, or a trace
-/// event stated twice is one that will drift, and a concurrency bug that only
-/// one backend has is the kind that does not reproduce — so `spawn`, `await`,
-/// and leaving a scope are written once here, and the two things that really
-/// differ are the two this trait asks about: which evaluator runs a body, and
-/// which timing contexts a wait is charged against.
+/// [`crate::interp::Interpreter`] is this trait's one implementor now. Before
+/// ADR 0034 it had a second: the predecessor VM shared this exact machinery,
+/// which is why `spawn`, `await`, and leaving a scope are written once here
+/// rather than twice, with only which evaluator runs a body and which timing
+/// contexts a wait is charged against left for an implementor to answer. The
+/// linear-memory backend was written clean-room rather than as a renovation
+/// of that VM, and it keeps its own task and scope bookkeeping in
+/// `crate::lvm` — see that module's docs — instead of implementing this
+/// trait. What still holds the two backends to one answer is the
+/// differential corpus rather than shared Rust code: a task-safety rule, a
+/// budget charge, or a trace event that drifted between them is exactly what
+/// that corpus exists to catch.
 ///
-/// [`crate::interp::Interpreter`] and [`crate::vm::Vm`] are the two
-/// implementations, and ADR 0008's "each task gets an evaluator of its own" is
-/// what makes them symmetrical: each holds a run's [`Runtime`], a stack of
-/// timings, and the id of the task it is running.
+/// An implementor holds a run's [`Runtime`], a stack of timings, and the id
+/// of the task it is running, which is what ADR 0008's "each task gets an
+/// evaluator of its own" asks of it.
 pub(crate) trait Tasking {
     /// What every thread of this run shares, which is what a `spawn` hands
     /// the thread it starts.
@@ -678,16 +682,16 @@ pub struct TransferClosure {
     /// [`ClosureBody::Tree`] is syntax and crosses the way the declaration
     /// inside it does: an `Arc<Block>` is immutable, so two threads reading
     /// one observe nothing about each other, and the parameters beside it are
-    /// copied like any other owned syntax. [`ClosureBody::Lowered`] is an
-    /// id into *one run's* `cove_ir::Program`, so what it means depends on
-    /// which program the receiving task holds — and the answer is that it
-    /// holds the same one. A `cove_ir::Program` is immutable once lowered and
-    /// holds `Arc<str>` throughout, so a run has one of them and every thread
-    /// of that run reads it; `crate::vm::Vm` therefore takes a share of the
-    /// handle rather than a bare reference, and a `FunctionId` names the same
-    /// function on the far side because it is the same `functions` it indexes
-    /// into. Lowering the program a second time on the receiving thread would
-    /// not have given that, which is why nothing does.
+    /// copied like any other owned syntax. [`ClosureBody::Linear`] is a
+    /// [`crate::value::LinearClosure`] naming a function in *one run's* `cove_lir::Program`
+    /// and the heap object it closes over, so what its `FunctionId` means
+    /// depends on which program the receiving task is running against — and
+    /// the answer is that every task of a run runs against the same one,
+    /// immutable once lowered. The heap object crosses unconverted alongside
+    /// it, because ADR 0034 makes the object heap the run's rather than the
+    /// task's, so an address made on one task's thread is good on another's.
+    /// Lowering the program a second time on the receiving thread would not
+    /// have given the same `FunctionId`, which is why nothing does.
     pub body: ClosureBody,
     pub module: String,
     pub captures: Vec<(String, Transfer)>,

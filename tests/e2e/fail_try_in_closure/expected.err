@@ -1,19 +1,19 @@
 error[cove::type::try_return]: `?` propagates `Error`, but this function value produces `String`
-  --> <e2e>/fail_try_in_closure/main/main.cove:18:5
+  --> <e2e>/fail_try_in_closure/main/main.cove:17:35
    |
-18 |     render("bookings")?
-   |     ^^^^^^^^^^^^^^^^^^^
+17 |   let panel = clock.timeout(1s) { render("bookings")? }?
+   |                                   ^^^^^^^^^^^^^^^^^^^
   --> <e2e>/fail_try_in_closure/main/main.cove:17:33
    |
-17 |   let panel = clock.timeout(1s) {
-   |                                 ^ nothing declares what this function value produces, so its body's value does: `String`
+17 |   let panel = clock.timeout(1s) { render("bookings")? }?
+   |                                 ^^^^^^^^^^^^^^^^^^^^^^^ nothing declares what this function value produces, so its body's value does: `String`
   rule: `expr?` returns the error from the function it is written in, and a function value is one. A function value no place declares a result type for produces what its body's value proves, so that value is what has to carry the failure.
   help: end the body with a `Result`, as in `Ok(...)`, so this function value produces `Result<String, Error>` and the `?` has an `Err` to return; then answer that failure where the value arrives
 note[cove::type::unconstrained_result]: `clock.timeout` declares its result `Result<Any, Error>`, so nothing here says what this call produced
   --> <e2e>/fail_try_in_closure/main/main.cove:17:15
    |
-17 |   let panel = clock.timeout(1s) {
-   |               ^^^^^^^^^^^^^^^^^^^
+17 |   let panel = clock.timeout(1s) { render("bookings")? }?
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   rule: A Host API operation declares `Any` where its meaning does not depend on the type of a value: the schema promises to carry the value, not to describe it.
   help: whatever the program does with the result of `clock.timeout` is checked at run time and by nothing here; the Host API schema declares `clock.timeout(Duration, Any) -> Result<Any, Error>`
 1 error(s)

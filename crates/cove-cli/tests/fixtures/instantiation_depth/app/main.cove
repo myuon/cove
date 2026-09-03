@@ -1,0 +1,21 @@
+struct Cell<T> {
+  it: T
+}
+
+/// A chain that asks for a wider type at every step.
+///
+/// `docs/LINEAR_VM.md` calls this a refusal rather than a gap: a generic is
+/// lowered to one function per instantiation, this asks for `grow<Int>`,
+/// `grow<Cell<Int>>`, `grow<Cell<Cell<Int>>>` and so on without end, and
+/// there is no finite set of functions to lower it to. No later task removes
+/// it, which is what makes it a fixture worth building a test on.
+fn grow<T>(x: T) -> Int {
+  grow(Cell(it: x))
+}
+
+/// Never runs, because nothing here can be built.
+export fn main() -> Result<Unit, Error> {
+  let n = grow(1)
+  assertEqual(n, 0)?
+  Ok(())
+}

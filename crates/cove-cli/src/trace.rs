@@ -90,12 +90,15 @@ pub(crate) enum Event {
         pause: Duration,
     },
     HeapSummary {
-        allocated: u64,
-        allocated_bytes: u64,
         collections: u64,
-        live_bytes: u64,
-        peak_bytes: u64,
-        pause: Duration,
+        object_count: Option<u64>,
+        allocated_bytes: Option<u64>,
+        live_bytes: Option<u64>,
+        peak_bytes: Option<u64>,
+        pause: Option<Duration>,
+        allocated_words: Option<u64>,
+        capacity_words: Option<u64>,
+        live_words: Option<u64>,
     },
     /// How the run ended, which is the last line of every trace.
     RunEnded {
@@ -268,9 +271,21 @@ fn parse_header(line: &str) -> Result<Header, String> {
     // is rejected for its version rather than for a field this build has
     // never heard of.
     if version != u64::from(TRACE_FORMAT_VERSION) {
+        // `read_str` returns an error the instant it sees this `version`
+        // disagree, before this `Header` is ever wrapped in a `Trace` and
+        // handed to a caller — so `backend` here is never read. There is no
+        // honest value to put in it: `Ast` and `Lvm` are both real backends
+        // a trace of a version this build does not read could have been
+        // recorded on, and the field has no third case to name "unknown"
+        // with. Making it `Option` to give this arm a `None` would carry
+        // that possibility into every place that reads `header.backend` for
+        // a trace that did pass the version check, where it can never be
+        // absent. So this is a placeholder rather than a reading of
+        // anything, and `Ast` is picked only because the field needs a
+        // value to be constructed at all.
         return Ok(Header {
             version,
-            backend: RecordingBackend::Vm,
+            backend: RecordingBackend::Ast,
             values: ValueCapture::Full,
             entry: String::new(),
             args: Vec::new(),
@@ -278,7 +293,7 @@ fn parse_header(line: &str) -> Result<Header, String> {
     }
     let backend = string_field(&json, "backend")?;
     let backend = RecordingBackend::parse(&backend)
-        .ok_or_else(|| format!("`backend` must be `ast`, `vm` or `lvm`, found `{backend}`"))?;
+        .ok_or_else(|| format!("`backend` must be `ast` or `lvm`, found `{backend}`"))?;
     let values = string_field(&json, "values")?;
     let values = ValueCapture::parse(&values)
         .ok_or_else(|| format!("`values` must be `full` or `redacted`, found `{values}`"))?;
@@ -350,12 +365,15 @@ fn parse_event(line: &str) -> Result<Event, String> {
             pause: nanos_field(&json, "pause_ns")?,
         }),
         "heap_summary" => Ok(Event::HeapSummary {
-            allocated: u64_field(&json, "allocated")?,
-            allocated_bytes: u64_field(&json, "allocated_bytes")?,
             collections: u64_field(&json, "collections")?,
-            live_bytes: u64_field(&json, "live_bytes")?,
-            peak_bytes: u64_field(&json, "peak_bytes")?,
-            pause: nanos_field(&json, "pause_ns")?,
+            object_count: optional_u64_field(&json, "object_count")?,
+            allocated_bytes: optional_u64_field(&json, "allocated_bytes")?,
+            live_bytes: optional_u64_field(&json, "live_bytes")?,
+            peak_bytes: optional_u64_field(&json, "peak_bytes")?,
+            pause: optional_nanos_field(&json, "pause_ns")?,
+            allocated_words: optional_u64_field(&json, "allocated_words")?,
+            capacity_words: optional_u64_field(&json, "capacity_words")?,
+            live_words: optional_u64_field(&json, "live_words")?,
         }),
         "run_ended" => {
             let name = string_field(&json, "outcome")?;
@@ -685,6 +703,26 @@ fn nanos_field(json: &Json, name: &str) -> Result<Duration, String> {
     Ok(Duration::from_nanos(u64_field(json, name)?))
 }
 
+/// A field a machine may not have measured, read the way [`u64_field`] reads
+/// one that is always there: `null` is `None`, and anything else that is not
+/// a non-negative integer is still an error. A field that is simply missing
+/// is also an error — `null` is how a writer says "not measured", and a
+/// reader that treated an absent key the same way would stop noticing when a
+/// writer dropped a field instead of nulling it.
+fn optional_u64_field(json: &Json, name: &str) -> Result<Option<u64>, String> {
+    match field(json, name)? {
+        Json::Null => Ok(None),
+        other => other
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("`{name}` must be a non-negative integer or null")),
+    }
+}
+
+fn optional_nanos_field(json: &Json, name: &str) -> Result<Option<Duration>, String> {
+    Ok(optional_u64_field(json, name)?.map(Duration::from_nanos))
+}
+
 /// What the Host API schema says about the operations a trace names.
 ///
 /// A trace records a call's module and operation, not its effect, so the
@@ -713,12 +751,25 @@ impl Schema {
 }
 
 /// What a run's `heap_summary` event carried.
+///
+/// The interpreter's heap is a set of `Rc`-ed objects and counts objects and
+/// the bytes they asked for; the linear-memory backend's heap is a run of
+/// eight-byte words and counts words. Neither family's figures can be
+/// derived from the other's — an inline struct is words in one and no object
+/// at all in the other — so this struct carries both families exactly as
+/// [`Event::HeapSummary`] does, `None` in whichever one the machine that
+/// wrote the trace did not count, and the printer below reports each family
+/// it finds rather than inventing a shared unit for them.
 struct HeapTotals {
-    allocated: u64,
-    allocated_bytes: u64,
-    live_bytes: u64,
-    peak_bytes: u64,
-    pause: Duration,
+    collections: u64,
+    object_count: Option<u64>,
+    allocated_bytes: Option<u64>,
+    live_bytes: Option<u64>,
+    peak_bytes: Option<u64>,
+    pause: Option<Duration>,
+    allocated_words: Option<u64>,
+    capacity_words: Option<u64>,
+    live_words: Option<u64>,
 }
 
 /// Counts of the calls one capability accounts for.
@@ -801,19 +852,26 @@ pub(crate) fn render_summary(path: &Path, trace: &Trace) -> String {
                 *collected_by.entry(*task).or_default() += 1;
             }
             Event::HeapSummary {
-                allocated,
+                collections: summary_collections,
+                object_count,
                 allocated_bytes,
                 live_bytes,
                 peak_bytes,
                 pause,
-                ..
+                allocated_words,
+                capacity_words,
+                live_words,
             } => {
                 heap = Some(HeapTotals {
-                    allocated: *allocated,
+                    collections: *summary_collections,
+                    object_count: *object_count,
                     allocated_bytes: *allocated_bytes,
                     live_bytes: *live_bytes,
                     peak_bytes: *peak_bytes,
                     pause: *pause,
+                    allocated_words: *allocated_words,
+                    capacity_words: *capacity_words,
+                    live_words: *live_words,
                 });
             }
             Event::EntryEnter { .. } | Event::RunEnded { .. } => {}
@@ -886,17 +944,78 @@ pub(crate) fn render_summary(path: &Path, trace: &Trace) -> String {
     );
     match &heap {
         Some(totals) => {
-            let _ = writeln!(
-                out,
-                "  heap         {} object(s) allocated in {} bytes, {} live at the end, peak {}",
-                totals.allocated, totals.allocated_bytes, totals.live_bytes, totals.peak_bytes
-            );
-            let _ = writeln!(
-                out,
-                "  collections  {collections} over {} heap(s), {freed_objects} object(s) reclaimed of {collected_allocated} allocated between them, pause {}",
-                collected_by.len(),
-                pretty(totals.pause)
-            );
+            match (
+                totals.object_count,
+                totals.allocated_bytes,
+                totals.live_bytes,
+                totals.peak_bytes,
+            ) {
+                (Some(object_count), Some(allocated_bytes), Some(live_bytes), Some(peak_bytes)) => {
+                    let _ = writeln!(
+                        out,
+                        "  heap         {object_count} object(s) allocated in {allocated_bytes} bytes, {live_bytes} live at the end, peak {peak_bytes}"
+                    );
+                }
+                _ => {
+                    let _ = writeln!(
+                        out,
+                        "  heap         no object figures — this trace's heap counts words, not objects"
+                    );
+                }
+            }
+            match (totals.allocated_words, totals.capacity_words) {
+                (Some(allocated_words), Some(capacity_words)) => {
+                    // A word is eight bytes, so the byte figures here are
+                    // derived from the word counts the heap actually kept,
+                    // not counted separately by it.
+                    let live = match totals.live_words {
+                        Some(live_words) => format!(
+                            "{live_words} word(s) ({} bytes) live at the end",
+                            live_words * 8
+                        ),
+                        None => "no collection ran, so nothing is known live".to_string(),
+                    };
+                    let _ = writeln!(
+                        out,
+                        "  heap         {allocated_words} word(s) ({} bytes) allocated, {capacity_words}-word region ({} bytes) capacity, {live}",
+                        allocated_words * 8,
+                        capacity_words * 8,
+                    );
+                }
+                _ => {
+                    let _ = writeln!(
+                        out,
+                        "  heap         no word figures — this trace's heap counts objects, not words"
+                    );
+                }
+            }
+            let pause = match totals.pause {
+                Some(pause) => format!(", pause {}", pretty(pause)),
+                // The linear-memory backend does not yet time its own
+                // collector, so a word-only summary has nothing here to
+                // report and printing a zero would claim otherwise.
+                None => String::new(),
+            };
+            if collected_by.is_empty() {
+                // No `heap_collected` line was recorded for any heap, which
+                // is what the linear-memory backend writes today: it emits
+                // only the run's `heap_summary`, not one line per
+                // collection. `collections` still comes from that event, the
+                // one figure both machines count, but which heap collected
+                // and how much it reclaimed are not known without the
+                // per-collection events the interpreter writes.
+                let _ = writeln!(
+                    out,
+                    "  collections  {} — no `heap_collected` events, so which heap and how much was reclaimed are not recorded{pause}",
+                    totals.collections
+                );
+            } else {
+                let _ = writeln!(
+                    out,
+                    "  collections  {collections} over {} heap(s), {freed_objects} object(s) reclaimed of {collected_allocated} allocated between them{pause}",
+                    collected_by.len(),
+                );
+            }
         }
         None => {
             let _ = writeln!(
@@ -1029,17 +1148,55 @@ pub(crate) fn render_timeline(trace: &Trace, filter: &Filter) -> String {
                 );
             }
             Event::HeapSummary {
-                allocated,
-                allocated_bytes,
                 collections,
+                object_count,
+                allocated_bytes,
                 live_bytes,
                 peak_bytes,
                 pause,
+                allocated_words,
+                capacity_words,
+                live_words,
             } => {
+                let objects = match (object_count, allocated_bytes, live_bytes, peak_bytes) {
+                    (Some(object_count), Some(allocated_bytes), Some(live_bytes), Some(peak_bytes)) => {
+                        Some(format!(
+                            "{object_count} allocated in {allocated_bytes} bytes, {live_bytes} live, peak {peak_bytes}"
+                        ))
+                    }
+                    _ => None,
+                };
+                // A word is eight bytes; the byte figures here are derived
+                // from the word counts, not a second measurement.
+                let words = match (allocated_words, capacity_words) {
+                    (Some(allocated_words), Some(capacity_words)) => {
+                        let live = match live_words {
+                            Some(live_words) => {
+                                format!("{live_words} words ({} bytes) live", live_words * 8)
+                            }
+                            None => "no collection ran".to_string(),
+                        };
+                        Some(format!(
+                            "{allocated_words} words ({} bytes) allocated, {capacity_words}-word region ({} bytes), {live}",
+                            allocated_words * 8,
+                            capacity_words * 8,
+                        ))
+                    }
+                    _ => None,
+                };
+                let figures = match (objects, words) {
+                    (Some(objects), Some(words)) => format!("{objects}; {words}"),
+                    (Some(objects), None) => objects,
+                    (None, Some(words)) => words,
+                    (None, None) => "no figures from either family".to_string(),
+                };
+                let pause = match pause {
+                    Some(pause) => format!(", pause {}", pretty(*pause)),
+                    None => String::new(),
+                };
                 let _ = writeln!(
                     out,
-                    "{at:>4}  heap_summary    {allocated} allocated in {allocated_bytes} bytes, {collections} collection(s), {live_bytes} live, peak {peak_bytes}, pause {}",
-                    pretty(*pause)
+                    "{at:>4}  heap_summary    {collections} collection(s), {figures}{pause}"
                 );
             }
             Event::TaskCancelled { id } => {
@@ -1197,7 +1354,7 @@ pub(crate) fn cmd_trace(args: &[String]) -> Result<(), CliError> {
 mod tests {
     use super::*;
 
-    const HEADER: &str = r#"{"event":"trace_header","version":3,"backend":"vm","values":"full","entry":"restricted.main","args":[]}"#;
+    const HEADER: &str = r#"{"event":"trace_header","version":4,"backend":"lvm","values":"full","entry":"restricted.main","args":[]}"#;
 
     fn read(lines: &[&str]) -> Trace {
         Trace::read_str(&lines.join("\n")).expect("the trace reads")
@@ -1217,8 +1374,8 @@ mod tests {
             r#"{"event":"entry_enter","module":"restricted","function":"main"}"#,
             r#"{"event":"host_call","task":0,"module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[{"type":"string","value":"input"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"string","value":"text"}]}}}"#,
         ]);
-        assert_eq!(trace.header.version, 3);
-        assert_eq!(trace.header.backend, RecordingBackend::Vm);
+        assert_eq!(trace.header.version, 4);
+        assert_eq!(trace.header.backend, RecordingBackend::Lvm);
         assert_eq!(trace.header.values, ValueCapture::Full);
         assert_eq!(trace.header.entry, "restricted.main");
         assert_eq!(trace.events.len(), 2);
@@ -1243,22 +1400,24 @@ mod tests {
     /// carries no task on a host call, no terminal event, and a null where
     /// the entry's own heap events name a task. A version 2 trace can answer
     /// all three and not the one ADR 0026 added, which `cove replay` now asks
-    /// first — which backend wrote this. Both are refused for their version,
-    /// which says exactly that, rather than half-read.
+    /// first — which backend wrote this. Version 3 can answer that one too,
+    /// and not the one version 4 asks: whether `heap_summary` counts objects,
+    /// words, or both. All three are refused for their version, which says
+    /// exactly that, rather than half-read.
     ///
     /// This is the compatibility behaviour ADR 0026 chose over an
     /// unknown-origin replay, and it is the behaviour this format has always
     /// had: one build reads one version.
     #[test]
     fn a_version_this_build_does_not_know_is_rejected() {
-        for version in [1, 2, 4] {
+        for version in [1, 2, 3] {
             let header = format!(
                 r#"{{"event":"trace_header","version":{version},"values":"full","entry":"a.b","args":[]}}"#
             );
             let message = error(&[&header]);
             assert!(
                 message.contains(&format!(
-                    "is version {version}, and this build of `cove` reads version 3"
+                    "is version {version}, and this build of `cove` reads version 4"
                 )),
                 "{message}"
             );
@@ -1274,10 +1433,10 @@ mod tests {
     #[test]
     fn a_backend_this_build_does_not_know_is_rejected() {
         let message = error(&[
-            r#"{"event":"trace_header","version":3,"backend":"jit","values":"full","entry":"a.b","args":[]}"#,
+            r#"{"event":"trace_header","version":4,"backend":"jit","values":"full","entry":"a.b","args":[]}"#,
         ]);
         assert!(
-            message.contains("`backend` must be `ast`, `vm` or `lvm`, found `jit`"),
+            message.contains("`backend` must be `ast` or `lvm`, found `jit`"),
             "{message}"
         );
     }
@@ -1287,11 +1446,10 @@ mod tests {
     fn a_header_reads_back_the_backend_that_recorded_it() {
         for (name, backend) in [
             ("ast", RecordingBackend::Ast),
-            ("vm", RecordingBackend::Vm),
             ("lvm", RecordingBackend::Lvm),
         ] {
             let header = format!(
-                r#"{{"event":"trace_header","version":3,"backend":"{name}","values":"full","entry":"a.b","args":[]}}"#
+                r#"{{"event":"trace_header","version":4,"backend":"{name}","values":"full","entry":"a.b","args":[]}}"#
             );
             assert_eq!(read(&[&header]).header.backend, backend);
         }
@@ -1343,7 +1501,7 @@ mod tests {
     #[test]
     fn a_redacted_value_reads_back_as_missing_rather_than_as_a_value() {
         let trace = read(&[
-            r#"{"event":"trace_header","version":3,"backend":"vm","values":"redacted","entry":"a.b","args":[]}"#,
+            r#"{"event":"trace_header","version":4,"backend":"lvm","values":"redacted","entry":"a.b","args":[]}"#,
             r#"{"event":"host_call","task":0,"module":"env","op":"get","capability":"env","wait_ns":0,"granted":true,"args":[{"type":"redacted","of":"String"}],"outcome":{"kind":"value","value":{"type":"redacted","of":"Option"}}}"#,
         ]);
         let call = trace.dispatched_calls()[0];
@@ -1488,18 +1646,29 @@ mod tests {
         assert!(text.contains("no `heap_summary` event"), "{text}");
     }
 
+    /// The object half of the event, from a machine that counts objects — the
+    /// shape this event had before version 4, and still one of the two it can
+    /// carry.
     #[test]
     fn the_summary_reports_allocation_collections_and_the_live_heap() {
         let trace = read(&[
             HEADER,
             r#"{"event":"heap_collected","task":1,"allocated":40,"freed":36,"live_objects":4,"live_bytes":512,"pause_ns":9000}"#,
             r#"{"event":"heap_collected","task":2,"allocated":24,"freed":24,"live_objects":0,"live_bytes":0,"pause_ns":3000}"#,
-            r#"{"event":"heap_summary","allocated":64,"allocated_bytes":4096,"collections":2,"live_bytes":512,"peak_bytes":900,"pause_ns":12000}"#,
+            r#"{"event":"heap_summary","collections":2,"object_count":64,"allocated_bytes":4096,"live_bytes":512,"peak_bytes":900,"pause_ns":12000,"allocated_words":null,"capacity_words":null,"live_words":null}"#,
         ]);
         let text = render_summary(Path::new("t.jsonl"), &trace);
         assert!(
             text.contains(
                 "heap         64 object(s) allocated in 4096 bytes, 512 live at the end, peak 900"
+            ),
+            "{text}"
+        );
+        // The word half was not counted, and the summary says so rather than
+        // a zero.
+        assert!(
+            text.contains(
+                "heap         no word figures — this trace's heap counts objects, not words"
             ),
             "{text}"
         );
@@ -1512,12 +1681,46 @@ mod tests {
         );
     }
 
+    /// The word half of the event, from a machine that counts words — the
+    /// shape issue #240 asked the format to admit, and the case this summary
+    /// could not report at all before version 4.
+    #[test]
+    fn the_summary_reports_a_word_counted_heap_when_that_is_what_the_backend_counts() {
+        let trace = read(&[
+            HEADER,
+            r#"{"event":"heap_summary","collections":1,"object_count":null,"allocated_bytes":null,"live_bytes":null,"peak_bytes":null,"pause_ns":null,"allocated_words":512,"capacity_words":4096,"live_words":96}"#,
+        ]);
+        let text = render_summary(Path::new("t.jsonl"), &trace);
+        assert!(
+            text.contains(
+                "heap         no object figures — this trace's heap counts words, not objects"
+            ),
+            "{text}"
+        );
+        // A word is eight bytes, and the bytes reported here are derived from
+        // the word counts rather than a second measurement.
+        assert!(
+            text.contains(
+                "heap         512 word(s) (4096 bytes) allocated, 4096-word region (32768 bytes) capacity, 96 word(s) (768 bytes) live at the end"
+            ),
+            "{text}"
+        );
+        // No `heap_collected` line exists for this machine, so the summary
+        // says that rather than reporting zero heaps collected.
+        assert!(
+            text.contains(
+                "collections  1 — no `heap_collected` events, so which heap and how much was reclaimed are not recorded"
+            ),
+            "{text}"
+        );
+    }
+
     #[test]
     fn the_timeline_shows_a_collection_and_the_run_s_heap_summary() {
         let trace = read(&[
             HEADER,
             r#"{"event":"heap_collected","task":2,"allocated":64,"freed":60,"live_objects":4,"live_bytes":512,"pause_ns":9000}"#,
-            r#"{"event":"heap_summary","allocated":64,"allocated_bytes":4096,"collections":1,"live_bytes":512,"peak_bytes":900,"pause_ns":9000}"#,
+            r#"{"event":"heap_summary","collections":1,"object_count":64,"allocated_bytes":4096,"live_bytes":512,"peak_bytes":900,"pause_ns":9000,"allocated_words":null,"capacity_words":null,"live_words":null}"#,
         ]);
         let text = render_timeline(&trace, &Filter::All);
         assert!(
@@ -1525,7 +1728,9 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("heap_summary    64 allocated in 4096 bytes, 1 collection(s)"),
+            text.contains(
+                "heap_summary    1 collection(s), 64 allocated in 4096 bytes, 512 live, peak 900"
+            ),
             "{text}"
         );
         // A collection belongs to a task, so a task filter keeps it.
@@ -1535,6 +1740,24 @@ mod tests {
         );
         assert!(
             !render_timeline(&trace, &Filter::Task(1)).contains("heap_collected"),
+            "{text}"
+        );
+    }
+
+    /// The word-only shape in the timeline, beside the object-only case
+    /// above: the same event, the other family, and no zero printed for the
+    /// family this machine did not count.
+    #[test]
+    fn the_timeline_shows_a_word_counted_heap_summary() {
+        let trace = read(&[
+            HEADER,
+            r#"{"event":"heap_summary","collections":1,"object_count":null,"allocated_bytes":null,"live_bytes":null,"peak_bytes":null,"pause_ns":null,"allocated_words":512,"capacity_words":4096,"live_words":96}"#,
+        ]);
+        let text = render_timeline(&trace, &Filter::All);
+        assert!(
+            text.contains(
+                "heap_summary    1 collection(s), 512 words (4096 bytes) allocated, 4096-word region (32768 bytes), 96 words (768 bytes) live"
+            ),
             "{text}"
         );
     }
@@ -1660,7 +1883,7 @@ mod tests {
     #[test]
     fn a_redacted_trace_says_it_cannot_be_replayed() {
         let trace = read(&[
-            r#"{"event":"trace_header","version":3,"backend":"vm","values":"redacted","entry":"a.b","args":[]}"#,
+            r#"{"event":"trace_header","version":4,"backend":"lvm","values":"redacted","entry":"a.b","args":[]}"#,
         ]);
         let text = render_summary(Path::new("t.jsonl"), &trace);
         assert!(text.contains("cannot be replayed"), "{text}");

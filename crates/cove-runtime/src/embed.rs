@@ -8,16 +8,18 @@
 //!
 //! # Why the binary lowers, and why `cove build` lowers too
 //!
-//! ADR 0019 leaves the IR unserialized on purpose, so a built binary cannot
-//! carry one: it carries its sources, resolves them, and lowers them when it
-//! starts. That is a few hundred microseconds against a run that lasts as
-//! long as the program does.
+//! The IR is not a serialization format, so a built binary cannot carry one:
+//! it carries its sources, resolves them, and lowers them when it starts.
+//! That is a few hundred microseconds against a run that lasts as long as the
+//! program does.
 //!
 //! What it must not do is discover at that moment that it cannot run. So
 //! `cove build` lowers the same entry at build time and refuses to write a
 //! binary it would refuse to start -- because the person who can act on the
 //! refusal is the one holding the source, and they are not the one holding
-//! the binary.
+//! the binary. ADR 0034 makes such a refusal a bug in the lowering rather
+//! than a construct the backend declines, which is why what comes back is a
+//! diagnostic and not a named construct.
 //!
 //! [`register_hosts`] is the one place the host implementations a run gets
 //! are chosen. `cove run` and a built binary both call it, so a built binary
@@ -45,7 +47,7 @@ use crate::process::Process;
 use crate::runtime::Runtime;
 use crate::trace::create_trace_file;
 use crate::value::Repr;
-use crate::vm::Vm;
+use crate::Lvm;
 use crate::{
     Budget, Cancellation, JsonlSink, Limits, NullSink, RecordingBackend, TraceHeader, TraceSink,
     Value, ValueCapture,
@@ -158,10 +160,12 @@ pub struct EmbeddedRun {
 /// honours none. `cove build --backend ast` is where the choice is made.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EmbeddedBackend {
-    /// The tree-walking interpreter.
+    /// The tree-walking interpreter, which ADR 0034 keeps as the semantic
+    /// oracle.
     Ast,
-    /// The dedicated VM of ADR 0019, and the default since ADR 0022.
-    Vm,
+    /// The linear-memory backend of ADR 0034, which is what a run runs on
+    /// unless the build asked otherwise.
+    Lvm,
 }
 
 /// A whole program: the sources a built binary carries, the run it carries
@@ -172,8 +176,8 @@ pub struct Embedded {
     pub sources: &'static [EmbeddedSource],
     /// The run the sources were built for.
     pub run: EmbeddedRun,
-    /// The backend `cove build` chose, which is the VM unless the build
-    /// asked otherwise.
+    /// The backend `cove build` chose, which is the linear-memory backend
+    /// unless the build asked otherwise.
     pub backend: EmbeddedBackend,
 }
 
@@ -239,7 +243,7 @@ impl Embedded {
         // binary resolves and does not check: the type checker's answer
         // cannot have changed for sources that cannot have changed.
         //
-        // A binary on the VM checks anyway, and not because the answer might
+        // A lowered binary checks anyway, and not because the answer might
         // differ. The lowering *reads* the checker's answers rather than
         // recomputing them -- what a reference denotes, what a receiver's
         // type is, where a field sits -- and resolution does not produce
@@ -251,8 +255,7 @@ impl Embedded {
         //
         // This is the startup cost ADR 0022 names: proportional to the size
         // of the program, paid once, before anything runs. Serializing the
-        // IR would remove it and ADR 0019 declined to make the IR a format,
-        // so it stays until something supersedes that.
+        // IR would remove it, and the IR is not a format.
         let program = match self.backend {
             EmbeddedBackend::Ast => {
                 cove_sema::resolve::resolve(&package).map_err(|items| Failure::Diagnostics {
@@ -260,7 +263,7 @@ impl Embedded {
                     items,
                 })?
             }
-            EmbeddedBackend::Vm => {
+            EmbeddedBackend::Lvm => {
                 cove_sema::Compiler::new()
                     .compile(&package)
                     .map_err(|items| Failure::Diagnostics {
@@ -275,27 +278,31 @@ impl Embedded {
         })?;
 
         // Before a host is registered and before anything the program could
-        // be observed by, exactly as `cove run` lowers: ADR 0019's rule is
-        // that a VM run either finishes on the VM or fails before any side
-        // effect, and a binary is a run.
+        // be observed by, exactly as `cove run` lowers: a run either finishes
+        // on the backend it was built for or fails before any side effect,
+        // and a binary is a run.
         //
-        // Reaching the refusal here means `cove build` did not reach it,
+        // Reaching the failure here means `cove build` did not reach it,
         // which it cannot for a binary built from these sources -- so this
         // arm is the one that would catch a lowering that stopped agreeing
         // with itself between the two, rather than a program anybody wrote.
         let lowered = match self.backend {
             EmbeddedBackend::Ast => None,
-            EmbeddedBackend::Vm => {
-                let ir = cove_ir::lower::lower_entry(&program, module, entry).map_err(|why| {
-                    Failure::Diagnostics {
-                        sources: sources.clone(),
-                        items: vec![why.to_diagnostic()],
-                    }
+            EmbeddedBackend::Lvm => {
+                // The shipped schemas and no others, which is the set the
+                // `Compiler::new()` above checked this package against.
+                let ir = cove_lir::lower_entry(
+                    &program,
+                    &sources,
+                    &cove_sema::HostSchemas::new(),
+                    module,
+                    entry,
+                )
+                .map_err(|items| Failure::Diagnostics {
+                    sources: sources.clone(),
+                    items,
                 })?;
-                cove_ir::lower::validate(&ir.program).map_err(|why| {
-                    Failure::Message(format!("the lowering of this program is not valid: {why}"))
-                })?;
-                Some(Arc::new(ir.program))
+                Some(Arc::new(ir))
             }
         };
 
@@ -340,7 +347,7 @@ impl Embedded {
         let runtime =
             Runtime::new(Arc::new(program), sources.clone(), Arc::new(hosts)).with_trace(sink);
         let outcome = match &lowered {
-            Some(ir) => Vm::new(&runtime, runtime.hosts(), ir).run_entry(module, entry, args),
+            Some(ir) => Lvm::new(&runtime, runtime.hosts(), ir).run_entry(module, entry, args),
             None => Interpreter::new(&runtime).run_entry(module, entry, args),
         };
         match outcome {
@@ -427,7 +434,7 @@ impl Embedded {
             // ran.
             backend: match self.backend {
                 EmbeddedBackend::Ast => RecordingBackend::Ast,
-                EmbeddedBackend::Vm => RecordingBackend::Vm,
+                EmbeddedBackend::Lvm => RecordingBackend::Lvm,
             },
             values: ValueCapture::Full,
             entry: self.run.entry.to_string(),
@@ -507,7 +514,7 @@ export fn main() -> Result<Unit, Error> {
     /// A binary built for `entry`, on the backend `cove build` would have
     /// chosen for it.
     fn embedded(sources: &'static [EmbeddedSource], entry: &'static str) -> Embedded {
-        embedded_on(sources, entry, EmbeddedBackend::Vm)
+        embedded_on(sources, entry, EmbeddedBackend::Lvm)
     }
 
     fn embedded_on(

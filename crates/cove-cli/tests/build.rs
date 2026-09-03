@@ -74,7 +74,7 @@ fn built_hello() -> &'static Path {
         let (out, summary) = build("examples", "hello");
         assert!(
             summary.contains("entry:   hello.main")
-                && summary.contains("backend: vm")
+                && summary.contains("backend: lvm")
                 && summary.contains("grants:  console"),
             "the build must report the boundary it baked in:\n{summary}"
         );
@@ -142,9 +142,9 @@ fn a_cove_toml_beside_a_built_binary_changes_nothing() {
     assert_eq!(outcome.stdout, "Hello, --files-root!\n");
 }
 
-/// ADR 0022 moved a built binary to the VM, and this is what the move must
-/// not have changed: the same program, built the other way, answering the
-/// same thing.
+/// A built binary embeds an evaluator, and this is what choosing the other
+/// one must not change: the same program, built both ways, answering the same
+/// thing.
 ///
 /// It is the only test in this file that names a backend. Everything else
 /// here builds the default one, which is the point — a suite that named the
@@ -162,43 +162,61 @@ fn the_same_program_built_on_either_backend_answers_the_same() {
     let interpreted = dir.install(&on_the_oracle);
     let interpreted = run(&interpreted, dir.path(), &["Ada"]);
 
-    let dir = TempDir::new("both-backends-vm");
-    let on_the_vm = dir.install(built_hello());
-    let on_the_vm = run(&on_the_vm, dir.path(), &["Ada"]);
+    let dir = TempDir::new("both-backends-lowered");
+    let lowered = dir.install(built_hello());
+    let lowered = run(&lowered, dir.path(), &["Ada"]);
 
-    assert_eq!(interpreted.stdout, on_the_vm.stdout);
-    assert_eq!(interpreted.stderr, on_the_vm.stderr);
+    assert_eq!(interpreted.stdout, lowered.stdout);
+    assert_eq!(interpreted.stderr, lowered.stderr);
     assert_eq!(
         interpreted.status.success(),
-        on_the_vm.status.success(),
+        lowered.status.success(),
         "{}",
-        on_the_vm.stderr
+        lowered.stderr
     );
 }
 
 /// ADR 0009 says a built binary "must not defer an error to whoever runs
-/// it", and a construct the VM cannot run is such an error: the person who
-/// can act on it is holding the source, and they are not the one holding the
-/// binary. So it is refused at build time, and nothing is written.
+/// it", and a program the lowering will not accept is such an error: the
+/// person who can act on it is holding the source, and they are not the one
+/// holding the binary. So it stops the build, and nothing is written.
 ///
-/// No `cargo build` happens here, because the refusal comes before one is
-/// started — which is most of why refusing at build time is worth doing.
+/// The program it stops on is `crates/cove-cli/tests/fixtures/`'s, and which
+/// program that is took some care. ADR 0034 leaves the backend no admission
+/// predicate at all, so almost nothing a checked program can contain will
+/// stop the lowering — a construct it has not been taught is a bug in the
+/// lowering and not a program it declines. What is left is the one refusal
+/// `docs/LINEAR_VM.md` argues is permanent: a generic chain that asks for a
+/// wider type at every step has no finite set of functions to lower it to,
+/// and no later task removes that. A fixture built on a gap would stop being
+/// a fixture the day the gap was filled.
+///
+/// It lives under `tests/fixtures/` rather than in `tests/e2e/` because the
+/// coverage harnesses walk `tests/e2e/`, `examples/` and `benches/` and count
+/// a program that does not lower — and this one is there precisely because it
+/// does not.
+///
+/// No `cargo build` happens here, because the failure comes before one is
+/// started, which is most of why failing at build time is worth doing.
 #[test]
-fn a_program_the_vm_cannot_run_is_refused_before_a_binary_is_written() {
-    let root = package("tests/e2e/backend_ast");
-    let out = root.join("target/backend_ast-e2e");
+fn a_program_that_cannot_be_lowered_is_refused_before_a_binary_is_written() {
+    let root = package("crates/cove-cli/tests/fixtures/instantiation_depth");
+    let out = root.join("target/instantiation-depth-e2e");
     let _ = std::fs::remove_file(&out);
     let output = Command::new(env!("CARGO_BIN_EXE_cove"))
         .current_dir(&root)
-        .args(["build", "backend_ast", "--out"])
+        .args(["build", "app", "--out"])
         .arg(&out)
         .output()
         .expect("`cove build` starts");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{stderr}");
-    assert!(stderr.contains("cove::backend::unsupported"), "{stderr}");
     assert!(
-        stderr.contains("a function declared inside a function body"),
+        stderr.contains("cove::lower::instantiation_depth"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("no finite set of functions to lower it to"),
         "{stderr}"
     );
     assert!(

@@ -42,7 +42,9 @@ export fn main() -> Result<Unit, Error> {
 fn step(cell: Shared<Node>) -> String {
   cell.lock(fn(value) {
     match value.next {
-      Some(next) => next.lock(fn(held) { held.label })
+      Some(next) => next.lock(fn(held) {
+        held.label
+      })
       None => "nothing"
     }
   })

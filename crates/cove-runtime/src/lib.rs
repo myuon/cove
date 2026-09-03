@@ -7,35 +7,26 @@ pub mod database;
 pub mod embed;
 pub mod error;
 pub mod files;
-pub mod frame;
 pub mod heap;
 pub mod host;
 pub mod http;
 pub mod interp;
 // Private: what it holds is one check both backends make, and the public
-// surface of it is `Interpreter::invoke` and `Vm::invoke`.
+// surface of it is `Interpreter::invoke` and `Lvm::invoke`.
 mod invoke;
-// Private, with one type re-exported below: the ADR 0034 replacement for
-// `vm` and `frame`, which are frozen until the cutover deletes them. The
-// module stays private so that what a caller can name is decided here rather
-// than by which items inside it happen to be `pub` — the words, the layouts,
-// the memory and the dispatch loop are the representation this boundary
-// exists to keep in.
+// Private, with one type re-exported below: the execution backend of ADR
+// 0034. The module stays private so that what a caller can name is decided
+// here rather than by which items inside it happen to be `pub` — the words,
+// the layouts, the memory and the dispatch loop are the representation this
+// boundary exists to keep in.
 mod lvm;
 pub mod process;
 pub mod runtime;
 pub mod schema;
 pub mod shared;
-// Private, and ADR 0028 decision 0 is why: a `Slot`, a `HeapObject` and the
-// handle that names one are internal representations, and "changing the VM's
-// internal representation must not require exposing that representation to
-// embedders" is the sentence issue #197 calls its thesis. This is the
-// vertical slice decision 8 asks for before any of that migration can begin.
-mod slot;
 pub mod task;
 pub mod trace;
 pub mod value;
-pub mod vm;
 
 pub use budget::{Budget, Cancellation, Limits, Meter, Stopped};
 pub use clock::{Clock, VirtualTime};
@@ -49,6 +40,7 @@ pub use host::{
 };
 pub use http::{Http, ScriptedRequest, Served};
 pub use interp::{on_cove_stack, STACK_SIZE};
+pub use lvm::exec::SAFEPOINT_STRIDE;
 pub use lvm::Lvm;
 pub use process::{Process, ProcessLog};
 pub use runtime::{Runtime, ENTRY_TASK};
@@ -64,4 +56,3 @@ pub use trace::{
     TRACE_FORMAT_VERSION,
 };
 pub use value::{Value, ValueView};
-pub use vm::Vm;

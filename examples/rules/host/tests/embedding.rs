@@ -43,7 +43,7 @@ fn compiled() -> RulePackage {
     RulePackage::load(&package_root(), REVIEWS).expect("the rule package checks")
 }
 
-/// What the decision for `request` is, over the shipped samples, on the VM.
+/// What the decision for `request` is, over the shipped samples, on `Lvm`.
 fn decide(request: &str) -> Result<Decision, String> {
     cove_runtime::on_cove_stack(|| {
         let package = compiled();
@@ -157,7 +157,7 @@ fn the_two_ways_in_reach_the_same_decision() {
 fn both_backends_answer_the_direct_invocation_the_same_way() {
     for pr in cove_rules::samples().values() {
         assert_eq!(
-            evaluate(pr, &[], true).expect("the VM decides"),
+            evaluate(pr, &[], true).expect("Lvm decides"),
             evaluate(pr, &[], false).expect("the interpreter decides"),
             "the two backends disagree about `{}`",
             pr.id
@@ -304,7 +304,7 @@ fn one_compiled_package_decides_every_open_request() {
     );
 }
 
-/// The interpreter and the VM reach the same decisions over the embedded
+/// The interpreter and `Lvm` reach the same decisions over the embedded
 /// entry.
 ///
 /// The differential corpus in `crates/cove-cli/tests/differential.rs` runs
@@ -672,7 +672,7 @@ fn a_budget_on_the_registry_is_spent_over_every_invocation() {
 ///
 /// The case above and this one differ in one call — `evaluate` against
 /// `evaluate_within` — and in nothing else: one compiled package, one
-/// `Runtime`, one `Vm`, one registry. Three requests that each fit the limit
+/// `Runtime`, one `Lvm`, one registry. Three requests that each fit the limit
 /// all answer, where three requests sharing it did not, and the fourth here
 /// is a request too big for its own limit, which stops and leaves the session
 /// serving the fifth.
@@ -809,7 +809,7 @@ fn a_host_call_limit_handed_to_one_invocation_bounds_that_invocation_alone() {
 
 /// The same limit per invocation on both backends.
 ///
-/// A budget is not a backend's, so the interpreter and the VM answer it the
+/// A budget is not a backend's, so the interpreter and `Lvm` answer it the
 /// same way. What they do not owe each other is the *number*: ADR 0024 makes a
 /// fuel limit non-portable, so this uses `max_host_calls`, which counts calls
 /// and not work and therefore means the same thing on both.

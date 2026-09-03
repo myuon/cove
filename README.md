@@ -17,8 +17,11 @@ design is recorded in [ADR 0001](docs/adr/0001-mvp-language-design.md).
 - [Language Card](docs/LANGUAGE_CARD.md) — a one-page map of the language
 - [Language Reference](docs/LANGUAGE_REFERENCE.md) — one rule per expression
   and pattern form, held to the implementation by a conformance suite
-- [VM architecture](docs/VM_ARCHITECTURE.md) — what the VM is today, what it
-  is being changed into, and the calling convention it holds to
+- [The linear-memory VM](docs/LINEAR_VM.md) — the backend that runs a Cove
+  program: one linear memory, one word stack, one slot numbering
+- [VM architecture](docs/VM_ARCHITECTURE.md) — the backend that one replaced,
+  kept for the measurements and the measurement discipline that came out of
+  it
 - [Architecture decisions](docs/adr/) — each one carries its status, the pull
   request that implemented it, how much of it is built, and what has since
   amended or superseded it
@@ -28,10 +31,11 @@ design is recorded in [ADR 0001](docs/adr/0001-mvp-language-design.md).
 
 ## Status
 
-An MVP compiler front end and two backends exist: a dedicated VM, which is
-what runs a program, and the tree-walking interpreter, which is the semantic
-oracle the VM is checked against and is still selectable with `--backend ast`
-([ADR 0022](docs/adr/0022-the-vm-is-the-default-backend.md)). `cove check`,
+An MVP compiler front end and two evaluators exist: the linear-memory backend
+of [ADR 0034](docs/adr/0034-one-physical-word-stack.md), which is what runs a
+program, and the tree-walking interpreter, which is the semantic oracle the
+backend is checked against and is still selectable with `--backend ast`.
+`cove check`,
 `cove outline`, and `cove run` all cover every representative program; what a
 run does depends on which host implementations it was given, and one of them
 still has no real implementation to give.
@@ -62,7 +66,7 @@ $ cove generate --check
 $ cove build hello
 built `hello` from 29 file(s) into `target/hello`
   entry:   hello.main
-  backend: vm
+  backend: lvm
   grants:  console
   limits:  (none)
 $ cp target/hello /tmp && cd /tmp && ./hello
@@ -193,8 +197,8 @@ number this project has for Cove doing a real job rather than a benchmark, and
 program's sources and a backend, so it delivers a program without compiling
 one: it checks and lowers its own sources when it starts, and only the
 packaging changed. `--backend ast` builds one that interprets instead, and a
-program the VM cannot run is refused when the binary is built rather than
-when somebody starts it. Its entry, its granted capabilities, and its limits are
+program the lowering has a gap for is reported when the binary is built rather
+than when somebody starts it. Its entry, its granted capabilities, and its limits are
 the ones `[run.<name>]` recorded when it was built, and it reads no
 `cove.toml` afterwards — a file placed beside it grants it nothing, which
 makes a built binary a stricter boundary than `cove run`. Building one needs

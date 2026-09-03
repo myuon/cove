@@ -1,5 +1,34 @@
 # The VM: what is built, and what is being tried
 
+> **The backend this describes has been deleted.**
+> [ADR 0034](adr/0034-one-physical-word-stack.md) replaced it, and at the
+> cutover commit `cove-ir`, `Vm`, `FrameVm`, the `admits` predicate and the
+> duplicate heap went with it. What runs a Cove program now is the
+> linear-memory backend, and [docs/LINEAR_VM.md](LINEAR_VM.md) is its design.
+> Read that one for how the machine works; read this one for what was
+> measured on the way here.
+>
+> It is kept, unrewritten, for two reasons.
+>
+> The first is that six accepted ADRs cite its sections **by name** — 0024 and
+> 0030 the table of bounds, 0027 and 0029 the control-build methodology, 0028
+> "The value representation, audited" and the safepoint list, 0033 the
+> safepoint list again — and an accepted ADR is immutable. Deleting a section
+> an ADR points at would break the pointer in the one direction the ADR
+> convention cannot repair.
+>
+> The second is that its measurement sections are not about the backend at
+> all. "What the measurement itself costs", "What `codegen-units = 1` was
+> measured to be worth" and the control-build discipline are how this project
+> takes a number, and `Cargo.toml`'s `bench-stable` profile, `cove-bench` and
+> `scripts/vm-time.sh` all point here for them. Those are live.
+>
+> Every performance figure below was taken on the deleted backend. None of
+> them has been reattributed and none should be read as a measurement of what
+> runs a program today; `cove-bench` measures that one, and the seven-of-nine
+> improvement it recorded at the cutover is where the comparison lives.
+> The tense of the prose below is the tense it was written in.
+
 > Written as the working document for
 > [issue #116](https://github.com/myuon/cove/issues/116) and for
 > [issue #109](https://github.com/myuon/cove/issues/109)'s representation

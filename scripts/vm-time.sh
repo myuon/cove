@@ -2,11 +2,18 @@
 #
 # The median of a benchmark's `execute=` time, over repeated runs.
 #
-# `docs/VM_ARCHITECTURE.md` measures small VM changes this way rather than
-# with `cove-bench`: fifteen runs of one benchmark through the `cove` binary
-# reproduce to under a percent in seconds, where the whole suite takes
+# `docs/VM_ARCHITECTURE.md` measures small backend changes this way rather
+# than with `cove-bench`: fifteen runs of one benchmark through the `cove`
+# binary reproduce to under a percent in seconds, where the whole suite takes
 # minutes. Every ablation table in that document was taken with this loop, so
 # it is written down here instead of being retyped each time.
+#
+# The tables it took were the predecessor backend's, and that backend was
+# deleted at ADR 0034's cutover. The loop is not: what it measures is the
+# `execute=` figure `--stats` prints, which the backend that replaced it
+# prints in the same words. It names no backend below, because there is now
+# one that a `cove` command runs a program on and naming it would be naming
+# the default.
 #
 # Usage, from anywhere in the repository:
 #
@@ -31,7 +38,7 @@ binary=${3:-$root/target/release/cove}
 cd "$root/benches"
 
 for _ in $(seq "$iterations"); do
-  "$binary" run "$bench" --backend vm --stats 2>&1 >/dev/null | grep '^backend:'
+  "$binary" run "$bench" --stats 2>&1 >/dev/null | grep '^backend:'
 done | BENCH="$bench" python3 -c '
 import os, re, statistics, sys
 

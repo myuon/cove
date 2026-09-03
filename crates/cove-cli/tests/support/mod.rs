@@ -1,16 +1,17 @@
-//! The corpus-walking machinery `differential.rs` and `admits_coverage.rs`
-//! both need: what a `[run.<name>]` case is, which package's `cove.toml`
-//! holds it, and — the part that takes the most care — parsing and
-//! type-checking exactly the modules that case's entry reaches, and nothing
-//! else.
+//! The corpus-walking machinery `differential.rs` and `lvm_coverage.rs` both
+//! need: what a `[run.<name>]` case is, which package's `cove.toml` holds it,
+//! and — the part that takes the most care — parsing and type-checking
+//! exactly the modules that case's entry reaches, and nothing else.
 //!
 //! This lives apart from either test so that there is one description of
 //! "load this corpus case and check it" rather than two that could drift.
-//! `differential.rs` runs what checks and compares two backends over it;
-//! `admits_coverage.rs` lowers what checks and asks a third backend whether
-//! it can run the result. Neither cares how the other answers its own
-//! question, so nothing about running or about `admits` lives here — only
-//! discovery, parsing and type-checking, which both need identically.
+//! `lvm_coverage.rs` walks the whole corpus and reports what lowers, runs and
+//! agrees; `differential.rs` walks the part of it that does not need a
+//! benchmark's two million turns and compares the two runs far more closely,
+//! down to the source span of a failure and the trace the run wrote. Neither
+//! cares how the other answers its own question, so nothing about running
+//! lives here — only discovery, parsing and type-checking, which both need
+//! identically.
 //!
 //! # A case is a program, not a package
 //!
@@ -50,10 +51,9 @@ pub struct Case {
     /// that never executes the program — checking and lowering take no
     /// arguments — and kept here anyway so that a caller that does run it
     /// reads the same case a second loader would not be able to promise it.
-    /// `admits_coverage.rs` is exactly such a caller, and its own build of
-    /// this module is where `#[allow(dead_code)]` earns its keep: nothing
-    /// there ever reads a field that `differential.rs`'s build of the same
-    /// module does.
+    /// The `#[allow(dead_code)]` is there because each test compiles its own
+    /// build of this module and neither reads every field of it: a field one
+    /// build never touches is not dead code, it is the other build's.
     #[allow(dead_code)]
     pub args: Vec<String>,
 }
@@ -304,10 +304,8 @@ pub enum Unprepared {
 
 /// One case's program: the modules it is made of, checked.
 pub struct Prepared {
-    /// Read by a caller that runs the checked program and needs a source
-    /// span to mean something — `differential.rs`'s — and not by
-    /// `admits_coverage.rs`'s build of this module, which only checks and
-    /// lowers.
+    /// Read by a caller that lowers the checked program, since the lowering
+    /// reports its gaps as diagnostics and a diagnostic points into source.
     #[allow(dead_code)]
     pub sources: Arc<SourceMap>,
     pub checked: Arc<Checked>,

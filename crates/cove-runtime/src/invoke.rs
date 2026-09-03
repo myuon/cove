@@ -1,7 +1,7 @@
 //! Holding a host's arguments to the declaration it is calling.
 //!
 //! [`Interpreter::invoke`](crate::interp::Interpreter::invoke) and
-//! [`Vm::invoke`](crate::vm::Vm::invoke) let a host call an exported function
+//! [`Lvm::invoke`](crate::Lvm::invoke) let a host call an exported function
 //! with values it built, which
 //! [`run_entry`](crate::interp::Interpreter::run_entry) cannot: that one takes
 //! the process arguments an entry may declare, so what a host could say to a
@@ -21,14 +21,15 @@
 //!
 //! # Why the check is not optional
 //!
-//! It would be tempting to let the backend discover a wrong argument. It
-//! cannot. `cove_ir::lower` spends the checker's answer when it chooses each
-//! parameter's slot kind, so a lowered function's parameters are `Value`,
-//! `Scalar` or `Place` and nothing finer; a `Value::Str` handed to a slot the
-//! lowering made scalar reaches `vm::promised_scalar`, which has no way to
-//! report anything and panics. An unchecked `invoke` would therefore be a
-//! public API that aborts the process on a caller's mistake. The check here is
-//! what makes it a `Result` instead.
+//! It would be tempting to let the backend discover a wrong argument on its
+//! own. It can, now: `cove_lir::lower` spends the checker's answer when it
+//! chooses each parameter's `Repr`, and the boundary that turns a `Value`
+//! into words for the call already refuses one of the wrong shape before the
+//! first instruction runs. But it refuses from inside its own reading of one
+//! word at a time, so what an unchecked caller would see is the function's
+//! declaration span and a message naming the word kind that was wanted —
+//! nothing about which parameter, and nothing in the checker's own words. The
+//! check here is what a caller sees instead.
 //!
 //! # What is checked, and what is not
 //!
@@ -113,7 +114,7 @@ pub(crate) fn check(
     // The declaration's parameter *types* are the checker's answer rather than
     // the source's, so they come from the facts table and not from
     // `decl.params[i].ty`: `-> module.Thing` written in one module and read in
-    // another is a name only the checker resolved. `cove_ir::lower` reads the
+    // another is a name only the checker resolved. `cove_lir::lower` reads the
     // same table through the same key.
     let Some(signature) = program.facts.signature(decl.span.file, decl.span) else {
         return Err(RuntimeError::new(format!(
@@ -141,11 +142,11 @@ pub(crate) fn check(
 /// brought.
 ///
 /// Each is refused here, from the declaration, rather than by a backend,
-/// because the two backends would otherwise answer differently: the VM places
-/// one value per lowered slot and the interpreter binds parameters by name,
-/// so a defaulted or variadic call means something to one of them and nothing
-/// to the other. ADR 0019 asks that anything both backends answer be answered
-/// once.
+/// because the two backends would otherwise answer differently: the
+/// linear-memory backend places one value per lowered slot and the
+/// interpreter binds parameters by name, so a defaulted or variadic call
+/// means something to one of them and nothing to the other. ADR 0019 asks
+/// that anything both backends answer be answered once.
 fn callable_shape(decl: &FnDecl, shown: &str) -> Result<(), RuntimeError> {
     if let Some(generic) = decl.generics.first() {
         return Err(RuntimeError::new(format!(
@@ -361,16 +362,16 @@ fn mismatched(declared: &Ty, value: &Value, module: &str) -> Wrong {
 /// read *by name* wherever a program reads one, so a value that is missing
 /// one is told so.
 ///
-/// A type this package declares is not read that way. `cove_ir::lower` spends
-/// the checker's answer and emits `get-field-at 2`, an index into the fields
-/// as the declaration orders them, because every value of a declared type is
-/// built by the lowering and stands in that order. A host's is not: a struct
-/// carrying nine of ten fields would have `get-field-at 9` read past its end,
-/// and one carrying ten in another order would answer the wrong field with no
-/// sign of it. So this follows a declared struct all the way down — the
-/// fields it carries, their order, and each one's declared type — and what it
-/// costs is a walk of the value, once, at a call a host makes once per
-/// request.
+/// A type this package declares is not read that way. `cove_lir::lower` spends
+/// the checker's answer and emits a `LoadField` at the payload word offset
+/// the declaration's field order lays out, because every value of a declared
+/// type is built by the lowering and stands in that order. A host's is not: a
+/// struct carrying nine of ten fields would have that offset read past its
+/// end, and one carrying ten in another order would answer the wrong field
+/// with no sign of it. So this follows a declared struct all the way down —
+/// the fields it carries, their order, and each one's declared type — and
+/// what it costs is a walk of the value, once, at a call a host makes once
+/// per request.
 ///
 /// A declared *enum* is checked the same way for the same reason, except that
 /// its case is checked by name, which is how both backends read one.

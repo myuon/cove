@@ -1,8 +1,8 @@
 //! What compiling once and invoking many times costs, counted.
 //!
 //! Issue #109's gate asks for a compile-once/invoke-many embedding measured on
-//! the VM, and for Host conversion measured beside it. This is that
-//! measurement. It is a binary rather than a `#[test]` for one reason: it
+//! the compiled backend, and for Host conversion measured beside it. This is
+//! that measurement. It is a binary rather than a `#[test]` for one reason: it
 //! installs a counting [`std::alloc::GlobalAlloc`], and a count taken while
 //! `cargo test` runs other cases on other threads would be a count of the
 //! test harness. Nothing here runs under `cargo test`, and the counts the
@@ -277,7 +277,7 @@ fn study(turns: u64) {
     let subject: PullRequest = cove_rules::samples()
         .remove("req-2")
         .expect("the sample exists");
-    header("paid per invocation, one VM serving all of them");
+    header("paid per invocation, one Lvm serving all of them");
     for (what, module, entry, way, grants, trace) in [
         (
             "floor: an entry that does nothing",
@@ -399,7 +399,7 @@ fn study(turns: u64) {
         }
     });
     Row {
-        what: "decide, a new Runtime and Vm each",
+        what: "decide, a new Runtime and Lvm each",
         turns,
         cost: rebuilt,
         instructions: None,

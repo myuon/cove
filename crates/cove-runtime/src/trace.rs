@@ -22,7 +22,7 @@
 //! that changes silently breaks whatever reads it:
 //!
 //! ```text
-//! {"event":"trace_header","version":<u32>,"backend":"ast"|"vm","values":"full"|"redacted","entry":<string>,"args":[<string>...]}
+//! {"event":"trace_header","version":<u32>,"backend":"ast"|"lvm","values":"full"|"redacted","entry":<string>,"args":[<string>...]}
 //! {"event":"task_spawned","id":<u64>,"parent":<u64|null>,"scope":<string>}
 //! {"event":"task_completed","id":<u64>,"cpu_ns":<u64>}
 //! {"event":"task_cancelled","id":<u64>}
@@ -30,7 +30,7 @@
 //! {"event":"entry_enter","module":<string>,"function":<string>}
 //! {"event":"entry_exit","module":<string>,"function":<string>,"cpu_ns":<u64>,"wait_ns":<u64>}
 //! {"event":"heap_collected","task":<u64>,"allocated":<u64>,"freed":<u64>,"live_objects":<u64>,"live_bytes":<u64>,"pause_ns":<u64>}
-//! {"event":"heap_summary","allocated":<u64>,"allocated_bytes":<u64>,"collections":<u64>,"live_bytes":<u64>,"peak_bytes":<u64>,"pause_ns":<u64>}
+//! {"event":"heap_summary","collections":<u64>,"object_count":<u64>|null,"allocated_bytes":<u64>|null,"live_bytes":<u64>|null,"peak_bytes":<u64>|null,"pause_ns":<u64>|null,"allocated_words":<u64>|null,"capacity_words":<u64>|null,"live_words":<u64>|null}
 //! {"event":"run_ended","outcome":<outcome-name>,"message":<string>|null}
 //! ```
 //!
@@ -103,13 +103,23 @@ use crate::value::{Repr, Value};
 /// line rather than an old file — so the version says what changed and a
 /// version 1 trace is refused for its version.
 ///
-/// Version 3 added [`TraceHeader::backend`], so a file says which of ADR
-/// 0019's two backends wrote it and `cove replay` reads that rather than
-/// guessing it. ADR 0026 is the decision. A version 2 trace is refused for
-/// its version, exactly as a version 1 one is: this reader has always read
-/// one version, and a version 2 file is precisely a file that cannot answer
-/// the question a version 3 replay asks first.
-pub const TRACE_FORMAT_VERSION: u32 = 3;
+/// Version 3 added [`TraceHeader::backend`], so a file says which of the two
+/// backends wrote it and `cove replay` reads that rather than guessing it.
+/// ADR 0026 is the decision. A version 2 trace is refused for its version,
+/// exactly as a version 1 one is: this reader has always read one version,
+/// and a version 2 file is precisely a file that cannot answer the question a
+/// version 3 replay asks first.
+///
+/// Version 4 reshaped `heap_summary`. It had six fields and all six described
+/// a heap that is a set of objects, because the only machine that wrote one
+/// had such a heap. The linear-memory backend's heap is a run of words, and
+/// [issue #240](https://github.com/myuon/cove/issues/240) decided not to make
+/// the event choose: *"Do not force `heap_summary` to choose between objects
+/// and words. They answer different questions."* So the event now carries
+/// both families, every figure is `null` from a machine that does not count
+/// it, and no reader is handed a zero that reads as a measurement. A version
+/// 3 trace is refused for its version like the two before it.
+pub const TRACE_FORMAT_VERSION: u32 = 4;
 
 /// Which backend produced a recording.
 ///
@@ -127,16 +137,15 @@ pub const TRACE_FORMAT_VERSION: u32 = 3;
 pub enum RecordingBackend {
     /// The tree-walking interpreter, which ADR 0012 keeps as the oracle.
     Ast,
-    /// The dedicated VM of ADR 0019, which ADR 0022 made the default.
-    Vm,
-    /// The linear-memory backend of ADR 0034, while it is being built.
+    /// The linear-memory backend of ADR 0034, which is what runs a program.
     ///
-    /// Transitional, and named as such: `docs/LINEAR_VM.md` says this
-    /// spelling is deleted at the cutover, when the replacement takes the
-    /// name `vm`. A file written in the window between then and now names a
-    /// backend that will not exist, which is a window measured in commits and
-    /// a trade issue #240 took deliberately — the alternative was renaming
-    /// the *predecessor* and invalidating every trace anyone already has.
+    /// The spelling is transitional and `docs/LINEAR_VM.md` says so: the
+    /// backend takes the name `vm` once there is nothing left to distinguish
+    /// it from. A file written before that names a backend spelled one way
+    /// and read by a toolchain that spells it another, which is a window
+    /// measured in commits and a trade issue #240 took deliberately — the
+    /// alternative was doing the rename first, while a `vm` that meant
+    /// something else was still in the tree.
     Lvm,
 }
 
@@ -146,7 +155,6 @@ impl RecordingBackend {
     pub fn as_str(self) -> &'static str {
         match self {
             RecordingBackend::Ast => "ast",
-            RecordingBackend::Vm => "vm",
             RecordingBackend::Lvm => "lvm",
         }
     }
@@ -155,7 +163,6 @@ impl RecordingBackend {
     pub fn parse(text: &str) -> Option<RecordingBackend> {
         match text {
             "ast" => Some(RecordingBackend::Ast),
-            "vm" => Some(RecordingBackend::Vm),
             "lvm" => Some(RecordingBackend::Lvm),
             _ => None,
         }
@@ -439,23 +446,51 @@ pub enum TraceEvent {
         pause: Duration,
     },
     /// What every heap in the run did, recorded once as the run ends.
+    ///
+    /// Every figure but `collections` is optional, and that is
+    /// [issue #240](https://github.com/myuon/cove/issues/240)'s decision
+    /// rather than laxity. The two evaluators do not have the same kind of
+    /// heap: the interpreter's is a set of `Rc`-ed objects and it counts
+    /// objects and the bytes they asked for, while the linear-memory
+    /// backend's is a run of eight-byte words and it counts words. Neither
+    /// figure can be derived from the other — an inline struct is words in
+    /// one and no object at all in the other — so the event carries both
+    /// families and a machine leaves `None` in the ones it does not count.
+    /// A zero there would read as a measurement of nothing rather than as the
+    /// absence of a measurement, which is the same distinction `cove run
+    /// --stats` draws.
     HeapSummary {
-        /// Collectable objects allocated over the whole run, by every task.
-        allocated: u64,
-        /// Bytes those allocations asked for.
-        allocated_bytes: u64,
-        /// How many collections ran, over every task.
+        /// How many collections ran, over every heap of the run.
+        ///
+        /// The one figure both machines count, and the one that is not
+        /// optional: a collection is a collection whatever the heap holds.
         collections: u64,
+        /// Collectable objects allocated over the whole run, by every task.
+        object_count: Option<u64>,
+        /// Bytes those allocations asked for.
+        allocated_bytes: Option<u64>,
         /// Bytes live when the run ended. Every heap is swept once more as it
         /// is retired, so this is what the entry was still holding after its
         /// own last sweep — usually nothing.
-        live_bytes: u64,
+        live_bytes: Option<u64>,
         /// The largest live set any one collection measured.
-        peak_bytes: u64,
+        peak_bytes: Option<u64>,
         /// Total time tasks were stopped for collection, summed over threads,
         /// so a run with four tasks collecting at once can report more pause
         /// than it took wall-clock time.
-        pause: Duration,
+        pause: Option<Duration>,
+        /// Words handed out over the whole run, reuse counted each time.
+        ///
+        /// Cumulative rather than present: it is what the run asked the
+        /// allocator for, so a loop that allocates and drops shows the work
+        /// it did rather than the nothing it kept.
+        allocated_words: Option<u64>,
+        /// Words the heap region occupies, free blocks included.
+        capacity_words: Option<u64>,
+        /// Words held by objects that survived the run's last collection, and
+        /// `None` when no collection ran, because there is then nothing that
+        /// measured it.
+        live_words: Option<u64>,
     },
     /// A host-selected entry function began running.
     EntryEnter { module: String, function: String },
@@ -616,6 +651,17 @@ fn json_string(s: &str) -> String {
 /// expects.
 fn json_ns(d: Duration) -> u128 {
     d.as_nanos()
+}
+
+/// A figure a machine may not have counted, as JSON.
+///
+/// `null` rather than `0`, for the reason [`TraceEvent::HeapSummary`] gives:
+/// a zero is a measurement and the absence of one is not.
+fn json_measure(measured: Option<impl std::fmt::Display>) -> String {
+    match measured {
+        Some(value) => value.to_string(),
+        None => "null".to_string(),
+    }
 }
 
 /// Renders one [`Value`] in the trace's value encoding, honouring `capture`.
@@ -799,15 +845,25 @@ fn to_json_line(event: &TraceEvent, capture: ValueCapture) -> String {
             )
         }
         TraceEvent::HeapSummary {
-            allocated,
-            allocated_bytes,
             collections,
+            object_count,
+            allocated_bytes,
             live_bytes,
             peak_bytes,
             pause,
+            allocated_words,
+            capacity_words,
+            live_words,
         } => format!(
-            "{{\"event\":\"heap_summary\",\"allocated\":{allocated},\"allocated_bytes\":{allocated_bytes},\"collections\":{collections},\"live_bytes\":{live_bytes},\"peak_bytes\":{peak_bytes},\"pause_ns\":{}}}",
-            json_ns(*pause)
+            "{{\"event\":\"heap_summary\",\"collections\":{collections},\"object_count\":{},\"allocated_bytes\":{},\"live_bytes\":{},\"peak_bytes\":{},\"pause_ns\":{},\"allocated_words\":{},\"capacity_words\":{},\"live_words\":{}}}",
+            json_measure(*object_count),
+            json_measure(*allocated_bytes),
+            json_measure(*live_bytes),
+            json_measure(*peak_bytes),
+            json_measure(pause.map(json_ns)),
+            json_measure(*allocated_words),
+            json_measure(*capacity_words),
+            json_measure(*live_words),
         ),
         TraceEvent::EntryEnter { module, function } => format!(
             "{{\"event\":\"entry_enter\",\"module\":{},\"function\":{}}}",
@@ -916,7 +972,7 @@ mod tests {
 
     fn header(values: ValueCapture) -> TraceHeader {
         TraceHeader {
-            backend: RecordingBackend::Vm,
+            backend: RecordingBackend::Lvm,
             values,
             entry: "hello.main".to_string(),
             args: Vec::new(),
@@ -967,7 +1023,7 @@ mod tests {
         let sink = JsonlSink::new(
             Buffer(Vec::new()),
             TraceHeader {
-                backend: RecordingBackend::Vm,
+                backend: RecordingBackend::Lvm,
                 values: ValueCapture::Full,
                 entry: "restricted.main".to_string(),
                 args: vec!["one".to_string(), "two".to_string()],
@@ -975,7 +1031,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(sink.writer.into_inner().unwrap().0).unwrap(),
-            "{\"event\":\"trace_header\",\"version\":3,\"backend\":\"vm\",\"values\":\"full\",\"entry\":\"restricted.main\",\"args\":[\"one\",\"two\"]}\n"
+            "{\"event\":\"trace_header\",\"version\":4,\"backend\":\"lvm\",\"values\":\"full\",\"entry\":\"restricted.main\",\"args\":[\"one\",\"two\"]}\n"
         );
     }
 
@@ -998,7 +1054,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(sink.writer.into_inner().unwrap().0).unwrap(),
-            "{\"event\":\"trace_header\",\"version\":3,\"backend\":\"ast\",\"values\":\"full\",\"entry\":\"restricted.main\",\"args\":[]}\n"
+            "{\"event\":\"trace_header\",\"version\":4,\"backend\":\"ast\",\"values\":\"full\",\"entry\":\"restricted.main\",\"args\":[]}\n"
         );
     }
 
@@ -1006,11 +1062,7 @@ mod tests {
     /// parses back to what wrote it.
     #[test]
     fn a_recording_backend_round_trips_through_its_name() {
-        for backend in [
-            RecordingBackend::Ast,
-            RecordingBackend::Vm,
-            RecordingBackend::Lvm,
-        ] {
+        for backend in [RecordingBackend::Ast, RecordingBackend::Lvm] {
             assert_eq!(RecordingBackend::parse(backend.as_str()), Some(backend));
         }
         assert_eq!(RecordingBackend::parse("jit"), None);
@@ -1310,18 +1362,43 @@ mod tests {
         );
     }
 
+    /// The object half of the event, from a machine that counts objects.
     #[test]
-    fn heap_summary() {
+    fn heap_summary_of_a_heap_of_objects() {
         assert_eq!(
             record_one(TraceEvent::HeapSummary {
-                allocated: 128,
-                allocated_bytes: 4096,
                 collections: 2,
-                live_bytes: 96,
-                peak_bytes: 1024,
-                pause: Duration::from_micros(31),
+                object_count: Some(128),
+                allocated_bytes: Some(4096),
+                live_bytes: Some(96),
+                peak_bytes: Some(1024),
+                pause: Some(Duration::from_micros(31)),
+                allocated_words: None,
+                capacity_words: None,
+                live_words: None,
             }),
-            r#"{"event":"heap_summary","allocated":128,"allocated_bytes":4096,"collections":2,"live_bytes":96,"peak_bytes":1024,"pause_ns":31000}"#
+            r#"{"event":"heap_summary","collections":2,"object_count":128,"allocated_bytes":4096,"live_bytes":96,"peak_bytes":1024,"pause_ns":31000,"allocated_words":null,"capacity_words":null,"live_words":null}"#
+        );
+    }
+
+    /// The word half, from a machine that counts words — and the shape issue
+    /// #240 asked for, which is that neither half is forced into the other's
+    /// units and an uncounted figure is `null` rather than nought.
+    #[test]
+    fn heap_summary_of_a_heap_of_words() {
+        assert_eq!(
+            record_one(TraceEvent::HeapSummary {
+                collections: 1,
+                object_count: None,
+                allocated_bytes: None,
+                live_bytes: None,
+                peak_bytes: None,
+                pause: None,
+                allocated_words: Some(512),
+                capacity_words: Some(4096),
+                live_words: Some(96),
+            }),
+            r#"{"event":"heap_summary","collections":1,"object_count":null,"allocated_bytes":null,"live_bytes":null,"peak_bytes":null,"pause_ns":null,"allocated_words":512,"capacity_words":4096,"live_words":96}"#
         );
     }
 

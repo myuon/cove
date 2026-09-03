@@ -1,21 +1,21 @@
 //! The execution backend [ADR 0034](../../../../docs/adr/0034-one-physical-word-stack.md)
-//! decides, being built alongside the one it replaces.
+//! decided on, and since the cutover, the only one: this is the production
+//! path an embedder runs a Cove program on.
 //!
-//! [`docs/LINEAR_VM.md`](../../../../docs/LINEAR_VM.md) is the design. It is a
-//! clean-room replacement rather than a renovation: nothing here is derived
-//! from [`crate::vm`], [`crate::frame`] or `cove_ir`, and this module imports
-//! from none of them. Those are frozen — fixed only where a fix keeps the
-//! oracle and the differential gate usable — and deleted at the cutover, when
-//! `cove-lir` and `lvm` take the names `cove-ir` and `vm`.
+//! [`docs/LINEAR_VM.md`](../../../../docs/LINEAR_VM.md) is the design. It was
+//! written as a clean-room replacement rather than a renovation: nothing here
+//! was derived from the backend it replaced, and at the cutover that backend
+//! was deleted. `lvm` and `cove-lir` are still transitional names and take
+//! the names `vm` and `cove-ir` once there is nothing left to distinguish
+//! them from.
 //!
-//! The memory, the dispatch loop, the boundary and [`Lvm`] — the type an
-//! embedder holds — all exist, and since `cove run --backend lvm` the last
-//! of those is reached from outside the crate: [`Lvm`] is re-exported from
-//! the crate root and nothing else here is, because what a caller can name
-//! is the whole of what this boundary decides. A word, a layout, a
-//! [`mem::Memory`] and a [`exec::Machine`] are the representation, and a
-//! representation that leaves the crate is one that cannot be changed
-//! without changing somebody else's code.
+//! Two things leave this module: [`Lvm`], the type an embedder holds, and
+//! [`exec::SAFEPOINT_STRIDE`], a number a test asserts a bound against.
+//! Nothing else does, because what a caller can name is the whole of what
+//! this boundary decides. A word, a layout, a [`mem::Memory`] and a
+//! [`exec::Machine`] are the representation, and a representation that leaves
+//! the crate is one that cannot be changed without changing somebody else's
+//! code.
 //!
 //! # What a run owns, and what each of its tasks owns
 //!
@@ -89,7 +89,7 @@ use crate::host::HostRegistry;
 use crate::lvm::exec::Machine;
 use crate::lvm::mem::Collected;
 use crate::runtime::Runtime;
-use crate::trace::{RunOutcome, TraceEvent};
+use crate::trace::{RunOutcome, Timing, TraceEvent};
 // The public `Value` reaches this file for the one reason ADR 0034 allows it
 // to reach any of them: this is a boundary. An entry's arguments and its
 // answer are what a host hands in and reads back, and they are `Value`s on
@@ -135,6 +135,7 @@ const DEFAULT_HEAP_WORDS: usize = 1 << 22;
 /// the first instruction runs. Everything below the two is one path.
 pub struct Lvm<'a> {
     runtime: &'a Runtime,
+    hosts: &'a HostRegistry,
     program: &'a Program,
     machine: Machine<'a>,
     /// The run's accounting, in the handle a safepoint charges through.
@@ -155,11 +156,10 @@ impl<'a> Lvm<'a> {
     pub fn new(runtime: &'a Runtime, hosts: &'a HostRegistry, program: &'a Program) -> Lvm<'a> {
         Lvm {
             runtime,
+            hosts,
             program,
             machine: Machine::for_run(program, DEFAULT_HEAP_WORDS, Some(hosts), Some(runtime)),
-            budget: hosts
-                .budget_meter()
-                .unwrap_or_else(|| Budget::new(Limits::default()).meter()),
+            budget: meter_of(hosts),
         }
     }
 
@@ -186,6 +186,14 @@ impl<'a> Lvm<'a> {
     /// anything runs. That check is the crate's own `invoke`, shared with the
     /// oracle so that a host that gets it wrong reads one answer and not one
     /// per backend.
+    ///
+    /// One refusal belongs to this backend rather than to the language, and
+    /// it is about the *lowering* rather than about the program.
+    /// [`cove_lir::lower_entry`] lowers what one entry can reach and nothing
+    /// else, so a run built for one entry cannot invoke a function no path
+    /// from that entry leads to. Saying the package does not declare it would
+    /// be false and would send an embedder to the wrong file, so this says
+    /// which of the two is missing and what to lower instead.
     pub fn invoke(
         &mut self,
         module: &str,
@@ -194,6 +202,67 @@ impl<'a> Lvm<'a> {
     ) -> Result<Value, RuntimeError> {
         let outcome = self.invoke_checked(module, name, args);
         self.ended(outcome)
+    }
+
+    /// [`Lvm::run_entry`], bounded by `budget` and by nothing else.
+    ///
+    /// The command-shaped way in, bounded the way [`Lvm::invoke_within`]
+    /// bounds the application-shaped one. Issue #152 is why both exist: an
+    /// application that runs somebody else's Cove wants the *request*
+    /// bounded, not the session, and a session is built once and invoked
+    /// many times.
+    pub fn run_entry_within(
+        &mut self,
+        budget: Budget,
+        module: &str,
+        name: &str,
+        args: Vec<Rc<str>>,
+    ) -> Result<Value, RuntimeError> {
+        self.hosts.begin_run(budget);
+        self.bind_budget();
+        let outcome = self.enter(module, name, args);
+        self.ended(outcome)
+    }
+
+    /// [`Lvm::invoke`], bounded by `budget` and by nothing else.
+    ///
+    /// The check runs before the budget is installed, so a call refused for a
+    /// wrong argument spends none of the budget it was handed and leaves
+    /// whatever bounded this backend where it was.
+    pub fn invoke_within(
+        &mut self,
+        budget: Budget,
+        module: &str,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        let outcome = self.checked_within(budget, module, name, args);
+        self.ended(outcome)
+    }
+
+    /// The check, the budget, and then the call.
+    fn checked_within(
+        &mut self,
+        budget: Budget,
+        module: &str,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        crate::invoke::check(self.runtime.program(), module, name, &args)?;
+        self.hosts.begin_run(budget);
+        self.bind_budget();
+        let id = self.lowered(module, name)?;
+        self.enter_with(module, name, id, args)
+    }
+
+    /// Re-reads the meter after the registry was given a new budget.
+    ///
+    /// The handle is taken once where a run begins, so installing a budget
+    /// for one invocation has to be followed by taking the handle again;
+    /// otherwise the safepoints would go on charging the budget the session
+    /// was built over.
+    fn bind_budget(&mut self) {
+        self.budget = meter_of(self.hosts);
     }
 
     /// How many instructions this run has executed.
@@ -271,7 +340,7 @@ impl<'a> Lvm<'a> {
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
         crate::invoke::check(self.runtime.program(), module, name, &args)?;
-        let id = self.lookup(module, name)?;
+        let id = self.lowered(module, name)?;
         self.enter_with(module, name, id, args)
     }
 
@@ -296,10 +365,67 @@ impl<'a> Lvm<'a> {
             module: module.to_string(),
             function: name.to_string(),
         });
+        // Started here and not in `run_entry`, because what this measures is
+        // the entry: the argument conversion is the entry's own boundary
+        // crossing and the run is what follows it.
+        let timing = Timing::start();
+        let waited = self.machine.host_wait();
 
-        let words = self.words_of(function, &args).map_err(|e| e.at(span))?;
-        let answer = self.machine.run(id, &words, &self.budget)?;
-        boundary::to_value(&self.machine, returns, &answer).map_err(|e| e.at(span))
+        let outcome = self
+            .words_of(function, &args)
+            .map_err(|e| e.at(span))
+            .and_then(|words| self.machine.run(id, &words, &self.budget))
+            .and_then(|answer| {
+                boundary::to_value(&self.machine, returns, &answer).map_err(|e| e.at(span))
+            });
+
+        // Both events on every path, the way the oracle writes them: an entry
+        // that failed still entered and still left, and a run that failed
+        // still allocated. A trace that recorded the exit only for a run that
+        // answered would be a trace whose shape depended on the answer.
+        self.runtime.trace(TraceEvent::EntryExit {
+            module: module.to_string(),
+            function: name.to_string(),
+            cpu: timing
+                .elapsed()
+                .saturating_sub(self.machine.host_wait().saturating_sub(waited)),
+            wait: self.machine.host_wait().saturating_sub(waited),
+        });
+        self.summarize_heap();
+        outcome
+    }
+
+    /// What this run's memory did, recorded once as the run ends.
+    ///
+    /// The word half of the event and none of the object half. Issue #240
+    /// decided that `heap_summary` does not choose between the two — an
+    /// inline struct is words here and no object at all on the oracle, so
+    /// neither family's figures can be derived from the other's — and the
+    /// rule that follows is that a machine leaves `None` in what it does not
+    /// count rather than a zero that reads as a measurement.
+    ///
+    /// `live_words` is one of those. It is what the last collection found
+    /// alive, so a run that never collected has nothing that measured it, and
+    /// the figure is absent rather than nought. `capacity_words` is not: the
+    /// heap region occupies what it occupies whether anything has been swept
+    /// or not.
+    ///
+    /// There is no pause here, and that is the same rule again. This
+    /// collector does not time itself yet, and a zero would say it stopped
+    /// the world for no time at all.
+    fn summarize_heap(&self) {
+        let collected = self.machine.collected();
+        self.runtime.trace(TraceEvent::HeapSummary {
+            collections: collected.collections,
+            object_count: None,
+            allocated_bytes: None,
+            live_bytes: None,
+            peak_bytes: None,
+            pause: None,
+            allocated_words: Some(self.machine.allocated_words()),
+            capacity_words: Some(self.machine.heap_words()),
+            live_words: (collected.collections > 0).then_some(collected.live_words),
+        });
     }
 
     /// The arguments in word form.
@@ -357,6 +483,26 @@ impl<'a> Lvm<'a> {
         })
     }
 
+    /// The same lookup, for a caller that has already established the package
+    /// declares the function.
+    ///
+    /// [`crate::invoke::check`] has passed by the time this runs, so the
+    /// package *does* declare it and the reader should not be told it does
+    /// not. What is missing is the lowering, and the remedy is the caller's.
+    fn lowered(&self, module: &str, name: &str) -> Result<FunctionId, RuntimeError> {
+        self.program.function_named(module, name).ok_or_else(|| {
+            RuntimeError::new(format!(
+                "this run's lowering does not include `{module}.{name}`"
+            ))
+            .with_rule(
+                "A run executes the functions one entry can reach, because that is what `lower_entry` lowers.",
+            )
+            .with_help(format!(
+                "lower it too, by naming `{module}.{name}` as a root, and build the run on that program"
+            ))
+        })
+    }
+
     /// Writes the run's terminal event, whichever way in produced it.
     ///
     /// Every path into a program passes through here, which is what makes
@@ -380,4 +526,14 @@ impl<'a> Lvm<'a> {
         });
         outcome
     }
+}
+
+/// The meter a run charges through, over `hosts`'s budget or over none.
+///
+/// A registry with no budget installed answers `None`, which has always meant
+/// no limit; a meter over default [`Limits`] is that, written down.
+fn meter_of(hosts: &HostRegistry) -> Meter {
+    hosts
+        .budget_meter()
+        .unwrap_or_else(|| Budget::new(Limits::default()).meter())
 }

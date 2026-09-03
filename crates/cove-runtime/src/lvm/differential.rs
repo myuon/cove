@@ -14,9 +14,12 @@
 //! round is a lowering bug; both failing is a shared misreading of the
 //! checker.
 //!
-//! The corpus is small because the lowering's scope is. It grows with the
-//! lowering, and the whole `tests/e2e` corpus joins it once there is a
-//! boundary and a Host call to run it through.
+//! The corpus here is written by hand rather than drawn from `tests/e2e`:
+//! whether the lowering covers the repository's own programs is
+//! `cove-cli/tests/lvm_coverage.rs`'s question, and it answers that the
+//! corpus lowers, runs, and agrees with the oracle. What is added here is
+//! smaller and more deliberate — a case chosen to pin one construct's
+//! agreement rather than to widen coverage.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

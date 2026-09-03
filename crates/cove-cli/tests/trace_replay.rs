@@ -60,12 +60,18 @@ fn e2e() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/e2e")
 }
 
-/// The one-program package holding the construct the lowering refuses.
+/// The package holding the one program a backend's lowering can never
+/// accept, at any depth.
 ///
-/// It is its own package rather than a run in `tests/e2e/` because the case
-/// it pins is a command that fails, and the e2e harness runs it as such.
-fn backend_unsupported() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/e2e/backend_unsupported")
+/// `crates/cove-cli/tests/build.rs`'s
+/// `a_program_that_cannot_be_lowered_is_refused_before_a_binary_is_written`
+/// pins the same fixture's diagnostic for `cove build`; this is the same
+/// program read across to `cove replay`. It lives under `tests/fixtures/`
+/// rather than in `tests/e2e/` for the reason that test's comment gives: it
+/// is a program that never finishes, and the e2e harness runs every case it
+/// holds to completion.
+fn instantiation_depth() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/instantiation_depth")
 }
 
 /// Runs `cove` with the working directory set to `examples/`.
@@ -156,34 +162,34 @@ fn record_on_the_interpreter(path: &Path) -> String {
 /// This is the cross-backend half of what issue #111 asks for under
 /// "replay/state result", and until ADR 0023 only one of its two directions
 /// existed: `cove replay` built a `cove_runtime::interp::Interpreter` and
-/// took no `--backend`, so a trace could be recorded on the VM and replayed
-/// on the interpreter and not the other way about. Both directions are here
-/// now, along with the two that stay on one backend, because a replay's
-/// value depends on which backend read the tape and there are four answers
-/// rather than two.
+/// took no `--backend`, so a trace could be recorded on the lowered backend
+/// and replayed on the interpreter and not the other way about. Both
+/// directions are here now, along with the two that stay on one evaluator,
+/// because a replay's value depends on which of them read the tape and there
+/// are four answers rather than two.
 ///
 /// Replaying on the oracle is the direction with something to prove: a
-/// recording the oracle cannot follow is the VM having asked for something
-/// the language does not say it should, and the replay reports it as a
-/// divergence with both calls shown. The direction ADR 0023 added catches the
-/// converse — a VM that asks for a call the interpreter's recording does not
-/// hold. What has stood in for it is `tests/differential.rs`, which compares
-/// every host call's module, operation, arguments and outcome, in order, over
-/// every case that lowers; that is the same tape a replay reads, checked over
-/// ninety-three programs rather than one. What it does not stand in for is a
-/// run driven by a file instead of by a host, which is the only thing a
-/// replay does that a second run does not — and that is exactly what the two
-/// cross-backend cells below do.
+/// recording the oracle cannot follow is the backend having asked for
+/// something the language does not say it should, and the replay reports it
+/// as a divergence with both calls shown. The direction ADR 0023 added
+/// catches the converse — a backend that asks for a call the interpreter's
+/// recording does not hold. What has stood in for it is
+/// `tests/differential.rs`, which compares every host call's module,
+/// operation, arguments and outcome, in order, over the corpus; that is the
+/// same tape a replay reads, checked over a hundred programs rather than one.
+/// What it does not stand in for is a run driven by a file instead of by a
+/// host, which is the only thing a replay does that a second run does not —
+/// and that is exactly what the two cross-backend cells below do.
 ///
 /// All four succeed today. `restricted` reads a document and prints a report,
-/// and the two backends ask for those two host calls in the same order with
+/// and the two evaluators ask for those two host calls in the same order with
 /// the same arguments whichever of them is driven by a file.
 #[test]
 fn a_recording_replays_on_either_backend_from_either_backend() {
     let dir = TempDir::new("cross-backend");
-    let on_the_vm = dir.join("vm.jsonl");
+    let on_the_backend = dir.join("lvm.jsonl");
     let on_the_interpreter = dir.join("ast.jsonl");
-    let recorded = record(&on_the_vm);
+    let recorded = record(&on_the_backend);
     let oracle = record_on_the_interpreter(&on_the_interpreter);
 
     // The two recordings are one recording once the wall-clock figures are
@@ -197,10 +203,10 @@ fn a_recording_replays_on_either_backend_from_either_backend() {
 
     for (recorded_on, trace, replayed_on, ran_on) in [
         // The ordinary case: `cove run --trace` then `cove replay`, neither
-        // of them naming a backend. Since ADR 0022 the recording is the VM's;
-        // since ADR 0026 the replay is the VM's *because the file says so*
-        // rather than because both defaults happen to be the VM.
-        ("vm", &on_the_vm, None, "vm"),
+        // of them naming a backend. The recording is the default backend's;
+        // since ADR 0026 the replay is that one's *because the file says so*
+        // rather than because both defaults happen to agree.
+        ("lvm", &on_the_backend, None, "lvm"),
         // The case ADR 0026 is for, and the one no flag could express before
         // it: an interpreter recording, replayed with no flag, runs on the
         // interpreter. Under ADR 0023 this same command line crossed
@@ -208,11 +214,11 @@ fn a_recording_replays_on_either_backend_from_either_backend() {
         ("ast", &on_the_interpreter, None, "ast"),
         // The direction ADR 0023 added, spelled out rather than defaulted —
         // and now a crossing the command can see and name.
-        ("ast", &on_the_interpreter, Some("vm"), "vm"),
+        ("ast", &on_the_interpreter, Some("lvm"), "lvm"),
         // The direction that worked before ADR 0023, which must keep working.
-        ("vm", &on_the_vm, Some("ast"), "ast"),
+        ("lvm", &on_the_backend, Some("ast"), "ast"),
         ("ast", &on_the_interpreter, Some("ast"), "ast"),
-        ("vm", &on_the_vm, Some("vm"), "vm"),
+        ("lvm", &on_the_backend, Some("lvm"), "lvm"),
     ] {
         let path = trace.display().to_string();
         let mut args = vec!["replay", path.as_str(), "restricted"];
@@ -254,74 +260,73 @@ fn a_recording_replays_on_either_backend_from_either_backend() {
 /// ADR 0019's no-silent-fallback rule, read across to a command that calls no
 /// host.
 ///
-/// `tests/e2e/backend_unsupported` is the program the lowering refuses, and
-/// its own `expected.err` pins what `cove run` says about it. A replay has no
-/// side effect for a refusal to come before — it makes no host call at all —
-/// so what the rule protects here is the verdict: a replay that quietly
-/// finished on the interpreter would report "replayed", or a divergence,
-/// about a backend nobody asked for.
+/// `crates/cove-cli/tests/fixtures/instantiation_depth` holds `grow`, a
+/// function that instantiates a generic one layer deeper at every call, so
+/// there is no finite set of functions to lower it to — a permanent refusal
+/// rather than a gap a later lowering pass fills in.
+/// `crates/cove-cli/tests/build.rs`'s
+/// `a_program_that_cannot_be_lowered_is_refused_before_a_binary_is_written`
+/// pins the diagnostic for `cove build`; this is the same refusal read across
+/// to `cove replay`. A replay has no side effect for a refusal to come before
+/// — it makes no host call at all — so what the rule protects here is the
+/// verdict: a replay that quietly finished on the interpreter would report
+/// "replayed", or a divergence, about a backend nobody asked for.
 ///
-/// The recording has to be made on the interpreter, since the VM cannot run
-/// this program at all. That is the point twice over: the trace exists, it is
-/// perfectly replayable, and `--backend vm` still refuses it rather than
-/// reading it on the backend that could.
-///
-/// What ADR 0026 changed is which command line gets the refusal. Under ADR
-/// 0023 it was the bare one, because the default was the VM and no file could
-/// argue: "a recording that only one backend can replay" was listed there
-/// under what that decision gave up, and the flag it needed was one the file
-/// could not suggest. Now the file suggests it, so the bare command replays
-/// this recording on the interpreter that made it, and the refusal belongs to
-/// the person who asked for the VM by name. The rule the refusal enforces is
-/// untouched: `--backend vm` never quietly finishes on the interpreter.
+/// The recording has to be made on the interpreter, since the linear-memory
+/// backend cannot lower this program at all, let alone run it. `grow` never
+/// returns, so the interpreter's own recording ends the way `cove run` itself
+/// would: stopped by the call-depth limit rather than by success, and the
+/// bare replay — naming no backend, so reading the one the file says
+/// recorded it — reaches the same limit for the same reason. Both are beside
+/// the point being pinned here, which is what happens on the backend that
+/// cannot even start: a replay of this recording with `--backend lvm` never
+/// reaches the tape, because the lowering refuses first.
 #[test]
-fn a_replay_on_the_vm_of_a_program_the_lowering_refuses_is_refused() {
+fn a_replay_of_a_program_the_lowering_can_never_accept_is_refused_before_the_tape() {
     let dir = TempDir::new("unsupported");
     let path = dir.join("t.jsonl");
     let trace = path.display().to_string();
-    let root = backend_unsupported();
+    let root = instantiation_depth();
 
     let run = cove_in(
         &root,
-        &[
-            "run",
-            "backend_unsupported",
-            "--backend",
-            "ast",
-            "--trace",
-            &trace,
-        ],
+        &["run", "app", "--backend", "ast", "--trace", &trace],
     );
-    assert!(run.status.success(), "the run failed: {}", stderr(&run));
-
-    // The bare command reads the file, finds `ast`, and replays there.
-    let bare = cove_in(&root, &["replay", &trace, "backend_unsupported"]);
     assert!(
-        bare.status.success(),
-        "a recording the file says is the interpreter's must replay with no flag: {}",
+        !run.status.success(),
+        "`grow` never returns, so this run must stop at the call-depth limit"
+    );
+    assert!(
+        stderr(&run).contains("call depth limit"),
+        "{}",
+        stderr(&run)
+    );
+
+    // The bare command reads the file, finds `ast`, and replays there: the
+    // interpreter runs the program for real and reaches the same limit the
+    // recording did, because only the Host API boundary is canned and this
+    // program never reaches one.
+    let bare = cove_in(&root, &["replay", &trace, "app"]);
+    assert!(
+        !bare.status.success(),
+        "the interpreted replay must reach the same limit the recording did"
+    );
+    assert!(
+        stderr(&bare).contains("call depth limit"),
+        "{}",
         stderr(&bare)
     );
-    assert!(
-        stdout(&bare).contains("backend     ast, which is the backend that recorded this trace"),
-        "{}",
-        stdout(&bare)
-    );
 
-    let refused = cove_in(
-        &root,
-        &["replay", &trace, "backend_unsupported", "--backend", "vm"],
-    );
+    let refused = cove_in(&root, &["replay", &trace, "app", "--backend", "lvm"]);
     assert!(
         !refused.status.success(),
-        "a replay on the VM of a program the lowering refuses must refuse"
+        "a replay on a backend that cannot lower this program must refuse"
     );
     let report = stderr(&refused);
     for expected in [
-        "error[cove::backend::unsupported]: the VM cannot yet run a function declared inside a function body",
-        "it never falls back to the interpreter",
-        // The flag this points at is one `cove replay` now has, so the help
-        // is advice rather than a dead end.
-        "help: run it on the interpreter with `--backend ast`",
+        "error[cove::lower::instantiation_depth]",
+        "no finite set of functions to lower it to",
+        "help: break the chain, or take the argument as a `dyn Trait`",
     ] {
         assert!(report.contains(expected), "missing `{expected}`:\n{report}");
     }
@@ -331,22 +336,6 @@ fn a_replay_on_the_vm_of_a_program_the_lowering_refuses_is_refused() {
         !stdout(&refused).contains("replayed"),
         "{}",
         stdout(&refused)
-    );
-
-    // And the flag the help names does run it, on the very same recording.
-    let played = cove_in(
-        &root,
-        &["replay", &trace, "backend_unsupported", "--backend", "ast"],
-    );
-    assert!(
-        played.status.success(),
-        "the flag the refusal points at must work: {}",
-        stderr(&played)
-    );
-    assert!(
-        stdout(&played).contains("2 of 2 recorded call(s), answered from the trace"),
-        "{}",
-        stdout(&played)
     );
 }
 
@@ -378,7 +367,7 @@ fn the_backend_flag_is_spelled_as_it_is_everywhere_else() {
         "an unknown backend must be refused rather than defaulted"
     );
     assert!(
-        stderr(&nonsense).contains("`--backend` must be `ast`, `vm` or `lvm`, found `jit`"),
+        stderr(&nonsense).contains("`--backend` must be `ast` or `lvm`, found `jit`"),
         "{}",
         stderr(&nonsense)
     );
@@ -386,7 +375,7 @@ fn the_backend_flag_is_spelled_as_it_is_everywhere_else() {
     let bare = cove(&["replay", &trace, "restricted", "--backend"]);
     assert!(!bare.status.success(), "`--backend` needs a value");
     assert!(
-        stderr(&bare).contains("`--backend` needs a value: `ast`, `vm` or `lvm`"),
+        stderr(&bare).contains("`--backend` needs a value: `ast` or `lvm`"),
         "{}",
         stderr(&bare)
     );
@@ -413,14 +402,52 @@ fn without_wall_clock(trace: &str) -> String {
         let (head, tail) = rest.split_at(at + "_ns\":".len());
         out.push_str(head);
         out.push_str("<wall clock>");
-        let end = tail
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(tail.len());
+        // A duration a machine did not measure is `null` rather than a
+        // number, and it is blanked with the numbers: what this function is
+        // for is that no reader of it compares a clock, and an absent clock
+        // is not something to compare either.
+        let end = if tail.starts_with("null") {
+            "null".len()
+        } else {
+            tail.find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(tail.len())
+        };
         rest = &tail[end..];
     }
     out.push_str(rest);
-    out.replace(r#""backend":"ast","#, r#""backend":"<either>","#)
-        .replace(r#""backend":"vm","#, r#""backend":"<either>","#)
+    without_heap(
+        &out.replace(r#""backend":"ast","#, r#""backend":"<either>","#)
+            .replace(r#""backend":"lvm","#, r#""backend":"<either>","#),
+    )
+}
+
+/// Replaces every `heap_summary` line with the fact that there was one.
+///
+/// The two evaluators do not have the same kind of heap, and since
+/// [issue #240](https://github.com/myuon/cove/issues/240) the event says so:
+/// the interpreter counts objects and the bytes they asked for, the
+/// linear-memory backend counts words, and each leaves `null` in the family
+/// it does not count. Neither set of figures can be derived from the other —
+/// an inline struct is words in one and no object at all in the other — so
+/// comparing them would be comparing two answers to two different questions.
+///
+/// What is still compared is that the event is there, once, in the same place
+/// in the sequence. That is a property of the run rather than of the heap: a
+/// backend that stopped writing a summary, or wrote one somewhere else, still
+/// fails this.
+fn without_heap(trace: &str) -> String {
+    trace
+        .lines()
+        .map(|line| {
+            if line.starts_with(r#"{"event":"heap_summary","#) {
+                r#"{"event":"heap_summary","figures":"<its own heap's>"}"#
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 #[test]
@@ -429,7 +456,7 @@ fn a_recorded_run_reads_back_and_replays() {
     let path = dir.join("t.jsonl");
     let recorded = record(&path);
     assert!(
-        recorded.starts_with(r#"{"event":"trace_header","version":3,"backend":"vm","values":"full","entry":"restricted.main","args":[]}"#),
+        recorded.starts_with(r#"{"event":"trace_header","version":4,"backend":"lvm","values":"full","entry":"restricted.main","args":[]}"#),
         "{recorded}"
     );
 
@@ -495,7 +522,7 @@ fn a_program_that_asks_for_a_different_call_diverges() {
         // No flag was given, so the replay ran on the backend the file names,
         // and the report says the strong thing ADR 0023 could not say: this
         // divergence is the program's.
-        "this replay ran on `vm`, which is the backend that",
+        "this replay ran on `lvm`, which is the backend that",
         "recorded the trace, so a divergence is the program's rather",
     ] {
         assert!(report.contains(expected), "missing `{expected}`:\n{report}");
@@ -533,7 +560,7 @@ fn a_cross_backend_divergence_says_the_two_backends_could_be_the_difference() {
     for expected in [
         "divergence: the program asked for a different host call",
         "this replay ran on `ast` and the trace was recorded on",
-        "`vm`, so a divergence here could be the two backends'",
+        "`lvm`, so a divergence here could be the two backends'",
     ] {
         assert!(report.contains(expected), "missing `{expected}`:\n{report}");
     }
@@ -545,7 +572,7 @@ fn a_cross_backend_divergence_says_the_two_backends_could_be_the_difference() {
 fn a_summary_names_the_backend_that_recorded_the_trace() {
     let dir = TempDir::new("summary-backend");
     for (name, record_it, expected) in [
-        ("vm.jsonl", record as fn(&Path) -> String, "vm"),
+        ("lvm.jsonl", record as fn(&Path) -> String, "lvm"),
         (
             "ast.jsonl",
             record_on_the_interpreter as fn(&Path) -> String,
@@ -617,7 +644,7 @@ fn a_trace_from_a_version_this_build_does_not_read_is_rejected_by_both_commands(
     for version in ["99", "2"] {
         std::fs::write(
             &path,
-            recorded.replace(r#""version":3"#, &format!(r#""version":{version}"#)),
+            recorded.replace(r#""version":4"#, &format!(r#""version":{version}"#)),
         )
         .unwrap();
 
@@ -633,7 +660,7 @@ fn a_trace_from_a_version_this_build_does_not_read_is_rejected_by_both_commands(
             );
             assert!(
                 stderr(&output).contains(&format!(
-                    "is version {version}, and this build of `cove` reads version 3"
+                    "is version {version}, and this build of `cove` reads version 4"
                 )),
                 "{}",
                 stderr(&output)

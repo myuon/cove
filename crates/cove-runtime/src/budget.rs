@@ -170,7 +170,7 @@ struct Accounting {
 /// every return, because every call and every return is a safepoint. Issue
 /// #182 measured what that cost: on `benches/call`, `with_budget` plus
 /// `pthread_mutex_lock` plus `pthread_mutex_unlock` were 36% of the run
-/// against `Vm::execute`'s 46%.
+/// against the predecessor's `execute` at 46%.
 ///
 /// The lock was not protecting anything that needed one. A safepoint adds to
 /// `fuel_spent`, reads an atomic flag, compares against a limit fixed before
@@ -196,7 +196,7 @@ struct Accounting {
 /// "whatever budget the registry holds now". `Budget::restart` gives its
 /// budget fresh accounting, so a `Meter` taken before a restart charges the
 /// run that ended. Both backends therefore take theirs where a run begins:
-/// `Vm::new` and `Interpreter::new` take one, and `invoke_within` and
+/// `Lvm::new` and `Interpreter::new` take one, and `invoke_within` and
 /// `run_entry_within` take another immediately after installing the budget
 /// they were handed. A registry's budget cannot be replaced by any other
 /// route — `set_budget` needs `&mut HostRegistry` and a backend holds the

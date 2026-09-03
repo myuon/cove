@@ -48,13 +48,12 @@ use cove_runtime::interp::Interpreter;
 use cove_runtime::process::{Process, ProcessLog};
 use cove_runtime::runtime::Runtime;
 use cove_runtime::value::Value;
-use cove_runtime::vm::Vm;
 use cove_runtime::Lvm;
 use cove_sema::capability::open_reasons;
 use cove_sema::resolve::DeclaredTest;
 use cove_sema::HostSchemas;
 
-use crate::{load, Backend, CliError, Executable};
+use crate::{load, Backend, CliError};
 
 /// The diagnostic a failing test is reported as.
 const FAILED: &str = "cove::test::failed";
@@ -216,15 +215,9 @@ fn run_test(
     // as the test does, which is the ratio ADR 0019 allows the lowering to be
     // slow on.
     //
-    // The refusal is reported as this test's failure rather than as the
-    // command's, for the same reason: the other tests still ran, and a
-    // suite that stopped at the first unlowerable test would report nothing
-    // about them.
-    //
-    // Both lowered backends do this now. `--backend lvm` used to lower the
-    // package once for the whole command, because `cove_lir` had no
-    // reachable-set slice; `cove_lir::lower_entry` is that slice, so one
-    // test's gap is no longer every test's.
+    // The failure is reported as this test's rather than as the command's,
+    // for the same reason: the other tests still ran, and a suite that
+    // stopped at the first unlowerable test would report nothing about them.
     let lowered = match backend {
         Backend::Ast => None,
         Backend::Lvm => match cove_lir::lower_entry(
@@ -234,7 +227,7 @@ fn run_test(
             test.module,
             test.name,
         ) {
-            Ok(ir) => Some(Executable::Linear(Arc::new(ir))),
+            Ok(ir) => Some(Arc::new(ir)),
             Err(items) => {
                 return Some(
                     Diagnostic::error(
@@ -253,37 +246,11 @@ fn run_test(
                 )
             }
         },
-        Backend::Vm => match cove_ir::lower::lower_entry(program, test.module, test.name) {
-            Ok(lowered) => match cove_ir::lower::validate(&lowered.program) {
-                Ok(()) => Some(Executable::Vm(Arc::new(lowered.program))),
-                Err(why) => {
-                    return Some(
-                        Diagnostic::error(
-                            FAILED,
-                            format!(
-                                "test `{}` could not be lowered: {why}",
-                                test.qualified_name()
-                            ),
-                        )
-                        .at(test.entry.decl.name.span),
-                    )
-                }
-            },
-            Err(why) => return Some(crate::unsupported_by_backend(&why)),
-        },
     };
 
     let runtime = Runtime::new(Arc::clone(program), Arc::clone(sources), Arc::new(hosts));
     let (outcome, assertion) = match &lowered {
-        Some(Executable::Vm(ir)) => {
-            let mut vm = Vm::new(&runtime, runtime.hosts(), ir);
-            let outcome = vm.run_entry(test.module, test.name, Vec::new());
-            let assertion = vm
-                .assertion_failure()
-                .map(|(span, message)| (span, message.to_string()));
-            (outcome, assertion)
-        }
-        Some(Executable::Linear(ir)) => {
+        Some(ir) => {
             let mut lvm = Lvm::new(&runtime, runtime.hosts(), ir);
             let outcome = lvm.run_entry(test.module, test.name, Vec::new());
             let assertion = lvm
@@ -487,20 +454,20 @@ mod tests {
     /// Runs every test of the package at `root` on both backends, in order,
     /// reporting each one's name and the message it failed with.
     ///
-    /// Both, and asserting they agree, because `cove test` runs on the VM
-    /// since ADR 0022 and every assertion below used to be about the
-    /// interpreter. Running only the new default would have retired that
-    /// coverage silently; running both keeps it and adds the property that
-    /// matters more than either — that a suite reports the same thing
-    /// whichever backend ran it.
+    /// Both, and asserting they agree, because `cove test` runs on the
+    /// linear-memory backend and every assertion below used to be about the
+    /// interpreter. Running only the default would have retired that coverage
+    /// silently; running both keeps it and adds the property that matters
+    /// more than either — that a suite reports the same thing whichever
+    /// evaluator ran it.
     fn run_all(root: &Path, allow_real: &[&str]) -> Vec<(String, Option<String>)> {
-        let on_the_vm = run_all_on(root, allow_real, Backend::Vm);
+        let on_the_backend = run_all_on(root, allow_real, Backend::Lvm);
         let on_the_oracle = run_all_on(root, allow_real, Backend::Ast);
         assert_eq!(
-            on_the_vm, on_the_oracle,
-            "the two backends report this suite differently"
+            on_the_backend, on_the_oracle,
+            "the two evaluators report this suite differently"
         );
-        on_the_vm
+        on_the_backend
     }
 
     /// One backend's answer for every test of the package at `root`.
@@ -570,10 +537,10 @@ mod tests {
     /// reporting something else.
     ///
     /// An `Err` carries a message and no position, so each evaluator has to
-    /// record the assertion it saw: the oracle and the predecessor keep the
-    /// span of the call they performed, and the replacement is told by the
-    /// `AssertFailed` its failing arm was lowered with. Three mechanisms,
-    /// and this is the one line that says they answer the same thing.
+    /// record the assertion it saw: the oracle keeps the span of the call it
+    /// performed, and the backend is told by the `AssertFailed` its failing
+    /// arm was lowered with. Two mechanisms, and this is the one line that
+    /// says they answer the same thing.
     #[test]
     fn a_failing_assertion_points_at_the_assertion_it_failed_in() {
         let source = "test fn fails() -> Result<Unit, Error> {\n  assert(1 == 2)?\n  Ok(())\n}\n";
@@ -581,7 +548,7 @@ mod tests {
         let (sources, _, program) = check_fixture(dir.path());
         let (sources, program) = (Arc::new(sources), Arc::new(program));
         let test = program.tests()[0];
-        for backend in [Backend::Ast, Backend::Vm, Backend::Lvm] {
+        for backend in [Backend::Ast, Backend::Lvm] {
             let diagnostic = run_test(
                 &test,
                 dir.path(),
@@ -616,7 +583,7 @@ mod tests {
         let (sources, _, program) = check_fixture(dir.path());
         let (sources, program) = (Arc::new(sources), Arc::new(program));
         let test = program.tests()[0];
-        for backend in [Backend::Ast, Backend::Vm, Backend::Lvm] {
+        for backend in [Backend::Ast, Backend::Lvm] {
             let diagnostic = run_test(
                 &test,
                 dir.path(),
@@ -768,7 +735,7 @@ test fn describesThroughDynDispatch() -> Result<Unit, Error> {
             &BTreeSet::new(),
             &sources,
             &program,
-            Backend::Vm,
+            Backend::Lvm,
         )
         .expect("the boundary refuses the call");
         assert!(

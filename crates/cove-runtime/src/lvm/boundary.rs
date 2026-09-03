@@ -142,7 +142,7 @@ fn out(
                 let value = out(machine, field.layout, run(program, words, field)?, deeper)?;
                 out_fields.push((field.name.to_string(), value));
             }
-            Ok(Value::structure(&*described.name, out_fields))
+            Ok(Value::structure(declared(&described.name), out_fields))
         }
         // Word 0 is the case index and the words after it are the payload
         // region. The collector no longer reads that word — the region's map
@@ -165,7 +165,11 @@ fn out(
                     .ok_or_else(|| short_run(&described.name))?;
                 payload.push(out(machine, part.layout, held, deeper)?);
             }
-            Ok(Value::enumeration(&*described.name, &*case.name, payload))
+            Ok(Value::enumeration(
+                declared(&described.name),
+                &*case.name,
+                payload,
+            ))
         }
         Shape::Free => Err(reclaimed()),
         // Every family left lives in the heap, so the location is one
@@ -463,8 +467,9 @@ fn into(
                 return Err(not_the_expected(&described.name));
             };
             // The qualified name on both sides, so two modules each declaring
-            // a `Point` cannot be matched to each other's layout.
-            if view.type_name() != &*described.name {
+            // a `Point` cannot be matched to each other's layout, and the
+            // *declared* name on this side, for the reason [`declared`] gives.
+            if view.type_name() != declared(&described.name) {
                 return Err(not_the_expected(&described.name));
             }
             let mut words = vec![0; width];
@@ -493,7 +498,7 @@ fn into(
             let ValueView::Enum(view) = value.view() else {
                 return Err(not_the_expected(&name));
             };
-            if view.type_name() != &*name {
+            if view.type_name() != declared(&name) {
                 return Err(not_the_expected(&name));
             }
             let index = cases
@@ -858,7 +863,7 @@ fn family_of(
                 let Shape::Struct { fields, .. } = &layout.shape else {
                     return false;
                 };
-                &*layout.name == name
+                declared(&layout.name) == name
                     && fields.len() == view.len()
                     && fields.iter().all(|field| {
                         view.field(&field.name)
@@ -878,7 +883,7 @@ fn family_of(
                 let Shape::Enum { cases, .. } = &layout.shape else {
                     return false;
                 };
-                if &*layout.name != name {
+                if declared(&layout.name) != name {
                     return false;
                 }
                 let Some(case) = cases.iter().find(|case| &*case.name == view.case()) else {
@@ -1099,7 +1104,7 @@ fn fits(program: &Program, layout: LayoutId, value: &Value, precision: Precision
         }
         Shape::Struct { fields, .. } => match value.view() {
             ValueView::Struct(view) => {
-                view.type_name() == &*described.name
+                view.type_name() == declared(&described.name)
                     && fields.len() == view.len()
                     && fields.iter().all(|field| {
                         view.field(&field.name)
@@ -1110,7 +1115,7 @@ fn fits(program: &Program, layout: LayoutId, value: &Value, precision: Precision
         },
         Shape::Enum { cases, .. } => match value.view() {
             ValueView::Enum(view) => {
-                view.type_name() == &*described.name
+                view.type_name() == declared(&described.name)
                     && cases.iter().any(|case| {
                         &*case.name == view.case()
                             && case.parts.len() == view.payload().len()
@@ -1262,6 +1267,31 @@ fn materialisable(view: &ValueView<'_>) -> bool {
 /// `Display` does with the same string.
 pub(crate) fn short(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
+}
+
+/// The name a *value* of a layout carries, which is the declaration's and not
+/// the instantiation's.
+///
+/// [`cove_lir`] names a layout by the instantiation it is: `m.Boxed<Int>` and
+/// `m.Boxed<String>` are two names because they are two widths, and that
+/// identity is the whole of why monomorphisation is the representation this
+/// machine can have. A [`Value`] carries no such thing. A host writes
+/// `Value::structure("m.Boxed", ...)` because the type argument is not
+/// something it is in a position to know it is supplying, `crate::invoke`
+/// checks a nominal type by the declared name on both backends, and the
+/// oracle answers that name for a value it produces. So the two are compared
+/// on the declaration they agree about, and *which* instantiation a value
+/// belongs to is settled by the fields — which every one of these comparisons
+/// goes on to check anyway, at the width the layout says.
+///
+/// The first `<` after the first character, so that the layout table's own
+/// bracketed names — `<free>`, `<ref>` — are left whole rather than reduced
+/// to nothing.
+pub(crate) fn declared(name: &str) -> &str {
+    match name.char_indices().find(|(at, ch)| *at > 0 && *ch == '<') {
+        Some((at, _)) => &name[..at],
+        None => name,
+    }
 }
 
 /// What a [`ValueView`] is called, for a refusal that has to name it.

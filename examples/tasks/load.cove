@@ -30,11 +30,10 @@ export async fn loadDashboard() -> Result<Dashboard, Error> {
     // timeout's own `Result` is the *clock's* failure — `clock.timeout` wraps
     // whatever the body answered in `Ok` whether the body succeeded or not —
     // so a body that can fail has to say so in its own type.
-    let bounded: Result<Result<Dashboard, Error>, Error> = clock.timeout(500ms) {
-      Ok(Dashboard(
-        bookings: panelOf("bookings", bookings.await()?)?,
-        prices: panelOf("prices", prices.await()?)?,
-      ))
+    let bounded: Result<Result<Dashboard, Error>, Error> = clock.timeout(
+      500ms,
+    ) {
+      Ok(Dashboard(bookings: panelOf("bookings", bookings.await()?)?, prices: panelOf("prices", prices.await()?)?))
     }
 
     bounded?

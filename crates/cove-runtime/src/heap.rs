@@ -35,50 +35,67 @@
 //! # Roots, and why reference counts are part of them
 //!
 //! ADR 0011 is explicit that the roots are the interpreter's own structures
-//! rather than a machine stack, so there are no stack maps here. What those
-//! structures are is not the same on both backends, so `Roots` is a trait
-//! rather than a list: it names something that can *drive* a walk of one
-//! task's roots, and each backend describes its own.
+//! rather than a machine stack, so there are no stack maps here. `Roots` is a
+//! trait naming something that can *drive* a walk of one task's roots, and
+//! `SlotRoots` is its one implementor now: every binding the interpreter
+//! creates is a [`crate::interp`] `Place`, whose slot is an
+//! `Rc<RefCell<Value>>` registered in a `SlotRoots` list with the same
+//! push-and-truncate discipline the environment chain already has; the
+//! collector borrows each cell as it walks, so what it sees is what the slot
+//! holds now rather than what it held when the binding was made.
 //!
-//! The two descriptions have nothing in common but the values they yield.
-//! Every binding the interpreter creates is a [`crate::interp`] `Place`,
-//! whose slot is an `Rc<RefCell<Value>>` registered in a `SlotRoots` list
-//! with the same push-and-truncate discipline the environment chain already
-//! has; the collector borrows each cell as it walks, so what it sees is what
-//! the slot holds now rather than what it held when the binding was made. The
-//! VM has no such cells — it put every binding into one contiguous
-//! `Vec<Value>` precisely so a call would allocate nothing — so its roots are
-//! that vector up to its current length, and walking them is iterating it.
-//! Neither backend can be made to build the other's representation without
-//! giving back what the representation was for, which is why the collector
-//! takes a walk instead of a structure.
+//! Before ADR 0034 there was a second implementor: the predecessor VM had no
+//! such cells, and put every binding into one contiguous `Vec<Value>`
+//! instead, precisely so a call on that backend would allocate nothing. A
+//! collector that demanded the interpreter's shape would have made that VM
+//! build a cell per binding and give back what the arrangement bought; one
+//! that demanded the VM's would have made the interpreter snapshot its
+//! bindings into a vector, which is both a copy and a lie, since the
+//! snapshot would be of the values as they were rather than as they are. A
+//! walk rather than a structure is what let the collector work over both
+//! shapes without asking either one to give back what it was for.
+//!
+//! The linear-memory backend does not implement this trait at all. Its heap
+//! belongs to the run rather than to a task, and it finds its roots from a
+//! frame's static reference map instead — `crate::lvm::mem`'s own `Roots`
+//! describes that on its own terms. Adding that backend cost this module
+//! nothing, which is the walk-not-a-list design paying for itself a second
+//! time: the point was never only the two shapes that existed when it was
+//! written.
 //!
 //! A walk is asked for twice, once to count and once to mark, so an
 //! implementation must be re-walkable and must yield the same values both
 //! times. Nothing here consumes it.
 //!
-//! Either description covers what the program has named. Neither covers a
-//! value the backend is holding in a Rust local — the left operand of a `+`
-//! whose right operand is still being evaluated, an argument the VM has taken
-//! off its stack into the vector a host call is about to be handed. Those are
-//! the values ADR 0011 calls "values being evaluated," and neither a tree
-//! walker nor a dispatch loop has a list of them.
+//! The walk covers what the program has named. It does not cover a value the
+//! interpreter is holding in a Rust local while it is mid-evaluation — the
+//! left operand of a `+` whose right operand is still being evaluated. Those
+//! are the values ADR 0011 calls "values being evaluated," and a tree walker
+//! has no list of them by construction. The linear-memory backend has no
+//! such gap to close: a value it is computing already lives in a frame slot
+//! the static reference map already covers, and an object allocated before
+//! its fields are written is zeroed rather than left holding whatever
+//! preceded it, so there is nothing mid-evaluation for its collector to
+//! miss the way this one can.
 //!
 //! The collector finds them exactly, without scanning anything: it counts the
 //! references it *can* see. For every shared allocation it walks — a vector, an
 //! array, a map, a struct, a closure, a trait object, a task, a task scope —
 //! it sums the references reachable from the walked roots and from the
 //! objects it manages, and compares that with `Rc::strong_count`. A shortfall
-//! is a reference held somewhere the collector cannot read — a backend's own
-//! temporary — so that allocation, and everything it holds, is a root.
+//! is a reference held somewhere the collector cannot read — a Rust local it
+//! has not walked — so that allocation, and everything it holds, is a root.
 //!
 //! This is the rule that makes a safepoint safe rather than merely
-//! well-chosen, and it is the same rule on both backends. A value in a Rust
-//! local is itself a reference, so a value the collector cannot see is a value
-//! whose count does not add up; there is no arrangement of locals a backend
-//! can reach a safepoint in that hides one. What a backend has to get right is
-//! therefore narrower than "have everything on a stack": it has to not walk
-//! anything twice, because a reference counted twice is a shortfall concealed.
+//! well-chosen. A value in a Rust local is itself a reference, so a value the
+//! collector cannot see is a value whose count does not add up; there is no
+//! arrangement of locals the interpreter can reach a safepoint in that hides
+//! one. What the interpreter has to get right is therefore narrower than
+//! "have everything on a stack": it has to not walk anything twice, because a
+//! reference counted twice is a shortfall concealed. The linear-memory
+//! backend answers the same demand — a safepoint must not reach a value its
+//! collector cannot find — without this counting trick: a static reference
+//! map leaves nothing held off to the side to count.
 //!
 //! Counting the containers as well as the objects is what makes this sound
 //! rather than merely plausible. An array can hold the only reference to a
@@ -155,23 +172,27 @@ const GROWTH_FACTOR: u64 = 2;
 ///
 /// # Why a walk and not a list
 ///
-/// The two backends keep a task's bindings in shapes that have nothing in
-/// common. The interpreter gives every binding an `Rc<RefCell<Value>>` of its
-/// own and hands the collector the cells, so a collection reads what a
-/// binding holds *now*; the VM gives every binding a slot of one contiguous
-/// `Vec<Value>`, which is the whole reason a call on that backend allocates
-/// nothing. A collector that demanded the interpreter's shape would make the
-/// VM build a cell per binding and give back what the arrangement bought; one
-/// that demanded the VM's would make the interpreter snapshot its bindings
-/// into a vector, which is both a copy and a lie, since the snapshot would be
-/// of the values as they were rather than as they are.
+/// `Interpreter` is this trait's one implementor now, giving every binding
+/// an `Rc<RefCell<Value>>` of its own and handing the collector the cells,
+/// so a collection reads what a binding holds *now* rather than a snapshot
+/// of what it held when the binding was made. Before ADR 0034 there was a
+/// second: the predecessor VM gave every binding a slot of one contiguous
+/// `Vec<Value>` instead, which was the whole reason a call on that backend
+/// allocated nothing. A collector that demanded the interpreter's shape
+/// would have made that VM build a cell per binding and give back what the
+/// arrangement bought; one that demanded the VM's would have made the
+/// interpreter snapshot its bindings into a vector, which is both a copy and
+/// a lie, since the snapshot would be of the values as they were rather than
+/// as they are.
 ///
-/// So neither shape is asked for. What is asked for is a walk: an
-/// implementation calls `visit` once per reference it holds, and how it finds
-/// them is its own business. An enum of the two shapes was the alternative
+/// So neither shape was asked for; what is asked for is a walk: an
+/// implementation calls `visit` once per reference it holds, and how it
+/// finds them is its own business. An enum of the shapes was the alternative
 /// and it was not taken, because it would put every backend's root
-/// representation in this module and make adding a third an edit here rather
-/// than there.
+/// representation in this module and make adding another an edit here
+/// rather than there — which is exactly what let the linear-memory backend
+/// add a third kind of root, in `crate::lvm::mem`'s own `Roots`, without
+/// touching this file at all.
 ///
 /// # What an implementation owes
 ///
@@ -411,7 +432,8 @@ impl Heap {
     /// Marks from the roots and sweeps what is not marked.
     ///
     /// `roots` is walked twice and never consumed: see [`Roots`] for what a
-    /// walk owes, and for why the two backends describe theirs differently.
+    /// walk owes, and for why the interpreter's own implementor of it is
+    /// shaped the way it is.
     pub(crate) fn collect(&mut self, roots: &dyn Roots) -> Collection {
         let started = Instant::now();
 
@@ -1336,11 +1358,13 @@ mod tests {
     ///
     /// Nothing in this suite built a `Value::Closure` at all, which is how
     /// its byte arithmetic could have gone wrong in either walker with
-    /// nothing failing. `tests/differential`'s `same_heap` does not close
-    /// that gap: it compares the two backends against each other, so an
-    /// absolute error made identically by both — and both backends reach
-    /// this one function — passes it. So the figure is stated here,
-    /// absolutely, the way
+    /// nothing failing. Before ADR 0034, `tests/differential`'s `same_heap`
+    /// did not close that gap either: it compared the interpreter against
+    /// the predecessor VM rather than against an absolute figure, so an
+    /// error made identically by both would have passed unseen there too.
+    /// There is no such comparison to lean on today — the linear-memory
+    /// backend counts bytes of a heap this one's arithmetic has nothing to
+    /// do with — so the figure is stated here, absolutely, the way
     /// `an_enum_case_charges_the_payload_it_actually_allocated` states the
     /// enum's.
     ///
@@ -1354,7 +1378,15 @@ mod tests {
         let closure = Rc::new(crate::value::Closure {
             is_async: false,
             arity: 1,
-            body: crate::value::ClosureBody::Lowered(cove_ir::FunctionId(0)),
+            body: crate::value::ClosureBody::Tree {
+                params: Vec::new(),
+                block: std::sync::Arc::new(cove_syntax::ast::Block {
+                    statements: Vec::new(),
+                    tail: None,
+                    span: cove_diag::Span::new(cove_diag::FileId(0), 0, 0),
+                }),
+                decl: None,
+            },
             module: "test".into(),
             captures: vec![
                 ("species".into(), Value(Repr::Int(7))),
@@ -1397,7 +1429,15 @@ mod tests {
             Value(Repr::Closure(Rc::new(crate::value::Closure {
                 is_async: false,
                 arity: 1,
-                body: crate::value::ClosureBody::Lowered(cove_ir::FunctionId(0)),
+                body: crate::value::ClosureBody::Tree {
+                    params: Vec::new(),
+                    block: std::sync::Arc::new(cove_syntax::ast::Block {
+                        statements: Vec::new(),
+                        tail: None,
+                        span: cove_diag::Span::new(cove_diag::FileId(0), 0, 0),
+                    }),
+                    decl: None,
+                },
                 module: "test".into(),
                 captures: vec![("held".into(), Value(Repr::Vector(held.clone())))],
             }))),
@@ -1522,10 +1562,10 @@ mod tests {
     /// `Marker::visit`'s closure arm has the `walked` guard the struct arm
     /// was missing, so this passes today. It is here because nothing checked
     /// it: `Value::Closure` was reached by exactly one test in this module
-    /// and that test asks about survival rather than about bytes, and
-    /// `vm::tests::heap`'s `same_heap` compares the two backends against each
-    /// other rather than against an absolute, so an error made identically on
-    /// both would go unseen there.
+    /// and that test asks about survival rather than about bytes, and before
+    /// ADR 0034 `vm::tests::heap`'s `same_heap` compared the interpreter
+    /// against the predecessor VM rather than against an absolute, so an
+    /// error made identically on both would have gone unseen there too.
     #[test]
     fn a_closure_shared_by_two_live_paths_reports_its_bytes_once() {
         let mut roots = SlotRoots::new();
@@ -1533,7 +1573,15 @@ mod tests {
         let closure = Rc::new(crate::value::Closure {
             is_async: false,
             arity: 1,
-            body: crate::value::ClosureBody::Lowered(cove_ir::FunctionId(0)),
+            body: crate::value::ClosureBody::Tree {
+                params: Vec::new(),
+                block: std::sync::Arc::new(cove_syntax::ast::Block {
+                    statements: Vec::new(),
+                    tail: None,
+                    span: cove_diag::Span::new(cove_diag::FileId(0), 0, 0),
+                }),
+                decl: None,
+            },
             module: "test".into(),
             captures: vec![("held".into(), Value::string("seven"))],
         });

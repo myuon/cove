@@ -14,9 +14,7 @@ use console.println
 /// This case lives in its own package so that check-time failure cannot take
 /// down every other case.
 export fn main() -> Result<Unit, Error> {
-  let panel = clock.timeout(1s) {
-    render("bookings")?
-  }?
+  let panel = clock.timeout(1s) { render("bookings")? }?
   println("{panel}")?
   Ok(())
 }

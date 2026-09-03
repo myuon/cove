@@ -18,18 +18,18 @@ may not).
 and the `#[ignore]`d cases, which together are more than half of a warm
 `cargo test --workspace` and which CI runs in steps of their own.
 
-Run the ignored ones by hand after a change to `crates/cove-runtime/src/frame.rs`:
-`cargo test --workspace --lib --tests -- --ignored`. Two things are in there.
-Five cases drive the `benches/` rows at the turn count the published
-measurements were taken at, and that file's module docs say why shortening them
-was refused. The sixth is `crates/cove-cli/tests/admits_coverage.rs`, which
-compiles every program in the repository and reports which ones the eight-byte
-frame admits and what the refusals say — the roadmap for what to build next,
-and a ratchet that fails if a change admits fewer than the last one did.
-`crates/cove-cli/tests/lvm_coverage.rs` is the same instrument for the
-linear-memory backend and is ignored for the same reason and one more: it
-*runs* what it lowers, on both backends, and the benchmark rows are two
-million turns each.
+Run the ignored ones by hand: `cargo test --workspace --lib --tests -- --ignored`.
+There is one, and it is the roadmap: `crates/cove-cli/tests/lvm_coverage.rs`
+runs every program in the repository on the linear-memory backend and sorts
+the answers into agrees, *disagrees*, and does not lower. It is ignored
+because it runs what it lowers, and the benchmark rows are two million turns
+each.
+
+Its two ratchets are both load-bearing and they are not the same. The count
+may rise and never fall. The known-disagreement set is compared as a *set*,
+because a count cannot tell a new disagreement from an old one — a change
+that teaches one family and breaks another raises the count while introducing
+a program that lowers and lies. The set has caught that twice.
 
 Before pushing, the full gate is what CI runs: `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,

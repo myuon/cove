@@ -19,10 +19,14 @@ VM" — and [Measurements](#measurements) is that measurement.
 So the interesting question here is not "can Cove express a rule engine",
 which it can and which [Shape](#shape) is the answer to. It is: what does an
 application pay to hold one, and where does the payment go? The short answer
-is that compiling is worth about 168 invocations, that reusing one VM instead
-of building one per request saves 167 allocations against the 237 an invocation
-costs, and that how the pull request gets in is worth 40 allocations and 135
-instructions.
+is that compiling is worth about 168 invocations, that reusing one backend
+instance instead of building one per request saves 167 allocations against the
+237 an invocation costs, and that how the pull request gets in is worth 40
+allocations and 135 instructions. Those figures are measured on the `vm`
+backend [ADR 0034](../../docs/adr/0034-one-physical-word-stack.md) has since
+replaced with `Lvm` — see the provenance note at the top of
+[Measurements](#measurements) for what that does and does not mean about the
+numbers below.
 
 That last number used to be a different number, and how it changed is the
 better half of this document. When this example was written, `run_entry` took a
@@ -30,7 +34,8 @@ list of strings on both backends and there was no other way in, so a pull
 request had to arrive through a Host API call into a host module the embedder
 declared for no other reason. What the measurement found and called "the Host
 API boundary" was, in large part, the cost of carrying an argument through a
-mechanism meant for reaching outside the process. `Vm::invoke` closed that
+mechanism meant for reaching outside the process. `Lvm::invoke` (`Vm::invoke`,
+at the time) closed that
 ([issue #150](https://github.com/myuon/cove/issues/150)),
 `rules.embedded.evaluate` takes the pull request as an argument, and
 [What the way in costs](#what-the-way-in-costs) measures the two ways against
@@ -154,16 +159,15 @@ a discovery at the boundary. The same value goes to `HostApi::module_schema`,
 so the description the checker read and the description the boundary enforces
 are one value and cannot drift.
 
-**Lower the entry, once.** `cove_ir::lower::lower_entry` lowers what one entry
-can reach, so an application that invokes two entries lowers twice and holds
-both.
+**Lower the entry, once.** `cove_lir::lower_entry` lowers what one entry can
+reach, so an application that invokes two entries lowers twice and holds both.
 
 **Build one backend and invoke it many times.** `RulePackage::serve` builds a
-`Runtime` and a `Vm` and hands them to a closure; every invocation the closure
-makes is served by that one VM. It takes a closure rather than answering with a
-session because a `Vm` borrows the `Runtime` and the lowered program, and
-because nothing Cove-shaped could leave it in any case: a `Value` is `Rc`-based
-and is not `Send`.
+`Runtime` and an `Lvm` and hands them to a closure; every invocation the
+closure makes is served by that one `Lvm`. It takes a closure rather than
+answering with a session because an `Lvm` borrows the `Runtime` and the
+lowered program, and because nothing Cove-shaped could leave it in any case: a
+`Value` is `Rc`-based and is not `Send`.
 
 ```rust
 session.invoke("rules.embedded", "evaluate", vec![pr.to_policy()])
@@ -208,10 +212,10 @@ carrying the ten fields the declaration lists, in that order, each of the
 declared type.
 
 The field order is not pedantry. The lowering spends the checker's answer and
-emits `get-field-at 4` where the source wrote `pr.changedLines`, so a struct a
-host built with nine fields would have the VM read past the end of one and a
-struct with ten in another order would answer the wrong field with no sign of
-it. `crates/cove-runtime/src/invoke.rs` is where that is refused, and
+emits `load-field ... +4 ...` where the source wrote `pr.changedLines`, so a
+struct a host built with nine fields would have `Lvm` read past the end of one
+and a struct with ten in another order would answer the wrong field with no
+sign of it. `crates/cove-runtime/src/invoke.rs` is where that is refused, and
 `an_argument_the_rules_do_not_declare_is_refused_before_anything_runs` is what
 holds it to the three ways a host can get it wrong.
 
@@ -349,7 +353,24 @@ Two cases, and they are the two an interface has.
 An **additive** change — `REVIEWS_NEXT` adds an operation and a field — leaves
 a package written against the older schema checking, lowering and deciding
 exactly as before. Nothing calls the operation and nothing reads the field, and
-nothing has to be told that.
+the package does not have to be told that.
+
+The host does. `Lvm` materialises a Host API result into the physical layout
+its schema declares the moment a call returns — one fixed-width struct, every
+field's word written before the value is a value at all — rather than reading
+a field lazily out of a tagged one the way the interpreter's oracle value
+does. So a host that registers `REVIEWS_NEXT` has to answer all eleven fields
+of a `reviews.PullRequest`, `openedAt` included, even though nothing this
+package lowers reads it; a host that goes on answering `REVIEWS`'s ten is
+answering a value its own declared schema does not admit, and is refused at
+the boundary rather than let through with a hole in it. `Reviews::answer`
+(`host/src/lib.rs`) is where this crate does that: it is the same ten fields
+`PullRequest::to_cove` always built, plus a zero `openedAt` when `self.schema`
+is the one that declares it. This was not a rule an embedder had to know
+before: the predecessor backend's boundary held a host's argument to a
+schema's fields as they were read, one at a time, so an unread field of a
+richer schema was never asked for and a host answering an older, narrower
+struct was never caught not having it.
 
 A **breaking** change — `REVIEWS_RENAMED` renames `changedLines` — is reported
 by the checker, at the line that reads the field, before anything runs:
@@ -382,6 +403,18 @@ That matters more than a provenance note usually does, because the wall times
 in this document had never been re-taken since it was written and were carried
 from another machine, and because the counts had been marked stale on a
 prediction that turned out to be wrong.
+
+**Every number in this section, and every `Vm` it names, is about the
+predecessor backend.** `732b238` predates
+[ADR 0034](../../docs/adr/0034-one-physical-word-stack.md)'s cutover, which
+deleted `cove-ir` and `cove_runtime::vm::Vm` and replaced them with `cove-lir`
+and `cove_runtime::Lvm` — a clean-room replacement, not a renaming, so nothing
+here says the counts below are `Lvm`'s. They have not been retaken on `Lvm`,
+and this section is left as the record of what the predecessor cost rather
+than silently reattributed to its replacement. Where the rest of this document
+describes what the embedding does today it says `Lvm`; where it reports a
+number, that number is the `Vm` measurement until somebody reruns
+`cove-rules-measure` and replaces this whole section, table by table.
 
 **The prediction was that making `labels` a `Set` would move the invocation
 counts, and it moved none of them.** The reasoning was that the `Set`
@@ -689,7 +722,7 @@ Worth recording beside the gaps, because the list is longer.
   resolved.
 - **A wrong argument is the checker's diagnostic and not a crash.** The
   lowering reads a declared struct's field by index, so a host that built one
-  with nine of ten fields would have had the VM read past its end. `invoke`
+  with nine of ten fields would have had `Lvm` read past its end. `invoke`
   holds the argument to the declaration before the first instruction, so what
   a host gets back is a sentence naming the argument, the field, and the type
   the declaration says belongs there.
@@ -719,12 +752,12 @@ Worth recording beside the gaps, because the list is longer.
   decision: [Measurements](#measurements) says why the invocation counts did
   not move a unit, and it is the kind of thing only a measurement says.
 - **A limit can belong to a request.** `evaluate_within` and `decide_within`
-  hand one invocation its own `Budget` on a `Vm` that was built once, which is
-  [What bounds one request](#what-bounds-one-request) and was
+  hand one invocation its own `Budget` on an `Lvm` that was built once, which
+  is [What bounds one request](#what-bounds-one-request) and was
   [issue #152](https://github.com/myuon/cove/issues/152).
 - **A failed invocation does not damage the session.** A host that fails, a
   request that does not exist, a schema the host broke, and a capability that
-  was not granted are four different failures and all four leave the VM able to
+  was not granted are four different failures and all four leave `Lvm` able to
   serve the next request. That is what makes holding one worthwhile.
 - **The trace links itself.** Both `reviews` operations take the request
   identifier as their first argument, so every `HostCall` event carries it and

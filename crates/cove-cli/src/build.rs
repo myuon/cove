@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use cove_diag::SourceMap;
+use cove_diag::{Diagnostic, SourceMap};
 use cove_sema::package::Package;
 use cove_sema::resolve::Program;
 
@@ -42,7 +42,7 @@ the Cove runtime, and that runs `[run.<name>]`'s entry when it is started. It
 is not a code generator: the binary runs the same program `cove run` does,
 on the same backend, so building changes how a program is delivered rather
 than how fast it runs. See docs/adr/0009-cove-build.md and, for which backend
-that is, docs/adr/0022-the-vm-is-the-default-backend.md.
+that is, docs/adr/0034-one-physical-word-stack.md.
 
 The binary needs no toolchain, no `cove` on the path, and no source tree. Its
 entry, its granted capabilities, and its limits are the ones `[run.<name>]`
@@ -74,17 +74,15 @@ flags:
                         `documents/` there for the `documents` host
   --allow-exec <path>   an absolute path `process.run` may start; repeat to
                         allow more, and omit to allow none
-  --backend <ast|vm>    which backend the binary runs on: `vm`, the dedicated
-                        VM and the default, or `ast`, the tree-walking
-                        interpreter. `lvm` is not one of them: a built binary
-                        embeds its backend, and the linear-memory backend of
-                        ADR 0034 is not one an embedded runtime can be yet
+  --backend <ast|lvm>   which backend the binary runs on: `lvm`, the
+                        linear-memory backend of ADR 0034 and the default, or
+                        `ast`, the tree-walking interpreter
 
 `--backend` is baked in like everything else, because a built binary honours
-no flag of its own. A program the VM cannot run is refused here, at build
-time, rather than by the binary when somebody starts it: the refusal names a
-construct in source, and the person holding the source is the one who can do
-something about it. Rebuild with `--backend ast` to get a binary that runs it.
+no flag of its own. A program the lowering has a gap for is reported here, at
+build time, rather than by the binary when somebody starts it: the diagnostic
+points into source, and the person holding the source is the one who can do
+something about it.
 
 Each flag overrides the `[run.<name>]` table for this build only. There is no
 `--stats` and no `--trace`: those are flags of the command that runs a
@@ -111,9 +109,9 @@ pub(crate) fn cmd_build(args: &[String]) -> Result<(), CliError> {
     // not check is not built.
     let (sources, package, program) = crate::load(None)?;
     let plan = plan(&sources, &package, &program, &flags)?;
-    if let Err(why) = refuse_what_the_backend_cannot_run(&plan, &program) {
+    if let Err(items) = lower_what_the_binary_will_lower(&plan, &program, &sources) {
         return Err(CliError::Diagnostics {
-            items: vec![why.to_diagnostic()],
+            items,
             sources: std::sync::Arc::new(sources),
         });
     }
@@ -203,25 +201,6 @@ fn parse_build_flags(args: &[String]) -> Result<BuildFlags, CliError> {
                         Backend::NAMES
                     ))
                 })?;
-                // The one command the third backend is not offered to, and
-                // the refusal is here rather than a silent fall back to the
-                // default: a built binary embeds an evaluator and has no
-                // flag to change it, so `cove build --backend lvm` would
-                // have to write a binary that runs on something else, and
-                // ADR 0009's "a built binary must not defer an error to
-                // whoever runs it" is the same rule read one step earlier.
-                // `cove_runtime::embed::EmbeddedBackend` names the two the
-                // embedded runtime can be, and widening it is work the
-                // cutover does by deleting one of them rather than work this
-                // window should pay for twice.
-                if flags.backend == Backend::Lvm {
-                    return Err(CliError::Message(format!(
-                        "`cove build --backend {}` is not supported: a built binary embeds the backend it runs on, and the linear-memory backend is not one an embedded runtime can be yet\n  \
-                         run it with `cove run --backend {}`, or build it on `vm`",
-                        Backend::Lvm,
-                        Backend::Lvm,
-                    )));
-                }
             }
             "--allow-exec" => {
                 let value = flag_value(args, &mut i, "--allow-exec")?;
@@ -375,18 +354,19 @@ fn plan(
 ///
 /// ADR 0009's rule is that "a built binary must not defer an error to
 /// whoever runs it", which is why `cove build` checks the package rather
-/// than leaving it to the binary. A refused lowering is the same kind of
-/// error and gets the same treatment: it names a construct in source, and
-/// whoever holds the source is who can act on it.
+/// than leaving it to the binary. A lowering that stopped is the same kind of
+/// error and gets the same treatment: it points into source, and whoever
+/// holds the source is who can act on it.
 ///
-/// The IR is thrown away. ADR 0019 leaves it unserialized, so the binary
-/// lowers again when it starts; what this buys is the moment the refusal
+/// The IR is thrown away — it is not a serialization format, so the binary
+/// lowers again when it starts. What this buys is the moment the diagnostic
 /// arrives, not the work.
-fn refuse_what_the_backend_cannot_run(
+fn lower_what_the_binary_will_lower(
     plan: &BuildPlan,
     program: &Program,
-) -> Result<(), cove_ir::Unsupported> {
-    if plan.backend != Backend::Vm {
+    sources: &SourceMap,
+) -> Result<(), Vec<Diagnostic>> {
+    if plan.backend != Backend::Lvm {
         return Ok(());
     }
     // `plan` was built from an entry `lookup_entry` already validated, so
@@ -395,7 +375,16 @@ fn refuse_what_the_backend_cannot_run(
     let Some((module, entry)) = plan.entry.rsplit_once('.') else {
         return Ok(());
     };
-    cove_ir::lower::lower_entry(program, module, entry).map(|_| ())
+    // The shipped schemas and no others, which is the set `crate::load`
+    // checked this package against and the set the binary will lower with.
+    cove_lir::lower_entry(
+        program,
+        sources,
+        &cove_sema::HostSchemas::new(),
+        module,
+        entry,
+    )
+    .map(|_| ())
 }
 
 /// The file name an executable for `name` gets, which is `name` itself
@@ -601,14 +590,7 @@ fn main() -> std::process::ExitCode {{
         ),
         backend = match plan.backend {
             Backend::Ast => "Ast",
-            Backend::Vm => "Vm",
-            // `parse_build_flags` is where this is refused, before a package
-            // is loaded and long before a crate is written, so a plan naming
-            // it cannot exist. Falling back to a spelling the embedded
-            // runtime does understand would build a binary that runs on a
-            // backend nobody asked for.
-            Backend::Lvm =>
-                unreachable!("`cove build --backend lvm` is refused when the flag is parsed"),
+            Backend::Lvm => "Lvm",
         },
     )
 }
@@ -979,7 +961,7 @@ export fn main() -> Result<Unit, Error> {
             "{summary}"
         );
         assert!(summary.contains("entry:   app.main"), "{summary}");
-        assert!(summary.contains("backend: vm"), "{summary}");
+        assert!(summary.contains("backend: lvm"), "{summary}");
         assert!(summary.contains("grants:  console"), "{summary}");
         assert!(summary.contains("limits:  fuel 10"), "{summary}");
     }
@@ -1008,11 +990,19 @@ export fn main() -> Result<Unit, Error> {
     }
 
     /// A binary that could not start is never written: `cove build` lowers
-    /// what the binary will lower and reports the refusal to whoever holds
-    /// the source, which is the only person who can act on it.
+    /// what the binary will lower, at build time, so that a gap in the
+    /// lowering reaches whoever holds the source rather than whoever holds
+    /// the binary.
+    ///
+    /// The program below is the one this case used to pin a *refusal* with —
+    /// a function declared inside a function body, which the predecessor
+    /// backend had no instruction for. It lowers now, and the case is worth
+    /// keeping in that form: what it asserts is that the build-time lowering
+    /// runs and answers about the entry, and a construct that used to stop it
+    /// is a better witness for that than one that never could.
     #[test]
-    fn a_construct_the_vm_cannot_run_is_refused_at_build_time() {
-        let dir = TempDir::new("build-unsupported");
+    fn the_binary_s_lowering_runs_at_build_time() {
+        let dir = TempDir::new("build-lowering");
         write(dir.path(), "cove.toml", "[run.app]\nentry = \"app.main\"\n");
         write(
             dir.path(),
@@ -1029,16 +1019,14 @@ export fn main() -> Result<Unit, Error> {
 ",
         );
         let plan = plan_ok(dir.path(), &flags("app"));
-        let (_, _, program) = crate::fixture::check_fixture(dir.path());
-        let why = refuse_what_the_backend_cannot_run(&plan, &program)
-            .expect_err("a nested function has no lowering");
-        assert_eq!(why.what, "a function declared inside a function body");
+        let (sources, _, program) = crate::fixture::check_fixture(dir.path());
+        assert!(lower_what_the_binary_will_lower(&plan, &program, &sources).is_ok());
 
-        // And the escape hatch actually escapes.
+        // And the interpreter, which lowers nothing, is asked for nothing.
         let mut on_the_oracle = flags("app");
         on_the_oracle.backend = Backend::Ast;
         let plan = plan_ok(dir.path(), &on_the_oracle);
-        assert!(refuse_what_the_backend_cannot_run(&plan, &program).is_ok());
+        assert!(lower_what_the_binary_will_lower(&plan, &program, &sources).is_ok());
     }
 
     #[test]

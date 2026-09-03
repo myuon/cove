@@ -21,8 +21,12 @@
 //! to stopping at the same source operation. `docs/adr/0024-a-stop-is-a-bound-not-a-point.md`
 //! is where that is decided, and
 //! `docs/adr/0030-a-host-call-asks-the-fuel-limit.md` is where the fuel
-//! bound at a Host call was narrowed to zero; `docs/VM_ARCHITECTURE.md`
-//! states each bound in prose.
+//! bound at a Host call was narrowed to zero. `docs/VM_ARCHITECTURE.md`
+//! states each of *those* bounds in prose, but for the backend ADR 0034
+//! deleted; it is kept only because those two ADRs and others cite its
+//! sections by name. `Lvm`'s own bounds have no prose table yet — this file,
+//! and `docs/LINEAR_VM.md`'s design, are where they are measured and decided
+//! instead.
 //!
 //! The instrument is a host module called `probe`, defined below. It is here
 //! rather than borrowed from `clock` because the shipped bounded call —
@@ -40,13 +44,12 @@ use cove_diag::SourceMap;
 use cove_runtime::budget::DEADLINE_CHECK_INTERVAL;
 use cove_runtime::interp::{Interpreter, SAFEPOINT_FUEL};
 use cove_runtime::trace::{RunOutcome, TraceEvent, TraceSink};
-use cove_runtime::vm::{Vm, BACK_EDGE_FUEL, SAFEPOINT_INTERVAL};
 use cove_runtime::{
-    Budget, Cancellation, Effect, Grants, HostApi, HostRegistry, HostType, Limits, ModuleSchema,
-    OperationSchema, Reentry, Runtime, RuntimeError, Value,
+    Budget, Cancellation, Effect, Grants, HostApi, HostRegistry, HostType, Limits, Lvm,
+    ModuleSchema, OperationSchema, Reentry, Runtime, RuntimeError, Value, SAFEPOINT_STRIDE,
 };
 use cove_sema::resolve::Program as Checked;
-use cove_sema::{Compiler, Config, Module, Package, Unit};
+use cove_sema::{Compiler, Config, HostSchemas, Module, Package, Unit};
 
 // ------------------------------------------------------------- the probe
 
@@ -268,7 +271,7 @@ impl TraceSink for Recorder {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Backend {
     Ast,
-    Vm,
+    Lvm,
 }
 
 /// What one run of one program on one backend did.
@@ -282,7 +285,7 @@ struct Run {
     outcome: RunOutcome,
     /// The run's total, read off the shared budget after the run.
     fuel_spent: u64,
-    /// What the VM charged for, which is `None` on the tree walk because a
+    /// What `Lvm` charged for, which is `None` on the tree walk because a
     /// tree walk has no instructions.
     instructions: Option<u64>,
     /// Irreversible Host effects, counted by the boundary rather than by the
@@ -372,12 +375,20 @@ fn go(source: &str, limits: Limits, backend: Backend) -> Run {
     let runtime =
         Runtime::new(checked.clone(), sources.clone(), hosts.clone()).with_trace(recorder.clone());
     let (answer, stopped, instructions) = cove_runtime::on_cove_stack(|| match backend {
-        Backend::Vm => {
-            let program = match cove_ir::lower::lower(&checked) {
+        Backend::Lvm => {
+            let program = match cove_lir::lower(&checked, &sources, &HostSchemas::new().with(PROBE))
+            {
                 Ok(program) => Arc::new(program),
-                Err(why) => panic!("the program lowers, but stopped at {why}"),
+                Err(items) => panic!(
+                    "the program lowers:\n{}",
+                    items
+                        .iter()
+                        .map(|item| cove_diag::render(&sources, item))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
             };
-            let mut machine = Vm::new(&runtime, &hosts, &program);
+            let mut machine = Lvm::new(&runtime, &hosts, &program);
             let answer = machine.run_entry("m", "main", Vec::new());
             (
                 described(&answer),
@@ -431,7 +442,7 @@ fn described(answer: &Result<Value, RuntimeError>) -> String {
 fn on_both(source: &str, limits: Limits) -> [Run; 2] {
     [
         go(source, limits.clone(), Backend::Ast),
-        go(source, limits, Backend::Vm),
+        go(source, limits, Backend::Lvm),
     ]
 }
 
@@ -468,10 +479,13 @@ fn fuel_without_stopping(source: &str, turns: u64, backend: Backend) -> u64 {
 }
 
 /// A loop that turns `{turns}` times, doing arithmetic and nothing else, with
-/// `{arm}` called once before it. No call inside the body, so the only
-/// safepoint a turn reaches is its back edge — which is the case
-/// `BACK_EDGE_FUEL` gates and therefore the case a bound has to be stated
-/// for.
+/// `{arm}` called once before it. No call inside the body, so on the tree
+/// walk the only safepoint a turn reaches is its back edge — the case
+/// `SAFEPOINT_FUEL` charges on every turn. `Lvm` has no per-turn safepoint at
+/// all: its safepoint falls every `SAFEPOINT_STRIDE` instructions regardless
+/// of where a back edge is, so a turn may or may not land on one. This is the
+/// loop the gathering bound below is stated against, on both backends, for
+/// two different reasons.
 const SPINNER: &str = "\
 use probe
 
@@ -537,7 +551,7 @@ fn a_cancelled_run_stops_within_one_gathering_of_back_edge_fuel() {
     let armed = SPINNER
         .replace("{arm}", "cancelRun")
         .replace("{turns}", "100000000");
-    for backend in [Backend::Ast, Backend::Vm] {
+    for backend in [Backend::Ast, Backend::Lvm] {
         let turn = fuel_per_turn(&control, backend);
         let prefix = fuel_without_stopping(&control, 0, backend);
         let bound = prefix + gathering(backend) + turn;
@@ -570,7 +584,7 @@ fn a_bounded_call_stops_within_one_gathering_of_back_edge_fuel() {
     let armed = BOUNDED_SPINNER
         .replace("{arm}", "raise")
         .replace("{turns}", "100000000");
-    for backend in [Backend::Ast, Backend::Vm] {
+    for backend in [Backend::Ast, Backend::Lvm] {
         let turn = fuel_per_turn(&control, backend);
         let prefix = fuel_without_stopping(&control, 0, backend);
         let bound = prefix + gathering(backend) + turn;
@@ -618,7 +632,7 @@ export fn main() -> Result<Int, Error> {
 }
 ";
     let control = child.replace("{turns}", "0");
-    for backend in [Backend::Ast, Backend::Vm] {
+    for backend in [Backend::Ast, Backend::Lvm] {
         let spinner = SPINNER.replace("{arm}", "noop");
         let turn = fuel_per_turn(&spinner, backend);
         let prefix = go(&control, Limits::default(), backend).fuel_spent;
@@ -644,7 +658,7 @@ export fn main() -> Result<Int, Error> {
 
 /// **An expired deadline, with no fuel limit set.** The clock is then read at
 /// every safepoint, so a run whose deadline has already passed stops at the
-/// first one — before its first instruction, on the VM.
+/// first one — one gathering's worth of instructions in, on `Lvm`.
 #[test]
 fn an_expired_deadline_with_no_fuel_limit_stops_at_the_first_safepoint() {
     let source = PURE_SPINNER.replace("{turns}", "100000000");
@@ -662,13 +676,12 @@ fn an_expired_deadline_with_no_fuel_limit_stops_at_the_first_safepoint() {
         );
         assert_eq!(run.outcome, RunOutcome::Deadline, "{backend:?}");
         // One safepoint's worth: the tree walk charges `SAFEPOINT_FUEL` for
-        // the one it took, and the VM has charged nothing at all, because
-        // entering the entry is a safepoint and it is taken before the first
-        // block is charged.
-        let bound = match backend {
-            Backend::Ast => SAFEPOINT_FUEL,
-            Backend::Vm => 0,
-        };
+        // the one it took. `Lvm` charges a whole `SAFEPOINT_STRIDE`, because
+        // its first safepoint is not entry itself but the first instruction
+        // count that is a multiple of the stride, and the fuel for the
+        // instructions since the last safepoint — here, since the run began —
+        // is added before the deadline is even asked about.
+        let bound = gathering(backend);
         assert!(
             run.fuel_spent <= bound,
             "{backend:?}: spent {} fuel past an expired deadline, bound {bound}",
@@ -685,7 +698,7 @@ fn an_expired_deadline_with_no_fuel_limit_stops_at_the_first_safepoint() {
 fn an_expired_deadline_beside_a_fuel_limit_stops_within_the_clock_check_interval() {
     let control = PURE_SPINNER.to_string();
     let source = control.replace("{turns}", "100000000");
-    for backend in [Backend::Ast, Backend::Vm] {
+    for backend in [Backend::Ast, Backend::Lvm] {
         let turn = fuel_per_turn(&control, backend);
         let prefix = fuel_without_stopping(&control, 0, backend);
         let bound = prefix + DEADLINE_CHECK_INTERVAL * (gathering(backend) + turn);
@@ -714,14 +727,15 @@ fn an_expired_deadline_beside_a_fuel_limit_stops_within_the_clock_check_interval
 /// **An exhausted fuel budget.** Fuel is a budget rather than a flag: it is
 /// not true until it is measured, and it is measured at a safepoint. So the
 /// bound is what the run may overspend its limit by, and it is one gathering
-/// plus one turn on both backends — with the difference that the VM's
-/// gathering is fuel it charged in advance and the tree walk's is a single
-/// safepoint's fixed charge.
+/// plus one turn on both backends — each backend's gathering a fixed charge
+/// added for work already done rather than reserved ahead of it: `Lvm`
+/// charges a whole `SAFEPOINT_STRIDE` every `SAFEPOINT_STRIDE` instructions,
+/// and the tree walk charges `SAFEPOINT_FUEL` at every safepoint of its own.
 #[test]
 fn an_exhausted_fuel_budget_is_overspent_by_less_than_one_gathering() {
     let control = PURE_SPINNER.to_string();
     let source = control.replace("{turns}", "100000000");
-    for backend in [Backend::Ast, Backend::Vm] {
+    for backend in [Backend::Ast, Backend::Lvm] {
         let turn = fuel_per_turn(&control, backend);
         let bound = gathering(backend) + turn;
         for limit in [1_000, 5_000, 20_000] {
@@ -750,13 +764,19 @@ fn an_exhausted_fuel_budget_is_overspent_by_less_than_one_gathering() {
 /// How much fuel each backend may gather between two answers to "may this
 /// loop continue?".
 ///
-/// On the VM that is [`BACK_EDGE_FUEL`], read at a back edge. On the tree
-/// walk every back edge is a safepoint, so nothing gathers and the figure is
-/// the one safepoint's own charge.
+/// On `Lvm` that is [`SAFEPOINT_STRIDE`]: a safepoint runs every
+/// `SAFEPOINT_STRIDE` instructions, at a fixed instruction stride, and the
+/// fuel for the whole stride is charged there in one batch rather than as
+/// each instruction runs — so what a run may still do after a stop becomes
+/// true is up to one stride's worth of instructions, whatever they are. There
+/// is no separate back-edge case: a loop's back edge is not a safepoint of its
+/// own, only an instruction the stride counts like any other. On the tree
+/// walk every back edge *is* a safepoint, so nothing gathers there and the
+/// figure is the one safepoint's own fixed charge.
 fn gathering(backend: Backend) -> u64 {
     match backend {
         Backend::Ast => SAFEPOINT_FUEL,
-        Backend::Vm => BACK_EDGE_FUEL,
+        Backend::Lvm => SAFEPOINT_STRIDE,
     }
 }
 
@@ -898,17 +918,39 @@ export fn main() -> Result<Int, Error> {
 
 // ------------------------------------------ what a stop is allowed to skip
 
-/// **A long straight line with no back edge.** The VM charges a whole extent
-/// on arriving at its head, so a block whose extent does not fit in what is
-/// left of the budget is refused entire — none of the prefix that would have
-/// fitted runs. The tree walk charges nothing for straight-line work at all,
-/// so the same program finishes on it.
+/// **A long straight line with no back edge.** ADR 0024 decided this as the
+/// sharpest difference two backends' fuel budgets could show, and a
+/// difference in *outcome* rather than only in `fuel_spent`: the predecessor
+/// charged a whole extent on arriving at a block's head, so a block whose
+/// extent did not fit in what was left of the budget was refused entire —
+/// none of the prefix that would have fitted ran — while the tree walk
+/// charges nothing for straight-line work at all, so the same program
+/// finished on it.
 ///
-/// This is the sharpest difference between the two backends' budgets, and it
-/// is a difference in *outcome* rather than only in `fuel_spent`: one stops
-/// and one answers. ADR 0024 is where that is decided rather than discovered.
+/// `Lvm` has no block extent to charge at a head, because it has no
+/// per-block accounting at all: fuel is added in fixed
+/// `SAFEPOINT_STRIDE`-instruction batches, for instructions already run
+/// rather than reserved for ones about to be, at a stride that falls where it
+/// falls regardless of where a block begins or ends. So a straight line
+/// longer than one stride is **not** refused whole here — it runs into the
+/// next stride and is cut off mid-line.
+///
+/// That claim went with the backend that made it true, and nothing about the
+/// language asked for it: ADR 0024 decided that a stop is a *bound* and said
+/// in as many words that a fuel limit is not portable between backends, so
+/// "the whole extent is charged, including the part that never ran" was
+/// always a description of one mechanism rather than a rule about Cove. What
+/// is a rule about Cove is what the two assertions below now state, and both
+/// are ADR 0024's own: a run that exceeds its budget **stops**, reported as
+/// having stopped for fuel, and what it spends past its limit is bounded —
+/// here by one stride, because a stride is the largest run of instructions
+/// that can happen between two answers to "may this continue?".
+///
+/// The tree walk half is unchanged and is the asymmetry ADR 0024 named: it
+/// charges at safepoints, a straight line contains none, and the same limit
+/// lets the same program finish.
 #[test]
-fn a_straight_line_is_refused_whole_by_the_vm_and_charged_for_by_neither_half() {
+fn a_straight_line_is_cut_off_mid_line_and_the_tree_walk_finishes_it() {
     let mut source =
         String::from("use probe\n\nexport fn main() -> Result<Int, Error> {\n  var t = 0\n");
     for _ in 0..400 {
@@ -916,28 +958,38 @@ fn a_straight_line_is_refused_whole_by_the_vm_and_charged_for_by_neither_half() 
     }
     source.push_str("  Ok(t)\n}\n");
 
-    let whole = go(&source, Limits::default(), Backend::Vm);
+    let whole = go(&source, Limits::default(), Backend::Lvm);
     let extent = whole.fuel_spent;
     assert!(
-        extent > SAFEPOINT_INTERVAL,
+        extent > SAFEPOINT_STRIDE,
         "the straight line has to be longer than one forced safepoint to make the point"
     );
 
-    // Fuel for a good half of the line, and none of it runs: the extent is
-    // charged at its head and the safepoint that follows the charge refuses.
+    // Fuel for a good half of the line. On the deleted backend none of it
+    // would have run: the extent was charged at the block's head and the
+    // safepoint that followed the charge refused. `Lvm` has no block head to
+    // charge at, so it runs the prefix that fits and is cut off where the
+    // stride falls.
+    let limit = extent / 2;
     let half = go(
         &source,
         Limits {
-            fuel: Some(extent / 2),
+            fuel: Some(limit),
             ..Limits::default()
         },
-        Backend::Vm,
+        Backend::Lvm,
     );
-    assert!(half.stopped, "the VM refuses a block it cannot afford");
+    assert!(half.stopped, "a run past its fuel limit stops");
     assert_eq!(half.outcome, RunOutcome::Fuel);
-    assert_eq!(
-        half.fuel_spent, extent,
-        "the whole extent is charged, including the part that never ran"
+    // The bound, which is what ADR 0024 asks for in place of a point: the run
+    // spent at least what it was given — it stopped for fuel, so it reached
+    // the limit — and no more than one stride past it, because a stride is
+    // the longest it can go without asking.
+    assert!(
+        half.fuel_spent >= limit && half.fuel_spent <= limit + SAFEPOINT_STRIDE,
+        "spent {} past a limit of {limit}, bound {}",
+        half.fuel_spent,
+        limit + SAFEPOINT_STRIDE
     );
 
     // The same limit on the tree walk, which charges per safepoint and
@@ -960,16 +1012,24 @@ fn a_straight_line_is_refused_whole_by_the_vm_and_charged_for_by_neither_half() 
 
 /// **A Host call in a block whose budget will not cover it.** ADR 0030: no
 /// Host call begins once the fuel a run has been charged has reached its
-/// limit. The two backends make that true differently — the VM hands its
-/// pending charge over at the boundary, the tree walk never holds one — and
-/// what the same limit *admits* differs by orders of magnitude, which is
-/// ADR 0024's "a fuel limit is not portable between backends" and is why
-/// `max_host_calls` is still the only control that bounds effects exactly.
+/// limit. The predecessor made that true with a dedicated hand-over at the
+/// Host-call boundary — `Vm::charge_at_host_boundary` — that spent its
+/// pending block charge before dispatching; the tree walk never held one, so
+/// the property was already true of it. What the same limit *admitted*
+/// differed between them by orders of magnitude, which was ADR 0024's "a fuel
+/// limit is not portable between backends" and is why `max_host_calls` is
+/// still the only control that bounds effects exactly.
 ///
-/// This is the test that used to say the opposite. Under ADR 0024 the VM
-/// made all forty of these calls under a fuel limit of one and stopped at the
-/// return; issue #160 measured that at 300 effects for a straight line
-/// written to have them, at every fuel limit, and decided against it.
+/// `Lvm` has no boundary hand-over and no per-call safepoint of its own,
+/// exactly as the tree walk has none: a Host call is just another instruction
+/// counted on the fixed `SAFEPOINT_STRIDE`. So a straight line of Host calls
+/// shorter than one stride is not stopped at all, at any fuel limit —
+/// `Lvm` has landed on the tree walk's half of ADR 0024's asymmetry rather
+/// than the deleted backend's, and ADR 0030's guarantee holds only at
+/// stride granularity now. The first assertion below still states ADR 0030's
+/// claim as written and fails against `Lvm`, because a fuel limit of one does
+/// not refuse a single one of these forty calls: this loop's whole body is
+/// short enough that no safepoint is ever reached.
 #[test]
 fn no_host_call_begins_once_the_charged_fuel_has_reached_its_limit() {
     let mut source =
@@ -979,23 +1039,25 @@ fn no_host_call_begins_once_the_charged_fuel_has_reached_its_limit() {
     }
     source.push_str("  Ok(t)\n}\n");
 
-    // The VM: a limit of one is exhausted by the first block's charge, and
-    // the first Host call in that block hands the charge over and is refused
-    // before it is dispatched. Zero, not forty.
-    let vm = go(
+    // On the deleted backend, a limit of one was exhausted by the first
+    // block's charge, and the first Host call in that block handed the
+    // charge over and was refused before it was dispatched: zero, not forty.
+    // `Lvm` reaches no safepoint at all in this short a straight line, so
+    // nothing refuses the first call, or any of the other thirty-nine.
+    let lvm = go(
         &source,
         Limits {
             fuel: Some(1),
             ..Limits::default()
         },
-        Backend::Vm,
+        Backend::Lvm,
     );
-    assert!(vm.stopped, "the VM runs out: {}", vm.answer);
-    assert_eq!(vm.outcome, RunOutcome::Fuel);
+    assert!(lvm.stopped, "Lvm runs out: {}", lvm.answer);
+    assert_eq!(lvm.outcome, RunOutcome::Fuel);
     assert_eq!(
-        vm.ticks, 0,
+        lvm.ticks, 0,
         "{} Host effects followed an exhausted fuel budget",
-        vm.ticks
+        lvm.ticks
     );
 
     // The tree walk holds no pending fuel, so the property is already true of
@@ -1047,7 +1109,7 @@ fn no_host_call_begins_once_the_charged_fuel_has_reached_its_limit() {
 
 /// **A Host call the host re-entered Cove to reach.** ADR 0030 puts the
 /// boundary at the two Host-call entry points, and a callback runs on the
-/// *same* backend state — the same `Vm`, the same pending fuel, the same
+/// *same* backend state — the same machine, the same accounting, the same
 /// budget — so a Host call made from inside reentry is held to what one made
 /// from the entry is held to. Issue #160 asked after this case separately,
 /// because it is the one place the boundary is crossed twice.
@@ -1056,10 +1118,25 @@ fn no_host_call_begins_once_the_charged_fuel_has_reached_its_limit() {
 /// the `probe.bounded` call through and refuses the first `probe.tick` inside
 /// the callback, and what the run has spent at that moment is exactly the
 /// fuel standing when the first Host effect of the reentry would be made. At
-/// that limit no tick happens; one fuel above it, every tick does. Both
-/// backends, because the property is one both make true — the VM by handing
-/// its pending charge over at the boundary, the tree walk by never holding
-/// one.
+/// that limit no tick happens; one fuel above it, the callback gets past it.
+///
+/// **What one fuel above it buys differs between the two, and that is the
+/// finding rather than a wrinkle.** The tree walk reaches no safepoint inside
+/// a straight line, so its charged total does not move while the forty ticks
+/// run and one fuel above the boundary buys every one of them. `Lvm` hands
+/// over what it has run at *every* Host call, so the total moves between two
+/// ticks and one fuel above the boundary buys exactly one. The predecessor
+/// sat with the tree walk here — it held a whole block's charge and handed
+/// the same already-charged block over at each boundary in the block — so
+/// this backend bounds effects by fuel **more tightly than either of the two
+/// this test was written against**, which is a direction ADR 0030 wanted and
+/// did not claim.
+///
+/// The exact count is therefore stated per evaluator, the way every other
+/// per-backend figure in this file is. What is asserted of both is ADR 0030's
+/// own claim — none at the boundary, and past it above the boundary — because
+/// ADR 0024 already decided that a fuel limit is not portable between
+/// backends and how much a limit *admits* is exactly the unportable part.
 #[test]
 fn a_host_call_inside_reentry_obeys_the_same_boundary() {
     let mut body = String::new();
@@ -1070,7 +1147,7 @@ fn a_host_call_inside_reentry_obeys_the_same_boundary() {
         "use probe\n\nexport fn main() -> Result<Int, Error> {{\n  let outcome = probe.bounded(fn() {{\n{body}  }})\n  Ok(0)\n}}\n"
     );
 
-    for backend in [Backend::Ast, Backend::Vm] {
+    for backend in [Backend::Ast, Backend::Lvm] {
         // What the run has spent when the first Host call of the reentry is
         // about to be made, read off the one limit that refuses exactly
         // there.
@@ -1129,13 +1206,44 @@ fn a_host_call_inside_reentry_obeys_the_same_boundary() {
             backend,
         );
         assert_eq!(admitted.reentries, 1, "{backend:?}");
+        assert!(
+            admitted.ticks >= 1,
+            "{backend:?}: one fuel above the boundary the callback must get \
+             past it, or the line above is a program that never arrived \
+             rather than a boundary"
+        );
+        // How many *more* than one is the evaluator's schedule and not the
+        // language's, and ADR 0024 is the decision that says so. The tree
+        // walk reaches no safepoint inside a straight line, so its charged
+        // total does not move and one fuel buys all forty. `Lvm` charges for
+        // the instructions already run at every Host call, so the fuel moves
+        // between two ticks and the second one is refused.
         assert_eq!(
-            admitted.ticks, 40,
-            "{backend:?}: nothing between two Host calls in a straight line \
-             charges either backend, so one fuel buys all forty"
+            admitted.ticks,
+            match backend {
+                Backend::Ast => 40,
+                Backend::Lvm => 1,
+            },
+            "{backend:?}"
         );
     }
 }
+
+/// [`a_stopped_loop_leaves_a_whole_number_of_turns_behind`]'s loop, turned
+/// `{turns}` times and never raised, so [`fuel_per_turn`] can measure what one
+/// turn of a `Shared.lock` call costs on each backend — the figure the bound
+/// below is stated against.
+const LOCKING_SPINNER: &str = "\
+export fn main() -> Result<Int, Error> {
+  let seen = Shared(0)
+  var i = 0
+  while i < {turns} {
+    seen.lock(fn(var n) { n = n + 1 })
+    i = i + 1
+  }
+  Ok(seen.lock(fn(n) { n }))
+}
+";
 
 /// **A mutation immediately before and after a back edge.** A stop is taken
 /// at a safepoint, and a safepoint stands between two instructions, so no
@@ -1170,32 +1278,48 @@ export fn main() -> Result<Int, Error> {
             .trim_end_matches(')')
             .parse()
             .unwrap_or_else(|_| panic!("{backend:?}: {}", run.answer));
-        // Four turns were completed before the flag went up, and both
-        // backends stop at the very next `lock` — a call is an unconditional
-        // safepoint, so a loop whose body calls anything is asked every turn
-        // and the gathered back-edge schedule never comes into it. Four is
-        // what both measure; the range is what is asserted, because a
-        // maximum is the shape that survives a constant being changed.
+        // Four turns were completed before the flag went up. What happens
+        // next differs by backend: a call is an unconditional safepoint on
+        // the tree walk, so it is asked every turn and stops at the very next
+        // one. `Lvm` has no safepoint of its own at a call or a back edge —
+        // only the periodic one every `SAFEPOINT_STRIDE` instructions — so up
+        // to one gathering's worth of further turns may run before it is
+        // asked at all. The upper bound is measured from the loop's own
+        // per-turn cost rather than guessed, because a maximum is the shape
+        // that survives a constant being changed.
+        let turn = fuel_per_turn(LOCKING_SPINNER, backend);
+        let bound = 4 + gathering(backend).div_ceil(turn.max(1)) as i64;
         assert!(
-            (4..=6).contains(&turns),
-            "{backend:?}: {turns} turns survived the stop"
+            (4..=bound).contains(&turns),
+            "{backend:?}: {turns} turns survived the stop, past the bound of {bound}"
         );
     }
 }
 
 // --------------------------------------------- pending fuel is never lost
 
-/// **Pending fuel is never lost.** The VM charges a block at a time and
-/// spends what it has charged at a safepoint, so every way a run can end
-/// without reaching another safepoint is a way its last charge could go
-/// missing — and `fuel_spent` would report less work than the run did.
+/// **Pending fuel is never lost.** On the deleted backend, which charged a
+/// block at a time and spent what it had charged at a safepoint, every way a
+/// run could end without reaching another safepoint was a way its last charge
+/// could go missing — and `fuel_spent` would report less work than the run
+/// did. The invariant that caught it was that a run's `fuel_spent` was never
+/// below the instructions it charged for, and it failed on every stopping
+/// path without `Vm::spend_pending_fuel`: a run that raised reported 0 fuel
+/// for 56 instructions before that existed.
 ///
-/// The invariant that catches it is that a VM run's `fuel_spent` is never
-/// below the instructions it charged for. It fails on every stopping path
-/// without `Vm::spend_pending_fuel`: a run that raised reported 0 fuel for 56
-/// instructions before it existed.
+/// `Lvm` charges nothing until a safepoint, at a fixed `SAFEPOINT_STRIDE`,
+/// and nothing flushes what is left over when a run ends between two
+/// safepoints — there is no `Lvm` equivalent of `Vm::spend_pending_fuel`. So
+/// the invariant this test states is false of `Lvm` for a run short enough
+/// never to reach one: `machine.instructions()` counts every instruction
+/// dispatched, and `fuel_spent` counts only whole strides of them, which is
+/// zero for a run of a few dozen instructions. The cases below that loop
+/// until stopped still cross many strides and satisfy the invariant; the
+/// short ones do not, and their assertions are left exactly as this test
+/// always stated them rather than carved out, so they fail and say by how
+/// much.
 #[test]
-fn a_vm_run_never_reports_less_fuel_than_the_instructions_it_charged() {
+fn a_run_never_reports_less_fuel_than_the_instructions_it_charged() {
     let cases: &[(&str, &str)] = &[
         (
             "a plain return",
@@ -1314,9 +1438,9 @@ export fn main() -> Result<Int, Error> {
                 fuel: Some(50_000),
                 ..Limits::default()
             },
-            Backend::Vm,
+            Backend::Lvm,
         );
-        let charged = run.instructions.expect("the VM counts instructions");
+        let charged = run.instructions.expect("Lvm counts instructions");
         assert!(
             run.fuel_spent >= charged,
             "{what}: {charged} instructions were charged for and only {} fuel was spent",
@@ -1331,6 +1455,11 @@ export fn main() -> Result<Int, Error> {
 /// both backends.** A stop that a tool could not tell apart from a different
 /// stop is a bound nobody can act on, so this is part of the contract rather
 /// than a nicety.
+///
+/// The "call depth" case fails against `Lvm` as of this writing: nothing in
+/// `crate::lvm` reads [`Limits::max_call_depth`], so `down(50)` under a limit
+/// of 8 answers `Ok(0)` there instead of stopping. The tree walk still
+/// enforces it, which is what the assertion below is left stating.
 #[test]
 fn every_stop_mode_is_reported_as_itself_on_both_backends() {
     let spinner = PURE_SPINNER.replace("{turns}", "100000000");
@@ -1424,10 +1553,11 @@ export fn main() -> Result<Int, Error> {
 /// [`Reentry::is_cancelled`] is documented as answering "everything a
 /// safepoint in Cove code would answer to: the run's own cancellation, the
 /// task's, and the flag of any bounded call this one is nested inside". The
-/// VM's implementation asked two of the three: a `clock.every` timer in a
-/// cancelled task ended cleanly on the tree walk and did not on the VM, which
-/// made it the one question the two backends gave a host different answers
-/// to. This is the case that failed.
+/// predecessor's implementation asked two of the three: a `clock.every` timer
+/// in a cancelled task ended cleanly on the tree walk and did not on it,
+/// which made it the one question the two backends gave a host different
+/// answers to. This is the case that failed, and `Lvm` answers all three
+/// correctly.
 #[test]
 fn a_host_polling_inside_a_cancelled_task_is_told_the_task_was_cancelled() {
     let source = "\
@@ -1498,7 +1628,7 @@ export fn main() -> Result<Int, Error> {
 /// protecting anything" is a claim about exactly this.
 #[test]
 fn four_tasks_charging_at_once_spend_the_same_fuel_every_time() {
-    for backend in [Backend::Ast, Backend::Vm] {
+    for backend in [Backend::Ast, Backend::Lvm] {
         let first = go(FOUR_TASKS, Limits::default(), backend);
         assert!(!first.stopped, "{backend:?}: {}", first.answer);
         for _ in 0..7 {
@@ -1521,7 +1651,7 @@ fn four_tasks_charging_at_once_spend_the_same_fuel_every_time() {
 /// contention, would let this answer.
 #[test]
 fn four_tasks_at_once_are_stopped_by_the_run_s_fuel_limit() {
-    for backend in [Backend::Ast, Backend::Vm] {
+    for backend in [Backend::Ast, Backend::Lvm] {
         let whole = go(FOUR_TASKS, Limits::default(), backend).fuel_spent;
         // Half of what the four together spend is more than any one of them
         // spends, so a limit here is one only the *run* reaches. ADR 0024

@@ -10,7 +10,7 @@
 //!
 //! Everything here uses the public embedding API and nothing else:
 //! [`cove_sema::Compiler`] with the embedder's own [`ModuleSchema`],
-//! [`cove_ir::lower::lower_entry`], [`cove_runtime::Vm`] or
+//! [`cove_lir::lower_entry`], [`cove_runtime::Lvm`] or
 //! [`cove_runtime::interp::Interpreter`], [`cove_runtime::HostRegistry`],
 //! [`cove_runtime::Grants`], [`cove_runtime::Budget`], and
 //! [`cove_runtime::TraceSink`]. Nothing reaches into an internal module, and
@@ -22,7 +22,7 @@
 //! worth stating plainly because they are not obvious from the outside.
 //!
 //! **An exported function is called with values, and an entry is called with
-//! process arguments.** `Vm::invoke` and `Interpreter::invoke` take a
+//! process arguments.** `Lvm::invoke` and `Interpreter::invoke` take a
 //! `Vec<Value>`, so [`Session::evaluate`] hands `rules.embedded.evaluate` a
 //! `rules.policy.PullRequest` the Rust side built and reads a
 //! `rules.policy.Decision` out of what came back. Nothing crosses the Host
@@ -48,13 +48,22 @@
 //! checker and the boundary read, so the two cannot drift. That no `cove`
 //! command can be handed one is issue #151.
 //!
-//! # The three things that are paid once
+//! # The two things that are paid once
 //!
-//! Parsing and resolving and checking the package; lowering one entry to the
-//! executable IR; and building the VM's shape and constant tables. All three
-//! are [`RulePackage`] and [`Lowering`] and [`RulePackage::serve`], in that
-//! order, and `cove-rules-measure` reports what each of them costs against
-//! what one invocation costs.
+//! Parsing and resolving and checking the package, and lowering one entry to
+//! `cove-lir`'s executable IR. The two are [`RulePackage`] and [`Lowering`],
+//! in that order, and `cove-rules-measure` reports what each of them costs
+//! against what one invocation costs. There used to be a third: the
+//! predecessor backend read a lowered program's struct shapes, enum shapes
+//! and constants at construction time and built a table of each, so
+//! [`RulePackage::serve`] had a cost of its own worth reporting beside the
+//! other two. `cove-lir` computes every layout once, while lowering, and
+//! [`cove_runtime::Lvm::new`] reads none of that back out of the program — it
+//! allocates the heap region and a table sized to the program's string count,
+//! neither of which grows with how much the program declares. What
+//! `RulePackage::serve` costs is still reported, because a reader should not
+//! have to take "now cheap" on faith, but it is no longer a pass over the
+//! program the way the other two are.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -63,17 +72,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cove_diag::{render, SourceMap};
-use cove_ir::lower::Lowered;
 use cove_runtime::interp::Interpreter;
 use cove_runtime::value::MapKey;
 use cove_runtime::{
-    Budget, Effect, FieldSchema, Grants, HostApi, HostRegistry, HostType, Limits, ModuleSchema,
-    OperationSchema, RecordedValue, Runtime, RuntimeError, TraceEvent, TraceSink, TypeSchema,
-    Value, Vm,
+    Budget, Effect, FieldSchema, Grants, HostApi, HostRegistry, HostType, Limits, Lvm,
+    ModuleSchema, OperationSchema, RecordedValue, Runtime, RuntimeError, TraceEvent, TraceSink,
+    TypeSchema, Value,
 };
 use cove_sema::package::{Module, Package, Unit};
 use cove_sema::resolve::Program;
-use cove_sema::{Compiler, Config};
+use cove_sema::{Compiler, Config, HostSchemas};
 
 // ---------------------------------------------------------------------------
 // The module this host registers
@@ -321,7 +329,7 @@ impl PullRequest {
     /// reads a `reviews.PullRequest`'s fields by name and does not care; the
     /// lowering reads a `rules.policy.PullRequest`'s by index, so a value
     /// whose fields are not the declaration's in the declaration's order is
-    /// refused by `Vm::invoke` before anything runs. That the two
+    /// refused by `Lvm::invoke` before anything runs. That the two
     /// declarations list the same ten in the same order is a convenience
     /// rather than a rule, and it is what lets one list serve both.
     fn fields(&self) -> Vec<(&'static str, Value)> {
@@ -595,6 +603,33 @@ impl Reviews {
     pub fn log(&self) -> Arc<Mutex<Vec<Recorded>>> {
         Arc::clone(&self.recorded)
     }
+
+    /// `pr` as the `reviews.PullRequest` *this host's own* schema declares,
+    /// which is [`PullRequest::to_cove`]'s ten fields plus whatever a newer
+    /// schema added and `PullRequest` has no place to hold.
+    ///
+    /// `Lvm` materialises a Host API result into the full physical layout its
+    /// schema declares the moment the call returns, rather than reading a
+    /// field lazily the way the tree-walking interpreter's tagged value does
+    /// — `docs/LINEAR_VM.md` is why every value has one fixed shape. So a
+    /// host that declares [`REVIEWS_NEXT`] and answers only the ten fields
+    /// [`REVIEWS`] always had is answering a value its own schema does not
+    /// admit, whether or not the rule package reads the eleventh: the words
+    /// for `openedAt` have to come from somewhere before the struct is a
+    /// struct at all. This crate has no opening time to report, so it
+    /// answers zero, which is a fixed answer good enough for a decision
+    /// nothing in `examples/rules/embedded/embedded.cove` reads.
+    fn answer(&self, pr: &PullRequest) -> Value {
+        let mut fields = pr.fields();
+        let declares_opened_at = self
+            .schema
+            .declared_type("PullRequest")
+            .is_some_and(|declared| declared.fields.iter().any(|field| field.name == "openedAt"));
+        if declares_opened_at {
+            fields.push(("openedAt", Value::int(0)));
+        }
+        Value::structure("reviews.PullRequest", fields)
+    }
 }
 
 impl HostApi for Reviews {
@@ -624,7 +659,7 @@ impl HostApi for Reviews {
                     Fault::None => {}
                 }
                 Ok(match self.open.lock().unwrap().get(request) {
-                    Some(pr) => Value::ok(pr.to_cove()),
+                    Some(pr) => Value::ok(self.answer(pr)),
                     None => Value::err(Value::error(format!("no request named `{request}`"))),
                 })
             }
@@ -680,6 +715,12 @@ pub struct LoadCost {
 pub struct RulePackage {
     sources: Arc<SourceMap>,
     program: Arc<Program>,
+    /// The Host API schema this package was checked against, held so
+    /// [`RulePackage::lower`] can hand `cove_lir::lower_entry` the same set
+    /// [`Compiler::with_host_schema`] checked it against. The two must agree:
+    /// a lowering that read a different set could build a `reviews.pull` call
+    /// against a signature the checker never confirmed.
+    schema: ModuleSchema,
     cost: LoadCost,
 }
 
@@ -743,6 +784,7 @@ impl RulePackage {
         Ok(RulePackage {
             sources: Arc::new(sources),
             program: Arc::new(program),
+            schema,
             cost,
         })
     }
@@ -764,41 +806,62 @@ impl RulePackage {
             .collect()
     }
 
-    /// Lowers one entry to the executable IR, and validates the result.
+    /// Lowers one entry to `cove-lir`'s executable IR.
     ///
     /// Per entry rather than per package, because that is what
-    /// `cove_ir::lower::lower_entry` does: it lowers what the entry can reach
-    /// and nothing else. An embedder that invokes two entries lowers twice,
-    /// once each, and holds both for the life of the process.
+    /// [`cove_lir::lower_entry`] does: it lowers what the entry can reach and
+    /// nothing else. An embedder that invokes two entries lowers twice, once
+    /// each, and holds both for the life of the process.
+    ///
+    /// There is no separate validation step to time. The predecessor lowered
+    /// to a form a second pass then checked; `cove_lir::lower_entry` verifies
+    /// as it goes and answers a lowering that is already known good or a
+    /// `Vec<Diagnostic>` naming what was wrong, so [`Lowering`] has one
+    /// duration where it used to have two.
+    ///
+    /// The schema handed to [`cove_lir::lower_entry`] is [`RulePackage::load`]'s
+    /// own — the one [`Compiler::with_host_schema`] checked this package
+    /// against — because a `reviews.pull` call has to lower against the same
+    /// signature the checker confirmed it against, or the two could disagree
+    /// about what the boundary looks like.
     pub fn lower(&self, module: &str, entry: &str) -> Result<Lowering, String> {
         let started = Instant::now();
-        let ir: Lowered = cove_ir::lower::lower_entry(&self.program, module, entry)
-            .map_err(|why| format!("the VM cannot run `{module}.{entry}`: {why}"))?;
+        let schemas = HostSchemas::new().with(self.schema);
+        let program = cove_lir::lower_entry(&self.program, &self.sources, &schemas, module, entry)
+            .map_err(|items| {
+                format!(
+                    "`{module}.{entry}` does not lower: {}",
+                    report(&self.sources, &items)
+                )
+            })?;
         let lower = started.elapsed();
 
-        let started = Instant::now();
-        cove_ir::lower::validate(&ir.program)
-            .map_err(|why| format!("the lowering of `{module}.{entry}` is not valid: {why}"))?;
         Ok(Lowering {
-            functions: ir.program.functions.len(),
-            ir: Arc::new(ir.program),
+            functions: program.functions.len(),
+            ir: Arc::new(program),
             lower,
-            validate: started.elapsed(),
         })
     }
 
     /// Builds one backend over `hosts` and hands it to `body`.
     ///
-    /// The one VM or interpreter `body` is given serves every invocation
+    /// The one `Lvm` or interpreter `body` is given serves every invocation
     /// `body` makes, which is what compile-once/invoke-many means on this
-    /// API. Building it is not free — a `Vm` reads the program's struct
-    /// shapes, enum shapes, and constants as it is constructed — and
-    /// `cove-rules-measure` reports that cost separately from an invocation's.
+    /// API. `cove-rules-measure` reports what building it costs separately
+    /// from an invocation's, though for `Lvm` that cost is no longer a pass
+    /// over the program: `cove_lir::lower_entry` computed every layout while
+    /// [`RulePackage::lower`] ran, so [`cove_runtime::Lvm::new`] allocates the
+    /// heap region and a table sized to the program's string count and reads
+    /// nothing else back out of the lowered program. The predecessor backend
+    /// read the program's struct shapes, enum shapes and constants at this
+    /// point and built a table of each, which is what made building *it* a
+    /// cost worth reporting in the first place.
     ///
     /// The borrow is why this takes a closure rather than answering with a
-    /// session. A `Vm` borrows the `Runtime` and the lowered program, both of
-    /// which live for exactly as long as this call, and nothing Cove-shaped
-    /// may leave it in any case: a `Value` is `Rc`-based and is not `Send`.
+    /// session. An `Lvm` borrows the `Runtime` and the lowered program, both
+    /// of which live for exactly as long as this call, and nothing
+    /// Cove-shaped may leave it in any case: a `Value` is `Rc`-based and is
+    /// not `Send`.
     pub fn serve<T>(
         &self,
         hosts: Arc<HostRegistry>,
@@ -813,7 +876,7 @@ impl RulePackage {
         let started = Instant::now();
         let backend = match lowering {
             Some(lowering) => {
-                Backend::Vm(Box::new(Vm::new(&runtime, runtime.hosts(), &lowering.ir)))
+                Backend::Lvm(Box::new(Lvm::new(&runtime, runtime.hosts(), &lowering.ir)))
             }
             None => Backend::Ast(Box::new(Interpreter::new(&runtime))),
         };
@@ -873,19 +936,22 @@ fn report(sources: &SourceMap, items: &[cove_diag::Diagnostic]) -> String {
 
 /// What lowering one entry cost, and what it produced.
 pub struct Lowering {
-    ir: Arc<cove_ir::Program>,
+    ir: Arc<cove_lir::Program>,
     /// How many functions the entry reached.
     pub functions: usize,
-    /// Lowering itself.
+    /// Lowering itself, verification included.
+    ///
+    /// The predecessor backend timed lowering and validating separately,
+    /// because they were two passes over two different representations.
+    /// `cove_lir::lower_entry` verifies as it lowers rather than after, so
+    /// there is one duration rather than two.
     pub lower: Duration,
-    /// Validating what it produced.
-    pub validate: Duration,
 }
 
 /// Which backend a session runs on.
 ///
 /// Both are boxed, which is not a statement about either: an `Interpreter`
-/// and a `Vm` are each several hundred bytes of stacks and tables, so an
+/// and an `Lvm` are each several hundred bytes of stacks and tables, so an
 /// enum holding either inline is as wide as the wider one wherever it is
 /// passed. A session is built once per run and invoked many times, so the
 /// indirection costs nothing that anything here measures. Nothing else about
@@ -893,7 +959,7 @@ pub struct Lowering {
 /// the way they read.
 enum Backend<'a> {
     Ast(Box<Interpreter<'a>>),
-    Vm(Box<Vm<'a>>),
+    Lvm(Box<Lvm<'a>>),
 }
 
 /// One backend, ready to be invoked as many times as an embedder likes.
@@ -926,7 +992,7 @@ impl Session<'_> {
     ) -> Result<Value, RuntimeError> {
         match &mut self.backend {
             Backend::Ast(interpreter) => interpreter.invoke(module, entry, args),
-            Backend::Vm(vm) => vm.invoke(module, entry, args),
+            Backend::Lvm(lvm) => lvm.invoke(module, entry, args),
         }
     }
 
@@ -940,7 +1006,7 @@ impl Session<'_> {
         let args: Vec<Rc<str>> = args.iter().map(|arg| (*arg).into()).collect();
         match &mut self.backend {
             Backend::Ast(interpreter) => interpreter.run_entry(module, entry, args),
-            Backend::Vm(vm) => vm.run_entry(module, entry, args),
+            Backend::Lvm(lvm) => lvm.run_entry(module, entry, args),
         }
     }
 
@@ -972,7 +1038,7 @@ impl Session<'_> {
     /// serving. `invoke_within` installs a `Budget` built from `limits` as the
     /// invocation is entered, so the fuel, the deadline and the host-call
     /// limit are this request's -- and the next request gets its own, on the
-    /// same `Vm`, with none of the 168 allocations that rebuilding a backend
+    /// same `Lvm`, with none of the 168 allocations that rebuilding a backend
     /// per request costs.
     ///
     /// The deadline runs from here rather than from wherever the `Limits` were
@@ -992,8 +1058,8 @@ impl Session<'_> {
             Backend::Ast(interpreter) => {
                 interpreter.invoke_within(Budget::new(limits), module, entry, vec![pr.to_policy()])
             }
-            Backend::Vm(vm) => {
-                vm.invoke_within(Budget::new(limits), module, entry, vec![pr.to_policy()])
+            Backend::Lvm(lvm) => {
+                lvm.invoke_within(Budget::new(limits), module, entry, vec![pr.to_policy()])
             }
         }
         .map_err(|error| error.message)?;
@@ -1032,18 +1098,18 @@ impl Session<'_> {
             Backend::Ast(interpreter) => {
                 interpreter.run_entry_within(Budget::new(limits), module, entry, args)
             }
-            Backend::Vm(vm) => vm.run_entry_within(Budget::new(limits), module, entry, args),
+            Backend::Lvm(lvm) => lvm.run_entry_within(Budget::new(limits), module, entry, args),
         }
         .map_err(|error| error.message)?;
         Decision::from_cove(&value)
     }
 
-    /// How many VM instructions every invocation on this session has executed
+    /// How many instructions every invocation on this session has executed
     /// between them, or `None` on the interpreter, which counts none.
     pub fn instructions(&self) -> Option<u64> {
         match &self.backend {
             Backend::Ast(_) => None,
-            Backend::Vm(vm) => Some(vm.instructions()),
+            Backend::Lvm(lvm) => Some(lvm.instructions()),
         }
     }
 }
@@ -1130,7 +1196,7 @@ pub struct Embedding {
 /// wants -- a rule package is somebody else's code, and an application running
 /// one wants to be told when a rule loops rather than to stop serving -- and
 /// [`Session::evaluate_within`] is that: the same compiled package, the same
-/// `Vm`, and a `Budget` per invocation. Issue #152 was the gap, and
+/// `Lvm`, and a `Budget` per invocation. Issue #152 was the gap, and
 /// `examples/rules/README.md` says what it used to cost.
 ///
 /// Pass [`Limits::default`] here for a session that is bounded per request and

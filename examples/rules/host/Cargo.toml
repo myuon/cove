@@ -14,7 +14,7 @@ path = "src/bin/check.rs"
 
 [dependencies]
 cove-diag.workspace = true
-cove-ir.workspace = true
+cove-lir.workspace = true
 cove-runtime.workspace = true
 cove-schema.workspace = true
 cove-sema.workspace = true

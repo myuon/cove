@@ -2,6 +2,16 @@
 #
 # The ablation builds issue #123's calibration was measured with.
 #
+# **None of these patches applies any more.** Every one of them is written
+# against `crates/cove-runtime/src/vm.rs`, and ADR 0034's cutover deleted that
+# file along with the rest of the backend it belonged to. They are kept
+# because `docs/VM_ARCHITECTURE.md` is kept, and for the same reason: that
+# document records what each mechanism was measured to cost, six accepted ADRs
+# cite its sections, and a table whose method has been thrown away is a table
+# nobody can check. Recalibrating the linear-memory backend means writing new
+# patches against its dispatch loop and a new table beside the old one, not
+# editing these.
+#
 # Each `.patch` beside this script removes one thing the VM's dispatch path
 # carries, so that what it costs can be read off the difference. Several of
 # them are unsound and none of them is a proposal: an ablation says what a

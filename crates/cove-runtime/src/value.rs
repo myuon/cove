@@ -231,9 +231,10 @@ pub(crate) enum Repr {
 // It was forty until issue #109's audit, because exactly one variant was wide:
 // `HostFn` inlined two fat pointers, so the variant that names
 // `console.println` set the width of every `Int` both backends move. Boxing it
-// was worth `field` −4.9% and `method` −6.3% on the VM and `arith` −8.2% on
-// the interpreter — the first change since the VM landed to make both backends
-// faster. Width was then measured directly, by widening `Value` with a padding
+// was worth `field` −4.9% and `method` −6.3% on the predecessor VM and `arith`
+// −8.2% on the interpreter — the first change since that backend landed to
+// make both backends faster. Width was then measured directly, by widening
+// `Value` with a padding
 // variant nothing constructs and running the suite at 24, 32 and 40: about a
 // percent per eight bytes. See `docs/VM_ARCHITECTURE.md`, "The value
 // representation, audited".
@@ -558,9 +559,9 @@ pub struct Closure {
     /// [`crate::builtins::Callable::arity`] answers out of this,
     /// `Result.mapError` reads it to decide whether to hand its callback the
     /// error it is replacing, and `builtins::expect_callback` refuses a
-    /// callback of the wrong shape in one place for both backends. None of
-    /// them wanted a name, a default, a type or a span, and issue #121 is
-    /// where each was asked and answered.
+    /// callback of the wrong shape in one place rather than at every call
+    /// site that needs the check. None of them wanted a name, a default, a
+    /// type or a span, and issue #121 is where each was asked and answered.
     ///
     /// It counts parameters, not arguments a call must supply: a defaulted
     /// or a variadic parameter is one of these like any other, which is what
@@ -579,19 +580,18 @@ pub struct Closure {
 /// declares, which module it resolves names in, whether it is `async` — is
 /// the same fact whichever backend made it, and a host that receives one
 /// reads those the same way either way. The body is not: the interpreter
-/// walks a tree and the VM runs a lowered function, and neither can run the
-/// other's.
+/// walks a tree and the linear-memory backend runs a lowered function, and
+/// neither can run the other's.
 ///
 /// **The declaration is part of the body, not part of the closure.** The
 /// parameters an interpreted call binds against and the return type it
 /// coerces to are syntax, and syntax is one backend's form of a body: a
-/// lowered function has neither, because `cove_ir::lower` spent both when it
+/// lowered function has neither, because `cove_lir::lower` spent both when it
 /// chose the slots and emitted the conversions. Keeping them beside the
 /// `Arc<Block>` they came from is what lets every field of a [`Closure`]
 /// outside this enum be a fact both backends state the same way, so that
 /// reaching syntax means reaching past the one variant that has any — which
-/// is the direction issue #109 asks for, and which issue #121 asked for on
-/// the `cove_ir` side of the same field.
+/// is the direction issue #109 asks for.
 ///
 /// So this is an enum rather than a second `Value` variant. Issue #109 asks
 /// that the internal representation become *less* exposed to an embedder,
@@ -614,9 +614,8 @@ pub enum ClosureBody {
         /// environment when an argument was left out, and `is_var` to bind
         /// the caller's place rather than a copy — which is also what
         /// `Interpreter::call_shared_method` reads off the first parameter
-        /// of a `lock` closure. The VM answers that last question from
-        /// `cove_ir::Function::params` instead, and has no use for the other
-        /// three.
+        /// of a `lock` closure. The lowering answers that last question when
+        /// it chooses the slots, and has no use for the other three.
         params: Vec<Param>,
         /// The block to evaluate.
         block: Arc<cove_syntax::ast::Block>,
@@ -625,32 +624,21 @@ pub enum ClosureBody {
         ///
         /// Read for the written return type: a `dyn Trait` in it is what
         /// tells the interpreter to wrap what the body produced. The lowered
-        /// form needs no equivalent, because `cove_ir::lower` emits a
-        /// `cove_ir::Inst::MakeDyn` before every return of such a function,
-        /// so the answer that leaves a lowered body is already wrapped.
+        /// form needs no equivalent, because `cove_lir::lower` boxes what a
+        /// function declared as erased returns, so the answer that leaves a
+        /// lowered body is already wrapped.
         decl: Option<Arc<FnDecl>>,
     },
-    /// The lowered function [`crate::vm::Vm`] runs, addressed in the
-    /// [`cove_ir::Program`] that run was given.
-    ///
-    /// An id and nothing else, because the captures are beside it in
-    /// [`Closure::captures`] and the program is the VM's. A closure built by
-    /// one run cannot be called by another, which is true of the tree form
-    /// as well: both name something a particular run owns.
-    Lowered(cove_ir::FunctionId),
     /// The lowered function `cove_runtime::lvm` runs, addressed in the
     /// [`cove_lir::Program`] that run was given, together with the
     /// environment object it closes over.
     ///
-    /// Additive beside [`ClosureBody::Lowered`] rather than a replacement for
-    /// it: the two backends have two programs and two `FunctionId` types, and
-    /// an id into the one this run does not have would send a host's callback
-    /// looking for a body that is not there. Which of them a `Closure` holds
-    /// is the same question it always was — *which backend made this* — and
-    /// [`crate::host::Reentry`] is still the only thing that asks it.
+    /// A closure built by one run cannot be called by another, which is true
+    /// of the tree form as well: both name something a particular run owns.
+    /// Which of the two a `Closure` holds is the question *which backend made
+    /// this*, and [`crate::host::Reentry`] is the only thing that asks it.
     ///
-    /// The environment is here and the captures are not, which is the one
-    /// structural difference from the predecessor's form. A `cove-lir`
+    /// The environment is here and the captures are not. A `cove-lir`
     /// closure's captures are inline in a heap object, at the widths its
     /// layout says, and copying them out into [`Closure::captures`] would be
     /// materialising a value nothing asked for and losing the identity of the
@@ -1032,7 +1020,7 @@ impl Value {
     /// boundary both check against.
     ///
     /// This exists so that a host building an argument for
-    /// [`Vm::invoke`](crate::vm::Vm::invoke) does not have to name
+    /// [`Lvm::invoke`](crate::Lvm::invoke) does not have to name
     /// [`StructValue`]'s layout to do it — the `Rc`, the field vector, and in
     /// particular `opaque`, which records that the *declaration* said `export
     /// opaque struct` (ADR 0014) and is therefore not a thing a caller has an
@@ -1862,9 +1850,9 @@ impl Value {
 /// Each payload borrows from the value or copies out of it, and building one
 /// allocates nothing — so every part named here must still be *stored* as the
 /// thing it answers with. That is a promise about a materialized boundary
-/// value and not about how the VM holds one: ADR 0028 separates the two, and
-/// the parts that will actually move — slots, heap objects, dynamic values —
-/// are not [`Value`] and never reach here.
+/// value and not about how the linear-memory backend holds one: ADR 0028
+/// separates the two, and the parts that will actually move — slots, heap
+/// objects, dynamic values — are not [`Value`] and never reach here.
 ///
 /// A part whose storage sits behind a cell is answered as an opaque guard
 /// rather than a borrow: [`Elements`] is the one that exists, and it is what
@@ -3031,7 +3019,15 @@ mod tests {
         let closure = Value(Repr::Closure(Rc::new(Closure {
             is_async: false,
             arity: 2,
-            body: ClosureBody::Lowered(cove_ir::FunctionId(0)),
+            body: ClosureBody::Tree {
+                params: Vec::new(),
+                block: Arc::new(cove_syntax::ast::Block {
+                    statements: Vec::new(),
+                    tail: None,
+                    span: cove_diag::Span::new(cove_diag::FileId(0), 0, 0),
+                }),
+                decl: None,
+            },
             module: "app".into(),
             captures: Vec::new(),
         })));
@@ -3065,7 +3061,15 @@ mod tests {
             Value(Repr::Closure(Rc::new(Closure {
                 is_async: true,
                 arity: 2,
-                body: ClosureBody::Lowered(cove_ir::FunctionId(0)),
+                body: ClosureBody::Tree {
+                    params: Vec::new(),
+                    block: Arc::new(cove_syntax::ast::Block {
+                        statements: Vec::new(),
+                        tail: None,
+                        span: cove_diag::Span::new(cove_diag::FileId(0), 0, 0),
+                    }),
+                    decl: None,
+                },
                 module: "app".into(),
                 captures: Vec::new(),
             }))),

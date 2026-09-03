@@ -1,33 +1,67 @@
-//! The whole corpus, run through both backends, compared answer for answer.
+//! The whole corpus, run on the linear-memory backend and on the oracle,
+//! compared answer for answer.
 //!
-//! [ADR 0019](../../../docs/adr/0019-executable-ir-and-vm.md) leaves Cove with
-//! two executable answers to what a program means, and says they must be kept
-//! in agreement by tests rather than by hope.
-//! [Issue #111](https://github.com/myuon/cove/issues/111) is the gate that
-//! decides when the VM becomes the default, and this is its evidence: every
-//! program the repository already keeps — every `[run.<name>]` under
-//! `tests/e2e/`, `examples/`, and `benches/` — lowered, and then run on the
-//! interpreter and on the VM against the same deterministic fakes.
+//! [ADR 0034](../../../docs/adr/0034-one-physical-word-stack.md) makes the
+//! linear-memory backend the thing a `cove` command runs a program on, and
+//! keeps the tree-walking interpreter as the definition of what a Cove
+//! program means. Its sixth completion condition is what this file is: the
+//! full differential corpus agrees with the tree-walking oracle, *including
+//! values, errors, source spans and trace events*. Every program the
+//! repository keeps under `tests/e2e/` and `examples/` — every `[run.<name>]`
+//! table of every `cove.toml` there — is lowered, run on both against the
+//! same deterministic fakes, and compared.
 //!
-//! # A refusal is coverage, a disagreement is a failure
+//! # Why this stands beside `lvm_coverage.rs`
 //!
-//! `cove_ir::lower` refuses what it does not cover, so most of this corpus
-//! does not reach the VM today. That is the measurement rather than the
-//! problem: a case the lowering refuses is recorded with the construct it
-//! named and counted, and the counts are printed as the roadmap for what to
-//! lower next. A case that *does* lower and then answers differently on the
-//! two backends is a failure, and the message shows both sides, because ADR
-//! 0012 ranks the oracle above a backend and a backend that disagrees with
-//! the oracle is wrong.
+//! Two harnesses walk this corpus and they ask different questions, so
+//! neither is the other's superset.
 //!
-//! Three assertions make this a ratchet rather than a report: everything
-//! that lowers agrees; the number of cases that lower never falls below
-//! [`LOWERED_FLOOR`]; and the refusals are exactly the ones
-//! [`REGISTERED_REFUSALS`] names. The last is there because the first two
-//! are about a count, and a count cannot tell a new refusal from an old one
-//! — a language feature the checker accepts and the lowering refuses widens
-//! the gap ADR 0022 documents without lowering the number of cases that
-//! lower, and may raise it.
+//! `lvm_coverage.rs` is the roadmap and the ratchet. It takes `benches/` in
+//! as well, so it covers more programs, and it compares what both evaluators
+//! can be asked for cheaply — the value or the failure's message, both
+//! console streams, how the run ended, and the files the run wrote. It
+//! reports rather than stops, so a program that lowers and then lies is a
+//! recorded finding and the survey goes on past it.
+//!
+//! This one is the richer comparison, and it is the one ADR 0034's sixth
+//! condition names. It compares the failure's *span* and the whole *trace* —
+//! every host call's arguments and outcome, every task's spawn and end, the
+//! entry's two events and the run's terminal one — as the JSONL lines a
+//! `--trace` file would hold rather than as events. Those are the two things
+//! a survey that also runs `benches/` cannot afford, for the reason
+//! [`discover`] gives. That one compares more programs; this one compares
+//! more of each program.
+//!
+//! # Every case that checks, lowers
+//!
+//! The predecessor had an admission predicate. Its lowering answered "would
+//! you run this?" and refused what it did not cover, so most of a corpus
+//! never reached it, and the honest measurement was a count of what did: this
+//! file carried a floor under that count and a register naming every
+//! construct a refusal was allowed to be for, so that a language feature the
+//! checker accepted and the backend refused could not arrive unnoticed.
+//!
+//! ADR 0034 deletes the predicate. There is no `Unsupported`, no `admits`,
+//! and no vocabulary of refusals — a construct the lowering has not been
+//! taught is a bug in the lowering, answered as `Vec<Diagnostic>` like any
+//! other compiler fault. So "which constructs may this backend refuse" is not
+//! a question that exists any more, and neither a floor nor a register of
+//! refusals has anything left to be about.
+//!
+//! The ratchet did not go with them; it got stronger. Every case that checks
+//! must lower, and the only floor that is honest for a backend with no
+//! admission predicate is zero. A floor at ninety-six out of a hundred and
+//! twenty-two was the strongest claim available while the question existed;
+//! with the question gone, anything short of all of them is a bug carrying
+//! its own diagnostic, and the assertion says exactly that. A case that does
+//! not lower fails this test with what the lowering said printed beside it,
+//! rather than being counted as coverage of anything.
+//!
+//! What is kept is the count of cases whose *package* does not check.
+//! `tests/e2e/` holds those on purpose, each pinning a check-time diagnostic,
+//! and a program `cove check` refuses never reaches an evaluator at all — so
+//! they are counted apart rather than folded into anything this backend did
+//! or did not do.
 //!
 //! # A case is a program, not a package
 //!
@@ -43,27 +77,32 @@
 //! each pinning a check-time diagnostic, and a package holding one of those
 //! does not check as a whole.
 //!
-//! Lowering is sliced by reachability: `cove_ir::lower::lower_entry` lowers
-//! what the entry can reach and nothing else, so a construct the VM cannot
-//! run refuses only the cases whose entry reaches it. This is the same call
-//! `cove run --backend vm` makes with the same entry, so what this harness
+//! Lowering is sliced by reachability: `cove_lir::lower_entry` lowers what
+//! the entry can reach and nothing else, so what is measured here is the
+//! program that entry is. This is the same call `cove run` makes, with the
+//! same entry and the same `cove_sema::HostSchemas`, so what this harness
 //! measures and what the CLI runs are one program rather than two that could
-//! drift.
+//! drift. It verifies what it emitted before it answers, so there is no
+//! separate validation step for this file to make.
 //!
 //! # What is compared, and what is not
 //!
 //! The value the entry answered or the structured error it failed with, every
-//! line written to the fake console in order, how the run ended, the fake
-//! filesystem as the run left it, and the trace the run wrote. Fuel is not
-//! compared: ADR 0019 makes `fuel_spent` backend-specific, since an
-//! instruction is not an AST node and there is no honest mapping between
-//! them.
+//! line written to either of the fake console's streams in order, how the run
+//! ended, the fake filesystem as the run left it, and the trace the run
+//! wrote. Fuel is not compared: it is each evaluator's own work counter,
+//! charged at safepoints each puts where its own execution model has one, and
+//! an instruction is not an AST node, so there is no honest mapping between
+//! the two figures.
 //!
-//! An error's source position is compared exactly. It did not have to be —
-//! an instruction's span covers the operation it came from and a tree walk's
-//! covers the expression node, so the two could name one failure from a byte
-//! apart — but across everything that lowers today they do not, and asserting
-//! the weaker property would be recording less than is true.
+//! An error's source position is compared exactly, and this is the claim in
+//! this file that most had to be re-established rather than inherited.
+//! `cove_runtime::lvm::differential` compares messages and not spans, saying
+//! the two evaluators "legitimately differ in the span they attach to a fault
+//! today". Over this corpus they do not: twelve cases fail with a span and
+//! all twelve name the same file and the same two byte offsets on both sides.
+//! The weaker property is the one to assert when it is the true one, and here
+//! it is not.
 //!
 //! The hosts are the deterministic fakes `examples.rs` and `cove-bench`
 //! already run against — a console that is a buffer, a virtual clock that
@@ -73,39 +112,43 @@
 //! same on every machine.
 //!
 //! Budgets come from `[run.<name>]` except fuel and the deadline, which are
-//! left off on purpose: fuel is backend-specific by ADR 0019, and a deadline
-//! is wall-clock, so bounding either would make the two backends disagree by
+//! left off on purpose: fuel is per-evaluator for the reason above, and a
+//! deadline is wall-clock, so bounding either would make the two disagree by
 //! construction rather than by fault. No case in the corpus sets one today.
 //!
 //! # The trace, and what a normalization is allowed to drop
 //!
-//! Issue #111 asks for "source-level trace events after backend-specific
-//! normalization", so every case that lowers is run with a
-//! `cove_runtime::trace::JsonlSink` on both backends and the two recordings
-//! are compared. The recording rather than the events: the JSONL is what
-//! `cove trace` reads and what `cove replay` consumes, so comparing the lines
+//! ADR 0034 asks for trace events by name, so every case is run with a
+//! `cove_runtime::trace::JsonlSink` on both sides and the two recordings are
+//! compared. The recording rather than the events: the JSONL is what `cove
+//! trace` reads and what `cove replay` consumes, so comparing the lines
 //! compares the artifact somebody else's program is handed, and a field that
 //! stops being written is a change to that artifact whether or not the event
 //! behind it still exists.
 //!
 //! A field dropped because it differed is exactly how a real divergence
 //! hides, so nothing below is dropped for differing. Each exclusion is a
-//! property of a backend rather than of the program, each was established by
-//! running the corpus rather than by assuming, and [`Trace::of`] is where
-//! each one is made and argued.
+//! property of an evaluator rather than of the program, each was established
+//! by running this corpus rather than by assuming, and [`Trace::of`] is where
+//! each one is made and argued. Every one of them was re-established against
+//! the linear-memory backend when the predecessor was deleted; none was
+//! inherited, and one — what `heap_summary` is worth comparing — did not
+//! survive the re-measurement and is now argued the other way.
 //!
 //! What survives the normalization is compared exactly and agrees over the
-//! whole corpus: `entry_enter` and `entry_exit`'s module and function, every
-//! `host_call`'s task, module, operation, capability, grant, arguments and
-//! outcome, `task_spawned`'s id, parent and scope, `run_ended`'s outcome and
-//! message, and what `heap_summary` says a run allocated. The task ids
-//! themselves agree because both backends draw them from the one counter
+//! whole corpus: `trace_header`'s version, capture mode, entry and arguments;
+//! `entry_enter` and `entry_exit`'s module and function; every `host_call`'s
+//! task, module, operation, capability, grant, arguments and outcome;
+//! `task_spawned`'s id, parent and scope; the `task_completed` of every task
+//! neither run cancelled; `heap_summary`'s presence, its position in the
+//! sequence and the keys it carries; and `run_ended`'s outcome and message.
+//! The task ids themselves agree because both draw them from the one counter
 //! `cove_runtime::runtime::Runtime` holds, so there was no renumbering to
 //! normalize.
 //!
-//! No trace event carries `fuel_spent`. ADR 0019's backend-specific figure
-//! reaches `cove run --stats` and never the trace, so there was nothing here
-//! to exclude for it.
+//! No trace event carries a fuel figure. The per-evaluator counter reaches
+//! `cove run --stats` and never the trace, so there was nothing here to
+//! exclude for it.
 //!
 //! # Reading the coverage summary
 //!
@@ -137,529 +180,51 @@ use cove_runtime::trace::{
     JsonlSink, RecordingBackend, RunOutcome, TraceHeader, TraceSink, ValueCapture,
 };
 use cove_runtime::value::Value;
-use cove_runtime::vm::Vm;
+use cove_runtime::Lvm;
 use cove_sema::config::RunConfig;
+use cove_sema::HostSchemas;
 
 #[path = "support/mod.rs"]
 mod support;
 use support::{Case, ModuleIndex, Prepared};
 
-/// How many corpus cases the lowering covers today.
-///
-/// A floor, not a target. Lowering one more construct raises it; nothing may
-/// lower it, because a case that stopped lowering would be coverage lost
-/// silently, and the whole point of counting is that it cannot be. Raise this
-/// number in the same change that raises the coverage.
-///
-/// 55 to 56: a range used as a value builds one now — `cove_ir::Inst::MakeRange`
-/// takes two `Int` bounds off the scalar stack and leaves the range value
-/// they make on the value stack — where the lowering previously had no
-/// instruction that made one and refused every range a `for` header did not
-/// consume. `tests/e2e:values_range` is the case that gained a lowering, and
-/// it is the only one the corpus held.
-///
-/// It stayed at 56 when a variadic parameter began to lower, and that is
-/// worth recording rather than leaving as a number that did not move.
-/// `tests/e2e:fn_variadic` is the only case in the corpus that declares one,
-/// and it also spreads — `joinAll("-", ...ready)` — so it now refuses for
-/// the `...` standing behind the variadic parameter rather than for the
-/// parameter itself. A spread is its own construct: it reads an `Array` or a
-/// `Vector` and refuses anything else, which is a runtime question and not
-/// one `make-array` answers.
-///
-/// 56 to 59: a method on a host resource handle is dispatched through the
-/// boundary that issued the handle — `cove_ir::Inst::CallResource` stands the
-/// handle below the arguments and lets `HostRegistry::call_resource` read the
-/// module and the resource kind off it — where the lowering previously looked
-/// the name up among the declared types and the builtins, found neither, and
-/// refused. `tests/e2e:fail_http_stale_handle`, `tests/e2e:host_http_resource`
-/// and `tests/e2e:host_files_streaming` are the cases that gained a lowering.
-///
-/// Six cases refused for a resource method and only three of them lower, which
-/// is worth recording rather than leaving as a gap between two numbers. The
-/// other three hold a second construct this backend does not cover and now
-/// refuse for that instead: `examples:cq` and `examples:cqSample` for
-/// `freeze`, and `examples:server` for `http.Route`, which initializes a type
-/// a host declares.
-/// 64 to 68: `freeze` takes the place rather than a read of it.
-/// `builtins::freeze` consumes uniquely owned storage and refuses when a
-/// second alias observes the vector, so a read of the receiver would be that
-/// second alias and the check would refuse every vector `freeze` is written
-/// for. `tests/e2e:coll_freeze`, `tests/e2e:fail_freeze_aliased`,
-/// `examples:values` and `examples:cqSample` gained a lowering — the second
-/// of those being the case that pins the refusal, which now happens
-/// identically on both backends.
-///
-/// `examples:cq` refused for `freeze` too and did not gain one. It refuses
-/// for `step: foldRevenue`, a function used as a value, which is one
-/// construct further down the same program.
-///
-/// 68 to 70: a call that leaves a parameter to its default reaches a
-/// specialisation of the callee. A default is evaluated by the callee — the
-/// interpreter's `bind_params` reaches `None => match &param.default` inside
-/// the frame it is filling — so a call that omits one is not the same call
-/// with fewer arguments; it is a call to a function whose prologue computes
-/// the rest. `cove_ir::lower` numbers one function per supplied-set, which
-/// keeps the arity a call passes and the arity the callee takes the same
-/// number and leaves the calling convention where it was.
-/// `tests/e2e:fn_defaults` and `tests/e2e:fn_recursion` are the cases that
-/// gained a lowering.
-///
-/// It stayed at 70 when `http.Route` began to lower, and that is worth
-/// recording rather than leaving as a number that did not move.
-/// `examples:server` is the only case in the corpus that initializes a type
-/// a host declares, and the line that does it also writes `http.Method.Get`
-/// — a case of an enum a host declares, which is a construct of its own —
-/// so the case now refuses for that instead. The function it passes as
-/// `handler:` is a third.
-///
-/// 70 to 71: `snapshot` splits by the receiver's type rather than by its
-/// name. A struct or an enum with an `impl Snapshot for Type` was already a
-/// `Call`, because the checker records which declaration that call reaches;
-/// what was refused outright is the half of the trait no conformance answers
-/// for, and `cove_ir::Inst::Snapshot` is that half — a `Vector`, which
-/// allocates storage of its own, and every value with nothing mutable inside
-/// it, which returns itself. A `Vector` whose elements would each dispatch is
-/// still refused, because an instruction cannot run a whole Cove function in
-/// the middle of itself. `tests/e2e:type_snapshot` is the case that gained a
-/// lowering, and it is the only one the corpus held.
-///
-/// 71 to 72: a `...` argument spreads a sequence into a variadic parameter.
-/// A variadic parameter receives one `Array` and `cove_ir::Inst::MakeArray`
-/// already built it out of the leftover arguments; a spread is the same array
-/// built out of a value, so `cove_ir::Inst::SpreadArgument` appends what one
-/// holds — an `Array`'s elements or a `Vector`'s, and nothing else, which is
-/// the pair `bind_params` reads. A call that mixes the two builds the array
-/// in runs. Everywhere a variadic parameter is *not*, the interpreter reads a
-/// spread argument's value and ignores its marking, so those are refused
-/// rather than reproduced. `tests/e2e:fn_variadic` is the case that gained a
-/// lowering, and it is the only one the corpus held.
-///
-/// 72 to 74: a lambda is lowered to a function of its own and the values the
-/// environment around it handed over. `cove_ir::Function::captures` was
-/// scaffolding until now — an explicit list with an explicit layout, decided
-/// when the lambda is lowered rather than when the closure is created, which
-/// is ADR 0019's "slots, not names" asked of a capture — and
-/// `cove_ir::Inst::MakeClosure` fills it while `cove_ir::Inst::CallValue`
-/// enters one. `tests/e2e:closures` and `tests/e2e:gc_cycles` are the cases
-/// that gained a lowering.
-///
-/// Two of the three cases that refused for a closure are what moved.
-/// `tests/e2e/backend_unsupported:backend_unsupported` is the third and did
-/// not: it exists to pin ADR 0019's no-silent-fallback rule, so it was
-/// rewritten around a task scope, which the lowering still refuses. What the
-/// case is about is the rule and not the construct.
-///
-/// 74 to 76: a trailing closure is the last positional argument.
-/// `Interpreter::eval_args` evaluates the written arguments and then pushes
-/// the trailing one on the end with no label, no `var` and no spread, and the
-/// parser has already built the block as a lambda — so once a lambda lowers
-/// there is nothing left for the sugar to do but land where a written
-/// argument would. `Args` is that said once, rather than a second parameter
-/// every path that reads a call's arguments would have to remember to use.
-/// `tests/e2e:type_result` and `examples:config` are the cases that gained a
-/// lowering.
-///
-/// 76 to 77: a declared function used as a value is a closure over nothing.
-/// `Interpreter::eval_ident` builds one with `captures: Vec::new()`, because
-/// a declaration reads no environment — the whole of what makes a function a
-/// value is that it can be called through one. The specialisation a closure
-/// is made of is not the one a direct call reaches: `cove_ir::Inst::CallValue`
-/// puts every argument on the value stack and reads the answer off it, and a
-/// convention is what a slot number means, so the body is lowered a second
-/// time under that convention. `examples:cq` — `step: foldRevenue` — is the
-/// case that gained a lowering, and it is the only one the corpus held.
-///
-/// 77 to 78: a `dyn Trait` value is built where one is written, and a method
-/// called on one dispatches from the value rather than from the type.
-/// `cove_ir::Inst::MakeDyn` is the language's one implicit conversion, made
-/// at the four places a type is *written* — a parameter, an annotated `let`,
-/// a struct's field, and a declared return type — which is where
-/// `Interpreter::coerce` makes it. `cove_ir::Inst::CallDyn` is the other
-/// half: a lookup by the concrete type's name over every implementation the
-/// package declares, which is the first call in this IR whose target is not
-/// a `FunctionId` written into the instruction.
-/// `tests/e2e/outline_dyn_field:app` is the case that gained a lowering.
-///
-/// Three more cases refused for a `dyn` parameter and none of them gained
-/// one, which is worth recording rather than leaving as a gap between two
-/// numbers. `tests/e2e:module_conformance`, `tests/e2e:type_trait` and
-/// `examples:traits` each also call a method on a value whose type is a
-/// *bounded type parameter* — `render<T: Display>(value: T)`,
-/// `headline<T: Summary>(entry: T)` — and each also reaches a trait's
-/// default body, whose `self` is `Self: Trait` and is the same construct
-/// again. A call through a trait bound is not a call through a `dyn`, and
-/// the lowering has no name for it, so all three now refuse as "a call to
-/// `summarize`, which no declared type and no builtin has": the name is
-/// all that is left once the receiver's type turns out to be one this pass
-/// cannot resolve a method against.
-///
-/// 78 to 81: a call on a value whose type is a bounded type parameter, or
-/// the rigid `Self` of a trait's default body, is the same dispatch a `dyn`
-/// gets. `Interpreter::eval_method_call` draws no distinction between the
-/// three — it reads the concrete value's own type name and looks the method
-/// up from there — so `cove_ir::Inst::CallDyn` serves all three, and the
-/// only thing the lowering takes from the static type is which trait the
-/// call goes through. Without it a `dyn` dispatch could not reach a
-/// method a conformance left to the trait's default, which is half of what
-/// a trait is. `tests/e2e:module_conformance`, `tests/e2e:type_trait` and
-/// `examples:traits` are the cases that gained a lowering, and they are the
-/// three the previous change left behind.
-///
-/// 81 to 82: `http.Method.Get`, a case of an enum a *host* declares. It has
-/// a `cove_schema::TypeSchema` rather than an `EnumDecl`, so
-/// `cove_ir::Inst::MakeEnum` — which the VM shapes from a declaration this
-/// package holds — could not serve it, and it carries no payload, so a
-/// second instruction naming the type and the case is the whole of it.
-/// Both backends reach `interp::host_enum_case`, so a case the schema does
-/// not name fails in the same words on either. `examples:server` is the
-/// case that gained a lowering, and it needed the two changes before this
-/// one as well: a type a host declares, and a function used as a value.
-/// 82 to 86: a task scope, and a VM of its own for each task spawned into
-/// it. ADR 0008 gives every task an evaluator, and `cove_runtime::vm::Vm` is
-/// now one of the two things that can be one — over the same `Runtime` and
-/// the same `cove_ir::Program`, which a run shares because a lowered
-/// closure's `FunctionId` has to mean the same function on both sides of the
-/// boundary. Everything a `spawn`, an `await` and a scope exit decide lives
-/// in `cove_runtime::task`, which both backends call, so there is no second
-/// statement of the task-safety rule for the two to drift apart on.
-/// `tests/e2e:fail_max_tasks`, `tests/e2e:gc_tasks`,
-/// `tests/e2e:tasks_host_order` and `tests/e2e:tasks_scope` are the cases
-/// that gained a lowering.
-///
-/// A fifth case refused for a task scope and did not gain one.
-/// `tests/e2e/backend_unsupported:backend_unsupported` exists to pin ADR
-/// 0019's no-silent-fallback rule, so it was rewritten again — around a call
-/// whose labelled arguments stand out of declaration order, which is refused
-/// deliberately rather than for want of work: the interpreter answers such a
-/// call by evaluating the arguments in the order they were *written*, and
-/// issue #112 is about moving that decision into the checker. It was a
-/// closure, then a task scope; what the case is about is the rule and not the
-/// construct. (ADR 0021 moved that decision, so the case has moved again;
-/// the note at the end of this comment says where.)
-///
-/// One scope shape is refused and stays refused, which is worth recording
-/// because it is a wall rather than unfinished work. A child whose value is
-/// `Err(...)` returns that failure from the function the scope was written
-/// in, and `Interpreter::leave_scope` does that whatever the declared return
-/// type is — `fn f() -> Int { scope s { ... } }` answers `Err(boom)` on the
-/// oracle. A function the checker settled as answering `Int` or `Bool`
-/// returns on the scalar stack and every one of its returns is a
-/// `return-scalar`, so there is no stack for that failure to travel on. The
-/// lowering refuses such a scope rather than approximating it.
-/// 86 to 88: `Shared`, which is ADR 0008's other half — the one value that
-/// crosses a task boundary by sharing rather than by copying.
-/// `Shared(value)` is an ordinary constructor and `lock` is one instruction
-/// over `cove_runtime::shared::SharedCell::lock`, so what a cell refuses to
-/// wrap, what holding it means, and what a cycle through it costs are all the
-/// oracle's. `tests/e2e:fail_shared_cycle` and `tests/e2e:tasks_shared` are
-/// the cases that gained a lowering, and they are the two the corpus held.
-///
-/// The one thing that is not the oracle's is the call. A closure written
-/// `fn(var value)` names the cell's contents rather than receiving a copy of
-/// them, and every argument of a `call-value` travels on the value stack, so
-/// `cove_ir::Inst::Lock` makes the call itself: the contents stand in a value
-/// slot of the locking frame and the closure is handed a place rooted there.
-/// A `lock` whose closure is a *value* rather than written at the call is
-/// therefore refused, which is narrower than the oracle and is what keeps
-/// such a closure from ever reaching a `call-value`.
-/// 88 to 90: an `async fn`, which is the last of the concurrency cluster.
-/// ADR 0008 gives a thread to `spawn` and not to every `async fn`, so one
-/// runs its body at the call site and answers a handle that is already
-/// settled — `Interpreter::call_target` wraps the result of the whole call, and
-/// `cove_ir::Function::answers_a_task` is the same fact read where the VM
-/// closes the frame, which is what catches a `?` that failed as well as a
-/// `return`. It is the callee's answer and not the call site's, because an
-/// `async fn` used as a value is called through a `call-value` and nothing
-/// there knows which function it will reach. `examples:callbacks` and
-/// `examples:tasks` are the cases that gained a lowering, and they are the
-/// two the corpus held.
-///
-/// What is left refused is what was always going to be. Three cases name a
-/// call whose labelled arguments stand out of declaration order and one an
-/// assignment to a read-only place; both are programs the oracle rejects at
-/// *run* time and this refuses at lowering, which is deliberate and is what
-/// issues #112 and #113 are about moving into the checker. Nothing in the
-/// corpus is refused for want of an execution model any more. (ADR 0021
-/// moved all four; the note at the end of this comment says where they
-/// went.)
-///
-/// 90 to 81, and it is the one time this number has gone *down*. Nine
-/// benchmarks left the corpus, not the lowering: `benches/` is no longer one
-/// of the corpora, for the reason `discover` gives, and all nine of its
-/// cases lowered and agreed on the day they went. Nothing stopped lowering
-/// and nothing stopped agreeing. A floor that falls for any other reason is
-/// the regression this constant exists to catch, and lowering it should
-/// always cost a paragraph saying which.
-///
-/// 81 to 87: six cases, and none of them a construct. `tests/e2e:gc_capture`,
-/// `gc_churn`, `gc_frames`, `gc_graph`, `gc_place` and `gc_reentry` are the
-/// programs issue #119 asks for — a graph one member of which stays rooted, a
-/// collection with frames standing above frames and a value operand of the
-/// outermost still on the stack, a capture that is the only root left, a
-/// place written through across a collection, and a collection inside a body
-/// the host is running re-entrantly. Every one of them lowered on the day it
-/// was written, which is the measurement: what they exercise is collection,
-/// and collection is not something a lowering has to reach.
-///
-/// 87 to 88: `tests/e2e:gc_struct`, the program issue #128 asks for. It is
-/// the one case in this corpus whose two answers came apart because of a
-/// collector bug rather than a lowering one, and the oracle is the side that
-/// was wrong: the interpreter printed an emptied vector where the VM printed
-/// the one the program built. It lowered on the day it was written, for the
-/// same reason the six before it did.
-///
-/// 88 to 89: one case and no construct again.
-/// `tests/e2e:host_console_streams` writes records to `console.println` and
-/// complaints to `console.eprintln`, and it lowered on the day it was
-/// written. That is the whole of what issue #102 had to check about the
-/// backends: a second stream is a second operation on a module,
-/// `cove_ir::Inst::CallHost` already carries the module and the operation as
-/// names, and there was no instruction to add. What the case measures is the
-/// fake console, which now has a buffer per stream so that a line written to
-/// the other one on one backend is a disagreement rather than a coincidence.
-///
-/// It was briefly two. A second case, `fail_console_error_not_granted`, was
-/// written and then removed before the change merged: it pinned a run that
-/// granted `console` and not `console.error`, and the repository decided
-/// against a second capability, so there is no refusal for it to pin. The
-/// floor is 89 rather than 90 because that case is gone and for no other
-/// reason — nothing stopped lowering.
-///
-/// 89 to 93: four cases, and no construct again — but for the first time the
-/// four are what this harness is *for*. `Array` and `Vector` gained `map`,
-/// `filter`, `fold`, and `sorted(by:)`, which are the language's first
-/// higher-order builtins on a collection, and a higher-order builtin is the
-/// first thing to drive the two `cove_runtime::builtins::Callable`
-/// implementations against each other over whole programs rather than over
-/// one `mapError` callback. `Result.mapError` was that one callback and it
-/// runs at most once per value; a `sorted` over eight elements re-enters the
-/// evaluator seventeen times from inside a single instruction, on the VM
-/// through `Vm::call_from_host` — the re-entrant loop that leaves the
-/// interrupted instruction's operands standing — and on the interpreter
-/// through an ordinary recursive call. `tests/e2e:coll_sorted`,
-/// `tests/e2e:coll_transform`, `tests/e2e:fail_sort_callback` and
-/// `tests/e2e:fail_map_host_calls` are the cases that gained a lowering, and
-/// all four lowered on the day they were written: the lowering already
-/// emitted `cove_ir::Inst::CallBuiltin` for any name the shared table
-/// declares, and a callback is an ordinary `make-closure`, so there was no
-/// instruction to add.
-///
-/// The last two are the ones worth having. `fail_sort_callback` is a
-/// comparison that divides by zero partway through a merge, and both
-/// backends stop at the same byte of the same closure with nothing
-/// half-sorted printed. `fail_map_host_calls` is a `map` whose transform
-/// prints, under a `max_host_calls` this file passes through from
-/// `[run.<name>]`: the budget stops the run from *inside* a callback, on the
-/// same element on both backends, which is the evidence that a runtime
-/// control is accounted the same on either side of a re-entry. A run
-/// cancelled inside a callback has no case here, because cancellation is
-/// reachable only through a task and a task's cancellation is a race no
-/// golden file can pin; the budget stop is the deterministic member of the
-/// same family, and it is what this records instead.
-///
-/// It then did not move at all when three of the four refusals went, and
-/// that is worth recording rather than leaving as a number that stood
-/// still. ADR 0021
-/// made assignment to a read-only place and a labelled argument out of
-/// declaration order `cove check` errors, so `tests/e2e:fail_assign_let`,
-/// `tests/e2e:fn_labels` and `tests/e2e:type_struct` moved from *refused* to
-/// *does not check* — 4 refused and 25 not checking became 1 and 28, over a
-/// corpus the four cases above had meanwhile grown to 122 — and
-/// each is now a package of its own, so their case names gained a directory.
-/// Nothing gained a lowering and nothing lost one. The refusals went because
-/// the checker catches them, not because the VM learned anything.
-///
-/// The one refusal left is `tests/e2e/backend_unsupported:backend_unsupported`,
-/// which pins ADR 0019's no-silent-fallback rule and had to be rewritten a
-/// fourth time: a program `cove check` refuses never reaches a backend, so a
-/// construct this pass refuses *because the program is wrong* can no longer
-/// pin what a backend does with one. It names a function declared inside a
-/// function body now, which is unsupported in the plain sense — the
-/// interpreter runs it and the lowering has no instruction for it.
-///
-/// 93 to 94: one case and no construct, and the construct is the point.
-/// `examples:covecheck` is a concurrent HTTP checker — a task scope per
-/// window of checks, a `spawn` per check, an `await` per task in the order
-/// they were spawned, a `Shared` counter every one of those tasks writes, a
-/// `clock.timeout` around each check and another around the whole run, and a
-/// host resource nowhere, because a client that only fetches never holds one.
-/// Every one of those lowered at 82 to 86, 86 to 88 and 88 to 90, one at a
-/// time and each with a case of its own; this is the first case in the corpus
-/// that drives all of them together over a whole program, and it lowered on
-/// the day it was written. The three earlier entries are what it is evidence
-/// for.
-///
-/// It is not in the race list below, and that is a property of the program
-/// rather than luck. Nothing it spawns prints, every window is awaited before
-/// the next is started, and the report is written once at the end by the task
-/// that read the manifest — so the only cancellation it can reach is the
-/// whole-run deadline, which a virtual clock nothing moves never fires.
-/// `examples/covecheck/README.md` is where that argument is made in full,
-/// and the corpus is what checks it: a checker whose output depended on which
-/// endpoint answered first would disagree with itself here long before it
-/// disagreed across backends.
-///
-/// 94 to 95: one case, `examples:reviewPolicy`, and no construct again --
-/// and this time the absence is the finding rather than an aside. The case is
-/// `examples/rules`, the embedded review-policy engine issue #90 asks for,
-/// and it is written the way the language card says to write Cove rather
-/// than the way a program that had to stay inside the lowering would be. Six
-/// rules behind a `dyn Rule` whose third method is a default the trait
-/// supplies and three of the six override; the same call written again
-/// through a bounded type parameter, so the two dispatch forms stand in one
-/// package; `Set` and `Map` as a rule's own state; `sorted(by:)` over a
-/// comparison of an enum's rank, then `fold` and `filter` over closures; and
-/// `match` on an enum case carrying a struct. Every one of them lowered on
-/// the day it was written and nothing had to be avoided.
-///
-/// That is worth recording because ADR 0022 makes the VM what a `cove`
-/// command runs a program on, so a construct the lowering refuses is a
-/// construct most users cannot use. A program written to a domain rather
-/// than to a backend is the only kind of evidence that can say the refusals
-/// are gone; the corpus is 125 cases now, and this is the second entry in a
-/// row whose case was shaped by what an example needed rather than by what
-/// would lower. `covecheck` above drove the task constructs together;
-/// this one drives the dispatch, collection and pattern constructs together,
-/// and neither had to be written around anything.
-///
-/// 95 to 96: one case, no construct, and the largest program in the corpus.
-/// `examples:life` is a deterministic ecosystem simulation — a grid, a
-/// population, three species as separate modules, and a seeded generator
-/// written in Cove — and it lowered on the day it was written, like every
-/// case before it since the higher-order builtins landed. That is the whole
-/// of what it had to prove about the lowering, and it is worth having for
-/// what it proves about the two backends instead: a run of it is twelve
-/// ticks of `map`, `filter`, `fold` and `sorted(by:)` over structs and enums
-/// with payloads, threading one `Int` seed, and the two backends print the
-/// same census and the same state hash at every tick they report. A simulation is the program shape where a
-/// disagreement about a copy, an alias, or a callback's order would show up
-/// as a different world rather than as a different line, and this is the
-/// corpus's first one.
-///
-/// It is also the corpus's most expensive case, and it was sized to be less
-/// so: twelve ticks over ninety-six cells is a third of a second across both
-/// backends here, where the whole corpus was four tenths. The size lives in
-/// `examples/life/options.cove` as the default `--ticks`, pinned by a
-/// `test fn` that says why, rather than in [`smaller_workload`] — a case
-/// whose own default is what a test can afford needs no second size.
-///
-/// 96 to 97: one case, no construct, and nothing about the VM at all.
-/// `tests/e2e:flow_break_ends_line` was written for a parser fix — a `break`
-/// and a `return` end at the end of the line they are written on — and it
-/// lowered on the day it was written, because a statement boundary is
-/// decided before anything reaches the lowering. The corpus grew by two in
-/// the same stretch and this is the one that counts: `fail_variadic_shape`
-/// is the other, and it pins two new check-time diagnostics, so it does not
-/// check and there is nothing in it to run.
-///
-/// It stayed at 97 when the lowering stopped refusing a closure's variadic
-/// parameter, and both halves of that are worth recording. The construct
-/// moved to `cove::type::variadic_lambda`, so no program the lowering is
-/// handed can hold one and the refusal it used to make was a rule stated
-/// twice — and no corpus case wrote one either way, which is exactly why the
-/// two backends could disagree about it undetected until issue #168 wrote
-/// the program by hand. `tests/e2e/fail_variadic_lambda` is that program,
-/// and it joins the cases that do not check rather than the ones that lower.
-///
-/// 97 to 96, and it is the one direction this number is not supposed to
-/// move, so it is worth saying exactly what left and why that is not a
-/// regression. `tests/e2e:fail_freeze_aliased` used to lower, run, and be
-/// refused *by both backends at run time*, because `builtins::freeze`
-/// counted `Rc` handles and found two.
-/// [Issue #240](https://github.com/myuon/cove/issues/240) moved that proof
-/// to where ADR 0001 always said it lived — `cove_sema`'s conservative
-/// local uniqueness pass — so the program is now refused by `cove check`
-/// and there is nothing left to lower. It joins the cases that do not
-/// check, exactly as `fail_variadic_lambda` did when its construct became a
-/// diagnostic, and for the same reason: a rule that moved from the run to
-/// the check takes its program with it.
-const LOWERED_FLOOR: usize = 96;
-
-/// Every refusal the corpus is allowed to hold: the case, and the construct
-/// the lowering named when it refused it.
-///
-/// [`LOWERED_FLOOR`] is a ratchet on a *number*, and a number cannot say
-/// which construct a case was refused for. That leaves it blind in the
-/// direction this project is most likely to move: a language feature the
-/// checker accepts and the lowering refuses arrives as a *new* refusal
-/// beside the old ones, and the count of what lowers does not fall — it
-/// rises, if the feature also brought a case that lowers. ADR 0022 calls
-/// that gap the real cost of making the VM the default, so the floor says
-/// coverage never falls and this says the gap never widens without somebody
-/// deciding that it should.
-///
-/// Adding a line here is that decision, and it is meant to be an awkward
-/// one: what reaches this list has passed `cove check` and then been refused
-/// by the backend every `cove` command runs, so a Cove program that is right
-/// in every way the checker can see does not run. The construct is written
-/// out rather than referred to, because the words the lowering chose are
-/// what a user is shown.
-///
-/// Removing a line is the same act in the other direction, and it happens in
-/// the change that lowers the construct, beside the floor rising.
-///
-/// Kept sorted, and compared as a whole rather than as a bound: a refusal
-/// that disappears fails this too, because a construct that quietly stopped
-/// being refused is a coverage claim nobody wrote down.
-const REGISTERED_REFUSALS: &[(&str, &str)] = &[
-    (
-        "tests/e2e/backend_ast:backend_ast",
-        "a function declared inside a function body",
-    ),
-    (
-        "tests/e2e/backend_unsupported:backend_unsupported",
-        "a function declared inside a function body",
-    ),
-];
-
 // ------------------------------------------------------------------ the test
 
-/// Every case in the corpus, on both backends.
+/// Every case in the corpus, on both evaluators.
 ///
 /// One `#[test]` rather than one per case: the corpus is discovered rather
 /// than declared, so there is nothing to hang a test attribute on, and a
 /// single run is what makes the coverage summary a summary.
 #[test]
-fn both_backends_agree_wherever_the_lowering_reaches() {
+fn the_backend_and_the_oracle_agree_over_the_whole_corpus() {
     // Everything happens on the stack the runtime sizes: the interpreter is
     // a recursive tree walker, a test thread's stack is not one it chose, and
-    // every `Value` either backend builds belongs to the thread that built
-    // it. The lowering could cross — a `cove_ir::Program` is shared by every
-    // thread of a run, which is what lets a spawned task run one — but it has
-    // no reason to, since what it is for is on the far side. Only the report
-    // comes back out.
+    // every `Value` either evaluator builds belongs to the thread that built
+    // it. The lowered program could cross — a `cove_lir::Program` is shared
+    // by every thread of a run, which is what lets a spawned task run one —
+    // but it has no reason to, since what it is for is on the far side. Only
+    // the report comes back out.
     let report = cove_runtime::on_cove_stack(run_the_corpus).expect("a thread to run Cove on");
     let summary = report.summary();
     print!("{summary}");
 
     assert!(
         report.disagreements.is_empty(),
-        "{} case(s) answered differently on the two backends:\n\n{}\n{summary}",
+        "{} case(s) answered differently on the two evaluators:\n\n{}\n{summary}",
         report.disagreements.len(),
         report.disagreements.join("\n")
     );
     assert!(
-        report.lowered.len() >= LOWERED_FLOOR,
-        "the lowering covered {} case(s), which is below the floor of {LOWERED_FLOOR}; \
-         coverage may rise but never fall\n\n{summary}",
-        report.lowered.len()
-    );
-
-    let mut refused: Vec<(&str, &str)> = report
-        .refused
-        .iter()
-        .map(|(case, what)| (case.as_str(), what.as_str()))
-        .collect();
-    refused.sort_unstable();
-    let mut registered = REGISTERED_REFUSALS.to_vec();
-    registered.sort_unstable();
-    assert_eq!(
-        refused, registered,
-        "the refusals the corpus holds are not the ones `REGISTERED_REFUSALS` \
-         registers; a construct the checker accepts and the default backend \
-         refuses is registered by somebody who decided to, or it is not \
-         refused at all\n{summary}"
+        report.not_lowered.is_empty(),
+        "{} case(s) checked and then did not lower, and the floor for that is \
+         zero:\n\n{}\n{summary}",
+        report.not_lowered.len(),
+        report
+            .not_lowered
+            .iter()
+            .map(|(case, why)| format!("{case}: {why}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 
@@ -684,34 +249,45 @@ fn run_the_corpus() -> Report {
         // run, and neither does a case whose entry names no module or
         // function this package declares. `tests/e2e` keeps the first kind
         // on purpose — each pins a check-time diagnostic — so both are
-        // counted apart rather than reported as anything the VM did or did
-        // not cover.
+        // counted apart rather than reported as anything this backend did
+        // or did not cover.
         let Ok(prepared) = Prepared::of(&case, index) else {
             report.unchecked.push(case.name.clone());
             continue;
         };
 
         let (module, entry) = prepared.entry();
-        // The same call `cove run --backend vm` makes, with the same entry:
-        // what is lowered is what this entry reaches, so the harness and the
-        // CLI mean one thing by "the program this entry is".
-        let ir = match cove_ir::lower::lower_entry(&prepared.checked, module, entry) {
-            Ok(lowered) => lowered.program,
-            Err(why) => {
-                report.refused.push((case.name.clone(), why.what.clone()));
+        // The same call `cove run` makes, with the same entry: what is
+        // lowered is what this entry reaches, so the harness and the CLI mean
+        // one thing by "the program this entry is". There is no separate
+        // validation step to make — the lowering verifies what it emitted
+        // before it answers — and no admission predicate to consult, so a
+        // program that checks and does not lower is a bug reported as
+        // diagnostics rather than a refusal to be counted.
+        let program = match cove_lir::lower_entry(
+            &prepared.checked,
+            &prepared.sources,
+            &HostSchemas::new(),
+            module,
+            entry,
+        ) {
+            Ok(program) => program,
+            Err(items) => {
+                report.not_lowered.push((
+                    case.name.clone(),
+                    items
+                        .iter()
+                        .map(|item| format!("[{}] {}", item.code, item.message))
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ));
                 continue;
             }
         };
-        if let Err(why) = cove_ir::lower::validate(&ir) {
-            report
-                .disagreements
-                .push(format!("{}: the lowering is not valid: {why}", case.name));
-            continue;
-        }
         report.lowered.push(case.name.clone());
 
         let oracle = run_on_ast(&case, &prepared, module, entry);
-        let backend = run_on_vm(&case, &prepared, &Arc::new(ir), module, entry);
+        let backend = run_on_lvm(&case, &prepared, &program, module, entry);
         if !oracle.trace.cancelled.is_empty() || !backend.trace.cancelled.is_empty() {
             report.races.push(case.name.clone());
         }
@@ -728,7 +304,7 @@ fn run_the_corpus() -> Report {
 //
 // `Case`, `ModuleIndex` and `Prepared` — discovering a `[run.<name>]` case
 // and parsing and checking the modules its entry reaches — are
-// `tests/support/mod.rs`'s, shared with `admits_coverage.rs` so that there is
+// `tests/support/mod.rs`'s, shared with `lvm_coverage.rs` so that there is
 // one description of how a corpus case is loaded rather than two that could
 // drift.
 
@@ -741,23 +317,30 @@ fn run_the_corpus() -> Report {
 ///
 /// # Why `benches/` is not one of them
 ///
-/// It was, and it was 78 of the 340 seconds this test spent running
-/// programs. A benchmark is sized to be measurable in an optimized build —
-/// `benches/arith` turns a loop two million times — and this test runs
-/// unoptimized, twice per case. Nothing about agreement needs two million
-/// turns to establish; the first one settles it and the rest are the same
-/// instruction again.
+/// It was, and it was 78 of the 340 seconds this test then spent running
+/// programs — a figure taken against the predecessor, on a corpus that is not
+/// this one, and quoted here as the reason a decision was made rather than as
+/// a measurement of what runs today. What has not changed is why: a benchmark
+/// is sized to be measurable in an optimized build — `benches/arith` turns a
+/// loop two million times — and this test runs unoptimized, twice per case.
+/// Nothing about agreement needs two million turns to establish; the first
+/// one settles it and the rest are the same instruction again. Left out, the
+/// whole corpus is under thirty seconds.
 ///
 /// The coverage did not go anywhere. `cove-bench` runs every benchmark on
-/// both backends and each of them asserts its own answer, so a backend that
-/// disagreed would fail the assertion on the side that was wrong — and it
-/// runs them optimized, in fifteen seconds, on every push. What is given up
-/// is the console comparison this harness makes and that one does not, and a
-/// benchmark writes almost nothing to the console.
+/// `ast` and on `lvm` and each row asserts its own answer, so an evaluator
+/// that disagreed would fail the assertion on the side that was wrong — and
+/// it runs them optimized, on every push. What is given up is the console
+/// comparison this harness makes and that one does not, and a benchmark
+/// writes almost nothing to the console.
 ///
-/// `admits_coverage.rs` makes the opposite choice for the opposite reason: it
-/// never executes a program, so a benchmark's size costs it nothing, and it
-/// wants `benches/` counted.
+/// `lvm_coverage.rs` makes the opposite choice, and it costs it: those two
+/// million turns are eighty seconds of its run. It pays them because what it
+/// measures is how much of the corpus this backend runs at all, and a
+/// benchmark it has never executed end to end is where a fault in the
+/// dispatch loop shows first. This file is not asking that question — it is
+/// asking whether two evaluators say the same thing, and the answer to that
+/// does not get truer on the millionth turn.
 fn discover() -> Vec<Case> {
     let root = support::repo_root();
     let mut roots = vec![root.join("tests/e2e")];
@@ -824,15 +407,23 @@ fn run_on_ast(case: &Case, prepared: &Prepared, module: &str, entry: &str) -> Ra
     fakes.observed(answer)
 }
 
-/// Runs the same case on the VM, over the IR it was lowered to.
-fn run_on_vm(
+/// Runs the same case on the linear-memory backend, over the program it was
+/// lowered to.
+///
+/// Through [`Lvm`] rather than through anything below it, because what is
+/// being compared is what the language says and the language's answer
+/// includes the boundary: the same entry-shape check, the same
+/// materialisation of the answer, the same terminal trace events. Comparing
+/// the dispatch loop against the whole of the oracle would be comparing two
+/// different things.
+fn run_on_lvm(
     case: &Case,
     prepared: &Prepared,
-    ir: &Arc<cove_ir::Program>,
+    program: &cove_lir::Program,
     module: &str,
     entry: &str,
 ) -> Ran {
-    let (fakes, hosts) = Fakes::build(case, module, entry, RecordingBackend::Vm);
+    let (fakes, hosts) = Fakes::build(case, module, entry, RecordingBackend::Lvm);
     let sink = Arc::clone(&fakes.sink);
     let hosts = Arc::new(hosts);
     let runtime = Runtime::new(
@@ -841,11 +432,12 @@ fn run_on_vm(
         hosts.clone(),
     )
     .with_trace(sink);
-    let answer = Vm::new(&runtime, &hosts, ir).run_entry(module, entry, arguments(case));
+    let answer = Lvm::new(&runtime, &hosts, program).run_entry(module, entry, arguments(case));
     fakes.observed(answer)
 }
 
-/// The process arguments the entry is handed, as both backends take them.
+/// The process arguments the entry is handed, as either evaluator takes
+/// them.
 fn arguments(case: &Case) -> Vec<Rc<str>> {
     case.args.iter().map(|arg| arg.as_str().into()).collect()
 }
@@ -907,10 +499,10 @@ impl Fakes {
             trace.clone(),
             TraceHeader {
                 // Each side records itself, exactly as `cove run --trace`
-                // does, so the recording each backend produces is the
-                // recording that backend would hand a person. See
-                // [`Trace::of`] for why this one field is then the only one
-                // the comparison drops.
+                // does, so the recording each evaluator produces is the
+                // recording it would hand a person. See [`Trace::of`] for why
+                // this is then the one field the comparison removes outright
+                // rather than standing a placeholder over.
                 backend,
                 values: ValueCapture::Full,
                 entry: format!("{module}.{entry}"),
@@ -955,11 +547,12 @@ impl Fakes {
 
 /// The budgets a case runs under.
 ///
-/// Everything `[run.<name>]` sets except fuel and the deadline. Fuel is
-/// backend-specific by ADR 0019 — an instruction is not an AST node — and a
-/// deadline is wall-clock, so either one would make the two backends stop at
+/// Everything `[run.<name>]` sets except fuel and the deadline. Fuel is each
+/// evaluator's own counter — an instruction is not an AST node, and the two
+/// charge at safepoints they put where their own execution models have one —
+/// and a deadline is wall-clock, so either one would make the two stop at
 /// different points by construction rather than by fault. What is left counts
-/// things both backends count the same way.
+/// things both count the same way: host calls, and tasks.
 fn limits(run: &RunConfig) -> Limits {
     Limits {
         fuel: None,
@@ -975,10 +568,11 @@ fn limits(run: &RunConfig) -> Limits {
 ///
 /// A failure is rendered by its structure rather than by its message alone:
 /// what it said, how it classified itself, which capability the boundary
-/// refused, the rule it cited, and where in the source it points. #111 asks
-/// that a runtime error keep useful Cove spans on both backends, and the
-/// strongest form of that claim the corpus supports today is that the two
-/// backends point at the same bytes.
+/// refused, the rule it cited, and where in the source it points. ADR 0034's
+/// sixth condition names source spans, and the strongest form of that claim
+/// is the one the corpus supports: over the twelve cases that fail with a
+/// span, the two evaluators point at the same file and the same two byte
+/// offsets.
 fn describe(answer: &Result<Value, RuntimeError>) -> String {
     match answer {
         Ok(value) => format!("value {value:?}"),
@@ -1000,7 +594,7 @@ fn describe(answer: &Result<Value, RuntimeError>) -> String {
 /// first and named as the oracle. Which side is wrong is still a judgement,
 /// and the message is what somebody makes it from.
 fn disagreement(name: &str, oracle: &Ran, backend: &Ran) -> String {
-    let mut out = format!("{name}: the two backends did not agree\n");
+    let mut out = format!("{name}: the two evaluators did not agree\n");
     let mut side = |which: &str, ran: &Ran| {
         let _ = write!(
             out,
@@ -1022,13 +616,13 @@ fn disagreement(name: &str, oracle: &Ran, backend: &Ran) -> String {
         }
     };
     side("ast (the oracle)", oracle);
-    side("vm", backend);
+    side("lvm", backend);
     out
 }
 
 // -------------------------------------------------------------- the trace
 
-/// One run's trace, normalized so that two backends' recordings of one
+/// One run's trace, normalized so that two evaluators' recordings of one
 /// program can be compared.
 ///
 /// Held per task rather than as the one interleaved file the run wrote. Every
@@ -1044,8 +638,8 @@ fn disagreement(name: &str, oracle: &Ran, backend: &Ran) -> String {
 /// `tests/e2e:tasks_shared` and `examples:tasks` each wrote a differently
 /// interleaved file every time, and every one of them writes the same file
 /// once it is read per task. A comparison that failed on the interleaving
-/// would be reporting the scheduler, and it would fail against the oracle as
-/// readily as against the VM.
+/// would be reporting the scheduler, and it would fail the oracle against
+/// itself as readily as it would fail one evaluator against the other.
 struct Trace {
     /// Each task's own events, in the order that task produced them, keyed by
     /// the task's id. The entry is `cove_runtime::runtime::ENTRY_TASK`, which
@@ -1061,83 +655,97 @@ impl Trace {
     /// # Every `Duration` is blanked
     ///
     /// `cpu`, `wait` and `pause` are wall time. Two runs of one program on
-    /// one backend do not agree on any of them either, so comparing them
+    /// one evaluator do not agree on any of them either, so comparing them
     /// would report the machine. The keys are kept and only the figures go,
     /// so a `_ns` field that stopped being written is still a difference.
     ///
     /// # `heap_collected` is dropped whole
     ///
-    /// The event says when a collection happened and what it found. Both
-    /// halves are the collector's schedule. A collection runs at a safepoint
-    /// where enough has been allocated since the last one, and the two
-    /// backends put safepoints in different places — the interpreter at every
-    /// loop turn, the VM at the first back edge with `BACK_EDGE_FUEL`
-    /// gathered — so the VM crosses the threshold and keeps allocating until
-    /// the next block head. The corpus shows both halves moving:
-    /// `tests/e2e:gc_capture` collects after 64 allocations on the
-    /// interpreter and after 66 on the VM, and `examples:cqSample` runs its
-    /// collection one `files.Writer.writeLine` earlier on the VM than on the
-    /// interpreter, so even a `heap_collected` with every figure blanked
-    /// stands in a different place in the sequence.
+    /// The event says when a collection happened and what it found, and only
+    /// one of the two evaluators writes it: `cove_runtime::interp` records
+    /// one per sweep of its `Rc`-ed object heap, and `cove_runtime::lvm`
+    /// records none, ever. Its four figures are objects allocated, objects
+    /// freed, objects live and bytes live, which is a vocabulary the
+    /// linear-memory heap does not have — its heap is a run of eight-byte
+    /// words and an inline struct is words in it and no object at all.
     ///
-    /// What the event was for is not lost, because `heap_summary` says the
-    /// same things about the whole run and is compared. Dropping the event
-    /// and keeping the summary is the only division that is about the
-    /// program rather than the schedule: *what* a run allocated and *how
-    /// often* it collected are the program's, and *when* each collection fell
-    /// is the backend's.
+    /// That is a categorical property of the two collectors rather than a
+    /// figure that came out differently, and the corpus shows how far apart
+    /// they are: `tests/e2e:gc_churn` writes eight of these events on the
+    /// interpreter and none on the linear-memory backend, and
+    /// `tests/e2e:gc_tasks` writes thirty-two and none. Comparing the event
+    /// at all would report one collector's schedule against the other's
+    /// silence.
     ///
-    /// # `heap_summary` keeps what was allocated and drops what was live
+    /// The predecessor dropped this event too, and the argument it dropped it
+    /// under was a narrower one — both evaluators wrote the event and put
+    /// their safepoints in different places, so the same collection landed at
+    /// a different point in the sequence. That argument was about a backend
+    /// that no longer exists. The event is still dropped, and the reason it
+    /// is dropped is now larger rather than the same.
     ///
-    /// `allocated`, `allocated_bytes` and `collections` are compared exactly,
-    /// and they agree on every case in this corpus. That is worth stating
-    /// plainly because `docs/VM_ARCHITECTURE.md` predicted the third of them
-    /// would not: a run that allocates identically "can collect five times
-    /// here and six times there". Over the ninety-three cases that lower it
-    /// never does. The reason the prediction is still right in general and
-    /// wrong here is that the threshold is a count of allocations and the two
-    /// backends allocate the same objects, so the VM's overshoot moves the
-    /// boundary between two collections without changing how many boundaries
-    /// there are; it would take an overshoot large enough to swallow a whole
-    /// threshold to lose one, and nothing in this corpus allocates fast
-    /// enough between two safepoints for that.
+    /// # `heap_summary`'s every figure is blanked, and every key is kept
     ///
-    /// `live_bytes` and `peak_bytes` are dropped. They measure the live set,
-    /// and the live set is decided by the root set, which is a frame's slots
-    /// on the VM and an environment chain on the interpreter. A `var`
-    /// declared in a loop body has left the chain by the time the
-    /// interpreter's safepoint is reached and is still the VM frame's slot
-    /// until something writes that slot again, because a frame's window is
-    /// sized once per function rather than opened and closed per block. Both
-    /// backends report truthfully what was reachable from their own roots;
-    /// the two are not the same question. `tests/e2e:gc_churn` peaks at 120
-    /// bytes on the interpreter and 216 on the VM for this reason.
+    /// This is the one exclusion in this file that the predecessor's version
+    /// of it would not recognize. That one compared `allocated`,
+    /// `allocated_bytes` and `collections` exactly and dropped `live_bytes`
+    /// and `peak_bytes` with an argument for each. None of it survives, and
+    /// what killed it is [issue #240](https://github.com/myuon/cove/issues/240):
+    /// the event was widened because the two evaluators do not have the same
+    /// kind of heap and neither family of figures can be derived from the
+    /// other. The interpreter counts objects and the bytes they asked for and
+    /// leaves the word half `null`; the linear-memory backend counts words
+    /// and leaves the object half and `pause_ns` `null`. There is no field on
+    /// the line both of them fill with a measurement of the same thing.
     ///
-    /// `live_bytes` is the near miss, and it is recorded rather than
-    /// rounded off: it agrees on ninety-two of the ninety-three cases that
-    /// lower. The one that differs is `tests/e2e:fail_freeze_aliased`, which
-    /// ends by raising — and a run that raised abandoned its frames where
-    /// they stood, so the vector its last sweep still finds in a VM frame
-    /// slot is one the interpreter's environment had already left. It is the
-    /// same root-set difference as `peak_bytes`, reached by a different
-    /// route, so it is excluded for the same stated reason rather than kept
-    /// with an exception carved out of it.
+    /// `collections` is the near miss and the reason to say this plainly. It
+    /// is the one figure neither side may leave out — a collection is a
+    /// collection whatever the heap holds — so it looks comparable. It is
+    /// not: a collection runs when a heap crosses a threshold measured in
+    /// that heap's own unit, and the two heaps are different sizes in
+    /// different units. Measured over this corpus, the linear-memory backend
+    /// reports `"collections":0` for every one of the ninety-seven cases,
+    /// because `cove_runtime::lvm`'s `DEFAULT_HEAP_WORDS` is four mebiwords
+    /// and nothing in the corpus fills it, while the interpreter reports
+    /// between one and thirty-two. Thirty of the ninety-seven differ and the
+    /// other sixty-seven agree only in reporting nothing. Comparing it would
+    /// be asserting a fact about a heap size neither the language nor the
+    /// program chose.
     ///
-    /// # `trace_header`'s `backend` is dropped, and it is the only field that is
+    /// So no figure on this line is compared, and that is written down here
+    /// rather than left to be inferred from a passing test: what is compared
+    /// is that the event was written, where in the task's sequence it stands,
+    /// and which keys it carries. Those are real. The event is the run's
+    /// second-to-last on both sides, after `entry_exit` and before
+    /// `run_ended`, and a backend that stopped writing one or started writing
+    /// a different set of fields fails here. Two answers to two different
+    /// questions are not a comparison, and pretending otherwise would be the
+    /// dishonest half of this whole file.
+    ///
+    /// The predecessor's figures are worth keeping as figures rather than
+    /// silently reattributed. `tests/e2e:gc_churn` peaked at 120 bytes on the
+    /// interpreter and 216 on the predecessor, and that pair was the argument
+    /// for dropping `peak_bytes`. On the interpreter it still peaks at 120;
+    /// the linear-memory backend writes `"peak_bytes":null` and the run it
+    /// describes is `"allocated_words":4534,"capacity_words":4534`. The old
+    /// number is not this backend's and no reading of it makes it so.
+    ///
+    /// # `trace_header`'s `backend` is dropped, and it is the only field of
+    /// that event that is
     ///
     /// ADR 0026 put the recording backend in the header so that `cove replay`
     /// can tell a same-backend replay from a cross-backend one. It is the one
-    /// field in the format that is *about* the backend rather than about the
-    /// program: the two sides differ in it by construction, and would differ
-    /// in it for a program with no instructions in it at all. Every other
-    /// header field — the version, the capture mode, the entry, the entry's
-    /// arguments — is compared exactly and agrees, so a header that stopped
-    /// saying one of those is still a difference.
+    /// field in the format that is *about* the evaluator rather than about
+    /// the program: the two sides differ in it by construction, and would
+    /// differ in it for a program with no instructions in it at all. Every
+    /// other header field — the version, the capture mode, the entry, the
+    /// entry's arguments — is compared exactly and agrees, so a header that
+    /// stopped saying one of those is still a difference.
     ///
     /// This is the exception that proves the rule stated at the top of this
     /// file rather than a hole in it. Nothing here is dropped for having
     /// differed; this is dropped for being, by its own definition, the answer
-    /// to "which backend is this", asked of a harness whose whole job is to
+    /// to "which evaluator is this", asked of a harness whose whole job is to
     /// run one program on both.
     fn of(lines: &[String]) -> Trace {
         let mut tasks: BTreeMap<u64, Vec<String>> = BTreeMap::new();
@@ -1146,13 +754,17 @@ impl Trace {
             if event(line) == "heap_collected" {
                 continue;
             }
-            let mut normalized = blank_durations(line);
+            // A `heap_summary` is blanked instead of having its durations
+            // blanked, rather than as well: every figure on that line goes,
+            // `pause_ns` among them, so running both over it would be one
+            // placeholder written over another.
+            let mut normalized = if event(line) == "heap_summary" {
+                blank_measures(line)
+            } else {
+                blank_durations(line)
+            };
             if event(line) == "trace_header" {
                 normalized = without_string(&normalized, "backend");
-            }
-            if event(line) == "heap_summary" {
-                normalized = without(&normalized, "live_bytes");
-                normalized = without(&normalized, "peak_bytes");
             }
             if event(line) == "task_cancelled" {
                 cancelled.insert(number(line, "id").unwrap_or(ENTRY_TASK));
@@ -1170,23 +782,35 @@ impl Trace {
 /// Cancellation is asynchronous: a scope that ends asks its children to stop
 /// and lands wherever each thread happened to be, so how far a cancelled task
 /// got is the scheduler's answer and not the program's. This is measured
-/// rather than assumed. `tests/e2e:fail_max_tasks` records
-/// `task_completed` for task 1 in three of twenty runs *on the interpreter
-/// alone* and `task_cancelled` in the other seventeen; `examples:callbacks`
-/// flips the same way on the VM alone, and on the run where it is cancelled
-/// the `clock.every` call that task would have made is missing from the trace
-/// with it. Holding two backends to a fact one backend does not hold itself
-/// to would be a test that fails at random.
+/// rather than assumed, and it was measured again against the linear-memory
+/// backend rather than carried over.
+///
+/// Take the rule out and the corpus holds exactly two cases that move.
+/// `tests/e2e:fail_max_tasks` disagrees in twenty runs of twenty and
+/// `examples:callbacks` in fourteen of the same twenty — which on its own
+/// would read as a systematic divergence rather than a race, since the
+/// interpreter cancels both of `fail_max_tasks`'s children every time and the
+/// linear-memory backend completes both of them every time. Then run the
+/// *oracle against itself*, with both sides of this harness on the
+/// interpreter and nothing else changed, and the same two cases disagree with
+/// themselves: `fail_max_tasks` in two runs of thirteen, `callbacks` in five,
+/// and six of the thirteen clean through. The fact is not one either
+/// evaluator holds itself to, so holding one to the other's version of it
+/// would be a test that fails at random. That the two land on opposite sides
+/// of the race almost every time is a difference in scheduling luck, not in
+/// what the program means.
 ///
 /// So what is compared for such a task is that it was spawned, with the same
 /// id, by the same parent, into the same scope. What is given up with the
-/// rest is real and is worth naming: a VM that always cancelled where the
-/// interpreter always completed would not be caught here. What catches it
-/// instead is that the entry's own trace is compared exactly, and a task's
-/// work reaches the entry — through what it printed, what it left in the
-/// filesystem, and what the entry answered, all of which this harness
-/// compares whether or not a trace was written. [`Report::races`] names every
-/// case this rule applied to, so the loss is printed rather than silent.
+/// rest is real and is worth naming: a backend that always cancelled where
+/// the interpreter always completed would not be caught here, and the
+/// paragraph above is a reminder that this corpus is close to that shape.
+/// What catches it instead is that the entry's own trace is compared exactly,
+/// and a task's work reaches the entry — through what it printed, what it
+/// left in the filesystem, and what the entry answered, all of which this
+/// harness compares whether or not a trace was written. [`Report::races`]
+/// names every case this rule applied to, so the loss is printed rather than
+/// silent.
 impl PartialEq for Trace {
     fn eq(&self, other: &Trace) -> bool {
         let ids: BTreeSet<u64> = self
@@ -1255,31 +879,12 @@ fn number(line: &str, key: &str) -> Option<u64> {
     rest[..end].parse().ok()
 }
 
-/// The line without `key` and the integer under it.
-fn without(line: &str, key: &str) -> String {
-    let needle = format!("\"{key}\":");
-    let Some(at) = line.find(&needle) else {
-        return line.to_string();
-    };
-    let rest = &line[at + needle.len()..];
-    let end = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(rest.len());
-    let (mut head, mut tail) = (&line[..at], &rest[end..]);
-    // One of the two commas around the field goes with it, whichever side it
-    // is on, so that what is left is still a JSON object.
-    if let Some(rest) = tail.strip_prefix(',') {
-        tail = rest;
-    } else {
-        head = head.strip_suffix(',').unwrap_or(head);
-    }
-    format!("{head}{tail}")
-}
-
 /// The line without `key` and the quoted string under it.
 ///
-/// The string sibling of [`without`], which takes an integer. A trace field
-/// is one or the other, and neither helper is asked to guess which.
+/// One field is removed outright rather than blanked, and it is
+/// `trace_header`'s `backend`: see [`Trace::of`]. Everything else this file
+/// declines to compare keeps its key and loses its figure, because a key that
+/// stopped being written is a change to the artifact and should still fail.
 fn without_string(line: &str, key: &str) -> String {
     let needle = format!("\"{key}\":\"");
     let Some(at) = line.find(&needle) else {
@@ -1298,6 +903,49 @@ fn without_string(line: &str, key: &str) -> String {
         head = head.strip_suffix(',').unwrap_or(head);
     }
     format!("{head}{tail}")
+}
+
+/// The `heap_summary` line with every figure replaced by a placeholder, and
+/// every key left where it was.
+///
+/// The same treatment [`blank_durations`] gives a `_ns` field and for the same
+/// reason: what is being kept is the shape of the line rather than the numbers
+/// on it, so a field that stopped being written is still a difference while a
+/// field the two heaps count differently is not. [`Trace::of`] is where the
+/// argument for why every one of these figures is the machine's rather than
+/// the program's is made.
+///
+/// A figure here is an integer or `null`, since
+/// [issue #240](https://github.com/myuon/cove/issues/240) made every one of
+/// them optional so that a machine can say it did not count something, and
+/// both read the same way once the value is only being stood over.
+fn blank_measures(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    // Every key on this line but `event` carries a figure, and `event` carries
+    // a string, so the split is on `":` — a quoted key followed by a value
+    // that is not a string.
+    while let Some(at) = rest.find("\":") {
+        let (head, tail) = rest.split_at(at + "\":".len());
+        if tail.starts_with('"') {
+            out.push_str(head);
+            rest = tail;
+            // Past the opening quote, so the string's own contents cannot be
+            // mistaken for another key.
+            let end = rest[1..].find('"').map(|i| i + 2).unwrap_or(rest.len());
+            out.push_str(&rest[..end]);
+            rest = &rest[end..];
+            continue;
+        }
+        out.push_str(head);
+        out.push_str("<heap>");
+        let end = tail
+            .find(|c: char| !c.is_ascii_digit() && !c.is_ascii_alphabetic())
+            .unwrap_or(tail.len());
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The line with the figure under every `_ns` key replaced by a placeholder.
@@ -1399,8 +1047,10 @@ fn read_tree(dir: &Path, prefix: String, into: &mut BTreeMap<String, String>) {
 struct Report {
     cases: usize,
     lowered: Vec<String>,
-    /// Each refused case, and the construct the lowering named.
-    refused: Vec<(String, String)>,
+    /// Each case that checked and then did not lower, and the diagnostics the
+    /// lowering answered with. The assertion over this is that it is empty:
+    /// see the module docs for why zero is the only honest floor.
+    not_lowered: Vec<(String, String)>,
     /// Cases whose package does not check, which have no program to run.
     unchecked: Vec<String>,
     /// Cases in which either run cancelled a task, so that task's own trace
@@ -1413,39 +1063,33 @@ struct Report {
 }
 
 impl Report {
-    /// The coverage summary: how much of the corpus the VM covers today, and
-    /// what stands between it and the rest.
+    /// The coverage summary: how much of the corpus reached a comparison, and
+    /// what did not.
     ///
-    /// The refusals are grouped by construct and ordered by how many cases
-    /// each one blocks, because that list is the roadmap for what to lower
-    /// next and the order is the argument for which to lower first.
+    /// A case that checked and then did not lower is printed with the
+    /// diagnostics the lowering answered with, because there is no taxonomy
+    /// left to group such a case under — the lowering has no admission
+    /// predicate and no vocabulary of refusals, so the diagnostic is the whole
+    /// of what can be said about it. The list is expected to stay empty; it is
+    /// printed rather than only asserted so that a failing run carries the
+    /// reason without being asked.
     fn summary(&self) -> String {
         let mut out = format!(
             "\ndifferential coverage over {} corpus case(s):\n  \
-             {:>3} lowered, and agree on both backends\n  \
-             {:>3} refused by the lowering\n  \
+             {:>3} lowered, ran, and agree with the oracle\n  \
+             {:>3} checked and did not lower\n  \
              {:>3} do not check, so there is nothing to run\n",
             self.cases,
             self.lowered.len(),
-            self.refused.len(),
+            self.not_lowered.len(),
             self.unchecked.len(),
         );
 
-        let mut by_construct: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        for (case, what) in &self.refused {
-            by_construct
-                .entry(what.as_str())
-                .or_default()
-                .push(case.as_str());
-        }
-        let mut ranked: Vec<(&str, Vec<&str>)> = by_construct.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
-
-        if !ranked.is_empty() {
-            out.push_str("\nwhat the lowering refuses, most common first:\n");
-            for (what, cases) in ranked {
-                let _ = writeln!(out, "  {:>3}  {what}", cases.len());
-                let _ = writeln!(out, "       first at {}", cases[0]);
+        if !self.not_lowered.is_empty() {
+            out.push_str("\nwhat checked and then did not lower:\n");
+            for (case, why) in &self.not_lowered {
+                let _ = writeln!(out, "       {case}");
+                let _ = writeln!(out, "         {why}");
             }
         }
         if !self.races.is_empty() {
@@ -1457,7 +1101,7 @@ impl Report {
             }
         }
         if !self.lowered.is_empty() {
-            out.push_str("\nwhat the VM runs today:\n");
+            out.push_str("\nwhat is compared, in full:\n");
             for case in &self.lowered {
                 let _ = writeln!(out, "       {case}");
             }

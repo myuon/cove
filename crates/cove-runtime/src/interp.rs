@@ -909,7 +909,7 @@ impl<'a> Interpreter<'a> {
     /// which the entry's result already allowed, so this is the way in
     /// catching up with the way out. See issue #150.
     ///
-    /// [`Vm::invoke`](crate::vm::Vm::invoke) takes the same three things and
+    /// [`Lvm::invoke`](crate::Lvm::invoke) takes the same three things and
     /// answers the same way, exactly as the two `run_entry`s do.
     ///
     /// # What holds the arguments to anything
@@ -1068,7 +1068,7 @@ impl<'a> Interpreter<'a> {
     /// The process arguments as the one value an entry may take them as.
     ///
     /// The entry-shape rule is the language's and not a backend's, so this and
-    /// [`crate::vm::Vm`]'s copy of it refuse in the same words.
+    /// [`crate::Lvm`]'s copy of it refuse in the same words.
     fn enter(
         &mut self,
         module: &str,
@@ -1178,13 +1178,20 @@ impl<'a> Interpreter<'a> {
         // retired and the totals are complete.
         self.retire_heap();
         let heap = self.heap_stats();
+        // The object half of the event and none of the word half: this heap
+        // is a set of `Rc`-ed objects and counts objects, and issue #240's
+        // rule is that a machine leaves `None` in what it does not count
+        // rather than a zero that reads as a measurement.
         self.runtime.trace(TraceEvent::HeapSummary {
-            allocated: heap.allocated_objects,
-            allocated_bytes: heap.allocated_bytes,
             collections: heap.collections,
-            live_bytes: heap.live_bytes,
-            peak_bytes: heap.peak_bytes,
-            pause: heap.pause,
+            object_count: Some(heap.allocated_objects),
+            allocated_bytes: Some(heap.allocated_bytes),
+            live_bytes: Some(heap.live_bytes),
+            peak_bytes: Some(heap.peak_bytes),
+            pause: Some(heap.pause),
+            allocated_words: None,
+            capacity_words: None,
+            live_words: None,
         });
 
         outcome
@@ -1436,8 +1443,10 @@ impl<'a> Interpreter<'a> {
     ///
     /// [ADR 0030](../../../docs/adr/0030-a-host-call-asks-the-fuel-limit.md)
     /// decides that no Host call begins once the fuel a run has been charged
-    /// has reached its limit, and `Vm::charge_at_host_boundary` is
-    /// what makes that true on the other backend. This one needs nothing,
+    /// has reached its limit, and the periodic safepoint the linear-memory
+    /// backend runs every [`crate::SAFEPOINT_STRIDE`] instructions is what
+    /// makes that true there, at the granularity fuel is charged at on that
+    /// backend. This one needs nothing,
     /// and could do nothing: [`Interpreter::charge_safepoint`] hands
     /// [`SAFEPOINT_FUEL`] to the shared budget in the same call that charges
     /// it, so there is never a charge standing between two safepoints and the
@@ -1849,10 +1858,10 @@ impl<'a> Interpreter<'a> {
                 let module = closure.module.clone();
                 // The oracle walks syntax, so a closure whose body is a
                 // lowered function is one it cannot run. Nothing produces
-                // that pairing today — a run has one backend, and the VM is
-                // the only party that builds a lowered body — so this is
-                // said rather than approximated, exactly as the VM says the
-                // reverse.
+                // that pairing today — a run has one backend, and the
+                // linear-memory backend is the only party that builds a
+                // lowered body — so this is said rather than approximated,
+                // exactly as that backend says the reverse.
                 let ClosureBody::Tree {
                     params,
                     block,
@@ -2269,8 +2278,12 @@ impl<'a> Interpreter<'a> {
     /// Waits for or cancels the children of a scope that is being left.
     ///
     /// The waiting, the order it happens in, and what a failed child does are
-    /// [`crate::task::wait_for_children`]'s, which is the same code the VM
-    /// leaves a scope through. What is here is the translation into this
+    /// [`crate::task::wait_for_children`]'s. Before ADR 0034 that was also
+    /// the code the predecessor VM left a scope through; the linear-memory
+    /// backend keeps its own version of the same rules in `crate::lvm`
+    /// instead, so what holds the two to the same answer now is the
+    /// differential corpus rather than one shared function. What is here is
+    /// the translation into this
     /// evaluator's own control flow: a child that answered `Err(error)`
     /// returns that error from the enclosing function, exactly as `?` would,
     /// and a child that raised propagates as itself. Either way the tasks
@@ -2452,15 +2465,18 @@ impl<'a> Interpreter<'a> {
         // as an ordinary parameter does anywhere else in the language.
         //
         // The parameter is the tree body's to state, which is why this reads
-        // it there: `Vm::run_locked` asks the same question of the same
-        // closure and reads a `SlotKind::Place` in first position, which is
-        // what `cove_ir::lower` turns a written `var` into. A body this
-        // evaluator cannot run answers `false` here and is refused a moment
-        // later by `call_value_slots`, in that refusal's own words — the
-        // shape `Vm::run_locked` has for the reverse case.
+        // it there. The linear-memory backend never asks this question at
+        // all: `cove_lir::lower`'s own `shared_lock` reads whether the
+        // callback's first parameter is `var` at lowering time, while it is
+        // still syntax, and lowers the call one way or the other. A closure
+        // whose body is lowered cannot reach this evaluator to run in the
+        // first place, so the `false` answered for `ClosureBody::Linear`
+        // below is never acted on for real — it exists so this match is
+        // exhaustive, and the refusal `call_value_slots` gives a moment
+        // later is the words for a body this evaluator can never run.
         let wants_alias = match &closure.body {
             ClosureBody::Tree { params, .. } => params.first().is_some_and(|param| param.is_var),
-            ClosureBody::Lowered(_) | ClosureBody::Linear(_) => false,
+            ClosureBody::Linear(_) => false,
         };
         Ok(cell.lock(span, |value| {
             let place = Place::binding(value);
@@ -3406,8 +3422,10 @@ impl Callable for Interpreter<'_> {
     /// label and a span beside its value and the interpreter binds
     /// parameters out of that shape. It is one of the several this backend
     /// builds per call — an `Env`, the parameter names, the label
-    /// assignment — rather than the only one, which is why the tree walk
-    /// moves less on this than the VM does.
+    /// assignment — rather than the only one, unlike the linear-memory
+    /// backend, whose calling convention needs no vector at all: an
+    /// argument already lives in the slot a frame reserved for it before the
+    /// call began.
     fn call_value(
         &mut self,
         callee: &Value,
@@ -3437,8 +3455,9 @@ impl Callable for Interpreter<'_> {
 /// A declared function used as a value: a closure over nothing.
 ///
 /// `Env::captures` is not consulted, because a declaration reads no
-/// environment — which is the same `captures: Vec::new()` the VM's
-/// `close_over` writes for a function `cove_ir::lower` lowered as a value.
+/// environment — the same fact `cove_lir::lower`'s own `close_over` states
+/// when it lowers a function used as a value: an environment object with no
+/// captures at all, rather than a list of names to read.
 ///
 /// A bare name and a `module.name` both reach a declaration this way, and
 /// they build the same closure out of it, so they build it here rather than
@@ -3478,11 +3497,13 @@ fn conformable(value: &Value) -> bool {
 /// Wraps a concrete value as the `dyn Trait` value a written type asks for.
 ///
 /// The language's one implicit conversion, and the one place a Cove value's
-/// runtime representation depends on its static type. Both backends build a
-/// trait object here so that neither can build a different one: the
-/// interpreter reaches it from [`Interpreter::coerce`], which walks the
-/// written type at the moment of the conversion, and the VM from
-/// `cove_ir::Inst::MakeDyn`, whose walk happened when the type was lowered.
+/// runtime representation depends on its static type. Each backend has
+/// exactly one place it does this, so that neither builds a different dyn
+/// value in a second place by accident: the interpreter reaches it from
+/// [`Interpreter::coerce`], which walks the written type at the moment of
+/// the conversion, and `cove_lir::lower`'s own `Body::erase` walks the same
+/// written type at lowering time instead — this function is what it calls
+/// `interp::as_dyn` in its own words.
 ///
 /// A value that is already a trait object is left alone rather than wrapped
 /// again, so `dyn Trait` does not nest. That is what makes the conversion
@@ -3503,16 +3524,17 @@ pub(crate) fn as_dyn(value: Value, trait_name: &Rc<str>) -> Value {
 /// and answers everything else unchanged.
 ///
 /// One step into a container whose elements a written type says are `dyn`
-/// too, taken by both backends here. `Array<dyn Display>` and
-/// `Option<dyn Display>` are the two forms of it, and nothing else is
-/// reached: a `Vector` is a shared handle whose elements cannot be rewritten
-/// behind its other aliases, and a `Map`'s and a `Set`'s elements are not
-/// what one argument of one head names.
+/// too — the interpreter's own version of a rule `cove_lir::lower` applies at
+/// lowering time instead. `Array<dyn Display>` and `Option<dyn Display>` are
+/// the two forms of it, and nothing else is reached: a `Vector` is a shared
+/// handle whose elements cannot be rewritten behind its other aliases, and a
+/// `Map`'s and a `Set`'s elements are not what one argument of one head
+/// names.
 ///
-/// The step does not ask which of the two it is taking, and neither does the
-/// lowering: `cove_ir::Inst::MakeDyn` carries a *depth* rather than a list of
-/// steps, because the value is what says whether a layer was an array or an
-/// option.
+/// The step does not ask which of the two it is taking, because the value is
+/// what says whether a layer was an array or an option; the lowering asks
+/// the same question earlier, of the written type, before the value it
+/// describes exists to be walked.
 pub(crate) fn coerce_inside(value: Value, mut each: impl FnMut(Value) -> Value) -> Value {
     match value {
         Value(Repr::Array(items)) => Value(Repr::Array(items.iter().cloned().map(each).collect())),
@@ -3532,9 +3554,11 @@ pub(crate) fn coerce_inside(value: Value, mut each: impl FnMut(Value) -> Value) 
 /// A `dyn Trait` receiver is unwrapped to the concrete value it carries, and
 /// the implementation is found from *that* value's type. This is what makes
 /// the dispatch dynamic: the static type says only which trait the method
-/// must come from. Both backends ask it here — the interpreter of a place or
-/// of a temporary, the VM of the slot its receiver argument stands in — so
-/// neither can decide to dispatch from the wrapper instead.
+/// must come from. The interpreter asks it of a place or of a temporary
+/// here, in one place, so it cannot decide to dispatch from the wrapper
+/// instead somewhere else; the linear-memory backend asks the same question
+/// of the slot its receiver argument stands in, reading the layout directly
+/// rather than through a materialized `Value`.
 ///
 /// `None` is not an error. The checker converts where a type is *written*
 /// and does not convert a lambda's inferred result, though it gives both the
@@ -3730,11 +3754,13 @@ pub(crate) fn unary(op: UnaryOp, value: Value, span: Span) -> Result<Value, Runt
 
 /// Builds one case of the enum `module` declares as `decl`.
 ///
-/// A free function rather than a method because both backends build a
-/// declared enum's value and there is one answer to what that value is: ADR
-/// 0012 ranks the oracle above a backend, so the VM's `MakeEnum` calls this
-/// rather than restating it, and the two cannot report a missing case or a
-/// payload of the wrong length in different words.
+/// A free function because the interpreter builds a declared enum's value
+/// by looking its case up by name at every evaluation — walking syntax does
+/// not resolve a case to a fixed position the way lowering does.
+/// `cove_lir::lower` needs no runtime equivalent of this: it resolves the
+/// case statically and lowers straight to the words a value of it holds,
+/// since `cove-sema` refuses a missing case or a wrong-length payload before
+/// either backend runs.
 ///
 /// Which errors those are is the whole of what this decides: a case the
 /// declaration does not write, and a payload whose length is not the one the
@@ -3775,7 +3801,7 @@ pub(crate) fn enum_case(
         // Drained rather than taken whole: the caller lent this vector and
         // wants it back with its capacity, and a `Payload` built from a
         // draining iterator allocates nothing at all for the arities that
-        // occur. See `crate::value::Payload` and `Vm::borrow_args`.
+        // occur. See `crate::value::Payload`.
         payload: payload.drain(..).collect(),
     }))))
 }
@@ -3806,9 +3832,12 @@ fn known_members(program: &Program, module: &str, decl: &Arc<EnumDecl>) -> Strin
 /// No arm of a `match` covered `value`.
 ///
 /// Static exhaustiveness checking is future work; until then a `match` that
-/// covers no case fails rather than silently producing a value. Both backends
-/// say so in these words, because it is one rule and not two — the VM's
-/// `NoMatch` is this sentence given an instruction to be reached by.
+/// covers no case fails rather than silently producing a value. Both
+/// backends refuse for the same rule — it is one and not two — though not
+/// always in the same words: `cove_lir::lower` emits a fixed trap message at
+/// the point a `match` has no arm left, because formatting the actual value
+/// there would mean calling back into a builtin from an instruction that is
+/// already failing. This is the oracle's fuller version of the same refusal.
 pub(crate) fn no_match(value: &Value, span: Span) -> RuntimeError {
     RuntimeError::new(format!("no `match` arm covers `{value}`"))
         .at(span)
@@ -3855,10 +3884,11 @@ fn init_map_entry(args: Vec<EvaluatedArg>, span: Span) -> Result<Value, RuntimeE
 ///
 /// The out-of-order refusal below is one `cove-sema` reports before the run
 /// (ADR 0021), so no checked program reaches it. It stays because this is
-/// the oracle's own statement of the evaluation-order rule the VM's calling
-/// convention is built on — `cove_ir::lower`'s `arguments_in_order` keeps
-/// the matching one — and a rule two backends both rely on is better stated
-/// twice than assumed twice.
+/// the oracle's own statement of the evaluation-order rule the linear-memory
+/// backend's calling convention is built on too — `cove_lir::lower` lowers
+/// every argument in source order at each call site rather than through one
+/// shared matching step — and a rule two backends both rely on is better
+/// stated twice than assumed twice.
 #[allow(clippy::type_complexity)]
 fn assign_labels(
     names: &[&str],
@@ -4402,11 +4432,14 @@ fn unsupported(what: &str, span: Span) -> RuntimeError {
 /// overflow is one rule, so it is one message wherever it is reached from.
 /// The values `for` walks over `value`, in the order it walks them.
 ///
-/// One function, so that both backends walk a collection the same way — which
-/// they did not. The VM lowered a sequence to a `length()`/`get(i)` index walk,
-/// and a `Map` answers neither: it walks as the `MapEntry` of each pair, and a
-/// `Set` in ascending order. A difference like that is not a difference of
-/// speed, so it is settled in one place rather than in each backend.
+/// One function, so that this backend walks a collection one way rather
+/// than in each of its callers' own words. It was not always agreed between
+/// backends: the predecessor VM once lowered a sequence to a
+/// `length()`/`get(i)` index walk, and a `Map` answers neither shape — it
+/// walks as the `MapEntry` of each pair, and a `Set` in ascending order.
+/// `cove_lir::lower`'s own walk states the same order independently now
+/// (`crates/cove-lir/src/lower/walks.rs`), and the differential corpus is
+/// what keeps the two agreeing.
 pub(crate) fn items_of(value: Value, span: Span) -> Result<Vec<Value>, RuntimeError> {
     // Iteration reads a snapshot of the elements; rejecting structural
     // mutation during iteration is future work.
@@ -4454,9 +4487,11 @@ pub(crate) fn overflow(operation: &str, span: Span) -> RuntimeError {
 
 /// `Int` division or remainder was asked for zero.
 ///
-/// Reachable from outside for the reason [`overflow`] is: `crate::vm`'s typed
-/// integer operator raises what this operator raises, because dividing by
-/// zero is one rule of the language and not one rule per backend.
+/// Reachable from outside for the reason [`overflow`] is: the linear-memory
+/// backend's own arithmetic keeps this message word for word rather than
+/// sharing this function, because dividing by zero is one rule of the
+/// language and not one rule per backend — the differential corpus is what
+/// compares them.
 pub(crate) fn divide_by_zero(operation: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!("`Int` {operation} by zero"))
         .at(span)
@@ -9686,22 +9721,27 @@ export fn main() -> Result<Unit, Error> {
                 .iter()
                 .rev()
                 .find_map(|event| match event {
+                    // Every object figure is `Some` here because this is the
+                    // interpreter's own summary and the interpreter counts
+                    // objects; a `None` would be a machine that does not, and
+                    // this test would rather fail than read it as a zero.
                     TraceEvent::HeapSummary {
-                        allocated,
-                        allocated_bytes,
                         collections,
+                        object_count,
+                        allocated_bytes,
                         live_bytes,
                         peak_bytes,
                         pause,
+                        ..
                     } => Some(HeapStats {
-                        allocated_objects: *allocated,
-                        allocated_bytes: *allocated_bytes,
+                        allocated_objects: object_count.expect("the interpreter counts objects"),
+                        allocated_bytes: allocated_bytes.expect("the interpreter counts bytes"),
                         collections: *collections,
                         freed_objects: 0,
-                        live_bytes: *live_bytes,
+                        live_bytes: live_bytes.expect("the interpreter counts bytes"),
                         live_objects: 0,
-                        peak_bytes: *peak_bytes,
-                        pause: *pause,
+                        peak_bytes: peak_bytes.expect("the interpreter counts bytes"),
+                        pause: pause.expect("the interpreter times its collections"),
                     }),
                     _ => None,
                 })

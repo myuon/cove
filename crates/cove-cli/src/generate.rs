@@ -35,10 +35,10 @@ const REQUIRED_RETURN_TYPE: &str = "Result<String, Error>";
 /// Runs `cove generate <name>` or `cove generate --check`.
 ///
 /// `--backend` is the one run flag this command takes, and it takes it for
-/// the reason [`crate::unsupported_by_backend`] gives: since ADR 0022 a
-/// generator runs on the VM, and a generator the lowering refuses would
-/// otherwise have no way to run at all. Every other budget stays
-/// `[run.<name>]`'s, per ADR 0010.
+/// the reason [`ExecuteError::NotLowered`] exists: a generator runs on
+/// whichever backend `cove run` runs a program on, and a generator the
+/// lowering has a gap for would otherwise have no way to run at all. Every
+/// other budget stays `[run.<name>]`'s, per ADR 0010.
 pub(crate) fn cmd_generate(args: &[String]) -> Result<(), CliError> {
     let (backend, rest) = crate::split_backend(args)?;
     let mut flags = RunFlags::none();
@@ -86,18 +86,9 @@ fn generate_one(path: Option<&Path>, name: &str, flags: &RunFlags) -> Result<(),
         Ok(value) => expect_generated_source(&run.entry, value)?,
         Err(ExecuteError::Setup(message)) => return Err(CliError::Message(message)),
         // `cove generate` runs on whichever backend `cove run` runs on, so
-        // since ADR 0022 this arm is reachable: a generator that reaches a
-        // construct the lowering does not cover is refused before it writes
-        // anything, and told which flag runs it.
-        Err(ExecuteError::Unsupported(why)) => {
-            return Err(CliError::Diagnostics {
-                items: vec![crate::unsupported_by_backend(&why)],
-                sources: sources.clone(),
-            })
-        }
-        // The same moment, on the backend that has gaps rather than
-        // refusals: nothing is written, and what is shown is where the
-        // lowering stopped.
+        // this arm is reachable: a generator that reaches a gap in the
+        // lowering stops before it writes anything, and what is shown is
+        // where the lowering stopped.
         Err(ExecuteError::NotLowered(items)) => {
             return Err(CliError::Diagnostics {
                 items,
@@ -152,15 +143,9 @@ fn generate_check(path: Option<&Path>, flags: &RunFlags) -> Result<(), CliError>
         ) {
             Ok(value) => expect_generated_source(&run.entry, value)?,
             Err(ExecuteError::Setup(message)) => return Err(CliError::Message(message)),
-            // Reachable since ADR 0022, for the reason `generate_one`
-            // gives: `--check` lowers every generator the package declares,
-            // so one the VM cannot run stops the check by name.
-            Err(ExecuteError::Unsupported(why)) => {
-                return Err(CliError::Diagnostics {
-                    items: vec![crate::unsupported_by_backend(&why)],
-                    sources: sources.clone(),
-                })
-            }
+            // Reachable for the reason `generate_one` gives: `--check`
+            // lowers every generator the package declares, so one the
+            // lowering has a gap for stops the check by name.
             Err(ExecuteError::NotLowered(items)) => {
                 return Err(CliError::Diagnostics {
                     items,

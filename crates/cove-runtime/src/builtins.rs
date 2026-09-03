@@ -66,7 +66,7 @@ pub trait Callable {
     /// down for the whole walk. Issue #193 is the cost that made that worth
     /// arranging — `map`, `filter`, `fold` and `sorted` built and dropped a
     /// `Vec<Value>` for every element they visited, which is the same shape
-    /// [`crate::vm::Vm`]'s own argument vectors had before #184 and on the
+    /// the predecessor's own argument vectors had before #184 and on the
     /// one path that scheme could not reach.
     ///
     /// A caller that fails partway is still handed back a vector it may
@@ -84,13 +84,14 @@ pub trait Callable {
 
     /// The independent copy `Snapshot` makes of one value.
     ///
-    /// A hook rather than a function because a struct and an enum answer it
-    /// through their own `impl Snapshot for Type`, which is a declaration
-    /// only a backend can reach: the interpreter invokes the conformance,
-    /// and the VM has no way to call one from inside an instruction and
-    /// reports it instead. [`snapshot`] is the half that is the same for
-    /// both, and it recurses through here so that a `Vector` of structs
-    /// reaches whichever answer its backend has.
+    /// A hook on this trait, whose one implementor is `Interpreter`, because
+    /// a struct and an enum answer their own `impl Snapshot for Type`
+    /// through a declaration that only the interpreter reaches this way. The
+    /// linear-memory backend puts the same recursion in the lowering
+    /// instead, exactly because a builtin never calls back into Cove —
+    /// `docs/LINEAR_VM.md` says why. [`snapshot`] recurses through here so
+    /// that a `Vector` of structs reaches the interpreter's own answer for
+    /// each one.
     fn snapshot(&mut self, value: &Value, span: Span) -> Result<Value, RuntimeError>;
 }
 
@@ -145,18 +146,21 @@ pub fn snapshot(
 ///
 /// A spread passes an existing sequence where a variadic parameter's
 /// elements would go, so the two sequences are what it reads; `bind_params`
-/// reports anything else, and the VM reports it from the instruction that
-/// does the appending. One wording, because it is one failure.
+/// reports anything else, and the linear-memory backend reports it from the
+/// instruction that does the appending. One wording, because it is one
+/// failure.
 pub fn spread_needs_a_sequence(span: Span) -> RuntimeError {
     RuntimeError::new("`...` spreads an `Array` or a `Vector`").at(span)
 }
 
 /// What a value that implements no `Snapshot` conformance is refused with.
 ///
-/// Both backends reach it: the interpreter for a struct or an enum whose
-/// type wrote none, and the VM for one it reached inside a `Vector` — where
-/// it cannot call the conformance even if there is one, because an
-/// instruction has no way to run a whole function in the middle of itself.
+/// Only the interpreter reaches it: a struct or an enum whose type wrote
+/// none, met while walking a `Vector` whose element type is not known until
+/// the value is. The linear-memory backend has no runtime version of this
+/// question — a `Vector`'s element type is part of its layout, so whether it
+/// snapshots itself or calls a conformance is decided when the walk is
+/// lowered, not when it runs.
 pub fn no_snapshot_conformance(value: &Value, span: Span) -> RuntimeError {
     RuntimeError::new(format!(
         "`{}` does not implement `Snapshot`",
@@ -1039,17 +1043,20 @@ fn duration_unit(name: &str) -> Option<i64> {
 }
 
 /// `map`, `filter`, `fold`, and `sorted`, which are the same four operations
-/// on an `Array` and on a `Vector`.
+/// on an `Array` and on a `Vector`, as the interpreter runs them: the
+/// linear-memory backend lowers each of the four to its own loop instead —
+/// see `crates/cove-lir/src/lower/walks.rs`, which calls this file's version
+/// the oracle it has to agree with.
 ///
 /// `elements` is already the caller's own copy — the `Array`'s elements, or
 /// the `Vector`'s taken out from under its `RefCell` before this was
 /// called — which is what makes the walk a walk over a snapshot. A callback
 /// that reaches the vector it was handed an element of may push onto it,
 /// `freeze` it, or drop the last other handle to it, and none of the three
-/// changes what is being walked or what comes back. `cove_ir::Inst::IterItems`
-/// makes a `for` ask once and walk what it was given; this is the same
-/// decision, in the place where a closure rather than a loop body is what
-/// could do the mutating.
+/// changes what is being walked or what comes back. The lowering makes the
+/// same decision by reading a sequence's length once, with `Inst::Len`,
+/// before it walks; this is that decision in the place where a closure
+/// rather than a loop body is what could do the mutating.
 ///
 /// Everything a callback costs is accounted where any other call is:
 /// [`Callable::call_value`] is the evaluator re-entered, so fuel, the depth
@@ -1074,14 +1081,14 @@ fn duration_unit(name: &str) -> Option<i64> {
 /// comparison, which for `examples/life`'s `population()` is an allocation
 /// per creature per tick.
 ///
-/// It costs nothing to arrange because `args` is already a vector the caller
-/// lends: on the VM it is [`crate::vm::Vm::borrow_args`]'s, pooled since
-/// #184, so the lending scheme that could not reach the callback path now
-/// reaches it by being handed one level further down. A slice would not do
-/// here for the same reason it would not do there — `map` moves its element
-/// into the call and `fold` moves the accumulator through every one of them,
-/// and the callback re-enters the evaluator and may push onto the very stack
-/// a slice would point into.
+/// It costs nothing to arrange because `args` is already a vector the
+/// caller lends. The predecessor pooled its own argument vectors the same
+/// way starting at #184; #193 is that scheme reaching a path it could not
+/// reach before, by being handed one level further down. A slice would not
+/// do here for the same reason it would not do there — `map` moves its
+/// element into the call and `fold` moves the accumulator through every one
+/// of them, and the callback re-enters the evaluator and may push onto the
+/// very stack a slice would point into.
 fn walk_with(
     host: &mut dyn Callable,
     type_name: &str,
@@ -1224,13 +1231,16 @@ fn merge_sort(
 /// declares, before it is called rather than while it is being called.
 ///
 /// The checker settles this for every program it accepts, so nothing a
-/// checked program does reaches either failure. It is still asked here, and
-/// asked once for the whole walk, because the two backends enter a closure
-/// through different code — `Interpreter::call_value_slots` and
-/// `Vm::call_from_host` — and a callback of the wrong arity would otherwise
-/// be refused by whichever of those the run happened to be on, in that one's
-/// words. One question asked in the one implementation both backends share
-/// is one answer.
+/// checked program does reaches either failure. It is still asked here,
+/// once for the whole walk, rather than left for
+/// `Interpreter::call_value_slots` to discover on the first call: a walk of
+/// zero elements never makes that call at all, so leaving the check there
+/// would mean an empty `Array` misses a callback of the wrong arity that a
+/// full one catches. Asking here also gives the failure the builtin's own
+/// words — the declared shape, `fn(T) -> R`, and which parameter — rather
+/// than a plain arity count. `map`, `filter`, `fold` and `sorted` are the
+/// interpreter's own implementation of the four walks; the linear-memory
+/// backend lowers each of them on its own and never reaches this function.
 fn expect_callback(
     host: &dyn Callable,
     method: &str,

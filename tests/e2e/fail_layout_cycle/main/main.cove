@@ -13,8 +13,8 @@ use console.println
 /// This case lives in its own package so that a check-time failure cannot
 /// take down every other case.
 struct Node {
-  value: Int,
-  next: Option<Node>,
+  value: Int
+  next: Option<Node>
 }
 
 /// Entry point, never reached: the package does not check.

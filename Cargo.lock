@@ -7,7 +7,6 @@ name = "cove-bench"
 version = "0.1.0"
 dependencies = [
  "cove-diag",
- "cove-ir",
  "cove-lir",
  "cove-runtime",
  "cove-sema",
@@ -18,7 +17,6 @@ name = "cove-cli"
 version = "0.1.0"
 dependencies = [
  "cove-diag",
- "cove-ir",
  "cove-lir",
  "cove-runtime",
  "cove-sema",
@@ -28,16 +26,6 @@ dependencies = [
 [[package]]
 name = "cove-diag"
 version = "0.1.0"
-
-[[package]]
-name = "cove-ir"
-version = "0.1.0"
-dependencies = [
- "cove-diag",
- "cove-schema",
- "cove-sema",
- "cove-syntax",
-]
 
 [[package]]
 name = "cove-lir"
@@ -54,7 +42,7 @@ name = "cove-rules"
 version = "0.1.0"
 dependencies = [
  "cove-diag",
- "cove-ir",
+ "cove-lir",
  "cove-runtime",
  "cove-schema",
  "cove-sema",
@@ -66,7 +54,6 @@ name = "cove-runtime"
 version = "0.1.0"
 dependencies = [
  "cove-diag",
- "cove-ir",
  "cove-lir",
  "cove-schema",
  "cove-sema",

@@ -1738,10 +1738,11 @@ impl Body<'_> {
         }
         // `forager.decide(view, observation)`, `lib.Box(item: ...)`: a module
         // `use` imported whole, reached through the name it is visible under.
-        // `ResolvedModule::module_imports` is the fact, and this is the last
-        // of the four consumers of it to be written: the checker reads it in
-        // `typeck::qualified_key`, the oracle in `interp::imported_module`,
-        // and the predecessor in `cove_ir::lower::index`.
+        // `ResolvedModule::module_imports` is the fact, and this is the third
+        // consumer of it: the checker reads it in `typeck::qualified_key`,
+        // the oracle in `interp::imported_module`, and this is the
+        // lowering's own reading — a fourth reading, the predecessor's own,
+        // was deleted with it at the cutover.
         //
         // Its two halves are the oracle's two: an exported function, then an
         // exported struct's initializer. Whether the owner exports the name

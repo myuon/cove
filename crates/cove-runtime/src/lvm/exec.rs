@@ -30,7 +30,7 @@ use cove_lir::{
     Num, Program, Repr, Shape, Slot, StrId,
 };
 
-use crate::budget::{Cancellation, Meter};
+use crate::budget::{Cancellation, Meter, Stopped};
 use crate::error::RuntimeError;
 use crate::host::{HostRegistry, Reentry, ResourceHandle};
 use crate::interp::stopped_here;
@@ -56,7 +56,7 @@ use crate::value::Value;
 /// tight arithmetic loop run unbounded. A fixed stride is the arrangement that
 /// bounds both: the run notices a cancellation within a known number of
 /// instructions, whatever it is doing.
-pub(crate) const SAFEPOINT_STRIDE: u64 = 1024;
+pub const SAFEPOINT_STRIDE: u64 = 1024;
 
 /// One live call.
 ///
@@ -395,6 +395,30 @@ pub(crate) struct Machine<'a> {
     /// the same time on two threads must not share one.
     next_task: u64,
     instructions: u64,
+    /// How many of [`Machine::instructions`] have been handed to the run's
+    /// [`Meter`].
+    ///
+    /// The two counters differ by the work this machine has done and not yet
+    /// paid for, and every place that pays hands over exactly that difference
+    /// and sets this to the count it paid up to. There is no second
+    /// accumulator to keep in step with the instruction count, which is what
+    /// makes "the run is charged for every instruction it dispatched" a
+    /// subtraction rather than a claim about the paths somebody remembered.
+    ///
+    /// Three places move it, and between them they cover every way work can
+    /// be done. The periodic safepoint in [`Machine::dispatch`] is the
+    /// ordinary one. [`Machine::charge_at_host_boundary`] is
+    /// [ADR 0030](../../../../docs/adr/0030-a-host-call-asks-the-fuel-limit.md)'s:
+    /// the fuel a run has been charged has to be current before a Host call
+    /// asks whether it may begin. [`Machine::spend_pending_fuel`] is the last
+    /// one, at the end of a run or of a spawned task's thread, because a run
+    /// that raised, ran out of budget, was cancelled or was abandoned by the
+    /// host that bounded it leaves through Rust's `?` rather than through an
+    /// instruction and reaches no further safepoint —
+    /// [ADR 0024](../../../../docs/adr/0024-a-stop-is-a-bound-not-a-point.md)
+    /// says pending fuel is never lost, and this is the counter that makes
+    /// that checkable.
+    charged: u64,
     /// How long this machine has spent inside host calls.
     ///
     /// The oracle charges the same measurement against every open timing
@@ -494,6 +518,7 @@ impl<'a> Machine<'a> {
             task: ENTRY_TASK,
             next_task: 1,
             instructions: 0,
+            charged: 0,
             host_wait: Duration::ZERO,
             collected: Collected::default(),
             held: Vec::new(),
@@ -545,6 +570,7 @@ impl<'a> Machine<'a> {
             task,
             next_task: 1,
             instructions: 0,
+            charged: 0,
             host_wait: Duration::ZERO,
             collected: Collected::default(),
             held: Vec::new(),
@@ -613,6 +639,25 @@ impl<'a> Machine<'a> {
             "an entry is called with its parameters' words"
         );
 
+        // On an empty stack, and that has to be said rather than assumed. A
+        // machine is built once and called many times — `Lvm::invoke_within`
+        // exists so that one bounded invocation can be stopped without
+        // damaging the session that made it — and a call that was stopped
+        // where it stood left its frames standing, because a runtime error is
+        // not a jump the lowering emits and nothing unwound them. Building
+        // this call on top of those would give `Inst::Return` a caller to
+        // resume that belongs to a call that is over: the answer would be
+        // written into an abandoned frame and the run would continue in it.
+        //
+        // The cells go back for the same reason and in the same breath. A
+        // `lock` region the stopped call was inside was left by no
+        // `SharedUnlock`, and a cell nobody gives back is a cell no task can
+        // ever take again.
+        self.give_cells_back(0);
+        self.frames.clear();
+        self.mem.reset_stack();
+        self.temps.clear();
+
         let base = self
             .mem
             .push_frame(function.frame_size())
@@ -660,8 +705,103 @@ impl<'a> Machine<'a> {
             );
             self.give_cells_back(0);
             self.stop_all(&mut running);
+            // Last, after the answer is settled and after the children are
+            // joined, so that what is put back is everything this thread
+            // dispatched and nothing is added to the run's total once the
+            // total has been read.
+            self.spend_pending_fuel(budget);
             answer
         })
+    }
+
+    /// Hands the run's [`Meter`] whatever this thread has dispatched and not
+    /// yet paid for, at the end of a run or of a spawned task's thread.
+    ///
+    /// The ordinary way out of a body pays on its way: a run long enough to
+    /// reach a periodic safepoint has handed over every whole stride of it,
+    /// and a Host call has handed over the part of the stride that preceded
+    /// it. What pays for nothing is the remainder — the instructions after
+    /// the last hand-over — and every way a run can end without dispatching
+    /// another instruction is a way that remainder would be dropped with the
+    /// stacks: a raised error, an exhausted budget, a cancelled task, a
+    /// bounded call the host abandoned. Each of those leaves through Rust's
+    /// `?` rather than through an instruction.
+    ///
+    /// The work was really done, so the run is charged for it.
+    /// [ADR 0024](../../../../docs/adr/0024-a-stop-is-a-bound-not-a-point.md)
+    /// decides that pending fuel is never lost, and a `fuel_spent` below the
+    /// instructions the run dispatched is the observable form of losing it.
+    ///
+    /// [`Meter::spend`] rather than [`Meter::safepoint`], and the difference
+    /// is the whole reason this is its own function: this runs after the
+    /// answer is settled, and a stop raised here would replace the reason the
+    /// run actually ended. A run that raised would report that it was out of
+    /// fuel.
+    ///
+    /// A spawned task's thread reaches this through its own [`Machine::drive`]
+    /// and pays into the same accounting, because ADR 0008 draws a task's
+    /// fuel from the run's budget rather than giving each task one of its
+    /// own.
+    fn spend_pending_fuel(&mut self, budget: &Meter) {
+        let pending = self.instructions - self.charged;
+        if pending != 0 {
+            self.charged = self.instructions;
+            budget.spend(pending);
+        }
+    }
+
+    /// Hands over what this thread has dispatched and not yet paid for, and
+    /// asks the run's accounting whether it may continue — at a Host call,
+    /// before the call is dispatched.
+    ///
+    /// # The contract
+    ///
+    /// **No Host call begins once the fuel a run has been charged has reached
+    /// its limit.**
+    /// [ADR 0030](../../../../docs/adr/0030-a-host-call-asks-the-fuel-limit.md)
+    /// decides that, and it is a statement about the bound rather than about
+    /// the count: what the two backends share is the property, not the number
+    /// that satisfies it. The oracle satisfies it by holding no pending fuel
+    /// at all — `Interpreter::charge_safepoint` hands `SAFEPOINT_FUEL` over in
+    /// the same call that charges it, so its charged total cannot move while
+    /// a straight line runs. This machine holds pending fuel by construction,
+    /// because it charges on a fixed instruction stride, so it satisfies it
+    /// the other way ADR 0030 allows: by flushing here.
+    ///
+    /// Without this, a Host call is just another instruction the stride
+    /// counts, and a straight line of them shorter than one
+    /// [`SAFEPOINT_STRIDE`] is not stopped at any fuel limit whatever —
+    /// forty effects under a limit of one, which is the shape ADR 0030 was
+    /// written to refuse.
+    ///
+    /// # Why this is not a safepoint
+    ///
+    /// It asks the budget and nothing else. The two flags a thread owns are
+    /// read by the caller one line above, so repeating them here would be
+    /// asking a question that has just been answered.
+    ///
+    /// The collector is the interesting half. The predecessor's argument for
+    /// leaving it out was that its arguments had already been drained into a
+    /// `Vec<Value>` and were therefore rooted by their own references rather
+    /// than by the walk. **That argument does not hold here, and the
+    /// conclusion still does.** The arguments this boundary converts are
+    /// [`Value`]s built by [`crate::lvm::boundary::to_value`], which copies
+    /// out of the heap rather than naming it, and the words they were read
+    /// from are still in the slots of a frame this machine has not left — so
+    /// a collection here would be as sound as one anywhere else, and
+    /// [`Machine::park`] is about to publish exactly those roots for the
+    /// length of the call. The reason not to collect is therefore the second
+    /// half of the predecessor's: this machine's collection point is a
+    /// rendezvous poll, and putting one in front of every Host call would
+    /// make an unpredictable sweep part of the cost of reaching the outside
+    /// world, for a reason the budget never asked for.
+    fn charge_at_host_boundary(&mut self, budget: &Meter, span: Span) -> Result<(), RuntimeError> {
+        let pending = self.instructions - self.charged;
+        self.charged = self.instructions;
+        if let Err(stopped) = budget.safepoint(pending) {
+            return Err(budget.to_runtime_error(stopped).at(span));
+        }
+        Ok(())
     }
 
     /// Runs the body of a spawned closure, which is this machine's whole
@@ -739,7 +879,15 @@ impl<'a> Machine<'a> {
                 // function, so the two backends cannot disagree about which
                 // of the two stopped the work.
                 stopped_here(self.cancellation.as_ref(), &self.stops, self.span(id, pc))?;
-                if let Err(stopped) = budget.safepoint(SAFEPOINT_STRIDE) {
+                // What is handed over is the instructions run since the last
+                // hand-over, not the stride: a Host call between two
+                // safepoints may already have paid for part of this window,
+                // and charging the stride flat would charge that part twice.
+                // It is a whole stride whenever nothing intervened, which is
+                // the case a bound is stated against.
+                let gathered = self.instructions - self.charged;
+                self.charged = self.instructions;
+                if let Err(stopped) = budget.safepoint(gathered) {
                     return Err(budget.to_runtime_error(stopped).at(self.span(id, pc)));
                 }
                 // And the run's: a collection is stop-the-world, so a task
@@ -933,6 +1081,10 @@ impl<'a> Machine<'a> {
                             list.len()
                         ));
                     }
+                    if let Err(error) = self.admit_frame(budget, self.span(id, pc - 1)) {
+                        self.sync(pc - 1);
+                        return Err(error);
+                    }
                     let callee_base = match self.mem.push_frame(target.frame_size()) {
                         Ok(base) => base,
                         Err(Overflow) => fail!(self.too_deep_error()),
@@ -993,6 +1145,10 @@ impl<'a> Machine<'a> {
                             target.params.len(),
                             list.len()
                         ));
+                    }
+                    if let Err(error) = self.admit_frame(budget, self.span(id, pc - 1)) {
+                        self.sync(pc - 1);
+                        return Err(error);
                     }
                     let callee_base = match self.mem.push_frame(target.frame_size()) {
                         Ok(base) => base,
@@ -1505,6 +1661,52 @@ impl<'a> Machine<'a> {
             .with_rule("A recursion that does not terminate is stopped rather than left to run.")
     }
 
+    /// Refuses a frame that would take this task past the embedder's
+    /// [`Limits::max_call_depth`].
+    ///
+    /// This is a *budget*, and the difference from
+    /// [`Machine::too_deep_error`] is the whole reason it is a second check.
+    /// A frame that would leave this task's stack segment is a stack
+    /// overflow: a fact about the memory the run was built with, reported as
+    /// a runtime error and classified as one. `max_call_depth` is a number an
+    /// embedder chose, reported as a stop, and classified as
+    /// [`RunOutcome::CallDepth`] — so a tool that reads a trace can tell a
+    /// program that recursed too far from a limit the embedder set, which is
+    /// what makes either bound worth acting on. Both stay, and they are asked
+    /// in the order the oracle asks them: the unconditional limit first, then
+    /// the configured one.
+    ///
+    /// Counted against *this* task's frames rather than against a total the
+    /// run shares, for the reason [`crate::budget::Budget`] gives for not
+    /// enforcing this limit itself: ADR 0008 gives each task a stack of its
+    /// own, and a shared count would stop a shallow task because a sibling
+    /// was deep.
+    ///
+    /// The limit is read off the meter at the call rather than cached in a
+    /// field, and that is a decision about where the answer lives. A
+    /// `Machine` holds no [`Meter`] — the run's accounting is passed into
+    /// [`Machine::dispatch`], which is what lets one machine serve a session
+    /// of invocations each bounded by a budget of its own. A field would have
+    /// to be re-bound every time [`crate::Lvm::invoke_within`] installed one,
+    /// and a stale one would enforce the previous request's limit on this
+    /// request. Reading it here cannot go stale, because it comes from the
+    /// very meter the safepoints of this run are charging. It costs one
+    /// pointer chase through an `Arc` to a field that does not change while a
+    /// run lasts, on a path that is already writing a frame.
+    ///
+    /// [`Limits::max_call_depth`]: crate::budget::Limits::max_call_depth
+    /// [`RunOutcome::CallDepth`]: crate::trace::RunOutcome::CallDepth
+    fn admit_frame(&self, budget: &Meter, span: Span) -> Result<(), RuntimeError> {
+        if let Some(limit) = budget.limits().max_call_depth {
+            if self.frames.len() + 1 > limit {
+                // The error names the value the limit was configured with, so
+                // it is built where that value is rather than here.
+                return Err(budget.to_runtime_error(Stopped::CallDepth).at(span));
+            }
+        }
+        Ok(())
+    }
+
     /// How many words a value of `layout` occupies.
     ///
     /// The one question every move in the machine asks now: a value location
@@ -1691,6 +1893,7 @@ impl<'a> Machine<'a> {
             .at(span)
         })?;
         stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
+        self.charge_at_host_boundary(budget, span)?;
         let started = Instant::now();
         let answer = {
             // A task inside a host call is not running Cove and its frames do
@@ -1771,6 +1974,10 @@ impl<'a> Machine<'a> {
             .at(span)
         })?;
         stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
+        // A resource operation is a Host API call and is bounded as one, so
+        // ADR 0030's boundary is here for the reason it is in
+        // [`Machine::call_host`] and in the same order.
+        self.charge_at_host_boundary(budget, span)?;
         let started = Instant::now();
         let answer = {
             let mut back = Back::parked(self, budget, span, threads, running);
@@ -2668,6 +2875,12 @@ impl<'a> Machine<'a> {
         if args.len() != target.params.len() {
             return Err(wrong_arity(target.qualified(), target.params.len(), args.len()).at(span));
         }
+
+        // A callback's own frame is an ordinary Cove frame and counts as
+        // one, which is the answer the oracle gives: the one frame a reentry
+        // adds is enough to cross a limit the same recursion fits under when
+        // it is called directly.
+        self.admit_frame(budget, span)?;
 
         let floor = self.frames.len();
         let children = self.children.len();
