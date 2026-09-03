@@ -56,6 +56,13 @@ use crate::value::Value;
 /// tight arithmetic loop run unbounded. A fixed stride is the arrangement that
 /// bounds both: the run notices a cancellation within a known number of
 /// instructions, whatever it is doing.
+///
+/// It is public because it is the arithmetic of a contract rather than a
+/// tuning knob.
+/// [ADR 0040](../../../../docs/adr/0040-a-bound-outlives-its-backend.md)
+/// states every bound a stop mode promises in terms of it, and
+/// `crates/cove-runtime/tests/responsiveness.rs` measures each of them, so
+/// moving this number moves a stated maximum and costs both.
 pub const SAFEPOINT_STRIDE: u64 = 1024;
 
 /// One live call.

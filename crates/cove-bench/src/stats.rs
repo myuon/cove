@@ -21,16 +21,18 @@
 //! rely on. The argument from skew is weaker than it looks, and it is recorded
 //! here because it was checked rather than assumed. The only distributions
 //! this repository has written down are the nine rows of the
-//! calling-convention matrix in `docs/VM_ARCHITECTURE.md`, taken at nine
-//! samples a row on a quiet machine, and they report `{median, min, max}`. If
-//! those series were reliably right-skewed then `max - median` would exceed
-//! `median - min` on most of them. It exceeds it on three rows, falls short on
-//! five, and ties on one. So "benchmark timings are right-skewed" is not a
-//! claim this data supports and is not what justifies the median here. What
-//! justifies it is that one bad sample must not be able to move the number a
-//! decision is made on — and that argument does not need the skew, because a
-//! statistic robust to an outlier in either direction is what a decision
-//! wants either way.
+//! calling-convention matrix, taken at nine samples a row on a quiet machine
+//! and reported as `{median, min, max}`. That table measured the backend
+//! ADR 0034 deleted and went with it; `docs/VM_ARCHITECTURE.md` restates the
+//! counts below, and the table itself is in git history at commit `6e90085`.
+//! If those series were reliably right-skewed then `max - median` would
+//! exceed `median - min` on most of them. It exceeds it on three rows, falls
+//! short on five, and ties on one. So "benchmark timings are right-skewed" is
+//! not a claim this data supports and is not what justifies the median here.
+//! What justifies it is that one bad sample must not be able to move the
+//! number a decision is made on — and that argument does not need the skew,
+//! because a statistic robust to an outlier in either direction is what a
+//! decision wants either way.
 //!
 //! Two caveats on that check, because it is weaker than a real one. Three
 //! order statistics are not a distribution, and nine samples put both

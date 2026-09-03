@@ -630,8 +630,9 @@ costs 53 allocations more than one `pull` untraced and carries a ten-field
 struct; the `record` beside it carries four scalars and costs the other 12. So
 the description is a per-value charge and not a per-call one, and a host
 operation that hands a large value across is the one a trace makes expensive.
-`docs/VM_ARCHITECTURE.md` records the same effect from the other end, at 16.8%
-of `benches/hostheavy`.
+The predecessor backend's mechanism suite recorded the same effect from the
+other end, at 16.8% of `benches/hostheavy`; that suite was deleted with the
+backend it measured and is in git history at commit `6e90085`.
 
 ### What reuse is worth
 
@@ -654,8 +655,8 @@ the load row on top of it.
 
 **The VM allocates 2.96× less than the interpreter here**, on a program written
 for a domain rather than for a benchmark, with a Host API call in it.
-`docs/VM_ARCHITECTURE.md`'s suite is mechanism benchmarks; this is a second
-kind of evidence for the same claim, and it agrees.
+The suite this is being weighed against was mechanism benchmarks; this is a
+second kind of evidence for the same claim, and it agrees.
 
 ### The Rust side of the conversion
 

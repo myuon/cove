@@ -19,9 +19,10 @@ design is recorded in [ADR 0001](docs/adr/0001-mvp-language-design.md).
   and pattern form, held to the implementation by a conformance suite
 - [The linear-memory VM](docs/LINEAR_VM.md) — the backend that runs a Cove
   program: one linear memory, one word stack, one slot numbering
-- [VM architecture](docs/VM_ARCHITECTURE.md) — the backend that one replaced,
-  kept for the measurements and the measurement discipline that came out of
-  it
+- [How a measurement is taken](docs/VM_ARCHITECTURE.md) — the code-layout
+  band, the control-build discipline, and what a benchmark number is worth.
+  It described the backend ADR 0034 replaced; those chapters were deleted and
+  this is the part of it that was never about a backend
 - [Architecture decisions](docs/adr/) — each one carries its status, the pull
   request that implemented it, how much of it is built, and what has since
   amended or superseded it
@@ -254,6 +255,12 @@ read the ten older ADRs that ADR 0034's replacement left behind: the new
 backend took the deleted one's names, so `cove-ir`, `cove_runtime::vm` and
 `--backend vm` still resolve but no longer mean what those ADRs meant by
 them, and a name in an accepted ADR is read at that ADR's date.
+[ADR 0040](docs/adr/0040-a-bound-outlives-its-backend.md) is where the bounds
+ADR 0024 promised now live: the replacement charges one fuel per instruction
+on a fixed 1024-instruction stride rather than a basic block at a time, so
+the table moved out of the prose beside the deleted backend and into the
+record, and `crates/cove-runtime/tests/responsiveness.rs` is what measures
+every row of it.
 
 Syntax is still provisional and may change.
 

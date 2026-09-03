@@ -13,9 +13,10 @@ no instruction, storage region or naming convention was carried over from it
 for compatibility. Where this document and the predecessor agreed, they
 agreed by arriving at the same place. The predecessor was deleted at the
 cutover ADR 0034's eighth completion condition asks for, and its names were
-handed over in the commit after; `docs/VM_ARCHITECTURE.md` is what remains of
-it, kept for the measurements taken on the way here and for the ADRs that
-cite them, and every `Vm` it names is the predecessor's.
+handed over in the commit after. `docs/VM_ARCHITECTURE.md` is what remains
+of it: its architecture chapters went with the backend they described, and
+what is kept there is the measurement discipline, which was never about a
+backend at all.
 
 The design was reviewed in [issue #240](https://github.com/myuon/cove/issues/240);
 its answers are folded in here rather than left in the thread. One of them

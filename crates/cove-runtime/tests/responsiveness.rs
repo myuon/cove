@@ -21,12 +21,13 @@
 //! to stopping at the same source operation. `docs/adr/0024-a-stop-is-a-bound-not-a-point.md`
 //! is where that is decided, and
 //! `docs/adr/0030-a-host-call-asks-the-fuel-limit.md` is where the fuel
-//! bound at a Host call was narrowed to zero. `docs/VM_ARCHITECTURE.md`
-//! states each of *those* bounds in prose, but for the backend ADR 0034
-//! deleted; it is kept only because those two ADRs and others cite its
-//! sections by name. `Vm`'s own bounds have no prose table yet — this file,
-//! and `docs/LINEAR_VM.md`'s design, are where they are measured and decided
-//! instead.
+//! bound at a Host call was narrowed to zero.
+//! `docs/adr/0040-a-bound-outlives-its-backend.md` is where `Vm`'s own
+//! bounds are stated: the table ADR 0024 asked for, taken out of the prose
+//! beside the backend ADR 0034 deleted and put into the record, with every
+//! row of it measured here. That is ADR 0040's restatement of ADR 0024's
+//! obligation, and it is why moving a bound costs an ADR superseding
+//! ADR 0040 as well as the test below that measures it.
 //!
 //! The instrument is a host module called `probe`, defined below. It is here
 //! rather than borrowed from `clock` because the shipped bounded call —
@@ -1020,16 +1021,17 @@ fn a_straight_line_is_cut_off_mid_line_and_the_tree_walk_finishes_it() {
 /// limit is not portable between backends" and is why `max_host_calls` is
 /// still the only control that bounds effects exactly.
 ///
-/// `Vm` has no boundary hand-over and no per-call safepoint of its own,
-/// exactly as the tree walk has none: a Host call is just another instruction
-/// counted on the fixed `SAFEPOINT_STRIDE`. So a straight line of Host calls
-/// shorter than one stride is not stopped at all, at any fuel limit —
-/// `Vm` has landed on the tree walk's half of ADR 0024's asymmetry rather
-/// than the deleted backend's, and ADR 0030's guarantee holds only at
-/// stride granularity now. The first assertion below still states ADR 0030's
-/// claim as written and fails against `Vm`, because a fuel limit of one does
-/// not refuse a single one of these forty calls: this loop's whole body is
-/// short enough that no safepoint is ever reached.
+/// `Vm` holds pending fuel by construction, because it charges on a fixed
+/// `SAFEPOINT_STRIDE`, so it satisfies ADR 0030 the way that ADR allows a
+/// backend which does: `Machine::charge_at_host_boundary` hands over what
+/// this thread has dispatched and asks the budget before the call goes out.
+/// Without it a Host call would be just another instruction the stride
+/// counts, and a straight line of them shorter than one stride would not be
+/// stopped at any fuel limit whatever. That is what b094d82 found — forty
+/// effects under a limit of one — and the first assertion below is ADR 0030's
+/// claim as written, on a line short enough that no periodic safepoint is
+/// ever reached, so the boundary is the only thing that can refuse.
+/// `docs/adr/0040-a-bound-outlives-its-backend.md` states the bound.
 #[test]
 fn no_host_call_begins_once_the_charged_fuel_has_reached_its_limit() {
     let mut source =
@@ -1308,17 +1310,16 @@ export fn main() -> Result<Int, Error> {
 /// reported 0 fuel for 56 instructions before that existed.
 ///
 /// `Vm` — the backend that replaced it, and which has since taken its name —
-/// charges nothing until a safepoint, at a fixed `SAFEPOINT_STRIDE`, and
-/// nothing flushes what is left over when a run ends between two safepoints;
-/// it has no `spend_pending_fuel` of its own. So the invariant this test
-/// states is false of `Vm` for a run short enough
-/// never to reach one: `machine.instructions()` counts every instruction
-/// dispatched, and `fuel_spent` counts only whole strides of them, which is
-/// zero for a run of a few dozen instructions. The cases below that loop
-/// until stopped still cross many strides and satisfy the invariant; the
-/// short ones do not, and their assertions are left exactly as this test
-/// always stated them rather than carved out, so they fail and say by how
-/// much.
+/// charges nothing between two safepoints, at a fixed `SAFEPOINT_STRIDE`, so
+/// it holds a remainder for the same reason and needs the same flush. It has
+/// one: `Machine::spend_pending_fuel`, at the end of a run and at the end of
+/// every spawned task's thread, after the answer is settled so that a stop
+/// raised there could not replace the reason the run actually ended. Without
+/// it a run of a few dozen instructions would report zero, because
+/// `machine.instructions()` counts every instruction dispatched and a
+/// safepoint counts only whole strides. The cases below are the seven ways of
+/// leaving without dispatching another instruction, and the invariant is
+/// stated of all of them alike.
 #[test]
 fn a_run_never_reports_less_fuel_than_the_instructions_it_charged() {
     let cases: &[(&str, &str)] = &[
@@ -1457,10 +1458,13 @@ export fn main() -> Result<Int, Error> {
 /// stop is a bound nobody can act on, so this is part of the contract rather
 /// than a nicety.
 ///
-/// The "call depth" case fails against `Vm` as of this writing: nothing in
-/// `crate::vm` reads [`Limits::max_call_depth`], so `down(50)` under a limit
-/// of 8 answers `Ok(0)` there instead of stopping. The tree walk still
-/// enforces it, which is what the assertion below is left stating.
+/// The "call depth" case is worth naming, because b094d82 found `Vm` reading
+/// no `max_call_depth` at all — `down(50)` under a limit of 8 answered
+/// `Ok(0)` there instead of stopping — and this case is what found it.
+/// `Machine::admit_frame` reads it now, at every frame pushed, and reports it
+/// as `RunOutcome::CallDepth` rather than as the stack overflow that leaving
+/// a task's stack segment is: one is a number an embedder chose and the other
+/// is a fact about the memory the run was built with.
 #[test]
 fn every_stop_mode_is_reported_as_itself_on_both_backends() {
     let spinner = PURE_SPINNER.replace("{turns}", "100000000");

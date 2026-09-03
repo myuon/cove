@@ -8,6 +8,15 @@
   effects under an exhausted fuel budget are bounded by one straight line's
   worth of them. A Host call now asks the fuel limit too, and the bound is
   zero on both backends
+- Superseded in part by
+  [ADR 0040](0040-a-bound-outlives-its-backend.md), which replaces the
+  placement of the table of bounds — the consequence below that
+  "`docs/VM_ARCHITECTURE.md` carries the table of bounds, and a change to any
+  of the four constants changes a number there", and the implementation
+  status that names the same document. ADR 0034 deleted the backend that
+  document describes, and two of the four constants with it. The decision
+  itself is untouched: a stop is still stated as a bound rather than as a
+  point, and the bound is still measured rather than claimed
 - Date: 2026-08-29
 - Supersedes: [ADR 0003](0003-task-execution-and-runtime-control.md)'s
   decision that the runtime controls are "all checked at defined safepoints —
