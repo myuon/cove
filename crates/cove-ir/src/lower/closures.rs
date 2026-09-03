@@ -65,7 +65,7 @@ use super::frame::{Frame, Val};
 use super::gap;
 use super::shapes::{self, CLOSURE_CALLEE, CLOSURE_CAPTURES};
 use super::{Body, Dest};
-use crate::inst::{Inst, Len, Slot};
+use crate::inst::{Inst, Len, Pc, Slot};
 use crate::layout::LayoutId;
 use crate::program::{Capture, Function, FunctionId};
 use crate::repr::RefMap;
@@ -635,7 +635,17 @@ impl Body<'_> {
         inner.emit(Inst::Return { src: answer.slot }, body.span);
 
         let reprs = inner.frame.reprs().to_vec();
-        let locals = inner.frame.locals();
+        let mut locals = inner.frame.locals();
+        // A capture's slot is taken with `frame.param(&words)` above, the
+        // same call a parameter's slot is taken with, so it is never freed
+        // or cleared for the same reason: see `Frame::close_whole_function`.
+        let never_freed: Vec<Slot> = param_slots
+            .iter()
+            .copied()
+            .chain(held.iter().map(|capture| capture.slot))
+            .collect();
+        let end = inner.code.len() as Pc;
+        Frame::close_whole_function(&mut locals, &never_freed, end);
         Function {
             module: Arc::from(self.module),
             name: inner.name.clone(),

@@ -1432,7 +1432,13 @@ fn lower_body(
     body.emit(Inst::Return { src: answer.slot }, decl.decl.body.span);
 
     let reprs = body.frame.reprs().to_vec();
-    let locals = body.frame.locals();
+    let mut locals = body.frame.locals();
+    // Every parameter, including a receiver bound at `param_slots[0]`, is
+    // live for the whole call — see `Frame::close_whole_function` for the
+    // proof — and this is the one place that both holds the parameters'
+    // slots and knows how long the finished body is.
+    let end = body.code.len() as Pc;
+    Frame::close_whole_function(&mut locals, &param_slots, end);
     Function {
         module: decl.module.clone(),
         name,

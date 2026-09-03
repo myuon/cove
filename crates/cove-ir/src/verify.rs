@@ -301,8 +301,13 @@ impl Check<'_> {
         // exists: a location the frame has, over a range of this function's
         // code. A local pointing past either would be a debugger's answer
         // about a slot or an instruction that is not there.
-        for local in self.function.locals.clone() {
-            let name = local.name.clone();
+        for index in 0..self.function.locals.len() {
+            // One `Local` at a time rather than `self.function.locals.clone()`:
+            // the loop body needs `&mut self` for `fault`, which a borrow of
+            // the table itself would still be holding, but a name and four
+            // `Copy` fields cost far less than a second copy of the table.
+            let local = self.function.locals[index].clone();
+            let name = local.name;
             if self.layout_exists(None, local.layout) {
                 self.fits(None, local.slot, local.layout, &format!("local `{name}`"));
             }

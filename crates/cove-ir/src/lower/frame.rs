@@ -360,4 +360,33 @@ impl Frame {
         }
         None
     }
+
+    /// Widens every [`Local`] at one of `slots` so its range covers the
+    /// whole function, because that is what is true of a parameter's slot
+    /// and of a capture's — the two things [`Frame::param`] allocates.
+    ///
+    /// [`Frame::param`] takes its run with `push` and hands it back to no
+    /// free list, and nowhere does a parameter or a capture reach
+    /// [`Frame::own`] between [`Frame::param`] and [`Frame::bind`] — so
+    /// [`Frame::pop_scope`] neither frees one of these slots nor asks for an
+    /// [`crate::Inst::Clear`] of it. [`Frame::alloc`] can therefore never
+    /// hand the slot to a later value, because a run only ever comes off a
+    /// free list it was put on, and this one never was. The argument or the
+    /// captured value that slot holds is consequently live in it for the
+    /// entire call, so `[from, end)` is not a wider approximation of the
+    /// scope's own `[from, at)` — it is the literally true range, and the
+    /// scope's is the one that was too narrow.
+    ///
+    /// `end` has to be supplied rather than found here because [`Frame::locals`]
+    /// is asked for before [`crate::Inst::Return`] is emitted, when the body
+    /// does not yet know how many instructions it will have. So this runs
+    /// once, after the body is finished and its instruction count is the
+    /// caller's to give.
+    pub fn close_whole_function(locals: &mut [Local], slots: &[Slot], end: Pc) {
+        for local in locals {
+            if slots.contains(&local.slot) {
+                local.to = end;
+            }
+        }
+    }
 }

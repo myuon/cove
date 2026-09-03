@@ -73,7 +73,7 @@ fn a_nested_struct_is_copied_whole() {
         "\
 fn0 m.f(m.Line) -> Int
   frame 10: s0!:int s1!:int s2!:int s3!:int s4:int s5:int s6:int s7:int s8:int s9:int
-  local l -> s0:m.Line [0, 5)
+  local l -> s0:m.Line [0, 6)
   local m -> s5:m.Line [1, 5)
      0  copy s5:int s0:int m.Line
      1  int s9:int 7
@@ -97,7 +97,7 @@ fn a_field_of_a_field_is_arithmetic_and_emits_nothing() {
         "\
 fn0 m.f(m.Line) -> Int
   frame 5: s0!:int s1!:int s2!:int s3!:int s4:int
-  local l -> s0:m.Line [0, 1)
+  local l -> s0:m.Line [0, 2)
      0  copy s4:int s3:int Int
      1  return s4:int
 "
@@ -119,7 +119,7 @@ fn a_struct_holding_a_vector_copies_the_words_and_shares_the_address() {
         "\
 fn0 m.f(m.Wrapper) -> Bool
   frame 9: s0!:int s1!:int s2!:ref s3:bool s4:int s5:int s6:ref s7:int s8:bool
-  local w -> s0:m.Wrapper [0, 5)
+  local w -> s0:m.Wrapper [0, 7)
   local other -> s4:m.Wrapper [1, 5)
      0  copy s4:int s0:int m.Wrapper
      1  int s7:int 7

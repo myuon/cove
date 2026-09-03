@@ -21,7 +21,7 @@ fn is_empty_asks_the_written_end_rather_than_a_normalised_one() {
         "\
 fn0 m.e(Range) -> Bool
   frame 5: s0!:int s1!:int s2!:bool s3:bool s4:bool
-  local r -> s0:Range [0, 5)
+  local r -> s0:Range [0, 6)
      0  branch-false s2:bool 3
      1  lt.int s4:bool s1:int s0:int
      2  jump 4
@@ -43,7 +43,7 @@ fn length_answers_zero_before_it_subtracts_anything() {
         "\
 fn0 m.n(Range) -> Int
   frame 7: s0!:int s1!:int s2!:bool s3:int s4:int s5:bool s6:int
-  local r -> s0:Range [0, 12)
+  local r -> s0:Range [0, 13)
      0  branch-false s2:bool 3
      1  lt.int s5:bool s1:int s0:int
      2  jump 4
@@ -72,8 +72,8 @@ fn contains_leaves_the_first_comparison_as_the_answer_when_it_fails() {
         "\
 fn0 m.c(Range Int) -> Bool
   frame 6: s0!:int s1!:int s2!:bool s3!:int s4:bool s5:bool
-  local r -> s0:Range [0, 7)
-  local v -> s3:Int [0, 7)
+  local r -> s0:Range [0, 8)
+  local v -> s3:Int [0, 8)
      0  le.int s5:bool s0:int s3:int
      1  branch-false s5:bool 6
      2  branch-false s2:bool 5

@@ -15,7 +15,7 @@ fn a_builtin_method_is_one_call_over_its_operands() {
         "\
 fn0 m.parts(String) -> Array
   frame 4: s0!:ref s1:ref s2:ref s3:ref
-  local s -> s0:String [0, 5)
+  local s -> s0:String [0, 6)
      0  str s2:ref \",\"
      1  call-builtin s3:ref String.split (s0:String s2:String)
      2  clear s2:ref String
@@ -52,7 +52,7 @@ fn a_duration_reader_passes_its_receiver_as_operand_zero() {
         "\
 fn0 m.ms(Duration) -> Int
   frame 3: s0!:duration s1:int s2:int
-  local d -> s0:Duration [0, 2)
+  local d -> s0:Duration [0, 3)
      0  call-builtin s2:int Duration.millis (s0:Duration)
      1  copy s1:int s2:int Int
      2  return s1:int
@@ -70,7 +70,7 @@ fn is_some_is_the_question_a_match_already_asks() {
         "\
 fn0 m.has(Option) -> Bool
   frame 5: s0!:int s1!:int s2:bool s3:int s4:bool
-  local o -> s0:Option [0, 3)
+  local o -> s0:Option [0, 4)
      0  int s3:int 1
      1  eq.int s4:bool s0:int s3:int
      2  copy s2:bool s4:bool Bool
@@ -92,8 +92,8 @@ fn unwrap_or_is_that_question_and_a_branch() {
         "\
 fn0 m.value(Option Int) -> Int
   frame 7: s0!:int s1!:int s2!:int s3:int s4:int s5:int s6:bool
-  local o -> s0:Option [0, 7)
-  local other -> s2:Int [0, 7)
+  local o -> s0:Option [0, 8)
+  local other -> s2:Int [0, 8)
      0  int s5:int 1
      1  eq.int s6:bool s0:int s5:int
      2  branch-false s6:bool 5
@@ -119,7 +119,7 @@ fn a_parser_answers_a_result_and_interns_the_error_it_may_carry() {
         "\
 fn0 m.parse(String) -> Int
   frame 9: s0!:ref s1:int s2:int s3:int s4:int s5:ref s6:int s7:int s8:bool
-  local s -> s0:String [0, 10)
+  local s -> s0:String [0, 11)
      0  call-builtin s3:int Int.parse (s0:String)
      1  int s6:int 0
      2  int s7:int 0
@@ -147,7 +147,7 @@ fn a_method_on_a_declared_type_is_an_ordinary_call() {
         "\
 fn0 m.f(m.Point) -> Int
   frame 4: s0!:int s1!:int s2:int s3:int
-  local p -> s0:m.Point [0, 2)
+  local p -> s0:m.Point [0, 3)
      0  call s3:int m.Point.sum (s0:m.Point)
      1  copy s2:int s3:int Int
      2  return s2:int
@@ -169,7 +169,7 @@ fn a_var_self_receiver_is_an_address() {
         "\
 fn0 m.Point.bump(<addr>) -> Unit
   frame 7: s0!:addr s1:unit s2:addr s3:int s4:int s5:int s6:unit
-  local self -> s0:<addr> [0, 10)
+  local self -> s0:<addr> [0, 11)
      0  addr-of-part s2:addr s0:addr +1
      1  load s3:int s2:addr Int
      2  clear s2:addr <addr>
@@ -208,7 +208,7 @@ fn map_error_is_a_branch_and_one_call_through_a_closure() {
         "\
 fn0 m.f(String) -> Result
   frame 15: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:ref s7:int s8:int s9:ref s10:ref s11:int s12:int s13:ref s14:bool
-  local t -> s0:String [0, 20)
+  local t -> s0:String [0, 21)
      0  call-builtin s7:int Int.parse (s0:String)
      1  alloc s10:ref closure m.f#0<closure>
      2  int s11:int 1
@@ -251,7 +251,7 @@ fn map_error_passes_the_failure_to_a_callback_that_takes_one() {
         "\
 fn0 m.f(String) -> Result
   frame 15: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:ref s7:int s8:int s9:ref s10:ref s11:int s12:int s13:ref s14:bool
-  local t -> s0:String [0, 19)
+  local t -> s0:String [0, 20)
      0  call-builtin s7:int Int.parse (s0:String)
      1  alloc s10:ref closure m.f#0<closure>
      2  int s11:int 1

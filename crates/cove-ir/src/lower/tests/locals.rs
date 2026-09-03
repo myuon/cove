@@ -34,21 +34,48 @@ fn function(source: &str, name: &str) -> Function {
 /// without this the debugger that can name every local still cannot say
 /// which argument a caller passed where.
 ///
-/// Its range is the body's: the parameters are bound before the first
-/// instruction and the scope that has them ends where the body does.
+/// Its range is the *whole function*, not the lexical scope that binds
+/// it — up to and including the `return`. `Frame::param` takes a
+/// parameter's run with `push` and never gives it back to a free list, and
+/// nothing ever `own`s one for `Frame::pop_scope` to free or to clear, so
+/// `Frame::alloc` can never hand that slot to a later value: there is no
+/// free list it could come off. The argument is live in it for the entire
+/// call, and `[0, code.len())` is that fact rather than an approximation of
+/// it — unlike an ordinary local, whose range really does end where its
+/// scope does.
 #[test]
-fn a_parameter_is_named_from_the_first_instruction_of_the_body() {
+fn a_parameter_is_named_from_the_first_instruction_to_the_last_of_the_whole_function() {
     assert_eq!(
         listing("fn area(w: Int, h: Int) -> Int { w * h }", "area"),
         "\
 fn0 m.area(Int Int) -> Int
   frame 4: s0!:int s1!:int s2:int s3:int
-  local w -> s0:Int [0, 2)
-  local h -> s1:Int [0, 2)
+  local w -> s0:Int [0, 3)
+  local h -> s1:Int [0, 3)
      0  mul.int s3:int s0:int s1:int
      1  copy s2:int s3:int Int
      2  return s2:int
 "
+    );
+}
+
+/// The case that was broken: a parameter has to be nameable *at* the
+/// `return`, because that is exactly where a debugger stops and asks what
+/// the frame holds. A range that ended one instruction earlier — the old
+/// `[from, at)` a lexical scope's own end gives every other local — made the
+/// answer disappear at the one instruction most likely to be asked about.
+#[test]
+fn a_parameter_is_nameable_at_the_return_instruction() {
+    let f = function("fn double(n: Int) -> Int { n * 2 }", "double");
+    let last = f.code.len() - 1;
+    assert!(
+        matches!(f.code[last], crate::Inst::Return { .. }),
+        "the function's last instruction is its return"
+    );
+    assert_eq!(
+        f.local_at("n", last as u32).map(|local| local.slot),
+        Some(0),
+        "`n` is still nameable at the instruction the debugger stops on"
     );
 }
 

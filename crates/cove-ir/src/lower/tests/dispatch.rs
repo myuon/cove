@@ -48,7 +48,7 @@ fn a_dyn_call_switches_on_the_layout_the_box_records() {
         "\
 fn0 m.take(Any) -> String
   frame 7: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:int
-  local v -> s0:Any [0, 12)
+  local v -> s0:Any [0, 13)
      0  load-field s2:int s0:ref +0 Int
      1  switch s2:int [9 9 9 9 9 9 9 9 9 9 9 9 9 2 6] else 9
      2  unbox s4:ref s0:ref m.Name
@@ -156,7 +156,7 @@ fn a_trait_method_s_default_body_is_lowered_once_per_conforming_type() {
         "\
 fn1 m.Booking.line(m.Booking) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
-  local self -> s0:m.Booking [0, 7)
+  local self -> s0:m.Booking [0, 8)
      0  str s2:ref \"- \"
      1  call s3:ref m.Booking.summarize (s0:m.Booking)
      2  call-builtin s4:ref String.interpolate (s2:String s3:String)
@@ -172,7 +172,7 @@ fn1 m.Booking.line(m.Booking) -> String
         "\
 fn3 m.Receipt.line(m.Receipt) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
-  local self -> s0:m.Receipt [0, 7)
+  local self -> s0:m.Receipt [0, 8)
      0  str s2:ref \"- \"
      1  call s3:ref m.Receipt.summarize (s0:m.Receipt)
      2  call-builtin s4:ref String.interpolate (s2:String s3:String)
@@ -202,7 +202,7 @@ fn a_conformance_that_writes_its_own_body_does_not_get_the_default() {
         "\
 fn1 m.Receipt.line(m.Receipt) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
-  local self -> s0:m.Receipt [0, 7)
+  local self -> s0:m.Receipt [0, 8)
      0  str s2:ref \"  $ \"
      1  call s3:ref m.Receipt.summarize (s0:m.Receipt)
      2  call-builtin s4:ref String.interpolate (s2:String s3:String)

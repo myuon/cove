@@ -34,7 +34,7 @@ fn recursion_is_an_ordinary_call() {
         "\
 fn0 m.fib(Int) -> Int
   frame 7: s0!:int s1:int s2:int s3:int s4:bool s5:int s6:int
-  local n -> s0:Int [0, 14)
+  local n -> s0:Int [0, 15)
      0  int s3:int 2
      1  lt.int s4:bool s0:int s3:int
      2  branch-false s4:bool 5
@@ -67,9 +67,9 @@ fn multiword_parameters_occupy_the_frame_from_slot_zero_in_order() {
         "\
 fn0 m.take(Int m.Point Int) -> Int
   frame 7: s0!:int s1!:int s2!:int s3!:int s4:int s5:int s6:int
-  local a -> s0:Int [0, 4)
-  local p -> s1:m.Point [0, 4)
-  local b -> s3:Int [0, 4)
+  local a -> s0:Int [0, 5)
+  local p -> s1:m.Point [0, 5)
+  local b -> s3:Int [0, 5)
      0  add.int s5:int s0:int s1:int
      1  add.int s6:int s5:int s2:int
      2  add.int s5:int s6:int s3:int
@@ -111,7 +111,7 @@ fn a_var_parameter_is_a_slot_holding_an_address() {
         "\
 fn0 m.bump(<addr>) -> Unit
   frame 6: s0!:addr s1:unit s2:int s3:int s4:int s5:unit
-  local n -> s0:<addr> [0, 6)
+  local n -> s0:<addr> [0, 7)
      0  load s2:int s0:addr Int
      1  int s3:int 1
      2  add.int s4:int s2:int s3:int
@@ -161,7 +161,7 @@ fn a_field_of_a_var_parameter_is_that_address_plus_the_offset() {
         "\
 fn1 m.shift(<addr>) -> Unit
   frame 5: s0!:addr s1:unit s2:int s3:addr s4:unit
-  local p -> s0:<addr> [0, 8)
+  local p -> s0:<addr> [0, 9)
      0  int s2:int 7
      1  addr-of-part s3:addr s0:addr +1
      2  store s3:addr s2:int Int
@@ -304,7 +304,7 @@ fn a_spread_argument_is_counted_and_then_walked_into_the_run() {
         "\
 fn0 m.f(Array) -> Int
   frame 12: s0!:ref s1:int s2:int s3:int s4:int s5:int s6:ref s7:int s8:int s9:int s10:bool s11:int
-  local xs -> s0:Array [0, 24)
+  local xs -> s0:Array [0, 25)
      0  int s2:int 0
      1  int s3:int 9
      2  int s4:int 2
@@ -429,8 +429,8 @@ fn a_default_on_a_method_reads_the_receiver() {
         "\
 fn0 m.f(m.P) -> Int
   frame 3: s0!:int s1:int s2:int
-  local p -> s0:m.P [0, 2)
-  local self -> s0:m.P [0, 0)
+  local p -> s0:m.P [0, 3)
+  local self -> s0:m.P [0, 3)
      0  call s2:int m.P.scaled (s0:m.P s0:Int)
      1  copy s1:int s2:int Int
      2  return s1:int

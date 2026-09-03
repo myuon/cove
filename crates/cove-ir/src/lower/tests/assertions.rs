@@ -23,7 +23,7 @@ fn an_assertion_is_a_branch_over_the_two_cases_it_answers() {
         "\
 fn0 m.f(Int) -> Result
   frame 12: s0!:int s1:int s2:unit s3:ref s4:int s5:unit s6:ref s7:int s8:bool s9:unit s10:ref s11:ref
-  local n -> s0:Int [0, 18)
+  local n -> s0:Int [0, 19)
      0  int s7:int 0
      1  gt.int s8:bool s0:int s7:int
      2  branch-false s8:bool 8
@@ -165,7 +165,7 @@ fn a_declaration_used_as_a_function_value_is_pulled_into_the_slice() {
         "\
 fn0 m.double(Int) -> Int
   frame 4: s0!:int s1:int s2:int s3:int
-  local n -> s0:Int [0, 3)
+  local n -> s0:Int [0, 4)
      0  int s2:int 2
      1  mul.int s3:int s0:int s2:int
      2  copy s1:int s3:int Int

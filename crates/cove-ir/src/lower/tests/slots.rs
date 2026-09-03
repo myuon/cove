@@ -45,8 +45,8 @@ fn a_run_is_never_reused_by_a_value_whose_words_differ() {
         "\
 fn0 m.mix(Int Float) -> Float
   frame 8: s0!:int s1!:float s2:float s3:int s4:int s5:float s6:float s7:int
-  local a -> s0:Int [0, 7)
-  local b -> s1:Float [0, 7)
+  local a -> s0:Int [0, 8)
+  local b -> s1:Float [0, 8)
   local n -> s4:Int [2, 7)
   local x -> s6:Float [4, 7)
   local m -> s7:Int [6, 7)
@@ -107,8 +107,8 @@ fn a_temporary_holding_a_reference_is_cleared_at_its_last_use() {
         "\
 fn0 m.shout(String String) -> Int
   frame 5: s0!:ref s1!:ref s2:int s3:ref s4:int
-  local a -> s0:String [0, 4)
-  local b -> s1:String [0, 4)
+  local a -> s0:String [0, 5)
+  local b -> s1:String [0, 5)
      0  call-builtin s3:ref String.interpolate (s0:String s1:String)
      1  call-builtin s4:int String.length (s3:String)
      2  clear s3:ref String

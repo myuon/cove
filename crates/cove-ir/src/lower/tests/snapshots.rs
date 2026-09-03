@@ -21,7 +21,7 @@ fn an_immutable_value_answers_a_copy_of_its_own_words() {
         "\
 fn0 m.n(Int) -> Int
   frame 3: s0!:int s1:int s2:int
-  local x -> s0:Int [0, 2)
+  local x -> s0:Int [0, 3)
      0  copy s2:int s0:int Int
      1  copy s1:int s2:int Int
      2  return s1:int
@@ -40,7 +40,7 @@ fn an_array_answers_itself_rather_than_being_walked() {
         "\
 fn0 m.a(Array) -> Array
   frame 3: s0!:ref s1:ref s2:ref
-  local xs -> s0:Array [0, 3)
+  local xs -> s0:Array [0, 4)
      0  copy s2:ref s0:ref Array
      1  copy s1:ref s2:ref Array
      2  clear s2:ref Array
@@ -65,7 +65,7 @@ fn a_vector_of_immutable_elements_is_copied_out_and_back() {
         "\
 fn0 m.v(Vector) -> Vector
   frame 4: s0!:ref s1:ref s2:ref s3:ref
-  local xs -> s0:Vector [0, 5)
+  local xs -> s0:Vector [0, 6)
      0  call-builtin s2:ref Vector.toArray (s0:Vector)
      1  call-builtin s3:ref Array.toVector (s2:Array)
      2  clear s2:ref Array

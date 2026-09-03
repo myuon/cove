@@ -34,7 +34,7 @@ fn0 m.f() -> Int
         "\
 fn1 m.f#0(Int) -> Int
   frame 4: s0!:int s1:int s2:int s3:int
-  local x -> s0:Int [0, 3)
+  local x -> s0:Int [0, 4)
      0  int s2:int 1
      1  add.int s3:int s0:int s2:int
      2  copy s1:int s3:int Int
@@ -60,7 +60,7 @@ fn a_capture_is_inline_in_the_environment_at_its_own_width() {
         "\
 fn0 m.f(m.Point) -> Int
   frame 5: s0!:int s1!:int s2:int s3:ref s4:int
-  local p -> s0:m.Point [0, 6)
+  local p -> s0:m.Point [0, 8)
   local g -> s3:fn [4, 6)
      0  alloc s3:ref closure m.f#0<closure>
      1  int s4:int 1
@@ -78,7 +78,7 @@ fn0 m.f(m.Point) -> Int
 fn1 m.f#0() -> Int
   frame 4: s0:int s1:int s2:int s3:int
   capture p -> s0:m.Point
-  local p -> s0:m.Point [0, 2)
+  local p -> s0:m.Point [0, 3)
      0  add.int s3:int s0:int s1:int
      1  copy s2:int s3:int Int
      2  return s2:int
@@ -168,8 +168,8 @@ fn a_call_through_a_function_value_names_the_slot_holding_it() {
         "\
 fn0 m.apply(fn Int) -> Int
   frame 4: s0!:ref s1!:int s2:int s3:int
-  local g -> s0:fn [0, 2)
-  local n -> s1:Int [0, 2)
+  local g -> s0:fn [0, 3)
+  local n -> s1:Int [0, 3)
      0  call-closure s3:int s0:ref (s1:Int)
      1  copy s2:int s3:int Int
      2  return s2:int
@@ -211,7 +211,7 @@ fn a_lambda_inside_a_lambda_is_numbered_after_the_one_that_made_it() {
 fn1 m.f#0() -> Int
   frame 4: s0:int s1:int s2:ref s3:int
   capture n -> s0:Int
-  local n -> s0:Int [0, 6)
+  local n -> s0:Int [0, 8)
   local inner -> s2:fn [4, 6)
      0  alloc s2:ref closure m.f#0#0<closure>
      1  int s3:int 2
@@ -229,7 +229,7 @@ fn1 m.f#0() -> Int
 fn2 m.f#0#0() -> Int
   frame 4: s0:int s1:int s2:int s3:int
   capture n -> s0:Int
-  local n -> s0:Int [0, 3)
+  local n -> s0:Int [0, 4)
      0  int s2:int 1
      1  add.int s3:int s0:int s2:int
      2  copy s1:int s3:int Int
@@ -256,7 +256,7 @@ fn a_capture_of_a_var_parameter_is_the_value_behind_the_address() {
         "\
 fn0 m.f(<addr>) -> Int
   frame 5: s0!:addr s1:int s2:int s3:ref s4:int
-  local n -> s0:<addr> [0, 7)
+  local n -> s0:<addr> [0, 9)
   local g -> s3:fn [5, 7)
      0  load s2:int s0:addr Int
      1  alloc s3:ref closure m.f#0<closure>
@@ -278,7 +278,7 @@ fn0 m.f(<addr>) -> Int
 fn1 m.f#0() -> Int
   frame 4: s0:int s1:int s2:int s3:int
   capture n -> s0:Int
-  local n -> s0:Int [0, 3)
+  local n -> s0:Int [0, 4)
      0  int s2:int 1
      1  add.int s3:int s0:int s2:int
      2  copy s1:int s3:int Int
@@ -322,7 +322,7 @@ fn0 m.f() -> Int
         "\
 fn1 m.f#0(Int) -> Int
   frame 4: s0!:int s1:int s2:int s3:int
-  local n -> s0:Int [0, 3)
+  local n -> s0:Int [0, 4)
      0  int s2:int 2
      1  mul.int s3:int s0:int s2:int
      2  copy s1:int s3:int Int
@@ -343,8 +343,8 @@ fn a_local_fn_captures_the_bindings_around_it() {
 fn1 m.f#0(Int) -> Int
   frame 4: s0!:int s1:int s2:int s3:int
   capture base -> s1:Int
-  local base -> s1:Int [0, 2)
-  local n -> s0:Int [0, 2)
+  local base -> s1:Int [0, 3)
+  local n -> s0:Int [0, 3)
      0  add.int s3:int s0:int s1:int
      1  copy s2:int s3:int Int
      2  return s2:int
