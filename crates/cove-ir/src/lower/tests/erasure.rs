@@ -129,6 +129,8 @@ fn a_question_mark_on_an_erased_result_answers_the_box() {
         "\
 fn0 m.f() -> Result
   frame 14: s0:int s1:int s2:ref s3:host s4:int s5:ref s6:int s7:bool s8:ref s9:int s10:int s11:ref s12:int s13:int
+  local s -> s3:<host> [1, 20)
+  local v -> s8:Any [12, 20)
      0  call-host s3:host oracle.open ()
      1  call-resource s4:int s3:host oracle.Seat.next ()
      2  int s6:int 0
@@ -334,6 +336,9 @@ fn an_annotation_says_what_an_erased_result_was_carrying() {
         "\
 fn0 m.f() -> Result
   frame 12: s0:int s1:int s2:ref s3:host s4:int s5:ref s6:int s7:bool s8:ref s9:int s10:int s11:ref
+  local s -> s3:<host> [1, 18)
+  local bounded -> s4:Result [2, 18)
+  local run -> s6:m.Run [13, 18)
      0  call-host s3:host oracle.open ()
      1  call-resource s4:int s3:host oracle.Seat.next ()
      2  int s6:int 0
@@ -390,6 +395,12 @@ fn a_result_inside_an_erased_result_is_opened_where_it_is_used() {
         "\
 fn0 m.f() -> Int
   frame 12: s0:int s1:host s2:int s3:ref s4:int s5:ref s6:int s7:int s8:int s9:ref s10:int s11:ref
+  local s -> s1:<host> [1, 26)
+  local answer -> s2:Result [2, 26)
+  local inner -> s5:Any [4, 17)
+  local n -> s10:Int [7, 8)
+  local e -> s11:Error [10, 12)
+  local e -> s5:Error [20, 22)
      0  call-host s1:host oracle.open ()
      1  call-resource s2:int s1:host oracle.Seat.next ()
      2  switch s2:int [3 19] else 24

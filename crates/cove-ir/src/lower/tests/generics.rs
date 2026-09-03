@@ -61,6 +61,7 @@ fn two_instantiations_are_two_functions_with_two_frames() {
         "\
 fn2 m.id<Int>(Int) -> Int
   frame 2: s0!:int s1:int
+  local x -> s0:Int [0, 1)
      0  copy s1:int s0:int Int
      1  return s1:int
 "
@@ -70,6 +71,7 @@ fn2 m.id<Int>(Int) -> Int
         "\
 fn3 m.id<m.Point>(m.Point) -> m.Point
   frame 4: s0!:int s1!:int s2:int s3:int
+  local x -> s0:m.Point [0, 1)
      0  copy s2:int s0:int m.Point
      1  return s2:int
 "
@@ -88,6 +90,8 @@ fn a_call_names_the_instantiation_it_reaches() {
         "\
 fn0 m.f() -> Int
   frame 8: s0:int s1:int s2:int s3:int s4:int s5:int s6:int s7:int
+  local a -> s2:Int [2, 9)
+  local p -> s6:m.Point [7, 9)
      0  int s1:int 1
      1  call s2:int m.id<Int> (s1:Int)
      2  int s1:int 2
@@ -244,6 +248,7 @@ fn a_bounded_parameter_dispatches_to_its_conformance() {
         "\
 fn4 m.headline<m.Article>(m.Article) -> String
   frame 4: s0!:ref s1!:int s2:ref s3:ref
+  local entry -> s0:m.Article [0, 3)
      0  call s3:ref m.Article.summary (s0:m.Article)
      1  copy s2:ref s3:ref String
      2  clear s3:ref String
@@ -255,6 +260,7 @@ fn4 m.headline<m.Article>(m.Article) -> String
         "\
 fn5 m.headline<m.Note>(m.Note) -> String
   frame 3: s0!:ref s1:ref s2:ref
+  local entry -> s0:m.Note [0, 3)
      0  call s2:ref m.Note.summary (s0:m.Note)
      1  copy s1:ref s2:ref String
      2  clear s2:ref String

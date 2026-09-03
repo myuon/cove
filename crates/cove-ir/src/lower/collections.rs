@@ -1025,7 +1025,8 @@ impl Body<'_> {
             }),
         });
         self.frame.push_scope();
-        self.frame.bind(&binding.node, element, layout);
+        let at = self.here();
+        self.frame.bind(&binding.node, element, layout, at);
     }
 
     /// Closes one turn: the scope's clears, the element's, and the back edge.
@@ -1042,7 +1043,8 @@ impl Body<'_> {
         body_span: Span,
         span: Span,
     ) {
-        let clears = self.frame.pop_scope();
+        let at = self.here();
+        let clears = self.frame.pop_scope(at);
         self.clear(&clears, body_span);
         if self.holds_ref(layout) {
             self.zero(element, layout, body_span);

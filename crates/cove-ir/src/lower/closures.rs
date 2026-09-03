@@ -329,7 +329,8 @@ impl Body<'_> {
         self.forget(value.slot);
         let width = self.width(layout);
         self.frame.own(value.slot, layout, width);
-        self.frame.bind(&decl.name.node, value.slot, layout);
+        let at = self.here();
+        self.frame.bind(&decl.name.node, value.slot, layout, at);
     }
 
     /// A declared function written where a value goes.
@@ -613,22 +614,28 @@ impl Body<'_> {
         // name shadows one: `Frame::lookup` searches a scope backwards, and
         // the over-approximating capture walk means a name the body binds for
         // itself may well be in both lists.
+        let start = inner.here();
         for capture in &held {
             inner
                 .frame
-                .bind(&capture.name, capture.slot, capture.layout);
+                .bind(&capture.name, capture.slot, capture.layout, start);
         }
         for (index, param) in params.iter().enumerate() {
-            inner
-                .frame
-                .bind(&param.name.node, param_slots[index], param_layouts[index]);
+            inner.frame.bind(
+                &param.name.node,
+                param_slots[index],
+                param_layouts[index],
+                start,
+            );
         }
         inner.block(body, Some(answer));
-        let clears = inner.frame.pop_scope();
+        let end = inner.here();
+        let clears = inner.frame.pop_scope(end);
         inner.clear(&clears, body.span);
         inner.emit(Inst::Return { src: answer.slot }, body.span);
 
         let reprs = inner.frame.reprs().to_vec();
+        let locals = inner.frame.locals();
         Function {
             module: Arc::from(self.module),
             name: inner.name.clone(),
@@ -639,6 +646,7 @@ impl Body<'_> {
             captures: held,
             code: inner.code,
             spans: inner.spans,
+            locals,
             span: body.span,
             // A record of how it was written, as `Function::is_async` is
             // for a declaration. The dispatch loop never reads it — what a

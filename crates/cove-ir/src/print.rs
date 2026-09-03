@@ -6,6 +6,12 @@
 //! because a value is a run of words and the layout is what says how many —
 //! `copy s2:int s0:int Point` moves two.
 //!
+//! Before the code come the frame's names, one to a line —
+//! `local count -> s3:Int [4, 11)` — because a slot number is not an answer
+//! to what the source called something and a slot is reused by several
+//! variables in turn. The pair is the half-open range of program counters the
+//! name denotes that slot over; see [`crate::Local`].
+//!
 //! A test that pins a lowering pins this text, so it is written to be
 //! diffed: one fact per line, and no alignment that changes when an
 //! unrelated line grows.
@@ -28,7 +34,8 @@ pub fn program(program: &Program) -> String {
     out
 }
 
-/// Renders one function: its boundary, its frame, then its code.
+/// Renders one function: its boundary, its frame, the names bound in it,
+/// then its code.
 pub fn function(program: &Program, id: FunctionId) -> String {
     let f = program.function(id);
     let mut out = String::new();
@@ -59,6 +66,17 @@ pub fn function(program: &Program, id: FunctionId) -> String {
             capture.name,
             capture.slot,
             name_of(program, capture.layout)
+        );
+    }
+    for local in &f.locals {
+        let _ = writeln!(
+            out,
+            "  local {} -> s{}:{} [{}, {})",
+            local.name,
+            local.slot,
+            name_of(program, local.layout),
+            local.from,
+            local.to
         );
     }
     for (pc, inst) in f.code.iter().enumerate() {

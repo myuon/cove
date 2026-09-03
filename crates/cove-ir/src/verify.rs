@@ -247,8 +247,8 @@ impl Check<'_> {
     }
 
     /// The frame's own invariants: the parameters fit, the answer's layout
-    /// exists, the spans line up, and the reference map is the one the reprs
-    /// imply.
+    /// exists, the spans line up, the reference map is the one the reprs
+    /// imply, and every name is of a location and a range this function has.
     fn check_frame(&mut self) {
         let size = self.function.frame_size();
         let mut at = 0;
@@ -295,6 +295,35 @@ impl Check<'_> {
                 capture.layout,
                 &format!("capture `{name}`"),
             );
+        }
+        // Nothing runs a local — it is read when a person asks what a frame
+        // holds — so what is checked is that it *names* something that
+        // exists: a location the frame has, over a range of this function's
+        // code. A local pointing past either would be a debugger's answer
+        // about a slot or an instruction that is not there.
+        for local in self.function.locals.clone() {
+            let name = local.name.clone();
+            if self.layout_exists(None, local.layout) {
+                self.fits(None, local.slot, local.layout, &format!("local `{name}`"));
+            }
+            if local.from > local.to {
+                self.fault(
+                    None,
+                    format!(
+                        "local `{name}` is bound at {} and freed at {}",
+                        local.from, local.to
+                    ),
+                );
+            } else if local.to as usize > self.function.code.len() {
+                self.fault(
+                    None,
+                    format!(
+                        "local `{name}` is live to {} and the function has {} instructions",
+                        local.to,
+                        self.function.code.len()
+                    ),
+                );
+            }
         }
         let _ = size;
     }
@@ -912,7 +941,7 @@ mod tests {
     use super::*;
     use crate::inst::Inst;
     use crate::layout::{Layout, Shape};
-    use crate::program::{Arg, Function, HostOp, Table, TableId};
+    use crate::program::{Arg, Function, HostOp, Local, Table, TableId};
     use crate::{ArgsId, HostOpId};
 
     const INT: LayoutId = LayoutId(0);
@@ -972,6 +1001,7 @@ mod tests {
             returns,
             captures: Vec::new(),
             code,
+            locals: Vec::new(),
             span: span(),
             is_async: false,
         }
@@ -1129,6 +1159,61 @@ mod tests {
                 "reference map disagrees with the frame's reprs, so a collection would scan the \
                  wrong slots"
             ]
+        );
+    }
+
+    /// A local names a location and a stretch of code, and both have to be
+    /// there. Nothing runs one — it is read when a person asks what a frame
+    /// holds — so the fault it prevents is not a wrong answer at a
+    /// collection but a debugger reading a slot or an instruction that does
+    /// not exist.
+    #[test]
+    fn a_local_outside_the_frame_or_past_the_last_instruction_is_a_fault() {
+        let mut f = function(
+            vec![Repr::Int, Repr::Int],
+            INT,
+            vec![Inst::Return { src: 0 }],
+        );
+        f.locals = vec![
+            Local {
+                name: Arc::from("wide"),
+                slot: 1,
+                layout: POINT,
+                from: 0,
+                to: 1,
+            },
+            Local {
+                name: Arc::from("late"),
+                slot: 0,
+                layout: INT,
+                from: 0,
+                to: 4,
+            },
+        ];
+        assert_eq!(
+            faults(&program(vec![f])),
+            vec![
+                "local `wide` is `Point`, 2 words at slot 1, and the frame has 2".to_string(),
+                "local `late` is live to 4 and the function has 1 instructions".to_string(),
+            ]
+        );
+    }
+
+    /// And a range has to be one: `[from, to)` is half-open, so `from > to`
+    /// is not an empty binding but a table nothing can be read out of.
+    #[test]
+    fn a_local_bound_after_it_is_freed_is_a_fault() {
+        let mut f = function(vec![Repr::Int], INT, vec![Inst::Return { src: 0 }]);
+        f.locals = vec![Local {
+            name: Arc::from("backwards"),
+            slot: 0,
+            layout: INT,
+            from: 1,
+            to: 0,
+        }];
+        assert_eq!(
+            faults(&program(vec![f])),
+            vec!["local `backwards` is bound at 1 and freed at 0"]
         );
     }
 

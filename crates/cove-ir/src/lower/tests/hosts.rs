@@ -99,6 +99,7 @@ fn the_answer_is_written_into_the_layout_the_schema_declared() {
         "\
 fn0 m.f(String) -> String
   frame 8: s0!:ref s1:ref s2:ref s3:int s4:ref s5:ref s6:int s7:bool
+  local key -> s0:String [0, 12)
      0  call-host s3:int env.get (s0:String)
      1  str s5:ref \"\"
      2  int s6:int 1
@@ -180,6 +181,7 @@ fn a_host_type_the_host_hands_over_is_its_fields_in_place() {
         "\
 fn0 m.f(http.Response) -> Int
   frame 3: s0!:int s1!:ref s2:int
+  local r -> s0:http.Response [0, 1)
      0  copy s2:int s0:int Int
      1  return s2:int
 "
@@ -247,6 +249,8 @@ fn an_operation_of_a_resource_is_addressed_to_the_handle() {
         "\
 fn0 m.f(<host> String) -> Result
   frame 8: s0!:host s1!:ref s2:int s3:unit s4:ref s5:int s6:unit s7:ref
+  local w -> s0:<host> [0, 3)
+  local line -> s1:String [0, 3)
      0  call-resource s5:int s0:host files.Writer.writeLine (s1:String)
      1  copy s2:int s5:int Result
      2  clear s5:int Result
@@ -269,6 +273,7 @@ fn a_resource_operation_reads_its_receiver_out_of_the_frame() {
         "\
 fn0 m.f() -> Result
   frame 17: s0:int s1:unit s2:ref s3:ref s4:int s5:host s6:ref s7:int s8:bool s9:host s10:int s11:unit s12:ref s13:unit s14:int s15:unit s16:ref
+  local reader -> s9:<host> [13, 30)
      0  str s3:ref \"a.txt\"
      1  call-host s4:int files.open (s3:String)
      2  clear s3:ref String
@@ -324,6 +329,7 @@ fn a_type_an_embedder_s_module_declares_is_its_fields_in_place() {
         "\
 fn0 m.f(ledger.Entry) -> Int
   frame 3: s0!:int s1!:ref s2:int
+  local e -> s0:ledger.Entry [0, 1)
      0  copy s2:int s0:int Int
      1  return s2:int
 "
@@ -344,6 +350,8 @@ fn a_resource_an_embedder_s_module_keeps_answers_its_own_operations() {
         "\
 fn0 m.f(<host> ledger.Entry) -> Result
   frame 9: s0!:host s1!:int s2!:ref s3:int s4:unit s5:ref s6:int s7:unit s8:ref
+  local b -> s0:<host> [0, 3)
+  local e -> s1:ledger.Entry [0, 3)
      0  call-resource s6:int s0:host ledger.Book.record (s1:ledger.Entry)
      1  copy s3:int s6:int Result
      2  clear s6:int Result

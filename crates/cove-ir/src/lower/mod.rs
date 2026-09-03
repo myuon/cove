@@ -1411,8 +1411,10 @@ fn lower_body(
     // is a `Load` through the word, which is the same rule a `var` parameter
     // already follows.
     let mut at = 0;
+    let start = body.here();
     if boundary.receiver {
-        body.frame.bind("self", param_slots[0], boundary.params[0]);
+        body.frame
+            .bind("self", param_slots[0], boundary.params[0], start);
         at = 1;
     }
     for (index, param) in decl.decl.params.iter().enumerate() {
@@ -1420,14 +1422,17 @@ fn lower_body(
             &param.name.node,
             param_slots[at + index],
             boundary.params[at + index],
+            start,
         );
     }
     body.block(&decl.decl.body, Some(answer));
-    let clears = body.frame.pop_scope();
+    let end = body.here();
+    let clears = body.frame.pop_scope(end);
     body.clear(&clears, decl.decl.body.span);
     body.emit(Inst::Return { src: answer.slot }, decl.decl.body.span);
 
     let reprs = body.frame.reprs().to_vec();
+    let locals = body.frame.locals();
     Function {
         module: decl.module.clone(),
         name,
@@ -1438,6 +1443,7 @@ fn lower_body(
         captures: Vec::new(),
         code: body.code,
         spans: body.spans,
+        locals,
         span: decl.decl.span,
         is_async: decl.decl.is_async,
     }
@@ -1476,6 +1482,7 @@ fn stub(decl: &Decl) -> Function {
         captures: Vec::new(),
         code: vec![Inst::Return { src: 0 }],
         spans: vec![decl.decl.span],
+        locals: Vec::new(),
         span: decl.decl.span,
         is_async: false,
     }

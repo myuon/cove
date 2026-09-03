@@ -402,19 +402,21 @@ impl Body<'_> {
         let held_generics = std::mem::replace(&mut self.generics, generics);
         let held_args = std::mem::replace(&mut self.args, args);
         self.frame.push_isolated_scope();
+        let start = self.here();
         if let (true, Some(value)) = (shape.receiver, receiver) {
-            self.frame.bind("self", value.slot, value.layout);
+            self.frame.bind("self", value.slot, value.layout, start);
         }
         for (name, value) in names.iter().zip(held) {
             if let Some(value) = value {
-                self.frame.bind(name, value.slot, value.layout);
+                self.frame.bind(name, value.slot, value.layout, start);
             }
         }
         let value = self.expr(default);
         let ty = shape.ty(at).clone();
         let value = self.erase(value, default, &ty);
         let value = self.fit(value, want, default.span);
-        let clears = self.frame.pop_scope();
+        let at = self.here();
+        let clears = self.frame.pop_scope(at);
         self.clear(&clears, default.span);
         self.module = outer;
         self.generics = held_generics;

@@ -16,6 +16,8 @@ fn a_nested_pattern_tests_the_payload_where_it_already_is() {
         "\
 fn0 m.f(m.E) -> Int
   frame 8: s0!:int s1!:int s2!:int s3:int s4:int s5:int s6:bool s7:int
+  local e -> s0:m.E [0, 19)
+  local n -> s5:Int [5, 6)
      0  switch s0:int [1 14] else 17
      1  int s5:int 1
      2  eq.int s6:bool s1:int s5:int
@@ -53,6 +55,8 @@ fn a_binding_is_a_copy_of_the_words_it_names() {
         "\
 fn0 m.f(m.Msg) -> String
   frame 5: s0!:int s1!:ref s2:ref s3:ref s4:ref
+  local m -> s0:m.Msg [0, 12)
+  local s -> s4:String [2, 3)
      0  switch s0:int [5 1] else 9
      1  copy s4:ref s1:ref String
      2  copy s3:ref s4:ref String
@@ -82,6 +86,7 @@ fn a_match_over_something_that_is_not_an_enum_is_a_chain() {
         "\
 fn0 m.name(Int) -> String
   frame 6: s0!:int s1:ref s2:ref s3:int s4:bool s5:ref
+  local n -> s0:Int [0, 21)
      0  int s3:int 0
      1  eq.int s4:bool s0:int s3:int
      2  branch-false s4:bool 7
@@ -118,6 +123,7 @@ fn a_match_over_strings_compares_bytes() {
         "\
 fn0 m.score(String) -> Int
   frame 6: s0!:ref s1:int s2:int s3:ref s4:bool s5:int
+  local s -> s0:String [0, 12)
      0  str s3:ref \"a\"
      1  eq.str s4:bool s0:ref s3:ref
      2  clear s3:ref String
@@ -147,6 +153,8 @@ fn an_arm_that_covers_every_case_ends_each_chain() {
         "\
 fn0 m.f(m.Shape) -> Int
   frame 6: s0!:int s1!:int s2!:int s3:int s4:int s5:int
+  local s -> s0:m.Shape [0, 9)
+  local a -> s5:Int [2, 3)
      0  switch s0:int [4 1 4] else 7
      1  copy s5:int s1:int Int
      2  copy s4:int s5:int Int

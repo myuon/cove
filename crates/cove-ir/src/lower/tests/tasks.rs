@@ -161,6 +161,7 @@ fn an_async_function_value_is_an_ordinary_closure() {
         "\
 fn0 m.f() -> Int
   frame 4: s0:int s1:ref s2:int s3:task
+  local g -> s1:fn [3, 7)
      0  alloc s1:ref closure m.f#0<closure>
      1  int s2:int 1
      2  store-field s1:ref +0 s2:int Int

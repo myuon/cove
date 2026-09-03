@@ -89,6 +89,9 @@ fn a_for_over_an_exclusive_range_never_touches_the_bound() {
         "\
 fn0 m.total(Int) -> Int
   frame 12: s0!:int s1:int s2:int s3:int s4:int s5:int s6:bool s7:int s8:bool s9:int s10:bool s11:int
+  local n -> s0:Int [0, 23)
+  local t -> s2:Int [1, 23)
+  local i -> s3:Int [15, 17)
      0  int s2:int 0
      1  int s3:int 0
      2  copy s4:int s3:int Int
@@ -130,6 +133,9 @@ fn a_for_over_an_inclusive_range_earns_one_more_turn_at_the_end() {
         "\
 fn0 m.total(Int) -> Int
   frame 12: s0!:int s1:int s2:int s3:int s4:int s5:int s6:bool s7:int s8:bool s9:int s10:bool s11:int
+  local n -> s0:Int [0, 23)
+  local t -> s2:Int [1, 23)
+  local i -> s3:Int [15, 17)
      0  int s2:int 0
      1  int s3:int 0
      2  copy s4:int s3:int Int
@@ -171,6 +177,9 @@ fn a_for_over_an_array_walks_the_object_and_clears_the_element() {
         "\
 fn0 m.count(Array) -> Int
   frame 11: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int s10:int
+  local xs -> s0:Array [0, 17)
+  local t -> s2:Int [1, 17)
+  local x -> s8:String [10, 13)
      0  int s2:int 0
      1  copy s3:ref s0:ref Array
      2  len s4:int s3:ref
@@ -206,6 +215,9 @@ fn a_for_over_a_vector_walks_a_snapshot() {
         "\
 fn0 m.count(Vector) -> Int
   frame 10: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int s9:int
+  local v -> s0:Vector [0, 15)
+  local t -> s2:Int [1, 15)
+  local x -> s8:Int [10, 12)
      0  int s2:int 0
      1  call-builtin s3:ref Vector.toArray (s0:Vector)
      2  len s4:int s3:ref
@@ -239,6 +251,9 @@ fn a_break_out_of_a_for_clears_the_element_it_was_holding() {
         "\
 fn0 m.first(Array) -> Int
   frame 13: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:ref s10:unit s11:int s12:int
+  local xs -> s0:Array [0, 29)
+  local t -> s2:Int [1, 29)
+  local x -> s8:String [10, 25)
      0  int s2:int 0
      1  copy s3:ref s0:ref Array
      2  len s4:int s3:ref
@@ -314,6 +329,7 @@ fn reading_a_vector_element_is_ordinary_instructions() {
         "\
 fn0 m.head(Vector) -> Option
   frame 10: s0!:ref s1:int s2:int s3:int s4:int s5:ref s6:int s7:int s8:int s9:bool
+  local v -> s0:Vector [0, 14)
      0  int s3:int 0
      1  load-field s4:int s0:ref +0 Int
      2  load-field s5:ref s0:ref +1 <ref>
@@ -350,6 +366,8 @@ fn two_inline_values_are_compared_where_they_sit() {
         "\
 fn0 m.same(m.Point m.Point) -> Bool
   frame 6: s0!:int s1!:int s2!:int s3!:int s4:bool s5:bool
+  local a -> s0:m.Point [0, 2)
+  local b -> s2:m.Point [0, 2)
      0  call-builtin s5:bool Any.equals (s0:m.Point s2:m.Point)
      1  copy s4:bool s5:bool Bool
      2  return s4:bool
@@ -369,6 +387,8 @@ fn two_arrays_compare_without_being_boxed() {
         "\
 fn0 m.same(Array Array) -> Bool
   frame 4: s0!:ref s1!:ref s2:bool s3:bool
+  local a -> s0:Array [0, 2)
+  local b -> s1:Array [0, 2)
      0  call-builtin s3:bool Any.equals (s0:Array s1:Array)
      1  copy s2:bool s3:bool Bool
      2  return s2:bool
@@ -388,6 +408,8 @@ fn is_compares_two_words_as_words() {
         "\
 fn0 m.same(Vector Vector) -> Bool
   frame 4: s0!:ref s1!:ref s2:bool s3:bool
+  local a -> s0:Vector [0, 2)
+  local b -> s1:Vector [0, 2)
      0  eq.identity s3:bool s0:ref s1:ref
      1  copy s2:bool s3:bool Bool
      2  return s2:bool
@@ -466,6 +488,7 @@ fn a_set_reports_its_length_from_its_own_header() {
         "\
 fn0 m.f(Set) -> Int
   frame 3: s0!:ref s1:int s2:int
+  local s -> s0:Set [0, 2)
      0  len s2:int s0:ref
      1  copy s1:int s2:int Int
      2  return s1:int
@@ -484,6 +507,7 @@ fn an_immutable_update_is_the_machine_s_and_answers_a_new_set() {
         "\
 fn0 m.f(Set) -> Set
   frame 4: s0!:ref s1:ref s2:int s3:ref
+  local s -> s0:Set [0, 4)
      0  int s2:int 4
      1  call-builtin s3:ref Set.inserted (s0:Set s2:Int)
      2  copy s1:ref s3:ref Set
@@ -508,6 +532,7 @@ fn a_map_lookup_answers_the_option_s_words_rather_than_an_object() {
         "\
 fn0 m.f(Map) -> Option
   frame 6: s0!:ref s1:int s2:int s3:ref s4:int s5:int
+  local m -> s0:Map [0, 4)
      0  str s3:ref \"a\"
      1  call-builtin s4:int Map.get (s0:Map s3:String)
      2  clear s3:ref String
@@ -530,6 +555,7 @@ fn a_map_answers_its_keys_as_an_array() {
         "\
 fn0 m.f(Map) -> Array
   frame 3: s0!:ref s1:ref s2:ref
+  local m -> s0:Map [0, 3)
      0  call-builtin s2:ref Map.keys (s0:Map)
      1  copy s1:ref s2:ref Array
      2  clear s2:ref Array
@@ -556,6 +582,9 @@ fn a_for_over_a_set_walks_the_members_in_place() {
         "\
 fn0 m.f(Set) -> Int
   frame 10: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int s9:int
+  local s -> s0:Set [0, 15)
+  local n -> s2:Int [1, 15)
+  local x -> s8:Int [10, 12)
      0  int s2:int 0
      1  copy s3:ref s0:ref Set
      2  len s4:int s3:ref
@@ -598,6 +627,9 @@ fn a_for_over_a_map_binds_one_entry_at_the_layout_s_width() {
         "\
 fn0 m.f(Map) -> Int
   frame 11: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int s10:int
+  local m -> s0:Map [0, 16)
+  local n -> s2:Int [1, 16)
+  local e -> s8:MapEntry [10, 12)
      0  int s2:int 0
      1  copy s3:ref s0:ref Map
      2  len s4:int s3:ref
@@ -672,6 +704,7 @@ fn an_array_literal_erases_each_element_the_written_type_erases() {
         "\
 fn0 m.f(m.B) -> Int
   frame 6: s0!:int s1:int s2:ref s3:ref s4:ref s5:int
+  local b -> s0:m.B [0, 12)
      0  box s2:ref s0:int m.B
      1  box s3:ref s0:int m.B
      2  alloc s4:ref Array<array> x2

@@ -12,6 +12,7 @@ fn an_if_with_an_else_is_two_writes_into_one_destination() {
         "\
 fn0 m.pick(Bool) -> Int
   frame 4: s0!:bool s1:int s2:int s3:int
+  local c -> s0:Bool [0, 7)
      0  branch-false s0:bool 4
      1  int s3:int 1
      2  copy s2:int s3:int Int
@@ -36,6 +37,8 @@ fn an_if_without_an_else_writes_its_unit_once_before_the_branch() {
         "\
 fn0 m.maybe(Bool) -> Int
   frame 4: s0!:bool s1:int s2:int s3:int
+  local c -> s0:Bool [0, 5)
+  local n -> s2:Int [1, 5)
      0  int s2:int 0
      1  branch-false s0:bool 4
      2  int s3:int 1
@@ -56,6 +59,9 @@ fn a_branch_join_of_a_struct_is_two_copies_of_its_words() {
         "\
 fn0 m.pick(Bool m.Point m.Point) -> m.Point
   frame 9: s0!:bool s1!:int s2!:int s3!:int s4!:int s5:int s6:int s7:int s8:int
+  local c -> s0:Bool [0, 5)
+  local a -> s1:m.Point [0, 5)
+  local b -> s3:m.Point [0, 5)
      0  branch-false s0:bool 3
      1  copy s7:int s1:int m.Point
      2  jump 4
@@ -78,6 +84,8 @@ fn a_while_re_decides_the_condition_every_turn() {
         "\
 fn0 m.count(Int) -> Int
   frame 6: s0!:int s1:int s2:int s3:bool s4:int s5:int
+  local n -> s0:Int [0, 8)
+  local t -> s2:Int [1, 8)
      0  int s2:int 0
      1  lt.int s3:bool s2:int s0:int
      2  branch-false s3:bool 7
@@ -101,6 +109,7 @@ fn a_break_leaves_the_loop_and_its_jump_is_patched_at_the_end() {
         "\
 fn0 m.first() -> Int
   frame 6: s0:int s1:int s2:bool s3:int s4:int s5:unit
+  local t -> s1:Int [1, 12)
      0  int s1:int 0
      1  bool s2:bool true
      2  branch-false s2:bool 11
@@ -130,6 +139,7 @@ fn a_return_leaves_without_clearing_what_the_frame_was_holding() {
         "\
 fn0 m.early(Int) -> Int
   frame 5: s0!:int s1:int s2:int s3:bool s4:unit
+  local n -> s0:Int [0, 6)
      0  int s2:int 0
      1  lt.int s3:bool s0:int s2:int
      2  branch-false s3:bool 5
@@ -179,6 +189,9 @@ fn a_break_clears_the_temporaries_the_turn_was_holding() {
         "\
 fn1 m.f(Array) -> Int
   frame 13: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:ref s10:ref s11:int s12:unit
+  local xs -> s0:Array [0, 28)
+  local total -> s2:Int [1, 28)
+  local x -> s8:String [10, 24)
      0  int s2:int 0
      1  copy s3:ref s0:ref Array
      2  len s4:int s3:ref

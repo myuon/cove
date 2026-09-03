@@ -169,6 +169,57 @@ pub struct Capture {
     pub layout: LayoutId,
 }
 
+/// One named binding, and the range of the function's code over which that
+/// name denotes that slot.
+///
+/// A side table, and read for the same reason [`Function::spans`] is: a name
+/// is wanted when a *human* asks what a frame holds — a debugger stopped at a
+/// breakpoint, issue #241 — and never in the dispatch loop, so it belongs
+/// beside the code rather than in it.
+///
+/// It exists because neither half of that question is answerable from the
+/// frame. [`Function::reprs`] says what a slot's *word* holds, for the whole
+/// function, and that is all it says: until this table the only name anywhere
+/// in a lowered program was [`Capture::name`], parameters were positional and
+/// locals were anonymous. So a debugger could say `s7:int = 3`, which is true
+/// of the machine and can be a lie about the program.
+///
+/// # Two locals may share a slot, and that is the point
+///
+/// [`Function::reprs`]' own note says a slot may be reused by a later value
+/// of the same `Repr`, because the lowering hands a dead run to the next
+/// value that asks for that shape. One slot is therefore several source
+/// variables over a function's life, and nothing but this table can tell them
+/// apart. Two locals of one slot have *disjoint* ranges and, usually,
+/// different names.
+///
+/// # Two locals may share a name
+///
+/// Shadowing is recorded, not resolved. `let x = 1; let x = "two"` is two
+/// bindings and both are kept, because the first is still what the frame
+/// holds at every pc before the second — and because resolving here would
+/// make the table disagree with the lowering, whose scope is searched
+/// backwards so that the latest declaration wins. Their ranges may overlap
+/// and their slots differ. A reader keeps the locals whose range contains the
+/// pc and **takes the last match**; [`Function::local_at`] is that rule
+/// written down.
+///
+/// A `break` or a `continue` is not an end of a range. `[from, to)` is an
+/// interval of program counters, every pc inside a scope's body is one the
+/// binding is live at, and the pc a `break` jumps to is outside the interval
+/// already.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Local {
+    pub name: Arc<str>,
+    pub slot: Slot,
+    pub layout: LayoutId,
+    /// The first pc at which the name is bound.
+    pub from: Pc,
+    /// One past the last. `[from, to)` is a half-open interval, like a
+    /// [`Span`].
+    pub to: Pc,
+}
+
 /// One lowered function.
 #[derive(Clone, Debug)]
 pub struct Function {
@@ -211,6 +262,14 @@ pub struct Function {
     /// a run fails or a trace is written, and never in the dispatch loop, so
     /// it should not be in the cache line the loop is reading.
     pub spans: Vec<Span>,
+    /// What the source called the values in the frame, and where each name
+    /// meant which slot.
+    ///
+    /// In declaration order, which is the order the shadowing rule reads
+    /// them in; see [`Local`]. Not parallel to anything — a function binds as
+    /// many names as it binds — and empty is a legal answer for a body that
+    /// binds none.
+    pub locals: Vec<Local>,
     /// Where the declaration itself is, for a diagnostic that is about the
     /// function rather than about one of its instructions.
     pub span: Span,
@@ -255,6 +314,17 @@ impl Function {
     /// The span of the instruction at `pc`, or the declaration's own.
     pub fn span_at(&self, pc: usize) -> Span {
         self.spans.get(pc).copied().unwrap_or(self.span)
+    }
+
+    /// Which slot `name` denotes at `pc`, if the source bound it there.
+    ///
+    /// The last match wins, because a shadowing declaration is recorded
+    /// beside the one it shadows rather than in place of it: see [`Local`].
+    pub fn local_at(&self, name: &str, pc: Pc) -> Option<&Local> {
+        self.locals
+            .iter()
+            .rev()
+            .find(|local| &*local.name == name && local.from <= pc && pc < local.to)
     }
 
     /// `module.name`, as a diagnostic writes it.

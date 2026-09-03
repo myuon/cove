@@ -33,6 +33,7 @@ fn map_is_a_loop_that_clears_the_element_and_the_turn_s_answer() {
         "\
 fn0 m.f(Array) -> Array
   frame 11: s0!:ref s1:ref s2:ref s3:ref s4:int s5:ref s6:int s7:int s8:bool s9:ref s10:ref
+  local xs -> s0:Array [0, 22)
      0  copy s2:ref s0:ref Array
      1  alloc s3:ref closure m.f#0<closure>
      2  int s4:int 1
@@ -77,6 +78,7 @@ fn filter_fills_a_run_of_the_receiver_s_length_and_slices_it() {
         "\
 fn0 m.f(Array) -> Array
   frame 11: s0!:ref s1:ref s2:ref s3:ref s4:int s5:ref s6:int s7:int s8:int s9:bool s10:ref
+  local xs -> s0:Array [0, 27)
      0  copy s2:ref s0:ref Array
      1  alloc s3:ref closure m.f#0<closure>
      2  int s4:int 1
@@ -129,6 +131,7 @@ fn fold_threads_the_accumulator_through_the_call_s_destination() {
         "\
 fn0 m.f(Array) -> Int
   frame 10: s0!:ref s1:int s2:ref s3:int s4:int s5:ref s6:int s7:int s8:bool s9:ref
+  local xs -> s0:Array [0, 20)
      0  copy s2:ref s0:ref Array
      1  int s3:int 0
      2  copy s4:int s3:int Int
@@ -171,6 +174,7 @@ fn a_vector_is_walked_through_a_copy_taken_before_the_first_call() {
         "\
 fn0 m.f(Vector) -> Array
   frame 11: s0!:ref s1:ref s2:ref s3:ref s4:int s5:ref s6:int s7:int s8:bool s9:int s10:int
+  local v -> s0:Vector [0, 20)
      0  call-builtin s2:ref Vector.toArray (s0:Vector)
      1  alloc s3:ref closure m.f#0<closure>
      2  int s4:int 1
@@ -212,6 +216,7 @@ fn a_declared_function_handed_to_map_is_the_same_loop() {
         "\
 fn1 m.f(Array) -> Array
   frame 11: s0!:ref s1:ref s2:ref s3:ref s4:int s5:ref s6:int s7:int s8:bool s9:int s10:int
+  local xs -> s0:Array [0, 20)
      0  copy s2:ref s0:ref Array
      1  alloc s3:ref closure m.double<closure>
      2  int s4:int 0
@@ -251,6 +256,7 @@ fn a_walk_over_multiword_elements_is_a_stride_rather_than_an_address() {
         "\
 fn0 m.f(Array) -> Array
   frame 12: s0!:ref s1:ref s2:ref s3:ref s4:int s5:ref s6:int s7:int s8:bool s9:int s10:int s11:int
+  local xs -> s0:Array [0, 20)
      0  copy s2:ref s0:ref Array
      1  alloc s3:ref closure m.f#0<closure>
      2  int s4:int 1
@@ -312,6 +318,7 @@ fn sorted_is_a_bottom_up_stable_merge_over_two_runs() {
         "\
 fn0 m.f(Array) -> Array
   frame 20: s0!:ref s1:ref s2:ref s3:ref s4:int s5:int s6:ref s7:int s8:int s9:int s10:int s11:int s12:int s13:int s14:int s15:bool s16:int s17:int s18:bool s19:ref
+  local xs -> s0:Array [0, 68)
      0  copy s2:ref s0:ref Array
      1  alloc s3:ref closure m.f#0<closure>
      2  int s4:int 1

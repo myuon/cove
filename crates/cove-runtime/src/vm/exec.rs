@@ -3570,6 +3570,7 @@ pub(crate) mod tests {
                 captures: Vec::<Capture>::new(),
                 code,
                 spans,
+                locals: Vec::new(),
                 span: nowhere,
                 is_async: false,
             });

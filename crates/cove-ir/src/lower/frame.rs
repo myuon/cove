@@ -35,12 +35,28 @@
 //! parameter, a local, or a field of one. [`Val`] carries which, because
 //! freeing a binding's run at the end of the expression that read it would
 //! let a later temporary overwrite a variable that is still in scope.
+//!
+//! # A name outlives the scope that had it
+//!
+//! The frame resolves a name while it is lowering and then, until issue #241,
+//! forgot it: a scope that ended dropped its names and its runs went back on
+//! the free lists under nothing but their shapes. So the finished program
+//! said what every slot held and never what anything was *called* — and the
+//! reuse this module exists to do is exactly what makes a slot number an
+//! unusable answer to "what is `count`?".
+//!
+//! So a scope that ends now leaves a [`Local`] behind for each name it had,
+//! and the pair of program counters on it is what says which of the several
+//! variables that shared a slot was the one live at a given instruction. It
+//! is written down as the scope ends rather than reconstructed afterwards,
+//! because the scope is the only thing that ever knew.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::layout::LayoutId;
-use crate::program::Arg;
-use crate::{Repr, Slot};
+use crate::program::{Arg, Local};
+use crate::{Pc, Repr, Slot};
 
 /// Where an expression left its answer: a base slot and the layout that says
 /// how many words follow it and what each of them holds.
@@ -98,7 +114,12 @@ struct Scope {
     /// declaration wins without the earlier one having to be removed — and
     /// the earlier one's run stays owned by this scope, which is what a
     /// shadowed binding still needs.
-    names: Vec<(String, Slot, LayoutId)>,
+    ///
+    /// It is also exactly the list of bindings the scope closes: every one
+    /// of them, the shadowed included, becomes a [`Local`] when the scope
+    /// ends, because a name the source wrote is a name a reader may be
+    /// stopped inside.
+    names: Vec<Binding>,
     /// The runs the scope gives back when it ends, with the width each one
     /// occupies. The width is carried rather than looked up, because ending
     /// a scope must not need the layout table the caller is holding.
@@ -115,10 +136,34 @@ struct Scope {
     isolated: bool,
 }
 
+/// One name a scope introduced, while the scope still has it.
+///
+/// It becomes a [`Local`] when the scope ends, which is the moment the other
+/// end of its range is known.
+struct Binding {
+    name: Arc<str>,
+    slot: Slot,
+    layout: LayoutId,
+    /// The pc the name became visible at.
+    from: Pc,
+    /// Which binding of the whole body this is.
+    ///
+    /// Scopes end innermost first, so the order bindings are *closed* in is
+    /// not the order they were written in — and the order they were written
+    /// in is the one a reader of a shadowed name needs, because the rule is
+    /// that the last match wins. This is what [`Frame::locals`] sorts by to
+    /// hand that order back.
+    order: u32,
+}
+
 pub(crate) struct Frame {
     reprs: Vec<Repr>,
     free: HashMap<Vec<Repr>, Vec<Slot>>,
     scopes: Vec<Scope>,
+    /// Every binding whose scope has ended, with the order it was written in.
+    closed: Vec<(u32, Local)>,
+    /// How many bindings this frame has made, which is the next `order`.
+    bound: u32,
 }
 
 impl Frame {
@@ -127,6 +172,8 @@ impl Frame {
             reprs: Vec::new(),
             free: HashMap::new(),
             scopes: Vec::new(),
+            closed: Vec::new(),
+            bound: 0,
         }
     }
 
@@ -203,8 +250,28 @@ impl Frame {
     /// The runs go back on the free lists here; the answer is what the
     /// caller must emit [`crate::Inst::Clear`] for, because a static
     /// reference map cannot say when a value stopped being needed.
-    pub fn pop_scope(&mut self) -> Vec<(Slot, LayoutId)> {
+    ///
+    /// `at` is where the code has reached, and it is one past the last pc
+    /// each of this scope's names denoted its slot at — the `to` of the
+    /// [`Local`]s the scope leaves behind. It is the *lexical* end and not
+    /// every way out: a `break` leaves the scope without ending it, and
+    /// nothing is closed there, because the pc it jumps to is outside
+    /// `[from, at)` already. See [`Frame::refs_within`], which is the same
+    /// distinction drawn for the clears.
+    pub fn pop_scope(&mut self, at: Pc) -> Vec<(Slot, LayoutId)> {
         let scope = self.scopes.pop().expect("a scope is open");
+        for name in scope.names {
+            self.closed.push((
+                name.order,
+                Local {
+                    name: name.name,
+                    slot: name.slot,
+                    layout: name.layout,
+                    from: name.from,
+                    to: at,
+                },
+            ));
+        }
         let mut clears = Vec::new();
         for (slot, layout, width) in scope.owned {
             if self.holds_ref(slot, width) {
@@ -230,13 +297,39 @@ impl Frame {
             .collect()
     }
 
-    /// Names a location in the innermost scope.
-    pub fn bind(&mut self, name: &str, slot: Slot, layout: LayoutId) {
+    /// Names a location in the innermost scope, from `at` onwards.
+    ///
+    /// The frame does not know where the code has reached — it holds no
+    /// instructions — so the pc is handed to it by the body that is emitting
+    /// them. This is the one place a name is attached to a slot, which is
+    /// what makes it the one place a [`Local`]'s `from` can come from.
+    pub fn bind(&mut self, name: &str, slot: Slot, layout: LayoutId, at: Pc) {
+        let order = self.bound;
+        self.bound += 1;
         self.scopes
             .last_mut()
             .expect("a scope is open")
             .names
-            .push((name.to_string(), slot, layout));
+            .push(Binding {
+                name: Arc::from(name),
+                slot,
+                layout,
+                from: at,
+                order,
+            });
+    }
+
+    /// Every name this frame has bound whose scope has ended, in the order
+    /// the source declared them.
+    ///
+    /// That order is what [`crate::Function::locals`] promises and what the
+    /// shadowing rule reads: the last local that matches a name and contains
+    /// the pc is the one that name denotes. Asked once, when the body is
+    /// finished — a scope still open has no `to` to give.
+    pub fn locals(&self) -> Vec<Local> {
+        let mut closed = self.closed.clone();
+        closed.sort_by_key(|(order, _)| *order);
+        closed.into_iter().map(|(_, local)| local).collect()
     }
 
     /// Makes the innermost scope responsible for giving a location back.
@@ -256,8 +349,8 @@ impl Frame {
                 .names
                 .iter()
                 .rev()
-                .find(|(bound, _, _)| bound == name)
-                .map(|(_, slot, layout)| (*slot, *layout));
+                .find(|bound| &*bound.name == name)
+                .map(|bound| (bound.slot, bound.layout));
             if found.is_some() {
                 return found;
             }

@@ -16,7 +16,8 @@ impl Body<'_> {
     pub(super) fn scoped_block(&mut self, block: &Block, dst: Option<Dest>) {
         self.frame.push_scope();
         self.block(block, dst);
-        let clears = self.frame.pop_scope();
+        let at = self.here();
+        let clears = self.frame.pop_scope(at);
         self.clear(&clears, block.span);
     }
 
@@ -98,7 +99,8 @@ impl Body<'_> {
                 };
                 let width = self.width(layout);
                 self.frame.own(slot, layout, width);
-                self.frame.bind(&name.node, slot, layout);
+                let at = self.here();
+                self.frame.bind(&name.node, slot, layout, at);
             }
             StmtKind::Expr(expr) => self.discard(expr),
             // A local `fn` is an ordinary closure the body writes, and the

@@ -84,6 +84,7 @@ fn the_payload_words_of_two_cases_agree_or_do_not_overlap() {
         "\
 fn0 m.f(Float) -> m.E
   frame 9: s0!:float s1:int s2:int s3:ref s4:float s5:int s6:int s7:ref s8:float
+  local x -> s0:Float [0, 6)
      0  int s5:int 1
      1  clear s6:int Int
      2  clear s7:ref <ref>
@@ -109,6 +110,10 @@ fn a_match_reads_the_discriminant_at_offset_zero() {
         "\
 fn0 m.f(m.Shape) -> Int
   frame 8: s0!:int s1!:int s2!:int s3:int s4:int s5:int s6:int s7:int
+  local s -> s0:m.Shape [0, 14)
+  local a -> s5:Int [5, 6)
+  local a -> s5:Int [8, 11)
+  local b -> s6:Int [9, 11)
      0  switch s0:int [1 4 7] else 12
      1  int s5:int 0
      2  copy s4:int s5:int Int
@@ -138,6 +143,8 @@ fn an_option_is_two_words_and_none_is_the_zeroed_one() {
         "\
 fn0 m.f(Option) -> Int
   frame 5: s0!:int s1!:int s2:int s3:int s4:int
+  local o -> s0:Option [0, 9)
+  local v -> s4:Int [2, 3)
      0  switch s0:int [4 1] else 7
      1  copy s4:int s1:int Int
      2  copy s3:int s4:int Int
@@ -164,6 +171,8 @@ fn a_case_is_copied_whole() {
         "\
 fn0 m.f(m.Shape) -> m.Shape
   frame 9: s0!:int s1!:int s2!:int s3:int s4:int s5:int s6:int s7:int s8:int
+  local s -> s0:m.Shape [0, 2)
+  local t -> s6:m.Shape [1, 2)
      0  copy s6:int s0:int m.Shape
      1  copy s3:int s6:int m.Shape
      2  return s3:int
@@ -185,6 +194,7 @@ fn a_question_mark_leaves_through_the_enclosing_function_s_own_failure() {
         "\
 fn0 m.f() -> Result
   frame 13: s0:int s1:int s2:ref s3:int s4:int s5:ref s6:int s7:bool s8:int s9:int s10:ref s11:int s12:int
+  local v -> s6:Int [11, 18)
      0  call s3:int m.g ()
      1  int s6:int 0
      2  eq.int s7:bool s3:int s6:int
@@ -218,6 +228,7 @@ fn a_question_mark_on_an_option_leaves_through_none() {
         "\
 fn0 m.f() -> Option
   frame 10: s0:int s1:int s2:int s3:int s4:int s5:bool s6:int s7:int s8:int s9:int
+  local v -> s4:Int [9, 14)
      0  call s2:int m.g ()
      1  int s4:int 1
      2  eq.int s5:bool s2:int s4:int
@@ -250,6 +261,8 @@ fn an_enum_inside_a_struct_is_inline_there_too() {
         "\
 fn0 m.f(m.S) -> Int
   frame 7: s0!:int s1!:int s2!:int s3:int s4:int s5:int s6:int
+  local s -> s0:m.S [0, 10)
+  local v -> s5:Int [5, 7)
      0  switch s0:int [1 4] else 8
      1  int s5:int 0
      2  copy s4:int s5:int Int

@@ -32,6 +32,7 @@ fn an_interpolation_is_one_builtin_over_the_pieces() {
         "\
 fn0 m.greet(String) -> String
   frame 5: s0!:ref s1:ref s2:ref s3:ref s4:ref
+  local name -> s0:String [0, 7)
      0  str s2:ref \"hi \"
      1  str s3:ref \"!\"
      2  call-builtin s4:ref String.interpolate (s2:String s0:String s3:String)
@@ -62,6 +63,7 @@ fn an_inline_value_crosses_into_an_interpolation_where_it_sits() {
         "\
 fn0 m.show(m.Point) -> String
   frame 5: s0!:int s1!:int s2:ref s3:ref s4:ref
+  local p -> s0:m.Point [0, 5)
      0  str s3:ref \"p=\"
      1  call-builtin s4:ref String.interpolate (s3:String s0:m.Point)
      2  clear s3:ref String
@@ -79,6 +81,8 @@ fn two_strings_compare_by_their_bytes() {
         "\
 fn0 m.same(String String) -> Bool
   frame 4: s0!:ref s1!:ref s2:bool s3:bool
+  local a -> s0:String [0, 2)
+  local b -> s1:String [0, 2)
      0  eq.str s3:bool s0:ref s1:ref
      1  copy s2:bool s3:bool Bool
      2  return s2:bool

@@ -13,6 +13,7 @@ fn a_parameter_is_the_run_a_caller_writes() {
         "\
 fn0 m.double(Int) -> Int
   frame 4: s0!:int s1:int s2:int s3:int
+  local n -> s0:Int [0, 3)
      0  int s2:int 2
      1  mul.int s3:int s0:int s2:int
      2  copy s1:int s3:int Int
@@ -33,6 +34,8 @@ fn arithmetic_and_comparison_read_the_operands_kind() {
         "\
 fn0 m.ordered(Int Int) -> Bool
   frame 6: s0!:int s1!:int s2:bool s3:int s4:int s5:bool
+  local a -> s0:Int [0, 4)
+  local b -> s1:Int [0, 4)
      0  int s3:int 1
      1  sub.int s4:int s0:int s3:int
      2  le.int s5:bool s4:int s1:int
@@ -49,6 +52,7 @@ fn a_float_keeps_its_bits_and_reads_as_a_float() {
         "\
 fn0 m.half(Float) -> Float
   frame 5: s0!:float s1:float s2:float s3:float s4:float
+  local x -> s0:Float [0, 4)
      0  neg.float s2:float s0:float
      1  float s3:float 2
      2  div.float s4:float s2:float s3:float
@@ -84,6 +88,7 @@ fn not_negates_a_bool() {
         "\
 fn0 m.flip(Bool) -> Bool
   frame 3: s0!:bool s1:bool s2:bool
+  local flag -> s0:Bool [0, 2)
      0  not s2:bool s0:bool
      1  copy s1:bool s2:bool Bool
      2  return s1:bool
@@ -124,6 +129,7 @@ fn a_var_local_is_one_location_written_again() {
         "\
 fn0 m.count() -> Int
   frame 4: s0:int s1:int s2:int s3:int
+  local n -> s1:Int [1, 7)
      0  int s1:int 0
      1  int s2:int 1
      2  add.int s3:int s1:int s2:int
@@ -159,6 +165,8 @@ fn a_block_is_a_scope_whose_locals_die_with_it() {
         "\
 fn0 m.scoped() -> Int
   frame 4: s0:int s1:int s2:int s3:int
+  local a -> s1:Int [1, 4)
+  local b -> s3:Int [2, 3)
      0  int s1:int 1
      1  int s3:int 2
      2  copy s2:int s3:int Int
@@ -179,6 +187,8 @@ fn short_circuiting_is_a_branch_over_the_right_hand_side() {
         "\
 fn0 m.both(Bool Bool) -> Bool
   frame 4: s0!:bool s1!:bool s2:bool s3:bool
+  local a -> s0:Bool [0, 4)
+  local b -> s1:Bool [0, 4)
      0  copy s3:bool s0:bool Bool
      1  branch-false s3:bool 3
      2  copy s3:bool s1:bool Bool
@@ -195,6 +205,8 @@ fn an_or_inverts_the_polarity_with_a_jump_rather_than_an_instruction() {
         "\
 fn0 m.either(Bool Bool) -> Bool
   frame 4: s0!:bool s1!:bool s2:bool s3:bool
+  local a -> s0:Bool [0, 5)
+  local b -> s1:Bool [0, 5)
      0  copy s3:bool s0:bool Bool
      1  branch-false s3:bool 3
      2  jump 4
@@ -219,6 +231,9 @@ fn a_binding_takes_over_the_temporary_its_initialiser_made() {
         "\
 fn0 m.twice(Int) -> Int
   frame 5: s0!:int s1:int s2:int s3:int s4:int
+  local n -> s0:Int [0, 5)
+  local a -> s3:Int [2, 5)
+  local b -> s2:Int [3, 5)
      0  int s2:int 1
      1  add.int s3:int s0:int s2:int
      2  copy s2:int s3:int Int

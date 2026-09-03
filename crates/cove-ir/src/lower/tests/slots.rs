@@ -45,6 +45,11 @@ fn a_run_is_never_reused_by_a_value_whose_words_differ() {
         "\
 fn0 m.mix(Int Float) -> Float
   frame 8: s0!:int s1!:float s2:float s3:int s4:int s5:float s6:float s7:int
+  local a -> s0:Int [0, 7)
+  local b -> s1:Float [0, 7)
+  local n -> s4:Int [2, 7)
+  local x -> s6:Float [4, 7)
+  local m -> s7:Int [6, 7)
      0  int s3:int 1
      1  add.int s4:int s0:int s3:int
      2  float s5:float 1
@@ -69,6 +74,8 @@ fn a_two_word_location_is_reused_only_by_a_two_word_one_of_the_same_shape() {
         "\
 fn0 m.f() -> Int
   frame 7: s0:int s1:int s2:ref s3:int s4:ref s5:ref s6:int
+  local a -> s3:m.A [5, 12)
+  local b -> s5:m.B [10, 12)
      0  int s1:int 1
      1  str s2:ref \"x\"
      2  copy s3:int s1:int Int
@@ -100,6 +107,8 @@ fn a_temporary_holding_a_reference_is_cleared_at_its_last_use() {
         "\
 fn0 m.shout(String String) -> Int
   frame 5: s0!:ref s1!:ref s2:int s3:ref s4:int
+  local a -> s0:String [0, 4)
+  local b -> s1:String [0, 4)
      0  call-builtin s3:ref String.interpolate (s0:String s1:String)
      1  call-builtin s4:int String.length (s3:String)
      2  clear s3:ref String
@@ -121,6 +130,8 @@ fn a_local_holding_a_reference_is_cleared_when_its_scope_ends() {
         "\
 fn0 m.f() -> Int
   frame 4: s0:int s1:int s2:ref s3:int
+  local n -> s1:Int [1, 6)
+  local s -> s2:String [2, 4)
      0  int s1:int 0
      1  str s2:ref \"held\"
      2  call-builtin s3:int String.length (s2:String)
@@ -142,6 +153,8 @@ fn a_scalar_is_never_cleared() {
         "\
 fn0 m.f() -> Int
   frame 4: s0:int s1:int s2:int s3:int
+  local a -> s1:Int [1, 4)
+  local b -> s2:Int [2, 4)
      0  int s1:int 1
      1  int s2:int 2
      2  add.int s3:int s1:int s2:int
@@ -164,6 +177,7 @@ fn a_location_with_one_reference_word_among_scalars_is_cleared_whole() {
         "\
 fn0 m.f() -> Int
   frame 5: s0:int s1:ref s2:int s3:ref s4:int
+  local u -> s3:m.User [5, 6)
      0  str s1:ref \"a\"
      1  int s2:int 1
      2  copy s3:ref s1:ref String

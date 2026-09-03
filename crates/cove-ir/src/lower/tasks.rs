@@ -80,7 +80,8 @@ impl Body<'_> {
         );
 
         self.frame.push_scope();
-        self.frame.bind(&name.node, handle.slot, shapes::SCOPE);
+        let at = self.here();
+        self.frame.bind(&name.node, handle.slot, shapes::SCOPE, at);
         self.scopes.push(OpenScope {
             slot: handle.slot,
             loops: self.loops.len(),
@@ -90,7 +91,8 @@ impl Body<'_> {
         // Asked *after* the body, because what a scope's children answer is
         // something the body says and the header does not.
         let open = self.scopes.pop().expect("this scope was pushed");
-        let clears = self.frame.pop_scope();
+        let at = self.here();
+        let clears = self.frame.pop_scope(at);
         self.clear(&clears, span);
 
         // The body reached its end, so this is the exit that waits rather

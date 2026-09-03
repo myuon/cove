@@ -230,7 +230,8 @@ impl Body<'_> {
             }
             None => self.discard(&arm.body),
         }
-        let clears = self.frame.pop_scope();
+        let at = self.here();
+        let clears = self.frame.pop_scope(at);
         self.clear(&clears, arm.span);
         ends.push(self.emit(Inst::Jump { to: PENDING }, arm.span));
         failures
@@ -441,7 +442,8 @@ impl Body<'_> {
                 self.copy(slot, subject, layout, span);
                 let width = self.width(layout);
                 self.frame.own(slot, layout, width);
-                self.frame.bind(name, slot, layout);
+                let at = self.here();
+                self.frame.bind(name, slot, layout, at);
             }
             PatternKind::Variant { path, payload } => {
                 let case = path

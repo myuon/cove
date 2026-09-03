@@ -23,6 +23,7 @@ mod gaps;
 mod generics;
 mod hosts;
 mod layouts;
+mod locals;
 mod methods;
 mod patterns;
 mod ranges;
