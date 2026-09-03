@@ -1460,3 +1460,70 @@ export async fn main() -> Int {
 "#;
     assert_eq!(entry_agrees(source, "main"), Answer::Value("7".to_string()));
 }
+
+/// A child the body **awaited** is not waited for a second time when the
+/// scope is left, so the answer the body computed from its failure survives.
+///
+/// `crate::task::wait_for_children` skips a child that is no longer running,
+/// and that first line is a language decision rather than an economy: a task
+/// the body awaited has already handed its value to the program, and the
+/// program has already decided what to do with one. A scope exit that
+/// reported it again would replace the recovery with the failure it recovered
+/// from, and there would be no way to handle a failed child at all.
+#[test]
+fn a_failing_child_the_body_awaited_is_not_reported_again_at_the_scope_exit() {
+    let source = r#"
+fn fails(name: String) -> Result<Int, Error> {
+  Err(Error(name))
+}
+export async fn main() -> Result<Int, Error> {
+  scope s {
+    let only = s.spawn { fails("only") }
+    let answered: Result<Int, Error> = only.await()
+    match answered {
+      Ok(n) => Ok(n)
+      Err(reason) => Ok(reason.message.length())
+    }
+  }
+}
+"#;
+    assert_eq!(
+        entry_agrees(source, "main"),
+        Answer::Value("Ok(4)".to_string())
+    );
+}
+
+/// And what *is* left to report is the child nothing read.
+///
+/// Both children fail and the body awaits only the first, so the first is the
+/// body's own business and the second is the failure sitting unread in a
+/// handle nobody awaited — which is the case the rule exists for. The answer
+/// is therefore the *second*, even though the first failed earlier and the
+/// body saw it.
+///
+/// `examples/tasks` is this program with two `http.fetch`es in it, and the
+/// machine used to answer the first because leaving a scope examined every
+/// child rather than every child still running.
+#[test]
+fn a_scope_exit_reports_the_child_the_body_never_awaited() {
+    let source = r#"
+fn fails(name: String) -> Result<Int, Error> {
+  Err(Error(name))
+}
+export async fn main() -> Result<Int, Error> {
+  scope s {
+    let first = s.spawn { fails("first") }
+    let second = s.spawn { fails("second") }
+    let answered: Result<Int, Error> = first.await()
+    match answered {
+      Ok(n) => Ok(n)
+      Err(reason) => Ok(reason.message.length())
+    }
+  }
+}
+"#;
+    assert_eq!(
+        entry_agrees(source, "main"),
+        Answer::Value("Err(second)".to_string())
+    );
+}

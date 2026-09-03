@@ -283,12 +283,18 @@ fn the_dashboard_reports_a_fetch_the_host_could_not_answer() {
     );
 }
 
-/// A failure the body *did* await is the body's own value, and the scope has
-/// nothing left to surface over it.
+/// A failure the body *did* await comes back as the entry's own failure.
 ///
 /// This is the same program as above with one fetch answered, which is what
 /// makes the pair readable: the only difference is whether a task was left
 /// unawaited, and that is what decides which failure comes back.
+///
+/// It used to answer `Ok(Err(...))` — the body's failure sitting inside the
+/// timeout's success — and that was a program the language does not have.
+/// A `?` returns from the function it is written in, and a function value is
+/// one; a body that can fail has to say so in its own type, so `load.cove`
+/// now writes `Result<Result<Dashboard, Error>, Error>` and unwraps the
+/// timeout's own layer with `?`. The failure is the entry's from here.
 #[test]
 fn the_dashboard_reports_an_awaited_failure_as_the_bodys_own_value() {
     let ran = run(
@@ -303,10 +309,9 @@ fn the_dashboard_reports_an_awaited_failure_as_the_bodys_own_value() {
         },
     );
 
-    let inner = ok(&ran.value);
-    assert_eq!(inner.case(), Some("Err"), "{}", ran.value);
+    assert_eq!(ran.value.case(), Some("Err"), "{}", ran.value);
     assert_eq!(
-        err_message(inner),
+        err_message(&ran.value),
         "http: no recorded answer for `http://127.0.0.1:8080/bookings`"
     );
 }

@@ -66,9 +66,6 @@ impl Body<'_> {
     /// outlives every one of them.
     pub(super) fn scope_expr(&mut self, expr: &Expr, name: &Ident, body: &Block) -> Val {
         let span = expr.span;
-        let Some(failure) = self.child_failure_layout(span) else {
-            return self.dead(expr);
-        };
         let layout = self.layout_of(expr);
         let dst = self.temp(layout);
 
@@ -87,14 +84,30 @@ impl Body<'_> {
         self.scopes.push(OpenScope {
             slot: handle.slot,
             loops: self.loops.len(),
+            can_fail: false,
         });
         self.scoped_block(body, Some(Dest::of(&dst)));
-        self.scopes.pop();
+        // Asked *after* the body, because what a scope's children answer is
+        // something the body says and the header does not.
+        let open = self.scopes.pop().expect("this scope was pushed");
         let clears = self.frame.pop_scope();
         self.clear(&clears, span);
 
         // The body reached its end, so this is the exit that waits rather
         // than the one that cancels.
+        let failure = if open.can_fail {
+            match self.child_failure_layout(span) {
+                Some(failure) => failure,
+                None => return self.dead(expr),
+            }
+        } else {
+            // No child of this scope answers a `Result`, so `failed` is
+            // false by construction: the machine reads a child's answer
+            // layout and reports a failure only from an enum with an `Err`
+            // case. The instruction still needs a layout for the location it
+            // would have written, and `Unit` is the honest one — nothing.
+            shapes::UNIT
+        };
         let failed = self.temp(shapes::BOOL);
         let error = self.temp(failure);
         self.emit(
@@ -106,24 +119,26 @@ impl Body<'_> {
             },
             span,
         );
-        let carry_on = self.emit(
-            Inst::BranchFalse {
-                cond: failed.slot,
-                to: PENDING,
-            },
-            span,
-        );
-        // A child's `Err` leaves the enclosing function the way `?` does, so
-        // it is built the way `?` builds one. Every scope *outside* this one
-        // is left on the way, because this is a `return`.
-        let payload = Val::borrowed(error.slot, failure);
-        if let Some(answer) = self.failure(Some(payload), span) {
-            self.leave_open_scopes(0, span);
-            self.emit(Inst::Return { src: answer.slot }, span);
-            self.give_back(answer.slot, answer.layout);
+        if open.can_fail {
+            let carry_on = self.emit(
+                Inst::BranchFalse {
+                    cond: failed.slot,
+                    to: PENDING,
+                },
+                span,
+            );
+            // A child's `Err` leaves the enclosing function the way `?` does,
+            // so it is built the way `?` builds one. Every scope *outside*
+            // this one is left on the way, because this is a `return`.
+            let payload = Val::borrowed(error.slot, failure);
+            if let Some(answer) = self.failure(Some(payload), span) {
+                self.leave_open_scopes(0, span);
+                self.emit(Inst::Return { src: answer.slot }, span);
+                self.give_back(answer.slot, answer.layout);
+            }
+            let after = self.here();
+            self.patch(carry_on, after);
         }
-        let after = self.here();
-        self.patch(carry_on, after);
 
         self.give_back(failed.slot, failed.layout);
         // The error location is written only on the path that has already
@@ -216,6 +231,13 @@ impl Body<'_> {
         let Some(answer) = self.layout(&produced, expr.span) else {
             return self.dead(expr);
         };
+        // The same question `Checker::spawned` asks: only a child whose value
+        // is a `Result` can hand the scope a failure to pass on.
+        if matches!(produced.as_ref(), Ty::Result(..)) {
+            if let Some(open) = self.scopes.last_mut() {
+                open.can_fail = true;
+            }
+        }
         let scope = self.expr(base);
         let closure = self.expr(&args[0].value);
         let dst = self.temp(shapes::TASK);

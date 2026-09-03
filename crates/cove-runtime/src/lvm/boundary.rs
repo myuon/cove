@@ -569,7 +569,7 @@ fn word_into(
             if let Some(addr) = linear_closure(machine, value)? {
                 return Ok(addr);
             }
-            let layout = layout_for(machine.program(), value)?;
+            let layout = held_layout(machine, value)?;
             let held = into(machine, layout, value, depth)?;
             if one_address(machine.program(), layout) && held.len() == 1 {
                 Ok(held[0])
@@ -685,7 +685,7 @@ fn object_from_value(
         // Erasure: the box records the layout of what it holds and holds that
         // value's words inline.
         Shape::Boxed => {
-            let held = layout_for(machine.program(), value)?;
+            let held = held_layout(machine, value)?;
             let words = into(machine, held, value, deeper)?;
             boxed(machine, layout, held, &words)
         }
@@ -757,14 +757,93 @@ fn one_address(program: &Program, layout: LayoutId) -> bool {
 
 // --- finding the family of a value, for the erasure path -------------------
 
+/// The family a box records for a value crossing in at an erased position.
+///
+/// [`layout_for`] is the general answer and it reads the value's own
+/// description, which is not always enough to name one family. Two families
+/// can describe a value equally well and be different runs of words:
+/// `Result<Int, Error>` and `Result<http.Response, Error>` both describe
+/// `Err(Error("no"))` exactly, and nothing about that value says which of
+/// them it is. The tag decides whether an [`crate::Inst::Unbox`] at the use
+/// succeeds, so "whichever the lowering interned first" is a wrong answer
+/// rather than an arbitrary one.
+///
+/// A callback's answer is the case where the machine already knows. It is a
+/// value that left this machine a moment ago, at a layout the callback's
+/// declaration fixed, and a host that declared its result `Any` — which is
+/// what `clock.timeout` does — hands that same value straight back. So the
+/// family it left with is preferred over anything a search could find, and
+/// [`Machine::callback_answer`] is where the way out wrote it down.
+///
+/// It is still checked against the value rather than trusted blind. A host
+/// may answer something of its own after running a callback, and a family
+/// that does not describe what arrived is not this value's family whoever
+/// suggested it.
+fn held_layout(machine: &Machine, value: &Value) -> Result<LayoutId, RuntimeError> {
+    if let Some(id) = machine.callback_answer() {
+        if fits(machine.program(), id, value, Precision::Described) {
+            return Ok(id);
+        }
+    }
+    layout_for(machine.program(), value)
+}
+
 /// The layout a value of unknown static type is built to.
 ///
-/// Only erasure asks: a destination whose layout is known builds to it. This
-/// reads the value's own description — a struct's declared type name, an
+/// Only erasure asks: a destination whose layout is known builds to it. The
+/// search is [`family_of`] and it is asked twice, because a family that
+/// erases somewhere admits every value a family that describes it does. See
+/// [`Precision`].
+fn layout_for(program: &Program, value: &Value) -> Result<LayoutId, RuntimeError> {
+    match family_of(program, value, Precision::Described) {
+        Ok(id) => Ok(id),
+        // Nothing describes it, so a family that erases somewhere is the
+        // answer if there is one. The refusal is the second pass's, because
+        // it is the one that looked everywhere.
+        Err(_) => family_of(program, value, Precision::Erased),
+    }
+}
+
+/// How closely a family has to describe a value before it is that value's
+/// family.
+///
+/// A `Shape::Boxed` position admits *every* value, so a family with one in it
+/// admits every value the described family does and the search has two
+/// answers where it needs one. Which of them is right is not a coin toss:
+/// what the box's tag is for is [`crate::Inst::Unbox`], which compares layout
+/// ids exactly and is asked for a layout a *static type* named — and no
+/// static type names `Result<Any, Error>`'s `Ok`, because that is precisely
+/// the position the type declined to describe. So the described family is
+/// looked for first and the erasing one is the fallback.
+///
+/// This matters exactly where a schema nests an `Any`. `clock.timeout`
+/// declares `Result<Any, Error>` and a body under it answers
+/// `Result<http.Response, Error>`; both are families in the table, both admit
+/// the value, and only one of them is what the program's annotation says to
+/// open it at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Precision {
+    /// Every position describes the value that stands in it. A
+    /// `Shape::Boxed` describes nothing, so it admits nothing.
+    Described,
+    /// A position may be erased, which is what a family holding a box there
+    /// is.
+    Erased,
+}
+
+/// The family a value belongs to, at one precision.
+///
+/// This reads the value's own description — a struct's declared type name, an
 /// enum's name and case, an array's elements — and looks it up in the
 /// program's table of *families*, so `Array<Int>` and `Array<String>` are told
-/// apart by whether the element layout admits the elements.
-fn layout_for(program: &Program, value: &Value) -> Result<LayoutId, RuntimeError> {
+/// apart by whether the element layout admits the elements. What `precision`
+/// decides is whether an erased position counts as describing one; see
+/// [`layout_for`], which asks this at both.
+fn family_of(
+    program: &Program,
+    value: &Value,
+    precision: Precision,
+) -> Result<LayoutId, RuntimeError> {
     match value.view() {
         ValueView::Unit => scalar(program, Repr::Unit),
         ValueView::Bool(_) => scalar(program, Repr::Bool),
@@ -783,7 +862,7 @@ fn layout_for(program: &Program, value: &Value) -> Result<LayoutId, RuntimeError
                     && fields.len() == view.len()
                     && fields.iter().all(|field| {
                         view.field(&field.name)
-                            .is_some_and(|v| fits(program, field.layout, v))
+                            .is_some_and(|v| fits(program, field.layout, v, precision))
                     })
             })
             .ok_or_else(|| unknown_family(name))
@@ -810,16 +889,18 @@ fn layout_for(program: &Program, value: &Value) -> Result<LayoutId, RuntimeError
                         .parts
                         .iter()
                         .zip(view.payload())
-                        .all(|(part, held)| fits(program, part.layout, held))
+                        .all(|(part, held)| fits(program, part.layout, held, precision))
             })
             .ok_or_else(|| unknown_family(name))
         }
-        ValueView::Array(items) => layout_for_run(program, items, false),
+        ValueView::Array(items) => layout_for_run(program, items, false, precision),
         ValueView::Vector(items) => find(program, |layout| {
             let Shape::Vector { elem } = layout.shape else {
                 return false;
             };
-            items.iter().all(|item| fits(program, elem, item))
+            items
+                .iter()
+                .all(|item| fits(program, elem, item, precision))
         })
         .ok_or_else(|| unknown_family("Vector")),
         ValueView::Set(items) => {
@@ -828,7 +909,9 @@ fn layout_for(program: &Program, value: &Value) -> Result<LayoutId, RuntimeError
                 let Shape::Members { elem } = layout.shape else {
                     return false;
                 };
-                items.iter().all(|item| fits(program, elem, item))
+                items
+                    .iter()
+                    .all(|item| fits(program, elem, item, precision))
             })
             .ok_or_else(|| unknown_family(SET.name))
         }
@@ -841,8 +924,9 @@ fn layout_for(program: &Program, value: &Value) -> Result<LayoutId, RuntimeError
                 let Shape::Entries { key, value } = layout.shape else {
                     return false;
                 };
-                held.iter()
-                    .all(|(one, other)| fits(program, key, one) && fits(program, value, other))
+                held.iter().all(|(one, other)| {
+                    fits(program, key, one, precision) && fits(program, value, other, precision)
+                })
             })
             .ok_or_else(|| unknown_family(MAP.name))
         }
@@ -877,6 +961,7 @@ fn layout_for_run(
     program: &Program,
     items: &[Value],
     growable: bool,
+    precision: Precision,
 ) -> Result<LayoutId, RuntimeError> {
     find(program, |layout| {
         let Shape::Elements {
@@ -886,7 +971,10 @@ fn layout_for_run(
         else {
             return false;
         };
-        is_growable == growable && items.iter().all(|item| fits(program, elem, item))
+        is_growable == growable
+            && items
+                .iter()
+                .all(|item| fits(program, elem, item, precision))
     })
     .ok_or_else(|| unknown_family(if growable { "Vector" } else { "Array" }))
 }
@@ -971,7 +1059,11 @@ fn layout_of(program: &Program, wanted: impl Fn(&Shape) -> bool) -> Option<Layou
 /// does: a value location's width is a static fact, so a struct's fields are
 /// checked and a reference is checked as a reference — which is the point of
 /// describing families rather than instantiations.
-fn fits(program: &Program, layout: LayoutId, value: &Value) -> bool {
+///
+/// `precision` is carried the whole way down, because the position that
+/// erases may be at any depth: a `Result<Any, Error>`'s is one part of one
+/// case.
+fn fits(program: &Program, layout: LayoutId, value: &Value, precision: Precision) -> bool {
     let described = program.layout(layout);
     match &described.shape {
         Shape::Word(Repr::Unit) => value.is_unit(),
@@ -988,9 +1080,14 @@ fn fits(program: &Program, layout: LayoutId, value: &Value) -> bool {
         // nothing to follow. What a resource may *not* be is the thing behind
         // a `Repr::Ref`: it is no object this run allocated, so there would be
         // nothing at the far end of the address.
+        //
+        // And it says yes only where the search has already said it will
+        // settle for a family that describes this position with nothing,
+        // because otherwise it says yes to everything. See [`Precision`].
         Shape::Boxed => {
             let view = value.view();
-            materialisable(&view) || matches!(view, ValueView::Resource(_))
+            precision == Precision::Erased
+                && (materialisable(&view) || matches!(view, ValueView::Resource(_)))
         }
         // The one word a host is on both ends of. See `word_out`.
         Shape::Word(Repr::Host) => matches!(value.view(), ValueView::Resource(_)),
@@ -1006,7 +1103,7 @@ fn fits(program: &Program, layout: LayoutId, value: &Value) -> bool {
                     && fields.len() == view.len()
                     && fields.iter().all(|field| {
                         view.field(&field.name)
-                            .is_some_and(|v| fits(program, field.layout, v))
+                            .is_some_and(|v| fits(program, field.layout, v, precision))
                     })
             }
             _ => false,
@@ -1021,33 +1118,36 @@ fn fits(program: &Program, layout: LayoutId, value: &Value) -> bool {
                                 .parts
                                 .iter()
                                 .zip(view.payload())
-                                .all(|(part, held)| fits(program, part.layout, held))
+                                .all(|(part, held)| fits(program, part.layout, held, precision))
                     })
             }
             _ => false,
         },
         Shape::Elements { elem, growable } => match value.view() {
-            ValueView::Array(items) if !growable => {
-                items.iter().all(|item| fits(program, *elem, item))
-            }
-            ValueView::Vector(items) if *growable => {
-                items.iter().all(|item| fits(program, *elem, item))
-            }
+            ValueView::Array(items) if !growable => items
+                .iter()
+                .all(|item| fits(program, *elem, item, precision)),
+            ValueView::Vector(items) if *growable => items
+                .iter()
+                .all(|item| fits(program, *elem, item, precision)),
             _ => false,
         },
         Shape::Vector { elem } => match value.view() {
-            ValueView::Vector(items) => items.iter().all(|item| fits(program, *elem, item)),
+            ValueView::Vector(items) => items
+                .iter()
+                .all(|item| fits(program, *elem, item, precision)),
             _ => false,
         },
         Shape::Members { elem } => match value.view() {
             ValueView::Set(items) => items
                 .iter()
-                .all(|item| fits(program, *elem, &item.to_value())),
+                .all(|item| fits(program, *elem, &item.to_value(), precision)),
             _ => false,
         },
         Shape::Entries { key, value: held } => match value.view() {
             ValueView::Map(entries) => entries.iter().all(|(one, other)| {
-                fits(program, *key, &one.to_value()) && fits(program, *held, other)
+                fits(program, *key, &one.to_value(), precision)
+                    && fits(program, *held, other, precision)
             }),
             _ => false,
         },

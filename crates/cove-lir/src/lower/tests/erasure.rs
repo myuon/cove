@@ -300,3 +300,180 @@ fn a_method_on_an_erased_value_is_a_use_nothing_says_the_type_of() {
         "{said:?}"
     );
 }
+
+/// The shape `examples/covecheck`'s `main.cove` is written in, and the
+/// general rule it is the smallest case of.
+///
+/// Nothing at the `?` says what came back: the schema declares
+/// `Result<Any, Error>` and so the `Ok` carries a box. What says is the
+/// *annotation on the binding*, one line earlier, and the checker is what
+/// carried it to the use — so the box is opened at the type
+/// `Facts::ty` records for the `?`, with no annotation re-resolved here.
+///
+/// Note where the `unbox` is and where it is not. The binding itself keeps
+/// the erased layout, because a `Result<Any, Error>` and a
+/// `Result<m.Run, Error>` are the same two words with a different word 1 and
+/// nothing has to be rebuilt to read them; what differs is one word, and the
+/// instruction that reads it is where the difference is settled.
+#[test]
+fn an_annotation_says_what_an_erased_result_was_carrying() {
+    assert_eq!(
+        listing_with(
+            "use oracle.open\n\
+             struct Tally { failed: Int }\n\
+             struct Run { tally: Tally }\n\
+             fn f() -> Result<Int, Error> {\n  \
+               let s = open()\n  \
+               let bounded: Result<Run, Error> = s.next()\n  \
+               let run = bounded?\n  \
+               Ok(run.tally.failed)\n\
+             }",
+            &oracle(),
+            "f"
+        ),
+        "\
+fn0 m.f() -> Result
+  frame 12: s0:int s1:int s2:ref s3:host s4:int s5:ref s6:int s7:bool s8:ref s9:int s10:int s11:ref
+     0  call-host s3:host oracle.open ()
+     1  call-resource s4:int s3:host oracle.Seat.next ()
+     2  int s6:int 0
+     3  eq.int s7:bool s4:int s6:int
+     4  branch-false s7:bool 7
+     5  copy s8:ref s5:ref Any
+     6  jump 11
+     7  int s9:int 1
+     8  clear s10:int Int
+     9  copy s11:ref s5:ref Error
+    10  return s9:int
+    11  unbox s6:int s8:ref m.Run
+    12  clear s8:ref Any
+    13  int s9:int 0
+    14  clear s11:ref <ref>
+    15  copy s10:int s6:int Int
+    16  copy s0:int s9:int Result
+    17  clear s9:int Result
+    18  clear s4:int Result
+    19  return s0:int
+"
+    );
+}
+
+/// The same rule one level further in, which is the whole of what a nesting
+/// needs.
+///
+/// `Result<Result<Int, Error>, Error>` over a schema's `Result<Any, Error>`
+/// is `examples/covecheck`'s `runner.cove`. The outer `match` reads an
+/// ordinary enum — the box is one word *inside* the value, not the value —
+/// and the inner `match`'s subject is that word, opened at what the
+/// annotation said it holds. So no whole-value conversion exists and none is
+/// needed: each level is opened at the use that reaches it, and a nesting of
+/// any depth is that rule applied as many times.
+#[test]
+fn a_result_inside_an_erased_result_is_opened_where_it_is_used() {
+    assert_eq!(
+        listing_with(
+            "use oracle.open\n\
+             fn f() -> Int {\n  \
+               let s = open()\n  \
+               let answer: Result<Result<Int, Error>, Error> = s.next()\n  \
+               match answer {\n    \
+                 Ok(inner) => match inner {\n      \
+                   Ok(n) => n\n      \
+                   Err(e) => e.message.length()\n    \
+                 }\n    \
+                 Err(e) => e.message.length()\n  \
+               }\n\
+             }",
+            &oracle(),
+            "f"
+        ),
+        "\
+fn0 m.f() -> Int
+  frame 12: s0:int s1:host s2:int s3:ref s4:int s5:ref s6:int s7:int s8:int s9:ref s10:int s11:ref
+     0  call-host s1:host oracle.open ()
+     1  call-resource s2:int s1:host oracle.Seat.next ()
+     2  switch s2:int [3 19] else 24
+     3  copy s5:ref s3:ref Any
+     4  unbox s7:int s5:ref Result
+     5  switch s7:int [6 9] else 14
+     6  copy s10:int s8:int Int
+     7  copy s6:int s10:int Int
+     8  jump 15
+     9  copy s11:ref s9:ref Error
+    10  call-builtin s10:int String.length (s11:String)
+    11  copy s6:int s10:int Int
+    12  clear s11:ref Error
+    13  jump 15
+    14  trap \"no `match` arm covers this value\"
+    15  clear s7:int Result
+    16  copy s4:int s6:int Int
+    17  clear s5:ref Any
+    18  jump 25
+    19  copy s5:ref s3:ref Error
+    20  call-builtin s6:int String.length (s5:String)
+    21  copy s4:int s6:int Int
+    22  clear s5:ref Error
+    23  jump 25
+    24  trap \"no `match` arm covers this value\"
+    25  copy s0:int s4:int Int
+    26  clear s2:int Result
+    27  return s0:int
+"
+    );
+}
+
+/// A field read off a value nothing states the type of is still a gap, and
+/// it is the same gap in the same words.
+///
+/// This is the boundary the rule above is drawn against. `ask` declares
+/// `Any` and the program annotates nothing, so the checker settles `Any` for
+/// the base — a promise that a value is there and nothing about which. There
+/// is no static answer to give, and the only other move is to dispatch on
+/// what the box turned out to hold, which is the run-time type universe this
+/// backend does not have.
+#[test]
+fn a_field_of_a_value_nothing_states_the_type_of_is_a_gap() {
+    let (sources, checked) = super::checked_with(
+        "use oracle.ask\nfn f() -> Int { ask(\"n\").failed }",
+        &oracle(),
+    );
+    let items = super::super::lower(&checked, &sources, &oracle())
+        .expect_err("a field of a value nothing describes has no offset");
+    let said: Vec<String> = items.into_iter().map(|item| item.message).collect();
+    assert!(
+        said.iter()
+            .any(|item| item == "not yet lowered: a field of `Any`, which is not a struct here"),
+        "{said:?}"
+    );
+}
+
+/// *Writing* through an erased value is a gap even where reading one is not,
+/// and the difference is not an omission.
+///
+/// A box is a heap object and the words of the value are inside it. Reading
+/// one copies them out, which is what every other case here does; writing
+/// one would have to write them back in — and then two bindings that were
+/// erased from the same box would share mutation, which is exactly the
+/// "representation deciding the language's semantics" that
+/// [ADR 0035](../../../../docs/adr/0035-a-value-type-may-not-contain-itself.md)
+/// refuses. So there is no place here, and the assignment says so.
+#[test]
+fn an_assignment_through_an_erased_value_is_a_gap() {
+    let (sources, checked) = super::checked_with(
+        "use oracle.ask\n\
+         struct Counts { failed: Int }\n\
+         fn f() -> Int {\n  \
+           var counts: Counts = ask(\"n\")\n  \
+           counts.failed = 1\n  \
+           counts.failed\n\
+         }",
+        &oracle(),
+    );
+    let items = super::super::lower(&checked, &sources, &oracle())
+        .expect_err("there is no place inside a box to assign to");
+    let said: Vec<String> = items.into_iter().map(|item| item.message).collect();
+    assert_eq!(
+        said,
+        vec!["not yet lowered: an assignment to something that is not a place"]
+    );
+}

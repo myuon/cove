@@ -263,7 +263,33 @@ use support::{Case, ModuleIndex, Prepared};
 /// the amendment never refused and called an accepted leak; that it is
 /// reclaimed rather than leaked is `cove_runtime::lvm::cell`'s to show,
 /// because only a test that runs the collection itself can say so.
-const AGREEING_FLOOR: usize = 115;
+///
+/// 115 to 117, and it is the whole board: nothing lowers and disagrees, and
+/// nothing fails to lower. The two were the last, and neither was a family
+/// this backend had not been taught — both were bugs in something it had.
+///
+/// **A box is tagged with the family the value left this machine with, where
+/// there is one.** `examples:covecheck` trapped at an `Inst::Unbox` before
+/// printing anything. `clock.timeout` declares `Result<Any, Error>`, and the
+/// search that decides what family a value crossing in at an erased position
+/// belongs to reads the value's own description — which does not always name
+/// one. `Err(Error("..."))` describes `Result<covecheck.Check, Error>` and
+/// `Result<http.Response, Error>` equally exactly, and those are different
+/// runs of words, so which one the box recorded was decided by which the
+/// lowering happened to intern first. `clock.timeout`'s answer is its
+/// *callback's* answer, and a callback's return layout is a static fact, so
+/// `cove_runtime::lvm::exec::Machine::callback_answer` records it on the way
+/// out and `boundary::held_layout` prefers it over any search.
+///
+/// **Leaving a scope waits for the children the body did not await.**
+/// `examples:tasks` spawns two fetches, awaits one inside a `clock.timeout`
+/// body, and both fail; the oracle answers the *unawaited* one and this
+/// backend answered the awaited one. `crate::task::wait_for_children` skips a
+/// child that is no longer running and that first line is a language
+/// decision: a child the body awaited has already handed its value to the
+/// program, so reporting it again at the scope exit would overwrite whatever
+/// the body did with it. `Machine::leave_scope` now skips it too.
+const AGREEING_FLOOR: usize = 117;
 
 /// The code `cove_lir` raises a gap under.
 ///

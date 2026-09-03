@@ -13,30 +13,37 @@
 
 use cove_schema::HostSchemas;
 
-use super::refused;
+use super::{listing, refused};
 
-/// A `scope` in a function that answers no `Result` has nowhere to pass a
-/// failing child's error, and that is a gap rather than an invention.
+/// A scope asks its function for a failure only where a child can make one,
+/// and the case where none can is the one that used to be refused.
 ///
-/// `crate::task::wait_for_children` answers `ChildFailure::Returned(err)` for
-/// a child whose value was `Err(...)`, and the oracle returns it from the
-/// enclosing function whatever that function's type is — a `Value::err` out
-/// of a body typed `Unit`, which nothing downstream can read as what it is.
-/// The linear model cannot do that: a return copies the words
-/// `Function::returns` describes, and a `Unit` is one word that is not an
-/// enum. So the shape is named rather than guessed at, and if the sentence is
-/// meant to be a program it is `cove-sema` that has to say what it means.
+/// `crate::task::wait_for_children` returns a failing child's `Err` from the
+/// function the scope was written in, whatever that function's type is — a
+/// `Value::err` out of a body typed `Unit`, which the linear model cannot
+/// represent, since a return copies the words `Function::returns` describes.
 ///
-/// `examples/covecheck/runner_test.cove`'s `counting` is the one program in
-/// the repository that writes it, and it is blocked by several other things.
+/// So the question is asked of the *children*, which is the same question
+/// `cove_sema::Checker::spawned` asks. A scope over `Task<Verdict>` children
+/// has no failure to pass on and lowers; the gap is left for a scope whose
+/// children answer a `Result` in a function that answers none.
+///
+/// **That gap is unreachable from a checked program**, and deliberately:
+/// `cove::type::scope_child_failure` refuses exactly that shape before the
+/// lowering sees it, which is what issue #240 asked for — "enforce this
+/// before lowering, so the LVM does not manufacture an `Err` in a frame whose
+/// return layout cannot carry one". It is kept as the thing that would notice
+/// if that rule ever stopped holding.
 #[test]
-fn a_scope_in_a_function_that_answers_no_result_has_no_failure_to_pass_on() {
-    let items = refused("fn f() {\n  scope tasks {\n    let n = 1\n  }\n}");
+fn a_scope_asks_for_a_failure_only_where_a_child_can_make_one() {
+    let text = listing(
+        "export fn f() {\n  scope tasks {\n    let n = 1\n  }\n}",
+        "f",
+    );
+    assert!(text.contains("scope.enter"), "the scope lowers:\n{text}");
     assert!(
-        items.iter().any(|item| item.starts_with(
-            "not yet lowered: a `scope` in a function that does not answer a `Result`"
-        )),
-        "{items:?}"
+        !text.contains("branch-false"),
+        "and leaving it needs no failure branch:\n{text}"
     );
 }
 

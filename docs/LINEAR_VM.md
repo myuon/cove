@@ -518,6 +518,31 @@ A heap object's payload map is the same function of the same kind of layout.
 An enum inline anywhere is static because of the payload-agreement rule, so
 nothing has to read a discriminant during a collection.
 
+### The boundary tags a box with the family that *describes* the value
+
+A `Value` crossing in at an erased position has to be tagged with some
+layout, and more than one can accept it: `Result<Int, Error>` and
+`Result<Any, Error>` both admit `Ok(7)`, because a boxed position admits
+everything.
+
+The tag exists for `Unbox`, which is asked for the layout a **static type**
+named — and no static type names `Result<Any, Error>`'s `Ok`. So the search
+prefers a family that describes the value and falls back to an erasing one
+only when nothing does. Taking the first match instead makes a program's
+answer depend on the order the layout table happened to intern in, which is
+the kind of bug that passes until an unrelated return type changes.
+
+**The search is the fallback, not the rule.** A value that describes one
+family can describe two: `Err(Error("no"))` is exactly a `Result<Int, Error>`
+and exactly a `Result<String, Error>`, and no property of the value will ever
+tell them apart. What does is where the value came from — a box built from a
+**callback's answer** is tagged with the layout that callback returns, which
+is a static fact the machine already holds. The search runs only where
+nothing knows.
+
+That is the same shape as everything else here: a word is untagged and its
+meaning comes from the static metadata it came from, never from its bits.
+
 ## A Host resource is a name, not an object
 
 `Repr::Host` is one word, and it is neither inline data nor an address into
@@ -648,6 +673,31 @@ where a value without a static width has to live. An `Int` written as an
 `Int` is one inline word; the same `Int` written as a `dyn` allocates. That
 is the right place to pay, and paying it there is what keeps every
 *un*-erased location's width a static fact.
+
+### A box is opened at the use, at the type the checker settled there
+
+Not at the binding, and not by rebuilding the value that contains it.
+
+`clock.timeout`'s schema answers `Result<Any, Error>`, and a program that
+writes `let answer: Result<Result<http.Response, Error>, Error> = …` has said
+what is inside. The box is one word *inside* the enum, so the outer `match`
+and the `?` read an ordinary enum, and the use that reaches the box word — an
+arm's binding, a `?`, a field read — is itself an expression whose type the
+checker settled. Opening it there is one `Unbox`.
+
+That is why nesting needs no conversion: each level is opened at its own use,
+to any depth, one instruction each. Rebuilding the enum case by case would
+have been a branch and several instructions to remake a value where one
+instruction reads the word that actually differs — and it would still have
+left a box inside for this rule to open.
+
+Nothing re-reads the written annotation. An annotation is a name, and only
+the checker knows what the name meant; it has already carried the answer to
+every use.
+
+**A use with no static answer stays a gap.** `ask("n").length()` where the
+checker settles `Any` has one other move — dispatch on what the box turned
+out to hold — and that is the move this backend does not make.
 
 A `Ty::Unknown` is not that. It is the checker declining, and a program the
 checker declined about is a compile error. The target is *every valid checked

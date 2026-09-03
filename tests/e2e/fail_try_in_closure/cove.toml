@@ -1,0 +1,3 @@
+[run.fail_try_in_closure]
+entry = "main.main"
+allow = ["clock", "console"]

@@ -1201,6 +1201,16 @@ struct OpenScope {
     /// opened outside it, and that is the same question `Loop::depth` asks
     /// about lexical scopes, asked the other way round.
     loops: usize,
+    /// Whether any child spawned into this scope answers a `Result`.
+    ///
+    /// What it decides is whether leaving the scope can produce a failure at
+    /// all. `wait_for_children` returns a child's `Err` from the function the
+    /// scope was written in, so that function must be able to carry one — but
+    /// only if a child can *make* one, and a scope over `Task<Verdict>`
+    /// children cannot. Asking every scope for a failure layout refused two
+    /// corpus programs the checker had already cleared, for the same reason
+    /// and by the same predicate `Checker::spawned` uses.
+    can_fail: bool,
 }
 
 /// The state of lowering one function body.

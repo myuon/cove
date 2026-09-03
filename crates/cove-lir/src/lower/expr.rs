@@ -90,7 +90,87 @@ impl Place {
 
 impl Body<'_> {
     /// Lowers `expr` and answers where its value ended up.
+    ///
+    /// Two steps, and the second is what makes erasure end somewhere. The
+    /// first is [`Body::lowered`], which builds the value the construct
+    /// produces; the second is [`Body::unerased`], which reconciles that value
+    /// with the type the *checker* settled for this expression. They differ
+    /// in exactly one situation and it is the one erasure creates: a
+    /// location holds a box because that is what the thing that filled it
+    /// had to say, and the program has since said what is in it.
     pub(super) fn expr(&mut self, expr: &Expr) -> Val {
+        let value = self.lowered(expr);
+        self.unerased(value, expr)
+    }
+
+    /// Opens an erased value at the type the checker settled for the place
+    /// it stands in.
+    ///
+    /// `docs/LINEAR_VM.md` gives an intentionally erased value one
+    /// representation and [`Body::unbox`] one rule for reading it: the
+    /// layout is *"a type the source wrote at the place the value is being
+    /// used"*, never one invented here. This is that rule at its most
+    /// general position. What the source wrote may be several statements
+    /// away — an annotation on a binding, a declared parameter the value was
+    /// passed through — and the checker is what carried it here, so the type
+    /// is read from [`Facts::ty`](cove_sema::facts::Facts::ty) rather than
+    /// from an annotation this pass would have to re-resolve.
+    ///
+    /// Three things it deliberately does not do.
+    ///
+    /// It never *boxes*. Erasing is the language's implicit conversion and
+    /// happens where a `dyn` or an `Any` is written, which is
+    /// [`Body::erase`] and [`Body::fit`]; this is only the way back.
+    ///
+    /// It asks nothing of a value that is not a box, so the disagreement it
+    /// closes is the one erasure opened and not a general re-typing of every
+    /// expression. A `Result<Any, Error>` in a location of that layout stays
+    /// where it is: the box is one word *inside* it, and opening it is the
+    /// business of the use that reaches that word — the `?`, the arm of the
+    /// `match` — each of which is an expression of its own and arrives here
+    /// in its turn. That is what makes a nesting of any depth need no
+    /// rebuilding: `Result<Result<T, E>, E>` is opened one level at each
+    /// level's use.
+    ///
+    /// And it stops where the checker stopped. A type that is still `Any`
+    /// or a `dyn` is a use that named nothing, and there is no static answer
+    /// to give it — reading it would mean dispatching on what the box turned
+    /// out to hold, which is the run-time type universe this backend does
+    /// not have. Such a use stays whatever gap it already was.
+    fn unerased(&mut self, value: Val, expr: &Expr) -> Val {
+        if !self.is_boxed(value.layout) {
+            return value;
+        }
+        let Some(ty) = self.ty(expr) else {
+            return value;
+        };
+        // Four types that are not a description of what is in a box.
+        // `Never` says the value was never produced, `Unknown` says the
+        // checker declined, and a `Param` is a declaration's own word for a
+        // type this instantiation was not given. An `Any` or a `dyn` *is* a
+        // description, and it is the description this value already has.
+        if matches!(
+            ty,
+            Ty::Any | Ty::Dyn(_) | Ty::Never | Ty::Unknown(_) | Ty::Param(_)
+        ) {
+            return value;
+        }
+        // Asked of the table directly rather than through `Body::layout`,
+        // because a settled type with no layout is a gap the use itself
+        // reports in its own words. Answering a second one here would name
+        // the same type twice for one expression.
+        let Some(want) = self.pool.shapes.of(self.checked, self.module, &ty) else {
+            return value;
+        };
+        if want == value.layout {
+            return value;
+        }
+        self.unbox(value, want, expr.span)
+    }
+
+    /// The value a construct produces, before the checker's type is
+    /// reconciled with it. See [`Body::expr`].
+    fn lowered(&mut self, expr: &Expr) -> Val {
         let span = expr.span;
         match &expr.kind {
             ExprKind::Int(value) => {
@@ -631,6 +711,18 @@ impl Body<'_> {
                 let held = outer.layout();
                 let field = match self.field_of(held, &name.node) {
                     Some(field) => field,
+                    // A field of an erased value is not a place. The words
+                    // are inside a box on the heap rather than in this
+                    // frame, so there is no slot arithmetic that reaches
+                    // them and no address of one that could be written
+                    // through — an assignment through a box would share
+                    // mutation, which is what `docs/LINEAR_VM.md` refuses.
+                    // Reading one is still ordinary: the caller opens the
+                    // base as a *value* and takes the field out of the copy,
+                    // which is [`Body::field`]. So this answers `None`
+                    // without reporting, and whoever asked says what it
+                    // wanted the place for.
+                    None if self.is_boxed(held) => return None,
                     None => {
                         let named = self.pool.shapes.layout(held).name.clone();
                         self.errors.push(gap::gap(
@@ -735,11 +827,16 @@ impl Body<'_> {
     // ---- assignment -------------------------------------------------------
 
     fn assign(&mut self, op: Option<BinaryOp>, target: &Expr, value: &Expr, span: Span) {
+        // A field target usually says what stopped it, and saying so twice
+        // about one assignment buries the sentence that names the work. So
+        // what decides whether this reports is whether anything was already
+        // reported, rather than which shape the target had: a field of an
+        // erased value is a place `Body::place_of` declines to form and
+        // deliberately says nothing about, because reading one is fine and
+        // only writing is not.
+        let reported = self.errors.len();
         let Some(place) = self.place_of(target) else {
-            // A field target has already said what stopped it, and saying
-            // so twice about one assignment buries the sentence that names
-            // the work.
-            if !matches!(target.kind, ExprKind::Field { .. }) {
+            if self.errors.len() == reported {
                 self.errors.push(gap::gap(
                     "an assignment to something that is not a place",
                     span,

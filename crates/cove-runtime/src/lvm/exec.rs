@@ -416,6 +416,33 @@ pub(crate) struct Machine<'a> {
     /// nest, the refusal is per cell rather than per task, and the lowering
     /// leaves the regions in the order it entered them.
     held: Vec<u64>,
+    /// The layout of the value the host call now running was handed back by a
+    /// callback, if it ran one.
+    ///
+    /// This exists for one question the family search in
+    /// [`crate::lvm::boundary`] cannot answer. A host answer that crosses in
+    /// at a `Shape::Boxed` position has to be tagged with the family it
+    /// holds, and the tag is what [`Inst::Unbox`] compares against the layout
+    /// the checker settled at the use. The search reads the value's own
+    /// description, and a description does not always name one family:
+    /// `Err(Error("no"))` fits `Result<Int, Error>` and
+    /// `Result<http.Response, Error>` equally well, and the two are different
+    /// runs of words. Which one the search returned was then decided by which
+    /// the lowering happened to intern first.
+    ///
+    /// A callback's answer needs no search, because it is a value that just
+    /// left this machine. `clock.timeout` declares `Result<Any, Error>` and
+    /// wraps whatever its body answered, so what goes in the box is the
+    /// callback's return value and the family it belongs to is the callback's
+    /// declared return layout — a static fact, recorded here on the way out
+    /// so that the way back in does not have to guess at it.
+    ///
+    /// Cleared when a host call begins ([`Back::parked`]) and written when a
+    /// callback returns ([`Machine::call_from_host`]), so it names the
+    /// innermost call in progress and never an older one: a host call the
+    /// callback itself makes clears it on the way in and the callback's own
+    /// return writes it afterwards.
+    callback_answer: Option<LayoutId>,
     /// Where the most recent assertion failed, and the message it produced.
     ///
     /// Written only by [`Inst::AssertFailed`], which the failing arm of a
@@ -470,6 +497,7 @@ impl<'a> Machine<'a> {
             host_wait: Duration::ZERO,
             collected: Collected::default(),
             held: Vec::new(),
+            callback_answer: None,
             assertion_failure: None,
         }
     }
@@ -520,8 +548,15 @@ impl<'a> Machine<'a> {
             host_wait: Duration::ZERO,
             collected: Collected::default(),
             held: Vec::new(),
+            callback_answer: None,
             assertion_failure: None,
         }
+    }
+
+    /// The family of the value a callback answered during the host call in
+    /// progress, if one ran. See [`Machine::callback_answer`].
+    pub(crate) fn callback_answer(&self) -> Option<LayoutId> {
+        self.callback_answer
     }
 
     /// How many instructions this machine has run.
@@ -2346,15 +2381,39 @@ impl<'a> Machine<'a> {
         }
     }
 
-    /// Waits for every child of a scope the body reached the end of, and
-    /// answers the first that failed in a way the enclosing function has to
-    /// pass on.
+    /// Waits for every child of a scope the body reached the end of **that
+    /// the body did not await**, and answers the first that failed in a way
+    /// the enclosing function has to pass on.
     ///
     /// `crate::task::wait_for_children` is the oracle and this is its
     /// translation. Waiting is in spawn order, which is an order of
     /// *observation* only — the tasks ran at the same time on threads of
     /// their own — and a task the program itself cancelled is neither a
     /// failure nor a success, because the program asked for that stop.
+    ///
+    /// # Why an awaited child is skipped
+    ///
+    /// `if !task.is_running() { continue }` is the oracle's first line and it
+    /// is a decision rather than an optimisation: a child the body awaited
+    /// has already handed its value to the program, and the program has
+    /// already done whatever it does with one. Reporting it again here would
+    /// overwrite the answer the body computed *from* that failure with the
+    /// failure itself, so
+    ///
+    /// ```cove
+    /// let answer = task.await()
+    /// match answer { Ok(n) => n, Err(_) => fallback() }
+    /// ```
+    ///
+    /// could not recover from a failed child at all — leaving the scope would
+    /// throw the recovery away. What is left to wait for is what nothing has
+    /// read, which is the case the rule exists for: a failure sitting unread
+    /// in a handle nobody awaited reaches the caller rather than vanishing.
+    ///
+    /// A child is "awaited" here for the same reason it is there: joining is
+    /// what settles a child's state, and [`Machine::settle`] joins. So a
+    /// state that is no longer [`ChildState::Running`] is exactly a child
+    /// something has already waited for.
     ///
     /// `Ok(Some(child))` is a child whose value was `Err(...)`; `Err` is a
     /// child that raised, which propagates as itself. Either way the tasks
@@ -2373,6 +2432,9 @@ impl<'a> Machine<'a> {
         // while it was being left is still waited for to the end.
         while let Some(&child) = self.scopes[at].tasks.get(index) {
             index += 1;
+            if !matches!(self.children[child].state, ChildState::Running) {
+                continue;
+            }
             self.join(child, running);
             match &self.children[child].state {
                 ChildState::Settled => {
@@ -2636,7 +2698,15 @@ impl<'a> Machine<'a> {
                 // the frame that produced them was popped — the same reason
                 // `Machine::run` may carry an answer out of a frame.
                 let returns = self.program.function(target_id).returns;
-                boundary::to_value(self, returns, &words).map_err(|error| error.at(span))
+                let answer =
+                    boundary::to_value(self, returns, &words).map_err(|error| error.at(span))?;
+                // The value has left, and its family goes with it: a host
+                // that wraps this answer in a result it declared `Any` hands
+                // it straight back, and the box that is built for it there is
+                // tagged with what it was here. See
+                // [`Machine::callback_answer`].
+                self.callback_answer = Some(returns);
+                Ok(answer)
             }
             Err(error) => {
                 self.unwind_to(floor, children, scopes, cells, base, running);
@@ -2840,6 +2910,9 @@ impl<'m, 's, 'a> Back<'m, 's, 'a> {
         running: &'m mut Vec<Option<ScopedJoinHandle<'s, Outcome>>>,
     ) -> Back<'m, 's, 'a> {
         let parked = machine.park();
+        // This call has run no callback yet, so nothing it answers may be
+        // tagged with the family an earlier one left behind.
+        machine.callback_answer = None;
         Back {
             machine,
             budget,

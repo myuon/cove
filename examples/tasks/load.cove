@@ -25,14 +25,19 @@ export async fn loadDashboard() -> Result<Dashboard, Error> {
     let bookings = tasks.spawn { http.fetch("http://127.0.0.1:8080/bookings") }
     let prices = tasks.spawn { http.fetch("http://127.0.0.1:8080/prices") }
 
-    let result = clock.timeout(500ms) {
-      Dashboard(
+    // The body answers a `Result` of its own, and it has to: a `?` returns
+    // from the function it is written in, and a function value is one. The
+    // timeout's own `Result` is the *clock's* failure — `clock.timeout` wraps
+    // whatever the body answered in `Ok` whether the body succeeded or not —
+    // so a body that can fail has to say so in its own type.
+    let bounded: Result<Result<Dashboard, Error>, Error> = clock.timeout(500ms) {
+      Ok(Dashboard(
         bookings: panelOf("bookings", bookings.await()?)?,
         prices: panelOf("prices", prices.await()?)?,
-      )
-    }?
+      ))
+    }
 
-    Ok(result)
+    bounded?
   }
 }
 

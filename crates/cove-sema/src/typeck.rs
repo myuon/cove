@@ -602,6 +602,12 @@ const TASK_SAFETY_RULE: &str = "Immutable task-safe values such as arrays may cr
 /// function answers.
 const SCOPE_CHILD_RULE: &str = "Leaving a `scope` waits for every task nothing awaited, and a task whose value is `Err` returns that failure from the function the scope was written in, exactly as `?` would.";
 
+/// The half of `?`'s rule only a function value makes a reader think about:
+/// `?` returns from the function it stands in, a lambda is one, and a lambda
+/// nobody typed is the one function in the language whose result the program
+/// never writes down.
+const TRY_LAMBDA_RULE: &str = "`expr?` returns the error from the function it is written in, and a function value is one. A function value no place declares a result type for produces what its body's value proves, so that value is what has to carry the failure.";
+
 /// The one sentence ADR 0035 decides, said the way a reader has to act on
 /// it: the rejection is what makes every finite value copy by word range,
 /// and the list is the whole set of escapes the language has today.
@@ -2106,6 +2112,16 @@ struct Checker<'a> {
     /// question is decided: the waiting happens there, so that is where a
     /// child nothing awaited is measured against what the function answers.
     open_scopes: Vec<OpenScope>,
+    /// One frame per function value being checked, innermost last, holding
+    /// the `?`s written directly in its body that nothing outside it said
+    /// where to put.
+    ///
+    /// A frame is emptied where the function value's own result type is
+    /// settled, which is the only place the question can be decided: a
+    /// lambda no place declared a result for produces what its body's value
+    /// turns out to be, and that is not known until the body has been
+    /// walked to the end.
+    open_lambdas: Vec<Vec<PendingTry>>,
 }
 
 /// A `scope` being checked, and the children of it that could fail.
@@ -2144,6 +2160,25 @@ struct SpawnedChild {
     /// which is where such a program stands today; what a false positive
     /// would cost is a working program the compiler stops accepting.
     awaited: bool,
+}
+
+/// A `?` written in a function value's body, held until the value has a type.
+///
+/// `?` returns from the function it is *written in*, and a function value is
+/// one: `Interpreter::eval` raises a `Control::Return` that the closure's own
+/// call is what catches, so the failure lands in the lambda's result and not
+/// in the declaration's. When a place declares the lambda's result type, the
+/// check `Checker::try_expr` already makes against `Checker::ret` is that
+/// check. When nothing does — a bare lambda, or a body a Host API schema
+/// declared `Any` — the result is whatever the body proves, so there is
+/// nothing to compare against until the body has been walked. These are the
+/// `?`s that wait for it.
+struct PendingTry {
+    /// Where the `?` was written.
+    span: Span,
+    /// What it propagates: the `Err` type of a `Result`, or `None` for the
+    /// `None` of an `Option`, which carries nothing.
+    error: Option<Ty>,
 }
 
 impl<'a> Checker<'a> {
@@ -2185,6 +2220,7 @@ impl<'a> Checker<'a> {
             body_mark: 0,
             open_facts: Vec::new(),
             open_scopes: Vec::new(),
+            open_lambdas: Vec::new(),
         }
     }
 
@@ -4158,6 +4194,12 @@ impl<'a> Checker<'a> {
                     let outer_ret = std::mem::replace(&mut self.ret, sig.ret.clone());
                     let outer_span = std::mem::replace(&mut self.ret_span, sig.ret_span);
                     let outer_stated = std::mem::replace(&mut self.ret_stated, true);
+                    // A local `fn` writes what it answers, so a `?` in it is
+                    // checked against that and never held. Taking the stack
+                    // all the same is what makes that a property of this
+                    // pass rather than of the return types a program happens
+                    // to be able to write.
+                    let outer_tries = std::mem::take(&mut self.open_lambdas);
                     self.type_params.extend(sig.generics.iter().cloned());
                     let outer_bounds = self.bounds.clone();
                     self.bounds.extend(
@@ -4178,6 +4220,7 @@ impl<'a> Checker<'a> {
                         format!("the declared return type is `{}`", sig.ret),
                     );
                     self.block(&decl.body, Some(&expected));
+                    self.open_lambdas = outer_tries;
                     self.scopes.pop();
                     self.capture_floor = outer_floor;
                     self.bounds = outer_bounds;
@@ -5198,11 +5241,15 @@ impl<'a> Checker<'a> {
                     self.constrain(&error, &ret_error, span);
                 }
                 match self.ret.clone() {
-                    // Nothing states what this body answers — the checker
-                    // abstained, or a schema declared the place `Any` — so
-                    // there is no failure type for this `?` to disagree
-                    // with.
-                    Ty::Unknown(_) | Ty::Any => {}
+                    // Nothing *written* states what this body answers — the
+                    // checker abstained, or a schema declared the place
+                    // `Any` — so there is no declared failure type for this
+                    // `?` to disagree with. Inside a function value that is
+                    // not the end of it: what such a lambda produces is what
+                    // its body proves, and the `?` is held until the body
+                    // has proved it. Everywhere else it is the abstention it
+                    // looks like.
+                    Ty::Unknown(_) | Ty::Any => self.defer_try(Some(error.clone()), span),
                     Ty::Result(_, ret_error) if error.matches(&ret_error) => {}
                     Ty::Result(_, ret_error) => self.diagnostics.push(
                         Diagnostic::error(
@@ -5234,7 +5281,8 @@ impl<'a> Checker<'a> {
             Ty::Option(inner_ty) => {
                 let inner_ty = (**inner_ty).clone();
                 match self.ret.clone() {
-                    Ty::Unknown(_) | Ty::Any | Ty::Option(_) => {}
+                    Ty::Option(_) => {}
+                    Ty::Unknown(_) | Ty::Any => self.defer_try(None, span),
                     other => self.diagnostics.push(
                         Diagnostic::error(
                             TRY_RETURN,
@@ -5274,6 +5322,107 @@ impl<'a> Checker<'a> {
                 );
                 Ty::recovery()
             }
+        }
+    }
+
+    /// Holds a `?` whose enclosing function has no *written* result to
+    /// disagree with, when that function is a value whose body will decide.
+    ///
+    /// Every way of saying "the body decides" is waited for. A placeholder
+    /// is a lambda no place typed at all. `Any` is a place — a Host API
+    /// schema's parameter — that typed it by saying it states nothing about
+    /// the result. A variable, or a type parameter nothing settled, is a
+    /// place whose result travels *outward*: `Scope.spawn` declares
+    /// `fn() -> T` and `Array.map` declares `fn(T) -> U`, and what fills
+    /// that `T` is the body. [`Checker::settle_pending_tries`] answers all
+    /// of them once the body has been walked, which is when there is
+    /// something to answer with.
+    ///
+    /// Two are silences already accounted for and stay silent: a recovery
+    /// unknown stands for a mistake reported upstream, and a dynamic
+    /// boundary for a host module this build was shown no schema for, whose
+    /// one diagnostic ADR 0016 puts at the `use` and nowhere else.
+    ///
+    /// Outside a function value there is nothing to hold this against — a
+    /// declaration always writes what it answers — so nothing is recorded.
+    fn defer_try(&mut self, error: Option<Ty>, span: Span) {
+        match &self.ret {
+            Ty::Unknown(Unknown::Recovery | Unknown::DynamicBoundary) => return,
+            ty if ty.is_wild() => {}
+            _ => return,
+        }
+        if let Some(open) = self.open_lambdas.last_mut() {
+            open.push(PendingTry { span, error });
+        }
+    }
+
+    /// Reports every `?` in a function value's body that the value's own
+    /// result cannot carry.
+    ///
+    /// `produced` is what the lambda turned out to answer: what the place
+    /// holding it declared, where it declared anything, joined with what the
+    /// body proved. A `?` returns from this function, so this is the type
+    /// its failure has to fit into, and `Dashboard` — the type a
+    /// `clock.timeout` body ends with — has nowhere to put an `Err`.
+    ///
+    /// A produced type that says nothing is left alone. The body proved a
+    /// recovery unknown, or an abstention, or never finished at all, and a
+    /// second diagnostic about a type nothing states would be a guess.
+    fn settle_pending_tries(&mut self, pending: Vec<PendingTry>, produced: &Ty, span: Span) {
+        // The failure a `?` propagates is a use that says what this
+        // function value's own failure type is, exactly as it is inside a
+        // declaration: `clock.timeout { ... ?; Ok(n) }` takes the error type
+        // of its `Ok` from here, which is the only thing in the body that
+        // states one.
+        if let Ty::Result(_, produced_error) = produced {
+            for try_expr in &pending {
+                if let Some(error) = &try_expr.error {
+                    self.constrain(error, produced_error, try_expr.span);
+                }
+            }
+        }
+        let produced = self.bound(produced.clone());
+        if produced.is_wild() {
+            return;
+        }
+        for PendingTry { span: at, error } in pending {
+            let diagnostic = match (&error, &produced) {
+                (Some(error), Ty::Result(_, produced_error)) if error.matches(produced_error) => {
+                    continue
+                }
+                (None, Ty::Option(_)) => continue,
+                (Some(error), _) => Diagnostic::error(
+                    TRY_RETURN,
+                    format!(
+                        "`?` propagates `{error}`, but this function value produces `{produced}`"
+                    ),
+                )
+                .at(at)
+                .label(
+                    span,
+                    format!("nothing declares what this function value produces, so its body's value does: `{produced}`"),
+                )
+                .rule(TRY_LAMBDA_RULE)
+                .help(format!(
+                    "end the body with a `Result`, as in `Ok(...)`, so this function value produces `Result<{produced}, {error}>` and the `?` has an `Err` to return; then answer that failure where the value arrives"
+                )),
+                (None, _) => Diagnostic::error(
+                    TRY_RETURN,
+                    format!(
+                        "`?` on an `Option` returns `None`, but this function value produces `{produced}`"
+                    ),
+                )
+                .at(at)
+                .label(
+                    span,
+                    format!("nothing declares what this function value produces, so its body's value does: `{produced}`"),
+                )
+                .rule(TRY_LAMBDA_RULE)
+                .help(format!(
+                    "end the body with an `Option`, as in `Some(...)`, so this function value produces `Option<{produced}>` and the `?` has a `None` to return; then answer the missing value where it arrives"
+                )),
+            };
+            self.diagnostics.push(diagnostic);
         }
     }
 
@@ -5927,6 +6076,7 @@ impl<'a> Checker<'a> {
         );
         let outer_span = std::mem::replace(&mut self.ret_span, span);
         let outer_stated = std::mem::replace(&mut self.ret_stated, stated_ret.is_some());
+        self.open_lambdas.push(Vec::new());
         let expected_body = stated_ret.clone().map(|ty| match ty.is_wild() {
             // An abstention passed on rather than dropped: a body given to a
             // place this pass said nothing about is not asked to state a type
@@ -5938,6 +6088,10 @@ impl<'a> Checker<'a> {
             }
         });
         let body_ty = self.block(body, expected_body.as_ref());
+        // Popped here, next to the `ret` this pass is putting back, but not
+        // answered until the produced type below exists — which is the whole
+        // reason these were kept rather than judged where they were written.
+        let pending = self.open_lambdas.pop().unwrap_or_default();
         self.ret = outer_ret;
         self.ret_span = outer_span;
         self.ret_stated = outer_stated;
@@ -5951,14 +6105,12 @@ impl<'a> Checker<'a> {
         // two disagree about a type the place *did* state, `Ty::join` keeps
         // the place's and the disagreement is already reported against the
         // body.
-        let value = Ty::func(
-            is_async,
-            param_types,
-            match declared_ret {
-                Some(declared) => declared.join(&body_ty),
-                None => body_ty,
-            },
-        );
+        let produced = match declared_ret {
+            Some(declared) => declared.join(&body_ty),
+            None => body_ty,
+        };
+        self.settle_pending_tries(pending, &produced, span);
+        let value = Ty::func(is_async, param_types, produced);
         // A function value given to a place that is not a function type is a
         // mismatch like any other, and this is where it is reported.
         // `Checker::expr` hands the expectation to this method rather than
@@ -12942,6 +13094,197 @@ fn double(text: String) -> Int {
         assert_eq!(
             error.help.unwrap(),
             "declare this function `-> Result<Int, Error>`, or handle the `Err` with `unwrapOr`"
+        );
+    }
+
+    // ---- `?` inside a function value
+
+    /// The case the rule was written for, from `examples/tasks/load.cove`: a
+    /// `?` in a `clock.timeout` body. The schema declares that body `Any`, so
+    /// nothing outside it says what it produces and the body's own value
+    /// does — and a `Dashboard` has nowhere to put an `Err`.
+    #[test]
+    fn rejects_the_question_mark_in_a_body_a_schema_declared_any() {
+        let error = rejects(
+            "\
+use clock
+
+struct Dashboard {
+  panel: String
+}
+
+fn panelOf(name: String) -> Result<String, Error> {
+  Ok(name)
+}
+
+export fn load() -> Result<Dashboard, Error> {
+  let result = clock.timeout(1s) {
+    Dashboard(panel: panelOf(\"bookings\")?)
+  }?
+  Ok(result)
+}
+",
+        );
+        assert_eq!(error.code, TRY_RETURN);
+        assert_eq!(
+            error.message,
+            "`?` propagates `Error`, but this function value produces `Dashboard`"
+        );
+        assert_eq!(error.rule.unwrap(), TRY_LAMBDA_RULE);
+        assert_eq!(
+            error.help.unwrap(),
+            "end the body with a `Result`, as in `Ok(...)`, so this function value produces `Result<Dashboard, Error>` and the `?` has an `Err` to return; then answer that failure where the value arrives"
+        );
+    }
+
+    /// The same body written so that it carries its own failure. The `Ok`
+    /// leaves its error type open, and the `?` is what states it: `Result`
+    /// and `Error` come from the two halves of the body together.
+    #[test]
+    fn a_body_that_ends_with_a_result_carries_its_own_failure() {
+        accepts(
+            "\
+use clock
+
+fn panelOf(name: String) -> Result<String, Error> {
+  Ok(name)
+}
+
+export fn load() -> Result<String, Error> {
+  let result = clock.timeout(1s) {
+    Ok(panelOf(\"bookings\")?)
+  }?
+  result
+}
+",
+        );
+    }
+
+    /// A lambda no place types at all is the same question with nothing in
+    /// the way of it: its result is its body's value, and an `Int` cannot
+    /// carry an `Error`.
+    #[test]
+    fn rejects_the_question_mark_in_a_lambda_nothing_types() {
+        let error = rejects(
+            "\
+fn run() -> Int {
+  let parse = fn(text: String) {
+    Int.parse(text)?
+  }
+  1
+}
+",
+        );
+        assert_eq!(error.code, TRY_RETURN);
+        assert_eq!(
+            error.message,
+            "`?` propagates `Error`, but this function value produces `Int`"
+        );
+    }
+
+    /// A `?` in a spawned task's body returns from the *task*, so the value
+    /// the handle settles on would be an `Err` in a slot typed `Int`. The
+    /// program the scope rule is written for spawns `work()` and lets the
+    /// `Task<Result<Int, Error>>` say so.
+    #[test]
+    fn rejects_the_question_mark_in_a_spawned_body() {
+        let error = rejects(
+            "\
+fn work() -> Result<Int, Error> {
+  Ok(1)
+}
+
+export async fn run() -> Result<Int, Error> {
+  scope tasks {
+    let job = tasks.spawn { work()? }
+    let value = await job
+    Ok(value)
+  }
+}
+",
+        );
+        assert_eq!(error.code, TRY_RETURN);
+        assert_eq!(
+            error.message,
+            "`?` propagates `Error`, but this function value produces `Int`"
+        );
+    }
+
+    /// `?` on an `Option` asks the same question and gets the same answer in
+    /// the `Option`'s words.
+    #[test]
+    fn rejects_the_option_question_mark_in_a_lambda_nothing_types() {
+        let error = rejects(
+            "\
+fn run() -> Int {
+  let first = fn(text: String) {
+    text.words().get(0)?
+  }
+  1
+}
+",
+        );
+        assert_eq!(error.code, TRY_RETURN);
+        assert_eq!(
+            error.message,
+            "`?` on an `Option` returns `None`, but this function value produces `String`"
+        );
+        assert_eq!(
+            error.help.unwrap(),
+            "end the body with an `Option`, as in `Some(...)`, so this function value produces `Option<String>` and the `?` has a `None` to return; then answer the missing value where it arrives"
+        );
+    }
+
+    /// A place that *does* declare the result is the check
+    /// `Checker::try_expr` already made, and it is still the one that
+    /// reports: nothing is held, so nothing is said twice.
+    #[test]
+    fn a_written_function_type_is_checked_where_the_question_mark_is() {
+        accepts(
+            "\
+fn run() -> Int {
+  let parse: fn(String) -> Result<Int, Error> = fn(text) {
+    Ok(Int.parse(text)?)
+  }
+  1
+}
+",
+        );
+        let error = rejects(
+            "\
+fn run() -> Int {
+  let parse: fn(String) -> Int = fn(text) {
+    Int.parse(text)?
+  }
+  1
+}
+",
+        );
+        assert_eq!(error.code, TRY_RETURN);
+        assert_eq!(
+            error.message,
+            "`?` needs a function that returns a `Result`, but this one returns `Int`"
+        );
+    }
+
+    /// A `?` in a body the enclosing declaration answers for is not a
+    /// function value's problem. `Result.mapError`'s callback is the place
+    /// this could have gone wrong: the expectation states its parameters and
+    /// leaves its result open, which is one of the shapes that waits.
+    #[test]
+    fn a_callback_whose_result_the_expectation_leaves_open_is_left_alone() {
+        accepts(
+            "\
+enum ParseError {
+  NotANumber
+}
+
+fn parse(text: String) -> Result<Int, ParseError> {
+  Int.parse(text).mapError(fn(cause) {
+    ParseError.NotANumber
+  })
+}
+",
         );
     }
 

@@ -1,0 +1,27 @@
+use clock
+use console.println
+
+/// Applies `?` inside a function value that has nowhere to put the failure.
+///
+/// `expr?` returns the error from the function it is *written in*, and a
+/// `clock.timeout` body is one of those: the Host API schema declares that
+/// body `Any`, which says the schema states nothing about what it produces,
+/// so the body's own value is what does. Here that value is a `String`, and
+/// a `String` has no `Err` half for the `?` to return through. The body
+/// would have to end with a `Result` — and then `clock.timeout` answers a
+/// `Result` of one, which is the shape `examples/covecheck` writes down.
+///
+/// This case lives in its own package so that check-time failure cannot take
+/// down every other case.
+export fn main() -> Result<Unit, Error> {
+  let panel = clock.timeout(1s) {
+    render("bookings")?
+  }?
+  println("{panel}")?
+  Ok(())
+}
+
+/// The body of a panel, or the reason there is none.
+fn render(panel: String) -> Result<String, Error> {
+  Err(Error("{panel}: nothing to render"))
+}

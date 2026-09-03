@@ -8,10 +8,17 @@
 //!
 //! It needs a module of its own rather than a case in [`super::differential`]
 //! because a schema that declares `Any` in a *result* is what the case is
-//! about, and no shipped module declares one a program can reach without also
-//! handing the host a closure — which is a boundary neither side crosses yet.
-//! An embedder's module is not a lesser kind of host, so one is declared here
-//! and handed to the checker, the lowering and the registry alike.
+//! about, and there is nothing but a host that can put a value at an erased
+//! position from outside. An embedder's module is not a lesser kind of host,
+//! so one is declared here and handed to the checker, the lowering and the
+//! registry alike.
+//!
+//! One of its operations takes a callback, because that is where the shipped
+//! `clock.timeout` differs from every other `Any` in the corpus and the
+//! difference decides an answer: what goes into the box is a value that just
+//! left this machine, so the family it left with is known and does not have
+//! to be searched for. `oracle.bounded` is that operation reduced to the part
+//! that matters — run the callback, wrap whatever it answered in `Ok`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -24,7 +31,7 @@ use cove_sema::package::{Module, Package, Unit};
 use cove_sema::resolve::Program as Checked;
 
 use crate::error::RuntimeError;
-use crate::host::{Grants, HostApi, HostRegistry};
+use crate::host::{Grants, HostApi, HostRegistry, Reentry};
 use crate::interp::Interpreter;
 use crate::lvm::Lvm;
 use crate::runtime::Runtime;
@@ -64,6 +71,33 @@ const ORACLE: ModuleSchema = ModuleSchema {
             result_is_task_safe: true,
         },
         OperationSchema {
+            name: "nested",
+            params: &[HostType::Int],
+            variadic: false,
+            result: HostType::Result(&HostType::Any, &HostType::Error),
+            capability: "oracle",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        // `clock.timeout` with the clock taken out: the parameter is the
+        // callback — an `Any` in a parameter position accepts every value —
+        // and the result is the body's answer wrapped in an `Ok` the host
+        // built. What crosses back in at the erased position is therefore a
+        // value this run produced a moment earlier.
+        OperationSchema {
+            name: "bounded",
+            params: &[HostType::Any],
+            variadic: false,
+            result: HostType::Result(&HostType::Any, &HostType::Error),
+            capability: "oracle",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        OperationSchema {
             name: "attempt",
             params: &[HostType::Int],
             variadic: false,
@@ -86,12 +120,42 @@ impl HostApi for Oracle {
         ORACLE
     }
 
+    /// `bounded` is the one operation that runs Cove, so it is the one that
+    /// needs the way back. Everything else is [`HostApi::call`], which the
+    /// default forwards to.
+    fn call_with(
+        &self,
+        op: &str,
+        args: Vec<Value>,
+        back: &mut dyn Reentry,
+    ) -> Result<Value, RuntimeError> {
+        match op {
+            // `Ok` whether the body succeeded or not, exactly as
+            // `clock.timeout` wraps its body: the host's own `Result` is the
+            // host's failure, and the body's is the body's.
+            "bounded" => Ok(Value::ok(back.call(&args[0], Vec::new())?)),
+            _ => self.call(op, args),
+        }
+    }
+
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "number" => Ok(Value::int(
                 args[0].as_int().expect("the schema declares an `Int`") * 10,
             )),
             "text" => Ok(Value::string("erased")),
+            // The shape `clock.timeout { http.fetch(..) }` has and the
+            // reason `runner.cove` writes a two-deep annotation: what the
+            // schema promised to carry is itself a `Result`, so the box
+            // holds an enum rather than a word.
+            "nested" => {
+                let n = args[0].as_int().expect("the schema declares an `Int`");
+                if n < 0 {
+                    Ok(Value::ok(Value::err(Value::error("inner"))))
+                } else {
+                    Ok(Value::ok(Value::ok(Value::int(n))))
+                }
+            }
             "attempt" => {
                 let n = args[0].as_int().expect("the schema declares an `Int`");
                 if n < 0 {
@@ -323,5 +387,142 @@ fn the_two_backends_word_a_failed_unboxing_differently() {
     assert_eq!(
         machine,
         Answer::Failed("this value is not of the type it is being read as".to_string())
+    );
+}
+
+/// The shape `examples/covecheck`'s `main.cove` is written in: a binding
+/// whose annotation says what a schema's `Any` was carrying, and a `?` that
+/// answers it.
+///
+/// Nothing at the `?` says anything — `clock.timeout` declares
+/// `Result<Any, Error>` and this declares the same — so what says is the
+/// annotation, several lines earlier, carried here by the checker. The box
+/// is opened where the value is *used*, at the type the checker settled for
+/// that use.
+#[test]
+fn an_annotation_says_what_a_question_mark_on_an_erased_result_answers() {
+    assert_eq!(
+        agree(
+            "use oracle.attempt\n\
+             export fn main() -> Result<Int, Error> {\n  \
+               let bounded: Result<Int, Error> = attempt(41)\n  \
+               let n = bounded?\n  \
+               Ok(n + 1)\n\
+             }"
+        ),
+        Answer::Value("Ok(43)".to_string())
+    );
+}
+
+/// The shape `examples/covecheck`'s `runner.cove` is written in: a schema's
+/// `Any` carrying a `Result` of its own, and a `match` inside a `match`.
+///
+/// This is the nesting, and what it pins is that no whole-value conversion
+/// is needed for one. The outer `match` reads an ordinary enum — the box is
+/// one word *inside* it — and the inner `match`'s subject is the box, opened
+/// at the type the annotation gave it. One level at each level's use.
+#[test]
+fn an_annotation_says_what_a_result_inside_an_erased_result_is() {
+    let source = "use oracle.nested\n\
+                  export fn main() -> Result<Int, Error> {\n  \
+                    let answer: Result<Result<Int, Error>, Error> = nested(7)\n  \
+                    match answer {\n    \
+                      Ok(inner) => match inner {\n      \
+                        Ok(n) => Ok(n * 2)\n      \
+                        Err(inside) => Ok(inside.message.length())\n    \
+                      }\n    \
+                      Err(outside) => Err(outside)\n  \
+                    }\n\
+                  }";
+    assert_eq!(agree(source), Answer::Value("Ok(14)".to_string()));
+    assert_eq!(
+        agree(&source.replace("nested(7)", "nested(0 - 1)")),
+        Answer::Value("Ok(5)".to_string())
+    );
+}
+
+/// The same program with one thing changed, which is the thing that used to
+/// decide whether it ran.
+///
+/// A box carries the layout of what was put in it, and what puts one there
+/// on a Host answer is a search of the program's *families* for one the
+/// value fits. `Result<Int, Error>` and `Result<Any, Error>` both fit
+/// `Ok(7)` — a `Shape::Boxed` position admits everything — so which is found
+/// used to depend on which the lowering happened to intern first. Above it
+/// is `Result<Int, Error>`, because that is what `main` returns; here `main`
+/// answers a `String`, so the only reason the described family is in the
+/// table at all is the `unbox` the inner `match` needed, and it is interned
+/// after the erasing one.
+///
+/// The search prefers the family that describes the value, so both run. See
+/// `boundary::Precision`.
+#[test]
+fn the_family_a_box_records_is_the_one_that_describes_the_value() {
+    let source = "use oracle.nested\n\
+                  export fn main() -> Result<String, Error> {\n  \
+                    let answer: Result<Result<Int, Error>, Error> = nested(7)\n  \
+                    match answer {\n    \
+                      Ok(inner) => match inner {\n      \
+                        Ok(n) => Ok(\"{n}\")\n      \
+                        Err(inside) => Ok(inside.message)\n    \
+                      }\n    \
+                      Err(outside) => Err(outside)\n  \
+                    }\n\
+                  }";
+    assert_eq!(agree(source), Answer::Value("Ok(7)".to_string()));
+}
+
+/// The shape `examples/covecheck`'s `runner.cove` is written in, with the
+/// thing that used to decide whether it ran: **another family that describes
+/// the same value, interned first.**
+///
+/// `Err(Error("no"))` is a `Result<String, Error>` here and it is also a
+/// perfectly good `Result<Int, Error>`, which is what `count` puts in the
+/// table one entry earlier. Both describe the value exactly, so
+/// `boundary::Precision` cannot choose between them and neither can anything
+/// else that reads the value alone — and they are different runs of words, so
+/// the box that records the wrong one traps at the `Unbox` the inner `match`
+/// emits.
+///
+/// The helper is called `count` and not something else on purpose: which of
+/// the two is interned first is what used to decide whether this program ran,
+/// and this name is one that puts `Result<Int, Error>` first. That the name
+/// of a function nothing in the program depends on could decide the answer is
+/// the whole complaint.
+///
+/// What decides it is that the value in the box is the *callback's* answer.
+/// It left this machine one instruction earlier at the layout the callback's
+/// return type fixed, so the family is a static fact rather than a search;
+/// `exec::Machine::callback_answer` is where the way out writes it down and
+/// `boundary::held_layout` is what prefers it.
+#[test]
+fn a_box_built_from_a_callback_answer_records_the_family_the_callback_returned() {
+    let source = "use oracle.bounded\n\
+                  fn count() -> Result<Int, Error> {\n  \
+                    Ok(1)\n\
+                  }\n\
+                  fn inner(n: Int) -> Result<String, Error> {\n  \
+                    if n < 0 {\n    \
+                      return Err(Error(\"no\"))\n  \
+                    }\n  \
+                    Ok(\"yes\")\n\
+                  }\n\
+                  export fn main() -> Result<Int, Error> {\n  \
+                    let n = count()?\n  \
+                    let answer: Result<Result<String, Error>, Error> = bounded(fn() {\n    \
+                      inner(0 - n)\n  \
+                    })\n  \
+                    match answer {\n    \
+                      Ok(held) => match held {\n      \
+                        Ok(text) => Ok(text.length())\n      \
+                        Err(inside) => Ok(inside.message.length())\n    \
+                      }\n    \
+                      Err(outside) => Err(outside)\n  \
+                    }\n\
+                  }";
+    assert_eq!(agree(source), Answer::Value("Ok(2)".to_string()));
+    assert_eq!(
+        agree(&source.replace("inner(0 - n)", "inner(n)")),
+        Answer::Value("Ok(3)".to_string())
     );
 }
