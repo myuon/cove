@@ -147,10 +147,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::rc::{Rc, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::task::{Task, TaskScope};
 use crate::value::{MapKey, Repr, Value, VectorStorage};
+use crate::wallclock::Instant;
 
 /// The fewest objects a task may allocate between two collections.
 ///

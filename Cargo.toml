@@ -8,6 +8,7 @@ members = [
   "crates/cove-ir",
   "crates/cove-runtime",
   "crates/cove-cli",
+  "crates/cove-wasm",
   "crates/cove-bench",
   # The embedding half of `examples/rules`: a Rust host that compiles the
   # rule package once and invokes it many times. It is a workspace member so
@@ -30,6 +31,7 @@ cove-syntax = { path = "crates/cove-syntax" }
 cove-sema = { path = "crates/cove-sema" }
 cove-ir = { path = "crates/cove-ir" }
 cove-runtime = { path = "crates/cove-runtime" }
+cove-wasm = { path = "crates/cove-wasm" }
 
 # A bench-only profile, kept for reproducing the measurement below and NOT
 # recommended as the baseline for implementation comparisons. Read

@@ -86,10 +86,11 @@
 
 use std::io::Write;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::task::Transfer;
 use crate::value::{Repr, Value};
+use crate::wallclock::Instant;
 
 /// The version of the JSONL trace format this build writes, and the only one
 /// it reads.

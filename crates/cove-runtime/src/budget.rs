@@ -10,10 +10,11 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::error::RuntimeError;
 use crate::trace::RunOutcome;
+use crate::wallclock::Instant;
 
 /// The rule this module implements, quoted for every error it raises.
 ///

@@ -82,6 +82,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cove-wasm"
+version = "0.1.0"
+dependencies = [
+ "cove-diag",
+ "cove-ir",
+ "cove-runtime",
+ "cove-schema",
+ "cove-sema",
+ "cove-syntax",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

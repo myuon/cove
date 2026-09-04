@@ -24,7 +24,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cove_sema::Capability;
 
@@ -35,6 +35,7 @@ use crate::schema::{
 };
 use crate::trace::{HostOutcome, NullSink, RecordedValue, RunOutcome, TraceEvent, TraceSink};
 use crate::value::{Repr, Value};
+use crate::wallclock::Instant;
 
 /// One host-provided module, such as `console` or `env`.
 ///

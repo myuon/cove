@@ -179,3 +179,48 @@ jobs:
 
       - name: cove-bench (correctness only; no threshold gate)
         run: ./target/release/cove-bench --iterations 1
+
+  # Issue #241 asks for the WebAssembly build to be in CI before the UI that
+  # depends on it, so this is a job of its own rather than a step: it fails on
+  # its own terms, in parallel with the pipeline above, and a browser
+  # playground that no longer builds is reported as that rather than as "the
+  # tests are red".
+  #
+  # It builds the artifact `web/README.md` tells a reader to build, and then
+  # runs Cove programs through it under node. That second half is what makes
+  # this a check rather than a compile: the module has to instantiate with the
+  # clock the page imports, compile a program, run it, refuse a `spawn`
+  # because a worker has one thread, and stop a loop at its deadline. Nothing
+  # short of executing it establishes any of that.
+  wasm:
+    name: the browser playground builds and runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the toolchain
+        run: |
+          rustup target add wasm32-unknown-unknown
+          rustc --version
+          node --version
+
+      # Keyed apart from the job above: this is a second target's artifacts
+      # and sharing one key would have the two jobs overwrite each other's.
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}-
+            ${{ runner.os }}-cargo-wasm-
+
+      - name: Build the playground for wasm32-unknown-unknown
+        run: cargo build -p cove-wasm --target wasm32-unknown-unknown --release
+
+      - name: Run Cove programs through it under node
+        run: node web/check.mjs

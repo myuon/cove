@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cove_diag::Span;
 
@@ -40,6 +40,7 @@ use crate::trace::TraceEvent;
 use crate::value::{
     Closure, ClosureBody, DynValue, EnumValue, HostFnValue, MapKey, Repr, StructValue, Value,
 };
+use crate::wallclock::Instant;
 
 /// What a task thread hands back to the task that spawned it: the value the
 /// body produced, in the form that may cross the boundary, or why it stopped.
@@ -204,6 +205,37 @@ pub(crate) fn scope_already_left(name: &str, span: Span) -> RuntimeError {
     .with_rule("Leaving a task scope waits for or cancels its child tasks.")
 }
 
+/// A `spawn` on a target that has no threads of its own.
+///
+/// ADR 0008 makes a Cove task a thread, and `wasm32-unknown-unknown` has
+/// none to give: a Web Worker is one thread and has no way to make a second,
+/// and `std::thread::Builder::spawn` there traps rather than returning an
+/// error a caller could report. So a `spawn`
+/// is refused before anything is charged, in the ordinary way a run stops —
+/// a [`RuntimeError`] with a span — rather than emulated by running the body
+/// inline. Running it inline would be the quiet failure: the program would
+/// answer, and it would answer something the tree-walking oracle, which
+/// really does spawn, need not agree with. The corpus is held together by
+/// those two agreeing.
+///
+/// [`crate::trace::RunOutcome::Concurrency`] is the classification because it
+/// already means "a `spawn` could not be given a task", and a target with no
+/// threads is the limiting case: no task may be alive at once. A second
+/// outcome for the same sentence would be a second vocabulary for one fact.
+///
+/// Both backends call this at the same point — after the checks that are
+/// about the program (the scope is open, the body is a closure, every capture
+/// may cross) and before the concurrency limit is charged — so a program that
+/// is wrong about its own `spawn` gets the same diagnostic here as anywhere
+/// else, and only a `spawn` that would otherwise have succeeded is refused.
+pub(crate) fn no_threads_here(span: Span) -> RuntimeError {
+    RuntimeError::new("`spawn` cannot run in this environment, which has no threads to give a task")
+        .at(span)
+        .with_rule(crate::budget::RULE)
+        .with_outcome(crate::trace::RunOutcome::Concurrency)
+        .with_help("run this program where a task can have a thread; `cove run` does")
+}
+
 /// A task whose own thread ended in a panic.
 pub(crate) fn broken_invariant(described: &str) -> RuntimeError {
     RuntimeError::new(format!("{described} ended in a broken invariant"))
@@ -361,6 +393,13 @@ pub(crate) fn spawn_into<H: Tasking>(
         .with_rule(TASK_SAFETY_RULE)
         .with_help(found.help("spawning"))
     })?;
+
+    // Everything above is about the program and is decided the same way
+    // everywhere. Everything below needs a thread, and `no_threads_here` says
+    // what it means for there not to be one.
+    if cfg!(target_arch = "wasm32") {
+        return Err(no_threads_here(span));
+    }
 
     // Charged before this task is given an id, an event, or a thread: a
     // thread that has started is a resource already taken, which no later

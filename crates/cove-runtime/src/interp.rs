@@ -28,7 +28,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cove_diag::{SourceMap, Span};
 use cove_schema::builtins::{FreeBuiltinKind, MAP_ENTRY, NONE_CASE, OPTION, RESULT};
@@ -50,6 +50,7 @@ use crate::trace::{RunOutcome, Timing, TraceEvent};
 use crate::value::{
     Closure, ClosureBody, DynValue, EnumValue, HostFnValue, RangeBounds, Repr, StructValue, Value,
 };
+use crate::wallclock::Instant;
 
 /// How deep Cove calls may nest before the runtime reports a limit instead of
 /// exhausting the host stack.

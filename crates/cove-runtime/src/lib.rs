@@ -27,6 +27,10 @@ pub mod task;
 pub mod trace;
 pub mod value;
 mod vm;
+// Private: one type, and on every platform but `wasm32-unknown-unknown` it is
+// `std::time::Instant` re-exported. See the module for why the exception
+// exists and what a deadline does under it.
+mod wallclock;
 
 pub use budget::{Budget, Cancellation, Limits, Meter, Stopped};
 pub use clock::{Clock, VirtualTime};

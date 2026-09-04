@@ -15,13 +15,29 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use crate::budget::Cancellation;
 use crate::error::RuntimeError;
 use crate::host::{HostApi, Reentry};
 use crate::schema::ModuleSchema;
 use crate::value::{Repr, Value};
+use crate::wallclock::Instant;
+
+/// What a real clock answers when it is asked to wait on a target that
+/// cannot.
+///
+/// `wasm32-unknown-unknown` has no way to block: `std::thread::sleep` traps
+/// and `std::thread::spawn` traps, so neither `sleep` nor the watchdog behind
+/// `timeout` can be honoured. This is said in the vocabulary the rest of this
+/// module already uses for a request it will not carry out — an `Err` value
+/// the program can match on, like a negative duration — rather than by
+/// returning at once, which would report a wait that did not happen.
+///
+/// `clock.now()` is unaffected and keeps working: reading a clock is not
+/// waiting on one, and [`crate::wallclock`] is where the reading comes from.
+#[cfg(target_arch = "wasm32")]
+const CANNOT_WAIT: &str =
+    "clock: this environment cannot wait, so a real clock has no `sleep`, `timeout` or `every`";
 
 /// How often a watchdog looks at the work it is bounding.
 ///
@@ -164,6 +180,10 @@ impl Clock {
                 Value(Repr::Duration(nanos))
             )))
         };
+        #[cfg(target_arch = "wasm32")]
+        if self.is_real() {
+            return Ok(Value::err(Value::error(CANNOT_WAIT)));
+        }
         match &self.source {
             ClockSource::Real(_) => {
                 let stop = Cancellation::new();
@@ -216,6 +236,13 @@ impl Clock {
                 "clock: a timer period must not be negative",
             )));
         }
+        // Before the loop rather than inside it: a real timer whose `sleep`
+        // refuses would otherwise run its body as fast as the fuel budget
+        // allowed, which is not the period it was asked for.
+        #[cfg(target_arch = "wasm32")]
+        if self.is_real() {
+            return Ok(Value::err(Value::error(CANNOT_WAIT)));
+        }
         loop {
             if back.is_cancelled() {
                 return Ok(Value::ok(Value(Repr::Unit)));
@@ -243,6 +270,9 @@ impl Clock {
             return Value::err(Value::error("clock: a sleep duration must not be negative"));
         }
         match &self.source {
+            #[cfg(target_arch = "wasm32")]
+            ClockSource::Real(_) => return Value::err(Value::error(CANNOT_WAIT)),
+            #[cfg(not(target_arch = "wasm32"))]
             ClockSource::Real(_) => {
                 std::thread::sleep(std::time::Duration::from_nanos(nanos as u64))
             }

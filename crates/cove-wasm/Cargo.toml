@@ -1,0 +1,22 @@
+[package]
+name = "cove-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cove's front end and linear-memory backend behind a C ABI, for a browser playground."
+
+# A `cdylib` because that is what `wasm32-unknown-unknown` links into a
+# `.wasm` module; `rlib` so that `cargo test` can reach the same functions on
+# the host. Both halves of `cargo t` and of the wasm build come from one
+# crate, which is the point: what node runs is what the tests exercised.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cove-diag.workspace = true
+cove-ir.workspace = true
+cove-runtime.workspace = true
+cove-schema.workspace = true
+cove-sema.workspace = true
+cove-syntax.workspace = true

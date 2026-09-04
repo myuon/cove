@@ -22,7 +22,7 @@
 
 use std::sync::{Arc, Mutex};
 use std::thread::{Scope, ScopedJoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cove_diag::Span;
 use cove_ir::{
@@ -41,6 +41,7 @@ use crate::vm::builtins::operand::Operand;
 use crate::vm::debug::{halted, Debugger, Resume, Stop};
 use crate::vm::mem::{Collected, Memory, NoSegment, Overflow, Parked, Rooted, Roots};
 use crate::vm::{boundary, builtins, cell};
+use crate::wallclock::Instant;
 // The one import of the public `Value` outside `boundary`, and the one thing
 // ADR 0034 allows it for: a host call's arguments and its answer exist as
 // `Value`s for the length of the call and nowhere else. Nothing here stores
@@ -2499,6 +2500,13 @@ impl<'a> Machine<'a> {
         if object == 0 {
             return Err(null_object().at(span));
         }
+        // Everything above is about the program and is decided the same way
+        // on both backends. Everything below needs a thread, and
+        // `task::no_threads_here` says what it means for there not to be one.
+        if cfg!(target_arch = "wasm32") {
+            return Err(task::no_threads_here(span));
+        }
+
         // Charged before this task is given an id, an event or a thread: a
         // thread that has started is a resource already taken, which no later
         // safepoint could refuse.

@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cove playground</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --edge: color-mix(in srgb, currentColor 18%, transparent);
+        --quiet: color-mix(in srgb, currentColor 60%, transparent);
+      }
+      body {
+        font: 14px/1.5 ui-sans-serif, system-ui, sans-serif;
+        margin: 0;
+        padding: 1rem;
+        max-width: 78rem;
+      }
+      h1 {
+        font-size: 1rem;
+        font-weight: 600;
+        margin: 0 0 0.25rem;
+      }
+      p.note {
+        color: var(--quiet);
+        margin: 0 0 1rem;
+      }
+      .panes {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+        align-items: start;
+      }
+      @media (max-width: 60rem) {
+        .panes { grid-template-columns: 1fr; }
+      }
+      textarea,
+      pre {
+        font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+        border: 1px solid var(--edge);
+        border-radius: 4px;
+        padding: 0.6rem;
+        margin: 0;
+        width: 100%;
+        box-sizing: border-box;
+        background: transparent;
+        color: inherit;
+      }
+      textarea { min-height: 22rem; resize: vertical; }
+      pre { overflow: auto; max-height: 22rem; white-space: pre-wrap; }
+      pre:empty::before { content: "—"; color: var(--quiet); }
+      h2 {
+        font-size: 0.8rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--quiet);
+        margin: 0.9rem 0 0.35rem;
+      }
+      h2:first-child { margin-top: 0; }
+      .bar {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        flex-wrap: wrap;
+        margin: 0.6rem 0;
+      }
+      button {
+        font: inherit;
+        padding: 0.3rem 0.8rem;
+        border: 1px solid var(--edge);
+        border-radius: 4px;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.4; cursor: default; }
+      label { color: var(--quiet); }
+      input[type="number"] {
+        font: inherit;
+        width: 8rem;
+        padding: 0.25rem 0.4rem;
+        border: 1px solid var(--edge);
+        border-radius: 4px;
+        background: transparent;
+        color: inherit;
+      }
+      #status { color: var(--quiet); margin-left: auto; }
+      .stopped { color: #c0392b; }
+    </style>
+  </head>
+  <body>
+    <h1>Cove playground</h1>
+    <p class="note">
+      Everything below happens in this tab: the parser, the type checker, the
+      lowering and the VM are one WebAssembly module, and no source leaves the
+      browser. A task <code>spawn</code> is refused rather than emulated —
+      a Cove task is a thread and a worker has one.
+    </p>
+
+    <div class="panes">
+      <div>
+        <h2>Source</h2>
+        <textarea id="source" spellcheck="false"></textarea>
+        <div class="bar">
+          <button id="run">Run</button>
+          <button id="compile">Compile only</button>
+          <button id="stop" disabled>Stop</button>
+          <label>fuel <input id="fuel" type="number" min="0" step="1000000" value="200000000" /></label>
+          <label>ms <input id="deadline" type="number" min="0" step="100" value="5000" /></label>
+          <span id="status">starting…</span>
+        </div>
+      </div>
+      <div>
+        <h2>Diagnostics</h2>
+        <pre id="diagnostics"></pre>
+        <h2>Output</h2>
+        <pre id="output"></pre>
+        <h2>Lowered IR</h2>
+        <pre id="ir"></pre>
+      </div>
+    </div>
+
+    <script type="module">
+      const EXAMPLE = `use console.println
+
+/// Returns a greeting for \`name\`.
+export fn greeting(name: String) -> String {
+  "Hello, {name}!"
+}
+
+export fn main() -> Result<Int, Error> {
+  println(greeting("browser"))?
+  Ok(21 * 2)
+}
+`;
+
+      const el = (id) => document.getElementById(id);
+      const source = el("source");
+      const status = el("status");
+      source.value = EXAMPLE;
+
+      // One worker at a time, and a sequence number so that an answer from a
+      // worker the page has already discarded is ignored rather than shown
+      // against the run that replaced it.
+      let worker = null;
+      let seq = 0;
+      let pending = null;
+
+      function start() {
+        worker = new Worker(new URL("./worker.mjs", import.meta.url), { type: "module" });
+        worker.onmessage = ({ data }) => {
+          if (data.seq !== pending) return;
+          if (data.ready) {
+            status.textContent = "running…";
+            return;
+          }
+          pending = null;
+          settle(false);
+          if (data.failed) {
+            el("diagnostics").textContent = `the module trapped: ${data.failed}`;
+            el("diagnostics").className = "stopped";
+            status.textContent = "trapped";
+            return;
+          }
+          show(data.kind, data.answer);
+        };
+        worker.onerror = (event) => {
+          pending = null;
+          settle(false);
+          el("diagnostics").textContent = `worker error: ${event.message}`;
+          status.textContent = "failed";
+        };
+      }
+
+      function settle(busy) {
+        el("run").disabled = busy;
+        el("compile").disabled = busy;
+        el("stop").disabled = !busy;
+      }
+
+      function show(kind, answer) {
+        const diagnostics = answer.diagnostics.map((d) => d.rendered).join("\n");
+        el("diagnostics").textContent = diagnostics;
+        el("diagnostics").className = answer.ok ? "" : "stopped";
+        if (answer.ir !== undefined) el("ir").textContent = answer.ir ?? "";
+        if (kind === "compile") {
+          el("output").textContent = "";
+          status.textContent = answer.ok ? "compiled" : "did not compile";
+          return;
+        }
+        const printed = [answer.stdout, answer.stderr].filter(Boolean).join("");
+        const shown = answer.answer === null ? "" : `\n=> ${describe(answer.answer)}`;
+        el("output").textContent = printed + shown;
+        status.textContent =
+          answer.outcome === null
+            ? "did not compile"
+            : `${answer.outcome} · ${answer.instructions ?? "?"} instructions · ${answer.fuel ?? "?"} fuel`;
+      }
+
+      // The trace's value encoding, shown the way a reader reads it. Only the
+      // shapes an entry can answer are named; anything else is shown as the
+      // encoding wrote it, which is still true and still readable.
+      function describe(value) {
+        switch (value.type) {
+          case "unit": return "()";
+          case "bool": case "int": case "float": return String(value.value);
+          case "string": return JSON.stringify(value.value);
+          case "array": return `[${value.items.map(describe).join(", ")}]`;
+          case "enum":
+            return value.payload && value.payload.length
+              ? `${value.case}(${value.payload.map(describe).join(", ")})`
+              : value.case ?? JSON.stringify(value);
+          default: return JSON.stringify(value);
+        }
+      }
+
+      function ask(kind) {
+        if (worker === null) start();
+        pending = ++seq;
+        settle(true);
+        status.textContent = kind === "run" ? "running…" : "compiling…";
+        worker.postMessage({
+          seq: pending,
+          kind,
+          source: source.value,
+          // `>>> 0` and not `| 0`: both fields are `u32` on the other side,
+          // and `| 0` is signed, so anything past two billion would arrive as
+          // a negative number.
+          fuel: Number(el("fuel").value) >>> 0,
+          deadlineMs: Number(el("deadline").value) >>> 0,
+        });
+      }
+
+      // Terminating is the only way to stop wasm from outside it. The fuel
+      // and deadline bounds are the mechanisms that stop a run from *inside*,
+      // and they are what a reader should reach for first: they report why
+      // the run stopped, and this does not.
+      el("stop").onclick = () => {
+        worker.terminate();
+        worker = null;
+        pending = null;
+        settle(false);
+        status.textContent = "stopped";
+        el("diagnostics").textContent =
+          "stopped from outside, so the run has nothing to say about why. " +
+          "Lower the fuel or the deadline to be told instead.";
+        el("diagnostics").className = "stopped";
+      };
+      el("run").onclick = () => ask("run");
+      el("compile").onclick = () => ask("compile");
+      source.onkeydown = (event) => {
+        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+          event.preventDefault();
+          ask("run");
+        }
+      };
+
+      start();
+      status.textContent = "ready";
+    </script>
+  </body>
+</html>
