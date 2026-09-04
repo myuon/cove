@@ -7,10 +7,12 @@
 # that stopped compiling, which is a documentation break rather than a
 # behaviour one. CI's `cargo test --workspace` step compiles them all.
 #
-# The `#[ignore]`d cases go with them: `crates/cove-runtime/src/frame/tests.rs`
-# drives the `benches/` rows at the 2,000,000 turns they are measured at, and
-# its module docs say why those were not shortened instead. CI has a step of
-# its own for them, and `cargo test --workspace --lib -- --ignored` is how to
-# run them by hand — which is worth doing after a change to `frame.rs`.
+# The `#[ignore]`d cases go with them. There is one, and it is the roadmap:
+# `crates/cove-cli/tests/vm_coverage.rs` runs every program in the repository
+# on the linear-memory backend and sorts the answers into agrees, disagrees,
+# and does not lower. It is ignored because it runs what it lowers, and the
+# benchmark rows are two million turns each. CI has a step of its own for it,
+# and `cargo test --workspace --lib --tests -- --ignored` is how to run it by
+# hand — which is worth doing after a change to the lowering or the machine.
 [alias]
 t = "test --workspace --lib --bins --tests"

@@ -35,6 +35,37 @@ Before pushing, the full gate is what CI runs: `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
 and `cargo doc --workspace --no-deps`.
 
+### What the gate costs, measured
+
+Run it in the **background** and keep working. It is the single thing most
+likely to leave somebody watching a blank terminal, and none of it needs
+watching.
+
+The steady state is about a minute — 22s for `cargo t` on an unchanged tree,
+13s for clippy, 26s for `cargo doc`. Everything above that is the first build
+after a change, and that is where a wait of several minutes comes from. So
+run the gate when there is something to gate, not after every edit.
+
+Two things were guessed wrong before they were measured, and both guesses are
+worth not repeating.
+
+**Clippy and `cargo t` do not invalidate each other.** `cargo t` immediately
+after a clippy run takes 12s, not a rebuild. The order they run in does not
+matter and neither needs a target directory of its own.
+
+**`--release` is not the faster gate.** What costs time here is compilation,
+not running: `cargo t` is 2,300 tests that finish in seconds, and an
+optimised build takes rustc *longer*. The one place release would pay is the
+`#[ignore]`d coverage ratchet, which really is compute-bound — it runs the
+whole corpus — and even there the rebuild has to be earned back.
+
+`target/` grows to tens of gigabytes, most of it `debug/deps`. A rename or a
+deletion leaves the old crate's artifacts behind forever: after the backend
+cutover there were 4.9 GB under `cove_lir`, a crate that no longer existed.
+Nothing collects those, so sweeping by the dead name is worth doing after a
+rename, and it is safe — no current target can reference an artifact named
+after one that is gone.
+
 ## Architecture Decision Records
 
 ADRs live in `docs/adr/`, numbered sequentially.
