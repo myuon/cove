@@ -53,6 +53,28 @@ all refused over `file://` by every browser's origin rules; that is the
 browser's decision and there is nothing this page can do about it. Any static
 server will do.
 
+## The published copy
+
+`.github/workflows/pages.yml` builds this page — with
+`RUSTFLAGS="-C opt-level=z"`, for the 12% off `cove_wasm.wasm` described above
+— on every push to `main`, stages `index.html`, `worker.mjs`, `cove.mjs` and
+the built `.wasm` into one directory, and runs `node web/check.mjs` against
+that build before anything is deployed. A run that does not hold — a program
+that no longer compiles, a `spawn` that stops saying why, a fuel or deadline
+bound that stops firing — fails the job, and nothing is published.
+
+It shares the repository's one GitHub Pages site with the API documentation
+(`cargo doc`, from the same workflow), rather than a site of its own, because
+a repository has exactly one such site when the source is "GitHub Actions"
+and a second workflow deploying to it would only race this one. It is reached
+at `https://myuon.github.io/cove/playground/`, and linked from the
+documentation's own landing page.
+
+Every path the page asks for — the worker, `cove.mjs`, the `.wasm` — is
+resolved relative to the file that asks for it, never to the site root, so
+nothing here needed to change to be served from that subdirectory rather than
+from `/`.
+
 ## Check it without a browser
 
 ```
