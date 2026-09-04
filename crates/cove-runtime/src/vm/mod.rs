@@ -88,6 +88,7 @@ use crate::error::RuntimeError;
 use crate::host::HostRegistry;
 use crate::runtime::Runtime;
 use crate::trace::{RunOutcome, Timing, TraceEvent};
+use crate::vm::debug::Debugger;
 use crate::vm::exec::Machine;
 use crate::vm::mem::Collected;
 // The public `Value` reaches this file for the one reason ADR 0034 allows it
@@ -101,12 +102,14 @@ use crate::value::Value;
 pub(crate) mod boundary;
 pub(crate) mod builtins;
 pub(crate) mod cell;
+pub(crate) mod debug;
 #[cfg(test)]
 mod differential;
 #[cfg(test)]
 mod erasure;
 pub(crate) mod exec;
 pub(crate) mod mem;
+pub(crate) mod render;
 
 /// The words a run's heap region may grow to unless an embedder says
 /// otherwise.
@@ -161,6 +164,30 @@ impl<'a> Vm<'a> {
             machine: Machine::for_run(program, DEFAULT_HEAP_WORDS, Some(hosts), Some(runtime)),
             budget: meter_of(hosts),
         }
+    }
+
+    /// The same run, watched by `debugger`.
+    ///
+    /// A second constructor rather than a parameter on [`Vm::new`], for the
+    /// reason the heap budget is not one either: no existing caller has a
+    /// debugger to name, and a parameter every caller passes `None` to is a
+    /// question every caller is asked and none of them answers.
+    ///
+    /// What it costs the run is stated where it is paid, in
+    /// the debugger's own module: the machine asks before **every** instruction
+    /// for as long as the debugger is installed, so a debugged run is slower
+    /// by whatever the debugger does per instruction. A run built with
+    /// [`Vm::new`] is unchanged — the loop's comparison is the same one it
+    /// was, against the next safepoint.
+    pub fn debugged(
+        runtime: &'a Runtime,
+        hosts: &'a HostRegistry,
+        program: &'a Program,
+        debugger: &'a dyn Debugger,
+    ) -> Vm<'a> {
+        let mut vm = Vm::new(runtime, hosts, program);
+        vm.machine.watch(Some(debugger));
+        vm
     }
 
     /// Runs `module.name` with the process arguments `args`.

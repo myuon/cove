@@ -335,6 +335,13 @@ pub enum RunOutcome {
     HostCalls,
     /// A `spawn` would have passed the concurrency limit.
     Concurrency,
+    /// A debugger halted the run.
+    ///
+    /// Its own outcome for the reason every other stop mode has one: a
+    /// reader deciding what to do about a stopped run wants to know which
+    /// control stopped it, and a run somebody was stepping through is not a
+    /// run that broke an invariant or ran out of anything.
+    Debugger,
 }
 
 impl RunOutcome {
@@ -351,6 +358,7 @@ impl RunOutcome {
             RunOutcome::CallDepth => "call_depth",
             RunOutcome::HostCalls => "host_calls",
             RunOutcome::Concurrency => "concurrency",
+            RunOutcome::Debugger => "debugger",
         }
     }
 
@@ -367,6 +375,7 @@ impl RunOutcome {
             RunOutcome::CallDepth,
             RunOutcome::HostCalls,
             RunOutcome::Concurrency,
+            RunOutcome::Debugger,
         ]
         .into_iter()
         .find(|outcome| outcome.as_str() == text)
@@ -1468,6 +1477,7 @@ mod tests {
             (RunOutcome::CallDepth, "call_depth"),
             (RunOutcome::HostCalls, "host_calls"),
             (RunOutcome::Concurrency, "concurrency"),
+            (RunOutcome::Debugger, "debugger"),
         ];
         for (outcome, name) in all {
             assert_eq!(outcome.as_str(), name);

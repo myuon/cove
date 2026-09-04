@@ -54,5 +54,10 @@ pub use trace::{
     TRACE_FORMAT_VERSION,
 };
 pub use value::{Value, ValueView};
+// The machine side of issue #241's debugger. The module is private like the
+// rest of `vm`, and what leaves it is a trait to implement, an answer to give,
+// and the owned snapshots a stop hands out — no word, no frame, no piece of
+// the representation `vm` exists to keep in.
+pub use vm::debug::{Call, Debugger, Field, Line, Local, Object, Resume, Stop, Word};
 pub use vm::exec::SAFEPOINT_STRIDE;
 pub use vm::Vm;

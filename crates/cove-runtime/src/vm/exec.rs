@@ -38,6 +38,7 @@ use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::task;
 use crate::trace::TraceEvent;
 use crate::vm::builtins::operand::Operand;
+use crate::vm::debug::{halted, Debugger, Resume, Stop};
 use crate::vm::mem::{Collected, Memory, NoSegment, Overflow, Parked, Rooted, Roots};
 use crate::vm::{boundary, builtins, cell};
 // The one import of the public `Value` outside `boundary`, and the one thing
@@ -402,6 +403,27 @@ pub(crate) struct Machine<'a> {
     /// the same time on two threads must not share one.
     next_task: u64,
     instructions: u64,
+    /// The instruction count at which the loop next asks a question.
+    ///
+    /// The whole of what a debugger costs the dispatch loop, and it is
+    /// nothing: the loop's one comparison already existed as
+    /// `instructions % SAFEPOINT_STRIDE == 0`, and this is the same
+    /// comparison against a number that answers *both* questions. With no
+    /// debugger installed it is the next multiple of [`SAFEPOINT_STRIDE`]
+    /// and the loop behaves exactly as it did; with one installed it is
+    /// `instructions + 1`, so the machine asks before every instruction and
+    /// the safepoint still fires on its own schedule inside.
+    ///
+    /// `docs/VM_ARCHITECTURE.md`'s "The mechanism that turns a thing off can
+    /// cost more than the thing" is why it is not an `Option` tested per
+    /// instruction: a `bool` guarding the counter measured 2.4% on `arith`,
+    /// and *"the branch costs what the increment costs"*. There is no second
+    /// branch here to pay for, and the substitution was measured to cost
+    /// nothing: the same tree with this comparison put back to the modulo
+    /// measured 82.9 ms on `arith` against 82.7 ms with it. What did cost
+    /// something was writing the question itself into the loop, which is why
+    /// [`Machine::ask`] is a call. [`crate::vm::debug`] has the table.
+    next_check: u64,
     /// How many of [`Machine::instructions`] have been handed to the run's
     /// [`Meter`].
     ///
@@ -484,6 +506,20 @@ pub(crate) struct Machine<'a> {
     /// rather than at the test, and keeps the message so that it can tell
     /// the `Err` it is holding from a later, unrelated one.
     assertion_failure: Option<(Span, String)>,
+    /// The debugger this run asks before every instruction, if one is
+    /// installed.
+    ///
+    /// It is the *machine* that calls, never the other way round: nothing
+    /// here hands out a suspended machine, and [`Stop`] is a shared borrow
+    /// that lasts one call. That is not a style choice. [`Machine::dispatch`]
+    /// holds a `&'s Scope<'s, 'a>` — the thread scope a `spawn` starts its
+    /// children in — and that borrow cannot outlive [`Machine::drive`], so a
+    /// handle to a paused machine could not be a value a debugger keeps.
+    /// Inverting the call is what makes the borrow expressible.
+    ///
+    /// `Send + Sync`, because a spawned task's machine is handed the same
+    /// reference and asks it from its own thread.
+    debugger: Option<&'a (dyn Debugger + Send + Sync)>,
 }
 
 impl<'a> Machine<'a> {
@@ -531,6 +567,8 @@ impl<'a> Machine<'a> {
             held: Vec::new(),
             callback_answer: None,
             assertion_failure: None,
+            debugger: None,
+            next_check: SAFEPOINT_STRIDE,
         }
     }
 
@@ -583,6 +621,8 @@ impl<'a> Machine<'a> {
             held: Vec::new(),
             callback_answer: None,
             assertion_failure: None,
+            debugger: None,
+            next_check: SAFEPOINT_STRIDE,
         }
     }
 
@@ -595,6 +635,34 @@ impl<'a> Machine<'a> {
     /// How many instructions this machine has run.
     pub(crate) fn instructions(&self) -> u64 {
         self.instructions
+    }
+
+    /// Installs `debugger`, to be asked before every instruction this machine
+    /// runs from here on.
+    ///
+    /// Installed rather than passed, because the question is asked in the
+    /// dispatch loop and the loop takes its arguments once per call. A task
+    /// this machine spawns is handed the same reference, which is why the
+    /// trait is `Send + Sync`.
+    pub(crate) fn watch(&mut self, debugger: Option<&'a (dyn Debugger + Send + Sync)>) {
+        self.debugger = debugger;
+        self.next_check = self.next_question();
+    }
+
+    /// The instruction count at which the loop next asks its one question.
+    ///
+    /// The two questions folded into one comparison. Without a debugger it is
+    /// the next multiple of [`SAFEPOINT_STRIDE`] — the same counts
+    /// `self.instructions % SAFEPOINT_STRIDE == 0` fired at, which is
+    /// contract arithmetic and may not move by one instruction. With a
+    /// debugger it is the very next instruction, and the safepoint's own
+    /// schedule is unchanged underneath it.
+    #[inline]
+    fn next_question(&self) -> u64 {
+        match self.debugger {
+            Some(_) => self.instructions + 1,
+            None => (self.instructions / SAFEPOINT_STRIDE + 1) * SAFEPOINT_STRIDE,
+        }
     }
 
     /// What every collection so far has done.
@@ -876,33 +944,71 @@ impl<'a> Machine<'a> {
 
         loop {
             self.instructions += 1;
-            if self.instructions.is_multiple_of(SAFEPOINT_STRIDE) {
+            // One comparison, and it answers both questions. `next_check` is
+            // the smaller of the next safepoint and the next debug stop, so
+            // a run with no debugger installed compares against the next
+            // multiple of `SAFEPOINT_STRIDE` and does exactly what the
+            // modulo did — and a run with one compares against
+            // `instructions + 1` and stops at every instruction. There is no
+            // second test on this path, which is what
+            // `docs/VM_ARCHITECTURE.md` measured the cost of.
+            if self.instructions >= self.next_check {
+                // Before anything reads a frame, because `pc` is a local of
+                // this loop until this line: a debugger — or a collection —
+                // reading a stale `pc` would read the instruction after the
+                // one this stop is at.
                 self.sync(pc);
-                // This task's own flag and every bounded call this thread is
-                // inside first, then the run's accounting, in the order
-                // `Interpreter::charge_safepoint` asks them: a cancelled task
-                // is cancelled and not out of fuel, whichever of the two also
-                // happens to be true. `stopped_here` is the oracle's own
-                // function, so the two backends cannot disagree about which
-                // of the two stopped the work.
-                stopped_here(self.cancellation.as_ref(), &self.stops, self.span(id, pc))?;
-                // What is handed over is the instructions run since the last
-                // hand-over, not the stride: a Host call between two
-                // safepoints may already have paid for part of this window,
-                // and charging the stride flat would charge that part twice.
-                // It is a whole stride whenever nothing intervened, which is
-                // the case a bound is stated against.
-                let gathered = self.instructions - self.charged;
-                self.charged = self.instructions;
-                if let Err(stopped) = budget.safepoint(gathered) {
-                    return Err(budget.to_runtime_error(stopped).at(self.span(id, pc)));
+                // The debugger first, so that a stop it asks for is not
+                // pre-empted by a safepoint that would have stopped the run
+                // for its own reason at the same instruction. Its whole
+                // contract is in `Machine::ask`: it is asked, and `Go` or
+                // `Halt` is honoured. Every policy a session has — a
+                // breakpoint, a step, a `finish` — is the implementor's,
+                // which is what keeps this loop from growing one.
+                //
+                // `is_some` and a call, rather than the question written out
+                // here, and that is measured rather than tidy: writing it
+                // out cost 4.3% on `arith`, because the dispatch body's
+                // footprint is a cost every program pays. See
+                // `Machine::ask`.
+                if self.debugger.is_some() {
+                    self.ask(id, pc)?;
                 }
-                // And the run's: a collection is stop-the-world, so a task
-                // that never published its roots would be a task the
-                // collector waits for while it waits for the collector. The
-                // question costs one relaxed load when nothing is pending,
-                // which is every time but the rare one.
-                self.mem.poll(&Live(self));
+                // The safepoint keeps its own schedule, and this is where
+                // that is enforced: ADR 0040 states every stop mode's bound
+                // in multiples of `SAFEPOINT_STRIDE`, so it fires at exactly
+                // the counts `instructions % SAFEPOINT_STRIDE == 0` fired at
+                // whether a debugger is installed or not.
+                if self.instructions.is_multiple_of(SAFEPOINT_STRIDE) {
+                    // This task's own flag and every bounded call this thread
+                    // is inside first, then the run's accounting, in the
+                    // order `Interpreter::charge_safepoint` asks them: a
+                    // cancelled task is cancelled and not out of fuel,
+                    // whichever of the two also happens to be true.
+                    // `stopped_here` is the oracle's own function, so the two
+                    // backends cannot disagree about which of the two stopped
+                    // the work.
+                    stopped_here(self.cancellation.as_ref(), &self.stops, self.span(id, pc))?;
+                    // What is handed over is the instructions run since the
+                    // last hand-over, not the stride: a Host call between two
+                    // safepoints may already have paid for part of this
+                    // window, and charging the stride flat would charge that
+                    // part twice. It is a whole stride whenever nothing
+                    // intervened, which is the case a bound is stated
+                    // against.
+                    let gathered = self.instructions - self.charged;
+                    self.charged = self.instructions;
+                    if let Err(stopped) = budget.safepoint(gathered) {
+                        return Err(budget.to_runtime_error(stopped).at(self.span(id, pc)));
+                    }
+                    // And the run's: a collection is stop-the-world, so a
+                    // task that never published its roots would be a task the
+                    // collector waits for while it waits for the collector.
+                    // The question costs one relaxed load when nothing is
+                    // pending, which is every time but the rare one.
+                    self.mem.poll(&Live(self));
+                }
+                self.next_check = self.next_question();
             }
 
             let inst = &code[pc];
@@ -1641,6 +1747,32 @@ impl<'a> Machine<'a> {
         }
     }
 
+    /// The debugger's question, out of line.
+    ///
+    /// `pc` has been synced by the caller, which is what makes the frame it
+    /// reads truthful, and this runs once per instruction while a debugger is
+    /// installed and never otherwise.
+    ///
+    /// `#[inline(never)]` is a measurement rather than a preference.
+    /// `docs/VM_ARCHITECTURE.md` has established more than once that a change
+    /// altering nothing a program executes can still move `arith` by several
+    /// percent, *"because the dispatch body's footprint and its branch-target
+    /// alignment are costs every program pays"* — and building the [`Stop`]
+    /// and the indirect call inside [`Machine::dispatch`] cost 4.3% on
+    /// `arith` against the same tree with this line, which is more than the
+    /// per-instruction branch this whole arrangement was shaped to avoid.
+    /// Out of line, the change measures at or below the base on both `arith`
+    /// and `field`.
+    #[inline(never)]
+    fn ask(&mut self, id: FunctionId, pc: usize) -> Result<(), RuntimeError> {
+        if let Some(debugger) = self.debugger {
+            if let Resume::Halt = debugger.at(&Stop::new(self, id, pc)) {
+                return Err(halted(self.span(id, pc)));
+            }
+        }
+        Ok(())
+    }
+
     /// Writes the local program counter back into the top frame.
     ///
     /// Called before anything that reads the frames: a collection, which
@@ -2213,6 +2345,36 @@ impl<'a> Machine<'a> {
         self.program
     }
 
+    /// This task's live calls, innermost first, as
+    /// [`crate::vm::debug`] projects them: which function, where its words
+    /// begin, and where it is.
+    ///
+    /// `pc` is truthful only after a [`Machine::sync`], which is the
+    /// dispatch loop's obligation and not this function's — it is the whole
+    /// of what makes a debug stop a stop rather than a guess.
+    pub(crate) fn calls(&self) -> Vec<(FunctionId, u64, u32)> {
+        self.frames
+            .iter()
+            .rev()
+            .map(|frame| (frame.function, frame.base, frame.pc))
+            .collect()
+    }
+
+    /// `words` words of the frame based at `base`, from `at`.
+    pub(crate) fn frame_run(&self, base: u64, at: u32, words: u32) -> Vec<u64> {
+        self.mem.read_words(base + at as u64, words)
+    }
+
+    /// Whether `words` words at `addr` are words this run's memory has.
+    ///
+    /// The question a lossy reader has to ask and a boundary conversion does
+    /// not: every address the boundary follows came out of a value location
+    /// the lowering wrote, and a debugger is handed words by whoever is
+    /// looking. Reading past the end of a region is what this refuses.
+    pub(crate) fn readable(&self, addr: u64, words: u32) -> bool {
+        self.mem.holds(addr, words)
+    }
+
     /// What the object at `addr` is, for a boundary that has to name it.
     pub(crate) fn object_layout(&self, addr: u64) -> LayoutId {
         self.mem.object_layout(addr)
@@ -2417,9 +2579,14 @@ impl<'a> Machine<'a> {
         let resources = Arc::clone(&self.resources);
         let meter = budget.clone();
         let flag = cancellation.clone();
+        // The same debugger, asked from the child's thread. That is what
+        // `Send + Sync` on the trait buys, and it is why a debugger sees a
+        // spawned task's instructions rather than only the entry's.
+        let watcher = self.debugger;
         let handle = threads.spawn(move || {
             run_task(
                 program, hosts, runtime, resources, segment, meter, flag, id, object, home, span,
+                watcher,
             )
         });
 
@@ -3243,6 +3410,7 @@ fn run_task(
     closure: u64,
     answer: u64,
     span: Span,
+    debugger: Option<&(dyn Debugger + Send + Sync)>,
 ) -> Outcome {
     let mut machine = Machine::for_task(
         program,
@@ -3253,6 +3421,7 @@ fn run_task(
         cancellation.clone(),
         id,
     );
+    machine.watch(debugger);
     let started = Instant::now();
     let result = machine.enter_closure(closure, &budget, span);
     if !(result.is_err() && cancellation.is_cancelled()) {

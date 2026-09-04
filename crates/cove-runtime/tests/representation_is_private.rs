@@ -44,6 +44,33 @@
 //! signature strings, and every entry in it existed because ADR 0028 wrote
 //! "handle" when it meant one of the two.
 //!
+//! # A word that crosses inward and roots nothing is not a handle
+//!
+//! `vm::debug::Stop::object` takes a bare `u64` and answers a rendered
+//! snapshot, and it passes this scan because it names none of the words
+//! below. It is worth saying why it *should* pass, because a grep that
+//! happens to be satisfied teaches a reader nothing.
+//!
+//! The definition above is the argument. A VM heap handle is a reference
+//! into storage this crate manages **and roots for as long as anything
+//! outside the machine needs it**. `Stop::object` roots nothing: the word
+//! goes in, a snapshot of owned strings comes out, and a word that does not
+//! name an object this memory holds answers `None` rather than anything at
+//! all. The `Stop` it hangs off is borrowed for the length of one
+//! `Debugger::at` call and cannot outlive it, so there is no moment at which
+//! something outside the machine holds a piece of the heap.
+//!
+//! The distinction the rule is drawn for survives, too. ADR 0028's sentence
+//! is that changing the VM's representation must not require exposing that
+//! representation to embedders — to code that *computes* with Cove values. A
+//! debugger does not: it renders for a person, in strings it cannot feed
+//! back. What it does inherit is the weaker promise. If a linear address
+//! stopped being a word index tomorrow, no signature here would move and no
+//! debugger UI would fail to compile; the numbers a person reads would mean
+//! something else. That is the right trade for a tool whose entire purpose
+//! is to look at the representation, and it is a trade rather than an
+//! oversight.
+//!
 //! # `pub fn` is not all of the public surface
 //!
 //! A trait method carries no visibility of its own — it is exactly as public

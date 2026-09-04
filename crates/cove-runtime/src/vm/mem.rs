@@ -1590,7 +1590,7 @@ impl Memory {
     /// A stack address of *another* task's segment fails it, which is the
     /// second thing segments buy: an address one task formed cannot be read by
     /// another even by accident, because it is not in the words that task has.
-    fn holds(&self, addr: u64, words: u32) -> bool {
+    pub(crate) fn holds(&self, addr: u64, words: u32) -> bool {
         let end = addr + words as u64;
         if is_stack(addr) {
             addr >= self.stack.origin && end <= self.stack.origin + self.stack.words.len() as u64
