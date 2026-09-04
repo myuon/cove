@@ -71,6 +71,7 @@ mod dispatch;
 mod expr;
 mod frame;
 mod gap;
+mod limits;
 mod methods;
 mod pattern;
 mod shapes;
@@ -362,6 +363,18 @@ fn emit<'a>(
 fn finish(program: Program, errors: Vec<Diagnostic>) -> Result<Program, Vec<Diagnostic>> {
     if !errors.is_empty() {
         return Err(only_once(errors));
+    }
+
+    // A frame wider than a sixteen-bit slot operand can name is the one thing
+    // this lowering refuses about a program it otherwise understood. It is
+    // checked here rather than as each body finishes because here is where
+    // every function exists — a lambda and an instantiation are appended
+    // while another body is still being lowered — and because a diagnostic
+    // about the *program* should list every function at fault rather than the
+    // first. See `limits`.
+    let oversized = limits::oversized_frames(&program);
+    if !oversized.is_empty() {
+        return Err(oversized);
     }
 
     // A fault here is a bug in this module, not a fault in the user's

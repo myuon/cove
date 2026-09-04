@@ -11,6 +11,7 @@
 //! be caught only when something ran it.
 
 mod assertions;
+mod bytecode;
 mod calls;
 mod cells;
 mod closures;
@@ -23,6 +24,7 @@ mod gaps;
 mod generics;
 mod hosts;
 mod layouts;
+mod limits;
 mod locals;
 mod methods;
 mod patterns;

@@ -41,6 +41,7 @@
 //! two could disagree, the checker is right by construction, because the
 //! lowering reads its answers rather than recomputing them.
 
+pub mod bytecode;
 pub mod inst;
 pub mod layout;
 pub mod lower;
@@ -49,6 +50,7 @@ pub mod program;
 pub mod repr;
 pub mod verify;
 
+pub use bytecode::{EncodedInst, MAX_FRAME_WORDS};
 pub use inst::{ArithOp, CmpOp, Compare, Convert, Inst, Len, Num, Pc, Slot};
 pub use layout::{
     enum_layout, struct_layout, Case, Field, Layout, LayoutId, Part, Shape, SHARED_STATE,
