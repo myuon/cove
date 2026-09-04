@@ -15,4 +15,4 @@
 # and `cargo test --workspace --lib --tests -- --ignored` is how to run it by
 # hand — which is worth doing after a change to the lowering or the machine.
 [alias]
-t = "test --workspace --lib --bins --tests"
+t = "test --profile checked --workspace --lib --bins --tests"

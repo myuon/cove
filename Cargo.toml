@@ -66,3 +66,26 @@ cove-wasm = { path = "crates/cove-wasm" }
 [profile.bench-stable]
 inherits = "release"
 codegen-units = 1
+
+# The profile the test suite runs under.
+#
+# `inherits = "release"` for the reason the suite is slow: what costs time
+# here is *running* Cove programs, not compiling the harness. The end-to-end
+# suite spawns the real binary 248 times and measured 28s unoptimised against
+# 7s optimised, and several other integration suites are the same shape.
+#
+# The two flags are what make that safe rather than a trade. Rust turns
+# integer overflow into a wrap in release and drops `debug_assert!`
+# altogether, and a language implementation that tested only that build would
+# be testing with its checks off. Setting them here keeps every check the
+# unoptimised build has.
+#
+# It is a profile rather than a rewrite of `debug_assert!` into `assert!`
+# deliberately: an `assert!` would keep the check in the release build of
+# anyone who *embeds* `cove-runtime`, which is our convenience charged to
+# them. `[profile.release]` itself stays absent — it is the reference for
+# what a user's own build does.
+[profile.checked]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true

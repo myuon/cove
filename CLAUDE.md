@@ -67,11 +67,21 @@ worth not repeating.
 after a clippy run takes 12s, not a rebuild. The order they run in does not
 matter and neither needs a target directory of its own.
 
-**`--release` is not the faster gate.** What costs time here is compilation,
-not running: `cargo t` is 2,300 tests that finish in seconds, and an
-optimised build takes rustc *longer*. The one place release would pay is the
-`#[ignore]`d coverage ratchet, which really is compute-bound — it runs the
-whole corpus — and even there the rebuild has to be earned back.
+**`cargo t` runs optimised, and that is the single biggest thing about its
+cost.** `[profile.checked]` inherits `release` and turns `debug-assertions`
+and `overflow-checks` back on, so every check the unoptimised build has is
+still there. The whole suite finishes in **20s**; from scratch, build and all,
+it is 85s.
+
+The reason is that this suite *runs Cove programs* rather than merely
+compiling a harness: the end-to-end suite spawns the real binary 248 times
+and measured 28s unoptimised against 7s optimised, and `trace_replay` and
+`embedding` are the same shape. This file previously said the opposite —
+that release could not help because the time was compilation and the tests
+finished in seconds — and that was generalised from a `cargo t` measurement
+that had stopped early at a failing target without running the slow suites at
+all. **Measure the suites individually before believing a total**, which is
+what eventually settled it.
 
 `target/` grows to tens of gigabytes, most of it `debug/deps`. A rename or a
 deletion leaves the old crate's artifacts behind forever: after the backend
