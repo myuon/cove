@@ -265,6 +265,12 @@ on a fixed 1024-instruction stride rather than a basic block at a time, so
 the table moved out of the prose beside the deleted backend and into the
 record, and `crates/cove-runtime/tests/responsiveness.rs` is what measures
 every row of it.
+[ADR 0041](docs/adr/0041-a-slot-number-fits-in-sixteen-bits.md) decides the
+width of the fixed-width instruction that will execute after the readable
+`Inst` IR: sixteen bytes, three sixteen-bit slot operands and a sixty-four-bit
+payload, which every one of the forty-nine instructions fits and which costs
+one compiler limit — a function's frame may hold 65,536 words, against the 122
+the largest function in the repository lowers to.
 
 Syntax is still provisional and may change.
 
