@@ -56,7 +56,7 @@ fn0 m.f(Array) -> Array
     19  clear s2:ref Array
     20  copy s1:ref s5:ref Array
     21  clear s5:ref Array
-    22  return s1:ref
+    22  return s1:ref Array
 "
     );
 }
@@ -102,11 +102,11 @@ fn0 m.f(Array) -> Array
     20  clear s3:ref fn
     21  clear s2:ref Array
     22  int s4:int 0
-    23  call-builtin s2:ref Array.slice (s5:Array s4:Int s6:Int)
+    23  call-builtin s2:ref Array.slice (s5:Array s4:Int s6:Int) Array
     24  clear s5:ref Array
     25  copy s1:ref s2:ref Array
     26  clear s2:ref Array
-    27  return s1:ref
+    27  return s1:ref Array
 "
     );
 }
@@ -152,7 +152,7 @@ fn0 m.f(Array) -> Int
     17  clear s5:ref fn
     18  clear s2:ref Array
     19  copy s1:int s4:int Int
-    20  return s1:int
+    20  return s1:int Int
 "
     );
 }
@@ -175,7 +175,7 @@ fn a_vector_is_walked_through_a_copy_taken_before_the_first_call() {
 fn0 m.f(Vector) -> Array
   frame 11: s0!:ref s1:ref s2:ref s3:ref s4:int s5:ref s6:int s7:int s8:bool s9:int s10:int
   local v -> s0:Vector [0, 21)
-     0  call-builtin s2:ref Vector.toArray (s0:Vector)
+     0  call-builtin s2:ref Vector.toArray (s0:Vector) Array
      1  alloc s3:ref closure m.f#0<closure>
      2  int s4:int 1
      3  store-field s3:ref +0 s4:int Int
@@ -195,7 +195,7 @@ fn0 m.f(Vector) -> Array
     17  clear s2:ref Array
     18  copy s1:ref s5:ref Array
     19  clear s5:ref Array
-    20  return s1:ref
+    20  return s1:ref Array
 "
     );
 }
@@ -237,7 +237,7 @@ fn1 m.f(Array) -> Array
     17  clear s2:ref Array
     18  copy s1:ref s5:ref Array
     19  clear s5:ref Array
-    20  return s1:ref
+    20  return s1:ref Array
 "
     );
 }
@@ -277,7 +277,7 @@ fn0 m.f(Array) -> Array
     17  clear s2:ref Array
     18  copy s1:ref s5:ref Array
     19  clear s5:ref Array
-    20  return s1:ref
+    20  return s1:ref Array
 "
     );
 }
@@ -325,7 +325,7 @@ fn0 m.f(Array) -> Array
      3  store-field s3:ref +0 s4:int Int
      4  len s4:int s2:ref
      5  int s5:int 0
-     6  call-builtin s6:ref Array.slice (s2:Array s5:Int s4:Int)
+     6  call-builtin s6:ref Array.slice (s2:Array s5:Int s4:Int) Array
      7  clear s2:ref Array
      8  alloc s2:ref Array<array> xs4:int
      9  int s7:int 1
@@ -387,7 +387,7 @@ fn0 m.f(Array) -> Array
     65  clear s3:ref fn
     66  copy s1:ref s6:ref Array
     67  clear s6:ref Array
-    68  return s1:ref
+    68  return s1:ref Array
 "
     );
 }

@@ -28,7 +28,7 @@ fn0 m.total() -> Int
      5  int s3:int 4
      6  add.int s1:int s2:int s3:int
      7  copy s0:int s1:int Int
-     8  return s0:int
+     8  return s0:int Int
 "
     );
 }
@@ -57,7 +57,7 @@ fn0 m.mix(Int Float) -> Float
      4  int s3:int 2
      5  add.int s7:int s4:int s3:int
      6  copy s2:float s6:float Float
-     7  return s2:float
+     7  return s2:float Float
 "
     );
 }
@@ -90,7 +90,7 @@ fn0 m.f() -> Int
     11  copy s0:int s1:int Int
     12  clear s3:int m.A
     13  clear s5:ref m.B
-    14  return s0:int
+    14  return s0:int Int
 "
     );
 }
@@ -109,11 +109,11 @@ fn0 m.shout(String String) -> Int
   frame 5: s0!:ref s1!:ref s2:int s3:ref s4:int
   local a -> s0:String [0, 5)
   local b -> s1:String [0, 5)
-     0  call-builtin s3:ref String.interpolate (s0:String s1:String)
-     1  call-builtin s4:int String.length (s3:String)
+     0  call-builtin s3:ref String.interpolate (s0:String s1:String) String
+     1  call-builtin s4:int String.length (s3:String) Int
      2  clear s3:ref String
      3  copy s2:int s4:int Int
-     4  return s2:int
+     4  return s2:int Int
 "
     );
 }
@@ -134,11 +134,11 @@ fn0 m.f() -> Int
   local s -> s2:String [2, 4)
      0  int s1:int 0
      1  str s2:ref \"held\"
-     2  call-builtin s3:int String.length (s2:String)
+     2  call-builtin s3:int String.length (s2:String) Int
      3  copy s1:int s3:int Int
      4  clear s2:ref String
      5  copy s0:int s1:int Int
-     6  return s0:int
+     6  return s0:int Int
 "
     );
 }
@@ -159,7 +159,7 @@ fn0 m.f() -> Int
      1  int s2:int 2
      2  add.int s3:int s1:int s2:int
      3  copy s0:int s3:int Int
-     4  return s0:int
+     4  return s0:int Int
 "
     );
 }
@@ -185,7 +185,7 @@ fn0 m.f() -> Int
      4  clear s1:ref String
      5  copy s0:int s4:int Int
      6  clear s3:ref m.User
-     7  return s0:int
+     7  return s0:int Int
 "
     );
 }

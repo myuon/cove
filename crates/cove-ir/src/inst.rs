@@ -213,7 +213,11 @@ pub enum Inst {
     /// case index read out of the object, and the table has one target per
     /// case plus a default.
     Switch { on: Slot, table: TableId },
-    /// Leave the function, answering the word in `src`.
+    /// Leave the function, answering the value at `src`.
+    ///
+    /// `src` is the *first* slot of that value location, and how many words
+    /// follow it is [`crate::Function::returns`] — which is why a listing
+    /// names that layout after the slot.
     Return { src: Slot },
 
     // ---- calls ----------------------------------------------------------

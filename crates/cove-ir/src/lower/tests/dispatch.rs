@@ -20,11 +20,11 @@ fn0 m.f() -> String
      2  copy s3:int s1:int Int
      3  copy s4:int s2:int Int
      4  box s5:ref s3:int m.Point
-     5  call s6:ref m.take (s5:Any)
+     5  call s6:ref m.take (s5:Any) String
      6  clear s5:ref Any
      7  copy s0:ref s6:ref String
      8  clear s6:ref String
-     9  return s0:ref
+     9  return s0:ref String
 "
     );
 }
@@ -52,16 +52,16 @@ fn0 m.take(Any) -> String
      0  load-field s2:int s0:ref +0 Int
      1  switch s2:int [9 9 9 9 9 9 9 9 9 9 9 9 9 2 6] else 9
      2  unbox s4:ref s0:ref m.Name
-     3  call s3:ref m.Name.show (s4:m.Name)
+     3  call s3:ref m.Name.show (s4:m.Name) String
      4  clear s4:ref m.Name
      5  jump 10
      6  unbox s5:int s0:ref m.Point
-     7  call s3:ref m.Point.show (s5:m.Point)
+     7  call s3:ref m.Point.show (s5:m.Point) String
      8  jump 10
      9  trap \"no implementation of `Show.show` for this value\"
     10  copy s1:ref s3:ref String
     11  clear s3:ref String
-    12  return s1:ref
+    12  return s1:ref String
 "
     );
 }
@@ -85,7 +85,7 @@ fn0 m.mk() -> Any
      4  box s5:ref s3:int m.Point
      5  copy s0:ref s5:ref Any
      6  clear s5:ref Any
-     7  return s0:ref
+     7  return s0:ref Any
 "
     );
 }
@@ -111,17 +111,17 @@ fn0 m.f() -> String
      7  load-field s3:int s2:ref +0 Int
      8  switch s3:int [16 16 16 16 16 16 16 16 16 16 16 16 16 9 13] else 16
      9  unbox s4:ref s2:ref m.Name
-    10  call s1:ref m.Name.show (s4:m.Name)
+    10  call s1:ref m.Name.show (s4:m.Name) String
     11  clear s4:ref m.Name
     12  jump 17
     13  unbox s5:int s2:ref m.Point
-    14  call s1:ref m.Point.show (s5:m.Point)
+    14  call s1:ref m.Point.show (s5:m.Point) String
     15  jump 17
     16  trap \"no implementation of `Show.show` for this value\"
     17  copy s0:ref s1:ref String
     18  clear s1:ref String
     19  clear s2:ref m.Holder
-    20  return s0:ref
+    20  return s0:ref String
 "
     );
 }
@@ -158,13 +158,13 @@ fn1 m.Booking.line(m.Booking) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
   local self -> s0:m.Booking [0, 8)
      0  str s2:ref \"- \"
-     1  call s3:ref m.Booking.summarize (s0:m.Booking)
-     2  call-builtin s4:ref String.interpolate (s2:String s3:String)
+     1  call s3:ref m.Booking.summarize (s0:m.Booking) String
+     2  call-builtin s4:ref String.interpolate (s2:String s3:String) String
      3  clear s3:ref String
      4  clear s2:ref String
      5  copy s1:ref s4:ref String
      6  clear s4:ref String
-     7  return s1:ref
+     7  return s1:ref String
 "
     );
     assert_eq!(
@@ -174,13 +174,13 @@ fn3 m.Receipt.line(m.Receipt) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
   local self -> s0:m.Receipt [0, 8)
      0  str s2:ref \"- \"
-     1  call s3:ref m.Receipt.summarize (s0:m.Receipt)
-     2  call-builtin s4:ref String.interpolate (s2:String s3:String)
+     1  call s3:ref m.Receipt.summarize (s0:m.Receipt) String
+     2  call-builtin s4:ref String.interpolate (s2:String s3:String) String
      3  clear s3:ref String
      4  clear s2:ref String
      5  copy s1:ref s4:ref String
      6  clear s4:ref String
-     7  return s1:ref
+     7  return s1:ref String
 "
     );
 }
@@ -204,13 +204,13 @@ fn1 m.Receipt.line(m.Receipt) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
   local self -> s0:m.Receipt [0, 8)
      0  str s2:ref \"  $ \"
-     1  call s3:ref m.Receipt.summarize (s0:m.Receipt)
-     2  call-builtin s4:ref String.interpolate (s2:String s3:String)
+     1  call s3:ref m.Receipt.summarize (s0:m.Receipt) String
+     2  call-builtin s4:ref String.interpolate (s2:String s3:String) String
      3  clear s3:ref String
      4  clear s2:ref String
      5  copy s1:ref s4:ref String
      6  clear s4:ref String
-     7  return s1:ref
+     7  return s1:ref String
 "
     );
 }

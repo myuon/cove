@@ -105,7 +105,7 @@ fn1 m.g() -> Int async
   frame 2: s0:int s1:int
      0  int s1:int 1
      1  copy s0:int s1:int Int
-     2  return s0:int
+     2  return s0:int Int
 "
     );
 }
@@ -132,11 +132,11 @@ fn a_call_to_an_async_declaration_answers_a_settled_task() {
         "\
 fn0 m.f() -> Int
   frame 3: s0:int s1:int s2:task
-     0  call s1:int m.g ()
+     0  call s1:int m.g () Int
      1  settled s2:task s1:int Int
      2  await s1:int s2:task Int
      3  copy s0:int s1:int Int
-     4  return s0:int
+     4  return s0:int Int
 "
     );
 }
@@ -170,7 +170,7 @@ fn0 m.f() -> Int
      5  await s2:int s3:task Int
      6  copy s0:int s2:int Int
      7  clear s1:ref fn
-     8  return s0:int
+     8  return s0:int Int
 "
     );
 }

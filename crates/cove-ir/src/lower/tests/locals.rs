@@ -54,7 +54,7 @@ fn0 m.area(Int Int) -> Int
   local h -> s1:Int [0, 3)
      0  mul.int s3:int s0:int s1:int
      1  copy s2:int s3:int Int
-     2  return s2:int
+     2  return s2:int Int
 "
     );
 }
@@ -119,7 +119,7 @@ fn0 m.f() -> Int
      5  add.int s3:int s1:int s2:int
      6  copy s1:int s3:int Int
      7  copy s0:int s1:int Int
-     8  return s0:int
+     8  return s0:int Int
 "
     );
 }
@@ -142,7 +142,7 @@ fn0 m.f() -> Int
      1  int s2:int 1
      2  add.int s3:int s1:int s2:int
      3  copy s0:int s3:int Int
-     4  return s0:int
+     4  return s0:int Int
 "
     );
 }

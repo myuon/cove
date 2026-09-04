@@ -52,8 +52,8 @@ total = 20  (word 14, 1 word(s))
     31 |   Ok(())
 (cove) disassemble 1
 debug_session.main:
-     17 | call s13:int debug_session.raise (s14:Int)
-=>   18 | call-builtin s15:ref String.interpolate (s3:String s13:Int)
+     17 | call s13:int debug_session.raise (s14:Int) Int
+=>   18 | call-builtin s15:ref String.interpolate (s3:String s13:Int) String
      19 | clear s3:ref String
 (cove) quit
 the run was halted after 22 instruction(s).

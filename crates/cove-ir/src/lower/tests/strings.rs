@@ -14,7 +14,7 @@ fn0 m.hello() -> String
      0  str s1:ref \"hello\"
      1  copy s0:ref s1:ref String
      2  clear s1:ref String
-     3  return s0:ref
+     3  return s0:ref String
 "
     );
 }
@@ -35,12 +35,12 @@ fn0 m.greet(String) -> String
   local name -> s0:String [0, 8)
      0  str s2:ref \"hi \"
      1  str s3:ref \"!\"
-     2  call-builtin s4:ref String.interpolate (s2:String s0:String s3:String)
+     2  call-builtin s4:ref String.interpolate (s2:String s0:String s3:String) String
      3  clear s3:ref String
      4  clear s2:ref String
      5  copy s1:ref s4:ref String
      6  clear s4:ref String
-     7  return s1:ref
+     7  return s1:ref String
 "
     );
 }
@@ -65,11 +65,11 @@ fn0 m.show(m.Point) -> String
   frame 5: s0!:int s1!:int s2:ref s3:ref s4:ref
   local p -> s0:m.Point [0, 6)
      0  str s3:ref \"p=\"
-     1  call-builtin s4:ref String.interpolate (s3:String s0:m.Point)
+     1  call-builtin s4:ref String.interpolate (s3:String s0:m.Point) String
      2  clear s3:ref String
      3  copy s2:ref s4:ref String
      4  clear s4:ref String
-     5  return s2:ref
+     5  return s2:ref String
 "
     );
 }
@@ -85,7 +85,7 @@ fn0 m.same(String String) -> Bool
   local b -> s1:String [0, 3)
      0  eq.str s3:bool s0:ref s1:ref
      1  copy s2:bool s3:bool Bool
-     2  return s2:bool
+     2  return s2:bool Bool
 "
     );
 }

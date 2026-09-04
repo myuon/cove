@@ -22,7 +22,7 @@ fn0 m.make() -> Shared
      2  store-field s2:ref +1 s1:int Int
      3  copy s0:ref s2:ref Shared
      4  clear s2:ref Shared
-     5  return s0:ref
+     5  return s0:ref Shared
 "
     );
 }
@@ -63,7 +63,7 @@ fn0 m.bump(Shared) -> Int
      7  shared.unlock s0:ref
      8  clear s2:ref fn
      9  copy s1:int s3:int Int
-    10  return s1:int
+    10  return s1:int Int
 "
     );
 }
@@ -93,7 +93,7 @@ fn1 m.bump#0(<addr>) -> Int
      3  store s0:addr s4:int Int
      4  load s4:int s0:addr Int
      5  copy s1:int s4:int Int
-     6  return s1:int
+     6  return s1:int Int
 "
     );
 }
@@ -129,7 +129,7 @@ fn0 m.read(Shared) -> Int
      8  shared.unlock s0:ref
      9  clear s2:ref fn
     10  copy s1:int s5:int Int
-    11  return s1:int
+    11  return s1:int Int
 "
     );
 }
@@ -165,7 +165,7 @@ fn1 m.count#0(<addr>) -> Int
      9  load s5:int s2:addr Int
     10  clear s2:addr <addr>
     11  copy s1:int s5:int Int
-    12  return s1:int
+    12  return s1:int Int
 "
     );
 }

@@ -37,7 +37,7 @@ fn0 m.f(m.E) -> Int
     16  jump 18
     17  trap \"no `match` arm covers this value\"
     18  copy s3:int s4:int Int
-    19  return s3:int
+    19  return s3:int Int
 "
     );
 }
@@ -69,7 +69,7 @@ fn0 m.f(m.Msg) -> String
      9  trap \"no `match` arm covers this value\"
     10  copy s2:ref s3:ref String
     11  clear s3:ref String
-    12  return s2:ref
+    12  return s2:ref String
 "
     );
 }
@@ -108,7 +108,7 @@ fn0 m.name(Int) -> String
     18  trap \"no `match` arm covers this value\"
     19  copy s1:ref s2:ref String
     20  clear s2:ref String
-    21  return s1:ref
+    21  return s1:ref String
 "
     );
 }
@@ -136,7 +136,7 @@ fn0 m.score(String) -> Int
      9  jump 11
     10  trap \"no `match` arm covers this value\"
     11  copy s1:int s2:int Int
-    12  return s1:int
+    12  return s1:int Int
 "
     );
 }
@@ -164,7 +164,7 @@ fn0 m.f(m.Shape) -> Int
      6  jump 8
      7  trap \"no `match` arm covers this value\"
      8  copy s3:int s4:int Int
-     9  return s3:int
+     9  return s3:int Int
 "
     );
 }

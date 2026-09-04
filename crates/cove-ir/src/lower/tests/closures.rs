@@ -24,7 +24,7 @@ fn0 m.f() -> Int
      4  call-closure s3:int s1:ref (s2:Int)
      5  copy s0:int s3:int Int
      6  clear s1:ref fn
-     7  return s0:int
+     7  return s0:int Int
 "
     );
     // The body is an ordinary function whose parameters occupy the frame from
@@ -38,7 +38,7 @@ fn1 m.f#0(Int) -> Int
      0  int s2:int 1
      1  add.int s3:int s0:int s2:int
      2  copy s1:int s3:int Int
-     3  return s1:int
+     3  return s1:int Int
 "
     );
 }
@@ -69,7 +69,7 @@ fn0 m.f(m.Point) -> Int
      4  call-closure s4:int s3:ref ()
      5  copy s2:int s4:int Int
      6  clear s3:ref fn
-     7  return s2:int
+     7  return s2:int Int
 "
     );
     assert_eq!(
@@ -81,7 +81,7 @@ fn1 m.f#0() -> Int
   local p -> s0:m.Point [0, 3)
      0  add.int s3:int s0:int s1:int
      1  copy s2:int s3:int Int
-     2  return s2:int
+     2  return s2:int Int
 "
     );
 }
@@ -108,7 +108,7 @@ fn0 m.f() -> Int
      3  call-closure s2:int s1:ref ()
      4  copy s0:int s2:int Int
      5  clear s1:ref fn
-     6  return s0:int
+     6  return s0:int Int
 "
     );
     assert_eq!(
@@ -118,7 +118,7 @@ fn1 m.f#0() -> Int
   frame 2: s0:int s1:int
      0  int s1:int 1
      1  copy s0:int s1:int Int
-     2  return s0:int
+     2  return s0:int Int
 "
     );
 }
@@ -149,7 +149,7 @@ fn1 m.f() -> Int
      4  call-closure s3:int s1:ref (s2:Int)
      5  copy s0:int s3:int Int
      6  clear s1:ref fn
-     7  return s0:int
+     7  return s0:int Int
 "
     );
 }
@@ -172,7 +172,7 @@ fn0 m.apply(fn Int) -> Int
   local n -> s1:Int [0, 3)
      0  call-closure s3:int s0:ref (s1:Int)
      1  copy s2:int s3:int Int
-     2  return s2:int
+     2  return s2:int Int
 "
     );
     // The lambda is built at the call site and passed as an ordinary
@@ -186,10 +186,10 @@ fn1 m.f() -> Int
      1  int s2:int 2
      2  store-field s1:ref +0 s2:int Int
      3  int s2:int 2
-     4  call s3:int m.apply (s1:fn s2:Int)
+     4  call s3:int m.apply (s1:fn s2:Int) Int
      5  clear s1:ref fn
      6  copy s0:int s3:int Int
-     7  return s0:int
+     7  return s0:int Int
 "
     );
 }
@@ -220,7 +220,7 @@ fn1 m.f#0() -> Int
      4  call-closure s3:int s2:ref ()
      5  copy s1:int s3:int Int
      6  clear s2:ref fn
-     7  return s1:int
+     7  return s1:int Int
 "
     );
     assert_eq!(
@@ -233,7 +233,7 @@ fn2 m.f#0#0() -> Int
      0  int s2:int 1
      1  add.int s3:int s0:int s2:int
      2  copy s1:int s3:int Int
-     3  return s1:int
+     3  return s1:int Int
 "
     );
 }
@@ -266,7 +266,7 @@ fn0 m.f(<addr>) -> Int
      5  call-closure s2:int s3:ref ()
      6  copy s1:int s2:int Int
      7  clear s3:ref fn
-     8  return s1:int
+     8  return s1:int Int
 "
     );
     assert_eq!(
@@ -282,7 +282,7 @@ fn1 m.f#0() -> Int
      0  int s2:int 1
      1  add.int s3:int s0:int s2:int
      2  copy s1:int s3:int Int
-     3  return s1:int
+     3  return s1:int Int
 "
     );
 }
@@ -314,7 +314,7 @@ fn0 m.f() -> Int
      4  call-closure s3:int s1:ref (s2:Int)
      5  copy s0:int s3:int Int
      6  clear s1:ref fn
-     7  return s0:int
+     7  return s0:int Int
 "
     );
     assert_eq!(
@@ -326,7 +326,7 @@ fn1 m.f#0(Int) -> Int
      0  int s2:int 2
      1  mul.int s3:int s0:int s2:int
      2  copy s1:int s3:int Int
-     3  return s1:int
+     3  return s1:int Int
 "
     );
 }
@@ -347,7 +347,7 @@ fn1 m.f#0(Int) -> Int
   local n -> s0:Int [0, 3)
      0  add.int s3:int s0:int s1:int
      1  copy s2:int s3:int Int
-     2  return s2:int
+     2  return s2:int Int
 "
     );
 }

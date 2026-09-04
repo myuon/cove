@@ -94,14 +94,14 @@ fn a_host_result_a_schema_declared_any_is_one_boxed_word() {
 fn0 m.f() -> Int
   frame 6: s0:int s1:ref s2:ref s3:int s4:int s5:int
      0  str s1:ref \"n\"
-     1  call-host s2:ref oracle.ask (s1:String)
+     1  call-host s2:ref oracle.ask (s1:String) Any
      2  clear s1:ref String
      3  int s3:int 1
      4  unbox s4:int s2:ref Int
      5  clear s2:ref Any
      6  add.int s5:int s4:int s3:int
      7  copy s0:int s5:int Int
-     8  return s0:int
+     8  return s0:int Int
 "
     );
 }
@@ -131,8 +131,8 @@ fn0 m.f() -> Result
   frame 14: s0:int s1:int s2:ref s3:host s4:int s5:ref s6:int s7:bool s8:ref s9:int s10:int s11:ref s12:int s13:int
   local s -> s3:<host> [1, 20)
   local v -> s8:Any [12, 20)
-     0  call-host s3:host oracle.open ()
-     1  call-resource s4:int s3:host oracle.Seat.next ()
+     0  call-host s3:host oracle.open () <host>
+     1  call-resource s4:int s3:host oracle.Seat.next () Result
      2  int s6:int 0
      3  eq.int s7:bool s4:int s6:int
      4  branch-false s7:bool 7
@@ -141,7 +141,7 @@ fn0 m.f() -> Result
      7  int s9:int 1
      8  clear s10:int Int
      9  copy s11:ref s5:ref Error
-    10  return s9:int
+    10  return s9:int Result
     11  clear s4:int Result
     12  int s6:int 2
     13  unbox s12:int s8:ref Int
@@ -152,7 +152,7 @@ fn0 m.f() -> Result
     18  copy s0:int s9:int Result
     19  clear s9:int Result
     20  clear s8:ref Any
-    21  return s0:int
+    21  return s0:int Result
 "
     );
 }
@@ -176,13 +176,13 @@ fn a_declared_parameter_says_what_an_erased_argument_is_opened_at() {
 fn0 m.f() -> Int
   frame 5: s0:int s1:ref s2:ref s3:int s4:int
      0  str s1:ref \"n\"
-     1  call-host s2:ref oracle.ask (s1:String)
+     1  call-host s2:ref oracle.ask (s1:String) Any
      2  clear s1:ref String
      3  unbox s3:int s2:ref Int
      4  clear s2:ref Any
-     5  call s4:int m.g (s3:Int)
+     5  call s4:int m.g (s3:Int) Int
      6  copy s0:int s4:int Int
-     7  return s0:int
+     7  return s0:int Int
 "
     );
 }
@@ -339,8 +339,8 @@ fn0 m.f() -> Result
   local s -> s3:<host> [1, 18)
   local bounded -> s4:Result [2, 18)
   local run -> s6:m.Run [13, 18)
-     0  call-host s3:host oracle.open ()
-     1  call-resource s4:int s3:host oracle.Seat.next ()
+     0  call-host s3:host oracle.open () <host>
+     1  call-resource s4:int s3:host oracle.Seat.next () Result
      2  int s6:int 0
      3  eq.int s7:bool s4:int s6:int
      4  branch-false s7:bool 7
@@ -349,7 +349,7 @@ fn0 m.f() -> Result
      7  int s9:int 1
      8  clear s10:int Int
      9  copy s11:ref s5:ref Error
-    10  return s9:int
+    10  return s9:int Result
     11  unbox s6:int s8:ref m.Run
     12  clear s8:ref Any
     13  int s9:int 0
@@ -358,7 +358,7 @@ fn0 m.f() -> Result
     16  copy s0:int s9:int Result
     17  clear s9:int Result
     18  clear s4:int Result
-    19  return s0:int
+    19  return s0:int Result
 "
     );
 }
@@ -401,8 +401,8 @@ fn0 m.f() -> Int
   local n -> s10:Int [7, 8)
   local e -> s11:Error [10, 12)
   local e -> s5:Error [20, 22)
-     0  call-host s1:host oracle.open ()
-     1  call-resource s2:int s1:host oracle.Seat.next ()
+     0  call-host s1:host oracle.open () <host>
+     1  call-resource s2:int s1:host oracle.Seat.next () Result
      2  switch s2:int [3 19] else 24
      3  copy s5:ref s3:ref Any
      4  unbox s7:int s5:ref Result
@@ -411,7 +411,7 @@ fn0 m.f() -> Int
      7  copy s6:int s10:int Int
      8  jump 15
      9  copy s11:ref s9:ref Error
-    10  call-builtin s10:int String.length (s11:String)
+    10  call-builtin s10:int String.length (s11:String) Int
     11  copy s6:int s10:int Int
     12  clear s11:ref Error
     13  jump 15
@@ -421,14 +421,14 @@ fn0 m.f() -> Int
     17  clear s5:ref Any
     18  jump 25
     19  copy s5:ref s3:ref Error
-    20  call-builtin s6:int String.length (s5:String)
+    20  call-builtin s6:int String.length (s5:String) Int
     21  copy s4:int s6:int Int
     22  clear s5:ref Error
     23  jump 25
     24  trap \"no `match` arm covers this value\"
     25  copy s0:int s4:int Int
     26  clear s2:int Result
-    27  return s0:int
+    27  return s0:int Int
 "
     );
 }

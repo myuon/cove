@@ -27,7 +27,7 @@ fn0 m.e(Range) -> Bool
      2  jump 4
      3  le.int s4:bool s1:int s0:int
      4  copy s3:bool s4:bool Bool
-     5  return s3:bool
+     5  return s3:bool Bool
 "
     );
 }
@@ -56,7 +56,7 @@ fn0 m.n(Range) -> Int
      9  int s6:int 1
     10  add.int s4:int s4:int s6:int
     11  copy s3:int s4:int Int
-    12  return s3:int
+    12  return s3:int Int
 "
     );
 }
@@ -81,7 +81,7 @@ fn0 m.c(Range Int) -> Bool
      4  jump 6
      5  lt.int s5:bool s3:int s1:int
      6  copy s4:bool s5:bool Bool
-     7  return s4:bool
+     7  return s4:bool Bool
 "
     );
 }

@@ -23,7 +23,7 @@ fn0 m.xs() -> Array
      9  store-elem s4:ref s5:int s3:int Int
     10  copy s0:ref s4:ref Array
     11  clear s4:ref Array
-    12  return s0:ref
+    12  return s0:ref Array
 "
     );
 }
@@ -49,7 +49,7 @@ fn0 m.xs() -> Array
      6  store-elem s5:ref s1:int s3:int m.Point
      7  copy s0:ref s5:ref Array
      8  clear s5:ref Array
-     9  return s0:ref
+     9  return s0:ref Array
 "
     );
 }
@@ -71,7 +71,7 @@ fn0 m.r() -> Range
      3  copy s6:int s4:int Int
      4  bool s7:bool false
      5  copy s0:int s5:int Range
-     6  return s0:int
+     6  return s0:int Range
 "
     );
 }
@@ -115,7 +115,7 @@ fn0 m.total(Int) -> Int
     20  branch-false s10:bool 22
     21  jump 15
     22  copy s1:int s2:int Int
-    23  return s1:int
+    23  return s1:int Int
 "
     );
 }
@@ -159,7 +159,7 @@ fn0 m.total(Int) -> Int
     20  branch-false s10:bool 22
     21  jump 15
     22  copy s1:int s2:int Int
-    23  return s1:int
+    23  return s1:int Int
 "
     );
 }
@@ -190,14 +190,14 @@ fn0 m.count(Array) -> Int
      7  lt.int s7:bool s5:int s4:int
      8  branch-false s7:bool 15
      9  load-elem s8:ref s3:ref s5:int String
-    10  call-builtin s9:int String.length (s8:String)
+    10  call-builtin s9:int String.length (s8:String) Int
     11  add.int s10:int s2:int s9:int
     12  copy s2:int s10:int Int
     13  clear s8:ref String
     14  jump 6
     15  clear s3:ref Array
     16  copy s1:int s2:int Int
-    17  return s1:int
+    17  return s1:int Int
 "
     );
 }
@@ -219,7 +219,7 @@ fn0 m.count(Vector) -> Int
   local t -> s2:Int [1, 15)
   local x -> s8:Int [10, 12)
      0  int s2:int 0
-     1  call-builtin s3:ref Vector.toArray (s0:Vector)
+     1  call-builtin s3:ref Vector.toArray (s0:Vector) Array
      2  len s4:int s3:ref
      3  int s5:int 0
      4  int s6:int 1
@@ -233,7 +233,7 @@ fn0 m.count(Vector) -> Int
     12  jump 6
     13  clear s3:ref Array
     14  copy s1:int s2:int Int
-    15  return s1:int
+    15  return s1:int Int
 "
     );
 }
@@ -283,7 +283,7 @@ fn0 m.first(Array) -> Int
     26  jump 6
     27  clear s3:ref Array
     28  copy s1:int s2:int Int
-    29  return s1:int
+    29  return s1:int Int
 "
     );
 }
@@ -312,7 +312,7 @@ fn0 m.v() -> Vector
     11  clear s3:ref <ref>
     12  copy s0:ref s5:ref Vector
     13  clear s5:ref Vector
-    14  return s0:ref
+    14  return s0:ref Vector
 "
     );
 }
@@ -344,7 +344,7 @@ fn0 m.head(Vector) -> Option
     11  load-elem s7:int s5:ref s3:int Int
     12  clear s5:ref <ref>
     13  copy s1:int s6:int Option
-    14  return s1:int
+    14  return s1:int Option
 "
     );
 }
@@ -368,9 +368,9 @@ fn0 m.same(m.Point m.Point) -> Bool
   frame 6: s0!:int s1!:int s2!:int s3!:int s4:bool s5:bool
   local a -> s0:m.Point [0, 3)
   local b -> s2:m.Point [0, 3)
-     0  call-builtin s5:bool Any.equals (s0:m.Point s2:m.Point)
+     0  call-builtin s5:bool Any.equals (s0:m.Point s2:m.Point) Bool
      1  copy s4:bool s5:bool Bool
-     2  return s4:bool
+     2  return s4:bool Bool
 "
     );
 }
@@ -389,9 +389,9 @@ fn0 m.same(Array Array) -> Bool
   frame 4: s0!:ref s1!:ref s2:bool s3:bool
   local a -> s0:Array [0, 3)
   local b -> s1:Array [0, 3)
-     0  call-builtin s3:bool Any.equals (s0:Array s1:Array)
+     0  call-builtin s3:bool Any.equals (s0:Array s1:Array) Bool
      1  copy s2:bool s3:bool Bool
-     2  return s2:bool
+     2  return s2:bool Bool
 "
     );
 }
@@ -412,7 +412,7 @@ fn0 m.same(Vector Vector) -> Bool
   local b -> s1:Vector [0, 3)
      0  eq.identity s3:bool s0:ref s1:ref
      1  copy s2:bool s3:bool Bool
-     2  return s2:bool
+     2  return s2:bool Bool
 "
     );
 }
@@ -436,10 +436,10 @@ fn0 m.f() -> Set
      0  int s1:int 3
      1  int s2:int 1
      2  int s3:int 2
-     3  call-builtin s4:ref Set.of (s1:Int s2:Int s3:Int)
+     3  call-builtin s4:ref Set.of (s1:Int s2:Int s3:Int) Set
      4  copy s0:ref s4:ref Set
      5  clear s4:ref Set
-     6  return s0:ref
+     6  return s0:ref Set
 "
     );
 }
@@ -466,11 +466,11 @@ fn0 m.f() -> Map
      2  copy s3:ref s1:ref String
      3  copy s4:int s2:int Int
      4  clear s1:ref String
-     5  call-builtin s1:ref Map.of (s3:MapEntry)
+     5  call-builtin s1:ref Map.of (s3:MapEntry) Map
      6  clear s3:ref MapEntry
      7  copy s0:ref s1:ref Map
      8  clear s1:ref Map
-     9  return s0:ref
+     9  return s0:ref Map
 "
     );
 }
@@ -491,7 +491,7 @@ fn0 m.f(Set) -> Int
   local s -> s0:Set [0, 3)
      0  len s2:int s0:ref
      1  copy s1:int s2:int Int
-     2  return s1:int
+     2  return s1:int Int
 "
     );
 }
@@ -509,10 +509,10 @@ fn0 m.f(Set) -> Set
   frame 4: s0!:ref s1:ref s2:int s3:ref
   local s -> s0:Set [0, 5)
      0  int s2:int 4
-     1  call-builtin s3:ref Set.inserted (s0:Set s2:Int)
+     1  call-builtin s3:ref Set.inserted (s0:Set s2:Int) Set
      2  copy s1:ref s3:ref Set
      3  clear s3:ref Set
-     4  return s1:ref
+     4  return s1:ref Set
 "
     );
 }
@@ -534,10 +534,10 @@ fn0 m.f(Map) -> Option
   frame 6: s0!:ref s1:int s2:int s3:ref s4:int s5:int
   local m -> s0:Map [0, 5)
      0  str s3:ref \"a\"
-     1  call-builtin s4:int Map.get (s0:Map s3:String)
+     1  call-builtin s4:int Map.get (s0:Map s3:String) Option
      2  clear s3:ref String
      3  copy s1:int s4:int Option
-     4  return s1:int
+     4  return s1:int Option
 "
     );
 }
@@ -556,10 +556,10 @@ fn a_map_answers_its_keys_as_an_array() {
 fn0 m.f(Map) -> Array
   frame 3: s0!:ref s1:ref s2:ref
   local m -> s0:Map [0, 4)
-     0  call-builtin s2:ref Map.keys (s0:Map)
+     0  call-builtin s2:ref Map.keys (s0:Map) Array
      1  copy s1:ref s2:ref Array
      2  clear s2:ref Array
-     3  return s1:ref
+     3  return s1:ref Array
 "
     );
 }
@@ -600,7 +600,7 @@ fn0 m.f(Set) -> Int
     12  jump 6
     13  clear s3:ref Set
     14  copy s1:int s2:int Int
-    15  return s1:int
+    15  return s1:int Int
 "
     );
 }
@@ -646,7 +646,7 @@ fn0 m.f(Map) -> Int
     13  jump 6
     14  clear s3:ref Map
     15  copy s1:int s2:int Int
-    16  return s1:int
+    16  return s1:int Int
 "
     );
 }
@@ -714,10 +714,10 @@ fn0 m.f(m.B) -> Int
      6  store-elem s4:ref s5:int s3:ref Any
      7  clear s3:ref Any
      8  clear s2:ref Any
-     9  call s5:int m.r (s4:Array)
+     9  call s5:int m.r (s4:Array) Int
     10  clear s4:ref Array
     11  copy s1:int s5:int Int
-    12  return s1:int
+    12  return s1:int Int
 "
     );
 }

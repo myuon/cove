@@ -42,7 +42,7 @@ fn0 m.f(Int) -> Result
     15  clear s11:ref Error
     16  copy s1:int s4:int Result
     17  clear s4:int Result
-    18  return s1:int
+    18  return s1:int Result
 "
     );
 }
@@ -131,9 +131,9 @@ fn a_gap_the_entry_does_not_reach_does_not_stop_it() {
         "\
 fn2 m.main() -> Int
   frame 2: s0:int s1:int
-     0  call s1:int m.helper ()
+     0  call s1:int m.helper () Int
      1  copy s0:int s1:int Int
-     2  return s0:int
+     2  return s0:int Int
 "
     );
 }
@@ -148,7 +148,7 @@ fn what_the_slice_leaves_out_is_a_stub() {
         "\
 fn1 m.unused() -> Unit
   frame 1: s0:unit
-     0  return s0:unit
+     0  return s0:unit Unit
 "
     );
 }
@@ -212,7 +212,7 @@ fn0 m.double(Int) -> Int
      0  int s2:int 2
      1  mul.int s3:int s0:int s2:int
      2  copy s1:int s3:int Int
-     3  return s1:int
+     3  return s1:int Int
 "
     );
 }
@@ -254,7 +254,7 @@ fn a_slice_over_several_roots_is_the_union_of_what_they_reach() {
         "\
 fn3 m.wide() -> Unit
   frame 1: s0:unit
-     0  return s0:unit
+     0  return s0:unit Unit
 "
     );
 }
@@ -276,7 +276,7 @@ fn0 m.main() -> Int
   frame 2: s0:int s1:int
      0  int s1:int 1
      1  copy s0:int s1:int Int
-     2  return s0:int
+     2  return s0:int Int
 "
     );
 }

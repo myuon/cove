@@ -17,11 +17,11 @@ fn0 m.parts(String) -> Array
   frame 4: s0!:ref s1:ref s2:ref s3:ref
   local s -> s0:String [0, 6)
      0  str s2:ref \",\"
-     1  call-builtin s3:ref String.split (s0:String s2:String)
+     1  call-builtin s3:ref String.split (s0:String s2:String) Array
      2  clear s2:ref String
      3  copy s1:ref s3:ref Array
      4  clear s3:ref Array
-     5  return s1:ref
+     5  return s1:ref Array
 "
     );
 }
@@ -38,9 +38,9 @@ fn an_associated_function_has_no_receiver() {
 fn0 m.wait() -> Duration
   frame 3: s0:duration s1:int s2:duration
      0  int s1:int 1
-     1  call-builtin s2:duration Duration.seconds (s1:Int)
+     1  call-builtin s2:duration Duration.seconds (s1:Int) Duration
      2  copy s0:duration s2:duration Duration
-     3  return s0:duration
+     3  return s0:duration Duration
 "
     );
 }
@@ -53,9 +53,9 @@ fn a_duration_reader_passes_its_receiver_as_operand_zero() {
 fn0 m.ms(Duration) -> Int
   frame 3: s0!:duration s1:int s2:int
   local d -> s0:Duration [0, 3)
-     0  call-builtin s2:int Duration.millis (s0:Duration)
+     0  call-builtin s2:int Duration.millis (s0:Duration) Int
      1  copy s1:int s2:int Int
-     2  return s1:int
+     2  return s1:int Int
 "
     );
 }
@@ -74,7 +74,7 @@ fn0 m.has(Option) -> Bool
      0  int s3:int 1
      1  eq.int s4:bool s0:int s3:int
      2  copy s2:bool s4:bool Bool
-     3  return s2:bool
+     3  return s2:bool Bool
 "
     );
 }
@@ -101,7 +101,7 @@ fn0 m.value(Option Int) -> Int
      4  jump 6
      5  copy s4:int s2:int Int
      6  copy s3:int s4:int Int
-     7  return s3:int
+     7  return s3:int Int
 "
     );
 }
@@ -120,7 +120,7 @@ fn a_parser_answers_a_result_and_interns_the_error_it_may_carry() {
 fn0 m.parse(String) -> Int
   frame 9: s0!:ref s1:int s2:int s3:int s4:int s5:ref s6:int s7:int s8:bool
   local s -> s0:String [0, 11)
-     0  call-builtin s3:int Int.parse (s0:String)
+     0  call-builtin s3:int Int.parse (s0:String) Result
      1  int s6:int 0
      2  int s7:int 0
      3  eq.int s8:bool s3:int s7:int
@@ -130,7 +130,7 @@ fn0 m.parse(String) -> Int
      7  copy s2:int s6:int Int
      8  clear s3:int Result
      9  copy s1:int s2:int Int
-    10  return s1:int
+    10  return s1:int Int
 "
     );
 }
@@ -148,9 +148,9 @@ fn a_method_on_a_declared_type_is_an_ordinary_call() {
 fn0 m.f(m.Point) -> Int
   frame 4: s0!:int s1!:int s2:int s3:int
   local p -> s0:m.Point [0, 3)
-     0  call s3:int m.Point.sum (s0:m.Point)
+     0  call s3:int m.Point.sum (s0:m.Point) Int
      1  copy s2:int s3:int Int
-     2  return s2:int
+     2  return s2:int Int
 "
     );
 }
@@ -180,7 +180,7 @@ fn0 m.Point.bump(<addr>) -> Unit
      7  clear s2:addr <addr>
      8  unit s6:unit
      9  copy s1:unit s6:unit Unit
-    10  return s1:unit
+    10  return s1:unit Unit
 "
     );
 }
@@ -209,7 +209,7 @@ fn map_error_is_a_branch_and_one_call_through_a_closure() {
 fn0 m.f(String) -> Result
   frame 15: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:ref s7:int s8:int s9:ref s10:ref s11:int s12:int s13:ref s14:bool
   local t -> s0:String [0, 21)
-     0  call-builtin s7:int Int.parse (s0:String)
+     0  call-builtin s7:int Int.parse (s0:String) Result
      1  alloc s10:ref closure m.f#0<closure>
      2  int s11:int 1
      3  store-field s10:ref +0 s11:int Int
@@ -229,7 +229,7 @@ fn0 m.f(String) -> Result
     17  clear s7:int Result
     18  copy s1:int s4:int Result
     19  clear s4:int Result
-    20  return s1:int
+    20  return s1:int Result
 "
     );
 }
@@ -252,7 +252,7 @@ fn map_error_passes_the_failure_to_a_callback_that_takes_one() {
 fn0 m.f(String) -> Result
   frame 15: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:ref s7:int s8:int s9:ref s10:ref s11:int s12:int s13:ref s14:bool
   local t -> s0:String [0, 20)
-     0  call-builtin s7:int Int.parse (s0:String)
+     0  call-builtin s7:int Int.parse (s0:String) Result
      1  alloc s10:ref closure m.f#0<closure>
      2  int s11:int 1
      3  store-field s10:ref +0 s11:int Int
@@ -271,7 +271,7 @@ fn0 m.f(String) -> Result
     16  clear s7:int Result
     17  copy s1:int s4:int Result
     18  clear s4:int Result
-    19  return s1:int
+    19  return s1:int Result
 "
     );
 }

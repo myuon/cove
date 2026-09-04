@@ -24,7 +24,7 @@ fn0 m.n(Int) -> Int
   local x -> s0:Int [0, 3)
      0  copy s2:int s0:int Int
      1  copy s1:int s2:int Int
-     2  return s1:int
+     2  return s1:int Int
 "
     );
 }
@@ -44,7 +44,7 @@ fn0 m.a(Array) -> Array
      0  copy s2:ref s0:ref Array
      1  copy s1:ref s2:ref Array
      2  clear s2:ref Array
-     3  return s1:ref
+     3  return s1:ref Array
 "
     );
 }
@@ -66,12 +66,12 @@ fn a_vector_of_immutable_elements_is_copied_out_and_back() {
 fn0 m.v(Vector) -> Vector
   frame 4: s0!:ref s1:ref s2:ref s3:ref
   local xs -> s0:Vector [0, 6)
-     0  call-builtin s2:ref Vector.toArray (s0:Vector)
-     1  call-builtin s3:ref Array.toVector (s2:Array)
+     0  call-builtin s2:ref Vector.toArray (s0:Vector) Array
+     1  call-builtin s3:ref Array.toVector (s2:Array) Vector
      2  clear s2:ref Array
      3  copy s1:ref s3:ref Vector
      4  clear s3:ref Vector
-     5  return s1:ref
+     5  return s1:ref Vector
 "
     );
 }

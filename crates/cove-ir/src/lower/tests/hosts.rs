@@ -75,11 +75,11 @@ fn a_host_call_names_the_module_and_the_operation_as_the_source_writes_them() {
 fn0 m.f() -> Result
   frame 7: s0:int s1:unit s2:ref s3:ref s4:int s5:unit s6:ref
      0  str s3:ref \"hi\"
-     1  call-host s4:int console.println (s3:String)
+     1  call-host s4:int console.println (s3:String) Result
      2  clear s3:ref String
      3  copy s0:int s4:int Result
      4  clear s4:int Result
-     5  return s0:int
+     5  return s0:int Result
 "
     );
 }
@@ -100,7 +100,7 @@ fn the_answer_is_written_into_the_layout_the_schema_declared() {
 fn0 m.f(String) -> String
   frame 8: s0!:ref s1:ref s2:ref s3:int s4:ref s5:ref s6:int s7:bool
   local key -> s0:String [0, 13)
-     0  call-host s3:int env.get (s0:String)
+     0  call-host s3:int env.get (s0:String) Option
      1  str s5:ref \"\"
      2  int s6:int 1
      3  eq.int s7:bool s3:int s6:int
@@ -112,7 +112,7 @@ fn0 m.f(String) -> String
      9  clear s3:int Option
     10  copy s1:ref s2:ref String
     11  clear s2:ref String
-    12  return s1:ref
+    12  return s1:ref String
 "
     );
 }
@@ -128,11 +128,11 @@ fn a_host_call_written_through_the_module_reaches_the_same_operation() {
 fn0 m.f() -> Result
   frame 7: s0:int s1:unit s2:ref s3:ref s4:int s5:unit s6:ref
      0  str s3:ref \"hi\"
-     1  call-host s4:int console.println (s3:String)
+     1  call-host s4:int console.println (s3:String) Result
      2  clear s3:ref String
      3  copy s0:int s4:int Result
      4  clear s4:int Result
-     5  return s0:int
+     5  return s0:int Result
 "
     );
 }
@@ -157,11 +157,11 @@ fn a_host_resource_is_one_word_that_is_not_a_root() {
 fn0 m.f() -> Result
   frame 7: s0:int s1:host s2:ref s3:ref s4:int s5:host s6:ref
      0  str s3:ref \"a.txt\"
-     1  call-host s4:int files.open (s3:String)
+     1  call-host s4:int files.open (s3:String) Result
      2  clear s3:ref String
      3  copy s0:int s4:int Result
      4  clear s4:int Result
-     5  return s0:int
+     5  return s0:int Result
 "
     );
 }
@@ -183,7 +183,7 @@ fn0 m.f(http.Response) -> Int
   frame 3: s0!:int s1!:ref s2:int
   local r -> s0:http.Response [0, 2)
      0  copy s2:int s0:int Int
-     1  return s2:int
+     1  return s2:int Int
 "
     );
 }
@@ -202,7 +202,7 @@ fn a_host_resource_is_a_case_s_payload_like_anything_else() {
 fn0 m.f() -> Result
   frame 17: s0:int s1:int s2:host s3:ref s4:ref s5:int s6:host s7:ref s8:int s9:bool s10:host s11:int s12:int s13:host s14:ref s15:int s16:host
      0  str s4:ref \"a\"
-     1  call-host s5:int files.create (s4:String)
+     1  call-host s5:int files.create (s4:String) Result
      2  clear s4:ref String
      3  int s8:int 0
      4  eq.int s9:bool s5:int s8:int
@@ -213,7 +213,7 @@ fn0 m.f() -> Result
      9  clear s12:int Int
     10  clear s13:host <host>
     11  copy s14:ref s7:ref Error
-    12  return s11:int
+    12  return s11:int Result
     13  clear s5:int Result
     14  int s15:int 1
     15  copy s16:host s10:host <host>
@@ -222,7 +222,7 @@ fn0 m.f() -> Result
     18  copy s12:int s15:int m.Sink
     19  copy s0:int s11:int Result
     20  clear s11:int Result
-    21  return s0:int
+    21  return s0:int Result
 "
     );
 }
@@ -251,10 +251,10 @@ fn0 m.f(<host> String) -> Result
   frame 8: s0!:host s1!:ref s2:int s3:unit s4:ref s5:int s6:unit s7:ref
   local w -> s0:<host> [0, 4)
   local line -> s1:String [0, 4)
-     0  call-resource s5:int s0:host files.Writer.writeLine (s1:String)
+     0  call-resource s5:int s0:host files.Writer.writeLine (s1:String) Result
      1  copy s2:int s5:int Result
      2  clear s5:int Result
-     3  return s2:int
+     3  return s2:int Result
 "
     );
 }
@@ -275,7 +275,7 @@ fn0 m.f() -> Result
   frame 17: s0:int s1:unit s2:ref s3:ref s4:int s5:host s6:ref s7:int s8:bool s9:host s10:int s11:unit s12:ref s13:unit s14:int s15:unit s16:ref
   local reader -> s9:<host> [13, 30)
      0  str s3:ref \"a.txt\"
-     1  call-host s4:int files.open (s3:String)
+     1  call-host s4:int files.open (s3:String) Result
      2  clear s3:ref String
      3  int s7:int 0
      4  eq.int s8:bool s4:int s7:int
@@ -285,9 +285,9 @@ fn0 m.f() -> Result
      8  int s10:int 1
      9  clear s11:unit Unit
     10  copy s12:ref s6:ref Error
-    11  return s10:int
+    11  return s10:int Result
     12  clear s4:int Result
-    13  call-resource s10:int s9:host files.Reader.close ()
+    13  call-resource s10:int s9:host files.Reader.close () Result
     14  int s7:int 0
     15  eq.int s8:bool s10:int s7:int
     16  branch-false s8:bool 19
@@ -296,7 +296,7 @@ fn0 m.f() -> Result
     19  int s14:int 1
     20  clear s15:unit Unit
     21  copy s16:ref s12:ref Error
-    22  return s14:int
+    22  return s14:int Result
     23  clear s10:int Result
     24  unit s13:unit
     25  int s10:int 0
@@ -304,7 +304,7 @@ fn0 m.f() -> Result
     27  copy s11:unit s13:unit Unit
     28  copy s0:int s10:int Result
     29  clear s10:int Result
-    30  return s0:int
+    30  return s0:int Result
 "
     );
 }
@@ -331,7 +331,7 @@ fn0 m.f(ledger.Entry) -> Int
   frame 3: s0!:int s1!:ref s2:int
   local e -> s0:ledger.Entry [0, 2)
      0  copy s2:int s0:int Int
-     1  return s2:int
+     1  return s2:int Int
 "
     );
 }
@@ -352,10 +352,10 @@ fn0 m.f(<host> ledger.Entry) -> Result
   frame 9: s0!:host s1!:int s2!:ref s3:int s4:unit s5:ref s6:int s7:unit s8:ref
   local b -> s0:<host> [0, 4)
   local e -> s1:ledger.Entry [0, 4)
-     0  call-resource s6:int s0:host ledger.Book.record (s1:ledger.Entry)
+     0  call-resource s6:int s0:host ledger.Book.record (s1:ledger.Entry) Result
      1  copy s3:int s6:int Result
      2  clear s6:int Result
-     3  return s3:int
+     3  return s3:int Result
 "
     );
 }
@@ -389,7 +389,7 @@ fn0 m.f() -> ledger.Entry
      4  clear s3:ref String
      5  copy s0:int s4:int ledger.Entry
      6  clear s4:int ledger.Entry
-     7  return s0:int
+     7  return s0:int ledger.Entry
 "
     );
 }
@@ -431,7 +431,7 @@ fn0 m.f() -> http.Route
     11  clear s4:ref String
     12  copy s0:int s8:int http.Route
     13  clear s8:int http.Route
-    14  return s0:int
+    14  return s0:int http.Route
 "
     );
 }

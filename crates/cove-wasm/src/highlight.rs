@@ -895,15 +895,21 @@ mod tests {
     /// A layout named after its slots is a type; a callee is a name, and the
     /// two are told apart by the argument list the printer writes after one
     /// of them and never after the other.
+    ///
+    /// Both are in this one line: `playground.greeting` is the callee and the
+    /// `String` after the arguments is the layout of what the call answers,
+    /// so a reader that told them apart by "a name in an instruction is a
+    /// layout" would colour one of them wrong.
     #[test]
     fn a_callee_is_a_name_and_everything_else_that_is_named_is_a_layout() {
         assert_eq!(
-            lit("     1  call s4:ref playground.greeting (s3:String)\n"),
+            lit("     1  call s4:ref playground.greeting (s3:String) String\n"),
             vec![
                 ("1".into(), Kind::Number),
                 ("call".into(), Kind::Keyword),
                 ("s4:ref".into(), Kind::Slot),
                 ("s3:String".into(), Kind::Slot),
+                ("String".into(), Kind::Type),
             ]
         );
         assert_eq!(
@@ -1039,13 +1045,13 @@ mod tests {
                     \x20 local n -> s0:Int [0, 3)\n\
                     \x20    0  add.int s2:int s0:int s0:int\n\
                     \x20    1  copy s1:int s2:int Int\n\
-                    \x20    2  return s1:int\n\
+                    \x20    2  return s1:int Int\n\
                     \n\
                     fn1 playground.main() -> Int\n\
                     \x20 frame 2: s0:int s1:int\n\
                     \x20    0  int s1:int 21\n\
-                    \x20    1  call s0:int playground.twice (s1:Int)\n\
-                    \x20    2  return s0:int\n";
+                    \x20    1  call s0:int playground.twice (s1:Int) Int\n\
+                    \x20    2  return s0:int Int\n";
         let painting = disassembly(text);
         assert!(painting.ok, "{:?}", painting.pieces);
         tiles(text, &painting);

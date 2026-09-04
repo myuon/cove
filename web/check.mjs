@@ -432,6 +432,9 @@ check(
       ["4", "number"],
       ["return", "keyword"],
       ["s0:int", "slot"],
+      // The layout of the answer, which is what says how many words `s0` is
+      // the head of. A `return` names it for the same reason a `copy` does.
+      ["Int", "type"],
     ]),
 );
 
@@ -636,7 +639,7 @@ check("named", functions.map((f) => f.name).join(" "), "playground.main playgrou
 check(
   "the disassembly is the one `cove ir` prints",
   functions[1].code.map((line) => line.text).join(" | "),
-  "add.int s2:int s0:int s0:int | copy s1:int s2:int Int | return s1:int",
+  "add.int s2:int s0:int s0:int | copy s1:int s2:int Int | return s1:int Int",
 );
 check(
   "every moment's pc is inside its function",

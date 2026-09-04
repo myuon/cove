@@ -17,9 +17,9 @@ fn1 m.f() -> Int
   frame 4: s0:int s1:int s2:int s3:int
      0  int s1:int 1
      1  int s2:int 2
-     2  call s3:int m.add (s1:Int s2:Int)
+     2  call s3:int m.add (s1:Int s2:Int) Int
      3  copy s0:int s3:int Int
-     4  return s0:int
+     4  return s0:int Int
 "
     );
 }
@@ -42,14 +42,14 @@ fn0 m.fib(Int) -> Int
      4  jump 13
      5  int s3:int 1
      6  sub.int s5:int s0:int s3:int
-     7  call s3:int m.fib (s5:Int)
+     7  call s3:int m.fib (s5:Int) Int
      8  int s5:int 2
      9  sub.int s6:int s0:int s5:int
-    10  call s5:int m.fib (s6:Int)
+    10  call s5:int m.fib (s6:Int) Int
     11  add.int s6:int s3:int s5:int
     12  copy s2:int s6:int Int
     13  copy s1:int s2:int Int
-    14  return s1:int
+    14  return s1:int Int
 "
     );
 }
@@ -74,7 +74,7 @@ fn0 m.take(Int m.Point Int) -> Int
      1  add.int s6:int s5:int s2:int
      2  add.int s5:int s6:int s3:int
      3  copy s4:int s5:int Int
-     4  return s4:int
+     4  return s4:int Int
 "
     );
 }
@@ -95,9 +95,9 @@ fn0 m.f() -> Int
      3  copy s4:int s2:int Int
      4  copy s5:int s3:int Int
      5  int s2:int 4
-     6  call s3:int m.take (s1:Int s4:m.Point s2:Int)
+     6  call s3:int m.take (s1:Int s4:m.Point s2:Int) Int
      7  copy s0:int s3:int Int
-     8  return s0:int
+     8  return s0:int Int
 "
     );
 }
@@ -118,7 +118,7 @@ fn0 m.bump(<addr>) -> Unit
      3  store s0:addr s4:int Int
      4  unit s5:unit
      5  copy s1:unit s5:unit Unit
-     6  return s1:unit
+     6  return s1:unit Unit
 "
     );
 }
@@ -136,10 +136,10 @@ fn1 m.f() -> Int
   local total -> s1:Int [1, 5)
      0  int s1:int 0
      1  addr-of-slot s2:addr s1:int
-     2  call s3:unit m.bump (s2:<addr>)
+     2  call s3:unit m.bump (s2:<addr>) Unit
      3  clear s2:addr <addr>
      4  copy s0:int s1:int Int
-     5  return s0:int
+     5  return s0:int Int
 "
     );
 }
@@ -167,10 +167,10 @@ fn1 m.shift(<addr>) -> Unit
      2  store s3:addr s2:int Int
      3  clear s3:addr <addr>
      4  addr-of-part s3:addr s0:addr +1
-     5  call s4:unit m.bump (s3:<addr>)
+     5  call s4:unit m.bump (s3:<addr>) Unit
      6  clear s3:addr <addr>
      7  copy s1:unit s4:unit Unit
-     8  return s1:unit
+     8  return s1:unit Unit
 "
     );
 }
@@ -194,10 +194,10 @@ fn1 m.f() -> Int
      2  copy s3:int s1:int Int
      3  copy s4:int s2:int Int
      4  addr-of-slot s5:addr s4:int
-     5  call s6:unit m.bump (s5:<addr>)
+     5  call s6:unit m.bump (s5:<addr>) Unit
      6  clear s5:addr <addr>
      7  copy s0:int s4:int Int
-     8  return s0:int
+     8  return s0:int Int
 "
     );
 }
@@ -216,9 +216,9 @@ fn0 m.f() -> Int
   frame 4: s0:int s1:int s2:int s3:int
      0  int s1:int 2
      1  int s2:int 3
-     2  call s3:int m.scaled (s1:Int s2:Int)
+     2  call s3:int m.scaled (s1:Int s2:Int) Int
      3  copy s0:int s3:int Int
-     4  return s0:int
+     4  return s0:int Int
 "
     );
 }
@@ -255,10 +255,10 @@ fn0 m.f() -> Int
      9  add.int s6:int s6:int s5:int
     10  store-elem s4:ref s6:int s3:int Int
     11  add.int s6:int s6:int s5:int
-    12  call s1:int m.total (s4:Array)
+    12  call s1:int m.total (s4:Array) Int
     13  clear s4:ref Array
     14  copy s0:int s1:int Int
-    15  return s0:int
+    15  return s0:int Int
 "
     );
 }
@@ -277,10 +277,10 @@ fn a_variadic_parameter_given_nothing_is_an_empty_array() {
 fn0 m.f() -> Int
   frame 3: s0:int s1:ref s2:int
      0  alloc s1:ref Array<array> x0
-     1  call s2:int m.total (s1:Array)
+     1  call s2:int m.total (s1:Array) Int
      2  clear s1:ref Array
      3  copy s0:int s2:int Int
-     4  return s0:int
+     4  return s0:int Int
 "
     );
 }
@@ -326,10 +326,10 @@ fn0 m.f(Array) -> Int
     18  jump 12
     19  store-elem s6:ref s7:int s3:int Int
     20  add.int s7:int s7:int s5:int
-    21  call s2:int m.total (s6:Array)
+    21  call s2:int m.total (s6:Array) Int
     22  clear s6:ref Array
     23  copy s1:int s2:int Int
-    24  return s1:int
+    24  return s1:int Int
 "
     );
 }
@@ -345,7 +345,7 @@ fn a_vector_spread_is_copied_out_before_it_is_walked() {
         "f",
     );
     assert!(
-        text.contains("     0  call-builtin s2:ref Vector.toArray (s0:Vector)\n"),
+        text.contains("     0  call-builtin s2:ref Vector.toArray (s0:Vector) Array\n"),
         "{text}"
     );
 }
@@ -373,9 +373,9 @@ fn0 m.f() -> Int
      0  int s1:int 3
      1  int s2:int 1
      2  add.int s3:int s1:int s2:int
-     3  call s2:int m.near (s1:Int s3:Int)
+     3  call s2:int m.near (s1:Int s3:Int) Int
      4  copy s0:int s2:int Int
-     5  return s0:int
+     5  return s0:int Int
 "
     );
 }
@@ -406,11 +406,11 @@ fn1 m.f() -> Int
      1  int s2:int 3
      2  store-field s1:ref +0 s2:int Int
      3  int s2:int 3
-     4  call s3:int m.base ()
-     5  call s4:int m.scaled (s2:Int s3:Int)
+     4  call s3:int m.base () Int
+     5  call s4:int m.scaled (s2:Int s3:Int) Int
      6  copy s0:int s4:int Int
      7  clear s1:ref fn
-     8  return s0:int
+     8  return s0:int Int
 "
     );
 }
@@ -431,9 +431,9 @@ fn0 m.f(m.P) -> Int
   frame 3: s0!:int s1:int s2:int
   local p -> s0:m.P [0, 3)
   local self -> s0:m.P [0, 3)
-     0  call s2:int m.P.scaled (s0:m.P s0:Int)
+     0  call s2:int m.P.scaled (s0:m.P s0:Int) Int
      1  copy s1:int s2:int Int
-     2  return s1:int
+     2  return s1:int Int
 "
     );
 }
@@ -460,10 +460,10 @@ fn0 m.f() -> Int
      1  alloc s2:ref closure m.f#0<closure>
      2  int s3:int 2
      3  store-field s2:ref +0 s3:int Int
-     4  call s3:int m.twice (s1:Int s2:fn)
+     4  call s3:int m.twice (s1:Int s2:fn) Int
      5  clear s2:ref fn
      6  copy s0:int s3:int Int
-     7  return s0:int
+     7  return s0:int Int
 "
     );
 }
@@ -494,9 +494,9 @@ fn a_call_through_a_module_imported_whole_names_the_declaration_it_exports() {
 fn0 app.f() -> Int
   frame 3: s0:int s1:int s2:int
      0  int s1:int 21
-     1  call s2:int greet.twice (s1:Int)
+     1  call s2:int greet.twice (s1:Int) Int
      2  copy s0:int s2:int Int
-     3  return s0:int
+     3  return s0:int Int
 "
     );
 }
@@ -530,7 +530,7 @@ fn0 app.f() -> shape.Point
      2  copy s4:int s2:int Int
      3  copy s5:int s3:int Int
      4  copy s0:int s4:int shape.Point
-     5  return s0:int
+     5  return s0:int shape.Point
 "
     );
 }

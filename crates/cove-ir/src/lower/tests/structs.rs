@@ -27,7 +27,7 @@ fn0 m.origin() -> m.Point
      2  copy s4:int s2:int Int
      3  copy s5:int s3:int Int
      4  copy s0:int s4:int m.Point
-     5  return s0:int
+     5  return s0:int m.Point
 "
     );
 }
@@ -55,7 +55,7 @@ fn0 m.f() -> Int
      5  int s1:int 7
      6  copy s5:int s1:int Int
      7  copy s0:int s3:int Int
-     8  return s0:int
+     8  return s0:int Int
 "
     );
 }
@@ -80,7 +80,7 @@ fn0 m.f(m.Line) -> Int
      2  copy s5:int s9:int Int
      3  add.int s9:int s0:int s5:int
      4  copy s4:int s9:int Int
-     5  return s4:int
+     5  return s4:int Int
 "
     );
 }
@@ -99,7 +99,7 @@ fn0 m.f(m.Line) -> Int
   frame 5: s0!:int s1!:int s2!:int s3!:int s4:int
   local l -> s0:m.Line [0, 2)
      0  copy s4:int s3:int Int
-     1  return s4:int
+     1  return s4:int Int
 "
     );
 }
@@ -127,7 +127,7 @@ fn0 m.f(m.Wrapper) -> Bool
      3  eq.identity s8:bool s6:ref s2:ref
      4  copy s3:bool s8:bool Bool
      5  clear s4:int m.Wrapper
-     6  return s3:bool
+     6  return s3:bool Bool
 "
     );
 }
@@ -144,10 +144,10 @@ fn a_field_of_a_call_s_answer_is_copied_out_of_the_temporary() {
         "\
 fn0 m.f() -> Int
   frame 4: s0:int s1:int s2:int s3:int
-     0  call s1:int m.mk ()
+     0  call s1:int m.mk () m.Point
      1  copy s3:int s2:int Int
      2  copy s0:int s3:int Int
-     3  return s0:int
+     3  return s0:int Int
 "
     );
 }
@@ -165,9 +165,9 @@ fn a_struct_returned_by_value_is_the_answer_location_s_words() {
 fn0 m.f() -> m.Point
   frame 5: s0:int s1:int s2:int s3:int s4:int
      0  int s2:int 3
-     1  call s3:int m.mk (s2:Int)
+     1  call s3:int m.mk (s2:Int) m.Point
      2  copy s0:int s3:int m.Point
-     3  return s0:int
+     3  return s0:int m.Point
 "
     );
 }

@@ -20,7 +20,7 @@ fn0 m.pick(Bool) -> Int
      4  int s3:int 2
      5  copy s2:int s3:int Int
      6  copy s1:int s2:int Int
-     7  return s1:int
+     7  return s1:int Int
 "
     );
 }
@@ -44,7 +44,7 @@ fn0 m.maybe(Bool) -> Int
      2  int s3:int 1
      3  copy s2:int s3:int Int
      4  copy s1:int s2:int Int
-     5  return s1:int
+     5  return s1:int Int
 "
     );
 }
@@ -67,7 +67,7 @@ fn0 m.pick(Bool m.Point m.Point) -> m.Point
      2  jump 4
      3  copy s7:int s3:int m.Point
      4  copy s5:int s7:int m.Point
-     5  return s5:int
+     5  return s5:int m.Point
 "
     );
 }
@@ -94,7 +94,7 @@ fn0 m.count(Int) -> Int
      5  copy s2:int s5:int Int
      6  jump 1
      7  copy s1:int s2:int Int
-     8  return s1:int
+     8  return s1:int Int
 "
     );
 }
@@ -122,7 +122,7 @@ fn0 m.first() -> Int
      9  jump 11
     10  jump 1
     11  copy s0:int s1:int Int
-    12  return s0:int
+    12  return s0:int Int
 "
     );
 }
@@ -144,9 +144,9 @@ fn0 m.early(Int) -> Int
      1  lt.int s3:bool s0:int s2:int
      2  branch-false s3:bool 5
      3  int s2:int 0
-     4  return s2:int
+     4  return s2:int Int
      5  copy s1:int s0:int Int
-     6  return s1:int
+     6  return s1:int Int
 "
     );
 }
@@ -202,7 +202,7 @@ fn1 m.f(Array) -> Int
      7  lt.int s7:bool s5:int s4:int
      8  branch-false s7:bool 26
      9  load-elem s8:ref s3:ref s5:int String
-    10  call-builtin s9:ref String.interpolate (s8:String)
+    10  call-builtin s9:ref String.interpolate (s8:String) String
     11  int s11:int 0
     12  gt.int s7:bool s2:int s11:int
     13  branch-false s7:bool 16
@@ -212,7 +212,7 @@ fn1 m.f(Array) -> Int
     17  clear s9:ref String
     18  clear s8:ref String
     19  jump 26
-    20  call s11:int m.both (s9:String s10:String)
+    20  call s11:int m.both (s9:String s10:String) Int
     21  clear s10:ref String
     22  clear s9:ref String
     23  copy s2:int s11:int Int
@@ -220,7 +220,7 @@ fn1 m.f(Array) -> Int
     25  jump 6
     26  clear s3:ref Array
     27  copy s1:int s2:int Int
-    28  return s1:int
+    28  return s1:int Int
 "
     );
 }

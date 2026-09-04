@@ -6,6 +6,16 @@
 //! because a value is a run of words and the layout is what says how many —
 //! `copy s2:int s0:int Point` moves two.
 //!
+//! That holds for the instructions that answer one, too. A call and a
+//! `return` name the layout of the *answer* last, after the argument list —
+//! `call-host s5:int console.println (s4:String) Result` — because the
+//! destination slot is the head of a run and its `Repr` is the head word's
+//! alone. Without it a three-word `Result` reads as an `int`, and the reader
+//! is told the width of what a `copy` moves but not of what a call writes.
+//! [`Inst::CallClosure`] is the one that cannot: its callee is a function id
+//! read out of an object at run time, so nothing in the program says what a
+//! closure call answers, and a guessed layout would be worse than the gap.
+//!
 //! Before the code come the frame's names, one to a line —
 //! `local count -> s3:Int [4, 11)` — because a slot number is not an answer
 //! to what the source called something and a slot is reused by several
@@ -141,13 +151,21 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
                 table.default
             )
         }
-        Inst::Return { src } => format!("return {}", s(*src)),
-        Inst::Call { dst, callee, args } => format!(
-            "call {} {} ({})",
-            s(*dst),
-            program.function(*callee).qualified(),
-            args_of(program, *args)
-        ),
+        Inst::Return { src } => format!("return {} {}", s(*src), l(f.returns)),
+        Inst::Call { dst, callee, args } => {
+            let target = program.function(*callee);
+            format!(
+                "call {} {} ({}) {}",
+                s(*dst),
+                target.qualified(),
+                args_of(program, *args),
+                l(target.returns)
+            )
+        }
+        // The one call with no layout after its arguments. Every other
+        // callee is named by the program — a `FunctionId`, a `HostOpId`, a
+        // `BuiltinId` — and this one is a word in a slot, read out of the
+        // closure object when the instruction runs. See the module docs.
         Inst::CallClosure { dst, closure, args } => format!(
             "call-closure {} {} ({})",
             s(*dst),
@@ -157,10 +175,11 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::CallHost { dst, op, args } => {
             let op = program.host_op(*op);
             format!(
-                "call-host {} {} ({})",
+                "call-host {} {} ({}) {}",
                 s(*dst),
                 op.qualified(),
-                args_of(program, *args)
+                args_of(program, *args),
+                l(op.result)
             )
         }
         Inst::CallResource {
@@ -171,21 +190,23 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         } => {
             let op = program.host_op(*op);
             format!(
-                "call-resource {} {} {} ({})",
+                "call-resource {} {} {} ({}) {}",
                 s(*dst),
                 s(*receiver),
                 op.qualified(),
-                args_of(program, *args)
+                args_of(program, *args),
+                l(op.result)
             )
         }
         Inst::CallBuiltin { dst, builtin, args } => {
             let builtin = program.builtin(*builtin);
             format!(
-                "call-builtin {} {}.{} ({})",
+                "call-builtin {} {}.{} ({}) {}",
                 s(*dst),
                 builtin.receiver,
                 builtin.operation,
-                args_of(program, *args)
+                args_of(program, *args),
+                l(builtin.result)
             )
         }
         Inst::Alloc { dst, layout, len } => {

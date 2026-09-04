@@ -17,7 +17,7 @@ fn0 m.double(Int) -> Int
      0  int s2:int 2
      1  mul.int s3:int s0:int s2:int
      2  copy s1:int s3:int Int
-     3  return s1:int
+     3  return s1:int Int
 "
     );
 }
@@ -40,7 +40,7 @@ fn0 m.ordered(Int Int) -> Bool
      1  sub.int s4:int s0:int s3:int
      2  le.int s5:bool s4:int s1:int
      3  copy s2:bool s5:bool Bool
-     4  return s2:bool
+     4  return s2:bool Bool
 "
     );
 }
@@ -57,7 +57,7 @@ fn0 m.half(Float) -> Float
      1  float s3:float 2
      2  div.float s4:float s2:float s3:float
      3  copy s1:float s4:float Float
-     4  return s1:float
+     4  return s1:float Float
 "
     );
 }
@@ -76,7 +76,7 @@ fn0 m.wait() -> Duration
      1  int s2:duration 3000000
      2  add.int s3:duration s1:duration s2:duration
      3  copy s0:duration s3:duration Duration
-     4  return s0:duration
+     4  return s0:duration Duration
 "
     );
 }
@@ -91,7 +91,7 @@ fn0 m.flip(Bool) -> Bool
   local flag -> s0:Bool [0, 3)
      0  not s2:bool s0:bool
      1  copy s1:bool s2:bool Bool
-     2  return s1:bool
+     2  return s1:bool Bool
 "
     );
 }
@@ -110,7 +110,7 @@ fn0 m.same() -> Bool
      1  unit s2:unit
      2  bool s3:bool true
      3  copy s0:bool s3:bool Bool
-     4  return s0:bool
+     4  return s0:bool Bool
 "
     );
 }
@@ -137,7 +137,7 @@ fn0 m.count() -> Int
      4  int s3:int 2
      5  add.int s1:int s1:int s3:int
      6  copy s0:int s1:int Int
-     7  return s0:int
+     7  return s0:int Int
 "
     );
 }
@@ -150,7 +150,7 @@ fn a_body_that_falls_off_the_end_answers_unit() {
 fn0 m.nothing() -> Unit
   frame 1: s0:unit
      0  unit s0:unit
-     1  return s0:unit
+     1  return s0:unit Unit
 "
     );
 }
@@ -171,7 +171,7 @@ fn0 m.scoped() -> Int
      1  int s3:int 2
      2  copy s2:int s3:int Int
      3  copy s0:int s2:int Int
-     4  return s0:int
+     4  return s0:int Int
 "
     );
 }
@@ -193,7 +193,7 @@ fn0 m.both(Bool Bool) -> Bool
      1  branch-false s3:bool 3
      2  copy s3:bool s1:bool Bool
      3  copy s2:bool s3:bool Bool
-     4  return s2:bool
+     4  return s2:bool Bool
 "
     );
 }
@@ -212,7 +212,7 @@ fn0 m.either(Bool Bool) -> Bool
      2  jump 4
      3  copy s3:bool s1:bool Bool
      4  copy s2:bool s3:bool Bool
-     5  return s2:bool
+     5  return s2:bool Bool
 "
     );
 }
@@ -239,7 +239,7 @@ fn0 m.twice(Int) -> Int
      2  copy s2:int s3:int Int
      3  add.int s4:int s3:int s2:int
      4  copy s1:int s4:int Int
-     5  return s1:int
+     5  return s1:int Int
 "
     );
 }
