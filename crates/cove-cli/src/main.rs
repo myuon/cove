@@ -28,6 +28,7 @@ use cove_syntax::ast::ItemKind;
 
 mod api;
 mod build;
+mod debug;
 #[cfg(test)]
 mod fixture;
 mod generate;
@@ -55,6 +56,7 @@ usage:
   cove trace <file> [--capability <c>] [--task <id>]
                                        summarise and list a recorded trace
   cove replay <file> <name>            re-run <name>, answering every host call from <file>
+  cove debug <name> [flags] [args]     run <name> under a stopping debugger, from a prompt
   cove help                            show this message
 
 `cove fmt` rewrites files in place and prints how many changed. `--check`
@@ -146,6 +148,19 @@ supported; the summary and every divergence report then say so, because a
 divergence found across backends could be the two backends' rather than the
 program's.
 
+`cove debug <name>` runs `[run.<name>]`'s entry on the linear-memory backend
+with the run stopped before its first instruction, and reads gdb-shaped
+commands from stdin: `break`, `continue`, `step`, `next`, `stepi`, `finish`,
+`backtrace`, `frame`, `list`, `print`, `locals`, `words`, `disassemble`,
+`object`, `quit`. `help` at the prompt lists them and `help limits` says what
+`step` and `break` get wrong, which is worth reading once: spans are
+per-instruction and expression-level, so `one source line` is a rule with
+edges rather than a fact the program records. It takes `--fuel`, `--deadline`,
+`--max-host-calls`, `--max-tasks`, `--files-root` and `--allow-exec`, and no
+`--backend`: a debugger is a feature of the linear-memory machine and that is
+the only backend it runs on. A `--deadline` keeps elapsing while you stand at
+the prompt, which is what a deadline means.
+
 `cove run` flags (may appear in any position after <name>; everything after a
 literal `--` is a program argument, even if it looks like a flag):
   --fuel <n>            stop the run after <n> fuel is spent
@@ -195,6 +210,7 @@ fn dispatch() -> ExitCode {
         "impact" => impact::cmd_impact(&args[1..]),
         "trace" => trace::cmd_trace(&args[1..]),
         "replay" => replay::cmd_replay(&args[1..]),
+        "debug" => debug::cmd_debug(&args[1..]),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;

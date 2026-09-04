@@ -1,0 +1,32 @@
+use console.println
+
+/// Doubles `n`, and binds a name of its own while it does, so that a stop
+/// inside it has something to `print`.
+fn twice(n: Int) -> Int {
+  let doubled = n * 2
+  doubled
+}
+
+/// Hands `n` on, so that a backtrace taken in `twice` has three frames to
+/// name and `finish` has somewhere to come back to.
+fn raise(n: Int) -> Int {
+  let raised = n + 1
+  twice(raised)
+}
+
+/// Never called from `main`, so the lowering leaves it a stub: a breakpoint
+/// on it has no instruction to stop at and is refused rather than accepted.
+fn unreached(n: Int) -> Int {
+  n - 1
+}
+
+/// Runs, binding `total` twice so that the debugger has to choose which of
+/// the two a `print total` means.
+export fn main() -> Result<Unit, Error> {
+  println("before")?
+  let total = 0
+  let total = total + 20
+  println("answer {raise(total)}")?
+  println("after")?
+  Ok(())
+}

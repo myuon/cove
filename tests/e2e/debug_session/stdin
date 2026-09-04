@@ -1,0 +1,18 @@
+break debug_session/main.cove:6
+break debug_session/main.cove:2
+break unreached
+info breakpoints
+continue
+backtrace
+print n
+locals
+step
+step
+finish
+words
+frame 1
+print total
+locals
+list 2
+disassemble 1
+quit

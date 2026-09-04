@@ -40,7 +40,14 @@
 //!                             run instead of `run <case>`, one per line
 //!   <case>/env                optional: KEY=VALUE per line, or a bare KEY
 //!                             to remove that variable from the child
+//!   <case>/stdin              optional: what the child reads on stdin
 //! ```
+//!
+//! A `stdin` file is what a case needs when the command it names *reads*.
+//! `cove debug` is the one that does: its prompt runs inside the debugger the
+//! machine calls, so a session is a script of commands and not a set of
+//! flags. Without such a file the child's stdin is closed, which is what
+//! `Command::output` does and what every other case wants.
 //!
 //! A `command` file is how a case exercises a command other than `cove run`
 //! — `cove test`, for instance. Such a case needs no `[run.<case>]` table,
@@ -114,7 +121,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// The placeholder that replaces the absolute path of `tests/e2e`.
 const E2E: &str = "<e2e>";
@@ -150,6 +157,9 @@ struct Case {
     args: Vec<String>,
     /// Variables to set, or to remove when the value is `None`.
     env: Vec<(String, Option<String>)>,
+    /// The file to redirect the child's stdin from, for a command that
+    /// reads. Absent leaves stdin closed, as `Command::output` does.
+    stdin: Option<PathBuf>,
 }
 
 /// What one run of the `cove` binary produced.
@@ -307,6 +317,8 @@ impl Case {
                     .collect()
             })
             .unwrap_or_default();
+        let stdin = dir.join("stdin");
+        let stdin = stdin.exists().then_some(stdin);
         Case {
             name: name.to_string(),
             dir,
@@ -315,6 +327,7 @@ impl Case {
             names_its_own_command,
             args,
             env,
+            stdin,
         }
     }
 
@@ -351,6 +364,20 @@ impl Case {
                 Some(value) => command.env(key, value),
                 None => command.env_remove(key),
             };
+        }
+        // Redirected from the file rather than written down a pipe: a
+        // command that reads its whole script before answering and one that
+        // answers as it reads are then the same case, and neither can
+        // deadlock against a parent that is waiting for output.
+        if let Some(path) = &self.stdin {
+            let file = std::fs::File::open(path).unwrap_or_else(|e| {
+                panic!(
+                    "case `{}`: cannot open `{}`: {e}",
+                    self.name,
+                    path.display()
+                )
+            });
+            command.stdin(Stdio::from(file));
         }
         let output = command
             .output()

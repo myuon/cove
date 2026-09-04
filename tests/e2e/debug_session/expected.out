@@ -1,0 +1,59 @@
+cove debug — debug_session.main on the linear-memory backend. `help` lists the commands.
+entering debug_session.main at debug_session/main.cove:26:11
+>   26 |   println("before")?
+(cove) break debug_session/main.cove:6
+breakpoint 1 at 1 location:
+  debug_session.twice pc 0 at debug_session/main.cove:6:21
+(cove) break debug_session/main.cove:2
+no instruction was lowered for debug_session/main.cove:2
+  `cove debug` lowers what the entry reaches, so a line in code no path leads to has no instructions to stop at, and neither has a line that is blank, a comment, or a declaration
+(cove) break unreached
+`debug_session.unreached` is declared, but this entry does not reach it: `cove debug` lowers only what the entry can call, so it has no instructions to break on
+(cove) info breakpoints
+breakpoint 1 at `debug_session/main.cove:6`, hit 0 time(s)
+  debug_session.twice pc 0 at debug_session/main.cove:6:21
+(cove) continue
+before
+breakpoint 1, debug_session.twice at debug_session/main.cove:6:21
+>    6 |   let doubled = n * 2
+(cove) backtrace
+#0  debug_session.twice at debug_session/main.cove:6:21
+#1  debug_session.raise at debug_session/main.cove:14:3
+#2  debug_session.main at debug_session/main.cove:29:11
+(cove) print n
+n = 21  (word 0)
+(cove) locals
+n = 21  (word 0, 1 word(s))
+(cove) step
+debug_session.twice at debug_session/main.cove:7:3
+>    7 |   doubled
+(cove) step
+debug_session.twice at debug_session/main.cove:5:25
+>    5 | fn twice(n: Int) -> Int {
+(cove) finish
+returned to debug_session.raise at debug_session/main.cove:14:3
+>   14 |   twice(raised)
+(cove) words
+word 1   int       0x0000000000000000  0
+word 2   int       0x000000000000002a  42
+(cove) frame 1
+#1  debug_session.main at debug_session/main.cove:29:11
+>   29 |   println("answer {raise(total)}")?
+(cove) print total
+total = 20  (word 14)
+(cove) locals
+total = 0  (word 7, 1 word(s), shadowed)
+total = 20  (word 14, 1 word(s))
+(cove) list 2
+    27 |   let total = 0
+    28 |   let total = total + 20
+>   29 |   println("answer {raise(total)}")?
+    30 |   println("after")?
+    31 |   Ok(())
+(cove) disassemble 1
+debug_session.raise:
+      2 | call s2:int debug_session.twice (s3:Int)
+=>    3 | copy s1:int s2:int Int
+      4 | return s1:int
+(cove) quit
+the run was halted after 22 instruction(s).
