@@ -12,8 +12,21 @@
 # on the linear-memory backend and sorts the answers into agrees, disagrees,
 # and does not lower. It is ignored because it runs what it lowers, and the
 # benchmark rows are two million turns each. CI has a step of its own for it,
-# and `cargo test --workspace --lib --tests -- --ignored` is how to run it by
-# hand — which is worth doing after a change to the lowering or the machine.
+# and `cargo ratchet` below is how to run it by hand — which is worth doing
+# after a change to the lowering or the machine.
+#
+# # Do not run a bare `cargo test`
+#
+# Both aliases carry `--profile checked`, and that is not a preference: this
+# suite *runs Cove programs*, so unoptimised it is 4x to 6x slower — 13s
+# against minutes for the suite, 36s against 241s for the ratchet. A bare
+# `cargo test`, or a `cargo test -p … --test …` for one file, silently uses
+# the unoptimised profile and pays all of it.
+#
+# Cargo cannot be made to default a profile for `test`, and it ignores an
+# alias that shadows a built-in command, so there is nothing here that can
+# enforce this — which is why it is written in three places instead. Pass
+# `--profile checked` when you invoke `cargo test` directly.
 [alias]
 t = "test --profile checked --workspace --lib --bins --tests"
 # The ratchet, which is `cargo t`'s ignored half and wants the same profile

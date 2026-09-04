@@ -18,6 +18,14 @@ may not).
 and the `#[ignore]`d cases, which together are more than half of a warm
 `cargo test --workspace` and which CI runs in steps of their own.
 
+**Never run a bare `cargo test`.** Both aliases carry `--profile checked`,
+and a direct `cargo test` — including `cargo test -p … --test …` for a single
+file — silently drops it and runs unoptimised, which on this suite costs 4x
+to 6x. Cargo cannot default a profile for `test` and ignores an alias that
+shadows a built-in, so nothing enforces this: pass `--profile checked`
+yourself when you invoke `cargo test` directly. This has already been got
+wrong twice, once for 241 seconds.
+
 Run the ignored ones with `cargo ratchet`, an alias for the same thing under
 `--profile checked`. Use the alias rather than writing the command out: the
 profile is not a nicety there, it is 39s against 241s, because this is the
