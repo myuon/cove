@@ -11,7 +11,7 @@ leaves the tab.
 cargo build -p cove-wasm --target wasm32-unknown-unknown --release
 ```
 
-That writes `target/wasm32-unknown-unknown/release/cove_wasm.wasm`, 3.07 MB.
+That writes `target/wasm32-unknown-unknown/release/cove_wasm.wasm`, 3.08 MB.
 There is no bundler, no `npm`, and no other step: `index.html`, `cove.mjs` and
 `worker.mjs` are loaded as they are.
 
@@ -96,6 +96,16 @@ pieces are the categories the lexer called them, kinds and not counts: a
 tiling of the right length made of the wrong categories is exactly what a
 highlighter that had drifted from the language would produce.
 
+And it colours **every sample's real disassembly**, which is the other pane
+the module colours and the one with no lexer to borrow. What holds there is
+that every line was a line shape `crates/cove-ir/src/print.rs` documents — the
+module answers `ok: false` for a line it does not recognise, and a false
+answer for any shipped sample fails the build. That is what keeps a change to
+the printer from quietly turning the pane into a wall of one colour. Beside it
+the categories are named on a small program, and the six the nine samples
+between them use are asserted as a set, for the reason kinds are asserted of
+source.
+
 Then it records one. A known program is run under the recording debugger and
 the recording is checked moment by moment: the stops it should have, in the
 order it ran them, on the lines they were written at, with the locals holding
@@ -140,9 +150,40 @@ the module as an import.
 ## Recording a run
 
 **Run & record** does the same run watched by a debugger that writes down what
-it saw, and then the page scrubs through the timeline: Source, Instructions,
-Runtime and Memory, all four moved by one slider. Selecting a frame in Runtime
-moves the other three to that frame.
+it saw, and then the page scrubs through the timeline. The source it scrubs
+through is the **editor itself**: the slider marks the line the moment was
+written at and, inside it, the instruction's own span, and scrolls the editor
+when the mark would otherwise be off screen. Three panes go with it —
+Instructions, Runtime and Memory — all moved by that one slider. Selecting a
+frame in Runtime moves the other two *and the mark in the editor* to that
+frame's call site, which is what makes an outer frame readable.
+
+There was a fourth pane, listing the recorded source with the moment's line
+marked. It is gone rather than kept: the page was showing the same program
+twice, once to type into and once to read, and the marked line belongs in the
+box the program was typed into.
+
+## The editor is locked while a recording is open
+
+A recording is of the text as it was when it ran. A marker computed from one
+and drawn over text that has since been edited points at source that is not
+there, so **Run & record** makes the editor read-only — for the run and then
+for the replay, with no window in between where the text could move — and
+**End replay** gives it back.
+
+A `readonly` textarea refuses keystrokes and says nothing about it, which is
+the failure this has to avoid: someone types, nothing happens, and no reason
+was given. So the state is written in words directly above the editor, with
+the End replay button beside them, and the box is visibly outlined while it is
+locked. It is the same standard the picker's `(your own program)` sets — a
+state is shown rather than left to be discovered.
+
+Nothing makes a visitor end a replay before doing something else. Run, Run &
+record and Compile only all end it themselves and start what was asked for;
+choosing a sample ends it after the usual question about replacing an edited
+program, so declining leaves the timeline where it was; and Stop, which can
+only fire while a run is in flight, unlocks because a terminated run has no
+recording to lock over.
 
 It records rather than steps, and the reason is a browser's. A Web Worker
 cannot block waiting for a message from the page — there is no synchronous
@@ -215,7 +256,7 @@ that deep and a local still names an object — so a rewrite that flattened it
 fails instead of leaving a sample whose own comment promises what it no longer
 does.
 
-## Colouring the editor
+## Colouring the editor, and the disassembly
 
 The editor is a `<pre>` of coloured text with a transparent `<textarea>` on
 top of it: what you type into is the textarea, what you see is the `<pre>`,
@@ -245,8 +286,29 @@ the step that throws the tokens away — the answer says `ok: false`, and an
 unterminated literal is coloured as the string it is up to the end of the
 file. Nothing goes plain and nothing goes stale.
 
-This is the one call to the module made on the page's own thread rather than
-on the worker. The worker exists because a Cove program can loop and wasm
+The **Lowered IR** pane is coloured the same way and for the same reason, with
+one honest difference: there is no lexer for a disassembly to borrow. So
+`crates/cove-wasm/src/highlight.rs` reads the six line shapes
+`crates/cove-ir/src/print.rs` documents — a header, a frame, a capture, a
+local, a blank line, and `pc  opcode operands` — and inside an instruction it
+goes by the shape of each token rather than by which instruction it is. It
+answers the same tiling, with one category more: `slot`, for `s3:int`, which
+is the thing a reader follows from line to line there and which source has
+nothing like. Opcodes are keywords, layout names are types, program counters
+and immediates are numbers, string literals are strings, and a callee — the
+one name written before a ` (` — is left plain along with the local names and
+the punctuation.
+
+That reader *is* a second reader of a format, which is the thing the paragraph
+above refuses to write in JavaScript. What makes it honest is where it is and
+what watches it: it is in Rust beside the crate that prints the text, it says
+in `ok` when it met a line it did not recognise, and `check.mjs` fails the
+build if that happens on any of the nine samples' real disassembly. Adding an
+instruction needs nothing there; changing how *operands* are written does, and
+that is exactly what the nine catch.
+
+These are the only calls to the module made on the page's own thread rather
+than on the worker. The worker exists because a Cove program can loop and wasm
 cannot be interrupted from outside it; lexing is one pass over the text. Being
 on this thread is what makes a keystroke and its colours the same frame — the
 glyphs are the `<pre>`'s, so an answer a frame late would be a *character* a
@@ -277,12 +339,12 @@ Running in a worker at all is why an infinite loop does not freeze the tab.
 
 | file | what it is |
 |---|---|
-| `index.html` | the page: the editor, three panes, the timeline's four, and the worker |
+| `index.html` | the page: the editor, three panes, the timeline's three, and the worker |
 | `worker.mjs` | the thread a Cove program runs on |
 | `cove.mjs` | the JavaScript half of the C ABI, and the loader |
 | `samples.mjs` | the manifest the picker is built from, and what each sample is expected to do |
 | `samples/` | the sample programs, as ordinary `.cove` files |
 | `check.mjs` | the node harness, run by CI |
 
-The ABI itself — six exported functions, one import, and a length-prefixed
+The ABI itself — seven exported functions, one import, and a length-prefixed
 answer — is documented in `crates/cove-wasm/src/abi.rs`.

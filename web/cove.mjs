@@ -92,6 +92,24 @@ class Cove {
     return this.#call((ptr, len) => this.#exports.cove_lex(ptr, len), source);
   }
 
+  /// Colours a disassembly and answers a tiling of it.
+  ///
+  /// Answers `{ok, spans}` in exactly `lex`'s shape and counted in exactly
+  /// `lex`'s units, so one renderer draws both. `kind` adds `slot` -- a slot
+  /// and its `Repr`, `s3:int` -- to `lex`'s six.
+  ///
+  /// `text` is what a `compile` or a `run` put in `ir`, handed back so that
+  /// the colouring is of the text being shown. There is no lexer for a
+  /// disassembly, so the module reads the line shapes `cove_ir::print`
+  /// documents, and `ok` is whether every line was one of them: false means
+  /// the printer has grown a line the colouring does not know, and the pane
+  /// is showing plain text where that line is rather than a guess.
+  /// `web/check.mjs` fails the build on a false answer for any shipped
+  /// sample, which is what keeps the two in step.
+  lexIr(text) {
+    return this.#call((ptr, len) => this.#exports.cove_lex_ir(ptr, len), text);
+  }
+
   /// Checks, lowers and runs `source` under a recording debugger.
   ///
   /// Answers everything `run` answers plus `debug`, which is the recording:

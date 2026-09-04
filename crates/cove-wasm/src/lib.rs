@@ -3,7 +3,7 @@
 //!
 //! [Issue #241](https://github.com/myuon/cove/issues/241) asks for a
 //! playground. This crate is the half of it that is Rust; `web/` is the half
-//! that is a page. What it exports is described in [`abi`], and it is six
+//! that is a page. What it exports is described in [`abi`], and it is seven
 //! functions and one import.
 //!
 //! The fifth is [`debug_json`]: the same run, watched by a [`record`]ing
@@ -16,6 +16,13 @@
 //! nothing after it: the page colours its editor by asking the compiler's own
 //! lexer what each piece of the text is. [`highlight`] argues why that is the
 //! only version of syntax highlighting worth having here.
+//!
+//! The seventh is [`lex_ir_json`], the same idea for the other text the page
+//! shows: the disassembly [`cove_ir::print`] writes. That one has no lexer to
+//! borrow, so [`highlight`] reads the line shapes the printer documents and
+//! says, in `ok`, when it met a line it did not know — which is what
+//! `web/check.mjs` holds it to, against the real disassembly of every shipped
+//! sample.
 //!
 //! # What is the same as `cove run`, and what is not
 //!
@@ -283,7 +290,8 @@ pub fn compile_json(source: &str) -> String {
 ///
 /// `kind` is one of `keyword`, `type`, `string`, `number`, `comment` and
 /// `plain`. [`highlight::Kind`] says what falls into each and which two are
-/// not decided by the lexer.
+/// not decided by the lexer. Its seventh, `slot`, is a disassembly's and
+/// never appears here.
 ///
 /// `ok` is whether the source lexed without complaint. It is false whenever
 /// the reader is part-way through typing a string literal, which is most of
@@ -296,6 +304,46 @@ pub fn compile_json(source: &str) -> String {
 /// call on every keystroke, where [`compile_json`] is not.
 pub fn lex_json(source: &str) -> String {
     let painting = highlight::paint(source);
+    json::object([
+        ("ok", painting.ok.to_string()),
+        (
+            "spans",
+            json::array(painting.pieces.iter().map(|piece| {
+                json::object([
+                    ("at", piece.at.to_string()),
+                    ("len", piece.len.to_string()),
+                    ("kind", json::string(piece.kind.as_str())),
+                ])
+            })),
+        ),
+    ])
+}
+
+/// Colours a disassembly and answers a colour for every part of it.
+///
+/// ```json
+/// {"ok":bool,"spans":[{"at":int,"len":int,"kind":string}]}
+/// ```
+///
+/// The same shape [`lex_json`] answers, and for the same consumer: the spans
+/// tile the text in UTF-16 code units, so a page renders the pane by walking
+/// them and slicing the string it already has.
+///
+/// `text` is what [`compile_json`]'s `ir` field held. It is passed back in
+/// rather than coloured on the way out because a colouring belongs to the
+/// text a page is *showing*, and a page shows one disassembly while a run
+/// answers another every time it is asked; sending both together would put a
+/// second copy of the tiling into every run answer for the sake of saving a
+/// call that costs one pass over a string.
+///
+/// `kind` adds `slot` to [`lex_json`]'s six. `ok` means something different
+/// here: not that the text parsed — it was written by
+/// [`cove_ir::print::program`] and always does — but that every line of it
+/// was a line shape that module documents. A false answer is a printer this
+/// module has not caught up with, and [`highlight`] says where that is
+/// asserted.
+pub fn lex_ir_json(text: &str) -> String {
+    let painting = highlight::disassembly(text);
     json::object([
         ("ok", painting.ok.to_string()),
         (
@@ -759,6 +807,44 @@ export fn main() -> Int {
             addresses.iter().any(|at| at.len() > 4),
             "an object address: {json}"
         );
+    }
+
+    /// The span a moment carries, which is what the page marks in the editor.
+    ///
+    /// A pair of UTF-16 offsets into the source the page already holds, so
+    /// `text.slice(from, to)` is the text that ran. The em dash above the
+    /// code is what tells this apart from a pair of byte offsets: it is two
+    /// bytes wide and one code unit, so a byte offset would mark two
+    /// characters to the right of everything below it.
+    #[test]
+    fn a_moment_carries_the_span_the_page_marks() {
+        let source = "// an \u{2014} dash\nexport fn main() -> Int {\n  21 * 2\n}\n";
+        let json = debug_json(source, None, None, 0);
+        let units: Vec<u16> = source.encode_utf16().collect();
+        let read = |key| -> Vec<usize> {
+            every(&json, key)
+                .iter()
+                .map(|held| held.parse().expect("an offset is a number"))
+                .collect()
+        };
+        let (from, to) = (read("from"), read("to"));
+        assert!(!from.is_empty(), "{json}");
+        assert_eq!(from.len(), to.len(), "{json}");
+        for (from, to) in from.iter().zip(&to) {
+            assert!(from <= to && *to <= units.len(), "{from}..{to} of {json}");
+            let marked = String::from_utf16(&units[*from..*to]).expect("whole code points");
+            assert!(source.contains(&marked), "{marked:?} is in the source");
+        }
+        // The first moment is the entry, which is `21 * 2`'s first operand.
+        // The same two numbers read as byte offsets are the two spaces that
+        // indent the line, which is what a page marking by them would have
+        // drawn a band on.
+        assert_eq!(
+            String::from_utf16(&units[from[0]..to[0]]).expect("whole code points"),
+            "21",
+            "{json}"
+        );
+        assert_eq!(&source[from[0]..to[0]], "  ", "{json}");
     }
 
     /// A recording that hit its bound says which bound, and the run it was

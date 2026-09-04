@@ -21,6 +21,10 @@
 //! length-prefixed JSON. Three additions in a row that cost one function each
 //! is the evidence, and it is now hard to argue with.
 //!
+//! Seven and not six because the disassembly pane wanted colouring too, and
+//! it is [`cove_lex_ir`]: the same two integers, the same length-prefixed
+//! JSON, the same tiling. Four in a row.
+//!
 //! # The calling convention
 //!
 //! Two directions, one shape each.
@@ -30,10 +34,10 @@
 //! and passes `(offset, n)`. It owns those bytes and releases them with
 //! [`cove_free`]; nothing here takes them.
 //!
-//! *Out of* the module: [`cove_compile`], [`cove_run`], [`cove_debug`] and
-//! [`cove_lex`] each answer one offset into the same memory. The four bytes
-//! there are a little-endian `u32` length, and the `n` bytes after them are
-//! UTF-8 JSON.
+//! *Out of* the module: [`cove_compile`], [`cove_run`], [`cove_debug`],
+//! [`cove_lex`] and [`cove_lex_ir`] each answer one offset into the same
+//! memory. The four bytes there are a little-endian `u32` length, and the `n`
+//! bytes after them are UTF-8 JSON.
 //! The caller decodes them and releases the whole block with
 //! `cove_free(offset, n + 4)`.
 //!
@@ -50,7 +54,7 @@
 
 use std::alloc::{alloc, dealloc, Layout};
 
-use crate::{compile_json, debug_json, lex_json, run_json};
+use crate::{compile_json, debug_json, lex_ir_json, lex_json, run_json};
 
 /// Reserves `len` bytes of the module's memory and answers where they start.
 ///
@@ -190,6 +194,22 @@ pub unsafe extern "C" fn cove_debug(
 #[no_mangle]
 pub unsafe extern "C" fn cove_lex(source: *const u8, len: usize) -> *mut u8 {
     answer(lex_json(&read(source, len)))
+}
+
+/// Colours the disassembly in `text` and answers a tiling of it, as an
+/// answer block. See [`crate::lex_ir_json`].
+///
+/// `text` is what [`cove_compile`] or [`cove_run`] put in `ir`, handed back
+/// so that the colouring is of the text the caller is actually showing. Like
+/// [`cove_lex`] it neither checks nor runs anything, and for the same reason
+/// it is a call a page can make on its own thread.
+///
+/// # Safety
+///
+/// As [`cove_compile`].
+#[no_mangle]
+pub unsafe extern "C" fn cove_lex_ir(text: *const u8, len: usize) -> *mut u8 {
+    answer(lex_ir_json(&read(text, len)))
 }
 
 /// The caller's bytes as a string.

@@ -10,14 +10,20 @@
         --edge: color-mix(in srgb, currentColor 18%, transparent);
         --quiet: color-mix(in srgb, currentColor 60%, transparent);
 
-        /* The editor's four colours. Four and not twenty: the categories are
-           what the compiler's own lexer distinguishes, and a reader wants the
-           shape of a program rather than a wall. A comment takes `--quiet`,
-           which is the colour everything secondary on this page already is. */
+        /* The five colours the two coloured panes share. Five and not twenty:
+           the categories are what the compiler's own lexer distinguishes in
+           source, and what `cove_ir::print`'s line shapes distinguish in a
+           disassembly, and a reader wants the shape of a program rather than
+           a wall. A comment takes `--quiet`, which is the colour everything
+           secondary on this page already is.
+
+           `--slot` is the disassembly's alone: `s3:int` is the thing a reader
+           follows from line to line there, and source has nothing like it. */
         --keyword: #8250df;
         --type: #0550ae;
         --string: #0a7d3f;
         --number: #953800;
+        --slot: #1b7c83;
       }
       @media (prefers-color-scheme: dark) {
         :root {
@@ -25,6 +31,7 @@
           --type: #79c0ff;
           --string: #7ee787;
           --number: #ffa657;
+          --slot: #39c5cf;
         }
       }
       body {
@@ -101,11 +108,27 @@
         pointer-events: none;
       }
       #paint::before { content: none; }
-      #paint .keyword { color: var(--keyword); }
-      #paint .type { color: var(--type); }
-      #paint .string { color: var(--string); }
-      #paint .number { color: var(--number); }
-      #paint .comment { color: var(--quiet); }
+
+      /* One set of rules for both coloured boxes, because both are painted
+         from the same kind of answer: a tiling whose pieces name one of these
+         classes. `#ir` wears it too, and nothing about the colours is per
+         pane. They are colours only — never bold, never italic — for the
+         alignment reason above, which the editor needs and the disassembly
+         gets for free. */
+      .tinted .keyword { color: var(--keyword); }
+      .tinted .type { color: var(--type); }
+      .tinted .string { color: var(--string); }
+      .tinted .number { color: var(--number); }
+      .tinted .slot { color: var(--slot); }
+      .tinted .comment { color: var(--quiet); }
+
+      /* Where the timeline is. `.on` is the line the moment was written at
+         and `.at` is the instruction's own span inside it, and a background
+         is the whole of both: a background changes no metric, so the caret
+         still sits on its glyphs. The two tints are `pre.pane .now`'s, so the
+         mark in the editor and the mark in the panes are the same mark. */
+      #paint .on { background: color-mix(in srgb, currentColor 8%, transparent); }
+      #paint .at { background: color-mix(in srgb, currentColor 20%, transparent); }
       #source {
         display: block;
         position: relative;
@@ -119,6 +142,33 @@
       /* Selected text is drawn in the textarea's layer, which is above the
          glyphs, so an opaque selection would hide what was selected. */
       #source::selection { background: color-mix(in srgb, Highlight 40%, transparent); }
+
+      /* ---- the locked editor ---------------------------------------------
+
+         While a run is being recorded and while its timeline is open, the
+         editor is read-only: the marked line has to be the line that ran, and
+         a text that can change under a recording is a mark that points at
+         source which is no longer there.
+
+         A `readonly` textarea refuses keystrokes and says nothing about it,
+         which is the failure this has to avoid — a visitor who types and sees
+         nothing happen has been given no reason. So the state is said in
+         words, in `#lock`, directly above the box it is about, with the way
+         out beside it; and the box itself is visibly not the box you type in.
+         The precedent in this page is the picker's `(your own program)`: a
+         state is shown rather than left to be discovered. */
+      .editor.locked #source { cursor: default; }
+      .editor.locked #paint { background: color-mix(in srgb, currentColor 4%, transparent); }
+      .editor.locked { outline: 2px solid var(--edge); outline-offset: 2px; border-radius: 6px; }
+      #lock {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        flex-wrap: wrap;
+        margin: 0.6rem 0;
+        color: var(--quiet);
+      }
+      #lock[hidden] { display: none; }
       h2 {
         font-size: 0.8rem;
         font-weight: 600;
@@ -167,17 +217,23 @@
       }
       #blurb { color: var(--quiet); }
 
-      /* The four panes a recording drives. Plain on purpose: this is a tool
+      /* The three panes a recording drives. Plain on purpose: this is a tool
          for reading a program's execution, and everything drawn on top of a
-         line of text is something between a reader and the line. */
-      .four {
+         line of text is something between a reader and the line.
+
+         Three and not four. There was a Source pane here, listing the
+         recorded text with the moment's line marked, which made the page show
+         the same program twice — once to type into and once to read. The
+         editor above marks the moment itself now, so the copy is gone rather
+         than kept as a third one. */
+      .three {
         display: grid;
         grid-template-columns: 1fr 1fr;
         gap: 1rem;
         align-items: start;
       }
       @media (max-width: 60rem) {
-        .four { grid-template-columns: 1fr; }
+        .three { grid-template-columns: 1fr; }
       }
       pre.pane {
         max-height: 15rem;
@@ -205,9 +261,12 @@
       browser. A task <code>spawn</code> is refused rather than emulated —
       a Cove task is a thread and a worker has one.
       <strong>Run &amp; record</strong> runs the program under a debugger that
-      writes down what it saw, and the timeline below scrubs through it: a
-      worker cannot block waiting for the page, so the machine is not stepped,
-      it is recorded. Pick a sample to see what the language looks like, or
+      writes down what it saw, and the timeline below scrubs through it,
+      marking where you are in the editor itself: a worker cannot block
+      waiting for the page, so the machine is not stepped, it is recorded.
+      The editor is read-only while a recording is open, because the mark has
+      to point at the source that ran; <strong>End replay</strong> closes it
+      and gives the editor back. Pick a sample to see what the language looks like, or
       write your own — the picker never replaces something you have changed
       without asking, and nothing here is saved anywhere.
     </p>
@@ -231,8 +290,15 @@
              transparent. `#paint` is `aria-hidden` because it is a second
              copy of the textarea's own value and a screen reader should be
              told the text once. -->
-        <div class="editor">
-          <pre id="paint" aria-hidden="true"></pre>
+        <!-- Said in words, above the box it is about, with the way out beside
+             it. Hidden entirely when the editor is not locked, so its
+             presence is itself the signal. -->
+        <p id="lock" hidden>
+          <span id="lock-why"></span>
+          <button id="unlock">End replay</button>
+        </p>
+        <div class="editor" id="editor">
+          <pre id="paint" class="tinted" aria-hidden="true"></pre>
           <textarea id="source" spellcheck="false" wrap="off"></textarea>
         </div>
         <div class="bar">
@@ -251,15 +317,21 @@
         <pre id="diagnostics"></pre>
         <h2>Output</h2>
         <pre id="output"></pre>
+        <!-- Coloured by the module too, and for the editor's reason: the page
+             does not read this format, the crate that writes it does. -->
         <h2>Lowered IR</h2>
-        <pre id="ir"></pre>
+        <pre id="ir" class="tinted"></pre>
       </div>
     </div>
 
-    <!-- The recording. Hidden until there is one, because four empty panes
+    <!-- The recording. Hidden until there is one, because three empty panes
          say less than no panes. Everything in it is one message the worker
          sent when the run had finished: the page never asks the machine
-         anything, for the reason `crates/cove-wasm/src/record.rs` gives. -->
+         anything, for the reason `crates/cove-wasm/src/record.rs` gives.
+
+         Where the source is, is the editor above: the slider marks the line
+         and the span the moment was written at, in the box the program was
+         typed into. -->
     <section id="timeline" hidden>
       <h2>Timeline</h2>
       <div class="bar">
@@ -268,11 +340,7 @@
         <button id="forward" title="the moment after">▶</button>
       </div>
       <p class="note" id="where"></p>
-      <div class="four">
-        <div>
-          <h2>Source</h2>
-          <pre id="pane-source" class="pane"></pre>
-        </div>
+      <div class="three">
         <div>
           <h2>Instructions</h2>
           <pre id="pane-code" class="pane"></pre>
@@ -296,74 +364,187 @@
       const source = el("source");
       const status = el("status");
 
-      // ---- syntax highlighting -------------------------------------------
+      // ---- colouring the two boxes that hold text ------------------------
       //
-      // The colours come from the compiler's own lexer. The module in this
-      // tab holds the whole front end, so `cove_lex` is a call away, and it
-      // answers a tiling of the source: a list of spans that between them
-      // cover every character exactly once, each named with what the lexer
-      // decided it was. `crates/cove-wasm/src/highlight.rs` argues why that
-      // and not a keyword list in this file -- in short, a list here would be
-      // a second, informal spelling of the language, and nothing would notice
-      // the day it stopped matching the first.
+      // The editor's colours come from the compiler's own lexer. The module
+      // in this tab holds the whole front end, so `cove_lex` is a call away,
+      // and it answers a tiling of the source: a list of spans that between
+      // them cover every character exactly once, each named with what the
+      // lexer decided it was. `crates/cove-wasm/src/highlight.rs` argues why
+      // that and not a keyword list in this file -- in short, a list here
+      // would be a second, informal spelling of the language, and nothing
+      // would notice the day it stopped matching the first.
       //
-      // This one is on the page's thread rather than on the worker, which is
-      // the opposite of every other call to the module here. The worker
-      // exists because a Cove program can loop and wasm cannot be interrupted
-      // from outside; lexing is one pass over the text and cannot. Being on
-      // this thread is what makes a keystroke and its colours the same frame:
-      // the glyphs a reader sees are `#paint`'s, so an answer that arrived a
-      // frame later would be a character that appeared a frame later.
+      // The disassembly pane is coloured by the same module answering the
+      // same shape, so `tile` below draws both. There is no lexer for that
+      // format, so what reads it is a reader of the line shapes
+      // `cove_ir::print` documents -- in Rust, beside the printer, and held
+      // to every shipped sample's real disassembly by `web/check.mjs`.
+      //
+      // These two are the only calls to the module made on the page's own
+      // thread rather than on the worker. The worker exists because a Cove
+      // program can loop and wasm cannot be interrupted from outside; a pass
+      // over some text cannot. Being on this thread is what makes a keystroke
+      // and its colours the same frame: the glyphs a reader sees are
+      // `#paint`'s, so an answer that arrived a frame later would be a
+      // character that appeared a frame later.
 
       let painter = null;
 
-      /// Redraws `#paint` from what the lexer says the text in the box is.
+      /// Cuts `text` into nodes by `spans`, which must be a tiling of it, and
+      /// answers them with the first node `mark` picked out.
       ///
       /// Built as elements and text nodes rather than as markup, for the
       /// reason the recording's panes are: a program's own text can then
       /// never be read as HTML.
       ///
-      /// Plain before the module has loaded, and plain if the spans ever fail
-      /// to cover the text -- the glyphs must be the ones that are in the box
-      /// even when the colours cannot be, because these are the glyphs the
-      /// caret is sitting on.
-      function repaint() {
+      /// `mark` is `null` or four offsets: the span to mark, and the line
+      /// that holds it. Its boundaries cut the coloured runs the same way the
+      /// runs cut the text, which is the whole of the marking -- another
+      /// piece in the same tiling, and no second pass over the DOM. A colour
+      /// and a mark are independent, so a marked keyword is both.
+      ///
+      /// Plain when the spans fail to cover the text -- the glyphs must be
+      /// the ones that are there even when the colours cannot be, because in
+      /// the editor these are the glyphs the caret is sitting on.
+      function tile(text, spans, mark) {
+        const held = document.createDocumentFragment();
+        const covered = spans.reduce((sum, span) => sum + span.len, 0);
+        if (covered !== text.length) {
+          held.append(text);
+          return { held, marked: null };
+        }
+        const cuts = mark ? [mark.lineFrom, mark.from, mark.to, mark.lineTo] : [];
+        let marked = null;
+        for (const span of spans) {
+          const end = span.at + span.len;
+          for (let at = span.at; at < end; ) {
+            let stop = end;
+            for (const cut of cuts) if (cut > at && cut < stop) stop = cut;
+            const inside =
+              mark === null
+                ? ""
+                : at >= mark.from && at < mark.to
+                  ? "at"
+                  : at >= mark.lineFrom && at < mark.lineTo
+                    ? "on"
+                    : "";
+            const run = text.slice(at, stop);
+            if (span.kind === "plain" && inside === "") {
+              held.append(run);
+            } else {
+              const node = document.createElement("span");
+              node.className = [span.kind === "plain" ? "" : span.kind, inside]
+                .filter(Boolean)
+                .join(" ");
+              node.textContent = run;
+              held.append(node);
+              if (marked === null && inside !== "") marked = node;
+            }
+            at = stop;
+          }
+        }
+        return { held, marked };
+      }
+
+      /// Redraws `#paint` from what the lexer says the text in the box is,
+      /// with the timeline's moment marked in it when there is one.
+      ///
+      /// Plain before the module has loaded, for `tile`'s reason.
+      ///
+      /// `follow` asks for the marked line to be brought into view. It is
+      /// what the timeline passes and what a keystroke does not: scrolling
+      /// the box someone is typing in is a thing to do only when they moved
+      /// the slider rather than the caret.
+      function repaint(follow = false) {
         const text = source.value;
         const spans = painter === null ? [] : painter.lex(text).spans;
-        const covered = spans.reduce((held, span) => held + span.len, 0);
-        const held = document.createDocumentFragment();
-        if (covered === text.length) {
-          for (const span of spans) {
-            const run = text.slice(span.at, span.at + span.len);
-            if (span.kind === "plain") {
-              held.append(run);
-              continue;
-            }
-            const node = document.createElement("span");
-            node.className = span.kind;
-            node.textContent = run;
-            held.append(node);
-          }
-        } else {
-          held.append(text);
-        }
+        const { held, marked } = tile(text, spans, marker(text));
         // A trailing newline of the reader's own leaves an empty last line
         // that a `<pre>` gives no height to and a textarea does, and the two
         // would then scroll to different bottoms.
         held.append("\n");
         el("paint").replaceChildren(held);
-        follow();
+        if (follow && marked) reveal(marked);
+        track();
+      }
+
+      /// Where the editor is marked, or `null` when nothing is being
+      /// replayed.
+      ///
+      /// The moment's own span, or the selected frame's call site when a
+      /// frame other than the innermost is selected -- which is what makes an
+      /// outer frame readable now that there is one editor and not one Source
+      /// pane per frame. Both arrive as UTF-16 offsets, which is what a
+      /// JavaScript string is indexed in, so they are offsets into this text.
+      ///
+      /// The equality is an invariant and not a state: the editor is
+      /// read-only for as long as a recording is open, so its text is the
+      /// text that ran. It is checked anyway, because a marker computed from
+      /// a recording of some other text would point at source that is not
+      /// there, and showing nothing is the honest answer to that.
+      function marker(text) {
+        if (!replaying || recording === null || text !== recorded) return null;
+        const moment = recording.moments[Number(el("moment").value)];
+        const frame = moment.frames[picked];
+        const from = Math.min(frame ? frame.from : moment.from, text.length);
+        const to = Math.min(Math.max(frame ? frame.to : moment.to, from), text.length);
+        const before = text.lastIndexOf("\n", Math.max(from - 1, 0));
+        const after = text.indexOf("\n", to);
+        return {
+          from,
+          to,
+          lineFrom: from === 0 || before < 0 ? 0 : before + 1,
+          lineTo: after < 0 ? text.length : after,
+        };
+      }
+
+      /// Scrolls the editor so that `node` is on screen, and no further.
+      ///
+      /// Only when it is not, because the timeline moves a moment at a time
+      /// and most moments are on a line already in view: a box that recentred
+      /// itself on every step would be a box that never stops moving. The
+      /// textarea is what scrolls and `#paint` follows it, which is the same
+      /// direction every other scroll on this page goes.
+      function reveal(node) {
+        const view = source.clientHeight;
+        const above = node.offsetTop - source.scrollTop;
+        if (above >= 0 && above + node.offsetHeight <= view) return;
+        const most = Math.max(0, source.scrollHeight - view);
+        source.scrollTop = Math.min(Math.max(node.offsetTop - view / 2, 0), most);
+        track();
       }
 
       /// Puts the glyphs back under the caret after the textarea has
       /// scrolled. Both boxes hold the same text at the same metrics and
       /// neither wraps, so one number each way is the whole of the alignment.
-      function follow() {
+      function track() {
         el("paint").scrollTop = source.scrollTop;
         el("paint").scrollLeft = source.scrollLeft;
       }
 
-      source.addEventListener("scroll", follow);
+      source.addEventListener("scroll", track);
+
+      // The disassembly the pane is showing, kept so that it can be coloured
+      // if the module finishes loading after a run has already filled it.
+      let disassembled = "";
+
+      /// Redraws the disassembly pane, coloured the way the editor is.
+      ///
+      /// The colours come from the module and not from this file, for the
+      /// reason the editor's do: a second reader of a format written in
+      /// JavaScript drifts from the format and nothing notices. There is no
+      /// lexer for a disassembly to borrow, so what the module reads is the
+      /// line shapes `cove_ir::print` documents, and it says whether it knew
+      /// every line -- `web/check.mjs` fails the build when it did not know
+      /// one of a shipped sample's. `crates/cove-wasm/src/highlight.rs`
+      /// argues all of it.
+      function paintIr(text) {
+        disassembled = text;
+        const spans = painter === null || text === "" ? [] : painter.lexIr(text).spans;
+        const { held } = tile(text, spans, null);
+        el("ir").replaceChildren(held);
+      }
 
       // ---- the samples, and the editor's one piece of state ---------------
       //
@@ -428,6 +609,10 @@
           restore();
           return;
         }
+        // Replacing the text is exactly what a replay cannot survive, so
+        // choosing a sample ends it -- after the question above, so that a
+        // declined replacement leaves the timeline where it was.
+        endReplay();
         try {
           await fill(file);
         } catch (error) {
@@ -461,8 +646,9 @@
       let seq = 0;
       let pending = null;
       // The source the run in flight was asked about, kept because a
-      // recording's Source pane must show the lines its moments were written
-      // at rather than whatever has been typed since.
+      // recording is a recording of that text and its marks are offsets into
+      // it. A recorded run locks the editor, so this cannot come apart from
+      // what is in the box; it is still what the marks are measured against.
       let asked = "";
 
       function start() {
@@ -476,6 +662,7 @@
           pending = null;
           settle(false);
           if (data.failed) {
+            lock(null);
             el("diagnostics").textContent = `the module trapped: ${data.failed}`;
             el("diagnostics").className = "stopped";
             status.textContent = "trapped";
@@ -486,6 +673,7 @@
         worker.onerror = (event) => {
           pending = null;
           settle(false);
+          lock(null);
           el("diagnostics").textContent = `worker error: ${event.message}`;
           status.textContent = "failed";
         };
@@ -498,32 +686,94 @@
         el("stop").disabled = !busy;
       }
 
-      // ---- the recording, and the four panes it drives -------------------
+      // ---- the recording, the editor's mark, and the three panes ---------
       //
       // A recording is what the module answered: a list of moments, and a
       // table of disassembled functions the moments index into. Selecting a
       // moment is the only state here, plus which frame of it is selected,
-      // and all four panes are redrawn from those two numbers. Nothing is
-      // asked of the worker; the run is over.
+      // and the editor's mark and all three panes are redrawn from those two
+      // numbers. Nothing is asked of the worker; the run is over.
+      //
+      // There is no Source pane. A moment carries the span it was written at,
+      // so the source it names is marked in the editor above -- the box the
+      // program was typed into -- rather than in a second listing of the same
+      // text beside three others. That is also why the editor is read-only
+      // for as long as a recording is open: see `lock`.
 
       let recording = null;
-      // The source the recording is of, and not whatever has been typed
-      // since. A Source pane showing lines the moments were not written at
-      // would be worse than one showing nothing.
+      // The source the recording is of. While a recording is open this is
+      // also what is in the editor, because the editor is locked for exactly
+      // that long -- see `lock` below, which is where that is argued.
       let recorded = "";
       let picked = 0;
+      // Whether a recording is open. It is the editor's state as much as the
+      // timeline's: replaying and locked are the same thing.
+      let replaying = false;
 
       function record(answer, source) {
         recording = answer.debug;
         recorded = source;
         picked = 0;
         const moments = recording ? recording.moments : [];
-        el("timeline").hidden = moments.length === 0;
-        if (moments.length === 0) return;
+        replaying = moments.length > 0;
+        el("timeline").hidden = !replaying;
+        // A run that recorded nothing -- one that did not compile -- unlocks
+        // the editor again rather than leaving it locked over no timeline.
+        lock(replaying ? "replaying" : null);
+        if (!replaying) {
+          repaint();
+          return;
+        }
         const slider = el("moment");
         slider.max = String(moments.length - 1);
         slider.value = "0";
         draw();
+      }
+
+      /// Closes the recording: the timeline goes, the mark in the editor
+      /// goes, and the editor is editable again.
+      ///
+      /// This is a state change and not a hidden section, which is why it is
+      /// one function called from the button, from the picker, and from the
+      /// start of every run. Nothing makes a visitor end a replay by hand
+      /// before doing something else -- pressing Run while replaying runs.
+      function endReplay() {
+        replaying = false;
+        recording = null;
+        recorded = "";
+        picked = 0;
+        el("timeline").hidden = true;
+        lock(null);
+        repaint();
+      }
+
+      /// Locks or unlocks the editor and says which of the two it is.
+      ///
+      /// `why` is `"recording"`, `"replaying"` or `null`. The editor is
+      /// read-only for the first two because a recording is of the text as it
+      /// was when it ran: a marked span computed from it points at source
+      /// that has to still be there, and a text that changed under the
+      /// recording would make the mark a lie. Locking through the run as well
+      /// as through the replay is what makes that an invariant rather than a
+      /// check -- there is no window in which the text can move.
+      ///
+      /// A `readonly` textarea refuses keystrokes silently, and a visitor who
+      /// types and sees nothing happen has been told nothing. So the state is
+      /// written above the box, the box is visibly outlined, and the way out
+      /// is the button beside the words. During the run itself there is no
+      /// way out but Stop, which is in the bar below, so no button is offered
+      /// that would only be a second Stop.
+      function lock(why) {
+        source.readOnly = why !== null;
+        el("editor").classList.toggle("locked", why !== null);
+        el("lock").hidden = why === null;
+        el("unlock").hidden = why !== "replaying";
+        el("lock-why").textContent =
+          why === "recording"
+            ? "Recording — the editor is locked until the run finishes, so the timeline is of the program that ran."
+            : why === "replaying"
+              ? "Replaying — the editor is locked so the marked line stays the line that ran."
+              : "";
       }
 
       function draw() {
@@ -532,7 +782,9 @@
         if (picked >= frames.length) picked = 0;
         const frame = frames[picked];
         say(moment, frames);
-        paintSource(moment, frame);
+        // The source pane is the editor. It is marked where this moment was
+        // written and scrolled to keep that in view.
+        repaint(true);
         paintCode(frame);
         paintRuntime(moment, frames);
         paintMemory(moment, frame);
@@ -594,17 +846,6 @@
       }
 
       const number = (n, width) => String(n).padStart(width);
-
-      function paintSource(moment, frame) {
-        const line = frame ? frame.line : moment.line;
-        rows(
-          "pane-source",
-          recorded.split("\n").map((text, at) => ({
-            text: `${number(at + 1, 4)}  ${text}`,
-            now: at + 1 === line,
-          })),
-        );
-      }
 
       function paintCode(frame) {
         if (!frame || frame.function === null) {
@@ -713,7 +954,7 @@
         const diagnostics = answer.diagnostics.map((d) => d.rendered).join("\n");
         el("diagnostics").textContent = diagnostics;
         el("diagnostics").className = answer.ok ? "" : "stopped";
-        if (answer.ir !== undefined) el("ir").textContent = answer.ir ?? "";
+        if (answer.ir !== undefined) paintIr(answer.ir ?? "");
         if (kind === "compile") {
           el("output").textContent = "";
           status.textContent = answer.ok ? "compiled" : "did not compile";
@@ -754,11 +995,15 @@
         if (worker === null) start();
         pending = ++seq;
         settle(true);
-        // Hidden while a run is in flight rather than left showing the last
-        // one: four panes describing a program that has been edited since
-        // are four panes that are wrong.
-        el("timeline").hidden = true;
         asked = source.value;
+        // A run replaces whatever the timeline was showing, so it ends the
+        // replay rather than asking the visitor to. Three panes describing a
+        // program that is being run again are three panes that are wrong.
+        endReplay();
+        // A recorded run locks the editor for the whole of the run and then
+        // for the whole of the replay, so that the text the recording is of
+        // cannot change while it is being recorded. `lock` argues it.
+        lock(kind === "debug" ? "recording" : null);
         status.textContent =
           kind === "compile" ? "compiling…" : kind === "debug" ? "recording…" : "running…";
         worker.postMessage({
@@ -783,6 +1028,9 @@
         worker = null;
         pending = null;
         settle(false);
+        // A terminated run answers nothing, so there is no recording to lock
+        // the editor over.
+        lock(null);
         status.textContent = "stopped";
         el("diagnostics").textContent =
           "stopped from outside, so the run has nothing to say about why. " +
@@ -792,6 +1040,7 @@
       el("run").onclick = () => ask("run");
       el("debug-run").onclick = () => ask("debug");
       el("compile").onclick = () => ask("compile");
+      el("unlock").onclick = endReplay;
       source.onkeydown = (event) => {
         if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
           event.preventDefault();
@@ -802,7 +1051,8 @@
       start();
       status.textContent = "ready";
 
-      // The page's own copy of the module, for colouring and nothing else.
+      // The page's own copy of the module, for colouring -- both boxes -- and
+      // nothing else.
       // A second instantiation of the same bytes, which the browser has in
       // its cache by now: the alternative was to ask the worker, and the
       // worker is the one thing on this page that is sometimes busy for five
@@ -815,6 +1065,9 @@
         .then((held) => {
           painter = held;
           repaint();
+          // A run that finished before the module was here left plain text
+          // in the pane; this is the one moment it can be coloured.
+          paintIr(disassembled);
         })
         .catch(() => {});
 

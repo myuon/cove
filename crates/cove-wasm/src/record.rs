@@ -39,7 +39,13 @@
 //! One captured stop — a *moment* — is what the four panes need and nothing
 //! else:
 //!
-//! - **Source**: the 1-based line and column the instruction was written at.
+//! - **Source**: the 1-based line and column the instruction was written at,
+//!   and the instruction's span as a pair of UTF-16 offsets. The page marks
+//!   that span in the editor itself rather than in a second copy of the text,
+//!   so it needs an end and not only a start, and it needs both counted the
+//!   way a JavaScript string is indexed. `crates/cove-wasm/src/highlight.rs`
+//!   argues UTF-16 at length; the same argument holds here, and an em dash in
+//!   a comment above the marked line is enough to make it matter.
 //! - **Instructions**: an index into a shared table of disassembled
 //!   functions, and the pc inside it.
 //! - **Runtime**: the backtrace, innermost first — each frame's function,
@@ -228,6 +234,14 @@ pub struct Recorder {
 /// than an assumption in this file.
 #[derive(Default)]
 struct Kept {
+    /// Whether a file's text is all ASCII, remembered after the first look.
+    ///
+    /// A UTF-16 offset is the byte offset when it is, which turns the two
+    /// conversions a moment needs per frame into nothing at all. When it is
+    /// not, the prefix is counted, and the cost is why this cache exists: a
+    /// recording is up to [`MOST_MOMENTS`] moments of up to [`FRAMES`] frames
+    /// and each frame carries a span.
+    ascii: Vec<(FileId, bool)>,
     /// Each moment, already rendered to JSON.
     ///
     /// Rendered at capture rather than at the end so that [`BYTES`] is a
@@ -375,10 +389,31 @@ impl Kept {
         (!same).then_some("line")
     }
 
+    /// Whether `file` holds nothing but ASCII, looked up once per file.
+    fn ascii(&mut self, sources: &SourceMap, file: FileId) -> bool {
+        if let Some((_, held)) = self.ascii.iter().find(|(id, _)| *id == file) {
+            return *held;
+        }
+        let held = sources.get(file).text.is_ascii();
+        self.ascii.push((file, held));
+        held
+    }
+
+    /// `span` as the pair of UTF-16 offsets a page slices its own string by.
+    fn utf16(&mut self, sources: &SourceMap, span: Span) -> (usize, usize) {
+        let ascii = self.ascii(sources, span.file);
+        let text = &sources.get(span.file).text;
+        (
+            at_utf16(text, span.start, ascii),
+            at_utf16(text, span.end, ascii),
+        )
+    }
+
     /// One moment, rendered.
     fn capture(&mut self, stop: &Stop<'_>, sources: &SourceMap, why: &'static str) -> String {
         let span = stop.span();
         let (line, col) = at_line(sources, span);
+        let (from, to) = self.utf16(sources, span);
         self.last = Some(Place {
             file: span.file,
             from: line_from(sources, span),
@@ -422,10 +457,17 @@ impl Kept {
                     ])
                 })
                 .collect::<Vec<_>>();
+            let (from, to) = self.utf16(sources, call.span());
             frames.push(json::object([
                 ("function", function.to_string()),
                 ("pc", call.pc().to_string()),
                 ("line", at_line(sources, call.span()).0.to_string()),
+                // A selected frame moves the editor's mark to that frame's
+                // own call site, which is the only thing that makes an outer
+                // frame readable in a page with one editor rather than one
+                // Source pane per frame.
+                ("from", from.to_string()),
+                ("to", to.to_string()),
                 ("locals", json::array(locals)),
             ]));
         }
@@ -440,6 +482,8 @@ impl Kept {
             ("pc", stop.pc().to_string()),
             ("line", line.to_string()),
             ("col", col.to_string()),
+            ("from", from.to_string()),
+            ("to", to.to_string()),
             ("depth", depth.to_string()),
             ("why", json::string(why)),
             ("frames", json::array(frames)),
@@ -525,6 +569,24 @@ fn remember(stop: &Stop<'_>, objects: &mut Vec<(u64, String)>, addr: u64) -> Opt
         ]),
     ));
     Some(addr.to_string())
+}
+
+/// A byte offset as a UTF-16 offset, which is what a JavaScript string is
+/// indexed in.
+///
+/// `ascii` is the file's answer to "are the two the same number?", looked up
+/// once by [`Kept::ascii`] rather than per span. Out-of-range offsets are
+/// clamped and a mid-character one is walked back, because a marked span that
+/// is one code unit wrong is better than a panic inside a debugger.
+fn at_utf16(text: &str, at: u32, ascii: bool) -> usize {
+    let mut at = (at as usize).min(text.len());
+    if ascii {
+        return at;
+    }
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    text[..at].encode_utf16().count()
 }
 
 /// The 1-based line and column `span` starts at.

@@ -100,7 +100,7 @@ check(
 // and slicing its own text, so a tiling that did not tile would put a colour
 // on the wrong glyphs, and the check below is the one that would catch it.
 
-const KINDS = ["keyword", "type", "string", "number", "comment", "plain"];
+const KINDS = ["keyword", "type", "string", "number", "slot", "comment", "plain"];
 
 /// "" when `spans` tile `source`, and a description of the first violation
 /// otherwise -- where it broke is the interesting half.
@@ -118,8 +118,12 @@ function tiling(source, spans) {
 }
 
 /// A colouring as `[text, kind]` pairs, which is what one looks like.
-function painted(source) {
-  const answer = cove.lex(source);
+///
+/// `read` is the module entry point that answers the tiling: `cove.lex` for
+/// source, `cove.lexIr` for a disassembly. The two answer the same shape on
+/// purpose, so everything asserted of one can be asserted of the other.
+function painted(source, read = (text) => cove.lex(text)) {
+  const answer = read(source);
   return {
     ok: answer.ok,
     tiles: tiling(source, answer.spans),
@@ -129,6 +133,13 @@ function painted(source) {
     ]),
   };
 }
+
+/// The colouring of a disassembly, whose `ok` means something stronger than
+/// source's: not that the text parsed -- `cove_ir::print` wrote it and it
+/// always does -- but that every line of it was a line shape that module
+/// documents. A false answer is the printer having grown a line the colouring
+/// does not know, which is the failure this whole section exists to catch.
+const disassembled = (ir) => painted(ir, (text) => cove.lexIr(text));
 
 // ---- every sample, compiled and run ------------------------------------
 //
@@ -140,6 +151,9 @@ function painted(source) {
 
 console.log("\nevery sample the picker offers:");
 const sources = new Map();
+// Every category the nine samples' disassembly was cut into, gathered as the
+// loop goes and asserted after it.
+const kinds = new Set();
 for (const sample of SAMPLES) {
   // An entry naming no file is already a failure above; reading it would be a
   // thrown `ENOENT` on top of it, which reports the same fact less clearly.
@@ -161,6 +175,20 @@ for (const sample of SAMPLES) {
   const shown = painted(source);
   check(`${sample.file} lexes, so the editor can colour it`, shown.ok, true);
   check(`${sample.file} is coloured end to end`, shown.tiles, "");
+
+  // And the other coloured pane, held to the same bar for the same reason.
+  // This is the check that a change to `cove_ir::print` fails rather than
+  // quietly turning the disassembly into a wall of one colour: `ok` is false
+  // the moment one line of one shipped sample is a line the colouring does
+  // not recognise, and these nine between them use most of the instruction
+  // set. `kinds` collects what they were coloured as for the coverage
+  // assertion below, which is the other half -- a tiling of the right length
+  // made of the wrong categories is what a reader that had drifted would
+  // produce, and `ok` alone would not notice it.
+  const listing = disassembled(built.ir ?? "");
+  check(`${sample.file} disassembles into lines the colouring knows`, listing.ok, true);
+  check(`${sample.file}'s disassembly is coloured end to end`, listing.tiles, "");
+  for (const [, kind] of listing.runs) kinds.add(kind);
 
   const outcome = cove.run(source);
   check(`${sample.file} runs inside this page's grants`, outcome.outcome, "success");
@@ -276,6 +304,117 @@ check("what came before the quote keeps its colours", half.runs[0], (held) =>
 check("and the open literal is a string to the end", half.runs.at(-1), (held) =>
   isDeepStrictEqual(held, ['"open', "string"]),
 );
+
+// ---- what a disassembly is coloured as ---------------------------------
+//
+// The other text this page shows. It has no lexer to borrow, so what colours
+// it reads the line shapes `crates/cove-ir/src/print.rs` documents -- and a
+// reader of a format is exactly the thing that drifts from the format, which
+// is why the nine samples above are all put through it and why the pieces
+// below are named rather than counted.
+//
+// `crates/cove-wasm/src/highlight.rs` argues why that reader is in Rust
+// beside the printer and not a regular expression in `index.html`.
+
+console.log("\nwhat a disassembly is coloured as:");
+check(
+  "every category the disassembly distinguishes is actually used by a sample",
+  [...kinds].sort().join(" "),
+  "keyword number plain slot string type",
+);
+
+const small = cove.compile(`export fn main() -> Int {
+  let n = 21
+  n * 2
+}
+`);
+const lit = disassembled(small.ir);
+check("it knows every line of it", lit.ok, true);
+check("it tiles the disassembly", lit.tiles, "");
+check(
+  "each piece is what the printer wrote it as",
+  lit.runs.filter(([, kind]) => kind !== "plain"),
+  (held) =>
+    isDeepStrictEqual(held, [
+      // The header: an id, then layouts. The function's own name is a name
+      // and is left plain, which is what tells it from the layouts around it.
+      ["fn0", "number"],
+      ["Int", "type"],
+      // The frame, and a slot with the `Repr` that says what that one word
+      // holds. A slot and its annotation are one piece: `s1` alone would not
+      // say whether the instruction moved a word or a `Point`.
+      ["frame", "keyword"],
+      ["4", "number"],
+      ["s0:int", "slot"],
+      ["s1:int", "slot"],
+      ["s2:int", "slot"],
+      ["s3:int", "slot"],
+      // The name a `local` binds is the source's own and is neither a layout
+      // nor a callee; the range is the program counters it holds the slot
+      // over, and program counters are numbers like any other.
+      ["local", "keyword"],
+      ["s1:Int", "slot"],
+      ["1", "number"],
+      ["4", "number"],
+      // Then the code: a pc, an opcode, and operands.
+      ["0", "number"],
+      ["int", "keyword"],
+      ["s1:int", "slot"],
+      ["21", "number"],
+      ["1", "number"],
+      ["int", "keyword"],
+      ["s2:int", "slot"],
+      ["2", "number"],
+      ["2", "number"],
+      ["mul.int", "keyword"],
+      ["s3:int", "slot"],
+      ["s1:int", "slot"],
+      ["s2:int", "slot"],
+      ["3", "number"],
+      ["copy", "keyword"],
+      ["s0:int", "slot"],
+      ["s3:int", "slot"],
+      ["Int", "type"],
+      ["4", "number"],
+      ["return", "keyword"],
+      ["s0:int", "slot"],
+    ]),
+);
+
+// A string literal is one piece, spaces and all, and a callee is a name where
+// the layout beside it is a type. Both are things a scanner that split on
+// whitespace would get wrong, and both are in every program that prints.
+const printing = disassembled(
+  cove.compile(`use console.println
+
+export fn main() -> Result<Unit, Error> {
+  println("two words")?
+  Ok(())
+}
+`).ir,
+);
+check("it knows every line of that one too", printing.ok, true);
+check("a string literal is one piece, spaces and all", printing.runs, (held) =>
+  held.some(([text, kind]) => text === '"two words"' && kind === "string"),
+);
+// Not `=== "console.println"`: a plain run is merged with the punctuation
+// around it, which is the point of merging -- one DOM node per visible run
+// rather than one per token. What is asserted is that the callee is inside a
+// plain one and not a piece of its own coloured as a layout.
+check(
+  "a callee is a name and not a layout",
+  printing.runs.filter(([text]) => text.includes("console.println")),
+  (held) => held.length === 1 && held[0][1] === "plain",
+);
+check("and the layout beside it still is one", printing.runs, (held) =>
+  held.some(([text, kind]) => text === "String" && kind === "type"),
+);
+
+// The signal itself, which is what makes all of the above a check rather than
+// a description: a line the printer never wrote is left plain and reported.
+const strange = disassembled("fn0 playground.main() -> Int\n  a new kind of line\n");
+check("a line it does not know turns the answer false", strange.ok, false);
+check("and is still tiled rather than dropped", strange.tiles, "");
 
 // ---- a program that does not compile ----------------------------------
 
@@ -394,6 +533,45 @@ check(
   "the instruction counts only go forwards",
   moments.every((m, at) => at === 0 || m.at > moments[at - 1].at),
   true,
+);
+
+// The span each moment was written at, which is what the page marks in the
+// editor rather than in a second copy of the text. It is a pair of UTF-16
+// offsets into the source the page already holds, so the page slices its own
+// string by them; `line` says which line, and these say where on it.
+const online = (text, at) => text.slice(0, at).split("\n").length;
+check(
+  "every moment carries a span the editor can slice",
+  moments.every((m) => m.from < m.to && m.to <= walked.length),
+  true,
+);
+check(
+  "and it is on the line the moment names",
+  moments.every((m) => online(walked, m.from) === m.line),
+  true,
+);
+check(
+  "every frame carries its own, so selecting one moves the mark",
+  moments.every((m) =>
+    m.frames.every((f) => f.from < f.to && online(walked, f.from) === f.line),
+  ),
+  true,
+);
+
+// Counted the way `String.prototype.slice` counts, which is the same bug the
+// disassembly capture had and the reason that one is remembered: on `wasm32`
+// a `usize` is 32 bits and nothing about a byte offset looks wrong until the
+// source holds a character that is not one byte wide.
+const dashes = `// an — dash
+export fn main() -> Int {
+  21 * 2
+}
+`;
+const marked = cove.debug(dashes).debug.moments[0];
+check(
+  "an offset counts code units and not bytes",
+  dashes.slice(marked.from, marked.to),
+  "21",
 );
 
 // Both functions, disassembled once each however many moments are in them.
