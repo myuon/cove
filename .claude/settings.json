@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(cargo test*)",
+            "command": "jq -c 'if ((.tool_input.command // \"\") | test(\"cargo[[:space:]]+test\")) and ((.tool_input.command // \"\") | test(\"--profile\") | not) then {hookSpecificOutput:{hookEventName:\"PreToolUse\",permissionDecision:\"deny\",permissionDecisionReason:\"This workspace runs its tests optimised. A bare `cargo test` uses the unoptimised profile and is 4x to 6x slower here \\u2014 13s against minutes for the suite, 36s against 241s for the ratchet \\u2014 because this suite runs Cove programs rather than merely compiling a harness. Use `cargo t` for the suite, `cargo ratchet` for the ignored corpus ratchet, or add `--profile checked` to this command. See CLAUDE.md, \\\"What the gate costs, measured\\\".\"}} else empty end'"
+          }
+        ]
+      }
+    ]
+  }
+}
