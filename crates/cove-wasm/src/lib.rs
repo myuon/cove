@@ -3,8 +3,14 @@
 //!
 //! [Issue #241](https://github.com/myuon/cove/issues/241) asks for a
 //! playground. This crate is the half of it that is Rust; `web/` is the half
-//! that is a page. What it exports is described in [`abi`], and it is four
+//! that is a page. What it exports is described in [`abi`], and it is five
 //! functions and one import.
+//!
+//! The fifth is [`debug_json`]: the same run, watched by a [`record`]ing
+//! debugger, so that the page can scrub through a timeline of it. A browser
+//! cannot be given the debugger `cove debug` is — a Web Worker cannot block
+//! waiting for the page — and [`record`] says at length why, and what
+//! recording keeps and loses instead.
 //!
 //! # What is the same as `cove run`, and what is not
 //!
@@ -32,6 +38,7 @@
 
 pub mod abi;
 mod json;
+pub mod record;
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -284,9 +291,75 @@ pub fn compile_json(source: &str) -> String {
 /// bound". A playground that could be asked for an unbounded run would be a
 /// page with a hang button.
 pub fn run_json(source: &str, fuel: Option<u64>, deadline_ms: Option<u64>) -> String {
+    execute(source, fuel, deadline_ms, None)
+}
+
+/// Runs `source` as [`run_json`] does, watched by a [`record::Recorder`],
+/// and answers everything [`run_json`] answers plus the recording under
+/// `debug`.
+///
+/// ```json
+/// {…as run_json…,"debug":{"moments":[…],"functions":[…],"kept":int,
+///                         "limit":int,"bytes":int,"truncated":…}}
+/// ```
+///
+/// `debug` is `null` for a source that did not compile, because there was no
+/// run to record and an empty recording of a program that never started
+/// reads as a program that did nothing.
+///
+/// `moments` is how many moments to keep; zero asks for
+/// [`record::MOMENTS`], and anything past [`record::MOST_MOMENTS`] is
+/// clamped to it. [`record`]'s module documentation says what a moment is,
+/// what bounds it, and why a browser gets a recording rather than a
+/// debugger it can step.
+///
+/// # One blob, not pieces
+///
+/// A recording is much larger than a compile result, so the alternative was
+/// considered and refused: a first call answering the moments' outlines and
+/// a second answering one moment's detail. Two things decided it.
+///
+/// A paged ABI needs the module to *hold* the recording between calls, and
+/// [`abi`] exists partly to have no module-level state — its length prefix
+/// replaced a "how long was the last answer?" export precisely so that two
+/// calls in flight have nothing to race over. Holding a recording would put
+/// that back, and worse, because the state would now be the size of the
+/// recording rather than of a number.
+///
+/// And the size a page actually pays is not the size paging would save.
+/// What makes a recording large is repetition, and the two repeated things —
+/// a function's disassembly and its name — are interned into `functions`
+/// once each. What is left per moment is what genuinely differs between
+/// moments. A recording of the example program is a few tens of kilobytes;
+/// see `web/README.md` for what larger ones measure. The bound that keeps it
+/// from growing without limit is [`record::BYTES`], and a bound is a better
+/// answer to "this could be huge" than an ABI that hands over a huge thing
+/// slowly.
+pub fn debug_json(
+    source: &str,
+    fuel: Option<u64>,
+    deadline_ms: Option<u64>,
+    moments: usize,
+) -> String {
+    execute(source, fuel, deadline_ms, Some(moments))
+}
+
+/// Checks, lowers and runs `source`, recording it when `moments` is `Some`.
+///
+/// One function and not two so that a debugged run and a plain one are the
+/// same run: the same hosts, the same grants, the same limits, the same
+/// classification of how it ended. A second copy of this setup would be a
+/// second playground that agreed with the first until it did not.
+fn execute(
+    source: &str,
+    fuel: Option<u64>,
+    deadline_ms: Option<u64>,
+    moments: Option<usize>,
+) -> String {
+    let recording = moments.is_some();
     let front = front(source);
     let Some((checked, program)) = front.lowered else {
-        return json::object([
+        let mut fields = vec![
             ("ok", "false".to_string()),
             (
                 "diagnostics",
@@ -299,7 +372,11 @@ pub fn run_json(source: &str, fuel: Option<u64>, deadline_ms: Option<u64>) -> St
             ("answer", "null".to_string()),
             ("instructions", "null".to_string()),
             ("fuel", "null".to_string()),
-        ]);
+        ];
+        if recording {
+            fields.push(("debug", "null".to_string()));
+        }
+        return json::object(fields);
     };
 
     let out = Buffer::default();
@@ -339,8 +416,12 @@ pub fn run_json(source: &str, fuel: Option<u64>, deadline_ms: Option<u64>) -> St
     let runtime = Runtime::new(Arc::new(checked), Arc::clone(&sources), Arc::new(hosts));
 
     let disassembly = cove_ir::print::program(&program);
+    let recorder = moments.map(|moments| record::Recorder::new(Arc::clone(&sources), moments));
     let (answer, instructions, fuel_spent) = {
-        let mut vm = Vm::new(&runtime, runtime.hosts(), &program);
+        let mut vm = match &recorder {
+            Some(recorder) => Vm::debugged(&runtime, runtime.hosts(), &program, recorder),
+            None => Vm::new(&runtime, runtime.hosts(), &program),
+        };
         let answer = vm.run_entry(MODULE, ENTRY, Vec::<Rc<str>>::new());
         let instructions = vm.instructions();
         let spent = runtime
@@ -359,7 +440,7 @@ pub fn run_json(source: &str, fuel: Option<u64>, deadline_ms: Option<u64>) -> St
         Err(error) => vec![error.to_diagnostic()],
     };
 
-    json::object([
+    let mut fields = vec![
         ("ok", matches!(outcome, RunOutcome::Success).to_string()),
         ("diagnostics", diagnostics_json(&sources, &diagnostics)),
         ("ir", json::string(&disassembly)),
@@ -380,7 +461,11 @@ pub fn run_json(source: &str, fuel: Option<u64>, deadline_ms: Option<u64>) -> St
             "fuel",
             json::or_null(fuel_spent.map(|spent| spent.to_string())),
         ),
-    ])
+    ];
+    if let Some(recorder) = &recorder {
+        fields.push(("debug", recorder.json()));
+    }
+    json::object(fields)
 }
 
 #[cfg(test)]
@@ -506,6 +591,203 @@ export fn main() -> Result<Unit, Error> {
             None,
         );
         assert!(says(&json, r#""outcome":"concurrency""#), "{json}");
+    }
+
+    /// Every value of `key` in `json`, in the order they were written.
+    ///
+    /// A recording is a sequence, and what these tests need to say about one
+    /// is "these things, in this order". A substring search answers "is this
+    /// in there" and cannot answer that, so this is the smallest thing that
+    /// can — still not a parser, still no dependency.
+    fn every(json: &str, key: &str) -> Vec<String> {
+        let needle = format!("\"{key}\":");
+        let mut found = Vec::new();
+        let mut rest = json;
+        while let Some(at) = rest.find(&needle) {
+            rest = &rest[at + needle.len()..];
+            let value = match rest.strip_prefix('"') {
+                Some(quoted) => {
+                    let end = quoted.find('"').unwrap_or(quoted.len());
+                    quoted[..end].to_string()
+                }
+                None => rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '-')
+                    .collect(),
+            };
+            found.push(value);
+        }
+        found
+    }
+
+    /// A program written so that every rule in [`record`]'s capture policy
+    /// fires exactly once and in a knowable order: an entry, a new line, a
+    /// call, a line inside the callee, and the return.
+    const WALKED: &str = r#"export fn twice(n: Int) -> Int {
+  n + n
+}
+
+export fn main() -> Int {
+  let one = 21
+  let total = twice(one)
+  total
+}
+"#;
+
+    /// The recording of a known program has the moments it should have, in
+    /// the order it ran them.
+    #[test]
+    fn a_recording_holds_the_moments_the_program_ran_in_order() {
+        let json = debug_json(WALKED, None, None, 0);
+        assert!(says(&json, r#""outcome":"success""#), "{json}");
+
+        // `why` appears once per moment and nowhere else in the answer.
+        assert_eq!(
+            every(&json, "why"),
+            // Six and not five: the last is `return`'s own instruction,
+            // which the lowering writes at the function's signature line, so
+            // the line changes one more time on the way out.
+            ["entry", "line", "call", "line", "return", "line"],
+            "{json}"
+        );
+
+        // Two functions, disassembled once each however often they are in a
+        // moment: the interning that keeps a recording from repeating a loop
+        // body once per turn.
+        assert_eq!(
+            every(&json, "name")
+                .iter()
+                .filter(|name| name.starts_with("playground."))
+                .count(),
+            2,
+            "{json}"
+        );
+        assert!(says(&json, r#""truncated":null"#), "{json}");
+        assert!(says(&json, r#""kept":6"#), "{json}");
+    }
+
+    /// The locals a moment holds are that moment's, and they change along
+    /// the timeline.
+    ///
+    /// `total` is declared before the call it is assigned from returns, so
+    /// the moment inside the callee shows it holding zero and the moment
+    /// after the return shows it holding 42. That is not a defect being
+    /// pinned: it is [`record`]'s stated limitation — a moment is at the
+    /// first instruction carrying a new line, which is inside the expression
+    /// rather than at the statement's start — and a test that showed 42 in
+    /// both would mean the recording was not per-moment at all.
+    #[test]
+    fn a_local_holds_what_it_held_at_that_moment() {
+        let json = debug_json(WALKED, None, None, 0);
+        let moments: Vec<&str> = json.split(r#"{"at":"#).collect();
+        let inside = moments
+            .iter()
+            .find(|moment| moment.contains(r#""why":"call""#))
+            .unwrap_or_else(|| panic!("a call moment: {json}"));
+        let after = moments
+            .iter()
+            .find(|moment| moment.contains(r#""why":"return""#))
+            .unwrap_or_else(|| panic!("a return moment: {json}"));
+        assert!(inside.contains(r#""name":"n","value":"21""#), "{inside}");
+        assert!(inside.contains(r#""name":"total","value":"0""#), "{inside}");
+        assert!(after.contains(r#""name":"total","value":"42""#), "{after}");
+    }
+
+    /// A local that names a heap object points at one the moment carries.
+    #[test]
+    fn a_local_that_names_an_object_carries_it() {
+        let json = debug_json(
+            "export fn main() -> Int {\n  let greeting = \"hello\"\n  greeting.length()\n}",
+            None,
+            None,
+            0,
+        );
+        assert!(says(&json, r#""outcome":"success""#), "{json}");
+        assert!(says(&json, r#""name":"String""#), "{json}");
+        assert!(says(&json, r#""name":"text","value":"hello""#), "{json}");
+        // The address on the local and the address on the object are the
+        // same number, which is what lets a Memory pane follow a name.
+        let addresses = every(&json, "at");
+        assert!(
+            addresses.iter().any(|at| at.len() > 4),
+            "an object address: {json}"
+        );
+    }
+
+    /// A recording that hit its bound says which bound, and the run it was
+    /// recording still finished and still answered.
+    ///
+    /// The second half is the point. A recorder that halted the run when it
+    /// filled up would answer a question about a program with a program that
+    /// did not run.
+    #[test]
+    fn a_recording_past_its_bound_says_so_and_the_run_goes_on() {
+        let counting =
+            "export fn main() -> Int {\n  var n = 0\n  while n < 100 {\n    n = n + 1\n  }\n  n\n}";
+        let json = debug_json(counting, None, None, 4);
+        assert!(says(&json, r#""truncated":"moments""#), "{json}");
+        assert!(says(&json, r#""kept":4"#), "{json}");
+        assert!(says(&json, r#""limit":4"#), "{json}");
+        // The run reached its own end rather than the recorder's.
+        assert!(says(&json, r#""outcome":"success""#), "{json}");
+        assert!(
+            says(&json, r#""answer":{"type":"int","value":100}"#),
+            "{json}"
+        );
+    }
+
+    /// A caller cannot ask for an unbounded recording.
+    #[test]
+    fn a_recording_is_bounded_however_much_is_asked_for() {
+        let json = debug_json("export fn main() -> Int { 1 }", None, None, usize::MAX);
+        assert!(
+            says(&json, &format!(r#""limit":{}"#, record::MOST_MOMENTS)),
+            "{json}"
+        );
+    }
+
+    /// A debugged run is the same run: the recorder watches it and does not
+    /// change it.
+    #[test]
+    fn recording_does_not_change_what_the_program_did() {
+        let source = r#"use console.println
+
+export fn main() -> Result<Int, Error> {
+  println("watched")?
+  Ok(21 * 2)
+}"#;
+        let plain = run_json(source, None, None);
+        let watched = debug_json(source, None, None, 0);
+        for fragment in [
+            r#""outcome":"success""#,
+            r#""stdout":"watched\n""#,
+            r#""instructions":"#,
+        ] {
+            assert!(plain.contains(fragment), "{plain}");
+            assert!(watched.contains(fragment), "{watched}");
+        }
+        assert_eq!(
+            every(&plain, "instructions"),
+            every(&watched, "instructions")
+        );
+    }
+
+    /// A source that did not compile has no recording, rather than an empty
+    /// one that reads as a program which did nothing.
+    #[test]
+    fn a_program_that_does_not_compile_has_no_recording() {
+        let json = debug_json("export fn main() -> Int { 1 +", None, None, 0);
+        assert!(says(&json, r#""debug":null"#), "{json}");
+    }
+
+    /// The four existing entry points answer what they always answered.
+    /// `web/check.mjs` and CI depend on it.
+    #[test]
+    fn a_plain_run_carries_no_recording() {
+        let json = run_json("export fn main() -> Int { 1 }", None, None);
+        assert!(!json.contains("\"debug\""), "{json}");
+        let json = compile_json("export fn main() -> Int { 1 }");
+        assert!(!json.contains("\"debug\""), "{json}");
     }
 
     /// Every answer is one JSON object and nothing else, whatever happened.

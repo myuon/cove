@@ -89,6 +89,23 @@ that loops past its fuel, one that loops past its deadline, and one that calls
 a capability the playground does not grant. It exits non-zero on the first
 that does not hold.
 
+Then it records one. A known program is run under the recording debugger and
+the recording is checked moment by moment: the stops it should have, in the
+order it ran them, on the lines they were written at, with the locals holding
+what they held *at each one*; the disassembly interned once per function; a
+local that names a heap object and the object it names; and a recording that
+hit its bound, said so, and left the run it was recording to reach its own
+end and answer.
+
+That last group is worth running on the wasm build and not only under
+`cargo test`, and this is not hypothetical. The first version of the
+disassembly capture asked for a range of `u32::MAX` instructions around the
+pc. On a 64-bit host that is the whole function. On `wasm32` a `usize` is
+32 bits, the addition wrapped, and every function came back with a *different*
+empty range at every pc — so the interning made a fresh table entry each time
+and the Instructions pane would have shown one instruction. `cargo test`
+passed. This did not.
+
 ## What the page can and cannot do
 
 **The same as `cove run`:** the parser, the checker, the lowering, the VM, and
@@ -113,6 +130,46 @@ differential harness uses. The *run's* deadline is a different thing and is
 real: it is enforced against `performance.now()`, which the page supplies to
 the module as an import.
 
+## Recording a run
+
+**Run & record** does the same run watched by a debugger that writes down what
+it saw, and then the page scrubs through the timeline: Source, Instructions,
+Runtime and Memory, all four moved by one slider. Selecting a frame in Runtime
+moves the other three to that frame.
+
+It records rather than steps, and the reason is a browser's. A Web Worker
+cannot block waiting for a message from the page — there is no synchronous
+receive, and an event loop that is inside a wasm call is not running — so the
+shape `cove debug` uses, where the prompt runs *inside* the debugger callback,
+has no spelling here. `Atomics.wait` on a `SharedArrayBuffer` would give it
+one, and a `SharedArrayBuffer` needs the page to be cross-origin isolated,
+which needs `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy`
+headers GitHub Pages does not send. So the machine is not asked anything: it
+runs to its end and hands over the whole recording at once. For reading a
+program that is the better trade anyway, because the timeline goes backwards.
+It is not a refusal of live stepping forever — only until something serves
+those two headers.
+
+A recording is bounded three ways, and each says so rather than truncating
+quietly: **moments** (the field beside fuel — the first N stops, after which
+the run goes on unrecorded and the timeline says `truncated`), a hard ceiling
+of 4 MiB of recording, and sixteen frames and thirty-two heap objects per
+moment. The **moments** figure is why the timeline can be trusted not to
+exhaust the tab: an unbounded recording of a real program would.
+
+What is captured is `cove debug`'s line-change rule with one clause added —
+the first instruction, every call and return, and the first instruction
+written on a new source line. Everything that rule gets wrong,
+`cove debug`'s `help limits` lists, and it is all still true here. The one
+you will notice first: a moment is at the *first* instruction carrying a new
+line, so a name assigned on that line still shows its old value.
+
+Measured, under node against the release build: the greeting example records
+six moments in 3.2 kB; a thousand-turn loop fills the default 1024 moments at
+about 200 B each, 206 kB in all. A recorded run of a fourteen-million-
+instruction loop takes 186 ms against the plain run's 119 ms.
+`crates/cove-wasm/src/record.rs` is where all of this is argued.
+
 ## Stopping a run
 
 Two bounds and one blunt instrument.
@@ -132,10 +189,10 @@ Running in a worker at all is why an infinite loop does not freeze the tab.
 
 | file | what it is |
 |---|---|
-| `index.html` | the page: a `<textarea>`, three panes, and the worker |
+| `index.html` | the page: a `<textarea>`, three panes, the timeline's four, and the worker |
 | `worker.mjs` | the thread a Cove program runs on |
 | `cove.mjs` | the JavaScript half of the C ABI, and the loader |
 | `check.mjs` | the node harness, run by CI |
 
-The ABI itself — four exported functions, one import, and a length-prefixed
+The ABI itself — five exported functions, one import, and a length-prefixed
 answer — is documented in `crates/cove-wasm/src/abi.rs`.

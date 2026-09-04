@@ -87,6 +87,35 @@
       }
       #status { color: var(--quiet); margin-left: auto; }
       .stopped { color: #c0392b; }
+
+      /* The four panes a recording drives. Plain on purpose: this is a tool
+         for reading a program's execution, and everything drawn on top of a
+         line of text is something between a reader and the line. */
+      .four {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+        align-items: start;
+      }
+      @media (max-width: 60rem) {
+        .four { grid-template-columns: 1fr; }
+      }
+      pre.pane {
+        max-height: 15rem;
+        /* `pre` and not `pre-wrap`: a wrapped line breaks the column that
+           makes a numbered listing readable. It scrolls sideways instead. */
+        white-space: pre;
+        /* So that a row's `offsetTop` is measured against the pane it is
+           scrolled inside, and not against the page. */
+        position: relative;
+      }
+      pre.pane span { display: block; }
+      pre.pane .now { background: color-mix(in srgb, currentColor 14%, transparent); }
+      pre.pane .pick { cursor: pointer; }
+      pre.pane .held { color: inherit; font-weight: 600; }
+      pre.pane .quiet { color: var(--quiet); }
+      #moment { flex: 1; min-width: 12rem; accent-color: currentColor; }
+      #where { margin: 0 0 0.6rem; }
     </style>
   </head>
   <body>
@@ -96,6 +125,10 @@
       lowering and the VM are one WebAssembly module, and no source leaves the
       browser. A task <code>spawn</code> is refused rather than emulated —
       a Cove task is a thread and a worker has one.
+      <strong>Run &amp; record</strong> runs the program under a debugger that
+      writes down what it saw, and the timeline below scrubs through it: a
+      worker cannot block waiting for the page, so the machine is not stepped,
+      it is recorded.
     </p>
 
     <div class="panes">
@@ -104,10 +137,12 @@
         <textarea id="source" spellcheck="false"></textarea>
         <div class="bar">
           <button id="run">Run</button>
+          <button id="debug-run">Run &amp; record</button>
           <button id="compile">Compile only</button>
           <button id="stop" disabled>Stop</button>
           <label>fuel <input id="fuel" type="number" min="0" step="1000000" value="200000000" /></label>
           <label>ms <input id="deadline" type="number" min="0" step="100" value="5000" /></label>
+          <label>moments <input id="moments" type="number" min="0" max="16384" step="128" value="1024" /></label>
           <span id="status">starting…</span>
         </div>
       </div>
@@ -120,6 +155,38 @@
         <pre id="ir"></pre>
       </div>
     </div>
+
+    <!-- The recording. Hidden until there is one, because four empty panes
+         say less than no panes. Everything in it is one message the worker
+         sent when the run had finished: the page never asks the machine
+         anything, for the reason `crates/cove-wasm/src/record.rs` gives. -->
+    <section id="timeline" hidden>
+      <h2>Timeline</h2>
+      <div class="bar">
+        <button id="back" title="the moment before">◀</button>
+        <input id="moment" type="range" min="0" max="0" value="0" />
+        <button id="forward" title="the moment after">▶</button>
+      </div>
+      <p class="note" id="where"></p>
+      <div class="four">
+        <div>
+          <h2>Source</h2>
+          <pre id="pane-source" class="pane"></pre>
+        </div>
+        <div>
+          <h2>Instructions</h2>
+          <pre id="pane-code" class="pane"></pre>
+        </div>
+        <div>
+          <h2>Runtime</h2>
+          <pre id="pane-runtime" class="pane"></pre>
+        </div>
+        <div>
+          <h2>Memory</h2>
+          <pre id="pane-memory" class="pane"></pre>
+        </div>
+      </div>
+    </section>
 
     <script type="module">
       const EXAMPLE = `use console.println
@@ -146,6 +213,10 @@ export fn main() -> Result<Int, Error> {
       let worker = null;
       let seq = 0;
       let pending = null;
+      // The source the run in flight was asked about, kept because a
+      // recording's Source pane must show the lines its moments were written
+      // at rather than whatever has been typed since.
+      let asked = "";
 
       function start() {
         worker = new Worker(new URL("./worker.mjs", import.meta.url), { type: "module" });
@@ -175,9 +246,221 @@ export fn main() -> Result<Int, Error> {
 
       function settle(busy) {
         el("run").disabled = busy;
+        el("debug-run").disabled = busy;
         el("compile").disabled = busy;
         el("stop").disabled = !busy;
       }
+
+      // ---- the recording, and the four panes it drives -------------------
+      //
+      // A recording is what the module answered: a list of moments, and a
+      // table of disassembled functions the moments index into. Selecting a
+      // moment is the only state here, plus which frame of it is selected,
+      // and all four panes are redrawn from those two numbers. Nothing is
+      // asked of the worker; the run is over.
+
+      let recording = null;
+      // The source the recording is of, and not whatever has been typed
+      // since. A Source pane showing lines the moments were not written at
+      // would be worse than one showing nothing.
+      let recorded = "";
+      let picked = 0;
+
+      function record(answer, source) {
+        recording = answer.debug;
+        recorded = source;
+        picked = 0;
+        const moments = recording ? recording.moments : [];
+        el("timeline").hidden = moments.length === 0;
+        if (moments.length === 0) return;
+        const slider = el("moment");
+        slider.max = String(moments.length - 1);
+        slider.value = "0";
+        draw();
+      }
+
+      function draw() {
+        const moment = recording.moments[Number(el("moment").value)];
+        const frames = moment.frames;
+        if (picked >= frames.length) picked = 0;
+        const frame = frames[picked];
+        say(moment, frames);
+        paintSource(moment, frame);
+        paintCode(frame);
+        paintRuntime(moment, frames);
+        paintMemory(moment, frame);
+      }
+
+      // One line of prose above the panes: where this moment is, and what
+      // the recording is not showing. A truncated recording that did not say
+      // so would be a recording that lied.
+      function say(moment, frames) {
+        const at = Number(el("moment").value);
+        const parts = [
+          `moment ${at + 1} of ${recording.moments.length}`,
+          moment.why,
+          `instruction #${moment.at}`,
+          `line ${moment.line}:${moment.col}`,
+          `depth ${moment.depth}`,
+        ];
+        if (moment.depth > frames.length) {
+          parts.push(`${moment.depth - frames.length} outer frame(s) not recorded`);
+        }
+        if (recording.truncated) {
+          parts.push(
+            `recording stopped at its ${recording.truncated} bound — the run went on past here`,
+          );
+        }
+        el("where").textContent = parts.join(" · ");
+      }
+
+      // Fills a pane with one `<span>` per line and scrolls the marked one
+      // into the middle. Built as elements rather than as markup so that a
+      // program's own text can never be read as HTML.
+      function rows(id, lines) {
+        const pane = el(id);
+        pane.textContent = "";
+        const held = document.createDocumentFragment();
+        let marked = null;
+        for (const line of lines) {
+          const row = document.createElement("span");
+          row.textContent = line.text;
+          if (line.now) {
+            row.className = "now";
+            marked = row;
+          }
+          if (line.quiet) row.classList.add("quiet");
+          if (line.held) row.classList.add("held");
+          if (line.pick !== undefined) {
+            row.classList.add("pick");
+            row.dataset.pick = String(line.pick);
+          }
+          held.append(row);
+        }
+        pane.append(held);
+        if (marked) {
+          pane.scrollTop = Math.max(
+            0,
+            marked.offsetTop - pane.offsetTop - pane.clientHeight / 2,
+          );
+        }
+      }
+
+      const number = (n, width) => String(n).padStart(width);
+
+      function paintSource(moment, frame) {
+        const line = frame ? frame.line : moment.line;
+        rows(
+          "pane-source",
+          recorded.split("\n").map((text, at) => ({
+            text: `${number(at + 1, 4)}  ${text}`,
+            now: at + 1 === line,
+          })),
+        );
+      }
+
+      function paintCode(frame) {
+        if (!frame || frame.function === null) {
+          rows("pane-code", [{ text: "no frame", quiet: true }]);
+          return;
+        }
+        const held = recording.functions[frame.function];
+        rows("pane-code", [
+          { text: held.name, quiet: true },
+          ...held.code.map((line) => ({
+            text: `${number(line.pc, 5)}  ${line.text}`,
+            now: line.pc === frame.pc,
+          })),
+        ]);
+      }
+
+      // The backtrace, innermost first, with every local in scope and what
+      // it held at this moment. A frame line is clickable: selecting one
+      // moves the Source, Instructions and Memory panes to that frame, which
+      // is what makes an outer frame readable at all.
+      function paintRuntime(moment, frames) {
+        const lines = [];
+        frames.forEach((frame, at) => {
+          const name = recording.functions[frame.function].name;
+          lines.push({
+            text: `#${at} ${name}  pc ${frame.pc}  line ${frame.line}`,
+            now: at === picked,
+            pick: at,
+          });
+          if (frame.locals.length === 0) {
+            lines.push({ text: "      (no locals in scope)", quiet: true });
+          }
+          for (const local of frame.locals) {
+            const points = local.refs.length ? `  → @${local.refs.join(" @")}` : "";
+            lines.push({ text: `      ${local.name} = ${local.value}${points}` });
+          }
+        });
+        if (moment.depth > frames.length) {
+          lines.push({
+            text: `… ${moment.depth - frames.length} more frame(s), past what a moment records`,
+            quiet: true,
+          });
+        }
+        rows("pane-runtime", lines);
+      }
+
+      // What the heap holds where a local named it. Only what a `ref` word
+      // of a captured local pointed at: the module says why in `record.rs`,
+      // and it is the same reason the collector gives — a `ref` is the one
+      // representation that names an object.
+      function paintMemory(moment, frame) {
+        if (moment.objects.length === 0) {
+          rows("pane-memory", [
+            { text: "no local of this moment names a heap object", quiet: true },
+          ]);
+          return;
+        }
+        const named = new Set(frame ? frame.locals.flatMap((local) => local.refs) : []);
+        const lines = [];
+        for (const object of moment.objects) {
+          const here = named.has(object.at);
+          lines.push({
+            text: `@${object.at}  ${object.name}${here ? "" : "   (named by another frame)"}`,
+            held: here,
+            quiet: !here,
+          });
+          for (const field of object.fields) {
+            lines.push({ text: `      ${field.name} = ${field.value}`, quiet: !here });
+          }
+        }
+        if (moment.objects.length >= recording.objects) {
+          lines.push({
+            text: `… only the first ${recording.objects} objects of a moment are recorded`,
+            quiet: true,
+          });
+        }
+        rows("pane-memory", lines);
+      }
+
+      function step(by) {
+        const slider = el("moment");
+        const to = Math.min(
+          Math.max(Number(slider.value) + by, 0),
+          Number(slider.max),
+        );
+        if (to === Number(slider.value)) return;
+        slider.value = String(to);
+        picked = 0;
+        draw();
+      }
+
+      el("moment").oninput = () => {
+        picked = 0;
+        draw();
+      };
+      el("back").onclick = () => step(-1);
+      el("forward").onclick = () => step(1);
+      el("pane-runtime").onclick = (event) => {
+        const pick = event.target.dataset && event.target.dataset.pick;
+        if (pick === undefined) return;
+        picked = Number(pick);
+        draw();
+      };
 
       function show(kind, answer) {
         const diagnostics = answer.diagnostics.map((d) => d.rendered).join("\n");
@@ -192,10 +475,15 @@ export fn main() -> Result<Int, Error> {
         const printed = [answer.stdout, answer.stderr].filter(Boolean).join("");
         const shown = answer.answer === null ? "" : `\n=> ${describe(answer.answer)}`;
         el("output").textContent = printed + shown;
+        const kept =
+          kind === "debug" && answer.debug
+            ? ` · ${answer.debug.kept} moments${answer.debug.truncated ? " (truncated)" : ""}`
+            : "";
         status.textContent =
           answer.outcome === null
             ? "did not compile"
-            : `${answer.outcome} · ${answer.instructions ?? "?"} instructions · ${answer.fuel ?? "?"} fuel`;
+            : `${answer.outcome} · ${answer.instructions ?? "?"} instructions · ${answer.fuel ?? "?"} fuel${kept}`;
+        if (kind === "debug") record(answer, asked);
       }
 
       // The trace's value encoding, shown the way a reader reads it. Only the
@@ -219,16 +507,23 @@ export fn main() -> Result<Int, Error> {
         if (worker === null) start();
         pending = ++seq;
         settle(true);
-        status.textContent = kind === "run" ? "running…" : "compiling…";
+        // Hidden while a run is in flight rather than left showing the last
+        // one: four panes describing a program that has been edited since
+        // are four panes that are wrong.
+        el("timeline").hidden = true;
+        asked = source.value;
+        status.textContent =
+          kind === "compile" ? "compiling…" : kind === "debug" ? "recording…" : "running…";
         worker.postMessage({
           seq: pending,
           kind,
-          source: source.value,
-          // `>>> 0` and not `| 0`: both fields are `u32` on the other side,
+          source: asked,
+          // `>>> 0` and not `| 0`: these fields are `u32` on the other side,
           // and `| 0` is signed, so anything past two billion would arrive as
           // a negative number.
           fuel: Number(el("fuel").value) >>> 0,
           deadlineMs: Number(el("deadline").value) >>> 0,
+          moments: Number(el("moments").value) >>> 0,
         });
       }
 
@@ -248,6 +543,7 @@ export fn main() -> Result<Int, Error> {
         el("diagnostics").className = "stopped";
       };
       el("run").onclick = () => ask("run");
+      el("debug-run").onclick = () => ask("debug");
       el("compile").onclick = () => ask("compile");
       source.onkeydown = (event) => {
         if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {

@@ -271,8 +271,20 @@ impl<'m> Stop<'m> {
         let frame_pc = frame_pc as usize;
         let program = self.machine.program();
         let function = program.function(id);
+        // Both ends saturate. Only `from` did at first, which reads as a
+        // decision and was an oversight: on a 32-bit target — which
+        // `wasm32-unknown-unknown` is — a `reach` of `u32::MAX` made
+        // `pc + reach + 1` wrap to zero, and the answer became the empty
+        // range `0..pc` rather than the whole function. `cargo test` on a
+        // 64-bit host cannot see it. A caller asking for "all of it" by
+        // naming a very large reach is the obvious way to ask, so this
+        // answers it here rather than leaving each caller to know the width
+        // of a `usize` on the target it will run on.
         let from = frame_pc.saturating_sub(reach);
-        let to = (frame_pc + reach + 1).min(function.code.len());
+        let to = frame_pc
+            .saturating_add(reach)
+            .saturating_add(1)
+            .min(function.code.len());
         (from..to)
             .map(|pc| Line {
                 pc: pc as u32,
@@ -1130,6 +1142,53 @@ export fn main() -> Int {
         for (task, first) in seen {
             assert_eq!(first, 1, "task {task} counts its own instructions from one");
         }
+    }
+
+    /// **A reach that would overflow answers the whole function, on any
+    /// pointer width.**
+    ///
+    /// Asking for "all of it" by naming a very large reach is the obvious
+    /// way to ask, and it has no other spelling. Only `from` saturated at
+    /// first, which reads as a decision and was an oversight: on a 32-bit
+    /// target `pc + reach + 1` wraps, and the answer becomes an *empty*
+    /// listing rather than a full one — a failure that a 64-bit `cargo test`
+    /// cannot reach and that `crates/cove-wasm` met in a browser.
+    #[test]
+    fn a_reach_that_would_overflow_answers_the_whole_function() {
+        #[derive(Default)]
+        struct Whole(Mutex<Option<(Vec<Line>, Vec<Line>)>>);
+
+        impl Debugger for Whole {
+            fn at(&self, stop: &Stop<'_>) -> Resume {
+                let mut held = self.0.lock().expect("a lock");
+                if held.is_none() && stop.function() == "m.inner" {
+                    *held = Some((stop.code(0, usize::MAX), stop.code(0, usize::MAX / 2)));
+                }
+                Resume::Go
+            }
+        }
+
+        let world = World::new(NESTED);
+        let whole = Whole::default();
+        let mut vm = world.watched(&whole);
+        vm.invoke("m", "main", Vec::new()).expect("the run answers");
+
+        let held = whole.0.lock().expect("a lock").clone();
+        let (widest, half) = held.expect("the run entered `m.inner`");
+        assert!(
+            !widest.is_empty(),
+            "the widest reach there is answered nothing"
+        );
+        assert_eq!(
+            widest.len(),
+            half.len(),
+            "two reaches past the end of the function answered different listings"
+        );
+        assert_eq!(
+            widest.first().expect("a line").pc(),
+            0,
+            "the whole function starts at its first instruction"
+        );
     }
 
     /// **A disassembly is of the frame it was asked for, and the outermost

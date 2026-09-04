@@ -6,9 +6,14 @@
 //! This workspace has exactly one third-party dependency (`toml`, in
 //! `cove-sema`); the CLI parses its own arguments and writes its own JSON. A
 //! binding generator would be the largest dependency in the tree, and a probe
-//! established before any of this was written that it buys nothing here: four
+//! established before any of this was written that it buys nothing here: five
 //! `extern "C"` functions and a length prefix are the whole of what crossing
 //! this boundary needs.
+//!
+//! Five and not four because a debug run was added after the first four
+//! shipped. That it was one more `extern "C"` function taking two more
+//! integers, with nothing else about the boundary moved, is the strongest
+//! evidence available that the probe's conclusion was right.
 //!
 //! # The calling convention
 //!
@@ -19,10 +24,11 @@
 //! and passes `(offset, n)`. It owns those bytes and releases them with
 //! [`cove_free`]; nothing here takes them.
 //!
-//! *Out of* the module: [`cove_compile`] and [`cove_run`] each answer one
-//! offset into the same memory. The four bytes there are a little-endian
-//! `u32` length, and the `n` bytes after them are UTF-8 JSON. The caller
-//! decodes them and releases the whole block with `cove_free(offset, n + 4)`.
+//! *Out of* the module: [`cove_compile`], [`cove_run`] and [`cove_debug`]
+//! each answer one offset into the same memory. The four bytes there are a
+//! little-endian `u32` length, and the `n` bytes after them are UTF-8 JSON.
+//! The caller decodes them and releases the whole block with
+//! `cove_free(offset, n + 4)`.
 //!
 //! The length prefix is what removes the alternative — a second exported
 //! function answering "how long was the last answer?" — and with it the
@@ -37,7 +43,7 @@
 
 use std::alloc::{alloc, dealloc, Layout};
 
-use crate::{compile_json, run_json};
+use crate::{compile_json, debug_json, run_json};
 
 /// Reserves `len` bytes of the module's memory and answers where they start.
 ///
@@ -125,6 +131,40 @@ pub unsafe extern "C" fn cove_run(
         &read(source, len),
         (fuel != 0).then_some(u64::from(fuel)),
         (deadline_ms != 0).then_some(u64::from(deadline_ms)),
+    ))
+}
+
+/// Checks, lowers and runs `source` under a recording debugger, and answers
+/// what [`cove_run`] answers plus the recording. See [`crate::debug_json`].
+///
+/// `fuel` and `deadline_ms` are [`cove_run`]'s, meaning the same things. A
+/// debugged run is slower than a run — the machine asks the recorder before
+/// every instruction — so a program that finished inside the default
+/// deadline may not finish inside it here. That is reported as a `deadline`
+/// outcome beside the recording of everything up to it, which is the honest
+/// answer and not a silent one.
+///
+/// `moments` is how many moments to keep, with zero meaning
+/// [`crate::record::MOMENTS`] and anything larger than
+/// [`crate::record::MOST_MOMENTS`] clamped to it. It is a `u32` for
+/// [`cove_run`]'s reason: a `u64` parameter reaches JavaScript as a `BigInt`.
+///
+/// # Safety
+///
+/// As [`cove_compile`].
+#[no_mangle]
+pub unsafe extern "C" fn cove_debug(
+    source: *const u8,
+    len: usize,
+    fuel: u32,
+    deadline_ms: u32,
+    moments: u32,
+) -> *mut u8 {
+    answer(debug_json(
+        &read(source, len),
+        (fuel != 0).then_some(u64::from(fuel)),
+        (deadline_ms != 0).then_some(u64::from(deadline_ms)),
+        moments as usize,
     ))
 }
 

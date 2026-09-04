@@ -66,6 +66,28 @@ class Cove {
     );
   }
 
+  /// Checks, lowers and runs `source` under a recording debugger.
+  ///
+  /// Answers everything `run` answers plus `debug`, which is the recording:
+  /// `{moments, functions, kept, limit, bytes, truncated, frames, objects,
+  /// policy}`, or `null` for a source that did not compile.
+  ///
+  /// `moments` of zero means the module's own default. It is a bound and not
+  /// the absence of one, and it is clamped: `crates/cove-wasm/src/record.rs`
+  /// says what a moment is, what it costs, and what a truncated recording
+  /// loses.
+  ///
+  /// A debugged run is slower than a run -- the machine asks the recorder
+  /// before every instruction -- so a program that finished inside the
+  /// default deadline may not finish inside it here. It is reported as a
+  /// `deadline` outcome beside the recording of everything up to it.
+  debug(source, { fuel = 0, deadlineMs = 0, moments = 0 } = {}) {
+    return this.#call(
+      (ptr, len) => this.#exports.cove_debug(ptr, len, fuel, deadlineMs, moments),
+      source,
+    );
+  }
+
   /// Sends `source` in, calls `entry`, and reads the answer back out.
   #call(entry, source) {
     const bytes = new TextEncoder().encode(source);
