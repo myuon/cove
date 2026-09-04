@@ -1,0 +1,46 @@
+// Structs and methods: a product type, an `impl` block, and what a copy is.
+//
+// Assignment copies a struct field by field, so `moved` — which builds a new
+// `Point` — and `shift` — which writes through a `var self` receiver — are
+// visibly different operations, and the one that writes says so in its
+// signature.
+
+use console.println
+
+/// A position on an integer grid.
+struct Point {
+  x: Int
+  y: Int
+}
+
+impl Point {
+  /// Answers this point displaced by `dx` and `dy`, leaving this one alone.
+  fn moved(self, dx: Int, dy: Int) -> Point {
+    Point(x: self.x + dx, y: self.y + dy)
+  }
+
+  /// Displaces this point in place.
+  fn shift(var self, dx: Int, dy: Int) {
+    self.x += dx
+    self.y += dy
+  }
+
+  /// How this point reads.
+  fn show(self) -> String {
+    "({self.x}, {self.y})"
+  }
+}
+
+/// Shows a copy that stayed put beside one that moved.
+export fn main() -> Result<String, Error> {
+  let origin = Point(x: 0, y: 0)
+  let north = origin.moved(0, 3)
+
+  var walker = origin
+  walker.shift(4, 0)
+
+  println("origin {origin.show()}")?
+  println("north  {north.show()}")?
+  println("walker {walker.show()}")?
+  Ok(walker.show())
+}

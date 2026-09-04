@@ -1,0 +1,49 @@
+// Collections and iteration: a fixed array, a growable vector, and the four
+// walks that take a closure.
+//
+// `[1, 2]` is an immutable `Array`; `Vector.of(...)` is the growable one, and
+// assigning a vector copies the handle rather than the elements, so an alias
+// sees a `push`. `map`, `filter`, `fold` and `sorted` all answer an `Array`,
+// because what a walk produces is a finished sequence.
+
+use console.println
+
+/// One entry of the log this program reads.
+struct Entry {
+  name: String
+  ms: Int
+}
+
+/// Sums, sorts and filters a handful of timings.
+export fn main() -> Result<Int, Error> {
+  var log = Vector.of(Entry(name: "parse", ms: 12))
+  log.push(Entry(name: "check", ms: 30))
+  log.push(Entry(name: "lower", ms: 7))
+  log.push(Entry(name: "run", ms: 51))
+
+  // A vector is a handle: `alias` and `log` are two names for one storage.
+  let alias = log
+  println("{alias.length()} entries recorded")?
+
+  let slowest = log.sorted(by: fn(a: Entry, b: Entry) {
+    a.ms > b.ms
+  })
+  for entry in slowest {
+    println("  {entry.name} took {entry.ms}ms")?
+  }
+
+  let slow = log.filter(fn(entry) {
+    entry.ms > 10
+  }).map(fn(entry) {
+    entry.name
+  })
+  println(
+    "over 10ms: {slow.length()} of them, first {slow.get(0).unwrapOr("none")}",
+  )?
+
+  let total = log.fold(0, fn(sum, entry) {
+    sum + entry.ms
+  })
+  println("{total}ms in all")?
+  Ok(total)
+}

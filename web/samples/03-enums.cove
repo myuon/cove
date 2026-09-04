@@ -1,0 +1,49 @@
+// Enums and pattern matching: a tagged union, cases that carry values, and a
+// `match` the compiler makes you finish.
+//
+// Leaving out an arm is an error rather than a silent fallthrough, so adding
+// a case to `Shape` below breaks every `match` that has not been told what to
+// do about it. That is the point of the type.
+
+use console.println
+
+/// A shape, described by whichever measurements it has.
+enum Shape {
+  Circle(Int)
+  Rectangle(Int, Int)
+  Point
+}
+
+impl Shape {
+  /// Roughly what this shape covers, in whole squares.
+  fn area(self) -> Int {
+    match self {
+      // Three is pi, roughly: an `Int` has no fractions to spend on a better
+      // one, and this sample is about the `match` rather than the geometry.
+      Shape.Circle(r) => 3 * r * r
+      Shape.Rectangle(w, h) => w * h
+      Shape.Point => 0
+    }
+  }
+
+  /// How this shape reads.
+  fn show(self) -> String {
+    match self {
+      Shape.Circle(r) => "circle of radius {r}"
+      Shape.Rectangle(w, h) => "{w}x{h} rectangle"
+      Shape.Point => "a point"
+    }
+  }
+}
+
+/// Describes three shapes and totals what they cover.
+export fn main() -> Result<Int, Error> {
+  let shapes = [Shape.Circle(2), Shape.Rectangle(3, 4), Shape.Point]
+
+  var total = 0
+  for shape in shapes {
+    println("{shape.show()} covers about {shape.area()}")?
+    total += shape.area()
+  }
+  Ok(total)
+}

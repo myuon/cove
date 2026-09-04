@@ -1,0 +1,36 @@
+// A host call: authority the program was given rather than authority it took.
+//
+// Cove code has no ambient I/O. `files` is a typed host module, and this page
+// grants it an in-memory filesystem that starts empty and lives as long as
+// the run — so this program has to write before it can read. Ask for `http`
+// or `database` instead and the run is refused at the boundary, by name,
+// because the playground grants neither.
+
+use clock
+use console.println
+use files
+
+/// Writes three notes, lists them, and reads one back.
+export fn main() -> Result<Int, Error> {
+  files.write("notes/first.txt", "the filesystem starts empty")?
+  files.write("notes/second.txt", "so a read has to follow a write")?
+  files.write("notes/third.txt", "and nothing here leaves the tab")?
+
+  let names = files.list("notes")?
+  println("{names.length()} notes:")?
+  for name in names {
+    println("  {name}")?
+  }
+
+  let first = files.read("notes/first.txt")?
+  println("first.txt says: {first}")?
+
+  // `clock` is granted too, and is virtual: it starts at zero and moves only
+  // when something moves it, so `sleep` finishes at once and a program that
+  // measures itself here answers the same number every time.
+  let started = clock.now()
+  clock.sleep(250ms)?
+  println("the clock says {(clock.now() - started).millis()}ms went by")?
+
+  Ok(names.length())
+}

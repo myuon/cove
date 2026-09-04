@@ -1,0 +1,20 @@
+// Values and functions: the smallest program that says something.
+//
+// `let` binds a read-only place; a block's last expression is its value, so
+// neither function here needs `return`. A string in braces interpolates. And
+// `main` answers a `Result`, which is what makes `?` legal: it hands a failed
+// `println` back to whoever asked for the run instead of hiding it.
+
+use console.println
+
+/// Returns a greeting for `name`.
+fn greeting(name: String) -> String {
+  "Hello, {name}!"
+}
+
+/// Greets the tab and answers a number.
+export fn main() -> Result<Int, Error> {
+  let who = "browser"
+  println(greeting(who))?
+  Ok(21 * 2)
+}

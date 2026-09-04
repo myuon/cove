@@ -87,6 +87,15 @@
       }
       #status { color: var(--quiet); margin-left: auto; }
       .stopped { color: #c0392b; }
+      select {
+        font: inherit;
+        padding: 0.25rem 0.4rem;
+        border: 1px solid var(--edge);
+        border-radius: 4px;
+        background: transparent;
+        color: inherit;
+      }
+      #blurb { color: var(--quiet); }
 
       /* The four panes a recording drives. Plain on purpose: this is a tool
          for reading a program's execution, and everything drawn on top of a
@@ -128,12 +137,25 @@
       <strong>Run &amp; record</strong> runs the program under a debugger that
       writes down what it saw, and the timeline below scrubs through it: a
       worker cannot block waiting for the page, so the machine is not stepped,
-      it is recorded.
+      it is recorded. Pick a sample to see what the language looks like, or
+      write your own — the picker never replaces something you have changed
+      without asking, and nothing here is saved anywhere.
     </p>
 
     <div class="panes">
       <div>
         <h2>Source</h2>
+        <!-- The picker. Its first option is the visitor's own program, and it
+             is selected the moment the editor stops matching the sample it was
+             loaded from, so what the box says is always what is in the box. -->
+        <div class="bar">
+          <label>sample
+            <select id="sample">
+              <option value="">(your own program)</option>
+            </select>
+          </label>
+          <span id="blurb"></span>
+        </div>
         <textarea id="source" spellcheck="false"></textarea>
         <div class="bar">
           <button id="run">Run</button>
@@ -189,23 +211,98 @@
     </section>
 
     <script type="module">
-      const EXAMPLE = `use console.println
-
-/// Returns a greeting for \`name\`.
-export fn greeting(name: String) -> String {
-  "Hello, {name}!"
-}
-
-export fn main() -> Result<Int, Error> {
-  println(greeting("browser"))?
-  Ok(21 * 2)
-}
-`;
+      import { SAMPLES } from "./samples.mjs";
 
       const el = (id) => document.getElementById(id);
       const source = el("source");
       const status = el("status");
-      source.value = EXAMPLE;
+
+      // ---- the samples, and the editor's one piece of state ---------------
+      //
+      // `held` is the text of the sample the editor was last filled from, and
+      // `from` names its file. Together they answer the only question the
+      // picker has to get right: has the visitor changed anything since. A
+      // page that answered it wrongly would throw away work on a stray click,
+      // which is worse than any sample is worth.
+
+      let held = "";
+      let from = "";
+      const edited = () =>
+        source.value.trim().length > 0 && source.value !== held;
+
+      for (const sample of SAMPLES) {
+        const option = document.createElement("option");
+        option.value = sample.file;
+        option.textContent = sample.label;
+        el("sample").append(option);
+      }
+
+      /// Fills the editor from `file`, which must be one of `SAMPLES`.
+      ///
+      /// Fetched rather than inlined: the samples are `.cove` files in
+      /// `web/samples/`, so the repository's own `cove fmt` formats them and
+      /// `web/check.mjs` runs every one of them through this module before
+      /// anything is deployed. `samples.mjs` says more about that.
+      async function fill(file) {
+        const sample = SAMPLES.find((entry) => entry.file === file);
+        const response = await fetch(new URL(`./samples/${file}`, import.meta.url));
+        if (!response.ok) throw new Error(`${file}: ${response.status}`);
+        source.value = await response.text();
+        held = source.value;
+        from = file;
+        el("sample").value = file;
+        el("blurb").textContent = sample.blurb;
+      }
+
+      // Switching samples asks first, and only when there is something to
+      // lose. Nothing here is saved anywhere — no storage, no server — so a
+      // replaced program is gone, and `confirm` is the whole of what a page
+      // with no dependencies can offer.
+      el("sample").onchange = async () => {
+        const file = el("sample").value;
+        if (file === "") {
+          // "your own program", chosen deliberately: the text stays exactly
+          // as it is, and the editor now belongs to the visitor.
+          held = source.value;
+          from = "";
+          el("blurb").textContent = "";
+          return;
+        }
+        const sample = SAMPLES.find((entry) => entry.file === file);
+        if (
+          edited() &&
+          !confirm(
+            `Replace what is in the editor with the "${sample.label}" sample?\n\n` +
+              `Nothing here is saved anywhere, so what you have written now would be lost.`,
+          )
+        ) {
+          restore();
+          return;
+        }
+        try {
+          await fill(file);
+        } catch (error) {
+          restore();
+          el("blurb").textContent = `could not load ${file}: ${error.message}`;
+        }
+      };
+
+      /// Puts the picker back to what it was showing, which is the visitor's
+      /// own program whenever the editor no longer matches the sample it was
+      /// filled from. Restoring `from` unconditionally would leave the box
+      /// naming a sample that is not what the editor holds.
+      function restore() {
+        el("sample").value = edited() ? "" : from;
+      }
+
+      // What the box says is what is in the box: one keystroke away from a
+      // sample is not that sample any more.
+      source.oninput = () => {
+        const own = edited();
+        el("sample").value = own ? "" : from;
+        const sample = own ? undefined : SAMPLES.find((entry) => entry.file === from);
+        el("blurb").textContent = sample ? sample.blurb : "";
+      };
 
       // One worker at a time, and a sequence number so that an answer from a
       // worker the page has already discarded is ignored rather than shown
@@ -554,6 +651,20 @@ export fn main() -> Result<Int, Error> {
 
       start();
       status.textContent = "ready";
+
+      // The first sample, so that a visitor arrives at a program rather than
+      // at an empty box. A failure here is reported and is not fatal: the
+      // editor still works, and the samples are the only thing missing.
+      try {
+        await fill(SAMPLES[0].file);
+      } catch (error) {
+        el("diagnostics").textContent =
+          `could not load the samples: ${error.message}\n\n` +
+          "They are fetched from `samples/` beside this page, which needs a " +
+          "static server rather than a `file://` URL. `web/README.md` says " +
+          "which one to run.";
+        el("diagnostics").className = "stopped";
+      }
     </script>
   </body>
 </html>

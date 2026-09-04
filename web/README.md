@@ -57,9 +57,9 @@ server will do.
 
 `.github/workflows/pages.yml` builds this page — with
 `RUSTFLAGS="-C opt-level=z"`, for the 12% off `cove_wasm.wasm` described above
-— on every push to `main`, stages `index.html`, `worker.mjs`, `cove.mjs` and
-the built `.wasm` into one directory, and runs `node web/check.mjs` against
-that build before anything is deployed. A run that does not hold — a program
+— on every push to `main`, stages everything in `web/` except this file and
+`check.mjs` into one directory beside the built `.wasm`, and runs
+`node web/check.mjs` against that build before anything is deployed. A run that does not hold — a program
 that no longer compiles, a `spawn` that stops saying why, a fuel or deadline
 bound that stops firing — fails the job, and nothing is published.
 
@@ -83,11 +83,11 @@ node web/check.mjs
 
 This is what CI runs. It loads the module through `cove.mjs` — the same module
 the page's worker loads through, so the loader under test is the loader the
-browser uses — and then compiles and runs Cove programs through it: a program
-that prints and answers, one that does not parse, one that spawns a task, one
-that loops past its fuel, one that loops past its deadline, and one that calls
-a capability the playground does not grant. It exits non-zero on the first
-that does not hold.
+browser uses — and then compiles and runs Cove programs through it: **every
+sample in `samples/`**, and then a program that does not parse, one that spawns
+a task, one that loops past its fuel, one that loops past its deadline, and one
+that calls a capability the playground does not grant. It exits non-zero on the
+first that does not hold.
 
 Then it records one. A known program is run under the recording debugger and
 the recording is checked moment by moment: the stops it should have, in the
@@ -170,6 +170,44 @@ about 200 B each, 206 kB in all. A recorded run of a fourteen-million-
 instruction loop takes 186 ms against the plain run's 119 ms.
 `crates/cove-wasm/src/record.rs` is where all of this is argued.
 
+## The samples
+
+The picker above the editor offers nine programs, in ascending order of what a
+reader has to already understand: values and functions, structs and methods,
+enums and `match`, `Result` and `?`, collections, traits and `dyn`, closures, a
+host call, and one written to be stepped rather than read. Writing your own
+stays what the page is for — the first entry is *(your own program)*, and it
+selects itself the moment the editor stops matching the sample it was filled
+from. Switching away from an edited program asks first, because nothing here
+is saved anywhere.
+
+They are real `.cove` files in `samples/`, and not strings inside `index.html`,
+for three reasons:
+
+- `cove fmt --check` at the repository root walks `web/` like everything else
+  — it stops only at dot-directories and at `target` — so a sample is
+  formatted by the project's own formatter and a drifting one fails CI's
+  dogfooding step. Nothing had to be added to any workflow for that.
+- A file that stops parsing is a file: `git diff` shows what changed.
+- `check.mjs` compiles and runs **every one of them** through the real wasm
+  module and asserts what each prints and answers. A sample that stops working
+  fails the build rather than greeting a visitor with an error on the live
+  site.
+
+`samples.mjs` is the manifest: a label and a one-line description per sample,
+for the picker, and what the sample is expected to print and answer, for the
+check. It and the directory may not disagree — `check.mjs` compares them as a
+*set*, so a file nothing lists and an entry naming no file both fail, and a
+rename fails as both at once rather than passing a count.
+
+`09-stepping.cove` is the one written for **Run & record** rather than for
+reading: a three-deep call chain, a name assigned from a call, a shadowed
+binding, and a local that names a heap object. Its manifest entry says so in a
+`records` field, and `check.mjs` records it and asserts the backtrace is still
+that deep and a local still names an object — so a rewrite that flattened it
+fails instead of leaving a sample whose own comment promises what it no longer
+does.
+
 ## Stopping a run
 
 Two bounds and one blunt instrument.
@@ -192,6 +230,8 @@ Running in a worker at all is why an infinite loop does not freeze the tab.
 | `index.html` | the page: a `<textarea>`, three panes, the timeline's four, and the worker |
 | `worker.mjs` | the thread a Cove program runs on |
 | `cove.mjs` | the JavaScript half of the C ABI, and the loader |
+| `samples.mjs` | the manifest the picker is built from, and what each sample is expected to do |
+| `samples/` | the sample programs, as ordinary `.cove` files |
 | `check.mjs` | the node harness, run by CI |
 
 The ABI itself — five exported functions, one import, and a length-prefixed

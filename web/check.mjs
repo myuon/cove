@@ -13,9 +13,11 @@
 // second one written for the check. Exits non-zero on the first case that
 // does not hold.
 
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { instantiate } from "./cove.mjs";
+import { SAMPLES } from "./samples.mjs";
 
 const wasm =
   process.argv[2] ??
@@ -40,22 +42,124 @@ const bytes = await readFile(wasm);
 const cove = await instantiate(bytes);
 console.log(`loaded ${wasm} (${(bytes.length / 1e6).toFixed(2)} MB)\n`);
 
+// ---- the samples the picker offers, and the directory they live in -----
+//
+// `samples.mjs` is the manifest the page's `<select>` is built from and
+// `samples/` is where the programs are. The two must name the same set, and
+// the comparison below is a set comparison rather than a count, because a
+// count cannot tell a renamed sample from a matched pair: one file unlisted
+// and one entry unbacked is still nine and nine.
+//
+// This is the check that makes a sample worth keeping in a file at all. It
+// runs here, in CI's `wasm` job, and again in the Pages workflow *before*
+// anything is staged, so a sample that stopped compiling, or stopped printing
+// what it says it prints, fails the build instead of greeting a visitor with
+// an error on the live site.
+
+const directory = new URL("./samples/", import.meta.url);
+const onDisk = (await readdir(directory))
+  .filter((name) => name.endsWith(".cove"))
+  .sort();
+const listed = SAMPLES.map((sample) => sample.file).sort();
+
+console.log("the manifest and the sample directory:");
+check(
+  "every file in `samples/` is listed in `samples.mjs`",
+  onDisk.filter((name) => !listed.includes(name)),
+  (extra) => extra.length === 0,
+);
+check(
+  "every entry of `samples.mjs` is a file in `samples/`",
+  listed.filter((name) => !onDisk.includes(name)),
+  (missing) => missing.length === 0,
+);
+check("more than a token few", SAMPLES.length >= 8, true);
+check(
+  "each entry has a label, a one-line description and an expectation",
+  SAMPLES.filter(
+    (sample) =>
+      !sample.label ||
+      !sample.blurb ||
+      !sample.expect ||
+      typeof sample.expect.stdout !== "string" ||
+      !sample.expect.answer,
+  ).map((sample) => sample.file),
+  (bare) => bare.length === 0,
+);
+check(
+  "the labels are distinct, so a picker can be read",
+  new Set(SAMPLES.map((sample) => sample.label)).size,
+  SAMPLES.length,
+);
+
+// ---- every sample, compiled and run ------------------------------------
+//
+// The right outcome, no diagnostics at all -- a warning is a diagnostic, and
+// a sample the compiler doubts is not a sample -- and what each one is
+// supposed to print and answer. Asserting the output rather than the absence
+// of a crash is the whole point: a sample that still runs and now prints
+// something else has stopped teaching what it was written to teach.
+
+console.log("\nevery sample the picker offers:");
+const sources = new Map();
+for (const sample of SAMPLES) {
+  // An entry naming no file is already a failure above; reading it would be a
+  // thrown `ENOENT` on top of it, which reports the same fact less clearly.
+  if (!onDisk.includes(sample.file)) continue;
+  const source = await readFile(new URL(sample.file, directory), "utf8");
+  sources.set(sample.file, source);
+
+  const built = cove.compile(source);
+  check(`${sample.file} compiles`, built.ok, true);
+  check(
+    `${sample.file} has nothing to complain about`,
+    built.diagnostics.map((d) => d.rendered).join("\n"),
+    "",
+  );
+
+  const outcome = cove.run(source);
+  check(`${sample.file} runs inside this page's grants`, outcome.outcome, "success");
+  check(`${sample.file} prints what it says it prints`, outcome.stdout, sample.expect.stdout);
+  check(`${sample.file} answers what it says it answers`, outcome.answer, (held) =>
+    isDeepStrictEqual(held, sample.expect.answer),
+  );
+
+  // The one sample whose point is the timeline. `records` says what scrubbing
+  // it is supposed to show, so a rewrite that flattened the call chain or
+  // stopped naming a heap object fails here rather than leaving a sample
+  // whose own comment promises something it no longer does.
+  if (sample.records) {
+    const recorded = cove.debug(source);
+    check(`${sample.file} records`, recorded.debug !== null, true);
+    check(
+      `${sample.file} is still worth stepping: ${sample.records.frames} frames deep`,
+      Math.max(...recorded.debug.moments.map((m) => m.frames.length)),
+      (deepest) => deepest >= sample.records.frames,
+    );
+    if (sample.records.objects) {
+      check(
+        `${sample.file} still has a local that names a heap object`,
+        recorded.debug.moments.some((m) =>
+          m.frames.some((frame) => frame.locals.some((local) => local.refs.length > 0)),
+        ),
+        true,
+      );
+    }
+  }
+}
+
 // ---- a program that compiles, runs, and prints -------------------------
+//
+// The first sample again, for what the samples loop does not ask: that a
+// compile and a run answer the same disassembly, that it names the entry, and
+// that the two counters move. It is the first sample and not a tenth program
+// written here so that the disassembly printed below -- the one thing this
+// check shows rather than asserts -- is a program a visitor can actually
+// open.
 
-const hello = `use console.println
+const hello = sources.get(SAMPLES[0].file);
 
-/// Returns a greeting for \`name\`.
-export fn greeting(name: String) -> String {
-  "Hello, {name}!"
-}
-
-export fn main() -> Result<Int, Error> {
-  println(greeting("browser"))?
-  Ok(21 * 2)
-}
-`;
-
-console.log("a program that compiles and runs:");
+console.log("\na program that compiles and runs:");
 const compiled = cove.compile(hello);
 check("compile ok", compiled.ok, true);
 check("no diagnostics", compiled.diagnostics.length, 0);
@@ -64,8 +168,10 @@ check("names the entry", compiled.ir.includes("playground.main"), true);
 
 const ran = cove.run(hello);
 check("outcome", ran.outcome, "success");
-check("printed", ran.stdout, "Hello, browser!\n");
-check("answered", JSON.stringify(ran.answer), (held) => held.includes('"value":42'));
+check("printed", ran.stdout, SAMPLES[0].expect.stdout);
+check("answered", ran.answer, (held) =>
+  isDeepStrictEqual(held, SAMPLES[0].expect.answer),
+);
 check("counted instructions", ran.instructions > 0, true);
 check("counted fuel", ran.fuel > 0, true);
 check("answered the disassembly too", ran.ir, compiled.ir);

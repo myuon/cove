@@ -1,0 +1,47 @@
+// Closures: functions as values, and what a capture is worth.
+//
+// A closure captures a *snapshot* of each binding it reads, taken where the
+// closure is written. Assigning to that binding afterwards does not change
+// what the closure sees, which is why `byTen` below still adds the ten it was
+// built with.
+
+use console.println
+
+/// The type of a function from one `Int` to another.
+type Step = fn(n: Int) -> Int
+
+/// Answers a function that adds `amount`, capturing it.
+fn adder(amount: Int) -> Step {
+  fn(n: Int) {
+    n + amount
+  }
+}
+
+/// Applies `step` `times` times, which is what makes `step` a value and not a
+/// name of a function known here.
+fn repeat(start: Int, times: Int, step: Step) -> Int {
+  var held = start
+  for turn in 0..<times {
+    held = step(held)
+  }
+  held
+}
+
+/// Builds two closures and spends them.
+export fn main() -> Result<Int, Error> {
+  var amount = 10
+  let byTen = adder(amount)
+  // The snapshot was taken above, so this changes nothing `byTen` sees.
+  amount = 1000
+
+  println("0 stepped by ten, three times: {repeat(0, 3, byTen)}")?
+  println("and by one, three times: {repeat(0, 3, adder(1))}")?
+
+  // A closure written at the call site is the same kind of value.
+  let doubled = [1, 2, 3].map(fn(n) {
+    n * 2
+  })
+  println("the last of [1, 2, 3] doubled is {doubled.get(2).unwrapOr(0)}")?
+
+  Ok(repeat(0, 3, byTen))
+}

@@ -1,0 +1,49 @@
+// `Result`, `Option`, and `?`: failure that is written down in the type.
+//
+// There is no `null` and no exception. A value that may be missing is an
+// `Option`, a call that may fail is a `Result`, and `?` is the one word that
+// says "and if that failed, stop here and hand the error back".
+
+use console.println
+
+/// What can be wrong with a reading.
+enum Bad {
+  NotANumber(String)
+  OutOfRange(Int)
+}
+
+/// Reads one temperature, refusing anything a thermometer could not have said.
+fn reading(text: String) -> Result<Int, Bad> {
+  let degrees = Int.parse(text).mapError { Bad.NotANumber(text) }?
+  if degrees < -90 || degrees > 60 {
+    return Err(Bad.OutOfRange(degrees))
+  }
+  Ok(degrees)
+}
+
+/// How a refusal reads.
+fn why(bad: Bad) -> String {
+  match bad {
+    Bad.NotANumber(text) => "`{text}` is not a number"
+    Bad.OutOfRange(degrees) => "{degrees} is not a temperature"
+  }
+}
+
+/// Reads three texts, two of which are not readings, and answers the good one.
+export fn main() -> Result<Int, Error> {
+  var good = 0
+  for text in ["21", "hot", "5000"] {
+    match reading(text) {
+      Ok(degrees) => {
+        println("{text} -> {degrees}C")?
+        good = degrees
+      }
+      Err(bad) => println("{text} -> refused: {why(bad)}")?
+    }
+  }
+
+  // An `Option` is the same idea for a value that is simply absent.
+  let first = ["a"].get(3).unwrapOr("nothing there")
+  println(first)?
+  Ok(good)
+}

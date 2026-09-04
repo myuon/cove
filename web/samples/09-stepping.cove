@@ -1,0 +1,48 @@
+// Written to be stepped rather than to be read.
+//
+// Press **Run & record** and drag the timeline. Four things below are here
+// only because scrubbing over them shows what the source does not: a call
+// chain three frames deep, for the Runtime pane's backtrace; a `total`
+// assigned from a call, which the moment *inside* that call still shows
+// holding zero; a `depth` shadowing the one above it; and a `label` that
+// names a heap object, for the Memory pane to follow.
+
+use console.println
+
+/// The innermost of the three frames: what one letter is worth.
+fn score(letter: String) -> Int {
+  letter.length() * 7
+}
+
+/// Adds up what a word is worth, one letter at a time.
+fn weigh(word: String) -> Int {
+  var total = 0
+  for letter in word.chars() {
+    total += score(letter)
+  }
+  total
+}
+
+/// The outermost of the three, so that a backtrace has something to show.
+fn describe(word: String) -> String {
+  let weight = weigh(word)
+  "{word} weighs {weight}"
+}
+
+/// Steps through a shadowed name and a three-deep call.
+export fn main() -> Result<Int, Error> {
+  let label = "cove"
+  var depth = 0
+
+  for round in 1..2 {
+    // A second `depth`, shadowing the one above for the rest of this block.
+    let depth = round * 10
+    println("round {round}, depth {depth}")?
+  }
+
+  // And the outer one is untouched, which the timeline is the shortest way
+  // to be sure of.
+  depth = weigh(label)
+  println(describe(label))?
+  Ok(depth)
+}

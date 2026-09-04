@@ -1,0 +1,74 @@
+// Traits, and the two dispatches Cove keeps apart.
+//
+// A trait is implemented explicitly, by name, and may carry a default method.
+// Which dispatch a call gets is written in the signature: `<T: Summary>`
+// settles `T` at the call site, so `summarize` resolves to one body, while
+// `dyn Summary` lets one array hold values of different types, each carrying
+// its own implementation with it.
+
+use console.println
+
+/// A value that can summarise itself for a report.
+trait Summary {
+  /// The one-line summary of this value.
+  fn summarize(self) -> String
+
+  /// The line this value takes in a report — an ordinary bullet by default.
+  fn line(self) -> String {
+    "- {self.summarize()}"
+  }
+}
+
+/// A room booking.
+struct Booking {
+  id: Int
+  guests: Int
+}
+
+/// A payment recorded against a booking.
+struct Receipt {
+  bookingId: Int
+  cents: Int
+}
+
+impl Summary for Booking {
+  fn summarize(self) -> String {
+    "booking {self.id} for {self.guests} guest(s)"
+  }
+}
+
+impl Summary for Receipt {
+  fn summarize(self) -> String {
+    "receipt for booking {self.bookingId}: {self.cents}c"
+  }
+
+  /// Overrides the default, so a receipt reads differently in a list.
+  fn line(self) -> String {
+    "  $ {self.summarize()}"
+  }
+}
+
+/// Static dispatch: one type per call, chosen here.
+fn headline<T: Summary>(entry: T) -> String {
+  "Latest: {entry.summarize()}"
+}
+
+/// Dynamic dispatch: one call, two types, `line` taken from each value.
+fn report(entries: Array<dyn Summary>) -> String {
+  var text = "Report"
+  for entry in entries {
+    text = "{text}\n{entry.line()}"
+  }
+  text
+}
+
+/// Builds the same report both ways.
+export fn main() -> Result<String, Error> {
+  let booking = Booking(id: 41, guests: 2)
+  let receipt = Receipt(bookingId: 41, cents: 12500)
+
+  println(headline(booking))?
+  let text = report([booking, receipt])
+  println(text)?
+  Ok(text)
+}

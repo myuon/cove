@@ -29,7 +29,8 @@ design is recorded in [ADR 0001](docs/adr/0001-mvp-language-design.md).
 - [Representative programs](examples/README.md)
 - [The browser playground](web/README.md) — the same front end and the same
   backend compiled to WebAssembly, compiling and running Cove in a tab with
-  no server
+  no server, over a picker of [sample programs](web/samples/) or whatever you
+  write instead
 - [API documentation](https://myuon.github.io/cove/) — rustdoc for the
   implementation crates, published from `main`
 
