@@ -42,9 +42,23 @@ likely to leave somebody watching a blank terminal, and none of it needs
 watching.
 
 The steady state is about a minute — 22s for `cargo t` on an unchanged tree,
-13s for clippy, 26s for `cargo doc`. Everything above that is the first build
-after a change, and that is where a wait of several minutes comes from. So
-run the gate when there is something to gate, not after every edit.
+13s for clippy, 26s for `cargo doc`. Changing one file deep in the workspace
+and rebuilding everything that depends on it is **59s**. So run the gate when
+there is something to gate, not after every edit — but a gate that takes many
+minutes is not what this workspace costs, it is something else going on.
+
+Usually that something else is **two builds at once**. A rebuild measured at
+481s while two agents were building measured 59s alone: the same work, eight
+times the wall clock, because they contend for the CPU and serialise on
+cargo's lock. Worse, this repository has tests that assert *timing maxima*
+(`crates/cove-runtime/tests/responsiveness.rs`), and those fail under
+contention for no reason at all — a red suite that says nothing about the
+code. One heavy command at a time.
+
+**`[profile.dev] debug = "line-tables-only"` buys nothing here, measured.**
+59s against 59s for the same one-file rebuild. It is the obvious thing to
+reach for and it is worth not reaching for twice: what costs time is the
+codegen and the linking of fifteen test binaries, not the debug info in them.
 
 Two things were guessed wrong before they were measured, and both guesses are
 worth not repeating.
