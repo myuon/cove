@@ -15,6 +15,12 @@
 //! integers, with nothing else about the boundary moved, is the strongest
 //! evidence available that the probe's conclusion was right.
 //!
+//! Six and not five for the same reason a second time: syntax highlighting
+//! was added, and it is [`cove_lex`] — one more `extern "C"` function taking
+//! the two integers every one of them takes, answering the same
+//! length-prefixed JSON. Three additions in a row that cost one function each
+//! is the evidence, and it is now hard to argue with.
+//!
 //! # The calling convention
 //!
 //! Two directions, one shape each.
@@ -24,9 +30,10 @@
 //! and passes `(offset, n)`. It owns those bytes and releases them with
 //! [`cove_free`]; nothing here takes them.
 //!
-//! *Out of* the module: [`cove_compile`], [`cove_run`] and [`cove_debug`]
-//! each answer one offset into the same memory. The four bytes there are a
-//! little-endian `u32` length, and the `n` bytes after them are UTF-8 JSON.
+//! *Out of* the module: [`cove_compile`], [`cove_run`], [`cove_debug`] and
+//! [`cove_lex`] each answer one offset into the same memory. The four bytes
+//! there are a little-endian `u32` length, and the `n` bytes after them are
+//! UTF-8 JSON.
 //! The caller decodes them and releases the whole block with
 //! `cove_free(offset, n + 4)`.
 //!
@@ -43,7 +50,7 @@
 
 use std::alloc::{alloc, dealloc, Layout};
 
-use crate::{compile_json, debug_json, run_json};
+use crate::{compile_json, debug_json, lex_json, run_json};
 
 /// Reserves `len` bytes of the module's memory and answers where they start.
 ///
@@ -166,6 +173,23 @@ pub unsafe extern "C" fn cove_debug(
         (deadline_ms != 0).then_some(u64::from(deadline_ms)),
         moments as usize,
     ))
+}
+
+/// Lexes `source` and answers a colour for every part of it, as an answer
+/// block. See [`crate::lex_json`].
+///
+/// The one entry point that neither checks nor runs anything: it is the
+/// lexer and nothing after it, so it costs a pass over the text. That is what
+/// lets a page call it on every keystroke, and it is why a page can call it
+/// on its own thread rather than on the worker a run needs — the reason the
+/// worker exists is that a Cove program can loop, and lexing cannot.
+///
+/// # Safety
+///
+/// As [`cove_compile`].
+#[no_mangle]
+pub unsafe extern "C" fn cove_lex(source: *const u8, len: usize) -> *mut u8 {
+    answer(lex_json(&read(source, len)))
 }
 
 /// The caller's bytes as a string.

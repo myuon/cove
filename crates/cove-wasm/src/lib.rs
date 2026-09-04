@@ -3,7 +3,7 @@
 //!
 //! [Issue #241](https://github.com/myuon/cove/issues/241) asks for a
 //! playground. This crate is the half of it that is Rust; `web/` is the half
-//! that is a page. What it exports is described in [`abi`], and it is five
+//! that is a page. What it exports is described in [`abi`], and it is six
 //! functions and one import.
 //!
 //! The fifth is [`debug_json`]: the same run, watched by a [`record`]ing
@@ -11,6 +11,11 @@
 //! cannot be given the debugger `cove debug` is — a Web Worker cannot block
 //! waiting for the page — and [`record`] says at length why, and what
 //! recording keeps and loses instead.
+//!
+//! The sixth is [`lex_json`], which is the front end's first stage and
+//! nothing after it: the page colours its editor by asking the compiler's own
+//! lexer what each piece of the text is. [`highlight`] argues why that is the
+//! only version of syntax highlighting worth having here.
 //!
 //! # What is the same as `cove run`, and what is not
 //!
@@ -37,6 +42,7 @@
 //!   that is the honest outcome rather than a bug.
 
 pub mod abi;
+pub mod highlight;
 mod json;
 pub mod record;
 
@@ -260,6 +266,47 @@ pub fn compile_json(source: &str) -> String {
                     .as_ref()
                     .map(|(_, program)| json::string(&cove_ir::print::program(program))),
             ),
+        ),
+    ])
+}
+
+/// Lexes `source` and answers a colour for every part of it.
+///
+/// ```json
+/// {"ok":bool,"spans":[{"at":int,"len":int,"kind":string}]}
+/// ```
+///
+/// The spans *tile*: the first begins at zero, each begins where the last
+/// ended, and together they cover the source, so a page renders the whole
+/// editor by walking the list and slicing its own text. `at` and `len` count
+/// UTF-16 code units, which is what a JavaScript string is indexed in.
+///
+/// `kind` is one of `keyword`, `type`, `string`, `number`, `comment` and
+/// `plain`. [`highlight::Kind`] says what falls into each and which two are
+/// not decided by the lexer.
+///
+/// `ok` is whether the source lexed without complaint. It is false whenever
+/// the reader is part-way through typing a string literal, which is most of
+/// the time one is being typed, and the spans are still a tiling of what was
+/// sent: [`highlight`] says what a broken source is coloured as and why the
+/// answer is not "nothing".
+///
+/// This is the front end's first stage and none of the rest, so it costs a
+/// pass over the text and nothing else. That is what makes it the thing to
+/// call on every keystroke, where [`compile_json`] is not.
+pub fn lex_json(source: &str) -> String {
+    let painting = highlight::paint(source);
+    json::object([
+        ("ok", painting.ok.to_string()),
+        (
+            "spans",
+            json::array(painting.pieces.iter().map(|piece| {
+                json::object([
+                    ("at", piece.at.to_string()),
+                    ("len", piece.len.to_string()),
+                    ("kind", json::string(piece.kind.as_str())),
+                ])
+            })),
         ),
     ])
 }

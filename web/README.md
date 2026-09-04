@@ -11,11 +11,11 @@ leaves the tab.
 cargo build -p cove-wasm --target wasm32-unknown-unknown --release
 ```
 
-That writes `target/wasm32-unknown-unknown/release/cove_wasm.wasm`, 3.01 MB.
+That writes `target/wasm32-unknown-unknown/release/cove_wasm.wasm`, 3.07 MB.
 There is no bundler, no `npm`, and no other step: `index.html`, `cove.mjs` and
 `worker.mjs` are loaded as they are.
 
-Optimizing for size gets it to 2.66 MB, a 12% saving, measured:
+Optimizing for size gets it to 2.71 MB, a 12% saving, measured:
 
 ```
 RUSTFLAGS="-C opt-level=z" cargo build -p cove-wasm --target wasm32-unknown-unknown --release
@@ -88,6 +88,13 @@ sample in `samples/`**, and then a program that does not parse, one that spawns
 a task, one that loops past its fuel, one that loops past its deadline, and one
 that calls a capability the playground does not grant. It exits non-zero on the
 first that does not hold.
+
+It also lexes every sample, because a sample a visitor opens and sees in one
+colour is a silent failure — nothing about it looks broken. What is asserted
+of a colouring is that its spans tile the source and that a known program's
+pieces are the categories the lexer called them, kinds and not counts: a
+tiling of the right length made of the wrong categories is exactly what a
+highlighter that had drifted from the language would produce.
 
 Then it records one. A known program is run under the recording debugger and
 the recording is checked moment by moment: the stops it should have, in the
@@ -208,6 +215,49 @@ that deep and a local still names an object — so a rewrite that flattened it
 fails instead of leaving a sample whose own comment promises what it no longer
 does.
 
+## Colouring the editor
+
+The editor is a `<pre>` of coloured text with a transparent `<textarea>` on
+top of it: what you type into is the textarea, what you see is the `<pre>`,
+and the caret is the textarea's own.
+
+The colours come from `cove_lex`, which is the compiler's own lexer and
+nothing after it. A keyword list written in JavaScript would be a second,
+informal spelling of the language that nothing compares against the first, and
+the day a keyword is added the page would keep colouring the old language
+with no test anywhere having an opinion. The module in the tab already holds
+the front end, so the lexer is simply *there*.
+
+It answers a **tiling**: spans that between them cover every character of the
+source exactly once, in order, each named `keyword`, `type`, `string`,
+`number`, `comment` or `plain`. The page paints by walking that list and
+slicing its own text. Two of the six are not token kinds — `type` is an
+identifier beginning with an uppercase letter, which is the rule the parser
+itself reads `Ok(value)` by, and `comment` is recovered from the gaps the
+lexer left, because it discards comments rather than tokenizing them.
+`crates/cove-wasm/src/highlight.rs` argues all of it.
+
+Source that does not lex is the normal case, not the exception: one open quote
+and the file has a lexical error, and that is the state a string literal is in
+for as long as it takes to write one. So the lexer's *recovered* tokens are
+what is coloured — `cove_syntax::lexer::lex_recovered`, which is `lex` without
+the step that throws the tokens away — the answer says `ok: false`, and an
+unterminated literal is coloured as the string it is up to the end of the
+file. Nothing goes plain and nothing goes stale.
+
+This is the one call to the module made on the page's own thread rather than
+on the worker. The worker exists because a Cove program can loop and wasm
+cannot be interrupted from outside it; lexing is one pass over the text. Being
+on this thread is what makes a keystroke and its colours the same frame — the
+glyphs are the `<pre>`'s, so an answer a frame late would be a *character* a
+frame late.
+
+Neither box wraps, and that is the alignment: the font, border and padding
+come from one CSS rule that names both, and with `white-space: pre` there are
+no wrap points for a scrollbar on one box and not the other to move. The
+colours are colours only, never bold or italic, because those are not the same
+width in every monospace font and one glyph of drift is one too many.
+
 ## Stopping a run
 
 Two bounds and one blunt instrument.
@@ -227,12 +277,12 @@ Running in a worker at all is why an infinite loop does not freeze the tab.
 
 | file | what it is |
 |---|---|
-| `index.html` | the page: a `<textarea>`, three panes, the timeline's four, and the worker |
+| `index.html` | the page: the editor, three panes, the timeline's four, and the worker |
 | `worker.mjs` | the thread a Cove program runs on |
 | `cove.mjs` | the JavaScript half of the C ABI, and the loader |
 | `samples.mjs` | the manifest the picker is built from, and what each sample is expected to do |
 | `samples/` | the sample programs, as ordinary `.cove` files |
 | `check.mjs` | the node harness, run by CI |
 
-The ABI itself — five exported functions, one import, and a length-prefixed
+The ABI itself — six exported functions, one import, and a length-prefixed
 answer — is documented in `crates/cove-wasm/src/abi.rs`.

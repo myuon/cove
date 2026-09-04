@@ -9,6 +9,23 @@
         color-scheme: light dark;
         --edge: color-mix(in srgb, currentColor 18%, transparent);
         --quiet: color-mix(in srgb, currentColor 60%, transparent);
+
+        /* The editor's four colours. Four and not twenty: the categories are
+           what the compiler's own lexer distinguishes, and a reader wants the
+           shape of a program rather than a wall. A comment takes `--quiet`,
+           which is the colour everything secondary on this page already is. */
+        --keyword: #8250df;
+        --type: #0550ae;
+        --string: #0a7d3f;
+        --number: #953800;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --keyword: #d2a8ff;
+          --type: #79c0ff;
+          --string: #7ee787;
+          --number: #ffa657;
+        }
       }
       body {
         font: 14px/1.5 ui-sans-serif, system-ui, sans-serif;
@@ -49,6 +66,59 @@
       textarea { min-height: 22rem; resize: vertical; }
       pre { overflow: auto; max-height: 22rem; white-space: pre-wrap; }
       pre:empty::before { content: "—"; color: var(--quiet); }
+
+      /* ---- the editor: coloured glyphs under a transparent textarea ------
+
+         `#paint` holds the same text, cut into `<span>`s the lexer decided
+         the colours of, and the textarea sits exactly on top of it with
+         transparent text and a visible caret. That is the whole trick, and
+         the thing it gets wrong is the caret drifting off its glyphs, so the
+         two boxes' metrics are the same rather than nearly:
+
+         - the font, border, padding and box-sizing come from the one
+           `textarea, pre` rule above, so they are equal by construction and
+           cannot be changed for one and not the other;
+         - neither box wraps. `wrap="off"` and `white-space: pre` mean there
+           are no wrap points to disagree about, which is the failure a
+           scrollbar on one box and not the other would otherwise cause: a
+           vertical scrollbar narrows the textarea, and wrapped text would
+           then break in different places from the text behind it. Nothing
+           here reflows, so a scrollbar costs visible width and no more;
+         - the colours are colours only. A bold or italic run is not the same
+           width as an upright one in every monospace font, and one that is
+           not would move every glyph after it on the line. */
+      .editor { position: relative; }
+      #paint {
+        position: absolute;
+        inset: 0;
+        max-height: none;
+        white-space: pre;
+        /* Scrolled from the textarea's `onscroll` and never by the reader:
+           a scroll container is still programmatically scrollable when its
+           overflow is hidden, and this way it cannot get its own scrollbars
+           and cannot be dragged out of alignment. */
+        overflow: hidden;
+        pointer-events: none;
+      }
+      #paint::before { content: none; }
+      #paint .keyword { color: var(--keyword); }
+      #paint .type { color: var(--type); }
+      #paint .string { color: var(--string); }
+      #paint .number { color: var(--number); }
+      #paint .comment { color: var(--quiet); }
+      #source {
+        display: block;
+        position: relative;
+        white-space: pre;
+        overflow: auto;
+        /* The glyphs a reader sees are `#paint`'s. `CanvasText` and not
+           `currentColor` for the caret, which would be the transparent one. */
+        color: transparent;
+        caret-color: CanvasText;
+      }
+      /* Selected text is drawn in the textarea's layer, which is above the
+         glyphs, so an opaque selection would hide what was selected. */
+      #source::selection { background: color-mix(in srgb, Highlight 40%, transparent); }
       h2 {
         font-size: 0.8rem;
         font-weight: 600;
@@ -156,7 +226,15 @@
           </label>
           <span id="blurb"></span>
         </div>
-        <textarea id="source" spellcheck="false"></textarea>
+        <!-- The editor. The `<pre>` is what a reader sees; the textarea on
+             top of it is what a reader types into, and its text is
+             transparent. `#paint` is `aria-hidden` because it is a second
+             copy of the textarea's own value and a screen reader should be
+             told the text once. -->
+        <div class="editor">
+          <pre id="paint" aria-hidden="true"></pre>
+          <textarea id="source" spellcheck="false" wrap="off"></textarea>
+        </div>
         <div class="bar">
           <button id="run">Run</button>
           <button id="debug-run">Run &amp; record</button>
@@ -212,10 +290,80 @@
 
     <script type="module">
       import { SAMPLES } from "./samples.mjs";
+      import { load } from "./cove.mjs";
 
       const el = (id) => document.getElementById(id);
       const source = el("source");
       const status = el("status");
+
+      // ---- syntax highlighting -------------------------------------------
+      //
+      // The colours come from the compiler's own lexer. The module in this
+      // tab holds the whole front end, so `cove_lex` is a call away, and it
+      // answers a tiling of the source: a list of spans that between them
+      // cover every character exactly once, each named with what the lexer
+      // decided it was. `crates/cove-wasm/src/highlight.rs` argues why that
+      // and not a keyword list in this file -- in short, a list here would be
+      // a second, informal spelling of the language, and nothing would notice
+      // the day it stopped matching the first.
+      //
+      // This one is on the page's thread rather than on the worker, which is
+      // the opposite of every other call to the module here. The worker
+      // exists because a Cove program can loop and wasm cannot be interrupted
+      // from outside; lexing is one pass over the text and cannot. Being on
+      // this thread is what makes a keystroke and its colours the same frame:
+      // the glyphs a reader sees are `#paint`'s, so an answer that arrived a
+      // frame later would be a character that appeared a frame later.
+
+      let painter = null;
+
+      /// Redraws `#paint` from what the lexer says the text in the box is.
+      ///
+      /// Built as elements and text nodes rather than as markup, for the
+      /// reason the recording's panes are: a program's own text can then
+      /// never be read as HTML.
+      ///
+      /// Plain before the module has loaded, and plain if the spans ever fail
+      /// to cover the text -- the glyphs must be the ones that are in the box
+      /// even when the colours cannot be, because these are the glyphs the
+      /// caret is sitting on.
+      function repaint() {
+        const text = source.value;
+        const spans = painter === null ? [] : painter.lex(text).spans;
+        const covered = spans.reduce((held, span) => held + span.len, 0);
+        const held = document.createDocumentFragment();
+        if (covered === text.length) {
+          for (const span of spans) {
+            const run = text.slice(span.at, span.at + span.len);
+            if (span.kind === "plain") {
+              held.append(run);
+              continue;
+            }
+            const node = document.createElement("span");
+            node.className = span.kind;
+            node.textContent = run;
+            held.append(node);
+          }
+        } else {
+          held.append(text);
+        }
+        // A trailing newline of the reader's own leaves an empty last line
+        // that a `<pre>` gives no height to and a textarea does, and the two
+        // would then scroll to different bottoms.
+        held.append("\n");
+        el("paint").replaceChildren(held);
+        follow();
+      }
+
+      /// Puts the glyphs back under the caret after the textarea has
+      /// scrolled. Both boxes hold the same text at the same metrics and
+      /// neither wraps, so one number each way is the whole of the alignment.
+      function follow() {
+        el("paint").scrollTop = source.scrollTop;
+        el("paint").scrollLeft = source.scrollLeft;
+      }
+
+      source.addEventListener("scroll", follow);
 
       // ---- the samples, and the editor's one piece of state ---------------
       //
@@ -248,6 +396,7 @@
         const response = await fetch(new URL(`./samples/${file}`, import.meta.url));
         if (!response.ok) throw new Error(`${file}: ${response.status}`);
         source.value = await response.text();
+        repaint();
         held = source.value;
         from = file;
         el("sample").value = file;
@@ -298,6 +447,7 @@
       // What the box says is what is in the box: one keystroke away from a
       // sample is not that sample any more.
       source.oninput = () => {
+        repaint();
         const own = edited();
         el("sample").value = own ? "" : from;
         const sample = own ? undefined : SAMPLES.find((entry) => entry.file === from);
@@ -651,6 +801,22 @@
 
       start();
       status.textContent = "ready";
+
+      // The page's own copy of the module, for colouring and nothing else.
+      // A second instantiation of the same bytes, which the browser has in
+      // its cache by now: the alternative was to ask the worker, and the
+      // worker is the one thing on this page that is sometimes busy for five
+      // seconds or terminated mid-keystroke.
+      //
+      // Failing here is not fatal and is not reported: the editor still
+      // works, still runs, and is black on white. Anything actually wrong
+      // with the module is reported by the worker, loudly, on the first Run.
+      load()
+        .then((held) => {
+          painter = held;
+          repaint();
+        })
+        .catch(() => {});
 
       // The first sample, so that a visitor arrives at a program rather than
       // at an empty box. A failure here is reported and is not fatal: the

@@ -92,6 +92,44 @@ check(
   SAMPLES.length,
 );
 
+// ---- what the editor is coloured by -----------------------------------
+//
+// `cove_lex` answers a *tiling* of the source: spans that between them cover
+// every UTF-16 code unit of it exactly once, in order, each named with what
+// the lexer decided it was. The page paints its editor by walking that list
+// and slicing its own text, so a tiling that did not tile would put a colour
+// on the wrong glyphs, and the check below is the one that would catch it.
+
+const KINDS = ["keyword", "type", "string", "number", "comment", "plain"];
+
+/// "" when `spans` tile `source`, and a description of the first violation
+/// otherwise -- where it broke is the interesting half.
+function tiling(source, spans) {
+  let at = 0;
+  for (const span of spans) {
+    if (span.at !== at) return `a span begins at ${span.at}, after ${at}`;
+    if (!(span.len > 0)) return `an empty span at ${span.at}`;
+    if (!KINDS.includes(span.kind)) return `an unknown kind \`${span.kind}\``;
+    at += span.len;
+  }
+  return at === source.length
+    ? ""
+    : `the spans cover ${at} of ${source.length} code units`;
+}
+
+/// A colouring as `[text, kind]` pairs, which is what one looks like.
+function painted(source) {
+  const answer = cove.lex(source);
+  return {
+    ok: answer.ok,
+    tiles: tiling(source, answer.spans),
+    runs: answer.spans.map((span) => [
+      source.slice(span.at, span.at + span.len),
+      span.kind,
+    ]),
+  };
+}
+
 // ---- every sample, compiled and run ------------------------------------
 //
 // The right outcome, no diagnostics at all -- a warning is a diagnostic, and
@@ -116,6 +154,13 @@ for (const sample of SAMPLES) {
     built.diagnostics.map((d) => d.rendered).join("\n"),
     "",
   );
+
+  // A sample a visitor opens and sees in one colour is a silent failure --
+  // nothing about it looks broken -- so every one of them lexing, and being
+  // covered end to end by what it lexed to, is asserted rather than assumed.
+  const shown = painted(source);
+  check(`${sample.file} lexes, so the editor can colour it`, shown.ok, true);
+  check(`${sample.file} is coloured end to end`, shown.tiles, "");
 
   const outcome = cove.run(source);
   check(`${sample.file} runs inside this page's grants`, outcome.outcome, "success");
@@ -177,9 +222,64 @@ check("counted fuel", ran.fuel > 0, true);
 check("answered the disassembly too", ran.ir, compiled.ir);
 console.log(`\n  --- the disassembly the page shows ---\n${compiled.ir.trimEnd()}\n  ---\n`);
 
+// ---- the colours themselves --------------------------------------------
+//
+// The kinds and not only the count: a tiling of the right length made of the
+// wrong categories is exactly what a highlighter that had drifted from the
+// language would produce, and it is what the count would not notice.
+
+console.log("what a program is coloured as:");
+const greeting = `// a comment
+export fn greet(name: String) -> String {
+  let times = 2
+  "Hello, {name}!"
+}
+`;
+const painting = painted(greeting);
+check("it lexes", painting.ok, true);
+check("it tiles the source", painting.tiles, "");
+check(
+  "each piece is what the lexer called it",
+  painting.runs.filter(([, kind]) => kind !== "plain"),
+  (held) =>
+    isDeepStrictEqual(held, [
+      ["// a comment", "comment"],
+      ["export", "keyword"],
+      ["fn", "keyword"],
+      ["String", "type"],
+      ["String", "type"],
+      ["let", "keyword"],
+      ["2", "number"],
+      ['"Hello, {name}!"', "string"],
+    ]),
+);
+
+// Offsets are in UTF-16 code units because that is what a JavaScript string
+// is indexed in, and two of the shipped samples hold an em dash. Counted in
+// bytes, every colour after the first one would land two characters late.
+const dashed = painted("// an \u2014 dash\nlet n = 1\n");
+check("offsets are counted the way `String.slice` counts", dashed.runs[0], (held) =>
+  isDeepStrictEqual(held, ["// an \u2014 dash", "comment"]),
+);
+
+// The state the editor is in for as long as it takes to type a string
+// literal, which is why this case is not an edge one. It answers `ok: false`
+// and a tiling of what it was sent; a page repaints from it rather than
+// keeping an older colouring of text that has since been typed over.
+console.log("\nsource that does not lex, which is what typing a string looks like:");
+const half = painted('let n = 1\nlet greeting = "open');
+check("it says so rather than throwing", half.ok, false);
+check("and still tiles the whole of it", half.tiles, "");
+check("what came before the quote keeps its colours", half.runs[0], (held) =>
+  isDeepStrictEqual(held, ["let", "keyword"]),
+);
+check("and the open literal is a string to the end", half.runs.at(-1), (held) =>
+  isDeepStrictEqual(held, ['"open', "string"]),
+);
+
 // ---- a program that does not compile ----------------------------------
 
-console.log("a program that does not parse:");
+console.log("\na program that does not parse:");
 const broken = cove.compile("export fn main() -> Int { 1 +");
 check("compile refused", broken.ok, false);
 check("no disassembly", broken.ir, null);

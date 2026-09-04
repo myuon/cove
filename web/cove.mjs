@@ -66,6 +66,32 @@ class Cove {
     );
   }
 
+  /// Lexes `source` and answers a colour for every part of it.
+  ///
+  /// Answers `{ok, spans}`, where each span is `{at, len, kind}` and the
+  /// spans *tile*: the first begins at zero, each begins where the last
+  /// ended, and together they cover the source. `at` and `len` count UTF-16
+  /// code units, so `source.slice(at, at + len)` is the text a span is for.
+  ///
+  /// `kind` is one of `keyword`, `type`, `string`, `number`, `comment` and
+  /// `plain`. `crates/cove-wasm/src/highlight.rs` argues why a page colours
+  /// by asking the compiler's own lexer rather than by a keyword list of its
+  /// own, and says what each category holds.
+  ///
+  /// `ok` is whether the source lexed without complaint -- false for as long
+  /// as a string literal is open, which is most of the time one is being
+  /// typed. The spans are a tiling either way, so a caller repaints from
+  /// them rather than holding on to an older colouring of text that is no
+  /// longer in the box.
+  ///
+  /// This is the front end's first stage and nothing after it, which is what
+  /// makes it cheap enough to call on every keystroke, and what makes it safe
+  /// to call on the page's own thread: the reason `run` is on a worker is
+  /// that a Cove program can loop, and lexing is one pass over the text.
+  lex(source) {
+    return this.#call((ptr, len) => this.#exports.cove_lex(ptr, len), source);
+  }
+
   /// Checks, lowers and runs `source` under a recording debugger.
   ///
   /// Answers everything `run` answers plus `debug`, which is the recording:

@@ -23,6 +23,36 @@ enum Unclosed {
 /// found in the file is collected and returned; no tokens are produced in
 /// that case.
 pub fn lex(sources: &SourceMap, file: FileId) -> Result<Vec<Token>, Vec<Diagnostic>> {
+    let (tokens, diagnostics) = lex_recovered(sources, file);
+    if diagnostics.is_empty() {
+        Ok(tokens)
+    } else {
+        Err(diagnostics)
+    }
+}
+
+/// Lexes `file` and answers both halves of what the lexer found: the tokens it
+/// recovered *and* everything it complained about.
+///
+/// [`lex`] is this function with the tokens thrown away whenever there is a
+/// diagnostic, which is the right contract for a compiler — a parser handed a
+/// token stream with a hole in it reports a second, invented error at the
+/// hole. It is the wrong contract for a reader looking at the text. The
+/// recovery this exposes is not new: the lexer has always skipped past a
+/// lexical error and carried on so that one call reports every problem in a
+/// file, and these are the tokens that pass produced.
+///
+/// The caller is what makes the difference. `crates/cove-wasm`'s highlighter
+/// colours source that is being typed, which is a state that does not lex for
+/// most of the time a string literal is being written, and a highlighter that
+/// had nothing to say about a file with one open quote in it would have
+/// nothing to say most of the time.
+///
+/// The tokens are the same tokens [`lex`] would have answered had there been
+/// no diagnostic; nothing is invented to fill a gap. Text the lexer skipped is
+/// simply absent from the stream, so a caller that cares what is between two
+/// tokens must look at the source.
+pub fn lex_recovered(sources: &SourceMap, file: FileId) -> (Vec<Token>, Vec<Diagnostic>) {
     let text = sources.get(file).text.as_str();
     let mut lexer = Lexer {
         text,
@@ -33,12 +63,7 @@ pub fn lex(sources: &SourceMap, file: FileId) -> Result<Vec<Token>, Vec<Diagnost
         pending_newline: false,
     };
     lexer.run();
-
-    if lexer.diagnostics.is_empty() {
-        Ok(lexer.tokens)
-    } else {
-        Err(lexer.diagnostics)
-    }
+    (lexer.tokens, lexer.diagnostics)
 }
 
 struct Lexer<'a> {
@@ -1066,6 +1091,52 @@ mod tests {
         for diag in &diags {
             assert_eq!(diag.code, "cove::lex::unexpected_character");
         }
+    }
+
+    /// The half of the lexer's work that [`lex`] discards. A highlighter
+    /// reads it, and the case it reads it for is this one: a string that is
+    /// open because the reader has not typed the closing quote yet.
+    #[test]
+    fn recovery_answers_the_tokens_before_an_error_as_well_as_the_error() {
+        let mut sources = SourceMap::new();
+        let file = sources.add("test.cove", "let n = 1\nlet greeting = \"open");
+        let (tokens, diagnostics) = lex_recovered(&sources, file);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "cove::lex::unterminated_string");
+        assert!(
+            lex(&sources, file).is_err(),
+            "`lex` still refuses what it always refused"
+        );
+
+        let kinds: Vec<TokenKind> = tokens.iter().map(|t| t.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Keyword(Keyword::Let),
+                TokenKind::Ident("n".into()),
+                TokenKind::Eq,
+                TokenKind::Int(1),
+                TokenKind::Keyword(Keyword::Let),
+                TokenKind::Ident("greeting".into()),
+                TokenKind::Eq,
+                TokenKind::Eof,
+            ],
+            "everything up to the open quote, and nothing invented for it"
+        );
+    }
+
+    /// What [`lex`] answers and what [`lex_recovered`] answers are the same
+    /// tokens whenever there is nothing to complain about, which is what lets
+    /// one be written in terms of the other.
+    #[test]
+    fn recovery_and_lex_agree_when_there_is_no_error() {
+        let source = "export fn main() -> Int { 1 + 2 }";
+        let mut sources = SourceMap::new();
+        let file = sources.add("test.cove", source);
+        let (tokens, diagnostics) = lex_recovered(&sources, file);
+        assert!(diagnostics.is_empty());
+        assert_eq!(tokens, lex(&sources, file).expect("it lexes"));
     }
 
     #[test]
