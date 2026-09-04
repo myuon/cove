@@ -667,6 +667,10 @@ impl Body<'_> {
             // is told what the source said. Leaving it `false` here was
             // harmless only while no lambda could be one.
             is_async: func.is_async,
+            // A lambda is always a lowered body, never a stand-in: there is
+            // no name to leave a stub for, since nothing outside the
+            // function that wrote it could call it by one.
+            stub: false,
         }
     }
 

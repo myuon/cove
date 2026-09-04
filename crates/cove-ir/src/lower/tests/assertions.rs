@@ -153,6 +153,49 @@ fn1 m.unused() -> Unit
     );
 }
 
+/// **A declaration a slice does not reach is a stub, and a declaration it
+/// does reach is not.**
+///
+/// `Function::is_stub` is read from `cove-cli`'s debugger, resolving a
+/// breakpoint or a stack frame against a program it did not lower itself. It
+/// has to tell a stand-in from a lowered body without reading the shape
+/// `lower::stub` happens to leave — one instruction, at the declaration's own
+/// span, no parameters, no locals — because that shape is an accident of how
+/// a stub is built, not a promise about what a lowered body can never look
+/// like. This pins the fact the field is supposed to carry, on the case it
+/// was added for: `unused` is left out of `main`'s slice and gets the stub
+/// `lower::stub` builds, `used` is what `main` calls and gets `used`'s own
+/// lowered body, and `main` itself — the root the slice is built from — is
+/// unreached by nothing and is a real body too.
+#[test]
+fn a_declaration_the_slice_does_not_reach_is_a_stub_and_one_it_does_is_not() {
+    let source = "fn unused() -> Int { 1 }\nfn used() -> Int { 2 }\nfn main() -> Int { used() }";
+    let (sources, checked) = super::checked(source);
+    let program = crate::lower_roots(
+        &checked,
+        &sources,
+        &cove_schema::HostSchemas::new(),
+        &[("m", "main")],
+    )
+    .expect("the roots' program lowers");
+
+    let is_stub = |name: &str| {
+        program
+            .functions
+            .iter()
+            .find(|f| &*f.module == "m" && &*f.name == name)
+            .unwrap_or_else(|| panic!("`{name}` is in the program"))
+            .is_stub()
+    };
+
+    assert!(is_stub("unused"), "a declaration nothing calls stands in");
+    assert!(!is_stub("main"), "the root itself has a real body");
+    assert!(
+        !is_stub("used"),
+        "what the root reaches has a real body too"
+    );
+}
+
 /// A declaration written where a *value* goes is not a call, so the
 /// checker's call graph records no edge to it. The slice learns it from the
 /// lowering instead, and the next pass has it.

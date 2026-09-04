@@ -1009,6 +1009,7 @@ mod tests {
             locals: Vec::new(),
             span: span(),
             is_async: false,
+            stub: false,
         }
     }
 

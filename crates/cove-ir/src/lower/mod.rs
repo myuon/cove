@@ -1452,6 +1452,7 @@ fn lower_body(
         locals,
         span: decl.decl.span,
         is_async: decl.decl.is_async,
+        stub: false,
     }
 }
 
@@ -1491,6 +1492,7 @@ fn stub(decl: &Decl) -> Function {
         locals: Vec::new(),
         span: decl.decl.span,
         is_async: false,
+        stub: true,
     }
 }
 

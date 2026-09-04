@@ -68,11 +68,18 @@
 //! instructions share one, and nothing marks where a statement begins. The
 //! rule this module settled on, written out in [`Mode::Line`]:
 //!
-//! > Remember the file, the line, and the frame depth the step was asked
-//! > from. Stop at the first instruction that is either *shallower* than that
-//! > depth — the frame returned — or written on a different line. `next` adds
-//! > one clause: an instruction *deeper* than that depth is skipped, so a
-//! > call runs to completion without stopping inside it.
+//! > Remember the task, the file, the line, and the frame depth the step was
+//! > asked from. Stop at the first instruction *of that task* that is either
+//! > *shallower* than that depth — the frame returned — or written on a
+//! > different line. `next` adds one clause: an instruction *deeper* than
+//! > that depth is skipped, so a call runs to completion without stopping
+//! > inside it.
+//!
+//! The task is part of the rule rather than an afterthought to it. A spawned
+//! task runs on a machine of its own with a stack of its own, so a depth
+//! compared across tasks compares two measurements as one, and a step asked
+//! in the entry would be satisfied by whichever thread happened to reach an
+//! instruction first. `Stop::task` is what the comparison is against.
 //!
 //! [`Session::misses`] is the honest list of what that rule gets wrong, and
 //! it is printed by `help limits` so that the person using the debugger reads
@@ -89,7 +96,7 @@ use cove_diag::{FileId, SourceMap, Span};
 use cove_ir::Pc;
 use cove_runtime::embed::{register_hosts, HostSetup};
 use cove_runtime::{
-    Budget, Call, Cancellation, Debugger, Limits, Local, Resume, RunOutcome, Runtime, Stop, Vm,
+    Budget, Cancellation, Debugger, Limits, Local, Resume, RunOutcome, Runtime, Stop, Vm, Word,
 };
 use cove_sema::package::Package;
 use cove_sema::HostSchemas;
@@ -325,12 +332,12 @@ struct Site {
 /// then never fire, which is the silent failure this command is supposed not
 /// to have.
 ///
-/// [`Sites::is_a_stub`] is how they are told apart, and it reads the shape
-/// rather than a flag, because the lowering exposes no flag: **one
-/// instruction, written at the declaration's own span**. Nothing a person
-/// writes lowers to that — a body's instructions are written inside the
-/// body — and the cost of being wrong is refusing a breakpoint on an empty
-/// function that does nothing, with a message saying to look at the entry.
+/// `cove_ir::Function::is_stub` is how they are told apart, and it is the
+/// lowering's own record of what it did. This command used to recognise one
+/// by its shape — one instruction, written at the declaration's own span, no
+/// parameters, no names — which worked and was still wrong: the shape is an
+/// accident of how a stub is built, it is `cove-ir`'s to change, and nothing
+/// there said so. Asking the lowering is asking the only thing that knows.
 struct Sites {
     by_line: BTreeMap<(FileId, usize), Vec<(Site, String)>>,
     /// Each lowered function's first instruction, for `break <function>`.
@@ -347,7 +354,7 @@ impl Sites {
         let mut stubs = Vec::new();
         for function in &ir.functions {
             let qualified = function.qualified();
-            if Sites::is_a_stub(function) {
+            if function.is_stub() {
                 stubs.push((function.span, qualified));
                 continue;
             }
@@ -386,15 +393,6 @@ impl Sites {
         }
     }
 
-    /// Whether `function` is what the lowering left behind for a declaration
-    /// this entry does not reach.
-    fn is_a_stub(function: &cove_ir::Function) -> bool {
-        function.code.len() == 1
-            && function.spans.first() == Some(&function.span)
-            && function.params.is_empty()
-            && function.locals.is_empty()
-    }
-
     /// The unreached declaration written on `line` of `file`, if one is.
     fn stub_on(&self, file: FileId, line: usize, sources: &SourceMap) -> Option<&str> {
         self.stubs.iter().find_map(|(span, name)| {
@@ -426,19 +424,31 @@ struct Breakpoint {
 enum Mode {
     /// Only a breakpoint does. `continue`.
     Free,
-    /// The very next instruction does, whatever it is. `stepi`, and the
-    /// state the session starts in so that the run stops before its first
-    /// instruction.
-    Instruction,
-    /// A different source line does, or a shallower frame. `step`, and with
-    /// `over` set, `next`.
+    /// The very next instruction does, whatever it is and whichever task
+    /// runs it. `stepi`, and the state the session starts in so that the run
+    /// stops before its first instruction.
     ///
-    /// The whole of the source-stepping rule. The step was asked from a
-    /// stack `depth` deep, at an instruction written somewhere in
-    /// `from..to` of `file`; an instruction stops the run when it is
-    /// shallower than `depth`, or when it was written outside that range.
-    /// `over` skips anything deeper, which is the only difference between
-    /// `next` and `step`.
+    /// The one stepping mode that is *not* scoped to a task, deliberately:
+    /// "one instruction" is a question about the machine rather than about a
+    /// call, and in a program with a spawned task the next instruction the
+    /// machine runs may be that task's. `help limits` says so.
+    Instruction,
+    /// A different source line does, or a shallower frame, in the task the
+    /// step was asked in. `step`, and with `over` set, `next`.
+    ///
+    /// The whole of the source-stepping rule. The step was asked in `task`,
+    /// from a stack `depth` deep, at an instruction written somewhere in
+    /// `from..to` of `file`; an instruction of that task stops the run when
+    /// it is shallower than `depth`, or when it was written outside that
+    /// range. `over` skips anything deeper, which is the only difference
+    /// between `next` and `step`.
+    ///
+    /// `task` is what keeps the depth meaning something. A spawned task runs
+    /// on a machine of its own with a stack of its own, so a depth compared
+    /// across tasks is two different measurements compared as one: a `step`
+    /// asked in the entry could be satisfied by an instruction of a task the
+    /// entry spawned, which is a stop the person did not ask for and cannot
+    /// explain. `Stop::task` is what makes the comparison answerable.
     ///
     /// The line is held as the byte range it occupies rather than as its
     /// number, because the number is what a `SourceMap` has to search for
@@ -450,9 +460,13 @@ enum Mode {
         to: u32,
         depth: usize,
         over: bool,
+        task: u64,
     },
-    /// A frame shallower than `depth` does. `finish`.
-    Out { depth: usize },
+    /// A frame of `task` shallower than `depth` does. `finish`.
+    ///
+    /// Scoped for the reason [`Mode::Line`] is: another task standing one
+    /// frame deep is not this frame returning.
+    Out { depth: usize, task: u64 },
 }
 
 /// Why the run stopped, for the line printed above the prompt.
@@ -546,9 +560,9 @@ impl State {
     /// The per-instruction question, and the only code here that runs at
     /// every instruction.
     ///
-    /// It reads three things off the stop, all of them copies the machine
-    /// already had: the pc, the span, and the depth, and compares them
-    /// against integers. It allocates nothing and reads no source.
+    /// It reads four things off the stop, all of them copies the machine
+    /// already had: the pc, the span, the depth and the task, and compares
+    /// them against integers. It allocates nothing and reads no source.
     fn wanted(&mut self, stop: &Stop<'_>) -> Option<Why> {
         if !self.started {
             self.started = true;
@@ -570,14 +584,23 @@ impl State {
         match self.mode {
             Mode::Free => None,
             Mode::Instruction => Some(Why::Stepped),
-            Mode::Out { depth } => (stop.depth() < depth).then_some(Why::Returned),
+            Mode::Out { depth, task } => {
+                (stop.task() == task && stop.depth() < depth).then_some(Why::Returned)
+            }
             Mode::Line {
                 file,
                 from,
                 to,
                 depth,
                 over,
+                task,
             } => {
+                // Another task's instruction is not this step's, however
+                // deep it stands or wherever it was written: a depth is that
+                // task's own measurement of its own stack.
+                if stop.task() != task {
+                    return None;
+                }
                 let here = stop.depth();
                 if here < depth {
                     return Some(Why::Returned);
@@ -728,11 +751,11 @@ impl Session {
                 Act::Stay
             }
             "disassemble" | "disas" => {
-                self.disassemble(stop, &rest);
+                self.disassemble(state, stop, &rest);
                 Act::Stay
             }
             "object" | "o" => {
-                self.object(stop, &rest);
+                self.object(state, stop, &rest);
                 Act::Stay
             }
             "help" | "h" | "?" => {
@@ -768,11 +791,17 @@ impl Session {
             to: to as u32,
             depth: stop.depth(),
             over,
+            task: stop.task(),
         }
     }
 
     /// `finish`: run until the *selected* frame returns, which is what makes
     /// `frame 2` and then `finish` mean "get me out of that one".
+    ///
+    /// The frame is one of this task's, so the mode remembers which task
+    /// that was: another task standing one frame deep is not this frame
+    /// returning, and before `Stop::task` existed it could not be told from
+    /// one.
     fn finish(&self, state: &mut State, stop: &Stop<'_>) -> Act {
         let depth = stop.depth().saturating_sub(state.frame);
         if depth <= 1 {
@@ -781,7 +810,10 @@ impl Session {
                 state.frame
             );
         }
-        state.mode = Mode::Out { depth };
+        state.mode = Mode::Out {
+            depth,
+            task: stop.task(),
+        };
         Act::Go(Resume::Go)
     }
 
@@ -960,13 +992,17 @@ impl Session {
                     }
                 }
             }
-            // The count and the depth are both the *stopping task's*: a
+            // The count and the depth are both the *stopping task's* — a
             // spawned task runs on a machine of its own and counts its own
-            // instructions, and a stop does not say which task it is.
+            // instructions — so the task is named beside them. Without the
+            // name the two numbers are unreadable in a program that spawns
+            // anything: a count that jumps and a depth that changes are a
+            // second task's, and nothing said so.
             "run" | "r" => {
                 println!(
-                    "{} instruction(s) run in this task, {} frame(s) live, frame #{} selected",
+                    "{} instruction(s) run in task {}, {} frame(s) live, frame #{} selected",
                     stop.instructions(),
+                    stop.task(),
                     stop.depth(),
                     state.frame
                 );
@@ -1040,13 +1076,28 @@ impl Session {
             println!("there is no frame #{}", state.frame);
             return;
         };
-        match latest(&call, name) {
-            Some(local) => println!(
-                "{} = {}  (word {})",
-                local.name(),
-                local.value(),
-                local.at()
-            ),
+        match call.local(name) {
+            // The raw words come out beside the rendering, because a
+            // rendering is where a reader stops and a debugger is not: a
+            // name bound to a vector reads as its elements and *holds* a
+            // reference, and the word printed here is the word `object`
+            // takes. `object <name>` follows it without being told, and this
+            // is what makes that word something a person can also see, copy,
+            // and compare with what `words` says about the frame.
+            Some(local) => {
+                let raw: Vec<String> = local
+                    .words()
+                    .iter()
+                    .map(|word| format!("{:#018x}", word.raw()))
+                    .collect();
+                println!(
+                    "{} = {}  (word {})  {}",
+                    local.name(),
+                    local.value(),
+                    local.at(),
+                    raw.join(" ")
+                );
+            }
             None => {
                 let names: Vec<&str> = call.locals().iter().map(Local::name).collect();
                 println!(
@@ -1111,7 +1162,7 @@ impl Session {
         }
     }
 
-    fn disassemble(&self, stop: &Stop<'_>, rest: &[&str]) {
+    fn disassemble(&self, state: &State, stop: &Stop<'_>, rest: &[&str]) {
         let reach = match rest.first() {
             Some(spec) => match spec.parse::<usize>() {
                 Ok(reach) => reach,
@@ -1124,11 +1175,17 @@ impl Session {
             },
             None => 4,
         };
-        // Always the innermost function: `Stop::code` disassembles the
-        // function the machine is in, and there is no way to ask it for
-        // another frame's.
-        println!("{}:", stop.function());
-        for line in stop.code(reach) {
+        // The selected frame's, like everything else `frame` selects: a
+        // person who has selected a frame and asks what it is executing is
+        // asking about that frame. The marked line is the instruction about
+        // to run in the innermost frame and the one to return to in every
+        // other, which is what `backtrace` already says of a frame's pc.
+        let Some(call) = stop.frame(state.frame) else {
+            println!("there is no frame #{}", state.frame);
+            return;
+        };
+        println!("{}:", call.function());
+        for line in stop.code(state.frame, reach) {
             println!(
                 "{} {:>4} | {}",
                 if line.current() { "=>" } else { "  " },
@@ -1138,17 +1195,35 @@ impl Session {
         }
     }
 
-    fn object(&self, stop: &Stop<'_>, rest: &[&str]) {
+    /// `object <word>`, and `object <name>` for a reference a name holds.
+    ///
+    /// The second is what makes a named reference followable. `words` prints
+    /// the frame words *no* name covers, so before `Local::words` existed
+    /// the only reference a person could follow was one nothing was called —
+    /// `print xs` would render a vector and there was no way to then ask
+    /// what the object was. Resolving the name here rather than making the
+    /// person copy the word is the difference between a hole and a step.
+    fn object(&self, state: &State, stop: &Stop<'_>, rest: &[&str]) {
         let Some(spec) = rest.first() else {
-            println!("`object` takes a word, as `words` prints one");
+            println!("`object` takes a word, as `words` and `print` print one, or the name of a local of the selected frame");
             return;
         };
         let word = match spec.strip_prefix("0x").or_else(|| spec.strip_prefix("0X")) {
-            Some(hex) => u64::from_str_radix(hex, 16).ok(),
-            None => spec.parse::<u64>().ok(),
+            Some(hex) => match u64::from_str_radix(hex, 16) {
+                Ok(word) => Some(word),
+                Err(_) => {
+                    println!("`object` takes a word in decimal or as `0x…`, found `{spec}`");
+                    None
+                }
+            },
+            // Not a number, so it is a name. No Cove name is a number, so
+            // the two cannot be confused for one another.
+            None => match spec.parse::<u64>() {
+                Ok(word) => Some(word),
+                Err(_) => self.reference_of(state, stop, spec),
+            },
         };
         let Some(word) = word else {
-            println!("`object` takes a word in decimal or as `0x…`, found `{spec}`");
             return;
         };
         match stop.object(word) {
@@ -1159,6 +1234,56 @@ impl Session {
                 }
             }
             None => println!("{word:#018x} does not name an object of this run's heap"),
+        }
+    }
+
+    /// The word a named local holds, when exactly one of its words is a
+    /// reference. Says why not, and answers `None`, when that is not so.
+    ///
+    /// A name covers a run of words and only some of them are references —
+    /// a struct held by value is several — so "the word of a name" is a
+    /// question with more than one answer in general. Where it has exactly
+    /// one, that is the answer; where it has none or several, the words are
+    /// printed and the person picks, which is the same conversation `words`
+    /// and `object` already have about the rest of the frame.
+    fn reference_of(&self, state: &State, stop: &Stop<'_>, name: &str) -> Option<u64> {
+        let call = stop.frame(state.frame).or_else(|| {
+            println!("there is no frame #{}", state.frame);
+            None
+        })?;
+        let Some(local) = call.local(name) else {
+            println!(
+                "no local called `{name}` is in scope in frame #{} ({}), and `{name}` is not a word",
+                state.frame,
+                call.function()
+            );
+            return None;
+        };
+        let refs: Vec<&Word> = local
+            .words()
+            .iter()
+            .filter(|word| word.holds() == "ref")
+            .collect();
+        match refs.as_slice() {
+            [word] => Some(word.raw()),
+            _ => {
+                match refs.len() {
+                    0 => println!("`{name}` holds no reference to follow; its words are:"),
+                    many => {
+                        println!("`{name}` holds {many} references, so name the word to follow:")
+                    }
+                }
+                for word in local.words() {
+                    println!(
+                        "  word {:<3} {:<9} {:#018x}  {}",
+                        word.at(),
+                        word.holds(),
+                        word.raw(),
+                        word.value()
+                    );
+                }
+                None
+            }
         }
     }
 
@@ -1201,15 +1326,22 @@ impl Session {
 
     /// What the stepping rule gets wrong, said out loud.
     ///
-    /// Every one of these is a consequence of what a lowered program
-    /// records: an expression-level span per instruction, adjacent
-    /// instructions sharing one, and nothing that says where a statement
-    /// begins. A rule built on "the line changed" cannot avoid them, and a
-    /// limitation a person can read beats one they have to discover.
+    /// Most of these are a consequence of what a lowered program records: an
+    /// expression-level span per instruction, adjacent instructions sharing
+    /// one, and nothing that says where a statement begins. A rule built on
+    /// "the line changed" cannot avoid them. The rest are what an all-stop
+    /// debugger of a concurrent program is: one prompt, and every task
+    /// standing still while somebody is at it.
+    ///
+    /// A limitation a person can read beats one they have to discover — and
+    /// a limitation that has been fixed does not belong here at all, because
+    /// a list that names what a person can now do is a list they stop
+    /// reading.
     fn misses() -> &'static str {
         "\
-one `step` is: run until the line changes, or until the frame returns.
-`next` also skips anything deeper than the frame it was asked from.
+one `step` is: run until the line changes in the task it was asked in, or
+until the frame it was asked from returns. `next` also skips anything
+deeper than that frame.
 
 what that rule gets wrong:
   - a callee whose body is written on the line that calls it is stepped
@@ -1221,19 +1353,15 @@ what that rule gets wrong:
   - a stop is at the first instruction carrying a new line, which is
     somewhere inside the expression rather than at the statement's start,
     so a name assigned on that line still holds its old value;
-  - `step`, `next` and `finish` are stated in frame depth, and depth is
-    the *stopping task's* — a spawned task reaching an instruction can
-    satisfy a step begun in another one, because a stop does not say which
-    task it belongs to, and `info run` counts that task's instructions
-    rather than the whole run's for the same reason;
+  - `step`, `next` and `finish` are satisfied only in the task they were
+    asked in, but `stepi` is not: it stops at the very next instruction the
+    machine runs, which in a program with a spawned task may be that task's;
+  - a breakpoint fires in whichever task reaches it, and stopping one task
+    stops them all, so a program whose tasks wait on each other can be
+    stopped in a state only `continue` unsticks;
   - a breakpoint set on a line resolves to the lowest instruction written
     there in each function, so a line holding two statements, or an `if`
-    and its `else`, fires only on the earlier of them;
-  - `disassemble` always shows the innermost frame, whichever is selected:
-    a stop can read the code of the function it is in and no other;
-  - `object` follows a word `words` printed, and `words` prints only the
-    frame words no name covers: a local is rendered but its raw word is not
-    handed over, so a named reference cannot be followed into the heap.
+    and its `else`, fires only on the earlier of them.
 "
     }
 }
@@ -1247,21 +1375,6 @@ impl State {
             .flat_map(|b| b.where_.iter().map(move |(site, _)| (*site, b.number)))
             .collect();
     }
-}
-
-/// The local called `name` that the source means at this pc.
-///
-/// The last match wins, which is `cove_ir::Function::local_at`'s rule and
-/// **not** `Call::local`'s: shadowing is recorded rather than resolved, so
-/// `let x = 1; let x = "two"` leaves two bindings live at once, and the
-/// lowering searches its scope backwards so that the later declaration is the
-/// one the source means. `Call::locals` is in declaration order, so reading
-/// it backwards is that rule.
-fn latest<'c>(call: &'c Call, name: &str) -> Option<&'c Local> {
-    call.locals()
-        .iter()
-        .rev()
-        .find(|local| local.name() == name)
 }
 
 const HELP: &str = "\
@@ -1283,12 +1396,12 @@ looking:
   backtrace, bt        every live call, innermost first
   frame <n>, f <n>     select the frame print, locals, words and list read
   list [n], l [n]      source around the selected frame, n lines either side
-  print <name>, p      one local of the selected frame
+  print <name>, p      one local of the selected frame, and its words
   locals               every local in scope there
   words                every frame word no name covers, for VM development
-  disassemble [n]      instructions around the pc, the current one marked
-  object <word>        what a word points at in the heap
-  info run             instructions run in this task, frames, selection
+  disassemble [n]      instructions around the selected frame's pc, marked
+  object <word|name>   what a word, or a reference a local holds, points at
+  info run             which task, instructions run in it, frames, selection
 
   help limits          what `step` and `break` get wrong, and why
 

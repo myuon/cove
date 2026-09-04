@@ -21,7 +21,7 @@ breakpoint 1, debug_session.twice at debug_session/main.cove:6:21
 #1  debug_session.raise at debug_session/main.cove:14:3
 #2  debug_session.main at debug_session/main.cove:29:11
 (cove) print n
-n = 21  (word 0)
+n = 21  (word 0)  0x0000000000000015
 (cove) locals
 n = 21  (word 0, 1 word(s))
 (cove) step
@@ -40,7 +40,7 @@ word 2   int       0x000000000000002a  42
 #1  debug_session.main at debug_session/main.cove:29:11
 >   29 |   println("answer {raise(total)}")?
 (cove) print total
-total = 20  (word 14)
+total = 20  (word 14)  0x0000000000000014
 (cove) locals
 total = 0  (word 7, 1 word(s), shadowed)
 total = 20  (word 14, 1 word(s))
@@ -51,9 +51,9 @@ total = 20  (word 14, 1 word(s))
     30 |   println("after")?
     31 |   Ok(())
 (cove) disassemble 1
-debug_session.raise:
-      2 | call s2:int debug_session.twice (s3:Int)
-=>    3 | copy s1:int s2:int Int
-      4 | return s1:int
+debug_session.main:
+     17 | call s13:int debug_session.raise (s14:Int)
+=>   18 | call-builtin s15:ref String.interpolate (s3:String s13:Int)
+     19 | clear s3:ref String
 (cove) quit
 the run was halted after 22 instruction(s).

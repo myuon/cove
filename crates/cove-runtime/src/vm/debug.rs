@@ -79,6 +79,18 @@
 //! ADR 0031 forbids — nothing roots it, nothing stores it, it is not valid
 //! after the run, and a word that names no object answers `None` rather than
 //! misbehaving.
+//!
+//! [`Local::words`] widens *which* words a [`Word`] view can show and not
+//! what one is: the words a name covers, in the same projection as the words
+//! no name covers, so that a named reference can be followed the way an
+//! unnamed one already could. The argument above is unchanged by it, which
+//! is the test of whether it belonged here.
+//!
+//! One number that is not a representation crosses too. [`Stop::task`] is
+//! the id `crate::trace` writes on its events, and it is here because
+//! everything else a [`Stop`] answers — the count, the depth, the frames —
+//! belongs to one task and nothing said which. It names a task; it is not a
+//! way to reach one.
 
 use cove_diag::Span;
 use cove_ir::{print, FunctionId, Pc};
@@ -144,9 +156,33 @@ impl<'m> Stop<'m> {
     /// How many instructions this task has run, this one included.
     ///
     /// The count [`crate::Vm::instructions`] reports, read at the moment the
-    /// instruction about to run was counted.
+    /// instruction about to run was counted. It is *this task's*, and
+    /// [`Stop::task`] is what says whose.
     pub fn instructions(&self) -> u64 {
         self.machine.instructions()
+    }
+
+    /// Which task this stop is in.
+    ///
+    /// Everything else a `Stop` answers is one task's — the count, the
+    /// depth, the frames — because a spawned task runs on a machine of its
+    /// own, and until this was here a debugger could not tell two of them
+    /// apart. A policy stated in frame depth is then a policy that a second
+    /// task can satisfy by accident: a `step` asked in the entry, finished
+    /// by an instruction of a task the entry spawned.
+    ///
+    /// The number is [`crate::ENTRY_TASK`] for the entry and a spawned
+    /// task's own id otherwise, which is to say it is the number
+    /// `crate::trace`'s events carry under `task`. That is deliberate and it
+    /// is the whole of the choice here: a debugger and a trace of the same
+    /// run must name the same task the same way, or a person holding both
+    /// has to work out the correspondence themselves.
+    ///
+    /// It is opaque. Two stops with the same id are the same task and two
+    /// with different ids are not; nothing else about the number is
+    /// promised, and no ordering of it means anything.
+    pub fn task(&self) -> u64 {
+        self.machine.task()
     }
 
     /// `module.name` of the function this stop is in.
@@ -174,10 +210,11 @@ impl<'m> Stop<'m> {
 
     /// Every live call, innermost first.
     ///
-    /// This renders every local of every frame, so a debugger that stops at
-    /// every instruction and takes a whole backtrace at each one is doing
-    /// real work per instruction. [`Stop::frame`] is the same view of one
-    /// call, for a session that only shows what it was asked for.
+    /// This renders every local of every frame — and every word of every
+    /// local — so a debugger that stops at every instruction and takes a
+    /// whole backtrace at each one is doing real work per instruction.
+    /// [`Stop::frame`] is the same view of one call, for a session that only
+    /// shows what it was asked for.
     pub fn backtrace(&self) -> Vec<Call> {
         (0..self.depth()).filter_map(|at| self.frame(at)).collect()
     }
@@ -206,23 +243,42 @@ impl<'m> Stop<'m> {
         })
     }
 
-    /// The instructions around this one, `reach` either side of it.
+    /// The instructions around frame `at`'s pc, `reach` either side of it,
+    /// or nothing past the outermost frame.
     ///
     /// The disassembly a session shows beside a stop.
     /// [`cove_ir::print::one`] renders each, which is the same rendering
     /// `cove ir` prints, so a debugger and a dump do not disagree about what
     /// an instruction is called.
-    pub fn code(&self, reach: usize) -> Vec<Line> {
+    ///
+    /// `at` names a frame the way [`Stop::frame`] names one, and for the
+    /// same reason: a session that lets a person select a frame has to be
+    /// able to show that frame's code, and one that could only ever
+    /// disassemble the innermost would answer `frame 2` with frame 0's
+    /// instructions. It is a parameter here rather than a method on [`Call`]
+    /// because a `Call` is an owned snapshot: giving it a disassembly would
+    /// mean rendering every instruction of every live function at every
+    /// stop, and a backtrace is already the expensive view.
+    ///
+    /// The pc it reads is the frame's own, so the line marked
+    /// [`Line::current`] is the instruction about to run for the innermost
+    /// frame and the one to return to for every other — which is what
+    /// [`Call::pc`] answers, and the same distinction.
+    pub fn code(&self, at: usize, reach: usize) -> Vec<Line> {
+        let Some((id, _, frame_pc)) = self.machine.calls().get(at).copied() else {
+            return Vec::new();
+        };
+        let frame_pc = frame_pc as usize;
         let program = self.machine.program();
-        let function = program.function(self.function);
-        let from = self.pc.saturating_sub(reach);
-        let to = (self.pc + reach + 1).min(function.code.len());
+        let function = program.function(id);
+        let from = frame_pc.saturating_sub(reach);
+        let to = (frame_pc + reach + 1).min(function.code.len());
         (from..to)
             .map(|pc| Line {
                 pc: pc as u32,
                 text: print::one(program, function, &function.code[pc]),
                 span: function.span_at(pc),
-                current: pc == self.pc,
+                current: pc == frame_pc,
             })
             .collect()
     }
@@ -247,6 +303,11 @@ impl<'m> Stop<'m> {
                 value: render::lossy(self.machine, local.layout, &words),
                 at: local.slot,
                 width,
+                words: words
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, raw)| self.word(function, local.slot + offset as u32, *raw))
+                    .collect(),
             });
         }
         // What no name covers, read as the frame itself describes it. This is
@@ -259,14 +320,8 @@ impl<'m> Stop<'m> {
             .filter(|(_, named)| !**named)
             .map(|(at, _)| {
                 let at = at as u32;
-                let repr = function.repr(at).unwrap_or(cove_ir::Repr::Int);
                 let raw = self.machine.frame_run(base, at, 1)[0];
-                Word {
-                    at,
-                    holds: repr.name(),
-                    raw,
-                    value: render::raw(self.machine, repr, raw),
-                }
+                self.word(function, at, raw)
             })
             .collect();
         Call {
@@ -275,6 +330,25 @@ impl<'m> Stop<'m> {
             span: function.span_at(pc as usize),
             locals,
             words,
+        }
+    }
+
+    /// One word of a frame, read as the frame itself says it should be.
+    ///
+    /// The same projection whether a name covers the word or nothing does,
+    /// which is what lets [`Local::words`] and [`Call::words`] be one type:
+    /// a position, what the frame says is in it, the word, and that word
+    /// rendered. A frame that says nothing about a word — one past the
+    /// declared frame, which the lowering does not produce — is read as an
+    /// `Int`, because a raw word shown as a number is the least a reader can
+    /// be told and it is still true.
+    fn word(&self, function: &cove_ir::Function, at: u32, raw: u64) -> Word {
+        let repr = function.repr(at).unwrap_or(cove_ir::Repr::Int);
+        Word {
+            at,
+            holds: repr.name(),
+            raw,
+            value: render::raw(self.machine, repr, raw),
         }
     }
 }
@@ -306,7 +380,13 @@ impl Call {
         self.span
     }
 
-    /// The names the source bound that are in scope at this pc.
+    /// The names the source bound that are in scope at this pc, in
+    /// declaration order.
+    ///
+    /// One name may appear twice. Shadowing is *recorded* rather than
+    /// resolved — see [`cove_ir::Local`] — so `let x = 1; let x = x + 41` is
+    /// two live bindings of two words, and both are here. [`Call::local`] is
+    /// what chooses between them.
     pub fn locals(&self) -> &[Local] {
         &self.locals
     }
@@ -316,9 +396,23 @@ impl Call {
         &self.words
     }
 
-    /// The local called `name`, if one is in scope here.
+    /// The local called `name` that the source means at this pc, if one is
+    /// in scope here.
+    ///
+    /// **The last match wins**, which is
+    /// [`cove_ir::Function::local_at`]'s rule and is the rule because the
+    /// lowering resolves a name by searching its scope backwards. Two
+    /// bindings of one name are live at once and the later one is what the
+    /// source at this pc means; taking the first match would answer with the
+    /// *shadowed* binding, which is a debugger that is wrong about the value
+    /// of a name exactly where a person is most likely to ask.
+    ///
+    /// The earlier binding is not hidden — it is still in [`Call::locals`],
+    /// where a reader can see both — because it is still in the frame, and a
+    /// view of the machine that quietly dropped a word would be a worse
+    /// lie than a view that shows two.
     pub fn local(&self, name: &str) -> Option<&Local> {
-        self.locals.iter().find(|local| local.name == name)
+        self.locals.iter().rev().find(|local| local.name == name)
     }
 }
 
@@ -329,6 +423,7 @@ pub struct Local {
     value: String,
     at: u32,
     width: u32,
+    words: Vec<Word>,
 }
 
 impl Local {
@@ -357,13 +452,40 @@ impl Local {
     }
 
     /// How many words it occupies. A value is a run of words, so a name
-    /// covers `width` of them from [`Local::at`].
+    /// covers `width` of them from [`Local::at`], and [`Local::words`] is
+    /// that run.
     pub fn width(&self) -> u32 {
         self.width
     }
+
+    /// The words the name covers, read as the frame says they should be.
+    ///
+    /// [`Local::value`] is what the name holds *rendered*, and that is where
+    /// a reader stops. This is where a debugger does not: a name bound to a
+    /// vector renders as its elements and holds a reference, and until this
+    /// was here there was no way to get from the name to the reference —
+    /// [`Stop::object`] follows a word, and [`Call::words`] by construction
+    /// excludes every word a name covers. So `print xs` could show a vector
+    /// and nothing could then look at the object, which is a hole in a
+    /// debugger rather than a missing convenience.
+    ///
+    /// It is the same [`Word`] view [`Call::words`] hands out, and
+    /// deliberately: a word of a frame is a word of a frame whether a name
+    /// covers it or not, and a second shape for the same thing would be a
+    /// second thing to keep true. `words().len()` is [`Local::width`], and
+    /// the first of them is at [`Local::at`].
+    pub fn words(&self) -> &[Word] {
+        &self.words
+    }
 }
 
-/// One word of a frame that no name in scope covers.
+/// One word of a frame.
+///
+/// [`Call::words`] hands out the ones no name in scope covers, which is what
+/// the view exists for; [`Local::words`] hands out the ones a name does. The
+/// projection is the same either way — a position, what the frame says is in
+/// it, the word, and that word rendered — because whether a name happens to
+/// cover a word does not change what the word is.
 #[derive(Clone, Debug)]
 pub struct Word {
     at: u32,
@@ -527,6 +649,37 @@ fn outer(b: Int) -> Int {
 
 export fn main() -> Int {
   outer(20)
+}
+";
+
+    /// One name bound twice in one frame, so that two bindings of it are
+    /// live at the same time.
+    const SHADOWED: &str = "
+export fn main() -> Int {
+  let total = 0
+  let total = total + 20
+  total
+}
+";
+
+    /// A name bound to something on the heap, for following a reference the
+    /// frame holds by the name that holds it.
+    const ARRAY: &str = "
+export fn main() -> Int {
+  let items = [10, 20, 30]
+  items.length()
+}
+";
+
+    /// Two tasks, so that two machines ask the same debugger.
+    const SPAWNED: &str = "
+export fn main() -> Int {
+  var total = 0
+  scope tasks {
+    let first = tasks.spawn { 42 }
+    total = await first
+  }
+  total
 }
 ";
 
@@ -732,7 +885,7 @@ export fn main() -> Int {
             fn at(&self, stop: &Stop<'_>) -> Resume {
                 let mut held = self.0.lock().expect("a lock");
                 if held.is_none() && stop.function() == "m.inner" {
-                    *held = Some((stop.function(), stop.pc(), stop.code(2)));
+                    *held = Some((stop.function(), stop.pc(), stop.code(0, 2)));
                 }
                 Resume::Go
             }
@@ -861,6 +1014,250 @@ export fn main() -> Int {
         for (stop, frame) in seen {
             assert_eq!(stop, frame, "the frame's pc was synced before the question");
         }
+    }
+
+    /// **A name bound twice in one frame is answered by the later binding,
+    /// and the earlier one is still there to be seen.**
+    ///
+    /// `cove_ir::Function::local_at` is the rule and the reason: shadowing
+    /// is recorded rather than resolved, so `let total = 0; let total =
+    /// total + 20` is two live bindings of two words, and the lowering
+    /// resolves a name by searching its scope *backwards*. A view that took
+    /// the first match would answer `total` with the value the source
+    /// stopped meaning one line earlier — wrong, and wrong silently, since
+    /// both answers are numbers.
+    ///
+    /// The method is pinned here and not only in `cove debug`'s own suite
+    /// because every reader of a stop calls it: the CLI worked around the
+    /// first-match rule by reading `Call::locals` backwards itself, and the
+    /// next reader would have had to know to do the same.
+    #[test]
+    fn a_shadowed_name_is_answered_by_the_binding_the_source_means() {
+        /// Keeps the last frame in which `total` was bound twice at once.
+        #[derive(Default)]
+        struct Shadow(Mutex<Option<Call>>);
+
+        impl Debugger for Shadow {
+            fn at(&self, stop: &Stop<'_>) -> Resume {
+                if let Some(call) = stop.frame(0) {
+                    let bound = call
+                        .locals()
+                        .iter()
+                        .filter(|local| local.name() == "total")
+                        .count();
+                    if bound == 2 {
+                        *self.0.lock().expect("a lock") = Some(call);
+                    }
+                }
+                Resume::Go
+            }
+        }
+
+        let world = World::new(SHADOWED);
+        let shadow = Shadow::default();
+        let mut vm = world.watched(&shadow);
+        let answer = vm.invoke("m", "main", Vec::new()).expect("the run answers");
+        assert_eq!(format!("{answer}"), "20");
+
+        let call = shadow
+            .0
+            .lock()
+            .expect("a lock")
+            .clone()
+            .expect("both bindings of `total` were live at once");
+        let both: Vec<&Local> = call
+            .locals()
+            .iter()
+            .filter(|local| local.name() == "total")
+            .collect();
+        assert_eq!(both.len(), 2, "shadowing is recorded, not resolved");
+        assert_ne!(both[0].at(), both[1].at(), "two bindings are two words");
+        assert_eq!(both[0].value(), "0", "the shadowed binding is still there");
+
+        let meant = call.local("total").expect("`total` is in scope");
+        assert_eq!(
+            meant.at(),
+            both[1].at(),
+            "the later declaration is the one the source means"
+        );
+        assert_eq!(meant.value(), "20");
+    }
+
+    /// **A stop says which task it is in, and the id is the one a trace
+    /// writes.**
+    ///
+    /// Everything else a stop answers is one task's — the instruction count,
+    /// the depth, the frames — because a spawned task runs on a machine of
+    /// its own. Without this, a policy stated in frame depth can be
+    /// satisfied by a task nobody was stepping in, and a count can be read
+    /// as the run's when it is one thread's.
+    ///
+    /// The count is checked per task rather than the id alone, because the
+    /// id would be worth nothing if the things it names were not really that
+    /// task's: each machine counts from one, so the first stop of every task
+    /// is its own first instruction.
+    #[test]
+    fn a_stop_names_the_task_it_is_in_and_a_spawned_task_is_not_the_entry() {
+        /// The lowest instruction count seen in each task.
+        #[derive(Default)]
+        struct Whose(Mutex<BTreeMap<u64, u64>>);
+
+        impl Debugger for Whose {
+            fn at(&self, stop: &Stop<'_>) -> Resume {
+                let mut seen = self.0.lock().expect("a lock");
+                let first = seen.entry(stop.task()).or_insert(u64::MAX);
+                *first = (*first).min(stop.instructions());
+                Resume::Go
+            }
+        }
+
+        let world = World::new(SPAWNED);
+        let whose = Whose::default();
+        let mut vm = world.watched(&whose);
+        let answer = vm.invoke("m", "main", Vec::new()).expect("the run answers");
+        assert_eq!(format!("{answer}"), "42");
+
+        let seen = whose.0.lock().expect("a lock").clone();
+        assert_eq!(
+            seen.len(),
+            2,
+            "the entry and the task it spawned are two tasks, not one"
+        );
+        assert!(
+            seen.contains_key(&crate::runtime::ENTRY_TASK),
+            "the entry names itself the way a trace names it"
+        );
+        for (task, first) in seen {
+            assert_eq!(first, 1, "task {task} counts its own instructions from one");
+        }
+    }
+
+    /// **A disassembly is of the frame it was asked for, and the outermost
+    /// is the last one there is.**
+    ///
+    /// A session that lets a person select a frame has to be able to show
+    /// that frame's code. Reading the stopping function's would answer
+    /// `frame 2` with frame 0's instructions — a listing that looks right,
+    /// is wrong, and says nothing about which frame it is of.
+    #[test]
+    fn a_disassembly_is_of_the_frame_it_was_asked_for() {
+        /// The first stop inside `m.inner`: the innermost frame's code, its
+        /// caller's, that caller's own pc, and a frame that is not there.
+        #[derive(Default)]
+        #[allow(clippy::type_complexity)]
+        struct Frames(Mutex<Option<(Vec<Line>, Vec<Line>, Pc, Vec<Line>)>>);
+
+        impl Debugger for Frames {
+            fn at(&self, stop: &Stop<'_>) -> Resume {
+                let mut held = self.0.lock().expect("a lock");
+                if held.is_none() && stop.function() == "m.inner" {
+                    let caller = stop.frame(1).expect("`m.inner` was called from `m.outer`");
+                    *held = Some((
+                        stop.code(0, 2),
+                        stop.code(1, 2),
+                        caller.pc(),
+                        stop.code(9, 2),
+                    ));
+                }
+                Resume::Go
+            }
+        }
+
+        let world = World::new(NESTED);
+        let frames = Frames::default();
+        let mut vm = world.watched(&frames);
+        vm.invoke("m", "main", Vec::new()).expect("the run answers");
+
+        let held = frames.0.lock().expect("a lock").clone();
+        let (innermost, outer, caller_pc, past) = held.expect("the run entered `m.inner`");
+        let marked = |lines: &[Line]| {
+            let found: Vec<Line> = lines
+                .iter()
+                .filter(|line| line.current())
+                .cloned()
+                .collect();
+            assert_eq!(found.len(), 1, "exactly one line is the one stopped at");
+            found[0].clone()
+        };
+
+        assert_eq!(marked(&innermost).pc(), 0, "a call stops at the callee's 0");
+        assert_eq!(
+            marked(&outer).pc(),
+            caller_pc,
+            "the caller is shown at the pc it will return to"
+        );
+        assert_ne!(
+            marked(&outer).text(),
+            marked(&innermost).text(),
+            "two frames of two functions are two instructions"
+        );
+        assert!(past.is_empty(), "there is no ninth frame to disassemble");
+    }
+
+    /// **A name hands over the words it covers, so a reference a name holds
+    /// can be followed into the heap.**
+    ///
+    /// `Stop::object` follows a word, and `Call::words` by construction
+    /// shows only the words no name covers. Between the two there was a hole
+    /// exactly where a debugger is most used: a name bound to a vector
+    /// rendered as its elements, and nothing could then ask what the object
+    /// was. The word is the same `Word` view an unnamed word gets, because a
+    /// word of a frame does not change shape by being named.
+    #[test]
+    fn a_local_hands_over_its_word_so_a_named_reference_can_be_followed() {
+        /// The first stop at which `items` holds something.
+        #[derive(Default)]
+        #[allow(clippy::type_complexity)]
+        struct Follow(Mutex<Option<(u32, u32, u32, String, Option<Object>)>>);
+
+        impl Debugger for Follow {
+            fn at(&self, stop: &Stop<'_>) -> Resume {
+                let mut held = self.0.lock().expect("a lock");
+                if held.is_some() {
+                    return Resume::Go;
+                }
+                let Some(call) = stop.frame(0) else {
+                    return Resume::Go;
+                };
+                let Some(items) = call.local("items") else {
+                    return Resume::Go;
+                };
+                let [word] = items.words() else {
+                    return Resume::Go;
+                };
+                if word.raw() == 0 {
+                    return Resume::Go;
+                }
+                *held = Some((
+                    items.at(),
+                    items.width(),
+                    word.at(),
+                    word.holds().to_string(),
+                    stop.object(word.raw()),
+                ));
+                Resume::Go
+            }
+        }
+
+        let world = World::new(ARRAY);
+        let follow = Follow::default();
+        let mut vm = world.watched(&follow);
+        let answer = vm.invoke("m", "main", Vec::new()).expect("the run answers");
+        assert_eq!(format!("{answer}"), "3");
+
+        let held = follow.0.lock().expect("a lock").clone();
+        let (at, width, word_at, holds, object) = held.expect("`items` held a reference");
+        assert_eq!(width, 1, "a reference is one word");
+        assert_eq!(word_at, at, "the name's first word is the name's position");
+        assert_eq!(holds, "ref", "the frame says the word is a reference");
+
+        let object = object.expect("the word names an object of this run's heap");
+        let values: Vec<&str> = object.fields().iter().map(Field::value).collect();
+        assert_eq!(
+            values,
+            vec!["10", "20", "30"],
+            "the object `items` names is the array the source wrote"
+        );
     }
 
     /// **A run of a program with no debugger is the run it always was.**

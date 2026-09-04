@@ -276,6 +276,9 @@ pub struct Function {
     /// Whether the body is a task's: `async fn`, or the lambda a `spawn`
     /// was handed.
     pub is_async: bool,
+    /// Whether this is a stand-in the lowering left for a declaration it
+    /// did not lower a body for. See `lower::stub`, and `Function::is_stub`.
+    pub stub: bool,
 }
 
 impl Function {
@@ -330,6 +333,43 @@ impl Function {
     /// `module.name`, as a diagnostic writes it.
     pub fn qualified(&self) -> String {
         format!("{}.{}", self.module, self.name)
+    }
+
+    /// Whether this is a stand-in rather than a lowered body.
+    ///
+    /// A stub has no body to stop at: its one instruction is a `Return`
+    /// written at the declaration's own span, and it has no parameters and
+    /// no names, because there was no boundary and no scope to bind them
+    /// from. A tool that resolves a source location or a breakpoint against
+    /// a program — a debugger walking [`Function::locals`], a stack trace
+    /// reading [`Function::span_at`] — has to skip a stub rather than answer
+    /// out of it, or it answers a question about a function that was never
+    /// written.
+    ///
+    /// It answers `true` for all three kinds `lower::stub`'s doc comment
+    /// describes, because `stub` is the one place any of them is built and
+    /// this reads back exactly what it recorded. But a program that actually
+    /// runs — the output of [`lower_roots`](crate::lower_roots) or
+    /// [`lower_entry`](crate::lower_entry) once a lowering finishes without
+    /// error — can only hold two of the three: the declaration a slice left
+    /// out, and a generic declaration whose instantiations carry the real
+    /// code beside it. The third kind, a declaration this lowering reported
+    /// a gap about, belongs to a lowering that never got handed back — a gap
+    /// is an error, so the program it would have been part of does not exist
+    /// for a caller of this method to ask about.
+    ///
+    /// This is a stored fact rather than a test of the four fields above,
+    /// because a shape a stub happens to have is not a shape only a stub
+    /// has. `lower::stub`'s own construction is the only place that knows
+    /// *why* the instruction, span, and empty lists are what they are;
+    /// asking a shape test to recover that intent at a distance means the
+    /// day a real body of one instruction is ever written at its
+    /// declaration's own span, the test is wrong and nothing says so.
+    /// Recording the fact the lowering already has costs one field;
+    /// re-deriving it costs a convention two crates now have to keep in
+    /// sync by hand.
+    pub fn is_stub(&self) -> bool {
+        self.stub
     }
 }
 

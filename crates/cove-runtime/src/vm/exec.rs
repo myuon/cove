@@ -637,6 +637,16 @@ impl<'a> Machine<'a> {
         self.instructions
     }
 
+    /// Which task this machine is running.
+    ///
+    /// The same number a trace event carries, because there is only one
+    /// counter: [`crate::trace::Event`] writes this field and so does
+    /// [`crate::vm::debug::Stop::task`], so a debugger and a trace name a
+    /// task the same way instead of each inventing an identity for it.
+    pub(crate) fn task(&self) -> u64 {
+        self.task
+    }
+
     /// Installs `debugger`, to be asked before every instruction this machine
     /// runs from here on.
     ///
@@ -3742,6 +3752,10 @@ pub(crate) mod tests {
                 locals: Vec::new(),
                 span: nowhere,
                 is_async: false,
+                // A function a test builds by hand is a function with a
+                // body, whatever the body is: nothing here stands in for a
+                // declaration the lowering left out.
+                stub: false,
             });
             let id = FunctionId(self.program.functions.len() as u32 - 1);
             self.program

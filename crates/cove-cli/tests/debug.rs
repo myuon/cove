@@ -244,9 +244,9 @@ fn print_finds_a_local_by_name_in_whichever_frame_is_selected() {
 /// `cove_ir::Local`'s rule: shadowing is *recorded* rather than resolved, so
 /// two bindings of `total` are live at once and the later one is what the
 /// source means — the lowering searches its scope backwards. `Call::local`
-/// takes the *first* match and would answer with the shadowed one, so this
-/// command reads the list backwards itself. That disagreement is the whole
-/// reason this test exists.
+/// used to take the *first* match, which is the shadowed one, and this
+/// command read the list backwards itself to work around it; the method now
+/// holds the rule and this asks whether the answer is still right.
 #[test]
 fn print_answers_with_the_later_binding_when_a_name_is_shadowed() {
     let session =
@@ -503,5 +503,136 @@ fn the_session_states_what_its_stepping_rule_gets_wrong() {
     session.says("run until the line changes");
     session.says("a loop whose body is written on one line");
     session.says("the line number can go backwards");
-    session.says("a spawned task reaching an instruction can");
+    session.says("a breakpoint fires in whichever task reaches it");
+    // The limitations that were fixed rather than documented are gone from
+    // the list. A list that goes on naming what a person can now do is a
+    // list they stop reading.
+    session.never_says("a stop does not say which task it belongs to");
+    session.never_says("`disassemble` always shows the innermost frame");
+    session.never_says("a named reference cannot be followed into the heap");
+}
+
+/// **A stop in a spawned task says which task it is in, and a step asked
+/// there is not satisfied by another task.**
+///
+/// Everything a stop reports is one task's — the instruction count, the
+/// frame depth, the frames — because a spawned task runs on a machine of its
+/// own. `step`, `next` and `finish` are stated in frame depth, so before a
+/// stop said whose depth it was, a step asked in one task could be answered
+/// by whichever thread reached an instruction first: a stop nobody asked for
+/// and no one could explain.
+///
+/// `tasks_scope` is the fixture because `wait` runs only in a spawned task,
+/// so the breakpoint on it cannot fire in the entry and the task the session
+/// reports is a real second one.
+#[test]
+fn a_stop_in_a_spawned_task_says_whose_it_is_and_a_step_stays_in_that_task() {
+    let session = run(
+        &["debug", "tasks_scope"],
+        "break wait\ncontinue\ninfo run\ndelete\nstep\ninfo run\nquit\n",
+    );
+    let named: Vec<&str> = session
+        .out
+        .lines()
+        .filter(|line| line.contains("instruction(s) run in task "))
+        .collect();
+    assert_eq!(named.len(), 2, "two `info run`s:\n{}", session.out);
+    let task = |line: &str| {
+        line.split("in task ")
+            .nth(1)
+            .and_then(|rest| rest.split(',').next())
+            .map(str::to_string)
+            .expect("a task id")
+    };
+    assert_ne!(
+        task(named[0]),
+        "0",
+        "`wait` runs only in a spawned task, and the entry is task 0"
+    );
+    assert_eq!(
+        task(named[0]),
+        task(named[1]),
+        "the step was satisfied in the task it was asked in:\n{}",
+        session.out
+    );
+}
+
+/// **`disassemble` shows the frame that is selected, not always the
+/// innermost.**
+///
+/// `frame` selects what `print`, `locals`, `words` and `list` read, and a
+/// disassembly that ignored it would answer a question about frame 2 with
+/// frame 0's instructions — a listing that looks right and is not. The stop
+/// can read any live frame's code; which one is the session's choice to
+/// make, and it makes the same one for every looking command.
+#[test]
+fn disassemble_shows_the_selected_frame_and_not_only_the_innermost() {
+    let session = debug(
+        "break debug_session/main.cove:6\ncontinue\ndisassemble 1\nframe 1\ndisassemble 1\nquit\n",
+    );
+    session.wrote("debug_session.twice:");
+    session.wrote("debug_session.raise:");
+    assert!(
+        session.at("debug_session.twice:") < session.at("debug_session.raise:"),
+        "the innermost was shown first, and the selected frame after:\n{}",
+        session.out
+    );
+    // Two listings, each with exactly one instruction marked as the one that
+    // frame is at.
+    let marked: Vec<&str> = session
+        .out
+        .lines()
+        .filter(|line| line.starts_with("=>"))
+        .collect();
+    assert_eq!(marked.len(), 2, "one marked line each:\n{}", session.out);
+    assert_ne!(
+        marked[0], marked[1],
+        "two frames of two functions are two instructions"
+    );
+}
+
+/// **A reference a name holds can be followed into the heap by the name that
+/// holds it.**
+///
+/// `object` follows a word and `words` prints only the frame words *no* name
+/// covers, so between the two there was a hole exactly where a debugger is
+/// most used: `print items` rendered a vector and nothing could then ask
+/// what the object was. `print` now hands the word over and `object` takes
+/// the name, which are the two halves of the same answer.
+#[test]
+fn a_reference_a_local_holds_is_followed_by_the_name_that_holds_it() {
+    let session = run(
+        &["debug", "coll_array"],
+        "break coll_array/main.cove:7\ncontinue\nprint items\nobject items\nquit\n",
+    );
+    // The word is printed beside the rendering, so a person can see it, copy
+    // it, and compare it with what `words` says.
+    // The line `print` wrote, and not the source line the listing quoted
+    // back, which holds the same text.
+    let printed = session
+        .out
+        .lines()
+        .find(|line| line.starts_with("items = "))
+        .unwrap_or_else(|| panic!("`print items` said nothing:\n{}", session.out));
+    assert!(
+        printed.contains("[10, 20, 30]") && printed.contains("0x"),
+        "`print` hands over the word it rendered: {printed}"
+    );
+    session.says(": Array");
+    session.wrote("  0 = 10");
+    session.wrote("  2 = 30");
+}
+
+/// **`object` says which of the two mistakes a name that answers nothing
+/// is.**
+///
+/// A word that names no object and a name that is not in scope are different
+/// questions with different answers, and a debugger that said "not an
+/// object" to both would send a person looking at the heap for a typo.
+#[test]
+fn object_tells_a_name_that_is_not_in_scope_from_a_word_that_names_nothing() {
+    let session =
+        debug("break debug_session/main.cove:6\ncontinue\nobject nope\nobject 12345\nquit\n");
+    session.says("no local called `nope` is in scope in frame #0 (debug_session.twice)");
+    session.says("0x0000000000003039 does not name an object of this run's heap");
 }
