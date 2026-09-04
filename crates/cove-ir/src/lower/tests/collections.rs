@@ -250,10 +250,10 @@ fn a_break_out_of_a_for_clears_the_element_it_was_holding() {
         ),
         "\
 fn0 m.first(Array) -> Int
-  frame 13: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:ref s10:unit s11:int s12:int
-  local xs -> s0:Array [0, 30)
-  local t -> s2:Int [1, 29)
-  local x -> s8:String [10, 25)
+  frame 12: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:ref s10:unit s11:int
+  local xs -> s0:Array [0, 29)
+  local t -> s2:Int [1, 28)
+  local x -> s8:String [10, 24)
      0  int s2:int 0
      1  copy s3:ref s0:ref Array
      2  len s4:int s3:ref
@@ -262,7 +262,7 @@ fn0 m.first(Array) -> Int
      5  jump 7
      6  add.int s5:int s5:int s6:int
      7  lt.int s7:bool s5:int s4:int
-     8  branch-false s7:bool 27
+     8  branch-false s7:bool 26
      9  load-elem s8:ref s3:ref s5:int String
     10  str s9:ref \"\"
     11  eq.str s7:bool s8:ref s9:ref
@@ -275,15 +275,59 @@ fn0 m.first(Array) -> Int
     18  clear s9:ref String
     19  branch-false s7:bool 22
     20  clear s8:ref String
-    21  jump 27
-    22  int s11:int 1
-    23  add.int s12:int s2:int s11:int
-    24  copy s2:int s12:int Int
-    25  clear s8:ref String
-    26  jump 6
-    27  clear s3:ref Array
-    28  copy s1:int s2:int Int
-    29  return s1:int Int
+    21  jump 26
+    22  add.int.imm s11:int s2:int 1
+    23  copy s2:int s11:int Int
+    24  clear s8:ref String
+    25  jump 6
+    26  clear s3:ref Array
+    27  copy s1:int s2:int Int
+    28  return s1:int Int
+"
+    );
+}
+
+/// And clears nothing at all when the element is a scalar, which is the
+/// other half of the same rule. `Inst::Clear` exists to stop a slot
+/// retaining a reference; an `Int` element retains nothing, so a `break` out
+/// of a `for` over an `Array<Int>` writes a word the collector never reads
+/// and the next turn overwrites. This pins the absence: there is exactly one
+/// `clear` in this listing, and it is the loop's own hold on `xs`.
+#[test]
+fn a_break_out_of_a_for_over_scalars_clears_nothing() {
+    assert_eq!(
+        listing(
+            "fn first(xs: Array<Int>) -> Int {\n  var t = 0\n  for x in xs {\n    if x == 0 { continue }\n    if x == 9 { break }\n    t = t + 1\n  }\n  t\n}",
+            "first"
+        ),
+        "\
+fn0 m.first(Array) -> Int
+  frame 11: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int s9:unit s10:int
+  local xs -> s0:Array [0, 22)
+  local t -> s2:Int [1, 21)
+  local x -> s8:Int [10, 18)
+     0  int s2:int 0
+     1  copy s3:ref s0:ref Array
+     2  len s4:int s3:ref
+     3  int s5:int 0
+     4  int s6:int 1
+     5  jump 7
+     6  add.int s5:int s5:int s6:int
+     7  lt.int s7:bool s5:int s4:int
+     8  branch-false s7:bool 19
+     9  load-elem s8:int s3:ref s5:int Int
+    10  eq.int.imm s7:bool s8:int 0
+    11  branch-false s7:bool 13
+    12  jump 6
+    13  eq.int.imm s7:bool s8:int 9
+    14  branch-false s7:bool 16
+    15  jump 19
+    16  add.int.imm s10:int s2:int 1
+    17  copy s2:int s10:int Int
+    18  jump 6
+    19  clear s3:ref Array
+    20  copy s1:int s2:int Int
+    21  return s1:int Int
 "
     );
 }

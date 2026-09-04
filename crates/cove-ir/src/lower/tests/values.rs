@@ -12,12 +12,42 @@ fn a_parameter_is_the_run_a_caller_writes() {
         listing("fn double(n: Int) -> Int { n * 2 }", "double"),
         "\
 fn0 m.double(Int) -> Int
-  frame 4: s0!:int s1:int s2:int s3:int
-  local n -> s0:Int [0, 4)
-     0  int s2:int 2
-     1  mul.int s3:int s0:int s2:int
-     2  copy s1:int s3:int Int
-     3  return s1:int Int
+  frame 3: s0!:int s1:int s2:int
+  local n -> s0:Int [0, 3)
+     0  mul.int.imm s2:int s0:int 2
+     1  copy s1:int s2:int Int
+     2  return s1:int Int
+"
+    );
+}
+
+/// A negated literal is still a literal, and nothing else is folded.
+///
+/// `-1` is parsed as a `Neg` of `1`, so without the one line in
+/// `expr::int_literal` that looks through it, `n > -1` would materialise a
+/// `1`, negate it into a second temporary, and compare against that: three
+/// instructions where the source wrote one number. That line is the whole of
+/// the constant folding in this lowering, and the second half of this listing
+/// is what says so — `1 + 1` is two literals rather than one, and the left
+/// one is materialised exactly as it always was. Nothing here evaluates
+/// anything; it reads syntax.
+#[test]
+fn a_negated_literal_is_an_immediate_and_a_sum_of_two_is_not_folded() {
+    assert_eq!(
+        listing("fn f(n: Int) -> Bool { n > -1 && n < 1 + 1 }", "f"),
+        "\
+fn0 m.f(Int) -> Bool
+  frame 6: s0!:int s1:bool s2:bool s3:bool s4:int s5:int
+  local n -> s0:Int [0, 9)
+     0  gt.int.imm s3:bool s0:int -1
+     1  copy s2:bool s3:bool Bool
+     2  branch-false s2:bool 7
+     3  int s4:int 1
+     4  add.int.imm s5:int s4:int 1
+     5  lt.int s3:bool s0:int s5:int
+     6  copy s2:bool s3:bool Bool
+     7  copy s1:bool s2:bool Bool
+     8  return s1:bool Bool
 "
     );
 }
@@ -33,14 +63,13 @@ fn arithmetic_and_comparison_read_the_operands_kind() {
         ),
         "\
 fn0 m.ordered(Int Int) -> Bool
-  frame 6: s0!:int s1!:int s2:bool s3:int s4:int s5:bool
-  local a -> s0:Int [0, 5)
-  local b -> s1:Int [0, 5)
-     0  int s3:int 1
-     1  sub.int s4:int s0:int s3:int
-     2  le.int s5:bool s4:int s1:int
-     3  copy s2:bool s5:bool Bool
-     4  return s2:bool Bool
+  frame 5: s0!:int s1!:int s2:bool s3:int s4:bool
+  local a -> s0:Int [0, 4)
+  local b -> s1:Int [0, 4)
+     0  sub.int.imm s3:int s0:int 1
+     1  le.int s4:bool s3:int s1:int
+     2  copy s2:bool s4:bool Bool
+     3  return s2:bool Bool
 "
     );
 }
@@ -71,12 +100,11 @@ fn a_duration_is_nanoseconds_and_adds_like_an_integer() {
         listing("fn wait() -> Duration { 5ms + 3ms }", "wait"),
         "\
 fn0 m.wait() -> Duration
-  frame 4: s0:duration s1:duration s2:duration s3:duration
+  frame 3: s0:duration s1:duration s2:duration
      0  int s1:duration 5000000
-     1  int s2:duration 3000000
-     2  add.int s3:duration s1:duration s2:duration
-     3  copy s0:duration s3:duration Duration
-     4  return s0:duration Duration
+     1  add.int.imm s2:duration s1:duration 3000000
+     2  copy s0:duration s2:duration Duration
+     3  return s0:duration Duration
 "
     );
 }
@@ -128,16 +156,14 @@ fn a_var_local_is_one_location_written_again() {
         ),
         "\
 fn0 m.count() -> Int
-  frame 4: s0:int s1:int s2:int s3:int
-  local n -> s1:Int [1, 7)
+  frame 3: s0:int s1:int s2:int
+  local n -> s1:Int [1, 5)
      0  int s1:int 0
-     1  int s2:int 1
-     2  add.int s3:int s1:int s2:int
-     3  copy s1:int s3:int Int
-     4  int s3:int 2
-     5  add.int s1:int s1:int s3:int
-     6  copy s0:int s1:int Int
-     7  return s0:int Int
+     1  add.int.imm s2:int s1:int 1
+     2  copy s1:int s2:int Int
+     3  add.int.imm s1:int s1:int 2
+     4  copy s0:int s1:int Int
+     5  return s0:int Int
 "
     );
 }
@@ -231,15 +257,14 @@ fn a_binding_takes_over_the_temporary_its_initialiser_made() {
         "\
 fn0 m.twice(Int) -> Int
   frame 5: s0!:int s1:int s2:int s3:int s4:int
-  local n -> s0:Int [0, 6)
-  local a -> s3:Int [2, 5)
-  local b -> s2:Int [3, 5)
-     0  int s2:int 1
-     1  add.int s3:int s0:int s2:int
-     2  copy s2:int s3:int Int
-     3  add.int s4:int s3:int s2:int
-     4  copy s1:int s4:int Int
-     5  return s1:int Int
+  local n -> s0:Int [0, 5)
+  local a -> s2:Int [1, 4)
+  local b -> s3:Int [2, 4)
+     0  add.int.imm s2:int s0:int 1
+     1  copy s3:int s2:int Int
+     2  add.int s4:int s2:int s3:int
+     3  copy s1:int s4:int Int
+     4  return s1:int Int
 "
     );
 }

@@ -3,7 +3,7 @@ entering debug_session.main at debug_session/main.cove:26:11
 >   26 |   println("before")?
 (cove) break debug_session/main.cove:6
 breakpoint 1 at 1 location:
-  debug_session.twice pc 0 at debug_session/main.cove:6:21
+  debug_session.twice pc 0 at debug_session/main.cove:6:17
 (cove) break debug_session/main.cove:2
 no instruction was lowered for debug_session/main.cove:2
   `cove debug` lowers what the entry reaches, so a line in code no path leads to has no instructions to stop at, and neither has a line that is blank, a comment, or a declaration
@@ -11,13 +11,13 @@ no instruction was lowered for debug_session/main.cove:2
 `debug_session.unreached` is declared, but this entry does not reach it: `cove debug` lowers only what the entry can call, so it has no instructions to break on
 (cove) info breakpoints
 breakpoint 1 at `debug_session/main.cove:6`, hit 0 time(s)
-  debug_session.twice pc 0 at debug_session/main.cove:6:21
+  debug_session.twice pc 0 at debug_session/main.cove:6:17
 (cove) continue
 before
-breakpoint 1, debug_session.twice at debug_session/main.cove:6:21
+breakpoint 1, debug_session.twice at debug_session/main.cove:6:17
 >    6 |   let doubled = n * 2
 (cove) backtrace
-#0  debug_session.twice at debug_session/main.cove:6:21
+#0  debug_session.twice at debug_session/main.cove:6:17
 #1  debug_session.raise at debug_session/main.cove:14:3
 #2  debug_session.main at debug_session/main.cove:29:11
 (cove) print n
@@ -35,15 +35,15 @@ returned to debug_session.raise at debug_session/main.cove:14:3
 >   14 |   twice(raised)
 (cove) words
 word 1   int       0x0000000000000000  0
-word 2   int       0x000000000000002a  42
+word 3   int       0x000000000000002a  42
 (cove) frame 1
 #1  debug_session.main at debug_session/main.cove:29:11
 >   29 |   println("answer {raise(total)}")?
 (cove) print total
-total = 20  (word 14)  0x0000000000000014
+total = 20  (word 13)  0x0000000000000014
 (cove) locals
 total = 0  (word 7, 1 word(s), shadowed)
-total = 20  (word 14, 1 word(s))
+total = 20  (word 13, 1 word(s))
 (cove) list 2
     27 |   let total = 0
     28 |   let total = total + 20
@@ -52,8 +52,8 @@ total = 20  (word 14, 1 word(s))
     31 |   Ok(())
 (cove) disassemble 1
 debug_session.main:
-     17 | call s13:int debug_session.raise (s14:Int) Int
-=>   18 | call-builtin s15:ref String.interpolate (s3:String s13:Int) String
-     19 | clear s3:ref String
+     16 | call s14:int debug_session.raise (s13:Int) Int
+=>   17 | call-builtin s15:ref String.interpolate (s3:String s14:Int) String
+     18 | clear s3:ref String
 (cove) quit
-the run was halted after 22 instruction(s).
+the run was halted after 19 instruction(s).

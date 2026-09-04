@@ -129,6 +129,19 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             s(*a),
             s(*b)
         ),
+        // An immediate is written bare, and the `.imm` on the opcode is what
+        // says the last operand is one. Nothing else is needed: a slot in
+        // this format is always `sN:repr`, so a number standing where an
+        // operand goes is already not a slot — it is how `jump 2` writes a
+        // program counter, how `int s5:int 7` writes a value, and how
+        // `load-field s2:int s1:ref 0 Point` writes an offset. Marking it
+        // `#7` would spell a distinction the format already draws.
+        Inst::ArithImm { op, dst, a, value } => {
+            format!("{}.int.imm {} {} {value}", arith_name(*op), s(*dst), s(*a))
+        }
+        Inst::CmpImm { op, dst, a, value } => {
+            format!("{}.int.imm {} {} {value}", cmp_name(*op), s(*dst), s(*a))
+        }
         Inst::Not { dst, a } => format!("not {} {}", s(*dst), s(*a)),
         Inst::Convert { to, dst, a } => format!(
             "{} {} {}",

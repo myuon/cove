@@ -33,12 +33,11 @@ fn0 m.f() -> Int
         listing(source, "f#0"),
         "\
 fn1 m.f#0(Int) -> Int
-  frame 4: s0!:int s1:int s2:int s3:int
-  local x -> s0:Int [0, 4)
-     0  int s2:int 1
-     1  add.int s3:int s0:int s2:int
-     2  copy s1:int s3:int Int
-     3  return s1:int Int
+  frame 3: s0!:int s1:int s2:int
+  local x -> s0:Int [0, 3)
+     0  add.int.imm s2:int s0:int 1
+     1  copy s1:int s2:int Int
+     2  return s1:int Int
 "
     );
 }
@@ -227,13 +226,12 @@ fn1 m.f#0() -> Int
         listing(source, "f#0#0"),
         "\
 fn2 m.f#0#0() -> Int
-  frame 4: s0:int s1:int s2:int s3:int
+  frame 3: s0:int s1:int s2:int
   capture n -> s0:Int
-  local n -> s0:Int [0, 4)
-     0  int s2:int 1
-     1  add.int s3:int s0:int s2:int
-     2  copy s1:int s3:int Int
-     3  return s1:int Int
+  local n -> s0:Int [0, 3)
+     0  add.int.imm s2:int s0:int 1
+     1  copy s1:int s2:int Int
+     2  return s1:int Int
 "
     );
 }
@@ -276,13 +274,12 @@ fn0 m.f(<addr>) -> Int
         ),
         "\
 fn1 m.f#0() -> Int
-  frame 4: s0:int s1:int s2:int s3:int
+  frame 3: s0:int s1:int s2:int
   capture n -> s0:Int
-  local n -> s0:Int [0, 4)
-     0  int s2:int 1
-     1  add.int s3:int s0:int s2:int
-     2  copy s1:int s3:int Int
-     3  return s1:int Int
+  local n -> s0:Int [0, 3)
+     0  add.int.imm s2:int s0:int 1
+     1  copy s1:int s2:int Int
+     2  return s1:int Int
 "
     );
 }
@@ -321,12 +318,11 @@ fn0 m.f() -> Int
         listing(source, "f#0"),
         "\
 fn1 m.f#0(Int) -> Int
-  frame 4: s0!:int s1:int s2:int s3:int
-  local n -> s0:Int [0, 4)
-     0  int s2:int 2
-     1  mul.int s3:int s0:int s2:int
-     2  copy s1:int s3:int Int
-     3  return s1:int Int
+  frame 3: s0!:int s1:int s2:int
+  local n -> s0:Int [0, 3)
+     0  mul.int.imm s2:int s0:int 2
+     1  copy s1:int s2:int Int
+     2  return s1:int Int
 "
     );
 }

@@ -16,3 +16,8 @@
 # hand — which is worth doing after a change to the lowering or the machine.
 [alias]
 t = "test --profile checked --workspace --lib --bins --tests"
+# The ratchet, which is `cargo t`'s ignored half and wants the same profile
+# for a stronger reason: it runs every program in the repository, so it is
+# the one suite that is compute-bound rather than merely spawn-bound. 39s
+# against 241s unoptimised.
+ratchet = "test --profile checked --workspace --lib --tests -- --ignored"

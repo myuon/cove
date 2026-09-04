@@ -42,6 +42,7 @@ use cove_diag::Span;
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::{MatchArm, Pattern, PatternKind};
 
+use super::expr;
 use super::gap;
 use super::shapes;
 use super::{Body, Dest, PENDING};
@@ -328,6 +329,33 @@ impl Body<'_> {
                 }
             }
             PatternKind::Literal(literal) => {
+                let repr = self.frame.repr(subject);
+                // `case 3` is a source literal in operand position, the same
+                // as the `3` of `n == 3`, so it is kept in the instruction
+                // the same way. See `expr::int_literal`.
+                if let (Repr::Int | Repr::Duration, Some(value)) =
+                    (repr, expr::int_literal(literal))
+                {
+                    let cond = self.temp(shapes::BOOL);
+                    self.emit(
+                        Inst::CmpImm {
+                            op: CmpOp::Eq,
+                            dst: cond.slot,
+                            a: subject,
+                            value,
+                        },
+                        span,
+                    );
+                    failures.push(self.emit(
+                        Inst::BranchFalse {
+                            cond: cond.slot,
+                            to: PENDING,
+                        },
+                        span,
+                    ));
+                    self.give_back(cond.slot, cond.layout);
+                    return;
+                }
                 let value = self.expr(literal);
                 let on = compare_of(self.frame.repr(subject));
                 let cond = self.temp(shapes::BOOL);

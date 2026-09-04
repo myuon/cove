@@ -528,6 +528,52 @@ impl Body<'_> {
     /// did not.
     fn operator(&mut self, expr: &Expr, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Val {
         let a = self.expr(lhs);
+        // An `Int` the source wrote on the right stays in the instruction.
+        //
+        // What it replaces is two instructions and a slot: `i < 2000000`
+        // materialised the bound into a temporary and compared against it,
+        // and because a `while`'s back edge lands on the *condition*, the
+        // materialisation ran once per turn. Nothing read the temporary but
+        // the compare that followed it.
+        //
+        // The left operand's `Repr` is what admits this, and it is the same
+        // question that decides `Num` and `Compare` below: an `Int` or a
+        // `Duration` word is what these two instructions read. Everything
+        // else — a `Float`, a `Bool`, a `String`, an erased box that
+        // `Body::opened` would have to open, a host handle — takes the path
+        // below unchanged, which is why there is no immediate form to get
+        // wrong for any of them.
+        //
+        // The right and only the right. `a - 1` and `1 - a` are different
+        // questions, and `a % 7` and `7 % a` more so; a left-hand immediate
+        // would be a second instruction family rather than a mirror of this
+        // one, for a shape no program here writes.
+        if matches!(self.frame.repr(a.slot), Repr::Int | Repr::Duration) {
+            if let Some(value) = int_literal(rhs) {
+                let dst = self.answer_of(expr);
+                let inst = match arith_of(op) {
+                    Some(op) => Inst::ArithImm {
+                        op,
+                        dst: dst.slot,
+                        a: a.slot,
+                        value,
+                    },
+                    // `operator` is reached for the eleven arithmetic and
+                    // comparison operators only — `&&`, `||` and `is` are
+                    // taken apart by `Body::binary` before this — so an
+                    // operator that is not arithmetic here is a comparison.
+                    None => Inst::CmpImm {
+                        op: cmp_of(op),
+                        dst: dst.slot,
+                        a: a.slot,
+                        value,
+                    },
+                };
+                self.emit(inst, expr.span);
+                self.release(a, expr.span);
+                return dst;
+            }
+        }
         let b = self.expr(rhs);
         let (a, b) = self.opened(a, b, expr.span);
         let dst = self.answer_of(expr);
@@ -851,11 +897,28 @@ impl Body<'_> {
         // rather than a read, an add and a copy.
         if let (Some(op), Place::Here { slot, layout }) = (op, place) {
             if let (Some(arith), 1) = (arith_of(op), self.width(layout)) {
+                let repr = self.frame.repr(slot);
+                // `i += 1` is one instruction and no temporary at all, which
+                // is what the accumulator being the destination was already
+                // for. See `Body::operator` for why the `Repr` is the guard.
+                if matches!(repr, Repr::Int | Repr::Duration) {
+                    if let Some(literal) = int_literal(value) {
+                        self.emit(
+                            Inst::ArithImm {
+                                op: arith,
+                                dst: slot,
+                                a: slot,
+                                value: literal,
+                            },
+                            span,
+                        );
+                        return;
+                    }
+                }
                 let source = self.expr(value);
-                let num = num_of(self.frame.repr(slot));
                 self.emit(
                     Inst::Arith {
-                        num,
+                        num: num_of(repr),
                         op: arith,
                         dst: slot,
                         a: slot,
@@ -882,22 +945,41 @@ impl Body<'_> {
                     return;
                 };
                 let held = self.read_place(place, span);
-                let source = self.expr(value);
-                let dst = self.temp(held.layout);
-                let num = num_of(self.frame.repr(held.slot));
-                self.emit(
-                    Inst::Arith {
-                        num,
-                        op: arith,
-                        dst: dst.slot,
-                        a: held.slot,
-                        b: source.slot,
-                    },
-                    span,
-                );
-                self.release(source, span);
-                self.release(held, span);
-                dst
+                let repr = self.frame.repr(held.slot);
+                // The same rule one branch further out: a compound
+                // assignment *through* an address reads, combines and stores
+                // back, and the literal it combines with need not be read
+                // from anywhere.
+                if let (Repr::Int | Repr::Duration, Some(literal)) = (repr, int_literal(value)) {
+                    let dst = self.temp(held.layout);
+                    self.emit(
+                        Inst::ArithImm {
+                            op: arith,
+                            dst: dst.slot,
+                            a: held.slot,
+                            value: literal,
+                        },
+                        span,
+                    );
+                    self.release(held, span);
+                    dst
+                } else {
+                    let source = self.expr(value);
+                    let dst = self.temp(held.layout);
+                    self.emit(
+                        Inst::Arith {
+                            num: num_of(repr),
+                            op: arith,
+                            dst: dst.slot,
+                            a: held.slot,
+                            b: source.slot,
+                        },
+                        span,
+                    );
+                    self.release(source, span);
+                    self.release(held, span);
+                    dst
+                }
             }
         };
         self.write_place(place, &source, span);
@@ -1528,8 +1610,21 @@ impl Body<'_> {
         self.clear(&temporaries, span);
         let clears = self.frame.refs_within(depth);
         self.clear(&clears, span);
+        // Guarded, as every other clear in this lowering is. A `Clear` of a
+        // scalar zeroes a word the collector never reads and the next turn
+        // never sees, so it is an instruction that does nothing — and the
+        // rule the guard states is `Inst::Clear`'s own: it is emitted only
+        // where the slot would otherwise retain something. Every other path
+        // that ends a live range already asks — `Body::release`,
+        // `Frame::pop_scope`, `walks::end_turn`, which does this same job on
+        // the path a turn ends normally — and `self.held` arrives here
+        // pre-filtered because `Body::hold` only records what holds a
+        // reference. This one path did not ask, so `break` out of a `for`
+        // over an `Array<Int>` emitted a `clear` on an `Int`.
         if let Some(element) = element {
-            self.zero(element.slot, element.layout, span);
+            if self.holds_ref(element.layout) {
+                self.zero(element.slot, element.layout, span);
+            }
         }
     }
 
@@ -2085,6 +2180,44 @@ pub(super) fn compare_of(repr: Repr) -> Compare {
         Repr::Bool => Compare::Bool,
         Repr::Ref => Compare::Str,
         _ => Compare::Int,
+    }
+}
+
+/// The `Int` word an expression **is**, where the source wrote one.
+///
+/// This is what decides that an operand stays in the instruction rather than
+/// becoming an [`Inst::Int`] into a temporary that only the next instruction
+/// reads. It answers about the *syntax*, not about a value some analysis
+/// worked out: the literal is there in the source, and what is being kept is
+/// the fact that it was.
+///
+/// Three shapes, and the third is the only judgement call:
+///
+/// - an `Int` literal;
+/// - a `Duration` literal, whose word is nanoseconds and so is an `i64` —
+///   only the boundary cares what the word is called;
+/// - a negation of one of those. `-1` is parsed as a `Neg` of `1` and not as
+///   a literal, so without this line `i > -1` would materialise a `1`,
+///   negate it into a second temporary, and compare against that — three
+///   instructions where the source wrote one number. This is the whole of
+///   the constant folding here, and it is deliberately the whole: it looks
+///   through a lowering artifact to a literal that is unambiguously present,
+///   and it does not evaluate anything. `1 + 1` is not a literal and is not
+///   folded.
+///
+/// [`i64::MIN`] cannot be written — the lexer refuses the magnitude — but
+/// `checked_neg` is what says so here rather than a comment, because a
+/// wrapping negation would silently answer the wrong constant if it ever
+/// could.
+pub(super) fn int_literal(expr: &Expr) -> Option<i64> {
+    match &expr.kind {
+        ExprKind::Int(value) => Some(*value),
+        ExprKind::Duration(nanos) => Some(*nanos),
+        ExprKind::Unary {
+            op: UnaryOp::Neg,
+            operand,
+        } => int_literal(operand)?.checked_neg(),
+        _ => None,
     }
 }
 

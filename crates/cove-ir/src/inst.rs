@@ -31,6 +31,15 @@
 //! What an object *is* is a question the object answers at run time, from
 //! its own header. Nothing here grows a case because a corpus program was
 //! refused, because nothing here refuses anything.
+//!
+//! The two instructions that carry an immediate — [`Inst::ArithImm`] and
+//! [`Inst::CmpImm`] — are the same rule applied to an operand rather than to
+//! a type. They are not `add.int.imm`, `sub.int.imm`, `lt.int.imm` and eight
+//! more: the operator is a field, as it already is on [`Inst::Arith`] and
+//! [`Inst::Cmp`], so the family stays two however many operators the language
+//! grows. What they say that no other instruction can is that an operand is a
+//! constant, which is a fact the source stated and every other representation
+//! of it throws away.
 
 use crate::layout::LayoutId;
 use crate::{ArgsId, BuiltinId, FunctionId, HostOpId, StrId, TableId};
@@ -192,6 +201,48 @@ pub enum Inst {
         dst: Slot,
         a: Slot,
         b: Slot,
+    },
+    /// `dst = a op value`, on `Int` words, where `value` was written in the
+    /// source.
+    ///
+    /// The same arithmetic [`Inst::Arith`] does — the same overflow, the same
+    /// division and remainder by zero, the same `Duration` naming — with the
+    /// right operand in the instruction instead of in a slot. It exists
+    /// because the alternative is worse than a wasted word: the literals of a
+    /// loop condition are materialised by instructions the back edge jumps
+    /// over, so `while i < 2000000` executed an [`Inst::Int`] two million
+    /// times to write a constant into a temporary that nothing else ever
+    /// read.
+    ///
+    /// **Two variants and not sixteen.** `op` is a field here exactly as it
+    /// is on [`Inst::Arith`], so an operator added to the language costs no
+    /// instruction, and this pair covers the eleven that exist.
+    ///
+    /// **The immediate is on the right, and only on the right.** `a - 1` and
+    /// `1 - a` are different questions and `a % 7` and `7 % a` more so, so a
+    /// left-hand immediate would be a second family rather than a mirror of
+    /// this one; a commutative operator's lowering puts the literal on the
+    /// right instead. There is no float immediate for the same reason there
+    /// is no left one — a second family, for a form no benchmark asked for.
+    ///
+    /// `Num` is absent because there is only [`Num::Int`] to name: `value` is
+    /// an `i64`, and a `Duration`'s word is nanoseconds, which is an `i64`.
+    ArithImm {
+        op: ArithOp,
+        dst: Slot,
+        a: Slot,
+        value: i64,
+    },
+    /// `dst = a op value`, comparing `Int` words, answering a `Bool`.
+    ///
+    /// [`Inst::ArithImm`]'s other half, and `Compare` is absent for the
+    /// reason `Num` is absent there: the operand is an `Int` word, so the
+    /// comparison is [`Compare::Int`].
+    CmpImm {
+        op: CmpOp,
+        dst: Slot,
+        a: Slot,
+        value: i64,
     },
     /// `dst = !a`
     Not { dst: Slot, a: Slot },

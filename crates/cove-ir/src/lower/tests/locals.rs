@@ -135,14 +135,13 @@ fn a_shadowing_declaration_is_a_second_local_beside_the_one_it_shadows() {
         listing("fn f() -> Int {\n  let x = 1\n  let x = x + 1\n  x\n}", "f"),
         "\
 fn0 m.f() -> Int
-  frame 4: s0:int s1:int s2:int s3:int
-  local x -> s1:Int [1, 4)
-  local x -> s3:Int [3, 4)
+  frame 3: s0:int s1:int s2:int
+  local x -> s1:Int [1, 3)
+  local x -> s2:Int [2, 3)
      0  int s1:int 1
-     1  int s2:int 1
-     2  add.int s3:int s1:int s2:int
-     3  copy s0:int s3:int Int
-     4  return s0:int Int
+     1  add.int.imm s2:int s1:int 1
+     2  copy s0:int s2:int Int
+     3  return s0:int Int
 "
     );
 }
@@ -154,8 +153,8 @@ fn0 m.f() -> Int
 fn the_last_local_that_matches_is_the_one_the_name_denotes() {
     let f = function("fn f() -> Int {\n  let x = 1\n  let x = x + 1\n  x\n}", "f");
     assert_eq!(f.local_at("x", 1).map(|local| local.slot), Some(1));
-    assert_eq!(f.local_at("x", 3).map(|local| local.slot), Some(3));
-    assert_eq!(f.local_at("y", 3), None);
+    assert_eq!(f.local_at("x", 2).map(|local| local.slot), Some(2));
+    assert_eq!(f.local_at("y", 2), None);
 }
 
 /// A local's range ends where its scope does, not where the function does:
@@ -198,7 +197,7 @@ fn a_break_leaves_the_element_s_range_rather_than_cutting_it_short() {
     let x = f
         .local_at("x", 12)
         .expect("the element is named in the body");
-    let leaves = match f.code[13] {
+    let leaves = match f.code[12] {
         crate::Inst::Jump { to } => to,
         ref other => panic!("the `break` is a jump, not a {other:?}"),
     };

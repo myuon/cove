@@ -1097,6 +1097,27 @@ impl<'a> Machine<'a> {
                     };
                     self.mem.set_slot(base, dst, word);
                 }
+                // The immediate pair charges exactly what its slot-operand
+                // twin charges: **one instruction, one unit of fuel**, the
+                // same as every other instruction in this loop. See
+                // `Machine::dispatch`'s counter and `SAFEPOINT_STRIDE`.
+                Inst::ArithImm { op, dst, a, value } => {
+                    let x = self.mem.slot(base, a);
+                    // The same question `Inst::Arith` asks, for the same
+                    // reason: which of the two the operands are decides only
+                    // what a failure calls the operation.
+                    let duration = self.repr(id, dst) == Some(Repr::Duration);
+                    let word = match int_arith(op, x as i64, value, duration) {
+                        Ok(value) => value as u64,
+                        Err(error) => fail!(error),
+                    };
+                    self.mem.set_slot(base, dst, word);
+                }
+                Inst::CmpImm { op, dst, a, value } => {
+                    let x = self.mem.slot(base, a);
+                    let answer = compare(op, (x as i64).cmp(&value));
+                    self.mem.set_slot(base, dst, answer as u64);
+                }
                 Inst::Cmp { on, op, dst, a, b } => {
                     let (x, y) = (self.mem.slot(base, a), self.mem.slot(base, b));
                     let answer = match on {

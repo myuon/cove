@@ -85,15 +85,14 @@ fn the_lock_closures_var_parameter_is_an_address() {
         ),
         "\
 fn1 m.bump#0(<addr>) -> Int
-  frame 5: s0!:addr s1:int s2:int s3:int s4:int
-  local value -> s0:<addr> [0, 7)
+  frame 4: s0!:addr s1:int s2:int s3:int
+  local value -> s0:<addr> [0, 6)
      0  load s2:int s0:addr Int
-     1  int s3:int 1
-     2  add.int s4:int s2:int s3:int
-     3  store s0:addr s4:int Int
-     4  load s4:int s0:addr Int
-     5  copy s1:int s4:int Int
-     6  return s1:int Int
+     1  add.int.imm s3:int s2:int 1
+     2  store s0:addr s3:int Int
+     3  load s3:int s0:addr Int
+     4  copy s1:int s3:int Int
+     5  return s1:int Int
 "
     );
 }
@@ -151,21 +150,20 @@ fn a_cell_wrapping_a_struct_holds_its_fields_inline() {
         ),
         "\
 fn1 m.count#0(<addr>) -> Int
-  frame 6: s0!:addr s1:int s2:addr s3:int s4:int s5:int
-  local value -> s0:<addr> [0, 13)
+  frame 5: s0!:addr s1:int s2:addr s3:int s4:int
+  local value -> s0:<addr> [0, 12)
      0  addr-of-part s2:addr s0:addr +1
      1  load s3:int s2:addr Int
      2  clear s2:addr <addr>
-     3  int s4:int 1
-     4  add.int s5:int s3:int s4:int
-     5  addr-of-part s2:addr s0:addr +1
-     6  store s2:addr s5:int Int
-     7  clear s2:addr <addr>
-     8  addr-of-part s2:addr s0:addr +1
-     9  load s5:int s2:addr Int
-    10  clear s2:addr <addr>
-    11  copy s1:int s5:int Int
-    12  return s1:int Int
+     3  add.int.imm s4:int s3:int 1
+     4  addr-of-part s2:addr s0:addr +1
+     5  store s2:addr s4:int Int
+     6  clear s2:addr <addr>
+     7  addr-of-part s2:addr s0:addr +1
+     8  load s4:int s2:addr Int
+     9  clear s2:addr <addr>
+    10  copy s1:int s4:int Int
+    11  return s1:int Int
 "
     );
 }

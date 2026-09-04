@@ -190,6 +190,7 @@ impl Check<'_> {
                 Inst::Int { dst, .. } | Inst::Float { dst, .. } => unknown(&mut seen, dst, 1),
                 Inst::Neg { dst, .. } | Inst::Not { dst, .. } => unknown(&mut seen, dst, 1),
                 Inst::Arith { dst, .. } | Inst::Cmp { dst, .. } => unknown(&mut seen, dst, 1),
+                Inst::ArithImm { dst, .. } | Inst::CmpImm { dst, .. } => unknown(&mut seen, dst, 1),
                 Inst::Convert { dst, .. } => unknown(&mut seen, dst, 1),
                 Inst::Len { dst, .. } | Inst::LayoutOf { dst, .. } => unknown(&mut seen, dst, 1),
                 // Forming the address of a slot is also a write to it, as
@@ -381,6 +382,19 @@ impl Check<'_> {
                 self.expect(at, dst, want);
                 self.expect(at, a, want);
                 self.expect(at, b, want);
+            }
+            // The same claims `Inst::Arith` makes, less the one about an
+            // operand that is not there. `Num` is not a field: an immediate is
+            // an `i64`, so the reading is the integer one, and a `Duration` is
+            // nanoseconds and admitted for the same reason it is there.
+            Inst::ArithImm { dst, a, .. } => {
+                let want = Self::numeric(Num::Int);
+                self.expect(at, dst, want);
+                self.expect(at, a, want);
+            }
+            Inst::CmpImm { dst, a, .. } => {
+                self.expect(at, dst, &[Repr::Bool]);
+                self.expect(at, a, &[Repr::Int, Repr::Duration]);
             }
             Inst::Cmp { on, dst, a, b, .. } => {
                 self.expect(at, dst, &[Repr::Bool]);

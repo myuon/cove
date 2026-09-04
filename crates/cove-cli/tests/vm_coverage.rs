@@ -313,7 +313,7 @@ use support::{Case, ModuleIndex, Prepared};
 /// to be filled, and the monomorphisation depth cap is a **refusal** that no
 /// later task removes. Teaching this file to tell a permanent refusal from a
 /// gap is the work that would let it come back into the corpus.
-const AGREEING_FLOOR: usize = 116;
+const AGREEING_FLOOR: usize = 117;
 
 /// The code `cove_ir` raises a gap under.
 ///

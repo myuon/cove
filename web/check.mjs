@@ -398,38 +398,40 @@ check(
       // holds. A slot and its annotation are one piece: `s1` alone would not
       // say whether the instruction moved a word or a `Point`.
       ["frame", "keyword"],
-      ["4", "number"],
+      ["3", "number"],
       ["s0:int", "slot"],
       ["s1:int", "slot"],
       ["s2:int", "slot"],
-      ["s3:int", "slot"],
       // The name a `local` binds is the source's own and is neither a layout
       // nor a callee; the range is the program counters it holds the slot
       // over, and program counters are numbers like any other.
       ["local", "keyword"],
       ["s1:Int", "slot"],
       ["1", "number"],
-      ["4", "number"],
+      ["3", "number"],
       // Then the code: a pc, an opcode, and operands.
       ["0", "number"],
       ["int", "keyword"],
       ["s1:int", "slot"],
       ["21", "number"],
+      // And an immediate is an operand like any other. `n * 2` is one
+      // instruction rather than two because the `2` the source wrote stays
+      // in it, and the trailing `2` here is that constant: written bare, so
+      // it reads as a number, which is what it is. What says it is an
+      // immediate rather than a slot is the `.imm` on the opcode and the
+      // fact that a slot in this format is always `sN:repr` — nothing about
+      // the colouring has to know, which is the point.
       ["1", "number"],
-      ["int", "keyword"],
+      ["mul.int.imm", "keyword"],
       ["s2:int", "slot"],
-      ["2", "number"],
-      ["2", "number"],
-      ["mul.int", "keyword"],
-      ["s3:int", "slot"],
       ["s1:int", "slot"],
-      ["s2:int", "slot"],
-      ["3", "number"],
+      ["2", "number"],
+      ["2", "number"],
       ["copy", "keyword"],
       ["s0:int", "slot"],
-      ["s3:int", "slot"],
+      ["s2:int", "slot"],
       ["Int", "type"],
-      ["4", "number"],
+      ["3", "number"],
       ["return", "keyword"],
       ["s0:int", "slot"],
       // The layout of the answer, which is what says how many words `s0` is

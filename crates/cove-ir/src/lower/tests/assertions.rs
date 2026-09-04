@@ -16,33 +16,29 @@ use super::{listing, refused, sliced, sliced_to};
 #[test]
 fn an_assertion_is_a_branch_over_the_two_cases_it_answers() {
     assert_eq!(
-        listing(
-            "fn f(n: Int) -> Result<Unit, Error> { assert(n > 0) }",
-            "f"
-        ),
+        listing("fn f(n: Int) -> Result<Unit, Error> { assert(n > 0) }", "f"),
         "\
 fn0 m.f(Int) -> Result
-  frame 12: s0!:int s1:int s2:unit s3:ref s4:int s5:unit s6:ref s7:int s8:bool s9:unit s10:ref s11:ref
-  local n -> s0:Int [0, 19)
-     0  int s7:int 0
-     1  gt.int s8:bool s0:int s7:int
-     2  branch-false s8:bool 8
-     3  unit s9:unit
-     4  int s4:int 0
-     5  clear s6:ref <ref>
-     6  copy s5:unit s9:unit Unit
-     7  jump 16
-     8  str s10:ref \"assertion failed: `n > 0`\"
-     9  assert.failed s10:ref
-    10  copy s11:ref s10:ref String
-    11  clear s10:ref String
-    12  int s4:int 1
-    13  clear s5:unit Unit
-    14  copy s6:ref s11:ref Error
-    15  clear s11:ref Error
-    16  copy s1:int s4:int Result
-    17  clear s4:int Result
-    18  return s1:int Result
+  frame 11: s0!:int s1:int s2:unit s3:ref s4:int s5:unit s6:ref s7:bool s8:unit s9:ref s10:ref
+  local n -> s0:Int [0, 18)
+     0  gt.int.imm s7:bool s0:int 0
+     1  branch-false s7:bool 7
+     2  unit s8:unit
+     3  int s4:int 0
+     4  clear s6:ref <ref>
+     5  copy s5:unit s8:unit Unit
+     6  jump 15
+     7  str s9:ref \"assertion failed: `n > 0`\"
+     8  assert.failed s9:ref
+     9  copy s10:ref s9:ref String
+    10  clear s9:ref String
+    11  int s4:int 1
+    12  clear s5:unit Unit
+    13  copy s6:ref s10:ref Error
+    14  clear s10:ref Error
+    15  copy s1:int s4:int Result
+    16  clear s4:int Result
+    17  return s1:int Result
 "
     );
 }
@@ -207,12 +203,11 @@ fn a_declaration_used_as_a_function_value_is_pulled_into_the_slice() {
         sliced(source, "main", "double"),
         "\
 fn0 m.double(Int) -> Int
-  frame 4: s0!:int s1:int s2:int s3:int
-  local n -> s0:Int [0, 4)
-     0  int s2:int 2
-     1  mul.int s3:int s0:int s2:int
-     2  copy s1:int s3:int Int
-     3  return s1:int Int
+  frame 3: s0!:int s1:int s2:int
+  local n -> s0:Int [0, 3)
+     0  mul.int.imm s2:int s0:int 2
+     1  copy s1:int s2:int Int
+     2  return s1:int Int
 "
     );
 }

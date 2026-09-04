@@ -193,8 +193,8 @@ fn a_question_mark_leaves_through_the_enclosing_function_s_own_failure() {
         ),
         "\
 fn0 m.f() -> Result
-  frame 13: s0:int s1:int s2:ref s3:int s4:int s5:ref s6:int s7:bool s8:int s9:int s10:ref s11:int s12:int
-  local v -> s6:Int [11, 18)
+  frame 12: s0:int s1:int s2:ref s3:int s4:int s5:ref s6:int s7:bool s8:int s9:int s10:ref s11:int
+  local v -> s6:Int [11, 17)
      0  call s3:int m.g () Result
      1  int s6:int 0
      2  eq.int s7:bool s3:int s6:int
@@ -206,14 +206,13 @@ fn0 m.f() -> Result
      8  copy s10:ref s5:ref Error
      9  return s8:int Result
     10  clear s3:int Result
-    11  int s11:int 1
-    12  add.int s12:int s6:int s11:int
-    13  int s3:int 0
-    14  clear s5:ref <ref>
-    15  copy s4:int s12:int Int
-    16  copy s0:int s3:int Result
-    17  clear s3:int Result
-    18  return s0:int Result
+    11  add.int.imm s11:int s6:int 1
+    12  int s3:int 0
+    13  clear s5:ref <ref>
+    14  copy s4:int s11:int Int
+    15  copy s0:int s3:int Result
+    16  clear s3:int Result
+    17  return s0:int Result
 "
     );
 }
@@ -227,8 +226,8 @@ fn a_question_mark_on_an_option_leaves_through_none() {
         ),
         "\
 fn0 m.f() -> Option
-  frame 10: s0:int s1:int s2:int s3:int s4:int s5:bool s6:int s7:int s8:int s9:int
-  local v -> s4:Int [9, 14)
+  frame 9: s0:int s1:int s2:int s3:int s4:int s5:bool s6:int s7:int s8:int
+  local v -> s4:Int [9, 13)
      0  call s2:int m.g () Option
      1  int s4:int 1
      2  eq.int s5:bool s2:int s4:int
@@ -238,12 +237,11 @@ fn0 m.f() -> Option
      6  int s6:int 0
      7  clear s7:int Int
      8  return s6:int Option
-     9  int s8:int 1
-    10  add.int s9:int s4:int s8:int
-    11  int s2:int 1
-    12  copy s3:int s9:int Int
-    13  copy s0:int s2:int Option
-    14  return s0:int Option
+     9  add.int.imm s8:int s4:int 1
+    10  int s2:int 1
+    11  copy s3:int s8:int Int
+    12  copy s0:int s2:int Option
+    13  return s0:int Option
 "
     );
 }

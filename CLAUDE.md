@@ -18,7 +18,10 @@ may not).
 and the `#[ignore]`d cases, which together are more than half of a warm
 `cargo test --workspace` and which CI runs in steps of their own.
 
-Run the ignored ones by hand: `cargo test --workspace --lib --tests -- --ignored`.
+Run the ignored ones with `cargo ratchet`, an alias for the same thing under
+`--profile checked`. Use the alias rather than writing the command out: the
+profile is not a nicety there, it is 39s against 241s, because this is the
+one suite that is compute-bound rather than spawn-bound.
 There is one, and it is the roadmap: `crates/cove-cli/tests/vm_coverage.rs`
 runs every program in the repository on the linear-memory backend and sorts
 the answers into agrees, *disagrees*, and does not lower. It is ignored

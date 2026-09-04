@@ -85,30 +85,28 @@ fn a_match_over_something_that_is_not_an_enum_is_a_chain() {
         ),
         "\
 fn0 m.name(Int) -> String
-  frame 6: s0!:int s1:ref s2:ref s3:int s4:bool s5:ref
-  local n -> s0:Int [0, 22)
-     0  int s3:int 0
-     1  eq.int s4:bool s0:int s3:int
-     2  branch-false s4:bool 7
-     3  str s5:ref \"zero\"
-     4  copy s2:ref s5:ref String
-     5  clear s5:ref String
-     6  jump 19
-     7  int s3:int 1
-     8  eq.int s4:bool s0:int s3:int
-     9  branch-false s4:bool 14
-    10  str s5:ref \"one\"
-    11  copy s2:ref s5:ref String
-    12  clear s5:ref String
-    13  jump 19
-    14  str s5:ref \"many\"
-    15  copy s2:ref s5:ref String
-    16  clear s5:ref String
-    17  jump 19
-    18  trap \"no `match` arm covers this value\"
-    19  copy s1:ref s2:ref String
-    20  clear s2:ref String
-    21  return s1:ref String
+  frame 5: s0!:int s1:ref s2:ref s3:bool s4:ref
+  local n -> s0:Int [0, 20)
+     0  eq.int.imm s3:bool s0:int 0
+     1  branch-false s3:bool 6
+     2  str s4:ref \"zero\"
+     3  copy s2:ref s4:ref String
+     4  clear s4:ref String
+     5  jump 17
+     6  eq.int.imm s3:bool s0:int 1
+     7  branch-false s3:bool 12
+     8  str s4:ref \"one\"
+     9  copy s2:ref s4:ref String
+    10  clear s4:ref String
+    11  jump 17
+    12  str s4:ref \"many\"
+    13  copy s2:ref s4:ref String
+    14  clear s4:ref String
+    15  jump 17
+    16  trap \"no `match` arm covers this value\"
+    17  copy s1:ref s2:ref String
+    18  clear s2:ref String
+    19  return s1:ref String
 "
     );
 }

@@ -33,23 +33,20 @@ fn recursion_is_an_ordinary_call() {
         ),
         "\
 fn0 m.fib(Int) -> Int
-  frame 7: s0!:int s1:int s2:int s3:int s4:bool s5:int s6:int
-  local n -> s0:Int [0, 15)
-     0  int s3:int 2
-     1  lt.int s4:bool s0:int s3:int
-     2  branch-false s4:bool 5
-     3  copy s2:int s0:int Int
-     4  jump 13
-     5  int s3:int 1
-     6  sub.int s5:int s0:int s3:int
-     7  call s3:int m.fib (s5:Int) Int
-     8  int s5:int 2
-     9  sub.int s6:int s0:int s5:int
-    10  call s5:int m.fib (s6:Int) Int
-    11  add.int s6:int s3:int s5:int
-    12  copy s2:int s6:int Int
-    13  copy s1:int s2:int Int
-    14  return s1:int Int
+  frame 7: s0!:int s1:int s2:int s3:bool s4:int s5:int s6:int
+  local n -> s0:Int [0, 12)
+     0  lt.int.imm s3:bool s0:int 2
+     1  branch-false s3:bool 4
+     2  copy s2:int s0:int Int
+     3  jump 10
+     4  sub.int.imm s4:int s0:int 1
+     5  call s5:int m.fib (s4:Int) Int
+     6  sub.int.imm s4:int s0:int 2
+     7  call s6:int m.fib (s4:Int) Int
+     8  add.int s4:int s5:int s6:int
+     9  copy s2:int s4:int Int
+    10  copy s1:int s2:int Int
+    11  return s1:int Int
 "
     );
 }
@@ -110,15 +107,14 @@ fn a_var_parameter_is_a_slot_holding_an_address() {
         listing("fn bump(var n: Int) { n = n + 1 }", "bump"),
         "\
 fn0 m.bump(<addr>) -> Unit
-  frame 6: s0!:addr s1:unit s2:int s3:int s4:int s5:unit
-  local n -> s0:<addr> [0, 7)
+  frame 5: s0!:addr s1:unit s2:int s3:int s4:unit
+  local n -> s0:<addr> [0, 6)
      0  load s2:int s0:addr Int
-     1  int s3:int 1
-     2  add.int s4:int s2:int s3:int
-     3  store s0:addr s4:int Int
-     4  unit s5:unit
-     5  copy s1:unit s5:unit Unit
-     6  return s1:unit Unit
+     1  add.int.imm s3:int s2:int 1
+     2  store s0:addr s3:int Int
+     3  unit s4:unit
+     4  copy s1:unit s4:unit Unit
+     5  return s1:unit Unit
 "
     );
 }
@@ -369,13 +365,12 @@ fn a_default_reads_the_parameters_before_it() {
         "\
 fn0 m.f() -> Int
   frame 4: s0:int s1:int s2:int s3:int
-  local n -> s1:Int [1, 3)
+  local n -> s1:Int [1, 2)
      0  int s1:int 3
-     1  int s2:int 1
-     2  add.int s3:int s1:int s2:int
-     3  call s2:int m.near (s1:Int s3:Int) Int
-     4  copy s0:int s2:int Int
-     5  return s0:int Int
+     1  add.int.imm s2:int s1:int 1
+     2  call s3:int m.near (s1:Int s2:Int) Int
+     3  copy s0:int s3:int Int
+     4  return s0:int Int
 "
     );
 }

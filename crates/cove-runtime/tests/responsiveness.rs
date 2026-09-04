@@ -954,7 +954,13 @@ export fn main() -> Result<Int, Error> {
 fn a_straight_line_is_cut_off_mid_line_and_the_tree_walk_finishes_it() {
     let mut source =
         String::from("use probe\n\nexport fn main() -> Result<Int, Error> {\n  var t = 0\n");
-    for _ in 0..400 {
+    // A thousand of them because the line has to outrun one
+    // `SAFEPOINT_STRIDE`, and how many statements that takes depends on what
+    // a statement lowers to: `t = t + 1` was three instructions before
+    // `Inst::ArithImm` and is two after, so a count chosen against the old
+    // shape stopped making the point. A thousand is comfortably past the
+    // stride either way rather than exactly past it.
+    for _ in 0..1000 {
         source.push_str("  t = t + 1\n");
     }
     source.push_str("  Ok(t)\n}\n");
@@ -1008,7 +1014,7 @@ fn a_straight_line_is_cut_off_mid_line_and_the_tree_walk_finishes_it() {
         "the tree walk charges nothing for a straight line: {}",
         walked.answer
     );
-    assert_eq!(walked.answer, "Ok(400)");
+    assert_eq!(walked.answer, "Ok(1000)");
 }
 
 /// **A Host call in a block whose budget will not cover it.** ADR 0030: no
