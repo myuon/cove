@@ -48,7 +48,7 @@ console.log(`loaded ${wasm} (${(bytes.length / 1e6).toFixed(2)} MB)\n`);
 // `samples/` is where the programs are. The two must name the same set, and
 // the comparison below is a set comparison rather than a count, because a
 // count cannot tell a renamed sample from a matched pair: one file unlisted
-// and one entry unbacked is still nine and nine.
+// and one entry unbacked is still ten and ten.
 //
 // This is the check that makes a sample worth keeping in a file at all. It
 // runs here, in CI's `wasm` job, and again in the Pages workflow *before*
@@ -151,7 +151,7 @@ const disassembled = (ir) => painted(ir, (text) => cove.lexIr(text));
 
 console.log("\nevery sample the picker offers:");
 const sources = new Map();
-// Every category the nine samples' disassembly was cut into, gathered as the
+// Every category the ten samples' disassembly was cut into, gathered as the
 // loop goes and asserted after it.
 const kinds = new Set();
 for (const sample of SAMPLES) {
@@ -180,7 +180,7 @@ for (const sample of SAMPLES) {
   // This is the check that a change to `cove_ir::print` fails rather than
   // quietly turning the disassembly into a wall of one colour: `ok` is false
   // the moment one line of one shipped sample is a line the colouring does
-  // not recognise, and these nine between them use most of the instruction
+  // not recognise, and these ten between them use most of the instruction
   // set. `kinds` collects what they were coloured as for the coverage
   // assertion below, which is the other half -- a tiling of the right length
   // made of the wrong categories is what a reader that had drifted would
@@ -218,6 +218,60 @@ for (const sample of SAMPLES) {
         true,
       );
     }
+  }
+
+  // The one sample that is a program from somewhere else. `sameAs` names the
+  // file, from the repository root, and what ties the two together is that
+  // both are *run*: the same answer, and the same instruction count.
+  //
+  // Comparing the text would fail on the comment, which is the one part that
+  // is supposed to differ -- the benchmark's prose is about the benchmark
+  // suite and the sample's is about this page. Comparing the two runs fails
+  // on the part that is not supposed to differ: a turn count edited on one
+  // side, a statement added to one loop, or a change to the lowering that
+  // reached one file and not the other.
+  //
+  // The count is deliberately not pinned to a literal here. Any change to the
+  // lowering moves it, and a golden that must be updated on every unrelated
+  // change is a golden people learn to update without reading -- at which
+  // point it stops catching the change that mattered. What is asserted
+  // instead is the property the sample exists for: that the number is *large*
+  // enough to be worth looking at. A rewrite that quietly shrank the loop
+  // would still agree with its twin and would still fail here.
+  // Moving or renaming the twin is the likeliest way for this to break, and a
+  // named failure reports that better than an `ENOENT` stack trace does.
+  const twin = sample.sameAs
+    ? await readFile(new URL(`../${sample.sameAs}`, import.meta.url), "utf8").catch(
+        () => null,
+      )
+    : null;
+  if (sample.sameAs) {
+    check(`\`${sample.sameAs}\` is where ${sample.file} says it is`, twin !== null, true);
+  }
+  if (twin !== null) {
+    // Not a copy: two files holding the same text drift and nothing notices,
+    // which is the failure the whole manifest is arranged to prevent. They
+    // are the same *program* under different prose, and the runs below are
+    // what says so.
+    check(`${sample.file} is not a copy of \`${sample.sameAs}\``, twin === source, false);
+
+    const also = cove.run(twin);
+    check(`\`${sample.sameAs}\` runs on this page's limits too`, also.outcome, "success");
+    check(
+      `${sample.file} answers what \`${sample.sameAs}\` answers`,
+      outcome.answer,
+      (held) => isDeepStrictEqual(held, also.answer),
+    );
+    check(
+      `${sample.file} costs what \`${sample.sameAs}\` costs`,
+      outcome.instructions,
+      also.instructions,
+    );
+    check(
+      `and it is a real workload: ${outcome.instructions} instructions, ${outcome.fuel} fuel`,
+      outcome.instructions > 1_000_000,
+      true,
+    );
   }
 }
 
@@ -310,7 +364,7 @@ check("and the open literal is a string to the end", half.runs.at(-1), (held) =>
 // The other text this page shows. It has no lexer to borrow, so what colours
 // it reads the line shapes `crates/cove-ir/src/print.rs` documents -- and a
 // reader of a format is exactly the thing that drifts from the format, which
-// is why the nine samples above are all put through it and why the pieces
+// is why the ten samples above are all put through it and why the pieces
 // below are named rather than counted.
 //
 // `crates/cove-wasm/src/highlight.rs` argues why that reader is in Rust

@@ -1,0 +1,30 @@
+// Written to be measured rather than to be read.
+//
+// It prints nothing. What it has to show is on the status line beside
+// **Run**: the instructions the VM retired and the fuel they cost. Two
+// million turns of this loop are about 22 million instructions, and they fit
+// inside this page's 200,000,000 fuel and five seconds, so the numbers are a
+// real workload's and not a scaled-down one's.
+//
+// The IR pane is the other half. The loop is a handful of instructions; the
+// count above is what running that handful two million times comes to.
+//
+// This is the program `benches/arith` measures, which is where the project
+// reads what a turn of a loop costs. Both are run by `web/check.mjs`, which
+// fails if they ever stop being the same program.
+//
+// **Run & record** works on it, but the timeline keeps only its first
+// moments — a few hundred turns of two million. A truncated recording of
+// this one is the bound doing its job.
+export fn main() -> Result<Unit, Error> {
+  var total = 0
+  var i = 0
+  while i < 2000000 {
+    if i % 7 == 0 {
+      total += 1
+    }
+    i += 1
+  }
+  assertEqual(total, 285715)?
+  Ok(())
+}

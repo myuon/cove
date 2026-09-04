@@ -102,7 +102,7 @@ that every line was a line shape `crates/cove-ir/src/print.rs` documents — the
 module answers `ok: false` for a line it does not recognise, and a false
 answer for any shipped sample fails the build. That is what keeps a change to
 the printer from quietly turning the pane into a wall of one colour. Beside it
-the categories are named on a small program, and the six the nine samples
+the categories are named on a small program, and the six the ten samples
 between them use are asserted as a set, for the reason kinds are asserted of
 source.
 
@@ -220,10 +220,11 @@ instruction loop takes 186 ms against the plain run's 119 ms.
 
 ## The samples
 
-The picker above the editor offers nine programs, in ascending order of what a
+The picker above the editor offers ten programs, in ascending order of what a
 reader has to already understand: values and functions, structs and methods,
 enums and `match`, `Result` and `?`, collections, traits and `dyn`, closures, a
-host call, and one written to be stepped rather than read. Writing your own
+host call, one written to be stepped rather than read, and one written to be
+measured. Writing your own
 stays what the page is for — the first entry is *(your own program)*, and it
 selects itself the moment the editor stops matching the sample it was filled
 from. Switching away from an edited program asks first, because nothing here
@@ -255,6 +256,27 @@ binding, and a local that names a heap object. Its manifest entry says so in a
 that deep and a local still names an object — so a rewrite that flattened it
 fails instead of leaving a sample whose own comment promises what it no longer
 does.
+
+`10-arithmetic.cove` is the one written for the *counters* rather than for the
+source. It prints nothing; what it has to show is the instruction count and
+the fuel beside it, and the IR pane holding the dozen instructions that get
+run two million times. It is `benches/arith`'s loop — the program the project
+reads what a turn of a loop costs from — and it runs on this page at its real
+scale, about 22 million instructions inside the default 200,000,000 fuel and
+five seconds.
+
+Its manifest entry says so in a `sameAs` field, and the two files are held
+together by being **run** rather than by being compared as text: `check.mjs`
+runs both through the module and requires the same answer and the same
+instruction count. The prose is what is supposed to differ — the benchmark's
+comment is about the benchmark suite, and the sample's is about this page — so
+a text comparison would fail on the one thing that is allowed to change and
+say nothing about the one that is not. A turn count edited on one side, or a
+lowering change that reached one file and not the other, fails there. The
+count itself is not pinned to a literal: any change to the lowering moves it,
+and a golden that has to be updated on every unrelated change teaches people
+to update goldens without reading them. What is asserted beside the agreement
+is that the number is *large*, which is the sample's whole point.
 
 ## Colouring the editor, and the disassembly
 
@@ -303,9 +325,9 @@ That reader *is* a second reader of a format, which is the thing the paragraph
 above refuses to write in JavaScript. What makes it honest is where it is and
 what watches it: it is in Rust beside the crate that prints the text, it says
 in `ok` when it met a line it did not recognise, and `check.mjs` fails the
-build if that happens on any of the nine samples' real disassembly. Adding an
+build if that happens on any of the ten samples' real disassembly. Adding an
 instruction needs nothing there; changing how *operands* are written does, and
-that is exactly what the nine catch.
+that is exactly what the ten catch.
 
 These are the only calls to the module made on the page's own thread rather
 than on the worker. The worker exists because a Cove program can loop and wasm

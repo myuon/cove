@@ -24,7 +24,7 @@
 
 /// What the module's value encoding answers for an entry that returned
 /// `Ok(value)`. `crates/cove-wasm`'s `run_json` documents the encoding;
-/// these three build the shapes these samples answer in, so that an
+/// these four build the shapes these samples answer in, so that an
 /// expectation below reads as the value and not as its JSON.
 const ok = (value) => ({
   type: "enum",
@@ -34,6 +34,7 @@ const ok = (value) => ({
 });
 const int = (value) => ({ type: "int", value });
 const text = (value) => ({ type: "string", value });
+const unit = () => ({ type: "unit" });
 
 /// The samples, in the order the picker offers them, which is ascending in
 /// what a reader has to already understand.
@@ -156,5 +157,22 @@ export const SAMPLES = [
     // rewrite that flattened it would fail here rather than quietly becoming
     // a sample that teaches nothing the source does not.
     records: { frames: 3, objects: true },
+  },
+  {
+    file: "10-arithmetic.cove",
+    label: "Two million turns",
+    blurb: "Nothing printed: the counters and the IR are what this one shows.",
+    expect: {
+      stdout: "",
+      answer: ok(unit()),
+    },
+    // The one sample that is a program from somewhere else. It is
+    // `benches/arith/main.cove`'s loop under a playground's comment, and the
+    // two are held together by being *run* rather than by being compared as
+    // text: `check.mjs` runs both through the module and requires the same
+    // answer and the same instruction count. A turn count edited in one and
+    // not the other fails there. `sameAs` names that file, from the
+    // repository root.
+    sameAs: "benches/arith/main.cove",
   },
 ];
