@@ -521,6 +521,88 @@ that fails is worth as much as one that holds, and because the next person to
 reach for "delete code near the loop" should know what that has been measured
 to be worth.
 
+### Halving the dispatch body moved nothing either, and that ends the rule
+
+The section above narrowed "a dispatch loop is charged for code that never
+runs" to **the loop's own function body, and whatever inlines into it**, and
+said in so many words that moving code *out of the function* was the
+intervention that should therefore work.
+[Issue #246](https://github.com/myuon/cove/issues/246) did that, and it does
+not work either.
+
+The split was drawn from a measurement rather than from intuition. A
+throwaway per-opcode counter in the loop, built once and discarded, gave the
+**dynamic** frequency of every opcode on ten programs — which is a different
+question from the 84-of-100 that `crates/cove-cli/tests/bytecode_corpus.rs`
+reports a program to *contain*. What it found:
+
+- `arith` executes **six** opcodes, 99.99% of its 14.3 M instructions:
+  `branch.false` 28%, `arith.imm` 30%, `cmp.imm` 28%, `jump` 14%.
+- `cq --program revenue-summary` spends 1.32 **billion** instructions on
+  `clear` 22.4%, `branch.false` 12.7%, `copy` 10.9%, `const.int` 7.7%,
+  `str` 7.6%, `cmp.str` 5.6%, `return` and `call` 4.3% each.
+- **The instructions the change was built to move out are not hot anywhere.**
+  `cq` executes `call.host` **four** times in 1.32 billion instructions —
+  its Host traffic is `call.resource`, 100,007 of them — and `store.field`
+  eighteen times. `alloc.*` is 0.02% of `cq` and 2.0% of `cqSample`. Scopes,
+  tasks, cells, `box`, `trap` and `layout.of` execute *not once* in any of
+  the ten.
+
+So the hot/cold line put the Host boundary, the allocations, the field and
+`box` families, every scope, task and cell instruction, `trap`, and the eight
+orderings the lowering never emits behind one `#[inline(never)]` function,
+and left the small arms — including the float family, which is rare but tiny
+— inline. `encoded::dispatch` went from **35,920 bytes to 20,768**, and the
+new `encoded::cold` is 8,976. Base, variant, base in one session, medians of
+15, 5 and 3 runs of `scripts/vm-time.sh`:
+
+| program | instructions | base | variant | base again | variant vs base |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `arith` | 14.3 M | 64.01 ms | 64.04 ms | 64.18 ms | **+0.0%** |
+| `cqSample` | 44.2 M | 2416.5 ms | 2396.7 ms | 2402.5 ms | −0.5% |
+| `cq revenue-summary` | 1,320 M | 27098.6 ms | 27526.6 ms | 27168.4 ms | **+1.4%** |
+
+A second round of `cq` read 27329.6 ms against a third base of 27188.2 ms,
+so its cost is about 1% and every variant median is above every base median.
+Six more benchmarks, same session, same method: `field` −2.0%, `call` −2.2%,
+`arrayget` −1.1%, `callback` −0.1%, `chars` +0.2%, `method` +0.2% — a band,
+centred on nothing.
+
+**`arith` recovered none of the 8.6%.** It is the benchmark the split was
+drawn to suit: all six of its opcodes stayed inline, and 42% of the body it
+does not execute left the function. If footprint were the mechanism, this is
+the row that had to move, and it moved by 0.03 ms.
+
+Two things follow.
+
+**The cost `cq` pays is not the call.** `cqSample` executes 8% of its
+instructions out of line — `call.builtin`, `alloc`, `call.resource` — against
+`cq`'s 1.3%, and `cqSample` did not slow down. A per-call cost that spared
+the program making six times as many calls is not a per-call cost. What is
+left is layout, in a workspace whose layout band this document measures at
+±6% and, on `arith`, at 23.5%.
+
+**Which is also the reading of the three findings the rule was built on.**
+`ad5f160`'s 4.3% was the debugger's question, and that question *ran* — once
+per instruction, whether or not a debugger was attached. `a78a8ad`'s 2.5% was
+two calls inside the closure that runs. Phase 4's 22.7% is the only one that
+was ever about unreachable code, and it is the same size as the band this
+document measured for **one unreachable enum variant**. So the honest rule is
+narrower again, and this time it is narrow enough to act on:
+
+> Code on the path costs what it does. Code off the path — an arm no program
+> reaches, a function it never calls — costs nothing measurable here,
+> wherever it is written. What moves a benchmark when neither of those
+> changes is the *arrangement* of the code, and the arrangement is not
+> something a source-level change controls.
+
+`cold` stays. It is not slower than the band, the loop reads better in two
+pieces than in one 1,300-line `match`, and the frequency table is worth
+having written down. But it is documentation of a null result, not a
+performance change, and the next person to reach for "shrink the dispatch
+body" should read this section first.
+
+
 ### The layout band is much wider than it was thought to be
 
 The section above bounds the band at "at least ±6%", from a build whose added
