@@ -466,6 +466,61 @@ cold match arms, [#126](https://github.com/myuon/cove/issues/126)'s spills, the
 calling convention's unattributed 8 ms on `arith`, and now this — and it is the
 first where the moved benchmark provably does not run the changed code at all.
 
+### Deleting 24 KB of unreachable dispatch loop moved nothing
+
+The converse of the case above, taken at
+[issue #245](https://github.com/myuon/cove/issues/245)'s Phase 5, and it is
+the one that bounds the rule.
+
+Through Phases 3 and 4 the machine carried **two** dispatch loops: the one
+over the readable `Inst` and the one over the fixed-width encoding. Phase 5
+deleted the first. Three findings had established by then that a loop is
+charged for code that never runs — `ad5f160`'s 4.3% from the debugger's
+question written inline, `a78a8ad`'s 2.5% from two large calls in one
+closure, and Phase 4's 22.7% from the loop's own body growing 10 KB to 36 KB
+— so the prediction going in was that removing 24,128 bytes of loop that no
+longer ran would win back part of Phase 4's measured +1.9%.
+
+**It won back nothing.** Base is `40bcf5d` run with `--encoded`, so both
+builds execute the same instructions through the same loop; variant is the
+cutover, where that loop is the only one. Three runs of each, base bracketing
+the variant, one build each, on the machine this document records:
+
+| program | instructions | base | variant | base again | variant vs base | base vs base |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `arith` | 14.3 M | 64.09 ms | 64.16 ms | 64.09 ms | **+0.11%** | 0.00% |
+| `cqSample` | 44.2 M | 2392.9 ms | 2428.8 ms | 2407.3 ms | +1.20% | +0.60% |
+| `cq revenue-summary` | 1,320 M | 27101 ms | 27204 ms | 27297 ms | **+0.02%** | +0.72% |
+
+Medians of 15, 5 and 3 runs. Two of the three rows are an order of magnitude
+inside the drift the two base runs show against each other, and the third is
+inside twice it and in the wrong direction to be a recovery.
+
+**The mechanism is distance.** `nm -n` on the base binary puts
+`Machine::dispatch` at `0x12ff70` and `encoded::dispatch` at `0x178740` —
+**296 KB apart**, in different codegen neighbourhoods, and neither is inlined
+into the other. The encoded loop's own symbol is 35,680 bytes before the
+deletion and 35,920 after, so the body that executes did not change either.
+Nothing the deleted code occupied was ever competing with the running loop
+for instruction cache or for branch-predictor state.
+
+So the rule the three earlier findings support is narrower than "a dispatch
+loop's neighbourhood charges for code that never runs", and it is worth
+stating in the narrow form: **the loop's own function body, and whatever
+inlines into it, charges for code that never runs.** Every one of the three
+is about code inside `dispatch` or inlined into the closure that calls it.
+A sibling function in the same module and the same crate, a quarter of a
+megabyte away, is free — which is also why the flag that chose between the
+two loops could be measured at zero while the code it chose between could
+not.
+
+The finding does not weaken the cutover's case, because speed was never it:
+33% less static code, one canonical form, and verify-once-then-trust are, and
+none of those is a wall-clock number. It is recorded because a prediction
+that fails is worth as much as one that holds, and because the next person to
+reach for "delete code near the loop" should know what that has been measured
+to be worth.
+
 ### The layout band is much wider than it was thought to be
 
 The section above bounds the band at "at least ±6%", from a build whose added

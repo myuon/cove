@@ -152,6 +152,22 @@ pub struct Vm<'a> {
 impl<'a> Vm<'a> {
     /// A run of `program`, over `runtime`'s checked program and `hosts`.
     ///
+    /// `program` is **encoded and verified here**, once, into the fixed-width
+    /// form [ADR 0041](../../../../docs/adr/0041-a-slot-number-fits-in-sixteen-bits.md)
+    /// decides and issue #245's Phase 5 made the only one a run executes.
+    /// There is no second representation to choose and no flag that selects
+    /// one: `Inst` is what the lowering produced and what a listing and the
+    /// debugger show, and what runs is sixteen bytes per instruction whose
+    /// operands were checked before the first of them ran.
+    ///
+    /// This stays infallible, and what that costs is stated where it is
+    /// paid. A program with no encoding — one whose frame is wider than a
+    /// sixteen-bit slot names, which `cove_ir::lower` already refuses with a
+    /// diagnostic — is refused by [`Vm::run_entry`] and [`Vm::invoke`]
+    /// before a frame is pushed, rather than by this constructor. The
+    /// alternative was a `Result` at every call site for a failure the
+    /// compiler in front of it has already made impossible.
+    ///
     /// The heap budget is this module's `DEFAULT_HEAP_WORDS` and is not a
     /// parameter yet:
     /// no caller has had a reason to name one, and a knob nobody turns is a
@@ -188,45 +204,6 @@ impl<'a> Vm<'a> {
         let mut vm = Vm::new(runtime, hosts, program);
         vm.machine.watch(Some(debugger));
         vm
-    }
-
-    /// The same run, executing the program's **encoded** instructions.
-    ///
-    /// [Issue #245](https://github.com/myuon/cove/issues/245)'s Phase 4, and
-    /// [ADR 0041](../../../../docs/adr/0041-a-slot-number-fits-in-sixteen-bits.md)
-    /// is the format. The program is encoded, verified once, and checked
-    /// against what the encoded dispatch loop implements *here*, before the run
-    /// exists — so this answers `Err` for a program the encoded path cannot
-    /// execute, naming the opcode and pointing at its source, and no
-    /// half-run happens.
-    ///
-    /// Every opcode is implemented, and the whole differential corpus runs
-    /// through here and agrees with the tree-walking oracle
-    /// (`crates/cove-cli/tests/differential.rs`), so the refusal is a
-    /// scaffold that nothing reaches rather than a limit. It is kept because
-    /// "no silent fallback to enum execution" is a property that has to be
-    /// checkable, and a path that could quietly hand a program back is one
-    /// where it is not.
-    ///
-    /// A third constructor rather than a parameter on [`Vm::new`], which is
-    /// the same shape [`Vm::debugged`] has and for the same reason: a
-    /// question every existing caller would answer the same way is a
-    /// question not worth asking them. **Nothing reaches this by default.**
-    /// `cove run --encoded` is the one way in, and it is a development flag
-    /// for the phase rather than a way to run a program.
-    ///
-    /// What it costs a run built with [`Vm::new`] is nothing, and that is
-    /// measured rather than asserted: the choice is made once, in
-    /// `Machine::drive`, and neither dispatch loop contains a test for it.
-    pub fn encoded(
-        runtime: &'a Runtime,
-        hosts: &'a HostRegistry,
-        program: &'a Program,
-    ) -> Result<Vm<'a>, RuntimeError> {
-        let code = exec::encoded::prepare(program)?;
-        let mut vm = Vm::new(runtime, hosts, program);
-        vm.machine.execute_encoded(code);
-        Ok(vm)
     }
 
     /// Runs `module.name` with the process arguments `args`.

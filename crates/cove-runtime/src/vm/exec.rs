@@ -1,8 +1,31 @@
-//! The dispatch loop.
+//! The machine, and everything one instruction can reach.
 //!
 //! One `Machine` runs one task's frames over one [`Memory`]. It is a
 //! register machine: every instruction names its operands and its
 //! destination by slot, and a slot is `memory[frame_base + slot]`.
+//!
+//! # The loop is not here
+//!
+//! [`encoded::dispatch`] is the loop, and it is the only one. Issue #245's
+//! Phase 5 cut production execution over to
+//! [ADR 0041](../../../../docs/adr/0041-a-slot-number-fits-in-sixteen-bits.md)'s
+//! fixed-width form and deleted the `Inst` loop that had been beside it, so
+//! the pipeline reads:
+//!
+//! ```text
+//! checked AST -> lowering -> cove_ir::Inst -> encoder -> bytecode -> verify once -> this machine
+//! ```
+//!
+//! [`cove_ir::Inst`] is still the *compiler's* vocabulary — what the lowering
+//! builds, what `cove_ir::print` renders, what a test asserts on, and what
+//! [`crate::vm::debug`] shows a debugger as lowered IR — and it is no longer
+//! anything the machine matches on. What is left in this file is the state
+//! an instruction acts on and every operation one can reach: the frames, the
+//! calls, the host boundary, the builtins, the scopes, the tasks and the
+//! collector's rendezvous. The loop reads sixteen bytes and calls into here.
+//!
+//! The cutover was not taken for speed and did not buy any; the commit that
+//! made it says what it cost and what it bought instead.
 //!
 //! # There is no Rust recursion here
 //!
@@ -26,8 +49,8 @@ use std::time::Duration;
 
 use cove_diag::Span;
 use cove_ir::{
-    ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Convert, FunctionId, HostOpId, Inst, LayoutId, Len,
-    Num, Program, Repr, Shape, Slot, StrId,
+    ArgsId, ArithOp, BuiltinId, CmpOp, FunctionId, HostOpId, LayoutId, Program, Repr, Shape, Slot,
+    StrId,
 };
 
 use crate::budget::{Cancellation, Meter, Stopped};
@@ -51,17 +74,12 @@ use crate::wallclock::Instant;
 // round and are converted by the same file.
 use crate::value::Value;
 
-/// The encoded dispatch loop, and the refusal that keeps it honest.
+/// The dispatch loop, and the refusal that keeps it honest.
 ///
-/// A **child** module rather than a sibling, and that is load-bearing twice.
-/// It reads `Machine`'s private state without widening any of it to the
-/// crate — a second loop over the same machine is exactly as privileged as
-/// this one, and nothing else is. And its code lives nowhere near
-/// [`Machine::dispatch`]'s body: `ad5f160` measured that writing the
-/// debugger's question *into* this loop cost 4.3% on `arith` even though it
-/// never ran, so a whole second loop grown inside it is not a thing to find
-/// out about afterwards. [`Machine::drive`] chooses between the two once per
-/// run, and no instruction of either asks which one is running.
+/// A **child** module rather than a sibling, and that is still load-bearing:
+/// it reads `Machine`'s private state without widening any of it to the
+/// crate. The loop over the same machine is exactly as privileged as the
+/// machine, and nothing else is.
 pub(crate) mod encoded;
 
 /// How many instructions run between two budget checks.
@@ -281,7 +299,8 @@ pub(crate) struct Machine<'a> {
     /// drawn from a counter of this machine's own. A program still spawns,
     /// awaits and cancels.
     runtime: Option<&'a Runtime>,
-    /// The boundary a [`Inst::CallHost`] calls through, if this run has one.
+    /// The boundary a [`cove_ir::Inst::CallHost`] calls through, if this run
+    /// has one.
     ///
     /// `None` is a machine with no host behind it — what a test that runs
     /// arithmetic drives, and the same state [`crate::host::NoReentry`]
@@ -403,7 +422,7 @@ pub(crate) struct Machine<'a> {
     ///
     /// A Cove call adds no native frame here — that is what the dispatch loop
     /// is for — but a *reentry* does: the host is a Rust frame, and running
-    /// its callback puts another turn of [`Machine::dispatch`] below it. So
+    /// its callback puts another turn of [`encoded::dispatch`] below it. So
     /// this is bounded exactly as the oracle bounds it, by
     /// [`crate::interp::MAX_REENTRY_DEPTH`], and for the same reason.
     reentry_depth: usize,
@@ -449,7 +468,7 @@ pub(crate) struct Machine<'a> {
     /// subtraction rather than a claim about the paths somebody remembered.
     ///
     /// Three places move it, and between them they cover every way work can
-    /// be done. The periodic safepoint in [`Machine::dispatch`] is the
+    /// be done. The periodic safepoint in [`encoded::dispatch`] is the
     /// ordinary one. [`Machine::charge_at_host_boundary`] is
     /// [ADR 0030](../../../../docs/adr/0030-a-host-call-asks-the-fuel-limit.md)'s:
     /// the fuel a run has been charged has to be current before a Host call
@@ -489,7 +508,8 @@ pub(crate) struct Machine<'a> {
     /// This exists for one question the family search in
     /// [`crate::vm::boundary`] cannot answer. A host answer that crosses in
     /// at a `Shape::Boxed` position has to be tagged with the family it
-    /// holds, and the tag is what [`Inst::Unbox`] compares against the layout
+    /// holds, and the tag is what [`cove_ir::Inst::Unbox`] compares against
+    /// the layout
     /// the checker settled at the use. The search reads the value's own
     /// description, and a description does not always name one family:
     /// `Err(Error("no"))` fits `Result<Int, Error>` and
@@ -512,7 +532,8 @@ pub(crate) struct Machine<'a> {
     callback_answer: Option<LayoutId>,
     /// Where the most recent assertion failed, and the message it produced.
     ///
-    /// Written only by [`Inst::AssertFailed`], which the failing arm of a
+    /// Written only by [`cove_ir::Inst::AssertFailed`], which the failing arm
+    /// of a
     /// lowered assertion carries. A failed assertion is an ordinary `Err`
     /// from here on — the machine does not stop, and a program that handles
     /// it goes on running — so this is a record of what was seen and not a
@@ -525,7 +546,7 @@ pub(crate) struct Machine<'a> {
     ///
     /// It is the *machine* that calls, never the other way round: nothing
     /// here hands out a suspended machine, and [`Stop`] is a shared borrow
-    /// that lasts one call. That is not a style choice. [`Machine::dispatch`]
+    /// that lasts one call. That is not a style choice. [`encoded::dispatch`]
     /// holds a `&'s Scope<'s, 'a>` — the thread scope a `spawn` starts its
     /// children in — and that borrow cannot outlive [`Machine::drive`], so a
     /// handle to a paused machine could not be a value a debugger keeps.
@@ -534,20 +555,30 @@ pub(crate) struct Machine<'a> {
     /// `Send + Sync`, because a spawned task's machine is handed the same
     /// reference and asks it from its own thread.
     debugger: Option<&'a (dyn Debugger + Send + Sync)>,
-    /// The encoded form of the program, when this run was built to execute
-    /// it, and `None` for every run that was not.
+    /// **The instructions this machine executes**, or why this program has
+    /// none.
     ///
-    /// Issue #245's Phase 3. It is read once per [`Machine::drive`] and never
-    /// by an instruction: what it selects is *which loop runs*, not what a
-    /// loop does, so neither loop pays for the other's existence. See
-    /// [`encoded`].
+    /// Issue #245's Phase 5. There is one execution form and this is it: the
+    /// program is encoded and verified once, when the machine is built, and
+    /// from then on the loop reads operands out of sixteen bytes without
+    /// asking whether they are in range. [`cove_ir::Inst`] is what the
+    /// *lowering* produces and what a listing and the debugger show; nothing
+    /// below
+    /// [`encoded::dispatch`] matches on one.
     ///
-    /// An `Arc` because a run's tasks would share one — and none do yet.
-    /// [`encoded::prepare`] refuses `Op::Spawn`, so no task machine can be
-    /// built on this path, and [`Machine::for_task`] leaves this `None`
-    /// rather than pretending to have propagated it. Phase 4 is where a task
-    /// gets one.
-    encoded: Option<Arc<cove_ir::bytecode::Encoded>>,
+    /// A `Result` rather than a refusal raised where it is discovered,
+    /// because a machine is built by an infallible constructor and a program
+    /// with no encoding must fail the same way however the machine was built.
+    /// [`Machine::run`] and [`Machine::enter_closure`] raise it **before a
+    /// frame is pushed**, so such a program has no observable effect at all
+    /// rather than stopping partway through one. A machine that only ever
+    /// answers builtin questions — several of this crate's tests build one —
+    /// never asks, and pays nothing for a program it will not run.
+    ///
+    /// An `Arc` because a run's tasks share one: [`Machine::for_task`] is
+    /// handed the parent's rather than encoding again, which is what makes
+    /// one spawn cost a pointer instead of a second pass over the program.
+    encoded: Result<Arc<cove_ir::bytecode::Encoded>, RuntimeError>,
 }
 
 impl<'a> Machine<'a> {
@@ -597,7 +628,11 @@ impl<'a> Machine<'a> {
             assertion_failure: None,
             debugger: None,
             next_check: SAFEPOINT_STRIDE,
-            encoded: None,
+            // Encoded and verified here, once, for every machine — because
+            // this is where a run's program arrives and because a refusal
+            // that happened later would happen after a frame was pushed. See
+            // the field.
+            encoded: encoded::prepare(program),
         }
     }
 
@@ -626,6 +661,7 @@ impl<'a> Machine<'a> {
         mem: Memory,
         cancellation: Cancellation,
         task: u64,
+        encoded: Arc<cove_ir::bytecode::Encoded>,
     ) -> Machine<'a> {
         Machine {
             program,
@@ -652,7 +688,11 @@ impl<'a> Machine<'a> {
             assertion_failure: None,
             debugger: None,
             next_check: SAFEPOINT_STRIDE,
-            encoded: None,
+            // The parent's, not a second encoding of the same program: a run
+            // executes one form, and encoding again per spawn would be a
+            // second pass over the whole program for a pointer's worth of
+            // sharing.
+            encoded: Ok(encoded),
         }
     }
 
@@ -689,16 +729,13 @@ impl<'a> Machine<'a> {
         self.next_check = self.next_question();
     }
 
-    /// Runs this machine's program from its encoded form rather than from
-    /// [`Inst`].
+    /// The instructions this machine runs, or the refusal every run of this
+    /// program answers with.
     ///
-    /// A setter beside [`Machine::watch`], and for the same reason it is one:
-    /// nothing that builds a machine has a reason to name a second
-    /// representation, and a parameter every caller passes `None` to is a
-    /// question every caller is asked and none of them answers. `Vm::encoded`
-    /// is the one caller.
-    pub(crate) fn execute_encoded(&mut self, code: Arc<cove_ir::bytecode::Encoded>) {
-        self.encoded = Some(code);
+    /// Cloning an `Arc`, because the loop borrows the code while the machine
+    /// is borrowed mutably, and a run's tasks share the one encoding anyway.
+    fn code(&self) -> Result<Arc<cove_ir::bytecode::Encoded>, RuntimeError> {
+        self.encoded.clone()
     }
 
     /// The instruction count at which the loop next asks its one question.
@@ -758,6 +795,11 @@ impl<'a> Machine<'a> {
         args: &[u64],
         budget: &Meter,
     ) -> Result<Vec<u64>, RuntimeError> {
+        // Before anything: a program with no encoding is refused here, with
+        // the stacks and the cells exactly as this call found them. There is
+        // one execution form, so this is not a fallback — it is the whole of
+        // what "verified once and then trusted" costs a caller.
+        let code = self.code()?;
         let program = self.program;
         let function = program.function(entry);
         debug_assert_eq!(
@@ -798,7 +840,7 @@ impl<'a> Machine<'a> {
             pc: 0,
             dst: 0,
         });
-        self.drive(budget)
+        self.drive(&code, budget)
     }
 
     /// Runs the frame already on the stack, inside the thread scope its
@@ -818,65 +860,16 @@ impl<'a> Machine<'a> {
     /// then wait for a task that is waiting for nobody. [`Machine::stop_all`]
     /// is that path, and on the ordinary one it has nothing to do because
     /// every scope was already left where it was written.
-    fn drive(&mut self, budget: &Meter) -> Result<Vec<u64>, RuntimeError> {
-        // The two representations are chosen between here, once per run, and
-        // **before** the thread scope rather than inside it. That placement
-        // is measured rather than tidy. Written as a `match` inside the
-        // closure, so that the closure held two large calls where it had held
-        // one, the *enum* loop measured 1% slower on `field` and 2.5% slower
-        // on `arith` — while an ablation that kept the whole encoded module
-        // in the binary and only removed the choice measured at or below the
-        // base on both. Nothing about a branch taken once per run can cost
-        // that; what changed was how `Machine::dispatch` compiles into this
-        // closure. It is the same lesson `ad5f160` and `Machine::ask` record,
-        // one level up: a phase's flag must not be a cost every program pays.
-        if let Some(code) = self.encoded.clone() {
-            return self.drive_encoded(&code, budget);
-        }
-        std::thread::scope(|threads| {
-            let mut running: Vec<Option<ScopedJoinHandle<'_, Outcome>>> = Vec::new();
-            let answer = self.dispatch(budget, threads, &mut running, 0);
-            debug_assert!(
-                answer.is_err() || !self.anything_running(),
-                "a body that answered left every scope it opened, so nothing is still running"
-            );
-            debug_assert!(
-                answer.is_err() || self.held.is_empty(),
-                "a body that answered left every cell it took"
-            );
-            self.give_cells_back(0);
-            self.stop_all(&mut running);
-            // Last, after the answer is settled and after the children are
-            // joined, so that what is put back is everything this thread
-            // dispatched and nothing is added to the run's total once the
-            // total has been read.
-            self.spend_pending_fuel(budget);
-            answer
-        })
-    }
-
-    /// [`Machine::drive`], for a run executing encoded instructions.
     ///
-    /// The same body [`Machine::drive`] has, over the other loop, and it is
-    /// the same body for a reason rather than by copying: `Op::Spawn` runs
-    /// here now, so this path starts threads, and every obligation the enum
-    /// path's exit carries this one carries too. The thread scope is what
-    /// bounds a task's threads to the task; the children of a scope an error
-    /// left are stopped, because a runtime error is not a jump the lowering
-    /// emits and `std::thread::scope` would otherwise wait for a task that is
-    /// waiting for nobody; the cells go back; and the fuel this thread
-    /// dispatched and has not paid for is handed to the run.
-    /// [ADR 0024](../../../../docs/adr/0024-a-stop-is-a-bound-not-a-point.md)
-    /// says pending fuel is never lost, and a second loop that lost it would
-    /// report a `fuel_spent` below the instructions it dispatched — which is
-    /// exactly what `crates/cove-runtime/tests/encoded.rs` compares.
-    ///
-    /// It is a function of its own, and `#[inline(never)]`, for what
-    /// `a78a8ad` measured: two large dispatch calls in one closure cost the
-    /// *enum* loop 2.5% on `arith` even though the branch between them was
-    /// taken once per run. Each loop gets a closure holding one call.
+    /// It is `#[inline(never)]` for what `a78a8ad` measured one phase ago:
+    /// two large dispatch calls in one closure cost the loop 2.5% on `arith`
+    /// even though the branch between them was taken once per run. There is
+    /// one call here now and one loop to call, so the measurement no longer
+    /// has a second body to be about — but what it established is that this
+    /// closure's contents are a cost every instruction pays, and the
+    /// attribute is what keeps that from being re-decided by an inliner.
     #[inline(never)]
-    fn drive_encoded(
+    fn drive(
         &mut self,
         code: &cove_ir::bytecode::Encoded,
         budget: &Meter,
@@ -894,6 +887,14 @@ impl<'a> Machine<'a> {
             );
             self.give_cells_back(0);
             self.stop_all(&mut running);
+            // Last, after the answer is settled and after the children are
+            // joined, so that what is put back is everything this thread
+            // dispatched and nothing is added to the run's total once the
+            // total has been read.
+            //
+            // [ADR 0024](../../../../docs/adr/0024-a-stop-is-a-bound-not-a-point.md)
+            // says pending fuel is never lost, and a loop that lost it would
+            // report a `fuel_spent` below the instructions it dispatched.
             self.spend_pending_fuel(budget);
             answer
         })
@@ -995,7 +996,8 @@ impl<'a> Machine<'a> {
     /// The closure takes no parameters — `scope.spawn { ... }` is written
     /// with none and an `async fn`'s handle carries none — so its frame is
     /// its captures and its locals. The captures are copied out of the
-    /// environment exactly as [`Inst::CallClosure`] copies them, because it
+    /// environment exactly as [`cove_ir::Inst::CallClosure`] copies them,
+    /// because it
     /// is the same object read the same way; what differs is only that the
     /// caller is a thread rather than an instruction.
     fn enter_closure(
@@ -1004,6 +1006,10 @@ impl<'a> Machine<'a> {
         budget: &Meter,
         span: Span,
     ) -> Result<Vec<u64>, RuntimeError> {
+        // A task machine was handed its parent's encoding, so this is `Ok`;
+        // it is asked rather than assumed because the alternative is an
+        // `expect` in the one place a task's body starts.
+        let code = self.code()?;
         let program = self.program;
         let callee = self.callee_of(object)?;
         let target = program.function(callee);
@@ -1030,852 +1036,7 @@ impl<'a> Machine<'a> {
             pc: 0,
             dst: 0,
         });
-        self.drive(budget)
-    }
-
-    /// The loop.
-    ///
-    /// `function`, `base` and `pc` are kept in locals rather than read out of
-    /// the top frame on every instruction, and written back at the two points
-    /// where something else looks: a collection, and a failure.
-    fn dispatch<'s>(
-        &mut self,
-        budget: &Meter,
-        threads: &'s Scope<'s, 'a>,
-        running: &mut Vec<Option<ScopedJoinHandle<'s, Outcome>>>,
-        floor: usize,
-    ) -> Result<Vec<u64>, RuntimeError> {
-        let program = self.program;
-        let top = self.frames.last().expect("run pushed a frame");
-        let mut id = top.function;
-        let mut base = top.base;
-        let mut pc = top.pc as usize;
-        let mut code = &program.function(id).code[..];
-
-        loop {
-            self.instructions += 1;
-            // One comparison, and it answers both questions. `next_check` is
-            // the smaller of the next safepoint and the next debug stop, so
-            // a run with no debugger installed compares against the next
-            // multiple of `SAFEPOINT_STRIDE` and does exactly what the
-            // modulo did — and a run with one compares against
-            // `instructions + 1` and stops at every instruction. There is no
-            // second test on this path, which is what
-            // `docs/VM_ARCHITECTURE.md` measured the cost of.
-            if self.instructions >= self.next_check {
-                // Before anything reads a frame, because `pc` is a local of
-                // this loop until this line: a debugger — or a collection —
-                // reading a stale `pc` would read the instruction after the
-                // one this stop is at.
-                self.sync(pc);
-                // The debugger first, so that a stop it asks for is not
-                // pre-empted by a safepoint that would have stopped the run
-                // for its own reason at the same instruction. Its whole
-                // contract is in `Machine::ask`: it is asked, and `Go` or
-                // `Halt` is honoured. Every policy a session has — a
-                // breakpoint, a step, a `finish` — is the implementor's,
-                // which is what keeps this loop from growing one.
-                //
-                // `is_some` and a call, rather than the question written out
-                // here, and that is measured rather than tidy: writing it
-                // out cost 4.3% on `arith`, because the dispatch body's
-                // footprint is a cost every program pays. See
-                // `Machine::ask`.
-                if self.debugger.is_some() {
-                    self.ask(id, pc)?;
-                }
-                // The safepoint keeps its own schedule, and this is where
-                // that is enforced: ADR 0040 states every stop mode's bound
-                // in multiples of `SAFEPOINT_STRIDE`, so it fires at exactly
-                // the counts `instructions % SAFEPOINT_STRIDE == 0` fired at
-                // whether a debugger is installed or not.
-                if self.instructions.is_multiple_of(SAFEPOINT_STRIDE) {
-                    // This task's own flag and every bounded call this thread
-                    // is inside first, then the run's accounting, in the
-                    // order `Interpreter::charge_safepoint` asks them: a
-                    // cancelled task is cancelled and not out of fuel,
-                    // whichever of the two also happens to be true.
-                    // `stopped_here` is the oracle's own function, so the two
-                    // backends cannot disagree about which of the two stopped
-                    // the work.
-                    stopped_here(self.cancellation.as_ref(), &self.stops, self.span(id, pc))?;
-                    // What is handed over is the instructions run since the
-                    // last hand-over, not the stride: a Host call between two
-                    // safepoints may already have paid for part of this
-                    // window, and charging the stride flat would charge that
-                    // part twice. It is a whole stride whenever nothing
-                    // intervened, which is the case a bound is stated
-                    // against.
-                    let gathered = self.instructions - self.charged;
-                    self.charged = self.instructions;
-                    if let Err(stopped) = budget.safepoint(gathered) {
-                        return Err(budget.to_runtime_error(stopped).at(self.span(id, pc)));
-                    }
-                    // And the run's: a collection is stop-the-world, so a
-                    // task that never published its roots would be a task the
-                    // collector waits for while it waits for the collector.
-                    // The question costs one relaxed load when nothing is
-                    // pending, which is every time but the rare one.
-                    self.mem.poll(&Live(self));
-                }
-                self.next_check = self.next_question();
-            }
-
-            let inst = &code[pc];
-            pc += 1;
-
-            macro_rules! fail {
-                ($error:expr) => {{
-                    self.sync(pc - 1);
-                    return Err($error.at(self.span(id, pc - 1)));
-                }};
-            }
-
-            match *inst {
-                // ---- constants and moves -------------------------------
-                Inst::Unit { dst } => self.mem.set_slot(base, dst, 0),
-                Inst::Bool { dst, value } => self.mem.set_slot(base, dst, value as u64),
-                Inst::Int { dst, value } => self.mem.set_slot(base, dst, value as u64),
-                Inst::Float { dst, bits } => self.mem.set_slot(base, dst, bits),
-                Inst::Str { dst, text } => {
-                    self.sync(pc - 1);
-                    match self.intern(text) {
-                        Ok(addr) => self.mem.set_slot(base, dst, addr),
-                        Err(error) => fail!(error),
-                    }
-                }
-                // ADR 0001's field-wise shallow copy, and the whole of it.
-                // A value's words are where the value is, so copying one is
-                // copying its run of words: a `Wrapper { p: Point, v: Vector }`
-                // copies three, the `Point` becomes independent and the
-                // `Vector` stays shared, and neither answer needed a policy.
-                Inst::Copy { dst, src, layout } => {
-                    let width = self.width(layout);
-                    self.mem
-                        .copy_words(base + dst as u64, base + src as u64, width);
-                }
-                // The one instruction whose whole purpose is what it stops
-                // happening: a reference the frame no longer needs is not a
-                // root, so the object it named is unreachable now rather
-                // than when this frame returns.
-                Inst::Clear { slot, layout } => {
-                    let width = self.width(layout);
-                    self.mem.clear_words(base + slot as u64, width);
-                }
-
-                // ---- scalar operations ----------------------------------
-                Inst::Neg { num, dst, a } => {
-                    let a = self.mem.slot(base, a);
-                    let word = match num {
-                        Num::Int => match (a as i64).checked_neg() {
-                            Some(value) => value as u64,
-                            None => fail!(overflowed("negation")),
-                        },
-                        Num::Float => (-f64::from_bits(a)).to_bits(),
-                    };
-                    self.mem.set_slot(base, dst, word);
-                }
-                Inst::Arith { num, op, dst, a, b } => {
-                    let (x, y) = (self.mem.slot(base, a), self.mem.slot(base, b));
-                    let word = match num {
-                        Num::Int => {
-                            // Which of the two the operands are decides only
-                            // what the message calls the operation. The
-                            // arithmetic is the same, because a `Duration` is
-                            // nanoseconds and nanoseconds add like integers.
-                            let duration = self.repr(id, dst) == Some(Repr::Duration);
-                            match int_arith(op, x as i64, y as i64, duration) {
-                                Ok(value) => value as u64,
-                                Err(error) => fail!(error),
-                            }
-                        }
-                        Num::Float => {
-                            let (x, y) = (f64::from_bits(x), f64::from_bits(y));
-                            float_arith(op, x, y).to_bits()
-                        }
-                    };
-                    self.mem.set_slot(base, dst, word);
-                }
-                // The immediate pair charges exactly what its slot-operand
-                // twin charges: **one instruction, one unit of fuel**, the
-                // same as every other instruction in this loop. See
-                // `Machine::dispatch`'s counter and `SAFEPOINT_STRIDE`.
-                Inst::ArithImm { op, dst, a, value } => {
-                    let x = self.mem.slot(base, a);
-                    // The same question `Inst::Arith` asks, for the same
-                    // reason: which of the two the operands are decides only
-                    // what a failure calls the operation.
-                    let duration = self.repr(id, dst) == Some(Repr::Duration);
-                    let word = match int_arith(op, x as i64, value, duration) {
-                        Ok(value) => value as u64,
-                        Err(error) => fail!(error),
-                    };
-                    self.mem.set_slot(base, dst, word);
-                }
-                Inst::CmpImm { op, dst, a, value } => {
-                    let x = self.mem.slot(base, a);
-                    let answer = compare(op, (x as i64).cmp(&value));
-                    self.mem.set_slot(base, dst, answer as u64);
-                }
-                Inst::Cmp { on, op, dst, a, b } => {
-                    let (x, y) = (self.mem.slot(base, a), self.mem.slot(base, b));
-                    let answer = match on {
-                        Compare::Int => compare(op, (x as i64).cmp(&(y as i64))),
-                        Compare::Bool | Compare::Identity => match op {
-                            CmpOp::Eq => x == y,
-                            CmpOp::Ne => x != y,
-                            // The verifier admits only `Eq` and `Ne` here;
-                            // ordering a `Bool` or an identity is not a
-                            // question the language asks.
-                            _ => fail!(RuntimeError::new(
-                                "this comparison is not defined for these operands"
-                            )),
-                        },
-                        Compare::Float => {
-                            let (x, y) = (f64::from_bits(x), f64::from_bits(y));
-                            match op {
-                                CmpOp::Eq => x == y,
-                                CmpOp::Ne => x != y,
-                                CmpOp::Lt => x < y,
-                                CmpOp::Le => x <= y,
-                                CmpOp::Gt => x > y,
-                                CmpOp::Ge => x >= y,
-                            }
-                        }
-                        Compare::Str => {
-                            let ordering = self.compare_strings(x, y);
-                            compare(op, ordering)
-                        }
-                    };
-                    self.mem.set_slot(base, dst, answer as u64);
-                }
-                Inst::Not { dst, a } => {
-                    let a = self.mem.slot(base, a);
-                    self.mem.set_slot(base, dst, (a == 0) as u64);
-                }
-                Inst::Convert { to, dst, a } => {
-                    let a = self.mem.slot(base, a);
-                    let word = match to {
-                        Convert::IntToFloat => (a as i64 as f64).to_bits(),
-                        Convert::FloatToInt => f64::from_bits(a) as i64 as u64,
-                    };
-                    self.mem.set_slot(base, dst, word);
-                }
-
-                // ---- control flow ----------------------------------------
-                Inst::Jump { to } => pc = to as usize,
-                Inst::BranchFalse { cond, to } => {
-                    if self.mem.slot(base, cond) == 0 {
-                        pc = to as usize;
-                    }
-                }
-                Inst::Switch { on, table } => {
-                    let index = self.mem.slot(base, on) as usize;
-                    let table = program.table(table);
-                    pc = *table.targets.get(index).unwrap_or(&table.default) as usize;
-                }
-                // The words `Function::returns` describes, copied into the
-                // caller's destination *location* — which is a base slot and
-                // a width, like every other value location. The copy happens
-                // before the frame is dropped, because the words are in it.
-                Inst::Return { src } => {
-                    let width = self.width(program.function(id).returns);
-                    // The frame being left is what says where its answer
-                    // goes. Keeping the destination with the callee rather
-                    // than re-reading the caller's `Call` means a return
-                    // touches one instruction, not two.
-                    let done = self.frames.pop().expect("a frame is executing");
-                    // The floor is where this turn of the loop was entered,
-                    // and returning to it is what ends it. It is zero for a
-                    // whole task's body and the caller's depth for a host
-                    // callback, whose caller is a Rust frame rather than an
-                    // instruction — so what is below the floor is left
-                    // standing, and the answer's words are handed back in
-                    // Rust.
-                    match self.frames.last().filter(|_| self.frames.len() > floor) {
-                        None => {
-                            let answer = self.mem.read_words(base + src as u64, width);
-                            self.mem.pop_frame(base);
-                            return Ok(answer);
-                        }
-                        Some(caller) => {
-                            id = caller.function;
-                            let caller_base = caller.base;
-                            pc = caller.pc as usize;
-                            code = &program.function(id).code[..];
-                            self.mem.copy_words(
-                                caller_base + done.dst as u64,
-                                base + src as u64,
-                                width,
-                            );
-                            self.mem.pop_frame(base);
-                            base = caller_base;
-                        }
-                    }
-                }
-
-                // ---- calls -------------------------------------------------
-                Inst::Call { dst, callee, args } => {
-                    let target = program.function(callee);
-                    let list = program.arg_list(args);
-                    if list.len() != target.params.len() {
-                        fail!(wrong_arity(
-                            target.qualified(),
-                            target.params.len(),
-                            list.len()
-                        ));
-                    }
-                    if let Err(error) = self.admit_frame(budget, self.span(id, pc - 1)) {
-                        self.sync(pc - 1);
-                        return Err(error);
-                    }
-                    let callee_base = match self.mem.push_frame(target.frame_size()) {
-                        Ok(base) => base,
-                        Err(Overflow) => fail!(self.too_deep_error()),
-                    };
-                    // Parameters occupy the callee's frame from slot 0 in
-                    // declaration order, each taking the words its layout
-                    // says. There is no argument buffer and no permutation
-                    // into type groups: the callee's frame begins where this
-                    // one ends, and the words are copied straight into it.
-                    // The width is the *parameter's*, not the argument's,
-                    // although an argument now carries a layout of its own
-                    // and the verifier holds the two to be the same one. The
-                    // frame being written is the callee's, and
-                    // `Function::params` is the only fact about the callee
-                    // here: a `CallClosure` does not know which function it
-                    // is entering until it has read the object, so nothing
-                    // static could be authoritative there, and one rule for
-                    // both is worth more than the symmetry.
-                    let mut at = 0;
-                    for (arg, layout) in list.iter().zip(&target.params) {
-                        let width = self.width(*layout);
-                        self.mem
-                            .copy_words(callee_base + at as u64, base + arg.slot as u64, width);
-                        at += width;
-                    }
-                    self.sync(pc);
-                    self.frames.push(Frame {
-                        function: callee,
-                        base: callee_base,
-                        pc: 0,
-                        dst,
-                    });
-                    id = callee;
-                    base = callee_base;
-                    pc = 0;
-                    code = &program.function(id).code[..];
-                }
-                // A closure call is a frame like any other, and that is the
-                // whole of it. The callee is not in the instruction — it is a
-                // word of the object the slot names — and the captures follow
-                // the arguments into the slots `Function::captures` names.
-                // Nothing else differs from [`Inst::Call`]: no Rust frame is
-                // added, so a `map` over a `map` over a `map` nests in the
-                // reserved stack region and nowhere else, which is the
-                // property `docs/LINEAR_VM.md` asks a closure-taking sequence
-                // method to lower to a loop in order to keep.
-                Inst::CallClosure { dst, closure, args } => {
-                    let object = self.mem.slot(base, closure);
-                    let callee = match self.callee_of(object) {
-                        Ok(callee) => callee,
-                        Err(error) => fail!(error),
-                    };
-                    let target = program.function(callee);
-                    let list = program.arg_list(args);
-                    if list.len() != target.params.len() {
-                        fail!(wrong_arity(
-                            target.qualified(),
-                            target.params.len(),
-                            list.len()
-                        ));
-                    }
-                    if let Err(error) = self.admit_frame(budget, self.span(id, pc - 1)) {
-                        self.sync(pc - 1);
-                        return Err(error);
-                    }
-                    let callee_base = match self.mem.push_frame(target.frame_size()) {
-                        Ok(base) => base,
-                        Err(Overflow) => fail!(self.too_deep_error()),
-                    };
-                    let mut at = 0;
-                    for (arg, layout) in list.iter().zip(&target.params) {
-                        let width = self.width(*layout);
-                        self.mem
-                            .copy_words(callee_base + at as u64, base + arg.slot as u64, width);
-                        at += width;
-                    }
-                    // The object has to stay reachable across every one of
-                    // these reads, and it does, for a reason rather than by
-                    // luck: it is named by slot `closure` of a frame this has
-                    // not left, the verifier holds that slot to `Repr::Ref`,
-                    // and a `Repr::Ref` slot of a live frame is a root. So no
-                    // temporary root is taken here — and nothing between the
-                    // read and the last write allocates, so no collection can
-                    // happen in the window at all.
-                    //
-                    // `Capture::slot` is read rather than re-derived from
-                    // `arity + at`. The two agree, and the verifier is what
-                    // says so: it refuses a capture naming a slot outside the
-                    // frame or holding a different `Repr`.
-                    //
-                    // A capture is stored inline in the environment, each at
-                    // its own width, so where one begins is the widths of the
-                    // ones before it — the same arrangement the parameters
-                    // are under, in a payload instead of a frame.
-                    let mut held = 1;
-                    for capture in &target.captures {
-                        let width = self.width(capture.layout);
-                        self.mem.copy_words(
-                            callee_base + capture.slot as u64,
-                            self.mem.payload_addr(object, held),
-                            width,
-                        );
-                        held += width;
-                    }
-                    self.sync(pc);
-                    self.frames.push(Frame {
-                        function: callee,
-                        base: callee_base,
-                        pc: 0,
-                        dst,
-                    });
-                    id = callee;
-                    base = callee_base;
-                    pc = 0;
-                    code = &program.function(id).code[..];
-                }
-                // The one instruction that leaves the machine. Everything it
-                // needs to read out of the frame is read before the call, so
-                // that the frames are consistent for the length of it: a host
-                // may collect through the boundary, and a boundary that had
-                // been handed a stale program counter would walk this frame
-                // to a slot the loop had already moved past.
-                Inst::CallHost { dst, op, args } => {
-                    self.sync(pc - 1);
-                    let span = self.span(id, pc - 1);
-                    match self.call_host(base, op, args, budget, span, threads, running) {
-                        Ok(words) => {
-                            for (at, word) in words.iter().enumerate() {
-                                self.mem.set_slot(base, dst + at as u32, *word);
-                            }
-                        }
-                        Err(error) => fail!(error),
-                    }
-                }
-                // The same boundary, addressed to a handle rather than to a
-                // module. ADR 0013 gives the host the only record of what is
-                // open, so which resource answers is the word in `receiver`
-                // and nothing static.
-                Inst::CallResource {
-                    dst,
-                    receiver,
-                    op,
-                    args,
-                } => {
-                    self.sync(pc - 1);
-                    let span = self.span(id, pc - 1);
-                    match self
-                        .call_resource(base, receiver, op, args, budget, span, threads, running)
-                    {
-                        Ok(words) => {
-                            for (at, word) in words.iter().enumerate() {
-                                self.mem.set_slot(base, dst + at as u32, *word);
-                            }
-                        }
-                        Err(error) => fail!(error),
-                    }
-                }
-                // Not a boundary. A builtin reads the words and the objects
-                // the machine already holds, and answers one word; nothing
-                // here is materialised into a `Value` on the way.
-                Inst::CallBuiltin { dst, builtin, args } => {
-                    self.sync(pc - 1);
-                    match self.call_builtin(base, builtin, args) {
-                        Ok(words) => {
-                            // The answer is a value location like any other:
-                            // `Builtin::result` names its layout, and an
-                            // `Option<Int>` is two words rather than an
-                            // address to two words somewhere else.
-                            for (at, word) in words.iter().enumerate() {
-                                self.mem.set_slot(base, dst + at as u32, *word);
-                            }
-                        }
-                        Err(error) => fail!(error),
-                    }
-                }
-
-                // ---- the heap ----------------------------------------------
-                Inst::Alloc { dst, layout, len } => {
-                    let len = match len {
-                        Len::Fixed => 0,
-                        Len::Count(n) => n,
-                        Len::Slot(slot) => self.mem.slot(base, slot) as u32,
-                    };
-                    self.sync(pc - 1);
-                    match self.allocate(layout, len) {
-                        Ok(addr) => self.mem.set_slot(base, dst, addr),
-                        Err(error) => fail!(error),
-                    }
-                }
-                // A field of a *heap object* is a run of words at a static
-                // offset, and its width is the layout the instruction names.
-                // A field of an inline struct is not here at all: it is a
-                // slot number the lowering computed, and reaching it costs
-                // nothing.
-                Inst::LoadField {
-                    dst,
-                    obj,
-                    at,
-                    layout,
-                } => {
-                    let addr = self.mem.slot(base, obj);
-                    let width = self.width(layout);
-                    match self.checked(addr, at, width) {
-                        Ok(()) => self.mem.copy_words(
-                            base + dst as u64,
-                            self.mem.payload_addr(addr, at),
-                            width,
-                        ),
-                        Err(error) => fail!(error),
-                    }
-                }
-                Inst::StoreField {
-                    obj,
-                    at,
-                    src,
-                    layout,
-                } => {
-                    let addr = self.mem.slot(base, obj);
-                    let width = self.width(layout);
-                    match self.checked(addr, at, width) {
-                        Ok(()) => self.mem.copy_words(
-                            self.mem.payload_addr(addr, at),
-                            base + src as u64,
-                            width,
-                        ),
-                        Err(error) => fail!(error),
-                    }
-                }
-                // The stride is the element layout's width, so an
-                // `Array<Point>` is a run of two-word elements rather than a
-                // run of addresses.
-                Inst::LoadElem {
-                    dst,
-                    obj,
-                    index,
-                    layout,
-                } => {
-                    let addr = self.mem.slot(base, obj);
-                    let at = self.mem.slot(base, index) as i64;
-                    let width = self.width(layout);
-                    match self.element(addr, at, width) {
-                        Ok(at) => self.mem.copy_words(
-                            base + dst as u64,
-                            self.mem.payload_addr(addr, at),
-                            width,
-                        ),
-                        Err(error) => fail!(error),
-                    }
-                }
-                Inst::StoreElem {
-                    obj,
-                    index,
-                    src,
-                    layout,
-                } => {
-                    let addr = self.mem.slot(base, obj);
-                    let at = self.mem.slot(base, index) as i64;
-                    let width = self.width(layout);
-                    match self.element(addr, at, width) {
-                        Ok(at) => self.mem.copy_words(
-                            self.mem.payload_addr(addr, at),
-                            base + src as u64,
-                            width,
-                        ),
-                        Err(error) => fail!(error),
-                    }
-                }
-                Inst::Len { dst, obj } => {
-                    let addr = self.mem.slot(base, obj);
-                    if addr == 0 {
-                        fail!(null_object());
-                    }
-                    let len = self.mem.object_len(addr) as i64;
-                    self.mem.set_slot(base, dst, len as u64);
-                }
-                // The other half of the header word `Len` reads. What an
-                // object *is* is a question the object answers, and this is
-                // that answer as an `Int`, so that a dispatch over it is an
-                // ordinary `Switch` rather than an instruction of its own.
-                Inst::LayoutOf { dst, obj } => {
-                    let addr = self.mem.slot(base, obj);
-                    if addr == 0 {
-                        fail!(null_object());
-                    }
-                    let layout = self.mem.object_layout(addr).0 as i64;
-                    self.mem.set_slot(base, dst, layout as u64);
-                }
-
-                // ---- places --------------------------------------------------
-                Inst::AddrOfSlot { dst, slot } => self.mem.set_slot(base, dst, base + slot as u64),
-                Inst::AddrOfField { dst, obj, at } => {
-                    let addr = self.mem.slot(base, obj);
-                    match self.checked(addr, at, 1) {
-                        Ok(()) => {
-                            let word = self.mem.payload_addr(addr, at);
-                            self.mem.set_slot(base, dst, word);
-                        }
-                        Err(error) => fail!(error),
-                    }
-                }
-                Inst::AddrOfElem {
-                    dst,
-                    obj,
-                    index,
-                    layout,
-                } => {
-                    let addr = self.mem.slot(base, obj);
-                    let at = self.mem.slot(base, index) as i64;
-                    let width = self.width(layout);
-                    match self.element(addr, at, width) {
-                        Ok(at) => {
-                            let word = self.mem.payload_addr(addr, at);
-                            self.mem.set_slot(base, dst, word);
-                        }
-                        Err(error) => fail!(error),
-                    }
-                }
-                // A place is the address of the *first word* of a value
-                // location, and its width is static — so a load and a store
-                // through one move the words the layout says, and a nested
-                // write through a `var` parameter updates the destination
-                // words in place with nothing in between.
-                // The one place instruction whose operand is a place. It
-                // is arithmetic and nothing else: what an address names is a
-                // value location, and a value location's parts are at static
-                // offsets from its first word, so a field of a `var`
-                // parameter is an addition rather than a load of the whole
-                // value and a store of it back.
-                Inst::AddrOfPart { dst, addr, at } => {
-                    let word = self.mem.slot(base, addr);
-                    self.mem.set_slot(base, dst, word + at as u64);
-                }
-                Inst::Load { dst, addr, layout } => {
-                    let addr = self.mem.slot(base, addr);
-                    let width = self.width(layout);
-                    self.mem.copy_words(base + dst as u64, addr, width);
-                }
-                Inst::Store { addr, src, layout } => {
-                    let addr = self.mem.slot(base, addr);
-                    let width = self.width(layout);
-                    self.mem.copy_words(addr, base + src as u64, width);
-                }
-
-                // ---- erasure ---------------------------------------------------
-                // A box holds the layout of what it carries in payload word
-                // 0 and that value's words after it, so a boxed `Point` is a
-                // two-word payload rather than a reference to somewhere else
-                // again. The header's length carries the width, because a
-                // `Boxed` layout cannot know it.
-                Inst::Box { dst, src, layout } => {
-                    let width = self.width(layout);
-                    self.sync(pc - 1);
-                    let boxed = match self.allocate(self.boxed_layout(), width) {
-                        Ok(addr) => addr,
-                        Err(error) => fail!(error),
-                    };
-                    self.mem.set_payload(boxed, 0, layout.0 as u64);
-                    self.mem
-                        .copy_words(self.mem.payload_addr(boxed, 1), base + src as u64, width);
-                    self.mem.set_slot(base, dst, boxed);
-                }
-                Inst::Unbox { dst, src, layout } => {
-                    let addr = self.mem.slot(base, src);
-                    if addr == 0 {
-                        fail!(null_object());
-                    }
-                    if self.mem.payload(addr, 0) != layout.0 as u64 {
-                        fail!(RuntimeError::new(
-                            "this value is not of the type it is being read as"
-                        ));
-                    }
-                    let width = self.width(layout);
-                    self.mem
-                        .copy_words(base + dst as u64, self.mem.payload_addr(addr, 1), width);
-                }
-
-                // ---- tasks ---------------------------------------------------
-                Inst::ScopeEnter { dst, name } => {
-                    let named = program.string(name).clone();
-                    self.scopes.push(ScopeEntry {
-                        name: named,
-                        tasks: Vec::new(),
-                        closed: false,
-                    });
-                    // One past the index, so a `Repr::Scope` slot a zeroed
-                    // frame has not written names no scope.
-                    self.mem.set_slot(base, dst, self.scopes.len() as u64);
-                }
-                // The body reached its end, so this is the exit that waits.
-                // The oracle is `crate::task::wait_for_children`, and what it
-                // answers about a failing child is a value here rather than
-                // control flow: the lowering knows which `Err` to build and
-                // what to return, and this does not.
-                Inst::ScopeLeave {
-                    scope,
-                    failed,
-                    error,
-                    layout,
-                } => {
-                    self.sync(pc - 1);
-                    let span = self.span(id, pc - 1);
-                    let word = self.mem.slot(base, scope);
-                    match self.leave_scope(word, running, span) {
-                        Ok(None) => self.mem.set_slot(base, failed, 0),
-                        Ok(Some(child)) => {
-                            match self.write_child_error(child, base + error as u64, layout) {
-                                Ok(()) => self.mem.set_slot(base, failed, 1),
-                                Err(error) => fail!(error),
-                            }
-                        }
-                        Err(error) => fail!(error),
-                    }
-                }
-                // The other exit, and the one a jump takes. Nothing is
-                // answered: a scope being left early is already leaving with
-                // something to say, and a child's failure found on the way
-                // out would replace it with an unrelated one.
-                Inst::ScopeCancel { scope } => {
-                    self.sync(pc - 1);
-                    let word = self.mem.slot(base, scope);
-                    match self.scope_at(word, self.span(id, pc - 1)) {
-                        Ok(at) => self.cancel_scope(at, running),
-                        Err(error) => fail!(error),
-                    }
-                }
-                Inst::Spawn {
-                    dst,
-                    scope,
-                    closure,
-                    answer,
-                } => {
-                    self.sync(pc - 1);
-                    let span = self.span(id, pc - 1);
-                    let scope_word = self.mem.slot(base, scope);
-                    let object = self.mem.slot(base, closure);
-                    match self.spawn(scope_word, object, answer, budget, span, threads, running) {
-                        Ok(word) => self.mem.set_slot(base, dst, word),
-                        Err(error) => fail!(error),
-                    }
-                }
-                Inst::Await { dst, task, answer } => {
-                    self.sync(pc - 1);
-                    let span = self.span(id, pc - 1);
-                    let word = self.mem.slot(base, task);
-                    match self.settle(word, answer, running, span) {
-                        Ok(words) => {
-                            for (at, held) in words.iter().enumerate() {
-                                self.mem.set_slot(base, dst + at as u32, *held);
-                            }
-                        }
-                        Err(error) => fail!(error),
-                    }
-                }
-                // A call to an `async fn` already ran, here, on this stack.
-                // What is left is the handle, and the table is where a
-                // `Repr::Task` word's name lives whether a thread ever
-                // existed or not.
-                Inst::Settled { dst, src, answer } => {
-                    self.sync(pc - 1);
-                    let words = self.mem.read_words(base + src as u64, self.width(answer));
-                    match self.settled(&words, answer, running) {
-                        Ok(word) => self.mem.set_slot(base, dst, word),
-                        Err(error) => fail!(error),
-                    }
-                }
-                // Asking is all it does. Whether the task stopped or had
-                // already finished is known only where something waits for
-                // it, which is why `TaskCancelled` is traced at the join.
-                Inst::Cancel { task } => {
-                    let word = self.mem.slot(base, task);
-                    match self.child_at(word, self.span(id, pc - 1)) {
-                        Ok(at) => {
-                            if matches!(self.children[at].state, ChildState::Running) {
-                                self.children[at].cancellation.cancel();
-                            }
-                        }
-                        Err(error) => fail!(error),
-                    }
-                }
-
-                // ---- cells -------------------------------------------------------
-                // Acquire, and then an ordinary `CallClosure` and an
-                // `Inst::SharedUnlock` the lowering emitted around it. The
-                // roots are published for the length of the wait, because a
-                // task waiting for a cell cannot reach a safepoint of its own
-                // and a collector that waited for it would be waiting for a
-                // task that is waiting for the collector.
-                Inst::SharedLock { cell: slot } => {
-                    let addr = self.mem.slot(base, slot);
-                    if addr == 0 {
-                        fail!(null_object());
-                    }
-                    self.sync(pc - 1);
-                    match cell::lock(&self.mem, addr, &Live(self)) {
-                        // Recorded so that the machine can give it back on the
-                        // one exit path the lowering cannot write. See
-                        // [`Machine::held`].
-                        Ok(()) => self.held.push(addr),
-                        Err(cell::Reentrant) => fail!(reentrant_lock()),
-                    }
-                }
-                Inst::SharedUnlock { cell: slot } => {
-                    let addr = self.mem.slot(base, slot);
-                    if addr == 0 {
-                        fail!(null_object());
-                    }
-                    cell::unlock(&self.mem, addr);
-                    debug_assert_eq!(
-                        self.held.last().copied(),
-                        Some(addr),
-                        "a lock region is left in the order it was entered"
-                    );
-                    self.held.pop();
-                }
-
-                // ---- failure -----------------------------------------------------
-                Inst::Trap { message } => {
-                    let message = program.string(message).to_string();
-                    fail!(RuntimeError::new(message))
-                }
-                // The only instruction that changes nothing the program can
-                // read. `message` is the `String` the failing arm just
-                // built, and it is read here rather than carried out in the
-                // `Err`, because the `Err` is a value like any other and
-                // this is the last moment anything knows which assertion it
-                // came from.
-                //
-                // The bytes are copied. A run goes on after a failed
-                // assertion — `?` propagates it, a test catches it — and the
-                // object holding them is unreachable as soon as the arm
-                // clears its slot, so a reference kept here would be a root
-                // nothing walks.
-                //
-                // Lossily, which is the one place this crate reads a string
-                // that way. Every string in the heap was written from valid
-                // UTF-8, so bytes that are not are a bug in this machine;
-                // the boundary answers that with an error because it is
-                // handing the value to a program, and this is a report about
-                // a failure that already happened. Stopping a run over the
-                // rendering of its own diagnostic would lose the diagnostic.
-                Inst::AssertFailed { message } => {
-                    let addr = self.mem.slot(base, message);
-                    let text = String::from_utf8_lossy(&self.string_bytes(addr)).into_owned();
-                    self.assertion_failure = Some((self.span(id, pc - 1), text));
-                }
-            }
-        }
+        self.drive(&code, budget)
     }
 
     /// The debugger's question, out of line.
@@ -1889,7 +1050,7 @@ impl<'a> Machine<'a> {
     /// altering nothing a program executes can still move `arith` by several
     /// percent, *"because the dispatch body's footprint and its branch-target
     /// alignment are costs every program pays"* — and building the [`Stop`]
-    /// and the indirect call inside [`Machine::dispatch`] cost 4.3% on
+    /// and the indirect call inside [`encoded::dispatch`] cost 4.3% on
     /// `arith` against the same tree with this line, which is more than the
     /// per-instruction branch this whole arrangement was shaped to avoid.
     /// Out of line, the change measures at or below the base on both `arith`
@@ -1955,7 +1116,7 @@ impl<'a> Machine<'a> {
     /// The limit is read off the meter at the call rather than cached in a
     /// field, and that is a decision about where the answer lives. A
     /// `Machine` holds no [`Meter`] — the run's accounting is passed into
-    /// [`Machine::dispatch`], which is what lets one machine serve a session
+    /// [`encoded::dispatch`], which is what lets one machine serve a session
     /// of invocations each bounded by a budget of its own. A field would have
     /// to be re-bound every time [`crate::Vm::invoke_within`] installed one,
     /// and a stale one would enforce the previous request's limit on this
@@ -2313,7 +1474,7 @@ impl<'a> Machine<'a> {
         Ok(addr)
     }
 
-    /// The layout a [`Inst::Box`] allocates its object as.
+    /// The layout a [`cove_ir::Inst::Box`] allocates its object as.
     ///
     /// The program says, rather than this searching for a `Shape::Boxed`.
     /// A search has to answer something when it fails, and the answer it
@@ -2360,7 +1521,8 @@ impl<'a> Machine<'a> {
     ///
     /// The id comes from the object rather than from the layout, which carries
     /// one too. They agree — a layout is one per lowered lambda — and the
-    /// object's word is the one [`Inst::CallClosure`] is defined in terms of.
+    /// object's word is the one [`cove_ir::Inst::CallClosure`] is defined in
+    /// terms of.
     pub(crate) fn callee_of(&self, addr: u64) -> Result<FunctionId, RuntimeError> {
         if addr == 0 {
             return Err(null_object());
@@ -2721,12 +1883,9 @@ impl<'a> Machine<'a> {
         // `Send + Sync` on the trait buys, and it is why a debugger sees a
         // spawned task's instructions rather than only the entry's.
         let watcher = self.debugger;
-        // And the same representation. A run is executed from one of the two
-        // forms, not from whichever one each thread happens to be built with:
-        // a child that ran the enum loop inside an encoded run would make the
-        // run's wall time a mixture and `Vm::encoded`'s "no fallback to enum
-        // execution" untrue of exactly the programs that spawn.
-        let form = self.encoded.clone();
+        // And the same instructions, handed over rather than encoded again:
+        // one program is encoded once per run, however many threads run it.
+        let form = self.code()?;
         let handle = threads.spawn(move || {
             run_task(
                 program, hosts, runtime, resources, segment, meter, flag, id, object, home, span,
@@ -3137,12 +2296,13 @@ impl<'a> Machine<'a> {
     /// **The call opens its frame at the top of the stack region as it
     /// stands, and leaves it exactly as it found it.** The callee's frame
     /// begins where the deepest live one ends, which is what
-    /// [`Memory::push_frame`] answers and what an [`Inst::Call`] would have
+    /// [`Memory::push_frame`] answers and what a [`cove_ir::Inst::Call`] would
+    /// have
     /// got; the arguments are written into it as the parameters' words, the
     /// captures follow them out of the environment object, and the frame is
     /// popped by the return that answers. The frame stack grows above the
     /// frame the interrupted instruction belongs to and comes back down to
-    /// it, which is what `floor` means in [`Machine::dispatch`].
+    /// it, which is what `floor` means in [`encoded::dispatch`].
     ///
     /// That the outer frames are *left* rather than unwound is the whole
     /// reason this is another turn of the loop rather than a jump: the
@@ -3281,18 +2441,13 @@ impl<'a> Machine<'a> {
             );
             held += width;
         }
+        // The one other place a dispatch loop is entered. `Machine::run`'s
+        // way back in is `drive`, and this is the other; both read the same
+        // encoding, because a host that calls back into a run must find
+        // itself in the run it called out of.
+        let code = self.code()?;
         self.reentry_depth += 1;
-        // The same choice `Machine::drive` makes, at the one other place a
-        // dispatch loop is entered. A callback runs on the representation the
-        // run was built for: a host that calls back into an encoded run must
-        // not find itself executing the enum, or the run would be half one
-        // path and half the other and no measurement of either would mean
-        // anything. `Machine::run`'s way back in is `drive`, and this is the
-        // other.
-        let answer = match self.encoded.clone() {
-            Some(code) => encoded::dispatch(self, &code, budget, threads, running, floor),
-            None => self.dispatch(budget, threads, running, floor),
-        };
+        let answer = encoded::dispatch(self, &code, budget, threads, running, floor);
         self.reentry_depth -= 1;
         answer
     }
@@ -3368,7 +2523,7 @@ impl<'a> Machine<'a> {
 ///
 /// A host that was handed a Cove callback calls it through this. The callback
 /// is an ordinary frame of this machine — [`Machine::call_from_host`] pushes
-/// it exactly as [`Inst::CallClosure`] would — and the difference from a call
+/// it exactly as [`cove_ir::Inst::CallClosure`] would — and the difference from a call
 /// the loop made is only in who is waiting for it: a Rust frame rather than
 /// an instruction. So it holds the machine mutably, which is what makes the
 /// rest of [`Reentry`]'s contract true rather than merely stated. There can
@@ -3403,7 +2558,7 @@ impl<'a> Machine<'a> {
 /// leaves is that one thing is no longer bounded by the stack region: between
 /// the callback's frame and the frame that called the host sit
 /// `HostRegistry::dispatch`, however much native stack the host itself uses,
-/// and one more turn of [`Machine::dispatch`]. That is exactly the situation
+/// and one more turn of [`encoded::dispatch`]. That is exactly the situation
 /// [`crate::interp::MAX_REENTRY_DEPTH`] was calibrated for, in the oracle,
 /// where its documentation says the depth limit's promise *"holds for Cove
 /// calling Cove and stops holding exactly where a third party controls the
@@ -3565,7 +2720,7 @@ fn run_task(
     answer: u64,
     span: Span,
     debugger: Option<&(dyn Debugger + Send + Sync)>,
-    encoded: Option<Arc<cove_ir::bytecode::Encoded>>,
+    encoded: Arc<cove_ir::bytecode::Encoded>,
 ) -> Outcome {
     let mut machine = Machine::for_task(
         program,
@@ -3575,11 +2730,9 @@ fn run_task(
         segment,
         cancellation.clone(),
         id,
+        encoded,
     );
     machine.watch(debugger);
-    if let Some(code) = encoded {
-        machine.execute_encoded(code);
-    }
     let started = Instant::now();
     let result = machine.enter_closure(closure, &budget, span);
     if !(result.is_err() && cancellation.is_cancelled()) {
@@ -3746,7 +2899,9 @@ fn no_segment_left() -> RuntimeError {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use cove_ir::{Arg, ArgsId, Capture, Function, Layout, RefMap, Table, TableId};
+    use cove_ir::{
+        Arg, ArgsId, Capture, Compare, Function, Inst, Layout, Len, Num, RefMap, Table, TableId,
+    };
     use std::sync::Arc;
 
     /// Builds a program by hand.
@@ -3993,7 +3148,7 @@ pub(crate) mod tests {
     /// this is the general shape of a result and [`run`] is the common case
     /// of it. A fixture that answers a `Point` reads two words here rather
     /// than one address naming two words somewhere else.
-    fn run_words(
+    pub(crate) fn run_words(
         program: &Program,
         entry: FunctionId,
         args: &[u64],
@@ -7657,7 +6812,7 @@ pub(crate) mod tests {
     /// whole of the depth question — but a *host* callback is not Cove
     /// calling Cove: the host is already a Rust frame, and running its
     /// callback puts `HostRegistry::dispatch`, the host's own frames, and
-    /// another turn of `Machine::dispatch` under every Cove frame the
+    /// another turn of `encoded::dispatch` under every Cove frame the
     /// callback makes. So the bound is the oracle's `MAX_REENTRY_DEPTH`,
     /// which exists for exactly that.
     #[test]

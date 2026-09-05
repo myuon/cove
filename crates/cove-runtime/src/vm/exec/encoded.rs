@@ -3,83 +3,87 @@
 //!
 //! [ADR 0041](../../../../../docs/adr/0041-a-slot-number-fits-in-sixteen-bits.md)
 //! decided the sixteen-byte instruction and `cove_ir::bytecode` built the
-//! encoder, the decoder, the verifier and the disassembly. Phase 3 ran the
-//! fourteen opcodes the `arith` benchmark reaches. This is
-//! [issue #245](https://github.com/myuon/cove/issues/245)'s **Phase 4**: every
-//! one of the hundred opcodes ADR 0041 defines, so that the complete
-//! differential corpus runs here and is compared against the oracle the way
-//! `crates/cove-cli/tests/differential.rs` compares the enum path.
+//! encoder, the decoder, the verifier and the disassembly. This is
+//! [issue #245](https://github.com/myuon/cove/issues/245)'s **Phase 5**:
+//! **the only loop**. The `Inst` loop that stood beside it through Phases 3
+//! and 4 is deleted, `Vm::new` encodes and verifies before it hands back a
+//! machine, and there is no flag, no constructor and no fallback that
+//! selects a second representation, because there is no second
+//! representation to select.
 //!
-//! # Why this is a file of its own
+//! # What runs, and what `Inst` is now for
 //!
-//! `ad5f160` measured something this crate now builds around. Writing the
-//! debugger's question inline in [`Machine::dispatch`] cost **4.3% on
-//! `arith`** — code that never ran when no debugger was installed — and
-//! [`Machine::ask`] is `#[inline(never)]` because of it. The dispatch body's
-//! footprint and its branch-target alignment are costs every program pays,
-//! whether or not the added code is reached.
+//! ```text
+//! checked AST -> lowering -> cove_ir::Inst -> encoder -> bytecode -> verify once -> here
+//! ```
 //!
-//! A second dispatch loop is a great deal more than a `Stop` and an indirect
-//! call. So it is not inside the first one, not reachable from inside it, and
-//! not in the same function: [`dispatch`] is a free function in a module of
-//! its own, and [`Machine::drive`] chooses between the two **once per run**,
-//! before either loop starts. There is no per-instruction test anywhere that
-//! asks which representation is executing, because there is nothing for such
-//! a test to decide.
+//! `Inst` is the compiler's vocabulary and stays exactly as it was: the
+//! lowering builds it, `cove_ir::print` renders it, the optimiser and the
+//! tests read it, `cove_ir::verify` checks it, and `cove debug` shows it as
+//! the lowered IR beside the source. What changed at the cutover is that
+//! nothing *executes* it.
+//!
+//! # Why it is still a file of its own
+//!
+//! `ad5f160` measured something this crate is built around. Writing the
+//! debugger's question inline in the loop cost **4.3% on `arith`** — code
+//! that never ran when no debugger was installed — and [`Machine::ask`] is
+//! `#[inline(never)]` because of it. The dispatch body's footprint and its
+//! branch-target alignment are costs every program pays, whether or not the
+//! added code is reached. Phase 4 measured the same thing an order of
+//! magnitude larger: growing this loop from fourteen opcodes to a hundred
+//! cost 22.7% on `arith` *in the fourteen it already had*.
+//!
+//! So the loop keeps a module to itself, and the rule that comes with it is
+//! not about tidiness: **nothing whose cost a program does not pay belongs
+//! inside `dispatch`.** [`open_frame`] and [`Machine::ask`] are out of line
+//! for that reason and measured to be.
 //!
 //! It is a *child* module of [`super`] rather than a sibling, which is what
 //! lets it read `Machine`'s private fields without widening them to the
-//! crate. A second loop over the same machine is exactly as privileged as the
-//! first; making the machine's state `pub(crate)` to allow it would have
-//! handed that privilege to everything else as well.
+//! crate. The loop over the machine is exactly as privileged as the machine;
+//! making its state `pub(crate)` would have handed that privilege to
+//! everything else as well.
 //!
-//! # What it covers, and what a refusal looks like
+//! # Verified once, then trusted
 //!
-//! Every opcode. [`implemented`] is an *exhaustive* match rather than a list,
-//! so an opcode added to [`Op`] is a compile error here rather than a program
-//! refused at run time — which is the form the scaffolding takes once the
-//! list is complete.
+//! [`prepare`] encodes, verifies, and then walks every instruction of every
+//! function before a machine exists, and it **refuses the program** rather
+//! than handing it back. That is what lets the loop below read `held.a()` as
+//! a frame slot without a bound, and `held.lo()` as a `LayoutId` without a
+//! table lookup that could fail.
 //!
-//! [`prepare`] still encodes, verifies, and then walks every instruction of
-//! every function before the run begins, and it still **refuses the program**
-//! rather than handing it back. Nothing in the corpus reaches that refusal
-//! today; it stays because "cannot happen" and "does not exist" are different
-//! claims, and because a byte that names no opcode is still a byte a loader
-//! could one day produce.
+//! Nothing in the corpus reaches either refusal. They stay because "cannot
+//! happen" and "does not exist" are different claims: [`implemented`] is an
+//! *exhaustive* match, so an opcode added to [`Op`] is a compile error here
+//! rather than a program that runs the wrong instruction, and a byte that
+//! names no opcode is still a byte a loader could one day produce.
 //!
-//! There is deliberately **no fallback to [`Machine::dispatch`]**. A quiet
-//! hand-back would make the measurement meaningless — a run that reported the
-//! encoded path's wall time while executing the enum's — and would make
-//! issue #245's Phase 5 unverifiable, since "no silent fallback to enum
-//! execution" cannot be checked against a path that silently falls back.
+//! There is **no fallback**. There is nothing to fall back to, which is the
+//! form issue #245's *"no silent fallback to enum execution"* takes once the
+//! enum execution is gone — but the refusal is still a refusal and not a
+//! quiet hand-back, because a program this machine cannot execute must stop
+//! before it has done anything rather than partway through.
 //!
 //! # It is the same machine
 //!
 //! Nothing here is a second implementation of anything a program can
 //! observe. The fuel accounting, the safepoint, the debugger question, the
-//! collector poll and the span lookup are the lines [`Machine::dispatch`]
-//! runs, in the same order; the arithmetic is [`super::int_arith`],
-//! [`super::float_arith`] and [`super::compare`], the same functions; a call
-//! pushes [`super::Frame`] onto the same stack, a host call is
-//! [`Machine::call_host`], a spawn is [`Machine::spawn`], and a scope is left
-//! by [`Machine::leave_scope`]. **One encoded instruction is one instruction
-//! and one unit of fuel**, exactly as the enum's, which is what makes a
-//! `fuel_spent` comparison between the two an equivalence check rather than
-//! a coincidence.
-//!
-//! That sameness is the whole of what Phase 4 had to establish, and it is
-//! stronger than agreeing on answers. A `spawn` here must leave the *same*
-//! child in `Machine::children`, at the same index, with the same answer
-//! object rooted by the same table; a `scope.leave` must join the same
-//! threads in the same order; a failure must leave the frames, the cells and
-//! the scopes in the state a host that catches it will find. None of that is
-//! re-decided here — every one of those is a call into the method
-//! [`Machine::dispatch`] calls, with the operands read out of sixteen bytes
-//! instead of out of an enum.
+//! collector poll and the span lookup are [`Machine`]'s own lines in
+//! [`Machine`]'s own order; the arithmetic is [`super::int_arith`],
+//! [`super::float_arith`] and [`super::compare`]; a call pushes
+//! [`super::Frame`] onto the stack, a host call is [`Machine::call_host`], a
+//! spawn is [`Machine::spawn`], and a scope is left by
+//! [`Machine::leave_scope`]. **One encoded instruction is one instruction
+//! and one unit of fuel**, which is what
+//! [ADR 0040](../../../../../docs/adr/0040-a-bound-outlives-its-backend.md)'s
+//! bounds are stated in and `crates/cove-runtime/tests/responsiveness.rs`
+//! measures.
 //!
 //! Bytecode pc *is* IR pc — ADR 0041's 1:1 encoding — so `Function::spans`
-//! is indexed by the same number and a failure points at the same place
-//! through both paths without a remapping.
+//! is indexed by the same number, a failure points at the same place without
+//! a remapping, and the debugger's `Local` ranges, `Call::pc` and marked
+//! line all mean what they meant when an `Inst` was what ran.
 
 use std::sync::Arc;
 use std::thread::{Scope, ScopedJoinHandle};
@@ -229,12 +233,11 @@ const ASSERT_FAILED: u8 = Op::AssertFailed.number();
 
 /// Whether [`dispatch`] implements this opcode.
 ///
-/// Exhaustive rather than a `matches!` list, and that is the whole of what
-/// Phase 4 changed about it. While opcodes were missing, a list was the work
-/// list; now that none are, the only useful thing this can be is a *proof
-/// obligation* — a new [`Op`] fails to compile here until someone decides
-/// what the loop does with it, instead of becoming a program refused at run
-/// time. The answer is a constant, so the walk [`prepare`] makes is free.
+/// Exhaustive rather than a `matches!` list, and since the cutover that is
+/// the only useful thing it can be: a *proof obligation*. A new [`Op`] fails
+/// to compile here until somebody decides what the loop does with it,
+/// instead of becoming a program that has no way to run at all. The answer
+/// is a constant, so the walk [`prepare`] makes is free.
 pub(crate) fn implemented(op: Op) -> bool {
     match op {
         Op::ConstUnit
@@ -291,15 +294,16 @@ pub(crate) fn implemented(op: Op) -> bool {
     }
 }
 
-/// `program` in the form [`dispatch`] runs, or why this path will not run it.
+/// `program` in the form [`dispatch`] runs, or why it cannot be run.
 ///
 /// Encode, verify once, then check that every opcode has an implementation —
 /// in that order, because the verifier is what establishes the structural
 /// facts the loop then trusts, and asking whether an opcode is implemented
 /// before knowing it is a real opcode would be asking about a byte.
 ///
-/// Every refusal is raised here, before the run pushes a frame, so a program
-/// this path cannot execute has no observable effect at all rather than
+/// Called once per machine, from `Machine::for_run`, and its answer is kept
+/// there. Every refusal is raised before a run pushes a frame, so a program
+/// this machine cannot execute has no observable effect at all rather than
 /// stopping partway through one.
 pub(crate) fn prepare(program: &Program) -> Result<Arc<Encoded>, RuntimeError> {
     let encoded = encode_program(program).map_err(|too_wide| {
@@ -330,7 +334,7 @@ pub(crate) fn prepare(program: &Program) -> Result<Arc<Encoded>, RuntimeError> {
     Ok(Arc::new(encoded))
 }
 
-/// What an opcode this path does not run is refused with.
+/// What an opcode this loop does not run is refused with.
 ///
 /// It names the operation, the function, the pc and the instruction as the
 /// disassembler renders it, and it points at the source the instruction was
@@ -347,10 +351,10 @@ fn refusal(program: &Program, id: FunctionId, pc: usize, held: EncodedInst) -> R
     ))
     .at(function.span_at(pc))
     .with_rule(
-        "The encoded path implements every opcode ADR 0041 defines and never hands a program back to the readable-IR loop, because a silent fallback would make the comparison between the two meaningless.",
+        "The machine implements every opcode ADR 0041 defines, and there is no second representation to hand a program back to: an instruction with no implementation is a gap in the machine rather than a program it declines.",
     )
     .with_help(format!(
-        "run this program on the ordinary path; the instruction is `{}` at `{}` pc {pc}",
+        "the instruction is `{}` at `{}` pc {pc}",
         disasm::one(program, id, held, pc as u32),
         function.qualified(),
     ))
@@ -422,20 +426,20 @@ fn open_frame(
     Ok(callee_base)
 }
 
-/// The loop, over encoded instructions.
+/// The loop, over encoded instructions. There is one.
 ///
-/// `id`, `base`, `pc` and `code` are locals for the same reason
-/// [`Machine::dispatch`] keeps them as locals, and are written back to the
-/// frame at the same two points: a stop something else reads at, and a
-/// failure.
+/// `id`, `base`, `pc` and `code` are locals rather than fields read through
+/// the top frame on every instruction, and are written back at the two
+/// points where something else looks: a stop, and a failure.
 ///
 /// `threads` and `running` are the thread scope a `spawn` starts children in
-/// and the handles onto them, exactly as they are for the enum loop and for
-/// the same reason: a scoped handle borrows the scope it was started in, so
-/// it cannot be a field of the machine.
+/// and the handles onto them. They are parameters rather than fields of the
+/// machine because a scoped handle borrows the scope it was started in, so
+/// it cannot outlive [`Machine::drive`].
 ///
-/// `floor` is [`Machine::dispatch`]'s: the frame depth this turn of the loop
-/// was entered at, which a `return` below is what ends it.
+/// `floor` is the frame depth this turn of the loop was entered at, which a
+/// `return` below is what ends it — one loop serves both a whole run and a
+/// host's callback into the middle of one.
 pub(super) fn dispatch<'s, 'a>(
     machine: &mut Machine<'a>,
     encoded: &Encoded,
@@ -510,9 +514,9 @@ pub(super) fn dispatch<'s, 'a>(
 
         // The operator is a constant at each call site, which is the whole
         // point of one opcode per concrete operation: `int_arith`,
-        // `float_arith` and `compare` are the enum path's own functions, so
-        // nothing can drift, and their inner `match` folds away because the
-        // operator is known.
+        // `float_arith` and `compare` are the machine's own functions, shared
+        // with everything else that does arithmetic, and their inner `match`
+        // folds away because the operator is known.
         macro_rules! int_op {
             ($op:expr) => {{
                 let x = machine.mem.slot(base, b!()) as i64;
@@ -676,8 +680,9 @@ pub(super) fn dispatch<'s, 'a>(
             GT_INT => cmp_int!(CmpOp::Gt),
             GE_INT => cmp_int!(CmpOp::Ge),
 
-            // Not `compare` over an `Ordering`: a `NaN` is unordered, and
-            // `f64`'s own operators are what the enum path uses.
+            // Not `compare` over an `Ordering`: a `NaN` is unordered, so
+            // `f64`'s own operators are what answer, which is also what the
+            // tree-walking oracle does.
             EQ_FLOAT => cmp_float!(|x, y| x == y),
             NE_FLOAT => cmp_float!(|x: f64, y: f64| x != y),
             LT_FLOAT => cmp_float!(|x, y| x < y),
@@ -1200,11 +1205,11 @@ pub(super) fn dispatch<'s, 'a>(
                 machine.assertion_failure = Some((machine.span(id, pc - 1), text));
             }
 
-            // [`prepare`] refused every one of these before the run began, so
-            // this cannot happen. It is written out because a loop that
-            // trusted its own precondition silently would be a loop that
-            // executed the wrong instruction when the precondition was one
-            // day widened and this was not.
+            // [`prepare`] refused every one of these before the machine was
+            // built, so this cannot happen. It is written out because a loop
+            // that trusted its own precondition silently would be a loop
+            // that executed the wrong instruction when the precondition was
+            // one day widened and this was not.
             _ => {
                 machine.sync(pc - 1);
                 return Err(refusal(program, id, pc - 1, held));
@@ -1217,50 +1222,26 @@ pub(super) fn dispatch<'s, 'a>(
 mod tests {
     use cove_ir::{Convert as ConvertTo, Inst, Len, Shape};
 
-    use super::super::tests::{budget, Build};
+    use super::super::tests::{run_words, Build};
     use super::*;
-
-    /// Runs a hand-written program on the encoded path.
-    ///
-    /// `Machine::run` reaches `Machine::drive`, which chooses the loop, so
-    /// this is `super::tests::run_words` with one setter added rather than a
-    /// third way of starting a run.
-    fn run_encoded(
-        program: &Program,
-        entry: FunctionId,
-        args: &[u64],
-    ) -> Result<Vec<u64>, RuntimeError> {
-        let code = prepare(program)?;
-        let mut machine = Machine::new(program, 1 << 16);
-        machine.execute_encoded(code);
-        machine.run(entry, args, &budget())
-    }
 
     /// Every opcode ADR 0041 defines has an implementation.
     ///
-    /// The completion condition of issue #245's Phase 4, as one assertion.
-    /// [`implemented`] is exhaustive, so a new opcode cannot compile without
-    /// an answer here — but "the author wrote `true`" and "the loop has an
-    /// arm" are different claims, and the second is what
-    /// `crates/cove-cli/tests/differential.rs` establishes over the corpus.
-    /// The three opcodes the lowering emits nowhere, run.
-    ///
     /// `crates/cove-cli/tests/bytecode_corpus.rs` names sixteen opcodes no
-    /// program in the repository reaches, and three of them —
+    /// program in the repository reaches, and four of them — `addr.elem`,
     /// `Convert(IntToFloat)`, `Convert(FloatToInt)` and `layout.of` — are not
     /// merely absent from the corpus: **the lowering has no site that emits
-    /// them**, so no Cove source can reach them and neither the differential
-    /// harness nor any fixture written in Cove can cover them. `addr.elem` is
-    /// a fourth that the corpus does not reach and `Machine::dispatch`'s own
-    /// tests do.
+    /// three of them**, so no Cove source can reach them and neither the
+    /// differential harness nor any fixture written in Cove can cover them.
     ///
     /// A program written in the IR directly is the only thing that can, which
-    /// is what `super::tests::Build` is for. What it asserts is parity: the
-    /// same hand-written program on both loops answers the same words. An
-    /// instruction that runs on one path and not the other would be exactly
-    /// the kind of gap Phase 5 must not delete the enum path over.
+    /// is what `super::tests::Build` is for. Before the cutover this
+    /// compared the two loops against each other; there is one loop now, so
+    /// what it asserts is the answer itself — a number chosen so that a
+    /// misread of any of the four is a wrong number rather than a discarded
+    /// one.
     #[test]
-    fn the_opcodes_no_cove_source_reaches_run_the_same_on_both_paths() {
+    fn the_opcodes_no_cove_source_reaches_run() {
         let mut build = Build::default();
         let int = build.scalar(Repr::Int);
         let ints = build.layout(
@@ -1339,12 +1320,10 @@ mod tests {
         );
         let program = build.done();
 
-        let enumerated = Machine::new(&program, 1 << 16)
-            .run(entry, &[], &budget())
-            .expect("the fixture runs on the enum path");
-        let encoded = run_encoded(&program, entry, &[]).expect("and on the encoded path");
-        assert_eq!(encoded, enumerated);
-        assert_eq!(encoded, vec![7 + u64::from(ints.0)]);
+        let answer = run_words(&program, entry, &[]).expect("the fixture runs");
+        // Seven, out to `Float` and back, plus the layout the object says it
+        // has: every one of the four opcodes contributes to it.
+        assert_eq!(answer, vec![7 + u64::from(ints.0)]);
     }
 
     #[test]
@@ -1355,7 +1334,7 @@ mod tests {
             .collect();
         assert!(
             missing.is_empty(),
-            "the encoded path refuses {} of the {} opcodes: {missing:?}",
+            "the machine refuses {} of the {} opcodes: {missing:?}",
             missing.len(),
             Op::all().len(),
         );

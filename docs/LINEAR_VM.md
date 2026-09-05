@@ -2,10 +2,11 @@
 
 This is the design [ADR 0034](adr/0034-one-physical-word-stack.md) decides,
 written out at the level an implementer needs. It describes `cove-ir` — the
-executable IR — and `cove_runtime::vm` — the virtual machine that runs it.
-"Linear" in this document's title and filename describes the memory model,
-not the IR, which is a register IR; the crate and the module carry the plain
-names, since there is nothing left to distinguish them from.
+register IR the checker lowers to, and the fixed-width encoding of it that is
+executed — and `cove_runtime::vm`, the virtual machine that runs the
+encoding. "Linear" in this document's title and filename describes the memory
+model, not the IR, which is a register IR; the crate and the module carry the
+plain names, since there is nothing left to distinguish them from.
 
 It is a clean-room design. Nothing here was derived from the predecessor,
 which held the names `cove-ir`, `Vm` and `FrameVm` before this one did, and
@@ -375,6 +376,133 @@ Two consequences are worth naming, because they are the reason to prefer it:
   caller's ends, so the caller copies each argument's words into the callee's
   frame before transferring control. Nothing is pushed, permuted or copied
   afterwards.
+
+## The machine executes bytecode; `Inst` is the compiler's vocabulary
+
+There are two forms of the IR and only one of them runs.
+
+~~~text
+checked AST
+    ↓ lowering
+cove_ir::Inst          the compiler's representation
+    ↓ encoder
+fixed-width bytecode   16 bytes an instruction
+    ↓ verify once
+cove_runtime::vm       the machine, which matches on nothing else
+~~~
+
+`Inst` is a Rust enum of forty-nine variants and it is what the *compiler*
+speaks. The lowering builds it, `cove_ir::print` renders it, `cove_ir::verify`
+checks it, a test asserts on it, a diagnostic points through its `spans`, and
+`cove debug` and the browser playground show it as the lowered IR beside the
+source. None of that changed at the cutover, and none of it is going to: an
+enum with named fields is the right thing for code that is being *written*,
+because a reader of `Inst::LoadField { dst, obj, at, layout }` does not have
+to know which sixteen bits hold what.
+
+What runs is the other form. [ADR 0041](adr/0041-a-slot-number-fits-in-sixteen-bits.md)
+gives it: one opcode byte, one reserved `flags` byte, three sixteen-bit
+fields that are **always frame slots**, and one sixty-four-bit payload that is
+everything else — sixteen bytes, four to a cache line, and the byte offset of
+instruction `pc` is `pc << 4`. `cove_ir::bytecode` is the encoder, the
+decoder, the verifier and the disassembly; `cove_runtime::vm::exec::encoded`
+is the dispatch loop, and it is the only one. `Vm::new` encodes and verifies
+before it hands back a machine.
+
+Three properties are what the split is for.
+
+- **The encoding is 1:1, so a bytecode pc *is* an IR pc.** One `Inst` is one
+  sixteen-byte instruction, always. That is not an accident of the current
+  instruction set; it is a constraint on every future one, and it is what
+  keeps `Function::spans` a parallel array indexed by pc, `Table::targets` a
+  list of pcs, a debugger's `Local` live ranges a range of pcs, and the
+  disassembler `decode()` composed with `cove_ir::print` rather than a second
+  renderer that could disagree with the first. A failure reports the same
+  span through the machine that the tree-walking oracle reports from the
+  same source, and `crates/cove-runtime/tests/encoded.rs` is where that is
+  asserted rather than assumed.
+- **Verified once, then trusted.** The verifier runs over the whole program
+  before the first instruction does, and it is safe against arbitrary bytes
+  rather than only against this encoder's output. What it buys the loop is
+  the right to read `a()` as a frame slot without a bound and `lo()` as a
+  `LayoutId` without a lookup that could fail.
+- **One instruction is one instruction.** One encoded instruction is one unit
+  of fuel and one step of `SAFEPOINT_STRIDE`, which is what lets
+  [ADR 0040](adr/0040-a-bound-outlives-its-backend.md) state a stop's bounds
+  in instructions and `responsiveness.rs` measure them.
+
+### The frame limit the width costs
+
+A slot operand is sixteen bits, so one function's frame may hold at most
+65,536 words. ADR 0041 adopts that as an explicit compiler limit rather than
+a truncation: `cove_ir::lower` refuses a wider frame with a diagnostic at the
+declaration. It is a limit on one *function*, at compile time, and is not the
+run's stack budget, which bounds one whole task at `SEGMENT_WORDS` and is
+answered by `Memory::push_frame`. The largest frame in the repository is 122
+words.
+
+### What this is not, and what it did not buy
+
+**It is not a compatibility surface.** There is no stable on-disk bytecode,
+no cross-version guarantee, no public ABI and no opcode-number stability: the
+numbers are positions in a generated table and move when the table does.
+Nothing may come to depend on a byte.
+
+**It is not faster, and it was not adopted for speed.** The measurement is on
+the record: the encoding cost +1.9% on a 1.3-billion-instruction program and
++0.3% (noise) on a 44-million-instruction one. [PHILOSOPHY.md](PHILOSOPHY.md)
+allows that trade — a small measured slowdown may buy simplicity, correctness or
+maintainability, where a change of *performance class* may not — and this is
+not a class change. What it bought is 33% less static code for the corpus's
+instructions, a canonical form with exactly one encoding per instruction, and
+a loop that trusts its operands because something else already checked them.
+
+Phase 3 of the work measured the encoding 15.6% *faster* and that number was
+wrong about its own cause: it was a fourteen-opcode dispatch body, and the
+same encoding with all hundred opcodes lost the win and went the other way.
+The mechanism is worth carrying forward as a fact about this machine rather
+than about this encoding: **the loop's own body charges for code that never
+runs.** Growing it from 10 KB to 36 KB cost 22.7% on `arith` in the fourteen
+opcodes it already had, and writing the debugger's question inline in it cost
+4.3%. That is why `Machine::ask` and `open_frame` are `#[inline(never)]` and
+why nothing whose cost a program does not pay belongs inside `dispatch`.
+
+**The neighbourhood is the function body, not the binary**, and the cutover
+is what measured the difference. Deleting the enum loop removed 24,128 bytes
+of machine code from the same crate and **recovered nothing**: `arith`
++0.11%, `cq revenue-summary` +0.02%, both inside a base-to-base drift of
+0.7%. The two loops were 296 KB apart in the binary and neither was ever
+inlined into the other, so the deleted code shared no instruction cache and
+no branch-predictor state with the loop that runs.
+`docs/VM_ARCHITECTURE.md` records it in full, beside the case that runs the
+other way.
+
+### What was rejected
+
+- **Keeping both loops, behind a flag.** Not for speed — the measurement
+  above says a second loop 296 KB away costs the first one nothing. For what
+  a second loop costs *people*: every instruction's semantics stated twice
+  and kept in step by hand, every bug report and every measurement having to
+  answer "which one ran?", and a differential harness comparing three things
+  where two would do. There is one loop, chosen by nothing.
+- **A silent fallback to enum execution.** A path that could quietly hand a
+  program back would make "the machine executes bytecode" unfalsifiable. A
+  program with no encoding is *refused*, before a frame is pushed, naming the
+  instruction — and after the cutover there is nothing to fall back to, which
+  is the strongest form the rule can take.
+- **Retaining a 32-bit slot and a wider instruction.** Four `u32` operands
+  and an opcode do not fit in sixteen bytes, so keeping `Slot = u32` in the
+  encoding meant 24 or 32 bytes an instruction. ADR 0041 measured every frame
+  the repository lowers — 1,223 functions, largest 122 words, 537 times under
+  the cap — and took the narrower instruction and the compile-time refusal.
+- **Making `Inst` itself the fixed-width form.** That would have bought one
+  representation at the price of the readable one, and the readable one is
+  what the lowering, the optimiser, the tests, the diagnostics and the
+  debugger are all written in.
+- **A variable-width encoding.** Denser, and it costs the property the whole
+  arrangement rests on: with a variable width, a pc is a byte offset and no
+  longer an index into `Function::spans`, so every table above would need a
+  side map and every one of them could be wrong.
 
 ## The calling convention
 

@@ -1,42 +1,43 @@
-//! The encoded execution path, held to the enum path it will one day replace.
+//! What the machine executes, and the four things the encoding promises.
 //!
-//! [Issue #245](https://github.com/myuon/cove/issues/245)'s Phase 3 executed
-//! the `arith` benchmark from
+//! [Issue #245](https://github.com/myuon/cove/issues/245)'s Phase 5 made
 //! [ADR 0041](../../../docs/adr/0041-a-slot-number-fits-in-sixteen-bits.md)'s
-//! fixed-width encoding, and asks for a comparison of *values and errors,
-//! source spans, instruction and fuel counts, and trace/replay*. Each of the
-//! four is a test here rather than a paragraph in a report, because a
-//! paragraph is true of the tree somebody measured and a test is true of the
-//! tree somebody pushed.
+//! fixed-width form the only thing a run executes and deleted the `Inst`
+//! dispatch loop that had stood beside it. Phase 3 asked for a comparison of
+//! *values and errors, source spans, instruction and fuel counts, and
+//! trace/replay*; each of the four is a test here rather than a paragraph in
+//! a report, because a paragraph is true of the tree somebody measured and a
+//! test is true of the tree somebody pushed.
 //!
 //! **The program is the benchmark itself**, `include_str!`d out of
 //! `benches/arith/main.cove` rather than retyped. A copy would agree with the
-//! encoded path about a program the benchmark no longer is.
+//! machine about a program the benchmark no longer is.
 //!
-//! Two of the four are worth saying why they are strong.
+//! # What the four are compared against, now that there is one loop
 //!
-//! `fuel_spent` and `instructions` are asserted *equal*, not merely
-//! plausible. ADR 0041's encoding is 1:1 — one `Inst` is one `EncodedInst` —
-//! so one encoded instruction has to be one instruction and one unit of fuel,
-//! and fourteen million of each agreeing exactly is a check that the two
-//! loops took the same branches at every one of them. A path that folded two
-//! instructions into one, or that charged a safepoint on a different stride,
-//! would be found here and nowhere else in this file.
+//! Through Phase 4 each of these ran the same program on both loops and
+//! compared them. That comparison is gone with the loop, and what replaced
+//! it is not weaker in the place it mattered:
 //!
-//! **Phase 4 ported every family**, and the arbiter for that is
-//! `crates/cove-cli/tests/differential.rs`, which runs the whole corpus on
-//! this path against the tree-walking oracle and compares values, errors,
-//! spans and whole traces. What stays here is what a corpus survey cannot
-//! say: the two paths dispatch the *same number of instructions* and are
-//! charged the same fuel, which is an equivalence between the loops rather
-//! than an agreement about answers.
+//! - **Values, errors and spans** are held to the **tree-walking oracle**,
+//!   which ADR 0034 makes the definition of what a Cove program means. That
+//!   was always the stronger comparison — two loops agreeing with each other
+//!   and not with the language would have passed the old one — and
+//!   `crates/cove-cli/tests/differential.rs` applies it to the whole corpus.
+//! - **Instruction and fuel counts** are held to *each other* and to a
+//!   pinned figure. `fuel_spent` and `instructions` are asserted **equal**,
+//!   not merely plausible: ADR 0041's encoding is 1:1, so one encoded
+//!   instruction has to be one instruction and one unit of fuel, and
+//!   fourteen million of each agreeing exactly is what
+//!   [ADR 0040](../../../docs/adr/0040-a-bound-outlives-its-backend.md)'s
+//!   bounds are stated in. The oracle cannot answer this — it counts no
+//!   instructions — so the number itself is pinned, and a lowering change
+//!   that halved the work has to say so here.
 //!
 //! The span test is the one the encoding's whole 1:1 argument rests on.
-//! `Function::spans` is a parallel array indexed by pc and neither loop
-//! carries a span in the instruction, so "bytecode pc is IR pc" is only true
-//! if a failure reports the same span through both. It is asserted on a
-//! program built to fail, because `arith` succeeds and a passing program
-//! reads no span at all.
+//! `Function::spans` is a parallel array indexed by pc and no instruction
+//! carries a span, so "bytecode pc is IR pc" is only true if a failure in the
+//! machine reports the span the oracle reports from the same source.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -45,6 +46,7 @@ use std::sync::{Arc, Mutex};
 use cove_diag::SourceMap;
 use cove_ir::bytecode::Op;
 use cove_ir::{CmpOp, Compare};
+use cove_runtime::interp::Interpreter;
 use cove_runtime::trace::{TraceEvent, TraceSink};
 use cove_runtime::{Budget, Grants, HostRegistry, Limits, Runtime, RuntimeError, Value, Vm};
 use cove_sema::package::{Module, Package, Unit};
@@ -53,12 +55,12 @@ use cove_sema::Compiler;
 /// The benchmark, as the benchmark. See this file's own docs.
 const ARITH: &str = include_str!("../../../benches/arith/main.cove");
 
-/// A program that fails at an instruction both paths run.
+/// A program that fails at a known instruction.
 ///
-/// `i += 1` on `Int`'s largest value lowers to `add.int.imm`, which is one of
-/// the opcodes the encoded path implements, so both loops reach the same
-/// overflow at the same pc. That is what makes it a span comparison rather
-/// than a comparison of one path's failure with the other's refusal.
+/// `i += 1` on `Int`'s largest value lowers to `add.int.imm`, one instruction
+/// whose span is the whole of what the test reads — small enough that a
+/// disagreement about where the failure happened cannot be a disagreement
+/// about which instruction failed.
 const OVERFLOWS: &str = "\
 export fn main() -> Result<Unit, Error> {
   var i = 9223372036854775807
@@ -69,40 +71,34 @@ export fn main() -> Result<Unit, Error> {
 
 // ------------------------------------------------------- the four comparisons
 
-/// Values and errors: the benchmark answers the same thing.
+/// Values and errors: the benchmark answers what it is meant to.
 #[test]
-fn arith_answers_what_it_answers_on_the_enum_path() {
-    let enumerated = run(ARITH, Path::Enum);
-    let encoded = run(ARITH, Path::Encoded);
-    assert_eq!(described(&encoded.answer), described(&enumerated.answer));
-    assert_eq!(described(&enumerated.answer), "Ok(Ok(()))");
+fn arith_answers_what_the_benchmark_asserts() {
+    let ran = run(ARITH);
+    assert_eq!(described(&ran.answer), "Ok(Ok(()))");
 }
 
-/// Instruction and fuel counts: exactly equal, both of them.
+/// Instruction and fuel counts: exactly equal, and the figure itself.
 #[test]
-fn arith_dispatches_and_is_charged_for_the_same_instructions() {
-    let enumerated = run(ARITH, Path::Enum);
-    let encoded = run(ARITH, Path::Encoded);
-    assert_eq!(encoded.instructions, enumerated.instructions);
-    assert_eq!(encoded.fuel_spent, enumerated.fuel_spent);
-    // One instruction is one unit of fuel on both, which is the accounting
-    // ADR 0024 and the immediate forms of #244 are both stated against. It is
-    // asserted rather than inferred because two equal-but-wrong counters
-    // would satisfy the two lines above.
-    assert_eq!(enumerated.fuel_spent, enumerated.instructions);
-    assert_eq!(encoded.fuel_spent, encoded.instructions);
+fn one_encoded_instruction_is_one_unit_of_fuel() {
+    let ran = run(ARITH);
+    // The accounting ADR 0024 and the immediate forms of #244 are both stated
+    // against. Asserted rather than inferred, because it is the property the
+    // 1:1 encoding has to preserve and nothing else in this crate checks that
+    // an *encoded* instruction costs one.
+    assert_eq!(ran.fuel_spent, ran.instructions);
     // And the figure itself, so that a lowering change that halved the work
-    // is not silently accepted by a test that only compares two paths with
-    // each other.
-    assert_eq!(encoded.instructions, 14_285_740);
+    // is not silently accepted by a test comparing two counters that would
+    // move together.
+    assert_eq!(ran.instructions, 14_285_740);
 }
 
-/// Source spans: a failing program points at the same place through both.
+/// Source spans: a failing program points where the oracle points.
 #[test]
-fn a_failure_points_at_the_same_source_through_both_paths() {
-    let enumerated = run(OVERFLOWS, Path::Enum);
-    let encoded = run(OVERFLOWS, Path::Encoded);
-    let (left, right) = (failure(&enumerated.answer), failure(&encoded.answer));
+fn a_failure_points_at_the_source_the_oracle_points_at() {
+    let ran = run(OVERFLOWS);
+    let oracle = on_the_oracle(OVERFLOWS);
+    let (left, right) = (failure(&oracle), failure(&ran.answer));
     assert_eq!(right.message, left.message);
     assert_eq!(right.message, "`Int` addition overflowed");
     // The span, and not only that there is one: `Function::spans` is indexed
@@ -115,17 +111,14 @@ fn a_failure_points_at_the_same_source_through_both_paths() {
     );
 }
 
-/// Trace and replay: the recording both paths write agrees.
+/// Trace and replay: the recording a run writes.
 #[test]
-fn both_paths_write_the_same_recording() {
-    let enumerated = run(ARITH, Path::Enum);
-    let encoded = run(ARITH, Path::Encoded);
-    assert_eq!(steady(&encoded.events), steady(&enumerated.events));
-    // A trace that agreed because it was empty would prove nothing, so the
-    // shape is pinned as well: an entry entered, an entry left, what the heap
-    // did, and how the run ended.
+fn the_run_writes_the_recording_a_run_writes() {
+    let ran = run(ARITH);
+    // A trace is pinned by shape: an entry entered, an entry left, what the
+    // heap did, and how the run ended.
     assert_eq!(
-        steady(&enumerated.events),
+        steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
@@ -136,15 +129,15 @@ fn both_paths_write_the_same_recording() {
     );
 }
 
-// ------------------------------------------------- the families Phase 4 added
+// ------------------------------------------- families that were once refused
 
-/// The program Phase 3 refused runs, and answers what the enum path answers.
+/// The program Phase 3 refused runs, and answers what the oracle answers.
 ///
 /// `total = total + i` is `add.int`, a slot-operand family Phase 3 did not
 /// implement, and this test asserted the refusal until Phase 4 built it. It is
-/// kept, inverted, because a refusal that becomes an answer is the whole of
-/// what the phase did — and because the program is still the smallest one that
-/// distinguishes the two arithmetic families.
+/// kept, inverted, because a refusal that became an answer is the whole of
+/// what that phase did — and because the program is still the smallest one
+/// that distinguishes the two arithmetic families.
 #[test]
 fn the_family_phase_three_refused_now_runs() {
     let source = "\
@@ -159,24 +152,20 @@ export fn main() -> Result<Unit, Error> {
   Ok(())
 }
 ";
-    assert!(prepared(source, Path::Encoded).is_ok());
-    let enumerated = run(source, Path::Enum);
-    let encoded = run(source, Path::Encoded);
-    assert_eq!(described(&encoded.answer), described(&enumerated.answer));
-    assert_eq!(described(&encoded.answer), "Ok(Ok(()))");
-    assert_eq!(encoded.instructions, enumerated.instructions);
+    let ran = run(source);
+    assert_eq!(described(&ran.answer), described(&on_the_oracle(source)));
+    assert_eq!(described(&ran.answer), "Ok(Ok(()))");
 }
 
-/// The heap, the collector's roots, and a closure call, on both paths.
+/// The heap, the collector's roots, and a closure call.
 ///
 /// One program rather than three, because what is being checked is not that
 /// each instruction works — `differential.rs` runs the whole corpus for that —
 /// but that a run mixing allocation, field access, element access and a
-/// closure call reaches the same *machine state* on both: the same objects
-/// live at the same points, so the same instruction counts and the same
-/// answer.
+/// closure call reaches the answer the oracle reaches, having charged itself
+/// one unit of fuel per instruction while doing it.
 #[test]
-fn the_heap_and_a_closure_agree_on_both_paths() {
+fn the_heap_and_a_closure_answer_what_the_oracle_answers() {
     let source = "\
 struct Point {
   x: Int
@@ -202,18 +191,16 @@ export fn main() -> Result<Unit, Error> {
   Ok(())
 }
 ";
-    let enumerated = run(source, Path::Enum);
-    let encoded = run(source, Path::Encoded);
-    assert_eq!(described(&encoded.answer), described(&enumerated.answer));
-    assert_eq!(described(&encoded.answer), "Ok(Ok(()))");
-    assert_eq!(encoded.instructions, enumerated.instructions);
-    assert_eq!(encoded.fuel_spent, enumerated.fuel_spent);
+    let ran = run(source);
+    assert_eq!(described(&ran.answer), described(&on_the_oracle(source)));
+    assert_eq!(described(&ran.answer), "Ok(Ok(()))");
+    assert_eq!(ran.fuel_spent, ran.instructions);
 }
 
-/// A failure inside a call leaves the same state and points at the same place.
+/// A failure inside a call points at the place the oracle points at.
 ///
 /// The span is the interesting half: the failure happens in a callee, so what
-/// is compared is that both paths kept `pc` truthful across a frame push and
+/// is compared is that the loop kept `pc` truthful across a frame push and
 /// reported the *callee's* span rather than the call site's.
 #[test]
 fn a_failure_inside_a_call_reports_the_same_place_on_both_paths() {
@@ -228,9 +215,9 @@ export fn main() -> Result<Unit, Error> {
   Ok(())
 }
 ";
-    let enumerated = run(source, Path::Enum);
-    let encoded = run(source, Path::Encoded);
-    let (left, right) = (failure(&enumerated.answer), failure(&encoded.answer));
+    let ran = run(source);
+    let oracle = on_the_oracle(source);
+    let (left, right) = (failure(&oracle), failure(&ran.answer));
     assert_eq!(right.message, left.message);
     assert_eq!(right.span, left.span);
     assert!(right.span.is_some(), "a division by zero reports where");
@@ -248,11 +235,11 @@ export fn main() -> Result<Unit, Error> {
 ///
 /// Three of the four are here, with the encoding asserted rather than
 /// assumed: the test lowers the fixture, encodes it, and checks the opcodes
-/// are present before comparing the two paths. Without that it would be a
-/// test that passed whatever the lowering chose to emit. The fourth,
+/// are present before running it. Without that it would be a test that
+/// passed whatever the lowering chose to emit. The fourth,
 /// `Cmp(Identity, Ne)`, has no source form this fixture could reach.
 #[test]
-fn the_comparisons_no_corpus_program_reaches_agree_on_both_paths() {
+fn the_comparisons_no_corpus_program_reaches_run() {
     let source = "\
 export fn main() -> Result<Unit, Error> {
   let a = 1.5
@@ -286,20 +273,12 @@ export fn main() -> Result<Unit, Error> {
         );
     }
 
-    let enumerated = run(source, Path::Enum);
-    let encoded = run(source, Path::Encoded);
-    assert_eq!(described(&encoded.answer), described(&enumerated.answer));
-    assert_eq!(described(&encoded.answer), "Ok(Ok(()))");
-    assert_eq!(encoded.instructions, enumerated.instructions);
+    let ran = run(source);
+    assert_eq!(described(&ran.answer), described(&on_the_oracle(source)));
+    assert_eq!(described(&ran.answer), "Ok(Ok(()))");
 }
 
 // ------------------------------------------------------------------ the harness
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Path {
-    Enum,
-    Encoded,
-}
 
 struct Ran {
     answer: Result<Value, RuntimeError>,
@@ -308,8 +287,8 @@ struct Ran {
     events: Vec<TraceEvent>,
 }
 
-/// What one path made of one program.
-fn run(source: &str, path: Path) -> Ran {
+/// What the machine made of one program.
+fn run(source: &str) -> Ran {
     let (sources, checked) = check(source);
     let lowered = Arc::new(
         cove_ir::lower(&checked, &sources, &cove_sema::HostSchemas::new())
@@ -326,12 +305,7 @@ fn run(source: &str, path: Path) -> Ran {
     )
     .with_trace(Arc::clone(&recorded) as Arc<dyn TraceSink>);
 
-    let mut vm = match path {
-        Path::Enum => Vm::new(&runtime, &hosts, &lowered),
-        Path::Encoded => {
-            Vm::encoded(&runtime, &hosts, &lowered).expect("this program encodes and is covered")
-        }
-    };
+    let mut vm = Vm::new(&runtime, &hosts, &lowered);
     let answer = vm.run_entry("m", "main", Vec::new());
     let instructions = vm.instructions();
     let fuel_spent = hosts
@@ -346,23 +320,26 @@ fn run(source: &str, path: Path) -> Ran {
     }
 }
 
-/// The same setup, stopping at whether the encoded path will take the program.
-fn prepared(source: &str, path: Path) -> Result<(), RuntimeError> {
+/// The same program on the tree-walking oracle, which ADR 0034 makes the
+/// definition of what it means.
+///
+/// The comparison the two loops used to make of each other is made here
+/// instead, against the thing that decides. It is only ever asked about the
+/// small fixtures: the oracle counts no instructions and charges fuel on its
+/// own schedule, so the counts are pinned rather than compared, and running
+/// `arith`'s fourteen million instructions through a tree walker would buy
+/// nothing this file does not already assert.
+fn on_the_oracle(source: &str) -> Result<Value, RuntimeError> {
     let (sources, checked) = check(source);
-    let lowered = Arc::new(
-        cove_ir::lower(&checked, &sources, &cove_sema::HostSchemas::new())
-            .expect("the fixture lowers"),
-    );
-    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let mut hosts = HostRegistry::new(Grants::new(Vec::<&str>::new()));
+    hosts.set_budget(Budget::new(Limits::default()));
+    let hosts = Arc::new(hosts);
     let runtime = Runtime::new(
         Arc::clone(&checked),
         Arc::clone(&sources),
         Arc::clone(&hosts),
     );
-    match path {
-        Path::Enum => Ok(()),
-        Path::Encoded => Vm::encoded(&runtime, &hosts, &lowered).map(|_| ()),
-    }
+    Interpreter::new(&runtime).run_entry("m", "main", Vec::new())
 }
 
 /// Parses and checks `source` as the one module `m`.

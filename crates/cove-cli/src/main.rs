@@ -90,13 +90,11 @@ and how many instructions the run executed — the figure a change to the
 lowering is judged by, because wall time moves for many reasons and that
 moves for one.
 
-`cove run --encoded` runs the entry from the program's fixed-width encoded
-instructions rather than from the readable IR. It is a development flag for
-issue #245's phased bytecode work, not a second backend: the same machine
-runs the same program over the same memory and answers the same thing. The
-encoded path implements every opcode, and the whole differential corpus runs
-on it and agrees with the tree-walking oracle; a program it could not execute
-would be refused by name before the run starts rather than handed back.
+What the backend executes is the program's fixed-width encoding, sixteen
+bytes an instruction, verified once before the run and then trusted. The
+readable IR stays what the compiler and `cove debug` speak, and the encoding
+is 1:1 with it, so a listing, a span and a debugger's line all mean the same
+thing they meant. There is no flag for it: there is one execution form.
 
 `cove test` runs every `test fn` in the package, reports each one, and exits
 non-zero when any failed. `--filter` runs only the tests whose qualified name
@@ -1259,14 +1257,7 @@ pub(crate) fn execute_entry(
     let started = Instant::now();
     let (outcome, memory, instructions) = match lowered.as_ref().map(|l| &l.program) {
         Some(ir) => {
-            // `--encoded` refuses before the run rather than during it, so a
-            // program this path cannot execute stops here having done
-            // nothing — no host call, no file, no output.
-            let mut vm = if flags.encoded {
-                Vm::encoded(&runtime, runtime.hosts(), ir).map_err(ExecuteError::Runtime)?
-            } else {
-                Vm::new(&runtime, runtime.hosts(), ir)
-            };
+            let mut vm = Vm::new(&runtime, runtime.hosts(), ir);
             let outcome = vm.run_entry(module, entry, program_args);
             (
                 outcome,
@@ -1398,21 +1389,6 @@ pub(crate) struct RunFlags {
     /// How much of each host call the trace records.
     trace_values: ValueCapture,
     stats: bool,
-    /// Run the entry from the program's encoded instructions rather than
-    /// from the readable `Inst` IR.
-    ///
-    /// [Issue #245](https://github.com/myuon/cove/issues/245)'s Phase 4, and
-    /// a **development flag** rather than a way to run a program: the
-    /// encoded path executes every opcode, and would refuse one it did not
-    /// by name before the run starts rather than fall back. It is not a
-    /// `--backend` value because it is not a backend — the same machine runs
-    /// the same program over the same memory, and what differs is the
-    /// representation the loop reads. A trace written from it says `vm`,
-    /// because that is what wrote it.
-    ///
-    /// It defaults to false everywhere, including [`RunFlags::none`], so no
-    /// existing command reaches it.
-    encoded: bool,
     /// The one directory the `files` host may reach.
     files_root: Option<PathBuf>,
     /// The executables `process.run` may start. Empty allows none.
@@ -1441,7 +1417,6 @@ impl RunFlags {
             trace: None,
             trace_values: ValueCapture::Full,
             stats: false,
-            encoded: false,
             files_root: None,
             allow_exec: Vec::new(),
             program_args: Vec::new(),
@@ -1626,7 +1601,6 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
         trace: None,
         trace_values: ValueCapture::Full,
         stats: false,
-        encoded: false,
         files_root: None,
         allow_exec: Vec::new(),
         program_args: Vec::new(),
@@ -1697,7 +1671,6 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
                 })?;
             }
             "--stats" => flags.stats = true,
-            "--encoded" => flags.encoded = true,
             "--files-root" => {
                 let value = flag_value(args, &mut i, "--files-root")?;
                 flags.files_root = Some(PathBuf::from(value));
