@@ -129,8 +129,8 @@ fn a_question_mark_on_an_erased_result_answers_the_box() {
         "\
 fn0 m.f() -> Result
   frame 14: s0:int s1:int s2:ref s3:host s4:int s5:ref s6:int s7:bool s8:ref s9:int s10:int s11:ref s12:int s13:int
-  local s -> s3:<host> [1, 20)
-  local v -> s8:Any [12, 20)
+  local s -> s3:<host> [1, 19)
+  local v -> s8:Any [12, 19)
      0  call-host s3:host oracle.open () <host>
      1  call-resource s4:int s3:host oracle.Seat.next () Result
      2  int s6:int 0
@@ -150,9 +150,7 @@ fn0 m.f() -> Result
     16  clear s11:ref <ref>
     17  copy s10:int s13:int Int
     18  copy s0:int s9:int Result
-    19  clear s9:int Result
-    20  clear s8:ref Any
-    21  return s0:int Result
+    19  return s0:int Result
 "
     );
 }
@@ -336,9 +334,9 @@ fn an_annotation_says_what_an_erased_result_was_carrying() {
         "\
 fn0 m.f() -> Result
   frame 12: s0:int s1:int s2:ref s3:host s4:int s5:ref s6:int s7:bool s8:ref s9:int s10:int s11:ref
-  local s -> s3:<host> [1, 18)
-  local bounded -> s4:Result [2, 18)
-  local run -> s6:m.Run [13, 18)
+  local s -> s3:<host> [1, 17)
+  local bounded -> s4:Result [2, 17)
+  local run -> s6:m.Run [13, 17)
      0  call-host s3:host oracle.open () <host>
      1  call-resource s4:int s3:host oracle.Seat.next () Result
      2  int s6:int 0
@@ -356,9 +354,7 @@ fn0 m.f() -> Result
     14  clear s11:ref <ref>
     15  copy s10:int s6:int Int
     16  copy s0:int s9:int Result
-    17  clear s9:int Result
-    18  clear s4:int Result
-    19  return s0:int Result
+    17  return s0:int Result
 "
     );
 }
@@ -427,8 +423,7 @@ fn0 m.f() -> Int
     23  jump 25
     24  trap \"no `match` arm covers this value\"
     25  copy s0:int s4:int Int
-    26  clear s2:int Result
-    27  return s0:int Int
+    26  return s0:int Int
 "
     );
 }

@@ -248,11 +248,10 @@ fn a_bounded_parameter_dispatches_to_its_conformance() {
         "\
 fn4 m.headline<m.Article>(m.Article) -> String
   frame 4: s0!:ref s1!:int s2:ref s3:ref
-  local entry -> s0:m.Article [0, 4)
+  local entry -> s0:m.Article [0, 3)
      0  call s3:ref m.Article.summary (s0:m.Article) String
      1  copy s2:ref s3:ref String
-     2  clear s3:ref String
-     3  return s2:ref String
+     2  return s2:ref String
 "
     );
     assert_eq!(
@@ -260,11 +259,10 @@ fn4 m.headline<m.Article>(m.Article) -> String
         "\
 fn5 m.headline<m.Note>(m.Note) -> String
   frame 3: s0!:ref s1:ref s2:ref
-  local entry -> s0:m.Note [0, 4)
+  local entry -> s0:m.Note [0, 3)
      0  call s2:ref m.Note.summary (s0:m.Note) String
      1  copy s1:ref s2:ref String
-     2  clear s2:ref String
-     3  return s1:ref String
+     2  return s1:ref String
 "
     );
 }

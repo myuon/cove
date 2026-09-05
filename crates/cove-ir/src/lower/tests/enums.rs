@@ -63,8 +63,7 @@ fn0 m.f() -> m.Msg
      0  int s2:int 0
      1  clear s3:ref <ref>
      2  copy s0:int s2:int m.Msg
-     3  clear s2:int m.Msg
-     4  return s0:int m.Msg
+     3  return s0:int m.Msg
 "
     );
 }
@@ -84,14 +83,13 @@ fn the_payload_words_of_two_cases_agree_or_do_not_overlap() {
         "\
 fn0 m.f(Float) -> m.E
   frame 9: s0!:float s1:int s2:int s3:ref s4:float s5:int s6:int s7:ref s8:float
-  local x -> s0:Float [0, 7)
+  local x -> s0:Float [0, 6)
      0  int s5:int 1
      1  clear s6:int Int
      2  clear s7:ref <ref>
      3  copy s8:float s0:float Float
      4  copy s1:int s5:int m.E
-     5  clear s5:int m.E
-     6  return s1:int m.E
+     5  return s1:int m.E
 "
     );
 }
@@ -194,7 +192,7 @@ fn a_question_mark_leaves_through_the_enclosing_function_s_own_failure() {
         "\
 fn0 m.f() -> Result
   frame 12: s0:int s1:int s2:ref s3:int s4:int s5:ref s6:int s7:bool s8:int s9:int s10:ref s11:int
-  local v -> s6:Int [11, 17)
+  local v -> s6:Int [11, 16)
      0  call s3:int m.g () Result
      1  int s6:int 0
      2  eq.int s7:bool s3:int s6:int
@@ -211,8 +209,7 @@ fn0 m.f() -> Result
     13  clear s5:ref <ref>
     14  copy s4:int s11:int Int
     15  copy s0:int s3:int Result
-    16  clear s3:int Result
-    17  return s0:int Result
+    16  return s0:int Result
 "
     );
 }

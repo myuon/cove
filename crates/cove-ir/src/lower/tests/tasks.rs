@@ -169,8 +169,7 @@ fn0 m.f() -> Int
      4  settled s3:task s2:int Int
      5  await s2:int s3:task Int
      6  copy s0:int s2:int Int
-     7  clear s1:ref fn
-     8  return s0:int Int
+     7  return s0:int Int
 "
     );
 }

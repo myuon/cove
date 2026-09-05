@@ -55,7 +55,7 @@ fn a_binding_is_a_copy_of_the_words_it_names() {
         "\
 fn0 m.f(m.Msg) -> String
   frame 5: s0!:int s1!:ref s2:ref s3:ref s4:ref
-  local m -> s0:m.Msg [0, 13)
+  local m -> s0:m.Msg [0, 12)
   local s -> s4:String [2, 3)
      0  switch s0:int [5 1] else 9
      1  copy s4:ref s1:ref String
@@ -68,8 +68,7 @@ fn0 m.f(m.Msg) -> String
      8  jump 10
      9  trap \"no `match` arm covers this value\"
     10  copy s2:ref s3:ref String
-    11  clear s3:ref String
-    12  return s2:ref String
+    11  return s2:ref String
 "
     );
 }
@@ -86,7 +85,7 @@ fn a_match_over_something_that_is_not_an_enum_is_a_chain() {
         "\
 fn0 m.name(Int) -> String
   frame 5: s0!:int s1:ref s2:ref s3:bool s4:ref
-  local n -> s0:Int [0, 20)
+  local n -> s0:Int [0, 19)
      0  eq.int.imm s3:bool s0:int 0
      1  branch-false s3:bool 6
      2  str s4:ref \"zero\"
@@ -105,8 +104,7 @@ fn0 m.name(Int) -> String
     15  jump 17
     16  trap \"no `match` arm covers this value\"
     17  copy s1:ref s2:ref String
-    18  clear s2:ref String
-    19  return s1:ref String
+    18  return s1:ref String
 "
     );
 }

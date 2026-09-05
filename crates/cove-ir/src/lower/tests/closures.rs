@@ -23,8 +23,7 @@ fn0 m.f() -> Int
      3  int s2:int 1
      4  call-closure s3:int s1:ref (s2:Int)
      5  copy s0:int s3:int Int
-     6  clear s1:ref fn
-     7  return s0:int Int
+     6  return s0:int Int
 "
     );
     // The body is an ordinary function whose parameters occupy the frame from
@@ -59,7 +58,7 @@ fn a_capture_is_inline_in_the_environment_at_its_own_width() {
         "\
 fn0 m.f(m.Point) -> Int
   frame 5: s0!:int s1!:int s2:int s3:ref s4:int
-  local p -> s0:m.Point [0, 8)
+  local p -> s0:m.Point [0, 7)
   local g -> s3:fn [4, 6)
      0  alloc s3:ref closure m.f#0<closure>
      1  int s4:int 1
@@ -67,8 +66,7 @@ fn0 m.f(m.Point) -> Int
      3  store-field s3:ref +1 s0:int m.Point
      4  call-closure s4:int s3:ref ()
      5  copy s2:int s4:int Int
-     6  clear s3:ref fn
-     7  return s2:int Int
+     6  return s2:int Int
 "
     );
     assert_eq!(
@@ -106,8 +104,7 @@ fn0 m.f() -> Int
      2  store-field s1:ref +0 s2:int Int
      3  call-closure s2:int s1:ref ()
      4  copy s0:int s2:int Int
-     5  clear s1:ref fn
-     6  return s0:int Int
+     5  return s0:int Int
 "
     );
     assert_eq!(
@@ -147,8 +144,7 @@ fn1 m.f() -> Int
      3  int s2:int 3
      4  call-closure s3:int s1:ref (s2:Int)
      5  copy s0:int s3:int Int
-     6  clear s1:ref fn
-     7  return s0:int Int
+     6  return s0:int Int
 "
     );
 }
@@ -210,7 +206,7 @@ fn a_lambda_inside_a_lambda_is_numbered_after_the_one_that_made_it() {
 fn1 m.f#0() -> Int
   frame 4: s0:int s1:int s2:ref s3:int
   capture n -> s0:Int
-  local n -> s0:Int [0, 8)
+  local n -> s0:Int [0, 7)
   local inner -> s2:fn [4, 6)
      0  alloc s2:ref closure m.f#0#0<closure>
      1  int s3:int 2
@@ -218,8 +214,7 @@ fn1 m.f#0() -> Int
      3  store-field s2:ref +1 s0:int Int
      4  call-closure s3:int s2:ref ()
      5  copy s1:int s3:int Int
-     6  clear s2:ref fn
-     7  return s1:int Int
+     6  return s1:int Int
 "
     );
     assert_eq!(
@@ -254,7 +249,7 @@ fn a_capture_of_a_var_parameter_is_the_value_behind_the_address() {
         "\
 fn0 m.f(<addr>) -> Int
   frame 5: s0!:addr s1:int s2:int s3:ref s4:int
-  local n -> s0:<addr> [0, 9)
+  local n -> s0:<addr> [0, 8)
   local g -> s3:fn [5, 7)
      0  load s2:int s0:addr Int
      1  alloc s3:ref closure m.f#0<closure>
@@ -263,8 +258,7 @@ fn0 m.f(<addr>) -> Int
      4  store-field s3:ref +1 s2:int Int
      5  call-closure s2:int s3:ref ()
      6  copy s1:int s2:int Int
-     7  clear s3:ref fn
-     8  return s1:int Int
+     7  return s1:int Int
 "
     );
     assert_eq!(
@@ -310,8 +304,7 @@ fn0 m.f() -> Int
      3  int s2:int 21
      4  call-closure s3:int s1:ref (s2:Int)
      5  copy s0:int s3:int Int
-     6  clear s1:ref fn
-     7  return s0:int Int
+     6  return s0:int Int
 "
     );
     assert_eq!(

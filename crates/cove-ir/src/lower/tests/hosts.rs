@@ -78,8 +78,7 @@ fn0 m.f() -> Result
      1  call-host s4:int console.println (s3:String) Result
      2  clear s3:ref String
      3  copy s0:int s4:int Result
-     4  clear s4:int Result
-     5  return s0:int Result
+     4  return s0:int Result
 "
     );
 }
@@ -99,7 +98,7 @@ fn the_answer_is_written_into_the_layout_the_schema_declared() {
         "\
 fn0 m.f(String) -> String
   frame 8: s0!:ref s1:ref s2:ref s3:int s4:ref s5:ref s6:int s7:bool
-  local key -> s0:String [0, 13)
+  local key -> s0:String [0, 12)
      0  call-host s3:int env.get (s0:String) Option
      1  str s5:ref \"\"
      2  int s6:int 1
@@ -111,8 +110,7 @@ fn0 m.f(String) -> String
      8  clear s5:ref String
      9  clear s3:int Option
     10  copy s1:ref s2:ref String
-    11  clear s2:ref String
-    12  return s1:ref String
+    11  return s1:ref String
 "
     );
 }
@@ -131,8 +129,7 @@ fn0 m.f() -> Result
      1  call-host s4:int console.println (s3:String) Result
      2  clear s3:ref String
      3  copy s0:int s4:int Result
-     4  clear s4:int Result
-     5  return s0:int Result
+     4  return s0:int Result
 "
     );
 }
@@ -160,8 +157,7 @@ fn0 m.f() -> Result
      1  call-host s4:int files.open (s3:String) Result
      2  clear s3:ref String
      3  copy s0:int s4:int Result
-     4  clear s4:int Result
-     5  return s0:int Result
+     4  return s0:int Result
 "
     );
 }
@@ -221,8 +217,7 @@ fn0 m.f() -> Result
     17  clear s14:ref <ref>
     18  copy s12:int s15:int m.Sink
     19  copy s0:int s11:int Result
-    20  clear s11:int Result
-    21  return s0:int Result
+    20  return s0:int Result
 "
     );
 }
@@ -249,12 +244,11 @@ fn an_operation_of_a_resource_is_addressed_to_the_handle() {
         "\
 fn0 m.f(<host> String) -> Result
   frame 8: s0!:host s1!:ref s2:int s3:unit s4:ref s5:int s6:unit s7:ref
-  local w -> s0:<host> [0, 4)
-  local line -> s1:String [0, 4)
+  local w -> s0:<host> [0, 3)
+  local line -> s1:String [0, 3)
      0  call-resource s5:int s0:host files.Writer.writeLine (s1:String) Result
      1  copy s2:int s5:int Result
-     2  clear s5:int Result
-     3  return s2:int Result
+     2  return s2:int Result
 "
     );
 }
@@ -273,7 +267,7 @@ fn a_resource_operation_reads_its_receiver_out_of_the_frame() {
         "\
 fn0 m.f() -> Result
   frame 17: s0:int s1:unit s2:ref s3:ref s4:int s5:host s6:ref s7:int s8:bool s9:host s10:int s11:unit s12:ref s13:unit s14:int s15:unit s16:ref
-  local reader -> s9:<host> [13, 30)
+  local reader -> s9:<host> [13, 29)
      0  str s3:ref \"a.txt\"
      1  call-host s4:int files.open (s3:String) Result
      2  clear s3:ref String
@@ -303,8 +297,7 @@ fn0 m.f() -> Result
     26  clear s12:ref <ref>
     27  copy s11:unit s13:unit Unit
     28  copy s0:int s10:int Result
-    29  clear s10:int Result
-    30  return s0:int Result
+    29  return s0:int Result
 "
     );
 }
@@ -350,12 +343,11 @@ fn a_resource_an_embedder_s_module_keeps_answers_its_own_operations() {
         "\
 fn0 m.f(<host> ledger.Entry) -> Result
   frame 9: s0!:host s1!:int s2!:ref s3:int s4:unit s5:ref s6:int s7:unit s8:ref
-  local b -> s0:<host> [0, 4)
-  local e -> s1:ledger.Entry [0, 4)
+  local b -> s0:<host> [0, 3)
+  local e -> s1:ledger.Entry [0, 3)
      0  call-resource s6:int s0:host ledger.Book.record (s1:ledger.Entry) Result
      1  copy s3:int s6:int Result
-     2  clear s6:int Result
-     3  return s3:int Result
+     2  return s3:int Result
 "
     );
 }
@@ -388,8 +380,7 @@ fn0 m.f() -> ledger.Entry
      3  copy s5:ref s3:ref String
      4  clear s3:ref String
      5  copy s0:int s4:int ledger.Entry
-     6  clear s4:int ledger.Entry
-     7  return s0:int ledger.Entry
+     6  return s0:int ledger.Entry
 "
     );
 }
@@ -430,8 +421,7 @@ fn0 m.f() -> http.Route
     10  clear s7:ref Any
     11  clear s4:ref String
     12  copy s0:int s8:int http.Route
-    13  clear s8:int http.Route
-    14  return s0:int http.Route
+    13  return s0:int http.Route
 "
     );
 }

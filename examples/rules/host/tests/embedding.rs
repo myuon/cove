@@ -683,6 +683,28 @@ fn a_budget_on_the_registry_is_spent_over_every_invocation() {
 /// registry, a `Runtime` and a backend per request — the 168 allocations of
 /// table rebuilding `examples/rules/README.md` measures, on top of a request
 /// that costs 237.
+/// A pull request too big to evaluate inside one safepoint stride.
+///
+/// A fuel limit is a bound and not a point — ADR 0024, and ADR 0040 for the
+/// arithmetic of this backend — so a run is charged
+/// [`cove_runtime::SAFEPOINT_STRIDE`] instructions at a time and **no** limit,
+/// however small, stops a run that finishes inside the first stride. `req-2`
+/// used to sit a little over that line and sits a little under it since the
+/// lowering stopped emitting the clears a `return` made pointless: the same
+/// program spends less fuel, which is a lowering change moving a bound rather
+/// than a bound being broken.
+///
+/// So the request that is too big for its own limit is built to be too big.
+/// Two hundred files and a hundred labels are several strides of rules,
+/// which puts the case back on the limit and off where one shipped sample
+/// happens to fall.
+fn oversized() -> PullRequest {
+    let mut big = cove_rules::samples()["req-2"].clone();
+    big.files_touched = (0..200).map(|at| format!("src/mod{at}.rs")).collect();
+    big.labels = (0..100).map(|at| format!("label-{at}")).collect();
+    big
+}
+
 #[test]
 fn fuel_handed_to_one_invocation_bounds_that_invocation_alone() {
     let (generous, mean, after) = cove_runtime::on_cove_stack(|| {
@@ -698,8 +720,8 @@ fn fuel_handed_to_one_invocation_bounds_that_invocation_alone() {
         );
         let samples = cove_rules::samples();
         package.serve(Arc::clone(&embed.hosts), Some(&lowering), |session| {
-            let mut each = |limits: Limits, request: &str| {
-                session.evaluate_within(limits, EVALUATE.0, EVALUATE.1, &samples[request])
+            let mut each = |limits: Limits, request: &PullRequest| {
+                session.evaluate_within(limits, EVALUATE.0, EVALUATE.1, request)
             };
             let generous: Vec<Result<Decision, String>> = ["req-2", "req-2", "req-2"]
                 .into_iter()
@@ -709,7 +731,7 @@ fn fuel_handed_to_one_invocation_bounds_that_invocation_alone() {
                             fuel: Some(1_200),
                             ..Limits::default()
                         },
-                        request,
+                        &samples[request],
                     )
                 })
                 .collect();
@@ -718,7 +740,7 @@ fn fuel_handed_to_one_invocation_bounds_that_invocation_alone() {
                     fuel: Some(50),
                     ..Limits::default()
                 },
-                "req-2",
+                &oversized(),
             );
             // And the session still serves, with nothing carried over from
             // the request that ran out.
@@ -727,7 +749,7 @@ fn fuel_handed_to_one_invocation_bounds_that_invocation_alone() {
                     fuel: Some(1_200),
                     ..Limits::default()
                 },
-                "req-3",
+                &samples["req-3"],
             );
             (generous, mean, after)
         })

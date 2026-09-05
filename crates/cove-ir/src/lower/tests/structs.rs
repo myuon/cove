@@ -119,15 +119,14 @@ fn a_struct_holding_a_vector_copies_the_words_and_shares_the_address() {
         "\
 fn0 m.f(m.Wrapper) -> Bool
   frame 9: s0!:int s1!:int s2!:ref s3:bool s4:int s5:int s6:ref s7:int s8:bool
-  local w -> s0:m.Wrapper [0, 7)
+  local w -> s0:m.Wrapper [0, 6)
   local other -> s4:m.Wrapper [1, 5)
      0  copy s4:int s0:int m.Wrapper
      1  int s7:int 7
      2  copy s4:int s7:int Int
      3  eq.identity s8:bool s6:ref s2:ref
      4  copy s3:bool s8:bool Bool
-     5  clear s4:int m.Wrapper
-     6  return s3:bool Bool
+     5  return s3:bool Bool
 "
     );
 }

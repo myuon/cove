@@ -20,7 +20,7 @@ fn an_assertion_is_a_branch_over_the_two_cases_it_answers() {
         "\
 fn0 m.f(Int) -> Result
   frame 11: s0!:int s1:int s2:unit s3:ref s4:int s5:unit s6:ref s7:bool s8:unit s9:ref s10:ref
-  local n -> s0:Int [0, 18)
+  local n -> s0:Int [0, 17)
      0  gt.int.imm s7:bool s0:int 0
      1  branch-false s7:bool 7
      2  unit s8:unit
@@ -37,8 +37,7 @@ fn0 m.f(Int) -> Result
     13  copy s6:ref s10:ref Error
     14  clear s10:ref Error
     15  copy s1:int s4:int Result
-    16  clear s4:int Result
-    17  return s1:int Result
+    16  return s1:int Result
 "
     );
 }

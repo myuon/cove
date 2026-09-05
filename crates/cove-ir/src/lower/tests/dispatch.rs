@@ -23,8 +23,7 @@ fn0 m.f() -> String
      5  call s6:ref m.take (s5:Any) String
      6  clear s5:ref Any
      7  copy s0:ref s6:ref String
-     8  clear s6:ref String
-     9  return s0:ref String
+     8  return s0:ref String
 "
     );
 }
@@ -48,7 +47,7 @@ fn a_dyn_call_switches_on_the_layout_the_box_records() {
         "\
 fn0 m.take(Any) -> String
   frame 7: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:int
-  local v -> s0:Any [0, 13)
+  local v -> s0:Any [0, 12)
      0  load-field s2:int s0:ref +0 Int
      1  switch s2:int [9 9 9 9 9 9 9 9 9 9 9 9 9 2 6] else 9
      2  unbox s4:ref s0:ref m.Name
@@ -60,8 +59,7 @@ fn0 m.take(Any) -> String
      8  jump 10
      9  trap \"no implementation of `Show.show` for this value\"
     10  copy s1:ref s3:ref String
-    11  clear s3:ref String
-    12  return s1:ref String
+    11  return s1:ref String
 "
     );
 }
@@ -84,8 +82,7 @@ fn0 m.mk() -> Any
      3  copy s4:int s2:int Int
      4  box s5:ref s3:int m.Point
      5  copy s0:ref s5:ref Any
-     6  clear s5:ref Any
-     7  return s0:ref Any
+     6  return s0:ref Any
 "
     );
 }
@@ -100,7 +97,7 @@ fn a_dyn_struct_field_holds_the_box() {
         "\
 fn0 m.f() -> String
   frame 7: s0:ref s1:ref s2:ref s3:int s4:ref s5:int s6:int
-  local h -> s2:m.Holder [7, 19)
+  local h -> s2:m.Holder [7, 18)
      0  str s1:ref \"n\"
      1  copy s2:ref s1:ref String
      2  clear s1:ref String
@@ -119,9 +116,7 @@ fn0 m.f() -> String
     15  jump 17
     16  trap \"no implementation of `Show.show` for this value\"
     17  copy s0:ref s1:ref String
-    18  clear s1:ref String
-    19  clear s2:ref m.Holder
-    20  return s0:ref String
+    18  return s0:ref String
 "
     );
 }
@@ -156,15 +151,14 @@ fn a_trait_method_s_default_body_is_lowered_once_per_conforming_type() {
         "\
 fn1 m.Booking.line(m.Booking) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
-  local self -> s0:m.Booking [0, 8)
+  local self -> s0:m.Booking [0, 7)
      0  str s2:ref \"- \"
      1  call s3:ref m.Booking.summarize (s0:m.Booking) String
      2  call-builtin s4:ref String.interpolate (s2:String s3:String) String
      3  clear s3:ref String
      4  clear s2:ref String
      5  copy s1:ref s4:ref String
-     6  clear s4:ref String
-     7  return s1:ref String
+     6  return s1:ref String
 "
     );
     assert_eq!(
@@ -172,15 +166,14 @@ fn1 m.Booking.line(m.Booking) -> String
         "\
 fn3 m.Receipt.line(m.Receipt) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
-  local self -> s0:m.Receipt [0, 8)
+  local self -> s0:m.Receipt [0, 7)
      0  str s2:ref \"- \"
      1  call s3:ref m.Receipt.summarize (s0:m.Receipt) String
      2  call-builtin s4:ref String.interpolate (s2:String s3:String) String
      3  clear s3:ref String
      4  clear s2:ref String
      5  copy s1:ref s4:ref String
-     6  clear s4:ref String
-     7  return s1:ref String
+     6  return s1:ref String
 "
     );
 }
@@ -202,15 +195,14 @@ fn a_conformance_that_writes_its_own_body_does_not_get_the_default() {
         "\
 fn1 m.Receipt.line(m.Receipt) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
-  local self -> s0:m.Receipt [0, 8)
+  local self -> s0:m.Receipt [0, 7)
      0  str s2:ref \"  $ \"
      1  call s3:ref m.Receipt.summarize (s0:m.Receipt) String
      2  call-builtin s4:ref String.interpolate (s2:String s3:String) String
      3  clear s3:ref String
      4  clear s2:ref String
      5  copy s1:ref s4:ref String
-     6  clear s4:ref String
-     7  return s1:ref String
+     6  return s1:ref String
 "
     );
 }

@@ -404,8 +404,7 @@ fn1 m.f() -> Int
      4  call s3:int m.base () Int
      5  call s4:int m.scaled (s2:Int s3:Int) Int
      6  copy s0:int s4:int Int
-     7  clear s1:ref fn
-     8  return s0:int Int
+     7  return s0:int Int
 "
     );
 }

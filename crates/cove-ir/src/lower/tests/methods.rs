@@ -15,13 +15,12 @@ fn a_builtin_method_is_one_call_over_its_operands() {
         "\
 fn0 m.parts(String) -> Array
   frame 4: s0!:ref s1:ref s2:ref s3:ref
-  local s -> s0:String [0, 6)
+  local s -> s0:String [0, 5)
      0  str s2:ref \",\"
      1  call-builtin s3:ref String.split (s0:String s2:String) Array
      2  clear s2:ref String
      3  copy s1:ref s3:ref Array
-     4  clear s3:ref Array
-     5  return s1:ref Array
+     4  return s1:ref Array
 "
     );
 }
@@ -207,7 +206,7 @@ fn map_error_is_a_branch_and_one_call_through_a_closure() {
         "\
 fn0 m.f(String) -> Result
   frame 15: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:ref s7:int s8:int s9:ref s10:ref s11:int s12:int s13:ref s14:bool
-  local t -> s0:String [0, 21)
+  local t -> s0:String [0, 20)
      0  call-builtin s7:int Int.parse (s0:String) Result
      1  alloc s10:ref closure m.f#0<closure>
      2  int s11:int 1
@@ -227,8 +226,7 @@ fn0 m.f(String) -> Result
     16  clear s10:ref fn
     17  clear s7:int Result
     18  copy s1:int s4:int Result
-    19  clear s4:int Result
-    20  return s1:int Result
+    19  return s1:int Result
 "
     );
 }
@@ -250,7 +248,7 @@ fn map_error_passes_the_failure_to_a_callback_that_takes_one() {
         "\
 fn0 m.f(String) -> Result
   frame 15: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:ref s7:int s8:int s9:ref s10:ref s11:int s12:int s13:ref s14:bool
-  local t -> s0:String [0, 20)
+  local t -> s0:String [0, 19)
      0  call-builtin s7:int Int.parse (s0:String) Result
      1  alloc s10:ref closure m.f#0<closure>
      2  int s11:int 1
@@ -269,8 +267,7 @@ fn0 m.f(String) -> Result
     15  clear s10:ref fn
     16  clear s7:int Result
     17  copy s1:int s4:int Result
-    18  clear s4:int Result
-    19  return s1:int Result
+    18  return s1:int Result
 "
     );
 }

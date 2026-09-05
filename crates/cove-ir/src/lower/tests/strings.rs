@@ -13,8 +13,7 @@ fn0 m.hello() -> String
   frame 2: s0:ref s1:ref
      0  str s1:ref \"hello\"
      1  copy s0:ref s1:ref String
-     2  clear s1:ref String
-     3  return s0:ref String
+     2  return s0:ref String
 "
     );
 }
@@ -32,15 +31,14 @@ fn an_interpolation_is_one_builtin_over_the_pieces() {
         "\
 fn0 m.greet(String) -> String
   frame 5: s0!:ref s1:ref s2:ref s3:ref s4:ref
-  local name -> s0:String [0, 8)
+  local name -> s0:String [0, 7)
      0  str s2:ref \"hi \"
      1  str s3:ref \"!\"
      2  call-builtin s4:ref String.interpolate (s2:String s0:String s3:String) String
      3  clear s3:ref String
      4  clear s2:ref String
      5  copy s1:ref s4:ref String
-     6  clear s4:ref String
-     7  return s1:ref String
+     6  return s1:ref String
 "
     );
 }
@@ -63,13 +61,12 @@ fn an_inline_value_crosses_into_an_interpolation_where_it_sits() {
         "\
 fn0 m.show(m.Point) -> String
   frame 5: s0!:int s1!:int s2:ref s3:ref s4:ref
-  local p -> s0:m.Point [0, 6)
+  local p -> s0:m.Point [0, 5)
      0  str s3:ref \"p=\"
      1  call-builtin s4:ref String.interpolate (s3:String s0:m.Point) String
      2  clear s3:ref String
      3  copy s2:ref s4:ref String
-     4  clear s4:ref String
-     5  return s2:ref String
+     4  return s2:ref String
 "
     );
 }

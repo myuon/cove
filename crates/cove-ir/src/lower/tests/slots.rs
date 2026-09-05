@@ -83,9 +83,7 @@ fn0 m.f() -> Int
      9  clear s2:ref String
     10  add.int s1:int s3:int s6:int
     11  copy s0:int s1:int Int
-    12  clear s3:int m.A
-    13  clear s5:ref m.B
-    14  return s0:int Int
+    12  return s0:int Int
 "
     );
 }
@@ -179,8 +177,7 @@ fn0 m.f() -> Int
      3  copy s4:int s2:int Int
      4  clear s1:ref String
      5  copy s0:int s4:int Int
-     6  clear s3:ref m.User
-     7  return s0:int Int
+     6  return s0:int Int
 "
     );
 }

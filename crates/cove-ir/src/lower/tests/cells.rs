@@ -21,8 +21,7 @@ fn0 m.make() -> Shared
      1  alloc s2:ref Shared<shared>
      2  store-field s2:ref +1 s1:int Int
      3  copy s0:ref s2:ref Shared
-     4  clear s2:ref Shared
-     5  return s0:ref Shared
+     4  return s0:ref Shared
 "
     );
 }

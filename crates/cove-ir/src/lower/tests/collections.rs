@@ -22,8 +22,7 @@ fn0 m.xs() -> Array
      8  int s5:int 2
      9  store-elem s4:ref s5:int s3:int Int
     10  copy s0:ref s4:ref Array
-    11  clear s4:ref Array
-    12  return s0:ref Array
+    11  return s0:ref Array
 "
     );
 }
@@ -48,8 +47,7 @@ fn0 m.xs() -> Array
      5  int s1:int 0
      6  store-elem s5:ref s1:int s3:int m.Point
      7  copy s0:ref s5:ref Array
-     8  clear s5:ref Array
-     9  return s0:ref Array
+     8  return s0:ref Array
 "
     );
 }
@@ -355,8 +353,7 @@ fn0 m.v() -> Vector
     10  store-field s5:ref +1 s3:ref <ref>
     11  clear s3:ref <ref>
     12  copy s0:ref s5:ref Vector
-    13  clear s5:ref Vector
-    14  return s0:ref Vector
+    13  return s0:ref Vector
 "
     );
 }
@@ -482,8 +479,7 @@ fn0 m.f() -> Set
      2  int s3:int 2
      3  call-builtin s4:ref Set.of (s1:Int s2:Int s3:Int) Set
      4  copy s0:ref s4:ref Set
-     5  clear s4:ref Set
-     6  return s0:ref Set
+     5  return s0:ref Set
 "
     );
 }
@@ -513,8 +509,7 @@ fn0 m.f() -> Map
      5  call-builtin s1:ref Map.of (s3:MapEntry) Map
      6  clear s3:ref MapEntry
      7  copy s0:ref s1:ref Map
-     8  clear s1:ref Map
-     9  return s0:ref Map
+     8  return s0:ref Map
 "
     );
 }
@@ -551,12 +546,11 @@ fn an_immutable_update_is_the_machine_s_and_answers_a_new_set() {
         "\
 fn0 m.f(Set) -> Set
   frame 4: s0!:ref s1:ref s2:int s3:ref
-  local s -> s0:Set [0, 5)
+  local s -> s0:Set [0, 4)
      0  int s2:int 4
      1  call-builtin s3:ref Set.inserted (s0:Set s2:Int) Set
      2  copy s1:ref s3:ref Set
-     3  clear s3:ref Set
-     4  return s1:ref Set
+     3  return s1:ref Set
 "
     );
 }
@@ -599,11 +593,10 @@ fn a_map_answers_its_keys_as_an_array() {
         "\
 fn0 m.f(Map) -> Array
   frame 3: s0!:ref s1:ref s2:ref
-  local m -> s0:Map [0, 4)
+  local m -> s0:Map [0, 3)
      0  call-builtin s2:ref Map.keys (s0:Map) Array
      1  copy s1:ref s2:ref Array
-     2  clear s2:ref Array
-     3  return s1:ref Array
+     2  return s1:ref Array
 "
     );
 }

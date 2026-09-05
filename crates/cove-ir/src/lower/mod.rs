@@ -76,6 +76,7 @@ mod methods;
 mod pattern;
 mod shapes;
 mod stmt;
+mod tails;
 mod tasks;
 mod walks;
 
@@ -360,10 +361,16 @@ fn emit<'a>(
 
 /// The lowered program, or what stopped it — and the verifier's word that
 /// the first of the two is well formed.
-fn finish(program: Program, errors: Vec<Diagnostic>) -> Result<Program, Vec<Diagnostic>> {
+fn finish(mut program: Program, errors: Vec<Diagnostic>) -> Result<Program, Vec<Diagnostic>> {
     if !errors.is_empty() {
         return Err(only_once(errors));
     }
+
+    // A clear the `return` after it was going to make pointless is dropped
+    // here rather than never emitted, because the emission sites are many and
+    // the condition is about the *code* — what follows an instruction — which
+    // only the finished code can be asked. See `tails`.
+    tails::drop_clears_before_return(&mut program);
 
     // A frame wider than a sixteen-bit slot operand can name is the one thing
     // this lowering refuses about a program it otherwise understood. It is
