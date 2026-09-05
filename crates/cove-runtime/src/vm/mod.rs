@@ -190,6 +190,37 @@ impl<'a> Vm<'a> {
         vm
     }
 
+    /// The same run, executing the program's **encoded** instructions.
+    ///
+    /// [Issue #245](https://github.com/myuon/cove/issues/245)'s Phase 3, and
+    /// [ADR 0041](../../../../docs/adr/0041-a-slot-number-fits-in-sixteen-bits.md)
+    /// is the format. The program is encoded, verified once, and checked
+    /// against what the encoded dispatch loop implements *here*, before the run
+    /// exists — so this answers `Err` for a program the encoded path cannot
+    /// execute, naming the opcode and pointing at its source, and no
+    /// half-run happens.
+    ///
+    /// A third constructor rather than a parameter on [`Vm::new`], which is
+    /// the same shape [`Vm::debugged`] has and for the same reason: a
+    /// question every existing caller would answer the same way is a
+    /// question not worth asking them. **Nothing reaches this by default.**
+    /// `cove run --encoded` is the one way in, and it is a development flag
+    /// for the phase rather than a way to run a program.
+    ///
+    /// What it costs a run built with [`Vm::new`] is nothing, and that is
+    /// measured rather than asserted: the choice is made once, in
+    /// `Machine::drive`, and neither dispatch loop contains a test for it.
+    pub fn encoded(
+        runtime: &'a Runtime,
+        hosts: &'a HostRegistry,
+        program: &'a Program,
+    ) -> Result<Vm<'a>, RuntimeError> {
+        let code = exec::encoded::prepare(program)?;
+        let mut vm = Vm::new(runtime, hosts, program);
+        vm.machine.execute_encoded(code);
+        Ok(vm)
+    }
+
     /// Runs `module.name` with the process arguments `args`.
     ///
     /// An entry takes either no parameters or one `Array<String>`, and that

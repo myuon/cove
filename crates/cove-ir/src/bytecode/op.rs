@@ -316,11 +316,32 @@ fn fields(a: Operand, b: Operand, c: Operand, payload: Payload) -> Fields {
 /// Nothing at all: the field is unused and must be zero.
 const NONE: Operand = Operand::Unused;
 
-/// The position of `wanted` in `held`, as an opcode offset.
-fn index_of<T: PartialEq>(held: &[T], wanted: T) -> u8 {
-    held.iter()
-        .position(|one| *one == wanted)
-        .expect("every member of the enum is in the table it is enumerated by") as u8
+/// The position of `wanted` in the table `held`, as an opcode offset.
+///
+/// A macro rather than a generic function because [`Op::number`] is a
+/// `const fn`, and an opcode number has to be a *constant* to be a `match`
+/// pattern: `crate::bytecode`'s numbers are what the runtime's encoded
+/// dispatch branches on, and a loop that had to call a function to learn
+/// which opcode it was holding would be doing the work the numbering exists
+/// to remove. `Iterator::position` is not const and neither is `PartialEq`,
+/// so this walks the array instead — and it walks *the array*, which keeps
+/// the tables above the only place any of these orders is written down. A
+/// `const fn` per enum would have been the second copy this module's doc
+/// refuses.
+///
+/// The comparison is on the discriminant, which is what `as u8` reads off a
+/// fieldless enum. Every member of an enum is in the table it is enumerated
+/// by, so the walk always stops on one; [`Op::all`] and the tests below are
+/// what hold that true.
+macro_rules! index_of {
+    ($held:ident, $wanted:expr) => {{
+        let wanted = $wanted as u8;
+        let mut at = 0;
+        while at < $held.len() && $held[at] as u8 != wanted {
+            at += 1;
+        }
+        at as u8
+    }};
 }
 
 impl Op {
@@ -396,7 +417,14 @@ impl Op {
     }
 
     /// The byte this opcode is written as.
-    pub fn number(self) -> u8 {
+    ///
+    /// `const`, so that an opcode is usable as a `match` pattern. That is
+    /// what lets the runtime's encoded dispatch name `add.int.imm` by
+    /// writing `Op::ArithImm(ArithOp::Add).number()` instead of a literal,
+    /// and it is why ADR 0041's *"opcode numbers are positions in a
+    /// generated table and move when the table does"* costs nothing outside
+    /// this file.
+    pub const fn number(self) -> u8 {
         match self {
             Op::ConstUnit => base::CONST_UNIT,
             Op::ConstBool => base::CONST_BOOL,
@@ -405,19 +433,19 @@ impl Op {
             Op::Str => base::STR,
             Op::Copy => base::COPY,
             Op::Clear => base::CLEAR,
-            Op::Neg(num) => base::NEG + index_of(&NUMS, num),
+            Op::Neg(num) => base::NEG + index_of!(NUMS, num),
             Op::Arith(num, op) => {
                 base::ARITH
-                    + index_of(&NUMS, num) * ARITH_OPS.len() as u8
-                    + index_of(&ARITH_OPS, op)
+                    + index_of!(NUMS, num) * ARITH_OPS.len() as u8
+                    + index_of!(ARITH_OPS, op)
             }
             Op::Cmp(on, op) => {
-                base::CMP + index_of(&COMPARES, on) * CMP_OPS.len() as u8 + index_of(&CMP_OPS, op)
+                base::CMP + index_of!(COMPARES, on) * CMP_OPS.len() as u8 + index_of!(CMP_OPS, op)
             }
-            Op::ArithImm(op) => base::ARITH_IMM + index_of(&ARITH_OPS, op),
-            Op::CmpImm(op) => base::CMP_IMM + index_of(&CMP_OPS, op),
+            Op::ArithImm(op) => base::ARITH_IMM + index_of!(ARITH_OPS, op),
+            Op::CmpImm(op) => base::CMP_IMM + index_of!(CMP_OPS, op),
             Op::Not => base::NOT,
-            Op::Convert(to) => base::CONVERT + index_of(&CONVERTS, to),
+            Op::Convert(to) => base::CONVERT + index_of!(CONVERTS, to),
             Op::Jump => base::JUMP,
             Op::BranchFalse => base::BRANCH_FALSE,
             Op::Switch => base::SWITCH,

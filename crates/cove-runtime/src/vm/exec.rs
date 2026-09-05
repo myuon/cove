@@ -51,6 +51,19 @@ use crate::wallclock::Instant;
 // round and are converted by the same file.
 use crate::value::Value;
 
+/// The encoded dispatch loop, and the refusal that keeps it honest.
+///
+/// A **child** module rather than a sibling, and that is load-bearing twice.
+/// It reads `Machine`'s private state without widening any of it to the
+/// crate — a second loop over the same machine is exactly as privileged as
+/// this one, and nothing else is. And its code lives nowhere near
+/// [`Machine::dispatch`]'s body: `ad5f160` measured that writing the
+/// debugger's question *into* this loop cost 4.3% on `arith` even though it
+/// never ran, so a whole second loop grown inside it is not a thing to find
+/// out about afterwards. [`Machine::drive`] chooses between the two once per
+/// run, and no instruction of either asks which one is running.
+pub(crate) mod encoded;
+
 /// How many instructions run between two budget checks.
 ///
 /// A budget check reads an atomic and a clock, and doing that per instruction
@@ -521,6 +534,20 @@ pub(crate) struct Machine<'a> {
     /// `Send + Sync`, because a spawned task's machine is handed the same
     /// reference and asks it from its own thread.
     debugger: Option<&'a (dyn Debugger + Send + Sync)>,
+    /// The encoded form of the program, when this run was built to execute
+    /// it, and `None` for every run that was not.
+    ///
+    /// Issue #245's Phase 3. It is read once per [`Machine::drive`] and never
+    /// by an instruction: what it selects is *which loop runs*, not what a
+    /// loop does, so neither loop pays for the other's existence. See
+    /// [`encoded`].
+    ///
+    /// An `Arc` because a run's tasks would share one — and none do yet.
+    /// [`encoded::prepare`] refuses `Op::Spawn`, so no task machine can be
+    /// built on this path, and [`Machine::for_task`] leaves this `None`
+    /// rather than pretending to have propagated it. Phase 4 is where a task
+    /// gets one.
+    encoded: Option<Arc<cove_ir::bytecode::Encoded>>,
 }
 
 impl<'a> Machine<'a> {
@@ -570,6 +597,7 @@ impl<'a> Machine<'a> {
             assertion_failure: None,
             debugger: None,
             next_check: SAFEPOINT_STRIDE,
+            encoded: None,
         }
     }
 
@@ -624,6 +652,7 @@ impl<'a> Machine<'a> {
             assertion_failure: None,
             debugger: None,
             next_check: SAFEPOINT_STRIDE,
+            encoded: None,
         }
     }
 
@@ -658,6 +687,18 @@ impl<'a> Machine<'a> {
     pub(crate) fn watch(&mut self, debugger: Option<&'a (dyn Debugger + Send + Sync)>) {
         self.debugger = debugger;
         self.next_check = self.next_question();
+    }
+
+    /// Runs this machine's program from its encoded form rather than from
+    /// [`Inst`].
+    ///
+    /// A setter beside [`Machine::watch`], and for the same reason it is one:
+    /// nothing that builds a machine has a reason to name a second
+    /// representation, and a parameter every caller passes `None` to is a
+    /// question every caller is asked and none of them answers. `Vm::encoded`
+    /// is the one caller.
+    pub(crate) fn execute_encoded(&mut self, code: Arc<cove_ir::bytecode::Encoded>) {
+        self.encoded = Some(code);
     }
 
     /// The instruction count at which the loop next asks its one question.
@@ -778,6 +819,20 @@ impl<'a> Machine<'a> {
     /// is that path, and on the ordinary one it has nothing to do because
     /// every scope was already left where it was written.
     fn drive(&mut self, budget: &Meter) -> Result<Vec<u64>, RuntimeError> {
+        // The two representations are chosen between here, once per run, and
+        // **before** the thread scope rather than inside it. That placement
+        // is measured rather than tidy. Written as a `match` inside the
+        // closure, so that the closure held two large calls where it had held
+        // one, the *enum* loop measured 1% slower on `field` and 2.5% slower
+        // on `arith` — while an ablation that kept the whole encoded module
+        // in the binary and only removed the choice measured at or below the
+        // base on both. Nothing about a branch taken once per run can cost
+        // that; what changed was how `Machine::dispatch` compiles into this
+        // closure. It is the same lesson `ad5f160` and `Machine::ask` record,
+        // one level up: a phase's flag must not be a cost every program pays.
+        if let Some(code) = self.encoded.clone() {
+            return self.drive_encoded(&code, budget);
+        }
         std::thread::scope(|threads| {
             let mut running: Vec<Option<ScopedJoinHandle<'_, Outcome>>> = Vec::new();
             let answer = self.dispatch(budget, threads, &mut running, 0);
@@ -798,6 +853,37 @@ impl<'a> Machine<'a> {
             self.spend_pending_fuel(budget);
             answer
         })
+    }
+
+    /// [`Machine::drive`], for a run executing encoded instructions.
+    ///
+    /// There is **no thread scope** here, and that is a statement about what
+    /// this phase covers rather than an economy: [`encoded::prepare`] refuses
+    /// `Op::Spawn`, so nothing this loop can dispatch starts a thread and
+    /// there is no child for a scope to bound. Phase 4 is where that changes,
+    /// and the scope comes back with the instruction that needs it.
+    ///
+    /// What is not skipped is the obligation every way out of a body carries:
+    /// the cells go back, and the fuel this thread dispatched and has not
+    /// paid for is handed to the run.
+    /// [ADR 0024](../../../../docs/adr/0024-a-stop-is-a-bound-not-a-point.md)
+    /// says pending fuel is never lost, and a second loop that lost it would
+    /// report a `fuel_spent` below the instructions it dispatched — which is
+    /// exactly what `crates/cove-runtime/tests/encoded.rs` compares.
+    #[inline(never)]
+    fn drive_encoded(
+        &mut self,
+        code: &cove_ir::bytecode::Encoded,
+        budget: &Meter,
+    ) -> Result<Vec<u64>, RuntimeError> {
+        let answer = encoded::dispatch(self, code, budget, 0);
+        debug_assert!(
+            answer.is_err() || self.held.is_empty(),
+            "a body that answered left every cell it took"
+        );
+        self.give_cells_back(0);
+        self.spend_pending_fuel(budget);
+        answer
     }
 
     /// Hands the run's [`Meter`] whatever this thread has dispatched and not
