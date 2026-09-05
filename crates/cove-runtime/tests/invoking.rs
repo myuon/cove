@@ -772,3 +772,171 @@ fn described(answer: Result<Value, RuntimeError>) -> String {
         Err(error) => format!("err {}", error.message),
     }
 }
+
+// -------------------------------------------------- compile once, invoke many
+
+/// A program whose exported function turns heap words into garbage on every
+/// call: `churn` builds a `Vector<Int>` `size` long, sums it, and answers a
+/// scalar, so `v` is unreachable the instant the call returns and nothing
+/// outside this call ever holds it.
+const CHURN_SOURCE: &str = "\
+export struct Batch {
+  base: Int
+  size: Int
+}
+
+/// Builds and abandons a vector every call, so a leak would show up as heap
+/// growth and a correct backend holds flat once the free list catches up.
+export fn churn(batch: Batch) -> Int {
+  var v: Vector<Int> = Vector.of()
+  var total = 0
+  var i = 0
+  while i < batch.size {
+    let value = batch.base + i
+    v.push(value)
+    total += value
+    i += 1
+  }
+  total + v.length()
+}
+";
+
+/// How many times `churn` is invoked, and how large a vector each call builds
+/// and abandons.
+///
+/// `Vector.push` doubles its backing store, so one call's abandoned stores
+/// sum to a few times `CHURN_SIZE` words; over `CHURN_ITERATIONS` calls that
+/// is comfortably past the linear-memory backend's default heap — [`Vm::new`]'s
+/// `DEFAULT_HEAP_WORDS`, `1 << 22` — which is what forces at least one
+/// collection to happen inside this loop rather than none at all. Without
+/// one, a bump allocator never reclaims anything and `heap_words` would grow
+/// on every iteration whether or not the run leaked.
+const CHURN_ITERATIONS: usize = 6_000;
+const CHURN_SIZE: i64 = 1_000;
+
+/// A budget wide enough that no call in the loop below is ever stopped by it.
+///
+/// It has to be a single, fixed number: the point of the test below is that
+/// one invocation's fuel is a stable quantity a host can read once and budget
+/// every future call by, and a limit that itself varied would beg that
+/// question rather than answer it.
+const CHURN_FUEL: u64 = 1_000_000;
+
+/// `Interpreter::invoke`'s doc comment and `Vm`'s module doc both promise
+/// "compile once, invoke many" — an embedder builds one session and calls it
+/// for the length of a process, the way [`Vm::invoke_within`]'s own doc
+/// explains the budget exists for. Nothing shipped ever held one `Vm` open
+/// across many calls and asked whether that promise holds, which is what
+/// this does: one compile, one `Vm`, thousands of `invoke_within` calls into
+/// a function that allocates and discards a vector every time, and three
+/// things a long session must keep true of itself —
+///
+/// - the same arguments answer the same thing every time;
+/// - one invocation costs the same fuel as any other, so a host can budget a
+///   request from a single measurement;
+/// - the heap does not grow once the run has warmed up, even though the
+///   *cumulative* words handed out keeps climbing forever.
+#[test]
+fn a_long_lived_session_answers_and_costs_the_same_across_thousands_of_invocations() {
+    let (sources, package) = packaged(CHURN_SOURCE);
+    let program = match Compiler::new().compile(&package) {
+        Ok(program) => Arc::new(program),
+        Err(items) => panic!(
+            "the fixture checks:\n{}",
+            items
+                .iter()
+                .map(|item| cove_diag::render(&sources, item))
+                .collect::<Vec<_>>()
+                .join("")
+        ),
+    };
+    let sources = Arc::new(sources);
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new()).unwrap_or_else(
+            |items| {
+                panic!(
+                    "the fixture lowers:\n{}",
+                    items
+                        .iter()
+                        .map(|item| cove_diag::render(&sources, item))
+                        .collect::<Vec<_>>()
+                        .join("")
+                )
+            },
+        ),
+    );
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(program.clone(), sources.clone(), hosts.clone());
+    // One `Vm`, held open for every iteration below — the shape an embedder's
+    // session actually has, and the one no other test in this file builds.
+    let mut vm = Vm::new(&runtime, &hosts, &lowered);
+
+    let batch = || {
+        vec![Value::structure(
+            "m.Batch",
+            [("base", Value::int(3)), ("size", Value::int(CHURN_SIZE))],
+        )]
+    };
+
+    let mut answer = None;
+    let mut fuel_per_call = None;
+    let mut heap_after_warm_up = None;
+
+    for i in 0..CHURN_ITERATIONS {
+        let budget = cove_runtime::Budget::new(cove_runtime::Limits {
+            fuel: Some(CHURN_FUEL),
+            ..cove_runtime::Limits::default()
+        });
+        let this_answer = vm
+            .invoke_within(budget, "m", "churn", batch())
+            .unwrap_or_else(|e| panic!("iteration {i}: {}", e.message))
+            .as_int()
+            .expect("`churn` declares -> Int");
+        let this_fuel = hosts
+            .with_budget(|b| b.fuel_spent())
+            .expect("invoke_within installed a budget for this call");
+
+        match answer {
+            None => answer = Some(this_answer),
+            Some(expected) => assert_eq!(
+                this_answer, expected,
+                "iteration {i}: identical arguments answered differently"
+            ),
+        }
+        match fuel_per_call {
+            None => fuel_per_call = Some(this_fuel),
+            Some(expected) => assert_eq!(
+                this_fuel, expected,
+                "iteration {i}: the same call cost a different amount of fuel"
+            ),
+        }
+
+        // Three quarters of the way in, comfortably after the heap has
+        // filled once and the collector this many abandoned vectors forces
+        // has had its first turn.
+        if i == 3 * CHURN_ITERATIONS / 4 {
+            heap_after_warm_up = Some(vm.heap_words());
+        }
+    }
+
+    // `<=` rather than a tolerance: the free list this many abandoned
+    // vectors builds up is large enough that every later call is served from
+    // it, so a correct run measures these two exactly equal — `4_194_291`
+    // words either side of it, for `CHURN_SIZE` and `CHURN_ITERATIONS` as
+    // they stand. A widening ceiling would hide the difference between that
+    // and a slow leak that only shows up after enough iterations.
+    let heap_after_warm_up = heap_after_warm_up.expect("the warm-up mark was taken");
+    let heap_at_end = vm.heap_words();
+    assert!(
+        heap_at_end <= heap_after_warm_up,
+        "live heap grew from {heap_after_warm_up} words after warm-up to {heap_at_end} words \
+         after {CHURN_ITERATIONS} invocations that each abandon their own vector: a long-lived \
+         session is not holding flat"
+    );
+    // What keeps rising for as long as the loop keeps calling: every word
+    // handed out, reuse included, which is the number `heap_words` is not.
+    assert!(
+        vm.allocated_words() > heap_at_end,
+        "cumulative allocation should outrun the heap's own footprint over this many calls"
+    );
+}
