@@ -95,13 +95,12 @@ fn0 m.f() -> Int
   frame 6: s0:int s1:ref s2:ref s3:int s4:int s5:int
      0  str s1:ref \"n\"
      1  call-host s2:ref oracle.ask (s1:String) Any
-     2  clear s1:ref String
-     3  int s3:int 1
-     4  unbox s4:int s2:ref Int
-     5  clear s2:ref Any
-     6  add.int s5:int s4:int s3:int
-     7  copy s0:int s5:int Int
-     8  return s0:int Int
+     2  int s3:int 1
+     3  unbox s4:int s2:ref Int
+     4  clear s2:ref Any
+     5  add.int s5:int s4:int s3:int
+     6  copy s0:int s5:int Int
+     7  return s0:int Int
 "
     );
 }
@@ -129,28 +128,26 @@ fn a_question_mark_on_an_erased_result_answers_the_box() {
         "\
 fn0 m.f() -> Result
   frame 14: s0:int s1:int s2:ref s3:host s4:int s5:ref s6:int s7:bool s8:ref s9:int s10:int s11:ref s12:int s13:int
-  local s -> s3:<host> [1, 19)
-  local v -> s8:Any [12, 19)
+  local s -> s3:<host> [1, 17)
+  local v -> s8:Any [11, 17)
      0  call-host s3:host oracle.open () <host>
      1  call-resource s4:int s3:host oracle.Seat.next () Result
      2  int s6:int 0
      3  eq.int s7:bool s4:int s6:int
      4  branch-false s7:bool 7
      5  copy s8:ref s5:ref Any
-     6  jump 11
+     6  jump 10
      7  int s9:int 1
-     8  clear s10:int Int
-     9  copy s11:ref s5:ref Error
-    10  return s9:int Result
-    11  clear s4:int Result
-    12  int s6:int 2
-    13  unbox s12:int s8:ref Int
-    14  mul.int s13:int s12:int s6:int
-    15  int s9:int 0
-    16  clear s11:ref <ref>
-    17  copy s10:int s13:int Int
-    18  copy s0:int s9:int Result
-    19  return s0:int Result
+     8  copy s11:ref s5:ref Error
+     9  return s9:int Result
+    10  clear s4:int Result
+    11  int s6:int 2
+    12  unbox s12:int s8:ref Int
+    13  mul.int s13:int s12:int s6:int
+    14  int s9:int 0
+    15  copy s10:int s13:int Int
+    16  copy s0:int s9:int Result
+    17  return s0:int Result
 "
     );
 }
@@ -175,12 +172,11 @@ fn0 m.f() -> Int
   frame 5: s0:int s1:ref s2:ref s3:int s4:int
      0  str s1:ref \"n\"
      1  call-host s2:ref oracle.ask (s1:String) Any
-     2  clear s1:ref String
-     3  unbox s3:int s2:ref Int
-     4  clear s2:ref Any
-     5  call s4:int m.g (s3:Int) Int
-     6  copy s0:int s4:int Int
-     7  return s0:int Int
+     2  unbox s3:int s2:ref Int
+     3  clear s2:ref Any
+     4  call s4:int m.g (s3:Int) Int
+     5  copy s0:int s4:int Int
+     6  return s0:int Int
 "
     );
 }
@@ -334,27 +330,25 @@ fn an_annotation_says_what_an_erased_result_was_carrying() {
         "\
 fn0 m.f() -> Result
   frame 12: s0:int s1:int s2:ref s3:host s4:int s5:ref s6:int s7:bool s8:ref s9:int s10:int s11:ref
-  local s -> s3:<host> [1, 17)
-  local bounded -> s4:Result [2, 17)
-  local run -> s6:m.Run [13, 17)
+  local s -> s3:<host> [1, 15)
+  local bounded -> s4:Result [2, 15)
+  local run -> s6:m.Run [12, 15)
      0  call-host s3:host oracle.open () <host>
      1  call-resource s4:int s3:host oracle.Seat.next () Result
      2  int s6:int 0
      3  eq.int s7:bool s4:int s6:int
      4  branch-false s7:bool 7
      5  copy s8:ref s5:ref Any
-     6  jump 11
+     6  jump 10
      7  int s9:int 1
-     8  clear s10:int Int
-     9  copy s11:ref s5:ref Error
-    10  return s9:int Result
-    11  unbox s6:int s8:ref m.Run
-    12  clear s8:ref Any
-    13  int s9:int 0
-    14  clear s11:ref <ref>
-    15  copy s10:int s6:int Int
-    16  copy s0:int s9:int Result
-    17  return s0:int Result
+     8  copy s11:ref s5:ref Error
+     9  return s9:int Result
+    10  unbox s6:int s8:ref m.Run
+    11  clear s8:ref Any
+    12  int s9:int 0
+    13  copy s10:int s6:int Int
+    14  copy s0:int s9:int Result
+    15  return s0:int Result
 "
     );
 }

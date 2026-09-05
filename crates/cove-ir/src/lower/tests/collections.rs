@@ -249,9 +249,9 @@ fn a_break_out_of_a_for_clears_the_element_it_was_holding() {
         "\
 fn0 m.first(Array) -> Int
   frame 12: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:ref s10:unit s11:int
-  local xs -> s0:Array [0, 29)
-  local t -> s2:Int [1, 28)
-  local x -> s8:String [10, 24)
+  local xs -> s0:Array [0, 27)
+  local t -> s2:Int [1, 26)
+  local x -> s8:String [10, 22)
      0  int s2:int 0
      1  copy s3:ref s0:ref Array
      2  len s4:int s3:ref
@@ -260,27 +260,25 @@ fn0 m.first(Array) -> Int
      5  jump 7
      6  add.int s5:int s5:int s6:int
      7  lt.int s7:bool s5:int s4:int
-     8  branch-false s7:bool 26
+     8  branch-false s7:bool 24
      9  load-elem s8:ref s3:ref s5:int String
     10  str s9:ref \"\"
     11  eq.str s7:bool s8:ref s9:ref
-    12  clear s9:ref String
-    13  branch-false s7:bool 16
-    14  clear s8:ref String
-    15  jump 6
-    16  str s9:ref \"q\"
-    17  eq.str s7:bool s8:ref s9:ref
-    18  clear s9:ref String
-    19  branch-false s7:bool 22
-    20  clear s8:ref String
-    21  jump 26
-    22  add.int.imm s11:int s2:int 1
-    23  copy s2:int s11:int Int
-    24  clear s8:ref String
-    25  jump 6
-    26  clear s3:ref Array
-    27  copy s1:int s2:int Int
-    28  return s1:int Int
+    12  branch-false s7:bool 15
+    13  clear s8:ref String
+    14  jump 6
+    15  str s9:ref \"q\"
+    16  eq.str s7:bool s8:ref s9:ref
+    17  branch-false s7:bool 20
+    18  clear s8:ref String
+    19  jump 24
+    20  add.int.imm s11:int s2:int 1
+    21  copy s2:int s11:int Int
+    22  clear s8:ref String
+    23  jump 6
+    24  clear s3:ref Array
+    25  copy s1:int s2:int Int
+    26  return s1:int Int
 "
     );
 }
@@ -370,22 +368,21 @@ fn reading_a_vector_element_is_ordinary_instructions() {
         "\
 fn0 m.head(Vector) -> Option
   frame 10: s0!:ref s1:int s2:int s3:int s4:int s5:ref s6:int s7:int s8:int s9:bool
-  local v -> s0:Vector [0, 15)
+  local v -> s0:Vector [0, 14)
      0  int s3:int 0
      1  load-field s4:int s0:ref +0 Int
      2  load-field s5:ref s0:ref +1 <ref>
      3  int s6:int 0
-     4  clear s7:int Int
-     5  int s8:int 0
-     6  ge.int s9:bool s3:int s8:int
-     7  branch-false s9:bool 12
-     8  lt.int s9:bool s3:int s4:int
-     9  branch-false s9:bool 12
-    10  int s6:int 1
-    11  load-elem s7:int s5:ref s3:int Int
-    12  clear s5:ref <ref>
-    13  copy s1:int s6:int Option
-    14  return s1:int Option
+     4  int s8:int 0
+     5  ge.int s9:bool s3:int s8:int
+     6  branch-false s9:bool 11
+     7  lt.int s9:bool s3:int s4:int
+     8  branch-false s9:bool 11
+     9  int s6:int 1
+    10  load-elem s7:int s5:ref s3:int Int
+    11  clear s5:ref <ref>
+    12  copy s1:int s6:int Option
+    13  return s1:int Option
 "
     );
 }
@@ -505,11 +502,10 @@ fn0 m.f() -> Map
      1  int s2:int 1
      2  copy s3:ref s1:ref String
      3  copy s4:int s2:int Int
-     4  clear s1:ref String
-     5  call-builtin s1:ref Map.of (s3:MapEntry) Map
-     6  clear s3:ref MapEntry
-     7  copy s0:ref s1:ref Map
-     8  return s0:ref Map
+     4  call-builtin s1:ref Map.of (s3:MapEntry) Map
+     5  clear s3:ref MapEntry
+     6  copy s0:ref s1:ref Map
+     7  return s0:ref Map
 "
     );
 }
@@ -570,12 +566,11 @@ fn a_map_lookup_answers_the_option_s_words_rather_than_an_object() {
         "\
 fn0 m.f(Map) -> Option
   frame 6: s0!:ref s1:int s2:int s3:ref s4:int s5:int
-  local m -> s0:Map [0, 5)
+  local m -> s0:Map [0, 4)
      0  str s3:ref \"a\"
      1  call-builtin s4:int Map.get (s0:Map s3:String) Option
-     2  clear s3:ref String
-     3  copy s1:int s4:int Option
-     4  return s1:int Option
+     2  copy s1:int s4:int Option
+     3  return s1:int Option
 "
     );
 }

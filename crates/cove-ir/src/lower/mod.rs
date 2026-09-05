@@ -68,8 +68,10 @@ mod cells;
 mod closures;
 mod collections;
 mod dispatch;
+mod dropping;
 mod expr;
 mod frame;
+mod frees;
 mod gap;
 mod limits;
 mod methods;
@@ -371,6 +373,14 @@ fn finish(mut program: Program, errors: Vec<Diagnostic>) -> Result<Program, Vec<
     // the condition is about the *code* — what follows an instruction — which
     // only the finished code can be asked. See `tails`.
     tails::drop_clears_before_return(&mut program);
+
+    // And a clear that frees nothing at all — because the word it zeroes is
+    // already null, or is an address the machine's interned string table
+    // roots whatever this frame does. Here for the reason above and for one
+    // more: the condition is about a *path* through the finished code, which
+    // is a graph the lowering does not have while it is building one. See
+    // `frees`.
+    frees::drop_clears_that_free_nothing(&mut program);
 
     // A frame wider than a sixteen-bit slot operand can name is the one thing
     // this lowering refuses about a program it otherwise understood. It is

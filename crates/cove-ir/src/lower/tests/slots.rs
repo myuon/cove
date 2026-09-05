@@ -69,21 +69,19 @@ fn a_two_word_location_is_reused_only_by_a_two_word_one_of_the_same_shape() {
         "\
 fn0 m.f() -> Int
   frame 7: s0:int s1:int s2:ref s3:int s4:ref s5:ref s6:int
-  local a -> s3:m.A [5, 12)
-  local b -> s5:m.B [10, 12)
+  local a -> s3:m.A [4, 10)
+  local b -> s5:m.B [8, 10)
      0  int s1:int 1
      1  str s2:ref \"x\"
      2  copy s3:int s1:int Int
      3  copy s4:ref s2:ref String
-     4  clear s2:ref String
-     5  str s2:ref \"y\"
-     6  int s1:int 2
-     7  copy s5:ref s2:ref String
-     8  copy s6:int s1:int Int
-     9  clear s2:ref String
-    10  add.int s1:int s3:int s6:int
-    11  copy s0:int s1:int Int
-    12  return s0:int Int
+     4  str s2:ref \"y\"
+     5  int s1:int 2
+     6  copy s5:ref s2:ref String
+     7  copy s6:int s1:int Int
+     8  add.int s1:int s3:int s6:int
+     9  copy s0:int s1:int Int
+    10  return s0:int Int
 "
     );
 }
@@ -113,25 +111,32 @@ fn0 m.shout(String String) -> Int
 
 /// The map says which slots a collection *reads*; only the data can say
 /// when the value in one stopped being needed.
+///
+/// The string is interpolated rather than written down, because a literal
+/// is interned: `Machine::interned` holds the object for the rest of the
+/// run and `Live::each_root` walks that table, so clearing a slot that
+/// holds one releases nothing and `lower::frees` drops it.
 #[test]
 fn a_local_holding_a_reference_is_cleared_when_its_scope_ends() {
     assert_eq!(
         listing(
-            "fn f() -> Int {\n  var n = 0\n  {\n    let s = \"held\"\n    n = s.length()\n  }\n  n\n}",
+            "fn f(what: String) -> Int {\n  var n = 0\n  {\n    let s = \"{what}!\"\n    n = s.length()\n  }\n  n\n}",
             "f"
         ),
         "\
-fn0 m.f() -> Int
-  frame 4: s0:int s1:int s2:ref s3:int
-  local n -> s1:Int [1, 6)
-  local s -> s2:String [2, 4)
-     0  int s1:int 0
-     1  str s2:ref \"held\"
-     2  call-builtin s3:int String.length (s2:String) Int
-     3  copy s1:int s3:int Int
-     4  clear s2:ref String
-     5  copy s0:int s1:int Int
-     6  return s0:int Int
+fn0 m.f(String) -> Int
+  frame 6: s0!:ref s1:int s2:int s3:ref s4:ref s5:int
+  local what -> s0:String [0, 8)
+  local n -> s2:Int [1, 7)
+  local s -> s4:String [3, 5)
+     0  int s2:int 0
+     1  str s3:ref \"!\"
+     2  call-builtin s4:ref String.interpolate (s0:String s3:String) String
+     3  call-builtin s5:int String.length (s4:String) Int
+     4  copy s2:int s5:int Int
+     5  clear s4:ref String
+     6  copy s1:int s2:int Int
+     7  return s1:int Int
 "
     );
 }
@@ -160,24 +165,31 @@ fn0 m.f() -> Int
 /// `Clear` takes a layout and zeroes the location's words, so a struct
 /// with a string in it is ended by one instruction rather than by one per
 /// field.
+///
+/// The scope is what keeps it: a clear the `return` renders pointless is
+/// dropped by `lower::tails`, and this one is about the instruction rather
+/// than about where it stands.
 #[test]
 fn a_location_with_one_reference_word_among_scalars_is_cleared_whole() {
     assert_eq!(
         listing(
-            "struct User { name: String, age: Int }\nfn f() -> Int {\n  let u = User(name: \"a\", age: 1)\n  u.age\n}",
+            "struct User { name: String, age: Int }\nfn f() -> Int {\n  var n = 0\n  {\n    let u = User(name: \"a\", age: 1)\n    n = u.age\n  }\n  n\n}",
             "f"
         ),
         "\
 fn0 m.f() -> Int
-  frame 5: s0:int s1:ref s2:int s3:ref s4:int
-  local u -> s3:m.User [5, 6)
-     0  str s1:ref \"a\"
-     1  int s2:int 1
-     2  copy s3:ref s1:ref String
-     3  copy s4:int s2:int Int
-     4  clear s1:ref String
-     5  copy s0:int s4:int Int
-     6  return s0:int Int
+  frame 6: s0:int s1:int s2:ref s3:int s4:ref s5:int
+  local n -> s1:Int [1, 8)
+  local u -> s4:m.User [5, 6)
+     0  int s1:int 0
+     1  str s2:ref \"a\"
+     2  int s3:int 1
+     3  copy s4:ref s2:ref String
+     4  copy s5:int s3:int Int
+     5  copy s1:int s5:int Int
+     6  clear s4:ref m.User
+     7  copy s0:int s1:int Int
+     8  return s0:int Int
 "
     );
 }

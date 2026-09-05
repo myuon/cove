@@ -76,9 +76,8 @@ fn0 m.f() -> Result
   frame 7: s0:int s1:unit s2:ref s3:ref s4:int s5:unit s6:ref
      0  str s3:ref \"hi\"
      1  call-host s4:int console.println (s3:String) Result
-     2  clear s3:ref String
-     3  copy s0:int s4:int Result
-     4  return s0:int Result
+     2  copy s0:int s4:int Result
+     3  return s0:int Result
 "
     );
 }
@@ -98,7 +97,7 @@ fn the_answer_is_written_into_the_layout_the_schema_declared() {
         "\
 fn0 m.f(String) -> String
   frame 8: s0!:ref s1:ref s2:ref s3:int s4:ref s5:ref s6:int s7:bool
-  local key -> s0:String [0, 12)
+  local key -> s0:String [0, 11)
      0  call-host s3:int env.get (s0:String) Option
      1  str s5:ref \"\"
      2  int s6:int 1
@@ -107,10 +106,9 @@ fn0 m.f(String) -> String
      5  copy s2:ref s4:ref String
      6  jump 8
      7  copy s2:ref s5:ref String
-     8  clear s5:ref String
-     9  clear s3:int Option
-    10  copy s1:ref s2:ref String
-    11  return s1:ref String
+     8  clear s3:int Option
+     9  copy s1:ref s2:ref String
+    10  return s1:ref String
 "
     );
 }
@@ -127,9 +125,8 @@ fn0 m.f() -> Result
   frame 7: s0:int s1:unit s2:ref s3:ref s4:int s5:unit s6:ref
      0  str s3:ref \"hi\"
      1  call-host s4:int console.println (s3:String) Result
-     2  clear s3:ref String
-     3  copy s0:int s4:int Result
-     4  return s0:int Result
+     2  copy s0:int s4:int Result
+     3  return s0:int Result
 "
     );
 }
@@ -155,9 +152,8 @@ fn0 m.f() -> Result
   frame 7: s0:int s1:host s2:ref s3:ref s4:int s5:host s6:ref
      0  str s3:ref \"a.txt\"
      1  call-host s4:int files.open (s3:String) Result
-     2  clear s3:ref String
-     3  copy s0:int s4:int Result
-     4  return s0:int Result
+     2  copy s0:int s4:int Result
+     3  return s0:int Result
 "
     );
 }
@@ -199,25 +195,21 @@ fn0 m.f() -> Result
   frame 17: s0:int s1:int s2:host s3:ref s4:ref s5:int s6:host s7:ref s8:int s9:bool s10:host s11:int s12:int s13:host s14:ref s15:int s16:host
      0  str s4:ref \"a\"
      1  call-host s5:int files.create (s4:String) Result
-     2  clear s4:ref String
-     3  int s8:int 0
-     4  eq.int s9:bool s5:int s8:int
-     5  branch-false s9:bool 8
-     6  copy s10:host s6:host <host>
-     7  jump 13
-     8  int s11:int 1
-     9  clear s12:int Int
-    10  clear s13:host <host>
-    11  copy s14:ref s7:ref Error
-    12  return s11:int Result
-    13  clear s5:int Result
-    14  int s15:int 1
-    15  copy s16:host s10:host <host>
-    16  int s11:int 0
-    17  clear s14:ref <ref>
-    18  copy s12:int s15:int m.Sink
-    19  copy s0:int s11:int Result
-    20  return s0:int Result
+     2  int s8:int 0
+     3  eq.int s9:bool s5:int s8:int
+     4  branch-false s9:bool 7
+     5  copy s10:host s6:host <host>
+     6  jump 10
+     7  int s11:int 1
+     8  copy s14:ref s7:ref Error
+     9  return s11:int Result
+    10  clear s5:int Result
+    11  int s15:int 1
+    12  copy s16:host s10:host <host>
+    13  int s11:int 0
+    14  copy s12:int s15:int m.Sink
+    15  copy s0:int s11:int Result
+    16  return s0:int Result
 "
     );
 }
@@ -267,37 +259,34 @@ fn a_resource_operation_reads_its_receiver_out_of_the_frame() {
         "\
 fn0 m.f() -> Result
   frame 17: s0:int s1:unit s2:ref s3:ref s4:int s5:host s6:ref s7:int s8:bool s9:host s10:int s11:unit s12:ref s13:unit s14:int s15:unit s16:ref
-  local reader -> s9:<host> [13, 29)
+  local reader -> s9:<host> [11, 26)
      0  str s3:ref \"a.txt\"
      1  call-host s4:int files.open (s3:String) Result
-     2  clear s3:ref String
-     3  int s7:int 0
-     4  eq.int s8:bool s4:int s7:int
-     5  branch-false s8:bool 8
-     6  copy s9:host s5:host <host>
-     7  jump 12
-     8  int s10:int 1
-     9  clear s11:unit Unit
-    10  copy s12:ref s6:ref Error
-    11  return s10:int Result
-    12  clear s4:int Result
-    13  call-resource s10:int s9:host files.Reader.close () Result
-    14  int s7:int 0
-    15  eq.int s8:bool s10:int s7:int
-    16  branch-false s8:bool 19
-    17  copy s13:unit s11:unit Unit
-    18  jump 23
-    19  int s14:int 1
-    20  clear s15:unit Unit
-    21  copy s16:ref s12:ref Error
-    22  return s14:int Result
-    23  clear s10:int Result
-    24  unit s13:unit
-    25  int s10:int 0
-    26  clear s12:ref <ref>
-    27  copy s11:unit s13:unit Unit
-    28  copy s0:int s10:int Result
-    29  return s0:int Result
+     2  int s7:int 0
+     3  eq.int s8:bool s4:int s7:int
+     4  branch-false s8:bool 7
+     5  copy s9:host s5:host <host>
+     6  jump 10
+     7  int s10:int 1
+     8  copy s12:ref s6:ref Error
+     9  return s10:int Result
+    10  clear s4:int Result
+    11  call-resource s10:int s9:host files.Reader.close () Result
+    12  int s7:int 0
+    13  eq.int s8:bool s10:int s7:int
+    14  branch-false s8:bool 17
+    15  copy s13:unit s11:unit Unit
+    16  jump 20
+    17  int s14:int 1
+    18  copy s16:ref s12:ref Error
+    19  return s14:int Result
+    20  clear s10:int Result
+    21  unit s13:unit
+    22  int s10:int 0
+    23  clear s12:ref <ref>
+    24  copy s11:unit s13:unit Unit
+    25  copy s0:int s10:int Result
+    26  return s0:int Result
 "
     );
 }
@@ -378,9 +367,8 @@ fn0 m.f() -> ledger.Entry
      1  str s3:ref \"rent\"
      2  copy s4:int s2:int Int
      3  copy s5:ref s3:ref String
-     4  clear s3:ref String
-     5  copy s0:int s4:int ledger.Entry
-     6  return s0:int ledger.Entry
+     4  copy s0:int s4:int ledger.Entry
+     5  return s0:int ledger.Entry
 "
     );
 }
@@ -419,9 +407,8 @@ fn0 m.f() -> http.Route
      8  copy s9:ref s4:ref String
      9  copy s10:ref s7:ref Any
     10  clear s7:ref Any
-    11  clear s4:ref String
-    12  copy s0:int s8:int http.Route
-    13  return s0:int http.Route
+    11  copy s0:int s8:int http.Route
+    12  return s0:int http.Route
 "
     );
 }

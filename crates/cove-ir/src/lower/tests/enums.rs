@@ -7,21 +7,34 @@ use super::listing;
 /// writes all three. The zeroing is not tidiness — the payload region's
 /// reference map is static, so a word another case would put a reference
 /// in has to read null.
+///
+/// The `Box` in the inner scope is what makes the zeroing *visible*, and it
+/// is there for that. `Memory::push_frame` reserves a frame with
+/// `resize(…, 0)`, so a payload word this frame has not written is already
+/// null and `lower::frees` drops a clear that would zero it again. Here the
+/// scope that closed left two payload words behind, and the run they occupy
+/// is the one `Dot` is built in.
 #[test]
 fn a_case_writes_the_discriminant_and_zeroes_what_it_does_not_fill() {
     assert_eq!(
         listing(
-            "enum Shape { Dot, Line(Int), Box(Int, Int) }\nfn f() -> Shape { Shape.Dot }",
+            "enum Shape { Dot, Line(Int), Box(Int, Int) }\nfn f() -> Shape {\n  {\n    let wide = Shape.Box(3, 4)\n  }\n  Shape.Dot\n}",
             "f"
         ),
         "\
 fn0 m.f() -> m.Shape
-  frame 6: s0:int s1:int s2:int s3:int s4:int s5:int
-     0  int s3:int 0
-     1  clear s4:int Int
-     2  clear s5:int Int
-     3  copy s0:int s3:int m.Shape
-     4  return s0:int m.Shape
+  frame 8: s0:int s1:int s2:int s3:int s4:int s5:int s6:int s7:int
+  local wide -> s5:m.Shape [5, 5)
+     0  int s3:int 3
+     1  int s4:int 4
+     2  int s5:int 2
+     3  copy s6:int s3:int Int
+     4  copy s7:int s4:int Int
+     5  int s5:int 0
+     6  clear s6:int Int
+     7  clear s7:int Int
+     8  copy s0:int s5:int m.Shape
+     9  return s0:int m.Shape
 "
     );
 }
@@ -50,20 +63,35 @@ fn0 m.f() -> m.Shape
 /// `enum Msg { Ping, Text(String) }` is `[disc, Ref]`, and `Ping` leaves
 /// the reference word null — so the collector reads null rather than a
 /// stale address, without ever looking at the discriminant.
+///
+/// The `Text` in the inner scope puts an address in that word first, which
+/// is what leaves `Ping` something to zero: a word the frame has never
+/// written is already null, and `lower::frees` drops the clear that would
+/// write null over it. Its string is interpolated rather than a literal for
+/// the same reason — a literal is interned, and clearing a slot that holds
+/// an interned string releases nothing either.
 #[test]
 fn a_reference_word_of_another_case_reads_null() {
     assert_eq!(
         listing(
-            "enum Msg { Ping, Text(String) }\nfn f() -> Msg { Msg.Ping }",
+            "enum Msg { Ping, Text(String) }\nfn f(what: String) -> Msg {\n  {\n    let said = Msg.Text(\"{what}!\")\n  }\n  Msg.Ping\n}",
             "f"
         ),
         "\
-fn0 m.f() -> m.Msg
-  frame 4: s0:int s1:ref s2:int s3:ref
-     0  int s2:int 0
-     1  clear s3:ref <ref>
-     2  copy s0:int s2:int m.Msg
-     3  return s0:int m.Msg
+fn0 m.f(String) -> m.Msg
+  frame 7: s0!:ref s1:int s2:ref s3:ref s4:ref s5:int s6:ref
+  local what -> s0:String [0, 10)
+  local said -> s5:m.Msg [5, 5)
+     0  str s3:ref \"!\"
+     1  call-builtin s4:ref String.interpolate (s0:String s3:String) String
+     2  int s5:int 1
+     3  copy s6:ref s4:ref String
+     4  clear s4:ref String
+     5  clear s5:int m.Msg
+     6  int s5:int 0
+     7  clear s6:ref <ref>
+     8  copy s1:int s5:int m.Msg
+     9  return s1:int m.Msg
 "
     );
 }
@@ -83,13 +111,11 @@ fn the_payload_words_of_two_cases_agree_or_do_not_overlap() {
         "\
 fn0 m.f(Float) -> m.E
   frame 9: s0!:float s1:int s2:int s3:ref s4:float s5:int s6:int s7:ref s8:float
-  local x -> s0:Float [0, 6)
+  local x -> s0:Float [0, 4)
      0  int s5:int 1
-     1  clear s6:int Int
-     2  clear s7:ref <ref>
-     3  copy s8:float s0:float Float
-     4  copy s1:int s5:int m.E
-     5  return s1:int m.E
+     1  copy s8:float s0:float Float
+     2  copy s1:int s5:int m.E
+     3  return s1:int m.E
 "
     );
 }
@@ -192,24 +218,23 @@ fn a_question_mark_leaves_through_the_enclosing_function_s_own_failure() {
         "\
 fn0 m.f() -> Result
   frame 12: s0:int s1:int s2:ref s3:int s4:int s5:ref s6:int s7:bool s8:int s9:int s10:ref s11:int
-  local v -> s6:Int [11, 16)
+  local v -> s6:Int [10, 15)
      0  call s3:int m.g () Result
      1  int s6:int 0
      2  eq.int s7:bool s3:int s6:int
      3  branch-false s7:bool 6
      4  copy s6:int s4:int Int
-     5  jump 10
+     5  jump 9
      6  int s8:int 1
-     7  clear s9:int Int
-     8  copy s10:ref s5:ref Error
-     9  return s8:int Result
-    10  clear s3:int Result
-    11  add.int.imm s11:int s6:int 1
-    12  int s3:int 0
-    13  clear s5:ref <ref>
-    14  copy s4:int s11:int Int
-    15  copy s0:int s3:int Result
-    16  return s0:int Result
+     7  copy s10:ref s5:ref Error
+     8  return s8:int Result
+     9  clear s3:int Result
+    10  add.int.imm s11:int s6:int 1
+    11  int s3:int 0
+    12  clear s5:ref <ref>
+    13  copy s4:int s11:int Int
+    14  copy s0:int s3:int Result
+    15  return s0:int Result
 "
     );
 }
@@ -224,21 +249,20 @@ fn a_question_mark_on_an_option_leaves_through_none() {
         "\
 fn0 m.f() -> Option
   frame 9: s0:int s1:int s2:int s3:int s4:int s5:bool s6:int s7:int s8:int
-  local v -> s4:Int [9, 13)
+  local v -> s4:Int [8, 12)
      0  call s2:int m.g () Option
      1  int s4:int 1
      2  eq.int s5:bool s2:int s4:int
      3  branch-false s5:bool 6
      4  copy s4:int s3:int Int
-     5  jump 9
+     5  jump 8
      6  int s6:int 0
-     7  clear s7:int Int
-     8  return s6:int Option
-     9  add.int.imm s8:int s4:int 1
-    10  int s2:int 1
-    11  copy s3:int s8:int Int
-    12  copy s0:int s2:int Option
-    13  return s0:int Option
+     7  return s6:int Option
+     8  add.int.imm s8:int s4:int 1
+     9  int s2:int 1
+    10  copy s3:int s8:int Int
+    11  copy s0:int s2:int Option
+    12  return s0:int Option
 "
     );
 }

@@ -52,22 +52,17 @@
 //!
 //! # Renumbering
 //!
-//! Dropping an instruction moves every instruction after it, and three
-//! things name a program counter: [`Inst::Jump`], [`Inst::BranchFalse`], and
-//! the [`Table`] an [`Inst::Switch`] dispatches through. A
-//! [`Local`](crate::Local)'s live range is a pair of them as well. Each is mapped through
-//! *the first surviving instruction at or after the old target*, which for a
-//! target that landed inside a dropped run is the `return` the run led into —
-//! the same place control would have arrived at, having done the stores this
-//! pass decided were free to skip.
-//!
-//! A table's targets are the function's own: `Pool::table` pushes a new one
-//! per switch site, so no two functions share one and remapping through the
-//! `Inst::Switch` that names it reaches each exactly once.
+//! Dropping an instruction moves every instruction after it, and what that
+//! costs is [`super::dropping`]'s: a target that landed inside a dropped run
+//! becomes the `return` the run led into, which is the same place control
+//! would have arrived at, having done the stores this pass decided were free
+//! to skip.
 
-use crate::inst::{Inst, Pc, Slot};
+use crate::inst::{Inst, Slot};
 use crate::layout::{Layout, LayoutId};
 use crate::program::{Function, Program, Table};
+
+use super::dropping;
 
 /// Drops every clear that a `return` was about to make pointless.
 pub(super) fn drop_clears_before_return(program: &mut Program) {
@@ -85,38 +80,7 @@ pub(super) fn drop_clears_before_return(program: &mut Program) {
 /// Rewrites one function without the clears its returns render pointless.
 fn trim(function: &mut Function, tables: &mut [Table], layouts: &[Layout]) {
     let dropped = pointless(function, layouts);
-    let count = dropped.iter().filter(|gone| **gone).count();
-    if count == 0 {
-        return;
-    }
-    let moved = renumbered(&dropped);
-    let mut code = Vec::with_capacity(function.code.len() - count);
-    let mut spans = Vec::with_capacity(function.code.len() - count);
-    for (at, inst) in function.code.iter().enumerate() {
-        if dropped[at] {
-            continue;
-        }
-        let mut inst = inst.clone();
-        match &mut inst {
-            Inst::Jump { to } | Inst::BranchFalse { to, .. } => *to = moved[*to as usize],
-            Inst::Switch { table, .. } => {
-                let table = &mut tables[table.index()];
-                for target in &mut table.targets {
-                    *target = moved[*target as usize];
-                }
-                table.default = moved[table.default as usize];
-            }
-            _ => {}
-        }
-        code.push(inst);
-        spans.push(function.spans[at]);
-    }
-    function.code = code;
-    function.spans = spans;
-    for local in &mut function.locals {
-        local.from = moved[local.from as usize];
-        local.to = moved[local.to as usize];
-    }
+    dropping::rewrite(function, tables, &dropped);
 }
 
 /// Which of a function's instructions are clears a `return` makes pointless.
@@ -146,30 +110,6 @@ fn pointless(function: &Function, layouts: &[Layout]) -> Vec<bool> {
         }
     }
     dropped
-}
-
-/// Where each old program counter lands: the first surviving instruction at
-/// or after it.
-///
-/// One longer than the code, because a [`Local`](crate::Local)'s `to` is one
-/// past its last pc and may be the end of the function.
-fn renumbered(dropped: &[bool]) -> Vec<Pc> {
-    let mut lands = vec![0 as Pc; dropped.len()];
-    let mut next = 0;
-    for (at, gone) in dropped.iter().enumerate() {
-        lands[at] = next;
-        if !gone {
-            next += 1;
-        }
-    }
-    let mut moved = vec![next; dropped.len() + 1];
-    for at in (0..dropped.len()).rev() {
-        if !dropped[at] {
-            next = lands[at];
-        }
-        moved[at] = next;
-    }
-    moved
 }
 
 #[cfg(test)]

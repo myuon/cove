@@ -97,26 +97,24 @@ fn a_dyn_struct_field_holds_the_box() {
         "\
 fn0 m.f() -> String
   frame 7: s0:ref s1:ref s2:ref s3:int s4:ref s5:int s6:int
-  local h -> s2:m.Holder [7, 18)
+  local h -> s2:m.Holder [5, 16)
      0  str s1:ref \"n\"
      1  copy s2:ref s1:ref String
-     2  clear s1:ref String
-     3  box s1:ref s2:ref m.Name
-     4  clear s2:ref m.Name
-     5  copy s2:ref s1:ref Any
-     6  clear s1:ref Any
-     7  load-field s3:int s2:ref +0 Int
-     8  switch s3:int [16 16 16 16 16 16 16 16 16 16 16 16 16 9 13] else 16
-     9  unbox s4:ref s2:ref m.Name
-    10  call s1:ref m.Name.show (s4:m.Name) String
-    11  clear s4:ref m.Name
-    12  jump 17
-    13  unbox s5:int s2:ref m.Point
-    14  call s1:ref m.Point.show (s5:m.Point) String
-    15  jump 17
-    16  trap \"no implementation of `Show.show` for this value\"
-    17  copy s0:ref s1:ref String
-    18  return s0:ref String
+     2  box s1:ref s2:ref m.Name
+     3  copy s2:ref s1:ref Any
+     4  clear s1:ref Any
+     5  load-field s3:int s2:ref +0 Int
+     6  switch s3:int [14 14 14 14 14 14 14 14 14 14 14 14 14 7 11] else 14
+     7  unbox s4:ref s2:ref m.Name
+     8  call s1:ref m.Name.show (s4:m.Name) String
+     9  clear s4:ref m.Name
+    10  jump 15
+    11  unbox s5:int s2:ref m.Point
+    12  call s1:ref m.Point.show (s5:m.Point) String
+    13  jump 15
+    14  trap \"no implementation of `Show.show` for this value\"
+    15  copy s0:ref s1:ref String
+    16  return s0:ref String
 "
     );
 }
@@ -151,14 +149,13 @@ fn a_trait_method_s_default_body_is_lowered_once_per_conforming_type() {
         "\
 fn1 m.Booking.line(m.Booking) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
-  local self -> s0:m.Booking [0, 7)
+  local self -> s0:m.Booking [0, 6)
      0  str s2:ref \"- \"
      1  call s3:ref m.Booking.summarize (s0:m.Booking) String
      2  call-builtin s4:ref String.interpolate (s2:String s3:String) String
      3  clear s3:ref String
-     4  clear s2:ref String
-     5  copy s1:ref s4:ref String
-     6  return s1:ref String
+     4  copy s1:ref s4:ref String
+     5  return s1:ref String
 "
     );
     assert_eq!(
@@ -166,14 +163,13 @@ fn1 m.Booking.line(m.Booking) -> String
         "\
 fn3 m.Receipt.line(m.Receipt) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
-  local self -> s0:m.Receipt [0, 7)
+  local self -> s0:m.Receipt [0, 6)
      0  str s2:ref \"- \"
      1  call s3:ref m.Receipt.summarize (s0:m.Receipt) String
      2  call-builtin s4:ref String.interpolate (s2:String s3:String) String
      3  clear s3:ref String
-     4  clear s2:ref String
-     5  copy s1:ref s4:ref String
-     6  return s1:ref String
+     4  copy s1:ref s4:ref String
+     5  return s1:ref String
 "
     );
 }
@@ -195,14 +191,13 @@ fn a_conformance_that_writes_its_own_body_does_not_get_the_default() {
         "\
 fn1 m.Receipt.line(m.Receipt) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
-  local self -> s0:m.Receipt [0, 7)
+  local self -> s0:m.Receipt [0, 6)
      0  str s2:ref \"  $ \"
      1  call s3:ref m.Receipt.summarize (s0:m.Receipt) String
      2  call-builtin s4:ref String.interpolate (s2:String s3:String) String
      3  clear s3:ref String
-     4  clear s2:ref String
-     5  copy s1:ref s4:ref String
-     6  return s1:ref String
+     4  copy s1:ref s4:ref String
+     5  return s1:ref String
 "
     );
 }

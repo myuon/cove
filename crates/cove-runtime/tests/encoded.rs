@@ -89,10 +89,11 @@ fn one_encoded_instruction_is_one_unit_of_fuel() {
     assert_eq!(ran.fuel_spent, ran.instructions);
     // And the figure itself, so that a lowering change that halved the work
     // is not silently accepted by a test comparing two counters that would
-    // move together. One instruction below what #244 left it at: `arith`
-    // executes four clears in its whole life and one of them stood before a
-    // `return`, which the lowering no longer emits.
-    assert_eq!(ran.instructions, 14_285_739);
+    // move together. Two instructions below what #244 left it at: `arith`
+    // executes four clears in its whole life, one of them stood before a
+    // `return` and one zeroed a slot this frame had never written, and the
+    // lowering emits neither.
+    assert_eq!(ran.instructions, 14_285_738);
 }
 
 /// Source spans: a failing program points where the oracle points.

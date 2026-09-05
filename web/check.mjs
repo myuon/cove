@@ -465,8 +465,14 @@ check(
   printing.runs.filter(([text]) => text.includes("console.println")),
   (held) => held.length === 1 && held[0][1] === "plain",
 );
+// `Result` and not `String`: the layout on *this* line is the one the call
+// answers, and `s3:String` is a slot rather than a layout — one run, coloured
+// as a slot, which is what the check above is about. It used to read `String`
+// and match the `clear s3:ref String` that followed, which is a different
+// line and is no longer emitted: the literal is interned, so clearing the
+// slot that holds it releases nothing.
 check("and the layout beside it still is one", printing.runs, (held) =>
-  held.some(([text, kind]) => text === "String" && kind === "type"),
+  held.some(([text, kind]) => text === "Result" && kind === "type"),
 );
 
 // The signal itself, which is what makes all of the above a check rather than
