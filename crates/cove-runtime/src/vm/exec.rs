@@ -857,33 +857,46 @@ impl<'a> Machine<'a> {
 
     /// [`Machine::drive`], for a run executing encoded instructions.
     ///
-    /// There is **no thread scope** here, and that is a statement about what
-    /// this phase covers rather than an economy: [`encoded::prepare`] refuses
-    /// `Op::Spawn`, so nothing this loop can dispatch starts a thread and
-    /// there is no child for a scope to bound. Phase 4 is where that changes,
-    /// and the scope comes back with the instruction that needs it.
-    ///
-    /// What is not skipped is the obligation every way out of a body carries:
-    /// the cells go back, and the fuel this thread dispatched and has not
-    /// paid for is handed to the run.
+    /// The same body [`Machine::drive`] has, over the other loop, and it is
+    /// the same body for a reason rather than by copying: `Op::Spawn` runs
+    /// here now, so this path starts threads, and every obligation the enum
+    /// path's exit carries this one carries too. The thread scope is what
+    /// bounds a task's threads to the task; the children of a scope an error
+    /// left are stopped, because a runtime error is not a jump the lowering
+    /// emits and `std::thread::scope` would otherwise wait for a task that is
+    /// waiting for nobody; the cells go back; and the fuel this thread
+    /// dispatched and has not paid for is handed to the run.
     /// [ADR 0024](../../../../docs/adr/0024-a-stop-is-a-bound-not-a-point.md)
     /// says pending fuel is never lost, and a second loop that lost it would
     /// report a `fuel_spent` below the instructions it dispatched — which is
     /// exactly what `crates/cove-runtime/tests/encoded.rs` compares.
+    ///
+    /// It is a function of its own, and `#[inline(never)]`, for what
+    /// `a78a8ad` measured: two large dispatch calls in one closure cost the
+    /// *enum* loop 2.5% on `arith` even though the branch between them was
+    /// taken once per run. Each loop gets a closure holding one call.
     #[inline(never)]
     fn drive_encoded(
         &mut self,
         code: &cove_ir::bytecode::Encoded,
         budget: &Meter,
     ) -> Result<Vec<u64>, RuntimeError> {
-        let answer = encoded::dispatch(self, code, budget, 0);
-        debug_assert!(
-            answer.is_err() || self.held.is_empty(),
-            "a body that answered left every cell it took"
-        );
-        self.give_cells_back(0);
-        self.spend_pending_fuel(budget);
-        answer
+        std::thread::scope(|threads| {
+            let mut running: Vec<Option<ScopedJoinHandle<'_, Outcome>>> = Vec::new();
+            let answer = encoded::dispatch(self, code, budget, threads, &mut running, 0);
+            debug_assert!(
+                answer.is_err() || !self.anything_running(),
+                "a body that answered left every scope it opened, so nothing is still running"
+            );
+            debug_assert!(
+                answer.is_err() || self.held.is_empty(),
+                "a body that answered left every cell it took"
+            );
+            self.give_cells_back(0);
+            self.stop_all(&mut running);
+            self.spend_pending_fuel(budget);
+            answer
+        })
     }
 
     /// Hands the run's [`Meter`] whatever this thread has dispatched and not
@@ -2708,10 +2721,16 @@ impl<'a> Machine<'a> {
         // `Send + Sync` on the trait buys, and it is why a debugger sees a
         // spawned task's instructions rather than only the entry's.
         let watcher = self.debugger;
+        // And the same representation. A run is executed from one of the two
+        // forms, not from whichever one each thread happens to be built with:
+        // a child that ran the enum loop inside an encoded run would make the
+        // run's wall time a mixture and `Vm::encoded`'s "no fallback to enum
+        // execution" untrue of exactly the programs that spawn.
+        let form = self.encoded.clone();
         let handle = threads.spawn(move || {
             run_task(
                 program, hosts, runtime, resources, segment, meter, flag, id, object, home, span,
-                watcher,
+                watcher, form,
             )
         });
 
@@ -3263,7 +3282,17 @@ impl<'a> Machine<'a> {
             held += width;
         }
         self.reentry_depth += 1;
-        let answer = self.dispatch(budget, threads, running, floor);
+        // The same choice `Machine::drive` makes, at the one other place a
+        // dispatch loop is entered. A callback runs on the representation the
+        // run was built for: a host that calls back into an encoded run must
+        // not find itself executing the enum, or the run would be half one
+        // path and half the other and no measurement of either would mean
+        // anything. `Machine::run`'s way back in is `drive`, and this is the
+        // other.
+        let answer = match self.encoded.clone() {
+            Some(code) => encoded::dispatch(self, &code, budget, threads, running, floor),
+            None => self.dispatch(budget, threads, running, floor),
+        };
         self.reentry_depth -= 1;
         answer
     }
@@ -3536,6 +3565,7 @@ fn run_task(
     answer: u64,
     span: Span,
     debugger: Option<&(dyn Debugger + Send + Sync)>,
+    encoded: Option<Arc<cove_ir::bytecode::Encoded>>,
 ) -> Outcome {
     let mut machine = Machine::for_task(
         program,
@@ -3547,6 +3577,9 @@ fn run_task(
         id,
     );
     machine.watch(debugger);
+    if let Some(code) = encoded {
+        machine.execute_encoded(code);
+    }
     let started = Instant::now();
     let result = machine.enter_closure(closure, &budget, span);
     if !(result.is_err() && cancellation.is_cancelled()) {

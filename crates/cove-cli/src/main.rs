@@ -93,9 +93,10 @@ moves for one.
 `cove run --encoded` runs the entry from the program's fixed-width encoded
 instructions rather than from the readable IR. It is a development flag for
 issue #245's phased bytecode work, not a second backend: the same machine
-runs the same program over the same memory and answers the same thing, and
-the encoded path today implements the opcodes the `arith` benchmark reaches
-and refuses every other one by name before the run starts.
+runs the same program over the same memory and answers the same thing. The
+encoded path implements every opcode, and the whole differential corpus runs
+on it and agrees with the tree-walking oracle; a program it could not execute
+would be refused by name before the run starts rather than handed back.
 
 `cove test` runs every `test fn` in the package, reports each one, and exits
 non-zero when any failed. `--filter` runs only the tests whose qualified name
@@ -1400,10 +1401,10 @@ pub(crate) struct RunFlags {
     /// Run the entry from the program's encoded instructions rather than
     /// from the readable `Inst` IR.
     ///
-    /// [Issue #245](https://github.com/myuon/cove/issues/245)'s Phase 3, and
+    /// [Issue #245](https://github.com/myuon/cove/issues/245)'s Phase 4, and
     /// a **development flag** rather than a way to run a program: the
-    /// encoded path executes what the `arith` benchmark reaches and refuses
-    /// every other opcode by name, before the run starts. It is not a
+    /// encoded path executes every opcode, and would refuse one it did not
+    /// by name before the run starts rather than fall back. It is not a
     /// `--backend` value because it is not a backend — the same machine runs
     /// the same program over the same memory, and what differs is the
     /// representation the loop reads. A trace written from it says `vm`,

@@ -1,5 +1,6 @@
 //! The whole corpus, run on the linear-memory backend and on the oracle,
-//! compared answer for answer.
+//! compared answer for answer — and on the **encoded** execution path, the
+//! same way.
 //!
 //! [ADR 0034](../../../docs/adr/0034-one-physical-word-stack.md) makes the
 //! linear-memory backend the thing a `cove` command runs a program on, and
@@ -10,6 +11,35 @@
 //! repository keeps under `tests/e2e/` and `examples/` — every `[run.<name>]`
 //! table of every `cove.toml` there — is lowered, run on both against the
 //! same deterministic fakes, and compared.
+//!
+//! # Three runs, one oracle
+//!
+//! Since [issue #245](https://github.com/myuon/cove/issues/245)'s Phase 4
+//! there are two things that execute a lowered program: `Machine::dispatch`
+//! over the readable `Inst`, and `Machine::encoded::dispatch` over
+//! [ADR 0041](../../../docs/adr/0041-a-slot-number-fits-in-sixteen-bits.md)'s
+//! sixteen-byte encoding. Each case runs on both, and **each is compared
+//! against the oracle** rather than against the other. That is deliberate and
+//! it is the point: two backends that agreed with each other and not with the
+//! language would pass a test that compared them, and ADR 0034 makes the
+//! tree-walking interpreter the definition of what a Cove program means
+//! precisely so that there is one thing to be right about.
+//!
+//! ADR 0034's sixth completion condition is applied unchanged to the third
+//! path — values, errors, source spans and whole traces — because the
+//! encoded path is not a second backend but the same machine reading a
+//! different representation. A `spawn` there pushes the same child into the
+//! same table, a `scope.leave` joins the same threads in the same order, and
+//! a failure leaves the frames, the cells and the scopes where a host that
+//! catches it will find them. None of that is visible in an answer; the trace
+//! and the console are where it shows, which is why this harness rather than
+//! a survey is the arbiter.
+//!
+//! A program the encoded path refuses is counted apart from a disagreement.
+//! `Vm::encoded` answers `Err` before pushing a frame, naming the opcode, and
+//! never hands the program back to the enum loop — so a gap in the port is a
+//! refusal with a name, and Phase 4's completion condition is that there are
+//! none.
 //!
 //! # Why this stands beside `vm_coverage.rs`
 //!
@@ -215,6 +245,24 @@ fn the_backend_and_the_oracle_agree_over_the_whole_corpus() {
         report.disagreements.join("\n")
     );
     assert!(
+        report.encoded_disagreements.is_empty(),
+        "{} case(s) answered differently on the encoded path than on the oracle:\n\n{}\n{summary}",
+        report.encoded_disagreements.len(),
+        report.encoded_disagreements.join("\n")
+    );
+    assert!(
+        report.refused.is_empty(),
+        "{} case(s) were refused by the encoded execution path, and issue #245's Phase 4 is \
+         that none are:\n\n{}\n{summary}",
+        report.refused.len(),
+        report
+            .refused
+            .iter()
+            .map(|(case, why)| format!("{case}: {why}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(
         report.not_lowered.is_empty(),
         "{} case(s) checked and then did not lower, and the floor for that is \
          zero:\n\n{}\n{summary}",
@@ -294,7 +342,26 @@ fn run_the_corpus() -> Report {
         if oracle != backend {
             report
                 .disagreements
-                .push(disagreement(&case.name, &oracle, &backend));
+                .push(disagreement(&case.name, "vm", &oracle, &backend));
+        }
+
+        // And the third path, against the same oracle and by the same
+        // comparison. See [`run_on_encoded`].
+        match run_on_encoded(&case, &prepared, &program, module, entry) {
+            Err(refused) => report.refused.push((case.name.clone(), refused)),
+            Ok(encoded) => {
+                if !encoded.trace.cancelled.is_empty() {
+                    report.races.push(format!("{} (encoded)", case.name));
+                }
+                if oracle != encoded {
+                    report.encoded_disagreements.push(disagreement(
+                        &case.name,
+                        "vm (encoded)",
+                        &oracle,
+                        &encoded,
+                    ));
+                }
+            }
         }
     }
     report
@@ -434,6 +501,44 @@ fn run_on_vm(
     .with_trace(sink);
     let answer = Vm::new(&runtime, &hosts, program).run_entry(module, entry, arguments(case));
     fakes.observed(answer)
+}
+
+/// Runs the same case on the **encoded** execution path.
+///
+/// [Issue #245](https://github.com/myuon/cove/issues/245)'s Phase 4 asks for
+/// the complete differential corpus on the encoded path, and this is the
+/// third run that makes that sentence a test rather than a claim. It is the
+/// same call [`run_on_vm`] makes with the one constructor changed, so what is
+/// compared is the same five things — the answer, both console streams, the
+/// outcome, the filesystem and the whole normalized trace — against the same
+/// oracle. Nothing here is compared against the *enum* path: two backends
+/// that agreed with each other and not with the language would pass such a
+/// test, which is the whole reason ADR 0034 makes the tree-walking
+/// interpreter the definition.
+///
+/// `Vm::encoded` answers `Err` before a frame is pushed for a program the
+/// encoded path will not run, naming the opcode. That is a different finding
+/// from a disagreement — a gap in the port rather than a wrong answer — so it
+/// is carried out as `Err` and counted apart.
+fn run_on_encoded(
+    case: &Case,
+    prepared: &Prepared,
+    program: &cove_ir::Program,
+    module: &str,
+    entry: &str,
+) -> Result<Ran, String> {
+    let (fakes, hosts) = Fakes::build(case, module, entry, RecordingBackend::Vm);
+    let sink = Arc::clone(&fakes.sink);
+    let hosts = Arc::new(hosts);
+    let runtime = Runtime::new(
+        prepared.checked.clone(),
+        prepared.sources.clone(),
+        hosts.clone(),
+    )
+    .with_trace(sink);
+    let mut vm = Vm::encoded(&runtime, &hosts, program).map_err(|error| error.message)?;
+    let answer = vm.run_entry(module, entry, arguments(case));
+    Ok(fakes.observed(answer))
 }
 
 /// The process arguments the entry is handed, as either evaluator takes
@@ -593,7 +698,7 @@ fn describe(answer: &Result<Value, RuntimeError>) -> String {
 /// ADR 0012 presumes the oracle right, so the interpreter's answer is named
 /// first and named as the oracle. Which side is wrong is still a judgement,
 /// and the message is what somebody makes it from.
-fn disagreement(name: &str, oracle: &Ran, backend: &Ran) -> String {
+fn disagreement(name: &str, which_backend: &str, oracle: &Ran, backend: &Ran) -> String {
     let mut out = format!("{name}: the two evaluators did not agree\n");
     let mut side = |which: &str, ran: &Ran| {
         let _ = write!(
@@ -616,7 +721,7 @@ fn disagreement(name: &str, oracle: &Ran, backend: &Ran) -> String {
         }
     };
     side("ast (the oracle)", oracle);
-    side("vm", backend);
+    side(which_backend, backend);
     out
 }
 
@@ -1060,6 +1165,14 @@ struct Report {
     /// much. [`Trace::eq`] is the argument for why.
     races: Vec<String>,
     disagreements: Vec<String>,
+    /// Cases the encoded execution path would not take at all, with the
+    /// opcode it named. Issue #245's Phase 4 is that this is empty, and it is
+    /// reported apart from a disagreement because a refusal is a gap in the
+    /// port rather than two evaluators saying different things.
+    refused: Vec<(String, String)>,
+    /// Cases where the encoded path and the oracle did not agree, compared
+    /// exactly as the enum path is.
+    encoded_disagreements: Vec<String>,
 }
 
 impl Report {
@@ -1077,13 +1190,25 @@ impl Report {
         let mut out = format!(
             "\ndifferential coverage over {} corpus case(s):\n  \
              {:>3} lowered, ran, and agree with the oracle\n  \
+             {:>3} of those also ran on the encoded path and agree with the oracle\n  \
+             {:>3} were refused by the encoded path\n  \
              {:>3} checked and did not lower\n  \
              {:>3} do not check, so there is nothing to run\n",
             self.cases,
             self.lowered.len(),
+            self.lowered.len() - self.refused.len() - self.encoded_disagreements.len(),
+            self.refused.len(),
             self.not_lowered.len(),
             self.unchecked.len(),
         );
+
+        if !self.refused.is_empty() {
+            out.push_str("\nwhat the encoded path would not run:\n");
+            for (case, why) in &self.refused {
+                let _ = writeln!(out, "       {case}");
+                let _ = writeln!(out, "         {why}");
+            }
+        }
 
         if !self.not_lowered.is_empty() {
             out.push_str("\nwhat checked and then did not lower:\n");

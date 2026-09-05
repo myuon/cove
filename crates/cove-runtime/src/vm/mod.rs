@@ -192,13 +192,21 @@ impl<'a> Vm<'a> {
 
     /// The same run, executing the program's **encoded** instructions.
     ///
-    /// [Issue #245](https://github.com/myuon/cove/issues/245)'s Phase 3, and
+    /// [Issue #245](https://github.com/myuon/cove/issues/245)'s Phase 4, and
     /// [ADR 0041](../../../../docs/adr/0041-a-slot-number-fits-in-sixteen-bits.md)
     /// is the format. The program is encoded, verified once, and checked
     /// against what the encoded dispatch loop implements *here*, before the run
     /// exists — so this answers `Err` for a program the encoded path cannot
     /// execute, naming the opcode and pointing at its source, and no
     /// half-run happens.
+    ///
+    /// Every opcode is implemented, and the whole differential corpus runs
+    /// through here and agrees with the tree-walking oracle
+    /// (`crates/cove-cli/tests/differential.rs`), so the refusal is a
+    /// scaffold that nothing reaches rather than a limit. It is kept because
+    /// "no silent fallback to enum execution" is a property that has to be
+    /// checkable, and a path that could quietly hand a program back is one
+    /// where it is not.
     ///
     /// A third constructor rather than a parameter on [`Vm::new`], which is
     /// the same shape [`Vm::debugged`] has and for the same reason: a

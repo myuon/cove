@@ -30,7 +30,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use cove_ir::bytecode::{decode, encode_program, verify};
+use cove_ir::bytecode::{decode, encode_program, verify, Op};
 use cove_ir::MAX_FRAME_WORDS;
 use cove_sema::HostSchemas;
 
@@ -148,6 +148,18 @@ fn every_program_the_repository_keeps_encodes_verifies_and_reads_back() {
         found.widest_frame,
         found.reached.len(),
     );
+    // And which ones it does not, by name. The count alone says a sixth of
+    // the instruction set is untested by every harness that walks this
+    // corpus — `differential.rs` and `vm_coverage.rs` both — and does not say
+    // *which* sixth, which is the only form in which that fact is actionable.
+    // It is printed rather than asserted: an opcode no program reaches is a
+    // statement about what the corpus contains, not a fault.
+    let unreached: Vec<String> = Op::all()
+        .into_iter()
+        .filter(|op| !found.reached.contains(&op.number()))
+        .map(|op| format!("{op:?}"))
+        .collect();
+    println!("  reached by no program: {}", unreached.join(", "));
     assert!(
         found.faults.is_empty(),
         "{} program(s) the compiler lowered are not encoded, decoded or verified as they \

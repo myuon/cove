@@ -1,6 +1,6 @@
 //! The encoded execution path, held to the enum path it will one day replace.
 //!
-//! [Issue #245](https://github.com/myuon/cove/issues/245)'s Phase 3 executes
+//! [Issue #245](https://github.com/myuon/cove/issues/245)'s Phase 3 executed
 //! the `arith` benchmark from
 //! [ADR 0041](../../../docs/adr/0041-a-slot-number-fits-in-sixteen-bits.md)'s
 //! fixed-width encoding, and asks for a comparison of *values and errors,
@@ -23,6 +23,14 @@
 //! instructions into one, or that charged a safepoint on a different stride,
 //! would be found here and nowhere else in this file.
 //!
+//! **Phase 4 ported every family**, and the arbiter for that is
+//! `crates/cove-cli/tests/differential.rs`, which runs the whole corpus on
+//! this path against the tree-walking oracle and compares values, errors,
+//! spans and whole traces. What stays here is what a corpus survey cannot
+//! say: the two paths dispatch the *same number of instructions* and are
+//! charged the same fuel, which is an equivalence between the loops rather
+//! than an agreement about answers.
+//!
 //! The span test is the one the encoding's whole 1:1 argument rests on.
 //! `Function::spans` is a parallel array indexed by pc and neither loop
 //! carries a span in the instruction, so "bytecode pc is IR pc" is only true
@@ -35,6 +43,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use cove_diag::SourceMap;
+use cove_ir::bytecode::Op;
+use cove_ir::{CmpOp, Compare};
 use cove_runtime::trace::{TraceEvent, TraceSink};
 use cove_runtime::{Budget, Grants, HostRegistry, Limits, Runtime, RuntimeError, Value, Vm};
 use cove_sema::package::{Module, Package, Unit};
@@ -126,16 +136,17 @@ fn both_paths_write_the_same_recording() {
     );
 }
 
-// ------------------------------------------------------------ what is refused
+// ------------------------------------------------- the families Phase 4 added
 
-/// A program the encoded path does not implement is refused, by name, before
-/// anything runs.
+/// The program Phase 3 refused runs, and answers what the enum path answers.
+///
+/// `total = total + i` is `add.int`, a slot-operand family Phase 3 did not
+/// implement, and this test asserted the refusal until Phase 4 built it. It is
+/// kept, inverted, because a refusal that becomes an answer is the whole of
+/// what the phase did — and because the program is still the smallest one that
+/// distinguishes the two arithmetic families.
 #[test]
-fn an_unimplemented_opcode_is_refused_and_never_handed_back() {
-    // `total + i` between two slots is `add.int`, a different family from the
-    // `add.int.imm` the encoded path implements, so this is refused — while
-    // `i += 1`, one line below it, is not. One function, so that the pc the
-    // scan stops at is not a question about declaration order.
+fn the_family_phase_three_refused_now_runs() {
     let source = "\
 export fn main() -> Result<Unit, Error> {
   var total = 0
@@ -148,27 +159,138 @@ export fn main() -> Result<Unit, Error> {
   Ok(())
 }
 ";
-    let refused = prepared(source, Path::Encoded);
-    let error = refused.expect_err("this program is refused");
-    assert_eq!(
-        error.message,
-        "the encoded execution path does not run `Arith(Int, Add)` yet"
-    );
-    // Pointed at source, and at the instruction, so that a reader is told
-    // which family to build next rather than a number.
-    assert!(error.span.is_some(), "a refusal points at the source");
-    assert!(
-        error
-            .help
-            .as_deref()
-            .unwrap_or_default()
-            .contains("add.int s"),
-        "a refusal names the instruction: {:?}",
-        error.help
-    );
-    // And the same program runs on the ordinary path, which is what makes the
-    // refusal a statement about this phase rather than about the program.
-    assert_eq!(described(&run(source, Path::Enum).answer), "Ok(Ok(()))");
+    assert!(prepared(source, Path::Encoded).is_ok());
+    let enumerated = run(source, Path::Enum);
+    let encoded = run(source, Path::Encoded);
+    assert_eq!(described(&encoded.answer), described(&enumerated.answer));
+    assert_eq!(described(&encoded.answer), "Ok(Ok(()))");
+    assert_eq!(encoded.instructions, enumerated.instructions);
+}
+
+/// The heap, the collector's roots, and a closure call, on both paths.
+///
+/// One program rather than three, because what is being checked is not that
+/// each instruction works — `differential.rs` runs the whole corpus for that —
+/// but that a run mixing allocation, field access, element access and a
+/// closure call reaches the same *machine state* on both: the same objects
+/// live at the same points, so the same instruction counts and the same
+/// answer.
+#[test]
+fn the_heap_and_a_closure_agree_on_both_paths() {
+    let source = "\
+struct Point {
+  x: Int
+  y: Int
+}
+
+export fn main() -> Result<Unit, Error> {
+  var points = Vector.of()
+  var i = 0
+  while i < 64 {
+    points.push(Point(x: i, y: i * 2))
+    i += 1
+  }
+  let doubled = points.map(fn(p) { p.x + p.y })
+  var total = 0
+  var at = 0
+  while at < doubled.length() {
+    total += doubled.get(at).unwrapOr(0)
+    at += 1
+  }
+  assertEqual(total, 6048)?
+  assertEqual(points.length(), 64)?
+  Ok(())
+}
+";
+    let enumerated = run(source, Path::Enum);
+    let encoded = run(source, Path::Encoded);
+    assert_eq!(described(&encoded.answer), described(&enumerated.answer));
+    assert_eq!(described(&encoded.answer), "Ok(Ok(()))");
+    assert_eq!(encoded.instructions, enumerated.instructions);
+    assert_eq!(encoded.fuel_spent, enumerated.fuel_spent);
+}
+
+/// A failure inside a call leaves the same state and points at the same place.
+///
+/// The span is the interesting half: the failure happens in a callee, so what
+/// is compared is that both paths kept `pc` truthful across a frame push and
+/// reported the *callee's* span rather than the call site's.
+#[test]
+fn a_failure_inside_a_call_reports_the_same_place_on_both_paths() {
+    let source = "\
+fn divide(a: Int, b: Int) -> Int {
+  a / b
+}
+
+export fn main() -> Result<Unit, Error> {
+  let answer = divide(1, 0)
+  assertEqual(answer, 0)?
+  Ok(())
+}
+";
+    let enumerated = run(source, Path::Enum);
+    let encoded = run(source, Path::Encoded);
+    let (left, right) = (failure(&enumerated.answer), failure(&encoded.answer));
+    assert_eq!(right.message, left.message);
+    assert_eq!(right.span, left.span);
+    assert!(right.span.is_some(), "a division by zero reports where");
+}
+
+/// The comparison opcodes no corpus program reaches, reached.
+///
+/// `crates/cove-cli/tests/bytecode_corpus.rs` reports that 84 of the 100
+/// opcodes appear in a program the repository keeps, and names the sixteen
+/// that do not. Twelve of those sixteen cannot appear in a valid program at
+/// all — eight are orderings of a `Bool` or an identity, which
+/// `cove_ir::verify` refuses, and four have no emission site in the lowering.
+/// **Four are legal, emittable, and simply absent from the corpus**, so the
+/// differential harness cannot cover them however many programs it runs.
+///
+/// Three of the four are here, with the encoding asserted rather than
+/// assumed: the test lowers the fixture, encodes it, and checks the opcodes
+/// are present before comparing the two paths. Without that it would be a
+/// test that passed whatever the lowering chose to emit. The fourth,
+/// `Cmp(Identity, Ne)`, has no source form this fixture could reach.
+#[test]
+fn the_comparisons_no_corpus_program_reaches_agree_on_both_paths() {
+    let source = "\
+export fn main() -> Result<Unit, Error> {
+  let a = 1.5
+  let b = 0.5
+  let yes = true
+  let no = false
+  assertEqual(a > b, true)?
+  assertEqual(\"beta\" > \"alpha\", true)?
+  assertEqual(yes != no, true)?
+  Ok(())
+}
+";
+    let (sources, checked) = check(source);
+    let program = cove_ir::lower(&checked, &sources, &cove_sema::HostSchemas::new())
+        .expect("the fixture lowers");
+    let encoded = cove_ir::bytecode::encode_program(&program).expect("it encodes");
+    let reached: std::collections::BTreeSet<u8> = encoded
+        .functions
+        .iter()
+        .flatten()
+        .map(|held| held.opcode())
+        .collect();
+    for op in [
+        Op::Cmp(Compare::Float, CmpOp::Gt),
+        Op::Cmp(Compare::Str, CmpOp::Gt),
+        Op::Cmp(Compare::Bool, CmpOp::Ne),
+    ] {
+        assert!(
+            reached.contains(&op.number()),
+            "this fixture is meant to reach `{op:?}` and does not"
+        );
+    }
+
+    let enumerated = run(source, Path::Enum);
+    let encoded = run(source, Path::Encoded);
+    assert_eq!(described(&encoded.answer), described(&enumerated.answer));
+    assert_eq!(described(&encoded.answer), "Ok(Ok(()))");
+    assert_eq!(encoded.instructions, enumerated.instructions);
 }
 
 // ------------------------------------------------------------------ the harness
