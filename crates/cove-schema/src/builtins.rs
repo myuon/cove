@@ -568,14 +568,14 @@ pub struct StdBinding {
 /// Every builtin method whose body has moved out of Rust and into the
 /// standard library.
 ///
-/// Thirteen entries, and what is *not* here is as informative as what is.
+/// Fourteen entries, and what is *not* here is as informative as what is.
 ///
-/// `Result.mapError` is absent although the other three `Result` methods
-/// moved, but not for the reason it used to be. ADR 0044 removed the
-/// exception that let a trailing closure of no parameters stand in for one
-/// that takes the error, so `mapError` calls its callback exactly like any
-/// other method now and is migratable like the rest — it has simply not
-/// been moved yet.
+/// `Result.mapError` is here, and it is the only one that needed a language
+/// change to arrive. While a callback's arity was adapted rather than
+/// matched, a program could write `mapError { ... }` with a trailing closure
+/// naming no parameter, and no Cove body can call such a closure —
+/// `body(error)` passes one argument always. ADR 0044 removed that
+/// exception, and this row is what it bought.
 ///
 /// `Int.abs` is absent although `min` and `max` moved. It is the only one of
 /// the three that can fail, and a Cove body would move that failure's
@@ -647,6 +647,12 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "unwrapOr",
         module: "std.result",
         function: "unwrapOr",
+    },
+    StdBinding {
+        receiver: "Result",
+        method: "mapError",
+        module: "std.result",
+        function: "mapError",
     },
     StdBinding {
         receiver: "Int",

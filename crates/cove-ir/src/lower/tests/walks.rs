@@ -36,7 +36,7 @@ fn0 m.f(Array) -> Array
   local xs -> s0:Array [0, 22)
      0  copy s2:ref s0:ref Array
      1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 14
+     2  int s4:int 15
      3  store-field s3:ref +0 s4:int Int
      4  len s4:int s2:ref
      5  alloc s5:ref Array<array> xs4:int
@@ -80,7 +80,7 @@ fn0 m.f(Array) -> Array
   local xs -> s0:Array [0, 27)
      0  copy s2:ref s0:ref Array
      1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 14
+     2  int s4:int 15
      3  store-field s3:ref +0 s4:int Int
      4  len s4:int s2:ref
      5  alloc s5:ref Array<array> xs4:int
@@ -134,7 +134,7 @@ fn0 m.f(Array) -> Int
      1  int s3:int 0
      2  copy s4:int s3:int Int
      3  alloc s5:ref closure m.f#0<closure>
-     4  int s3:int 14
+     4  int s3:int 15
      5  store-field s5:ref +0 s3:int Int
      6  len s3:int s2:ref
      7  int s6:int 0
@@ -175,7 +175,7 @@ fn0 m.f(Vector) -> Array
   local v -> s0:Vector [0, 20)
      0  call-builtin s2:ref Vector.toArray (s0:Vector) Array
      1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 14
+     2  int s4:int 15
      3  store-field s3:ref +0 s4:int Int
      4  len s4:int s2:ref
      5  alloc s5:ref Array<array> xs4:int
@@ -255,7 +255,7 @@ fn0 m.f(Array) -> Array
   local xs -> s0:Array [0, 20)
      0  copy s2:ref s0:ref Array
      1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 14
+     2  int s4:int 15
      3  store-field s3:ref +0 s4:int Int
      4  len s4:int s2:ref
      5  alloc s5:ref Array<array> xs4:int
@@ -316,7 +316,7 @@ fn0 m.f(Array) -> Array
   local xs -> s0:Array [0, 68)
      0  copy s2:ref s0:ref Array
      1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 14
+     2  int s4:int 15
      3  store-field s3:ref +0 s4:int Int
      4  len s4:int s2:ref
      5  int s5:int 0

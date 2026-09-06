@@ -53,7 +53,7 @@ fn0 m.bump(Shared) -> Int
   frame 5: s0!:ref s1:int s2:ref s3:int s4:addr
   local cell -> s0:Shared [0, 11)
      0  alloc s2:ref closure m.bump#0<closure>
-     1  int s3:int 14
+     1  int s3:int 15
      2  store-field s2:ref +0 s3:int Int
      3  shared.lock s0:ref
      4  addr-of-field s4:addr s0:ref +1
@@ -83,7 +83,7 @@ fn the_lock_closures_var_parameter_is_an_address() {
             "bump#0"
         ),
         "\
-fn14 m.bump#0(<addr>) -> Int
+fn15 m.bump#0(<addr>) -> Int
   frame 4: s0!:addr s1:int s2:int s3:int
   local value -> s0:<addr> [0, 6)
      0  load s2:int s0:addr Int
@@ -117,7 +117,7 @@ fn0 m.read(Shared) -> Int
   frame 6: s0!:ref s1:int s2:ref s3:int s4:addr s5:int
   local cell -> s0:Shared [0, 12)
      0  alloc s2:ref closure m.read#0<closure>
-     1  int s3:int 14
+     1  int s3:int 15
      2  store-field s2:ref +0 s3:int Int
      3  shared.lock s0:ref
      4  addr-of-field s4:addr s0:ref +1
@@ -148,7 +148,7 @@ fn a_cell_wrapping_a_struct_holds_its_fields_inline() {
             "count#0"
         ),
         "\
-fn14 m.count#0(<addr>) -> Int
+fn15 m.count#0(<addr>) -> Int
   frame 5: s0!:addr s1:int s2:addr s3:int s4:int
   local value -> s0:<addr> [0, 12)
      0  addr-of-part s2:addr s0:addr +1

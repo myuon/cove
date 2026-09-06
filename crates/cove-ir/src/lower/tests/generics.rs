@@ -59,7 +59,7 @@ fn two_instantiations_are_two_functions_with_two_frames() {
     assert_eq!(
         listing(IDENTITY, "id<Int>"),
         "\
-fn15 m.id<Int>(Int) -> Int
+fn16 m.id<Int>(Int) -> Int
   frame 2: s0!:int s1:int
   local x -> s0:Int [0, 2)
      0  copy s1:int s0:int Int
@@ -69,7 +69,7 @@ fn15 m.id<Int>(Int) -> Int
     assert_eq!(
         listing(IDENTITY, "id<m.Point>"),
         "\
-fn16 m.id<m.Point>(m.Point) -> m.Point
+fn17 m.id<m.Point>(m.Point) -> m.Point
   frame 4: s0!:int s1!:int s2:int s3:int
   local x -> s0:m.Point [0, 2)
      0  copy s2:int s0:int m.Point
@@ -246,7 +246,7 @@ fn a_bounded_parameter_dispatches_to_its_conformance() {
     assert_eq!(
         listing(SUMMARY, "headline<m.Article>"),
         "\
-fn17 m.headline<m.Article>(m.Article) -> String
+fn18 m.headline<m.Article>(m.Article) -> String
   frame 4: s0!:ref s1!:int s2:ref s3:ref
   local entry -> s0:m.Article [0, 3)
      0  call s3:ref m.Article.summary (s0:m.Article) String
@@ -257,7 +257,7 @@ fn17 m.headline<m.Article>(m.Article) -> String
     assert_eq!(
         listing(SUMMARY, "headline<m.Note>"),
         "\
-fn18 m.headline<m.Note>(m.Note) -> String
+fn19 m.headline<m.Note>(m.Note) -> String
   frame 3: s0!:ref s1:ref s2:ref
   local entry -> s0:m.Note [0, 3)
      0  call s2:ref m.Note.summary (s0:m.Note) String

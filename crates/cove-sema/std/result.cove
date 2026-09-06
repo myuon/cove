@@ -33,3 +33,27 @@ export fn unwrapOr<T, E>(result: Result<T, E>, fallback: T) -> T {
     Err(_) => fallback
   }
 }
+
+/// The same result with its error replaced by what `body` answers.
+///
+/// The success is rebuilt rather than passed through, because a
+/// `Result<T, E>` and a `Result<T, F>` are different types and Cove converts
+/// nothing implicitly. `body` is called only on the failing side, which is
+/// the one place in this file where a branch decides whether a call happens
+/// at all.
+///
+/// This is the method [ADR 0044](../../../docs/adr/0044-a-callback-takes-what-its-type-declares.md)
+/// was written for. It could not be here while a callback's arity was
+/// adapted rather than matched: a program could write `mapError { ... }` with
+/// a trailing closure naming no parameter, and no Cove body can call such a
+/// closure — `body(error)` passes one argument always. Removing that
+/// exception is the whole of what let this line be written.
+export fn mapError<T, E, F>(
+  result: Result<T, E>,
+  body: fn(error: E) -> F,
+) -> Result<T, F> {
+  match result {
+    Ok(value) => Ok(value)
+    Err(error) => Err(body(error))
+  }
+}

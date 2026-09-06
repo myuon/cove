@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use cove_diag::Span;
-use cove_schema::builtins::{FreeBuiltinKind, FreeBuiltinSchema, MAP_ENTRY, OK_CASE, RESULT};
+use cove_schema::builtins::{FreeBuiltinKind, FreeBuiltinSchema, MAP_ENTRY};
 
 use crate::error::RuntimeError;
 use crate::shared::SharedCell;
@@ -875,32 +875,17 @@ pub fn call_method(
                 _ => Err(no_method("Range", name, span)),
             }
         }
-        // `Option` and `Result` used to answer here for `isSome`, `isNone`,
-        // `unwrapOr` on the one and `isOk`, `isError`, `unwrapOr` on the
-        // other. None of those reach this function any more:
-        // `Interpreter::eval_method_call` resolves each of them to a call
-        // into `std.option` or `std.result` before this function is ever
-        // asked — see `cove_schema::builtins::standard_binding`.
+        // `Option` and `Result` do not answer here at all any more. Every
+        // one of their methods — `isSome`, `isNone`, `unwrapOr` on the one,
+        // `isOk`, `isError`, `unwrapOr`, `mapError` on the other — is
+        // resolved by `Interpreter::eval_method_call` to a call into
+        // `std.option` or `std.result` before this function is ever asked;
+        // see `cove_schema::builtins::standard_binding`.
         //
-        Value(Repr::Enum(value)) if &*value.type_name == RESULT.name => match name {
-            "mapError" => {
-                let args = expect_args("mapError", args, 1, span)?;
-                let callback = args.remove(0);
-                if &*value.case == OK_CASE.name {
-                    return Ok(receiver.clone());
-                }
-                let error = value.payload.first().cloned().unwrap_or(Value(Repr::Unit));
-                // `args` is empty here — the callback was removed from it —
-                // so it is the argument list rather than a second vector
-                // built to hold at most one value. The callback always
-                // takes the error (ADR 0044: a function value has exactly
-                // the parameters its type declares, with no exception for
-                // `mapError` any more).
-                args.push(error);
-                Ok(Value::err(host.call_value(&callback, args, span)?))
-            }
-            _ => Err(no_method("Result", name, span)),
-        },
+        // `mapError` was the last to go and it needed a language change
+        // rather than a migration: while a callback of no parameters could
+        // stand in for one that takes the error, no Cove body could call it.
+        // ADR 0044 removed that exception.
         Value(Repr::Int(n)) => match name {
             "toFloat" => {
                 expect_args(name, args, 0, span)?;

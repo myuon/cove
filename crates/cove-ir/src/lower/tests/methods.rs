@@ -201,20 +201,40 @@ fn0 m.Point.bump(<addr>) -> Unit
     );
 }
 
-/// `mapError` is a branch and one call through a closure.
+/// `mapError` moved out of the lowering the same way `isSome` and
+/// `unwrapOr` did above: `cove_schema::builtins::STANDARD_LIBRARY` names it
+/// too, so `Int.parse(t).mapError(fn(error) { ... })` is an ordinary
+/// [`crate::Inst::Call`] into `std.result.mapError<Int, Error, m.E>`, with
+/// the callback passed as an ordinary closure argument — built, captured,
+/// and handed to the call exactly as any other argument would be.
 ///
-/// The module docs above named it as the one `Result` method that is not a
-/// question about the discriminant: it takes a callback, and
-/// `docs/LINEAR_VM.md` says a builtin never calls back into Cove — so what
-/// runs the callback is an ordinary [`crate::Inst::CallClosure`] frame here.
+/// The two `Result`s are still two layouts (`Int.parse` answers a
+/// `Result<Int, Error>` and `f` answers a `Result<Int, m.E>`), which is why
+/// the callee is instantiated at three type arguments rather than two — but
+/// the branch between the `Ok` and `Err` arms is no longer in this listing
+/// at all. It, and the question of what the callback is handed, now live
+/// inside `std/result.cove`'s own body:
 ///
-/// The two `Result`s are two layouts, which is why the `Ok` is copied rather
-/// than passed along: `Int.parse` answers a `Result<Int, Error>` and this
-/// answers a `Result<Int, m.E>`. The closure is built before the branch,
-/// because it is an ordinary argument and the language evaluates a call's
-/// arguments before the call.
+/// ```text
+/// export fn mapError<T, E, F>(result: Result<T, E>, body: fn(error: E) -> F) -> Result<T, F> {
+///   match result {
+///     Ok(value) => Ok(value)
+///     Err(error) => Err(body(error))
+///   }
+/// }
+/// ```
+///
+/// This replaces two tests that used to describe that branch directly: one
+/// showed the discriminant check choosing between a copy and a
+/// `CallClosure`, the other showed the callback reading the `Err` payload
+/// borrowed out of the receiver rather than through a copy (ADR 0044). Both
+/// facts are true of `mapError` still, but neither is visible to the
+/// *caller's* lowering any more — what is left to distinguish between a
+/// callback that ignores its parameter and one that uses it is only whether
+/// the closure captures an outer binding, which `closures.rs` already
+/// covers generically. One test is what is left to say here.
 #[test]
-fn map_error_is_a_branch_and_one_call_through_a_closure() {
+fn map_error_is_an_ordinary_call_into_the_standard_library() {
     assert_eq!(
         super::listing(
             "enum E { Bad(String) }\n\
@@ -223,64 +243,18 @@ fn map_error_is_a_branch_and_one_call_through_a_closure() {
         ),
         "\
 fn0 m.f(String) -> Result
-  frame 15: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:ref s7:int s8:int s9:ref s10:ref s11:int s12:int s13:ref s14:bool
-  local t -> s0:String [0, 19)
-     0  call-builtin s7:int Int.parse (s0:String) Result
-     1  alloc s10:ref closure m.f#0<closure>
-     2  int s11:int 14
-     3  store-field s10:ref +0 s11:int Int
-     4  store-field s10:ref +1 s0:ref String
-     5  int s11:int 0
-     6  eq.int s14:bool s7:int s11:int
-     7  branch-false s14:bool 11
-     8  int s4:int 0
-     9  copy s5:int s8:int Int
-    10  jump 14
-    11  call-closure s12:int s10:ref (s9:Error)
-    12  int s4:int 1
-    13  copy s5:int s12:int m.E
-    14  clear s12:int m.E
-    15  clear s10:ref fn
-    16  clear s7:int Result
-    17  copy s1:int s4:int Result
-    18  return s1:int Result
-"
-    );
-}
-
-/// The callback is always handed the error it replaces (ADR 0044): the
-/// operand the closure runs with is the `Err` payload the branch above just
-/// tested, borrowed directly out of the receiver rather than copied.
-#[test]
-fn map_error_passes_the_failure_to_a_callback_that_takes_one() {
-    assert_eq!(
-        super::listing(
-            "enum E { Bad(String) }\n\
-             fn f(t: String) -> Result<Int, E> { Int.parse(t).mapError(fn(e) { E.Bad(\"{e}\") }) }",
-            "f"
-        ),
-        "\
-fn0 m.f(String) -> Result
-  frame 15: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:ref s7:int s8:int s9:ref s10:ref s11:int s12:int s13:ref s14:bool
-  local t -> s0:String [0, 18)
-     0  call-builtin s7:int Int.parse (s0:String) Result
-     1  alloc s10:ref closure m.f#0<closure>
-     2  int s11:int 14
-     3  store-field s10:ref +0 s11:int Int
-     4  int s11:int 0
-     5  eq.int s14:bool s7:int s11:int
-     6  branch-false s14:bool 10
-     7  int s4:int 0
-     8  copy s5:int s8:int Int
-     9  jump 13
-    10  call-closure s12:int s10:ref (s9:Error)
-    11  int s4:int 1
-    12  copy s5:int s12:int m.E
-    13  clear s12:int m.E
-    14  clear s10:ref fn
-    15  clear s7:int Result
-    16  copy s1:int s4:int Result
-    17  return s1:int Result
+  frame 12: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:ref s7:ref s8:int s9:int s10:int s11:ref
+  local t -> s0:String [0, 10)
+     0  call-builtin s4:int Int.parse (s0:String) Result
+     1  alloc s7:ref closure m.f#0<closure>
+     2  int s8:int 16
+     3  store-field s7:ref +0 s8:int Int
+     4  store-field s7:ref +1 s0:ref String
+     5  call s9:int std.result.mapError<Int, Error, m.E> (s4:Result s7:fn) Result
+     6  clear s7:ref fn
+     7  clear s4:int Result
+     8  copy s1:int s9:int Result
+     9  return s1:int Result
 "
     );
 }
