@@ -98,6 +98,15 @@ pub(crate) mod encoded;
 /// moving this number moves a stated maximum and costs both.
 pub const SAFEPOINT_STRIDE: u64 = 1024;
 
+/// How many [`crate::vm::builtins::operand::Operand`]s
+/// [`Machine::call_builtin`] holds inline before it spills to a `Vec`.
+///
+/// Sized for an ordinary fixed-arity builtin — a receiver and a couple of
+/// arguments — which is every call except the handful `cove-schema` declares
+/// `variadic: true` (`Vector.of`, `Map.of`, `Set.of`), and those spill
+/// instead of raising this for everyone else's sake.
+const INLINE_OPERANDS: usize = 8;
+
 /// One live call.
 ///
 /// The top of [`Machine::frames`] is the frame currently executing, not the
@@ -579,6 +588,48 @@ pub(crate) struct Machine<'a> {
     /// handed the parent's rather than encoding again, which is what makes
     /// one spawn cost a pointer instead of a second pass over the program.
     encoded: Result<Arc<cove_ir::bytecode::Encoded>, RuntimeError>,
+    /// [`Machine::call_builtin`]'s scratch buffer of argument words, taken
+    /// out for the duration of one call and put back afterwards.
+    ///
+    /// A builtin call reads every argument's words into one buffer before it
+    /// can hand out an [`crate::vm::builtins::operand::Operand`] pointing
+    /// into it, and a fresh `Vec` for that on every single call is exactly
+    /// the allocation issue #268's stage 1 is about. Keeping one here and
+    /// moving it in and out with [`std::mem::take`], instead of borrowing it
+    /// in place, is what lets the call stay `&mut self` without a second
+    /// borrow of `self` alive at the same time for the body that fills it —
+    /// and it is also what makes the following safe to be wrong about.
+    ///
+    /// **The reentrancy question this answers.** Nothing reachable from
+    /// [`crate::vm::builtins::call`] — not the ~100-arm dispatch in
+    /// `builtins.rs`, nor `seq.rs`, `keyed.rs`, `key.rs`, `text.rs`,
+    /// `scalar.rs`, `make.rs`, or `equal.rs` — calls [`Machine::call_host`],
+    /// [`Machine::call_resource`], [`Machine::call_from_host`], or anything
+    /// else that runs the dispatch loop again: a builtin is a leaf call. The
+    /// AST interpreter's own builtin table
+    /// ([`crate::builtins::Callable`]) says the same thing of itself and
+    /// cites `docs/LINEAR_VM.md` for why, and the VM's higher-order
+    /// operations (`Result.mapError`, `map`, `sorted`) are lowered to
+    /// ordinary Cove-level loops that call back through `Inst::Call`, not
+    /// through `CallBuiltin`, so they never reach here at all. The one
+    /// genuinely reentrant path in this file, [`Machine::call_resource`] /
+    /// [`Machine::call_host`] parking the machine so a host call can run a
+    /// callback back through [`Machine::call_from_host`], is a different
+    /// method with its own local `values: Vec<Value>` and is never invoked
+    /// from inside [`Machine::call_builtin`].
+    ///
+    /// So today, taking this field's `Vec` out and putting it back is a
+    /// no-op around a leaf call. But it costs nothing to be wrong about
+    /// safely: because the buffer is moved out with `mem::take` rather than
+    /// borrowed, a `call_builtin` that somehow nested inside another one
+    /// finds `self.builtin_words` already emptied by the outer call and
+    /// allocates its own `Vec` rather than aliasing or clobbering the outer
+    /// call's words. And the restore keeps the *whole run* allocation-free
+    /// in that case too, not just the outer call: whichever of the outer
+    /// call's buffer and the inner call's buffer has the larger capacity is
+    /// the one left in this field, so the next call — nested or not — still
+    /// finds a buffer large enough not to grow.
+    builtin_words: Vec<u64>,
 }
 
 impl<'a> Machine<'a> {
@@ -633,6 +684,7 @@ impl<'a> Machine<'a> {
             // that happened later would happen after a frame was pushed. See
             // the field.
             encoded: encoded::prepare(program),
+            builtin_words: Vec::new(),
         }
     }
 
@@ -693,6 +745,7 @@ impl<'a> Machine<'a> {
             // second pass over the whole program for a pointer's worth of
             // sharing.
             encoded: Ok(encoded),
+            builtin_words: Vec::new(),
         }
     }
 
@@ -1442,24 +1495,66 @@ impl<'a> Machine<'a> {
     ) -> Result<Vec<u64>, RuntimeError> {
         let program = self.program;
         let list = program.arg_list(args);
-        let mut words: Vec<u64> = Vec::with_capacity(list.len());
-        let mut runs = Vec::with_capacity(list.len());
+
+        // The word buffer is [`Machine::builtin_words`], taken out for this
+        // call and put back at the end — see the field for why that is safe
+        // and what it costs if it is ever wrong.
+        let mut words = std::mem::take(&mut self.builtin_words);
+        words.clear();
+        words.reserve(list.len());
         for arg in list {
-            let from = words.len();
             let width = self.width(arg.layout);
             for at in 0..width {
                 words.push(self.mem.slot(base, arg.slot + at));
             }
-            runs.push((arg.layout, from, words.len()));
         }
-        let operands: Vec<Operand> = runs
-            .iter()
-            .map(|(layout, from, to)| Operand {
-                layout: *layout,
-                words: &words[*from..*to],
-            })
-            .collect();
-        builtins::call(self, program.builtin(builtin), &operands)
+
+        // The operands point into `words`, so they cannot themselves live in
+        // the machine beside it: a field borrowed here would have to stay
+        // borrowed across `builtins::call(self, ...)`, which takes `&mut
+        // Machine`. [`INLINE_OPERANDS`] is sized for an ordinary fixed-arity
+        // call — a receiver and a couple of arguments — and only the
+        // builtins `cove-schema` declares `variadic: true` (`Vector.of`,
+        // `Map.of`, `Set.of`) can exceed it, so they spill to a `Vec` sized
+        // to the call instead of paying for a larger array on every call.
+        let mut inline: [Operand; INLINE_OPERANDS] = [Operand {
+            layout: LayoutId(0),
+            words: &[],
+        }; INLINE_OPERANDS];
+        let mut spill: Vec<Operand>;
+        let operands: &[Operand] = if list.len() <= INLINE_OPERANDS {
+            let mut offset = 0usize;
+            for (slot, arg) in inline.iter_mut().zip(list) {
+                let width = self.width(arg.layout) as usize;
+                *slot = Operand {
+                    layout: arg.layout,
+                    words: &words[offset..offset + width],
+                };
+                offset += width;
+            }
+            &inline[..list.len()]
+        } else {
+            let mut offset = 0usize;
+            spill = Vec::with_capacity(list.len());
+            for arg in list {
+                let width = self.width(arg.layout) as usize;
+                spill.push(Operand {
+                    layout: arg.layout,
+                    words: &words[offset..offset + width],
+                });
+                offset += width;
+            }
+            &spill
+        };
+
+        let answer = builtins::call(self, program.builtin(builtin), operands);
+
+        // `words` may have grown past what was already here — keep whichever
+        // of the two has the larger capacity, per the field's doc comment.
+        if words.capacity() >= self.builtin_words.capacity() {
+            self.builtin_words = words;
+        }
+        answer
     }
 
     /// The string object for `text`, allocated the first time it is asked for.
