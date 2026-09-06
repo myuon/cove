@@ -198,6 +198,9 @@ impl Compiler {
     /// after, because a reader looking for what went wrong should not have
     /// to read past what merely could.
     pub fn compile(&self, package: &Package) -> Result<Program, Vec<Diagnostic>> {
+        if let Some(diagnostic) = missing_stdlib_diagnostic(package) {
+            return Err(vec![diagnostic]);
+        }
         let mut program = self.resolve(package)?;
         let (diagnostics, facts) = typeck::check_facts(package, &program, &self.schemas);
         let (errors, warnings): (Vec<Diagnostic>, Vec<Diagnostic>) = diagnostics
@@ -216,6 +219,62 @@ impl Compiler {
         program.facts = facts;
         Ok(program)
     }
+}
+
+/// The one diagnostic for a package a caller forgot to attach the standard
+/// library to.
+///
+/// `cove_schema::builtins::STANDARD_LIBRARY` names the modules a builtin
+/// method's body now lives in, and `cove_ir`'s lowering trusts that a call
+/// into one of them resolves: it lowers `items.isEmpty()` to an ordinary
+/// call on `std.array.isEmpty` the same way it lowers a call to any other
+/// declared function, with no fallback. A `Package` built by hand — an
+/// embedder's, or a test harness's — that skipped
+/// `cove_sema::stdlib::attach` would resolve that call to nothing and fail
+/// somewhere past this point with no hint of why. This is `compile`'s one
+/// check before either half of the pipeline runs, so the diagnostic names
+/// the fix rather than leaving it to be rediscovered downstream.
+///
+/// `compile` cannot attach the standard library itself: [`stdlib::attach`]
+/// has to add its sources to the same [`SourceMap`](cove_diag::SourceMap)
+/// the rest of the package's units are in, and `compile` is handed a
+/// [`Package`] with no map of its own to add to.
+fn missing_stdlib_diagnostic(package: &Package) -> Option<Diagnostic> {
+    use std::collections::BTreeSet;
+
+    let missing: BTreeSet<&str> = cove_schema::builtins::standard_library()
+        .iter()
+        .map(|binding| binding.module)
+        .filter(|module| !package.modules.contains_key(*module))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    let missing: Vec<&str> = missing.into_iter().collect();
+    Some(
+        Diagnostic::error(
+            "cove::compile::missing_stdlib",
+            format!(
+                "the standard library module{} {} {} missing from this package",
+                if missing.len() == 1 { "" } else { "s" },
+                missing
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if missing.len() == 1 { "is" } else { "are" },
+            ),
+        )
+        .rule(
+            "A package must include every module `cove_schema::builtins::STANDARD_LIBRARY` \
+             names, because lowering a builtin method whose body has moved into the standard \
+             library depends on finding it there.",
+        )
+        .help(
+            "Call `cove_sema::stdlib::attach` on the package's `SourceMap` and insert the \
+             modules it returns, the way `cove_sema::package::load` does.",
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -312,6 +371,9 @@ mod tests {
                     units: vec![Unit { file, path, ast }],
                 },
             );
+        }
+        for (name, module) in crate::stdlib::attach(&mut sources).expect("stdlib parses") {
+            loaded.insert(name, module);
         }
         (
             sources,

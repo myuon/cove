@@ -16,6 +16,7 @@ pub mod config;
 pub mod facts;
 pub mod package;
 pub mod resolve;
+pub mod stdlib;
 pub mod typeck;
 pub mod unique;
 

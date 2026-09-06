@@ -94,6 +94,23 @@ impl Body<'_> {
         if name == "snapshot" && args.is_empty() {
             return self.snapshot(expr, base, &ty);
         }
+        // A method whose body has moved out of Rust and into the standard
+        // library is resolved next, and generically: `receiver_name` reads
+        // the same name a diagnostic would, and
+        // `cove_schema::builtins::standard_binding` says whether that
+        // receiver's `name` is one of the methods `STANDARD_LIBRARY` names.
+        // When it is, nothing below this point ever runs for it — the call
+        // becomes an ordinary call to a declared function, indistinguishable
+        // from a program's own call to `std.array.isEmpty`, with the
+        // receiver as the function's first argument. Nothing here is
+        // specific to `Array` or to `isEmpty`; the table in `cove-schema` is
+        // the only thing that says which receiver and method this applies
+        // to.
+        if let Some(receiver) = receiver_name(&ty) {
+            if let Some(binding) = cove_schema::builtins::standard_binding(receiver, name) {
+                return self.call_std_binding(expr, binding, base, args);
+            }
+        }
         match &ty {
             Ty::Range => self.range_method(expr, base, name, args),
             Ty::Array(elem) => {
@@ -147,6 +164,59 @@ impl Body<'_> {
                 self.machine_call(expr, Some(base), receiver, name, args)
             }
         }
+    }
+
+    /// A call to a builtin method the standard library implements rather
+    /// than the machine.
+    ///
+    /// `binding` names a declared function of the package — `std.array`'s
+    /// `isEmpty`, so far, and whatever else moves into the standard library
+    /// later — and this reaches it exactly as a call written
+    /// `isEmpty(items)` in Cove source would: [`Body::call_target`] is the
+    /// one path every call to a declared function takes, generic or not, so
+    /// there is no second one here. The one thing this does that an
+    /// ordinary call does not is decide the argument list, because the
+    /// method call the program wrote has an implicit receiver and the
+    /// function it becomes does not: `base` is pushed on as the first
+    /// argument and whatever the call site wrote follows it, unevaluated
+    /// until `call_target` walks the list in order.
+    fn call_std_binding(
+        &mut self,
+        expr: &Expr,
+        binding: &cove_schema::builtins::StdBinding,
+        base: &Expr,
+        args: &[Arg],
+    ) -> Val {
+        let Some(id) = self
+            .plan
+            .resolve(self.checked, binding.module, binding.function)
+        else {
+            // The package this program was checked against is missing the
+            // module `cove_schema::builtins::STANDARD_LIBRARY` names, which
+            // `cove_sema::Compiler::compile` already refuses before a
+            // program reaches this crate at all. Reaching this arm means a
+            // caller built a `Program` some other way and skipped that
+            // check; the gap says so rather than emitting a call to
+            // nothing.
+            return self.gap(
+                &format!(
+                    "`{}.{}` names no function of `{}` — the package is missing the standard \
+                     library module `cove_sema::stdlib::attach` adds",
+                    binding.receiver, binding.method, binding.module
+                ),
+                expr,
+            );
+        };
+        let mut written = Vec::with_capacity(args.len() + 1);
+        written.push(Arg {
+            label: None,
+            is_var: false,
+            spread: false,
+            value: base.clone(),
+            span: base.span,
+        });
+        written.extend_from_slice(args);
+        self.call_target(expr, id, None, &written)
     }
 
     /// `Int.parse(text)`, `Duration.millis(n)`: an operation of a builtin

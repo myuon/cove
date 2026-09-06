@@ -771,6 +771,9 @@ fn package(body: &str) -> (Package, Arc<SourceMap>) {
             units: vec![Unit { file, path, ast }],
         },
     );
+    for (name, module) in cove_sema::stdlib::attach(&mut sources).expect("stdlib parses") {
+        modules.insert(name, module);
+    }
     let package = Package {
         root: PathBuf::new(),
         config: Config::default(),

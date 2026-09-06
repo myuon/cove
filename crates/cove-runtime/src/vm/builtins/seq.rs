@@ -303,15 +303,6 @@ pub(super) fn array_length(
     Ok(array(machine, "length", receiver)?.len as u64)
 }
 
-/// `Array.isEmpty() -> Bool`.
-pub(super) fn array_is_empty(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, _) = operand::method("isEmpty", operands, 0)?;
-    Ok((array(machine, "isEmpty", receiver)?.len == 0) as u64)
-}
-
 /// `Array.contains(element) -> Bool`.
 pub(super) fn array_contains(
     machine: &mut Machine,
@@ -755,17 +746,18 @@ mod tests {
         let items = array_of(&mut machine, &[10, 20, 30]);
         let empty = array_of(&mut machine, &[]);
 
+        // `isEmpty` is not a machine builtin: it is `std.array.isEmpty`,
+        // `length() == 0` written in Cove, so it is `cove-sema`'s and
+        // `cove-ir`'s tests that check it rather than a word read off the
+        // machine here. `length` is still the machine's, for both an array
+        // that holds something and one that holds nothing.
         assert_eq!(
             word(&mut machine, "Array", "length", &[(Repr::Ref, items)]).unwrap(),
             3
         );
         assert_eq!(
-            word(&mut machine, "Array", "isEmpty", &[(Repr::Ref, items)]).unwrap(),
+            word(&mut machine, "Array", "length", &[(Repr::Ref, empty)]).unwrap(),
             0
-        );
-        assert_eq!(
-            word(&mut machine, "Array", "isEmpty", &[(Repr::Ref, empty)]).unwrap(),
-            1
         );
     }
 
@@ -873,10 +865,6 @@ mod tests {
         assert_eq!(
             word(&mut machine, "Array", "length", &[(Repr::Ref, items)]).unwrap(),
             3
-        );
-        assert_eq!(
-            word(&mut machine, "Array", "isEmpty", &[(Repr::Ref, items)]).unwrap(),
-            0
         );
 
         // `get` answers the whole element, inline in the `Some`'s payload

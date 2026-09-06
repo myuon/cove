@@ -769,6 +769,17 @@ impl RulePackage {
         cost.parse = started.elapsed();
         cost.modules = modules.len();
 
+        // This embedder composes its package by hand rather than through
+        // `cove_sema::package::load`, for the reason given above — and that
+        // means it, and not `load`, is responsible for attaching the
+        // standard library `cove_schema::builtins::STANDARD_LIBRARY`'s
+        // methods resolve into.
+        for (name, module) in
+            cove_sema::stdlib::attach(&mut sources).map_err(|items| report(&sources, &items))?
+        {
+            modules.insert(name, module);
+        }
+
         let package = Package {
             root: root.to_path_buf(),
             config: Config::default(),

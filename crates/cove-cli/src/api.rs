@@ -254,6 +254,14 @@ fn header_name(header: &str) -> &str {
 pub(crate) fn derive(program: &Program) -> Interface {
     let mut interface = Interface::default();
     for (name, resolved) in &program.modules {
+        // The standard library is not part of the package whose public
+        // interface this command derives: `cove_sema::package::load` attaches
+        // it so a call into a migrated builtin method has a declaration to
+        // reach, not so a snapshot of a package's own API grows a module
+        // nobody in that package wrote.
+        if cove_sema::stdlib::module_names().contains(&name.as_str()) {
+            continue;
+        }
         let mut decls: Vec<Decl> = Vec::new();
 
         for entry in resolved.functions.values().filter(|e| e.exported) {

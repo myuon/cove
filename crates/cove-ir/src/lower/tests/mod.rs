@@ -96,6 +96,9 @@ fn checked_package(modules: &[(&str, &str)], schemas: &HostSchemas) -> (SourceMa
             },
         );
     }
+    for (name, module) in cove_sema::stdlib::attach(&mut sources).expect("stdlib parses") {
+        held.insert(name, module);
+    }
     let package = Package {
         root: PathBuf::from("."),
         config: Config::default(),

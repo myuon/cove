@@ -353,6 +353,12 @@ impl Prepared {
             );
         }
 
+        for (name, module) in
+            cove_sema::stdlib::attach(&mut sources).map_err(|_| Unprepared::DoesNotCheck)?
+        {
+            modules.insert(name, module);
+        }
+
         let package = Package {
             root: case.root.clone(),
             config: Default::default(),

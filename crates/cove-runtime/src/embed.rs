@@ -397,6 +397,17 @@ impl Embedded {
         if !diagnostics.is_empty() {
             return Err(diagnostics);
         }
+        // The binary carries the sources `cove build` embedded and nothing
+        // else — `cove_sema::stdlib`'s module is not among them, because
+        // `crate::build::plan` does not embed it; see that function for why.
+        // So this is attached the same way `cove_sema::package::load` always
+        // attaches it, and for the same reason: a builtin method whose body
+        // moved into the standard library has to find that body wherever a
+        // `Package` is assembled, including one rebuilt from a binary's own
+        // embedded sources.
+        for (name, module) in cove_sema::stdlib::attach(sources)? {
+            modules.insert(name, module);
+        }
 
         let mut runs = BTreeMap::new();
         runs.insert(

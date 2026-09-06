@@ -116,7 +116,10 @@ pub(crate) fn call(
         // it follows.
         ("Array", "get") => seq::array_get(machine, operands),
         ("Array", "length") => seq::array_length(machine, operands).map(one),
-        ("Array", "isEmpty") => seq::array_is_empty(machine, operands).map(one),
+        // `Array.isEmpty` is not here: it is `std.array.isEmpty`, the first
+        // builtin method whose body is Cove rather than a machine builtin —
+        // see `cove_schema::builtins::standard_binding` and
+        // `cove_ir::lower::methods::Body::call_std_binding`.
         ("Array", "contains") => seq::array_contains(machine, operands).map(one),
         ("Array", "indexOf") => seq::array_index_of(machine, operands),
         ("Array", "slice") => seq::array_slice(machine, operands).map(one),

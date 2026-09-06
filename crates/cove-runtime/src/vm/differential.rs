@@ -44,21 +44,25 @@ fn checked(source: &str) -> (Arc<SourceMap>, Arc<Checked>) {
         Ok(ast) => ast,
         Err(items) => panic!("the source parses:\n{}", rendered(&sources, &items)),
     };
+    let mut modules = BTreeMap::from([(
+        "m".to_string(),
+        Module {
+            name: "m".to_string(),
+            dir: PathBuf::from("m"),
+            units: vec![Unit {
+                file,
+                path: PathBuf::from("m/main.cove"),
+                ast,
+            }],
+        },
+    )]);
+    for (name, module) in cove_sema::stdlib::attach(&mut sources).expect("stdlib parses") {
+        modules.insert(name, module);
+    }
     let package = Package {
         root: PathBuf::from("."),
         config: Config::default(),
-        modules: BTreeMap::from([(
-            "m".to_string(),
-            Module {
-                name: "m".to_string(),
-                dir: PathBuf::from("m"),
-                units: vec![Unit {
-                    file,
-                    path: PathBuf::from("m/main.cove"),
-                    ast,
-                }],
-            },
-        )]),
+        modules,
     };
     match cove_sema::Compiler::new().compile(&package) {
         Ok(program) => (Arc::new(sources), Arc::new(program)),

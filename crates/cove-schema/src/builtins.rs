@@ -530,6 +530,66 @@ pub fn enum_declaring(name: &str) -> Option<&'static BuiltinSchema> {
     BUILTINS.iter().find(|entry| entry.case(name).is_some())
 }
 
+// ------------------------------------------------------- the standard library
+//
+// A builtin's signature lives in [`BUILTINS`] whether its body is Rust or
+// Cove; what [`StdBinding`] adds is a second fact some methods carry, which
+// is *where the body is instead*. `Array.isEmpty` type-checks exactly as it
+// always did — the schema above still answers its signature — but there is
+// no Rust arm for it in either evaluator any more, because `isEmpty` is
+// `length() == 0` and saying so once, in Cove, replaced saying it twice, in
+// Rust.
+//
+// A table rather than a field on [`MethodSchema`], because a field would
+// mean touching all hundred-odd literals above to add one that is empty for
+// every one of them but this. The table only grows as a method migrates.
+
+/// A builtin method whose implementation is Cove source rather than Rust.
+///
+/// This is the fact `cove_ir`'s lowering reads to turn `items.isEmpty()`
+/// into an ordinary call to a declared function instead of a
+/// `CallBuiltin`: the receiver and method name are what a call site already
+/// has, and the module and function name are where to send it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StdBinding {
+    /// The builtin type the method is called on, such as `"Array"`.
+    pub receiver: &'static str,
+    /// The method name Cove source calls, such as `"isEmpty"`.
+    pub method: &'static str,
+    /// The standard-library module the implementation lives in, such as
+    /// `"std.array"`.
+    pub module: &'static str,
+    /// The function within that module, such as `"isEmpty"`. Usually the
+    /// same spelling as `method`, but named separately because nothing
+    /// requires it to be.
+    pub function: &'static str,
+}
+
+/// Every builtin method whose body has moved out of Rust and into the
+/// standard library.
+///
+/// One entry today: `Array.isEmpty`, the proof that the mechanism works
+/// before a second method leans on it.
+pub static STANDARD_LIBRARY: &[StdBinding] = &[StdBinding {
+    receiver: "Array",
+    method: "isEmpty",
+    module: "std.array",
+    function: "isEmpty",
+}];
+
+/// Every builtin method whose body lives in the standard library.
+pub fn standard_library() -> &'static [StdBinding] {
+    STANDARD_LIBRARY
+}
+
+/// The standard-library binding for `receiver.method`, if that method's body
+/// has moved out of Rust.
+pub fn standard_binding(receiver: &str, method: &str) -> Option<&'static StdBinding> {
+    STANDARD_LIBRARY
+        .iter()
+        .find(|entry| entry.receiver == receiver && entry.method == method)
+}
+
 // -------------------------------------------- the cases and the one field
 //
 // The four case names and the two structs' field names are what
@@ -2939,6 +2999,24 @@ mod tests {
                     method.name
                 );
             }
+        }
+    }
+
+    /// A [`StdBinding`] names a receiver and a method, and both have to be
+    /// real: a table can name a method that does not exist where a field on
+    /// [`MethodSchema`] could not, because a field is only ever read off a
+    /// method that is already there. This is the test that closes that gap.
+    #[test]
+    fn every_std_binding_names_a_method_that_exists() {
+        for entry in STANDARD_LIBRARY {
+            let receiver = builtin(entry.receiver)
+                .unwrap_or_else(|| panic!("`{}` is not a builtin type", entry.receiver));
+            assert!(
+                receiver.method(entry.method).is_some(),
+                "`{}` has no method `{}`",
+                entry.receiver,
+                entry.method
+            );
         }
     }
 }

@@ -804,17 +804,21 @@ fn check(source: &str) -> (Arc<SourceMap>, Vec<Diagnostic>, Option<Arc<Program>>
         Ok(ast) => ast,
         Err(errors) => return (Arc::new(sources), errors, None),
     };
+    let mut modules = BTreeMap::from([(
+        MODULE.to_string(),
+        Module {
+            name: MODULE.to_string(),
+            dir: PathBuf::from(MODULE),
+            units: vec![Unit { file, path, ast }],
+        },
+    )]);
+    for (name, module) in cove_sema::stdlib::attach(&mut sources).expect("stdlib parses") {
+        modules.insert(name, module);
+    }
     let package = Package {
         root: PathBuf::new(),
         config: Config::default(),
-        modules: BTreeMap::from([(
-            MODULE.to_string(),
-            Module {
-                name: MODULE.to_string(),
-                dir: PathBuf::from(MODULE),
-                units: vec![Unit { file, path, ast }],
-            },
-        )]),
+        modules,
     };
     let program = match resolve(&package) {
         Ok(program) => program,

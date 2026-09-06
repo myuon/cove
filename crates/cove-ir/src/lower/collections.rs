@@ -336,12 +336,18 @@ impl Body<'_> {
 
     // ---- methods -----------------------------------------------------------
 
-    /// `items.length()`, `items.isEmpty()`, `items.get(i)`.
+    /// `items.length()`, `items.get(i)`.
     ///
     /// An `Array` keeps its elements in the object, so its length is the
     /// object's own header length and an element is one [`Inst::LoadElem`].
     /// There is no element assignment beside them: an `Array` is immutable,
     /// and the growable sequence is a `Vector`.
+    ///
+    /// `isEmpty` used to answer here too, the same `length() == 0` every
+    /// other sequence still answers with. It is not reached from here any
+    /// more: `Body::call_builtin_method` resolves it to a standard-library
+    /// call — `cove_schema::builtins::standard_binding` names
+    /// `std.array.isEmpty` — before this function is ever called for it.
     pub(super) fn array_method(
         &mut self,
         expr: &Expr,
@@ -351,7 +357,7 @@ impl Body<'_> {
         args: &[Arg],
     ) -> Val {
         match (name, args.len()) {
-            ("length", 0) | ("isEmpty", 0) => self.header_length(expr, base, name),
+            ("length", 0) => self.header_length(expr, base, name),
             ("get", 1) => {
                 let Some(element) = self.layout(elem, expr.span) else {
                     return self.dead(expr);

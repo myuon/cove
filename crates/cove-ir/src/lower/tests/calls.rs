@@ -398,7 +398,7 @@ fn1 m.f() -> Int
   local base -> s1:fn [3, 7)
   local n -> s2:Int [4, 5)
      0  alloc s1:ref closure m.f#0<closure>
-     1  int s2:int 3
+     1  int s2:int 4
      2  store-field s1:ref +0 s2:int Int
      3  int s2:int 3
      4  call s3:int m.base () Int
@@ -452,7 +452,7 @@ fn0 m.f() -> Int
   frame 4: s0:int s1:int s2:ref s3:int
      0  int s1:int 1
      1  alloc s2:ref closure m.f#0<closure>
-     2  int s3:int 2
+     2  int s3:int 3
      3  store-field s2:ref +0 s3:int Int
      4  call s3:int m.twice (s1:Int s2:fn) Int
      5  clear s2:ref fn
