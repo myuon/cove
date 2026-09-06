@@ -1,3 +1,4 @@
+// CI EXPERIMENT: proving the manifest rebuilds a changed crate. Reverted next commit.
 //! The MVP tree-walking interpreter.
 //!
 //! The interpreter is an ordinary evaluator over [`cove_syntax::ast`] plus the
