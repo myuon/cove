@@ -96,8 +96,19 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --profile checked
 
+      # Split from the doc examples below so that the log says which of the
+      # two cost what. They are different things that `cargo test --workspace`
+      # runs together: this is the suite, and it is the half that *runs Cove
+      # programs* and so is the half optimisation is for.
       - name: cargo test
-        run: cargo test --workspace --profile checked
+        run: cargo test --workspace --lib --bins --tests --profile checked
+
+      # The doc examples. Each fenced example compiles as a crate of its own,
+      # so this half is compilation rather than execution and behaves the
+      # opposite way under a profile — which is exactly why it is a step of
+      # its own rather than a number folded into the one above.
+      - name: cargo test (the doc examples)
+        run: cargo test --workspace --doc --profile checked
 
       # The `#[ignore]`d cases, which live in `crates/cove-cli/tests/` —
       # `vm_coverage.rs`, `bytecode_corpus.rs` and `build.rs`. The first is
