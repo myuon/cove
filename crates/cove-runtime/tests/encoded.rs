@@ -351,17 +351,21 @@ fn check(source: &str) -> (Arc<SourceMap>, Arc<cove_sema::resolve::Program>) {
     let path = PathBuf::from("m/main.cove");
     let file = sources.add(path.clone(), source);
     let ast = cove_syntax::parse_file(&sources, file).expect("the fixture parses");
+    let mut modules = BTreeMap::from([(
+        "m".to_string(),
+        Module {
+            name: "m".to_string(),
+            dir: PathBuf::from("m"),
+            units: vec![Unit { file, path, ast }],
+        },
+    )]);
+    for (name, module) in cove_sema::stdlib::attach(&mut sources).expect("stdlib parses") {
+        modules.insert(name, module);
+    }
     let package = Package {
         root: PathBuf::from("."),
         config: Default::default(),
-        modules: BTreeMap::from([(
-            "m".to_string(),
-            Module {
-                name: "m".to_string(),
-                dir: PathBuf::from("m"),
-                units: vec![Unit { file, path, ast }],
-            },
-        )]),
+        modules,
     };
     let checked = Compiler::new()
         .compile(&package)

@@ -732,21 +732,25 @@ export fn main() -> Int {
         let mut sources = SourceMap::new();
         let file = sources.add("m/main.cove", source.to_string());
         let ast = cove_syntax::parse_file(&sources, file).expect("the fixture parses");
+        let mut modules = BTreeMap::from([(
+            "m".to_string(),
+            Module {
+                name: "m".to_string(),
+                dir: PathBuf::from("m"),
+                units: vec![Unit {
+                    file,
+                    path: PathBuf::from("m/main.cove"),
+                    ast,
+                }],
+            },
+        )]);
+        for (name, module) in cove_sema::stdlib::attach(&mut sources).expect("stdlib parses") {
+            modules.insert(name, module);
+        }
         let package = Package {
             root: PathBuf::from("."),
             config: Config::default(),
-            modules: BTreeMap::from([(
-                "m".to_string(),
-                Module {
-                    name: "m".to_string(),
-                    dir: PathBuf::from("m"),
-                    units: vec![Unit {
-                        file,
-                        path: PathBuf::from("m/main.cove"),
-                        ast,
-                    }],
-                },
-            )]),
+            modules,
         };
         let program = cove_sema::Compiler::new()
             .compile(&package)

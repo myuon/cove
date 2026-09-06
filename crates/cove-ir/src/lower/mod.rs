@@ -723,6 +723,24 @@ impl<'a> Plan<'a> {
     /// One walk over every root rather than one walk each, because the
     /// answer is a union and `seen` is what makes a shared callee cost the
     /// walk once no matter how many roots reach it.
+    ///
+    /// This does *not* seed the walk with
+    /// [`cove_schema::builtins::standard_library`]'s functions, and that
+    /// was tried and measured wrong rather than assumed: seeding
+    /// `std.array.isEmpty` put it in `reach` whether or not any root called
+    /// it, and a generic declaration's *un-instantiated* id in `reach` is
+    /// not nothing — [`Plan::boundaries`] gives it no [`Boundary`] and
+    /// [`lower_function`] stubs it, so every lowered program carried a
+    /// dead, nameless stub function for a method it never called. A call
+    /// that *does* reach `std.array.isEmpty` is still found, one round
+    /// later, by the same `wanted` correction documented on
+    /// [`lower_roots`] that finds any other declaration `reach` left out —
+    /// [`Body::call_target`]'s `reached` check defers the call site to the
+    /// next round exactly as it would for a package's own generic function,
+    /// and a probe confirmed the two are lowered identically. So a builtin
+    /// method whose body has moved into the standard library costs a
+    /// program nothing extra unless a program actually calls it, which is
+    /// the same promise every other builtin already keeps.
     fn reachable_from(&self, checked: &'a Checked, roots: &[(&str, &str)]) -> HashSet<FunctionId> {
         let mut seen: BTreeSet<Node> = BTreeSet::new();
         let mut stack: Vec<Node> = roots

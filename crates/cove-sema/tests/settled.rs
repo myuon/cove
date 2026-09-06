@@ -295,6 +295,12 @@ fn check_slice(root: &Path, index: &ModuleIndex, start: &str) -> Slice {
             },
         );
     }
+    let Ok(std_modules) = cove_sema::stdlib::attach(&mut sources) else {
+        return Slice::DoesNotCheck;
+    };
+    for (name, module) in std_modules {
+        modules.insert(name, module);
+    }
     let package = Package {
         root: root.to_path_buf(),
         config: Default::default(),
@@ -633,19 +639,23 @@ fn settles(source: &str) -> Result<(), String> {
     let ast = cove_syntax::parse_file(&sources, file).expect("the fixture parses");
     let mut spans = BTreeMap::new();
     collect_spans(&ast, file, &mut spans);
+    let mut modules: BTreeMap<String, Module> = [(
+        "app".to_string(),
+        Module {
+            name: "app".to_string(),
+            dir: PathBuf::from("app"),
+            units: vec![Unit { file, path, ast }],
+        },
+    )]
+    .into_iter()
+    .collect();
+    for (name, module) in cove_sema::stdlib::attach(&mut sources).expect("stdlib parses") {
+        modules.insert(name, module);
+    }
     let package = Package {
         root: PathBuf::new(),
         config: Default::default(),
-        modules: [(
-            "app".to_string(),
-            Module {
-                name: "app".to_string(),
-                dir: PathBuf::from("app"),
-                units: vec![Unit { file, path, ast }],
-            },
-        )]
-        .into_iter()
-        .collect(),
+        modules,
     };
     let program = Compiler::new()
         .compile(&package)

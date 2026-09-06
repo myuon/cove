@@ -194,6 +194,18 @@ fn front(source: &str) -> Front {
             units: vec![Unit { file, path, ast }],
         },
     );
+    // A playground program is a package of one module built by hand rather
+    // than loaded with `cove_sema::package::load`, so it has to attach the
+    // standard library itself, the same way `load` does — a call into
+    // `Array.isEmpty` has to find `std.array.isEmpty` here exactly as it
+    // would in a package read from disk.
+    let std_modules = match cove_sema::stdlib::attach(&mut sources) {
+        Ok(std_modules) => std_modules,
+        Err(diagnostics) => return stopped(sources, diagnostics),
+    };
+    for (name, module) in std_modules {
+        modules.insert(name, module);
+    }
     let package = Package {
         root: PathBuf::new(),
         config: Config::default(),
@@ -255,8 +267,9 @@ fn diagnostics_json(sources: &SourceMap, diagnostics: &[Diagnostic]) -> String {
 ///
 /// `ok` is "nothing stopped this from running", which is not the same as "no
 /// diagnostics": a warning leaves `ok` true and is still shown. `ir` is
-/// [`cove_ir::print::program`]'s disassembly, and is `null` for a source that
-/// did not reach the lowering.
+/// this crate's own rendering of the lowered program's disassembly, minus
+/// the standard library, and is `null` for a source that did not reach the
+/// lowering.
 pub fn compile_json(source: &str) -> String {
     let front = front(source);
     json::object([
@@ -271,10 +284,43 @@ pub fn compile_json(source: &str) -> String {
                 front
                     .lowered
                     .as_ref()
-                    .map(|(_, program)| json::string(&cove_ir::print::program(program))),
+                    .map(|(_, program)| json::string(&disassembly(program))),
             ),
         ),
     ])
+}
+
+/// The disassembly a person reads, which is [`cove_ir::print::program`]'s
+/// minus the standard library.
+///
+/// `cove_sema::stdlib::attach` puts a module in every package so a call into
+/// a builtin method that has moved into the standard library has a
+/// declaration to reach, and [`cove_ir::lower_entry`] gives *every*
+/// declaration of the package a [`cove_ir::Function`] — a stub for one
+/// nothing reaches, same as any unreached declaration a program's own author
+/// wrote. Both are right for what they are for: the package needs the
+/// module, and the lowering's whole-declaration accounting needs the stub.
+/// Neither is something a person asked to see when they open the playground
+/// and read what their own three-line program compiled to, so this is where
+/// the two facts above are read together and the standard library's
+/// functions are left out — the same reasoning `cove outline`, `cove api`
+/// and `cove check`'s summary already apply to the same module, for the
+/// same reason.
+fn disassembly(program: &cove_ir::Program) -> String {
+    let mut out = String::new();
+    for (index, function) in program.functions.iter().enumerate() {
+        if cove_sema::stdlib::module_names().contains(&&*function.module) {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&cove_ir::print::function(
+            program,
+            cove_ir::FunctionId(index as u32),
+        ));
+    }
+    out
 }
 
 /// Lexes `source` and answers a colour for every part of it.
@@ -510,7 +556,7 @@ fn execute(
     let sources = Arc::new(front.sources);
     let runtime = Runtime::new(Arc::new(checked), Arc::clone(&sources), Arc::new(hosts));
 
-    let disassembly = cove_ir::print::program(&program);
+    let program_disassembly = disassembly(&program);
     let recorder = moments.map(|moments| record::Recorder::new(Arc::clone(&sources), moments));
     let (answer, instructions, fuel_spent) = {
         let mut vm = match &recorder {
@@ -538,7 +584,7 @@ fn execute(
     let mut fields = vec![
         ("ok", matches!(outcome, RunOutcome::Success).to_string()),
         ("diagnostics", diagnostics_json(&sources, &diagnostics)),
-        ("ir", json::string(&disassembly)),
+        ("ir", json::string(&program_disassembly)),
         ("outcome", json::string(outcome.as_str())),
         ("stdout", json::string(&out.text())),
         ("stderr", json::string(&err.text())),

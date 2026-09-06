@@ -153,6 +153,30 @@ fn0 m.f(m.Point) -> Int
     );
 }
 
+/// `Array.isEmpty` is not a machine builtin: it is the one method
+/// `cove_schema::builtins::STANDARD_LIBRARY` names, so `items.isEmpty()` is
+/// an ordinary [`crate::Inst::Call`] into `std.array.isEmpty` and never a
+/// [`Body::call_builtin_method`](super::super::Body::call_builtin_method)
+/// dispatch — the same lowering a bare `isEmpty(items)` written in Cove
+/// would reach, generic instantiation and all. This is the proof the
+/// mechanism reaches all the way through, alongside
+/// `crates/cove-sema/src/stdlib.rs`'s and `crates/cove-schema/src/builtins.rs`'s
+/// own tests of the same table.
+#[test]
+fn a_method_the_standard_library_implements_is_an_ordinary_call() {
+    assert_eq!(
+        listing("fn f(xs: Array<Int>) -> Bool { xs.isEmpty() }", "f"),
+        "\
+fn0 m.f(Array) -> Bool
+  frame 3: s0!:ref s1:bool s2:bool
+  local xs -> s0:Array [0, 3)
+     0  call s2:bool std.array.isEmpty<Int> (s0:Array) Bool
+     1  copy s1:bool s2:bool Bool
+     2  return s1:bool Bool
+"
+    );
+}
+
 /// The method names the caller's storage, so a write to a field of `self`
 /// reaches the caller's own words with no copy back. There is no
 /// instruction that offsets an address, so a field of one is a load, a
@@ -208,7 +232,7 @@ fn0 m.f(String) -> Result
   local t -> s0:String [0, 19)
      0  call-builtin s7:int Int.parse (s0:String) Result
      1  alloc s10:ref closure m.f#0<closure>
-     2  int s11:int 1
+     2  int s11:int 2
      3  store-field s10:ref +0 s11:int Int
      4  store-field s10:ref +1 s0:ref String
      5  int s11:int 0
@@ -249,7 +273,7 @@ fn0 m.f(String) -> Result
   local t -> s0:String [0, 18)
      0  call-builtin s7:int Int.parse (s0:String) Result
      1  alloc s10:ref closure m.f#0<closure>
-     2  int s11:int 1
+     2  int s11:int 2
      3  store-field s10:ref +0 s11:int Int
      4  int s11:int 0
      5  eq.int s14:bool s7:int s11:int

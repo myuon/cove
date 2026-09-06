@@ -521,6 +521,9 @@ mod tests {
                 },
             );
         }
+        for (name, module) in crate::stdlib::attach(&mut sources).expect("stdlib parses") {
+            map.insert(name, module);
+        }
         let package = Package {
             root: PathBuf::new(),
             config: Config::default(),
@@ -835,7 +838,11 @@ export fn broken() -> Int {
         let past_end = collect(checked.unit("main")).len() as u32;
         assert_eq!(checked.facts.ty(file, ExprId(past_end)), None);
         assert_eq!(checked.facts.ty(file, ExprId::UNSET), None);
-        assert_eq!(checked.facts.ty(FileId(file.0 + 1), ExprId(0)), None);
+        // Past every file the source map holds, including the standard
+        // library `compile` attaches, so this is a file the check truly
+        // never saw rather than one that merely sorts after `main`.
+        let past_every_file = checked.sources.files().count() as u32;
+        assert_eq!(checked.facts.ty(FileId(past_every_file), ExprId(0)), None);
     }
 
     /// Every file numbers from zero, so an id alone names nothing. Reading

@@ -513,8 +513,22 @@ fn cmd_check(args: &[String]) -> Result<(), CliError> {
     }
 
     let (sources, package, program) = load(path)?;
-    let modules = program.modules.len();
-    let files: usize = package.modules.values().map(|m| m.units.len()).sum();
+    // The standard library `cove_sema::package::load` attaches is not a
+    // module or a file of the package being checked, so it is not part of
+    // what this summary reports checking — the same reasoning `cove
+    // outline` and `cove api` follow for the same module.
+    let is_stdlib = |name: &str| cove_sema::stdlib::module_names().contains(&name);
+    let modules = program
+        .modules
+        .keys()
+        .filter(|name| !is_stdlib(name))
+        .count();
+    let files: usize = package
+        .modules
+        .iter()
+        .filter(|(name, _)| !is_stdlib(name))
+        .map(|(_, m)| m.units.len())
+        .sum();
     for diagnostic in &program.notices {
         eprint!("{}", render(&sources, diagnostic));
     }
@@ -575,6 +589,14 @@ fn cmd_outline(path: Option<&Path>) -> Result<(), CliError> {
 fn render_outline(sources: &SourceMap, package: &Package, program: &Program) -> String {
     let mut out = String::new();
     for (name, resolved) in &program.modules {
+        // The standard library is part of every package `cove_sema::package::load`
+        // reads — `cove_sema::stdlib::attach` puts it there so a call into
+        // `Array.isEmpty` has a declaration to reach — but it is not part of
+        // the package anybody asking for this package's outline wrote, so it
+        // is left out here the way an unexported declaration already is.
+        if cove_sema::stdlib::module_names().contains(&name.as_str()) {
+            continue;
+        }
         out.push_str(&format!("module {name}\n"));
         let blocks = module_blocks(sources, &package.root, package, program, resolved);
         for (i, block) in blocks.iter().enumerate() {

@@ -45,20 +45,20 @@ written as a namespace; binds `T`.
 
 **Methods.**
 
-| signature | `var self` | variadic | binds |
-| --- | --- | --- | --- |
-| `get(index: Int) -> Option<T>` |  |  |  |
-| `length() -> Int` |  |  |  |
-| `isEmpty() -> Bool` |  |  |  |
-| `contains(element: T) -> Bool` |  |  |  |
-| `indexOf(element: T) -> Option<Int>` |  |  |  |
-| `slice(from: Int, to: Int) -> Array<T>` |  |  |  |
-| `map(transform: fn(T) -> R) -> Array<R>` |  |  | `R` |
-| `filter(keep: fn(T) -> Bool) -> Array<T>` |  |  |  |
-| `fold(initial: R, step: fn(R, T) -> R) -> R` |  |  | `R` |
-| `sorted(by: fn(T, T) -> Bool) -> Array<T>` |  |  |  |
-| `toVector() -> Vector<T>` |  |  |  |
-| `snapshot() -> Self` |  |  |  |
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `get(index: Int) -> Option<T>` |  |  |  | `machine` |
+| `length() -> Int` |  |  |  | `machine` |
+| `isEmpty() -> Bool` |  |  |  | `std.array.isEmpty` |
+| `contains(element: T) -> Bool` |  |  |  | `machine` |
+| `indexOf(element: T) -> Option<Int>` |  |  |  | `machine` |
+| `slice(from: Int, to: Int) -> Array<T>` |  |  |  | `machine` |
+| `map(transform: fn(T) -> R) -> Array<R>` |  |  | `R` | `machine` |
+| `filter(keep: fn(T) -> Bool) -> Array<T>` |  |  |  | `machine` |
+| `fold(initial: R, step: fn(R, T) -> R) -> R` |  |  | `R` | `machine` |
+| `sorted(by: fn(T, T) -> Bool) -> Array<T>` |  |  |  | `machine` |
+| `toVector() -> Vector<T>` |  |  |  | `machine` |
+| `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Vector<T>`
 
@@ -66,31 +66,31 @@ written as a namespace; binds `T`.
 
 **Associated functions.**
 
-| signature | variadic | binds |
-| --- | --- | --- |
-| `of(items: T...) -> Vector<T>` | yes | `T` |
+| signature | variadic | binds | implemented by |
+| --- | --- | --- | --- |
+| `of(items: T...) -> Vector<T>` | yes | `T` | `machine` |
 
 **Methods.**
 
-| signature | `var self` | variadic | binds |
-| --- | --- | --- | --- |
-| `get(index: Int) -> Option<T>` |  |  |  |
-| `length() -> Int` |  |  |  |
-| `isEmpty() -> Bool` |  |  |  |
-| `contains(element: T) -> Bool` |  |  |  |
-| `indexOf(element: T) -> Option<Int>` |  |  |  |
-| `slice(from: Int, to: Int) -> Array<T>` |  |  |  |
-| `map(transform: fn(T) -> R) -> Array<R>` |  |  | `R` |
-| `filter(keep: fn(T) -> Bool) -> Array<T>` |  |  |  |
-| `fold(initial: R, step: fn(R, T) -> R) -> R` |  |  | `R` |
-| `sorted(by: fn(T, T) -> Bool) -> Array<T>` |  |  |  |
-| `push(value: T) -> Unit` | yes |  |  |
-| `set(index: Int, value: T) -> Option<T>` | yes |  |  |
-| `pop() -> Option<T>` | yes |  |  |
-| `remove(index: Int) -> Option<T>` | yes |  |  |
-| `freeze() -> Array<T>` | yes |  |  |
-| `toArray() -> Array<T>` |  |  |  |
-| `snapshot() -> Self` |  |  |  |
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `get(index: Int) -> Option<T>` |  |  |  | `machine` |
+| `length() -> Int` |  |  |  | `machine` |
+| `isEmpty() -> Bool` |  |  |  | `machine` |
+| `contains(element: T) -> Bool` |  |  |  | `machine` |
+| `indexOf(element: T) -> Option<Int>` |  |  |  | `machine` |
+| `slice(from: Int, to: Int) -> Array<T>` |  |  |  | `machine` |
+| `map(transform: fn(T) -> R) -> Array<R>` |  |  | `R` | `machine` |
+| `filter(keep: fn(T) -> Bool) -> Array<T>` |  |  |  | `machine` |
+| `fold(initial: R, step: fn(R, T) -> R) -> R` |  |  | `R` | `machine` |
+| `sorted(by: fn(T, T) -> Bool) -> Array<T>` |  |  |  | `machine` |
+| `push(value: T) -> Unit` | yes |  |  | `machine` |
+| `set(index: Int, value: T) -> Option<T>` | yes |  |  | `machine` |
+| `pop() -> Option<T>` | yes |  |  | `machine` |
+| `remove(index: Int) -> Option<T>` | yes |  |  | `machine` |
+| `freeze() -> Array<T>` | yes |  |  | `machine` |
+| `toArray() -> Array<T>` |  |  |  | `machine` |
+| `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Map<K, V>`
 
@@ -98,23 +98,23 @@ written as a namespace; binds `K`, `V`.
 
 **Associated functions.**
 
-| signature | variadic | binds |
-| --- | --- | --- |
-| `of(entries: MapEntry<K, V>...) -> Map<K, V>` | yes | `K`, `V` |
+| signature | variadic | binds | implemented by |
+| --- | --- | --- | --- |
+| `of(entries: MapEntry<K, V>...) -> Map<K, V>` | yes | `K`, `V` | `machine` |
 
 **Methods.**
 
-| signature | `var self` | variadic | binds |
-| --- | --- | --- | --- |
-| `get(key: K) -> Option<V>` |  |  |  |
-| `length() -> Int` |  |  |  |
-| `isEmpty() -> Bool` |  |  |  |
-| `contains(key: K) -> Bool` |  |  |  |
-| `keys() -> Array<K>` |  |  |  |
-| `values() -> Array<V>` |  |  |  |
-| `inserted(key: K, value: V) -> Map<K, V>` |  |  |  |
-| `removed(key: K) -> Map<K, V>` |  |  |  |
-| `snapshot() -> Self` |  |  |  |
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `get(key: K) -> Option<V>` |  |  |  | `machine` |
+| `length() -> Int` |  |  |  | `machine` |
+| `isEmpty() -> Bool` |  |  |  | `machine` |
+| `contains(key: K) -> Bool` |  |  |  | `machine` |
+| `keys() -> Array<K>` |  |  |  | `machine` |
+| `values() -> Array<V>` |  |  |  | `machine` |
+| `inserted(key: K, value: V) -> Map<K, V>` |  |  |  | `machine` |
+| `removed(key: K) -> Map<K, V>` |  |  |  | `machine` |
+| `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `MapEntry<K, V>`
 
@@ -128,21 +128,21 @@ written as a namespace; binds `T`.
 
 **Associated functions.**
 
-| signature | variadic | binds |
-| --- | --- | --- |
-| `of(items: T...) -> Set<T>` | yes | `T` |
+| signature | variadic | binds | implemented by |
+| --- | --- | --- | --- |
+| `of(items: T...) -> Set<T>` | yes | `T` | `machine` |
 
 **Methods.**
 
-| signature | `var self` | variadic | binds |
-| --- | --- | --- | --- |
-| `length() -> Int` |  |  |  |
-| `isEmpty() -> Bool` |  |  |  |
-| `toArray() -> Array<T>` |  |  |  |
-| `contains(element: T) -> Bool` |  |  |  |
-| `inserted(element: T) -> Set<T>` |  |  |  |
-| `removed(element: T) -> Set<T>` |  |  |  |
-| `snapshot() -> Self` |  |  |  |
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `length() -> Int` |  |  |  | `machine` |
+| `isEmpty() -> Bool` |  |  |  | `machine` |
+| `toArray() -> Array<T>` |  |  |  | `machine` |
+| `contains(element: T) -> Bool` |  |  |  | `machine` |
+| `inserted(element: T) -> Set<T>` |  |  |  | `machine` |
+| `removed(element: T) -> Set<T>` |  |  |  | `machine` |
+| `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `String`
 
@@ -150,30 +150,30 @@ written as a namespace.
 
 **Associated functions.**
 
-| signature | variadic | binds |
-| --- | --- | --- |
-| `fromCodePoint(codePoint: Int) -> Result<String, Error>` |  |  |
+| signature | variadic | binds | implemented by |
+| --- | --- | --- | --- |
+| `fromCodePoint(codePoint: Int) -> Result<String, Error>` |  |  | `machine` |
 
 **Methods.**
 
-| signature | `var self` | variadic | binds |
-| --- | --- | --- | --- |
-| `length() -> Int` |  |  |  |
-| `isEmpty() -> Bool` |  |  |  |
-| `words() -> Array<String>` |  |  |  |
-| `chars() -> Array<String>` |  |  |  |
-| `split(separator: String) -> Array<String>` |  |  |  |
-| `join(parts: Array<String>) -> String` |  |  |  |
-| `slice(from: Int, to: Int) -> String` |  |  |  |
-| `trim() -> String` |  |  |  |
-| `contains(text: String) -> Bool` |  |  |  |
-| `startsWith(prefix: String) -> Bool` |  |  |  |
-| `endsWith(suffix: String) -> Bool` |  |  |  |
-| `indexOf(text: String) -> Option<Int>` |  |  |  |
-| `replace(old: String, new: String) -> String` |  |  |  |
-| `toUpper() -> String` |  |  |  |
-| `toLower() -> String` |  |  |  |
-| `snapshot() -> Self` |  |  |  |
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `length() -> Int` |  |  |  | `machine` |
+| `isEmpty() -> Bool` |  |  |  | `machine` |
+| `words() -> Array<String>` |  |  |  | `machine` |
+| `chars() -> Array<String>` |  |  |  | `machine` |
+| `split(separator: String) -> Array<String>` |  |  |  | `machine` |
+| `join(parts: Array<String>) -> String` |  |  |  | `machine` |
+| `slice(from: Int, to: Int) -> String` |  |  |  | `machine` |
+| `trim() -> String` |  |  |  | `machine` |
+| `contains(text: String) -> Bool` |  |  |  | `machine` |
+| `startsWith(prefix: String) -> Bool` |  |  |  | `machine` |
+| `endsWith(suffix: String) -> Bool` |  |  |  | `machine` |
+| `indexOf(text: String) -> Option<Int>` |  |  |  | `machine` |
+| `replace(old: String, new: String) -> String` |  |  |  | `machine` |
+| `toUpper() -> String` |  |  |  | `machine` |
+| `toLower() -> String` |  |  |  | `machine` |
+| `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Range`
 
@@ -181,12 +181,12 @@ never written by name.
 
 **Methods.**
 
-| signature | `var self` | variadic | binds |
-| --- | --- | --- | --- |
-| `length() -> Int` |  |  |  |
-| `isEmpty() -> Bool` |  |  |  |
-| `contains(value: Int) -> Bool` |  |  |  |
-| `snapshot() -> Self` |  |  |  |
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `length() -> Int` |  |  |  | `machine` |
+| `isEmpty() -> Bool` |  |  |  | `machine` |
+| `contains(value: Int) -> Bool` |  |  |  | `machine` |
+| `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Option<T>`
 
@@ -196,11 +196,11 @@ written as a namespace; binds `T`.
 
 **Methods.**
 
-| signature | `var self` | variadic | binds |
-| --- | --- | --- | --- |
-| `isSome() -> Bool` |  |  |  |
-| `isNone() -> Bool` |  |  |  |
-| `unwrapOr(fallback: T) -> T` |  |  |  |
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `isSome() -> Bool` |  |  |  | `machine` |
+| `isNone() -> Bool` |  |  |  | `machine` |
+| `unwrapOr(fallback: T) -> T` |  |  |  | `machine` |
 
 ### `Result<T, E>`
 
@@ -210,12 +210,12 @@ written as a namespace; binds `T`, `E`.
 
 **Methods.**
 
-| signature | `var self` | variadic | binds |
-| --- | --- | --- | --- |
-| `isOk() -> Bool` |  |  |  |
-| `isError() -> Bool` |  |  |  |
-| `unwrapOr(fallback: T) -> T` |  |  |  |
-| `mapError(body: fn(E) -> F) -> Result<T, F>` |  |  | `F` |
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `isOk() -> Bool` |  |  |  | `machine` |
+| `isError() -> Bool` |  |  |  | `machine` |
+| `unwrapOr(fallback: T) -> T` |  |  |  | `machine` |
+| `mapError(body: fn(E) -> F) -> Result<T, F>` |  |  | `F` | `machine` |
 
 ### `Int`
 
@@ -223,20 +223,20 @@ written as a namespace.
 
 **Associated functions.**
 
-| signature | variadic | binds |
-| --- | --- | --- |
-| `parse(text: String) -> Result<Int, Error>` |  |  |
-| `parseRadix(text: String, radix: Int) -> Result<Int, Error>` |  |  |
+| signature | variadic | binds | implemented by |
+| --- | --- | --- | --- |
+| `parse(text: String) -> Result<Int, Error>` |  |  | `machine` |
+| `parseRadix(text: String, radix: Int) -> Result<Int, Error>` |  |  | `machine` |
 
 **Methods.**
 
-| signature | `var self` | variadic | binds |
-| --- | --- | --- | --- |
-| `toFloat() -> Float` |  |  |  |
-| `abs() -> Int` |  |  |  |
-| `min(other: Int) -> Int` |  |  |  |
-| `max(other: Int) -> Int` |  |  |  |
-| `snapshot() -> Self` |  |  |  |
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `toFloat() -> Float` |  |  |  | `machine` |
+| `abs() -> Int` |  |  |  | `machine` |
+| `min(other: Int) -> Int` |  |  |  | `machine` |
+| `max(other: Int) -> Int` |  |  |  | `machine` |
+| `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Float`
 
@@ -244,21 +244,21 @@ written as a namespace.
 
 **Associated functions.**
 
-| signature | variadic | binds |
-| --- | --- | --- |
-| `parse(text: String) -> Result<Float, Error>` |  |  |
+| signature | variadic | binds | implemented by |
+| --- | --- | --- | --- |
+| `parse(text: String) -> Result<Float, Error>` |  |  | `machine` |
 
 **Methods.**
 
-| signature | `var self` | variadic | binds |
-| --- | --- | --- | --- |
-| `toInt() -> Result<Int, Error>` |  |  |  |
-| `round() -> Float` |  |  |  |
-| `abs() -> Float` |  |  |  |
-| `min(other: Float) -> Float` |  |  |  |
-| `max(other: Float) -> Float` |  |  |  |
-| `format(digits: Int) -> String` |  |  |  |
-| `snapshot() -> Self` |  |  |  |
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `toInt() -> Result<Int, Error>` |  |  |  | `machine` |
+| `round() -> Float` |  |  |  | `machine` |
+| `abs() -> Float` |  |  |  | `machine` |
+| `min(other: Float) -> Float` |  |  |  | `machine` |
+| `max(other: Float) -> Float` |  |  |  | `machine` |
+| `format(digits: Int) -> String` |  |  |  | `machine` |
+| `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Bool`
 
@@ -266,9 +266,9 @@ written as a namespace.
 
 **Methods.**
 
-| signature | `var self` | variadic | binds |
-| --- | --- | --- | --- |
-| `snapshot() -> Self` |  |  |  |
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Unit`
 
@@ -276,9 +276,9 @@ never written by name.
 
 **Methods.**
 
-| signature | `var self` | variadic | binds |
-| --- | --- | --- | --- |
-| `snapshot() -> Self` |  |  |  |
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Duration`
 
@@ -286,26 +286,26 @@ written as a namespace.
 
 **Associated functions.**
 
-| signature | variadic | binds |
-| --- | --- | --- |
-| `nanos(count: Int) -> Duration` |  |  |
-| `micros(count: Int) -> Duration` |  |  |
-| `millis(count: Int) -> Duration` |  |  |
-| `seconds(count: Int) -> Duration` |  |  |
-| `minutes(count: Int) -> Duration` |  |  |
-| `hours(count: Int) -> Duration` |  |  |
+| signature | variadic | binds | implemented by |
+| --- | --- | --- | --- |
+| `nanos(count: Int) -> Duration` |  |  | `machine` |
+| `micros(count: Int) -> Duration` |  |  | `machine` |
+| `millis(count: Int) -> Duration` |  |  | `machine` |
+| `seconds(count: Int) -> Duration` |  |  | `machine` |
+| `minutes(count: Int) -> Duration` |  |  | `machine` |
+| `hours(count: Int) -> Duration` |  |  | `machine` |
 
 **Methods.**
 
-| signature | `var self` | variadic | binds |
-| --- | --- | --- | --- |
-| `nanos() -> Int` |  |  |  |
-| `micros() -> Int` |  |  |  |
-| `millis() -> Int` |  |  |  |
-| `seconds() -> Int` |  |  |  |
-| `minutes() -> Int` |  |  |  |
-| `hours() -> Int` |  |  |  |
-| `snapshot() -> Self` |  |  |  |
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `nanos() -> Int` |  |  |  | `machine` |
+| `micros() -> Int` |  |  |  | `machine` |
+| `millis() -> Int` |  |  |  | `machine` |
+| `seconds() -> Int` |  |  |  | `machine` |
+| `minutes() -> Int` |  |  |  | `machine` |
+| `hours() -> Int` |  |  |  | `machine` |
+| `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Error`
 
@@ -319,10 +319,10 @@ never written by name; binds `T`.
 
 **Methods.**
 
-| signature | `var self` | variadic | binds |
-| --- | --- | --- | --- |
-| `await() -> T` |  |  |  |
-| `cancel() -> Unit` |  |  |  |
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `await() -> T` |  |  |  | `machine` |
+| `cancel() -> Unit` |  |  |  | `machine` |
 
 ### `Shared<T>`
 
@@ -330,9 +330,9 @@ never written by name; binds `T`.
 
 **Methods.**
 
-| signature | `var self` | variadic | binds |
-| --- | --- | --- | --- |
-| `lock(body: fn(T) -> R) -> R` |  |  | `R` |
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `lock(body: fn(T) -> R) -> R` |  |  | `R` | `machine` |
 
 ### `Scope`
 
@@ -340,9 +340,9 @@ never written by name.
 
 **Methods.**
 
-| signature | `var self` | variadic | binds |
-| --- | --- | --- | --- |
-| `spawn(body: fn() -> T) -> Task<T>` |  |  | `T` |
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `spawn(body: fn() -> T) -> Task<T>` |  |  | `T` | `machine` |
 
 ## Host API
 

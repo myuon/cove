@@ -306,6 +306,17 @@ fn plan(
 
     let mut embedded = Vec::new();
     for module in package.modules.values() {
+        // The standard library is not a file of this package: it has no
+        // path under `package.root` to be relative to, because
+        // `cove_sema::stdlib::attach` embeds it into the toolchain rather
+        // than reading it from the package's tree. The binary does not need
+        // a copy of it either — `cove_runtime::embed::Embedded::package`
+        // attaches the same module the same way when the binary rebuilds
+        // its package at startup — so it is left out here rather than
+        // failing the `strip_prefix` below.
+        if cove_sema::stdlib::module_names().contains(&module.name.as_str()) {
+            continue;
+        }
         for unit in &module.units {
             let relative = unit.path.strip_prefix(&package.root).map_err(|_| {
                 CliError::Message(format!(

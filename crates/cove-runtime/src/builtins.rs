@@ -494,10 +494,11 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Int(items.len() as i64)))
             }
-            "isEmpty" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Bool(items.is_empty())))
-            }
+            // `isEmpty` used to answer here too, `length() == 0`. It does
+            // not reach this arm any more: `Interpreter::eval_method_call`
+            // resolves it to a call into `std.array.isEmpty` before this
+            // function is ever asked about it — see
+            // `cove_schema::builtins::standard_binding`.
             "contains" => contains("Array.contains", items, args, span),
             "indexOf" => index_of_element("Array.indexOf", items, args, span),
             "slice" => Ok(Value(Repr::Array(slice("Array.slice", items, args, span)?))),

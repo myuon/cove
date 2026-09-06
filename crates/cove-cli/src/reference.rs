@@ -247,11 +247,11 @@ fn render_type(out: &mut String, schema: &BuiltinSchema) {
     }
     if !schema.associated.is_empty() {
         let _ = writeln!(out, "**Associated functions.**\n");
-        render_methods(out, schema.associated, false);
+        render_methods(out, schema.name, schema.associated, false);
     }
     if !schema.methods.is_empty() {
         let _ = writeln!(out, "**Methods.**\n");
-        render_methods(out, schema.methods, true);
+        render_methods(out, schema.name, schema.methods, true);
     }
 }
 
@@ -262,16 +262,16 @@ fn type_header(schema: &BuiltinSchema) -> String {
     format!("{}<{}>", schema.name, schema.parameters.join(", "))
 }
 
-fn render_methods(out: &mut String, entries: &[MethodSchema], receiver: bool) {
+fn render_methods(out: &mut String, owner: &str, entries: &[MethodSchema], receiver: bool) {
     out.push_str("| signature | ");
     if receiver {
         out.push_str("`var self` | ");
     }
-    out.push_str("variadic | binds |\n| --- | ");
+    out.push_str("variadic | binds | implemented by |\n| --- | ");
     if receiver {
         out.push_str("--- | ");
     }
-    out.push_str("--- | --- |\n");
+    out.push_str("--- | --- | --- |\n");
     for entry in entries {
         let binds = if entry.generics.is_empty() {
             String::new()
@@ -287,9 +287,28 @@ fn render_methods(out: &mut String, entries: &[MethodSchema], receiver: bool) {
         if receiver {
             let _ = write!(out, "{} | ", yes_no(entry.mutating));
         }
-        let _ = writeln!(out, "{} | {binds} |", yes_no(entry.variadic));
+        let _ = writeln!(
+            out,
+            "{} | {binds} | `{}` |",
+            yes_no(entry.variadic),
+            implemented_by(owner, entry.name)
+        );
     }
     out.push('\n');
+}
+
+/// Where a builtin method or associated function's body lives: `machine`
+/// for the ordinary case, or the standard-library function it names.
+///
+/// This is the same fact `cove_ir`'s lowering reads before it dispatches a
+/// call per receiver type — `cove_schema::builtins::standard_binding` — so
+/// the generated reference and the lowering can never disagree about which
+/// methods these are.
+fn implemented_by(owner: &str, method: &str) -> String {
+    match cove_schema::builtins::standard_binding(owner, method) {
+        Some(binding) => format!("{}.{}", binding.module, binding.function),
+        None => "machine".to_string(),
+    }
 }
 
 fn yes_no(flag: bool) -> &'static str {
@@ -428,9 +447,9 @@ fn render_json() -> String {
             );
         }
         out.push_str("],\n      \"associated\": [\n");
-        methods_json(&mut out, schema.associated, false);
+        methods_json(&mut out, schema.name, schema.associated, false);
         out.push_str("      ],\n      \"methods\": [\n");
-        methods_json(&mut out, schema.methods, true);
+        methods_json(&mut out, schema.name, schema.methods, true);
         out.push_str("      ]\n");
         out.push_str(if at + 1 == types.len() {
             "    }\n"
@@ -501,7 +520,7 @@ fn render_json() -> String {
     out
 }
 
-fn methods_json(out: &mut String, entries: &[MethodSchema], receiver: bool) {
+fn methods_json(out: &mut String, owner: &str, entries: &[MethodSchema], receiver: bool) {
     for (i, entry) in entries.iter().enumerate() {
         let _ = write!(
             out,
@@ -516,6 +535,11 @@ fn methods_json(out: &mut String, entries: &[MethodSchema], receiver: bool) {
         if receiver {
             let _ = write!(out, ", \"mutating\": {}", entry.mutating);
         }
+        let _ = write!(
+            out,
+            ", \"implementedBy\": {}",
+            quote(&implemented_by(owner, entry.name))
+        );
         out.push_str(", \"host\": false}");
         out.push_str(if i + 1 == entries.len() { "\n" } else { ",\n" });
     }

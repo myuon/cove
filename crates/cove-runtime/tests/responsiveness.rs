@@ -323,19 +323,23 @@ fn packaged(source: &str) -> (SourceMap, Package) {
                 .join("\n")
         ),
     };
+    let mut modules = BTreeMap::from([(
+        "m".to_string(),
+        Module {
+            name: "m".to_string(),
+            dir: PathBuf::from("m"),
+            units: vec![Unit { file, path, ast }],
+        },
+    )]);
+    for (name, module) in cove_sema::stdlib::attach(&mut sources).expect("stdlib parses") {
+        modules.insert(name, module);
+    }
     (
         sources,
         Package {
             root: PathBuf::new(),
             config: Config::default(),
-            modules: BTreeMap::from([(
-                "m".to_string(),
-                Module {
-                    name: "m".to_string(),
-                    dir: PathBuf::from("m"),
-                    units: vec![Unit { file, path, ast }],
-                },
-            )]),
+            modules,
         },
     )
 }

@@ -1,0 +1,10 @@
+/// Whether this array holds nothing.
+///
+/// This is here to be here: `isEmpty` used to be a Rust arm in each
+/// evaluator, both of them computing `length() == 0` and neither saying so
+/// in as many words. It is the first builtin method moved into the standard
+/// library, in Cove, checked and lowered like any call a program writes —
+/// proof that a builtin's body need not be Rust at all.
+export fn isEmpty<T>(items: Array<T>) -> Bool {
+  items.length() == 0
+}

@@ -11,6 +11,7 @@ use cove_diag::{Diagnostic, FileId, SourceMap, Span};
 use cove_syntax::ast::SourceUnit;
 
 use crate::config::{self, Config};
+use crate::stdlib;
 
 /// One parsed `.cove` file.
 #[derive(Debug)]
@@ -54,6 +55,15 @@ pub fn load(root: &Path, sources: &mut SourceMap) -> Result<Package, Vec<Diagnos
     let mut modules = BTreeMap::new();
     let mut diagnostics = Vec::new();
     walk(root, root, &mut modules, sources, &mut diagnostics);
+
+    match stdlib::attach(sources) {
+        Ok(std_modules) => {
+            for (name, module) in std_modules {
+                modules.insert(name, module);
+            }
+        }
+        Err(errs) => diagnostics.extend(errs),
+    }
 
     if diagnostics.is_empty() {
         Ok(Package {
@@ -297,7 +307,11 @@ mod tests {
 
         let mut sources = SourceMap::new();
         let package = load(dir.path(), &mut sources).expect("loads");
-        let mut names: Vec<&String> = package.modules.keys().collect();
+        let mut names: Vec<&String> = package
+            .modules
+            .keys()
+            .filter(|name| !stdlib::module_names().contains(&name.as_str()))
+            .collect();
         names.sort();
         assert_eq!(names, vec!["hello", "src.booking"]);
     }
@@ -317,7 +331,12 @@ mod tests {
 
         let mut sources = SourceMap::new();
         let package = load(dir.path(), &mut sources).expect("loads");
-        assert_eq!(package.modules.len(), 1);
+        assert_eq!(
+            package.modules.len(),
+            1 + stdlib::module_names().len(),
+            "{:?}",
+            package.modules.keys().collect::<Vec<_>>()
+        );
         assert!(package.modules.contains_key("hello"));
     }
 
@@ -346,7 +365,11 @@ mod tests {
 
         let mut sources = SourceMap::new();
         let package = load(dir.path(), &mut sources).expect("loads");
-        let mut names: Vec<&String> = package.modules.keys().collect();
+        let mut names: Vec<&String> = package
+            .modules
+            .keys()
+            .filter(|name| !stdlib::module_names().contains(&name.as_str()))
+            .collect();
         names.sort();
         assert_eq!(names, vec!["hello"]);
     }

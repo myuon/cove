@@ -2991,6 +2991,38 @@ impl<'a> Interpreter<'a> {
             }
         }
 
+        // A method whose implementation has moved out of Rust and into the
+        // standard library is resolved next, and generically:
+        // `cove_schema::builtins::standard_binding` is the same table
+        // `cove_ir`'s lowering consults before its own per-type dispatch, so
+        // the tree-walking oracle and the lowered backend agree about which
+        // methods these are without either restating the other's list. It
+        // only applies to a builtin receiver — `declared` is `None` for one,
+        // by construction, since a declared struct or enum's conformances
+        // were already tried above — and when it applies, this reaches the
+        // declared function `binding` names exactly as a call written
+        // `isEmpty(items)` would: `Interpreter::call_target` is the one path
+        // every call to a declared function takes, with the receiver
+        // supplied as its first argument. Nothing here is specific to
+        // `Array` or to `isEmpty`; the table in `cove-schema` is the only
+        // thing that says which receiver and method this applies to.
+        if declared.is_none() {
+            let builtin_receiver = match (&place, &temporary) {
+                (Some(place), _) => place.with_ref(span, |value| value.type_name())?,
+                (_, Some(value)) => value.type_name(),
+                _ => unreachable!("a receiver is either a place or a temporary"),
+            };
+            if let Some(binding) = cove_schema::builtins::standard_binding(&builtin_receiver, name)
+            {
+                let receiver_value = match (place, temporary) {
+                    (Some(place), _) => place.read(span)?,
+                    (_, Some(value)) => value,
+                    _ => unreachable!("a receiver is either a place or a temporary"),
+                };
+                return self.call_std_binding(env, binding, receiver_value, args, trailing, span);
+            }
+        }
+
         // `snapshot()` is the builtin `Snapshot` trait's one method. A struct
         // or enum conformance was already tried above like any other method;
         // reaching here means either the receiver is a builtin value type,
@@ -3117,6 +3149,67 @@ impl<'a> Interpreter<'a> {
             &receiver_value,
             name,
             &mut values,
+            span,
+        )?)
+    }
+
+    /// A call to a builtin method the standard library implements rather
+    /// than a Rust arm of [`builtins::call_method`].
+    ///
+    /// `binding` names a declared function of the package — `std.array`'s
+    /// `isEmpty`, so far — and this reaches it exactly the way
+    /// `eval_call`'s own `ExprKind::Ident` arm reaches an ordinary call to a
+    /// declared function: through [`Interpreter::call_target`], the one path
+    /// every such call takes. The one thing this does that an ordinary call
+    /// does not is decide the argument list, because the method call the
+    /// program wrote has an implicit receiver and the function it becomes
+    /// does not: `receiver` is pushed on as the first argument and whatever
+    /// the call site wrote follows it.
+    fn call_std_binding(
+        &mut self,
+        env: &mut Env,
+        binding: &cove_schema::builtins::StdBinding,
+        receiver: Value,
+        args: &[Arg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Eval {
+        let Some((owner, decl)) = self.find_function(binding.module, binding.function) else {
+            // The package this program resolved against is missing the
+            // module `cove_schema::builtins::STANDARD_LIBRARY` names, which
+            // `cove_sema::Compiler::compile` already refuses before a
+            // program reaches this evaluator at all. Reaching this arm
+            // means a caller resolved a package some other way and skipped
+            // that check; the error says so rather than panicking.
+            return Err(RuntimeError::new(format!(
+                "`{}.{}` names no function of `{}` — the package is missing the standard \
+                 library module `cove_sema::stdlib::attach` adds",
+                binding.receiver, binding.method, binding.module
+            ))
+            .at(span)
+            .into());
+        };
+        let mut evaluated = Vec::with_capacity(args.len() + 1);
+        evaluated.push(EvaluatedArg {
+            label: None,
+            spread: false,
+            slot: ArgSlot::Value(receiver),
+            span,
+        });
+        evaluated.extend(self.eval_args(env, args, trailing)?);
+        Ok(self.call_target(
+            &Target {
+                name: binding.function,
+                params: &decl.params,
+                body: &decl.body,
+                module: owner,
+                receiver: decl.receiver,
+                is_async: decl.is_async,
+                captures: &[],
+                return_type: decl.return_type.as_ref(),
+            },
+            None,
+            evaluated,
             span,
         )?)
     }
@@ -4675,6 +4768,9 @@ mod tests {
                 units: vec![Unit { file, path, ast }],
             },
         );
+        for (name, module) in cove_sema::stdlib::attach(&mut sources).expect("stdlib parses") {
+            modules.insert(name, module);
+        }
         let package = Package {
             root: PathBuf::new(),
             config: Config::default(),
@@ -4700,6 +4796,9 @@ mod tests {
                     units: vec![Unit { file, path, ast }],
                 },
             );
+        }
+        for (name, module) in cove_sema::stdlib::attach(&mut sources).expect("stdlib parses") {
+            map.insert(name, module);
         }
         let package = Package {
             root: PathBuf::new(),
