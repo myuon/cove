@@ -53,7 +53,7 @@ fn0 m.bump(Shared) -> Int
   frame 5: s0!:ref s1:int s2:ref s3:int s4:addr
   local cell -> s0:Shared [0, 11)
      0  alloc s2:ref closure m.bump#0<closure>
-     1  int s3:int 19
+     1  func-ref s3:int @m.bump#0
      2  store-field s2:ref +0 s3:int Int
      3  shared.lock s0:ref
      4  addr-of-field s4:addr s0:ref +1
@@ -117,7 +117,7 @@ fn0 m.read(Shared) -> Int
   frame 6: s0!:ref s1:int s2:ref s3:int s4:addr s5:int
   local cell -> s0:Shared [0, 12)
      0  alloc s2:ref closure m.read#0<closure>
-     1  int s3:int 19
+     1  func-ref s3:int @m.read#0
      2  store-field s2:ref +0 s3:int Int
      3  shared.lock s0:ref
      4  addr-of-field s4:addr s0:ref +1

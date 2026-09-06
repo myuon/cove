@@ -407,9 +407,9 @@ impl Body<'_> {
         );
         let word = self.temp(shapes::INT);
         self.emit(
-            Inst::Int {
+            Inst::FuncRef {
                 dst: word.slot,
-                value: id.0 as i64,
+                callee: id,
             },
             span,
         );

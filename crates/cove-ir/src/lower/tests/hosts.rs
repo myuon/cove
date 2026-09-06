@@ -394,7 +394,7 @@ fn0 m.f() -> http.Route
      0  int s3:int 0
      1  str s4:ref \"/health\"
      2  alloc s5:ref closure m.health<closure>
-     3  int s6:int 1
+     3  func-ref s6:int @m.health
      4  store-field s5:ref +0 s6:int Int
      5  box s7:ref s5:ref fn
      6  clear s5:ref fn
