@@ -3,5 +3,9 @@ error[cove::runtime]: `Int` division by zero
    |
 12 |   println("never printed {items.sorted(by: fn(a, b) { a / zero < b })}")?
    |                                                       ^^^^^^^^
+  --> <e2e>/fail_sort_callback/main.cove:12:27
+   |
+12 |   println("never printed {items.sorted(by: fn(a, b) { a / zero < b })}")?
+   |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ called from here
   rule: Division and remainder by zero are broken invariants.
 1 error(s)

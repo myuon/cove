@@ -1,0 +1,11 @@
+error[cove::runtime]: `Int` division by zero
+ --> <e2e>/fail_nested_divide_by_zero/main.cove:6:3
+  |
+6 |   a / b
+  |   ^^^^^
+  --> <e2e>/fail_nested_divide_by_zero/main.cove:15:27
+   |
+15 |   println("never printed {divide(10, zero)}")?
+   |                           ^^^^^^^^^^^^^^^^ called from here
+  rule: Division and remainder by zero are broken invariants.
+1 error(s)
