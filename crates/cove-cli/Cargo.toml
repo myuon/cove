@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 cove-diag.workspace = true
 cove-syntax.workspace = true
+cove-schema.workspace = true
 cove-sema.workspace = true
 cove-ir.workspace = true
 cove-runtime.workspace = true

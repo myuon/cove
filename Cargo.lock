@@ -19,6 +19,7 @@ dependencies = [
  "cove-diag",
  "cove-ir",
  "cove-runtime",
+ "cove-schema",
  "cove-sema",
  "cove-syntax",
 ]
