@@ -480,10 +480,11 @@ impl Body<'_> {
     ///
     /// ADR 0001 says *"a `var` parameter cannot be stored or captured beyond
     /// the call"*, and nothing enforces the second half: the checker accepts
-    /// `scan.word("true").mapError { scan.fail(...) }` and the oracle runs
-    /// it. What the oracle runs, though, is a *copy* — no alias outlives the
-    /// call, because the address was read through before the closure existed
-    /// — so the rule's purpose holds even where its letter does not.
+    /// `scan.word("true").mapError(fn(error) { scan.fail(...) })` and the
+    /// oracle runs it. What the oracle runs, though, is a *copy* — no alias
+    /// outlives the call, because the address was read through before the
+    /// closure existed — so the rule's purpose holds even where its letter
+    /// does not.
     ///
     /// This lowers what the oracle runs. ADR 0012 puts the oracle above a
     /// backend, and a backend that refused a program the oracle answers would

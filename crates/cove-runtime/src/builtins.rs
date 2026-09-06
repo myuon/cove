@@ -882,13 +882,6 @@ pub fn call_method(
         // into `std.option` or `std.result` before this function is ever
         // asked — see `cove_schema::builtins::standard_binding`.
         //
-        // `mapError` stayed, and the reason is the `if` below. A program
-        // writes `mapError { ... }` with a trailing closure that names no
-        // parameter and ignores the error it replaces, and this passes it
-        // nothing. A Cove body would have to write `body(error)`, which
-        // passes one argument always and which a closure naming no parameter
-        // refuses. The affordance is the call site's, and Cove source cannot
-        // reproduce it.
         Value(Repr::Enum(value)) if &*value.type_name == RESULT.name => match name {
             "mapError" => {
                 let args = expect_args("mapError", args, 1, span)?;
@@ -899,10 +892,11 @@ pub fn call_method(
                 let error = value.payload.first().cloned().unwrap_or(Value(Repr::Unit));
                 // `args` is empty here — the callback was removed from it —
                 // so it is the argument list rather than a second vector
-                // built to hold at most one value.
-                if host.arity(&callback) != Some(0) {
-                    args.push(error);
-                }
+                // built to hold at most one value. The callback always
+                // takes the error (ADR 0044: a function value has exactly
+                // the parameters its type declares, with no exception for
+                // `mapError` any more).
+                args.push(error);
                 Ok(Value::err(host.call_value(&callback, args, span)?))
             }
             _ => Err(no_method("Result", name, span)),

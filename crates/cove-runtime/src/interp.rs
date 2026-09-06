@@ -3304,7 +3304,7 @@ impl<'a> Interpreter<'a> {
         Ok(evaluated)
     }
 
-    /// A trailing block is a closure argument: `mapError { ... }`.
+    /// A trailing block is a closure argument: `tasks.spawn { ... }`.
     fn eval_trailing(&mut self, env: &mut Env, expr: &Expr) -> Eval {
         match &expr.kind {
             ExprKind::Block(block) => self
@@ -4723,6 +4723,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    use cove_diag::Diagnostic;
     use cove_sema::config::Config;
     use cove_sema::package::{Module, Package, Unit};
 
@@ -4783,6 +4784,43 @@ mod tests {
         };
         let program = cove_sema::resolve::resolve(&package).expect("test source resolves");
         (Arc::new(sources), Arc::new(program))
+    }
+
+    /// Like [`program_of`], for source the checker is expected to reject:
+    /// answers the type-checker's diagnostics instead of panicking on them.
+    ///
+    /// `resolve` alone does not run `Checker` — it settles names, imports,
+    /// capabilities, and the call graph, and an arity mismatch is none of
+    /// those. `cove_sema::typeck::check` is the separate pass that reports
+    /// it, which is why this asks for it explicitly rather than reusing
+    /// `program_of`'s `resolve(&package).expect(..)`.
+    fn check_errors_of(source: &str) -> Vec<Diagnostic> {
+        let mut sources = SourceMap::new();
+        let path = PathBuf::from("test/main.cove");
+        let file = sources.add(path.clone(), source);
+        let ast = cove_syntax::parse_file(&sources, file).expect("test source parses");
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "test".to_string(),
+            Module {
+                name: "test".to_string(),
+                dir: PathBuf::from("test"),
+                units: vec![Unit { file, path, ast }],
+            },
+        );
+        for (name, module) in cove_sema::stdlib::attach(&mut sources).expect("stdlib parses") {
+            modules.insert(name, module);
+        }
+        let package = Package {
+            root: PathBuf::new(),
+            config: Config::default(),
+            modules,
+        };
+        let program = cove_sema::resolve::resolve(&package).expect("test source resolves");
+        cove_sema::typeck::check(&package, &program)
+            .into_iter()
+            .filter(|d| d.severity == cove_diag::Severity::Error)
+            .collect()
     }
 
     /// Parses several modules, so one can `use` another.
@@ -6458,7 +6496,7 @@ enum ConfigError {
 }
 
 fn port(text: String) -> Result<Int, ConfigError> {
-  Int.parse(text).mapError { ConfigError.InvalidPort(text) }
+  Int.parse(text).mapError(fn(error) { ConfigError.InvalidPort(text) })
 }
 
 export fn main() -> Result<Unit, Error> {
@@ -6571,8 +6609,14 @@ export fn main() -> Result<Unit, Error> {
         );
     }
 
+    /// ADR 0044: a trailing closure can never declare a parameter, and
+    /// `mapError`'s callback declares one (`fn(E) -> F`) with no exception
+    /// any more — so a program that writes the callback as a trailing
+    /// closure is rejected rather than silently handed nothing. This test
+    /// used to be `map_error_accepts_a_trailing_closure` and assert the
+    /// opposite.
     #[test]
-    fn map_error_accepts_a_trailing_closure() {
+    fn map_error_rejects_a_trailing_closure() {
         let source = r#"
 use console.println
 
@@ -6587,9 +6631,11 @@ export fn main() -> Result<Unit, Error> {
   Ok(())
 }
 "#;
-        assert_eq!(
-            run_entry_of(source, "main", &[]).output,
-            "Err(InvalidPort(x)) Ok(7)\n"
+        let errors = check_errors_of(source);
+        assert!(
+            errors.iter().any(|error| error.code == "cove::type::arity"
+                && error.message == "this function takes 0 parameter(s), but 1 were expected here"),
+            "{errors:?}"
         );
     }
 

@@ -14,7 +14,7 @@ enum Bad {
 
 /// Reads one temperature, refusing anything a thermometer could not have said.
 fn reading(text: String) -> Result<Int, Bad> {
-  let degrees = Int.parse(text).mapError { Bad.NotANumber(text) }?
+  let degrees = Int.parse(text).mapError(fn(error) { Bad.NotANumber(text) })?
   if degrees < -90 || degrees > 60 {
     return Err(Bad.OutOfRange(degrees))
   }

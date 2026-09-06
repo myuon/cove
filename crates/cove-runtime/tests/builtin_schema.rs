@@ -440,13 +440,10 @@ static EXERCISES: &[Exercise] = &[
         name: "unwrapOr",
         body: "  Int.parse(\"x\").unwrapOr(0)",
     },
-    // The Language Card writes `mapError { ... }` with a trailing closure
-    // that may ignore the error it replaces, which is the shape the schema
-    // does not declare and both ends accept anyway.
     Exercise {
         ty: "Result",
         name: "mapError",
-        body: "  let outcome = Int.parse(\"x\").mapError { Error(\"not a number\") }\n  let failed = outcome.isError()\n  0",
+        body: "  let outcome = Int.parse(\"x\").mapError(fn(error) { Error(\"not a number\") })\n  let failed = outcome.isError()\n  0",
     },
     Exercise {
         ty: "Int",

@@ -157,15 +157,15 @@ fn parseValue(var scan: Scanner, depth: Int) -> Result<Json, Detail> {
     return Ok(Json.Text(parseText(var scan)?))
   }
   if head == "t" {
-    scan.word("true").mapError { scan.fail("expected `true`") }?
+    scan.word("true").mapError(fn(error) { scan.fail("expected `true`") })?
     return Ok(Json.Bool(true))
   }
   if head == "f" {
-    scan.word("false").mapError { scan.fail("expected `false`") }?
+    scan.word("false").mapError(fn(error) { scan.fail("expected `false`") })?
     return Ok(Json.Bool(false))
   }
   if head == "n" {
-    scan.word("null").mapError { scan.fail("expected `null`") }?
+    scan.word("null").mapError(fn(error) { scan.fail("expected `null`") })?
     return Ok(Json.Null)
   }
   if head == "" {

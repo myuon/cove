@@ -5262,7 +5262,7 @@ impl<'a> Checker<'a> {
                         .label(self.ret_span, format!("the declared failure type is `{ret_error}`"))
                         .rule("`expr?` returns the error from the current function, so the two failure types must be the same.")
                         .help(format!(
-                            "map the failure first, as in `expr.mapError {{ ... }}?`, or declare this function `-> Result<_, {error}>`"
+                            "map the failure first, as in `expr.mapError(fn(error) {{ ... }})?`, or declare this function `-> Result<_, {error}>`"
                         )),
                     ),
                     other => self.diagnostics.push(
@@ -5532,7 +5532,7 @@ impl<'a> Checker<'a> {
                 )
                 .rule(SCOPE_CHILD_RULE)
                 .help(format!(
-                    "map the failure inside the task, as in `{scope}.spawn {{ ... .mapError {{ ... }} }}`, or declare this function `-> Result<{ret_ok}, {error}>`"
+                    "map the failure inside the task, as in `{scope}.spawn {{ ... .mapError(fn(error) {{ ... }}) }}`, or declare this function `-> Result<{ret_ok}, {error}>`"
                 )),
                 other => Diagnostic::error(
                     SCOPE_CHILD_FAILURE,
@@ -5972,6 +5972,25 @@ impl<'a> Checker<'a> {
         };
         if let Some(func) = &hint {
             if func.params.len() != params.len() {
+                // A trailing closure parses as a lambda of no parameters,
+                // unconditionally (`parse_trailing_closure`) — and the AST
+                // does not otherwise record that this lambda came from that
+                // form rather than a written `fn() { ... }`. So a lambda of
+                // no parameters gets the help that assumes the harder case:
+                // it cannot be fixed by adding a parameter to it, because a
+                // trailing closure has nowhere to write one, and the fix is
+                // to stop writing it as a trailing closure.
+                let help = if params.is_empty() {
+                    "a trailing closure can never declare a parameter — write it as an ordinary argument instead, as in `result.mapError(fn(error) { ... })`".to_string()
+                } else {
+                    format!(
+                        "write `fn({}) {{ ... }}`",
+                        (0..func.params.len())
+                            .map(|i| format!("p{i}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
                 self.diagnostics.push(
                     Diagnostic::error(
                         ARITY,
@@ -5983,7 +6002,7 @@ impl<'a> Checker<'a> {
                     )
                     .at(span)
                     .rule("A function value has exactly the parameters the place that holds it declares.")
-                    .help(format!("write `fn({}) {{ ... }}`", (0..func.params.len()).map(|i| format!("p{i}")).collect::<Vec<_>>().join(", "))),
+                    .help(help),
                 );
             }
         }
@@ -8010,7 +8029,7 @@ impl<'a> Checker<'a> {
         self.diagnostics.push(diagnostic);
     }
 
-    /// A trailing block is a closure argument: `mapError { ... }` is a
+    /// A trailing block is a closure argument: `tasks.spawn { ... }` is a
     /// function of no parameters.
     fn trailing_type(&mut self, trailing: &Expr, expected: Option<&Ty>) -> Ty {
         match &trailing.kind {
@@ -8549,13 +8568,12 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// `result.mapError { ... }`, which replaces a `Result`'s failure with
-    /// whatever its callback produces.
+    /// `result.mapError(fn(error) { ... })`, which replaces a `Result`'s
+    /// failure with whatever its callback produces.
     ///
-    /// The Language Card writes the callback as a trailing closure that may
-    /// ignore the error it replaces, so a callback of no parameters and one
-    /// of a single `E` parameter are both accepted — exactly the two forms
-    /// the runtime dispatches.
+    /// The callback's declared type is `fn(E) -> F`, matched exactly like
+    /// any other callback in the language — there is no exception for a
+    /// callback that ignores the error.
     fn map_error(
         &mut self,
         ok: &Ty,
@@ -8578,22 +8596,16 @@ impl<'a> Checker<'a> {
                 )
                 .at(span)
                 .rule("`mapError` replaces a failure with the value its one callback produces.")
-                .help("write `result.mapError { ... }`"),
+                .help("write `result.mapError(fn(error) { ... })`"),
             );
         }
         let Some(callback) = callback else {
             self.check_args_freely(args, trailing);
             return Ty::Result(Box::new(ok.clone()), Box::new(Ty::recovery()));
         };
-        let takes_error =
-            matches!(&callback.kind, ExprKind::Lambda { params, .. } if params.len() == 1);
         let expected = Ty::func(
             false,
-            if takes_error {
-                vec![error.clone()]
-            } else {
-                Vec::new()
-            },
+            vec![error.clone()],
             // The callback's own result is what replaces the failure type,
             // so the expectation states the parameters and leaves the result
             // to the body.
@@ -10586,7 +10598,7 @@ fn build() -> Array<Int> {
         accepts_body(
             "  let found: Int = [1].get(0).unwrapOr(0)\n\
              \x20 let parsed: Int = Int.parse(\"1\").unwrapOr(0)\n\
-             \x20 let mapped: Int = Int.parse(\"1\").mapError { \"bad\" }.unwrapOr(0)",
+             \x20 let mapped: Int = Int.parse(\"1\").mapError(fn(error) { \"bad\" }).unwrapOr(0)",
         );
         let error = rejects_body("  Int.parse(\"1\").unwrapOr(\"zero\")");
         assert_eq!(error.code, MISMATCH);
@@ -13073,7 +13085,7 @@ fn double(text: String) -> Result<Int, ParseError> {
         );
         assert_eq!(
             error.help.unwrap(),
-            "map the failure first, as in `expr.mapError { ... }?`, or declare this function `-> Result<_, Error>`"
+            "map the failure first, as in `expr.mapError(fn(error) { ... })?`, or declare this function `-> Result<_, Error>`"
         );
     }
 
@@ -13322,7 +13334,7 @@ enum ParseError {
 }
 
 fn parseOrFail(text: String) -> Result<Int, ParseError> {
-  Int.parse(text).mapError { ParseError.NotANumber(text) }
+  Int.parse(text).mapError(fn(error) { ParseError.NotANumber(text) })
 }
 ",
         );
@@ -13333,7 +13345,7 @@ enum ParseError {
 }
 
 fn parseOrFail(text: String) -> Result<Int, ParseError> {
-  Int.parse(text).mapError { text }
+  Int.parse(text).mapError(fn(error) { text })
 }
 ",
         );
@@ -13606,7 +13618,7 @@ fn run() -> Result<Unit, Error> {
         );
         assert_eq!(
             error.help.unwrap(),
-            "map the failure inside the task, as in `tasks.spawn { ... .mapError { ... } }`, or declare this function `-> Result<(), Wrong>`"
+            "map the failure inside the task, as in `tasks.spawn { ... .mapError(fn(error) { ... }) }`, or declare this function `-> Result<(), Wrong>`"
         );
     }
 
@@ -14987,7 +14999,7 @@ fn run() -> Int {{
 fn attempt() -> Result<Int, Error> { Ok(1) }
 
 fn run() -> Int {
-  let r = attempt().mapError { return 42 }
+  let r = attempt().mapError(fn(error) { return 42 })
   match r {
     Ok(v) => v
     Err(e) => e.length()
@@ -15007,7 +15019,7 @@ fn run() -> Int {
 fn attempt() -> Result<Int, Error> { Ok(1) }
 
 fn run() -> Int {
-  let r = attempt().mapError { 42 }
+  let r = attempt().mapError(fn(error) { 42 })
   match r {
     Ok(v) => v
     Err(e) => e.length()

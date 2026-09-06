@@ -218,7 +218,7 @@ fn map_error_is_a_branch_and_one_call_through_a_closure() {
     assert_eq!(
         super::listing(
             "enum E { Bad(String) }\n\
-             fn f(t: String) -> Result<Int, E> { Int.parse(t).mapError { E.Bad(t) } }",
+             fn f(t: String) -> Result<Int, E> { Int.parse(t).mapError(fn(error) { E.Bad(t) }) }",
             "f"
         ),
         "\
@@ -236,7 +236,7 @@ fn0 m.f(String) -> Result
      8  int s4:int 0
      9  copy s5:int s8:int Int
     10  jump 14
-    11  call-closure s12:int s10:ref ()
+    11  call-closure s12:int s10:ref (s9:Error)
     12  int s4:int 1
     13  copy s5:int s12:int m.E
     14  clear s12:int m.E
@@ -248,12 +248,9 @@ fn0 m.f(String) -> Result
     );
 }
 
-/// Whether the callback is handed the error it replaces is read off the
-/// function type the checker settled, not off the syntax.
-///
-/// The oracle asks `Host::arity`, and `Checker::map_error` accepts a
-/// callback written either way — so the settled type is the one place both
-/// spellings have already agreed.
+/// The callback is always handed the error it replaces (ADR 0044): the
+/// operand the closure runs with is the `Err` payload the branch above just
+/// tested, borrowed directly out of the receiver rather than copied.
 #[test]
 fn map_error_passes_the_failure_to_a_callback_that_takes_one() {
     assert_eq!(

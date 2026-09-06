@@ -88,7 +88,7 @@ reports that rather than guessing which reading was meant.
 - Expected failure uses `Result<T, E>`: `Ok(value)` or `Err(error)`.
 - `unwrapOr(fallback)` takes the value out of either: what a `Some` or an `Ok`
   carries, and `fallback` for a `None` or an `Err`. It says nothing about the
-  error, which is what `result.mapError { ... }` is for.
+  error, which is what `result.mapError(fn(error) { ... })` is for.
 - `Error` is the builtin error type. `Error("...")` builds one and `.message`
   reads what it carries.
 - `expr?` returns the error from the current function.
