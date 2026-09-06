@@ -18,7 +18,7 @@ fn0 m.f() -> Int
   frame 4: s0:int s1:ref s2:int s3:int
   local g -> s1:fn [3, 6)
      0  alloc s1:ref closure m.f#0<closure>
-     1  int s2:int 2
+     1  int s2:int 14
      2  store-field s1:ref +0 s2:int Int
      3  int s2:int 1
      4  call-closure s3:int s1:ref (s2:Int)
@@ -31,7 +31,7 @@ fn0 m.f() -> Int
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn2 m.f#0(Int) -> Int
+fn14 m.f#0(Int) -> Int
   frame 3: s0!:int s1:int s2:int
   local x -> s0:Int [0, 3)
      0  add.int.imm s2:int s0:int 1
@@ -61,7 +61,7 @@ fn0 m.f(m.Point) -> Int
   local p -> s0:m.Point [0, 7)
   local g -> s3:fn [4, 6)
      0  alloc s3:ref closure m.f#0<closure>
-     1  int s4:int 2
+     1  int s4:int 14
      2  store-field s3:ref +0 s4:int Int
      3  store-field s3:ref +1 s0:int m.Point
      4  call-closure s4:int s3:ref ()
@@ -72,7 +72,7 @@ fn0 m.f(m.Point) -> Int
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn2 m.f#0() -> Int
+fn14 m.f#0() -> Int
   frame 4: s0:int s1:int s2:int s3:int
   capture p -> s0:m.Point
   local p -> s0:m.Point [0, 3)
@@ -100,7 +100,7 @@ fn0 m.f() -> Int
   frame 3: s0:int s1:ref s2:int
   local g -> s1:fn [3, 5)
      0  alloc s1:ref closure m.f#0<closure>
-     1  int s2:int 2
+     1  int s2:int 14
      2  store-field s1:ref +0 s2:int Int
      3  call-closure s2:int s1:ref ()
      4  copy s0:int s2:int Int
@@ -110,7 +110,7 @@ fn0 m.f() -> Int
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn2 m.f#0() -> Int
+fn14 m.f#0() -> Int
   frame 2: s0:int s1:int
      0  int s1:int 1
      1  copy s0:int s1:int Int
@@ -178,7 +178,7 @@ fn0 m.apply(fn Int) -> Int
 fn1 m.f() -> Int
   frame 4: s0:int s1:ref s2:int s3:int
      0  alloc s1:ref closure m.f#0<closure>
-     1  int s2:int 3
+     1  int s2:int 15
      2  store-field s1:ref +0 s2:int Int
      3  int s2:int 2
      4  call s3:int m.apply (s1:fn s2:Int) Int
@@ -203,13 +203,13 @@ fn a_lambda_inside_a_lambda_is_numbered_after_the_one_that_made_it() {
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn2 m.f#0() -> Int
+fn14 m.f#0() -> Int
   frame 4: s0:int s1:int s2:ref s3:int
   capture n -> s0:Int
   local n -> s0:Int [0, 7)
   local inner -> s2:fn [4, 6)
      0  alloc s2:ref closure m.f#0#0<closure>
-     1  int s3:int 3
+     1  int s3:int 15
      2  store-field s2:ref +0 s3:int Int
      3  store-field s2:ref +1 s0:int Int
      4  call-closure s3:int s2:ref ()
@@ -220,7 +220,7 @@ fn2 m.f#0() -> Int
     assert_eq!(
         listing(source, "f#0#0"),
         "\
-fn3 m.f#0#0() -> Int
+fn15 m.f#0#0() -> Int
   frame 3: s0:int s1:int s2:int
   capture n -> s0:Int
   local n -> s0:Int [0, 3)
@@ -253,7 +253,7 @@ fn0 m.f(<addr>) -> Int
   local g -> s3:fn [5, 7)
      0  load s2:int s0:addr Int
      1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 2
+     2  int s4:int 14
      3  store-field s3:ref +0 s4:int Int
      4  store-field s3:ref +1 s2:int Int
      5  call-closure s2:int s3:ref ()
@@ -267,7 +267,7 @@ fn0 m.f(<addr>) -> Int
             "f#0"
         ),
         "\
-fn2 m.f#0() -> Int
+fn14 m.f#0() -> Int
   frame 3: s0:int s1:int s2:int
   capture n -> s0:Int
   local n -> s0:Int [0, 3)
@@ -299,7 +299,7 @@ fn0 m.f() -> Int
   frame 4: s0:int s1:ref s2:int s3:int
   local double -> s1:fn [3, 6)
      0  alloc s1:ref closure m.f#0<closure>
-     1  int s2:int 2
+     1  int s2:int 14
      2  store-field s1:ref +0 s2:int Int
      3  int s2:int 21
      4  call-closure s3:int s1:ref (s2:Int)
@@ -310,7 +310,7 @@ fn0 m.f() -> Int
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn2 m.f#0(Int) -> Int
+fn14 m.f#0(Int) -> Int
   frame 3: s0!:int s1:int s2:int
   local n -> s0:Int [0, 3)
      0  mul.int.imm s2:int s0:int 2
@@ -329,7 +329,7 @@ fn a_local_fn_captures_the_bindings_around_it() {
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn2 m.f#0(Int) -> Int
+fn14 m.f#0(Int) -> Int
   frame 4: s0!:int s1:int s2:int s3:int
   capture base -> s1:Int
   local base -> s1:Int [0, 3)

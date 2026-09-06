@@ -58,30 +58,35 @@ fn0 m.ms(Duration) -> Int
     );
 }
 
-/// The discriminant is word 0 of the value, so the answer is a comparison
-/// against the location itself — a builtin for it would be a call into the
-/// runtime to read one word the instruction set reads on its own.
+/// `Option.isSome` no longer compiles to an inline discriminant comparison:
+/// it is one of the methods `cove_schema::builtins::STANDARD_LIBRARY` names,
+/// so `o.isSome()` is an ordinary [`crate::Inst::Call`] into
+/// `std.option.isSome` and never a
+/// [`Body::call_builtin_method`](super::super::Body::call_builtin_method)
+/// dispatch — the same path `a_method_the_standard_library_implements_is_an_ordinary_call`
+/// shows for `Array.isEmpty`.
 #[test]
-fn is_some_is_the_question_a_match_already_asks() {
+fn is_some_is_a_call_the_standard_library_implements() {
     assert_eq!(
         listing("fn has(o: Option<Int>) -> Bool { o.isSome() }", "has"),
         "\
 fn0 m.has(Option) -> Bool
-  frame 5: s0!:int s1!:int s2:bool s3:int s4:bool
-  local o -> s0:Option [0, 4)
-     0  int s3:int 1
-     1  eq.int s4:bool s0:int s3:int
-     2  copy s2:bool s4:bool Bool
-     3  return s2:bool Bool
+  frame 4: s0!:int s1!:int s2:bool s3:bool
+  local o -> s0:Option [0, 3)
+     0  call s3:bool std.option.isSome<Int> (s0:Option) Bool
+     1  copy s2:bool s3:bool Bool
+     2  return s2:bool Bool
 "
     );
 }
 
-/// The fallback is evaluated before the branch and whichever way it goes,
-/// because it is an ordinary argument and the language evaluates a call's
-/// arguments before the call.
+/// `Option.unwrapOr` migrated the same way: `o.unwrapOr(other)` is an
+/// ordinary [`crate::Inst::Call`] into `std.option.unwrapOr`, with `other`
+/// evaluated as an ordinary argument before the call — there is no branch
+/// here for the discriminant to drive, because the discriminant question is
+/// now inside the callee's own body rather than in this caller's listing.
 #[test]
-fn unwrap_or_is_that_question_and_a_branch() {
+fn unwrap_or_is_an_ordinary_call_into_the_standard_library() {
     assert_eq!(
         listing(
             "fn value(o: Option<Int>, other: Int) -> Int { o.unwrapOr(other) }",
@@ -89,17 +94,12 @@ fn unwrap_or_is_that_question_and_a_branch() {
         ),
         "\
 fn0 m.value(Option Int) -> Int
-  frame 7: s0!:int s1!:int s2!:int s3:int s4:int s5:int s6:bool
-  local o -> s0:Option [0, 8)
-  local other -> s2:Int [0, 8)
-     0  int s5:int 1
-     1  eq.int s6:bool s0:int s5:int
-     2  branch-false s6:bool 5
-     3  copy s4:int s1:int Int
-     4  jump 6
-     5  copy s4:int s2:int Int
-     6  copy s3:int s4:int Int
-     7  return s3:int Int
+  frame 5: s0!:int s1!:int s2!:int s3:int s4:int
+  local o -> s0:Option [0, 3)
+  local other -> s2:Int [0, 3)
+     0  call s4:int std.option.unwrapOr<Int> (s0:Option s2:Int) Int
+     1  copy s3:int s4:int Int
+     2  return s3:int Int
 "
     );
 }
@@ -116,19 +116,14 @@ fn a_parser_answers_a_result_and_interns_the_error_it_may_carry() {
         ),
         "\
 fn0 m.parse(String) -> Int
-  frame 9: s0!:ref s1:int s2:int s3:int s4:int s5:ref s6:int s7:int s8:bool
-  local s -> s0:String [0, 11)
-     0  call-builtin s3:int Int.parse (s0:String) Result
-     1  int s6:int 0
-     2  int s7:int 0
-     3  eq.int s8:bool s3:int s7:int
-     4  branch-false s8:bool 7
-     5  copy s2:int s4:int Int
-     6  jump 8
-     7  copy s2:int s6:int Int
-     8  clear s3:int Result
-     9  copy s1:int s2:int Int
-    10  return s1:int Int
+  frame 7: s0!:ref s1:int s2:int s3:int s4:ref s5:int s6:int
+  local s -> s0:String [0, 6)
+     0  call-builtin s2:int Int.parse (s0:String) Result
+     1  int s5:int 0
+     2  call s6:int std.result.unwrapOr<Int, Error> (s2:Result s5:Int) Int
+     3  clear s2:int Result
+     4  copy s1:int s6:int Int
+     5  return s1:int Int
 "
     );
 }
@@ -232,7 +227,7 @@ fn0 m.f(String) -> Result
   local t -> s0:String [0, 19)
      0  call-builtin s7:int Int.parse (s0:String) Result
      1  alloc s10:ref closure m.f#0<closure>
-     2  int s11:int 2
+     2  int s11:int 14
      3  store-field s10:ref +0 s11:int Int
      4  store-field s10:ref +1 s0:ref String
      5  int s11:int 0
@@ -273,7 +268,7 @@ fn0 m.f(String) -> Result
   local t -> s0:String [0, 18)
      0  call-builtin s7:int Int.parse (s0:String) Result
      1  alloc s10:ref closure m.f#0<closure>
-     2  int s11:int 2
+     2  int s11:int 14
      3  store-field s10:ref +0 s11:int Int
      4  int s11:int 0
      5  eq.int s14:bool s7:int s11:int

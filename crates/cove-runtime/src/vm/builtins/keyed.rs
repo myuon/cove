@@ -287,15 +287,6 @@ pub(super) fn set_length(
     Ok(set(machine, "length", receiver)?.len as u64)
 }
 
-/// `Set.isEmpty() -> Bool`.
-pub(super) fn set_is_empty(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, _) = operand::method("isEmpty", operands, 0)?;
-    Ok((set(machine, "isEmpty", receiver)?.len == 0) as u64)
-}
-
 /// `Set.contains(element) -> Bool`.
 pub(super) fn set_contains(
     machine: &mut Machine,
@@ -599,15 +590,6 @@ pub(super) fn map_length(
 ) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("length", operands, 0)?;
     Ok(map(machine, "length", receiver)?.len as u64)
-}
-
-/// `Map.isEmpty() -> Bool`.
-pub(super) fn map_is_empty(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, _) = operand::method("isEmpty", operands, 0)?;
-    Ok((map(machine, "isEmpty", receiver)?.len == 0) as u64)
 }
 
 /// `Map.keys() -> Array<K>`, in ascending order.
@@ -915,19 +897,14 @@ mod tests {
         let mut machine = machine(&program);
         let int = scalar(&program, Repr::Int);
         let items = members(&mut machine, int, &[1, 2, 3]);
-        let empty = members(&mut machine, int, &[]);
         assert_eq!(
             word(&mut machine, "Set", "length", &[(Repr::Ref, items)]).unwrap(),
             3
         );
-        assert_eq!(
-            word(&mut machine, "Set", "isEmpty", &[(Repr::Ref, items)]).unwrap(),
-            0
-        );
-        assert_eq!(
-            word(&mut machine, "Set", "isEmpty", &[(Repr::Ref, empty)]).unwrap(),
-            1
-        );
+
+        // `isEmpty` is not a machine builtin for `Set` either: it is
+        // `std.set.isEmpty`, and it is `cove-sema`'s and `cove-ir`'s tests
+        // that check it rather than a word read off the machine here.
 
         let array = word(&mut machine, "Set", "toArray", &[(Repr::Ref, items)]).unwrap();
         assert_eq!(words_of(&machine, array), vec![1, 2, 3]);
@@ -1073,20 +1050,15 @@ mod tests {
         let mut machine = machine(&program);
         let int = scalar(&program, Repr::Int);
         let held_map = entries(&mut machine, int, int, &[(1, 10), (2, 20)]);
-        let empty = entries(&mut machine, int, int, &[]);
 
         assert_eq!(
             word(&mut machine, "Map", "length", &[(Repr::Ref, held_map)]).unwrap(),
             2
         );
-        assert_eq!(
-            word(&mut machine, "Map", "isEmpty", &[(Repr::Ref, held_map)]).unwrap(),
-            0
-        );
-        assert_eq!(
-            word(&mut machine, "Map", "isEmpty", &[(Repr::Ref, empty)]).unwrap(),
-            1
-        );
+
+        // `isEmpty` is not a machine builtin for `Map` either: it is
+        // `std.map.isEmpty`, and it is `cove-sema`'s and `cove-ir`'s tests
+        // that check it rather than a word read off the machine here.
         assert_eq!(
             word(
                 &mut machine,

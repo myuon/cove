@@ -45,7 +45,7 @@
       "methods": [
         {"name": "get", "signature": "get(index: Int) -> Option<T>", "generics": [], "params": [{"name": "index", "type": "Int"}], "variadic": false, "result": "Option<T>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.vector.isEmpty", "host": false},
         {"name": "contains", "signature": "contains(element: T) -> Bool", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "indexOf", "signature": "indexOf(element: T) -> Option<Int>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Option<Int>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "slice", "signature": "slice(from: Int, to: Int) -> Array<T>", "generics": [], "params": [{"name": "from", "type": "Int"}, {"name": "to", "type": "Int"}], "variadic": false, "result": "Array<T>", "mutating": false, "implementedBy": "machine", "host": false},
@@ -74,7 +74,7 @@
       "methods": [
         {"name": "get", "signature": "get(key: K) -> Option<V>", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Option<V>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.map.isEmpty", "host": false},
         {"name": "contains", "signature": "contains(key: K) -> Bool", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "keys", "signature": "keys() -> Array<K>", "generics": [], "params": [], "variadic": false, "result": "Array<K>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "values", "signature": "values() -> Array<V>", "generics": [], "params": [], "variadic": false, "result": "Array<V>", "mutating": false, "implementedBy": "machine", "host": false},
@@ -105,7 +105,7 @@
       ],
       "methods": [
         {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.set.isEmpty", "host": false},
         {"name": "toArray", "signature": "toArray() -> Array<T>", "generics": [], "params": [], "variadic": false, "result": "Array<T>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "contains", "signature": "contains(element: T) -> Bool", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "inserted", "signature": "inserted(element: T) -> Set<T>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Set<T>", "mutating": false, "implementedBy": "machine", "host": false},
@@ -124,7 +124,7 @@
       ],
       "methods": [
         {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.string.isEmpty", "host": false},
         {"name": "words", "signature": "words() -> Array<String>", "generics": [], "params": [], "variadic": false, "result": "Array<String>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "chars", "signature": "chars() -> Array<String>", "generics": [], "params": [], "variadic": false, "result": "Array<String>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "split", "signature": "split(separator: String) -> Array<String>", "generics": [], "params": [{"name": "separator", "type": "String"}], "variadic": false, "result": "Array<String>", "mutating": false, "implementedBy": "machine", "host": false},
@@ -165,9 +165,9 @@
       "associated": [
       ],
       "methods": [
-        {"name": "isSome", "signature": "isSome() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "isNone", "signature": "isNone() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "unwrapOr", "signature": "unwrapOr(fallback: T) -> T", "generics": [], "params": [{"name": "fallback", "type": "T"}], "variadic": false, "result": "T", "mutating": false, "implementedBy": "machine", "host": false}
+        {"name": "isSome", "signature": "isSome() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.option.isSome", "host": false},
+        {"name": "isNone", "signature": "isNone() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.option.isNone", "host": false},
+        {"name": "unwrapOr", "signature": "unwrapOr(fallback: T) -> T", "generics": [], "params": [{"name": "fallback", "type": "T"}], "variadic": false, "result": "T", "mutating": false, "implementedBy": "std.option.unwrapOr", "host": false}
       ]
     },
     {
@@ -179,9 +179,9 @@
       "associated": [
       ],
       "methods": [
-        {"name": "isOk", "signature": "isOk() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "isError", "signature": "isError() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "unwrapOr", "signature": "unwrapOr(fallback: T) -> T", "generics": [], "params": [{"name": "fallback", "type": "T"}], "variadic": false, "result": "T", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "isOk", "signature": "isOk() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.result.isOk", "host": false},
+        {"name": "isError", "signature": "isError() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.result.isError", "host": false},
+        {"name": "unwrapOr", "signature": "unwrapOr(fallback: T) -> T", "generics": [], "params": [{"name": "fallback", "type": "T"}], "variadic": false, "result": "T", "mutating": false, "implementedBy": "std.result.unwrapOr", "host": false},
         {"name": "mapError", "signature": "mapError(body: fn(E) -> F) -> Result<T, F>", "generics": ["F"], "params": [{"name": "body", "type": "fn(E) -> F"}], "variadic": false, "result": "Result<T, F>", "mutating": false, "implementedBy": "machine", "host": false}
       ]
     },
@@ -198,8 +198,8 @@
       "methods": [
         {"name": "toFloat", "signature": "toFloat() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "abs", "signature": "abs() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "min", "signature": "min(other: Int) -> Int", "generics": [], "params": [{"name": "other", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "max", "signature": "max(other: Int) -> Int", "generics": [], "params": [{"name": "other", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "min", "signature": "min(other: Int) -> Int", "generics": [], "params": [{"name": "other", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.int.min", "host": false},
+        {"name": "max", "signature": "max(other: Int) -> Int", "generics": [], "params": [{"name": "other", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.int.max", "host": false},
         {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "implementedBy": "machine", "host": false}
       ]
     },

@@ -1,0 +1,34 @@
+/// Whether this option holds a value.
+///
+/// Three lines of `match` that were two Rust implementations: an arm in the
+/// tree-walking interpreter, and a pair of instructions the lowering emitted
+/// in place of a call. Neither of them said `Some` or `None` in as many
+/// words, which is the only thing either of them was doing.
+export fn isSome<T>(option: Option<T>) -> Bool {
+  match option {
+    Some(_) => true
+    None => false
+  }
+}
+
+/// Whether this option holds nothing.
+export fn isNone<T>(option: Option<T>) -> Bool {
+  match option {
+    Some(_) => false
+    None => true
+  }
+}
+
+/// The value this option holds, or `fallback` if it holds none.
+///
+/// `fallback` is evaluated whether or not it is used, exactly as it was
+/// before this moved: the inlined form the lowering emitted computed the
+/// argument first and then branched, and so does a call. A reader who wants
+/// the fallback computed only when it is needed writes the `match` out, and
+/// always did.
+export fn unwrapOr<T>(option: Option<T>, fallback: T) -> T {
+  match option {
+    Some(value) => value
+    None => fallback
+  }
+}

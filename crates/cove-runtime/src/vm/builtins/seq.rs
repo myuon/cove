@@ -631,15 +631,6 @@ pub(super) fn vector_length(
     Ok(vector(machine, "length", receiver)?.len as u64)
 }
 
-/// `Vector.isEmpty() -> Bool`.
-pub(super) fn vector_is_empty(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, _) = operand::method("isEmpty", operands, 0)?;
-    Ok((vector(machine, "isEmpty", receiver)?.len == 0) as u64)
-}
-
 /// `Vector.toArray() -> Array<T>`, copying the elements.
 pub(super) fn vector_to_array(
     machine: &mut Machine,
@@ -1270,10 +1261,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(option_int(&program, &words), ("Some".to_string(), vec![2]));
-        assert_eq!(
-            word(&mut machine, "Vector", "isEmpty", &[(Repr::Ref, items)]).unwrap(),
-            0
-        );
+
+        // `isEmpty` is not a machine builtin for `Vector` either: it is
+        // `std.vector.isEmpty`, and it is `cove-sema`'s and `cove-ir`'s
+        // tests that check it rather than a word read off the machine here.
 
         // An `Array`, not a `Vector`: a slice is a reading of a sequence.
         let addr = word(

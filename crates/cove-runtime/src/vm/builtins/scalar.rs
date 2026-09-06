@@ -100,28 +100,6 @@ pub(super) fn int_abs(
         .ok_or_else(|| operand::overflowed("abs"))
 }
 
-/// `Int.min(other) -> Int`.
-pub(super) fn int_min(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("Int.min", operands, 1)?;
-    let n = int_receiver(machine, "min", self_)?;
-    let other = operand::int(machine, "Int.min", "other", args[0])?;
-    Ok(n.min(other) as u64)
-}
-
-/// `Int.max(other) -> Int`.
-pub(super) fn int_max(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("Int.max", operands, 1)?;
-    let n = int_receiver(machine, "max", self_)?;
-    let other = operand::int(machine, "Int.max", "other", args[0])?;
-    Ok(n.max(other) as u64)
-}
-
 /// `Int.parse(text) -> Result<Int, Error>`.
 ///
 /// Rust's `str::parse::<i64>` reads a leading `+` or `-` and no digit
@@ -340,22 +318,11 @@ mod tests {
             f64::from_bits(word(&mut machine, "Int", "toFloat", &[(Repr::Int, 3)]).unwrap()),
             3.0
         );
-        assert_eq!(
-            int_of(
-                &mut machine,
-                "min",
-                &[(Repr::Int, 3), (Repr::Int, -1i64 as u64)]
-            ),
-            -1
-        );
-        assert_eq!(
-            int_of(
-                &mut machine,
-                "max",
-                &[(Repr::Int, 3), (Repr::Int, -1i64 as u64)]
-            ),
-            3
-        );
+
+        // `min` and `max` are not machine builtins for `Int` any more: they
+        // are `std.int.min` and `std.int.max`, and it is `cove-sema`'s and
+        // `cove-ir`'s tests that check them rather than a word read off the
+        // machine here.
         assert_eq!(int_of(&mut machine, "abs", &[(Repr::Int, -7i64 as u64)]), 7);
     }
 

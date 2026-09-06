@@ -1,0 +1,8 @@
+/// Whether this string is the empty one.
+///
+/// `length()` counts characters and stays a primitive: it has to know how
+/// the text is stored. Comparing that count against zero does not, and that
+/// is the whole of the line between them.
+export fn isEmpty(text: String) -> Bool {
+  text.length() == 0
+}

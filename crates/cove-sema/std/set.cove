@@ -1,0 +1,4 @@
+/// Whether this set holds nothing.
+export fn isEmpty<T>(items: Set<T>) -> Bool {
+  items.length() == 0
+}

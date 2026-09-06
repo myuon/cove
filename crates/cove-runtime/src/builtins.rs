@@ -22,9 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use cove_diag::Span;
-use cove_schema::builtins::{
-    FreeBuiltinKind, FreeBuiltinSchema, MAP_ENTRY, OK_CASE, OPTION, RESULT, SOME_CASE,
-};
+use cove_schema::builtins::{FreeBuiltinKind, FreeBuiltinSchema, MAP_ENTRY, OK_CASE, RESULT};
 
 use crate::error::RuntimeError;
 use crate::shared::SharedCell;
@@ -595,10 +593,11 @@ pub fn call_method(
                     expect_args(name, args, 0, span)?;
                     Ok(Value(Repr::Int(storage.len() as i64)))
                 }
-                "isEmpty" => {
-                    expect_args(name, args, 0, span)?;
-                    Ok(Value(Repr::Bool(storage.is_empty())))
-                }
+                // `isEmpty` used to answer here too, `storage.is_empty()`.
+                // It does not reach this arm any more:
+                // `Interpreter::eval_method_call` resolves it to a call into
+                // `std.vector.isEmpty` before this function is ever asked
+                // about it — see `cove_schema::builtins::standard_binding`.
                 "freeze" => {
                     expect_args("freeze", args, 0, span)?;
                     freeze(storage, span)
@@ -640,10 +639,11 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Int(entries.len() as i64)))
             }
-            "isEmpty" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Bool(entries.is_empty())))
-            }
+            // `isEmpty` used to answer here too, `entries.is_empty()`. It
+            // does not reach this arm any more: `Interpreter::eval_method_call`
+            // resolves it to a call into `std.map.isEmpty` before this
+            // function is ever asked about it — see
+            // `cove_schema::builtins::standard_binding`.
             // Ascending key order, matching the `BTreeMap` storage and the
             // order `for` iterates.
             "keys" => {
@@ -686,10 +686,11 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Int(items.len() as i64)))
             }
-            "isEmpty" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Bool(items.is_empty())))
-            }
+            // `isEmpty` used to answer here too, `items.is_empty()`. It does
+            // not reach this arm any more: `Interpreter::eval_method_call`
+            // resolves it to a call into `std.set.isEmpty` before this
+            // function is ever asked about it — see
+            // `cove_schema::builtins::standard_binding`.
             "toArray" => {
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Array(
@@ -717,10 +718,11 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Int(text.chars().count() as i64)))
             }
-            "isEmpty" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Bool(text.is_empty())))
-            }
+            // `isEmpty` used to answer here too, `text.is_empty()`. It does
+            // not reach this arm any more: `Interpreter::eval_method_call`
+            // resolves it to a call into `std.string.isEmpty` before this
+            // function is ever asked about it — see
+            // `cove_schema::builtins::standard_binding`.
             "words" => {
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Array(
@@ -873,70 +875,38 @@ pub fn call_method(
                 _ => Err(no_method("Range", name, span)),
             }
         }
-        Value(Repr::Enum(value)) if &*value.type_name == OPTION.name => {
-            let some = &*value.case == SOME_CASE.name;
-            match name {
-                "isSome" => {
-                    expect_args(name, args, 0, span)?;
-                    Ok(Value(Repr::Bool(some)))
+        // `Option` and `Result` used to answer here for `isSome`, `isNone`,
+        // `unwrapOr` on the one and `isOk`, `isError`, `unwrapOr` on the
+        // other. None of those reach this function any more:
+        // `Interpreter::eval_method_call` resolves each of them to a call
+        // into `std.option` or `std.result` before this function is ever
+        // asked — see `cove_schema::builtins::standard_binding`.
+        //
+        // `mapError` stayed, and the reason is the `if` below. A program
+        // writes `mapError { ... }` with a trailing closure that names no
+        // parameter and ignores the error it replaces, and this passes it
+        // nothing. A Cove body would have to write `body(error)`, which
+        // passes one argument always and which a closure naming no parameter
+        // refuses. The affordance is the call site's, and Cove source cannot
+        // reproduce it.
+        Value(Repr::Enum(value)) if &*value.type_name == RESULT.name => match name {
+            "mapError" => {
+                let args = expect_args("mapError", args, 1, span)?;
+                let callback = args.remove(0);
+                if &*value.case == OK_CASE.name {
+                    return Ok(receiver.clone());
                 }
-                "isNone" => {
-                    expect_args(name, args, 0, span)?;
-                    Ok(Value(Repr::Bool(!some)))
+                let error = value.payload.first().cloned().unwrap_or(Value(Repr::Unit));
+                // `args` is empty here — the callback was removed from it —
+                // so it is the argument list rather than a second vector
+                // built to hold at most one value.
+                if host.arity(&callback) != Some(0) {
+                    args.push(error);
                 }
-                "unwrapOr" => {
-                    let args = expect_args("unwrapOr", args, 1, span)?;
-                    Ok(match value.payload.first() {
-                        Some(inner) if some => inner.clone(),
-                        _ => args.remove(0),
-                    })
-                }
-                _ => Err(no_method("Option", name, span)),
+                Ok(Value::err(host.call_value(&callback, args, span)?))
             }
-        }
-        Value(Repr::Enum(value)) if &*value.type_name == RESULT.name => {
-            let ok = &*value.case == OK_CASE.name;
-            match name {
-                "isOk" => {
-                    expect_args(name, args, 0, span)?;
-                    Ok(Value(Repr::Bool(ok)))
-                }
-                "isError" => {
-                    expect_args(name, args, 0, span)?;
-                    Ok(Value(Repr::Bool(!ok)))
-                }
-                // `Option.unwrapOr` above, with `Ok` where it has `Some`.
-                // The error an `Err` carries is dropped rather than passed
-                // to anything, which is the whole difference between this
-                // and `mapError`: a caller that wants to see the error has
-                // that one, and a caller that has a default has this one.
-                "unwrapOr" => {
-                    let args = expect_args("unwrapOr", args, 1, span)?;
-                    Ok(match value.payload.first() {
-                        Some(inner) if ok => inner.clone(),
-                        _ => args.remove(0),
-                    })
-                }
-                "mapError" => {
-                    let args = expect_args("mapError", args, 1, span)?;
-                    let callback = args.remove(0);
-                    if ok {
-                        return Ok(receiver.clone());
-                    }
-                    let error = value.payload.first().cloned().unwrap_or(Value(Repr::Unit));
-                    // The Language Card writes `mapError { ... }` with a trailing
-                    // closure that may ignore the error it replaces. `args` is
-                    // empty here — the callback was removed from it — so it is
-                    // the argument list rather than a second vector built to
-                    // hold at most one value.
-                    if host.arity(&callback) != Some(0) {
-                        args.push(error);
-                    }
-                    Ok(Value::err(host.call_value(&callback, args, span)?))
-                }
-                _ => Err(no_method("Result", name, span)),
-            }
-        }
+            _ => Err(no_method("Result", name, span)),
+        },
         Value(Repr::Int(n)) => match name {
             "toFloat" => {
                 expect_args(name, args, 0, span)?;
@@ -949,20 +919,12 @@ pub fn call_method(
                         .ok_or_else(|| crate::interp::overflow("abs", span))?,
                 )))
             }
-            "min" => {
-                let args = expect_args("Int.min", args, 1, span)?;
-                let Value(Repr::Int(other)) = &args[0] else {
-                    return Err(type_error("Int.min", "other", "Int", &args[0], span));
-                };
-                Ok(Value(Repr::Int((*n).min(*other))))
-            }
-            "max" => {
-                let args = expect_args("Int.max", args, 1, span)?;
-                let Value(Repr::Int(other)) = &args[0] else {
-                    return Err(type_error("Int.max", "other", "Int", &args[0], span));
-                };
-                Ok(Value(Repr::Int((*n).max(*other))))
-            }
+            // `min` and `max` used to answer here too, `(*n).min(*other)`
+            // and `(*n).max(*other)`. Neither reaches this arm any more:
+            // `Interpreter::eval_method_call` resolves them to a call into
+            // `std.int.min`/`std.int.max` before this function is ever
+            // asked about them — see
+            // `cove_schema::builtins::standard_binding`.
             _ => Err(no_method("Int", name, span)),
         },
         Value(Repr::Float(x)) => match name {

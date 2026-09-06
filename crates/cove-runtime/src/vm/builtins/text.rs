@@ -57,15 +57,6 @@ pub(super) fn length(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<
     Ok(receiver(machine, "length", self_)?.chars().count() as u64)
 }
 
-/// `String.isEmpty() -> Bool`.
-pub(super) fn is_empty(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("isEmpty", operands, 0)?;
-    Ok(receiver(machine, "isEmpty", self_)?.is_empty() as u64)
-}
-
 /// `String.words() -> Array<String>`, split on ASCII whitespace.
 pub(super) fn words(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
     let (self_, _) = operand::method("words", operands, 0)?;
@@ -359,8 +350,10 @@ mod tests {
             5,
             "five characters"
         );
-        assert_eq!(on(&mut machine, "", "isEmpty", &[]), 1);
-        assert_eq!(on(&mut machine, "a", "isEmpty", &[]), 0);
+
+        // `isEmpty` is not a machine builtin for `String` either: it is
+        // `std.string.isEmpty`, and it is `cove-sema`'s and `cove-ir`'s
+        // tests that check it rather than a word read off the machine here.
     }
 
     #[test]
