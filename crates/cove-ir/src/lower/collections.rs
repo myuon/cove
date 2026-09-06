@@ -399,6 +399,12 @@ impl Body<'_> {
     /// `push`, which replaces the store with a larger one when the old one is
     /// full, and `toArray`, which builds an immutable copy. Neither is
     /// something an instruction expresses.
+    ///
+    /// `isEmpty` used to answer here too, `length() == 0`. It is not reached
+    /// from here any more: `Body::call_builtin_method` resolves it to a
+    /// standard-library call — `cove_schema::builtins::standard_binding`
+    /// names `std.vector.isEmpty` — before this function is ever called for
+    /// it.
     pub(super) fn vector_method(
         &mut self,
         expr: &Expr,
@@ -408,7 +414,7 @@ impl Body<'_> {
         args: &[Arg],
     ) -> Val {
         match (name, args.len()) {
-            ("length", 0) | ("isEmpty", 0) => {
+            ("length", 0) => {
                 let obj = self.expr(base);
                 let len = self.temp(shapes::INT);
                 self.emit(
@@ -458,8 +464,7 @@ impl Body<'_> {
         }
     }
 
-    /// `members.length()`, `members.isEmpty()`, and everything else a `Set`
-    /// answers.
+    /// `members.length()` and everything else a `Set` answers.
     ///
     /// A `Set` is a run of members in the object, so its length is the
     /// object's own header length and reading it is one [`Inst::Len`] — the
@@ -471,9 +476,14 @@ impl Body<'_> {
     /// over the order [`cove_runtime::vm::builtins::key`] defines or a run
     /// built sorted in one pass, and neither is something an instruction
     /// expresses.
+    ///
+    /// `isEmpty` used to answer here too, `length() == 0`. It is not reached
+    /// from here any more: `Body::call_builtin_method` resolves it to a
+    /// standard-library call — `cove_schema::builtins::standard_binding`
+    /// names `std.set.isEmpty` — before this function is ever called for it.
     pub(super) fn set_method(&mut self, expr: &Expr, base: &Expr, name: &str, args: &[Arg]) -> Val {
         match (name, args.len()) {
-            ("length", 0) | ("isEmpty", 0) => self.header_length(expr, base, name),
+            ("length", 0) => self.header_length(expr, base, name),
             _ if HANDED_OVER.contains(&("Set", name)) => {
                 self.machine_call(expr, Some(base), "Set", name, args)
             }
@@ -481,15 +491,19 @@ impl Body<'_> {
         }
     }
 
-    /// `entries.length()`, `entries.isEmpty()`, and everything else a `Map`
-    /// answers.
+    /// `entries.length()` and everything else a `Map` answers.
     ///
     /// The header's length counts *entries* rather than words, so the same
     /// [`Inst::Len`] a `Set` reads its member count with reads a map's entry
     /// count. See [`Body::set_method`] for why the rest are the machine's.
+    ///
+    /// `isEmpty` used to answer here too, `length() == 0`. It is not reached
+    /// from here any more: `Body::call_builtin_method` resolves it to a
+    /// standard-library call — `cove_schema::builtins::standard_binding`
+    /// names `std.map.isEmpty` — before this function is ever called for it.
     pub(super) fn map_method(&mut self, expr: &Expr, base: &Expr, name: &str, args: &[Arg]) -> Val {
         match (name, args.len()) {
-            ("length", 0) | ("isEmpty", 0) => self.header_length(expr, base, name),
+            ("length", 0) => self.header_length(expr, base, name),
             _ if HANDED_OVER.contains(&("Map", name)) => {
                 self.machine_call(expr, Some(base), "Map", name, args)
             }

@@ -1305,8 +1305,14 @@ impl Value {
     ///
     /// A method declared in a package can only ever be found on one of those
     /// two, so this is what receiver dispatch asks rather than
-    /// [`Value::type_name`]: a builtin receiver answers `None` and no name is
-    /// built at all, and a declared one hands back the name it already holds.
+    /// [`Value::type_name`]: no name is built at all for the receivers that
+    /// have none, and a declared one hands back the name it already holds.
+    ///
+    /// **A `Some` here is not a declared type.** The builtin `Option` and
+    /// `Result` are `Repr::Enum` as well, and answer their own bare names —
+    /// `Option`, with no module in front. A caller asking "is this a
+    /// declared type" has to look for the dot; a caller that read `is_some`
+    /// as the answer got two builtins wrong.
     pub fn declared_type_name(&self) -> Option<&Rc<str>> {
         match self {
             Value(Repr::Struct(value)) => Some(&value.type_name),

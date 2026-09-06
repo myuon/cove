@@ -1,0 +1,8 @@
+/// Whether this vector holds nothing.
+///
+/// The same one line as [`std.array.isEmpty`], and a separate function
+/// because `Array` and `Vector` are separate types rather than one type with
+/// a flag. Sharing a body would need a bound the language does not have.
+export fn isEmpty<T>(items: Vector<T>) -> Bool {
+  items.length() == 0
+}

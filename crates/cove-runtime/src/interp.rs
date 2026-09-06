@@ -2997,16 +2997,21 @@ impl<'a> Interpreter<'a> {
         // `cove_ir`'s lowering consults before its own per-type dispatch, so
         // the tree-walking oracle and the lowered backend agree about which
         // methods these are without either restating the other's list. It
-        // only applies to a builtin receiver — `declared` is `None` for one,
-        // by construction, since a declared struct or enum's conformances
-        // were already tried above — and when it applies, this reaches the
+        // only applies to a builtin receiver, and telling one apart is the
+        // dot: a builtin `Option` or `Result` is a `Repr::Enum` too and
+        // answers its own bare name, where a declared enum answers
+        // `rules.policy.Verdict`. That is the same test the declared-method
+        // lookup above already makes, and reading `declared.is_none()` here
+        // instead is what made this hook skip every `Option` and `Result`
+        // method the first time they were bound — the two builtins that are
+        // not, in fact, `None`. When it applies, this reaches the
         // declared function `binding` names exactly as a call written
         // `isEmpty(items)` would: `Interpreter::call_target` is the one path
         // every call to a declared function takes, with the receiver
         // supplied as its first argument. Nothing here is specific to
         // `Array` or to `isEmpty`; the table in `cove-schema` is the only
         // thing that says which receiver and method this applies to.
-        if declared.is_none() {
+        if declared.as_deref().is_none_or(|name| !name.contains('.')) {
             let builtin_receiver = match (&place, &temporary) {
                 (Some(place), _) => place.with_ref(span, |value| value.type_name())?,
                 (_, Some(value)) => value.type_name(),

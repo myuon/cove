@@ -568,14 +568,99 @@ pub struct StdBinding {
 /// Every builtin method whose body has moved out of Rust and into the
 /// standard library.
 ///
-/// One entry today: `Array.isEmpty`, the proof that the mechanism works
-/// before a second method leans on it.
-pub static STANDARD_LIBRARY: &[StdBinding] = &[StdBinding {
-    receiver: "Array",
-    method: "isEmpty",
-    module: "std.array",
-    function: "isEmpty",
-}];
+/// Thirteen entries, and what is *not* here is as informative as what is.
+///
+/// `Result.mapError` is absent although the other three `Result` methods
+/// moved. A program writes `mapError { ... }` with a trailing closure that
+/// names no parameter and ignores the error it replaces, and both evaluators
+/// had a special case passing such a closure nothing. Cove source cannot
+/// write that: a body calling `body(error)` passes one argument always. The
+/// same wall stands in front of every closure-taking method.
+///
+/// `Int.abs` is absent although `min` and `max` moved. It is the only one of
+/// the three that can fail, and a Cove body would move that failure's
+/// diagnostic out of the caller's source and into the standard library —
+/// [issue #258](https://github.com/myuon/cove/issues/258).
+pub static STANDARD_LIBRARY: &[StdBinding] = &[
+    StdBinding {
+        receiver: "Array",
+        method: "isEmpty",
+        module: "std.array",
+        function: "isEmpty",
+    },
+    StdBinding {
+        receiver: "Vector",
+        method: "isEmpty",
+        module: "std.vector",
+        function: "isEmpty",
+    },
+    StdBinding {
+        receiver: "Map",
+        method: "isEmpty",
+        module: "std.map",
+        function: "isEmpty",
+    },
+    StdBinding {
+        receiver: "Set",
+        method: "isEmpty",
+        module: "std.set",
+        function: "isEmpty",
+    },
+    StdBinding {
+        receiver: "String",
+        method: "isEmpty",
+        module: "std.string",
+        function: "isEmpty",
+    },
+    StdBinding {
+        receiver: "Option",
+        method: "isSome",
+        module: "std.option",
+        function: "isSome",
+    },
+    StdBinding {
+        receiver: "Option",
+        method: "isNone",
+        module: "std.option",
+        function: "isNone",
+    },
+    StdBinding {
+        receiver: "Option",
+        method: "unwrapOr",
+        module: "std.option",
+        function: "unwrapOr",
+    },
+    StdBinding {
+        receiver: "Result",
+        method: "isOk",
+        module: "std.result",
+        function: "isOk",
+    },
+    StdBinding {
+        receiver: "Result",
+        method: "isError",
+        module: "std.result",
+        function: "isError",
+    },
+    StdBinding {
+        receiver: "Result",
+        method: "unwrapOr",
+        module: "std.result",
+        function: "unwrapOr",
+    },
+    StdBinding {
+        receiver: "Int",
+        method: "min",
+        module: "std.int",
+        function: "min",
+    },
+    StdBinding {
+        receiver: "Int",
+        method: "max",
+        module: "std.int",
+        function: "max",
+    },
+];
 
 /// Every builtin method whose body lives in the standard library.
 pub fn standard_library() -> &'static [StdBinding] {

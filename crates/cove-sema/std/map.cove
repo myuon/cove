@@ -1,0 +1,4 @@
+/// Whether this map holds nothing.
+export fn isEmpty<K, V>(entries: Map<K, V>) -> Bool {
+  entries.length() == 0
+}

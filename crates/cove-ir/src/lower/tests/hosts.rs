@@ -96,19 +96,14 @@ fn the_answer_is_written_into_the_layout_the_schema_declared() {
         ),
         "\
 fn0 m.f(String) -> String
-  frame 8: s0!:ref s1:ref s2:ref s3:int s4:ref s5:ref s6:int s7:bool
-  local key -> s0:String [0, 11)
-     0  call-host s3:int env.get (s0:String) Option
-     1  str s5:ref \"\"
-     2  int s6:int 1
-     3  eq.int s7:bool s3:int s6:int
-     4  branch-false s7:bool 7
-     5  copy s2:ref s4:ref String
-     6  jump 8
-     7  copy s2:ref s5:ref String
-     8  clear s3:int Option
-     9  copy s1:ref s2:ref String
-    10  return s1:ref String
+  frame 6: s0!:ref s1:ref s2:int s3:ref s4:ref s5:ref
+  local key -> s0:String [0, 6)
+     0  call-host s2:int env.get (s0:String) Option
+     1  str s4:ref \"\"
+     2  call s5:ref std.option.unwrapOr<String> (s2:Option s4:String) String
+     3  clear s2:int Option
+     4  copy s1:ref s5:ref String
+     5  return s1:ref String
 "
     );
 }

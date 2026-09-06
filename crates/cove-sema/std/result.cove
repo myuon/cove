@@ -1,0 +1,35 @@
+/// Whether this result is a success.
+///
+/// The first standard-library functions to be generic over two parameters.
+/// Nothing in the repository had written `fn f<T, E>(...)` before — the
+/// grammar accepted it and no checked program used it — so this is also the
+/// first thing that proves `Result<T, E>` is expressible in Cove at all.
+export fn isOk<T, E>(result: Result<T, E>) -> Bool {
+  match result {
+    Ok(_) => true
+    Err(_) => false
+  }
+}
+
+/// Whether this result is a failure.
+///
+/// Named `isError` and matching `Err`, which is the same disagreement the
+/// lowering carried before it: the case is `Err` because that is what a
+/// program writes, and the method is `isError` because that is what a
+/// sentence reads like.
+export fn isError<T, E>(result: Result<T, E>) -> Bool {
+  match result {
+    Ok(_) => false
+    Err(_) => true
+  }
+}
+
+/// The value this result holds, or `fallback` if it failed.
+///
+/// Strict in `fallback`, for the same reason [`std.option.unwrapOr`] is.
+export fn unwrapOr<T, E>(result: Result<T, E>, fallback: T) -> T {
+  match result {
+    Ok(value) => value
+    Err(_) => fallback
+  }
+}

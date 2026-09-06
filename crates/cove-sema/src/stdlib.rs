@@ -1,8 +1,8 @@
 //! The standard library: Cove source embedded in the compiler binary.
 //!
 //! `cove_schema::builtins::STANDARD_LIBRARY` names which builtin methods have
-//! moved out of Rust and into Cove — `Array.isEmpty`, so far — and points at
-//! the module each one lives in. This module is where that module's source
+//! moved out of Rust and into Cove, and points at the module each one lives
+//! in. This module is where that module's source
 //! actually is: `crates/cove-sema/std/*.cove`, read into the binary with
 //! `include_str!` so a checked program never depends on a file existing on
 //! disk at some path relative to the running `cove`.
@@ -38,15 +38,54 @@ struct StdSource {
 
 /// Every file the standard library is made of.
 ///
-/// One entry today, `std/array.cove`, holding `Array.isEmpty`. A method
+/// One file per receiver, which is why there are several holding one
+/// function each: `Array` and `Vector` cannot share a body without a bound
+/// the language does not have, so they do not share a file either. A method
 /// migrating out of Rust adds a function to an existing file or a new file
-/// here, and an entry to
-/// `cove_schema::builtins::STANDARD_LIBRARY` pointing at it.
-static SOURCES: &[StdSource] = &[StdSource {
-    module: "std.array",
-    path: "std/array.cove",
-    text: include_str!("../std/array.cove"),
-}];
+/// here, and an entry to `cove_schema::builtins::STANDARD_LIBRARY` pointing
+/// at it.
+static SOURCES: &[StdSource] = &[
+    StdSource {
+        module: "std.array",
+        path: "std/array.cove",
+        text: include_str!("../std/array.cove"),
+    },
+    StdSource {
+        module: "std.vector",
+        path: "std/vector.cove",
+        text: include_str!("../std/vector.cove"),
+    },
+    StdSource {
+        module: "std.map",
+        path: "std/map.cove",
+        text: include_str!("../std/map.cove"),
+    },
+    StdSource {
+        module: "std.set",
+        path: "std/set.cove",
+        text: include_str!("../std/set.cove"),
+    },
+    StdSource {
+        module: "std.string",
+        path: "std/string.cove",
+        text: include_str!("../std/string.cove"),
+    },
+    StdSource {
+        module: "std.option",
+        path: "std/option.cove",
+        text: include_str!("../std/option.cove"),
+    },
+    StdSource {
+        module: "std.result",
+        path: "std/result.cove",
+        text: include_str!("../std/result.cove"),
+    },
+    StdSource {
+        module: "std.int",
+        path: "std/int.cove",
+        text: include_str!("../std/int.cove"),
+    },
+];
 
 /// Every module name the standard library declares.
 ///
@@ -138,8 +177,8 @@ mod tests {
             });
             assert!(
                 declares,
-                "`{}` names `{}.{}`, which `std/array.cove` does not declare",
-                binding.receiver, binding.module, binding.function
+                "`{}.{}` names `{}.{}`, which that module does not declare",
+                binding.receiver, binding.method, binding.module, binding.function
             );
         }
     }

@@ -1,0 +1,23 @@
+/// The smaller of two integers.
+///
+/// `abs` is deliberately not here beside these two. It is the only one of
+/// the three that can fail — `abs` of the least `Int` has no answer — and a
+/// standard-library body would move that failure's diagnostic out of the
+/// caller's source and into this file, which Cove has no call stack to
+/// compensate for. See [issue #258](https://github.com/myuon/cove/issues/258).
+export fn min(value: Int, other: Int) -> Int {
+  if value < other {
+    value
+  } else {
+    other
+  }
+}
+
+/// The larger of two integers.
+export fn max(value: Int, other: Int) -> Int {
+  if value > other {
+    value
+  } else {
+    other
+  }
+}

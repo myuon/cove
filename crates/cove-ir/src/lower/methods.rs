@@ -24,20 +24,16 @@
 //!
 //! # `Option` and `Result` are not in that table, and are not added to it
 //!
-//! An `Option` is an enum object, and `isSome()` is the question a `match`
-//! already asks of one: word 0 is the case index, so the answer is a
-//! [`Inst::GetWord`] and a comparison. `unwrapOr(fallback)` is that question
-//! and a branch. Both are lowered here, directly, because a builtin for
-//! either would be a call into the runtime to read one word the instruction
-//! set reads on its own — and the receiver would have to be held across it.
-//! `mapError` is lowered here too, and it is the one of the three that takes
-//! a closure. There is no loop in it to lower to — a `Result` is one value
-//! rather than a sequence — but the rule `docs/LINEAR_VM.md` states for a
-//! sequence method holds for the same reason: a builtin never calls back into
-//! Cove, so what runs the callback is an ordinary [`Inst::CallClosure`] frame
-//! and not a re-entry into the dispatch loop from inside a Rust function. So
-//! it is a branch and one call. `cove_ir::lower::walks` is where the four
-//! that *are* walks live.
+//! Every method of either type — `isSome`, `isNone`, `unwrapOr`, `isOk`,
+//! `isError`, `mapError` — has moved to `std.option` and `std.result`, the
+//! standard library written in Cove rather than in Rust. What used to be
+//! lowered here directly, before this table was ever consulted, is now an
+//! ordinary call: `receiver_name` and
+//! `cove_schema::builtins::standard_binding` resolve it earlier in
+//! [`Body::call_builtin_method`], the same way they resolve
+//! `` `Array.isEmpty` ``, and a type this match never reaches falls through
+//! to the `_` arm below like any other receiver whose declared methods are
+//! not a machine builtin.
 
 use cove_diag::Span;
 use cove_sema::typeck::Ty;
@@ -123,12 +119,27 @@ impl Body<'_> {
             }
             Ty::Set(_) => self.set_method(expr, base, name, args),
             Ty::Map(..) => self.map_method(expr, base, name, args),
-            Ty::Option(_) | Ty::Result(..) => self.answer_method(expr, base, &ty, name, args),
             // A scope and a task handle are the two values whose operations
             // are the scheduler's rather than the heap's, so they are
             // instructions rather than builtins: `cove_ir::lower::tasks` is
             // where the Language Card's sentence about a scope is taken
             // apart.
+            // `Result.mapError` is the one method of `Option` or `Result` still
+            // lowered here. The rest moved to `std.option` and `std.result`
+            // and are resolved by the binding above, before this match runs.
+            //
+            // It did not move with them because of its argument. A program
+            // writes `mapError { ... }` with a trailing closure that takes no
+            // parameter and ignores the error it replaces, and the operand
+            // list below is built to suit — a closure that names nothing is
+            // called with nothing. Cove source has no way to say that: a body
+            // written `body(error)` passes one argument always, and a closure
+            // that names no parameter refuses it. So this stays until the
+            // language can express what the call site is already allowed to
+            // write.
+            Ty::Result(..) if name == "mapError" && args.len() == 1 => {
+                self.map_error(expr, base, &ty, &args[0].value)
+            }
             Ty::Scope => self.scope_method(expr, base, name, args),
             Ty::Task(_) => self.task_method(expr, base, name, args),
             // A `Shared` is the third: `lock` is two instructions and a call
@@ -256,6 +267,144 @@ impl Body<'_> {
     /// first operand is its receiver, whose type the checker settled as
     /// `Duration`, and a builder has no receiver and passes an `Int` count.
     /// Nothing is inferred from a word on either side.
+    /// The layout of the one thing case `index` of an enum-shaped layout
+    /// carries, and the layout of `()` for one that carries nothing.
+    fn case_layout(&self, layout: LayoutId, index: u32) -> LayoutId {
+        match self.case_of(layout, index) {
+            Some((parts, _)) => parts.first().map_or(shapes::UNIT, |part| part.layout),
+            None => shapes::UNIT,
+        }
+    }
+
+    /// `result.mapError { ... }`: the `Ok` carried through, the failure
+    /// replaced by what the callback answers.
+    ///
+    /// This is the one the module docs above named as owed, and it is what
+    /// they said it would be: a branch and one [`Inst::CallClosure`]. A
+    /// `Result` is one value rather than a sequence, so there is no loop to
+    /// build — but the rule `docs/LINEAR_VM.md` states for `map` holds here
+    /// for the same reason, and the callback runs as an ordinary frame
+    /// rather than from inside a builtin that re-entered the dispatch loop.
+    ///
+    /// **The two `Result`s are two layouts.** `Int.parse(text)` answers a
+    /// `Result<Int, Error>` and `.mapError { ConfigError.InvalidPort(text) }`
+    /// answers a `Result<Int, ConfigError>`, so the `Ok` that is "carried
+    /// through" is copied rather than passed along: the oracle answers the
+    /// receiver itself because its values carry their own shape, and here a
+    /// location's width is its layout's.
+    ///
+    /// The callback is evaluated **before** the branch and whichever way the
+    /// branch goes, exactly as [`Body::unwrap_or`]'s fallback is and for the
+    /// same reason: it is an ordinary argument, and the language evaluates a
+    /// call's arguments before the call.
+    ///
+    /// Whether it is handed the error it replaces is read off the function
+    /// type the checker settled rather than off the syntax. The oracle asks
+    /// `Host::arity`, and `Checker::map_error` accepts both a callback that
+    /// takes the error and one that ignores it — so the settled type is the
+    /// one place both spellings have already agreed.
+    fn map_error(&mut self, expr: &Expr, base: &Expr, ty: &Ty, callback: &Expr) -> Val {
+        let (Some((ok_at, _)), Some((err_at, _))) = (
+            shapes::case_at(self.checked, self.module, ty, "Ok"),
+            shapes::case_at(self.checked, self.module, ty, "Err"),
+        ) else {
+            self.report(ty, expr.span);
+            return self.dead(expr);
+        };
+        let Some(func) = self.callback(callback) else {
+            return self.dead(expr);
+        };
+        let Some(replaced) = self.layout(&func.ret, callback.span) else {
+            return self.dead(expr);
+        };
+
+        let layout = self.layout_of(expr);
+        let dst = self.temp(layout);
+        let obj = self.expr(base);
+        let closure = self.expr(callback);
+        // Taken before the branch although only one arm writes it: a run
+        // allocated inside an arm would be handed back to the next
+        // temporary while the other arm still had a jump into it.
+        let answer = self.temp(replaced);
+
+        let carried = self.case_of(obj.layout, ok_at);
+        let failed = self.case_of(obj.layout, err_at);
+        let (Some((carried, _)), Some((failed, _))) = (carried, failed) else {
+            self.release(answer, expr.span);
+            self.release(closure, expr.span);
+            self.release(obj, expr.span);
+            return self.gap("`mapError` on a value that is not an enum here", expr);
+        };
+
+        let wanted = self.temp(shapes::INT);
+        self.emit(
+            Inst::Int {
+                dst: wanted.slot,
+                value: ok_at as i64,
+            },
+            expr.span,
+        );
+        let succeeded = self.temp(shapes::BOOL);
+        self.emit(
+            Inst::Cmp {
+                on: Compare::Int,
+                op: CmpOp::Eq,
+                dst: succeeded.slot,
+                a: obj.slot,
+                b: wanted.slot,
+            },
+            expr.span,
+        );
+        self.give_back(wanted.slot, wanted.layout);
+        let branch = self.emit(
+            Inst::BranchFalse {
+                cond: succeeded.slot,
+                to: PENDING,
+            },
+            expr.span,
+        );
+        self.give_back(succeeded.slot, succeeded.layout);
+
+        let held: Vec<Val> = carried
+            .iter()
+            .map(|part| Val::borrowed(obj.slot + 1 + part.at, part.layout))
+            .collect();
+        self.write_case(dst.slot, layout, ok_at, &held, expr.span);
+        let carry_on = self.emit(Inst::Jump { to: PENDING }, expr.span);
+
+        let otherwise = self.here();
+        self.patch(branch, otherwise);
+        // A callback written to ignore the error takes no operand, which is
+        // what `Host::arity` answers zero for on the other side.
+        let operands = match (func.params.is_empty(), failed.first()) {
+            (false, Some(part)) => {
+                vec![Val::borrowed(obj.slot + 1 + part.at, part.layout).arg()]
+            }
+            _ => Vec::new(),
+        };
+        self.call_closure(answer.slot, closure.slot, operands, expr.span);
+        let fitted = self.fit(
+            Val::borrowed(answer.slot, replaced),
+            self.case_layout(layout, err_at),
+            expr.span,
+        );
+        self.write_case(
+            dst.slot,
+            layout,
+            err_at,
+            std::slice::from_ref(&fitted),
+            expr.span,
+        );
+        self.release(fitted, expr.span);
+        let end = self.here();
+        self.patch(carry_on, end);
+
+        self.release(answer, expr.span);
+        self.release(closure, expr.span);
+        self.release(obj, expr.span);
+        dst
+    }
+
     pub(super) fn machine_call(
         &mut self,
         expr: &Expr,
@@ -673,291 +822,6 @@ impl Body<'_> {
         self.release(range, span);
         dst
     }
-
-    // ---- `Option` and `Result` ---------------------------------------------
-
-    /// A method of the two enums the language answers a failure with.
-    ///
-    /// Neither is in the machine's table and neither is added to it: both
-    /// questions are about the value's discriminant, which is word 0 and is
-    /// already in the frame. See the module docs.
-    fn answer_method(
-        &mut self,
-        expr: &Expr,
-        base: &Expr,
-        ty: &Ty,
-        name: &str,
-        args: &[Arg],
-    ) -> Val {
-        let receiver = if matches!(ty, Ty::Option(_)) {
-            "Option"
-        } else {
-            "Result"
-        };
-        match (receiver, name, args.len()) {
-            ("Option", "isSome", 0) => self.case_test(expr, base, ty, "Some"),
-            ("Option", "isNone", 0) => self.case_test(expr, base, ty, "None"),
-            ("Result", "isOk", 0) => self.case_test(expr, base, ty, "Ok"),
-            // `isError`, not `isErr`: the case is called `Err` and the
-            // question is called `isError`, and both names are the
-            // language's — `cove_schema::builtins` writes them.
-            ("Result", "isError", 0) => self.case_test(expr, base, ty, "Err"),
-            ("Option", "unwrapOr", 1) => self.unwrap_or(expr, base, ty, "Some", &args[0].value),
-            ("Result", "unwrapOr", 1) => self.unwrap_or(expr, base, ty, "Ok", &args[0].value),
-            ("Result", "mapError", 1) => self.map_error(expr, base, ty, &args[0].value),
-            _ => self.gap(&format!("`{receiver}.{name}`"), expr),
-        }
-    }
-
-    /// Whether the value is in the case `case`.
-    ///
-    /// The discriminant is word 0 of the value, so the comparison names the
-    /// value's own location and nothing is read out of anything.
-    fn case_test(&mut self, expr: &Expr, base: &Expr, ty: &Ty, case: &str) -> Val {
-        let Some((index, _)) = shapes::case_at(self.checked, self.module, ty, case) else {
-            self.report(ty, expr.span);
-            return self.dead(expr);
-        };
-        let obj = self.expr(base);
-        let wanted = self.temp(shapes::INT);
-        self.emit(
-            Inst::Int {
-                dst: wanted.slot,
-                value: index as i64,
-            },
-            expr.span,
-        );
-        let dst = self.temp(shapes::BOOL);
-        self.emit(
-            Inst::Cmp {
-                on: Compare::Int,
-                op: CmpOp::Eq,
-                dst: dst.slot,
-                a: obj.slot,
-                b: wanted.slot,
-            },
-            expr.span,
-        );
-        self.give_back(wanted.slot, wanted.layout);
-        self.release(obj, expr.span);
-        dst
-    }
-
-    /// `value.unwrapOr(fallback)`: the payload of the carrying case, or the
-    /// fallback.
-    ///
-    /// The fallback is evaluated before the branch and whichever way the
-    /// branch goes, because it is an ordinary argument: the language
-    /// evaluates a call's arguments before the call, and one of them may do
-    /// something. Making it lazy here would be this lowering deciding
-    /// something the language did not — the oracle's `unwrapOr` receives it
-    /// already evaluated.
-    fn unwrap_or(
-        &mut self,
-        expr: &Expr,
-        base: &Expr,
-        ty: &Ty,
-        carrier: &str,
-        fallback: &Expr,
-    ) -> Val {
-        let Some((index, _)) = shapes::case_at(self.checked, self.module, ty, carrier) else {
-            self.report(ty, expr.span);
-            return self.dead(expr);
-        };
-        let layout = self.layout_of(expr);
-        let dst = self.temp(layout);
-        let obj = self.expr(base);
-        let other = self.expr(fallback);
-        let Some((parts, _)) = self.case_of(obj.layout, index) else {
-            self.release(other, expr.span);
-            self.release(obj, expr.span);
-            return self.gap("`unwrapOr` on a value that is not an enum here", expr);
-        };
-
-        let wanted = self.temp(shapes::INT);
-        self.emit(
-            Inst::Int {
-                dst: wanted.slot,
-                value: index as i64,
-            },
-            expr.span,
-        );
-        let carries = self.temp(shapes::BOOL);
-        self.emit(
-            Inst::Cmp {
-                on: Compare::Int,
-                op: CmpOp::Eq,
-                dst: carries.slot,
-                a: obj.slot,
-                b: wanted.slot,
-            },
-            expr.span,
-        );
-        self.give_back(wanted.slot, wanted.layout);
-        let branch = self.emit(
-            Inst::BranchFalse {
-                cond: carries.slot,
-                to: PENDING,
-            },
-            expr.span,
-        );
-        self.give_back(carries.slot, carries.layout);
-
-        match parts.first() {
-            Some(part) => self.copy(dst.slot, obj.slot + 1 + part.at, part.layout, expr.span),
-            None => {
-                self.emit(Inst::Unit { dst: dst.slot }, expr.span);
-            }
-        }
-        let carry_on = self.emit(Inst::Jump { to: PENDING }, expr.span);
-        let otherwise = self.here();
-        self.patch(branch, otherwise);
-        self.copy(dst.slot, other.slot, layout, expr.span);
-        let end = self.here();
-        self.patch(carry_on, end);
-
-        self.release(other, expr.span);
-        self.release(obj, expr.span);
-        dst
-    }
-
-    /// `result.mapError { ... }`: the `Ok` carried through, the failure
-    /// replaced by what the callback answers.
-    ///
-    /// This is the one the module docs above named as owed, and it is what
-    /// they said it would be: a branch and one [`Inst::CallClosure`]. A
-    /// `Result` is one value rather than a sequence, so there is no loop to
-    /// build — but the rule `docs/LINEAR_VM.md` states for `map` holds here
-    /// for the same reason, and the callback runs as an ordinary frame
-    /// rather than from inside a builtin that re-entered the dispatch loop.
-    ///
-    /// **The two `Result`s are two layouts.** `Int.parse(text)` answers a
-    /// `Result<Int, Error>` and `.mapError { ConfigError.InvalidPort(text) }`
-    /// answers a `Result<Int, ConfigError>`, so the `Ok` that is "carried
-    /// through" is copied rather than passed along: the oracle answers the
-    /// receiver itself because its values carry their own shape, and here a
-    /// location's width is its layout's.
-    ///
-    /// The callback is evaluated **before** the branch and whichever way the
-    /// branch goes, exactly as [`Body::unwrap_or`]'s fallback is and for the
-    /// same reason: it is an ordinary argument, and the language evaluates a
-    /// call's arguments before the call.
-    ///
-    /// Whether it is handed the error it replaces is read off the function
-    /// type the checker settled rather than off the syntax. The oracle asks
-    /// `Host::arity`, and `Checker::map_error` accepts both a callback that
-    /// takes the error and one that ignores it — so the settled type is the
-    /// one place both spellings have already agreed.
-    fn map_error(&mut self, expr: &Expr, base: &Expr, ty: &Ty, callback: &Expr) -> Val {
-        let (Some((ok_at, _)), Some((err_at, _))) = (
-            shapes::case_at(self.checked, self.module, ty, "Ok"),
-            shapes::case_at(self.checked, self.module, ty, "Err"),
-        ) else {
-            self.report(ty, expr.span);
-            return self.dead(expr);
-        };
-        let Some(func) = self.callback(callback) else {
-            return self.dead(expr);
-        };
-        let Some(replaced) = self.layout(&func.ret, callback.span) else {
-            return self.dead(expr);
-        };
-
-        let layout = self.layout_of(expr);
-        let dst = self.temp(layout);
-        let obj = self.expr(base);
-        let closure = self.expr(callback);
-        // Taken before the branch although only one arm writes it: a run
-        // allocated inside an arm would be handed back to the next
-        // temporary while the other arm still had a jump into it.
-        let answer = self.temp(replaced);
-
-        let carried = self.case_of(obj.layout, ok_at);
-        let failed = self.case_of(obj.layout, err_at);
-        let (Some((carried, _)), Some((failed, _))) = (carried, failed) else {
-            self.release(answer, expr.span);
-            self.release(closure, expr.span);
-            self.release(obj, expr.span);
-            return self.gap("`mapError` on a value that is not an enum here", expr);
-        };
-
-        let wanted = self.temp(shapes::INT);
-        self.emit(
-            Inst::Int {
-                dst: wanted.slot,
-                value: ok_at as i64,
-            },
-            expr.span,
-        );
-        let succeeded = self.temp(shapes::BOOL);
-        self.emit(
-            Inst::Cmp {
-                on: Compare::Int,
-                op: CmpOp::Eq,
-                dst: succeeded.slot,
-                a: obj.slot,
-                b: wanted.slot,
-            },
-            expr.span,
-        );
-        self.give_back(wanted.slot, wanted.layout);
-        let branch = self.emit(
-            Inst::BranchFalse {
-                cond: succeeded.slot,
-                to: PENDING,
-            },
-            expr.span,
-        );
-        self.give_back(succeeded.slot, succeeded.layout);
-
-        let held: Vec<Val> = carried
-            .iter()
-            .map(|part| Val::borrowed(obj.slot + 1 + part.at, part.layout))
-            .collect();
-        self.write_case(dst.slot, layout, ok_at, &held, expr.span);
-        let carry_on = self.emit(Inst::Jump { to: PENDING }, expr.span);
-
-        let otherwise = self.here();
-        self.patch(branch, otherwise);
-        // A callback written to ignore the error takes no operand, which is
-        // what `Host::arity` answers zero for on the other side.
-        let operands = match (func.params.is_empty(), failed.first()) {
-            (false, Some(part)) => {
-                vec![Val::borrowed(obj.slot + 1 + part.at, part.layout).arg()]
-            }
-            _ => Vec::new(),
-        };
-        self.call_closure(answer.slot, closure.slot, operands, expr.span);
-        let fitted = self.fit(
-            Val::borrowed(answer.slot, replaced),
-            self.case_layout(layout, err_at),
-            expr.span,
-        );
-        self.write_case(
-            dst.slot,
-            layout,
-            err_at,
-            std::slice::from_ref(&fitted),
-            expr.span,
-        );
-        self.release(fitted, expr.span);
-        let end = self.here();
-        self.patch(carry_on, end);
-
-        self.release(answer, expr.span);
-        self.release(closure, expr.span);
-        self.release(obj, expr.span);
-        dst
-    }
-
-    /// The layout of the one thing case `index` of an enum-shaped layout
-    /// carries, and the layout of `()` for one that carries nothing.
-    fn case_layout(&self, layout: LayoutId, index: u32) -> LayoutId {
-        match self.case_of(layout, index) {
-            Some((parts, _)) => parts.first().map_or(shapes::UNIT, |part| part.layout),
-            None => shapes::UNIT,
-        }
-    }
 }
 
 /// Whether `snapshot()` on a value of this type answers the value itself.
@@ -1004,7 +868,6 @@ fn snapshots_itself(ty: &Ty) -> bool {
 /// machine tells them apart by the `Repr` of operand 0.
 const MACHINE_METHODS: &[(&str, &str)] = &[
     ("String", "length"),
-    ("String", "isEmpty"),
     ("String", "words"),
     ("String", "chars"),
     ("String", "split"),
@@ -1020,8 +883,6 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
     ("String", "toLower"),
     ("Int", "toFloat"),
     ("Int", "abs"),
-    ("Int", "min"),
-    ("Int", "max"),
     ("Float", "toInt"),
     ("Float", "round"),
     ("Float", "abs"),

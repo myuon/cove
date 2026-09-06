@@ -136,7 +136,8 @@ pub(crate) fn call(
         ("Vector", "indexOf") => seq::vector_index_of(machine, operands),
         ("Vector", "slice") => seq::vector_slice(machine, operands).map(one),
         ("Vector", "length") => seq::vector_length(machine, operands).map(one),
-        ("Vector", "isEmpty") => seq::vector_is_empty(machine, operands).map(one),
+        // `Vector.isEmpty` is not here: it is `std.vector.isEmpty` — see
+        // `cove_schema::builtins::standard_binding`.
         ("Vector", "toArray") => seq::vector_to_array(machine, operands).map(one),
         ("Vector", "freeze") => seq::vector_freeze(machine, operands).map(one),
 
@@ -146,7 +147,8 @@ pub(crate) fn call(
         // binary search over `key`'s order or a walk of a run already in it.
         ("Set", "of") => keyed::set_of(machine, operands).map(one),
         ("Set", "length") => keyed::set_length(machine, operands).map(one),
-        ("Set", "isEmpty") => keyed::set_is_empty(machine, operands).map(one),
+        // `Set.isEmpty` is not here: it is `std.set.isEmpty` — see
+        // `cove_schema::builtins::standard_binding`.
         ("Set", "contains") => keyed::set_contains(machine, operands).map(one),
         ("Set", "toArray") => keyed::set_to_array(machine, operands).map(one),
         ("Set", "inserted") => keyed::set_inserted(machine, operands).map(one),
@@ -157,7 +159,8 @@ pub(crate) fn call(
         ("Map", "get") => keyed::map_get(machine, operands),
         ("Map", "contains") => keyed::map_contains(machine, operands).map(one),
         ("Map", "length") => keyed::map_length(machine, operands).map(one),
-        ("Map", "isEmpty") => keyed::map_is_empty(machine, operands).map(one),
+        // `Map.isEmpty` is not here: it is `std.map.isEmpty` — see
+        // `cove_schema::builtins::standard_binding`.
         ("Map", "keys") => keyed::map_keys(machine, operands).map(one),
         ("Map", "values") => keyed::map_values(machine, operands).map(one),
         ("Map", "inserted") => keyed::map_inserted(machine, operands).map(one),
@@ -165,7 +168,8 @@ pub(crate) fn call(
 
         // ---- String ------------------------------------------------------
         ("String", "length") => text::length(machine, operands).map(one),
-        ("String", "isEmpty") => text::is_empty(machine, operands).map(one),
+        // `String.isEmpty` is not here: it is `std.string.isEmpty` — see
+        // `cove_schema::builtins::standard_binding`.
         ("String", "words") => text::words(machine, operands).map(one),
         ("String", "chars") => text::chars(machine, operands).map(one),
         ("String", "split") => text::split(machine, operands).map(one),
@@ -184,8 +188,8 @@ pub(crate) fn call(
         // ---- Int ---------------------------------------------------------
         ("Int", "toFloat") => scalar::int_to_float(machine, operands).map(one),
         ("Int", "abs") => scalar::int_abs(machine, operands).map(one),
-        ("Int", "min") => scalar::int_min(machine, operands).map(one),
-        ("Int", "max") => scalar::int_max(machine, operands).map(one),
+        // `Int.min` and `Int.max` are not here: they are `std.int.min` and
+        // `std.int.max` — see `cove_schema::builtins::standard_binding`.
         ("Int", "parse") => scalar::int_parse(machine, operands),
         ("Int", "parseRadix") => scalar::int_parse_radix(machine, operands),
 

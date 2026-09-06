@@ -76,7 +76,7 @@ written as a namespace; binds `T`.
 | --- | --- | --- | --- | --- |
 | `get(index: Int) -> Option<T>` |  |  |  | `machine` |
 | `length() -> Int` |  |  |  | `machine` |
-| `isEmpty() -> Bool` |  |  |  | `machine` |
+| `isEmpty() -> Bool` |  |  |  | `std.vector.isEmpty` |
 | `contains(element: T) -> Bool` |  |  |  | `machine` |
 | `indexOf(element: T) -> Option<Int>` |  |  |  | `machine` |
 | `slice(from: Int, to: Int) -> Array<T>` |  |  |  | `machine` |
@@ -108,7 +108,7 @@ written as a namespace; binds `K`, `V`.
 | --- | --- | --- | --- | --- |
 | `get(key: K) -> Option<V>` |  |  |  | `machine` |
 | `length() -> Int` |  |  |  | `machine` |
-| `isEmpty() -> Bool` |  |  |  | `machine` |
+| `isEmpty() -> Bool` |  |  |  | `std.map.isEmpty` |
 | `contains(key: K) -> Bool` |  |  |  | `machine` |
 | `keys() -> Array<K>` |  |  |  | `machine` |
 | `values() -> Array<V>` |  |  |  | `machine` |
@@ -137,7 +137,7 @@ written as a namespace; binds `T`.
 | signature | `var self` | variadic | binds | implemented by |
 | --- | --- | --- | --- | --- |
 | `length() -> Int` |  |  |  | `machine` |
-| `isEmpty() -> Bool` |  |  |  | `machine` |
+| `isEmpty() -> Bool` |  |  |  | `std.set.isEmpty` |
 | `toArray() -> Array<T>` |  |  |  | `machine` |
 | `contains(element: T) -> Bool` |  |  |  | `machine` |
 | `inserted(element: T) -> Set<T>` |  |  |  | `machine` |
@@ -159,7 +159,7 @@ written as a namespace.
 | signature | `var self` | variadic | binds | implemented by |
 | --- | --- | --- | --- | --- |
 | `length() -> Int` |  |  |  | `machine` |
-| `isEmpty() -> Bool` |  |  |  | `machine` |
+| `isEmpty() -> Bool` |  |  |  | `std.string.isEmpty` |
 | `words() -> Array<String>` |  |  |  | `machine` |
 | `chars() -> Array<String>` |  |  |  | `machine` |
 | `split(separator: String) -> Array<String>` |  |  |  | `machine` |
@@ -198,9 +198,9 @@ written as a namespace; binds `T`.
 
 | signature | `var self` | variadic | binds | implemented by |
 | --- | --- | --- | --- | --- |
-| `isSome() -> Bool` |  |  |  | `machine` |
-| `isNone() -> Bool` |  |  |  | `machine` |
-| `unwrapOr(fallback: T) -> T` |  |  |  | `machine` |
+| `isSome() -> Bool` |  |  |  | `std.option.isSome` |
+| `isNone() -> Bool` |  |  |  | `std.option.isNone` |
+| `unwrapOr(fallback: T) -> T` |  |  |  | `std.option.unwrapOr` |
 
 ### `Result<T, E>`
 
@@ -212,9 +212,9 @@ written as a namespace; binds `T`, `E`.
 
 | signature | `var self` | variadic | binds | implemented by |
 | --- | --- | --- | --- | --- |
-| `isOk() -> Bool` |  |  |  | `machine` |
-| `isError() -> Bool` |  |  |  | `machine` |
-| `unwrapOr(fallback: T) -> T` |  |  |  | `machine` |
+| `isOk() -> Bool` |  |  |  | `std.result.isOk` |
+| `isError() -> Bool` |  |  |  | `std.result.isError` |
+| `unwrapOr(fallback: T) -> T` |  |  |  | `std.result.unwrapOr` |
 | `mapError(body: fn(E) -> F) -> Result<T, F>` |  |  | `F` | `machine` |
 
 ### `Int`
@@ -234,8 +234,8 @@ written as a namespace.
 | --- | --- | --- | --- | --- |
 | `toFloat() -> Float` |  |  |  | `machine` |
 | `abs() -> Int` |  |  |  | `machine` |
-| `min(other: Int) -> Int` |  |  |  | `machine` |
-| `max(other: Int) -> Int` |  |  |  | `machine` |
+| `min(other: Int) -> Int` |  |  |  | `std.int.min` |
+| `max(other: Int) -> Int` |  |  |  | `std.int.max` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Float`
