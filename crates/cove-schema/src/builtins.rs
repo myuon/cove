@@ -571,11 +571,11 @@ pub struct StdBinding {
 /// Thirteen entries, and what is *not* here is as informative as what is.
 ///
 /// `Result.mapError` is absent although the other three `Result` methods
-/// moved. A program writes `mapError { ... }` with a trailing closure that
-/// names no parameter and ignores the error it replaces, and both evaluators
-/// had a special case passing such a closure nothing. Cove source cannot
-/// write that: a body calling `body(error)` passes one argument always. The
-/// same wall stands in front of every closure-taking method.
+/// moved, but not for the reason it used to be. ADR 0044 removed the
+/// exception that let a trailing closure of no parameters stand in for one
+/// that takes the error, so `mapError` calls its callback exactly like any
+/// other method now and is migratable like the rest — it has simply not
+/// been moved yet.
 ///
 /// `Int.abs` is absent although `min` and `max` moved. It is the only one of
 /// the three that can fail, and a Cove body would move that failure's
@@ -1996,14 +1996,10 @@ pub const RESULT: BuiltinSchema = BuiltinSchema {
             result: BuiltinType::Param("T"),
             mutating: false,
         },
-        // The one builtin whose callback has two accepted shapes. The
-        // Language Card writes `mapError { ... }` with a trailing closure
-        // that may ignore the error it replaces, so a closure of no
-        // parameters is accepted where this declares one. Both ends know
-        // that — `cove_sema`'s `Checker::map_error` and the arity the runtime
-        // asks the callback for — and the shape declared here is the one that
-        // carries the error, because the other is this one with a parameter
-        // dropped.
+        // Declares `fn(E) -> F`, matched exactly like any other callback in
+        // the language (ADR 0044). A callback that does not want the error
+        // still names its parameter — `_` is not a parameter name — so
+        // `result.mapError(fn(error) { ... })` is the one shape there is.
         MethodSchema {
             name: "mapError",
             generics: &["F"],

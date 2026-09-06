@@ -13,7 +13,9 @@ fn double(text: String) -> Result<Int, Error> {
 
 /// Replaces the builtin error with a domain error.
 fn parseOrFail(text: String) -> Result<Int, ParseError> {
-  Int.parse(text).mapError { ParseError.NotANumber(text) }
+  Int.parse(text).mapError(fn(error) {
+    ParseError.NotANumber(text)
+  })
 }
 
 /// Prints `Result` construction, queries, unwrapping, mapping, and

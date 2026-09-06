@@ -128,15 +128,10 @@ impl Body<'_> {
             // lowered here. The rest moved to `std.option` and `std.result`
             // and are resolved by the binding above, before this match runs.
             //
-            // It did not move with them because of its argument. A program
-            // writes `mapError { ... }` with a trailing closure that takes no
-            // parameter and ignores the error it replaces, and the operand
-            // list below is built to suit — a closure that names nothing is
-            // called with nothing. Cove source has no way to say that: a body
-            // written `body(error)` passes one argument always, and a closure
-            // that names no parameter refuses it. So this stays until the
-            // language can express what the call site is already allowed to
-            // write.
+            // It did not move with them for want of moving, not for want of
+            // being movable: ADR 0044 removed the exception that used to
+            // block it (a callback's arity is matched exactly here now, like
+            // any other), and it is migratable like the rest.
             Ty::Result(..) if name == "mapError" && args.len() == 1 => {
                 self.map_error(expr, base, &ty, &args[0].value)
             }
@@ -276,8 +271,8 @@ impl Body<'_> {
         }
     }
 
-    /// `result.mapError { ... }`: the `Ok` carried through, the failure
-    /// replaced by what the callback answers.
+    /// `result.mapError(fn(error) { ... })`: the `Ok` carried through, the
+    /// failure replaced by what the callback answers.
     ///
     /// This is the one the module docs above named as owed, and it is what
     /// they said it would be: a branch and one [`Inst::CallClosure`]. A
@@ -287,8 +282,9 @@ impl Body<'_> {
     /// rather than from inside a builtin that re-entered the dispatch loop.
     ///
     /// **The two `Result`s are two layouts.** `Int.parse(text)` answers a
-    /// `Result<Int, Error>` and `.mapError { ConfigError.InvalidPort(text) }`
-    /// answers a `Result<Int, ConfigError>`, so the `Ok` that is "carried
+    /// `Result<Int, Error>` and
+    /// `.mapError(fn(error) { ConfigError.InvalidPort(text) })` answers a
+    /// `Result<Int, ConfigError>`, so the `Ok` that is "carried
     /// through" is copied rather than passed along: the oracle answers the
     /// receiver itself because its values carry their own shape, and here a
     /// location's width is its layout's.
@@ -298,11 +294,9 @@ impl Body<'_> {
     /// same reason: it is an ordinary argument, and the language evaluates a
     /// call's arguments before the call.
     ///
-    /// Whether it is handed the error it replaces is read off the function
-    /// type the checker settled rather than off the syntax. The oracle asks
-    /// `Host::arity`, and `Checker::map_error` accepts both a callback that
-    /// takes the error and one that ignores it — so the settled type is the
-    /// one place both spellings have already agreed.
+    /// It is always handed the error it replaces: `Checker::map_error`
+    /// declares the callback as `fn(E) -> F`, matched exactly like any other
+    /// callback (ADR 0044), so there is nothing left to branch on here.
     fn map_error(&mut self, expr: &Expr, base: &Expr, ty: &Ty, callback: &Expr) -> Val {
         let (Some((ok_at, _)), Some((err_at, _))) = (
             shapes::case_at(self.checked, self.module, ty, "Ok"),
@@ -374,13 +368,15 @@ impl Body<'_> {
 
         let otherwise = self.here();
         self.patch(branch, otherwise);
-        // A callback written to ignore the error takes no operand, which is
-        // what `Host::arity` answers zero for on the other side.
-        let operands = match (func.params.is_empty(), failed.first()) {
-            (false, Some(part)) => {
-                vec![Val::borrowed(obj.slot + 1 + part.at, part.layout).arg()]
-            }
-            _ => Vec::new(),
+        // The callback always takes the error (ADR 0044: a function value
+        // has exactly the parameters its type declares, with no exception
+        // here any more). `Err(E)` declares exactly one field, so `failed`
+        // always has a part to read the error from; the `None` arm stays
+        // only because `case_of` returns a `Vec` rather than a guarantee,
+        // and an empty one is a shape this lowering has no other name for.
+        let operands = match failed.first() {
+            Some(part) => vec![Val::borrowed(obj.slot + 1 + part.at, part.layout).arg()],
+            None => Vec::new(),
         };
         self.call_closure(answer.slot, closure.slot, operands, expr.span);
         let fitted = self.fit(

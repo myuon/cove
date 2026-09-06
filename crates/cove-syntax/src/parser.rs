@@ -3008,7 +3008,7 @@ mod tests {
         assert_eq!(args.len(), 1);
         assert!(trailing.is_some());
 
-        let then_try = tail_expr("value.mapError { ConfigError.InvalidPort(raw) }?");
+        let then_try = tail_expr("value.recover { ConfigError.InvalidPort(raw) }?");
         let ExprKind::Try(inner) = &then_try.kind else {
             panic!("expected `?`");
         };

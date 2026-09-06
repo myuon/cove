@@ -1,6 +1,10 @@
 # ADR 0043: A method moves if it is total and takes no closure
 
-- Status: Accepted
+- Status: Accepted. Its **"It must not take a closure"** condition is
+  superseded by
+  [ADR 0044](0044-a-callback-takes-what-its-type-declares.md), which found
+  that the condition generalised from one case and that the four methods
+  named under it were never subject to it
 - Date: 2026-09-06
 - Supersedes: [ADR 0042](0042-a-builtin-is-a-primitive-a-library-or-a-capability.md)'s
   **Library** test, and its `Duration` row

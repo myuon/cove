@@ -23,7 +23,9 @@ export enum ConfigError {
 /// Loads configuration from the host environment.
 export fn loadConfig() -> Result<Config, ConfigError> {
   let rawPort = env.get("PORT").unwrapOr("8080")
-  let port = Int.parse(rawPort).mapError { ConfigError.InvalidPort(rawPort) }?
+  let port = Int.parse(rawPort).mapError(fn(error) {
+    ConfigError.InvalidPort(rawPort)
+  })?
 
   let rawLevel = env.get("LOG_LEVEL").unwrapOr("info")
   let logLevel = match rawLevel {
