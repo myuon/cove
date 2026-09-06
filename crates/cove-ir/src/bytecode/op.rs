@@ -1,4 +1,4 @@
-//! The hundred opcodes, and what each one makes of the four fields.
+//! The hundred and one opcodes, and what each one makes of the four fields.
 //!
 //! # One opcode per concrete operation
 //!
@@ -78,7 +78,8 @@ mod base {
     pub const CONST_UNIT: u8 = 0;
     pub const CONST_BOOL: u8 = CONST_UNIT + 1;
     pub const CONST_INT: u8 = CONST_BOOL + 1;
-    pub const CONST_FLOAT: u8 = CONST_INT + 1;
+    pub const FUNC_REF: u8 = CONST_INT + 1;
+    pub const CONST_FLOAT: u8 = FUNC_REF + 1;
     pub const STR: u8 = CONST_FLOAT + 1;
     pub const COPY: u8 = STR + 1;
     pub const CLEAR: u8 = COPY + 1;
@@ -143,6 +144,7 @@ pub enum Op {
     ConstUnit,
     ConstBool,
     ConstInt,
+    FuncRef,
     ConstFloat,
     Str,
     Copy,
@@ -354,6 +356,7 @@ impl Op {
             Op::ConstUnit,
             Op::ConstBool,
             Op::ConstInt,
+            Op::FuncRef,
             Op::ConstFloat,
             Op::Str,
             Op::Copy,
@@ -429,6 +432,7 @@ impl Op {
             Op::ConstUnit => base::CONST_UNIT,
             Op::ConstBool => base::CONST_BOOL,
             Op::ConstInt => base::CONST_INT,
+            Op::FuncRef => base::FUNC_REF,
             Op::ConstFloat => base::CONST_FLOAT,
             Op::Str => base::STR,
             Op::Copy => base::COPY,
@@ -513,6 +517,12 @@ impl Op {
             Op::ConstUnit => fields(Operand::Word(UNIT), NONE, NONE, Payload::Empty),
             Op::ConstBool => fields(Operand::Word(BOOL), NONE, NONE, Payload::Bool),
             Op::ConstInt => fields(Operand::Word(INT), NONE, NONE, Payload::Imm),
+            // The callee's dense id, bound against the function table the
+            // same way `Op::Call`'s is — see the generic check `bounds`
+            // makes of every `Half::Function`. No name is looked up: this
+            // writes the id into `a` exactly as `Op::ConstInt` writes its
+            // immediate.
+            Op::FuncRef => fields(Operand::Word(INT), NONE, NONE, one(Half::Function)),
             Op::ConstFloat => fields(Operand::Word(FLOAT), NONE, NONE, Payload::Imm),
             Op::Str => fields(Operand::Word(REF), NONE, NONE, one(Half::Str)),
             Op::Copy => fields(Operand::Value, Operand::Value, NONE, one(Half::Layout)),
@@ -729,11 +739,11 @@ mod tests {
     use super::*;
 
     /// ADR 0041's count, which is the one number the format's headroom is
-    /// argued from: a hundred opcodes out of the 256 a byte names.
+    /// argued from: a hundred and one opcodes out of the 256 a byte names.
     #[test]
-    fn there_are_a_hundred_opcodes() {
-        assert_eq!(Op::all().len(), 100);
-        assert_eq!(OPCODES, 100);
+    fn there_are_a_hundred_and_one_opcodes() {
+        assert_eq!(Op::all().len(), 101);
+        assert_eq!(OPCODES, 101);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

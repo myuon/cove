@@ -247,7 +247,7 @@ fn0 m.f(String) -> Result
   local t -> s0:String [0, 10)
      0  call-builtin s4:int Int.parse (s0:String) Result
      1  alloc s7:ref closure m.f#0<closure>
-     2  int s8:int 20
+     2  func-ref s8:int @m.f#0
      3  store-field s7:ref +0 s8:int Int
      4  store-field s7:ref +1 s0:ref String
      5  call s9:int std.result.mapError<Int, Error, m.E> (s4:Result s7:fn) Result

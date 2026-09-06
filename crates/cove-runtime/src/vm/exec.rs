@@ -6496,9 +6496,9 @@ pub(crate) mod tests {
                     layout: closure,
                     len: Len::Fixed,
                 },
-                Inst::Int {
+                Inst::FuncRef {
                     dst: 4,
-                    value: step_id.0 as i64,
+                    callee: step_id,
                 },
                 Inst::StoreField {
                     obj: 3,
@@ -6550,9 +6550,9 @@ pub(crate) mod tests {
                     layout: closure,
                     len: Len::Fixed,
                 },
-                Inst::Int {
+                Inst::FuncRef {
                     dst: 1,
-                    value: step_id.0 as i64,
+                    callee: step_id,
                 },
                 Inst::StoreField {
                     obj: 0,
@@ -6672,9 +6672,9 @@ pub(crate) mod tests {
                     layout: closure,
                     len: Len::Fixed,
                 },
-                Inst::Int {
+                Inst::FuncRef {
                     dst: 1,
-                    value: step_id.0 as i64,
+                    callee: step_id,
                 },
                 Inst::StoreField {
                     obj: 0,
@@ -6775,9 +6775,9 @@ pub(crate) mod tests {
                     layout: closure,
                     len: Len::Fixed,
                 },
-                Inst::Int {
+                Inst::FuncRef {
                     dst: 1,
-                    value: step_id.0 as i64,
+                    callee: step_id,
                 },
                 Inst::StoreField {
                     obj: 0,

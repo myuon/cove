@@ -106,6 +106,18 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::Unit { dst } => format!("unit {}", s(*dst)),
         Inst::Bool { dst, value } => format!("bool {} {value}", s(*dst)),
         Inst::Int { dst, value } => format!("int {} {value}", s(*dst)),
+        // Named, not numbered — the whole point of this instruction over an
+        // `Inst::Int` carrying the same word. `FunctionId` is dense and
+        // renumbers whenever an unrelated declaration is added or moved, so
+        // printing it would make this line, and the golden test that pins
+        // it, churn on changes that have nothing to do with this closure.
+        Inst::FuncRef { dst, callee } => {
+            format!(
+                "func-ref {} @{}",
+                s(*dst),
+                program.function(*callee).qualified()
+            )
+        }
         Inst::Float { dst, bits } => format!("float {} {}", s(*dst), f64::from_bits(*bits)),
         Inst::Str { dst, text } => format!("str {} {:?}", s(*dst), program.string(*text)),
         Inst::Copy { dst, src, layout } => {

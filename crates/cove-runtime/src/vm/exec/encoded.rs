@@ -114,6 +114,7 @@ use super::{
 const CONST_UNIT: u8 = Op::ConstUnit.number();
 const CONST_BOOL: u8 = Op::ConstBool.number();
 const CONST_INT: u8 = Op::ConstInt.number();
+const FUNC_REF: u8 = Op::FuncRef.number();
 const CONST_FLOAT: u8 = Op::ConstFloat.number();
 const STR: u8 = Op::Str.number();
 const COPY: u8 = Op::Copy.number();
@@ -243,6 +244,7 @@ pub(crate) fn implemented(op: Op) -> bool {
         Op::ConstUnit
         | Op::ConstBool
         | Op::ConstInt
+        | Op::FuncRef
         | Op::ConstFloat
         | Op::Str
         | Op::Copy
@@ -627,6 +629,10 @@ pub(super) fn dispatch<'s, 'a>(
             CONST_BOOL | CONST_INT | CONST_FLOAT => {
                 machine.mem.set_slot(base, a!(), held.payload())
             }
+            // The callee's dense id, written as a word — the same one store
+            // `CONST_INT` makes, and no name lookup: `held.lo()` is already
+            // the `FunctionId` the encoder put there.
+            FUNC_REF => machine.mem.set_slot(base, a!(), held.lo() as u64),
             STR => {
                 machine.sync(pc - 1);
                 match machine.intern(StrId(held.lo())) {

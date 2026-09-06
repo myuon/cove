@@ -104,6 +104,10 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             dst: a,
             value: code.payload() as i64,
         },
+        Op::FuncRef => Inst::FuncRef {
+            dst: a,
+            callee: FunctionId(lo),
+        },
         Op::ConstFloat => Inst::Float {
             dst: a,
             bits: code.payload(),
@@ -376,11 +380,11 @@ mod tests {
     }
 
     /// A byte that names no operation is refused rather than indexed with.
-    /// A hundred opcodes are defined out of 256, so more than half of all
-    /// bytes reach this.
+    /// A hundred and one opcodes are defined out of 256, so more than half of
+    /// all bytes reach this.
     #[test]
     fn an_opcode_no_encoder_produced_is_refused() {
-        for byte in 100u8..=255 {
+        for byte in crate::bytecode::op::OPCODES as u8..=255 {
             assert_eq!(
                 decode(with(int(), 0, byte), 0),
                 Err(Malformed::Opcode(byte))

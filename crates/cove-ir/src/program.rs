@@ -38,6 +38,32 @@ macro_rules! id {
 
 id!(
     /// Names a [`Function`] in [`Program::functions`].
+    ///
+    /// # Scope and stability
+    ///
+    /// A `FunctionId` is dense — it is a position in one [`Program`]'s
+    /// `functions`, not a name — and it means nothing outside that one
+    /// linked program. It is not stable across an edit to the package that
+    /// produced it: declarations are numbered first and lambdas and generic
+    /// instantiations are appended after them, so adding, removing or moving
+    /// an earlier one renumbers every later one. It is not a stable external
+    /// identity either, in the way a qualified name is — two builds of the
+    /// same source are not guaranteed to number a function the same way, and
+    /// nothing here promises they will.
+    ///
+    /// Nothing may persist a bare `FunctionId` across an artifact boundary,
+    /// because there is no third thing to check it against once it is on
+    /// the far side of one. Every boundary Cove has today avoids the
+    /// question instead of answering it: `cove build` embeds the checked
+    /// source in the generated crate and lowers a fresh [`Program`] when
+    /// that crate is compiled, rather than serialising this one's; the
+    /// trace and replay format keys an entry point by `module` and
+    /// `function` **strings** ([`Program::function_named`] resolves the
+    /// pair against whatever program is current, back into a `FunctionId`
+    /// of *that* run) and never writes the id itself; and the wasm
+    /// playground's boundary is rendered text — [`crate::print`]'s
+    /// listing — not the program that produced it. No id crosses a boundary
+    /// today because nothing here has ever needed one to.
     FunctionId, "fn"
 );
 id!(

@@ -1,13 +1,16 @@
 //! Function values: the environment, the captures in it, and the call.
 
-use super::listing;
+use super::{listing, listing_in};
 
 /// A lambda is a `Function` numbered after every declaration, and the value
 /// the enclosing body holds is one word naming an environment.
 ///
-/// The environment's payload word 0 is the callee's id — `1`, which is
-/// `fn1` — and the call reads it out of the object rather than out of the
-/// instruction.
+/// The environment's payload word 0 is the callee's [`crate::FunctionId`],
+/// written by [`crate::Inst::FuncRef`] and read by the call out of the
+/// object rather than out of the instruction. The listing names it
+/// symbolically — `@m.f#0`, never a bare number — which is the fact the
+/// test below this one pins: the id underneath does renumber when the
+/// package changes, and used to make it into this text.
 #[test]
 fn a_lambda_is_a_function_of_its_own_and_an_environment_naming_it() {
     let source = "fn f() -> Int {\n  let g = fn(x: Int) { x + 1 }\n  g(1)\n}";
@@ -18,7 +21,7 @@ fn0 m.f() -> Int
   frame 4: s0:int s1:ref s2:int s3:int
   local g -> s1:fn [3, 6)
      0  alloc s1:ref closure m.f#0<closure>
-     1  int s2:int 19
+     1  func-ref s2:int @m.f#0
      2  store-field s1:ref +0 s2:int Int
      3  int s2:int 1
      4  call-closure s3:int s1:ref (s2:Int)
@@ -41,6 +44,36 @@ fn19 m.f#0(Int) -> Int
     );
 }
 
+/// [Issue #262](https://github.com/myuon/cove/issues/262)'s acceptance
+/// criterion, proved rather than merely fixed: a listing with a closure in it
+/// is byte-for-byte unchanged when an unrelated declaration is added ahead of
+/// it, though the addition renumbers the callee's `FunctionId` underneath.
+///
+/// `Plan::index` numbers a module's declarations in name order — `by_name`
+/// is a `BTreeMap` — so `aardvark` sorts ahead of `f` and is what actually
+/// renumbers it here; a name that sorted after `f` would prove nothing.
+/// Before [`crate::Inst::FuncRef`] the renumbering reached this text: the
+/// shifted id passed through an [`crate::Inst::Int`] and the `int sN:int
+/// <id>` line changed with it. Twelve standard-library functions moving
+/// earlier is exactly this, at the scale of a real PR: #259 changed 27
+/// golden lowerings for it.
+#[test]
+fn a_lambda_s_environment_is_unmoved_by_an_unrelated_declaration_ahead_of_it() {
+    let with_lambda = "fn f() -> Int {\n  let g = fn(x: Int) { x + 1 }\n  g(1)\n}";
+    let before = listing_in(&[("m", with_lambda)], "m", "f");
+
+    let unrelated_ahead = format!("fn aardvark() -> Int {{ 42 }}\n{with_lambda}");
+    let after = listing_in(&[("m", &unrelated_ahead)], "m", "f");
+
+    // The unrelated declaration did renumber the callee: `f` itself moved
+    // from `fn0` to `fn1`. What did not move is every character after that
+    // line, which is the churn this issue is about.
+    assert_ne!(before, after);
+    let strip_own_id = |text: &str| text.split_once('\n').unwrap().1.to_string();
+    assert_eq!(strip_own_id(&before), strip_own_id(&after));
+    assert!(before.contains("     1  func-ref s2:int @m.f#0\n"));
+}
+
 /// A capture is stored **inline in the environment, at its own layout's
 /// width**, and read back into a run of the callee's frame that follows the
 /// parameters.
@@ -61,7 +94,7 @@ fn0 m.f(m.Point) -> Int
   local p -> s0:m.Point [0, 7)
   local g -> s3:fn [4, 6)
      0  alloc s3:ref closure m.f#0<closure>
-     1  int s4:int 19
+     1  func-ref s4:int @m.f#0
      2  store-field s3:ref +0 s4:int Int
      3  store-field s3:ref +1 s0:int m.Point
      4  call-closure s4:int s3:ref ()
@@ -100,7 +133,7 @@ fn0 m.f() -> Int
   frame 3: s0:int s1:ref s2:int
   local g -> s1:fn [3, 5)
      0  alloc s1:ref closure m.f#0<closure>
-     1  int s2:int 19
+     1  func-ref s2:int @m.f#0
      2  store-field s1:ref +0 s2:int Int
      3  call-closure s2:int s1:ref ()
      4  copy s0:int s2:int Int
@@ -139,7 +172,7 @@ fn1 m.f() -> Int
   frame 4: s0:int s1:ref s2:int s3:int
   local g -> s1:fn [3, 6)
      0  alloc s1:ref closure m.double<closure>
-     1  int s2:int 0
+     1  func-ref s2:int @m.double
      2  store-field s1:ref +0 s2:int Int
      3  int s2:int 3
      4  call-closure s3:int s1:ref (s2:Int)
@@ -178,7 +211,7 @@ fn0 m.apply(fn Int) -> Int
 fn1 m.f() -> Int
   frame 4: s0:int s1:ref s2:int s3:int
      0  alloc s1:ref closure m.f#0<closure>
-     1  int s2:int 20
+     1  func-ref s2:int @m.f#0
      2  store-field s1:ref +0 s2:int Int
      3  int s2:int 2
      4  call s3:int m.apply (s1:fn s2:Int) Int
@@ -209,7 +242,7 @@ fn19 m.f#0() -> Int
   local n -> s0:Int [0, 7)
   local inner -> s2:fn [4, 6)
      0  alloc s2:ref closure m.f#0#0<closure>
-     1  int s3:int 20
+     1  func-ref s3:int @m.f#0#0
      2  store-field s2:ref +0 s3:int Int
      3  store-field s2:ref +1 s0:int Int
      4  call-closure s3:int s2:ref ()
@@ -253,7 +286,7 @@ fn0 m.f(<addr>) -> Int
   local g -> s3:fn [5, 7)
      0  load s2:int s0:addr Int
      1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 19
+     2  func-ref s4:int @m.f#0
      3  store-field s3:ref +0 s4:int Int
      4  store-field s3:ref +1 s2:int Int
      5  call-closure s2:int s3:ref ()
@@ -299,7 +332,7 @@ fn0 m.f() -> Int
   frame 4: s0:int s1:ref s2:int s3:int
   local double -> s1:fn [3, 6)
      0  alloc s1:ref closure m.f#0<closure>
-     1  int s2:int 19
+     1  func-ref s2:int @m.f#0
      2  store-field s1:ref +0 s2:int Int
      3  int s2:int 21
      4  call-closure s3:int s1:ref (s2:Int)

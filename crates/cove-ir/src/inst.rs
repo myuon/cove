@@ -129,6 +129,30 @@ pub enum Inst {
     Bool { dst: Slot, value: bool },
     /// `dst = value`, also how a `Duration` literal reaches a slot.
     Int { dst: Slot, value: i64 },
+    /// `dst = <callee's dense id>`, as a word.
+    ///
+    /// What a lowered closure's environment is given for its callee field,
+    /// and the only place that value is produced. It is not [`Inst::Int`],
+    /// though the word it writes is the same [`FunctionId`] an `Int` of that
+    /// value would be: a closure's [`crate::layout::Shape::Closure`] already
+    /// carries `function: FunctionId` as a typed fact, and writing the same
+    /// id again through the untyped integer path made a second,
+    /// uninspectable copy of it — one no verifier could tell from an
+    /// ordinary integer, and one that renumbered every golden lowering with
+    /// a closure in it whenever an unrelated function was added or moved,
+    /// because the two facts were spelled a plain number in the listing
+    /// rather than the name that number happened to hold that day.
+    ///
+    /// [`mod@crate::verify`] bounds `callee` against
+    /// [`crate::program::Program::functions`] the way [`Inst::Call`]'s is
+    /// bounded, and, where the destination is then stored into a
+    /// statically-known closure object, checks that `callee` agrees with
+    /// what the object's own layout says — the comparison the two copies
+    /// never had. [`crate::print`] renders it symbolically, by the callee's
+    /// name and not its number, which is what stops the churn: an unrelated
+    /// declaration changing `callee`'s numeric value no longer changes a
+    /// single character of the listing.
+    FuncRef { dst: Slot, callee: FunctionId },
     /// `dst = f64::from_bits(bits)`
     ///
     /// The bits rather than the `f64` so that [`Inst`] can be `Eq` and

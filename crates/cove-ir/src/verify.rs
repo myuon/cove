@@ -71,6 +71,7 @@ pub fn verify(program: &Program) -> Result<(), Vec<Invalid>> {
             function,
             id: FunctionId(index as u32),
             objects: Vec::new(),
+            funcs: Vec::new(),
             faults: &mut faults,
         }
         .run();
@@ -82,19 +83,48 @@ pub fn verify(program: &Program) -> Result<(), Vec<Invalid>> {
     }
 }
 
+/// Marks `width` words starting at `slot` as written by something
+/// [`Check::slot_facts`] declines to guess about — the `Some(None)` case any
+/// writer other than the one this fact is about produces.
+fn poison<T>(seen: &mut [Option<Option<T>>], slot: Slot, width: u32) {
+    for at in slot..slot.saturating_add(width) {
+        if let Some(place) = seen.get_mut(at as usize) {
+            *place = Some(None);
+        }
+    }
+}
+
+/// Marks `slot` as written by `id` — the answer stays `id` if every writer
+/// [`Check::slot_facts`] has seen so far agrees, and becomes the poisoned
+/// [`Option::None`] the moment two disagree.
+fn identify<T: Copy + PartialEq>(seen: &mut [Option<Option<T>>], slot: Slot, id: T) {
+    if let Some(place) = seen.get_mut(slot as usize) {
+        *place = match *place {
+            None => Some(Some(id)),
+            Some(Some(held)) if held == id => Some(Some(id)),
+            _ => Some(None),
+        };
+    }
+}
+
 struct Check<'a> {
     program: &'a Program,
     function: &'a Function,
     id: FunctionId,
     /// The layout of the object each reference slot holds, where the whole
-    /// function agrees on one. See [`Check::objects`].
+    /// function agrees on one. See [`Check::slot_facts`].
     objects: Vec<Option<LayoutId>>,
+    /// The callee each slot holds, where the whole function agrees on one and
+    /// the writer was [`Inst::FuncRef`]. See [`Check::slot_facts`].
+    funcs: Vec<Option<FunctionId>>,
     faults: &'a mut Vec<Invalid>,
 }
 
 impl Check<'_> {
     fn run(&mut self) {
-        self.objects = self.objects();
+        let (objects, funcs) = self.slot_facts();
+        self.objects = objects;
+        self.funcs = funcs;
         self.check_frame();
         for pc in 0..self.function.code.len() {
             self.check_inst(pc);
@@ -102,7 +132,10 @@ impl Check<'_> {
         self.check_falls_off_the_end();
     }
 
-    /// Which slots hold an object whose layout is a static fact.
+    /// Which slots hold an object whose layout is a static fact, and which
+    /// hold a callee whose id is one — one walk of the code answering both,
+    /// because a slot is disqualified from the second the same way it is
+    /// from the first.
     ///
     /// A `Repr::Ref` slot carries no layout — that is the point of the header
     /// — so in general only the machine can bound a field access. But a slot
@@ -115,30 +148,25 @@ impl Check<'_> {
     /// answer, and it is the common one — a lowering allocates an object and
     /// reads its fields in the same breath.
     ///
-    /// Anything else is `None`, which means the check is skipped rather than
-    /// failed. A slot written by a call, a load or a copy holds whatever the
-    /// callee or the source held, and this declines to guess.
-    fn objects(&self) -> Vec<Option<LayoutId>> {
-        // `Some(None)` is "written, by something that says no layout"; `None`
+    /// The second answer is the same question about [`Inst::FuncRef`] instead
+    /// of [`Inst::Alloc`]: a slot written by one, and by nothing else, holds
+    /// that callee at every program counter. A temporary is given back to the
+    /// pool once its value is stored, [`crate::lower::closures`] among its
+    /// callers, so one slot number can hold two different closures' callees
+    /// in one function — which is a second writer with a different id, and
+    /// poisons the answer exactly as a second, different [`Inst::Alloc`]
+    /// would.
+    ///
+    /// Anything else is `None`, which means the check the answer feeds is
+    /// skipped rather than failed. A slot written by a call, a load or a copy
+    /// holds whatever the callee or the source held, and this declines to
+    /// guess.
+    fn slot_facts(&self) -> (Vec<Option<LayoutId>>, Vec<Option<FunctionId>>) {
+        // `Some(None)` is "written, by something that says no fact"; `None`
         // is "not written yet". The parameters and the captures are written
         // by the caller, so they start as the first.
-        let mut seen: Vec<Option<Option<LayoutId>>> = vec![None; self.function.reprs.len()];
-        let unknown = |seen: &mut Vec<Option<Option<LayoutId>>>, slot: Slot, width: u32| {
-            for at in slot..slot.saturating_add(width) {
-                if let Some(place) = seen.get_mut(at as usize) {
-                    *place = Some(None);
-                }
-            }
-        };
-        let allocates = |seen: &mut Vec<Option<Option<LayoutId>>>, slot: Slot, id: LayoutId| {
-            if let Some(place) = seen.get_mut(slot as usize) {
-                *place = match *place {
-                    None => Some(Some(id)),
-                    Some(Some(held)) if held == id => Some(Some(id)),
-                    _ => Some(None),
-                };
-            }
-        };
+        let mut objects: Vec<Option<Option<LayoutId>>> = vec![None; self.function.reprs.len()];
+        let mut funcs: Vec<Option<Option<FunctionId>>> = vec![None; self.function.reprs.len()];
         let words = |id: LayoutId| {
             self.program
                 .layouts
@@ -146,28 +174,56 @@ impl Check<'_> {
                 .map_or(1, |layout| layout.width())
         };
         for at in 0..self.function.param_words(&self.program.layouts) {
-            unknown(&mut seen, at, 1);
+            poison(&mut objects, at, 1);
+            poison(&mut funcs, at, 1);
         }
         for capture in &self.function.captures {
-            unknown(&mut seen, capture.slot, words(capture.layout));
+            poison(&mut objects, capture.slot, words(capture.layout));
+            poison(&mut funcs, capture.slot, words(capture.layout));
         }
         for inst in &self.function.code {
             match *inst {
                 // The three that say what they allocate. A `Clear` is not
                 // among them and is not a writer either: it stores null, and
                 // null is refused by the machine before a layout is asked
-                // about.
-                Inst::Alloc { dst, layout, .. } => allocates(&mut seen, dst, layout),
-                Inst::Str { dst, .. } => allocates(&mut seen, dst, self.program.str_layout),
-                Inst::Box { dst, .. } => allocates(&mut seen, dst, self.program.boxed_layout),
+                // about. None of the three is `Inst::FuncRef`, so all three
+                // poison the second answer the way any other writer does.
+                Inst::Alloc { dst, layout, .. } => {
+                    identify(&mut objects, dst, layout);
+                    poison(&mut funcs, dst, 1);
+                }
+                Inst::Str { dst, .. } => {
+                    identify(&mut objects, dst, self.program.str_layout);
+                    poison(&mut funcs, dst, 1);
+                }
+                Inst::Box { dst, .. } => {
+                    identify(&mut objects, dst, self.program.boxed_layout);
+                    poison(&mut funcs, dst, 1);
+                }
+                // The one instruction that identifies a callee rather than a
+                // layout. It is not an allocation, so it poisons the first
+                // answer exactly as `Inst::Int` does.
+                Inst::FuncRef { dst, callee } => {
+                    poison(&mut objects, dst, 1);
+                    identify(&mut funcs, dst, callee);
+                }
                 Inst::Clear { .. } | Inst::Jump { .. } | Inst::BranchFalse { .. } => {}
                 Inst::Switch { .. } | Inst::Return { .. } | Inst::Trap { .. } => {}
                 // Scheduler state, not objects. A `Repr::Task` and a
                 // `Repr::Scope` word name a table entry, so there is no
                 // layout for one of these to claim.
-                Inst::ScopeEnter { dst, .. } => unknown(&mut seen, dst, 1),
-                Inst::Spawn { dst, .. } => unknown(&mut seen, dst, 1),
-                Inst::Settled { dst, .. } => unknown(&mut seen, dst, 1),
+                Inst::ScopeEnter { dst, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                }
+                Inst::Spawn { dst, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                }
+                Inst::Settled { dst, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                }
                 Inst::ScopeCancel { .. } | Inst::Cancel { .. } => {}
                 // Neither writes a slot: what they change is the cell's own
                 // lock word, which is not a location this frame numbers.
@@ -178,21 +234,47 @@ impl Check<'_> {
                     layout,
                     ..
                 } => {
-                    unknown(&mut seen, failed, 1);
-                    unknown(&mut seen, error, words(layout));
+                    poison(&mut objects, failed, 1);
+                    poison(&mut funcs, failed, 1);
+                    poison(&mut objects, error, words(layout));
+                    poison(&mut funcs, error, words(layout));
                 }
-                Inst::Await { dst, answer, .. } => unknown(&mut seen, dst, words(answer)),
+                Inst::Await { dst, answer, .. } => {
+                    poison(&mut objects, dst, words(answer));
+                    poison(&mut funcs, dst, words(answer));
+                }
                 // Writes nothing a program can read: what it writes is the
                 // run's report of where an assertion failed.
                 Inst::AssertFailed { .. } => {}
                 Inst::Store { .. } | Inst::StoreField { .. } | Inst::StoreElem { .. } => {}
-                Inst::Unit { dst } | Inst::Bool { dst, .. } => unknown(&mut seen, dst, 1),
-                Inst::Int { dst, .. } | Inst::Float { dst, .. } => unknown(&mut seen, dst, 1),
-                Inst::Neg { dst, .. } | Inst::Not { dst, .. } => unknown(&mut seen, dst, 1),
-                Inst::Arith { dst, .. } | Inst::Cmp { dst, .. } => unknown(&mut seen, dst, 1),
-                Inst::ArithImm { dst, .. } | Inst::CmpImm { dst, .. } => unknown(&mut seen, dst, 1),
-                Inst::Convert { dst, .. } => unknown(&mut seen, dst, 1),
-                Inst::Len { dst, .. } | Inst::LayoutOf { dst, .. } => unknown(&mut seen, dst, 1),
+                Inst::Unit { dst } | Inst::Bool { dst, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                }
+                Inst::Int { dst, .. } | Inst::Float { dst, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                }
+                Inst::Neg { dst, .. } | Inst::Not { dst, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                }
+                Inst::Arith { dst, .. } | Inst::Cmp { dst, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                }
+                Inst::ArithImm { dst, .. } | Inst::CmpImm { dst, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                }
+                Inst::Convert { dst, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                }
+                Inst::Len { dst, .. } | Inst::LayoutOf { dst, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                }
                 // Forming the address of a slot is also a write to it, as
                 // far as this is concerned: a `var` argument is that address
                 // handed to a callee, and what the callee stores through it
@@ -200,43 +282,61 @@ impl Check<'_> {
                 // and so to one layout, but a static claim about a slot
                 // should not rest on an argument made somewhere else.
                 Inst::AddrOfSlot { dst, slot } => {
-                    unknown(&mut seen, dst, 1);
-                    unknown(&mut seen, slot, 1);
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                    poison(&mut objects, slot, 1);
+                    poison(&mut funcs, slot, 1);
                 }
-                Inst::AddrOfField { dst, .. } => unknown(&mut seen, dst, 1),
+                Inst::AddrOfField { dst, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                }
                 Inst::AddrOfElem { dst, .. } | Inst::AddrOfPart { dst, .. } => {
-                    unknown(&mut seen, dst, 1)
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
                 }
                 Inst::Copy { dst, layout, .. }
                 | Inst::Load { dst, layout, .. }
                 | Inst::LoadField { dst, layout, .. }
                 | Inst::LoadElem { dst, layout, .. }
-                | Inst::Unbox { dst, layout, .. } => unknown(&mut seen, dst, words(layout)),
+                | Inst::Unbox { dst, layout, .. } => {
+                    poison(&mut objects, dst, words(layout));
+                    poison(&mut funcs, dst, words(layout));
+                }
                 Inst::Call { dst, callee, .. } => {
                     let width = match self.program.functions.get(callee.index()) {
                         Some(target) => words(target.returns),
                         None => 1,
                     };
-                    unknown(&mut seen, dst, width);
+                    poison(&mut objects, dst, width);
+                    poison(&mut funcs, dst, width);
                 }
-                Inst::CallClosure { dst, .. } => unknown(&mut seen, dst, 1),
+                Inst::CallClosure { dst, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                }
                 Inst::CallHost { dst, op, .. } | Inst::CallResource { dst, op, .. } => {
                     let width = match self.program.host_ops.get(op.index()) {
                         Some(op) => words(op.result),
                         None => 1,
                     };
-                    unknown(&mut seen, dst, width);
+                    poison(&mut objects, dst, width);
+                    poison(&mut funcs, dst, width);
                 }
                 Inst::CallBuiltin { dst, builtin, .. } => {
                     let width = match self.program.builtins.get(builtin.index()) {
                         Some(builtin) => words(builtin.result),
                         None => 1,
                     };
-                    unknown(&mut seen, dst, width);
+                    poison(&mut objects, dst, width);
+                    poison(&mut funcs, dst, width);
                 }
             }
         }
-        seen.into_iter().map(Option::flatten).collect()
+        (
+            objects.into_iter().map(Option::flatten).collect(),
+            funcs.into_iter().map(Option::flatten).collect(),
+        )
     }
 
     fn fault(&mut self, pc: Option<usize>, what: impl Into<String>) {
@@ -356,6 +456,12 @@ impl Check<'_> {
             Inst::Unit { dst } => self.expect(at, dst, &[Repr::Unit]),
             Inst::Bool { dst, .. } => self.expect(at, dst, &[Repr::Bool]),
             Inst::Int { dst, .. } => self.expect(at, dst, &[Repr::Int, Repr::Duration]),
+            Inst::FuncRef { dst, callee } => {
+                if !self.in_range(at, callee.index(), self.program.functions.len(), "function") {
+                    return;
+                }
+                self.expect(at, dst, &[Repr::Int]);
+            }
             Inst::Float { dst, .. } => self.expect(at, dst, &[Repr::Float]),
             Inst::Str { dst, text } => {
                 self.expect(at, dst, &[Repr::Ref]);
@@ -566,6 +672,7 @@ impl Check<'_> {
                     self.fits(at, src, layout, "what a field is written from");
                     self.reaches(at, obj, word, layout, "written");
                 }
+                self.check_closure_callee(at, obj, word, src);
             }
             Inst::LoadElem {
                 dst,
@@ -857,6 +964,46 @@ impl Check<'_> {
         }
     }
 
+    /// When `obj` is known to be a [`Shape::Closure`] and `word` is its
+    /// callee field, checks that `src` is a known [`Inst::FuncRef`] naming
+    /// the same callee the closure's own layout does.
+    ///
+    /// This is the comparison the module doc calls out: a closure's callee
+    /// is carried twice, once in its [`Shape::Closure::function`] and once in
+    /// the word [`Inst::FuncRef`] writes into its environment, and until this
+    /// nothing checked the two agreed. It is silent whenever either half is
+    /// not a static fact — `obj`'s layout from [`Check::objects`], `src`'s
+    /// callee from [`Check::funcs`] — for the reason [`Check::slot_facts`]
+    /// declines to guess there: a slot written by more than one thing, or by
+    /// something this analysis was not taught, answers `None` rather than a
+    /// wrong guess.
+    fn check_closure_callee(&mut self, at: Option<usize>, obj: Slot, word: u32, src: Slot) {
+        let Some(Some(layout_id)) = self.objects.get(obj as usize).copied() else {
+            return;
+        };
+        let described = self.program.layout(layout_id);
+        let Shape::Closure { function, .. } = &described.shape else {
+            return;
+        };
+        // Payload word 0 is the callee's `FunctionId`; see `Shape::Closure`.
+        if word != 0 {
+            return;
+        }
+        let Some(Some(callee)) = self.funcs.get(src as usize).copied() else {
+            return;
+        };
+        if callee != *function {
+            let name = described.name.clone();
+            self.fault(
+                at,
+                format!(
+                    "stores {callee} into the callee field of a `{name}` closure, whose layout \
+                     names {function}"
+                ),
+            );
+        }
+    }
+
     /// Every argument is a value location of the layout it names, and that
     /// location is inside the frame.
     ///
@@ -972,6 +1119,10 @@ mod tests {
     /// family, which is what an argument's layout is checked against.
     const PAIR: LayoutId = LayoutId(4);
     const BOXED: LayoutId = LayoutId(5);
+    /// A closure over nothing, whose layout says its callee is `FunctionId(1)`
+    /// — the second function [`program`] is given, in the tests that need
+    /// one. See [`Check::check_closure_callee`].
+    const CLOSURE: LayoutId = LayoutId(6);
 
     fn layouts() -> Vec<Layout> {
         vec![
@@ -1002,6 +1153,13 @@ mod tests {
                 vec![Repr::Int, Repr::Int],
             ),
             Layout::object("Any", Shape::Boxed),
+            Layout::object(
+                "closure g",
+                Shape::Closure {
+                    function: FunctionId(1),
+                    captures: Vec::new(),
+                },
+            ),
         ]
     }
 
@@ -1539,6 +1697,73 @@ mod tests {
         // The first `LoadField` names a slot two allocations disagree about
         // and the second an object whose payload the header decides.
         assert_eq!(faults(&held), Vec::<String>::new());
+    }
+
+    /// A closure's callee is carried twice — once in
+    /// [`Shape::Closure::function`], the typed fact, and once in the word
+    /// [`Inst::FuncRef`] writes into its environment's callee field — and
+    /// until [`Check::check_closure_callee`] nothing compared them. `f#0` is
+    /// what [`CLOSURE`]'s layout says the environment holds; the body writes
+    /// `fn0` into it instead.
+    #[test]
+    fn a_closures_environment_naming_a_different_callee_than_its_layout_is_a_fault() {
+        let f = function(
+            vec![Repr::Ref, Repr::Int],
+            INT,
+            vec![
+                Inst::Alloc {
+                    dst: 0,
+                    layout: CLOSURE,
+                    len: Len::Fixed,
+                },
+                Inst::FuncRef {
+                    dst: 1,
+                    callee: FunctionId(0),
+                },
+                Inst::StoreField {
+                    obj: 0,
+                    at: 0,
+                    src: 1,
+                    layout: INT,
+                },
+                Inst::Return { src: 1 },
+            ],
+        );
+        assert_eq!(
+            faults(&program(vec![f])),
+            vec![
+                "stores fn0 into the callee field of a `closure g` closure, whose layout names fn1"
+            ]
+        );
+    }
+
+    /// The same shape, agreeing: `f#0`'s environment says `f#0`.
+    #[test]
+    fn a_closures_environment_naming_its_own_layouts_callee_is_well_formed() {
+        let f = function(
+            vec![Repr::Ref, Repr::Int],
+            INT,
+            vec![
+                Inst::Alloc {
+                    dst: 0,
+                    layout: CLOSURE,
+                    len: Len::Fixed,
+                },
+                Inst::FuncRef {
+                    dst: 1,
+                    callee: FunctionId(1),
+                },
+                Inst::StoreField {
+                    obj: 0,
+                    at: 0,
+                    src: 1,
+                    layout: INT,
+                },
+                Inst::Return { src: 1 },
+            ],
+        );
+        let other = function(vec![Repr::Int], INT, vec![Inst::Return { src: 0 }]);
+        assert_eq!(faults(&program(vec![f, other])), Vec::<String>::new());
     }
 
     #[test]

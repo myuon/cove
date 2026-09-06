@@ -44,7 +44,7 @@ fn0 m.f(Array) -> Array
   local xs -> s0:Array [0, 22)
      0  copy s2:ref s0:ref Array
      1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 19
+     2  func-ref s4:int @m.f#0
      3  store-field s3:ref +0 s4:int Int
      4  len s4:int s2:ref
      5  alloc s5:ref Array<array> xs4:int
@@ -86,7 +86,7 @@ fn0 m.f(Array) -> Array
   frame 5: s0!:ref s1:ref s2:ref s3:int s4:ref
   local xs -> s0:Array [0, 7)
      0  alloc s2:ref closure m.f#0<closure>
-     1  int s3:int 20
+     1  func-ref s3:int @m.f#0
      2  store-field s2:ref +0 s3:int Int
      3  call s4:ref std.array.filter<String> (s0:Array s2:fn) Array
      4  clear s2:ref fn
@@ -115,7 +115,7 @@ fn0 m.f(Array) -> Int
   local xs -> s0:Array [0, 8)
      0  int s2:int 0
      1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 20
+     2  func-ref s4:int @m.f#0
      3  store-field s3:ref +0 s4:int Int
      4  call s4:int std.array.fold<String, Int> (s0:Array s2:Int s3:fn) Int
      5  clear s3:ref fn
@@ -145,7 +145,7 @@ fn0 m.f(Vector) -> Array
   local v -> s0:Vector [0, 20)
      0  call-builtin s2:ref Vector.toArray (s0:Vector) Array
      1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 19
+     2  func-ref s4:int @m.f#0
      3  store-field s3:ref +0 s4:int Int
      4  len s4:int s2:ref
      5  alloc s5:ref Array<array> xs4:int
@@ -186,7 +186,7 @@ fn1 m.f(Array) -> Array
   local xs -> s0:Array [0, 20)
      0  copy s2:ref s0:ref Array
      1  alloc s3:ref closure m.double<closure>
-     2  int s4:int 0
+     2  func-ref s4:int @m.double
      3  store-field s3:ref +0 s4:int Int
      4  len s4:int s2:ref
      5  alloc s5:ref Array<array> xs4:int
@@ -225,7 +225,7 @@ fn0 m.f(Array) -> Array
   local xs -> s0:Array [0, 20)
      0  copy s2:ref s0:ref Array
      1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 19
+     2  func-ref s4:int @m.f#0
      3  store-field s3:ref +0 s4:int Int
      4  len s4:int s2:ref
      5  alloc s5:ref Array<array> xs4:int
@@ -286,7 +286,7 @@ fn0 m.f(Array) -> Array
   local xs -> s0:Array [0, 68)
      0  copy s2:ref s0:ref Array
      1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 19
+     2  func-ref s4:int @m.f#0
      3  store-field s3:ref +0 s4:int Int
      4  len s4:int s2:ref
      5  int s5:int 0
