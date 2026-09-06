@@ -64,7 +64,11 @@ jobs:
       # away. A key that always misses always saves, and `restore-keys`
       # takes the most recent one that matches the prefix, which is what
       # the lockfile-keyed entry was meant to be doing all along.
+      #
+      # The key carries a hash of every compile input as well as the
+      # lockfile, and the step below is what that second hash is for.
       - name: Cache cargo registry and target
+        id: cache
         uses: actions/cache@v4
         with:
           path: |
@@ -74,10 +78,58 @@ jobs:
             target
             examples/target
             tests/e2e/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ github.run_id }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('crates/**', 'examples/**', '**/Cargo.toml', '.cargo/config.toml') }}-${{ github.run_id }}
           restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('crates/**', 'examples/**', '**/Cargo.toml', '.cargo/config.toml') }}-
             ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
             ${{ runner.os }}-cargo-
+
+      # A restored cache did not stop cargo rebuilding every crate in the
+      # workspace, and the reason is mtimes: `actions/checkout` writes the
+      # sources, `actions/cache` then extracts artifacts carrying an earlier
+      # run's timestamps, and cargo's freshness check for a path dependency
+      # is "is any source newer than what was built from it". Every source
+      # is. So the pipeline compiled the whole workspace on every run and the
+      # cache served only the registry — 112 seconds of a 176-second step,
+      # measured, on a commit whose Rust had not changed at all
+      # ([issue #257](https://github.com/myuon/cove/issues/257)).
+      #
+      # The fix is one line and the safety is the `case`. Dating the sources
+      # into the past makes cargo trust what was restored, and that is only
+      # correct when what was restored was built from *these* sources — so it
+      # happens only when the key that matched carries this run's own hash of
+      # every compile input, which means byte-identical sources, lockfile,
+      # manifests and cargo config. On any other match the sources keep their
+      # checkout timestamps and cargo rebuilds exactly as it did before.
+      #
+      # `git-restore-mtime` is the usual reach here and it is wrong for this
+      # repository. It dates each file to the commit that last touched it,
+      # which is *always* earlier than the build time of any cache — so a
+      # branch whose cache came from `main` by the prefix key above would
+      # look fresh while holding artifacts compiled from different code.
+      # Cargo would not rebuild and the run would test something that is not
+      # the commit. The hash is what rules that out; a commit date cannot.
+      #
+      # This buys nothing on a pull request that changes Rust, and that is
+      # the honest half of it: those rebuild because they must. What it buys
+      # back is every run that changes none — a documentation change, an ADR,
+      # a workflow edit, a re-run of the same commit — which is about two in
+      # five here.
+      - name: Let cargo trust the cache when the sources are byte-identical
+        env:
+          PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
+        run: |
+          identical="${PRIMARY%-*}-"
+          case "$MATCHED" in
+            "$identical"*)
+              echo "the cache was built from these exact sources; dating them back so cargo reuses it"
+              git ls-files -z crates examples | xargs -0 touch -d '2000-01-01T00:00:00Z'
+              ;;
+            *)
+              echo "the cache is from other sources (matched: ${MATCHED:-none}); cargo will rebuild what changed"
+              ;;
+          esac
 
       # Formatting first: it is the cheapest check and the easiest to fix.
       - name: cargo fmt
@@ -246,6 +298,7 @@ jobs:
       # Keyed apart from the job above: this is a second target's artifacts
       # and sharing one key would have the two jobs overwrite each other's.
       - name: Cache cargo registry and target
+        id: cache
         uses: actions/cache@v4
         with:
           path: |
@@ -253,10 +306,30 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}-${{ github.run_id }}
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('crates/**', 'examples/**', '**/Cargo.toml', '.cargo/config.toml') }}-${{ github.run_id }}
           restore-keys: |
+            ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('crates/**', 'examples/**', '**/Cargo.toml', '.cargo/config.toml') }}-
             ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}-
             ${{ runner.os }}-cargo-wasm-
+
+      # The same trade as the job above, for the same reason, and it is worth
+      # having twice: this job compiles the whole workspace for a second
+      # target and threw all of it away on every run.
+      - name: Let cargo trust the cache when the sources are byte-identical
+        env:
+          PRIMARY: ${{ steps.cache.outputs.cache-primary-key }}
+          MATCHED: ${{ steps.cache.outputs.cache-matched-key }}
+        run: |
+          identical="${PRIMARY%-*}-"
+          case "$MATCHED" in
+            "$identical"*)
+              echo "the cache was built from these exact sources; dating them back so cargo reuses it"
+              git ls-files -z crates examples | xargs -0 touch -d '2000-01-01T00:00:00Z'
+              ;;
+            *)
+              echo "the cache is from other sources (matched: ${MATCHED:-none}); cargo will rebuild what changed"
+              ;;
+          esac
 
       - name: Build the playground for wasm32-unknown-unknown
         run: cargo build -p cove-wasm --target wasm32-unknown-unknown --release
