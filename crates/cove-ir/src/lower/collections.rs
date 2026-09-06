@@ -348,6 +348,12 @@ impl Body<'_> {
     /// more: `Body::call_builtin_method` resolves it to a standard-library
     /// call — `cove_schema::builtins::standard_binding` names
     /// `std.array.isEmpty` — before this function is ever called for it.
+    ///
+    /// `filter` and `fold` used to answer here too, as loops
+    /// `cove_ir::lower::walks` wrote out. They are not reached from here any
+    /// more either: the same `Body::call_builtin_method` resolves them to
+    /// `std.array.filter` and `std.array.fold`, ordinary calls into the
+    /// standard library.
     pub(super) fn array_method(
         &mut self,
         expr: &Expr,
@@ -378,7 +384,7 @@ impl Body<'_> {
                 self.release(obj, expr.span);
                 answer
             }
-            ("map", 1) | ("filter", 1) | ("sorted", 1) | ("fold", 2) => {
+            ("map", 1) | ("sorted", 1) => {
                 let elem = elem.clone();
                 let items = self.expr(base);
                 let obj = self.own_iterable(items, expr.span);
@@ -405,6 +411,13 @@ impl Body<'_> {
     /// standard-library call — `cove_schema::builtins::standard_binding`
     /// names `std.vector.isEmpty` — before this function is ever called for
     /// it.
+    ///
+    /// `filter` and `fold` used to answer here too, as loops
+    /// `cove_ir::lower::walks` wrote out through the same `toArray` copy.
+    /// They are not reached from here any more either: the same
+    /// `Body::call_builtin_method` resolves them to `std.vector.filter` and
+    /// `std.vector.fold`, ordinary calls into the standard library — which
+    /// take the copy themselves, at the same point and for the same reason.
     pub(super) fn vector_method(
         &mut self,
         expr: &Expr,
@@ -447,7 +460,7 @@ impl Body<'_> {
             // `Vector` shares its storage and the callback may reach the very
             // vector being walked. That is `Vector.toArray`, which is the
             // copy the oracle makes for the same reason at the same point.
-            ("map", 1) | ("filter", 1) | ("sorted", 1) | ("fold", 2) => {
+            ("map", 1) | ("sorted", 1) => {
                 let elem = elem.clone();
                 let items = self.expr(base);
                 let Some(snapshot) = self.vector_snapshot(&items, &elem, base.span) else {
@@ -1192,11 +1205,14 @@ impl Body<'_> {
 /// Each of them either builds an object whose family only the layout table
 /// knows — `slice`, `toVector`, `toArray` — or walks the elements with the
 /// language's own equality, which is not something an instruction expresses.
-/// The four that take a closure are not here and never will be. A builtin
-/// that invoked the closure would re-enter the dispatch loop from inside a
-/// Rust function, which is the one thing `docs/LINEAR_VM.md` asks this
-/// backend not to do — so `map`, `filter`, `fold` and `sorted` are all loops
-/// in the IR, in `cove_ir::lower::walks`.
+/// `map` and `sorted` are not here and never will be: a builtin that invoked
+/// their closure would re-enter the dispatch loop from inside a Rust
+/// function, which is the one thing `docs/LINEAR_VM.md` asks this backend
+/// not to do — so both are loops in the IR, in `cove_ir::lower::walks`,
+/// instead. `filter` and `fold` took a closure too and are not here either,
+/// but for a different reason now: they are ordinary calls into
+/// `std.array`/`std.vector`, resolved before this table is ever consulted —
+/// see `Body::array_method` and `Body::vector_method`.
 ///
 /// A `Set` and a `Map` are here for the whole of their tables but `length`
 /// and `isEmpty`: both are sorted runs, so every one of these is a binary

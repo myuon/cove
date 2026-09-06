@@ -1,12 +1,20 @@
-//! `map`, `filter`, `fold` and `sorted`, which are loops in the IR rather
-//! than builtins.
+//! `map` and `sorted`, which are loops in the IR rather than builtins — and
+//! `filter` and `fold`, which are ordinary calls into the standard library and
+//! are here to say so.
 //!
-//! `docs/LINEAR_VM.md` gives the reason: a builtin that invoked the closure
-//! would re-enter the dispatch loop from inside a Rust function, putting a
-//! Rust frame under every Cove frame the closure creates — and giving back
-//! the property the loop was built to have. So every case here is a listing
-//! with an [`Inst::CallClosure`](crate::Inst::CallClosure) inside a loop and
-//! no builtin doing the walking.
+//! `docs/LINEAR_VM.md` gives the reason `map` and `sorted` are loops: a
+//! builtin that invoked the closure would re-enter the dispatch loop from
+//! inside a Rust function, putting a Rust frame under every Cove frame the
+//! closure creates — and giving back the property the loop was built to
+//! have. So each of those two is a listing with an
+//! [`Inst::CallClosure`](crate::Inst::CallClosure) inside a loop and no
+//! builtin doing the walking.
+//!
+//! `filter` and `fold` needed none of that: they are `std.array` and
+//! `std.vector` functions written in Cove, resolved to an ordinary
+//! [`Inst::Call`](crate::Inst::Call) before this crate's per-receiver dispatch
+//! ever sees the method name, and their two cases below are what that call
+//! looks like rather than what a walk does.
 
 use super::listing;
 
@@ -36,7 +44,7 @@ fn0 m.f(Array) -> Array
   local xs -> s0:Array [0, 22)
      0  copy s2:ref s0:ref Array
      1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 15
+     2  int s4:int 19
      3  store-field s3:ref +0 s4:int Int
      4  len s4:int s2:ref
      5  alloc s5:ref Array<array> xs4:int
@@ -60,15 +68,14 @@ fn0 m.f(Array) -> Array
     );
 }
 
-/// `filter` cannot know how many elements it will keep until the last call,
-/// and an `Array` object is as long as it was allocated.
-///
-/// So it fills a run of the receiver's length — the most there can be —
-/// counts what it kept in `s6`, and answers `Array.slice(0, kept)`. The words
-/// past the count are the zeroes the allocation left, so a reference among
-/// them reads null and the collector traces nothing from one.
+/// `filter` is not a walk in the IR at all any more: `Body::call_builtin_method`
+/// resolves it, before either `Body::array_method` or `Body::walk_with` is
+/// ever asked, to an ordinary call into `std.array.filter` — the same
+/// generic-instantiated `` `call` `` a program's own `filter(xs, keep)` would
+/// reach. The `for` and the `Vector` it fills are inside that callee's own
+/// body, in `crates/cove-sema/std/array.cove`, not in this listing.
 #[test]
-fn filter_fills_a_run_of_the_receiver_s_length_and_slices_it() {
+fn filter_is_an_ordinary_call_into_the_standard_library() {
     assert_eq!(
         listing(
             "fn f(xs: Array<String>) -> Array<String> { xs.filter(fn(s) { s.isEmpty() }) }",
@@ -76,51 +83,27 @@ fn filter_fills_a_run_of_the_receiver_s_length_and_slices_it() {
         ),
         "\
 fn0 m.f(Array) -> Array
-  frame 11: s0!:ref s1:ref s2:ref s3:ref s4:int s5:ref s6:int s7:int s8:int s9:bool s10:ref
-  local xs -> s0:Array [0, 27)
-     0  copy s2:ref s0:ref Array
-     1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 15
-     3  store-field s3:ref +0 s4:int Int
-     4  len s4:int s2:ref
-     5  alloc s5:ref Array<array> xs4:int
-     6  int s6:int 0
-     7  int s7:int 0
-     8  int s8:int 1
-     9  jump 11
-    10  add.int s7:int s7:int s8:int
-    11  lt.int s9:bool s7:int s4:int
-    12  branch-false s9:bool 20
-    13  load-elem s10:ref s2:ref s7:int String
-    14  call-closure s9:bool s3:ref (s10:String)
-    15  branch-false s9:bool 18
-    16  store-elem s5:ref s6:int s10:ref String
-    17  add.int s6:int s6:int s8:int
-    18  clear s10:ref String
-    19  jump 10
-    20  clear s3:ref fn
-    21  clear s2:ref Array
-    22  int s4:int 0
-    23  call-builtin s2:ref Array.slice (s5:Array s4:Int s6:Int) Array
-    24  clear s5:ref Array
-    25  copy s1:ref s2:ref Array
-    26  return s1:ref Array
+  frame 5: s0!:ref s1:ref s2:ref s3:int s4:ref
+  local xs -> s0:Array [0, 7)
+     0  alloc s2:ref closure m.f#0<closure>
+     1  int s3:int 20
+     2  store-field s2:ref +0 s3:int Int
+     3  call s4:ref std.array.filter<String> (s0:Array s2:fn) Array
+     4  clear s2:ref fn
+     5  copy s1:ref s4:ref Array
+     6  return s1:ref Array
 "
     );
 }
 
-/// `fold` threads one accumulator through every element, and the accumulator
-/// is the call's **destination** as well as its first argument.
-///
-/// A turn is therefore one instruction rather than a call and a copy: the
-/// machine copies the arguments into the callee's frame on the way in and the
-/// answer back on the way out, so nothing reads the location between the two.
-/// It is the arrangement `n += 2` already has, where the destination *is* the
-/// accumulator.
-///
-/// An empty receiver answers `initial`, because nothing overwrote it.
+/// `fold` moved the same way `filter` did: `Body::call_builtin_method`
+/// resolves it to an ordinary call into `std.array.fold`, generic over both
+/// the element and the accumulator types, and the accumulator that used to
+/// thread through a call's destination in this crate now threads through an
+/// ordinary `var` inside that callee's own `for`, in
+/// `crates/cove-sema/std/array.cove`.
 #[test]
-fn fold_threads_the_accumulator_through_the_call_s_destination() {
+fn fold_is_an_ordinary_call_into_the_standard_library() {
     assert_eq!(
         listing(
             "fn f(xs: Array<String>) -> Int { xs.fold(0, fn(t, s) { t + s.length() }) }",
@@ -128,29 +111,16 @@ fn fold_threads_the_accumulator_through_the_call_s_destination() {
         ),
         "\
 fn0 m.f(Array) -> Int
-  frame 10: s0!:ref s1:int s2:ref s3:int s4:int s5:ref s6:int s7:int s8:bool s9:ref
-  local xs -> s0:Array [0, 21)
-     0  copy s2:ref s0:ref Array
-     1  int s3:int 0
-     2  copy s4:int s3:int Int
-     3  alloc s5:ref closure m.f#0<closure>
-     4  int s3:int 15
-     5  store-field s5:ref +0 s3:int Int
-     6  len s3:int s2:ref
-     7  int s6:int 0
-     8  int s7:int 1
-     9  jump 11
-    10  add.int s6:int s6:int s7:int
-    11  lt.int s8:bool s6:int s3:int
-    12  branch-false s8:bool 17
-    13  load-elem s9:ref s2:ref s6:int String
-    14  call-closure s4:int s5:ref (s4:Int s9:String)
-    15  clear s9:ref String
-    16  jump 10
-    17  clear s5:ref fn
-    18  clear s2:ref Array
-    19  copy s1:int s4:int Int
-    20  return s1:int Int
+  frame 5: s0!:ref s1:int s2:int s3:ref s4:int
+  local xs -> s0:Array [0, 8)
+     0  int s2:int 0
+     1  alloc s3:ref closure m.f#0<closure>
+     2  int s4:int 20
+     3  store-field s3:ref +0 s4:int Int
+     4  call s4:int std.array.fold<String, Int> (s0:Array s2:Int s3:fn) Int
+     5  clear s3:ref fn
+     6  copy s1:int s4:int Int
+     7  return s1:int Int
 "
     );
 }
@@ -175,7 +145,7 @@ fn0 m.f(Vector) -> Array
   local v -> s0:Vector [0, 20)
      0  call-builtin s2:ref Vector.toArray (s0:Vector) Array
      1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 15
+     2  int s4:int 19
      3  store-field s3:ref +0 s4:int Int
      4  len s4:int s2:ref
      5  alloc s5:ref Array<array> xs4:int
@@ -255,7 +225,7 @@ fn0 m.f(Array) -> Array
   local xs -> s0:Array [0, 20)
      0  copy s2:ref s0:ref Array
      1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 15
+     2  int s4:int 19
      3  store-field s3:ref +0 s4:int Int
      4  len s4:int s2:ref
      5  alloc s5:ref Array<array> xs4:int
@@ -316,7 +286,7 @@ fn0 m.f(Array) -> Array
   local xs -> s0:Array [0, 68)
      0  copy s2:ref s0:ref Array
      1  alloc s3:ref closure m.f#0<closure>
-     2  int s4:int 15
+     2  int s4:int 19
      3  store-field s3:ref +0 s4:int Int
      4  len s4:int s2:ref
      5  int s5:int 0

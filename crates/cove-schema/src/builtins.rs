@@ -589,10 +589,34 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         function: "isEmpty",
     },
     StdBinding {
+        receiver: "Array",
+        method: "filter",
+        module: "std.array",
+        function: "filter",
+    },
+    StdBinding {
+        receiver: "Array",
+        method: "fold",
+        module: "std.array",
+        function: "fold",
+    },
+    StdBinding {
         receiver: "Vector",
         method: "isEmpty",
         module: "std.vector",
         function: "isEmpty",
+    },
+    StdBinding {
+        receiver: "Vector",
+        method: "filter",
+        module: "std.vector",
+        function: "filter",
+    },
+    StdBinding {
+        receiver: "Vector",
+        method: "fold",
+        module: "std.vector",
+        function: "fold",
     },
     StdBinding {
         receiver: "Map",

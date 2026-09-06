@@ -511,9 +511,13 @@ pub fn call_method(
                 expect_args("toVector", args, 0, span)?;
                 Ok(host.allocate_vector(items.to_vec()))
             }
-            "map" | "filter" | "fold" | "sorted" => {
-                walk_with(host, "Array", items.to_vec(), name, args, span)
-            }
+            // `filter` and `fold` used to answer here too, through
+            // `walk_with` below. Neither reaches this arm any more:
+            // `Interpreter::eval_method_call` resolves both to a call into
+            // `std.array.filter` and `std.array.fold` before this function is
+            // ever asked about them — see
+            // `cove_schema::builtins::standard_binding`.
+            "map" | "sorted" => walk_with(host, "Array", items.to_vec(), name, args, span),
             _ => Err(no_method("Array", name, span)),
         },
         Value(Repr::Vector(storage)) => {
@@ -608,7 +612,13 @@ pub fn call_method(
                         storage.elements.borrow().iter().cloned().collect(),
                     )))
                 }
-                "map" | "filter" | "fold" | "sorted" => {
+                // `filter` and `fold` used to answer here too, through
+                // `walk_with` below, taking the same copy first. Neither
+                // reaches this arm any more: `Interpreter::eval_method_call`
+                // resolves both to a call into `std.vector.filter` and
+                // `std.vector.fold` before this function is ever asked about
+                // them — see `cove_schema::builtins::standard_binding`.
+                "map" | "sorted" => {
                     // The elements come out here, before the first callback,
                     // and the borrow ends with this statement. Both matter:
                     // a callback can reach this very vector and push onto it
@@ -984,21 +994,25 @@ fn duration_unit(name: &str) -> Option<i64> {
     })
 }
 
-/// `map`, `filter`, `fold`, and `sorted`, which are the same four operations
-/// on an `Array` and on a `Vector`, as the interpreter runs them: the
-/// linear-memory backend lowers each of the four to its own loop instead —
+/// `map` and `sorted`, the two operations on an `Array` and on a `Vector`
+/// that still take their callback here, as the interpreter runs them: the
+/// linear-memory backend lowers each of the two to its own loop instead —
 /// see `crates/cove-ir/src/lower/walks.rs`, which calls this file's version
 /// the oracle it has to agree with.
+///
+/// `filter` and `fold` used to be two more. They are ordinary calls into
+/// `std.array` and `std.vector` now, resolved before either evaluator ever
+/// reaches this function — see `cove_schema::builtins::standard_binding`.
 ///
 /// `elements` is already the caller's own copy — the `Array`'s elements, or
 /// the `Vector`'s taken out from under its `RefCell` before this was
 /// called — which is what makes the walk a walk over a snapshot. A callback
 /// that reaches the vector it was handed an element of may push onto it,
-/// `freeze` it, or drop the last other handle to it, and none of the three
-/// changes what is being walked or what comes back. The lowering makes the
-/// same decision by reading a sequence's length once, with `Inst::Len`,
-/// before it walks; this is that decision in the place where a closure
-/// rather than a loop body is what could do the mutating.
+/// `freeze` it, or drop the last other handle to it, and neither changes
+/// what is being walked or what comes back. The lowering makes the same
+/// decision by reading a sequence's length once, with `Inst::Len`, before it
+/// walks; this is that decision in the place where a closure rather than a
+/// loop body is what could do the mutating.
 ///
 /// Everything a callback costs is accounted where any other call is:
 /// [`Callable::call_value`] is the evaluator re-entered, so fuel, the depth
@@ -1014,23 +1028,23 @@ fn duration_unit(name: &str) -> Option<i64> {
 ///
 /// # The argument list is `args`, once, for the whole walk
 ///
-/// Each of the four takes its callback out of `args` first, which leaves
-/// that vector empty with its capacity intact — so it is what every
-/// invocation of the callback is handed, filled and drained again per
-/// element rather than allocated per element. That is issue #193: `map`
-/// built a `vec![item]` for each element it visited, `filter` a
-/// `vec![item.clone()]`, `fold` a `vec![total, item]`, and `sorted` one per
-/// comparison, which for `examples/life`'s `population()` is an allocation
-/// per creature per tick.
+/// Each of the two takes its callback out of `args` first, which leaves that
+/// vector empty with its capacity intact — so it is what every invocation of
+/// the callback is handed, filled and drained again per element rather than
+/// allocated per element. That is issue #193: `map` built a `vec![item]` for
+/// each element it visited, `filter` a `vec![item.clone()]`, `fold` a
+/// `vec![total, item]`, and `sorted` one per comparison, which for
+/// `examples/life`'s `population()` is an allocation per creature per tick —
+/// true of all four at the time #193 was fixed, even though two of them have
+/// since moved out of this function entirely.
 ///
 /// It costs nothing to arrange because `args` is already a vector the
 /// caller lends. The predecessor pooled its own argument vectors the same
 /// way starting at #184; #193 is that scheme reaching a path it could not
 /// reach before, by being handed one level further down. A slice would not
 /// do here for the same reason it would not do there — `map` moves its
-/// element into the call and `fold` moves the accumulator through every one
-/// of them, and the callback re-enters the evaluator and may push onto the
-/// very stack a slice would point into.
+/// element into the call, and the callback re-enters the evaluator and may
+/// push onto the very stack a slice would point into.
 fn walk_with(
     host: &mut dyn Callable,
     type_name: &str,
@@ -1060,37 +1074,6 @@ fn walk_with(
             }
             Ok(Value(Repr::Array(mapped.into())))
         }
-        "filter" => {
-            let args = expect_args(&method, args, 1, span)?;
-            let keep = args.remove(0);
-            expect_callback(host, &method, "keep", "fn(T) -> Bool", 1, &keep, span)?;
-            let mut kept = Vec::new();
-            for item in elements {
-                args.push(item.clone());
-                let verdict = host.call_value(&keep, args, span)?;
-                if callback_bool(&method, "keep", &verdict, span)? {
-                    kept.push(item);
-                }
-            }
-            Ok(Value(Repr::Array(kept.into())))
-        }
-        "fold" => {
-            let args = expect_args(&method, args, 2, span)?;
-            let step = args.remove(1);
-            let mut total = args.remove(0);
-            expect_callback(host, &method, "step", "fn(R, T) -> R", 2, &step, span)?;
-            for item in elements {
-                // The accumulator is *moved* through every call, which is
-                // half of why the argument list is a vector rather than a
-                // slice of something the caller still owns. What is left
-                // behind is never read: the next statement either overwrites
-                // it or leaves the loop with an error.
-                args.push(std::mem::replace(&mut total, Value(Repr::Unit)));
-                args.push(item);
-                total = host.call_value(&step, args, span)?;
-            }
-            Ok(total)
-        }
         "sorted" => {
             let args = expect_args(&method, args, 1, span)?;
             let by = args.remove(0);
@@ -1099,8 +1082,9 @@ fn walk_with(
                 merge_sort(host, &method, elements, &by, args, span)?.into(),
             )))
         }
-        // Only the four names above are routed here, and the shared table is
-        // what says which four. Answering the way an unknown method is
+        // Only the two names above are routed here now; `filter` and `fold`
+        // are resolved to a standard-library call before either evaluator
+        // reaches this function. Answering the way an unknown method is
         // answered keeps that a fact rather than a `panic!` nobody can reach.
         _ => Err(no_method(type_name, name, span)),
     }
@@ -1180,9 +1164,11 @@ fn merge_sort(
 /// would mean an empty `Array` misses a callback of the wrong arity that a
 /// full one catches. Asking here also gives the failure the builtin's own
 /// words — the declared shape, `fn(T) -> R`, and which parameter — rather
-/// than a plain arity count. `map`, `filter`, `fold` and `sorted` are the
-/// interpreter's own implementation of the four walks; the linear-memory
-/// backend lowers each of them on its own and never reaches this function.
+/// than a plain arity count. `map` and `sorted` are the interpreter's own
+/// implementation of the two walks that remain here — `filter` and `fold`
+/// moved to the standard library and never reach this function — and the
+/// linear-memory backend lowers `map` and `sorted` on its own and never
+/// reaches this function either.
 fn expect_callback(
     host: &dyn Callable,
     method: &str,
