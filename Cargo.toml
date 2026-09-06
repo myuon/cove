@@ -40,8 +40,15 @@ cove-wasm = { path = "crates/cove-wasm" }
 #
 # `[profile.release]` is deliberately absent and stays absent. Release is the
 # reference for distribution performance -- what a user's build does, at
-# Cargo's defaults -- and it is what CI builds, which is why CI's pipeline
-# keeps the 137 seconds it was cut to rather than the 514 it came from.
+# Cargo's defaults -- and leaving it alone is what makes it one.
+#
+# CI no longer builds it. The pipeline runs entirely under `checked`, which
+# inherits `release`, so a compile failure unique to `release` is not a thing
+# that can happen; what CI was buying by building both was a second copy of
+# the workspace. (This paragraph used to say CI kept a 137-second pipeline by
+# building release. That number was true when it was written and had drifted
+# to 474 by the time anyone looked, because the tests that grew in between
+# all ran unoptimised.)
 #
 # `codegen-units = 1` is the whole of this profile. The hope
 # ([issue #179](https://github.com/myuon/cove/issues/179), option 2) was that
