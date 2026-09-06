@@ -1,0 +1,413 @@
+{
+  "format": 1,
+  "freeBuiltins": [
+    {"name": "Ok", "kind": "constructor", "signature": "Ok(value: T) -> Result<T, E>", "generics": ["T", "E"], "params": [{"name": "value", "type": "T"}], "result": "Result<T, E>", "host": false},
+    {"name": "Err", "kind": "constructor", "signature": "Err(error: E) -> Result<T, E>", "generics": ["T", "E"], "params": [{"name": "error", "type": "E"}], "result": "Result<T, E>", "host": false},
+    {"name": "Some", "kind": "constructor", "signature": "Some(value: T) -> Option<T>", "generics": ["T"], "params": [{"name": "value", "type": "T"}], "result": "Option<T>", "host": false},
+    {"name": "Error", "kind": "constructor", "signature": "Error(message: String) -> Error", "generics": [], "params": [{"name": "message", "type": "String"}], "result": "Error", "host": false},
+    {"name": "Shared", "kind": "constructor", "signature": "Shared(value: T) -> Shared<T>", "generics": ["T"], "params": [{"name": "value", "type": "T"}], "result": "Shared<T>", "host": false},
+    {"name": "assert", "kind": "assertion", "signature": "assert(condition: Bool) -> Result<Unit, Error>", "generics": [], "params": [{"name": "condition", "type": "Bool"}], "result": "Result<Unit, Error>", "host": false},
+    {"name": "assertEqual", "kind": "assertion", "signature": "assertEqual(actual: T, expected: T) -> Result<Unit, Error>", "generics": ["T"], "params": [{"name": "actual", "type": "T"}, {"name": "expected", "type": "T"}], "result": "Result<Unit, Error>", "host": false}
+  ],
+  "types": [
+    {
+      "name": "Array",
+      "parameters": ["T"],
+      "namespace": true,
+      "cases": [],
+      "fields": [],
+      "associated": [
+      ],
+      "methods": [
+        {"name": "get", "signature": "get(index: Int) -> Option<T>", "generics": [], "params": [{"name": "index", "type": "Int"}], "variadic": false, "result": "Option<T>", "mutating": false, "host": false},
+        {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "host": false},
+        {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "contains", "signature": "contains(element: T) -> Bool", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "indexOf", "signature": "indexOf(element: T) -> Option<Int>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Option<Int>", "mutating": false, "host": false},
+        {"name": "slice", "signature": "slice(from: Int, to: Int) -> Array<T>", "generics": [], "params": [{"name": "from", "type": "Int"}, {"name": "to", "type": "Int"}], "variadic": false, "result": "Array<T>", "mutating": false, "host": false},
+        {"name": "map", "signature": "map(transform: fn(T) -> R) -> Array<R>", "generics": ["R"], "params": [{"name": "transform", "type": "fn(T) -> R"}], "variadic": false, "result": "Array<R>", "mutating": false, "host": false},
+        {"name": "filter", "signature": "filter(keep: fn(T) -> Bool) -> Array<T>", "generics": [], "params": [{"name": "keep", "type": "fn(T) -> Bool"}], "variadic": false, "result": "Array<T>", "mutating": false, "host": false},
+        {"name": "fold", "signature": "fold(initial: R, step: fn(R, T) -> R) -> R", "generics": ["R"], "params": [{"name": "initial", "type": "R"}, {"name": "step", "type": "fn(R, T) -> R"}], "variadic": false, "result": "R", "mutating": false, "host": false},
+        {"name": "sorted", "signature": "sorted(by: fn(T, T) -> Bool) -> Array<T>", "generics": [], "params": [{"name": "by", "type": "fn(T, T) -> Bool"}], "variadic": false, "result": "Array<T>", "mutating": false, "host": false},
+        {"name": "toVector", "signature": "toVector() -> Vector<T>", "generics": [], "params": [], "variadic": false, "result": "Vector<T>", "mutating": false, "host": false},
+        {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "host": false}
+      ]
+    },
+    {
+      "name": "Vector",
+      "parameters": ["T"],
+      "namespace": true,
+      "cases": [],
+      "fields": [],
+      "associated": [
+        {"name": "of", "signature": "of(items: T...) -> Vector<T>", "generics": ["T"], "params": [{"name": "items", "type": "T"}], "variadic": true, "result": "Vector<T>", "host": false}
+      ],
+      "methods": [
+        {"name": "get", "signature": "get(index: Int) -> Option<T>", "generics": [], "params": [{"name": "index", "type": "Int"}], "variadic": false, "result": "Option<T>", "mutating": false, "host": false},
+        {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "host": false},
+        {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "contains", "signature": "contains(element: T) -> Bool", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "indexOf", "signature": "indexOf(element: T) -> Option<Int>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Option<Int>", "mutating": false, "host": false},
+        {"name": "slice", "signature": "slice(from: Int, to: Int) -> Array<T>", "generics": [], "params": [{"name": "from", "type": "Int"}, {"name": "to", "type": "Int"}], "variadic": false, "result": "Array<T>", "mutating": false, "host": false},
+        {"name": "map", "signature": "map(transform: fn(T) -> R) -> Array<R>", "generics": ["R"], "params": [{"name": "transform", "type": "fn(T) -> R"}], "variadic": false, "result": "Array<R>", "mutating": false, "host": false},
+        {"name": "filter", "signature": "filter(keep: fn(T) -> Bool) -> Array<T>", "generics": [], "params": [{"name": "keep", "type": "fn(T) -> Bool"}], "variadic": false, "result": "Array<T>", "mutating": false, "host": false},
+        {"name": "fold", "signature": "fold(initial: R, step: fn(R, T) -> R) -> R", "generics": ["R"], "params": [{"name": "initial", "type": "R"}, {"name": "step", "type": "fn(R, T) -> R"}], "variadic": false, "result": "R", "mutating": false, "host": false},
+        {"name": "sorted", "signature": "sorted(by: fn(T, T) -> Bool) -> Array<T>", "generics": [], "params": [{"name": "by", "type": "fn(T, T) -> Bool"}], "variadic": false, "result": "Array<T>", "mutating": false, "host": false},
+        {"name": "push", "signature": "push(value: T) -> Unit", "generics": [], "params": [{"name": "value", "type": "T"}], "variadic": false, "result": "Unit", "mutating": true, "host": false},
+        {"name": "set", "signature": "set(index: Int, value: T) -> Option<T>", "generics": [], "params": [{"name": "index", "type": "Int"}, {"name": "value", "type": "T"}], "variadic": false, "result": "Option<T>", "mutating": true, "host": false},
+        {"name": "pop", "signature": "pop() -> Option<T>", "generics": [], "params": [], "variadic": false, "result": "Option<T>", "mutating": true, "host": false},
+        {"name": "remove", "signature": "remove(index: Int) -> Option<T>", "generics": [], "params": [{"name": "index", "type": "Int"}], "variadic": false, "result": "Option<T>", "mutating": true, "host": false},
+        {"name": "freeze", "signature": "freeze() -> Array<T>", "generics": [], "params": [], "variadic": false, "result": "Array<T>", "mutating": true, "host": false},
+        {"name": "toArray", "signature": "toArray() -> Array<T>", "generics": [], "params": [], "variadic": false, "result": "Array<T>", "mutating": false, "host": false},
+        {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "host": false}
+      ]
+    },
+    {
+      "name": "Map",
+      "parameters": ["K", "V"],
+      "namespace": true,
+      "cases": [],
+      "fields": [],
+      "associated": [
+        {"name": "of", "signature": "of(entries: MapEntry<K, V>...) -> Map<K, V>", "generics": ["K", "V"], "params": [{"name": "entries", "type": "MapEntry<K, V>"}], "variadic": true, "result": "Map<K, V>", "host": false}
+      ],
+      "methods": [
+        {"name": "get", "signature": "get(key: K) -> Option<V>", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Option<V>", "mutating": false, "host": false},
+        {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "host": false},
+        {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "contains", "signature": "contains(key: K) -> Bool", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "keys", "signature": "keys() -> Array<K>", "generics": [], "params": [], "variadic": false, "result": "Array<K>", "mutating": false, "host": false},
+        {"name": "values", "signature": "values() -> Array<V>", "generics": [], "params": [], "variadic": false, "result": "Array<V>", "mutating": false, "host": false},
+        {"name": "inserted", "signature": "inserted(key: K, value: V) -> Map<K, V>", "generics": [], "params": [{"name": "key", "type": "K"}, {"name": "value", "type": "V"}], "variadic": false, "result": "Map<K, V>", "mutating": false, "host": false},
+        {"name": "removed", "signature": "removed(key: K) -> Map<K, V>", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Map<K, V>", "mutating": false, "host": false},
+        {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "host": false}
+      ]
+    },
+    {
+      "name": "MapEntry",
+      "parameters": ["K", "V"],
+      "namespace": false,
+      "cases": [],
+      "fields": [{"name": "key", "type": "K"}, {"name": "value", "type": "V"}],
+      "associated": [
+      ],
+      "methods": [
+      ]
+    },
+    {
+      "name": "Set",
+      "parameters": ["T"],
+      "namespace": true,
+      "cases": [],
+      "fields": [],
+      "associated": [
+        {"name": "of", "signature": "of(items: T...) -> Set<T>", "generics": ["T"], "params": [{"name": "items", "type": "T"}], "variadic": true, "result": "Set<T>", "host": false}
+      ],
+      "methods": [
+        {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "host": false},
+        {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "toArray", "signature": "toArray() -> Array<T>", "generics": [], "params": [], "variadic": false, "result": "Array<T>", "mutating": false, "host": false},
+        {"name": "contains", "signature": "contains(element: T) -> Bool", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "inserted", "signature": "inserted(element: T) -> Set<T>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Set<T>", "mutating": false, "host": false},
+        {"name": "removed", "signature": "removed(element: T) -> Set<T>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Set<T>", "mutating": false, "host": false},
+        {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "host": false}
+      ]
+    },
+    {
+      "name": "String",
+      "parameters": [],
+      "namespace": true,
+      "cases": [],
+      "fields": [],
+      "associated": [
+        {"name": "fromCodePoint", "signature": "fromCodePoint(codePoint: Int) -> Result<String, Error>", "generics": [], "params": [{"name": "codePoint", "type": "Int"}], "variadic": false, "result": "Result<String, Error>", "host": false}
+      ],
+      "methods": [
+        {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "host": false},
+        {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "words", "signature": "words() -> Array<String>", "generics": [], "params": [], "variadic": false, "result": "Array<String>", "mutating": false, "host": false},
+        {"name": "chars", "signature": "chars() -> Array<String>", "generics": [], "params": [], "variadic": false, "result": "Array<String>", "mutating": false, "host": false},
+        {"name": "split", "signature": "split(separator: String) -> Array<String>", "generics": [], "params": [{"name": "separator", "type": "String"}], "variadic": false, "result": "Array<String>", "mutating": false, "host": false},
+        {"name": "join", "signature": "join(parts: Array<String>) -> String", "generics": [], "params": [{"name": "parts", "type": "Array<String>"}], "variadic": false, "result": "String", "mutating": false, "host": false},
+        {"name": "slice", "signature": "slice(from: Int, to: Int) -> String", "generics": [], "params": [{"name": "from", "type": "Int"}, {"name": "to", "type": "Int"}], "variadic": false, "result": "String", "mutating": false, "host": false},
+        {"name": "trim", "signature": "trim() -> String", "generics": [], "params": [], "variadic": false, "result": "String", "mutating": false, "host": false},
+        {"name": "contains", "signature": "contains(text: String) -> Bool", "generics": [], "params": [{"name": "text", "type": "String"}], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "startsWith", "signature": "startsWith(prefix: String) -> Bool", "generics": [], "params": [{"name": "prefix", "type": "String"}], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "endsWith", "signature": "endsWith(suffix: String) -> Bool", "generics": [], "params": [{"name": "suffix", "type": "String"}], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "indexOf", "signature": "indexOf(text: String) -> Option<Int>", "generics": [], "params": [{"name": "text", "type": "String"}], "variadic": false, "result": "Option<Int>", "mutating": false, "host": false},
+        {"name": "replace", "signature": "replace(old: String, new: String) -> String", "generics": [], "params": [{"name": "old", "type": "String"}, {"name": "new", "type": "String"}], "variadic": false, "result": "String", "mutating": false, "host": false},
+        {"name": "toUpper", "signature": "toUpper() -> String", "generics": [], "params": [], "variadic": false, "result": "String", "mutating": false, "host": false},
+        {"name": "toLower", "signature": "toLower() -> String", "generics": [], "params": [], "variadic": false, "result": "String", "mutating": false, "host": false},
+        {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "host": false}
+      ]
+    },
+    {
+      "name": "Range",
+      "parameters": [],
+      "namespace": false,
+      "cases": [],
+      "fields": [],
+      "associated": [
+      ],
+      "methods": [
+        {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "host": false},
+        {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "contains", "signature": "contains(value: Int) -> Bool", "generics": [], "params": [{"name": "value", "type": "Int"}], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "host": false}
+      ]
+    },
+    {
+      "name": "Option",
+      "parameters": ["T"],
+      "namespace": true,
+      "cases": [{"name": "Some", "payload": ["T"], "signature": "Some(T)"}, {"name": "None", "payload": [], "signature": "None"}],
+      "fields": [],
+      "associated": [
+      ],
+      "methods": [
+        {"name": "isSome", "signature": "isSome() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "isNone", "signature": "isNone() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "unwrapOr", "signature": "unwrapOr(fallback: T) -> T", "generics": [], "params": [{"name": "fallback", "type": "T"}], "variadic": false, "result": "T", "mutating": false, "host": false}
+      ]
+    },
+    {
+      "name": "Result",
+      "parameters": ["T", "E"],
+      "namespace": true,
+      "cases": [{"name": "Ok", "payload": ["T"], "signature": "Ok(T)"}, {"name": "Err", "payload": ["E"], "signature": "Err(E)"}],
+      "fields": [],
+      "associated": [
+      ],
+      "methods": [
+        {"name": "isOk", "signature": "isOk() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "isError", "signature": "isError() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "host": false},
+        {"name": "unwrapOr", "signature": "unwrapOr(fallback: T) -> T", "generics": [], "params": [{"name": "fallback", "type": "T"}], "variadic": false, "result": "T", "mutating": false, "host": false},
+        {"name": "mapError", "signature": "mapError(body: fn(E) -> F) -> Result<T, F>", "generics": ["F"], "params": [{"name": "body", "type": "fn(E) -> F"}], "variadic": false, "result": "Result<T, F>", "mutating": false, "host": false}
+      ]
+    },
+    {
+      "name": "Int",
+      "parameters": [],
+      "namespace": true,
+      "cases": [],
+      "fields": [],
+      "associated": [
+        {"name": "parse", "signature": "parse(text: String) -> Result<Int, Error>", "generics": [], "params": [{"name": "text", "type": "String"}], "variadic": false, "result": "Result<Int, Error>", "host": false},
+        {"name": "parseRadix", "signature": "parseRadix(text: String, radix: Int) -> Result<Int, Error>", "generics": [], "params": [{"name": "text", "type": "String"}, {"name": "radix", "type": "Int"}], "variadic": false, "result": "Result<Int, Error>", "host": false}
+      ],
+      "methods": [
+        {"name": "toFloat", "signature": "toFloat() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "host": false},
+        {"name": "abs", "signature": "abs() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "host": false},
+        {"name": "min", "signature": "min(other: Int) -> Int", "generics": [], "params": [{"name": "other", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "host": false},
+        {"name": "max", "signature": "max(other: Int) -> Int", "generics": [], "params": [{"name": "other", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "host": false},
+        {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "host": false}
+      ]
+    },
+    {
+      "name": "Float",
+      "parameters": [],
+      "namespace": true,
+      "cases": [],
+      "fields": [],
+      "associated": [
+        {"name": "parse", "signature": "parse(text: String) -> Result<Float, Error>", "generics": [], "params": [{"name": "text", "type": "String"}], "variadic": false, "result": "Result<Float, Error>", "host": false}
+      ],
+      "methods": [
+        {"name": "toInt", "signature": "toInt() -> Result<Int, Error>", "generics": [], "params": [], "variadic": false, "result": "Result<Int, Error>", "mutating": false, "host": false},
+        {"name": "round", "signature": "round() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "host": false},
+        {"name": "abs", "signature": "abs() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "host": false},
+        {"name": "min", "signature": "min(other: Float) -> Float", "generics": [], "params": [{"name": "other", "type": "Float"}], "variadic": false, "result": "Float", "mutating": false, "host": false},
+        {"name": "max", "signature": "max(other: Float) -> Float", "generics": [], "params": [{"name": "other", "type": "Float"}], "variadic": false, "result": "Float", "mutating": false, "host": false},
+        {"name": "format", "signature": "format(digits: Int) -> String", "generics": [], "params": [{"name": "digits", "type": "Int"}], "variadic": false, "result": "String", "mutating": false, "host": false},
+        {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "host": false}
+      ]
+    },
+    {
+      "name": "Bool",
+      "parameters": [],
+      "namespace": true,
+      "cases": [],
+      "fields": [],
+      "associated": [
+      ],
+      "methods": [
+        {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "host": false}
+      ]
+    },
+    {
+      "name": "Unit",
+      "parameters": [],
+      "namespace": false,
+      "cases": [],
+      "fields": [],
+      "associated": [
+      ],
+      "methods": [
+        {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "host": false}
+      ]
+    },
+    {
+      "name": "Duration",
+      "parameters": [],
+      "namespace": true,
+      "cases": [],
+      "fields": [],
+      "associated": [
+        {"name": "nanos", "signature": "nanos(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "host": false},
+        {"name": "micros", "signature": "micros(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "host": false},
+        {"name": "millis", "signature": "millis(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "host": false},
+        {"name": "seconds", "signature": "seconds(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "host": false},
+        {"name": "minutes", "signature": "minutes(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "host": false},
+        {"name": "hours", "signature": "hours(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "host": false}
+      ],
+      "methods": [
+        {"name": "nanos", "signature": "nanos() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "host": false},
+        {"name": "micros", "signature": "micros() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "host": false},
+        {"name": "millis", "signature": "millis() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "host": false},
+        {"name": "seconds", "signature": "seconds() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "host": false},
+        {"name": "minutes", "signature": "minutes() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "host": false},
+        {"name": "hours", "signature": "hours() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "host": false},
+        {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "host": false}
+      ]
+    },
+    {
+      "name": "Error",
+      "parameters": [],
+      "namespace": true,
+      "cases": [],
+      "fields": [{"name": "message", "type": "String"}],
+      "associated": [
+      ],
+      "methods": [
+      ]
+    },
+    {
+      "name": "Task",
+      "parameters": ["T"],
+      "namespace": false,
+      "cases": [],
+      "fields": [],
+      "associated": [
+      ],
+      "methods": [
+        {"name": "await", "signature": "await() -> T", "generics": [], "params": [], "variadic": false, "result": "T", "mutating": false, "host": false},
+        {"name": "cancel", "signature": "cancel() -> Unit", "generics": [], "params": [], "variadic": false, "result": "Unit", "mutating": false, "host": false}
+      ]
+    },
+    {
+      "name": "Shared",
+      "parameters": ["T"],
+      "namespace": false,
+      "cases": [],
+      "fields": [],
+      "associated": [
+      ],
+      "methods": [
+        {"name": "lock", "signature": "lock(body: fn(T) -> R) -> R", "generics": ["R"], "params": [{"name": "body", "type": "fn(T) -> R"}], "variadic": false, "result": "R", "mutating": false, "host": false}
+      ]
+    },
+    {
+      "name": "Scope",
+      "parameters": [],
+      "namespace": false,
+      "cases": [],
+      "fields": [],
+      "associated": [
+      ],
+      "methods": [
+        {"name": "spawn", "signature": "spawn(body: fn() -> T) -> Task<T>", "generics": ["T"], "params": [{"name": "body", "type": "fn() -> T"}], "variadic": false, "result": "Task<T>", "mutating": false, "host": false}
+      ]
+    }
+  ],
+  "hostModules": [
+    {
+      "name": "console",
+      "capability": "console",
+      "operations": [
+        {"name": "println", "signature": "println(String...) -> Result<Unit, Error>", "params": ["String"], "variadic": true, "result": "Result<Unit, Error>", "capability": "console", "effect": "irreversible write", "cancellable": false, "host": true},
+        {"name": "print", "signature": "print(String...) -> Result<Unit, Error>", "params": ["String"], "variadic": true, "result": "Result<Unit, Error>", "capability": "console", "effect": "irreversible write", "cancellable": false, "host": true},
+        {"name": "eprintln", "signature": "eprintln(String...) -> Result<Unit, Error>", "params": ["String"], "variadic": true, "result": "Result<Unit, Error>", "capability": "console", "effect": "irreversible write", "cancellable": false, "host": true},
+        {"name": "eprint", "signature": "eprint(String...) -> Result<Unit, Error>", "params": ["String"], "variadic": true, "result": "Result<Unit, Error>", "capability": "console", "effect": "irreversible write", "cancellable": false, "host": true}
+      ],
+      "types": [],
+      "resources": []
+    },
+    {
+      "name": "env",
+      "capability": "env",
+      "operations": [
+        {"name": "get", "signature": "get(String) -> Option<String>", "params": ["String"], "variadic": false, "result": "Option<String>", "capability": "env", "effect": "read", "cancellable": false, "host": true}
+      ],
+      "types": [],
+      "resources": []
+    },
+    {
+      "name": "documents",
+      "capability": "documents",
+      "operations": [
+        {"name": "read", "signature": "read(String) -> Result<String, Error>", "params": ["String"], "variadic": false, "result": "Result<String, Error>", "capability": "documents", "effect": "read", "cancellable": false, "host": true}
+      ],
+      "types": [],
+      "resources": []
+    },
+    {
+      "name": "clock",
+      "capability": "clock",
+      "operations": [
+        {"name": "now", "signature": "now() -> Duration", "params": [], "variadic": false, "result": "Duration", "capability": "clock", "effect": "read", "cancellable": false, "host": true},
+        {"name": "sleep", "signature": "sleep(Duration) -> Result<Unit, Error>", "params": ["Duration"], "variadic": false, "result": "Result<Unit, Error>", "capability": "clock", "effect": "read", "cancellable": true, "host": true},
+        {"name": "timeout", "signature": "timeout(Duration, Any) -> Result<Any, Error>", "params": ["Duration", "Any"], "variadic": false, "result": "Result<Any, Error>", "capability": "clock", "effect": "read", "cancellable": true, "host": true},
+        {"name": "every", "signature": "every(Duration, Any) -> Result<Unit, Error>", "params": ["Duration", "Any"], "variadic": false, "result": "Result<Unit, Error>", "capability": "clock", "effect": "read", "cancellable": true, "host": true}
+      ],
+      "types": [],
+      "resources": []
+    },
+    {
+      "name": "files",
+      "capability": "files",
+      "operations": [
+        {"name": "read", "signature": "read(String) -> Result<String, Error>", "params": ["String"], "variadic": false, "result": "Result<String, Error>", "capability": "files", "effect": "read", "cancellable": true, "host": true},
+        {"name": "write", "signature": "write(String, String) -> Result<Unit, Error>", "params": ["String", "String"], "variadic": false, "result": "Result<Unit, Error>", "capability": "files", "effect": "irreversible write", "cancellable": false, "host": true},
+        {"name": "exists", "signature": "exists(String) -> Bool", "params": ["String"], "variadic": false, "result": "Bool", "capability": "files", "effect": "read", "cancellable": true, "host": true},
+        {"name": "list", "signature": "list(String) -> Result<Array<String>, Error>", "params": ["String"], "variadic": false, "result": "Result<Array<String>, Error>", "capability": "files", "effect": "read", "cancellable": true, "host": true},
+        {"name": "delete", "signature": "delete(String) -> Result<Unit, Error>", "params": ["String"], "variadic": false, "result": "Result<Unit, Error>", "capability": "files", "effect": "irreversible write", "cancellable": false, "host": true},
+        {"name": "open", "signature": "open(String) -> Result<files.Reader, Error>", "params": ["String"], "variadic": false, "result": "Result<files.Reader, Error>", "capability": "files", "effect": "read", "cancellable": true, "host": true},
+        {"name": "create", "signature": "create(String) -> Result<files.Writer, Error>", "params": ["String"], "variadic": false, "result": "Result<files.Writer, Error>", "capability": "files", "effect": "irreversible write", "cancellable": false, "host": true}
+      ],
+      "types": [],
+      "resources": [{"name": "Reader", "taskSafe": false}, {"name": "Writer", "taskSafe": false}]
+    },
+    {
+      "name": "process",
+      "capability": "process",
+      "operations": [
+        {"name": "args", "signature": "args() -> Array<String>", "params": [], "variadic": false, "result": "Array<String>", "capability": "process", "effect": "read", "cancellable": true, "host": true},
+        {"name": "exit", "signature": "exit(Int) -> Unit", "params": ["Int"], "variadic": false, "result": "Unit", "capability": "process", "effect": "irreversible write", "cancellable": false, "host": true},
+        {"name": "run", "signature": "run(String, Array<String>) -> Result<String, Error>", "params": ["String", "Array<String>"], "variadic": false, "result": "Result<String, Error>", "capability": "process", "effect": "irreversible write", "cancellable": false, "host": true}
+      ],
+      "types": [],
+      "resources": []
+    },
+    {
+      "name": "database",
+      "capability": "database",
+      "operations": [
+        {"name": "query", "signature": "query(String) -> Result<Array<String>, Error>", "params": ["String"], "variadic": false, "result": "Result<Array<String>, Error>", "capability": "database", "effect": "read", "cancellable": true, "host": true},
+        {"name": "connect", "signature": "connect(String) -> Result<database.Connection, Error>", "params": ["String"], "variadic": false, "result": "Result<database.Connection, Error>", "capability": "database", "effect": "reversible write", "cancellable": false, "host": true}
+      ],
+      "types": [],
+      "resources": [{"name": "Connection", "taskSafe": true}]
+    },
+    {
+      "name": "http",
+      "capability": "http",
+      "operations": [
+        {"name": "fetch", "signature": "fetch(String) -> Result<http.Response, Error>", "params": ["String"], "variadic": false, "result": "Result<http.Response, Error>", "capability": "http", "effect": "read", "cancellable": true, "host": true},
+        {"name": "json", "signature": "json(Int, Any) -> http.Response", "params": ["Int", "Any"], "variadic": false, "result": "http.Response", "capability": "http", "effect": "read", "cancellable": false, "host": true},
+        {"name": "listen", "signature": "listen(Int) -> Result<http.Server, Error>", "params": ["Int"], "variadic": false, "result": "Result<http.Server, Error>", "capability": "http", "effect": "reversible write", "cancellable": false, "host": true}
+      ],
+      "types": [{"name": "Method", "initializer": "Method()", "isEnum": true}, {"name": "Request", "initializer": "Request(method: http.Method, path: String, body: String)", "isEnum": false}, {"name": "Response", "initializer": "Response(status: Int, body: String)", "isEnum": false}, {"name": "Route", "initializer": "Route(method: http.Method, path: String, handler: Any)", "isEnum": false}],
+      "resources": [{"name": "Server", "taskSafe": true}]
+    }
+  ]
+}

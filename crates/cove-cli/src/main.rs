@@ -34,6 +34,7 @@ mod fixture;
 mod generate;
 mod impact;
 mod json;
+mod reference;
 mod replay;
 mod test;
 mod trace;
@@ -52,6 +53,7 @@ usage:
   cove outline [path]                  show modules and their exported declarations
   cove api snapshot [path]             record the package's derived public interface
   cove api diff [path]                 compare the source against a recorded interface
+  cove reference [--check]             write the builtin and Host API reference
   cove impact [path] <name>            explain what a change to <name> can affect
   cove trace <file> [--capability <c>] [--task <id>]
                                        summarise and list a recorded trace
@@ -105,6 +107,12 @@ suite. Each test is granted exactly the
 capabilities its call graph requires, with each host's fake implementation,
 so a suite is deterministic; `cove.toml`'s `[test] allow_real = [...]` names
 the capabilities to grant for real instead.
+
+`cove reference` writes `docs/BUILTINS.md` and `docs/builtins.json` out of
+`cove_schema`, which is the one table the checker and both evaluators already
+read. It describes the language rather than a package, so it takes no path and
+answers the same thing wherever it is run. `--check` fails if either file is
+stale, which is what CI runs; `--out-md` and `--out-json` name somewhere else.
 
 `cove api snapshot` derives the package's public interface from source and
 writes it to `cove-api.txt` at the package root, or to `--out <file>`. Check
@@ -213,6 +221,7 @@ fn dispatch() -> ExitCode {
         "test" => test::cmd_test(&args[1..]),
         "outline" => cmd_outline(args.get(1).map(Path::new)),
         "api" => api::cmd_api(&args[1..]),
+        "reference" => reference::cmd_reference(&args[1..]),
         "impact" => impact::cmd_impact(&args[1..]),
         "trace" => trace::cmd_trace(&args[1..]),
         "replay" => replay::cmd_replay(&args[1..]),

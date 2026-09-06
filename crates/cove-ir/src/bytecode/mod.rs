@@ -214,13 +214,17 @@ pub fn instructions(bytes: &[u8]) -> Result<Vec<EncodedInst>, Truncated> {
             over,
         });
     }
-    Ok(bytes
-        .chunks_exact(EncodedInst::BYTES)
-        .map(|chunk| {
-            let mut held = [0u8; EncodedInst::BYTES];
-            held.copy_from_slice(chunk);
-            EncodedInst::from_bytes(held)
-        })
+    // `as_chunks` rather than `chunks_exact`, and the difference is not
+    // only that a newer clippy asks for it. A `chunks_exact` over a constant
+    // width answers slices the caller has to copy back into an array of the
+    // width it already knew; `as_chunks` answers the arrays. The copy and the
+    // scratch buffer that made it go away with it.
+    let (chunks, rest) = bytes.as_chunks::<{ EncodedInst::BYTES }>();
+    debug_assert!(rest.is_empty(), "the remainder was refused above");
+    Ok(chunks
+        .iter()
+        .copied()
+        .map(EncodedInst::from_bytes)
         .collect())
 }
 

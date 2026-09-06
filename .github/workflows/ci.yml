@@ -119,6 +119,12 @@ jobs:
       - name: cove fmt --check (repository root)
         run: ./target/debug/cove fmt --check
 
+      # `docs/BUILTINS.md` and `docs/builtins.json` are the contents of
+      # `crates/cove-schema`, written out. This is what stops them becoming a
+      # second table that says something else.
+      - name: cove reference --check (repository root)
+        run: ./target/debug/cove reference --check
+
       - name: cove check (examples)
         working-directory: examples
         run: ../target/debug/cove check
