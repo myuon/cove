@@ -1,5 +1,14 @@
-//! `map`, `filter`, `fold` and `sorted`: the sequence methods that take a
-//! closure.
+//! `map` and `sorted`: the two sequence methods that take a closure and
+//! still lower to a loop here.
+//!
+//! `filter` and `fold` used to be two more, in this same module. They are
+//! ordinary calls into `std.array` and `std.vector` now —
+//! `crates/cove-sema/std/array.cove` and `std/vector.cove` write each as a
+//! plain `for` over the receiver, bound through
+//! `cove_schema::builtins::STANDARD_LIBRARY` the same way `` `Array.isEmpty` ``
+//! is. `Body::call_builtin_method` resolves the two names to that
+//! standard-library call before `Body::walk_with` below is ever asked about
+//! them, so this module never sees either name.
 //!
 //! # A builtin never calls back into Cove
 //!
@@ -12,16 +21,22 @@
 //! interpreter compiled to. A `map` over a `map` over a `map` would be three
 //! Rust frames deep before the program did anything.
 //!
-//! So each of the four **lowers to a loop in the IR**, and the closure's
-//! calls are [`Inst::CallClosure`] frames like any other: depth, the
-//! collector's roots and a stack overflow all work without a second story.
-//! `cove_runtime::vm::builtins` stays a library over words with nothing in
-//! it that can call anything.
+//! `filter` and `fold` never needed an exception to this: a Cove body calling
+//! a Cove closure is calls all the way down, with no Rust frame between one
+//! and the next to stack up. The standard library did not have to be taught
+//! anything to be allowed to write them as a plain `for` loop — there is
+//! nothing here to arrange for them at all.
+//!
+//! So each of the two remaining **lowers to a loop in the IR**, and the
+//! closure's calls are [`Inst::CallClosure`] frames like any other: depth,
+//! the collector's roots and a stack overflow all work without a second
+//! story. `cove_runtime::vm::builtins` stays a library over words with
+//! nothing in it that can call anything.
 //!
 //! # What the loops promise, and where it comes from
 //!
-//! `cove_runtime::builtins::walk_with` is the oracle, and the four promises
-//! it states are the ones these loops keep:
+//! `cove_runtime::builtins::walk_with` is the oracle, and the promises it
+//! states for `map` and `sorted` are the ones these loops keep:
 //!
 //! - **the elements are taken once, before the first call.** For an `Array`
 //!   the object *is* the snapshot, because an array cannot change; for a
@@ -30,16 +45,15 @@
 //!   borrow nor a walk that changes under it.
 //! - **every element is visited once, front to back**, in the receiver's own
 //!   order — one counter, ascending.
-//! - **each answers an `Array`** whichever receiver it was called on, except
-//!   `fold`, which answers the accumulator.
+//! - **each answers an `Array`** whichever receiver it was called on.
 //! - **each is empty-safe by construction.** An empty receiver is a `count`
 //!   of zero, the test fails on the first turn, and the answer is the empty
-//!   array the loop allocated — or, for `fold`, the initial value nothing
-//!   overwrote, or, for `sorted`, the copy no pass ever ran over.
+//!   array the loop allocated — or, for `sorted`, the copy no pass ever ran
+//!   over.
 //!
-//! `sorted` is the fourth and the one that is not a single counter: it is a
-//! bottom-up stable merge over two runs, and `Body::walk_sorted` says why it
-//! is written out rather than handed over.
+//! `sorted` is the one that is not a single counter: it is a bottom-up stable
+//! merge over two runs, and `Body::walk_sorted` says why it is written out
+//! rather than handed over.
 //!
 //! # A callback that fails takes the whole call with it
 //!
@@ -49,8 +63,8 @@
 //! is a runtime error, and a runtime error ends the task. The half-filled
 //! object is in a slot of a frame that is being unwound, and no Cove
 //! expression exists that could observe it. The receiver is never written
-//! through on any path either — every one of the three builds a new object
-//! and none of them stores into the elements it is walking.
+//! through on any path either — both `map` and `sorted` build a new object
+//! and neither stores into the elements it is walking.
 //!
 //! # The element and the turn's answer are cleared per turn
 //!
@@ -88,7 +102,7 @@ struct Walk {
 }
 
 impl Body<'_> {
-    /// One of the four, over elements this caller has already settled.
+    /// One of the two, over elements this caller has already settled.
     ///
     /// `obj` is a location the walk owns — an `Array` copied out of whatever
     /// named it, or the copy a `Vector` is walked through — and this ends its
@@ -103,9 +117,7 @@ impl Body<'_> {
     ) -> Val {
         match name {
             "map" => self.walk_map(expr, obj, elem, &args[0].value),
-            "filter" => self.walk_filter(expr, obj, elem, &args[0].value),
-            "sorted" => self.walk_sorted(expr, obj, elem, &args[0].value),
-            _ => self.walk_fold(expr, obj, elem, &args[0].value, &args[1].value),
+            _ => self.walk_sorted(expr, obj, elem, &args[0].value),
         }
     }
 
@@ -186,214 +198,6 @@ impl Body<'_> {
         self.release(closure, span);
         self.release(obj, span);
         kept
-    }
-
-    // ---- filter -------------------------------------------------------------
-
-    /// `items.filter(keep)`: the elements the closure answered `true` for, in
-    /// the order they were in.
-    ///
-    /// How many there will be is not known until the last call, and an
-    /// `Array` object is as long as it was allocated. So the loop fills a run
-    /// of the receiver's length — the most there can be — counts what it
-    /// kept, and answers `Array.slice(0, kept)`, which is the language's own
-    /// "a part of a sequence is a finished sequence". The words past the
-    /// count are the zeroes the allocation left, so a reference among them
-    /// reads null and the collector traces nothing from one.
-    fn walk_filter(&mut self, expr: &Expr, obj: Val, elem: &Ty, callback: &Expr) -> Val {
-        let Some(answer) = self.settled_ty(expr) else {
-            self.release(obj, expr.span);
-            return self.dead(expr);
-        };
-        let (Some(result), Some(element)) = (
-            self.layout(&answer, expr.span),
-            self.layout(elem, expr.span),
-        ) else {
-            self.release(obj, expr.span);
-            return self.dead(expr);
-        };
-        let Some((closure, params, returns)) = self.callback_of(callback) else {
-            self.release(obj, expr.span);
-            return self.dead(expr);
-        };
-        if !self.callback_matches(callback, &params, returns, &[element], shapes::BOOL) {
-            self.release(closure, expr.span);
-            self.release(obj, expr.span);
-            return self.dead(expr);
-        }
-        let span = expr.span;
-
-        let count = self.length_of(&obj, span);
-        let room = self.temp(result);
-        self.emit(
-            Inst::Alloc {
-                dst: room.slot,
-                layout: result,
-                len: Len::Slot(count.slot),
-            },
-            span,
-        );
-        let taken = self.temp(shapes::INT);
-        self.emit(
-            Inst::Int {
-                dst: taken.slot,
-                value: 0,
-            },
-            span,
-        );
-        let walk = self.open_walk(count, span);
-
-        let element_at = self.temp(element);
-        self.emit(
-            Inst::LoadElem {
-                dst: element_at.slot,
-                obj: obj.slot,
-                index: walk.index.slot,
-                layout: element,
-            },
-            span,
-        );
-        let verdict = self.temp(shapes::BOOL);
-        self.call_closure(verdict.slot, closure.slot, vec![element_at.arg()], span);
-        let dropped = self.emit(
-            Inst::BranchFalse {
-                cond: verdict.slot,
-                to: PENDING,
-            },
-            span,
-        );
-        self.emit(
-            Inst::StoreElem {
-                obj: room.slot,
-                index: taken.slot,
-                src: element_at.slot,
-                layout: element,
-            },
-            span,
-        );
-        self.emit(
-            Inst::Arith {
-                num: Num::Int,
-                op: ArithOp::Add,
-                dst: taken.slot,
-                a: taken.slot,
-                b: walk.one.slot,
-            },
-            span,
-        );
-        let rest = self.here();
-        self.patch(dropped, rest);
-        self.end_turn(&[element_at], span);
-        self.close_walk(walk, span);
-
-        self.give_back(verdict.slot, verdict.layout);
-        self.give_back(element_at.slot, element_at.layout);
-        self.release(closure, span);
-        self.release(obj, span);
-
-        let zero = self.temp(shapes::INT);
-        self.emit(
-            Inst::Int {
-                dst: zero.slot,
-                value: 0,
-            },
-            span,
-        );
-        let answer = self.temp(result);
-        self.emit_builtin(
-            answer.slot,
-            "Array",
-            "slice",
-            &[room.arg(), zero.arg(), taken.arg()],
-            result,
-            span,
-        );
-        self.give_back(zero.slot, zero.layout);
-        self.give_back(taken.slot, taken.layout);
-        self.release(room, span);
-        answer
-    }
-
-    // ---- fold ---------------------------------------------------------------
-
-    /// `items.fold(initial, step)`: one accumulator, threaded through every
-    /// element.
-    ///
-    /// The accumulator is the call's **destination** as well as its first
-    /// argument, so a turn is one instruction rather than a call and a copy.
-    /// That is sound because the machine copies the arguments into the
-    /// callee's frame on the way in and the answer back on the way out, so
-    /// nothing reads the location between the two — and it is the same
-    /// arrangement `n += 2` has, where the destination *is* the accumulator.
-    ///
-    /// An empty receiver answers `initial`, because nothing overwrote it.
-    fn walk_fold(
-        &mut self,
-        expr: &Expr,
-        obj: Val,
-        elem: &Ty,
-        initial: &Expr,
-        callback: &Expr,
-    ) -> Val {
-        let Some(answer) = self.settled_ty(expr) else {
-            self.release(obj, expr.span);
-            return self.dead(expr);
-        };
-        let (Some(result), Some(element)) = (
-            self.layout(&answer, expr.span),
-            self.layout(elem, expr.span),
-        ) else {
-            self.release(obj, expr.span);
-            return self.dead(expr);
-        };
-        let span = expr.span;
-
-        // The arguments are evaluated in source order, because they are
-        // ordinary expressions and the first may do something the second
-        // sees.
-        let start = self.expr(initial);
-        let start = self.fit(start, result, initial.span);
-        let total = self.temp(result);
-        self.copy(total.slot, start.slot, result, initial.span);
-        self.release(start, initial.span);
-
-        let Some((closure, params, returns)) = self.callback_of(callback) else {
-            self.release(total, span);
-            self.release(obj, span);
-            return self.dead(expr);
-        };
-        if !self.callback_matches(callback, &params, returns, &[result, element], result) {
-            self.release(closure, span);
-            self.release(total, span);
-            self.release(obj, span);
-            return self.dead(expr);
-        }
-
-        let count = self.length_of(&obj, span);
-        let walk = self.open_walk(count, span);
-        let element_at = self.temp(element);
-        self.emit(
-            Inst::LoadElem {
-                dst: element_at.slot,
-                obj: obj.slot,
-                index: walk.index.slot,
-                layout: element,
-            },
-            span,
-        );
-        self.call_closure(
-            total.slot,
-            closure.slot,
-            vec![total.arg(), element_at.arg()],
-            span,
-        );
-        self.end_turn(&[element_at], span);
-        self.close_walk(walk, span);
-
-        self.give_back(element_at.slot, element_at.layout);
-        self.release(closure, span);
-        self.release(obj, span);
-        total
     }
 
     // ---- sorted ---------------------------------------------------------------

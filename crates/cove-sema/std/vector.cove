@@ -6,3 +6,37 @@
 export fn isEmpty<T>(items: Vector<T>) -> Bool {
   items.length() == 0
 }
+
+/// The elements `keep` answers `true` for, in the order they were in.
+///
+/// **Through a copy taken before the first call.** A vector shares its
+/// storage and a callback can reach the very vector being walked, so what is
+/// walked has to be settled first — `toArray` is that copy, taken here for
+/// exactly the reason the walk instruction took it, and the reason the
+/// tree-walking interpreter takes it at the same point. An `Array` needs
+/// none of this: the object *is* the snapshot, so `std.array.filter` walks
+/// its receiver directly.
+export fn filter<T>(items: Vector<T>, keep: fn(item: T) -> Bool) -> Array<T> {
+  var out: Vector<T> = Vector.of()
+  for item in items.toArray() {
+    if keep(item) {
+      out.push(item)
+    }
+  }
+  out.freeze()
+}
+
+/// `initial`, with `step` applied to it once per element, left to right.
+///
+/// Through the same copy, for the same reason as [`filter`] above.
+export fn fold<T, A>(
+  items: Vector<T>,
+  initial: A,
+  step: fn(acc: A, item: T) -> A,
+) -> A {
+  var acc = initial
+  for item in items.toArray() {
+    acc = step(acc, item)
+  }
+  acc
+}

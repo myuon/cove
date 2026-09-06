@@ -8,3 +8,39 @@
 export fn isEmpty<T>(items: Array<T>) -> Bool {
   items.length() == 0
 }
+
+/// The elements `keep` answers `true` for, in the order they were in.
+///
+/// A loop and a `Vector` that is frozen at the end, which is what the walk
+/// instruction this replaces did with an array it filled to the receiver's
+/// length and then sliced. That difference is the whole of what the move
+/// costs, and it was measured before it was made: the mechanism is about a
+/// quarter slower on a benchmark that does nothing else two million times,
+/// and `myuon/the-cove` — a real application, and the one whose Cove code
+/// used `filter` more than anything else — runs 2% slower end to end with
+/// its twenty golden world-hashes unchanged.
+export fn filter<T>(items: Array<T>, keep: fn(item: T) -> Bool) -> Array<T> {
+  var out: Vector<T> = Vector.of()
+  for item in items {
+    if keep(item) {
+      out.push(item)
+    }
+  }
+  out.freeze()
+}
+
+/// `initial`, with `step` applied to it once per element, left to right.
+///
+/// Allocates nothing, which is why it costs less to have moved than
+/// [`filter`] did — 1.13x against 1.24x on the same benchmark.
+export fn fold<T, A>(
+  items: Array<T>,
+  initial: A,
+  step: fn(acc: A, item: T) -> A,
+) -> A {
+  var acc = initial
+  for item in items {
+    acc = step(acc, item)
+  }
+  acc
+}

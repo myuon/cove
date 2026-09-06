@@ -54,8 +54,8 @@ written as a namespace; binds `T`.
 | `indexOf(element: T) -> Option<Int>` |  |  |  | `machine` |
 | `slice(from: Int, to: Int) -> Array<T>` |  |  |  | `machine` |
 | `map(transform: fn(T) -> R) -> Array<R>` |  |  | `R` | `machine` |
-| `filter(keep: fn(T) -> Bool) -> Array<T>` |  |  |  | `machine` |
-| `fold(initial: R, step: fn(R, T) -> R) -> R` |  |  | `R` | `machine` |
+| `filter(keep: fn(T) -> Bool) -> Array<T>` |  |  |  | `std.array.filter` |
+| `fold(initial: R, step: fn(R, T) -> R) -> R` |  |  | `R` | `std.array.fold` |
 | `sorted(by: fn(T, T) -> Bool) -> Array<T>` |  |  |  | `machine` |
 | `toVector() -> Vector<T>` |  |  |  | `machine` |
 | `snapshot() -> Self` |  |  |  | `machine` |
@@ -81,8 +81,8 @@ written as a namespace; binds `T`.
 | `indexOf(element: T) -> Option<Int>` |  |  |  | `machine` |
 | `slice(from: Int, to: Int) -> Array<T>` |  |  |  | `machine` |
 | `map(transform: fn(T) -> R) -> Array<R>` |  |  | `R` | `machine` |
-| `filter(keep: fn(T) -> Bool) -> Array<T>` |  |  |  | `machine` |
-| `fold(initial: R, step: fn(R, T) -> R) -> R` |  |  | `R` | `machine` |
+| `filter(keep: fn(T) -> Bool) -> Array<T>` |  |  |  | `std.vector.filter` |
+| `fold(initial: R, step: fn(R, T) -> R) -> R` |  |  | `R` | `std.vector.fold` |
 | `sorted(by: fn(T, T) -> Bool) -> Array<T>` |  |  |  | `machine` |
 | `push(value: T) -> Unit` | yes |  |  | `machine` |
 | `set(index: Int, value: T) -> Option<T>` | yes |  |  | `machine` |
