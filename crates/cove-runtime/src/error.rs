@@ -16,7 +16,7 @@ use crate::trace::RunOutcome;
 ///
 /// A bound rather than the whole call stack, because the chain is built for
 /// every error whether the recursion behind it was three frames deep or
-/// [`crate::interp::MAX_CALL_DEPTH`]'s 256 — and a diagnostic naming 256
+/// the tree-walking interpreter's 256-frame limit — and a diagnostic naming 256
 /// callers would be unreadable long before it is untruthful. Eight is enough
 /// to show a handful of library layers above the fault and to say, honestly,
 /// that there were more: it is not derived from anything else that is
