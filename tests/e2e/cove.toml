@@ -72,6 +72,10 @@ allow = ["console"]
 entry = "fail_int_overflow.main"
 allow = ["console"]
 
+[run.fail_nested_divide_by_zero]
+entry = "fail_nested_divide_by_zero.main"
+allow = ["console"]
+
 [run.fail_no_capability]
 entry = "fail_no_capability.main"
 allow = []

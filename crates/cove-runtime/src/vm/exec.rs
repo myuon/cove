@@ -930,6 +930,14 @@ impl<'a> Machine<'a> {
         std::thread::scope(|threads| {
             let mut running: Vec<Option<ScopedJoinHandle<'_, Outcome>>> = Vec::new();
             let answer = encoded::dispatch(self, code, budget, threads, &mut running, 0);
+            // The frames are not unwound on this path — see the module-level
+            // note beside `Machine::frames` — so they are still exactly what
+            // was live when the error was raised. This is the one place that
+            // reads them for it: every error leaves the machine through here,
+            // whichever instruction or safepoint raised it, so a chain
+            // attached at every `.at()` site instead would be the same work
+            // repeated at every one of them for no error that reaches two.
+            let answer = answer.map_err(|error| error.with_chain(self.call_chain()));
             debug_assert!(
                 answer.is_err() || !self.anything_running(),
                 "a body that answered left every scope it opened, so nothing is still running"
@@ -1746,6 +1754,38 @@ impl<'a> Machine<'a> {
             .rev()
             .map(|frame| (frame.function, frame.base, frame.pc))
             .collect()
+    }
+
+    /// The call-site spans [`RuntimeError::with_chain`] wants, innermost
+    /// first: every live frame above the one that is failing.
+    ///
+    /// The innermost frame is excluded because its `pc` is the error's own
+    /// span, already `RuntimeError::span` — read there by whatever `fail!`
+    /// or `.at()` this error passed through, not here.
+    ///
+    /// Every frame above it is suspended at *the instruction after* the call
+    /// that led one level deeper — [`Frame::pc`] says so, and
+    /// [`crate::vm::debug::Stop::frame`] reads that same `pc` for the
+    /// debugger's own backtrace. A resume address is not a call site: the
+    /// instruction it names is whatever runs next, which is frequently the
+    /// next statement's rather than anything to do with the call, and a
+    /// label built from it points at the wrong line as often as the right
+    /// one. `- 1` is always the call itself — `entered!` only ever syncs a
+    /// `pc` that has already moved past the instruction it just dispatched —
+    /// so that is what this reads instead. The debugger's own view is left
+    /// alone; nothing here changes what a resume address is used to display
+    /// there.
+    ///
+    /// Lazy, so a bound below [`RuntimeError::with_chain`]'s
+    /// [`crate::error::MAX_CALL_CHAIN`] never walks past it: nothing here
+    /// builds a `Vec` sized to the recursion depth on its way to being
+    /// truncated back down.
+    fn call_chain(&self) -> impl Iterator<Item = Span> + '_ {
+        self.frames.iter().rev().skip(1).map(|frame| {
+            self.program
+                .function(frame.function)
+                .span_at(frame.pc.saturating_sub(1) as usize)
+        })
     }
 
     /// `words` words of the frame based at `base`, from `at`.

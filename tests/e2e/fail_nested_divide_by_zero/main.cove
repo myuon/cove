@@ -1,0 +1,17 @@
+use console.println
+
+/// Divides two `Int`s. Not the entry, and not the standard library either —
+/// just an ordinary Cove function with a caller.
+fn divide(a: Int, b: Int) -> Int {
+  a / b
+}
+
+/// Fails inside `divide`, called from here, so the diagnostic must name both:
+/// where the division happened and where `divide` was called from. Issue
+/// #258.
+export fn main() -> Result<Unit, Error> {
+  let zero = 0
+  println("about to divide")?
+  println("never printed {divide(10, zero)}")?
+  Ok(())
+}

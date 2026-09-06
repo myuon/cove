@@ -590,6 +590,20 @@ pub struct Interpreter<'a> {
     /// thread everything it needs to run a body.
     runtime: &'a Runtime,
     depth: usize,
+    /// The call-site span of every live call, outermost first — pushed and
+    /// popped in `call_target` exactly where `depth` is, one entry per
+    /// level, so the two can never disagree about how deep the call is.
+    ///
+    /// This evaluator has no frame stack for a `RuntimeError` to read the way
+    /// the linear-memory backend's does — issue #258 is exactly that gap —
+    /// so it keeps this instead. Reading it happens at the one place an
+    /// error can still see the frame that is failing: inside `call_target`,
+    /// right where `depth` would otherwise be decremented, before the entry
+    /// this level pushed is popped. Everything but the outermost entry
+    /// becomes [`RuntimeError::chain`]; the outermost is the entry's own
+    /// invocation, which — like [`crate::vm::exec::Machine::calls`]'s
+    /// innermost frame — names no caller and is excluded the same way.
+    call_sites: Vec<Span>,
     /// The run's budget, as this interpreter's safepoints charge it.
     ///
     /// `None` is a run with no budget installed, which is what an embedder
@@ -691,6 +705,7 @@ impl<'a> Interpreter<'a> {
             hosts: runtime.hosts(),
             runtime,
             depth: 0,
+            call_sites: Vec::new(),
             budget: None,
             call_depth_limit: None,
             cancellation: None,
@@ -1641,7 +1656,11 @@ impl<'a> Interpreter<'a> {
         self.charge_safepoint(span)?;
 
         self.depth += 1;
-        let result = self.invoke_body(target, receiver, args, span);
+        self.call_sites.push(span);
+        let result = self
+            .invoke_body(target, receiver, args, span)
+            .map_err(|error| self.attach_call_chain(error));
+        self.call_sites.pop();
         self.depth -= 1;
         if target.is_async {
             // An `async fn` is called like any other function and produces a
@@ -1655,6 +1674,27 @@ impl<'a> Interpreter<'a> {
             return Ok(Value(Repr::Task(Task::settled(result?))));
         }
         result
+    }
+
+    /// Attaches this interpreter's call chain to `error`, innermost first.
+    ///
+    /// Read here and nowhere else: this runs inside `call_target`, right
+    /// after `invoke_body` returns and before the entry it pushed for this
+    /// level is popped, which is the one moment an error can still see the
+    /// frame that raised it. `RuntimeError::with_chain` is a no-op once a
+    /// chain is attached, which is what makes calling this at every level on
+    /// the way out safe: the innermost `call_target` to see the error is the
+    /// only one whose call is still un-popped, and every level further out
+    /// finds a chain already there.
+    ///
+    /// `self.call_sites[0]` is excluded — it is this run's entry being
+    /// called, which names no caller, the same way
+    /// [`crate::vm::exec::Machine::calls`]'s innermost frame names none.
+    /// Everything above it is a real call site, read outermost-last so the
+    /// chain comes out innermost-first, the order [`RuntimeError::with_chain`]
+    /// bounds and [`RuntimeError::to_diagnostic`] renders in.
+    fn attach_call_chain(&self, error: RuntimeError) -> RuntimeError {
+        error.with_chain(self.call_sites[1..].iter().rev().copied())
     }
 
     fn invoke_body(
@@ -5723,7 +5763,7 @@ export fn main() -> Result<Unit, Error> {
             "{}",
             error.message
         );
-        assert_eq!(error.help.unwrap(), "write `fill(var output)`");
+        assert_eq!(error.help.as_deref(), Some("write `fill(var output)`"));
     }
 
     // ------------------------------------------------------------- rule 4
@@ -6125,7 +6165,10 @@ export fn main() -> Result<Unit, Error> {
             "{}",
             error.message
         );
-        assert_eq!(error.rule.unwrap(), "`match` must cover every enum case.");
+        assert_eq!(
+            error.rule.as_deref(),
+            Some("`match` must cover every enum case.")
+        );
     }
 
     #[test]

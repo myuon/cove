@@ -280,7 +280,11 @@ fn verdict(value: &Value) -> (String, Vec<String>) {
 /// can hold all three.
 fn refusal(answer: Result<Value, RuntimeError>) -> (String, Option<String>, Option<String>) {
     let error = answer.expect_err("this invocation must be refused");
-    (error.message, error.rule, error.help)
+    (
+        error.message,
+        error.rule.map(String::from),
+        error.help.map(String::from),
+    )
 }
 
 // ---------------------------------------------------------------- the point

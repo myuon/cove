@@ -3,5 +3,9 @@ error[cove::runtime]: execution stopped: host-call limit of 3 exceeded
    |
 13 |     let reported = println("visiting {n}")
    |                    ^^^^^^^^^^^^^^^^^^^^^^^
+  --> <e2e>/fail_map_host_calls/main.cove:12:17
+   |
+12 |   let doubled = items.map(fn(n) {
+   |                 ^^^^^^^^^^^^^^^^^ called from here
   rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
 1 error(s)

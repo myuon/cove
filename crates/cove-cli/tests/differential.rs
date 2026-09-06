@@ -602,13 +602,15 @@ fn describe(answer: &Result<Value, RuntimeError>) -> String {
     match answer {
         Ok(value) => format!("value {value:?}"),
         Err(error) => format!(
-            "failed {:?}: {}\n    rule: {:?}\n    help: {:?}\n    denied: {:?}\n    at: {:?}",
+            "failed {:?}: {}\n    rule: {:?}\n    help: {:?}\n    denied: {:?}\n    at: {:?}\n    chain: {:?}\n    chain_omitted: {}",
             error.outcome,
             error.message,
             error.rule,
             error.help,
             error.denied_capability,
             error.span,
+            error.chain(),
+            error.chain_omitted(),
         ),
     }
 }
