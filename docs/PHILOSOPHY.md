@@ -58,6 +58,19 @@ Cove does not add model-specific query syntax. Predictable source, doc
 comments, compiler errors, and structural outlines are the durable interface
 between programmers, coding agents, and tools.
 
+## Separate policy from mechanism
+
+User-visible abstractions and algorithms belong in Cove source and its standard
+library. Executable IR describes resolved storage, control flow, calls, and
+runtime boundaries, rather than conveniences that can be expressed safely in
+Cove.
+
+The VM provides mechanisms, the runtime enforces invariants, and the Host grants
+authority. A Rust implementation, frequent use, or an unmeasured speed
+hypothesis does not by itself make an operation a VM primitive.
+Performance-specific fusion remains a replaceable lowering or superinstruction,
+not permanent language semantics.
+
 ## Prefer runtime control to heroic proofs
 
 Cove does not prove that programs terminate. Hosts control CPU, memory,
