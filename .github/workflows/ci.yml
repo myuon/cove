@@ -23,6 +23,15 @@ env:
   # cache below is now written on every run.
   CARGO_INCREMENTAL: 0
 
+# Every cargo invocation in the job below runs under `checked`, and that is
+# the point rather than a detail. `[profile.checked]` inherits `release` and
+# turns `debug-assertions` and `overflow-checks` back on, so it is an
+# optimised build with every check the unoptimised one has — and this suite
+# *runs Cove programs* rather than merely compiling a harness, so optimisation
+# is most of what it costs. One profile also means one dependency graph is
+# built instead of two: the job used to compile the workspace unoptimised for
+# the tests and again optimised for the benchmark harness.
+
 jobs:
   build:
     name: test, lint, and dogfood
@@ -75,7 +84,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --profile checked -- -D warnings
 
       # The `Pages` workflow publishes these docs with warnings denied, so a
       # broken intra-doc link (or any other doc build failure) is a build
@@ -85,59 +94,81 @@ jobs:
       - name: cargo doc
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --no-deps --profile checked
 
+      # Split from the doc examples below so that the log says which of the
+      # two cost what. They are different things that `cargo test --workspace`
+      # runs together: this is the suite, and it is the half that *runs Cove
+      # programs* and so is the half optimisation is for.
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --lib --bins --tests --profile checked
 
-      # The cases `crates/cove-runtime/src/frame/tests.rs` marks `#[ignore]`:
-      # the five that drive the `benches/` rows at the 2,000,000 turns the
-      # published measurement was taken at. They cost between thirty and fifty
-      # seconds each in an unoptimised build, which is a price worth paying
-      # once here rather than on every local `cargo test`. The module docs
-      # there say why shortening the rows was refused instead.
+      # The doc examples. Each fenced example compiles as a crate of its own,
+      # so this half is compilation rather than execution and behaves the
+      # opposite way under a profile — which is exactly why it is a step of
+      # its own rather than a number folded into the one above.
+      - name: cargo test (the doc examples)
+        run: cargo test --workspace --doc --profile checked
+
+      # The `#[ignore]`d cases, which live in `crates/cove-cli/tests/` —
+      # `vm_coverage.rs`, `bytecode_corpus.rs` and `build.rs`. The first is
+      # the roadmap: it runs every program in the repository on the
+      # linear-memory backend and sorts the answers into agrees, disagrees,
+      # and does not lower. It is ignored because it *runs* what it lowers,
+      # and the benchmark rows are two million turns each, so it is a price
+      # worth paying once here rather than on every local `cargo test`.
       #
-      # `crates/cove-cli/tests/admits_coverage.rs` is the same trade made by
-      # an integration test rather than a unit test, which is why `--lib`
-      # alone no longer covers everything `#[ignore]` marks: a target under
-      # `tests/` is not part of `--lib`, so a `--lib`-only run would build
-      # that test and never execute it. `--tests` beside it picks up every
-      # integration test binary's ignored cases too.
+      # (This comment used to name `crates/cove-runtime/src/frame/tests.rs`
+      # and `crates/cove-cli/tests/admits_coverage.rs`. Neither file has
+      # existed since ADR 0034 replaced the execution backend.)
       #
       # `--lib --tests` and not `--workspace` alone, because `--ignored`
       # would otherwise reach the doc examples fenced ```ignore, which are
       # marked that way precisely because they do not compile on their own.
+      # A target under `tests/` is not part of `--lib`, so `--lib` by itself
+      # would build these and never execute them.
+      #
+      # This is `cargo ratchet` — the same command, character for character,
+      # that `.cargo/config.toml` aliases for running it by hand. It was the
+      # single most expensive step in the pipeline while it ran unoptimised,
+      # which is what the profile is doing here.
       - name: cargo test (the ignored rows)
-        run: cargo test --workspace --lib --tests -- --ignored
+        run: cargo test --workspace --lib --tests --profile checked -- --ignored
 
       # Dogfooding. These are the project's own claims about its own sources:
       # the repository is formatted, the representative programs check, and
       # their tests pass. They are checked with the binary this commit builds.
-      - name: Build the cove CLI
-        run: cargo build -p cove-cli
+      #
+      # `cove-bench` is built here beside the CLI rather than in a step of its
+      # own further down, because in one profile they are one build. It also
+      # has to be the same profile as the CLI whichever one is chosen: the
+      # `startup` benchmark measures a real process, so it spawns the `cove`
+      # binary beside itself rather than calling into the runtime in-process.
+      - name: Build the cove CLI and the benchmark harness
+        run: cargo build --profile checked -p cove-cli -p cove-bench
 
       - name: cove fmt --check (repository root)
-        run: ./target/debug/cove fmt --check
+        run: ./target/checked/cove fmt --check
 
       # `docs/BUILTINS.md` and `docs/builtins.json` are the contents of
       # `crates/cove-schema`, written out. This is what stops them becoming a
       # second table that says something else.
       - name: cove reference --check (repository root)
-        run: ./target/debug/cove reference --check
+        run: ./target/checked/cove reference --check
 
       - name: cove check (examples)
         working-directory: examples
-        run: ../target/debug/cove check
+        run: ../target/checked/cove check
 
       # `httpstatus/status_code.cove` is checked in, generated by
       # `codegen.statusCodes`; this is what catches it going stale.
       - name: cove generate --check (examples)
         working-directory: examples
-        run: ../target/debug/cove generate --check
+        run: ../target/checked/cove generate --check
 
       - name: cove test (examples)
         working-directory: examples
-        run: ../target/debug/cove test
+        run: ../target/checked/cove test
 
       # The two steps above run on the linear-memory backend, because ADR
       # 0034 makes that what a command that runs a program runs it on. The
@@ -147,8 +178,8 @@ jobs:
       - name: cove generate --check and cove test on the interpreter (examples)
         working-directory: examples
         run: |
-          ../target/debug/cove generate --check --backend ast
-          ../target/debug/cove test --backend ast
+          ../target/checked/cove generate --check --backend ast
+          ../target/checked/cove test --backend ast
 
       # ADR 0012's performance-gate harness. Wall-clock numbers are too
       # noisy on a shared runner for a threshold to mean anything, so this
@@ -167,24 +198,26 @@ jobs:
       # spent on the one step that asserts nothing. An optimized build runs
       # `arith` 7.6x faster and one iteration is three times fewer, and
       # neither changes any of the three things above.
-      # The CLI as well, and in the same profile: the `startup` benchmark
-      # measures a real process, so it spawns the `cove` binary beside
-      # itself rather than calling into the runtime in-process, and an
-      # optimized harness looks for an optimized one. The debug build above
-      # stays, because the dogfooding steps run against the binary this
-      # commit builds and that is what they have always meant.
       #
-      # `--release`, not the workspace's `bench-stable` profile. That profile
-      # exists only to hold a recorded negative result (issue #179: one
-      # codegen unit per crate did not reduce layout sensitivity and cost 44%
-      # to 96% more build time), and selecting it here would spend that build
-      # time on a step that asserts no number. `[profile.release]` is left at
-      # Cargo's defaults for the same reason this step is one iteration.
-      - name: Build cove-bench
-        run: cargo build --release -p cove-cli -p cove-bench
-
+      # `checked` rather than `release`, which is the whole of what this step
+      # gave up to make the job one profile. It is not free and it is close
+      # to it: measured locally, `cove-bench --iterations 1` is 37.6s under
+      # `checked` against 36.0s under `release`, which is the overflow checks
+      # costing 4%. What it buys is the 30s build of a second copy of the
+      # workspace, which no longer happens — the binaries this step wants
+      # were built by the dogfooding step above.
+      #
+      # Neither is the workspace's `bench-stable` profile. That exists only
+      # to hold a recorded negative result (issue #179: one codegen unit per
+      # crate did not reduce layout sensitivity and cost 44% to 96% more
+      # build time), and selecting it here would spend that build time on a
+      # step that asserts no number. Nothing in this job builds `release` any
+      # more; `[profile.release]` stays at Cargo's defaults because it is the
+      # reference for what a user's own build does, and a compile failure
+      # unique to it, given `checked` inherits it, is not a thing that
+      # happens.
       - name: cove-bench (correctness only; no threshold gate)
-        run: ./target/release/cove-bench --iterations 1
+        run: ./target/checked/cove-bench --iterations 1
 
   # Issue #241 asks for the WebAssembly build to be in CI before the UI that
   # depends on it, so this is a job of its own rather than a step: it fails on
