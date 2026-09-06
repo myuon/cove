@@ -215,7 +215,7 @@ written as a namespace; binds `T`, `E`.
 | `isOk() -> Bool` |  |  |  | `std.result.isOk` |
 | `isError() -> Bool` |  |  |  | `std.result.isError` |
 | `unwrapOr(fallback: T) -> T` |  |  |  | `std.result.unwrapOr` |
-| `mapError(body: fn(E) -> F) -> Result<T, F>` |  |  | `F` | `machine` |
+| `mapError(body: fn(E) -> F) -> Result<T, F>` |  |  | `F` | `std.result.mapError` |
 
 ### `Int`
 

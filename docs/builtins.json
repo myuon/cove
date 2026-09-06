@@ -182,7 +182,7 @@
         {"name": "isOk", "signature": "isOk() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.result.isOk", "host": false},
         {"name": "isError", "signature": "isError() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.result.isError", "host": false},
         {"name": "unwrapOr", "signature": "unwrapOr(fallback: T) -> T", "generics": [], "params": [{"name": "fallback", "type": "T"}], "variadic": false, "result": "T", "mutating": false, "implementedBy": "std.result.unwrapOr", "host": false},
-        {"name": "mapError", "signature": "mapError(body: fn(E) -> F) -> Result<T, F>", "generics": ["F"], "params": [{"name": "body", "type": "fn(E) -> F"}], "variadic": false, "result": "Result<T, F>", "mutating": false, "implementedBy": "machine", "host": false}
+        {"name": "mapError", "signature": "mapError(body: fn(E) -> F) -> Result<T, F>", "generics": ["F"], "params": [{"name": "body", "type": "fn(E) -> F"}], "variadic": false, "result": "Result<T, F>", "mutating": false, "implementedBy": "std.result.mapError", "host": false}
       ]
     },
     {
