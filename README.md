@@ -276,6 +276,13 @@ width of the fixed-width instruction that will execute after the readable
 payload, which every one of the forty-nine instructions fits and which costs
 one compiler limit — a function's frame may hold 65,536 words, against the 122
 the largest function in the repository lowers to.
+[ADR 0042](docs/adr/0042-a-builtin-is-a-primitive-a-library-or-a-capability.md)
+sorts the one undifferentiated pile of "builtin" into three: a primitive stays
+in the runtime because it must know the machine's representation, memory or
+scheduling; a library method becomes ordinary Cove source under
+`crates/cove-sema/std/`; a capability reaches outside the process and stays at
+the host boundary, where it already was. Performance alone does not make a
+primitive.
 
 Syntax is still provisional and may change.
 
