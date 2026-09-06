@@ -283,6 +283,14 @@ scheduling; a library method becomes ordinary Cove source under
 `crates/cove-sema/std/`; a capability reaches outside the process and stays at
 the host boundary, where it already was. Performance alone does not make a
 primitive.
+[ADR 0043](docs/adr/0043-a-method-moves-if-it-is-total-and-takes-no-closure.md)
+narrows that Library test with two conditions a wave of actual migrations
+found: a method moves only if it is **total** — Cove's runtime errors carry no
+call stack, so a fallible body moves the diagnostic out of the caller's source
+— and only if it takes **no closure**, because a call site may pass one that
+names no parameter and a standard-library body cannot. It also strikes ADR
+0042's `Duration` row, which counted thirteen schema entries as thirteen
+implementations when they are two.
 
 Syntax is still provisional and may change.
 

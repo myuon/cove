@@ -1,6 +1,8 @@
 # ADR 0042: A builtin is a primitive, a library, or a capability
 
-- Status: Accepted
+- Status: Accepted. Superseded in part by
+  [ADR 0043](0043-a-method-moves-if-it-is-total-and-takes-no-closure.md),
+  which narrows the **Library** test and strikes the `Duration` row
 - Date: 2026-09-06
 - Decides: which of the 18 builtin types' 97 methods, 13 associated functions
   and 7 free builtins stay in the runtime, which become Cove source in a
