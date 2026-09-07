@@ -18,7 +18,7 @@ fn a_run_is_reused_by_a_later_value_of_the_same_words() {
     assert_eq!(
         listing("fn total() -> Int { ((1 + 2) + 3) + 4 }", "total"),
         "\
-fn0 m.total() -> Int
+fn @m.total() -> Int
   frame 3: s0:int s1:int s2:int
      0  int s1:int 1
      1  add.int.imm s2:int s1:int 2
@@ -40,7 +40,7 @@ fn a_run_is_never_reused_by_a_value_whose_words_differ() {
             "mix"
         ),
         "\
-fn0 m.mix(Int Float) -> Float
+fn @m.mix(Int Float) -> Float
   frame 7: s0!:int s1!:float s2:float s3:int s4:float s5:float s6:int
   local a -> s0:Int [0, 6)
   local b -> s1:Float [0, 6)
@@ -67,7 +67,7 @@ fn a_two_word_location_is_reused_only_by_a_two_word_one_of_the_same_shape() {
             "f"
         ),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 7: s0:int s1:int s2:ref s3:int s4:ref s5:ref s6:int
   local a -> s3:m.A [4, 10)
   local b -> s5:m.B [8, 10)
@@ -96,7 +96,7 @@ fn a_temporary_holding_a_reference_is_cleared_at_its_last_use() {
             "shout"
         ),
         "\
-fn0 m.shout(String String) -> Int
+fn @m.shout(String String) -> Int
   frame 5: s0!:ref s1!:ref s2:int s3:ref s4:int
   local a -> s0:String [0, 5)
   local b -> s1:String [0, 5)
@@ -124,7 +124,7 @@ fn a_local_holding_a_reference_is_cleared_when_its_scope_ends() {
             "f"
         ),
         "\
-fn0 m.f(String) -> Int
+fn @m.f(String) -> Int
   frame 6: s0!:ref s1:int s2:int s3:ref s4:ref s5:int
   local what -> s0:String [0, 8)
   local n -> s2:Int [1, 7)
@@ -149,7 +149,7 @@ fn a_scalar_is_never_cleared() {
     assert_eq!(
         listing("fn f() -> Int {\n  let a = 1\n  let b = 2\n  a + b\n}", "f"),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 4: s0:int s1:int s2:int s3:int
   local a -> s1:Int [1, 4)
   local b -> s2:Int [2, 4)
@@ -177,7 +177,7 @@ fn a_location_with_one_reference_word_among_scalars_is_cleared_whole() {
             "f"
         ),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 6: s0:int s1:int s2:ref s3:int s4:ref s5:int
   local n -> s1:Int [1, 8)
   local u -> s4:m.User [5, 6)

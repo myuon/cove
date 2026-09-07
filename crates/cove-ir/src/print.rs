@@ -56,7 +56,7 @@ pub fn function(program: &Program, id: FunctionId) -> String {
         .collect();
     let _ = writeln!(
         out,
-        "{id} {}({}) -> {}{}",
+        "fn @{}({}) -> {}{}",
         f.qualified(),
         params.join(" "),
         name_of(program, f.returns),

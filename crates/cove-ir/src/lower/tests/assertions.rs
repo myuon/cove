@@ -18,7 +18,7 @@ fn an_assertion_is_a_branch_over_the_two_cases_it_answers() {
     assert_eq!(
         listing("fn f(n: Int) -> Result<Unit, Error> { assert(n > 0) }", "f"),
         "\
-fn0 m.f(Int) -> Result
+fn @m.f(Int) -> Result
   frame 11: s0!:int s1:int s2:unit s3:ref s4:int s5:unit s6:ref s7:bool s8:unit s9:ref s10:ref
   local n -> s0:Int [0, 13)
      0  gt.int.imm s7:bool s0:int 0
@@ -120,7 +120,7 @@ fn a_gap_the_entry_does_not_reach_does_not_stop_it() {
     assert_eq!(
         sliced(source, "main", "main"),
         "\
-fn2 m.main() -> Int
+fn @m.main() -> Int
   frame 2: s0:int s1:int
      0  call s1:int m.helper () Int
      1  copy s0:int s1:int Int
@@ -137,7 +137,7 @@ fn what_the_slice_leaves_out_is_a_stub() {
     assert_eq!(
         sliced(source, "main", "unused"),
         "\
-fn1 m.unused() -> Unit
+fn @m.unused() -> Unit
   frame 1: s0:unit
      0  return s0:unit Unit
 "
@@ -197,7 +197,7 @@ fn a_declaration_used_as_a_function_value_is_pulled_into_the_slice() {
     assert_eq!(
         sliced(source, "main", "double"),
         "\
-fn0 m.double(Int) -> Int
+fn @m.double(Int) -> Int
   frame 3: s0!:int s1:int s2:int
   local n -> s0:Int [0, 3)
      0  mul.int.imm s2:int s0:int 2
@@ -242,7 +242,7 @@ fn a_slice_over_several_roots_is_the_union_of_what_they_reach() {
     assert_eq!(
         sliced_to(source, &["left", "right"], "wide"),
         "\
-fn3 m.wide() -> Unit
+fn @m.wide() -> Unit
   frame 1: s0:unit
      0  return s0:unit Unit
 "
@@ -262,7 +262,7 @@ fn a_root_that_names_nothing_contributes_nothing() {
     assert_eq!(
         sliced_to(source, &["main", "nowhere"], "main"),
         "\
-fn0 m.main() -> Int
+fn @m.main() -> Int
   frame 2: s0:int s1:int
      0  int s1:int 1
      1  copy s0:int s1:int Int

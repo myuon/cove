@@ -48,7 +48,7 @@ fn a_parameter_is_named_from_the_first_instruction_to_the_last_of_the_whole_func
     assert_eq!(
         listing("fn area(w: Int, h: Int) -> Int { w * h }", "area"),
         "\
-fn0 m.area(Int Int) -> Int
+fn @m.area(Int Int) -> Int
   frame 4: s0!:int s1!:int s2:int s3:int
   local w -> s0:Int [0, 3)
   local h -> s1:Int [0, 3)
@@ -106,7 +106,7 @@ fn a_slot_two_scopes_reused_carries_a_name_over_each_of_its_two_lives() {
             "f"
         ),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 4: s0:int s1:int s2:int s3:int
   local t -> s1:Int [1, 8)
   local a -> s2:Int [2, 4)
@@ -134,7 +134,7 @@ fn a_shadowing_declaration_is_a_second_local_beside_the_one_it_shadows() {
     assert_eq!(
         listing("fn f() -> Int {\n  let x = 1\n  let x = x + 1\n  x\n}", "f"),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 3: s0:int s1:int s2:int
   local x -> s1:Int [1, 3)
   local x -> s2:Int [2, 3)

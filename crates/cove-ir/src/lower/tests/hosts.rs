@@ -72,7 +72,7 @@ fn a_host_call_names_the_module_and_the_operation_as_the_source_writes_them() {
             "f"
         ),
         "\
-fn0 m.f() -> Result
+fn @m.f() -> Result
   frame 7: s0:int s1:unit s2:ref s3:ref s4:int s5:unit s6:ref
      0  str s3:ref \"hi\"
      1  call-host s4:int console.println (s3:String) Result
@@ -95,7 +95,7 @@ fn the_answer_is_written_into_the_layout_the_schema_declared() {
             "f"
         ),
         "\
-fn0 m.f(String) -> String
+fn @m.f(String) -> String
   frame 6: s0!:ref s1:ref s2:int s3:ref s4:ref s5:ref
   local key -> s0:String [0, 6)
      0  call-host s2:int env.get (s0:String) Option
@@ -116,7 +116,7 @@ fn a_host_call_written_through_the_module_reaches_the_same_operation() {
             "f"
         ),
         "\
-fn0 m.f() -> Result
+fn @m.f() -> Result
   frame 7: s0:int s1:unit s2:ref s3:ref s4:int s5:unit s6:ref
      0  str s3:ref \"hi\"
      1  call-host s4:int console.println (s3:String) Result
@@ -143,7 +143,7 @@ fn a_host_resource_is_one_word_that_is_not_a_root() {
             "f"
         ),
         "\
-fn0 m.f() -> Result
+fn @m.f() -> Result
   frame 7: s0:int s1:host s2:ref s3:ref s4:int s5:host s6:ref
      0  str s3:ref \"a.txt\"
      1  call-host s4:int files.open (s3:String) Result
@@ -166,7 +166,7 @@ fn a_host_type_the_host_hands_over_is_its_fields_in_place() {
     assert_eq!(
         listing("use http\nfn f(r: http.Response) -> Int { r.status }", "f"),
         "\
-fn0 m.f(http.Response) -> Int
+fn @m.f(http.Response) -> Int
   frame 3: s0!:int s1!:ref s2:int
   local r -> s0:http.Response [0, 2)
      0  copy s2:int s0:int Int
@@ -186,7 +186,7 @@ fn a_host_resource_is_a_case_s_payload_like_anything_else() {
             "f"
         ),
         "\
-fn0 m.f() -> Result
+fn @m.f() -> Result
   frame 17: s0:int s1:int s2:host s3:ref s4:ref s5:int s6:host s7:ref s8:int s9:bool s10:host s11:int s12:int s13:host s14:ref s15:int s16:host
      0  str s4:ref \"a\"
      1  call-host s5:int files.create (s4:String) Result
@@ -229,7 +229,7 @@ fn an_operation_of_a_resource_is_addressed_to_the_handle() {
             "f"
         ),
         "\
-fn0 m.f(<host> String) -> Result
+fn @m.f(<host> String) -> Result
   frame 8: s0!:host s1!:ref s2:int s3:unit s4:ref s5:int s6:unit s7:ref
   local w -> s0:<host> [0, 3)
   local line -> s1:String [0, 3)
@@ -252,7 +252,7 @@ fn a_resource_operation_reads_its_receiver_out_of_the_frame() {
             "f"
         ),
         "\
-fn0 m.f() -> Result
+fn @m.f() -> Result
   frame 17: s0:int s1:unit s2:ref s3:ref s4:int s5:host s6:ref s7:int s8:bool s9:host s10:int s11:unit s12:ref s13:unit s14:int s15:unit s16:ref
   local reader -> s9:<host> [11, 26)
      0  str s3:ref \"a.txt\"
@@ -304,7 +304,7 @@ fn a_type_an_embedder_s_module_declares_is_its_fields_in_place() {
             "f"
         ),
         "\
-fn0 m.f(ledger.Entry) -> Int
+fn @m.f(ledger.Entry) -> Int
   frame 3: s0!:int s1!:ref s2:int
   local e -> s0:ledger.Entry [0, 2)
      0  copy s2:int s0:int Int
@@ -325,7 +325,7 @@ fn a_resource_an_embedder_s_module_keeps_answers_its_own_operations() {
             "f"
         ),
         "\
-fn0 m.f(<host> ledger.Entry) -> Result
+fn @m.f(<host> ledger.Entry) -> Result
   frame 9: s0!:host s1!:int s2!:ref s3:int s4:unit s5:ref s6:int s7:unit s8:ref
   local b -> s0:<host> [0, 3)
   local e -> s1:ledger.Entry [0, 3)
@@ -356,7 +356,7 @@ fn a_host_type_is_initialized_with_labels_and_never_crosses_the_boundary() {
             "f"
         ),
         "\
-fn0 m.f() -> ledger.Entry
+fn @m.f() -> ledger.Entry
   frame 6: s0:int s1:ref s2:int s3:ref s4:int s5:ref
      0  int s2:int 1
      1  str s3:ref \"rent\"
@@ -389,7 +389,7 @@ fn a_host_field_declared_any_is_boxed_on_the_way_in() {
             "f"
         ),
         "\
-fn0 m.f() -> http.Route
+fn @m.f() -> http.Route
   frame 11: s0:int s1:ref s2:ref s3:int s4:ref s5:ref s6:int s7:ref s8:int s9:ref s10:ref
      0  int s3:int 0
      1  str s4:ref \"/health\"

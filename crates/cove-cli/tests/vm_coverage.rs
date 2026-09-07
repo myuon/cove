@@ -96,6 +96,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+use cove_ir::program::FunctionId;
 use cove_runtime::budget::{Budget, Cancellation, Limits};
 use cove_runtime::clock::{Clock, VirtualTime};
 use cove_runtime::database::Database;
@@ -386,6 +387,70 @@ fn the_corpus_says_what_the_linear_memory_backend_runs() {
          `KNOWN_DISAGREEMENTS` names; a program that started answering \
          something the oracle does not is registered by somebody who looked \
          at it, and one that stopped is a line to delete\n\n{text}"
+    );
+}
+
+/// Whether [`Function::qualified`](cove_ir::program::Function::qualified) is
+/// actually unique within one lowered [`Program`](cove_ir::Program), over
+/// every program the repository keeps.
+///
+/// Issue #275 makes a definition's header print `fn @{qualified}` instead of
+/// its position in `Program::functions`, on the strength of an example: a
+/// declared function is `m.f#0`, a nested closure `m.f#0#0`, a generic
+/// instantiation `std.result.mapError<Int, Error, m.E>`. Those look distinct,
+/// but "look distinct" is not something to hang an identity on — this checks
+/// it, over the corpus rather than over one hand-written case, because a
+/// collision two hand-written closures cannot produce is exactly the kind a
+/// real program's generics and nested lambdas might.
+///
+/// Not `#[ignore]`d, unlike the survey above: it only checks and lowers, and
+/// never runs a program, so it costs a small fraction of what executing the
+/// corpus — let alone executing it on two backends — costs. `discover` and
+/// `lower` are shared with the survey so this walks exactly the same corpus,
+/// benchmarks included, without paying for their turns.
+#[test]
+fn every_function_of_a_lowered_program_names_itself_uniquely() {
+    let mut checked_cases = 0usize;
+    let mut checked_functions = 0usize;
+    let cases = discover();
+    assert!(!cases.is_empty(), "the corpus is empty");
+
+    let mut indexes: BTreeMap<PathBuf, ModuleIndex> = BTreeMap::new();
+    for case in cases {
+        let index = indexes
+            .entry(case.root.clone())
+            .or_insert_with(|| ModuleIndex::of(&case.root));
+
+        let Ok(prepared) = Prepared::of(&case, index) else {
+            continue;
+        };
+
+        let program = match lower(&prepared.checked, &prepared.sources) {
+            Ok(program) => program,
+            Err(_) => continue,
+        };
+
+        let mut seen: BTreeMap<String, FunctionId> = BTreeMap::new();
+        for (at, function) in program.functions.iter().enumerate() {
+            let id = FunctionId(at as u32);
+            let qualified = function.qualified();
+            if let Some(other) = seen.insert(qualified.clone(), id) {
+                panic!(
+                    "`{}`: {other} and {id} both name themselves `{qualified}` — \
+                     `Function::qualified` is not the unique identity issue #275 \
+                     needs it to be",
+                    case.name
+                );
+            }
+            checked_functions += 1;
+        }
+        checked_cases += 1;
+    }
+
+    assert!(checked_cases > 0, "no case in the corpus lowered");
+    println!(
+        "{checked_functions} function(s) across {checked_cases} lowered program(s) each name \
+         themselves uniquely"
     );
 }
 

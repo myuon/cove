@@ -20,7 +20,7 @@ fn a_struct_literal_is_its_fields_written_where_the_value_is() {
             "origin"
         ),
         "\
-fn0 m.origin() -> m.Point
+fn @m.origin() -> m.Point
   frame 6: s0:int s1:int s2:int s3:int s4:int s5:int
      0  int s2:int 1
      1  int s3:int 2
@@ -43,7 +43,7 @@ fn a_two_word_struct_is_copied_by_one_copy() {
             "f"
         ),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 7: s0:int s1:int s2:int s3:int s4:int s5:int s6:int
   local a -> s3:m.Point [4, 8)
   local b -> s5:m.Point [5, 8)
@@ -71,7 +71,7 @@ fn a_nested_struct_is_copied_whole() {
             "f"
         ),
         "\
-fn0 m.f(m.Line) -> Int
+fn @m.f(m.Line) -> Int
   frame 10: s0!:int s1!:int s2!:int s3!:int s4:int s5:int s6:int s7:int s8:int s9:int
   local l -> s0:m.Line [0, 6)
   local m -> s5:m.Line [1, 5)
@@ -95,7 +95,7 @@ fn a_field_of_a_field_is_arithmetic_and_emits_nothing() {
             "f"
         ),
         "\
-fn0 m.f(m.Line) -> Int
+fn @m.f(m.Line) -> Int
   frame 5: s0!:int s1!:int s2!:int s3!:int s4:int
   local l -> s0:m.Line [0, 2)
      0  copy s4:int s3:int Int
@@ -117,7 +117,7 @@ fn a_struct_holding_a_vector_copies_the_words_and_shares_the_address() {
             "f"
         ),
         "\
-fn0 m.f(m.Wrapper) -> Bool
+fn @m.f(m.Wrapper) -> Bool
   frame 9: s0!:int s1!:int s2!:ref s3:bool s4:int s5:int s6:ref s7:int s8:bool
   local w -> s0:m.Wrapper [0, 6)
   local other -> s4:m.Wrapper [1, 5)
@@ -141,7 +141,7 @@ fn a_field_of_a_call_s_answer_is_copied_out_of_the_temporary() {
             "f"
         ),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 4: s0:int s1:int s2:int s3:int
      0  call s1:int m.mk () m.Point
      1  copy s3:int s2:int Int
@@ -161,7 +161,7 @@ fn a_struct_returned_by_value_is_the_answer_location_s_words() {
             "f"
         ),
         "\
-fn0 m.f() -> m.Point
+fn @m.f() -> m.Point
   frame 5: s0:int s1:int s2:int s3:int s4:int
      0  int s2:int 3
      1  call s3:int m.mk (s2:Int) m.Point

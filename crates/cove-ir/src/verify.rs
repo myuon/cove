@@ -994,11 +994,25 @@ impl Check<'_> {
         };
         if callee != *function {
             let name = described.name.clone();
+            // Symbolic, not `FunctionId`'s bare `Display` — the whole point
+            // issue #275 makes of this message, which is otherwise the last
+            // place in the crate a diagnostic still named a function by its
+            // position in `Program::functions`. The fallback to the raw id
+            // mirrors `print::name_of`'s for a `LayoutId`: this runs over a
+            // program the verifier has not yet vouched for, so a fault about
+            // a callee that is itself out of range should say so rather than
+            // panic indexing into the table it is complaining about.
+            let named = |id: FunctionId| match self.program.functions.get(id.index()) {
+                Some(f) => format!("@{}", f.qualified()),
+                None => id.to_string(),
+            };
             self.fault(
                 at,
                 format!(
-                    "stores {callee} into the callee field of a `{name}` closure, whose layout \
-                     names {function}"
+                    "stores {} into the callee field of a `{name}` closure, whose layout \
+                     names {}",
+                    named(callee),
+                    named(*function)
                 ),
             );
         }
@@ -1702,9 +1716,16 @@ mod tests {
     /// A closure's callee is carried twice — once in
     /// [`Shape::Closure::function`], the typed fact, and once in the word
     /// [`Inst::FuncRef`] writes into its environment's callee field — and
-    /// until [`Check::check_closure_callee`] nothing compared them. `f#0` is
+    /// until [`Check::check_closure_callee`] nothing compared them. `m.g` is
     /// what [`CLOSURE`]'s layout says the environment holds; the body writes
-    /// `fn0` into it instead.
+    /// `m.f` into it instead.
+    ///
+    /// [Issue #275](https://github.com/myuon/cove/issues/275) is why the
+    /// message names them `@m.f` and `@m.g` rather than `fn0` and `fn1`: a
+    /// program's second function is given a name of its own, `g`, distinct
+    /// from [`function`]'s hard-coded `f`, purely so this message has two
+    /// different symbols to tell apart rather than `m.f` disagreeing with
+    /// itself.
     #[test]
     fn a_closures_environment_naming_a_different_callee_than_its_layout_is_a_fault() {
         let f = function(
@@ -1729,10 +1750,12 @@ mod tests {
                 Inst::Return { src: 1 },
             ],
         );
+        let mut other = function(vec![Repr::Int], INT, vec![Inst::Return { src: 0 }]);
+        other.name = Arc::from("g");
         assert_eq!(
-            faults(&program(vec![f])),
+            faults(&program(vec![f, other])),
             vec![
-                "stores fn0 into the callee field of a `closure g` closure, whose layout names fn1"
+                "stores @m.f into the callee field of a `closure g` closure, whose layout names @m.g"
             ]
         );
     }

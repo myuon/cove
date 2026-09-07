@@ -13,7 +13,7 @@ fn a_call_names_the_arguments_and_the_destination_location() {
             "f"
         ),
         "\
-fn1 m.f() -> Int
+fn @m.f() -> Int
   frame 4: s0:int s1:int s2:int s3:int
      0  int s1:int 1
      1  int s2:int 2
@@ -32,7 +32,7 @@ fn recursion_is_an_ordinary_call() {
             "fib"
         ),
         "\
-fn0 m.fib(Int) -> Int
+fn @m.fib(Int) -> Int
   frame 7: s0!:int s1:int s2:int s3:bool s4:int s5:int s6:int
   local n -> s0:Int [0, 12)
      0  lt.int.imm s3:bool s0:int 2
@@ -62,7 +62,7 @@ fn multiword_parameters_occupy_the_frame_from_slot_zero_in_order() {
             "take"
         ),
         "\
-fn0 m.take(Int m.Point Int) -> Int
+fn @m.take(Int m.Point Int) -> Int
   frame 7: s0!:int s1!:int s2!:int s3!:int s4:int s5:int s6:int
   local a -> s0:Int [0, 5)
   local p -> s1:m.Point [0, 5)
@@ -84,7 +84,7 @@ fn a_call_passing_a_multiword_argument_names_its_base_slot() {
             "f"
         ),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 6: s0:int s1:int s2:int s3:int s4:int s5:int
      0  int s1:int 1
      1  int s2:int 2
@@ -106,7 +106,7 @@ fn a_var_parameter_is_a_slot_holding_an_address() {
     assert_eq!(
         listing("fn bump(var n: Int) { n = n + 1 }", "bump"),
         "\
-fn0 m.bump(<addr>) -> Unit
+fn @m.bump(<addr>) -> Unit
   frame 5: s0!:addr s1:unit s2:int s3:int s4:unit
   local n -> s0:<addr> [0, 6)
      0  load s2:int s0:addr Int
@@ -127,7 +127,7 @@ fn a_var_argument_is_the_address_of_the_caller_s_location() {
             "f"
         ),
         "\
-fn1 m.f() -> Int
+fn @m.f() -> Int
   frame 4: s0:int s1:int s2:addr s3:unit
   local total -> s1:Int [1, 5)
      0  int s1:int 0
@@ -155,7 +155,7 @@ fn a_field_of_a_var_parameter_is_that_address_plus_the_offset() {
             "shift"
         ),
         "\
-fn1 m.shift(<addr>) -> Unit
+fn @m.shift(<addr>) -> Unit
   frame 5: s0!:addr s1:unit s2:int s3:addr s4:unit
   local p -> s0:<addr> [0, 9)
      0  int s2:int 7
@@ -182,7 +182,7 @@ fn a_var_argument_naming_a_field_is_the_address_of_that_word() {
             "f"
         ),
         "\
-fn1 m.f() -> Int
+fn @m.f() -> Int
   frame 7: s0:int s1:int s2:int s3:int s4:int s5:addr s6:unit
   local p -> s3:m.Point [4, 8)
      0  int s1:int 1
@@ -208,7 +208,7 @@ fn a_labelled_argument_is_not_a_permutation() {
             "f"
         ),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 4: s0:int s1:int s2:int s3:int
      0  int s1:int 2
      1  int s2:int 3
@@ -237,7 +237,7 @@ fn a_variadic_parameter_collects_its_arguments_into_an_array() {
             "f"
         ),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 7: s0:int s1:int s2:int s3:int s4:ref s5:int s6:int
      0  int s1:int 1
      1  int s2:int 2
@@ -270,7 +270,7 @@ fn a_variadic_parameter_given_nothing_is_an_empty_array() {
             "f"
         ),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 3: s0:int s1:ref s2:int
      0  alloc s1:ref Array<array> x0
      1  call s2:int m.total (s1:Array) Int
@@ -298,7 +298,7 @@ fn a_spread_argument_is_counted_and_then_walked_into_the_run() {
             "f"
         ),
         "\
-fn0 m.f(Array) -> Int
+fn @m.f(Array) -> Int
   frame 12: s0!:ref s1:int s2:int s3:int s4:int s5:int s6:ref s7:int s8:int s9:int s10:bool s11:int
   local xs -> s0:Array [0, 25)
      0  int s2:int 0
@@ -363,7 +363,7 @@ fn a_default_reads_the_parameters_before_it() {
             "f"
         ),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 4: s0:int s1:int s2:int s3:int
   local n -> s1:Int [1, 2)
      0  int s1:int 3
@@ -393,7 +393,7 @@ fn a_default_does_not_see_what_the_caller_happens_to_have_bound() {
             "f"
         ),
         "\
-fn1 m.f() -> Int
+fn @m.f() -> Int
   frame 5: s0:int s1:ref s2:int s3:int s4:int
   local base -> s1:fn [3, 7)
   local n -> s2:Int [4, 5)
@@ -421,7 +421,7 @@ fn a_default_on_a_method_reads_the_receiver() {
             "f"
         ),
         "\
-fn0 m.f(m.P) -> Int
+fn @m.f(m.P) -> Int
   frame 3: s0!:int s1:int s2:int
   local p -> s0:m.P [0, 3)
   local self -> s0:m.P [0, 3)
@@ -448,7 +448,7 @@ fn a_trailing_lambda_is_the_call_s_last_argument() {
             "f"
         ),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 4: s0:int s1:int s2:ref s3:int
      0  int s1:int 1
      1  alloc s2:ref closure m.f#0<closure>
@@ -485,7 +485,7 @@ fn a_call_through_a_module_imported_whole_names_the_declaration_it_exports() {
             "f",
         ),
         "\
-fn0 app.f() -> Int
+fn @app.f() -> Int
   frame 3: s0:int s1:int s2:int
      0  int s1:int 21
      1  call s2:int greet.twice (s1:Int) Int
@@ -517,7 +517,7 @@ fn an_initializer_through_a_module_imported_whole_is_an_ordinary_one() {
             "f",
         ),
         "\
-fn0 app.f() -> shape.Point
+fn @app.f() -> shape.Point
   frame 6: s0:int s1:int s2:int s3:int s4:int s5:int
      0  int s2:int 1
      1  int s3:int 2

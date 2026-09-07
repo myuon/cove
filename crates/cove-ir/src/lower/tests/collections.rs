@@ -9,7 +9,7 @@ fn an_array_literal_is_one_object_and_one_store_per_element() {
     assert_eq!(
         listing("fn xs() -> Array<Int> { [1, 2, 3] }", "xs"),
         "\
-fn0 m.xs() -> Array
+fn @m.xs() -> Array
   frame 6: s0:ref s1:int s2:int s3:int s4:ref s5:int
      0  int s1:int 1
      1  int s2:int 2
@@ -37,7 +37,7 @@ fn an_array_of_multiword_elements_stores_at_the_layout_s_stride() {
             "xs"
         ),
         "\
-fn0 m.xs() -> Array
+fn @m.xs() -> Array
   frame 6: s0:ref s1:int s2:int s3:int s4:int s5:ref
      0  int s1:int 1
      1  int s2:int 2
@@ -61,7 +61,7 @@ fn a_range_is_three_inline_words() {
     assert_eq!(
         listing("fn r() -> Range { 0..<3 }", "r"),
         "\
-fn0 m.r() -> Range
+fn @m.r() -> Range
   frame 8: s0:int s1:int s2:bool s3:int s4:int s5:int s6:int s7:bool
      0  int s3:int 0
      1  int s4:int 3
@@ -85,7 +85,7 @@ fn a_for_over_an_exclusive_range_never_touches_the_bound() {
             "total"
         ),
         "\
-fn0 m.total(Int) -> Int
+fn @m.total(Int) -> Int
   frame 12: s0!:int s1:int s2:int s3:int s4:int s5:int s6:bool s7:int s8:bool s9:int s10:bool s11:int
   local n -> s0:Int [0, 24)
   local t -> s2:Int [1, 23)
@@ -129,7 +129,7 @@ fn a_for_over_an_inclusive_range_earns_one_more_turn_at_the_end() {
             "total"
         ),
         "\
-fn0 m.total(Int) -> Int
+fn @m.total(Int) -> Int
   frame 12: s0!:int s1:int s2:int s3:int s4:int s5:int s6:bool s7:int s8:bool s9:int s10:bool s11:int
   local n -> s0:Int [0, 24)
   local t -> s2:Int [1, 23)
@@ -173,7 +173,7 @@ fn a_for_over_an_array_walks_the_object_and_clears_the_element() {
             "count"
         ),
         "\
-fn0 m.count(Array) -> Int
+fn @m.count(Array) -> Int
   frame 11: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int s10:int
   local xs -> s0:Array [0, 18)
   local t -> s2:Int [1, 17)
@@ -211,7 +211,7 @@ fn a_for_over_a_vector_walks_a_snapshot() {
             "count"
         ),
         "\
-fn0 m.count(Vector) -> Int
+fn @m.count(Vector) -> Int
   frame 10: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int s9:int
   local v -> s0:Vector [0, 16)
   local t -> s2:Int [1, 15)
@@ -247,7 +247,7 @@ fn a_break_out_of_a_for_clears_the_element_it_was_holding() {
             "first"
         ),
         "\
-fn0 m.first(Array) -> Int
+fn @m.first(Array) -> Int
   frame 12: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:ref s10:unit s11:int
   local xs -> s0:Array [0, 27)
   local t -> s2:Int [1, 26)
@@ -297,7 +297,7 @@ fn a_break_out_of_a_for_over_scalars_clears_nothing() {
             "first"
         ),
         "\
-fn0 m.first(Array) -> Int
+fn @m.first(Array) -> Int
   frame 11: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int s9:unit s10:int
   local xs -> s0:Array [0, 22)
   local t -> s2:Int [1, 21)
@@ -336,7 +336,7 @@ fn a_vector_is_a_header_and_a_store() {
     assert_eq!(
         listing("fn v() -> Vector<Int> { Vector.of(1, 2) }", "v"),
         "\
-fn0 m.v() -> Vector
+fn @m.v() -> Vector
   frame 6: s0:ref s1:int s2:int s3:ref s4:int s5:ref
      0  int s1:int 1
      1  int s2:int 2
@@ -366,7 +366,7 @@ fn reading_a_vector_element_is_ordinary_instructions() {
             "head"
         ),
         "\
-fn0 m.head(Vector) -> Option
+fn @m.head(Vector) -> Option
   frame 10: s0!:ref s1:int s2:int s3:int s4:int s5:ref s6:int s7:int s8:int s9:bool
   local v -> s0:Vector [0, 14)
      0  int s3:int 0
@@ -402,7 +402,7 @@ fn two_inline_values_are_compared_where_they_sit() {
             "same"
         ),
         "\
-fn0 m.same(m.Point m.Point) -> Bool
+fn @m.same(m.Point m.Point) -> Bool
   frame 6: s0!:int s1!:int s2!:int s3!:int s4:bool s5:bool
   local a -> s0:m.Point [0, 3)
   local b -> s2:m.Point [0, 3)
@@ -423,7 +423,7 @@ fn two_arrays_compare_without_being_boxed() {
             "same"
         ),
         "\
-fn0 m.same(Array Array) -> Bool
+fn @m.same(Array Array) -> Bool
   frame 4: s0!:ref s1!:ref s2:bool s3:bool
   local a -> s0:Array [0, 3)
   local b -> s1:Array [0, 3)
@@ -444,7 +444,7 @@ fn is_compares_two_words_as_words() {
             "same"
         ),
         "\
-fn0 m.same(Vector Vector) -> Bool
+fn @m.same(Vector Vector) -> Bool
   frame 4: s0!:ref s1!:ref s2:bool s3:bool
   local a -> s0:Vector [0, 3)
   local b -> s1:Vector [0, 3)
@@ -469,7 +469,7 @@ fn a_set_literal_is_one_call_over_its_elements() {
     assert_eq!(
         listing("fn f() -> Set<Int> { Set.of(3, 1, 2) }", "f"),
         "\
-fn0 m.f() -> Set
+fn @m.f() -> Set
   frame 5: s0:ref s1:int s2:int s3:int s4:ref
      0  int s1:int 3
      1  int s2:int 1
@@ -496,7 +496,7 @@ fn a_map_literal_passes_its_entries_as_inline_pairs() {
             "f"
         ),
         "\
-fn0 m.f() -> Map
+fn @m.f() -> Map
   frame 5: s0:ref s1:ref s2:int s3:ref s4:int
      0  str s1:ref \"a\"
      1  int s2:int 1
@@ -521,7 +521,7 @@ fn a_set_reports_its_length_from_its_own_header() {
     assert_eq!(
         listing("fn f(s: Set<Int>) -> Int { s.length() }", "f"),
         "\
-fn0 m.f(Set) -> Int
+fn @m.f(Set) -> Int
   frame 3: s0!:ref s1:int s2:int
   local s -> s0:Set [0, 3)
      0  len s2:int s0:ref
@@ -540,7 +540,7 @@ fn an_immutable_update_is_the_machine_s_and_answers_a_new_set() {
     assert_eq!(
         listing("fn f(s: Set<Int>) -> Set<Int> { s.inserted(4) }", "f"),
         "\
-fn0 m.f(Set) -> Set
+fn @m.f(Set) -> Set
   frame 4: s0!:ref s1:ref s2:int s3:ref
   local s -> s0:Set [0, 4)
      0  int s2:int 4
@@ -564,7 +564,7 @@ fn a_map_lookup_answers_the_option_s_words_rather_than_an_object() {
             "f"
         ),
         "\
-fn0 m.f(Map) -> Option
+fn @m.f(Map) -> Option
   frame 6: s0!:ref s1:int s2:int s3:ref s4:int s5:int
   local m -> s0:Map [0, 4)
      0  str s3:ref \"a\"
@@ -586,7 +586,7 @@ fn a_map_answers_its_keys_as_an_array() {
             "f"
         ),
         "\
-fn0 m.f(Map) -> Array
+fn @m.f(Map) -> Array
   frame 3: s0!:ref s1:ref s2:ref
   local m -> s0:Map [0, 3)
      0  call-builtin s2:ref Map.keys (s0:Map) Array
@@ -612,7 +612,7 @@ fn a_for_over_a_set_walks_the_members_in_place() {
             "f"
         ),
         "\
-fn0 m.f(Set) -> Int
+fn @m.f(Set) -> Int
   frame 10: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int s9:int
   local s -> s0:Set [0, 16)
   local n -> s2:Int [1, 15)
@@ -657,7 +657,7 @@ fn a_for_over_a_map_binds_one_entry_at_the_layout_s_width() {
             "f"
         ),
         "\
-fn0 m.f(Map) -> Int
+fn @m.f(Map) -> Int
   frame 11: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int s10:int
   local m -> s0:Map [0, 17)
   local n -> s2:Int [1, 16)
@@ -734,7 +734,7 @@ fn an_array_literal_erases_each_element_the_written_type_erases() {
             "f"
         ),
         "\
-fn0 m.f(m.B) -> Int
+fn @m.f(m.B) -> Int
   frame 6: s0!:int s1:int s2:ref s3:ref s4:ref s5:int
   local b -> s0:m.B [0, 13)
      0  box s2:ref s0:int m.B

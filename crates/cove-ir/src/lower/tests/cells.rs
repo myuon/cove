@@ -15,7 +15,7 @@ fn a_cell_is_an_allocation_and_a_store() {
     assert_eq!(
         listing("fn make() -> Shared<Int> { Shared(1) }", "make"),
         "\
-fn0 m.make() -> Shared
+fn @m.make() -> Shared
   frame 3: s0:ref s1:int s2:ref
      0  int s1:int 1
      1  alloc s2:ref Shared<shared>
@@ -49,7 +49,7 @@ fn a_lock_is_acquire_call_release() {
             "bump"
         ),
         "\
-fn0 m.bump(Shared) -> Int
+fn @m.bump(Shared) -> Int
   frame 5: s0!:ref s1:int s2:ref s3:int s4:addr
   local cell -> s0:Shared [0, 11)
      0  alloc s2:ref closure m.bump#0<closure>
@@ -83,7 +83,7 @@ fn the_lock_closures_var_parameter_is_an_address() {
             "bump#0"
         ),
         "\
-fn20 m.bump#0(<addr>) -> Int
+fn @m.bump#0(<addr>) -> Int
   frame 4: s0!:addr s1:int s2:int s3:int
   local value -> s0:<addr> [0, 6)
      0  load s2:int s0:addr Int
@@ -113,7 +113,7 @@ fn a_closure_without_var_is_handed_a_copy() {
             "read"
         ),
         "\
-fn0 m.read(Shared) -> Int
+fn @m.read(Shared) -> Int
   frame 6: s0!:ref s1:int s2:ref s3:int s4:addr s5:int
   local cell -> s0:Shared [0, 12)
      0  alloc s2:ref closure m.read#0<closure>
@@ -148,7 +148,7 @@ fn a_cell_wrapping_a_struct_holds_its_fields_inline() {
             "count#0"
         ),
         "\
-fn20 m.count#0(<addr>) -> Int
+fn @m.count#0(<addr>) -> Int
   frame 5: s0!:addr s1:int s2:addr s3:int s4:int
   local value -> s0:<addr> [0, 12)
      0  addr-of-part s2:addr s0:addr +1

@@ -17,7 +17,7 @@ fn a_lambda_is_a_function_of_its_own_and_an_environment_naming_it() {
     assert_eq!(
         listing(source, "f"),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 4: s0:int s1:ref s2:int s3:int
   local g -> s1:fn [3, 6)
      0  alloc s1:ref closure m.f#0<closure>
@@ -34,7 +34,7 @@ fn0 m.f() -> Int
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn20 m.f#0(Int) -> Int
+fn @m.f#0(Int) -> Int
   frame 3: s0!:int s1:int s2:int
   local x -> s0:Int [0, 3)
      0  add.int.imm s2:int s0:int 1
@@ -45,33 +45,68 @@ fn20 m.f#0(Int) -> Int
 }
 
 /// [Issue #262](https://github.com/myuon/cove/issues/262)'s acceptance
-/// criterion, proved rather than merely fixed: a listing with a closure in it
-/// is byte-for-byte unchanged when an unrelated declaration is added ahead of
-/// it, though the addition renumbers the callee's `FunctionId` underneath.
+/// criterion, and [#275](https://github.com/myuon/cove/issues/275)'s: a
+/// listing with a closure in it is byte-for-byte unchanged when an unrelated
+/// declaration is added ahead of it, though the addition renumbers the
+/// callee's `FunctionId` underneath — and, since #275, renumbers the
+/// closure's own `FunctionId` too.
 ///
 /// `Plan::index` numbers a module's declarations in name order — `by_name`
-/// is a `BTreeMap` — so `aardvark` sorts ahead of `f` and is what actually
-/// renumbers it here; a name that sorted after `f` would prove nothing.
-/// Before [`crate::Inst::FuncRef`] the renumbering reached this text: the
-/// shifted id passed through an [`crate::Inst::Int`] and the `int sN:int
-/// <id>` line changed with it. Twelve standard-library functions moving
-/// earlier is exactly this, at the scale of a real PR: #259 changed 27
-/// golden lowerings for it.
+/// is a `BTreeMap` — so `aardvark` sorts ahead of `f` and `id` and is what
+/// actually renumbers them here; a name that sorted after would prove
+/// nothing.
+///
+/// Before [`crate::Inst::FuncRef`] the callee's renumbering reached this
+/// text: the shifted id passed through an [`crate::Inst::Int`] and the
+/// `int sN:int <id>` line changed with it. Before #275 the closure's *own*
+/// renumbering reached it too, through the header's `fn20`; that test could
+/// only assert the two listings differed **solely** in that one line, because
+/// the header carried a position by design. Now nothing does, so the three
+/// cases below assert the listings are identical, full stop — a declared
+/// function, a nested closure, and a generic instantiation, each read out of
+/// a package with an unrelated earlier declaration inserted ahead of it.
+/// Twelve standard-library functions moving earlier is exactly this, at the
+/// scale of a real PR: #259 changed 27 golden lowerings for it.
 #[test]
-fn a_lambda_s_environment_is_unmoved_by_an_unrelated_declaration_ahead_of_it() {
-    let with_lambda = "fn f() -> Int {\n  let g = fn(x: Int) { x + 1 }\n  g(1)\n}";
-    let before = listing_in(&[("m", with_lambda)], "m", "f");
+fn a_declared_functions_header_is_unmoved_by_an_unrelated_declaration_ahead_of_it() {
+    let source = "fn f() -> Int {\n  let g = fn(x: Int) { x + 1 }\n  g(1)\n}";
+    let before = listing_in(&[("m", source)], "m", "f");
 
-    let unrelated_ahead = format!("fn aardvark() -> Int {{ 42 }}\n{with_lambda}");
+    let unrelated_ahead = format!("fn aardvark() -> Int {{ 42 }}\n{source}");
     let after = listing_in(&[("m", &unrelated_ahead)], "m", "f");
 
-    // The unrelated declaration did renumber the callee: `f` itself moved
-    // from `fn0` to `fn1`. What did not move is every character after that
-    // line, which is the churn this issue is about.
-    assert_ne!(before, after);
-    let strip_own_id = |text: &str| text.split_once('\n').unwrap().1.to_string();
-    assert_eq!(strip_own_id(&before), strip_own_id(&after));
-    assert!(before.contains("     1  func-ref s2:int @m.f#0\n"));
+    assert_eq!(before, after);
+    assert!(before.starts_with("fn @m.f() -> Int\n"));
+}
+
+#[test]
+fn a_nested_closures_header_is_unmoved_by_an_unrelated_declaration_ahead_of_it() {
+    let source = "fn f() -> Int {\n  \
+                    let g = fn(x: Int) {\n    \
+                      let h = fn(y: Int) { x + y }\n    \
+                      h(1)\n  \
+                    }\n  \
+                    g(2)\n\
+                  }";
+    let before = listing_in(&[("m", source)], "m", "f#0#0");
+
+    let unrelated_ahead = format!("fn aardvark() -> Int {{ 42 }}\n{source}");
+    let after = listing_in(&[("m", &unrelated_ahead)], "m", "f#0#0");
+
+    assert_eq!(before, after);
+    assert!(before.starts_with("fn @m.f#0#0(Int) -> Int\n"));
+}
+
+#[test]
+fn a_generic_instantiations_header_is_unmoved_by_an_unrelated_declaration_ahead_of_it() {
+    let source = "fn id<T>(x: T) -> T { x }\nfn f() -> Int { id(1) }";
+    let before = listing_in(&[("m", source)], "m", "id<Int>");
+
+    let unrelated_ahead = format!("fn aardvark() -> Int {{ 42 }}\n{source}");
+    let after = listing_in(&[("m", &unrelated_ahead)], "m", "id<Int>");
+
+    assert_eq!(before, after);
+    assert!(before.starts_with("fn @m.id<Int>(Int) -> Int\n"));
 }
 
 /// A capture is stored **inline in the environment, at its own layout's
@@ -89,7 +124,7 @@ fn a_capture_is_inline_in_the_environment_at_its_own_width() {
     assert_eq!(
         listing(source, "f"),
         "\
-fn0 m.f(m.Point) -> Int
+fn @m.f(m.Point) -> Int
   frame 5: s0!:int s1!:int s2:int s3:ref s4:int
   local p -> s0:m.Point [0, 7)
   local g -> s3:fn [4, 6)
@@ -105,7 +140,7 @@ fn0 m.f(m.Point) -> Int
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn20 m.f#0() -> Int
+fn @m.f#0() -> Int
   frame 4: s0:int s1:int s2:int s3:int
   capture p -> s0:m.Point
   local p -> s0:m.Point [0, 3)
@@ -129,7 +164,7 @@ fn a_closure_that_captures_nothing_is_the_same_object_with_an_empty_list() {
     assert_eq!(
         listing(source, "f"),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 3: s0:int s1:ref s2:int
   local g -> s1:fn [3, 5)
      0  alloc s1:ref closure m.f#0<closure>
@@ -143,7 +178,7 @@ fn0 m.f() -> Int
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn20 m.f#0() -> Int
+fn @m.f#0() -> Int
   frame 2: s0:int s1:int
      0  int s1:int 1
      1  copy s0:int s1:int Int
@@ -168,7 +203,7 @@ fn a_declared_function_used_as_a_value_is_an_environment_naming_it() {
             "f"
         ),
         "\
-fn1 m.f() -> Int
+fn @m.f() -> Int
   frame 4: s0:int s1:ref s2:int s3:int
   local g -> s1:fn [3, 6)
      0  alloc s1:ref closure m.double<closure>
@@ -194,7 +229,7 @@ fn a_call_through_a_function_value_names_the_slot_holding_it() {
     assert_eq!(
         listing(source, "apply"),
         "\
-fn0 m.apply(fn Int) -> Int
+fn @m.apply(fn Int) -> Int
   frame 4: s0!:ref s1!:int s2:int s3:int
   local g -> s0:fn [0, 3)
   local n -> s1:Int [0, 3)
@@ -208,7 +243,7 @@ fn0 m.apply(fn Int) -> Int
     assert_eq!(
         listing(source, "f"),
         "\
-fn1 m.f() -> Int
+fn @m.f() -> Int
   frame 4: s0:int s1:ref s2:int s3:int
      0  alloc s1:ref closure m.f#0<closure>
      1  func-ref s2:int @m.f#0
@@ -236,7 +271,7 @@ fn a_lambda_inside_a_lambda_is_numbered_after_the_one_that_made_it() {
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn20 m.f#0() -> Int
+fn @m.f#0() -> Int
   frame 4: s0:int s1:int s2:ref s3:int
   capture n -> s0:Int
   local n -> s0:Int [0, 7)
@@ -253,7 +288,7 @@ fn20 m.f#0() -> Int
     assert_eq!(
         listing(source, "f#0#0"),
         "\
-fn21 m.f#0#0() -> Int
+fn @m.f#0#0() -> Int
   frame 3: s0:int s1:int s2:int
   capture n -> s0:Int
   local n -> s0:Int [0, 3)
@@ -280,7 +315,7 @@ fn a_capture_of_a_var_parameter_is_the_value_behind_the_address() {
             "f"
         ),
         "\
-fn0 m.f(<addr>) -> Int
+fn @m.f(<addr>) -> Int
   frame 5: s0!:addr s1:int s2:int s3:ref s4:int
   local n -> s0:<addr> [0, 8)
   local g -> s3:fn [5, 7)
@@ -300,7 +335,7 @@ fn0 m.f(<addr>) -> Int
             "f#0"
         ),
         "\
-fn20 m.f#0() -> Int
+fn @m.f#0() -> Int
   frame 3: s0:int s1:int s2:int
   capture n -> s0:Int
   local n -> s0:Int [0, 3)
@@ -328,7 +363,7 @@ fn a_local_fn_is_the_closure_the_body_wrote_and_a_binding_of_its_scope() {
     assert_eq!(
         listing(source, "f"),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 4: s0:int s1:ref s2:int s3:int
   local double -> s1:fn [3, 6)
      0  alloc s1:ref closure m.f#0<closure>
@@ -343,7 +378,7 @@ fn0 m.f() -> Int
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn20 m.f#0(Int) -> Int
+fn @m.f#0(Int) -> Int
   frame 3: s0!:int s1:int s2:int
   local n -> s0:Int [0, 3)
      0  mul.int.imm s2:int s0:int 2
@@ -362,7 +397,7 @@ fn a_local_fn_captures_the_bindings_around_it() {
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn20 m.f#0(Int) -> Int
+fn @m.f#0(Int) -> Int
   frame 4: s0!:int s1:int s2:int s3:int
   capture base -> s1:Int
   local base -> s1:Int [0, 3)

@@ -9,7 +9,7 @@ fn a_literal_is_one_instruction_and_one_object_for_the_run() {
     assert_eq!(
         listing("fn hello() -> String { \"hello\" }", "hello"),
         "\
-fn0 m.hello() -> String
+fn @m.hello() -> String
   frame 2: s0:ref s1:ref
      0  str s1:ref \"hello\"
      1  copy s0:ref s1:ref String
@@ -29,7 +29,7 @@ fn an_interpolation_is_one_builtin_over_the_pieces() {
             "greet"
         ),
         "\
-fn0 m.greet(String) -> String
+fn @m.greet(String) -> String
   frame 5: s0!:ref s1:ref s2:ref s3:ref s4:ref
   local name -> s0:String [0, 5)
      0  str s2:ref \"hi \"
@@ -57,7 +57,7 @@ fn an_inline_value_crosses_into_an_interpolation_where_it_sits() {
             "show"
         ),
         "\
-fn0 m.show(m.Point) -> String
+fn @m.show(m.Point) -> String
   frame 5: s0!:int s1!:int s2:ref s3:ref s4:ref
   local p -> s0:m.Point [0, 4)
      0  str s3:ref \"p=\"
@@ -73,7 +73,7 @@ fn two_strings_compare_by_their_bytes() {
     assert_eq!(
         listing("fn same(a: String, b: String) -> Bool { a == b }", "same"),
         "\
-fn0 m.same(String String) -> Bool
+fn @m.same(String String) -> Bool
   frame 4: s0!:ref s1!:ref s2:bool s3:bool
   local a -> s0:String [0, 3)
   local b -> s1:String [0, 3)
