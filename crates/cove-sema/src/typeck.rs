@@ -9304,7 +9304,12 @@ fn unchecked_host_type(shown: &str, span: Span) -> Diagnostic {
 /// `MapEntry` and `Error` are here for their *fields* rather than their
 /// methods: both are builtin structs that answer no methods at all, and what
 /// the table says about them is what they carry.
-fn builtin_schema_of(receiver: &Ty) -> Option<&'static BuiltinSchema> {
+///
+/// `pub(crate)` because `unique::creates` reads it too, to turn a method
+/// call's already-settled receiver type into the schema entry that answers
+/// whether the call is fresh — the same mapping this module uses to check
+/// the call in the first place, read back rather than re-derived.
+pub(crate) fn builtin_schema_of(receiver: &Ty) -> Option<&'static BuiltinSchema> {
     let name = match receiver {
         Ty::Unit => "Unit",
         Ty::Bool => "Bool",

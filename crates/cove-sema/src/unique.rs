@@ -329,7 +329,7 @@ pub fn check(program: &Program, facts: &Facts) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     for (body, scanned) in bodies.iter().zip(&scans) {
         for consumed in consumptions(scanned, &demands) {
-            prove(body, scanned, &demands, &consumed, &mut diagnostics);
+            prove(body, scanned, facts, &demands, &consumed, &mut diagnostics);
         }
     }
     diagnostics.sort_by_key(|diagnostic| {
@@ -377,6 +377,7 @@ fn consumptions(
 fn prove(
     body: &Body<'_>,
     scanned: &Scan<'_>,
+    facts: &Facts,
     demands: &BTreeMap<FnKey, BTreeSet<Vec<String>>>,
     consumed: &Consume,
     out: &mut Vec<Diagnostic>,
@@ -421,7 +422,7 @@ fn prove(
                 );
                 return;
             };
-            if !establishes(init, &consumed.place.fields) {
+            if !establishes(init, &consumed.place.fields, facts, body.file) {
                 refuse(
                     init.span,
                     format!(
@@ -565,38 +566,83 @@ fn prove(
 /// Whether `init` creates storage this body is the only holder of, reached
 /// through `fields`.
 ///
-/// With no fields, the initialiser has to be one of the three expressions
-/// that produce a vector nothing else names: `Vector.of(...)` allocates,
-/// `toVector()` copies an array's elements out, `snapshot()` copies a
-/// vector's. With fields, the initialiser has to be a literal this body
-/// wrote, so that the named field's own initialiser can be asked the same
-/// question.
-fn establishes(init: &Expr, fields: &[String]) -> bool {
+/// With no fields, the initialiser has to be a call [`creates`] recognises.
+/// With fields, the initialiser has to be a literal this body wrote, so that
+/// the named field's own initialiser can be asked the same question.
+fn establishes(init: &Expr, fields: &[String], facts: &Facts, file: FileId) -> bool {
     let Some((first, rest)) = fields.split_first() else {
-        return creates(init);
+        return creates(init, facts, file);
     };
     match &init.kind {
         ExprKind::Call { args, .. } => args
             .iter()
             .find(|arg| arg.label.as_ref().is_some_and(|label| label.node == *first))
-            .is_some_and(|arg| establishes(&arg.value, rest)),
+            .is_some_and(|arg| establishes(&arg.value, rest, facts, file)),
         _ => false,
     }
 }
 
 /// Whether this expression allocates a vector nothing else holds a handle to.
-fn creates(init: &Expr) -> bool {
+///
+/// # Freshness is a fact `cove-schema` states, not a name this pass matches
+///
+/// The answer used to be three method names matched against the source
+/// regardless of what they were called on — `of`, `toVector`, `snapshot` —
+/// which is exactly the coupling
+/// [issue #270](https://github.com/myuon/cove/issues/270) named: a fourth
+/// builtin that answers a fresh `Vector` needed a fourth name added here, and
+/// a call that merely *shared* one of these three names — a user's own
+/// `snapshot()` on an unrelated type, reached through a value of that type —
+/// would have been read as fresh too, because nothing here ever asked what
+/// `base` actually was.
+///
+/// Now the call has to *resolve* to a builtin entry `cove-schema` marks
+/// [`MethodSchema::fresh`](cove_schema::builtins::MethodSchema::fresh), and
+/// resolving it is what tells the two call shapes apart:
+///
+/// - `Vector.of(...)`: an associated function, named through the type
+///   itself. There is no value to type — [`Facts::ty`] answers `None` for
+///   `base` for exactly this reason (see the `facts` module) — so `base`
+///   is read as a builtin type's own name instead, the same name
+///   `cove_schema::is_builtin_type` uses to admit `Vector.of(...)` in the
+///   first place.
+/// - `array.toVector()`, `vector.snapshot()`: a method, named through a
+///   receiver whose type the checker already settled and recorded. That
+///   type is read off [`Facts::ty`] and turned into the builtin schema it
+///   names, so `array.snapshot()` and `vector.snapshot()` are answered from
+///   two different entries even though the source spells the call the same
+///   way.
+///
+/// A call that resolves to neither — a declared function, a method of a
+/// declared type, or a builtin entry the schema does not mark `fresh` —
+/// answers `false`. That includes a call to a Cove-written wrapper such as
+/// `std.vector.filter`, whose own `out.freeze()` this pass proves the
+/// ordinary way from the `Vector.of()` a few lines above it in the same
+/// body: a *caller* of `filter` never reaches this function at all, because
+/// `filter`'s result is not the direct initialiser of anything `creates`
+/// looks at. See `MethodSchema::fresh` for who may assert freshness and why
+/// a declared `fn` is not on that list.
+fn creates(init: &Expr, facts: &Facts, file: FileId) -> bool {
     let ExprKind::Call { callee, .. } = &init.kind else {
         return false;
     };
     let ExprKind::Field { base, name } = &callee.kind else {
         return false;
     };
-    match name.node.as_str() {
-        "of" => matches!(&base.kind, ExprKind::Ident(head) if head == "Vector"),
-        "toVector" | "snapshot" => true,
-        _ => false,
+    if let ExprKind::Ident(head) = &base.kind {
+        if facts.ty(file, base.id).is_none() {
+            if let Some(schema) = cove_schema::builtin(head) {
+                return schema
+                    .associated_function(&name.node)
+                    .is_some_and(|method| method.fresh);
+            }
+        }
     }
+    facts
+        .ty(file, base.id)
+        .and_then(crate::typeck::builtin_schema_of)
+        .and_then(|schema| schema.method(&name.node))
+        .is_some_and(|method| method.fresh)
 }
 
 // --- reading a body --------------------------------------------------------
@@ -1579,6 +1625,146 @@ fn build(early: Bool) -> Array<Int> {
   items.freeze()
 }
 ",
+        );
+    }
+
+    // -- issue #270: freshness is a schema fact, not a name this pass reads -
+
+    /// `Vector.snapshot()` is `cove-schema`'s third `fresh` entry, and the
+    /// one that needs a receiver's *settled type* rather than a bare `Ident`
+    /// to resolve: unlike `Vector.of(...)`, `items.snapshot()` is reached
+    /// through a value, and [`creates`] has to read that value's type off
+    /// [`Facts::ty`] and turn it into the right builtin schema before it can
+    /// ask whether `snapshot` is `fresh` there. Binding the result first,
+    /// rather than freezing it as a temporary the way
+    /// [`a_temporary_receiver_needs_no_proof`] does, is what exercises
+    /// [`establishes`] rather than only the direct case.
+    #[test]
+    fn a_vectors_own_snapshot_is_a_fresh_primitive_result() {
+        proves(
+            "\
+fn build(items: Vector<Int>) -> Array<Int> {
+  var copy = items.snapshot()
+  copy.freeze()
+}
+",
+        );
+    }
+
+    /// The regression this issue is named for: before, `creates()` matched
+    /// the method name `toVector` against *any* receiver, so a user's own
+    /// method of that name — on a type `cove-schema` says nothing about —
+    /// was read as fresh too. `Holder.toVector()` here hands back a field
+    /// it did not just allocate, and a caller that binds and freezes it has
+    /// exactly the alias the proof exists to catch: `holder` and `copy`
+    /// would share `holder.items`'s storage. A non-fresh result has to stay
+    /// refused now that the check is `cove-schema`-driven, the same as it
+    /// was refused by luck before — this program is why "by luck" was not
+    /// good enough.
+    #[test]
+    fn a_declared_methods_result_is_not_fresh_even_when_it_shares_a_builtins_name() {
+        let error = refuses(
+            "\
+struct Holder {
+  items: Vector<Int>
+}
+
+impl Holder {
+  fn toVector(self) -> Vector<Int> {
+    self.items
+  }
+}
+
+fn build(holder: Holder) -> Array<Int> {
+  var copy = holder.toVector()
+  copy.freeze()
+}
+",
+        );
+        assert_eq!(error.code, NOT_UNIQUE);
+        assert_eq!(
+            error.message,
+            "`freeze()` cannot prove that `copy` holds the only handle to its storage"
+        );
+    }
+
+    /// The wrapper case the issue asks to think hardest about, in the shape
+    /// `std.vector.filter` and `std.array.filter` are actually written:
+    /// `var out = Vector.of(); ...; out.freeze()`. That `freeze()` is
+    /// proved the ordinary local way, from the `Vector.of()` a few lines
+    /// above it in the very same body — nothing here has to know `make` is
+    /// a "wrapper" for its own proof to go through.
+    ///
+    /// What does not follow is that `make`'s *result* is fresh to whoever
+    /// calls it. `establishes()` only ever asks [`creates`] about a call's
+    /// own callee, and a call to `make` names a declared function, not a
+    /// builtin schema entry — the same refusal
+    /// [`a_binding_this_body_did_not_create_is_refused`] already pins for a
+    /// single-expression wrapper. This test is the multi-statement shape a
+    /// real one is written in, proved and refused in the same place so the
+    /// two facts read together: a wrapper's own `freeze()` inside it is
+    /// unaffected by this pass, and a wrapper's `return` still carries
+    /// nothing past its own body.
+    #[test]
+    fn a_cove_wrappers_return_is_not_fresh_for_its_caller() {
+        proves(
+            "\
+fn make() -> Array<Int> {
+  var out = Vector.of(1, 2)
+  out.freeze()
+}
+",
+        );
+        let error = refuses(
+            "\
+fn make() -> Vector<Int> {
+  Vector.of(1, 2)
+}
+
+fn build() -> Array<Int> {
+  var log = make()
+  log.freeze()
+}
+",
+        );
+        assert_eq!(error.code, NOT_UNIQUE);
+        assert_eq!(
+            error.message,
+            "`freeze()` cannot prove that `log` holds the only handle to its storage"
+        );
+        assert_eq!(
+            error.labels[0].message,
+            "`log` is initialised from a value this function did not create, so its storage \
+             may already have another handle"
+        );
+    }
+
+    /// The same wrapper, renamed. `creates()` never reads a call's callee
+    /// name at all once the callee is not a builtin's own `Field` — it asks
+    /// whether the call *resolves* to a schema entry, and a declared
+    /// function does not, whatever it is spelled. Naming it `toVector` here
+    /// — a name `cove-schema` itself marks `fresh` on a different type —
+    /// is deliberate: if this pass still matched by name anywhere in this
+    /// path, this is the program that would prove when it must not.
+    #[test]
+    fn renaming_the_wrapper_changes_nothing() {
+        let error = refuses(
+            "\
+fn toVector() -> Vector<Int> {
+  Vector.of(1, 2)
+}
+
+fn build() -> Array<Int> {
+  var log = toVector()
+  log.freeze()
+}
+",
+        );
+        assert_eq!(error.code, NOT_UNIQUE);
+        assert_eq!(
+            error.labels[0].message,
+            "`log` is initialised from a value this function did not create, so its storage \
+             may already have another handle"
         );
     }
 }
