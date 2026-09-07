@@ -887,10 +887,17 @@ pub(super) fn dispatch<'s, 'a>(
             // discriminant in a field, so nothing is stored and nothing is
             // asked.
             ALLOC_FIXED | ALLOC_IMM | ALLOC_SLOT => {
+                // `Len::Slot`'s word is read as `i64` and handed to
+                // `Machine::allocate` whole, not narrowed here: a negative
+                // count or one past what a `u32` header field can hold is
+                // that call's to reject, the same way it rejects
+                // `ALLOC_IMM`'s `Half::Count` — the other half `verify`
+                // does not range-check, for want of a table to check it
+                // against.
                 let len = match held.opcode() {
                     ALLOC_FIXED => 0,
-                    ALLOC_IMM => held.hi(),
-                    _ => machine.mem.slot(base, b!()) as u32,
+                    ALLOC_IMM => held.hi() as i64,
+                    _ => machine.mem.slot(base, b!()) as i64,
                 };
                 machine.sync(pc - 1);
                 match machine.allocate(LayoutId(held.lo()), len) {
@@ -1029,7 +1036,7 @@ pub(super) fn dispatch<'s, 'a>(
                 let layout = LayoutId(held.lo());
                 let width = machine.width(layout);
                 machine.sync(pc - 1);
-                let boxed = match machine.allocate(machine.boxed_layout(), width) {
+                let boxed = match machine.allocate(machine.boxed_layout(), width as i64) {
                     Ok(addr) => addr,
                     Err(error) => fail!(error),
                 };

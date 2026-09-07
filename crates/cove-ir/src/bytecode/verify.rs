@@ -30,7 +30,7 @@
 //! own encoder is not a verifier. Nothing in this module indexes with a value
 //! it has not bounded, and nothing panics on any sixteen bytes at all.
 
-use crate::inst::Inst;
+use crate::inst::{Inst, Len};
 use crate::layout::LayoutId;
 use crate::program::{Function, FunctionId, Program};
 use crate::repr::Repr;
@@ -174,8 +174,12 @@ impl Check<'_> {
     /// leaves for a number is a number the field can hold.
     ///
     /// A `Count` and an `Offset` are 32 bits in a 32-bit half, so their range
-    /// is the field's own and there is nothing to check; they are named here
-    /// so that the table is read exhaustively rather than by omission.
+    /// as a *field* is the field's own and there is nothing to check here;
+    /// they are named here so that the table is read exhaustively rather than
+    /// by omission. `Half::Count` is not therefore unchecked everywhere:
+    /// `Op::AllocImm`'s is checked against the layout the same instruction
+    /// names, in [`Check::meaning`], because that is a fact about what the
+    /// two fields mean *together* rather than about either field's range.
     fn payload(&mut self, at: Option<usize>, op: Op, bytes: EncodedInst) {
         let Payload::Halves(lo, hi) = op.fields().payload else {
             return;
@@ -295,6 +299,34 @@ impl Check<'_> {
                     self.fits(at, dst, result, "the answer of a builtin");
                 }
                 self.args_fit(at, args);
+            }
+            // `Len::Count` is the one `Len` form this check can settle ahead
+            // of time: both halves of the payload are right here, so the
+            // layout `Op::AllocImm` names and the count it carries are known
+            // without running anything. `Len::Slot` is not — its count is a
+            // value the running program computes — so that is a run-time
+            // question `Machine::allocate` answers the same way this does:
+            // checked, and never a wraparound.
+            Inst::Alloc {
+                layout,
+                len: Len::Count(count),
+                ..
+            } => {
+                let Some(described) = self.program.layouts.get(layout.index()) else {
+                    return;
+                };
+                if described
+                    .try_payload_words(count, &self.program.layouts)
+                    .is_none()
+                {
+                    self.fault(
+                        at,
+                        format!(
+                            "allocates {count} of `{}`, whose payload size overflows",
+                            described.name
+                        ),
+                    );
+                }
             }
             _ => {}
         }
@@ -735,6 +767,52 @@ mod tests {
             layout: LayoutId(40),
         })];
         assert_eq!(faults(&held, &code), ["names layout 40, and there are 4"]);
+    }
+
+    /// Issue #269: an `alloc.imm` carries its count in the payload's own
+    /// bytes, so a hand-built one — not something `crate::lower` would ever
+    /// emit, which is the point — can say anything a `u32` can say. This one
+    /// says a count whose product with `Array`'s one-word stride does not fit
+    /// `u32`, and the check this test is for is what stands between that and
+    /// `Machine::allocate` under-allocating the object by exactly the amount
+    /// the multiply wrapped by.
+    #[test]
+    fn an_alloc_imm_whose_count_times_stride_overflows_is_refused() {
+        let layouts = vec![
+            // Two words wide, so `u32::MAX` elements — which alone still
+            // fits `u32` — times this stride does not.
+            Layout::inline(
+                "Point",
+                Shape::Struct {
+                    fields: Vec::new(),
+                    opaque: false,
+                },
+                vec![Repr::Int, Repr::Int],
+            ),
+            Layout::object(
+                "Array",
+                Shape::Elements {
+                    elem: LayoutId(0),
+                    growable: false,
+                },
+            ),
+        ];
+        let held = Program {
+            functions: vec![function(vec![Inst::Return { src: 0 }])],
+            layouts,
+            str_layout: LayoutId(0),
+            boxed_layout: LayoutId(0),
+            ..Program::default()
+        };
+        let code = [at(Inst::Alloc {
+            dst: 2,
+            layout: LayoutId(1),
+            len: Len::Count(u32::MAX),
+        })];
+        assert_eq!(
+            faults(&held, &code),
+            ["allocates 4294967295 of `Array`, whose payload size overflows"]
+        );
     }
 
     /// A call's arity is the callee's, not the call site's.
