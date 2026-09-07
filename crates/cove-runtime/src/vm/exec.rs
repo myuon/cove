@@ -5232,6 +5232,22 @@ pub(crate) mod tests {
             b"kept forever",
             "a collection that roots nothing still leaves the literal untouched"
         );
+        // Surviving and being counted as surviving are two claims, and the
+        // second is the one a floor can quietly lose: the sweep starts above
+        // the literal, so nothing marks it and nothing adds it up unless the
+        // static region is counted whole. `freed + live` is what says how
+        // much was occupied when the collection began.
+        let words = 1 + machine
+            .program
+            .layout(machine.program.str_layout)
+            .try_payload_words(b"kept forever".len() as u32, &machine.program.layouts)
+            .expect("a twelve-byte string has a payload");
+        assert_eq!(
+            machine.collected().live_words,
+            u64::from(words),
+            "the literal's header and payload are live words, unwalked or not"
+        );
+        assert_eq!(machine.collected().freed_words, 0);
     }
 
     /// A heap object holding a reference to a literal survives a collection

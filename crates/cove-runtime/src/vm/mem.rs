@@ -285,7 +285,10 @@ pub(crate) struct Collected {
     /// Words that held an object at the start of this collection and are free
     /// after it, headers included.
     pub(crate) freed_words: u64,
-    /// Words held by objects that survived, headers included.
+    /// Words held by objects that survived, headers included. The static
+    /// region below [`Space::static_end`] is counted whole: those objects
+    /// survive by construction rather than by being marked, and a survivor a
+    /// sweep declines to walk is still a survivor.
     pub(crate) live_words: u64,
     /// How many collections this memory has run, this one counted.
     pub(crate) collections: u64,
@@ -1108,12 +1111,18 @@ impl Space {
     fn sweep(&self, alloc: &mut Alloc, layouts: &[Layout]) -> (u64, u64) {
         alloc.free.clear();
         let mut freed = 0;
-        let mut live = 0;
         let mut run: Option<u64> = None;
         // The floor, not `STACK_WORDS`: nothing below it is visited, so
         // nothing below it can be freed, coalesced, or relabelled. See
         // `Space::static_end`.
-        let mut addr = self.static_end.load(Ordering::Relaxed);
+        let static_end = self.static_end.load(Ordering::Relaxed);
+        // Everything below the floor survived, by construction rather than by
+        // being marked, and `live` counts what survived. Not walking the
+        // static region is what makes it a floor; leaving it out of the count
+        // would make `freed + live` stop meaning what was occupied when the
+        // collection began, which is the relation `HeapSummary` reports.
+        let mut live = static_end - STACK_WORDS;
+        let mut addr = static_end;
         let end = STACK_WORDS + alloc.bump;
         while addr < end {
             let words = self.object_words(layouts, addr);
