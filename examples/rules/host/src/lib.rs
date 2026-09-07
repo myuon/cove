@@ -774,11 +774,8 @@ impl RulePackage {
         // means it, and not `load`, is responsible for attaching the
         // standard library `cove_schema::builtins::STANDARD_LIBRARY`'s
         // methods resolve into.
-        for (name, module) in
-            cove_sema::stdlib::attach(&mut sources).map_err(|items| report(&sources, &items))?
-        {
-            modules.insert(name, module);
-        }
+        cove_sema::stdlib::install(&mut sources, &mut modules)
+            .map_err(|items| report(&sources, &items))?;
 
         let package = Package {
             root: root.to_path_buf(),

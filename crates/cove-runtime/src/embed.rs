@@ -405,9 +405,7 @@ impl Embedded {
         // moved into the standard library has to find that body wherever a
         // `Package` is assembled, including one rebuilt from a binary's own
         // embedded sources.
-        for (name, module) in cove_sema::stdlib::attach(sources)? {
-            modules.insert(name, module);
-        }
+        cove_sema::stdlib::install(sources, &mut modules)?;
 
         let mut runs = BTreeMap::new();
         runs.insert(

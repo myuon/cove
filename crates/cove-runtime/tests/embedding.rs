@@ -8,6 +8,20 @@
 //! [`HostRegistry`], [`Grants`], [`Budget`], [`Limits`], and [`Runtime`],
 //! plus [`cove_runtime::interp::Interpreter`].
 //!
+//! One thing a host supplies that is not a value is the standard library.
+//! Some builtin methods have Cove bodies rather than Rust ones —
+//! `cove_schema::builtins::STANDARD_LIBRARY` says which — so a package has
+//! to carry the modules they live in before it can be checked.
+//! `cove_sema::package::load` attaches them for a package read off disk; a
+//! host that composes its own, as this one does and as any host with
+//! embedded or generated sources must, calls `cove_sema::stdlib::install`
+//! itself. It is one line, it is below, and `Compiler::compile` refuses a
+//! package without it rather than producing one that cannot lower.
+//!
+//! That is deliberately not done inside `compile`: what `compile` is handed
+//! should be a package that is already whole, so that what checks is what
+//! the host assembled.
+//!
 //! One thing a host supplies that is not a limit is the stack. The runtime
 //! sizes every thread it creates for Cove, because its call depth limit is a
 //! promise about the native stack and a promise like that needs a known
@@ -148,9 +162,11 @@ fn package_of(text: &str) -> (SourceMap, Package) {
             units: vec![Unit { file, path, ast }],
         },
     );
-    for (name, module) in cove_sema::stdlib::attach(&mut sources).expect("stdlib parses") {
-        modules.insert(name, module);
-    }
+    // The one step a host that composes its own package owes: the standard
+    // library the builtins `cove_schema::builtins::STANDARD_LIBRARY` names
+    // resolve into. `cove_sema::package::load` does this for a package read
+    // off disk; this one is held in memory, so it does it here.
+    cove_sema::stdlib::install(&mut sources, &mut modules).expect("the standard library parses");
     (
         sources,
         Package {
