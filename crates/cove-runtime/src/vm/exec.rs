@@ -1221,18 +1221,39 @@ impl<'a> Machine<'a> {
     }
 
     /// Allocates, collecting once if the first attempt does not fit.
-    fn allocate(&mut self, layout: LayoutId, len: u32) -> Result<u64, RuntimeError> {
+    ///
+    /// `len` is `i64` rather than `u32` because this is the one place every
+    /// `Inst::Alloc` operand converges on, and one of its three `Len` forms —
+    /// `Len::Slot` — is a slot the running program computed, not a count this
+    /// compiler chose. `cove_ir::bytecode::verify`'s own module doc says why
+    /// that boundary cannot be trusted ahead of time: *"this must be safe
+    /// against arbitrary bytes, because a verifier that is only safe against
+    /// its own encoder is not a verifier"* — and `Len::Count`'s encoded form,
+    /// `Half::Count`, is one of the two halves that same verifier explicitly
+    /// does not range-check, because there is no table for a raw count to be
+    /// an index into. So every caller here, trusted or not, is checked the
+    /// same way: a negative `len`, a `len` past what the header's length
+    /// field can hold, and a `count * stride` that would not fit `u32` are
+    /// all rejected before anything is allocated.
+    ///
+    /// They are rejected through the same error an exhausted heap already
+    /// raises below rather than a new one of their own, because from the
+    /// machine's point of view a request nothing could ever satisfy is not a
+    /// different failure than one this run's budget happens not to satisfy
+    /// today.
+    fn allocate(&mut self, layout: LayoutId, len: i64) -> Result<u64, RuntimeError> {
+        let exhausted = || RuntimeError::new("this run has no memory left");
+        let len = u32::try_from(len).map_err(|_| exhausted())?;
         let words = self
             .program
             .layout(layout)
-            .payload_words(len, &self.program.layouts);
+            .try_payload_words(len, &self.program.layouts)
+            .ok_or_else(exhausted)?;
         if let Some(addr) = self.mem.alloc(layout, len, words) {
             return Ok(addr);
         }
         self.collect();
-        self.mem
-            .alloc(layout, len, words)
-            .ok_or_else(|| RuntimeError::new("this run has no memory left"))
+        self.mem.alloc(layout, len, words).ok_or_else(exhausted)
     }
 
     /// Stops the world and reclaims what nothing this run's tasks hold
@@ -1581,7 +1602,7 @@ impl<'a> Machine<'a> {
             return Ok(self.interned[text.index()]);
         }
         let bytes = self.program.string(text).clone();
-        let addr = self.allocate(self.program.str_layout, bytes.len() as u32)?;
+        let addr = self.allocate(self.program.str_layout, bytes.len() as i64)?;
         self.write_bytes(addr, bytes.as_bytes());
         self.interned[text.index()] = addr;
         Ok(addr)
@@ -1731,7 +1752,7 @@ impl<'a> Machine<'a> {
     /// string that arrived from outside has no such name and retaining every
     /// one a host ever answered would be a leak with a table in front of it.
     pub(crate) fn new_string(&mut self, text: &str) -> Result<u64, RuntimeError> {
-        let addr = self.allocate(self.program.str_layout, text.len() as u32)?;
+        let addr = self.allocate(self.program.str_layout, text.len() as i64)?;
         self.write_bytes(addr, text.as_bytes());
         Ok(addr)
     }
@@ -1995,7 +2016,7 @@ impl<'a> Machine<'a> {
         // here finds it — which is the one thing this allocation could
         // otherwise have taken away.
         let width = self.width(answer);
-        let home = self.allocate(self.boxed_layout(), width)?;
+        let home = self.allocate(self.boxed_layout(), width as i64)?;
         self.mem.set_payload(home, 0, answer.0 as u64);
 
         let id = match self.runtime {
@@ -2091,7 +2112,7 @@ impl<'a> Machine<'a> {
     ) -> Result<u64, RuntimeError> {
         // The same object a spawned task's answer goes into, so that
         // `Machine::settle` reads one shape rather than two.
-        let home = self.allocate(self.boxed_layout(), words.len() as u32)?;
+        let home = self.allocate(self.boxed_layout(), words.len() as i64)?;
         self.mem.set_payload(home, 0, answer.0 as u64);
         for (at, word) in words.iter().enumerate() {
             self.mem.set_payload(home, 1 + at as u32, *word);
@@ -2660,7 +2681,7 @@ impl<'a> Machine<'a> {
     /// *through* once [`Machine::push_temp`] has made it safe to collect
     /// *around*.
     pub(crate) fn new_object(&mut self, layout: LayoutId, len: u32) -> Result<u64, RuntimeError> {
-        self.allocate(layout, len)
+        self.allocate(layout, len as i64)
     }
 }
 
@@ -3992,6 +4013,126 @@ pub(crate) mod tests {
             dropped.collected().collections > 0,
             "the second cell only fits after the first is reclaimed"
         );
+    }
+
+    /// A one-parameter function that allocates `layout` with `Len::Slot(0)`
+    /// and returns it: the shape issue #269 is about, where the count is a
+    /// value the *running* program computed rather than one this compiler
+    /// chose, so the parameter is a slot the caller controls entirely, and
+    /// `Machine::allocate` is the one place left to check it.
+    ///
+    /// `build` and `int` are the caller's: a `LayoutId` only means anything
+    /// against the layout table it came from, so `layout` and the scalar the
+    /// parameter is declared with have to be pushed into the same `Build`
+    /// this finishes.
+    fn alloc_of_slot_length(
+        mut build: Build,
+        int: LayoutId,
+        layout: LayoutId,
+    ) -> (Program, FunctionId) {
+        let f = build.function(
+            "alloc_len",
+            &[int],
+            &[Repr::Int, Repr::Ref],
+            layout,
+            vec![
+                Inst::Alloc {
+                    dst: 1,
+                    layout,
+                    len: Len::Slot(0),
+                },
+                Inst::Return { src: 1 },
+            ],
+        );
+        (build.done(), f)
+    }
+
+    /// A negative count is not a large `u32`: `Machine::allocate` reads the
+    /// slot's bits as the `i64` they are before anything narrows them, so a
+    /// negative one is caught rather than turned into an allocation of
+    /// billions of elements.
+    #[test]
+    fn a_negative_length_is_rejected_before_it_narrows() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let cell = build.layout(
+            "Cell",
+            Shape::Elements {
+                elem: int,
+                growable: false,
+            },
+        );
+        let (program, f) = alloc_of_slot_length(build, int, cell);
+        let mut machine = Machine::new(&program, 1 << 16);
+        let error = machine.run(f, &[(-1i64) as u64], &budget()).unwrap_err();
+        assert_eq!(error.message, "this run has no memory left");
+    }
+
+    /// A count past `u32::MAX` is not representable in the header's own
+    /// length field, whatever the element width is.
+    #[test]
+    fn a_length_past_u32_max_is_rejected() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let cell = build.layout(
+            "Cell",
+            Shape::Elements {
+                elem: int,
+                growable: false,
+            },
+        );
+        let (program, f) = alloc_of_slot_length(build, int, cell);
+        let mut machine = Machine::new(&program, 1 << 16);
+        let error = machine
+            .run(f, &[u64::from(u32::MAX) + 1], &budget())
+            .unwrap_err();
+        assert_eq!(error.message, "this run has no memory left");
+    }
+
+    /// A count that fits `u32` on its own can still make `count * stride`
+    /// overflow it: `u32::MAX` elements of a two-word `Point` is the case
+    /// [`cove_ir::Layout::try_payload_words`] exists for, checked in `u64`
+    /// rather than wrapped in `u32`.
+    #[test]
+    fn a_count_times_stride_overflow_is_rejected() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let point = build.structure("Point", &[("x", int), ("y", int)]);
+        let array = build.layout(
+            "Array",
+            Shape::Elements {
+                elem: point,
+                growable: false,
+            },
+        );
+        let (program, f) = alloc_of_slot_length(build, int, array);
+        let mut machine = Machine::new(&program, 1 << 16);
+        let error = machine
+            .run(f, &[u64::from(u32::MAX)], &budget())
+            .unwrap_err();
+        assert_eq!(error.message, "this run has no memory left");
+    }
+
+    /// A count that is entirely in range, and whose payload size does not
+    /// overflow anything, is still refused once it is larger than this run's
+    /// own heap budget — the same "this run has no memory left" a
+    /// `Len::Count` allocation raises, reached this time through a
+    /// `Len::Slot` the running program computed.
+    #[test]
+    fn a_length_beyond_the_heap_budget_is_rejected() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let cell = build.layout(
+            "Cell",
+            Shape::Elements {
+                elem: int,
+                growable: false,
+            },
+        );
+        let (program, f) = alloc_of_slot_length(build, int, cell);
+        let mut machine = Machine::new(&program, 64);
+        let error = machine.run(f, &[1_000_000], &budget()).unwrap_err();
+        assert_eq!(error.message, "this run has no memory left");
     }
 
     /// A frame's map is a function of its `Repr`s, and a multiword value

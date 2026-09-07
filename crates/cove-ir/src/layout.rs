@@ -358,6 +358,62 @@ impl Layout {
         }
     }
 
+    /// The same computation, checked against a `len` this compiler did not
+    /// choose.
+    ///
+    /// [`Layout::payload_words`] does the multiplication in `u32`, which is
+    /// exactly right for the `len` every internal caller passes it — a
+    /// header's own length field, or a count `crate::lower` computed and
+    /// which [`mod@crate::verify`] has already agreed is small enough. This
+    /// is for the one caller that cannot make that assumption:
+    /// `cove_runtime`'s `Machine::allocate` takes a `len` an `Inst::Alloc`
+    /// operand supplies, and one of its three `Len` forms is a slot the
+    /// running program computed at run time. A `len` that large is rare, but
+    /// `u32 * u32` wraps silently rather than answering wrong loudly, and a
+    /// wrapped payload size is an under-allocation followed by writes sized
+    /// by the caller's original, larger `len` — so this does the same match
+    /// in `u64`, wide enough that `len` and a stride each at most `u32::MAX`
+    /// cannot overflow the multiply, and answers `None` rather than a
+    /// truncated `u32` when the true result does not fit one.
+    ///
+    /// Kept beside [`Layout::payload_words`] rather than folded into it: the
+    /// two are the same rule at two widths on purpose, not a second, weaker
+    /// copy of the first. Widening the arithmetic every internal caller
+    /// already trusts to be in range would pay a `u64` multiply and a range
+    /// check on the collector's sweep of every live object for a case that
+    /// caller cannot hit, on the one path this workspace measures for
+    /// allocation cost.
+    pub fn try_payload_words(&self, len: u32, layouts: &[Layout]) -> Option<u32> {
+        if let Some(fixed) = self.fixed_payload_words(layouts) {
+            return Some(fixed);
+        }
+        // `checked_mul`/`checked_add` throughout rather than the plain `*`
+        // and `+` a proof that `len` and one stride each at most `u32::MAX`
+        // cannot overflow `u64` would justify: `Entries`' stride is a *sum*
+        // of two widths first, and nothing here bounds a layout's width
+        // short of `u32::MAX` the way it bounds `len`. Provable headroom for
+        // one shape is not a reason to assume it for another.
+        let words: Option<u64> = match &self.shape {
+            Shape::Free => Some(u64::from(len)),
+            Shape::Str => Some(u64::from(len).div_ceil(8)),
+            Shape::Elements { elem, .. } | Shape::Members { elem } => {
+                u64::from(len).checked_mul(u64::from(layouts[elem.index()].width()))
+            }
+            Shape::Entries { key, value } => {
+                let stride = u64::from(layouts[key.index()].width())
+                    .checked_add(u64::from(layouts[value.index()].width()))?;
+                u64::from(len).checked_mul(stride)
+            }
+            // One word of `LayoutId` and then whatever it named, whose width
+            // this layout cannot know: the header's `len` carries it.
+            Shape::Boxed => Some(1 + u64::from(len)),
+            // Every shape whose payload the header does not decide answered
+            // above.
+            _ => Some(u64::from(self.width())),
+        };
+        u32::try_from(words?).ok()
+    }
+
     /// The same, where the answer is a fact about the layout alone.
     ///
     /// `None` for a shape whose payload the header's `len` decides: a
@@ -737,5 +793,92 @@ mod tests {
         let array = &layouts[layouts.len() - 1];
         assert_eq!(array.payload_words(5, &layouts), 10);
         assert!(!array.may_hold_refs(&layouts));
+    }
+
+    /// [`Layout::try_payload_words`] is the widened arithmetic
+    /// `Machine::allocate` checks an instruction operand against; it must
+    /// answer exactly what [`Layout::payload_words`] answers for every `len`
+    /// that fits, or the two have drifted apart.
+    #[test]
+    fn try_payload_words_agrees_with_payload_words_when_it_fits() {
+        let mut layouts = table();
+        let (fields, words) =
+            struct_layout(&[(Arc::from("x"), INT), (Arc::from("y"), INT)], &layouts);
+        layouts.push(Layout::inline(
+            "Point",
+            Shape::Struct {
+                fields,
+                opaque: false,
+            },
+            words,
+        ));
+        let point = LayoutId(layouts.len() as u32 - 1);
+        layouts.push(Layout::object(
+            "Array",
+            Shape::Elements {
+                elem: point,
+                growable: false,
+            },
+        ));
+        let array = layouts.last().unwrap();
+        for len in [0, 1, 5, 1000] {
+            assert_eq!(
+                array.try_payload_words(len, &layouts),
+                Some(array.payload_words(len, &layouts)),
+            );
+        }
+
+        let str_layout = &layouts[STR.index()];
+        for len in [0, 1, 9, 64] {
+            assert_eq!(
+                str_layout.try_payload_words(len, &layouts),
+                Some(str_layout.payload_words(len, &layouts)),
+            );
+        }
+    }
+
+    /// A count large enough that `count * stride` does not fit `u32`, though
+    /// the count alone does. This is what a `Len::Slot` operand can hand
+    /// `Machine::allocate` — the count is a value the running program
+    /// computed, not one this compiler bounded — and it must be rejected
+    /// rather than silently wrapped to a small, wrong allocation size.
+    #[test]
+    fn try_payload_words_rejects_a_multiply_that_overflows_u32() {
+        let mut layouts = table();
+        let (fields, words) =
+            struct_layout(&[(Arc::from("x"), INT), (Arc::from("y"), INT)], &layouts);
+        layouts.push(Layout::inline(
+            "Point",
+            Shape::Struct {
+                fields,
+                opaque: false,
+            },
+            words,
+        ));
+        let point = LayoutId(layouts.len() as u32 - 1);
+        layouts.push(Layout::object(
+            "Array",
+            Shape::Elements {
+                elem: point,
+                growable: false,
+            },
+        ));
+        let array = layouts.last().unwrap();
+        // `Point` is two words wide, so `u32::MAX * 2` overflows `u32` even
+        // though `u32::MAX` itself does not.
+        assert_eq!(array.try_payload_words(u32::MAX, &layouts), None);
+    }
+
+    /// `Shape::Boxed`'s `1 + len` overflows too, at the one `len` that makes
+    /// it possible.
+    #[test]
+    fn try_payload_words_rejects_a_boxed_header_plus_len_overflow() {
+        let layouts = table();
+        let boxed = Layout::object("Boxed", Shape::Boxed);
+        assert_eq!(boxed.try_payload_words(u32::MAX, &layouts), None);
+        assert_eq!(
+            boxed.try_payload_words(u32::MAX - 1, &layouts),
+            Some(u32::MAX)
+        );
     }
 }
