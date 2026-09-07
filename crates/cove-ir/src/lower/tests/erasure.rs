@@ -91,7 +91,7 @@ fn a_host_result_a_schema_declared_any_is_one_boxed_word() {
             "f"
         ),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 6: s0:int s1:ref s2:ref s3:int s4:int s5:int
      0  str s1:ref \"n\"
      1  call-host s2:ref oracle.ask (s1:String) Any
@@ -126,7 +126,7 @@ fn a_question_mark_on_an_erased_result_answers_the_box() {
             "f"
         ),
         "\
-fn0 m.f() -> Result
+fn @m.f() -> Result
   frame 14: s0:int s1:int s2:ref s3:host s4:int s5:ref s6:int s7:bool s8:ref s9:int s10:int s11:ref s12:int s13:int
   local s -> s3:<host> [1, 17)
   local v -> s8:Any [11, 17)
@@ -168,7 +168,7 @@ fn a_declared_parameter_says_what_an_erased_argument_is_opened_at() {
             "f"
         ),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 5: s0:int s1:ref s2:ref s3:int s4:int
      0  str s1:ref \"n\"
      1  call-host s2:ref oracle.ask (s1:String) Any
@@ -328,7 +328,7 @@ fn an_annotation_says_what_an_erased_result_was_carrying() {
             "f"
         ),
         "\
-fn0 m.f() -> Result
+fn @m.f() -> Result
   frame 12: s0:int s1:int s2:ref s3:host s4:int s5:ref s6:int s7:bool s8:ref s9:int s10:int s11:ref
   local s -> s3:<host> [1, 15)
   local bounded -> s4:Result [2, 15)
@@ -383,7 +383,7 @@ fn a_result_inside_an_erased_result_is_opened_where_it_is_used() {
             "f"
         ),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 12: s0:int s1:host s2:int s3:ref s4:int s5:ref s6:int s7:int s8:int s9:ref s10:int s11:ref
   local s -> s1:<host> [1, 26)
   local answer -> s2:Result [2, 26)

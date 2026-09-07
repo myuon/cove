@@ -22,7 +22,7 @@ fn a_case_writes_the_discriminant_and_zeroes_what_it_does_not_fill() {
             "f"
         ),
         "\
-fn0 m.f() -> m.Shape
+fn @m.f() -> m.Shape
   frame 8: s0:int s1:int s2:int s3:int s4:int s5:int s6:int s7:int
   local wide -> s5:m.Shape [5, 5)
      0  int s3:int 3
@@ -47,7 +47,7 @@ fn a_case_that_fills_the_region_zeroes_nothing() {
             "f"
         ),
         "\
-fn0 m.f() -> m.Shape
+fn @m.f() -> m.Shape
   frame 8: s0:int s1:int s2:int s3:int s4:int s5:int s6:int s7:int
      0  int s3:int 3
      1  int s4:int 4
@@ -78,7 +78,7 @@ fn a_reference_word_of_another_case_reads_null() {
             "f"
         ),
         "\
-fn0 m.f(String) -> m.Msg
+fn @m.f(String) -> m.Msg
   frame 7: s0!:ref s1:int s2:ref s3:ref s4:ref s5:int s6:ref
   local what -> s0:String [0, 10)
   local said -> s5:m.Msg [5, 5)
@@ -109,7 +109,7 @@ fn the_payload_words_of_two_cases_agree_or_do_not_overlap() {
             "f"
         ),
         "\
-fn0 m.f(Float) -> m.E
+fn @m.f(Float) -> m.E
   frame 9: s0!:float s1:int s2:int s3:ref s4:float s5:int s6:int s7:ref s8:float
   local x -> s0:Float [0, 4)
      0  int s5:int 1
@@ -132,7 +132,7 @@ fn a_match_reads_the_discriminant_at_offset_zero() {
             "f"
         ),
         "\
-fn0 m.f(m.Shape) -> Int
+fn @m.f(m.Shape) -> Int
   frame 8: s0!:int s1!:int s2!:int s3:int s4:int s5:int s6:int s7:int
   local s -> s0:m.Shape [0, 15)
   local a -> s5:Int [5, 6)
@@ -165,7 +165,7 @@ fn an_option_is_two_words_and_none_is_the_zeroed_one() {
             "f"
         ),
         "\
-fn0 m.f(Option) -> Int
+fn @m.f(Option) -> Int
   frame 5: s0!:int s1!:int s2:int s3:int s4:int
   local o -> s0:Option [0, 10)
   local v -> s4:Int [2, 3)
@@ -193,7 +193,7 @@ fn a_case_is_copied_whole() {
             "f"
         ),
         "\
-fn0 m.f(m.Shape) -> m.Shape
+fn @m.f(m.Shape) -> m.Shape
   frame 9: s0!:int s1!:int s2!:int s3:int s4:int s5:int s6:int s7:int s8:int
   local s -> s0:m.Shape [0, 3)
   local t -> s6:m.Shape [1, 2)
@@ -216,7 +216,7 @@ fn a_question_mark_leaves_through_the_enclosing_function_s_own_failure() {
             "f"
         ),
         "\
-fn0 m.f() -> Result
+fn @m.f() -> Result
   frame 12: s0:int s1:int s2:ref s3:int s4:int s5:ref s6:int s7:bool s8:int s9:int s10:ref s11:int
   local v -> s6:Int [10, 15)
      0  call s3:int m.g () Result
@@ -247,7 +247,7 @@ fn a_question_mark_on_an_option_leaves_through_none() {
             "f"
         ),
         "\
-fn0 m.f() -> Option
+fn @m.f() -> Option
   frame 9: s0:int s1:int s2:int s3:int s4:int s5:bool s6:int s7:int s8:int
   local v -> s4:Int [8, 12)
      0  call s2:int m.g () Option
@@ -278,7 +278,7 @@ fn an_enum_inside_a_struct_is_inline_there_too() {
             "f"
         ),
         "\
-fn0 m.f(m.S) -> Int
+fn @m.f(m.S) -> Int
   frame 7: s0!:int s1!:int s2!:int s3:int s4:int s5:int s6:int
   local s -> s0:m.S [0, 11)
   local v -> s5:Int [5, 7)

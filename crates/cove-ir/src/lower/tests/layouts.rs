@@ -311,7 +311,7 @@ fn a_field_s_type_is_read_where_the_declaration_wrote_it() {
             "f",
         ),
         "\
-fn0 app.f(shape.Tile) -> Int
+fn @app.f(shape.Tile) -> Int
   frame 3: s0!:int s1!:int s2:int
   local t -> s0:shape.Tile [0, 2)
      0  copy s2:int s1:int Int

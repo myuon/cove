@@ -13,7 +13,7 @@ fn a_builtin_method_is_one_call_over_its_operands() {
             "parts"
         ),
         "\
-fn0 m.parts(String) -> Array
+fn @m.parts(String) -> Array
   frame 4: s0!:ref s1:ref s2:ref s3:ref
   local s -> s0:String [0, 4)
      0  str s2:ref \",\"
@@ -33,7 +33,7 @@ fn an_associated_function_has_no_receiver() {
     assert_eq!(
         listing("fn wait() -> Duration { Duration.seconds(1) }", "wait"),
         "\
-fn0 m.wait() -> Duration
+fn @m.wait() -> Duration
   frame 3: s0:duration s1:int s2:duration
      0  int s1:int 1
      1  call-builtin s2:duration Duration.seconds (s1:Int) Duration
@@ -48,7 +48,7 @@ fn a_duration_reader_passes_its_receiver_as_operand_zero() {
     assert_eq!(
         listing("fn ms(d: Duration) -> Int { d.millis() }", "ms"),
         "\
-fn0 m.ms(Duration) -> Int
+fn @m.ms(Duration) -> Int
   frame 3: s0!:duration s1:int s2:int
   local d -> s0:Duration [0, 3)
      0  call-builtin s2:int Duration.millis (s0:Duration) Int
@@ -70,7 +70,7 @@ fn is_some_is_a_call_the_standard_library_implements() {
     assert_eq!(
         listing("fn has(o: Option<Int>) -> Bool { o.isSome() }", "has"),
         "\
-fn0 m.has(Option) -> Bool
+fn @m.has(Option) -> Bool
   frame 4: s0!:int s1!:int s2:bool s3:bool
   local o -> s0:Option [0, 3)
      0  call s3:bool std.option.isSome<Int> (s0:Option) Bool
@@ -93,7 +93,7 @@ fn unwrap_or_is_an_ordinary_call_into_the_standard_library() {
             "value"
         ),
         "\
-fn0 m.value(Option Int) -> Int
+fn @m.value(Option Int) -> Int
   frame 5: s0!:int s1!:int s2!:int s3:int s4:int
   local o -> s0:Option [0, 3)
   local other -> s2:Int [0, 3)
@@ -115,7 +115,7 @@ fn a_parser_answers_a_result_and_interns_the_error_it_may_carry() {
             "parse"
         ),
         "\
-fn0 m.parse(String) -> Int
+fn @m.parse(String) -> Int
   frame 7: s0!:ref s1:int s2:int s3:int s4:ref s5:int s6:int
   local s -> s0:String [0, 6)
      0  call-builtin s2:int Int.parse (s0:String) Result
@@ -138,7 +138,7 @@ fn a_method_on_a_declared_type_is_an_ordinary_call() {
             "f"
         ),
         "\
-fn0 m.f(m.Point) -> Int
+fn @m.f(m.Point) -> Int
   frame 4: s0!:int s1!:int s2:int s3:int
   local p -> s0:m.Point [0, 3)
      0  call s3:int m.Point.sum (s0:m.Point) Int
@@ -162,7 +162,7 @@ fn a_method_the_standard_library_implements_is_an_ordinary_call() {
     assert_eq!(
         listing("fn f(xs: Array<Int>) -> Bool { xs.isEmpty() }", "f"),
         "\
-fn0 m.f(Array) -> Bool
+fn @m.f(Array) -> Bool
   frame 3: s0!:ref s1:bool s2:bool
   local xs -> s0:Array [0, 3)
      0  call s2:bool std.array.isEmpty<Int> (s0:Array) Bool
@@ -184,7 +184,7 @@ fn a_var_self_receiver_is_an_address() {
             "Point.bump"
         ),
         "\
-fn0 m.Point.bump(<addr>) -> Unit
+fn @m.Point.bump(<addr>) -> Unit
   frame 6: s0!:addr s1:unit s2:addr s3:int s4:int s5:unit
   local self -> s0:<addr> [0, 10)
      0  addr-of-part s2:addr s0:addr +1
@@ -242,7 +242,7 @@ fn map_error_is_an_ordinary_call_into_the_standard_library() {
             "f"
         ),
         "\
-fn0 m.f(String) -> Result
+fn @m.f(String) -> Result
   frame 12: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:ref s7:ref s8:int s9:int s10:int s11:ref
   local t -> s0:String [0, 10)
      0  call-builtin s4:int Int.parse (s0:String) Result

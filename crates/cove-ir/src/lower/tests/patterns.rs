@@ -14,7 +14,7 @@ fn a_nested_pattern_tests_the_payload_where_it_already_is() {
             "f"
         ),
         "\
-fn0 m.f(m.E) -> Int
+fn @m.f(m.E) -> Int
   frame 8: s0!:int s1!:int s2!:int s3:int s4:int s5:int s6:bool s7:int
   local e -> s0:m.E [0, 20)
   local n -> s5:Int [5, 6)
@@ -53,7 +53,7 @@ fn a_binding_is_a_copy_of_the_words_it_names() {
             "f"
         ),
         "\
-fn0 m.f(m.Msg) -> String
+fn @m.f(m.Msg) -> String
   frame 5: s0!:int s1!:ref s2:ref s3:ref s4:ref
   local m -> s0:m.Msg [0, 11)
   local s -> s4:String [2, 3)
@@ -82,7 +82,7 @@ fn a_match_over_something_that_is_not_an_enum_is_a_chain() {
             "name"
         ),
         "\
-fn0 m.name(Int) -> String
+fn @m.name(Int) -> String
   frame 5: s0!:int s1:ref s2:ref s3:bool s4:ref
   local n -> s0:Int [0, 16)
      0  eq.int.imm s3:bool s0:int 0
@@ -113,7 +113,7 @@ fn a_match_over_strings_compares_bytes() {
             "score"
         ),
         "\
-fn0 m.score(String) -> Int
+fn @m.score(String) -> Int
   frame 6: s0!:ref s1:int s2:int s3:ref s4:bool s5:int
   local s -> s0:String [0, 12)
      0  str s3:ref \"a\"
@@ -142,7 +142,7 @@ fn an_arm_that_covers_every_case_ends_each_chain() {
             "f"
         ),
         "\
-fn0 m.f(m.Shape) -> Int
+fn @m.f(m.Shape) -> Int
   frame 6: s0!:int s1!:int s2!:int s3:int s4:int s5:int
   local s -> s0:m.Shape [0, 10)
   local a -> s5:Int [2, 3)

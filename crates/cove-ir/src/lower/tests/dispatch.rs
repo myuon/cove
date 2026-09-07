@@ -13,7 +13,7 @@ fn erasure_boxes_a_concrete_value_where_a_dyn_type_is_written() {
             "f"
         ),
         "\
-fn0 m.f() -> String
+fn @m.f() -> String
   frame 7: s0:ref s1:int s2:int s3:int s4:int s5:ref s6:ref
      0  int s1:int 1
      1  int s2:int 2
@@ -45,7 +45,7 @@ fn a_dyn_call_switches_on_the_layout_the_box_records() {
             "take"
         ),
         "\
-fn0 m.take(Any) -> String
+fn @m.take(Any) -> String
   frame 7: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:int
   local v -> s0:Any [0, 12)
      0  load-field s2:int s0:ref +0 Int
@@ -74,7 +74,7 @@ fn a_body_declared_dyn_erases_its_tail() {
             "mk"
         ),
         "\
-fn0 m.mk() -> Any
+fn @m.mk() -> Any
   frame 6: s0:ref s1:int s2:int s3:int s4:int s5:ref
      0  int s1:int 1
      1  int s2:int 2
@@ -95,7 +95,7 @@ fn a_dyn_struct_field_holds_the_box() {
             "f"
         ),
         "\
-fn0 m.f() -> String
+fn @m.f() -> String
   frame 7: s0:ref s1:ref s2:ref s3:int s4:ref s5:int s6:int
   local h -> s2:m.Holder [5, 16)
      0  str s1:ref \"n\"
@@ -147,7 +147,7 @@ fn a_trait_method_s_default_body_is_lowered_once_per_conforming_type() {
     assert_eq!(
         listing(source, "Booking.line"),
         "\
-fn1 m.Booking.line(m.Booking) -> String
+fn @m.Booking.line(m.Booking) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
   local self -> s0:m.Booking [0, 6)
      0  str s2:ref \"- \"
@@ -161,7 +161,7 @@ fn1 m.Booking.line(m.Booking) -> String
     assert_eq!(
         listing(source, "Receipt.line"),
         "\
-fn3 m.Receipt.line(m.Receipt) -> String
+fn @m.Receipt.line(m.Receipt) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
   local self -> s0:m.Receipt [0, 6)
      0  str s2:ref \"- \"
@@ -189,7 +189,7 @@ fn a_conformance_that_writes_its_own_body_does_not_get_the_default() {
             "Receipt.line"
         ),
         "\
-fn1 m.Receipt.line(m.Receipt) -> String
+fn @m.Receipt.line(m.Receipt) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
   local self -> s0:m.Receipt [0, 6)
      0  str s2:ref \"  $ \"

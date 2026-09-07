@@ -19,7 +19,7 @@ fn an_immutable_value_answers_a_copy_of_its_own_words() {
     assert_eq!(
         listing("fn n(x: Int) -> Int { x.snapshot() }", "n"),
         "\
-fn0 m.n(Int) -> Int
+fn @m.n(Int) -> Int
   frame 3: s0!:int s1:int s2:int
   local x -> s0:Int [0, 3)
      0  copy s2:int s0:int Int
@@ -38,7 +38,7 @@ fn an_array_answers_itself_rather_than_being_walked() {
     assert_eq!(
         listing("fn a(xs: Array<Int>) -> Array<Int> { xs.snapshot() }", "a"),
         "\
-fn0 m.a(Array) -> Array
+fn @m.a(Array) -> Array
   frame 3: s0!:ref s1:ref s2:ref
   local xs -> s0:Array [0, 3)
      0  copy s2:ref s0:ref Array
@@ -62,7 +62,7 @@ fn a_vector_of_immutable_elements_is_copied_out_and_back() {
             "v"
         ),
         "\
-fn0 m.v(Vector) -> Vector
+fn @m.v(Vector) -> Vector
   frame 4: s0!:ref s1:ref s2:ref s3:ref
   local xs -> s0:Vector [0, 5)
      0  call-builtin s2:ref Vector.toArray (s0:Vector) Array

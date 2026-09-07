@@ -11,7 +11,7 @@ fn a_parameter_is_the_run_a_caller_writes() {
     assert_eq!(
         listing("fn double(n: Int) -> Int { n * 2 }", "double"),
         "\
-fn0 m.double(Int) -> Int
+fn @m.double(Int) -> Int
   frame 3: s0!:int s1:int s2:int
   local n -> s0:Int [0, 3)
      0  mul.int.imm s2:int s0:int 2
@@ -36,7 +36,7 @@ fn a_negated_literal_is_an_immediate_and_a_sum_of_two_is_not_folded() {
     assert_eq!(
         listing("fn f(n: Int) -> Bool { n > -1 && n < 1 + 1 }", "f"),
         "\
-fn0 m.f(Int) -> Bool
+fn @m.f(Int) -> Bool
   frame 6: s0!:int s1:bool s2:bool s3:bool s4:int s5:int
   local n -> s0:Int [0, 9)
      0  gt.int.imm s3:bool s0:int -1
@@ -62,7 +62,7 @@ fn arithmetic_and_comparison_read_the_operands_kind() {
             "ordered"
         ),
         "\
-fn0 m.ordered(Int Int) -> Bool
+fn @m.ordered(Int Int) -> Bool
   frame 5: s0!:int s1!:int s2:bool s3:int s4:bool
   local a -> s0:Int [0, 4)
   local b -> s1:Int [0, 4)
@@ -79,7 +79,7 @@ fn a_float_keeps_its_bits_and_reads_as_a_float() {
     assert_eq!(
         listing("fn half(x: Float) -> Float { -x / 2.0 }", "half"),
         "\
-fn0 m.half(Float) -> Float
+fn @m.half(Float) -> Float
   frame 5: s0!:float s1:float s2:float s3:float s4:float
   local x -> s0:Float [0, 5)
      0  neg.float s2:float s0:float
@@ -99,7 +99,7 @@ fn a_duration_is_nanoseconds_and_adds_like_an_integer() {
     assert_eq!(
         listing("fn wait() -> Duration { 5ms + 3ms }", "wait"),
         "\
-fn0 m.wait() -> Duration
+fn @m.wait() -> Duration
   frame 3: s0:duration s1:duration s2:duration
      0  int s1:duration 5000000
      1  add.int.imm s2:duration s1:duration 3000000
@@ -114,7 +114,7 @@ fn not_negates_a_bool() {
     assert_eq!(
         listing("fn flip(flag: Bool) -> Bool { !flag }", "flip"),
         "\
-fn0 m.flip(Bool) -> Bool
+fn @m.flip(Bool) -> Bool
   frame 3: s0!:bool s1:bool s2:bool
   local flag -> s0:Bool [0, 3)
      0  not s2:bool s0:bool
@@ -132,7 +132,7 @@ fn comparing_two_units_is_the_answer_rather_than_an_instruction() {
     assert_eq!(
         listing("fn same() -> Bool { () == () }", "same"),
         "\
-fn0 m.same() -> Bool
+fn @m.same() -> Bool
   frame 4: s0:bool s1:unit s2:unit s3:bool
      0  unit s1:unit
      1  unit s2:unit
@@ -155,7 +155,7 @@ fn a_var_local_is_one_location_written_again() {
             "count"
         ),
         "\
-fn0 m.count() -> Int
+fn @m.count() -> Int
   frame 3: s0:int s1:int s2:int
   local n -> s1:Int [1, 5)
      0  int s1:int 0
@@ -173,7 +173,7 @@ fn a_body_that_falls_off_the_end_answers_unit() {
     assert_eq!(
         listing("fn nothing() {}", "nothing"),
         "\
-fn0 m.nothing() -> Unit
+fn @m.nothing() -> Unit
   frame 1: s0:unit
      0  unit s0:unit
      1  return s0:unit Unit
@@ -189,7 +189,7 @@ fn a_block_is_a_scope_whose_locals_die_with_it() {
             "scoped"
         ),
         "\
-fn0 m.scoped() -> Int
+fn @m.scoped() -> Int
   frame 4: s0:int s1:int s2:int s3:int
   local a -> s1:Int [1, 4)
   local b -> s3:Int [2, 3)
@@ -211,7 +211,7 @@ fn short_circuiting_is_a_branch_over_the_right_hand_side() {
     assert_eq!(
         listing("fn both(a: Bool, b: Bool) -> Bool { a && b }", "both"),
         "\
-fn0 m.both(Bool Bool) -> Bool
+fn @m.both(Bool Bool) -> Bool
   frame 4: s0!:bool s1!:bool s2:bool s3:bool
   local a -> s0:Bool [0, 5)
   local b -> s1:Bool [0, 5)
@@ -229,7 +229,7 @@ fn an_or_inverts_the_polarity_with_a_jump_rather_than_an_instruction() {
     assert_eq!(
         listing("fn either(a: Bool, b: Bool) -> Bool { a || b }", "either"),
         "\
-fn0 m.either(Bool Bool) -> Bool
+fn @m.either(Bool Bool) -> Bool
   frame 4: s0!:bool s1!:bool s2:bool s3:bool
   local a -> s0:Bool [0, 6)
   local b -> s1:Bool [0, 6)
@@ -255,7 +255,7 @@ fn a_binding_takes_over_the_temporary_its_initialiser_made() {
             "twice"
         ),
         "\
-fn0 m.twice(Int) -> Int
+fn @m.twice(Int) -> Int
   frame 5: s0!:int s1:int s2:int s3:int s4:int
   local n -> s0:Int [0, 5)
   local a -> s2:Int [1, 4)

@@ -101,7 +101,7 @@ fn an_async_declaration_is_an_ordinary_function() {
             "g"
         ),
         "\
-fn1 m.g() -> Int async
+fn @m.g() -> Int async
   frame 2: s0:int s1:int
      0  int s1:int 1
      1  copy s0:int s1:int Int
@@ -130,7 +130,7 @@ fn a_call_to_an_async_declaration_answers_a_settled_task() {
             "f"
         ),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 3: s0:int s1:int s2:task
      0  call s1:int m.g () Int
      1  settled s2:task s1:int Int
@@ -159,7 +159,7 @@ fn an_async_function_value_is_an_ordinary_closure() {
             "f"
         ),
         "\
-fn0 m.f() -> Int
+fn @m.f() -> Int
   frame 4: s0:int s1:ref s2:int s3:task
   local g -> s1:fn [3, 7)
      0  alloc s1:ref closure m.f#0<closure>
