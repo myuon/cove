@@ -254,19 +254,19 @@
       "fields": [],
       "associated": [
         {"name": "nanos", "signature": "nanos(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "implementedBy": "machine", "host": false},
-        {"name": "micros", "signature": "micros(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "implementedBy": "machine", "host": false},
-        {"name": "millis", "signature": "millis(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "implementedBy": "machine", "host": false},
-        {"name": "seconds", "signature": "seconds(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "implementedBy": "machine", "host": false},
-        {"name": "minutes", "signature": "minutes(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "implementedBy": "machine", "host": false},
-        {"name": "hours", "signature": "hours(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "implementedBy": "machine", "host": false}
+        {"name": "micros", "signature": "micros(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "implementedBy": "std.duration.ofMicros", "host": false},
+        {"name": "millis", "signature": "millis(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "implementedBy": "std.duration.ofMillis", "host": false},
+        {"name": "seconds", "signature": "seconds(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "implementedBy": "std.duration.ofSeconds", "host": false},
+        {"name": "minutes", "signature": "minutes(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "implementedBy": "std.duration.ofMinutes", "host": false},
+        {"name": "hours", "signature": "hours(count: Int) -> Duration", "generics": [], "params": [{"name": "count", "type": "Int"}], "variadic": false, "result": "Duration", "implementedBy": "std.duration.ofHours", "host": false}
       ],
       "methods": [
         {"name": "nanos", "signature": "nanos() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "micros", "signature": "micros() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "millis", "signature": "millis() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "seconds", "signature": "seconds() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "minutes", "signature": "minutes() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "hours", "signature": "hours() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "micros", "signature": "micros() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.duration.micros", "host": false},
+        {"name": "millis", "signature": "millis() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.duration.millis", "host": false},
+        {"name": "seconds", "signature": "seconds() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.duration.seconds", "host": false},
+        {"name": "minutes", "signature": "minutes() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.duration.minutes", "host": false},
+        {"name": "hours", "signature": "hours() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.duration.hours", "host": false},
         {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "implementedBy": "machine", "host": false}
       ]
     },

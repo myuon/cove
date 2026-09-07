@@ -321,16 +321,6 @@ pub(super) fn layout_name(machine: &Machine, layout: LayoutId, first: u64, depth
     }
 }
 
-/// `` `Int` {operation} overflowed ``.
-///
-/// [`crate::interp::overflow`] and [`crate::vm::exec`]'s own copy, in the
-/// one place a builtin reaches it: `Int.abs` at `Int.MIN`, and a
-/// `Duration.<unit>` whose nanoseconds do not fit.
-pub(super) fn overflowed(operation: &str) -> RuntimeError {
-    RuntimeError::new(format!("`Int` {operation} overflowed"))
-        .with_rule("Integer overflow is a broken invariant, not a wrapped result.")
-}
-
 /// `split` and `replace` both refuse an empty needle.
 pub(super) fn empty_needle(method: &str, parameter: &str, help: &str) -> RuntimeError {
     RuntimeError::new(format!("`{method}` cannot use an empty `{parameter}`"))

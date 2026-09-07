@@ -1,0 +1,72 @@
+/// The receiver's whole microseconds, truncated toward zero.
+///
+/// This is `Duration`, except the one operation that has to know how a
+/// duration is actually stored: `Duration.nanos` and `d.nanos()` are the
+/// only primitive left, and every function in this file is nanoseconds
+/// scaled by a constant. A reader divides by its unit's factor, truncating
+/// toward zero the way `Int` division already does, and a builder
+/// multiplies by its factor and hands the count to `Duration.nanos`. The
+/// factors are the ones the lexer already gives the matching literal suffix
+/// — `us`, `ms`, `s`, `m`, `h` — so `1s` and `Duration.seconds(1)` are the
+/// same value, and a duration built in a unit and read back in it answers
+/// the count unchanged.
+///
+/// A reader can never fail: dividing a count that fits leaves a count that
+/// fits. A builder's multiplication traps exactly as any other `Int`
+/// multiplication does — the trap now reads `` `Int` multiplication
+/// overflowed `` at the multiply below, rather than `` `Int` duration
+/// arithmetic overflowed `` at the call, which is the one externally
+/// visible change this migration makes.
+export fn micros(duration: Duration) -> Int {
+  duration.nanos() / 1_000
+}
+
+/// The receiver's whole milliseconds, truncated toward zero.
+export fn millis(duration: Duration) -> Int {
+  duration.nanos() / 1_000_000
+}
+
+/// The receiver's whole seconds, truncated toward zero.
+export fn seconds(duration: Duration) -> Int {
+  duration.nanos() / 1_000_000_000
+}
+
+/// The receiver's whole minutes, truncated toward zero.
+export fn minutes(duration: Duration) -> Int {
+  duration.nanos() / 60_000_000_000
+}
+
+/// The receiver's whole hours, truncated toward zero.
+export fn hours(duration: Duration) -> Int {
+  duration.nanos() / 3_600_000_000_000
+}
+
+/// `count` microseconds.
+///
+/// Named `ofMicros` rather than `micros`, because a Cove module cannot
+/// declare `micros` twice — the reader above already has that name, and
+/// `Duration.micros(n)` and `d.micros()` are one schema entry each, bound to
+/// two different functions of this module.
+export fn ofMicros(count: Int) -> Duration {
+  Duration.nanos(count * 1_000)
+}
+
+/// `count` milliseconds.
+export fn ofMillis(count: Int) -> Duration {
+  Duration.nanos(count * 1_000_000)
+}
+
+/// `count` seconds.
+export fn ofSeconds(count: Int) -> Duration {
+  Duration.nanos(count * 1_000_000_000)
+}
+
+/// `count` minutes.
+export fn ofMinutes(count: Int) -> Duration {
+  Duration.nanos(count * 60_000_000_000)
+}
+
+/// `count` hours.
+export fn ofHours(count: Int) -> Duration {
+  Duration.nanos(count * 3_600_000_000_000)
+}

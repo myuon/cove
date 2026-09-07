@@ -9,20 +9,22 @@
 //! - **`Float.toInt()` answers a `Result`**, because three floats have no
 //!   truncation that fits: `NaN`, an infinity, and a magnitude at or past
 //!   2^63. Each is named separately.
-//! - **`d.millis()` truncates toward zero**, which is what `Int` division
-//!   already does — so `1500ms.seconds()` is 1 and `(-1500ms).seconds()` is
-//!   -1, and `d.seconds()` is `d.nanos() / 1_000_000_000` whichever way a
-//!   program asks.
 //!
-//! # `Duration.<unit>` is two operations under one name
+//! # `Duration.nanos` is two operations under one name
 //!
-//! `Duration.seconds(1)` builds a duration and `d.seconds()` reads one back
-//! out, and the language spells them the same. [`cove_ir::Builtin`] names an
+//! `Duration.nanos(n)` builds a duration and `d.nanos()` reads one back out,
+//! and the language spells them the same. [`cove_ir::Builtin`] names an
 //! operation by its receiver and its name, so the two arrive here
 //! indistinguishable by name — and are told apart by the **`Repr` of the
 //! operand**, which is a static fact about the slot the lowering chose:
 //! `Repr::Duration` is the receiver of a reader, and anything else is the
 //! count of a builder. Nothing is inferred from a word.
+//!
+//! `nanos` is the only unit still here. `micros`, `millis`, `seconds`,
+//! `minutes` and `hours` are `std.duration` functions now — a reader divides
+//! by its unit's constant and a builder multiplies by it, both ordinary
+//! `Int` arithmetic once nanoseconds are the only representation this
+//! machine has to know about.
 
 use cove_ir::{LayoutId, Program, Repr, Shape};
 
@@ -232,54 +234,29 @@ pub(super) fn float_parse(
 
 // --- Duration --------------------------------------------------------------
 
-/// The nanoseconds in one of the six units a `Duration` is written in.
+/// `d.nanos() -> Int` and `Duration.nanos(count) -> Duration`, told apart by
+/// the operand's `Repr`. See the module docs.
 ///
-/// One table for both directions: `Duration.millis(n)` multiplies by what
-/// `d.millis()` divides by, so a duration built in a unit and read back in it
-/// is the same number. The names are the schema's and the factors are the
-/// ones the lexer gives the matching literal suffix — `ns`, `us`, `ms`, `s`,
-/// `m`, `h` — so `1s` and `Duration.seconds(1)` cannot come apart.
-pub(super) fn unit(name: &str) -> Option<i64> {
-    Some(match name {
-        "nanos" => 1,
-        "micros" => 1_000,
-        "millis" => 1_000_000,
-        "seconds" => 1_000_000_000,
-        "minutes" => 60 * 1_000_000_000,
-        "hours" => 60 * 60 * 1_000_000_000,
-        _ => return None,
-    })
-}
-
-/// `d.<unit>() -> Int` and `Duration.<unit>(count) -> Duration`, told apart
-/// by the operand's `Repr`. See the module docs.
-pub(super) fn duration(
+/// This is the one primitive `Duration` keeps — every other unit is
+/// nanoseconds scaled by a constant, and scaling is `std.duration`'s
+/// arithmetic now, not this machine's. With only `nanos` left there is no
+/// factor to multiply or divide by, so the reader is the identity and the
+/// builder cannot overflow: a `Duration` is signed nanoseconds and every
+/// `Int` is already a valid count of them.
+pub(super) fn duration_nanos(
     machine: &mut Machine,
-    name: &str,
     operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
-    let factor = unit(name).expect("the dispatch matched one of the six units");
     let first = operands
         .first()
         .and_then(|operand| operand::as_word(machine, *operand));
     if let Some((Repr::Duration, nanos)) = first {
-        operand::method(name, operands, 0)?;
-        // Truncating toward zero, which is what `Int` division does. None of
-        // the six can fail: every unit divides into a count that fits where
-        // the nanoseconds already did.
-        return Ok(((nanos as i64) / factor) as u64);
+        operand::method("nanos", operands, 0)?;
+        return Ok(nanos);
     }
-    let shown = format!("Duration.{name}");
-    let args = operand::free(&shown, operands, 1)?;
-    let count = operand::int(machine, &shown, "count", args[0])?;
-    // A negative count is a negative duration, because a `Duration` is signed
-    // nanoseconds and `-1s` is already writable. A count whose nanoseconds do
-    // not fit stops the run in the words `Duration` arithmetic already stops
-    // it in.
-    count
-        .checked_mul(factor)
-        .map(|nanos| nanos as u64)
-        .ok_or_else(|| operand::overflowed("duration arithmetic"))
+    let args = operand::free("Duration.nanos", operands, 1)?;
+    let count = operand::int(machine, "Duration.nanos", "count", args[0])?;
+    Ok(count as u64)
 }
 
 #[cfg(test)]
@@ -458,74 +435,58 @@ mod tests {
     }
 
     /// The same name reads a duration and builds one, and the operand's
-    /// `Repr` is what tells them apart. Read and built in the same unit, the
-    /// count comes back unchanged.
+    /// `Repr` is what tells them apart. `nanos` is the identity both ways —
+    /// there is no factor left to multiply or divide by — so a count built
+    /// and read straight back is unchanged, including a negative one and
+    /// the extremes of `Int`'s range: with only `nanos` left the builder is
+    /// total, where the six-unit builder it replaced could overflow.
     #[test]
-    fn a_duration_is_read_in_a_unit_and_built_from_one() {
+    fn a_duration_is_read_and_built_in_nanoseconds_and_the_builder_is_total() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
 
-        // The builder: an `Int` count.
-        let built = word(&mut machine, "Duration", "millis", &[(Repr::Int, 1500)]).unwrap();
-        assert_eq!(built as i64, 1_500_000_000);
-        // The reader: a `Duration` receiver, truncating toward zero.
+        let built = word(&mut machine, "Duration", "nanos", &[(Repr::Int, 1500)]).unwrap();
+        assert_eq!(built as i64, 1500);
         assert_eq!(
             word(
                 &mut machine,
                 "Duration",
-                "millis",
+                "nanos",
                 &[(Repr::Duration, built)]
             )
             .unwrap() as i64,
             1500
         );
-        assert_eq!(
-            word(
-                &mut machine,
-                "Duration",
-                "seconds",
-                &[(Repr::Duration, built)]
-            )
-            .unwrap() as i64,
-            1
-        );
-        let negative = (-1_500_000_000i64) as u64;
-        assert_eq!(
-            word(
-                &mut machine,
-                "Duration",
-                "seconds",
-                &[(Repr::Duration, negative)]
-            )
-            .unwrap() as i64,
-            -1,
-            "toward zero, not down"
-        );
-    }
 
-    /// A negative count is a negative duration; a count whose nanoseconds do
-    /// not fit stops the run in the words `Duration` arithmetic stops it in.
-    #[test]
-    fn a_duration_builder_takes_a_negative_count_and_refuses_one_that_does_not_fit() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let built = word(
+        let negative = word(
             &mut machine,
             "Duration",
-            "hours",
+            "nanos",
             &[(Repr::Int, -1i64 as u64)],
         )
         .unwrap();
-        assert_eq!(built as i64, -3_600_000_000_000);
+        assert_eq!(negative as i64, -1);
 
-        let error = run(
-            &mut machine,
-            "Duration",
-            "hours",
-            &[(Repr::Int, i64::MAX as u64)],
-        )
-        .unwrap_err();
-        assert_eq!(error.message, "`Int` duration arithmetic overflowed");
+        for extreme in [i64::MIN, i64::MAX] {
+            let built = word(
+                &mut machine,
+                "Duration",
+                "nanos",
+                &[(Repr::Int, extreme as u64)],
+            )
+            .unwrap();
+            assert_eq!(built as i64, extreme);
+            assert_eq!(
+                word(
+                    &mut machine,
+                    "Duration",
+                    "nanos",
+                    &[(Repr::Duration, built)]
+                )
+                .unwrap() as i64,
+                extreme
+            );
+        }
     }
 
     #[test]

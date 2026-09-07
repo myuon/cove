@@ -214,12 +214,50 @@ impl Body<'_> {
         self.call_target(expr, id, None, &written)
     }
 
+    /// A call to an associated builtin function the standard library
+    /// implements rather than the machine, such as `Duration.millis(n)`.
+    ///
+    /// Symmetric to [`Body::call_std_binding`], but simpler: an associated
+    /// call has no implicit receiver, so the call site's own argument list
+    /// is already exactly what the declared function needs — there is
+    /// nothing to push in front of it.
+    fn call_std_associated(
+        &mut self,
+        expr: &Expr,
+        binding: &cove_schema::builtins::StdBinding,
+        args: &[Arg],
+    ) -> Val {
+        let Some(id) = self
+            .plan
+            .resolve(self.checked, binding.module, binding.function)
+        else {
+            // As in `call_std_binding`: reachable only if a caller built a
+            // `Program` without attaching the standard library.
+            return self.gap(
+                &format!(
+                    "`{}.{}` names no function of `{}` — the package is missing the standard \
+                     library module `cove_sema::stdlib::attach` adds",
+                    binding.receiver, binding.method, binding.module
+                ),
+                expr,
+            );
+        };
+        self.call_target(expr, id, None, args)
+    }
+
     /// `Int.parse(text)`, `Duration.millis(n)`: an operation of a builtin
     /// type written through the type's own name.
     ///
     /// It has no receiver, so its operands are its arguments alone. That is
     /// also what tells a `Duration` builder from a `Duration` reader — see
     /// [`Body::machine_call`].
+    ///
+    /// A builder whose body has moved to the standard library — every
+    /// `Duration` unit but `nanos` — is resolved first and generically,
+    /// exactly as [`Body::call_builtin_method`] resolves a method's std
+    /// binding before its own per-type dispatch: `cove_schema::builtins`'s
+    /// table is the only thing that says which receiver and name this
+    /// applies to, and nothing below this point runs for one it names.
     pub(super) fn call_associated(
         &mut self,
         expr: &Expr,
@@ -229,6 +267,11 @@ impl Body<'_> {
     ) -> Val {
         if let Some(bad) = self.plain_arguments(args) {
             return self.gap(bad, expr);
+        }
+        if let Some(binding) =
+            cove_schema::builtins::standard_associated_binding(receiver, operation)
+        {
+            return self.call_std_associated(expr, binding, args);
         }
         self.machine_call(expr, None, receiver, operation, args)
     }
@@ -691,9 +734,13 @@ fn snapshots_itself(ty: &Ty) -> bool {
 /// sequence some of them *are* instructions and the split is the interesting
 /// part.
 ///
-/// The six `Duration` names are each both a reader and a builder;
-/// [`ASSOCIATED`] holds the builders and this holds the readers, and the
-/// machine tells them apart by the `Repr` of operand 0.
+/// `Duration.nanos` is the one `Duration` name left here: it is both a
+/// reader and a builder — [`ASSOCIATED`] holds the builder half and this
+/// holds the reader half, and the machine tells them apart by the `Repr` of
+/// operand 0 — and it is the one primitive `Duration` keeps, because
+/// something has to know how a duration is actually stored. Its five
+/// neighbours, `micros` through `hours`, moved to `std.duration` and are
+/// resolved by [`Body::call_std_binding`] before this table is ever asked.
 const MACHINE_METHODS: &[(&str, &str)] = &[
     ("String", "length"),
     ("String", "words"),
@@ -717,11 +764,6 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
     ("Float", "max"),
     ("Float", "format"),
     ("Duration", "nanos"),
-    ("Duration", "micros"),
-    ("Duration", "millis"),
-    ("Duration", "seconds"),
-    ("Duration", "minutes"),
-    ("Duration", "hours"),
 ];
 
 /// The operations the machine performs that are written on a type's name
@@ -730,20 +772,21 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
 /// `Vector.of` is not here: it allocates two objects whose layouts the
 /// lowering knows, so it is [`Inst::Alloc`]s rather than a call — see
 /// [`Body::vector_of`].
+///
+/// `Duration.micros` through `Duration.hours` are not here for the same
+/// reason their reader halves are not in [`MACHINE_METHODS`]: they moved to
+/// `std.duration`. Only `Duration.nanos` is still the machine's.
 const ASSOCIATED: &[(&str, &str)] = &[
     ("String", "fromCodePoint"),
     ("Int", "parse"),
     ("Int", "parseRadix"),
     ("Float", "parse"),
     ("Duration", "nanos"),
-    ("Duration", "micros"),
-    ("Duration", "millis"),
-    ("Duration", "seconds"),
-    ("Duration", "minutes"),
-    ("Duration", "hours"),
 ];
 
-/// Whether `head.name(...)` is one of the machine's associated functions.
+/// Whether `head.name(...)` is an associated function this lowering knows
+/// how to reach — the machine's own, or a builder the standard library
+/// implements instead.
 ///
 /// The name in front of the `.` is a namespace rather than a value here, and
 /// a module or an enum can be written the same way — so the type the checker
@@ -751,17 +794,25 @@ const ASSOCIATED: &[(&str, &str)] = &[
 /// answers a `Duration`, and each of the three parsers answers the `Result`
 /// of the type it is named for; nothing else in the language answers those
 /// under those names.
+///
+/// A name in [`ASSOCIATED`] is asked with the same per-receiver type check a
+/// machine associated function always needed; a name the schema binds
+/// instead only needs the type to have named this receiver at all, because
+/// `cove_schema::builtins::standard_associated_binding` already answers for
+/// one receiver and one name, the same specificity `ASSOCIATED` gets from
+/// its `match` below.
 pub(super) fn associated(head: &str, name: &str, ty: &Ty) -> bool {
-    if !ASSOCIATED.contains(&(head, name)) {
-        return false;
+    if ASSOCIATED.contains(&(head, name)) {
+        return match head {
+            "Duration" => matches!(ty, Ty::Duration),
+            "Int" => answers(ty, &Ty::Int),
+            "Float" => answers(ty, &Ty::Float),
+            "String" => answers(ty, &Ty::Str),
+            _ => false,
+        };
     }
-    match head {
-        "Duration" => matches!(ty, Ty::Duration),
-        "Int" => answers(ty, &Ty::Int),
-        "Float" => answers(ty, &Ty::Float),
-        "String" => answers(ty, &Ty::Str),
-        _ => false,
-    }
+    receiver_name(ty) == Some(head)
+        && cove_schema::builtins::standard_associated_binding(head, name).is_some()
 }
 
 /// Whether `ty` is the `Result<ok, Error>` a builtin parser answers.

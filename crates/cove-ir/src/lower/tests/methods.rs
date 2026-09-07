@@ -24,19 +24,20 @@ fn @m.parts(String) -> Array
     );
 }
 
-/// `Duration.seconds(1)` builds a duration and `d.seconds()` reads one
-/// back out, and the language spells them the same. The machine tells them
-/// apart by the `Repr` of operand 0, which is a static fact about the
-/// location chosen here.
+/// `Duration.nanos(1)` builds a duration and `d.nanos()` reads one back
+/// out, and the language spells them the same. The machine tells them apart
+/// by the `Repr` of operand 0, which is a static fact about the location
+/// chosen here. `nanos` is the one unit that still works this way — every
+/// other one moved to `std.duration`, below.
 #[test]
 fn an_associated_function_has_no_receiver() {
     assert_eq!(
-        listing("fn wait() -> Duration { Duration.seconds(1) }", "wait"),
+        listing("fn wait() -> Duration { Duration.nanos(1) }", "wait"),
         "\
 fn @m.wait() -> Duration
   frame 3: s0:duration s1:int s2:duration
      0  int s1:int 1
-     1  call-builtin s2:duration Duration.seconds (s1:Int) Duration
+     1  call-builtin s2:duration Duration.nanos (s1:Int) Duration
      2  copy s0:duration s2:duration Duration
      3  return s0:duration Duration
 "
@@ -46,12 +47,47 @@ fn @m.wait() -> Duration
 #[test]
 fn a_duration_reader_passes_its_receiver_as_operand_zero() {
     assert_eq!(
+        listing("fn ns(d: Duration) -> Int { d.nanos() }", "ns"),
+        "\
+fn @m.ns(Duration) -> Int
+  frame 3: s0!:duration s1:int s2:int
+  local d -> s0:Duration [0, 3)
+     0  call-builtin s2:int Duration.nanos (s0:Duration) Int
+     1  copy s1:int s2:int Int
+     2  return s1:int Int
+"
+    );
+}
+
+/// `Duration.millis` and `d.millis()` are `std.duration`'s now, and each
+/// call form is bound to a different function of it: the associated call
+/// that builds a duration is `ofMillis`, and the method that reads one back
+/// is `millis` — the same split every migrated unit makes, because a module
+/// cannot declare `millis` twice.
+#[test]
+fn a_duration_builder_is_a_call_the_standard_library_implements() {
+    assert_eq!(
+        listing("fn wait() -> Duration { Duration.millis(1) }", "wait"),
+        "\
+fn @m.wait() -> Duration
+  frame 3: s0:duration s1:int s2:duration
+     0  int s1:int 1
+     1  call s2:duration std.duration.ofMillis (s1:Int) Duration
+     2  copy s0:duration s2:duration Duration
+     3  return s0:duration Duration
+"
+    );
+}
+
+#[test]
+fn a_duration_reader_is_a_call_the_standard_library_implements() {
+    assert_eq!(
         listing("fn ms(d: Duration) -> Int { d.millis() }", "ms"),
         "\
 fn @m.ms(Duration) -> Int
   frame 3: s0!:duration s1:int s2:int
   local d -> s0:Duration [0, 3)
-     0  call-builtin s2:int Duration.millis (s0:Duration) Int
+     0  call s2:int std.duration.millis (s0:Duration) Int
      1  copy s1:int s2:int Int
      2  return s1:int Int
 "

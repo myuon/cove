@@ -291,7 +291,7 @@ fn render_methods(out: &mut String, owner: &str, entries: &[MethodSchema], recei
             out,
             "{} | {binds} | `{}` |",
             yes_no(entry.variadic),
-            implemented_by(owner, entry.name)
+            implemented_by(owner, entry.name, receiver)
         );
     }
     out.push('\n');
@@ -301,11 +301,24 @@ fn render_methods(out: &mut String, owner: &str, entries: &[MethodSchema], recei
 /// for the ordinary case, or the standard-library function it names.
 ///
 /// This is the same fact `cove_ir`'s lowering reads before it dispatches a
-/// call per receiver type — `cove_schema::builtins::standard_binding` — so
-/// the generated reference and the lowering can never disagree about which
-/// methods these are.
-fn implemented_by(owner: &str, method: &str) -> String {
-    match cove_schema::builtins::standard_binding(owner, method) {
+/// call per receiver type — `cove_schema::builtins::standard_binding` and
+/// `standard_associated_binding` — so the generated reference and the
+/// lowering can never disagree about which methods these are.
+///
+/// `receiver` is which of the two tables to ask, exactly as it is at both
+/// call sites above: a builtin type can bind a method and an associated
+/// function of the same name to two different standard-library functions —
+/// `Duration`'s `millis` is the reader `std.duration.millis` as a method and
+/// the builder `std.duration.ofMillis` as an associated function — so
+/// asking the wrong table would either miss the binding or report the
+/// other one's.
+fn implemented_by(owner: &str, method: &str, receiver: bool) -> String {
+    let binding = if receiver {
+        cove_schema::builtins::standard_binding(owner, method)
+    } else {
+        cove_schema::builtins::standard_associated_binding(owner, method)
+    };
+    match binding {
         Some(binding) => format!("{}.{}", binding.module, binding.function),
         None => "machine".to_string(),
     }
@@ -538,7 +551,7 @@ fn methods_json(out: &mut String, owner: &str, entries: &[MethodSchema], receive
         let _ = write!(
             out,
             ", \"implementedBy\": {}",
-            quote(&implemented_by(owner, entry.name))
+            quote(&implemented_by(owner, entry.name, receiver))
         );
         out.push_str(", \"host\": false}");
         out.push_str(if i + 1 == entries.len() { "\n" } else { ",\n" });

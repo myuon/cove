@@ -2877,6 +2877,23 @@ impl<'a> Interpreter<'a> {
                             return Err(self.no_export(&owner, &name.node, span).into());
                         }
                         if builtins::is_builtin_type(head) {
+                            // An associated builtin function whose body has
+                            // moved to the standard library — every
+                            // `Duration` unit but `nanos` — is resolved
+                            // first and generically, the same way
+                            // `eval_method_call` resolves a method's
+                            // binding before `builtins::call_method` is
+                            // ever asked: `standard_associated_binding`
+                            // is `standard_binding`'s counterpart for a
+                            // call written on the type's own name rather
+                            // than on a value.
+                            if let Some(binding) =
+                                cove_schema::builtins::standard_associated_binding(head, &name.node)
+                            {
+                                return self.call_std_associated_binding(
+                                    env, binding, args, trailing, span,
+                                );
+                            }
                             let args = self.eval_args(env, args, trailing)?;
                             let mut values = plain_values(args, &format!("{head}.{}", name.node))?;
                             return Ok(builtins::call_associated(
@@ -3242,6 +3259,50 @@ impl<'a> Interpreter<'a> {
             span,
         });
         evaluated.extend(self.eval_args(env, args, trailing)?);
+        Ok(self.call_target(
+            &Target {
+                name: binding.function,
+                params: &decl.params,
+                body: &decl.body,
+                module: owner,
+                receiver: decl.receiver,
+                is_async: decl.is_async,
+                captures: &[],
+                return_type: decl.return_type.as_ref(),
+            },
+            None,
+            evaluated,
+            span,
+        )?)
+    }
+
+    /// A call to an associated builtin function the standard library
+    /// implements rather than a Rust arm of [`builtins::call_associated`],
+    /// such as `Duration.millis(n)`.
+    ///
+    /// Symmetric to [`Interpreter::call_std_binding`], but simpler: an
+    /// associated call has no implicit receiver, so `args` is already
+    /// exactly the argument list the declared function needs.
+    fn call_std_associated_binding(
+        &mut self,
+        env: &mut Env,
+        binding: &cove_schema::builtins::StdBinding,
+        args: &[Arg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Eval {
+        let Some((owner, decl)) = self.find_function(binding.module, binding.function) else {
+            // As in `call_std_binding`: reachable only if a caller resolved
+            // a package without attaching the standard library.
+            return Err(RuntimeError::new(format!(
+                "`{}.{}` names no function of `{}` — the package is missing the standard \
+                 library module `cove_sema::stdlib::attach` adds",
+                binding.receiver, binding.method, binding.module
+            ))
+            .at(span)
+            .into());
+        };
+        let evaluated = self.eval_args(env, args, trailing)?;
         Ok(self.call_target(
             &Target {
                 name: binding.function,

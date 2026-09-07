@@ -289,22 +289,22 @@ written as a namespace.
 | signature | variadic | binds | implemented by |
 | --- | --- | --- | --- |
 | `nanos(count: Int) -> Duration` |  |  | `machine` |
-| `micros(count: Int) -> Duration` |  |  | `machine` |
-| `millis(count: Int) -> Duration` |  |  | `machine` |
-| `seconds(count: Int) -> Duration` |  |  | `machine` |
-| `minutes(count: Int) -> Duration` |  |  | `machine` |
-| `hours(count: Int) -> Duration` |  |  | `machine` |
+| `micros(count: Int) -> Duration` |  |  | `std.duration.ofMicros` |
+| `millis(count: Int) -> Duration` |  |  | `std.duration.ofMillis` |
+| `seconds(count: Int) -> Duration` |  |  | `std.duration.ofSeconds` |
+| `minutes(count: Int) -> Duration` |  |  | `std.duration.ofMinutes` |
+| `hours(count: Int) -> Duration` |  |  | `std.duration.ofHours` |
 
 **Methods.**
 
 | signature | `var self` | variadic | binds | implemented by |
 | --- | --- | --- | --- | --- |
 | `nanos() -> Int` |  |  |  | `machine` |
-| `micros() -> Int` |  |  |  | `machine` |
-| `millis() -> Int` |  |  |  | `machine` |
-| `seconds() -> Int` |  |  |  | `machine` |
-| `minutes() -> Int` |  |  |  | `machine` |
-| `hours() -> Int` |  |  |  | `machine` |
+| `micros() -> Int` |  |  |  | `std.duration.micros` |
+| `millis() -> Int` |  |  |  | `std.duration.millis` |
+| `seconds() -> Int` |  |  |  | `std.duration.seconds` |
+| `minutes() -> Int` |  |  |  | `std.duration.minutes` |
+| `hours() -> Int` |  |  |  | `std.duration.hours` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Error`

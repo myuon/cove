@@ -361,28 +361,18 @@ pub fn call_associated(
             }
             Ok(Value(Repr::Set(Rc::new(set))))
         }
-        // `Duration.millis(n)` and its five neighbours: the six duration
-        // literal suffixes as functions, so a count a program computed
-        // becomes the `Duration` a host call takes. `Duration.seconds(1)`
-        // and `1s` are one value.
-        //
-        // A negative count is a negative duration, because a `Duration` is
-        // signed nanoseconds and `-1s` is already writable. A count whose
-        // nanoseconds do not fit stops the run in the words `Duration`
-        // arithmetic already stops it in — `checked_mul` is the same
-        // question `checked_add` asks for `1h + 1h`, so an overflow is one
-        // kind of event however the duration was reached.
-        ("Duration", unit) if duration_unit(unit).is_some() => {
-            let factor = duration_unit(unit).expect("the guard just asked");
-            let what = format!("Duration.{unit}");
-            let args = expect_args(&what, args, 1, span)?;
+        // `Duration.nanos(count)`: the one primitive builder left.
+        // `micros` through `hours` are `std.duration.ofMicros` and its four
+        // neighbours now — see `cove_schema::builtins::standard_associated_binding`
+        // — and this arm no longer names them, so there is no factor to
+        // multiply by and nothing here can overflow: a `Duration` is signed
+        // nanoseconds and every `Int` is already a valid count of them.
+        ("Duration", "nanos") => {
+            let args = expect_args("Duration.nanos", args, 1, span)?;
             let Value(Repr::Int(count)) = &args[0] else {
-                return Err(type_error(&what, "count", "Int", &args[0], span));
+                return Err(type_error("Duration.nanos", "count", "Int", &args[0], span));
             };
-            let nanos = count
-                .checked_mul(factor)
-                .ok_or_else(|| crate::interp::overflow("duration arithmetic", span))?;
-            Ok(Value(Repr::Duration(nanos)))
+            Ok(Value(Repr::Duration(*count)))
         }
         ("Int", "parse") => {
             let args = expect_args("Int.parse", args, 1, span)?;
@@ -950,41 +940,20 @@ pub fn call_method(
             }
             _ => Err(no_method("Float", name, span)),
         },
-        // The six builders read backwards: `d.millis()` is the whole number
-        // of milliseconds in `d`, **truncated toward zero**, which is what
-        // `Int` division already does — so `1500ms.seconds()` is 1 and
-        // `(-1500ms).seconds()` is -1, and `d.seconds()` is
-        // `d.nanos() / 1_000_000_000` whichever way a program asks. None can
-        // fail: dividing a count that fits leaves a count that fits.
-        Value(Repr::Duration(ns)) => match duration_unit(name) {
-            Some(factor) => {
+        // `d.nanos()`: the one primitive reader left. `micros` through
+        // `hours` are `std.duration.micros` and its four neighbours now,
+        // resolved by `Interpreter::eval_method_call` before this function
+        // is ever asked — see
+        // `cove_schema::builtins::standard_binding`.
+        Value(Repr::Duration(ns)) => match name {
+            "nanos" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Int(ns / factor)))
+                Ok(Value(Repr::Int(*ns)))
             }
-            None => Err(no_method("Duration", name, span)),
+            _ => Err(no_method("Duration", name, span)),
         },
         other => Err(no_method(&other.type_name(), name, span)),
     }
-}
-
-/// The nanoseconds in one of the six units a `Duration` is written in.
-///
-/// One table for both directions and for both halves of the toolchain's
-/// question: `Duration.millis(n)` multiplies by what `d.millis()` divides
-/// by, so a duration built in a unit and read back in it is the same number.
-/// The names are the schema's, and the factors are the ones the lexer gives
-/// the matching literal suffix — `ns`, `us`, `ms`, `s`, `m`, `h` — so `1s`
-/// and `Duration.seconds(1)` cannot come apart.
-fn duration_unit(name: &str) -> Option<i64> {
-    Some(match name {
-        "nanos" => 1,
-        "micros" => 1_000,
-        "millis" => 1_000_000,
-        "seconds" => 1_000_000_000,
-        "minutes" => 60 * 1_000_000_000,
-        "hours" => 60 * 60 * 1_000_000_000,
-        _ => return None,
-    })
 }
 
 /// `map` and `sorted`, the two operations on an `Array` and on a `Vector`
