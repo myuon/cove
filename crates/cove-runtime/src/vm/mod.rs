@@ -120,8 +120,9 @@ pub(crate) mod exec;
 pub(crate) mod mem;
 pub(crate) mod render;
 
-/// The words a run's heap region may grow to unless an embedder says
-/// otherwise.
+/// The words a run's heap region may grow to, for every [`Vm`] [`Vm::new`]
+/// builds. [`Vm::with_heap_words`] is the one way to build a run over a
+/// different budget, and its own doc comment says who that is for.
 ///
 /// Four mebiwords, thirty-two mebibytes. Reserved is not committed: the
 /// backing store grows on demand, so a program that allocates nothing pays
@@ -177,16 +178,42 @@ impl<'a> Vm<'a> {
     /// alternative was a `Result` at every call site for a failure the
     /// compiler in front of it has already made impossible.
     ///
-    /// The heap budget is this module's `DEFAULT_HEAP_WORDS` and is not a
-    /// parameter yet:
-    /// no caller has had a reason to name one, and a knob nobody turns is a
-    /// knob whose meaning nobody has had to decide.
+    /// The heap budget is this module's `DEFAULT_HEAP_WORDS`. [`Vm::with_heap_words`]
+    /// is the constructor for a caller that needs a different one.
     pub fn new(runtime: &'a Runtime, hosts: &'a HostRegistry, program: &'a Program) -> Vm<'a> {
+        Vm::with_heap_words(runtime, hosts, program, DEFAULT_HEAP_WORDS)
+    }
+
+    /// The same run, over a heap that may grow only to `heap_words` words
+    /// rather than `DEFAULT_HEAP_WORDS`.
+    ///
+    /// This is deliberately not a [`Limits`] field. [ADR 0011](../../../../docs/adr/0011-garbage-collection.md)'s
+    /// amendment retracted `Limits::max_memory` because a number that bounds
+    /// only what one collector's table can see is not a memory ceiling; it
+    /// is that instrument's readout wearing a ceiling's name. Nothing about
+    /// the linear-memory backend changes that argument for an *embedder*: its
+    /// heap is a fuller account of a run's Cove-owned values than the old
+    /// per-task heap ever was, per ADR 0034, but a Host's own allocations,
+    /// open resources and each task's stack region still sit outside it, so
+    /// naming `heap_words` beside `fuel` and `max_host_calls` would still
+    /// promise a bound this number cannot back.
+    ///
+    /// What this constructor is for is what `mem::STACK_WORDS` already is
+    /// — an implementation choice a test may need to name to provoke the
+    /// behaviour it bounds, not a knob an embedder is invited to reach for.
+    /// Prefer [`Vm::new`] unless the caller is deliberately forcing a small
+    /// heap so a collection has something to be tested against.
+    pub fn with_heap_words(
+        runtime: &'a Runtime,
+        hosts: &'a HostRegistry,
+        program: &'a Program,
+        heap_words: usize,
+    ) -> Vm<'a> {
         Vm {
             runtime,
             hosts,
             program,
-            machine: Machine::for_run(program, DEFAULT_HEAP_WORDS, Some(hosts), Some(runtime)),
+            machine: Machine::for_run(program, heap_words, Some(hosts), Some(runtime)),
             budget: meter_of(hosts),
         }
     }
