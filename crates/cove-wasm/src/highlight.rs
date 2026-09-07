@@ -369,17 +369,18 @@ fn line(tiling: &mut Tiling, text: &str, start: usize, end: usize) -> bool {
     false
 }
 
-/// `fn0 playground.main(Int) -> Int`, optionally ` async`.
+/// `fn @playground.main(Int) -> Int`, optionally ` async`.
 ///
 /// The name is left plain as a whole, generic arguments and all: it is one
 /// name however many angle brackets are in it, and cutting it up would say
 /// that `playground.headline<playground.Booking>` is two things.
+///
+/// It was `fn @playground.main(...)` until issue #275 made a definition name
+/// itself instead of stating its position in the function table. The `fn `
+/// and the `@` are what this reads; everything after the `@` is the name.
 fn header(tiling: &mut Tiling, text: &str, start: usize, end: usize) -> bool {
     let held = &text[start..end];
-    let id = held
-        .strip_prefix("fn")
-        .map(|rest| 2 + rest.bytes().take_while(u8::is_ascii_digit).count())
-        .filter(|len| *len > 2 && held[*len..].starts_with(' '));
+    let id = held.starts_with("fn @").then_some(2);
     let (Some(id), Some(close)) = (id, held.rfind(") -> ")) else {
         tiling.take(start, end, Kind::Plain);
         return false;
@@ -388,7 +389,10 @@ fn header(tiling: &mut Tiling, text: &str, start: usize, end: usize) -> bool {
         tiling.take(start, end, Kind::Plain);
         return false;
     };
-    tiling.take(start, start + id, Kind::Number);
+    // `fn` is the heading word here, the way `frame`, `capture` and `local`
+    // are on the lines below it. What follows the `@` is one name and is
+    // left plain, which is what tells it from the layouts around it.
+    tiling.take(start, start + id, Kind::Keyword);
     tiling.take(start + id, start + open + 1, Kind::Plain);
     operands(tiling, text, start + open + 1, start + close);
     tiling.take(start + close, start + close + 5, Kind::Plain);
@@ -806,9 +810,9 @@ mod tests {
     #[test]
     fn a_header_names_its_layouts_and_leaves_the_function_plain() {
         assert_eq!(
-            lit("fn2 playground.Point.shift(<addr> Int Int) -> Unit\n"),
+            lit("fn @playground.Point.shift(<addr> Int Int) -> Unit\n"),
             vec![
-                ("fn2".into(), Kind::Number),
+                ("fn".into(), Kind::Keyword),
                 ("<addr>".into(), Kind::Type),
                 ("Int".into(), Kind::Type),
                 ("Int".into(), Kind::Type),
@@ -822,9 +826,9 @@ mod tests {
     #[test]
     fn a_generic_header_is_one_name() {
         assert_eq!(
-            lit("fn7 playground.headline<playground.Booking>(playground.Booking) -> String\n"),
+            lit("fn @playground.headline<playground.Booking>(playground.Booking) -> String\n"),
             vec![
-                ("fn7".into(), Kind::Number),
+                ("fn".into(), Kind::Keyword),
                 ("playground.Booking".into(), Kind::Type),
                 ("String".into(), Kind::Type),
             ]
@@ -833,7 +837,7 @@ mod tests {
 
     #[test]
     fn an_async_header_says_so_in_the_word_the_printer_wrote() {
-        let held = lit("fn0 playground.main() -> Int async\n");
+        let held = lit("fn @playground.main() -> Int async\n");
         assert_eq!(held.last(), Some(&("async".to_string(), Kind::Keyword)));
     }
 
@@ -1015,7 +1019,7 @@ mod tests {
     /// as nothing rather than guessed at, and the whole answer says so.
     #[test]
     fn a_line_this_reader_does_not_know_is_left_plain_and_reported() {
-        let text = "fn0 playground.main() -> Int\n  something new\n     0  unit s0:unit\n";
+        let text = "fn @playground.main() -> Int\n  something new\n     0  unit s0:unit\n";
         let painting = disassembly(text);
         assert!(!painting.ok);
         tiles(text, &painting);
@@ -1040,14 +1044,14 @@ mod tests {
     /// any other, and nothing in it went unrecognised.
     #[test]
     fn a_whole_disassembly_tiles_and_is_understood() {
-        let text = "fn0 playground.twice(Int) -> Int\n\
+        let text = "fn @playground.twice(Int) -> Int\n\
                     \x20 frame 3: s0!:int s1:int s2:int\n\
                     \x20 local n -> s0:Int [0, 3)\n\
                     \x20    0  add.int s2:int s0:int s0:int\n\
                     \x20    1  copy s1:int s2:int Int\n\
                     \x20    2  return s1:int Int\n\
                     \n\
-                    fn1 playground.main() -> Int\n\
+                    fn @playground.main() -> Int\n\
                     \x20 frame 2: s0:int s1:int\n\
                     \x20    0  int s1:int 21\n\
                     \x20    1  call s0:int playground.twice (s1:Int) Int\n\

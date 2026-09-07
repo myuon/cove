@@ -390,9 +390,11 @@ check(
   lit.runs.filter(([, kind]) => kind !== "plain"),
   (held) =>
     isDeepStrictEqual(held, [
-      // The header: an id, then layouts. The function's own name is a name
-      // and is left plain, which is what tells it from the layouts around it.
-      ["fn0", "number"],
+      // The header: the heading word, then layouts. The function's own name
+      // is a name and is left plain, which is what tells it from the layouts
+      // around it — and since issue #275 the header states that name rather
+      // than a position, so there is no id to colour as a number.
+      ["fn", "keyword"],
       ["Int", "type"],
       // The frame, and a slot with the `Repr` that says what that one word
       // holds. A slot and its annotation are one piece: `s1` alone would not
