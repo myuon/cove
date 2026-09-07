@@ -187,9 +187,9 @@ pub(crate) fn call(
 
         // ---- Int ---------------------------------------------------------
         ("Int", "toFloat") => scalar::int_to_float(machine, operands).map(one),
-        ("Int", "abs") => scalar::int_abs(machine, operands).map(one),
-        // `Int.min` and `Int.max` are not here: they are `std.int.min` and
-        // `std.int.max` — see `cove_schema::builtins::standard_binding`.
+        // `Int.min`, `Int.max`, and `Int.abs` are not here: they are
+        // `std.int.min`, `std.int.max`, and `std.int.abs` — see
+        // `cove_schema::builtins::standard_binding`.
         ("Int", "parse") => scalar::int_parse(machine, operands),
         ("Int", "parseRadix") => scalar::int_parse_radix(machine, operands),
 

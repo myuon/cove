@@ -34,7 +34,7 @@ fn0 m.f() -> Int
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn19 m.f#0(Int) -> Int
+fn20 m.f#0(Int) -> Int
   frame 3: s0!:int s1:int s2:int
   local x -> s0:Int [0, 3)
      0  add.int.imm s2:int s0:int 1
@@ -105,7 +105,7 @@ fn0 m.f(m.Point) -> Int
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn19 m.f#0() -> Int
+fn20 m.f#0() -> Int
   frame 4: s0:int s1:int s2:int s3:int
   capture p -> s0:m.Point
   local p -> s0:m.Point [0, 3)
@@ -143,7 +143,7 @@ fn0 m.f() -> Int
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn19 m.f#0() -> Int
+fn20 m.f#0() -> Int
   frame 2: s0:int s1:int
      0  int s1:int 1
      1  copy s0:int s1:int Int
@@ -236,7 +236,7 @@ fn a_lambda_inside_a_lambda_is_numbered_after_the_one_that_made_it() {
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn19 m.f#0() -> Int
+fn20 m.f#0() -> Int
   frame 4: s0:int s1:int s2:ref s3:int
   capture n -> s0:Int
   local n -> s0:Int [0, 7)
@@ -253,7 +253,7 @@ fn19 m.f#0() -> Int
     assert_eq!(
         listing(source, "f#0#0"),
         "\
-fn20 m.f#0#0() -> Int
+fn21 m.f#0#0() -> Int
   frame 3: s0:int s1:int s2:int
   capture n -> s0:Int
   local n -> s0:Int [0, 3)
@@ -300,7 +300,7 @@ fn0 m.f(<addr>) -> Int
             "f#0"
         ),
         "\
-fn19 m.f#0() -> Int
+fn20 m.f#0() -> Int
   frame 3: s0:int s1:int s2:int
   capture n -> s0:Int
   local n -> s0:Int [0, 3)
@@ -343,7 +343,7 @@ fn0 m.f() -> Int
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn19 m.f#0(Int) -> Int
+fn20 m.f#0(Int) -> Int
   frame 3: s0!:int s1:int s2:int
   local n -> s0:Int [0, 3)
      0  mul.int.imm s2:int s0:int 2
@@ -362,7 +362,7 @@ fn a_local_fn_captures_the_bindings_around_it() {
     assert_eq!(
         listing(source, "f#0"),
         "\
-fn19 m.f#0(Int) -> Int
+fn20 m.f#0(Int) -> Int
   frame 4: s0!:int s1:int s2:int s3:int
   capture base -> s1:Int
   local base -> s1:Int [0, 3)

@@ -1,0 +1,11 @@
+error[cove::runtime]: `Int` negation overflowed
+  --> std/int.cove:29:5
+   |
+29 |     -value
+   |     ^^^^^^
+  --> <e2e>/fail_int_abs_overflow/main.cove:10:27
+   |
+10 |   println("never printed {least.abs()}")?
+   |                           ^^^^^^^^^^^ called from here
+  rule: Integer overflow is a broken invariant, not a wrapped result.
+1 error(s)

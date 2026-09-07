@@ -1370,16 +1370,18 @@ fn float_to_int_errors_outside_ints_range() {
 }
 
 /// `Int.abs` on the most negative `Int` has no positive counterpart to
-/// answer, so it overflows the same way `+` does. The literal is built as
-/// `i64::MIN` rather than written directly, because the digits of
-/// `9223372036854775808` alone do not fit a 64-bit integer.
+/// answer. `abs` is `std.int.abs` — a Cove body that negates — so what
+/// overflows is the negation inside it, and the message says so rather than
+/// naming `abs`. The literal is built as `i64::MIN` rather than written
+/// directly, because the digits of `9223372036854775808` alone do not fit a
+/// 64-bit integer.
 #[test]
 fn int_abs_on_the_most_negative_int_overflows() {
     let error = check_and_error(
         "Int.abs on the most negative Int",
         "  let min = -9223372036854775807 - 1\n  min.abs()",
     );
-    assert_eq!(error.message, "`Int` abs overflowed");
+    assert_eq!(error.message, "`Int` negation overflowed");
     assert_eq!(
         error.rule.as_deref(),
         Some("Integer overflow is a broken invariant, not a wrapped result.")
