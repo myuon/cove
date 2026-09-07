@@ -7541,7 +7541,22 @@ impl<'a> Checker<'a> {
         // trailing closure are checked here and nowhere else, so this is
         // where a use of that shape says what a binding's open type is.
         self.constrain(found, hint, span);
-        let unified = unify(expected, found, generics, subst, &self.view());
+        // A generic parameter is bound from what the checker already knows
+        // about `found`, not only from what `found`'s own written form
+        // states: `items` read from a binding that took its type from
+        // `Vector.of()` and a later `push` is still `Array<a>` here — the
+        // binding's stored type is rewritten only at the end of the body —
+        // even though `a` was settled several statements ago. `unify` binds
+        // a type parameter by inserting `found` verbatim, so an argument in
+        // that shape looked exactly as unconstrained as one that really was,
+        // and a later argument — a closure whose parameter type is this
+        // same still-open generic — was asked to settle a decision the
+        // array had already made. `Checker::bound` is the existing read of
+        // "what does the checker already know", used everywhere a name that
+        // cannot itself own a variable is bound from one; a generic
+        // parameter is exactly such a name, so the same read applies here.
+        let resolved = self.bound(found.clone());
+        let unified = unify(expected, &resolved, generics, subst, &self.view());
         if !unified && found.matches(hint) {
             let expected = expected.substitute(subst);
             self.report_argument(found, &expected, span, param, role);
@@ -10284,6 +10299,133 @@ fn build(n: Int) -> Int {
         assert_eq!(
             error.message,
             "`log` was settled as `Vector<String>`, but this use needs `Vector<Int>`"
+        );
+    }
+
+    // ---- issue #265: a generic call reads the whole argument list
+
+    #[test]
+    fn a_generic_parameter_is_bound_from_an_argument_a_binding_only_just_settled() {
+        // `items` is `Array<a>` here in exactly the same way `log` is
+        // `Vector<a>` two tests up — the binding's stored type is not
+        // rewritten until the end of the body — but `a` was settled by the
+        // `push` calls above it. Before this was fixed, a generic call's
+        // own unification saw only the still-open `a` and never bound `T`
+        // to it, so neither the array's element type nor the closure's
+        // parameter was ever pinned down and `result` came out as a type
+        // nothing settled.
+        accepts(
+            "\
+fn myFilter<T>(items: Array<T>, keep: fn(item: T) -> Bool) -> Array<T> {
+  var out = Vector.of()
+  for item in items {
+    if keep(item) {
+      out.push(item)
+    }
+  }
+  out.freeze()
+}
+
+fn build() -> Int {
+  var v = Vector.of()
+  v.push(1)
+  v.push(2)
+  let items = v.freeze()
+  let result = myFilter(items, fn(item) { item % 2 == 0 })
+  result.length()
+}
+",
+        );
+    }
+
+    #[test]
+    fn an_annotated_closure_parameter_still_settles_a_generic_call_alone() {
+        // The rescue the issue names as already working, kept working: the
+        // closure states its own parameter type, which settles `T` without
+        // any help from `items`.
+        accepts(
+            "\
+fn myFilter<T>(items: Array<T>, keep: fn(item: T) -> Bool) -> Array<T> {
+  var out = Vector.of()
+  for item in items {
+    if keep(item) {
+      out.push(item)
+    }
+  }
+  out.freeze()
+}
+
+fn build() -> Int {
+  var v = Vector.of()
+  v.push(1)
+  v.push(2)
+  let items = v.freeze()
+  let result = myFilter(items, fn(item: Int) { item % 2 == 0 })
+  result.length()
+}
+",
+        );
+    }
+
+    #[test]
+    fn a_generic_call_still_unconstrained_reads_as_before() {
+        // `items` here is never settled by anything at all — not by an
+        // earlier use, not by an annotation on it or on the closure — so
+        // reading what the checker already knows about it finds nothing to
+        // read, exactly as ADR 0038 requires: a type nothing settles is
+        // still refused, with the same diagnostic as before this fix.
+        let error = rejects(
+            "\
+fn myFilter<T>(items: Array<T>, keep: fn(item: T) -> Bool) -> Array<T> {
+  var out = Vector.of()
+  for item in items {
+    if keep(item) {
+      out.push(item)
+    }
+  }
+  out.freeze()
+}
+
+fn build() -> Int {
+  let items = Vector.of().freeze()
+  let result = myFilter(items, fn(item: Int) { item == item })
+  result.length()
+}
+",
+        );
+        assert_eq!(error.code, UNCONSTRAINED);
+        assert_eq!(
+            error.message,
+            "nothing says what the `_` in `items: Array<_>` is"
+        );
+    }
+
+    #[test]
+    fn two_type_parameters_are_settled_from_different_arguments() {
+        // Neither argument alone determines both `T` and `U`: `items`
+        // settles `T` and says nothing about `U`, and `transform` settles
+        // `U` only once `T` is known, because its own parameter is
+        // unannotated and takes its type from the call. The two settle the
+        // call together.
+        accepts(
+            "\
+fn myMap<T, U>(items: Array<T>, transform: fn(item: T) -> U) -> Array<U> {
+  var out = Vector.of()
+  for item in items {
+    out.push(transform(item))
+  }
+  out.freeze()
+}
+
+fn build() -> Int {
+  var v = Vector.of()
+  v.push(1)
+  v.push(2)
+  let items = v.freeze()
+  let result = myMap(items, fn(item) { \"{item}\" })
+  result.length()
+}
+",
         );
     }
 
