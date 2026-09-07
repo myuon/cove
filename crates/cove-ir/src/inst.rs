@@ -158,10 +158,14 @@ pub enum Inst {
     /// The bits rather than the `f64` so that [`Inst`] can be `Eq` and
     /// `Hash`ed, and so that a NaN in the source survives the IR unchanged.
     Float { dst: Slot, bits: u64 },
-    /// `dst = <a string object for `text`>`
+    /// `dst = <the address of the string object for `text`>`
     ///
-    /// The object is allocated on first use and shared afterwards: a string
-    /// literal in a loop allocates once for the run, not once per turn.
+    /// The object already exists.
+    /// [ADR 0045](../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md)
+    /// places every program literal in the heap before the run's first
+    /// instruction executes, so this is a load of a precomputed address —
+    /// no branch, no allocation, no copy, whether this is the first turn of
+    /// a loop or the millionth.
     Str { dst: Slot, text: StrId },
     /// `dst = src`, for the words `layout` describes.
     ///

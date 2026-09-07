@@ -83,3 +83,41 @@ fn @m.same(String String) -> Bool
 "
     );
 }
+
+/// [ADR 0045](../../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md)
+/// places every entry of `Program::strings` in the heap once, so what makes
+/// two occurrences of the same literal one object is the lowering
+/// interning them into one entry before that ever runs — confirmed here
+/// rather than assumed.
+#[test]
+fn two_occurrences_of_the_same_text_share_one_string_id() {
+    let (sources, checked) = super::checked("fn twice() -> Bool { \"dup\" == \"dup\" }");
+    let program = super::lower(&checked, &sources, &cove_schema::HostSchemas::new())
+        .expect("the program lowers");
+    assert_eq!(
+        program.strings.len(),
+        1,
+        "one text, written twice, is one entry: {:?}",
+        program.strings
+    );
+}
+
+/// An unmentioned literal still costs an entry: the lowering does not prune
+/// the pool to what a particular run reaches, because it cannot know that —
+/// and [ADR 0045] places every entry regardless. See
+/// `crates/cove-runtime/src/vm/exec.rs`'s `Machine::place_literals`.
+///
+/// [ADR 0045]: ../../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md
+#[test]
+fn a_literal_no_instruction_loads_is_still_in_the_pool() {
+    let (sources, checked) = super::checked(
+        "fn pick(flag: Bool) -> String { if flag { \"used\" } else { \"also used\" } }",
+    );
+    let program = super::lower(&checked, &sources, &cove_schema::HostSchemas::new())
+        .expect("the program lowers");
+    // Both arms are reachable from `pick` and both are in the pool — the
+    // interesting case, `\"also used\"`, is the one a run that always passes
+    // `flag: true` would never load, and the pool holds it anyway.
+    assert!(program.strings.iter().any(|s| &**s == "used"));
+    assert!(program.strings.iter().any(|s| &**s == "also used"));
+}
