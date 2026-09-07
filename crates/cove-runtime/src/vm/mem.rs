@@ -269,7 +269,10 @@ pub(crate) trait Roots {
 /// No roots at all.
 ///
 /// What a task publishes before it has run an instruction, and what a fixture
-/// with nothing to keep alive hands the collector.
+/// with nothing to keep alive hands the collector. Production code always has
+/// a task's real roots to publish instead, so this is constructed only by
+/// this crate's own tests, in fixtures that have nothing else to keep alive.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct NoRoots;
 
 impl Roots for NoRoots {
@@ -1211,11 +1214,19 @@ impl Space {
     }
 
     /// How many collections this run has run.
+    ///
+    /// Read only through [`Memory::collections`], which itself has no
+    /// production caller — see there.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn collections(&self) -> u64 {
         self.allocator().collections
     }
 
     /// How many tasks are executing over this space.
+    ///
+    /// Read only through [`Memory::tasks`], which itself has no production
+    /// caller — see there.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn tasks(&self) -> usize {
         self.world().live
     }
@@ -1426,11 +1437,19 @@ impl Memory {
     }
 
     /// Which stack segment this task owns.
+    ///
+    /// Nothing outside this crate's own tests asks a task which segment it
+    /// was handed; a task addresses its own stack by nothing but its base.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn segment(&self) -> u32 {
         self.at
     }
 
     /// How many tasks are executing over this run's heap, this one counted.
+    ///
+    /// Reached only from this crate's own tests, which assert it against the
+    /// number of segments they attached.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn tasks(&self) -> usize {
         self.space.tasks()
     }
@@ -1654,6 +1673,10 @@ impl Memory {
     }
 
     /// How many words of this task's segment are committed.
+    ///
+    /// Reached only from this crate's own tests, which assert it grows and
+    /// shrinks with the frames pushed and popped over it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn stack_words(&self) -> u64 {
         self.stack.words.len() as u64
     }
@@ -1752,6 +1775,12 @@ impl Memory {
     }
 
     /// How many collections have run.
+    ///
+    /// A separate figure from `Machine::collected`'s, which the machine
+    /// tracks on its own side of the boundary and is what a run's trace
+    /// actually reports. This one is reached only from this crate's own
+    /// tests, which assert directly on the memory that a collection ran.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn collections(&self) -> u64 {
         self.space.collections()
     }

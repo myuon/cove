@@ -66,19 +66,29 @@
 //! which is what ADR 0013's *"two handles are equal when they name the same
 //! resource"* costs once there is more than one thread.
 //!
-//! The dead-code allowance stays, and what it now covers is narrower than
-//! what it covered before: not "nothing reaches this module" but "several
-//! items below it are reached only from their own `#[cfg(test)]` code" —
-//! `Machine::new`, `cell`'s whole surface until the lowering reaches
-//! `Shared`, the collection counters a test asserts over, and
-//! [`Vm::collected`] and [`Vm::host_wait`], the two figures this type can
-//! report that nothing outside asks for yet. It is one line in one place
-//! rather than an attribute per item, so that removing it is a single edit
-//! whose failure lists exactly what is still unused.
-#![allow(dead_code)]
+//! There used to be a single `#![allow(dead_code)]` here, covering every
+//! submodule beneath it. Its own comment was honest about what it was *for*
+//! — several items below are reached only from their own `#[cfg(test)]`
+//! code, and one line in one place meant removing it was a single edit whose
+//! failure would list exactly what was still unused. What it did not say was
+//! that it covered far more than those items, because a module-wide allow
+//! does not distinguish "reached only by a test" from "reached by nothing at
+//! all": [ADR 0043](../../../../docs/adr/0043-a-method-moves-if-it-is-total-and-takes-no-closure.md)'s
+//! third migration condition is checked by deleting a builtin's dispatch arm
+//! and asking clippy whether the implementation it leaves behind is now
+//! unreachable, and inside this module clippy could never answer, allow or
+//! no. It was removed for that reason (issue #274).
+//!
+//! What replaces it is one `#[cfg_attr(not(test), allow(dead_code))]` per
+//! item that is genuinely reached only from this crate's own tests, each
+//! with a comment saying so beside it. That form says under `cargo test`
+//! exactly what the broad allow said all the time — nothing, because the
+//! item is used — and only turns the lint off for the build that has no
+//! caller, which is the build the check above runs against. A handful of
+//! items had no caller at all, not even a test; those were deleted rather
+//! than annotated, which is what removing the broad allow was for.
 
 use std::rc::Rc;
-use std::time::Duration;
 
 use cove_diag::Span;
 use cove_ir::{Function, FunctionId, Program};
@@ -90,7 +100,6 @@ use crate::runtime::Runtime;
 use crate::trace::{RunOutcome, Timing, TraceEvent};
 use crate::vm::debug::Debugger;
 use crate::vm::exec::Machine;
-use crate::vm::mem::Collected;
 // The public `Value` reaches this file for the one reason ADR 0034 allows it
 // to reach any of them: this is a boundary. An entry's arguments and its
 // answer are what a host hands in and reads back, and they are `Value`s on
@@ -313,11 +322,6 @@ impl<'a> Vm<'a> {
         self.machine.instructions()
     }
 
-    /// What every collection of this run has done.
-    pub(crate) fn collected(&self) -> Collected {
-        self.machine.collected()
-    }
-
     /// Words the heap region occupies, free blocks included.
     pub fn heap_words(&self) -> u64 {
         self.machine.heap_words()
@@ -326,11 +330,6 @@ impl<'a> Vm<'a> {
     /// Words handed out over the whole run, reuse counted each time.
     pub fn allocated_words(&self) -> u64 {
         self.machine.allocated_words()
-    }
-
-    /// How long this run has spent inside host calls.
-    pub(crate) fn host_wait(&self) -> Duration {
-        self.machine.host_wait()
     }
 
     /// Where the most recent failed assertion was written, together with the
