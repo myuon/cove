@@ -49,16 +49,26 @@ the base of the heap region, and is never collected.**
 
 Concretely:
 
-1. When a `Machine` is constructed — the same moment the program is encoded
-   and verified — each entry of `Program::strings` is allocated in `StrId`
-   order, before any instruction executes and therefore before any other
-   object exists.
-2. The allocator records where that finished: one word, `statics`, the first
-   address after the last of them.
-3. `Inst::Str` becomes a load of a precomputed address. No branch, no
+1. The **entry's** machine — `Machine::for_run`, once per run — allocates
+   each entry of `Program::strings` in `StrId` order, before any instruction
+   executes and therefore before any other object exists.
+2. Two things record it, and they are deliberately two:
+
+   ```text
+   Space.static_end: u64                 // the immortal floor
+   Machine.literal_addrs: Arc<[u64]>     // StrId -> address
+   ```
+
+   `Space` is one per run and shared by every task; `static_end` therefore
+   belongs to it, because what it bounds is the heap the run shares.
+   `literal_addrs` is immutable program metadata built once and handed on.
+3. `Machine::for_task` **receives** `literal_addrs`. A spawned task does not
+   allocate a literal, does not copy the table, and does not place an object
+   anywhere: it clones an `Arc` and addresses what the run already built.
+4. `Inst::Str` becomes a load of a precomputed address. No branch, no
    allocation, no copy.
-4. The collector does not sweep an object below `statics`. One comparison,
-   in the same shape as the region decoder it sits beside.
+5. A sweep, and the free-list rebuild that follows it, **begin at
+   `static_end`** rather than at the base of the heap.
 
 ### It is not a third region, and that is the load-bearing claim
 
@@ -95,9 +105,13 @@ fn reachable(addr: u64, bump: u64) -> bool {
 ```
 
 A literal is below `bump`, so tracing *through* a reference to one already
-works, unchanged. What must change is that a sweep may not reclaim one, and
-that is `addr >= statics` — one comparison against one word the allocator
-already has room for.
+works, unchanged. What must change is that a sweep may not reclaim one.
+
+That is stated as a **floor rather than a test**: a sweep and the free-list
+rebuild after it start at `static_end` and walk upward. Nothing below it is
+visited, so nothing below it can be freed, coalesced, or relabelled — and the
+invariant is a property of where the walk begins rather than a comparison
+every object has to pass and a reader has to trust is never skipped.
 
 **No table, and specifically not the one that exists today.** `interned` is
 a root list, and a root list is exactly the "GC side table" issue #281 rules
@@ -109,8 +123,8 @@ comparison could have kept.
 ### Addressing them
 
 The encoded instruction keeps a dense `StrId`, and the machine holds
-`statics: Vec<u64>` — the address of each, in `StrId` order, filled at
-construction.
+`literal_addrs: Arc<[u64]>` — the address of each, in `StrId` order, built
+once by `Machine::for_run` and shared with every task the run spawns.
 
 That is a table, and it is the kind ADR 0041 permits — "an index into
 immutable program metadata" — rather than the kind it forbids. It is not
@@ -121,8 +135,9 @@ layout, so a program could not be encoded without knowing where it would run.
 
 ### Tasks share them
 
-Because they are built before any task exists and never change, every task of
-a run addresses the same objects. No lock, because there is nothing to
+Because they are built by the entry's machine before it executes an
+instruction — and therefore before any `spawn` can have happened — and never
+change afterwards, every task of a run addresses the same objects. No lock, because there is nothing to
 synchronise: an immutable object at a fixed address needs no more agreement
 than the `Program` itself does.
 
@@ -130,6 +145,40 @@ This is the part worth more than the branch. The current design pays one
 object per literal *per task*, and the comment defending it is right that
 sharing *lazily built* objects would need a lock. Building them eagerly is
 what removes the lock from the question.
+
+## Building them can fail, and that is a semantic change
+
+`Vm::new` and `Machine::for_run` cannot fail today. Placing every literal
+before the program runs introduces an allocation that can, and the
+consequence is not only a startup cost: **a run can now fail before it
+begins, because of a literal it would never have reached.** Under lazy
+allocation an enormous unused string cost nothing and could not stop
+anything.
+
+That is accepted as this design's price rather than hidden. A program whose
+literals do not fit in its heap is a program that cannot be relied on to run,
+and finding that out at the start is better than finding it out at whichever
+loop iteration first reaches the string. But it is observable, and it is not
+what happens today, so it is decided here rather than discovered later.
+
+The contract:
+
+- **The constructor stays infallible.** The failure is held on the machine,
+  exactly as the encoded and verified program already is — preparation that
+  cannot fail early keeps its answer until someone asks.
+- **It is returned before a frame exists.** `run_entry` and `invoke` answer it
+  as their first act, before pushing anything. So a failed run has no stack to
+  unwind and no partial state to describe, and a host sees the same shape of
+  `Err` it would see from a run that failed on its first instruction.
+- **The message is the one a full heap already gives** — `"this run has no
+  memory left"` — because that is what happened, and inventing a second
+  wording for the same exhaustion would make two errors out of one condition.
+- **It carries the entry's span**, the one a host asked to run. A literal has
+  no source position of its own worth naming here: the program is what could
+  not be started, not the string.
+- **It charges no fuel.** Fuel meters what a program executed, and this
+  program executed nothing. Charging for it would make a budget's meaning
+  depend on how many literals a source file happens to contain.
 
 ## What it costs
 
@@ -175,6 +224,12 @@ from that path; it adds nothing to it.
   values and are already outside this question. `Inst::Trap` and
   `Inst::ScopeEnter` carry a `StrId` and never allocate — they read the
   program's text directly — so they are untouched.
+- **A general `load.const`.** A string is the only heap-shaped constant the
+  language has, so `Inst::Str` changes meaning — from *build one* to *load the
+  address of the one that is there* — and keeps its name and its printed
+  form. Generalising an instruction to a second kind of constant that does
+  not exist would be building the shape rather than the thing. When one
+  appears, that is when the two have something to share.
 - **Unifying the regions.** ADR 0034 reserves the freedom to make the stack
   and heap one allocation later. A literal at the base of the heap is
   compatible with that and does not advance it.
