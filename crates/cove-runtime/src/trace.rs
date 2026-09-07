@@ -122,6 +122,39 @@ use crate::wallclock::Instant;
 /// 3 trace is refused for its version like the two before it.
 pub const TRACE_FORMAT_VERSION: u32 = 4;
 
+/// The version of the `cove-runtime` crate a program ran against —
+/// `CARGO_PKG_VERSION` at build time, and nothing more than that.
+///
+/// This is not [`TRACE_FORMAT_VERSION`]: that one versions the shape of the
+/// JSONL a trace is written as, and moves only when an event's fields do,
+/// which is rarely. This one moves with every release of the crate, whether
+/// or not a single trace field changed, because what it answers is "which
+/// build of the runtime ran this" rather than "can this reader parse what was
+/// written".
+///
+/// [Issue #248](https://github.com/myuon/cove/issues/248) is why this exists:
+/// an embedding that records enough to replay a run needs a
+/// `cove_runtime_version` among what it records, and before this there was
+/// nothing reachable from the embedding API to put there — only
+/// `TRACE_FORMAT_VERSION`, which answers a different question, and the
+/// interface hash `cove-cli` computes for its own package format, which is
+/// `pub(crate)` and hashes declared signatures rather than a build. A version
+/// genuinely is the runtime's own to answer, and re-exporting the one Cargo
+/// already stamps on every build costs nothing.
+///
+/// A replay identity needs one more thing this crate can answer and this
+/// constant does not carry: which backend ran the program. Fuel is not
+/// portable between [`Vm`](crate::Vm) and the tree-walking interpreter, so a
+/// version without a backend does not pin down a run. [`RecordingBackend`]
+/// is that other half — already public, already spelled the way `--backend`
+/// accepts — and a replay identity built from the embedding API is this
+/// constant plus one of its variants, not a new string invented to match
+/// them. What this constant deliberately does not attempt is a hash of the
+/// program that ran: that identity is the *embedding's* source or bytecode,
+/// not the runtime's, and only the embedding knows which of those it shipped
+/// — folding it in here would answer a question that belongs one layer up.
+pub const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Which backend produced a recording.
 ///
 /// A trace is written by `cove run --trace`, by a built binary, and by a
@@ -543,6 +576,33 @@ pub enum TraceEvent {
 /// would not be one trace. A sink that needs mutable state of its own
 /// synchronizes it, which is also what keeps two threads from interleaving
 /// halves of a line.
+///
+/// # Two installation points, not one
+///
+/// One `Arc<dyn TraceSink>` does not see every event: a run has two of them.
+/// [`HostRegistry::set_trace`](crate::HostRegistry::set_trace) is where
+/// [`TraceEvent::HostCall`] alone goes. Every other event —
+/// [`TraceEvent::TaskSpawned`], [`TraceEvent::TaskCompleted`],
+/// [`TraceEvent::TaskCancelled`], [`TraceEvent::HeapCollected`],
+/// [`TraceEvent::HeapSummary`], [`TraceEvent::EntryEnter`],
+/// [`TraceEvent::EntryExit`] and [`TraceEvent::RunEnded`] — goes through
+/// [`Runtime::with_trace`](crate::Runtime::with_trace). Each defaults to its
+/// own [`NullSink`], independently, so installing one says nothing about
+/// whether the other was, and an embedding that installs only one gets a
+/// trace that is silently missing the other's events rather than an error.
+///
+/// # Correlating an event to something of the host's own
+///
+/// [`TraceEvent`]'s task-lifecycle and per-call variants carry a bare task
+/// id — [`crate::runtime::ENTRY_TASK`] for the entry, and whatever
+/// [`Runtime::next_task_id`](crate::Runtime::next_task_id) handed out for a
+/// spawned one — and nothing else. That is deliberate rather than an
+/// omission: the id a host wants to hang an event on (a creature, a request,
+/// a session) belongs to the host, not to the runtime, and a sink is exactly
+/// the place a host bridges the two. A sink built per invocation, closing
+/// over the host's own identifier, is how that bridge is made; the runtime
+/// does not carry the identifier itself because it has no way to know what
+/// shape it should be.
 pub trait TraceSink: Send + Sync {
     /// Records one event. Must not panic: a broken trace sink should degrade
     /// the trace, not the program being traced.

@@ -55,7 +55,7 @@ pub use task::Transfer;
 pub use trace::{
     create_trace_file, value_to_json, HostOutcome, JsonlSink, NullSink, RecordedValue,
     RecordingBackend, RunOutcome, TraceEvent, TraceHeader, TraceSink, ValueCapture,
-    TRACE_FORMAT_VERSION,
+    RUNTIME_VERSION, TRACE_FORMAT_VERSION,
 };
 pub use value::{Value, ValueView};
 // The machine side of issue #241's debugger. The module is private like the

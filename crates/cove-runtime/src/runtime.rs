@@ -64,6 +64,17 @@ impl Runtime {
 
     /// Sends this run's trace events to `sink`. Replaces any sink installed
     /// earlier; the default is [`NullSink`], which discards everything.
+    ///
+    /// This is where every event but one goes: task lifecycle
+    /// (`TaskSpawned`, `TaskCompleted`, `TaskCancelled`), a heap's
+    /// (`HeapCollected`, `HeapSummary`), and the entry's own (`EntryEnter`,
+    /// `EntryExit`, `RunEnded`). The one exception is
+    /// [`TraceEvent::HostCall`], which reports through
+    /// [`HostRegistry::set_trace`](crate::HostRegistry::set_trace) instead —
+    /// a separate sink on a separate object, defaulting to its own
+    /// `NullSink`. An embedding that installs a sink here and expects host
+    /// calls on the same tape gets a trace with everything but those, and no
+    /// diagnostic saying the other sink was never installed.
     pub fn with_trace(mut self, sink: Arc<dyn TraceSink>) -> Self {
         self.trace = sink;
         self
@@ -107,6 +118,26 @@ impl Runtime {
     }
 
     /// What every heap retired so far has done.
+    ///
+    /// Only [`Interpreter`], the tree-walking backend, ever calls
+    /// [`Runtime::retire_heap`]. A run on [`Vm`] never does, so this stays at
+    /// `HeapStats::default()` for the whole of a VM run — not because the VM
+    /// is not counting, but because it counts memory in words rather than
+    /// the bytes and objects this struct holds, and there is no honest way to
+    /// fold one into the other. Reporting a zero here for a VM run would read
+    /// as a session that allocated nothing, which is worse than not
+    /// answering at all.
+    ///
+    /// A `Vm` embedder reads
+    /// [`heap_words`](crate::Vm::heap_words),
+    /// [`allocated_words`](crate::Vm::allocated_words),
+    /// [`collections`](crate::Vm::collections) and
+    /// [`live_words`](crate::Vm::live_words) instead — see
+    /// [`Vm::live_words`](crate::Vm::live_words) for which of those answers
+    /// "does this run still hold what it allocated".
+    ///
+    /// [`Interpreter`]: crate::interp::Interpreter
+    /// [`Vm`]: crate::Vm
     pub fn heap_stats(&self) -> HeapStats {
         *self.locked_heap()
     }
