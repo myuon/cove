@@ -66,6 +66,13 @@ pub(super) fn equals(machine: &Machine, operands: &[Operand<'_>]) -> Result<u64,
 ///
 /// What every reader of a value inside another value asks: an array's
 /// element, a struct's field, an enum's part, the value inside a box.
+///
+/// Every current caller already holds two [`Operand`]s — possibly of two
+/// different layouts — and reaches [`same`] directly instead, so this
+/// narrower one-layout form has no caller outside this module's own tests,
+/// which use it to exercise the layout-driven walk without an `Operand` on
+/// either side.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn same_value(
     machine: &Machine,
     layout: LayoutId,

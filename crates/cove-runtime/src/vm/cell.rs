@@ -94,6 +94,12 @@ use crate::vm::mem::{Memory, Roots};
 pub(crate) const STATE: u32 = cove_ir::SHARED_STATE;
 
 /// The payload word the wrapped value begins at.
+///
+/// Read only by [`value`] below, which is itself reached only from this
+/// module's own tests — the general addressing the lowering emits computes
+/// a struct field's offset the same way it does for any other field, without
+/// calling back into this module.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const VALUE: u32 = cove_ir::SHARED_VALUE;
 
 /// What the state word holds when no task is inside `lock`.
@@ -145,12 +151,22 @@ pub(crate) fn state(mem: &Memory, cell: u64) -> u64 {
 /// The address of the first word of `cell`'s value.
 ///
 /// What `lock` hands its closure: an ordinary place, of the ordinary width
-/// its layout says, aliased rather than copied.
+/// its layout says, aliased rather than copied. No production caller asks
+/// for it through this function — the lowering addresses the payload field
+/// the same way it addresses any other — so this is reached only from this
+/// module's own tests, which use it to check the address they assert
+/// against.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn value(mem: &Memory, cell: u64) -> u64 {
     mem.payload_addr(cell, VALUE)
 }
 
 /// Which task is inside `cell`, or zero.
+///
+/// No production caller reads a cell's holder outside of `lock`'s own
+/// reentrancy check, which reads the state word directly rather than through
+/// this accessor. Reached only from this module's own tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn holder(mem: &Memory, cell: u64) -> u64 {
     mem.read(state(mem, cell))
 }

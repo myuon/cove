@@ -1417,11 +1417,15 @@ mod tests {
     /// A fixture's scalars, declared once so that everything else can name
     /// them: a family is a `LayoutId` now, and an `Array<Point>` cannot be
     /// written down without a `Point` to point at.
+    ///
+    /// Only `int` is ever read back off `World` itself — every other family
+    /// a test wants, `Bool` and `String` included, is looked up afterwards by
+    /// name through [`World::named`], so `Bool`'s and `String`'s `LayoutId`s
+    /// are not kept here; keeping them was dead weight clippy caught once the
+    /// module-wide dead-code allow was narrowed (issue #274).
     struct World {
         program: Program,
         int: LayoutId,
-        boolean: LayoutId,
-        string: LayoutId,
     }
 
     impl World {
@@ -1435,8 +1439,6 @@ mod tests {
             World {
                 program: build.done(),
                 int,
-                boolean,
-                string,
             }
         }
 

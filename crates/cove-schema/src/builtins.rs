@@ -584,6 +584,35 @@ pub struct StdBinding {
 /// instead of only the library's own line — without that, moving `abs`
 /// here would have moved its diagnostic out of the caller's source along
 /// with it.
+///
+/// # Checking ADR 0043's third condition before adding a row here
+///
+/// [ADR 0043](../../../docs/adr/0043-a-method-moves-if-it-is-total-and-takes-no-closure.md)'s
+/// third migration condition is that the Rust an entry deletes is
+/// **per-method**: a method whose implementation is shared with others (the
+/// way `Duration`'s readers share one table-driven function) moves nothing
+/// by moving, and counting schema entries instead of implementations is the
+/// mistake that ADR corrects.
+///
+/// The check is: delete the dispatch arm in `cove-runtime`'s
+/// `vm::builtins` that calls the Rust function, leave the function itself
+/// defined, and run
+/// `cargo clippy --workspace --all-targets --profile checked -- -D warnings`.
+/// If the condition holds, clippy reports the now-unreachable function as
+/// dead code and the build fails; a build that stays green says the
+/// function still has another caller, which is exactly the shared-Rust case
+/// the condition rules out.
+///
+/// This only works because `crates/cove-runtime/src/vm/mod.rs` carries no
+/// module-wide `#[allow(dead_code)]` — it did once, and while it did this
+/// check passed silently for every candidate, moved or not, which is how
+/// `Int.min` and `Int.max` in [PR #259](https://github.com/myuon/cove/pull/259)
+/// went unverified. [Issue #274](https://github.com/myuon/cove/issues/274)
+/// narrowed that allow to the individual items that need it, each with its
+/// own comment saying why it has no caller outside its own tests; deleting a
+/// dispatch arm anywhere else in `vm::builtins` now reaches exactly one of
+/// two outcomes — a clippy failure, or a genuinely shared implementation —
+/// and never the third, silent one this note used to have to warn about.
 pub static STANDARD_LIBRARY: &[StdBinding] = &[
     StdBinding {
         receiver: "Array",

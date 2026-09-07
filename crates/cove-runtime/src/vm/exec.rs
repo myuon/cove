@@ -634,11 +634,21 @@ pub(crate) struct Machine<'a> {
 
 impl<'a> Machine<'a> {
     /// A machine with no host boundary, for a program that calls none.
+    ///
+    /// Production always goes through [`Machine::for_run`], which a `Vm`
+    /// calls with the runtime it is part of; this and [`Machine::with_hosts`]
+    /// are the two narrower forms this crate's own tests build a bare
+    /// `Machine` from when a fixture has no runtime to hand one.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(program: &'a Program, heap_words: usize) -> Machine<'a> {
         Machine::with_hosts(program, heap_words, None)
     }
 
     /// A machine that calls hosts through `hosts`, with nothing above it.
+    ///
+    /// See [`Machine::new`]: reached only from this crate's own tests, which
+    /// use it for a fixture that has hosts to call but no runtime.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn with_hosts(
         program: &'a Program,
         heap_words: usize,
@@ -3091,15 +3101,6 @@ pub(crate) mod tests {
                 },
                 words,
             ))
-        }
-
-        /// An `export opaque struct`, which renders as its bare name.
-        pub(crate) fn opaque(&mut self, name: &str, fields: &[(&str, LayoutId)]) -> LayoutId {
-            let id = self.structure(name, fields);
-            if let Shape::Struct { opaque, .. } = &mut self.program.layouts[id.index()].shape {
-                *opaque = true;
-            }
-            id
         }
 
         /// An enum, laid out under the payload-agreement rule.
