@@ -332,6 +332,30 @@ impl<'a> Vm<'a> {
         self.machine.allocated_words()
     }
 
+    /// How many collections this run's heap has done.
+    ///
+    /// [`Vm::live_words`] is `None` exactly when this is `0`: a heap that has
+    /// never collected has nothing that measured what is live.
+    pub fn collections(&self) -> u64 {
+        self.machine.collected().collections
+    }
+
+    /// Words the most recent collection found alive, or `None` if the heap
+    /// has never collected.
+    ///
+    /// [Issue #248](https://github.com/myuon/cove/issues/248) is why this
+    /// exists as its own accessor rather than only inside the trace's
+    /// `heap_summary` event: `Runtime::heap_stats` is filled in only by the
+    /// tree-walking backend (see its doc comment), so a `Vm` embedder asking
+    /// "does this run still hold what an early invocation allocated" has
+    /// nothing else public to read. `heap_words` and `allocated_words`
+    /// answer capacity and a monotonic total; this is the one that answers
+    /// what is live right now, as of the last sweep.
+    pub fn live_words(&self) -> Option<u64> {
+        let collected = self.machine.collected();
+        (collected.collections > 0).then_some(collected.live_words)
+    }
+
     /// Where the most recent failed assertion was written, together with the
     /// message it produced, or `None` when no assertion has failed.
     ///
@@ -456,17 +480,16 @@ impl<'a> Vm<'a> {
     /// collector does not time itself yet, and a zero would say it stopped
     /// the world for no time at all.
     fn summarize_heap(&self) {
-        let collected = self.machine.collected();
         self.runtime.trace(TraceEvent::HeapSummary {
-            collections: collected.collections,
+            collections: self.collections(),
             object_count: None,
             allocated_bytes: None,
             live_bytes: None,
             peak_bytes: None,
             pause: None,
-            allocated_words: Some(self.machine.allocated_words()),
-            capacity_words: Some(self.machine.heap_words()),
-            live_words: (collected.collections > 0).then_some(collected.live_words),
+            allocated_words: Some(self.allocated_words()),
+            capacity_words: Some(self.heap_words()),
+            live_words: self.live_words(),
         });
     }
 

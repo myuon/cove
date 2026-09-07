@@ -672,8 +672,20 @@ impl HostRegistry {
         self.modules.iter().any(|m| m.module_schema().name == name)
     }
 
-    /// Installs where trace events go. Replaces any sink installed earlier;
-    /// the default is [`NullSink`], which discards everything.
+    /// Installs where this registry's trace events go. Replaces any sink
+    /// installed earlier; the default is [`NullSink`], which discards
+    /// everything.
+    ///
+    /// This is the Host API boundary's own sink, and it carries exactly one
+    /// event: [`TraceEvent::HostCall`]. Everything else a run traces — task
+    /// lifecycle, a heap's summary, and the entry's own
+    /// [`TraceEvent::EntryEnter`], [`TraceEvent::EntryExit`] and
+    /// [`TraceEvent::RunEnded`] — goes through
+    /// [`Runtime::with_trace`](crate::Runtime::with_trace) instead, which
+    /// has a `NullSink` of its own to install into. An embedding that installs
+    /// only this one and only measures host calls will not notice; one that
+    /// expects a full tape from this alone gets an empty one for everything
+    /// but `HostCall`, with no error to say so.
     pub fn set_trace(&mut self, sink: Arc<dyn TraceSink>) {
         self.trace = sink;
     }
