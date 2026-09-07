@@ -177,6 +177,24 @@ pub(super) fn float_abs(
     Ok(float_receiver(machine, "abs", self_)?.abs().to_bits())
 }
 
+/// `Float.sqrt() -> Float`.
+///
+/// IEEE 754 requires a correctly-rounded square root, so this is the one
+/// irrational operation whose bits are the same on every conforming
+/// machine — the whole reason issue #250 asked for it. It traps on
+/// nothing: Rust's `f64::sqrt` answers `NaN` for a negative operand
+/// (`-0.0` included, whose root is `-0.0` rather than `NaN`) exactly as
+/// IEEE 754 does, and `Float`'s other primitives already leave `NaN` and
+/// signed-zero semantics undecided — see issue #254 — so this does not
+/// decide them either.
+pub(super) fn float_sqrt(
+    machine: &mut Machine,
+    operands: &[Operand<'_>],
+) -> Result<u64, RuntimeError> {
+    let (self_, _) = operand::method("sqrt", operands, 0)?;
+    Ok(float_receiver(machine, "sqrt", self_)?.sqrt().to_bits())
+}
+
 /// `Float.min(other) -> Float`.
 pub(super) fn float_min(
     machine: &mut Machine,
@@ -383,6 +401,31 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.message, "`Float.format` cannot use `18` digits");
+    }
+
+    /// `sqrt` answers what IEEE 754 answers: the correctly-rounded root for
+    /// a non-negative operand, `NaN` for a negative one, and `-0.0` for
+    /// `-0.0` — the one case where a negative operand's root is not `NaN`.
+    #[test]
+    fn sqrt_answers_what_ieee_754_answers() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 14);
+        assert_eq!(
+            float_of(&mut machine, "sqrt", &[(Repr::Float, 4.0f64.to_bits())]),
+            2.0
+        );
+        assert_eq!(
+            float_of(&mut machine, "sqrt", &[(Repr::Float, 2.0f64.to_bits())]),
+            std::f64::consts::SQRT_2
+        );
+        assert_eq!(
+            float_of(&mut machine, "sqrt", &[(Repr::Float, 0.0f64.to_bits())]),
+            0.0
+        );
+        let negative_zero = float_of(&mut machine, "sqrt", &[(Repr::Float, (-0.0f64).to_bits())]);
+        assert_eq!(negative_zero, 0.0);
+        assert!(negative_zero.is_sign_negative());
+        assert!(float_of(&mut machine, "sqrt", &[(Repr::Float, (-1.0f64).to_bits())]).is_nan());
     }
 
     /// Three floats have no truncation an `Int` can hold, and each is named

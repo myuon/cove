@@ -216,6 +216,7 @@
         {"name": "toInt", "signature": "toInt() -> Result<Int, Error>", "generics": [], "params": [], "variadic": false, "result": "Result<Int, Error>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "round", "signature": "round() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "abs", "signature": "abs() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "sqrt", "signature": "sqrt() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "min", "signature": "min(other: Float) -> Float", "generics": [], "params": [{"name": "other", "type": "Float"}], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "max", "signature": "max(other: Float) -> Float", "generics": [], "params": [{"name": "other", "type": "Float"}], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "format", "signature": "format(digits: Int) -> String", "generics": [], "params": [{"name": "digits", "type": "Int"}], "variadic": false, "result": "String", "mutating": false, "implementedBy": "machine", "host": false},

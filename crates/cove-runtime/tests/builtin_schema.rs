@@ -507,6 +507,11 @@ static EXERCISES: &[Exercise] = &[
     },
     Exercise {
         ty: "Float",
+        name: "sqrt",
+        body: "  let ratio = 2.0\n  let root = ratio.sqrt()\n  0",
+    },
+    Exercise {
+        ty: "Float",
         name: "min",
         body: "  let ratio = 1.5\n  let lesser = ratio.min(0.5)\n  0",
     },

@@ -2456,8 +2456,9 @@ pub const INT: BuiltinSchema = BuiltinSchema {
 /// handling them.
 ///
 /// `Float` is IEEE 754 and stops at nothing, so nothing here traps: `abs`,
-/// `round`, `min`, and `max` are total. `format` is the one exception, and
-/// what it refuses is its own argument rather than the value.
+/// `round`, `sqrt`, `min`, and `max` are total. `format` is the one
+/// exception, and what it refuses is its own argument rather than the
+/// value.
 pub const FLOAT: BuiltinSchema = BuiltinSchema {
     name: "Float",
     parameters: &[],
@@ -2493,6 +2494,29 @@ pub const FLOAT: BuiltinSchema = BuiltinSchema {
         // The magnitude.
         MethodSchema {
             name: "abs",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Float,
+            mutating: false,
+            fresh: false,
+        },
+        // The square root. IEEE 754 requires a correctly-rounded `sqrt`,
+        // so this is exact on every conforming machine — unlike a
+        // trigonometric or exponential function, which the standard leaves
+        // free to differ in the last bit between two implementations. That
+        // exactness is the entire reason this method exists (issue #250)
+        // rather than a wider set of maths functions.
+        //
+        // It traps on nothing, the same as `abs` and `round`: a negative
+        // operand answers `NaN`, matching Rust's `f64::sqrt` and IEEE 754
+        // both, with one exception IEEE 754 carves out and Rust follows —
+        // `(-0.0).sqrt()` is `-0.0`, not `NaN`. `Float`'s `NaN` and
+        // signed-zero semantics are otherwise still undecided (issue #254),
+        // and this does not decide them: it answers what the hardware
+        // answers and nothing more.
+        MethodSchema {
+            name: "sqrt",
             generics: &[],
             params: &[],
             variadic: false,

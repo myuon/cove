@@ -760,6 +760,7 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
     ("Float", "toInt"),
     ("Float", "round"),
     ("Float", "abs"),
+    ("Float", "sqrt"),
     ("Float", "min"),
     ("Float", "max"),
     ("Float", "format"),
