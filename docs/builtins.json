@@ -197,7 +197,7 @@
       ],
       "methods": [
         {"name": "toFloat", "signature": "toFloat() -> Float", "generics": [], "params": [], "variadic": false, "result": "Float", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "abs", "signature": "abs() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "abs", "signature": "abs() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.int.abs", "host": false},
         {"name": "min", "signature": "min(other: Int) -> Int", "generics": [], "params": [{"name": "other", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.int.min", "host": false},
         {"name": "max", "signature": "max(other: Int) -> Int", "generics": [], "params": [{"name": "other", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.int.max", "host": false},
         {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "implementedBy": "machine", "host": false}

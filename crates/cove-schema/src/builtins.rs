@@ -568,7 +568,7 @@ pub struct StdBinding {
 /// Every builtin method whose body has moved out of Rust and into the
 /// standard library.
 ///
-/// Fourteen entries, and what is *not* here is as informative as what is.
+/// Fifteen entries, and what is *not* here is as informative as what is.
 ///
 /// `Result.mapError` is here, and it is the only one that needed a language
 /// change to arrive. While a callback's arity was adapted rather than
@@ -577,10 +577,13 @@ pub struct StdBinding {
 /// `body(error)` passes one argument always. ADR 0044 removed that
 /// exception, and this row is what it bought.
 ///
-/// `Int.abs` is absent although `min` and `max` moved. It is the only one of
-/// the three that can fail, and a Cove body would move that failure's
-/// diagnostic out of the caller's source and into the standard library —
-/// [issue #258](https://github.com/myuon/cove/issues/258).
+/// `Int.abs` is here too now, and it is the first entry that can fail: the
+/// least `Int` has no positive counterpart. It waited on
+/// [issue #258](https://github.com/myuon/cove/issues/258), which taught a
+/// trap raised from inside a standard-library body to name its caller
+/// instead of only the library's own line — without that, moving `abs`
+/// here would have moved its diagnostic out of the caller's source along
+/// with it.
 pub static STANDARD_LIBRARY: &[StdBinding] = &[
     StdBinding {
         receiver: "Array",
@@ -689,6 +692,12 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "max",
         module: "std.int",
         function: "max",
+    },
+    StdBinding {
+        receiver: "Int",
+        method: "abs",
+        module: "std.int",
+        function: "abs",
     },
 ];
 

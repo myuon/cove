@@ -901,18 +901,11 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Float(*n as f64)))
             }
-            "abs" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Int(
-                    n.checked_abs()
-                        .ok_or_else(|| crate::interp::overflow("abs", span))?,
-                )))
-            }
-            // `min` and `max` used to answer here too, `(*n).min(*other)`
-            // and `(*n).max(*other)`. Neither reaches this arm any more:
-            // `Interpreter::eval_method_call` resolves them to a call into
-            // `std.int.min`/`std.int.max` before this function is ever
-            // asked about them — see
+            // `min`, `max`, and `abs` used to answer here too, `(*n).min(*other)`,
+            // `(*n).max(*other)`, and `n.checked_abs()`. None reaches this arm
+            // any more: `Interpreter::eval_method_call` resolves them to a
+            // call into `std.int.min`/`std.int.max`/`std.int.abs` before this
+            // function is ever asked about them — see
             // `cove_schema::builtins::standard_binding`.
             _ => Err(no_method("Int", name, span)),
         },

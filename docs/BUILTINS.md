@@ -233,7 +233,7 @@ written as a namespace.
 | signature | `var self` | variadic | binds | implemented by |
 | --- | --- | --- | --- | --- |
 | `toFloat() -> Float` |  |  |  | `machine` |
-| `abs() -> Int` |  |  |  | `machine` |
+| `abs() -> Int` |  |  |  | `std.int.abs` |
 | `min(other: Int) -> Int` |  |  |  | `std.int.min` |
 | `max(other: Int) -> Int` |  |  |  | `std.int.max` |
 | `snapshot() -> Self` |  |  |  | `machine` |

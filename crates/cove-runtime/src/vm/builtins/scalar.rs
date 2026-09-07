@@ -3,12 +3,9 @@
 //! A scalar is one word, and a `Result` is a run of words rather than an
 //! object, so the only thing any of these allocates is text: the `String` a
 //! `format` builds, and the message an `Err` explains itself with. What each
-//! one *means* is the oracle's, including the three places the answer is not
+//! one *means* is the oracle's, including the two places the answer is not
 //! the obvious one:
 //!
-//! - **`Int.abs()` at `Int.MIN` stops the run.** Integer overflow is a broken
-//!   invariant in this language and not a wrapped result, so `abs` raises
-//!   what `-x` raises, in the same words.
 //! - **`Float.toInt()` answers a `Result`**, because three floats have no
 //!   truncation that fits: `NaN`, an infinity, and a magnitude at or past
 //!   2^63. Each is named separately.
@@ -86,18 +83,6 @@ pub(super) fn int_to_float(
 ) -> Result<u64, RuntimeError> {
     let (self_, _) = operand::method("toFloat", operands, 0)?;
     Ok((int_receiver(machine, "toFloat", self_)? as f64).to_bits())
-}
-
-/// `Int.abs() -> Int`, which `Int.MIN` has none of.
-pub(super) fn int_abs(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("abs", operands, 0)?;
-    let n = int_receiver(machine, "abs", self_)?;
-    n.checked_abs()
-        .map(|value| value as u64)
-        .ok_or_else(|| operand::overflowed("abs"))
 }
 
 /// `Int.parse(text) -> Result<Int, Error>`.
@@ -302,10 +287,6 @@ mod tests {
     use super::*;
     use crate::vm::builtins::tests::{message_of, read, result_of, run, scalar, word, world};
 
-    fn int_of(machine: &mut Machine, operation: &str, operands: &[(Repr, u64)]) -> i64 {
-        word(machine, "Int", operation, operands).unwrap() as i64
-    }
-
     fn float_of(machine: &mut Machine, operation: &str, operands: &[(Repr, u64)]) -> f64 {
         f64::from_bits(word(machine, "Float", operation, operands).unwrap())
     }
@@ -319,26 +300,10 @@ mod tests {
             3.0
         );
 
-        // `min` and `max` are not machine builtins for `Int` any more: they
-        // are `std.int.min` and `std.int.max`, and it is `cove-sema`'s and
-        // `cove-ir`'s tests that check them rather than a word read off the
-        // machine here.
-        assert_eq!(int_of(&mut machine, "abs", &[(Repr::Int, -7i64 as u64)]), 7);
-    }
-
-    /// `Int.MIN` has no absolute value, and integer overflow is a broken
-    /// invariant rather than a wrapped result — so `abs` raises what `-x`
-    /// raises, in the same words.
-    #[test]
-    fn abs_of_the_smallest_int_overflows() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let error = run(&mut machine, "Int", "abs", &[(Repr::Int, i64::MIN as u64)]).unwrap_err();
-        assert_eq!(error.message, "`Int` abs overflowed");
-        assert_eq!(
-            error.rule.as_deref(),
-            Some("Integer overflow is a broken invariant, not a wrapped result.")
-        );
+        // `min`, `max`, and `abs` are not machine builtins for `Int` any
+        // more: they are `std.int.min`, `std.int.max`, and `std.int.abs`,
+        // and it is `cove-sema`'s and `cove-ir`'s tests that check them
+        // rather than a word read off the machine here.
     }
 
     /// Text that is not a number is the *data's* failure and answers `Err`; a
@@ -567,8 +532,8 @@ mod tests {
     fn a_receiver_of_the_wrong_kind_says_so() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
-        let error = run(&mut machine, "Int", "abs", &[(Repr::Float, 0)]).unwrap_err();
-        assert_eq!(error.message, "`Float` has no method `abs`");
+        let error = run(&mut machine, "Int", "toFloat", &[(Repr::Float, 0)]).unwrap_err();
+        assert_eq!(error.message, "`Float` has no method `toFloat`");
         let error = run(
             &mut machine,
             "Float",

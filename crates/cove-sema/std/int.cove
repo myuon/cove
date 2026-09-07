@@ -1,10 +1,4 @@
 /// The smaller of two integers.
-///
-/// `abs` is deliberately not here beside these two. It is the only one of
-/// the three that can fail — `abs` of the least `Int` has no answer — and a
-/// standard-library body would move that failure's diagnostic out of the
-/// caller's source and into this file, which Cove has no call stack to
-/// compensate for. See [issue #258](https://github.com/myuon/cove/issues/258).
 export fn min(value: Int, other: Int) -> Int {
   if value < other {
     value
@@ -19,5 +13,21 @@ export fn max(value: Int, other: Int) -> Int {
     value
   } else {
     other
+  }
+}
+
+/// This value, with its sign removed.
+///
+/// Unlike `min` and `max` beside it, this one can fail: the least `Int` has
+/// no positive counterpart, and it traps there exactly as the builtin did.
+/// It is the first fallible function in the standard library, which was
+/// possible to write here at all only once a trap raised from inside a
+/// standard-library body named its caller rather than only this file's own
+/// line — [issue #258](https://github.com/myuon/cove/issues/258).
+export fn abs(value: Int) -> Int {
+  if value < 0 {
+    -value
+  } else {
+    value
   }
 }

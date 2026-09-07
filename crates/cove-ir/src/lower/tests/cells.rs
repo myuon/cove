@@ -83,7 +83,7 @@ fn the_lock_closures_var_parameter_is_an_address() {
             "bump#0"
         ),
         "\
-fn19 m.bump#0(<addr>) -> Int
+fn20 m.bump#0(<addr>) -> Int
   frame 4: s0!:addr s1:int s2:int s3:int
   local value -> s0:<addr> [0, 6)
      0  load s2:int s0:addr Int
@@ -148,7 +148,7 @@ fn a_cell_wrapping_a_struct_holds_its_fields_inline() {
             "count#0"
         ),
         "\
-fn19 m.count#0(<addr>) -> Int
+fn20 m.count#0(<addr>) -> Int
   frame 5: s0!:addr s1:int s2:addr s3:int s4:int
   local value -> s0:<addr> [0, 12)
      0  addr-of-part s2:addr s0:addr +1

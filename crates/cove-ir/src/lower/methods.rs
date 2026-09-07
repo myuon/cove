@@ -710,7 +710,6 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
     ("String", "toUpper"),
     ("String", "toLower"),
     ("Int", "toFloat"),
-    ("Int", "abs"),
     ("Float", "toInt"),
     ("Float", "round"),
     ("Float", "abs"),
