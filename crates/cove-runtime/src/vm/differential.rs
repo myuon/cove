@@ -113,6 +113,35 @@ fn on_the_machine(source: &str, name: &str, args: Vec<Value>) -> Answer {
     said(Vm::new(&runtime, &hosts, &program).invoke("m", name, args))
 }
 
+/// [`on_the_machine`], but the run's heap is bounded to `heap_words` rather
+/// than [`super::DEFAULT_HEAP_WORDS`], and the answer comes back with how
+/// many collections the run actually did.
+///
+/// Issue #242 is why this exists beside `on_the_machine` rather than as a
+/// parameter on it: the collector's unit tests build their programs with
+/// `mem`'s own `Build` helper, so they establish that the collector is
+/// correct given a correct set of roots but never that *lowering* produced
+/// one. Nothing here checks that directly either — what it does is run a
+/// program the lowering actually produced, over a heap small enough that a
+/// collection is not a possibility this run happens to avoid, and hold the
+/// answer to the oracle, which has no collector to agree or disagree with.
+/// The collection count is what tells a caller the small heap did its job
+/// rather than merely being unused.
+fn on_the_machine_with_heap_words(
+    source: &str,
+    name: &str,
+    args: Vec<Value>,
+    heap_words: usize,
+) -> (Answer, u64) {
+    let (sources, checked) = checked(source);
+    let program = lowered(&sources, &checked);
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(checked.clone(), sources, hosts.clone());
+    let mut vm = Vm::with_heap_words(&runtime, &hosts, &program, heap_words);
+    let answer = said(vm.invoke("m", name, args));
+    (answer, vm.collections())
+}
+
 /// Runs `m.<name>` as an entry on the interpreter, with no process
 /// arguments.
 fn entry_on_the_oracle(source: &str, name: &str) -> Answer {
@@ -163,7 +192,12 @@ fn said(outcome: Result<Value, crate::error::RuntimeError>) -> Answer {
 /// [`Answer`] is `String`s, which is what makes this possible: a [`Value`] is
 /// `Rc`-based and cannot leave the thread that built it, so the comparison is
 /// of what each backend *said* rather than of what it holds.
-fn on_a_deep_stack(f: impl FnOnce() -> Answer + Send + 'static) -> Answer {
+///
+/// Generic over what `f` answers rather than fixed to [`Answer`]: the GC
+/// cases below also want `Vm::collections()` back, a plain `u64` that
+/// crosses a thread boundary for free, so it travels out beside the answer
+/// instead of through a second call that would need its own machine.
+fn on_a_deep_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new()
         .stack_size(crate::interp::STACK_SIZE)
         .spawn(f)
@@ -203,6 +237,49 @@ fn agree(source: &str, name: &str, args: Vec<Value>) -> Answer {
         "the machine and the interpreter do not agree about `{name}`"
     );
     oracle
+}
+
+/// [`agree`], but the machine runs over a heap bounded to `heap_words`, and
+/// the answer comes back with how many collections it took to produce.
+///
+/// A caller asserts a floor on the count itself — a test that would pass
+/// whether or not a collection occurred proves nothing about the roots the
+/// lowering produced, which is the whole reason this file has a GC-stress
+/// section at all.
+#[track_caller]
+fn agree_under_heap_pressure(
+    source: &str,
+    name: &str,
+    args: Vec<Value>,
+    heap_words: usize,
+) -> (Answer, u64) {
+    let described = args.iter().map(Described::of).collect::<Vec<_>>();
+    let oracle = {
+        let (source, name, described) = (source.to_string(), name.to_string(), described.clone());
+        on_a_deep_stack(move || {
+            on_the_oracle(
+                &source,
+                &name,
+                described.iter().map(Described::value).collect(),
+            )
+        })
+    };
+    let (machine, collections) = {
+        let (source, name, described) = (source.to_string(), name.to_string(), described);
+        on_a_deep_stack(move || {
+            on_the_machine_with_heap_words(
+                &source,
+                &name,
+                described.iter().map(Described::value).collect(),
+                heap_words,
+            )
+        })
+    };
+    assert_eq!(
+        machine, oracle,
+        "the machine and the interpreter do not agree about `{name}` under heap pressure"
+    );
+    (oracle, collections)
 }
 
 /// Asserts that the two backends answer the entry `m.<name>` the same way.
@@ -1532,5 +1609,171 @@ export async fn main() -> Result<Int, Error> {
     assert_eq!(
         entry_agrees(source, "main"),
         Answer::Value("Err(second)".to_string())
+    );
+}
+
+// # GC stress: a program that runs through a collection
+//
+// Issue #242. Everything above this point runs comfortably inside
+// `DEFAULT_HEAP_WORDS` — no case in this file, and none of the 116 programs
+// `cove-cli/tests/vm_coverage.rs` runs, has ever forced a collection. The
+// collector's own unit tests in `vm::mem` are the hard concurrent cases, but
+// they build their programs with `Build`, which writes the root set by hand.
+// What none of that exercises is whether *lowering* produced a correct root
+// set — `Function::refs`, the static bitmap the collector trusts completely
+// and never narrows except where the lowering places `Inst::Clear`.
+//
+// The three cases below run real source through the checker and the
+// lowering, over `Vm::with_heap_words`' small budget rather than the
+// default, and hold the answer to the oracle — which has no collector at
+// all, so any disagreement is the reference map or a `Clear` placement, not
+// a difference of opinion about what the collector itself should do. Each
+// asserts a floor on `Vm::collections()` too: a case that would pass whether
+// or not a collection happened proves nothing, which is this issue's own
+// diagnosis of the state before it.
+
+/// Allocates in a loop and keeps almost none of it: a `Vector<String>` root
+/// stands for the whole loop, but only the last three iterations ever push
+/// into it, so most of what the loop allocates is garbage by the next turn.
+///
+/// This is the shape most corpus programs already have — a short-lived
+/// allocation inside a loop — which is exactly why it matters that this one
+/// collects and the corpus programs never do.
+#[test]
+fn a_loop_that_keeps_almost_nothing_survives_a_collection() {
+    let source = r#"
+export fn keeps_a_little(n: Int) -> Int {
+  var kept: Vector<String> = Vector.of()
+  var i = 0
+  while i < n {
+    let text = "turn {i} of {n}"
+    if i >= n - 3 {
+      kept.push(text)
+    }
+    i += 1
+  }
+  kept.length()
+}
+"#;
+    let (answer, collections) =
+        agree_under_heap_pressure(source, "keeps_a_little", vec![Value::int(4000)], 1 << 12);
+    assert_eq!(answer, Answer::Value("3".to_string()));
+    assert!(
+        collections >= 3,
+        "expected several collections over a heap this small, got {collections}"
+    );
+}
+
+/// Allocates in a loop and keeps *all* of it: a `Vector<Int>` root grows for
+/// the whole loop, so its backing storage is reallocated by `push` more than
+/// once and a collection must find the growing object's current address
+/// correctly, not the one it had when it was last live at a safepoint.
+///
+/// This is `mem`'s `an_interior_address_survives_a_collection` unit test's
+/// question, asked of a program the lowering actually produced instead of
+/// one `Build` wrote by hand.
+#[test]
+fn a_growing_vector_survives_a_collection() {
+    // `v`'s own reallocations are unrelated garbage: `Vector.push` doubles
+    // its backing store, and when it does, the old store — dead the instant
+    // the copy finishes — is the only garbage this loop would otherwise
+    // produce. A geometric series of doublings turns out to be close to the
+    // worst case for a bump allocator that only ever collects on a failed
+    // allocation and retries once: growing `v` on every turn puts almost
+    // all of the heap's peak demand into one final doubling, which is
+    // either comfortably under budget or permanently over it — there is no
+    // heap size in between that fails once and then succeeds. Growing it
+    // only on every fourth turn keeps its final size, and so that one
+    // allocation's demand, well under the budget; `pad`, discarded every
+    // turn regardless, is what forces a collection on a schedule of its
+    // own — regular, small, and frequent enough that several run before `v`
+    // is done growing.
+    let source = r#"
+export fn keeps_a_lot(n: Int) -> Int {
+  var v: Vector<Int> = Vector.of()
+  var sum = 0
+  var i = 0
+  while i < n {
+    if i % 4 == 0 {
+      v.push(i)
+    }
+    sum += i
+    let pad = "padding-{i}-{i}-{i}-{i}-{i}-{i}-{i}-{i}"
+    i += 1
+  }
+  sum + v.length()
+}
+"#;
+    let (answer, collections) =
+        agree_under_heap_pressure(source, "keeps_a_lot", vec![Value::int(3000)], 1 << 12);
+    assert_eq!(answer, Answer::Value("4499250".to_string()));
+    assert!(
+        collections >= 3,
+        "expected several collections over a heap this small, got {collections}"
+    );
+}
+
+/// A closure's captured environment stays live and correctly rooted across a
+/// collection that happens after it was created and before it is called.
+///
+/// `greet` closes over `greeting`, a heap string, and nothing else in the
+/// function ever reads `greeting` again until `greet()` runs at the very
+/// end — every collection the loop below forces happens while the only path
+/// back to `greeting` is through the closure's own environment.
+#[test]
+fn a_captured_environment_survives_a_collection() {
+    let source = r#"
+export fn closure_survives(n: Int) -> Int {
+  let greeting = "hello-{n}"
+  let greet = fn() { greeting.length() }
+  var i = 0
+  while i < n {
+    let junk = "junk-{i}-{i}-{i}"
+    i += 1
+  }
+  greet()
+}
+"#;
+    let (answer, collections) =
+        agree_under_heap_pressure(source, "closure_survives", vec![Value::int(6000)], 1 << 12);
+    assert_eq!(answer, Answer::Value("10".to_string()));
+    assert!(
+        collections >= 3,
+        "expected several collections over a heap this small, got {collections}"
+    );
+}
+
+/// A budget small enough that even a collection cannot free enough words:
+/// allocation must fail cleanly, as a [`crate::RuntimeError`] with a span,
+/// rather than panic.
+///
+/// The oracle has no heap budget and does not fail this program at all, so
+/// this is not an `agree`-shaped case — it runs the machine alone and checks
+/// the one property that is this backend's to keep: an exhausted heap is a
+/// runtime error, not a crash.
+#[test]
+fn an_exhausted_heap_fails_cleanly_with_a_span() {
+    let source = r#"
+export fn f(n: Int) -> Int {
+  var kept: Vector<String> = Vector.of()
+  var i = 0
+  while i < n {
+    kept.push("turn {i} of {n}")
+    i += 1
+  }
+  kept.length()
+}
+"#;
+    let (sources, checked) = checked(source);
+    let program = lowered(&sources, &checked);
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(checked.clone(), sources, hosts.clone());
+    let mut vm = Vm::with_heap_words(&runtime, &hosts, &program, 64);
+    let outcome = vm.invoke("m", "f", vec![Value::int(100_000)]);
+    let error = outcome.expect_err("a heap this small cannot hold what this loop keeps");
+    assert_eq!(error.message, "this run has no memory left");
+    assert!(
+        error.span.is_some(),
+        "an exhausted heap should point at the allocation that could not be served"
     );
 }
