@@ -120,6 +120,39 @@ pub fn module_names() -> &'static [&'static str] {
 /// this is therefore always `attach(&mut sources)` where `sources` is the
 /// same map the rest of the package's units are already in.
 ///
+/// Adds the standard library to a package a host is composing.
+///
+/// This is the one call an embedder makes. `cove_sema::package::load` makes
+/// it for a package read off disk; a host that composes its own — because
+/// its sources are embedded, or generated, or come from somewhere that is
+/// not a directory — makes it itself, and this is the whole of that step:
+///
+/// ```no_run
+/// # use std::collections::BTreeMap;
+/// # use cove_diag::SourceMap;
+/// # use cove_sema::package::Module;
+/// # fn f(sources: &mut SourceMap, modules: &mut BTreeMap<String, Module>) -> Result<(), Vec<cove_diag::Diagnostic>> {
+/// cove_sema::stdlib::install(sources, modules)?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// It is not done inside [`crate::Compiler::compile`], and that is a
+/// decision rather than an omission: what `compile` is given should be a
+/// package that is already whole, dependencies and all, so that what checks
+/// is what the host assembled. `compile` refuses a package missing a module
+/// `cove_schema::builtins::STANDARD_LIBRARY` names — see the diagnostic
+/// `cove::compile::missing_stdlib`, which says to call this.
+pub fn install(
+    sources: &mut SourceMap,
+    modules: &mut std::collections::BTreeMap<String, Module>,
+) -> Result<(), Vec<Diagnostic>> {
+    for (name, module) in attach(sources)? {
+        modules.insert(name, module);
+    }
+    Ok(())
+}
+
 /// See the module doc for what this function is allowed to become without
 /// its callers changing.
 pub fn attach(sources: &mut SourceMap) -> Result<Vec<(String, Module)>, Vec<Diagnostic>> {
