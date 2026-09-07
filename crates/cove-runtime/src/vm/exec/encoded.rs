@@ -633,13 +633,13 @@ pub(super) fn dispatch<'s, 'a>(
             // `CONST_INT` makes, and no name lookup: `held.lo()` is already
             // the `FunctionId` the encoder put there.
             FUNC_REF => machine.mem.set_slot(base, a!(), held.lo() as u64),
-            STR => {
-                machine.sync(pc - 1);
-                match machine.intern(StrId(held.lo())) {
-                    Ok(addr) => machine.mem.set_slot(base, a!(), addr),
-                    Err(error) => fail!(error),
-                }
-            }
+            // A load of a precomputed address, exactly as `CONST_INT` loads
+            // a precomputed word: `Machine::for_run` placed every literal
+            // before this loop's first turn, so there is nothing here that
+            // can fail and nothing to `sync` before. See ADR 0045.
+            STR => machine
+                .mem
+                .set_slot(base, a!(), machine.literal_addr(StrId(held.lo()))),
             // ADR 0001's field-wise shallow copy, and the whole of it.
             COPY => {
                 let width = machine.width(LayoutId(held.lo()));

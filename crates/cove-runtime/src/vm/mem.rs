@@ -285,7 +285,10 @@ pub(crate) struct Collected {
     /// Words that held an object at the start of this collection and are free
     /// after it, headers included.
     pub(crate) freed_words: u64,
-    /// Words held by objects that survived, headers included.
+    /// Words held by objects that survived, headers included. The static
+    /// region below [`Space::static_end`] is counted whole: those objects
+    /// survive by construction rather than by being marked, and a survivor a
+    /// sweep declines to walk is still a survivor.
     pub(crate) live_words: u64,
     /// How many collections this memory has run, this one counted.
     pub(crate) collections: u64,
@@ -442,15 +445,37 @@ impl Stw {
 /// It holds no Cove value that is not in the heap. The stack-segment ledger is
 /// a bitmap's worth of booleans, and the stop-the-world state holds addresses
 /// a task published as roots, which are names for objects the heap already
-/// owns rather than a second place to keep one. That is the same distinction
-/// [`crate::vm::exec::Machine`]'s interned string table rests on, and it is
-/// what keeps this from being the second value store ADR 0034 forbids.
+/// owns rather than a second place to keep one. `static_end` is the same
+/// distinction rather than an exception to it: an address below it names an
+/// object the heap already owns, placed once before this run's first
+/// instruction and kept for the run's whole life. See
+/// [ADR 0045](../../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md).
 pub(crate) struct Space {
     words: Words,
     /// The bump pointer, for the readers that hold no lock: the collector's
     /// own bounds checks, and the debug assertions that say an address names
     /// an object that exists.
     bump: AtomicU64,
+    /// The immortal floor: every address below this was placed before this
+    /// run's first instruction and is never collected.
+    ///
+    /// [`Space::sweep`] and the free-list rebuild that follows it begin here
+    /// rather than at [`STACK_WORDS`], so nothing below it is ever visited —
+    /// not walked, not marked, not freed, not coalesced. That is what makes
+    /// the invariant a property of where the walk starts rather than a
+    /// per-object comparison every reader has to trust is never skipped.
+    /// Tracing *through* a reference to an object below the floor is
+    /// unaffected: [`reachable`] already accepts anything below `bump`, and
+    /// every placed object is.
+    ///
+    /// Set once, by [`Space::seal_static`], after
+    /// [`crate::vm::exec::Machine::for_run`] has placed every program
+    /// literal and before this run's first instruction can execute — in
+    /// particular, before a `spawn` could exist to read it from a second
+    /// thread. `STACK_WORDS` — the base of the heap — until then, which is
+    /// the same floor a run with no literals keeps forever: placing nothing
+    /// costs nothing.
+    static_end: AtomicU64,
     alloc: Mutex<Alloc>,
     stw: Mutex<Stw>,
     /// Mirrors `Stw::collecting` so that a safepoint can ask without a lock.
@@ -506,6 +531,7 @@ impl Space {
         Space {
             words: Words::new(budget),
             bump: AtomicU64::new(STACK_WORDS),
+            static_end: AtomicU64::new(STACK_WORDS),
             alloc: Mutex::new(Alloc {
                 bump: 0,
                 limit: STACK_WORDS + budget,
@@ -709,6 +735,22 @@ impl Space {
         self.store(addr, header(layout, len));
         alloc.allocated_words += words;
         Some(addr)
+    }
+
+    /// Raises the immortal floor to the current bump pointer: everything
+    /// allocated so far is never collected from here on.
+    ///
+    /// Called exactly once per run, by [`crate::vm::exec::Machine::for_run`]
+    /// immediately after every program literal has been placed and before
+    /// this run's first instruction executes. `Relaxed` is enough: nothing
+    /// reads `static_end` before this call, because nothing but the entry's
+    /// own placement runs before it, and every thread that could read it
+    /// afterwards — this run's own and any task it spawns — is created only
+    /// once this call has returned, which already orders the store before
+    /// the read on every target this runs on.
+    fn seal_static(&self) {
+        self.static_end
+            .store(self.bump.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 
     /// The first free block of at least `words` words, split to size.
@@ -1069,9 +1111,18 @@ impl Space {
     fn sweep(&self, alloc: &mut Alloc, layouts: &[Layout]) -> (u64, u64) {
         alloc.free.clear();
         let mut freed = 0;
-        let mut live = 0;
         let mut run: Option<u64> = None;
-        let mut addr = STACK_WORDS;
+        // The floor, not `STACK_WORDS`: nothing below it is visited, so
+        // nothing below it can be freed, coalesced, or relabelled. See
+        // `Space::static_end`.
+        let static_end = self.static_end.load(Ordering::Relaxed);
+        // Everything below the floor survived, by construction rather than by
+        // being marked, and `live` counts what survived. Not walking the
+        // static region is what makes it a floor; leaving it out of the count
+        // would make `freed + live` stop meaning what was occupied when the
+        // collection began, which is the relation `HeapSummary` reports.
+        let mut live = static_end - STACK_WORDS;
+        let mut addr = static_end;
         let end = STACK_WORDS + alloc.bump;
         while addr < end {
             let words = self.object_words(layouts, addr);
@@ -1691,6 +1742,12 @@ impl Memory {
     /// error.
     pub(crate) fn alloc(&mut self, layout: LayoutId, len: u32, payload_words: u32) -> Option<u64> {
         self.space.alloc(layout, len, payload_words)
+    }
+
+    /// Raises this run's immortal floor to whatever has been allocated so
+    /// far. See [`Space::seal_static`].
+    pub(crate) fn seal_static(&self) {
+        self.space.seal_static();
     }
 
     /// Re-labels the object at `addr` as `layout` with header length `len`,

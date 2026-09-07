@@ -10,12 +10,12 @@
 //!
 //! Two kinds of word are not:
 //!
-//! - **A word holding an interned string.** `Machine::interned` is
-//!   `vec![0; program.strings.len()]`, filled by `Machine::intern` on first
-//!   use and never emptied, and `Live::each_root` walks it *unconditionally*
-//!   beside the frames. So the object an [`Inst::Str`] produces is a root of
-//!   that machine from the moment it exists until the machine is dropped,
-//!   and no slot holding it is what keeps it alive.
+//! - **A word holding a literal's address.** [ADR 0045](../../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md)
+//!   places every program literal in the heap before the run's first
+//!   instruction, below the floor a collection's sweep never walks past. So
+//!   the object an [`Inst::Str`] loads the address of is retained for the
+//!   whole run whether or not any slot still names it, and no slot holding
+//!   it is what keeps it alive.
 //! - **A word this frame has not written.** `Memory::push_frame` reserves
 //!   the frame with `resize(…, 0)` — it says why in so many words: a
 //!   `Repr::Ref` slot that has not been written must read as null, because
@@ -141,8 +141,8 @@ use super::dropping;
 
 /// A word this frame has not written, which `Memory::push_frame` left zero.
 const NULL: u8 = 0;
-/// A word that is null, or holds an address `Machine::interned` roots for
-/// the rest of the run. Clearing it releases nothing.
+/// A word that is null, or holds the address of a literal placed once for
+/// the whole run and never collected. Clearing it releases nothing.
 const FREE: u8 = 1;
 /// Anything else.
 const UNKNOWN: u8 = 2;
@@ -556,9 +556,9 @@ impl<'p> Flow<'p> {
             // lets the whole function be decided from one walk rather than
             // from dropping a clear, recomputing, and repeating.
             Inst::Clear { .. } => {}
-            // The object `Machine::intern` allocates is in
-            // `Machine::interned` for the rest of the run, and
-            // `Live::each_root` walks that table unconditionally.
+            // The object this loads the address of was placed below the
+            // collector's floor before the run began, and stays there for
+            // the run's whole life — see ADR 0045.
             Inst::Str { dst, .. } => {
                 if let Some(holds) = out.get_mut(dst as usize) {
                     *holds = FREE;
@@ -721,7 +721,7 @@ mod tests {
     }
 
     /// The first of the two kinds of word a clear cannot free: one holding
-    /// an object `Machine::interned` will root for the rest of the run.
+    /// the address of a literal placed once for the run and never freed.
     ///
     /// This is `cq.json.isSpace`, which does it four times a call.
     #[test]

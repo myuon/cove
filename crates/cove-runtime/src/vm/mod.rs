@@ -40,9 +40,10 @@
 //! could be hidden in. The last is an address, which makes the table a **root
 //! provider** and not a second store: the answer's words are in the run's
 //! heap, in an object the spawning task allocated before the thread existed,
-//! and the table names one the way `Machine::interned` names a string
-//! literal. Nothing that wanted to dodge a heap representation could be put
-//! there, which is the test ADR 0034 actually applies.
+//! and the table names one the way `Machine::literal_addrs` names a literal's
+//! address: an index into the run's own metadata, not a second store.
+//! Nothing that wanted to dodge a heap representation could be put there,
+//! which is the test ADR 0034 actually applies.
 //!
 //! # The scheduler's table is a *task's*, and the host's is the *run's*
 //!

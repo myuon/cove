@@ -112,10 +112,10 @@ fn @m.shout(String String) -> Int
 /// The map says which slots a collection *reads*; only the data can say
 /// when the value in one stopped being needed.
 ///
-/// The string is interpolated rather than written down, because a literal
-/// is interned: `Machine::interned` holds the object for the rest of the
-/// run and `Live::each_root` walks that table, so clearing a slot that
-/// holds one releases nothing and `lower::frees` drops it.
+/// The string is interpolated rather than written down, because a literal's
+/// object is placed once, before the run begins, and never collected — see
+/// ADR 0045 — so clearing a slot that holds one releases nothing and
+/// `lower::frees` drops it.
 #[test]
 fn a_local_holding_a_reference_is_cleared_when_its_scope_ends() {
     assert_eq!(

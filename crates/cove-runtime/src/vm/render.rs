@@ -656,8 +656,9 @@ mod tests {
         let list = world.named("m.List");
         let mut machine = world.machine();
         let addr = machine.new_object(list, 2).expect("the heap has room");
-        // Nothing roots it: this machine has no frames, no temporaries and
-        // no interned strings, so the collection takes it back.
+        // Nothing roots it: this machine has no frames and no temporaries,
+        // and this fixture places no literals, so the collection takes it
+        // back.
         machine.collect();
 
         assert!(

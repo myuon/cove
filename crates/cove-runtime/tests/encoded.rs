@@ -120,12 +120,23 @@ fn the_run_writes_the_recording_a_run_writes() {
     let ran = run(ARITH);
     // A trace is pinned by shape: an entry entered, an entry left, what the
     // heap did, and how the run ended.
+    //
+    // `allocated_words` is 10 and not 0, even though this program's own loop
+    // reaches no collection, struct, call or string: `assertEqual`'s failing
+    // arm carries a literal message, and
+    // [ADR 0045](../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md)
+    // places every program literal before the run's first instruction,
+    // whether or not the arm that loads it ever runs. This benchmark's
+    // assertion always passes, so under the lazy allocation this replaced
+    // that literal cost nothing; here it costs its bytes once, which is the
+    // regression the ADR names and asks to be measured rather than assumed
+    // small.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(0), capacity_words: Some(0) }"
+            "HeapSummary { collections: 0, allocated_words: Some(10), capacity_words: Some(10) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

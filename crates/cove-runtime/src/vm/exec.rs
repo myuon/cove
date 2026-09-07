@@ -152,11 +152,6 @@ impl Roots for Live<'_, '_> {
                 }
             }
         }
-        for &addr in &machine.interned {
-            if addr != 0 {
-                f(addr);
-            }
-        }
         for &addr in &machine.temps {
             if addr != 0 {
                 f(addr);
@@ -319,14 +314,22 @@ pub(crate) struct Machine<'a> {
     hosts: Option<&'a HostRegistry>,
     mem: Memory,
     frames: Vec<Frame>,
-    /// The string object for each [`StrId`], allocated on first use.
+    /// The heap address of each [`StrId`], or the refusal
+    /// [`Machine::place_literals`] met trying to build one — held exactly as
+    /// [`Machine::encoded`] holds its own, because both are prepared once,
+    /// before anything runs, by a constructor that itself cannot fail.
     ///
-    /// A literal in a loop allocates once for the run rather than once per
-    /// turn. The table is a root for as long as the machine lives, which is
-    /// the price: a string mentioned once and never reached again is retained.
-    /// That is the right trade for a *literal*, which the program named
-    /// statically and can name again.
-    interned: Vec<u64>,
+    /// Placed by [`Machine::for_run`], once per run, before the first
+    /// instruction executes and therefore before any other heap object can
+    /// exist. [`Machine::for_task`] never places one: it is handed this
+    /// `Arc` and clones it, so every task of a run addresses the same
+    /// objects with no lock between them and no second placement to pay
+    /// for. The objects themselves are never collected — they sit below
+    /// [`Memory::seal_static`]'s floor, which a sweep never walks past — so
+    /// unlike the table this replaces, nothing here roots them: there is
+    /// nothing for a collector to be told. See
+    /// [ADR 0045](../../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md).
+    literal_addrs: Result<Arc<[u64]>, RuntimeError>,
     /// The host resources this run has been handed, in the table a
     /// [`Repr::Host`] word indexes.
     ///
@@ -658,19 +661,29 @@ impl<'a> Machine<'a> {
     }
 
     /// The entry task of one run.
+    ///
+    /// Places every program literal into the heap before answering — see
+    /// [`Machine::place_literals`] and
+    /// [ADR 0045](../../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md).
+    /// A failure there is held on [`Machine::literal_addrs`] exactly as a
+    /// failure to encode the program is held on [`Machine::encoded`]: this
+    /// constructor stays infallible, and [`Machine::run`] and
+    /// [`Machine::enter_closure`] are what turn either into a refusal,
+    /// before a frame exists.
     pub(crate) fn for_run(
         program: &'a Program,
         heap_words: usize,
         hosts: Option<&'a HostRegistry>,
         runtime: Option<&'a Runtime>,
     ) -> Machine<'a> {
-        Machine {
+        let mut machine = Machine {
             program,
             runtime,
             hosts,
             mem: Memory::new(heap_words),
             frames: Vec::new(),
-            interned: vec![0; program.strings.len()],
+            // Overwritten below, once the machine that places them exists.
+            literal_addrs: Ok(Arc::from([])),
             resources: Arc::new(Mutex::new(Vec::new())),
             temps: Vec::new(),
             scopes: Vec::new(),
@@ -695,7 +708,9 @@ impl<'a> Machine<'a> {
             // the field.
             encoded: encoded::prepare(program),
             builtin_words: Vec::new(),
-        }
+        };
+        machine.literal_addrs = machine.place_literals();
+        machine
     }
 
     /// A machine for a spawned task, over a stack segment of its own and the
@@ -703,17 +718,18 @@ impl<'a> Machine<'a> {
     ///
     /// Everything a run owns is shared and everything a task owns is fresh,
     /// and the split is the whole of ADR 0008 here. Shared: the program, the
-    /// hosts, the trace, the heap, the run's budget, the resource table.
-    /// Fresh: the stack segment, the frames, the string objects this task
-    /// allocates for its own literals, and the scheduler table it spawns its
-    /// own children into.
+    /// hosts, the trace, the heap, the run's budget, the resource table, and
+    /// — since [ADR 0045](../../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md)
+    /// — every literal's address. Fresh: the stack segment, the frames, and
+    /// the scheduler table it spawns its own children into.
     ///
-    /// The interned strings are the one that looks like an economy and is
-    /// not. A literal is an *object*, and an object belongs to the heap both
-    /// tasks address; interning it twice costs one object per literal per
-    /// task and buys a table with no lock on the path a literal in a loop
-    /// takes. Sharing it would put a lock between every `Inst::Str` and its
-    /// answer.
+    /// `literal_addrs` is handed over rather than rebuilt, and that is the
+    /// point: the entry's machine placed every literal, in the run's one
+    /// heap, before this task could have been spawned, so there is nothing
+    /// left for this constructor to allocate, copy or place. A literal in a
+    /// loop this task runs costs one load, exactly as it does in the task
+    /// that spawned it — no lock, because there is nothing left to
+    /// synchronise.
     #[allow(clippy::too_many_arguments)]
     fn for_task(
         program: &'a Program,
@@ -724,6 +740,7 @@ impl<'a> Machine<'a> {
         cancellation: Cancellation,
         task: u64,
         encoded: Arc<cove_ir::bytecode::Encoded>,
+        literal_addrs: Arc<[u64]>,
     ) -> Machine<'a> {
         Machine {
             program,
@@ -731,7 +748,7 @@ impl<'a> Machine<'a> {
             hosts,
             mem,
             frames: Vec::new(),
-            interned: vec![0; program.strings.len()],
+            literal_addrs: Ok(literal_addrs),
             resources,
             temps: Vec::new(),
             scopes: Vec::new(),
@@ -801,6 +818,15 @@ impl<'a> Machine<'a> {
         self.encoded.clone()
     }
 
+    /// The address of every program literal, or the refusal placing them
+    /// met. See [`Machine::literal_addrs`].
+    ///
+    /// Cloning an `Arc`, for the same reason [`Machine::code`] does: a run's
+    /// tasks share the one placement.
+    fn literals(&self) -> Result<Arc<[u64]>, RuntimeError> {
+        self.literal_addrs.clone()
+    }
+
     /// The instruction count at which the loop next asks its one question.
     ///
     /// The two questions folded into one comparison. Without a debugger it is
@@ -865,6 +891,11 @@ impl<'a> Machine<'a> {
         let code = self.code()?;
         let program = self.program;
         let function = program.function(entry);
+        // And before anything else: a heap that could not hold every
+        // literal is refused here too, at the entry's own span rather than
+        // a literal's — the program is what could not be started, not the
+        // string. See ADR 0045.
+        self.literals().map_err(|error| error.at(function.span))?;
         debug_assert_eq!(
             args.len(),
             function.param_words(&program.layouts) as usize,
@@ -1077,10 +1108,12 @@ impl<'a> Machine<'a> {
         budget: &Meter,
         span: Span,
     ) -> Result<Vec<u64>, RuntimeError> {
-        // A task machine was handed its parent's encoding, so this is `Ok`;
-        // it is asked rather than assumed because the alternative is an
-        // `expect` in the one place a task's body starts.
+        // A task machine was handed its parent's encoding and its parent's
+        // placed literals, so both of these are `Ok`; each is asked rather
+        // than assumed because the alternative is an `expect` in the one
+        // place a task's body starts.
         let code = self.code()?;
+        self.literals().map_err(|error| error.at(span))?;
         let program = self.program;
         let callee = self.callee_of(object)?;
         let target = program.function(callee);
@@ -1596,16 +1629,58 @@ impl<'a> Machine<'a> {
         answer
     }
 
-    /// The string object for `text`, allocated the first time it is asked for.
-    fn intern(&mut self, text: StrId) -> Result<u64, RuntimeError> {
-        if self.interned[text.index()] != 0 {
-            return Ok(self.interned[text.index()]);
+    /// Places every entry of [`Program::strings`] into the heap, in
+    /// [`StrId`] order, before this machine's first instruction can run and
+    /// therefore before any other object exists. Called once, by
+    /// [`Machine::for_run`]; [`Machine::for_task`] is handed the `Arc` this
+    /// builds rather than calling it again. See
+    /// [ADR 0045](../../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md).
+    ///
+    /// Not [`Machine::allocate`], on purpose: that collects and retries when
+    /// an allocation does not fit, and every object a collection could find
+    /// at this point *is* a literal this very call is still placing —
+    /// nothing else has run yet, so there is nothing else to reclaim.
+    /// Collecting here would sweep an already-placed literal the moment
+    /// before [`Memory::seal_static`] could tell the collector to leave it
+    /// alone, and a later literal reusing the freed run would land on the
+    /// address an earlier one already handed out. A heap that does not fit
+    /// them once will not fit them a second time, so this fails immediately
+    /// instead of trying twice for the same answer.
+    fn place_literals(&mut self) -> Result<Arc<[u64]>, RuntimeError> {
+        let exhausted = || RuntimeError::new("this run has no memory left");
+        let mut addrs = Vec::with_capacity(self.program.strings.len());
+        for index in 0..self.program.strings.len() {
+            let bytes = Arc::clone(self.program.string(StrId(index as u32)));
+            let len = u32::try_from(bytes.len()).map_err(|_| exhausted())?;
+            let words = self
+                .program
+                .layout(self.program.str_layout)
+                .try_payload_words(len, &self.program.layouts)
+                .ok_or_else(exhausted)?;
+            let addr = self
+                .mem
+                .alloc(self.program.str_layout, len, words)
+                .ok_or_else(exhausted)?;
+            self.write_bytes(addr, bytes.as_bytes());
+            addrs.push(addr);
         }
-        let bytes = self.program.string(text).clone();
-        let addr = self.allocate(self.program.str_layout, bytes.len() as i64)?;
-        self.write_bytes(addr, bytes.as_bytes());
-        self.interned[text.index()] = addr;
-        Ok(addr)
+        self.mem.seal_static();
+        Ok(addrs.into())
+    }
+
+    /// The address of the literal `text` names.
+    ///
+    /// Reached only from the dispatch loop's `STR` arm, after
+    /// [`Machine::run`] or [`Machine::enter_closure`] has already turned a
+    /// placement failure into a refusal before any frame existed — so by
+    /// the time an instruction asks, the answer is always there, and this
+    /// is a load rather than a question.
+    #[inline]
+    fn literal_addr(&self, text: StrId) -> u64 {
+        self.literal_addrs
+            .as_ref()
+            .expect("a placement failure is refused before this machine's first frame")
+            [text.index()]
     }
 
     /// The layout a [`cove_ir::Inst::Box`] allocates its object as.
@@ -1747,10 +1822,12 @@ impl<'a> Machine<'a> {
 
     /// A new string object holding `text`.
     ///
-    /// Unlike [`Machine::intern`] this allocates every time. Interning is for
-    /// a literal, which the program named statically and can name again; a
-    /// string that arrived from outside has no such name and retaining every
-    /// one a host ever answered would be a leak with a table in front of it.
+    /// Unlike [`Machine::place_literals`] this allocates every time, and is
+    /// never collected out from under it either: a literal is retained
+    /// because the program named it statically and can name it again; a
+    /// string that arrived from outside has no such name, and retaining
+    /// every one a host ever answered would be a leak with a table in front
+    /// of it.
     pub(crate) fn new_string(&mut self, text: &str) -> Result<u64, RuntimeError> {
         let addr = self.allocate(self.program.str_layout, text.len() as i64)?;
         self.write_bytes(addr, text.as_bytes());
@@ -2052,10 +2129,14 @@ impl<'a> Machine<'a> {
         // And the same instructions, handed over rather than encoded again:
         // one program is encoded once per run, however many threads run it.
         let form = self.code()?;
+        // And the same literal addresses, for the reason ADR 0045 gives:
+        // every task of a run addresses the objects the entry placed, so
+        // this is a clone of the `Arc` rather than a second placement.
+        let literals = self.literals()?;
         let handle = threads.spawn(move || {
             run_task(
                 program, hosts, runtime, resources, segment, meter, flag, id, object, home, span,
-                watcher, form,
+                watcher, form, literals,
             )
         });
 
@@ -2887,6 +2968,7 @@ fn run_task(
     span: Span,
     debugger: Option<&(dyn Debugger + Send + Sync)>,
     encoded: Arc<cove_ir::bytecode::Encoded>,
+    literal_addrs: Arc<[u64]>,
 ) -> Outcome {
     let mut machine = Machine::for_task(
         program,
@@ -2897,6 +2979,7 @@ fn run_task(
         cancellation.clone(),
         id,
         encoded,
+        literal_addrs,
     );
     machine.watch(debugger);
     let started = Instant::now();
@@ -5034,6 +5117,242 @@ pub(crate) mod tests {
         assert_eq!(run(&program, f, &[]).unwrap(), 1);
     }
 
+    // --- ADR 0045: a literal is there before the program runs -------------
+
+    /// A literal in a hot loop allocates nothing: `Inst::Str` is a load of a
+    /// precomputed address, and `Machine::allocated_words` — the figure that
+    /// used to grow the first time a loop reached the literal — does not
+    /// move at all once the run has started.
+    #[test]
+    fn a_literal_in_a_loop_allocates_nothing() {
+        let mut build = Build::default().strings(&["hot"]);
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
+        let int = build.scalar(Repr::Int);
+        // fn turns() -> Int { var i = 0; while i < 1000 { let _s = "hot"; i += 1 }; i }
+        let f = build.function(
+            "turns",
+            &[],
+            &[Repr::Ref, Repr::Int, Repr::Int, Repr::Bool, Repr::Int],
+            int,
+            vec![
+                Inst::Int {
+                    dst: 2,
+                    value: 1000,
+                },
+                Inst::Int { dst: 1, value: 0 },
+                Inst::Cmp {
+                    on: Compare::Int,
+                    op: CmpOp::Lt,
+                    dst: 3,
+                    a: 1,
+                    b: 2,
+                },
+                Inst::BranchFalse { cond: 3, to: 8 },
+                Inst::Str {
+                    dst: 0,
+                    text: StrId(0),
+                },
+                Inst::Int { dst: 4, value: 1 },
+                Inst::Arith {
+                    num: Num::Int,
+                    op: ArithOp::Add,
+                    dst: 1,
+                    a: 1,
+                    b: 4,
+                },
+                Inst::Jump { to: 2 },
+                Inst::Return { src: 1 },
+            ],
+        );
+        let program = build.done();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let before = machine.allocated_words();
+        assert_eq!(machine.run(f, &[], &budget()).unwrap(), vec![1000]);
+        assert_eq!(
+            machine.allocated_words(),
+            before,
+            "a thousand turns through `str` allocated nothing beyond the literal's own placement"
+        );
+        assert_eq!(
+            machine.collected().collections,
+            0,
+            "nothing here ever had reason to collect"
+        );
+    }
+
+    /// An unused literal is still built: `Machine::place_literals` places
+    /// every entry of `Program::strings`, not only the ones an entry
+    /// happens to load. Today an unused literal costs nothing; under ADR
+    /// 0045 it costs its bytes, which is the regression the ADR names
+    /// rather than hides.
+    #[test]
+    fn an_unused_literal_is_still_built() {
+        let mut build = Build::default().strings(&["never loaded"]);
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
+        let int = build.scalar(Repr::Int);
+        // `f`'s body never mentions `StrId(0)` — there is no `Inst::Str` in
+        // it at all — and the literal is placed before `f` can run anyway.
+        let f = build.function(
+            "f",
+            &[],
+            &[Repr::Int],
+            int,
+            vec![Inst::Int { dst: 0, value: 0 }, Inst::Return { src: 0 }],
+        );
+        let program = build.done();
+        let mut machine = Machine::new(&program, 1 << 12);
+        let addr = machine.literal_addr(StrId(0));
+        assert_ne!(
+            addr, 0,
+            "the literal was placed even though nothing loads it"
+        );
+        assert_eq!(machine.string_bytes(addr), b"never loaded");
+        // And `f` runs exactly as it would if the literal did not exist:
+        // placing it ahead of time changes nothing this body can observe.
+        assert_eq!(machine.run(f, &[], &budget()).unwrap(), vec![0]);
+    }
+
+    /// Literals are never collected, rooted or not — the floor's whole job.
+    /// A sweep begins at `Space::static_end` and never walks below it, so
+    /// nothing there can be found unmarked and freed, whether or not any
+    /// frame, slot or temp names it. This machine has none of those at all.
+    #[test]
+    fn a_literal_survives_a_collection_that_roots_nothing() {
+        let mut build = Build::default().strings(&["kept forever"]);
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
+        let program = build.done();
+        let mut machine = Machine::new(&program, 1 << 12);
+        let addr = machine.literal_addr(StrId(0));
+        machine.collect();
+        assert_eq!(
+            machine.string_bytes(addr),
+            b"kept forever",
+            "a collection that roots nothing still leaves the literal untouched"
+        );
+        // Surviving and being counted as surviving are two claims, and the
+        // second is the one a floor can quietly lose: the sweep starts above
+        // the literal, so nothing marks it and nothing adds it up unless the
+        // static region is counted whole. `freed + live` is what says how
+        // much was occupied when the collection began.
+        let words = 1 + machine
+            .program
+            .layout(machine.program.str_layout)
+            .try_payload_words(b"kept forever".len() as u32, &machine.program.layouts)
+            .expect("a twelve-byte string has a payload");
+        assert_eq!(
+            machine.collected().live_words,
+            u64::from(words),
+            "the literal's header and payload are live words, unwalked or not"
+        );
+        assert_eq!(machine.collected().freed_words, 0);
+    }
+
+    /// A heap object holding a reference to a literal survives a collection
+    /// that reclaims everything else, and reads the reference back
+    /// correctly: tracing *through* a reference to a placed literal already
+    /// worked before this ADR — `reachable` accepts anything below `bump` —
+    /// and this is what confirms it still does.
+    #[test]
+    fn a_struct_field_holding_a_literal_survives_a_collection() {
+        let mut build = Build::default().strings(&["held by a field"]);
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
+        let holder = build.structure("Holder", &[("text", str_layout)]);
+        let program = build.done();
+        let mut machine = Machine::new(&program, 1 << 12);
+        let literal = machine.literal_addr(StrId(0));
+
+        let object = machine.new_object(holder, 0).expect("the heap has room");
+        machine.set_payload(object, 0, literal);
+        // The struct's own address is the only root; the literal is
+        // reachable only by tracing through it.
+        machine.push_temp(object);
+
+        machine.collect();
+
+        assert_eq!(machine.mem.payload(object, 0), literal);
+        assert_eq!(machine.string_bytes(literal), b"held by a field");
+    }
+
+    /// Two tasks of one run see the same address for one literal: the
+    /// entry places it once, and `Machine::for_task` receives the table
+    /// rather than building its own — which is the whole of the per-task
+    /// duplication this ADR removes.
+    #[test]
+    fn two_tasks_of_one_run_see_the_same_address_for_a_literal() {
+        let mut build = Build::default().strings(&["shared"]);
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
+        let program = build.done();
+
+        let entry = Machine::new(&program, 1 << 12);
+        let entry_addr = entry.literal_addr(StrId(0));
+
+        let segment = entry
+            .mem
+            .for_task()
+            .expect("a fresh space has a segment free");
+        let task = Machine::for_task(
+            &program,
+            None,
+            None,
+            Arc::clone(&entry.resources),
+            segment,
+            Cancellation::new(),
+            1,
+            entry.code().expect("this fixture encodes"),
+            entry.literals().expect("the literals placed"),
+        );
+
+        assert_eq!(
+            task.literal_addr(StrId(0)),
+            entry_addr,
+            "no second placement, no second address"
+        );
+        assert_eq!(task.string_bytes(entry_addr), b"shared");
+    }
+
+    /// The eager-placement failure, end to end: a heap too small for the
+    /// program's literals fails before the entry runs, at the entry's own
+    /// span, with the message an exhausted heap already gives, and no fuel
+    /// charged — this program executed nothing.
+    #[test]
+    fn a_heap_too_small_for_its_literals_fails_before_the_entry_runs() {
+        let mut build = Build::default().strings(&["far too long for the heap this run was given"]);
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
+        let int = build.scalar(Repr::Int);
+        let f = build.function(
+            "f",
+            &[],
+            &[Repr::Int],
+            int,
+            vec![Inst::Int { dst: 0, value: 0 }, Inst::Return { src: 0 }],
+        );
+        let program = build.done();
+        // Far fewer words than the literal's own header and payload, so
+        // placing it is what fails — nothing in `f`'s body ever runs.
+        let mut machine = Machine::new(&program, 4);
+        let meter = budget();
+        let error = machine
+            .run(f, &[], &meter)
+            .expect_err("a heap this small cannot hold the literal");
+        assert_eq!(error.message, "this run has no memory left");
+        assert_eq!(
+            error.span,
+            Some(program.function(f).span),
+            "the entry's own span, not the literal's"
+        );
+        assert_eq!(
+            meter.fuel_spent(),
+            0,
+            "a run that executed nothing is charged nothing"
+        );
+    }
+
     /// A box carries the *layout* of what it holds in payload word 0, not a
     /// per-word `Repr`: erasure is where a value stops having a static width,
     /// so what the box has to record is the thing that says the width.
@@ -5788,6 +6107,8 @@ pub(crate) mod tests {
     #[test]
     fn leaving_a_scope_waits_for_a_task_the_body_never_awaited() {
         let mut build = Build::default().strings(&["tasks"]);
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
         let int = build.scalar(Repr::Int);
         let word = build.scalar(Repr::Ref);
         let held = counter(&mut build);
@@ -5899,6 +6220,8 @@ pub(crate) mod tests {
     #[test]
     fn awaiting_the_same_handle_twice_runs_the_body_once() {
         let mut build = Build::default().strings(&["tasks"]);
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
         let int = build.scalar(Repr::Int);
         let word = build.scalar(Repr::Ref);
         let held = counter(&mut build);
@@ -6029,6 +6352,8 @@ pub(crate) mod tests {
     #[test]
     fn awaiting_a_cancelled_task_is_refused() {
         let mut build = Build::default().strings(&["tasks"]);
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
         let int = build.scalar(Repr::Int);
         let body = build.lambda(
             "body",
@@ -6325,6 +6650,8 @@ pub(crate) mod tests {
     #[test]
     fn a_child_that_raises_leaves_the_scope_with_its_own_error() {
         let mut build = Build::default().strings(&["tasks", "the child said so"]);
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
         let int = build.scalar(Repr::Int);
         let body = build.lambda(
             "body",
@@ -6385,6 +6712,8 @@ pub(crate) mod tests {
     #[test]
     fn a_collection_a_sibling_ran_keeps_what_the_parent_holds() {
         let mut build = Build::default().strings(&["tasks"]);
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
         let int = build.scalar(Repr::Int);
         let held = counter(&mut build);
         let body = build.lambda(
@@ -6532,6 +6861,8 @@ pub(crate) mod tests {
     #[test]
     fn a_child_whose_value_failed_leaves_the_scope_with_its_payload() {
         let mut build = Build::default().strings(&["tasks"]);
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
         let int = build.scalar(Repr::Int);
         let answer = build.enumeration("Result", &[("Ok", vec![int]), ("Err", vec![int])]);
         let body = build.lambda(
@@ -7186,6 +7517,8 @@ pub(crate) mod tests {
     #[test]
     fn a_failing_run_gives_back_every_cell_it_held() {
         let mut build = Build::default().strings(&["stop"]);
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
         let int = build.word("Int", Repr::Int);
         let held = build.layout("Shared", Shape::Shared { value: int });
         let main = build.function(
