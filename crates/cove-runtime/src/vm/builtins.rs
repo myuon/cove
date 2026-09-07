@@ -204,17 +204,17 @@ pub(crate) fn call(
 
         // ---- Duration ----------------------------------------------------
         //
-        // Six names, each of which is both a reader and a builder. The guard
-        // is the whole of what tells a `Duration` operation from any other
-        // name on the same receiver; which of the two it is, is the operand's
-        // `Repr`, and `scalar::duration` is where that is read.
+        // `nanos` is the one name left here: it is both a reader and a
+        // builder, told apart by the operand's `Repr`, which
+        // `scalar::duration_nanos` is where that is read. Its five
+        // neighbours — `micros` through `hours` — are `std.duration`
+        // functions now; see `cove_schema::builtins::standard_binding` and
+        // `standard_associated_binding`.
         //
         // `Bool` is not below this line because `Bool` has no operations: the
         // schema gives it none beyond `snapshot`, and `!`, `&&` and `||` are
         // instructions rather than builtins.
-        ("Duration", name) if scalar::unit(name).is_some() => {
-            scalar::duration(machine, name, operands).map(one)
-        }
+        ("Duration", "nanos") => scalar::duration_nanos(machine, operands).map(one),
 
         // ---- equality ----------------------------------------------------
         //

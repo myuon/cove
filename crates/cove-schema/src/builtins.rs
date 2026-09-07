@@ -544,7 +544,25 @@ pub fn enum_declaring(name: &str) -> Option<&'static BuiltinSchema> {
 // mean touching all hundred-odd literals above to add one that is empty for
 // every one of them but this. The table only grows as a method migrates.
 
-/// A builtin method whose implementation is Cove source rather than Rust.
+/// Which of a builtin type's two call forms a [`StdBinding`] names.
+///
+/// A receiver and a name are not always one thing: `Duration` declares
+/// `micros`, `millis`, `seconds`, `minutes`, and `hours` as both a method —
+/// `d.millis()`, the reader — and an associated function — `Duration.millis(n)`,
+/// the builder — of the same name. `(receiver, name)` cannot key both without
+/// telling the two apart, so this is the third field of the key, and it is
+/// also why the two bindings for one name have to point at two different
+/// functions: a Cove module cannot declare `millis` twice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StdBindingKind {
+    /// `receiver.method(...)`, resolved by [`standard_binding`].
+    Method,
+    /// `Receiver.method(...)`, resolved by [`standard_associated_binding`].
+    Associated,
+}
+
+/// A builtin method or associated function whose implementation is Cove
+/// source rather than Rust.
 ///
 /// This is the fact `cove_ir`'s lowering reads to turn `items.isEmpty()`
 /// into an ordinary call to a declared function instead of a
@@ -552,23 +570,29 @@ pub fn enum_declaring(name: &str) -> Option<&'static BuiltinSchema> {
 /// has, and the module and function name are where to send it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StdBinding {
+    /// Whether `method` names a method or an associated function of
+    /// `receiver`. See [`StdBindingKind`].
+    pub kind: StdBindingKind,
     /// The builtin type the method is called on, such as `"Array"`.
     pub receiver: &'static str,
-    /// The method name Cove source calls, such as `"isEmpty"`.
+    /// The method or associated function name Cove source calls, such as
+    /// `"isEmpty"`.
     pub method: &'static str,
     /// The standard-library module the implementation lives in, such as
     /// `"std.array"`.
     pub module: &'static str,
     /// The function within that module, such as `"isEmpty"`. Usually the
     /// same spelling as `method`, but named separately because nothing
-    /// requires it to be.
+    /// requires it to be — an associated binding in particular cannot share
+    /// its module function's name with its method counterpart, since a
+    /// module cannot declare the same name twice.
     pub function: &'static str,
 }
 
 /// Every builtin method whose body has moved out of Rust and into the
 /// standard library.
 ///
-/// Fifteen entries, and what is *not* here is as informative as what is.
+/// Twenty-nine entries, and what is *not* here is as informative as what is.
 ///
 /// `Result.mapError` is here, and it is the only one that needed a language
 /// change to arrive. While a callback's arity was adapted rather than
@@ -585,14 +609,26 @@ pub struct StdBinding {
 /// here would have moved its diagnostic out of the caller's source along
 /// with it.
 ///
+/// Ten of the twenty-nine are `Duration`'s, and they are the first entries
+/// that come in pairs: `micros`, `millis`, `seconds`, `minutes`, and `hours`
+/// each name a method (`d.millis()`, the reader) and, separately, an
+/// associated function (`Duration.millis(n)`, the builder) — see
+/// [`StdBindingKind`]. `nanos` is not among them and never will be: it is
+/// the one primitive `Duration` keeps, because something has to know how a
+/// duration is actually stored. Before this migration all six readers
+/// shared one table-driven Rust function and so did all six builders; a
+/// reader now divides by its unit's constant and a builder multiplies by
+/// it, both written once in `std.duration` rather than once per backend.
+///
 /// # Checking ADR 0043's third condition before adding a row here
 ///
 /// [ADR 0043](../../../docs/adr/0043-a-method-moves-if-it-is-total-and-takes-no-closure.md)'s
 /// third migration condition is that the Rust an entry deletes is
-/// **per-method**: a method whose implementation is shared with others (the
-/// way `Duration`'s readers share one table-driven function) moves nothing
-/// by moving, and counting schema entries instead of implementations is the
-/// mistake that ADR corrects.
+/// **per-method**: a method whose implementation is shared with others
+/// moves nothing by moving, and counting schema entries instead of
+/// implementations is the mistake that ADR corrects — which is exactly what
+/// made `Duration` wait until its shared table-driven function could be
+/// deleted outright rather than merely bypassed for five of its six units.
 ///
 /// The check is: delete the dispatch arm in `cove-runtime`'s
 /// `vm::builtins` that calls the Rust function, leave the function itself
@@ -615,118 +651,213 @@ pub struct StdBinding {
 /// and never the third, silent one this note used to have to warn about.
 pub static STANDARD_LIBRARY: &[StdBinding] = &[
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Array",
         method: "isEmpty",
         module: "std.array",
         function: "isEmpty",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Array",
         method: "filter",
         module: "std.array",
         function: "filter",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Array",
         method: "fold",
         module: "std.array",
         function: "fold",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Vector",
         method: "isEmpty",
         module: "std.vector",
         function: "isEmpty",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Vector",
         method: "filter",
         module: "std.vector",
         function: "filter",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Vector",
         method: "fold",
         module: "std.vector",
         function: "fold",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Map",
         method: "isEmpty",
         module: "std.map",
         function: "isEmpty",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Set",
         method: "isEmpty",
         module: "std.set",
         function: "isEmpty",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "String",
         method: "isEmpty",
         module: "std.string",
         function: "isEmpty",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Option",
         method: "isSome",
         module: "std.option",
         function: "isSome",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Option",
         method: "isNone",
         module: "std.option",
         function: "isNone",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Option",
         method: "unwrapOr",
         module: "std.option",
         function: "unwrapOr",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Result",
         method: "isOk",
         module: "std.result",
         function: "isOk",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Result",
         method: "isError",
         module: "std.result",
         function: "isError",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Result",
         method: "unwrapOr",
         module: "std.result",
         function: "unwrapOr",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Result",
         method: "mapError",
         module: "std.result",
         function: "mapError",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Int",
         method: "min",
         module: "std.int",
         function: "min",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Int",
         method: "max",
         module: "std.int",
         function: "max",
     },
     StdBinding {
+        kind: StdBindingKind::Method,
         receiver: "Int",
         method: "abs",
         module: "std.int",
         function: "abs",
+    },
+    // `Duration.nanos` is not here: it is the one primitive left, and both
+    // its forms — the reader and the builder — stay in the machine. Each of
+    // its five neighbours is bound twice, once as the method that reads it
+    // and once as the associated function that builds it, and the two point
+    // at different functions of `std.duration` because a module cannot
+    // declare `micros` twice.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Duration",
+        method: "micros",
+        module: "std.duration",
+        function: "micros",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Duration",
+        method: "millis",
+        module: "std.duration",
+        function: "millis",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Duration",
+        method: "seconds",
+        module: "std.duration",
+        function: "seconds",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Duration",
+        method: "minutes",
+        module: "std.duration",
+        function: "minutes",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Duration",
+        method: "hours",
+        module: "std.duration",
+        function: "hours",
+    },
+    StdBinding {
+        kind: StdBindingKind::Associated,
+        receiver: "Duration",
+        method: "micros",
+        module: "std.duration",
+        function: "ofMicros",
+    },
+    StdBinding {
+        kind: StdBindingKind::Associated,
+        receiver: "Duration",
+        method: "millis",
+        module: "std.duration",
+        function: "ofMillis",
+    },
+    StdBinding {
+        kind: StdBindingKind::Associated,
+        receiver: "Duration",
+        method: "seconds",
+        module: "std.duration",
+        function: "ofSeconds",
+    },
+    StdBinding {
+        kind: StdBindingKind::Associated,
+        receiver: "Duration",
+        method: "minutes",
+        module: "std.duration",
+        function: "ofMinutes",
+    },
+    StdBinding {
+        kind: StdBindingKind::Associated,
+        receiver: "Duration",
+        method: "hours",
+        module: "std.duration",
+        function: "ofHours",
     },
 ];
 
@@ -735,12 +866,31 @@ pub fn standard_library() -> &'static [StdBinding] {
     STANDARD_LIBRARY
 }
 
-/// The standard-library binding for `receiver.method`, if that method's body
-/// has moved out of Rust.
+/// The standard-library binding for `receiver.method(...)`, a call on a
+/// value of `receiver`, if that method's body has moved out of Rust.
+///
+/// Only [`StdBindingKind::Method`] entries answer here — an associated
+/// function of the same name, such as `Duration`'s builder half of
+/// `millis`, is a different binding and [`standard_associated_binding`]
+/// is what finds it.
 pub fn standard_binding(receiver: &str, method: &str) -> Option<&'static StdBinding> {
-    STANDARD_LIBRARY
-        .iter()
-        .find(|entry| entry.receiver == receiver && entry.method == method)
+    STANDARD_LIBRARY.iter().find(|entry| {
+        entry.kind == StdBindingKind::Method && entry.receiver == receiver && entry.method == method
+    })
+}
+
+/// The standard-library binding for `Receiver.method(...)`, a call on the
+/// type's own name, if that associated function's body has moved out of
+/// Rust.
+///
+/// Only [`StdBindingKind::Associated`] entries answer here, for the reason
+/// [`standard_binding`] gives.
+pub fn standard_associated_binding(receiver: &str, method: &str) -> Option<&'static StdBinding> {
+    STANDARD_LIBRARY.iter().find(|entry| {
+        entry.kind == StdBindingKind::Associated
+            && entry.receiver == receiver
+            && entry.method == method
+    })
 }
 
 // -------------------------------------------- the cases and the one field
@@ -3151,21 +3301,36 @@ mod tests {
         }
     }
 
-    /// A [`StdBinding`] names a receiver and a method, and both have to be
-    /// real: a table can name a method that does not exist where a field on
-    /// [`MethodSchema`] could not, because a field is only ever read off a
-    /// method that is already there. This is the test that closes that gap.
+    /// A [`StdBinding`] names a receiver and a method or an associated
+    /// function, and it has to be real: a table can name one that does not
+    /// exist where a field on [`MethodSchema`] could not, because a field is
+    /// only ever read off a method that is already there. This is the test
+    /// that closes that gap — and, since [`StdBindingKind`] split one name
+    /// into two possible call forms, it holds a [`StdBindingKind::Method`]
+    /// entry to naming a method and a [`StdBindingKind::Associated`] entry
+    /// to naming an associated function, rather than either satisfying the
+    /// other: `Duration.millis(n)` existing does not mean `d.millis()`
+    /// does, and a table that only checked "some function by this name"
+    /// would not catch the two bindings landing on the wrong list.
     #[test]
     fn every_std_binding_names_a_method_that_exists() {
         for entry in STANDARD_LIBRARY {
             let receiver = builtin(entry.receiver)
                 .unwrap_or_else(|| panic!("`{}` is not a builtin type", entry.receiver));
-            assert!(
-                receiver.method(entry.method).is_some(),
-                "`{}` has no method `{}`",
-                entry.receiver,
-                entry.method
-            );
+            match entry.kind {
+                StdBindingKind::Method => assert!(
+                    receiver.method(entry.method).is_some(),
+                    "`{}` has no method `{}`",
+                    entry.receiver,
+                    entry.method
+                ),
+                StdBindingKind::Associated => assert!(
+                    receiver.associated_function(entry.method).is_some(),
+                    "`{}` has no associated function `{}`",
+                    entry.receiver,
+                    entry.method
+                ),
+            }
         }
     }
 }

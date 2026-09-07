@@ -1551,15 +1551,17 @@ fn a_negative_count_builds_a_negative_duration() {
     );
 }
 
-/// A count whose nanoseconds do not fit stops the run, in the words
-/// `Duration` arithmetic already stops it in.
+/// A count whose nanoseconds do not fit stops the run — in the words an
+/// ordinary `Int` multiplication stops it in, because `Duration.hours` is
+/// `std.duration.ofHours` now and the multiply that can overflow is written
+/// there rather than in a builtin.
 #[test]
 fn a_duration_that_does_not_fit_stops_the_run() {
     let error = check_and_error(
         "Duration.hours past the end",
         "  Duration.hours(9223372036854775807).hours()",
     );
-    assert_eq!(error.message, "`Int` duration arithmetic overflowed");
+    assert_eq!(error.message, "`Int` multiplication overflowed");
     assert_eq!(
         error.rule.as_deref(),
         Some("Integer overflow is a broken invariant, not a wrapped result.")

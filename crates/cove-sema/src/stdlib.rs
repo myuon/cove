@@ -85,6 +85,11 @@ static SOURCES: &[StdSource] = &[
         path: "std/int.cove",
         text: include_str!("../std/int.cove"),
     },
+    StdSource {
+        module: "std.duration",
+        path: "std/duration.cove",
+        text: include_str!("../std/duration.cove"),
+    },
 ];
 
 /// Every module name the standard library declares.
