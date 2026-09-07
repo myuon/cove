@@ -177,14 +177,19 @@ export async fn main() -> Result<Unit, Error> {
   let server = http.listen(8080)?
   console.println("listening on :{server.port()}")?
 
+  // The reporter samples the metrics on a period, and does not print them.
+  //
+  // It cannot, usefully: this server handles the requests it was given and
+  // stops, in less time than the first period takes, so a timer that printed
+  // would print nothing at all on a real clock. What a reader wants to see is
+  // the figures the run ended with, and those are printed below, once the
+  // scope has closed and the reporter is no longer sampling them.
   scope services {
     let reportTimer = services.spawn {
       clock.every(60s, async fn() {
         app.metrics.lock(fn(metrics) {
-          console.println(
-            "requests={metrics.requests} failures={metrics.failures}",
-          )
-        })?
+          metrics.requests + metrics.failures
+        })
         Ok(())
       })
     }
@@ -193,6 +198,10 @@ export async fn main() -> Result<Unit, Error> {
 
     reportTimer.cancel()
   }
+
+  app.metrics.lock(fn(metrics) {
+    console.println("requests={metrics.requests} failures={metrics.failures}")
+  })?
 
   server.close()?
   repository.close()?
