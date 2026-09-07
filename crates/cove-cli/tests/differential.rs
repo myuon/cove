@@ -835,7 +835,22 @@ impl Trace {
 /// What catches it instead is that the entry's own trace is compared exactly,
 /// and a task's work reaches the entry — through what it printed, what it
 /// left in the filesystem, and what the entry answered, all of which this
-/// harness compares whether or not a trace was written. [`Report::races`]
+/// harness compares whether or not a trace was written.
+///
+/// That compensating control is only worth having while it is itself
+/// deterministic, and once it was not. `examples:callbacks` spawned a timer
+/// that printed, and whether the print landed before the scope cancelled it
+/// was the same scheduling luck this rule exists for — so the console
+/// comparison raced exactly where the trace comparison had been excused, and
+/// `main` went red for it once (issue #278). The fix was not to excuse the
+/// console too: that would have removed the check this rule leans on, in the
+/// corpus the paragraph above warns is close to the shape it guards against.
+/// It was to stop the case racing — that timer now samples the metrics and
+/// the entry reports them, which is what the example wanted to show anyway,
+/// since a sixty-second period never elapses in a run this short. **A case
+/// whose console output depends on whether a spawned task was scheduled does
+/// not belong in this corpus**, and that is the rule to apply to the next
+/// one rather than another exemption here. [`Report::races`]
 /// names every case this rule applied to, so the loss is printed rather than
 /// silent.
 impl PartialEq for Trace {
