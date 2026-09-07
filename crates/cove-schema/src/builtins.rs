@@ -278,6 +278,37 @@ pub struct MethodSchema {
     /// Whether the receiver is `var self`, so the call needs the caller's own
     /// mutable place rather than a value.
     pub mutating: bool,
+    /// Whether this call hands back a value nothing else holds a handle to —
+    /// freshly allocated storage, or a copy of somebody else's.
+    ///
+    /// `cove_sema::unique::creates` is the one reader, and this field is the
+    /// whole of what it trusts: `Vector.of(...)` allocates,
+    /// `Array.toVector()` copies an array's elements into storage nothing
+    /// else names, and `Vector.snapshot()` copies the vector's own graph, so
+    /// the three are `true`. Everything else here is `false`, including the
+    /// other types that share `snapshot`'s declaration —
+    /// `Array.snapshot()`, `Map.snapshot()`, `Set.snapshot()` and the rest
+    /// answer themselves, because the type is immutable and "itself" is
+    /// exactly the handle the caller already had, not a new one.
+    ///
+    /// # Who may say `true`, and why that is the whole boundary
+    ///
+    /// This table, and only this table. It is the compiler's own claim
+    /// about what the runtime allocates, not a declaration a program
+    /// writes, and `crates/cove-runtime/tests/builtin_schema.rs` drives
+    /// every entry through a real interpreter to hold the claim to account.
+    /// A Cove `fn` cannot make the same claim about its own `return` —
+    /// nothing checks that a body actually hands back unaliased storage —
+    /// so `unique::creates()` asks no question of a declared function at
+    /// all: it resolves a call to an entry in this table or it does not,
+    /// and a call to a declared function, however it is written or spelled,
+    /// simply has no entry to resolve to. `std.vector.filter`'s own
+    /// `out.freeze()` is proved the ordinary local way, from `Vector.of()`
+    /// a few lines above it in the same body; a *caller* of `filter` gets
+    /// no obligation-free `Vector` back, before or after this field
+    /// existed, because the field only ever answers a question about one
+    /// call's schema entry, and `filter` has none.
+    pub fresh: bool,
 }
 
 impl MethodSchema {
@@ -1100,6 +1131,7 @@ const SNAPSHOT: MethodSchema = MethodSchema {
     variadic: false,
     result: BuiltinType::SelfType,
     mutating: false,
+    fresh: false,
 };
 
 /// `length() -> Int`, how every sequence reports its element count. There is
@@ -1111,6 +1143,7 @@ const LENGTH: MethodSchema = MethodSchema {
     variadic: false,
     result: BuiltinType::Int,
     mutating: false,
+    fresh: false,
 };
 
 /// `isEmpty() -> Bool`.
@@ -1121,6 +1154,7 @@ const IS_EMPTY: MethodSchema = MethodSchema {
     variadic: false,
     result: BuiltinType::Bool,
     mutating: false,
+    fresh: false,
 };
 
 // ------------------------------- the questions an ordered sequence answers
@@ -1176,6 +1210,7 @@ const CONTAINS: MethodSchema = MethodSchema {
     variadic: false,
     result: BuiltinType::Bool,
     mutating: false,
+    fresh: false,
 };
 
 /// `indexOf(element: T) -> Option<Int>`: the position of the **first**
@@ -1196,6 +1231,7 @@ const INDEX_OF: MethodSchema = MethodSchema {
     variadic: false,
     result: BuiltinType::Option(&BuiltinType::Int),
     mutating: false,
+    fresh: false,
 };
 
 /// `slice(from: Int, to: Int) -> Array<T>`: the elements at indices `from`
@@ -1231,6 +1267,7 @@ const SLICE: MethodSchema = MethodSchema {
     variadic: false,
     result: BuiltinType::Array(&BuiltinType::Param("T")),
     mutating: false,
+    fresh: false,
 };
 
 // ------------------------------- the higher-order methods a sequence shares
@@ -1296,6 +1333,7 @@ const MAP_EACH: MethodSchema = MethodSchema {
     variadic: false,
     result: BuiltinType::Array(&BuiltinType::Param("R")),
     mutating: false,
+    fresh: false,
 };
 
 /// `filter(keep: fn(T) -> Bool) -> Array<T>`.
@@ -1312,6 +1350,7 @@ const FILTER: MethodSchema = MethodSchema {
     variadic: false,
     result: BuiltinType::Array(&BuiltinType::Param("T")),
     mutating: false,
+    fresh: false,
 };
 
 /// `fold(initial: R, step: fn(R, T) -> R) -> R`.
@@ -1341,6 +1380,7 @@ const FOLD: MethodSchema = MethodSchema {
     variadic: false,
     result: BuiltinType::Param("R"),
     mutating: false,
+    fresh: false,
 };
 
 /// `sorted(by: fn(T, T) -> Bool) -> Array<T>`, a **stable** sort under the
@@ -1381,6 +1421,7 @@ const SORTED: MethodSchema = MethodSchema {
     variadic: false,
     result: BuiltinType::Array(&BuiltinType::Param("T")),
     mutating: false,
+    fresh: false,
 };
 
 // ------------------------------------------------------------------- Array
@@ -1414,6 +1455,7 @@ pub const ARRAY: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Option(&BuiltinType::Param("T")),
             mutating: false,
+            fresh: false,
         },
         LENGTH,
         IS_EMPTY,
@@ -1460,6 +1502,9 @@ pub const ARRAY: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Vector(&BuiltinType::Param("T")),
             mutating: false,
+            // Copies the array's elements into storage nothing else names —
+            // see `MethodSchema::fresh`.
+            fresh: true,
         },
         SNAPSHOT,
     ],
@@ -1539,6 +1584,7 @@ pub const VECTOR: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Option(&BuiltinType::Param("T")),
             mutating: false,
+            fresh: false,
         },
         LENGTH,
         IS_EMPTY,
@@ -1559,6 +1605,7 @@ pub const VECTOR: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Unit,
             mutating: true,
+            fresh: false,
         },
         // `set(index: Int, value: T) -> Option<T>`: replaces the element at
         // `index` and answers what was there.
@@ -1597,6 +1644,7 @@ pub const VECTOR: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Option(&BuiltinType::Param("T")),
             mutating: true,
+            fresh: false,
         },
         // `pop() -> Option<T>`: takes the last element out and answers it,
         // or answers `None` and writes nothing when there is no last
@@ -1627,6 +1675,7 @@ pub const VECTOR: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Option(&BuiltinType::Param("T")),
             mutating: true,
+            fresh: false,
         },
         // `remove(index: Int) -> Option<T>`: takes the element at `index`
         // out, moves everything after it down one, and answers what was
@@ -1652,6 +1701,7 @@ pub const VECTOR: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Option(&BuiltinType::Param("T")),
             mutating: true,
+            fresh: false,
         },
         MethodSchema {
             name: "freeze",
@@ -1660,6 +1710,7 @@ pub const VECTOR: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Array(&BuiltinType::Param("T")),
             mutating: true,
+            fresh: false,
         },
         MethodSchema {
             name: "toArray",
@@ -1668,8 +1719,17 @@ pub const VECTOR: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Array(&BuiltinType::Param("T")),
             mutating: false,
+            fresh: false,
         },
-        SNAPSHOT,
+        // `Vector` is the one `SNAPSHOT` user whose storage is not the
+        // receiver's own already: the runtime copies its mutable graph
+        // rather than handing the same handle back, so this override is
+        // `fresh` where every other user of the shared constant is not —
+        // see `MethodSchema::fresh`.
+        MethodSchema {
+            fresh: true,
+            ..SNAPSHOT
+        },
     ],
     associated: &[MethodSchema {
         name: "of",
@@ -1681,6 +1741,8 @@ pub const VECTOR: BuiltinSchema = BuiltinSchema {
         variadic: true,
         result: BuiltinType::Vector(&BuiltinType::Param("T")),
         mutating: false,
+        // Allocates fresh storage — see `MethodSchema::fresh`.
+        fresh: true,
     }],
 };
 
@@ -1710,6 +1772,7 @@ pub const MAP: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Option(&BuiltinType::Param("V")),
             mutating: false,
+            fresh: false,
         },
         LENGTH,
         IS_EMPTY,
@@ -1723,6 +1786,7 @@ pub const MAP: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Bool,
             mutating: false,
+            fresh: false,
         },
         MethodSchema {
             name: "keys",
@@ -1731,6 +1795,7 @@ pub const MAP: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Array(&BuiltinType::Param("K")),
             mutating: false,
+            fresh: false,
         },
         MethodSchema {
             name: "values",
@@ -1739,6 +1804,7 @@ pub const MAP: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Array(&BuiltinType::Param("V")),
             mutating: false,
+            fresh: false,
         },
         MethodSchema {
             name: "inserted",
@@ -1756,6 +1822,7 @@ pub const MAP: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Map(&BuiltinType::Param("K"), &BuiltinType::Param("V")),
             mutating: false,
+            fresh: false,
         },
         MethodSchema {
             name: "removed",
@@ -1767,6 +1834,7 @@ pub const MAP: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Map(&BuiltinType::Param("K"), &BuiltinType::Param("V")),
             mutating: false,
+            fresh: false,
         },
         SNAPSHOT,
     ],
@@ -1780,6 +1848,7 @@ pub const MAP: BuiltinSchema = BuiltinSchema {
         variadic: true,
         result: BuiltinType::Map(&BuiltinType::Param("K"), &BuiltinType::Param("V")),
         mutating: false,
+        fresh: false,
     }],
 };
 
@@ -1839,6 +1908,7 @@ pub const SET: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Array(&BuiltinType::Param("T")),
             mutating: false,
+            fresh: false,
         },
         CONTAINS,
         MethodSchema {
@@ -1851,6 +1921,7 @@ pub const SET: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Set(&BuiltinType::Param("T")),
             mutating: false,
+            fresh: false,
         },
         MethodSchema {
             name: "removed",
@@ -1862,6 +1933,7 @@ pub const SET: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Set(&BuiltinType::Param("T")),
             mutating: false,
+            fresh: false,
         },
         SNAPSHOT,
     ],
@@ -1875,6 +1947,7 @@ pub const SET: BuiltinSchema = BuiltinSchema {
         variadic: true,
         result: BuiltinType::Set(&BuiltinType::Param("T")),
         mutating: false,
+        fresh: false,
     }],
 };
 
@@ -1912,6 +1985,7 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Array(&BuiltinType::String),
             mutating: false,
+            fresh: false,
         },
         // One element per character, each a `String` of length 1 — the
         // decomposition `for` cannot do itself, since `for` refuses a
@@ -1923,6 +1997,7 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Array(&BuiltinType::String),
             mutating: false,
+            fresh: false,
         },
         // Every occurrence of `separator` separates, so adjacent separators
         // produce an empty part and text with none produces one part that is
@@ -1938,6 +2013,7 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Array(&BuiltinType::String),
             mutating: false,
+            fresh: false,
         },
         // The receiver is the separator; see the type's own doc comment for
         // why this is not `Array<T>.join`.
@@ -1951,6 +2027,7 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::String,
             mutating: false,
+            fresh: false,
         },
         // The characters at indices `from` up to but not including `to`.
         // Both bounds are clamped into `0..length()`, and a `to` at or below
@@ -1973,6 +2050,7 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::String,
             mutating: false,
+            fresh: false,
         },
         // Leading and trailing whitespace removed, where whitespace is
         // Unicode whitespace as Rust's own `str::trim` sees it; `words()`
@@ -1985,6 +2063,7 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::String,
             mutating: false,
+            fresh: false,
         },
         MethodSchema {
             name: "contains",
@@ -1996,6 +2075,7 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Bool,
             mutating: false,
+            fresh: false,
         },
         MethodSchema {
             name: "startsWith",
@@ -2007,6 +2087,7 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Bool,
             mutating: false,
+            fresh: false,
         },
         MethodSchema {
             name: "endsWith",
@@ -2018,6 +2099,7 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Bool,
             mutating: false,
+            fresh: false,
         },
         // The character index `text` first occurs at, or `None`; an empty
         // `text` occurs at 0.
@@ -2031,6 +2113,7 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Option(&BuiltinType::Int),
             mutating: false,
+            fresh: false,
         },
         // Every non-overlapping occurrence of `old`, scanning left to right;
         // an empty `old` is refused for the same reason `split`'s empty
@@ -2051,6 +2134,7 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::String,
             mutating: false,
+            fresh: false,
         },
         // Unicode-aware, by Rust's own `str::to_uppercase`.
         MethodSchema {
@@ -2060,6 +2144,7 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::String,
             mutating: false,
+            fresh: false,
         },
         // Unicode-aware, by Rust's own `str::to_lowercase`.
         MethodSchema {
@@ -2069,6 +2154,7 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::String,
             mutating: false,
+            fresh: false,
         },
         SNAPSHOT,
     ],
@@ -2095,6 +2181,7 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
         variadic: false,
         result: BuiltinType::Result(&BuiltinType::String, &BuiltinType::Error),
         mutating: false,
+        fresh: false,
     }],
 };
 
@@ -2120,6 +2207,7 @@ pub const RANGE: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Bool,
             mutating: false,
+            fresh: false,
         },
         SNAPSHOT,
     ],
@@ -2146,6 +2234,7 @@ pub const OPTION: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Bool,
             mutating: false,
+            fresh: false,
         },
         MethodSchema {
             name: "isNone",
@@ -2154,6 +2243,7 @@ pub const OPTION: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Bool,
             mutating: false,
+            fresh: false,
         },
         MethodSchema {
             name: "unwrapOr",
@@ -2165,6 +2255,7 @@ pub const OPTION: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Param("T"),
             mutating: false,
+            fresh: false,
         },
     ],
     associated: &[],
@@ -2187,6 +2278,7 @@ pub const RESULT: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Bool,
             mutating: false,
+            fresh: false,
         },
         MethodSchema {
             name: "isError",
@@ -2195,6 +2287,7 @@ pub const RESULT: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Bool,
             mutating: false,
+            fresh: false,
         },
         // `Option.unwrapOr`'s sibling, and deliberately the same signature
         // word for word: the fallback is the type the value would have
@@ -2213,6 +2306,7 @@ pub const RESULT: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Param("T"),
             mutating: false,
+            fresh: false,
         },
         // Declares `fn(E) -> F`, matched exactly like any other callback in
         // the language (ADR 0044). A callback that does not want the error
@@ -2228,6 +2322,7 @@ pub const RESULT: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Result(&BuiltinType::Param("T"), &BuiltinType::Param("F")),
             mutating: false,
+            fresh: false,
         },
     ],
     associated: &[],
@@ -2257,6 +2352,7 @@ pub const INT: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Float,
             mutating: false,
+            fresh: false,
         },
         // The magnitude. `Int` is two's complement, so the most negative
         // `Int` has no positive counterpart; that case is an overflow, and
@@ -2270,6 +2366,7 @@ pub const INT: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Int,
             mutating: false,
+            fresh: false,
         },
         // The lesser of the receiver and `other`.
         MethodSchema {
@@ -2282,6 +2379,7 @@ pub const INT: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Int,
             mutating: false,
+            fresh: false,
         },
         // The greater of the receiver and `other`.
         MethodSchema {
@@ -2294,6 +2392,7 @@ pub const INT: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Int,
             mutating: false,
+            fresh: false,
         },
         SNAPSHOT,
     ],
@@ -2308,6 +2407,7 @@ pub const INT: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Result(&BuiltinType::Int, &BuiltinType::Error),
             mutating: false,
+            fresh: false,
         },
         // The same reading in a base other than ten, and a second function
         // rather than a second parameter on `parse`. A builtin's parameters
@@ -2339,6 +2439,7 @@ pub const INT: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Result(&BuiltinType::Int, &BuiltinType::Error),
             mutating: false,
+            fresh: false,
         },
     ],
 };
@@ -2376,6 +2477,7 @@ pub const FLOAT: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Result(&BuiltinType::Int, &BuiltinType::Error),
             mutating: false,
+            fresh: false,
         },
         // The nearest whole `Float`, halfway cases rounded away from zero —
         // Rust's own `f64::round`.
@@ -2386,6 +2488,7 @@ pub const FLOAT: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Float,
             mutating: false,
+            fresh: false,
         },
         // The magnitude.
         MethodSchema {
@@ -2395,6 +2498,7 @@ pub const FLOAT: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Float,
             mutating: false,
+            fresh: false,
         },
         // The lesser of the receiver and `other`. Rust's own `f64::min`
         // answers whichever operand is not `NaN`, and answers `NaN` only
@@ -2410,6 +2514,7 @@ pub const FLOAT: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Float,
             mutating: false,
+            fresh: false,
         },
         // The greater of the receiver and `other`, by the same rule as
         // `min`: Rust's own `f64::max` answers whichever operand is not
@@ -2424,6 +2529,7 @@ pub const FLOAT: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Float,
             mutating: false,
+            fresh: false,
         },
         // The value written with exactly `digits` digits after the decimal
         // point. `digits` outside `0..=17` is a runtime error: a `Float`
@@ -2440,6 +2546,7 @@ pub const FLOAT: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::String,
             mutating: false,
+            fresh: false,
         },
         SNAPSHOT,
     ],
@@ -2460,6 +2567,7 @@ pub const FLOAT: BuiltinSchema = BuiltinSchema {
         variadic: false,
         result: BuiltinType::Result(&BuiltinType::Float, &BuiltinType::Error),
         mutating: false,
+        fresh: false,
     }],
 };
 
@@ -2614,6 +2722,7 @@ const fn duration_builder(name: &'static str) -> MethodSchema {
         variadic: false,
         result: BuiltinType::Duration,
         mutating: false,
+        fresh: false,
     }
 }
 
@@ -2626,6 +2735,7 @@ const fn duration_reader(name: &'static str) -> MethodSchema {
         variadic: false,
         result: BuiltinType::Int,
         mutating: false,
+        fresh: false,
     }
 }
 
@@ -2668,6 +2778,7 @@ pub const TASK: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Param("T"),
             mutating: false,
+            fresh: false,
         },
         MethodSchema {
             name: "cancel",
@@ -2676,6 +2787,7 @@ pub const TASK: BuiltinSchema = BuiltinSchema {
             variadic: false,
             result: BuiltinType::Unit,
             mutating: false,
+            fresh: false,
         },
     ],
     associated: &[],
@@ -2705,6 +2817,7 @@ pub const SHARED: BuiltinSchema = BuiltinSchema {
         variadic: false,
         result: BuiltinType::Param("R"),
         mutating: false,
+        fresh: false,
     }],
     associated: &[],
 };
@@ -2731,6 +2844,7 @@ pub const SCOPE: BuiltinSchema = BuiltinSchema {
         variadic: false,
         result: BuiltinType::Task(&BuiltinType::Param("T")),
         mutating: false,
+        fresh: false,
     }],
     associated: &[],
 };
@@ -2809,6 +2923,25 @@ mod tests {
         for name in shared {
             let array = ARRAY.method(name).expect("`Array` declares it");
             let vector = VECTOR.method(name).expect("`Vector` declares it");
+            if name == "snapshot" {
+                // The one declared difference: `Vector` copies its own
+                // mutable graph, so its `snapshot` hands back storage
+                // nothing else names and `Array`'s does not, because an
+                // immutable sequence's `snapshot` returns itself. Comparing
+                // the rest of the signature still catches any other drift —
+                // see `MethodSchema::fresh`.
+                assert!(vector.fresh, "`Vector.snapshot` should be fresh");
+                assert!(!array.fresh, "`Array.snapshot` should not be fresh");
+                assert_eq!(
+                    MethodSchema {
+                        fresh: false,
+                        ..*vector
+                    },
+                    *array,
+                    "`{name}`, apart from `fresh`"
+                );
+                continue;
+            }
             assert_eq!(array, vector, "`{name}`");
         }
         // `Set` answers membership with the sequences' own declaration,
