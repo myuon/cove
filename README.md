@@ -291,6 +291,21 @@ call stack, so a fallible body moves the diagnostic out of the caller's source
 names no parameter and a standard-library body cannot. It also strikes ADR
 0042's `Duration` row, which counted thirteen schema entries as thirteen
 implementations when they are two.
+[ADR 0044](docs/adr/0044-a-callback-takes-what-its-type-declares.md) removes
+the language's one exception to that: `Result.mapError` accepted a trailing
+closure naming no parameter and was silently passed nothing, in three
+cooperating places including a checker that built the expected type to match
+whatever was written. A function value has exactly the parameters the place
+that holds it declares, with no exception, and the four walk methods that
+condition was thought to block turned out never to have been subject to it.
+[ADR 0045](docs/adr/0045-a-literal-is-there-before-the-program-runs.md)
+decides that a string literal's object is built into the base of the heap
+before the program runs and never collected, so executing `str` is a load
+rather than a check and an allocation. It is deliberately *not* a third
+region — a literal is an ordinary heap object at an ordinary heap address, so
+ADR 0034's two-region rule stands — and what it buys beyond the branch is that
+every task of a run shares one object per literal instead of allocating its
+own.
 
 Syntax is still provisional and may change.
 
