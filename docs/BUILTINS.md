@@ -16,7 +16,7 @@ unless the run was granted the capability it names.
 | | |
 | --- | --- |
 | builtin types | 18 |
-| builtin methods | 97 |
+| builtin methods | 98 |
 | builtin associated functions | 13 |
 | free builtins | 7 |
 | host modules | 8 |
@@ -255,6 +255,7 @@ written as a namespace.
 | `toInt() -> Result<Int, Error>` |  |  |  | `machine` |
 | `round() -> Float` |  |  |  | `machine` |
 | `abs() -> Float` |  |  |  | `machine` |
+| `sqrt() -> Float` |  |  |  | `machine` |
 | `min(other: Float) -> Float` |  |  |  | `machine` |
 | `max(other: Float) -> Float` |  |  |  | `machine` |
 | `format(digits: Int) -> String` |  |  |  | `machine` |

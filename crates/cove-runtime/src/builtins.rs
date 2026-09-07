@@ -912,6 +912,10 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Float(x.abs())))
             }
+            "sqrt" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value(Repr::Float(x.sqrt())))
+            }
             "min" => {
                 let args = expect_args("Float.min", args, 1, span)?;
                 let Value(Repr::Float(other)) = &args[0] else {

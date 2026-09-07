@@ -197,6 +197,7 @@ pub(crate) fn call(
         ("Float", "toInt") => scalar::float_to_int(machine, operands),
         ("Float", "round") => scalar::float_round(machine, operands).map(one),
         ("Float", "abs") => scalar::float_abs(machine, operands).map(one),
+        ("Float", "sqrt") => scalar::float_sqrt(machine, operands).map(one),
         ("Float", "min") => scalar::float_min(machine, operands).map(one),
         ("Float", "max") => scalar::float_max(machine, operands).map(one),
         ("Float", "format") => scalar::float_format(machine, operands).map(one),
