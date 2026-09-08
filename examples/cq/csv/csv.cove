@@ -59,13 +59,11 @@ export fn splitRecord(line: String) -> Result<Array<String>, Detail> {
         if character == -1 {
           fields.push(taken(line, built, start, at))
           reading = false
-        } else if character == 34 {
-          // `"`
+        } else if character == '"' {
           position = Position.Quoted
           at += 1
           start = at
-        } else if character == 44 {
-          // `,`
+        } else if character == ',' {
           fields.push(taken(line, built, start, at))
           built = ""
           at += 1
@@ -79,15 +77,13 @@ export fn splitRecord(line: String) -> Result<Array<String>, Detail> {
         if character == -1 {
           fields.push(taken(line, built, start, at))
           reading = false
-        } else if character == 44 {
-          // `,`
+        } else if character == ',' {
           fields.push(taken(line, built, start, at))
           built = ""
           position = Position.Start
           at += 1
           start = at
-        } else if character == 34 {
-          // `"`
+        } else if character == '"' {
           return Err(Detail(column: columnAt(line, at), message: "a quote may only open a field, not appear inside an unquoted one"))
         } else {
           at += advance
@@ -96,12 +92,8 @@ export fn splitRecord(line: String) -> Result<Array<String>, Detail> {
       Position.Quoted => {
         if character == -1 {
           return Err(Detail(column: columnAt(line, at), message: "a quoted field was still open when the line ended"))
-        } else if character == 34 {
-          // `"`
-          if line.codePointAtByte(at + 1).unwrapOr(-1) == 34 {
-            // The one place a field is not a single run: the escape ends this
-            // run, contributes the literal quote, and the next run starts
-            // past both.
+        } else if character == '"' {
+          if line.codePointAtByte(at + 1).unwrapOr(-1) == '"' {
             built = "{taken(line, built, start, at)}\""
             at += 2
             start = at
@@ -119,8 +111,7 @@ export fn splitRecord(line: String) -> Result<Array<String>, Detail> {
         if character == -1 {
           fields.push(taken(line, built, start, at))
           reading = false
-        } else if character == 44 {
-          // `,`
+        } else if character == ',' {
           fields.push(taken(line, built, start, at))
           built = ""
           position = Position.Start

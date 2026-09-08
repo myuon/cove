@@ -1,0 +1,3 @@
+[run.fail_code_point]
+entry = "main.main"
+allow = ["console"]

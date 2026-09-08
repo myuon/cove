@@ -192,6 +192,7 @@ it leaves.
 | Form | Types as | Evaluates to |
 | --- | --- | --- |
 | `1` | `Int` | a 64-bit signed integer |
+| `'a'` | `Int` | the Unicode scalar value of one character |
 | `1.5` | `Float` | a 64-bit IEEE 754 double |
 | `true` | `Bool` | a boolean |
 | `500ms` | `Duration` | nanoseconds, rendered in the largest unit that divides it exactly |
@@ -201,6 +202,21 @@ it leaves.
 
 A literal's written form fixes its type: there is no untyped numeric literal,
 so an `Int` literal never becomes a `Float` where one is expected.
+
+A **code-point literal** is an `Int` and not a type of its own — there is no
+`Char` in Cove, and `'a'` and `97` are one value written two ways, so `"{'a'}"`
+prints `97`. It holds **exactly one Unicode scalar value**: `''` is an error,
+`'ab'` is an error, and so is a grapheme cluster written as one character but
+made of several scalars, such as an emoji sequence. What it is for is reading
+text as numbers — `digit - '0'` is a digit's value, and
+`c >= '0' && c <= '9'` is the classifier — beside `String.codePointAtByte` and
+`String.fromCodePoint`, which are the operations that produce and consume one.
+
+It takes the escapes a string takes and `\'` besides: `\\`, `\"`, `\'`,
+`\n`, `\t`, `\r`, `\0`, `\{`, `\}`. `\'` is legal in a string too,
+where the apostrophe needs no escaping, because there is one escape table.
+**There is no `\u{...}` in either form**; write the character itself, or use
+`String.fromCodePoint` for a number computed at run time.
 
 An interpolation `{expr}` renders any value and constrains none, so it is
 checked but not required to be a `String`.

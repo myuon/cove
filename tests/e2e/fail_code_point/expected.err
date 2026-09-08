@@ -1,0 +1,22 @@
+error[cove::lex::empty_code_point]: code-point literal names no character
+ --> <e2e>/fail_code_point/main/main.cove:9:13
+  |
+9 |   println("{''}")?
+  |             ^^
+  rule: A code-point literal holds exactly one Unicode scalar value.
+  help: Write the character between the quotes, as `'a'`. The empty string is `""`.
+error[cove::lex::code_point_is_not_one_scalar]: code-point literal holds 2 scalar values, not one
+  --> <e2e>/fail_code_point/main/main.cove:10:13
+   |
+10 |   println("{'ab'}")?
+   |             ^^^^
+  rule: A code-point literal holds exactly one Unicode scalar value, so a combining pair or an emoji sequence is more than one and is not a code point.
+  help: Write one scalar, or use a `"..."` string for text of any length.
+error[cove::lex::code_point_is_not_one_scalar]: code-point literal holds 5 scalar values, not one
+  --> <e2e>/fail_code_point/main/main.cove:11:13
+   |
+11 |   println("{'👨‍👩‍👦'}")?
+   |             ^^^^^^^
+  rule: A code-point literal holds exactly one Unicode scalar value, so a combining pair or an emoji sequence is more than one and is not a code point.
+  help: Write one scalar, or use a `"..."` string for text of any length.
+3 error(s)

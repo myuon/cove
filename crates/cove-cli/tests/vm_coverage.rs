@@ -314,6 +314,12 @@ use support::{Case, ModuleIndex, Prepared};
 /// to be filled, and the monomorphisation depth cap is a **refusal** that no
 /// later task removes. Teaching this file to tell a permanent refusal from a
 /// gap is the work that would let it come back into the corpus.
+/// 127 to 128 with [ADR 0047](../../../docs/adr/0047-a-code-point-is-written-as-a-character-and-is-an-int.md):
+/// `tests/e2e/values_code_point`, the code-point literal on both evaluators.
+/// Its sibling `tests/e2e/fail_code_point` is not counted here and cannot be
+/// — it is a program that fails to *lex*, so there is nothing for either
+/// evaluator to run.
+///
 /// 117 to 127 with [ADR 0046](../../../docs/adr/0046-a-byte-offset-is-a-value-a-string-hands-out.md):
 /// ten programs, all of them `benches/`, added to measure what the three
 /// byte-counted `String` primitives cost against what they replace.
@@ -322,7 +328,7 @@ use support::{Case, ModuleIndex, Prepared};
 /// beside the builtins they would replace. Each is a program this survey runs
 /// on both evaluators like any other, which is the reason a benchmark is
 /// allowed in the corpus at all.
-const AGREEING_FLOOR: usize = 127;
+const AGREEING_FLOOR: usize = 128;
 
 /// The code `cove_ir` raises a gap under.
 ///
