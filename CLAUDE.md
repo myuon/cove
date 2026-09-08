@@ -45,13 +45,21 @@ a program that lowers and lies. The set has caught that twice.
 Before pushing, the full gate is what CI runs, and CI runs all of it under
 `--profile checked`: `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --profile checked -- -D warnings`,
-`cargo doc --workspace --no-deps --profile checked`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --profile checked`,
 `cargo test --workspace --profile checked`, and `cargo ratchet`.
 
 The profile is on every one of them for the reason it is on the aliases —
 this suite runs Cove programs, so unoptimised it is several times slower —
 and CI carries it too, so a run there and a run here are the same run. Pass
 it by hand; nothing can default it for you.
+
+**`RUSTDOCFLAGS="-D warnings"` is not optional on the `cargo doc` line**, and
+it is the one place a local run and a CI run were not the same. Without it a
+broken intra-doc link is a *warning* and `cargo doc` exits zero, so the gate
+reads green locally and both CI jobs stop on it — `.github/workflows/ci.yml`
+sets the variable and so does `pages.yml`. This has already been got wrong
+once, on a link to a private item from another module, and the failure mode is
+the worst kind: a gate that passes and a pull request that is red.
 
 ### What the gate costs, measured
 

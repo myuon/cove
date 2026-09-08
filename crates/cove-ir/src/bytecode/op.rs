@@ -286,8 +286,8 @@ pub enum Half {
     ///
     /// It is not bounds-checked here, for `Half::Count`'s reason: which
     /// numbers are cases is a fact about the layout the same instruction
-    /// names, so it is checked in [`Check::meaning`] against that layout
-    /// rather than against a table of its own.
+    /// names, so [`mod@crate::bytecode::verify`]'s semantic pass checks it
+    /// against that layout rather than against a table of its own.
     Case,
     /// A word offset into an object or into the value an address names.
     Offset,
