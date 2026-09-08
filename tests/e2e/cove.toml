@@ -319,3 +319,7 @@ allow = ["console"]
 [run.debug_session]
 entry = "debug_session.main"
 allow = ["console"]
+
+[run.values_code_point]
+entry = "values_code_point.main"
+allow = ["console"]

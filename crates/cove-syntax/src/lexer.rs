@@ -14,6 +14,7 @@ use crate::token::{Keyword, StringPart, Token, TokenKind};
 enum Unclosed {
     Brace,
     Quote,
+    Apostrophe,
 }
 
 /// Lexes `file` out of `sources` into a token stream.
@@ -75,6 +76,34 @@ struct Lexer<'a> {
     /// Set once a line break is seen in the trivia before the next token, and
     /// cleared when that token is produced.
     pending_newline: bool,
+}
+
+/// The character an escape sequence spells, or `None` when it spells none.
+///
+/// One table for both literal forms, because the rule is one: **a code-point
+/// literal takes the escapes a string takes, and `\'` besides.** `\'` is
+/// therefore legal in a string too, where the apostrophe needs no escaping —
+/// which is a widening, and a deliberate one: a second table would be a
+/// second rule to remember and a second place for the two to drift apart.
+///
+/// There is no `\u{...}`. Nothing in the corpus has needed one — every
+/// code point a program in this repository names is ASCII — and adding it to
+/// one literal form and not the other would be exactly the asymmetry the
+/// paragraph above avoids. When something needs it, it goes in here and
+/// both forms gain it at once.
+fn escaped_char(escaped: char) -> Option<char> {
+    Some(match escaped {
+        '\\' => '\\',
+        '"' => '"',
+        '\'' => '\'',
+        'n' => '\n',
+        't' => '\t',
+        'r' => '\r',
+        '0' => '\0',
+        '{' => '{',
+        '}' => '}',
+        _ => return None,
+    })
 }
 
 fn is_ident_start(c: char) -> bool {
@@ -142,6 +171,14 @@ impl<'a> Lexer<'a> {
             if c == '"' {
                 self.bump();
                 if let Some(kind) = self.lex_string(start) {
+                    self.push_token(kind, start);
+                }
+                continue;
+            }
+
+            if c == '\'' {
+                self.bump();
+                if let Some(kind) = self.lex_code_point(start) {
                     self.push_token(kind, start);
                 }
                 continue;
@@ -520,27 +557,9 @@ impl<'a> Lexer<'a> {
                         }
                         Some(escaped) => {
                             self.bump();
-                            match escaped {
-                                '\\' => current.push('\\'),
-                                '"' => current.push('"'),
-                                'n' => current.push('\n'),
-                                't' => current.push('\t'),
-                                'r' => current.push('\r'),
-                                '0' => current.push('\0'),
-                                '{' => current.push('{'),
-                                '}' => current.push('}'),
-                                _ => {
-                                    let span =
-                                        Span::new(self.file, esc_start as u32, self.pos as u32);
-                                    let message = format!("unknown escape sequence `\\{escaped}`");
-                                    self.diagnostics.push(
-                                        Diagnostic::error("cove::lex::unknown_escape", message)
-                                            .at(span)
-                                            .help(
-                                                "Use one of the supported escapes: \\\\, \\\", \\n, \\t, \\r, \\0, \\{, \\}.",
-                                            ),
-                                    );
-                                }
+                            match escaped_char(escaped) {
+                                Some(character) => current.push(character),
+                                None => self.unknown_escape(escaped, esc_start),
                             }
                         }
                     }
@@ -581,6 +600,115 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// A code-point literal: `'a'`, whose value is a Unicode scalar value and
+    /// whose type is `Int`.
+    ///
+    /// There is no `Char` type and this does not add one —
+    /// [ADR 0046](../../../docs/adr/0046-a-byte-offset-is-a-value-a-string-hands-out.md)
+    /// decided a code point is an `Int`, and this is a literal for one rather
+    /// than a type for one. It answers [`TokenKind::Int`], so nothing past
+    /// this function knows the form exists, which is the whole of what it
+    /// costs the rest of the compiler.
+    ///
+    /// A literal holding no scalar or more than one is reported and then
+    /// answers something anyway, so that one bad literal does not cascade
+    /// into every expression that reads it.
+    fn lex_code_point(&mut self, quote_start: usize) -> Option<TokenKind> {
+        let mut scalars = String::new();
+        loop {
+            match self.peek_char() {
+                None => {
+                    let span = Span::new(self.file, quote_start as u32, self.pos as u32);
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            "cove::lex::unterminated_code_point",
+                            "code-point literal is never closed",
+                        )
+                        .at(span)
+                        .help("Add a closing `'`."),
+                    );
+                    return None;
+                }
+                Some('\'') => {
+                    self.bump();
+                    let span = Span::new(self.file, quote_start as u32, self.pos as u32);
+                    let mut characters = scalars.chars();
+                    let Some(first) = characters.next() else {
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                "cove::lex::empty_code_point",
+                                "code-point literal names no character",
+                            )
+                            .at(span)
+                            .rule("A code-point literal holds exactly one Unicode scalar value.")
+                            .help("Write the character between the quotes, as `'a'`. The empty string is `\"\"`."),
+                        );
+                        return Some(TokenKind::Int(0));
+                    };
+                    if characters.next().is_some() {
+                        let count = scalars.chars().count();
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                "cove::lex::code_point_is_not_one_scalar",
+                                format!("code-point literal holds {count} scalar values, not one"),
+                            )
+                            .at(span)
+                            .rule(
+                                "A code-point literal holds exactly one Unicode scalar value, so a \
+                                 combining pair or an emoji sequence is more than one and is not a \
+                                 code point.",
+                            )
+                            .help("Write one scalar, or use a `\"...\"` string for text of any length."),
+                        );
+                    }
+                    return Some(TokenKind::Int(first as i64));
+                }
+                Some('\\') => {
+                    let esc_start = self.pos;
+                    self.bump();
+                    match self.peek_char() {
+                        None => {
+                            let span = Span::new(self.file, quote_start as u32, self.pos as u32);
+                            self.diagnostics.push(
+                                Diagnostic::error(
+                                    "cove::lex::unterminated_code_point",
+                                    "code-point literal is never closed",
+                                )
+                                .at(span)
+                                .help("Add a closing `'`."),
+                            );
+                            return None;
+                        }
+                        Some(escaped) => {
+                            self.bump();
+                            match escaped_char(escaped) {
+                                Some(character) => scalars.push(character),
+                                None => self.unknown_escape(escaped, esc_start),
+                            }
+                        }
+                    }
+                }
+                Some(c) => {
+                    self.bump();
+                    scalars.push(c);
+                }
+            }
+        }
+    }
+
+    /// Reports an escape neither literal form spells anything with.
+    fn unknown_escape(&mut self, escaped: char, esc_start: usize) {
+        let span = Span::new(self.file, esc_start as u32, self.pos as u32);
+        let message = format!("unknown escape sequence `\\{escaped}`");
+        self.diagnostics.push(
+            Diagnostic::error("cove::lex::unknown_escape", message)
+                .at(span)
+                .help(
+                    "Use one of the supported escapes: \\\\, \\\", \\', \\n, \\t, \\r, \\0, \\{, \\}.",
+                ),
+        );
+    }
+
     fn unterminated_string(&mut self, quote_start: usize) {
         let span = Span::new(self.file, quote_start as u32, self.pos as u32);
         self.diagnostics.push(
@@ -610,29 +738,46 @@ impl<'a> Lexer<'a> {
     fn skip_interpolation_body(&mut self) -> Result<(), ()> {
         let mut unclosed = vec![Unclosed::Brace];
         while let Some(innermost) = unclosed.last() {
-            let inside_string = matches!(innermost, Unclosed::Quote);
+            // A `'...'` is stepped over whole, the way a `"..."` is, and for
+            // one reason more: inside it a brace is a *character*. Without
+            // that, `"{ head == '\{' }"` ends the interpolation at a brace
+            // the program meant as text. A `{` inside a `"..."` is not the
+            // same case — a nested string may itself interpolate — which is
+            // why only the apostrophe suppresses it.
+            let inside_scalar = matches!(innermost, Unclosed::Apostrophe);
+            let escaping = matches!(innermost, Unclosed::Quote | Unclosed::Apostrophe);
             match self.peek_char() {
                 None => return Err(()),
-                Some('\\') if inside_string => {
+                Some('\\') if escaping => {
                     self.bump();
                     if self.peek_char().is_none() {
                         return Err(());
                     }
                     self.bump();
                 }
-                Some('"') => {
+                Some('"') if !inside_scalar => {
                     self.bump();
-                    if inside_string {
+                    if matches!(innermost, Unclosed::Quote) {
                         unclosed.pop();
                     } else {
                         unclosed.push(Unclosed::Quote);
                     }
                 }
-                Some('{') => {
+                // An apostrophe inside a string is ordinary text, so only a
+                // brace's body opens one and only its own closes it.
+                Some('\'') if !matches!(innermost, Unclosed::Quote) => {
+                    self.bump();
+                    if inside_scalar {
+                        unclosed.pop();
+                    } else {
+                        unclosed.push(Unclosed::Apostrophe);
+                    }
+                }
+                Some('{') if !inside_scalar => {
                     self.bump();
                     unclosed.push(Unclosed::Brace);
                 }
-                Some('}') if !inside_string => {
+                Some('}') if matches!(innermost, Unclosed::Brace) => {
                     self.bump();
                     unclosed.pop();
                 }
@@ -931,6 +1076,99 @@ mod tests {
                 "\\ \" \n \t \r \0 { }".into()
             )])]
         );
+    }
+
+    /// A code-point literal is an `Int` token and nothing else.
+    ///
+    /// There is no `Char`, so what the lexer answers here is the same token
+    /// `97` answers, and every test below is written against that fact
+    /// rather than against a form the rest of the compiler would have to
+    /// know about.
+    #[test]
+    fn code_point_literals_are_int_tokens() {
+        assert_eq!(kinds("'a'"), vec![TokenKind::Int(97)]);
+        assert_eq!(kinds("'0'"), vec![TokenKind::Int(48)]);
+        assert_eq!(kinds("' '"), vec![TokenKind::Int(32)]);
+        assert_eq!(kinds("'{'"), vec![TokenKind::Int(123)]);
+        assert_eq!(kinds("'\u{e9}'"), vec![TokenKind::Int(233)]);
+        assert_eq!(kinds("'\u{3042}'"), vec![TokenKind::Int(12354)]);
+        assert_eq!(kinds("'\u{1F600}'"), vec![TokenKind::Int(128512)]);
+    }
+
+    /// The escapes are the string's, and `\'` besides.
+    #[test]
+    fn code_point_literals_take_the_escapes_a_string_takes() {
+        assert_eq!(kinds(r"'\n'"), vec![TokenKind::Int(10)]);
+        assert_eq!(kinds(r"'\t'"), vec![TokenKind::Int(9)]);
+        assert_eq!(kinds(r"'\r'"), vec![TokenKind::Int(13)]);
+        assert_eq!(kinds(r"'\0'"), vec![TokenKind::Int(0)]);
+        assert_eq!(kinds(r"'\\'"), vec![TokenKind::Int(92)]);
+        assert_eq!(kinds(r"'\''"), vec![TokenKind::Int(39)]);
+        assert_eq!(kinds(r#"'\"'"#), vec![TokenKind::Int(34)]);
+        assert_eq!(kinds(r"'\{'"), vec![TokenKind::Int(123)]);
+        assert_eq!(kinds(r"'\}'"), vec![TokenKind::Int(125)]);
+    }
+
+    /// `\'` is legal in a string too, because there is one escape table and
+    /// the apostrophe is in it. It spells the apostrophe it always did.
+    #[test]
+    fn a_string_may_escape_an_apostrophe() {
+        assert_eq!(
+            kinds(r#""\'""#),
+            vec![TokenKind::Str(vec![StringPart::Text("'".to_string())])]
+        );
+    }
+
+    #[test]
+    fn an_empty_code_point_literal_is_an_error() {
+        let diags = lex_err("''");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "cove::lex::empty_code_point");
+    }
+
+    /// Two scalars is an error, and so is a grapheme cluster that is written
+    /// as one character and is not one scalar — which is the case the rule
+    /// exists for.
+    #[test]
+    fn a_code_point_literal_holding_more_than_one_scalar_is_an_error() {
+        let diags = lex_err("'ab'");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "cove::lex::code_point_is_not_one_scalar");
+        assert_eq!(
+            diags[0].message,
+            "code-point literal holds 2 scalar values, not one"
+        );
+
+        let diags = lex_err("'\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F466}'");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].message,
+            "code-point literal holds 5 scalar values, not one"
+        );
+    }
+
+    #[test]
+    fn an_unterminated_code_point_literal_is_an_error() {
+        let diags = lex_err("'a");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "cove::lex::unterminated_code_point");
+    }
+
+    /// An interpolation is scanned for its closing brace before it is parsed,
+    /// and a brace inside a code-point literal is a character rather than a
+    /// nesting. Without that, this string ends at the wrong place.
+    #[test]
+    fn a_code_point_literal_inside_an_interpolation_may_hold_a_brace() {
+        let tokens = kinds(r#""{ head == '{' }""#);
+        assert_eq!(tokens.len(), 1);
+        let TokenKind::Str(parts) = &tokens[0] else {
+            panic!("expected a string token, got {tokens:?}");
+        };
+        assert_eq!(parts.len(), 1);
+        let StringPart::Interpolation { source, .. } = &parts[0] else {
+            panic!("expected one interpolation, got {parts:?}");
+        };
+        assert_eq!(source.trim(), "head == '{'");
     }
 
     #[test]

@@ -19,7 +19,7 @@ export fn main() -> Result<Unit, Error> {
     while at < end {
       match line.codePointAtByte(at) {
         Some(codePoint) => {
-          if codePoint == 34 {
+          if codePoint == '"' {
             quotes += 1
           }
           if codePoint < 128 {
@@ -57,7 +57,7 @@ export fn viaCall() -> Result<Unit, Error> {
     while at < end {
       match line.codePointAtByte(at) {
         Some(codePoint) => {
-          if codePoint == 34 {
+          if codePoint == '"' {
             quotes += 1
           }
           at += width(codePoint)

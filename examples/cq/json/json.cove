@@ -180,7 +180,8 @@ impl Scanner {
 
 /// Whether `codePoint` is whitespace between JSON tokens.
 fn isSpace(codePoint: Int) -> Bool {
-  codePoint == 32 || codePoint == 9 || codePoint == 13 || codePoint == 10
+  codePoint == ' ' || codePoint == '\t' || codePoint == '\r' ||
+    codePoint == '\n'
 }
 
 // ------------------------------------------------------------------- parsing
@@ -191,45 +192,37 @@ fn parseValue(var scan: Scanner, depth: Int) -> Result<Json, Detail> {
     return Err(scan.fail("this value nests more than {maxDepth()} levels deep"))
   }
   let head = scan.peek()
-  if head == 123 {
-    // `{`
+  if head == '{' {
     return parseObject(var scan, depth: depth)
   }
-  if head == 91 {
-    // `[`
+  if head == '[' {
     return parseArray(var scan, depth: depth)
   }
-  if head == 34 {
-    // `"`
+  if head == '"' {
     return Ok(Json.Text(parseText(var scan)?))
   }
-  if head == 116 {
-    // `t`
+  if head == 't' {
     scan.word("true").mapError(fn(error) {
       scan.fail("expected `true`")
     })?
     return Ok(Json.Bool(true))
   }
-  if head == 102 {
-    // `f`
+  if head == 'f' {
     scan.word("false").mapError(fn(error) {
       scan.fail("expected `false`")
     })?
     return Ok(Json.Bool(false))
   }
-  if head == 110 {
-    // `n`
+  if head == 'n' {
     scan.word("null").mapError(fn(error) {
       scan.fail("expected `null`")
     })?
     return Ok(Json.Null)
   }
   if head == -1 {
-    // end of text
     return Err(scan.fail("a JSON value was expected and the line ended"))
   }
-  if head == 45 || isDigit(head) {
-    // `-`
+  if head == '-' || isDigit(head) {
     return parseNumber(var scan)
   }
   Err(scan.fail("`{scan.text.sliceBytes(scan.at, scan.at + width(head)).unwrapOr("")}` does not start a JSON value"))
@@ -241,7 +234,6 @@ fn parseObject(var scan: Scanner, depth: Int) -> Result<Json, Detail> {
   var fields = Map.of()
   scan.skipSpace()
   if scan.peek() == 125 {
-    // `}`
     scan.take()
     return Ok(Json.Fields(fields))
   }
@@ -249,13 +241,11 @@ fn parseObject(var scan: Scanner, depth: Int) -> Result<Json, Detail> {
   while more {
     scan.skipSpace()
     if scan.peek() != 34 {
-      // `"`
       return Err(scan.fail("a field name must be a quoted string"))
     }
     let name = parseText(var scan)?
     scan.skipSpace()
     if scan.peek() != 58 {
-      // `:`
       return Err(scan.fail("a field name must be followed by `:`"))
     }
     scan.take()
@@ -264,9 +254,8 @@ fn parseObject(var scan: Scanner, depth: Int) -> Result<Json, Detail> {
     fields = fields.inserted(name, value)
     scan.skipSpace()
     match scan.peek() {
-      44 => scan.take() // `,`
-      125 => {
-        // `}`
+      ',' => scan.take()
+      '}' => {
         scan.take()
         more = false
       }
@@ -281,8 +270,7 @@ fn parseArray(var scan: Scanner, depth: Int) -> Result<Json, Detail> {
   scan.take()
   var items = Vector.of()
   scan.skipSpace()
-  if scan.peek() == 93 {
-    // `]`
+  if scan.peek() == ']' {
     scan.take()
     return Ok(Json.Items(items.freeze()))
   }
@@ -292,9 +280,8 @@ fn parseArray(var scan: Scanner, depth: Int) -> Result<Json, Detail> {
     items.push(parseValue(var scan, depth: depth + 1)?)
     scan.skipSpace()
     match scan.peek() {
-      44 => scan.take() // `,`
-      93 => {
-        // `]`
+      ',' => scan.take()
+      ']' => {
         scan.take()
         more = false
       }
@@ -324,22 +311,18 @@ fn parseText(var scan: Scanner) -> Result<String, Detail> {
   while reading {
     let character = scan.peek()
     if character == -1 {
-      // end of text
       return Err(scan.fail("this string was never closed"))
     }
-    // JSON writes a character below U+0020 as an escape and never as itself.
-    if character < 32 {
+    if character < ' ' {
       return Err(scan.fail(
         "a string may not hold an unescaped control character",
       ))
     }
-    if character == 34 {
-      // `"`
+    if character == '"' {
       text = "{text}{scan.text.sliceBytes(start, scan.at).unwrapOr("")}"
       scan.take()
       reading = false
-    } else if character == 92 {
-      // `\`
+    } else if character == '\\' {
       let run = scan.text.sliceBytes(start, scan.at).unwrapOr("")
       scan.take()
       let unescaped = escape(var scan)?
@@ -370,21 +353,17 @@ fn escape(var scan: Scanner) -> Result<String, Detail> {
   let character = scan.peek()
   scan.take()
   match character {
-    34 => Ok("\"")                                                  // `"`
-    92 => Ok("\\")                                                  // `\`
-    47 => Ok("/")                                                   // `/`
-    110 => Ok("\n")                                                 // `n`
-    116 => Ok("\t")                                                 // `t`
-    114 => Ok("\r")                                                 // `r`
-    117 => Err(scan.fail("`\\u` escapes are not supported"))        // `u`
-    98 => Err(scan.fail("`\\b` is a character Cove cannot write"))  // `b`
-    102 => Err(scan.fail("`\\f` is a character Cove cannot write")) // `f`
-    -1 => Err(scan.fail("a backslash ended the line"))              // end of text
-    _ => Err(scan.fail(
-      // The offending character is sliced out only here, on the one branch
-      // that needs to name it in a message.
-      "`\\{scan.text.sliceBytes(start, start + width(character)).unwrapOr("")}` is not a JSON escape",
-    ))
+    '"' => Ok("\"")
+    '\\' => Ok("\\")
+    '/' => Ok("/")
+    'n' => Ok("\n")
+    't' => Ok("\t")
+    'r' => Ok("\r")
+    'u' => Err(scan.fail("`\\u` escapes are not supported"))
+    'b' => Err(scan.fail("`\\b` is a character Cove cannot write"))
+    'f' => Err(scan.fail("`\\f` is a character Cove cannot write"))
+    -1 => Err(scan.fail("a backslash ended the line"))
+    _ => Err(scan.fail("`\\{scan.text.sliceBytes(start, start + width(character)).unwrapOr("")}` is not a JSON escape"))
   }
 }
 
@@ -405,8 +384,7 @@ fn escape(var scan: Scanner) -> Result<String, Detail> {
 /// to hand back one interpolation at a time.
 fn parseNumber(var scan: Scanner) -> Result<Json, Detail> {
   let start = scan.at
-  if scan.peek() == 45 {
-    // `-`
+  if scan.peek() == '-' {
     scan.take()
   }
   let leading = scan.peek()
@@ -414,19 +392,14 @@ fn parseNumber(var scan: Scanner) -> Result<Json, Detail> {
     return Err(scan.fail("a number needs a digit here"))
   }
   scan.take()
-  // JSON has no leading zeroes, so `0` is the whole of an integer part that
-  // starts with one. Saying that here rather than letting the `0` parse and
-  // the rest become the caller's problem is what makes `01` report itself.
-  if leading == 48 {
-    // `0`
+  if leading == '0' {
     if isDigit(scan.peek()) {
       return Err(scan.fail("a number may not have a leading zero"))
     }
   } else {
     digitsAt(var scan)
   }
-  if scan.peek() == 46 {
-    // `.`
+  if scan.peek() == '.' {
     scan.take()
     if !isDigit(scan.peek()) {
       return Err(scan.fail("a decimal point needs a digit after it"))
@@ -434,11 +407,9 @@ fn parseNumber(var scan: Scanner) -> Result<Json, Detail> {
     digitsAt(var scan)
   }
   let exponent = scan.peek()
-  if exponent == 101 || exponent == 69 {
-    // `e` or `E`
+  if exponent == 'e' || exponent == 'E' {
     scan.take()
-    if scan.peek() == 43 || scan.peek() == 45 {
-      // `+` or `-`
+    if scan.peek() == '+' || scan.peek() == '-' {
       scan.take()
     }
     if !isDigit(scan.peek()) {
@@ -492,7 +463,7 @@ fn isFinite(value: Float) -> Bool {
 /// `-1`, this scanner's end-of-text sentinel, is answered `false` by the same
 /// comparison that rejects any other non-digit; it needs no case of its own.
 fn isDigit(codePoint: Int) -> Bool {
-  codePoint >= 48 && codePoint <= 57
+  codePoint >= '0' && codePoint <= '9'
 }
 
 /// The number of UTF-8 bytes the scalar `codePoint` occupies.
@@ -514,8 +485,6 @@ fn width(codePoint: Int) -> Int {
     4
   }
 }
-
-// ------------------------------------------------------------------ printing
 
 /// Renders a number the way JSON writes one.
 ///
