@@ -71,6 +71,10 @@ pub(crate) fn call(
     builtin: &Builtin,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
+    // What the IR says this call answers. `make` needs it to tell two
+    // instantiations of one family apart, and this is the only place it is
+    // known — see `Machine::builtin_result`.
+    machine.expect_builtin_result(builtin.result);
     // One match over the pair the IR names, so that teaching the machine an
     // operation is adding an arm and nothing else.
     match (&*builtin.receiver, &*builtin.operation) {
@@ -671,6 +675,13 @@ mod tests {
             build.layout("Vector", Shape::Vector { elem });
             build.enumeration("Option", &[("None", vec![]), ("Some", vec![elem])]);
         }
+        // A `Result` whose `Ok` carries a `String` and whose `Err` is two
+        // words, declared *before* the `Result<String, Error>` below and
+        // indistinguishable from it by name and by what `Ok` holds. It is
+        // here so that a builtin answering the narrow one has a wider wrong
+        // answer to find — see
+        // `a_builtin_answers_the_result_its_instruction_declares`.
+        build.enumeration("Result", &[("Ok", vec![string]), ("Err", vec![point])]);
         for ok in [int, float, string] {
             build.enumeration("Result", &[("Ok", vec![ok]), ("Err", vec![error])]);
         }
@@ -708,9 +719,12 @@ mod tests {
     /// Direct rather than through the dispatch loop: what a builtin reads is
     /// words and heap objects, so building those by hand is what makes a
     /// failure unambiguously the operation's rather than the lowering's or the
-    /// loop's. `result` is not read by [`call`] — every builtin finds the
-    /// family of its answer in the layout table — and is the free layout
-    /// throughout.
+    /// loop's.
+    ///
+    /// `result` is the free layout here, which is what a caller passes when
+    /// it does not care: it names no enum, so `make` falls back to searching
+    /// the layout table as it always did. [`answering`] is the form for a
+    /// test that does care.
     pub(super) fn run(
         machine: &mut Machine,
         receiver: &str,
@@ -751,6 +765,35 @@ mod tests {
     /// What [`run`] is in terms of, and what a test of a value wider than one
     /// word uses directly: an operand is a layout and the words at a
     /// location, so a `Point` argument is the layout and both of its words.
+    /// The same, declaring the layout the answer is supposed to have.
+    ///
+    /// What `Inst::CallBuiltin` carries, and the only thing that tells two
+    /// instantiations of one family apart.
+    pub(super) fn answering(
+        machine: &mut Machine,
+        receiver: &str,
+        operation: &str,
+        result: LayoutId,
+        operands: &[(LayoutId, &[u64])],
+    ) -> Result<Vec<u64>, RuntimeError> {
+        let passed: Vec<Operand<'_>> = operands
+            .iter()
+            .map(|(layout, words)| Operand {
+                layout: *layout,
+                words,
+            })
+            .collect();
+        call(
+            machine,
+            &Builtin {
+                receiver: Arc::from(receiver),
+                operation: Arc::from(operation),
+                result,
+            },
+            &passed,
+        )
+    }
+
     pub(super) fn values(
         machine: &mut Machine,
         receiver: &str,

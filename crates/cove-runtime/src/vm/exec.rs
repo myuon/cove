@@ -313,6 +313,17 @@ pub(crate) struct Machine<'a> {
     /// registry that answers nothing.
     hosts: Option<&'a HostRegistry>,
     mem: Memory,
+    /// The layout the builtin now running declares as its answer.
+    ///
+    /// [`cove_ir::Inst::CallBuiltin`] carries it, and it is the only thing
+    /// that says *which* `Result` or `Option` a builtin answers when a
+    /// program holds several: `Result<String, Error>` and
+    /// `Result<String, cq.diag.Detail>` are two layouts of different widths
+    /// whose `Ok` carries the same thing. `vm::builtins::make` looked for one
+    /// by name and by what its carrying case holds, which cannot tell those
+    /// two apart, and wrote the wider one's words into the narrower one's
+    /// destination. It reads this instead.
+    builtin_result: Option<LayoutId>,
     frames: Vec<Frame>,
     /// The heap address of each [`StrId`], or the refusal
     /// [`Machine::place_literals`] met trying to build one — held exactly as
@@ -681,6 +692,7 @@ impl<'a> Machine<'a> {
             runtime,
             hosts,
             mem: Memory::new(heap_words),
+            builtin_result: None,
             frames: Vec::new(),
             // Overwritten below, once the machine that places them exists.
             literal_addrs: Ok(Arc::from([])),
@@ -747,6 +759,7 @@ impl<'a> Machine<'a> {
             runtime,
             hosts,
             mem,
+            builtin_result: None,
             frames: Vec::new(),
             literal_addrs: Ok(literal_addrs),
             resources,
@@ -1847,6 +1860,19 @@ impl<'a> Machine<'a> {
     /// The program this machine runs.
     pub(crate) fn program(&self) -> &'a Program {
         self.program
+    }
+
+    /// Records the layout the builtin about to run declares as its answer.
+    ///
+    /// Set on entry to every builtin and never cleared: nothing outside a
+    /// builtin call reads it, and every call sets it before anything can.
+    pub(crate) fn expect_builtin_result(&mut self, layout: LayoutId) {
+        self.builtin_result = Some(layout);
+    }
+
+    /// The layout the running builtin declares as its answer, if one is.
+    pub(crate) fn builtin_result(&self) -> Option<LayoutId> {
+        self.builtin_result
     }
 
     /// This task's live calls, innermost first, as

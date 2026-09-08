@@ -105,6 +105,30 @@ list of places to think about.
 an integer.** Both add an opcode family for an operation that turned out not
 to be needed at all; see below.
 
+## What it exposed, which was not its own
+
+Reordering the layout table found a latent bug that had nothing to do with
+tags, and it is recorded here because the *shape* of it is the same one this
+ADR is about — a fact that was inferred where it was already known.
+
+`vm::builtins::make` built a builtin's `Result` or `Option` answer by
+**searching** the layout table for an enum of that name whose carrying case
+holds the right payload. That cannot tell `Result<String, Error>` from
+`Result<String, cq.diag.Detail>`: both are named `Result` and both carry a
+`String` in `Ok`. What differs is their *width* — two words against four —
+so answering the wrong one is not a wrong discriminant but a word run written
+into a destination sized for the other, off the end of a frame if the
+destination is near the top of one.
+
+It had been latent for as long as both existed. Adding one layout to the table
+changed which of the two the search reached first, and `examples/cq`'s own test
+suite crashed the VM.
+
+**`Inst::CallBuiltin` has carried the answer's layout all along.** The machine
+now records it on entry to every builtin and `make` reads it instead of
+searching, which is exact and cannot be ambiguous. The search is still there
+for the callers that declare no enum.
+
 ## Consequences
 
 **`Inst::Switch` accepts a `Tag` or an `Int`.** A `dyn` dispatch switches on a

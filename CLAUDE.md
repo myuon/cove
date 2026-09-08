@@ -61,6 +61,33 @@ sets the variable and so does `pages.yml`. This has already been got wrong
 once, on a link to a private item from another module, and the failure mode is
 the worst kind: a gate that passes and a pull request that is red.
 
+### The five commands are not the whole job
+
+CI's `test, lint, and dogfood` job runs the five above and then **runs the
+toolchain against this repository's own Cove**, which is the half that catches
+what a Rust test cannot:
+
+```console
+$ cargo build --profile checked -p cove-cli -p cove-bench
+$ ./target/checked/cove fmt --check
+$ ./target/checked/cove reference --check
+$ cd examples
+$ ../target/checked/cove check
+$ ../target/checked/cove generate --check
+$ ../target/checked/cove test
+$ ../target/checked/cove generate --check --backend ast
+$ ../target/checked/cove test --backend ast
+$ cd .. && ./target/checked/cove-bench --iterations 1
+```
+
+`cove test (examples)` is the one that matters most and the one most easily
+forgotten: it runs 165 `test fn`s in `examples/`, on the linear-memory backend
+and then on the interpreter, and it is the first place a lowering change is
+felt by a *real* program rather than by a fixture. A change to the IR has been
+merged-shaped and green on the five commands while crashing there — the
+symptom was a VM panic writing past a frame, and nothing above `cove test`
+went anywhere near it.
+
 ### What the gate costs, measured
 
 Run it in the **background** and keep working. It is the single thing most

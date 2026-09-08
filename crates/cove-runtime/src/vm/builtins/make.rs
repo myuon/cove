@@ -131,11 +131,11 @@ fn error(program: &Program) -> Result<LayoutId, RuntimeError> {
 /// The `Option` whose `Some` carries a `payload`, and the index of its
 /// `case`.
 fn option(
-    program: &Program,
+    machine: &Machine,
     payload: LayoutId,
     case: &str,
 ) -> Result<(LayoutId, u32), RuntimeError> {
-    two_case(program, OPTION.name, SOME_CASE.name, payload, case)
+    two_case(machine, OPTION.name, SOME_CASE.name, payload, case)
         .ok_or_else(|| operand::unknown_family(OPTION.name))
 }
 
@@ -143,8 +143,8 @@ fn option(
 ///
 /// The `Err` side is not asked about: every `Result` a builtin answers is a
 /// `Result<T, Error>`, and an `Error` is one word whatever it holds.
-fn result(program: &Program, ok: LayoutId, case: &str) -> Result<(LayoutId, u32), RuntimeError> {
-    two_case(program, RESULT.name, OK_CASE.name, ok, case)
+fn result(machine: &Machine, ok: LayoutId, case: &str) -> Result<(LayoutId, u32), RuntimeError> {
+    two_case(machine, RESULT.name, OK_CASE.name, ok, case)
         .ok_or_else(|| operand::unknown_family(RESULT.name))
 }
 
@@ -158,12 +158,29 @@ fn result(program: &Program, ok: LayoutId, case: &str) -> Result<(LayoutId, u32)
 /// same discriminant word, but the payload region would be the wrong width
 /// and everything that later read it would read the wrong words.
 fn two_case(
-    program: &Program,
+    machine: &Machine,
     name: &str,
     carrier: &str,
     payload: LayoutId,
     wanted: &str,
 ) -> Option<(LayoutId, u32)> {
+    let program = machine.program();
+    // What the instruction declared, where it declared one of this family.
+    // The search below cannot tell `Result<String, Error>` from
+    // `Result<String, cq.diag.Detail>` — both are named `Result` and both
+    // carry a `String` in `Ok` — and answering the wrong one is not a wrong
+    // discriminant but a word run of the wrong *width*, written into a
+    // destination sized for the other. `Inst::CallBuiltin` has known which
+    // all along.
+    if let Some(declared) = machine.builtin_result() {
+        if let Some(layout) = program.layouts.get(declared.index()) {
+            if matches!(layout.shape, Shape::Enum { .. }) && &*layout.name == name {
+                if let Some(index) = layout.case(wanted) {
+                    return Some((declared, index));
+                }
+            }
+        }
+    }
     for (at, layout) in program.layouts.iter().enumerate() {
         let Shape::Enum { cases, .. } = &layout.shape else {
             continue;
@@ -215,7 +232,7 @@ fn case_words(
 
 /// `None`, as an `Option` whose `Some` would carry a `payload`.
 pub(super) fn none(machine: &mut Machine, payload: LayoutId) -> Result<Vec<u64>, RuntimeError> {
-    let (id, case) = option(machine.program(), payload, NONE_CASE.name)?;
+    let (id, case) = option(machine, payload, NONE_CASE.name)?;
     case_words(machine, id, case, &[])
 }
 
@@ -225,7 +242,7 @@ pub(super) fn some(
     payload: LayoutId,
     words: &[u64],
 ) -> Result<Vec<u64>, RuntimeError> {
-    let (id, case) = option(machine.program(), payload, SOME_CASE.name)?;
+    let (id, case) = option(machine, payload, SOME_CASE.name)?;
     case_words(machine, id, case, &[words])
 }
 
@@ -235,7 +252,7 @@ pub(super) fn ok(
     ok: LayoutId,
     words: &[u64],
 ) -> Result<Vec<u64>, RuntimeError> {
-    let (id, case) = result(machine.program(), ok, OK_CASE.name)?;
+    let (id, case) = result(machine, ok, OK_CASE.name)?;
     case_words(machine, id, case, &[words])
 }
 
@@ -249,7 +266,7 @@ pub(super) fn failed(
     ok: LayoutId,
     message: &str,
 ) -> Result<Vec<u64>, RuntimeError> {
-    let (id, case) = result(machine.program(), ok, ERR_CASE.name)?;
+    let (id, case) = result(machine, ok, ERR_CASE.name)?;
     let carried = error_value(machine, message)?;
     case_words(machine, id, case, &[&carried])
 }
@@ -365,6 +382,74 @@ mod tests {
         // is what makes one static reference map right for both cases.
         let empty = none(&mut machine, text).unwrap();
         assert_eq!(empty, vec![0, 0]);
+    }
+
+    /// Two `Result`s can carry the same thing in `Ok` and differ in width,
+    /// and only the instruction says which one a builtin answers.
+    ///
+    /// `world()` declares `Result<String, Point>` before `Result<String,
+    /// Error>`; both are named `Result` and both carry a `String` in `Ok`, so
+    /// the search below cannot tell them apart and answers the first. That is
+    /// not a wrong discriminant — it is a word run one word too long, written
+    /// into a destination sized for the other, and in a real program it ran
+    /// off the end of the frame. `cq.json` hit it: `String.sliceBytes`
+    /// answers `Result<String, Error>` in a module that also has
+    /// `Result<String, cq.diag.Detail>`.
+    #[test]
+    fn a_builtin_answers_the_result_its_instruction_declares() {
+        let program = world();
+        let text = program.str_layout;
+        let narrow = results_carrying(&program, text)
+            .into_iter()
+            .min_by_key(|(_, width)| *width)
+            .expect("a `Result` carrying a `String`");
+        let wide = results_carrying(&program, text)
+            .into_iter()
+            .max_by_key(|(_, width)| *width)
+            .expect("a `Result` carrying a `String`");
+        assert_ne!(narrow.0, wide.0, "the fixture has to be ambiguous");
+        assert!(
+            wide.0.index() < narrow.0.index(),
+            "the wide one is found first"
+        );
+
+        let mut machine = Machine::new(&program, 1 << 14);
+        let source = machine.new_string("hello").unwrap();
+        let held = crate::vm::builtins::tests::answering(
+            &mut machine,
+            "String",
+            "sliceBytes",
+            narrow.0,
+            &[
+                (text, &[source]),
+                (scalar(&program, Repr::Int), &[0]),
+                (scalar(&program, Repr::Int), &[2]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            held.len(),
+            narrow.1 as usize,
+            "the answer is the declared `Result`'s width, not the wider one's"
+        );
+    }
+
+    /// Every `Result` in `program` whose `Ok` carries `payload`, with its
+    /// width.
+    fn results_carrying(program: &Program, payload: LayoutId) -> Vec<(LayoutId, u32)> {
+        program
+            .layouts
+            .iter()
+            .enumerate()
+            .filter(|(_, layout)| &*layout.name == "Result")
+            .filter(|(_, layout)| match &layout.shape {
+                Shape::Enum { cases, .. } => cases.iter().any(|case| {
+                    &*case.name == "Ok" && case.parts.len() == 1 && case.parts[0].layout == payload
+                }),
+                _ => false,
+            })
+            .map(|(at, layout)| (LayoutId(at as u32), layout.width()))
+            .collect()
     }
 
     #[test]
