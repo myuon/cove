@@ -186,7 +186,7 @@ impl Check<'_> {
         };
         for (half, value) in [(lo, bytes.lo()), (hi, bytes.hi())] {
             let len = match half {
-                Half::Unused | Half::Count | Half::Offset => continue,
+                Half::Unused | Half::Count | Half::Offset | Half::Case => continue,
                 Half::Function => self.program.functions.len(),
                 Half::Str => self.program.strings.len(),
                 Half::Layout => self.program.layouts.len(),

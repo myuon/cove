@@ -324,6 +324,15 @@ emoji sequence are all errors. It is a spelling and not a type, so it lexes
 to the token `97` lexes to and nothing past the lexer knows the form exists,
 and `"{'a'}"` prints `97`.
 
+[ADR 0048](docs/adr/0048-a-repr-says-what-a-word-means.md)
+separates what a word *means* from what class of word it is: an enum's case
+index is `Repr::Tag` rather than `Repr::Int`, written by an instruction that
+names the enum and a `CaseId` and read only by a switch, so arithmetic,
+ordering and integer comparison refuse it and a case index is bounded against
+the enum it claims. The physical side is untouched — one non-reference word,
+never a GC root, and the dispatch loop answers it with the same arm that
+answers a function reference.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles

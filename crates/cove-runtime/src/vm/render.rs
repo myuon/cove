@@ -117,6 +117,11 @@ pub(crate) fn raw(machine: &Machine, repr: Repr, word: u64) -> String {
         Repr::Addr => format!("@{word}"),
         Repr::Task => task_or_scope("task", word),
         Repr::Scope => task_or_scope("scope", word),
+        // A debugger showing a frame word by word is the one reader that
+        // wants to see a case index as the number it is, since the case it
+        // names is a fact about a layout this view deliberately does not
+        // consult.
+        Repr::Tag => format!("case {word}"),
     }
 }
 

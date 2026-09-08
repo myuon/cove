@@ -106,6 +106,12 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::Unit { dst } => format!("unit {}", s(*dst)),
         Inst::Bool { dst, value } => format!("bool {} {value}", s(*dst)),
         Inst::Int { dst, value } => format!("int {} {value}", s(*dst)),
+        // Named, not numbered, for `Inst::FuncRef`'s reason below: a case
+        // added before this one changes its index and would otherwise
+        // change every listing that never mentions it.
+        Inst::Tag { dst, layout, case } => {
+            format!("tag {} {}", s(*dst), case_name(program, *layout, *case))
+        }
         // Named, not numbered — the whole point of this instruction over an
         // `Inst::Int` carrying the same word. `FunctionId` is dense and
         // renumbers whenever an unrelated declaration is added or moved, so
@@ -354,6 +360,27 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::SharedUnlock { cell } => format!("shared.unlock {}", s(*cell)),
         Inst::Trap { message } => format!("trap {:?}", program.string(*message)),
         Inst::AssertFailed { message } => format!("assert.failed {}", s(*message)),
+    }
+}
+
+/// What a case is called in a listing: `Shape.Circle`, not `1`.
+///
+/// The number is the fact the instruction carries and the name is what a
+/// reader wants, and printing the number is what made a listing change when
+/// an unrelated case was declared before this one. Where the layout is not an
+/// enum, or the index is past its cases, the id is printed instead — a
+/// listing is read while a lowering is being debugged, and a lowering that
+/// produced either of those is the thing being debugged.
+fn case_name(program: &Program, layout: LayoutId, case: crate::CaseId) -> String {
+    match program.layouts.get(layout.index()) {
+        Some(held) => match &held.shape {
+            crate::layout::Shape::Enum { cases, .. } => match cases.get(case.index()) {
+                Some(found) => format!("{}.{}", held.name, found.name),
+                None => format!("{}.{case}", held.name),
+            },
+            _ => format!("{}.{case}", held.name),
+        },
+        None => format!("{layout}.{case}"),
     }
 }
 

@@ -325,7 +325,7 @@ impl Body<'_> {
                     return;
                 };
                 if !dispatched {
-                    self.test_case(subject, index, span, failures);
+                    self.test_case(subject, layout, index, span, failures);
                 }
             }
             PatternKind::Literal(literal) => {
@@ -393,7 +393,7 @@ impl Body<'_> {
                     return;
                 };
                 if !dispatched {
-                    self.test_case(subject, index, span, failures);
+                    self.test_case(subject, layout, index, span, failures);
                 }
                 let Some((parts, _)) = self.case_of(layout, index) else {
                     return;
@@ -422,35 +422,53 @@ impl Body<'_> {
     }
 
     /// The one test an enum case needs: word 0 against the index.
-    fn test_case(&mut self, subject: Slot, index: u32, span: Span, failures: &mut Vec<Pc>) {
-        let wanted = self.temp(shapes::INT);
-        self.emit(
-            Inst::Int {
-                dst: wanted.slot,
-                value: index as i64,
+    ///
+    /// A switch over the discriminant with two destinations, rather than the
+    /// three instructions and two temporaries it took to ask the same
+    /// question as integer equality. It could be asked that way only while a
+    /// discriminant was an `Int`; a [`Repr::Tag`](crate::Repr::Tag) is not
+    /// one, and the instruction that dispatches on a case is the one that
+    /// was meant all along.
+    ///
+    /// The jump between the switch and the matching path is what the caller
+    /// patches: a failure's destination is not known until the arms after
+    /// this one have been laid out, and a table is placed once.
+    fn test_case(
+        &mut self,
+        subject: Slot,
+        layout: LayoutId,
+        index: u32,
+        span: Span,
+        failures: &mut Vec<Pc>,
+    ) {
+        let switch = self.emit(
+            Inst::Switch {
+                on: subject,
+                table: UNPLACED,
             },
             span,
         );
-        let cond = self.temp(shapes::BOOL);
-        self.emit(
-            Inst::Cmp {
-                on: Compare::Int,
-                op: CmpOp::Eq,
-                dst: cond.slot,
-                a: subject,
-                b: wanted.slot,
-            },
-            span,
-        );
-        self.give_back(wanted.slot, wanted.layout);
-        failures.push(self.emit(
-            Inst::BranchFalse {
-                cond: cond.slot,
-                to: PENDING,
-            },
-            span,
-        ));
-        self.give_back(cond.slot, cond.layout);
+        let missed = self.emit(Inst::Jump { to: PENDING }, span);
+        let matched = self.here();
+        let cases = self
+            .case_count(layout)
+            .unwrap_or(index as usize + 1)
+            .max(index as usize + 1);
+        let targets = (0..cases)
+            .map(|case| {
+                if case == index as usize {
+                    matched
+                } else {
+                    missed
+                }
+            })
+            .collect();
+        let table = self.pool.table(crate::Table {
+            targets,
+            default: missed,
+        });
+        self.place_table(switch, table);
+        failures.push(missed);
     }
 
     /// Names what a pattern binds, once every test has passed.

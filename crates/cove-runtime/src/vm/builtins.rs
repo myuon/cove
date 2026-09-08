@@ -257,7 +257,11 @@ fn render(machine: &Machine, repr: Repr, word: u64, depth: usize) -> Result<Stri
         // host's, and a task or a scope is the scheduler's. Interpolating one
         // would be putting this run's bookkeeping into a string a program
         // prints.
-        Repr::Addr | Repr::Host | Repr::Task | Repr::Scope => {
+        //
+        // A tag is not a value either, for a reason of its own: it is word 0
+        // of an enum and an enum renders whole, through its layout, as the
+        // case it holds. A tag reaching here alone is a lowering bug.
+        Repr::Addr | Repr::Host | Repr::Task | Repr::Scope | Repr::Tag => {
             return Err(RuntimeError::new("this value has no text of its own"))
         }
     })

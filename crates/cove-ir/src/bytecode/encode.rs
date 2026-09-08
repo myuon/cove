@@ -112,6 +112,9 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
         Inst::Unit { dst } => build(Op::ConstUnit, slot(dst)?, 0, 0, 0),
         Inst::Bool { dst, value } => build(Op::ConstBool, slot(dst)?, 0, 0, u64::from(value)),
         Inst::Int { dst, value } => build(Op::ConstInt, slot(dst)?, 0, 0, value as u64),
+        Inst::Tag { dst, layout, case } => {
+            build(Op::ConstTag, slot(dst)?, 0, 0, halves(case.0, layout.0))
+        }
         Inst::FuncRef { dst, callee } => build(Op::FuncRef, slot(dst)?, 0, 0, halves(callee.0, 0)),
         Inst::Float { dst, bits } => build(Op::ConstFloat, slot(dst)?, 0, 0, bits),
         Inst::Str { dst, text } => build(Op::Str, slot(dst)?, 0, 0, halves(text.0, 0)),
@@ -370,6 +373,14 @@ mod tests {
                 },
             ),
             (0, Inst::Int { dst: 1, value: 7 }),
+            (
+                0,
+                Inst::Tag {
+                    dst: 1,
+                    layout: LayoutId(3),
+                    case: crate::CaseId(1),
+                },
+            ),
             (
                 0,
                 Inst::FuncRef {
@@ -813,6 +824,14 @@ mod tests {
             ),
             (
                 0,
+                Inst::Tag {
+                    dst: 0,
+                    layout: LayoutId(u32::MAX),
+                    case: crate::CaseId(u32::MAX),
+                },
+            ),
+            (
+                0,
                 Inst::LoadField {
                     dst: 0,
                     obj: 1,
@@ -831,7 +850,7 @@ mod tests {
         ]
     }
 
-    /// Every one of the hundred and one opcodes is produced by some sample.
+    /// Every one of the hundred and two opcodes is produced by some sample.
     ///
     /// The structural half of the round trip: a variant added to `Inst`
     /// cannot pass this without an instruction here that encodes to it.

@@ -251,7 +251,7 @@ impl Check<'_> {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
-                Inst::Int { dst, .. } | Inst::Float { dst, .. } => {
+                Inst::Int { dst, .. } | Inst::Tag { dst, .. } | Inst::Float { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
@@ -456,6 +456,35 @@ impl Check<'_> {
             Inst::Unit { dst } => self.expect(at, dst, &[Repr::Unit]),
             Inst::Bool { dst, .. } => self.expect(at, dst, &[Repr::Bool]),
             Inst::Int { dst, .. } => self.expect(at, dst, &[Repr::Int, Repr::Duration]),
+            // The one place a case index is written, and the only check that
+            // it names a case of the enum it claims to. `Inst::Int` could
+            // write the same word and be bounded against nothing.
+            Inst::Tag { dst, layout, case } => {
+                self.expect(at, dst, &[Repr::Tag]);
+                if self.in_range(at, layout.index(), self.program.layouts.len(), "layout") {
+                    match &self.program.layout(layout).shape {
+                        crate::layout::Shape::Enum { cases, .. } => {
+                            if case.index() >= cases.len() {
+                                let count = cases.len();
+                                self.fault(
+                                    at,
+                                    format!(
+                                        "names {case} of {}, which has {count} case(s)",
+                                        self.program.layout(layout).name
+                                    ),
+                                );
+                            }
+                        }
+                        _ => self.fault(
+                            at,
+                            format!(
+                                "writes a case of {}, which is not an enum",
+                                self.program.layout(layout).name
+                            ),
+                        ),
+                    }
+                }
+            }
             Inst::FuncRef { dst, callee } => {
                 if !self.in_range(at, callee.index(), self.program.functions.len(), "function") {
                     return;
@@ -540,7 +569,7 @@ impl Check<'_> {
                 // the strongest thing a static check has to say about which
                 // word this is — a location's extent is a fact about the
                 // instruction that produced the word, not about the frame.
-                self.expect(at, on, &[Repr::Int]);
+                self.expect(at, on, &[Repr::Tag, Repr::Int]);
                 if self.in_range(at, table.index(), self.program.tables.len(), "table") {
                     let table = self.program.table(table).clone();
                     for to in table.targets.iter().chain(std::iter::once(&table.default)) {
@@ -1119,8 +1148,8 @@ mod tests {
     use cove_diag::{FileId, Span};
 
     use super::*;
-    use crate::inst::Inst;
-    use crate::layout::{Layout, Shape};
+    use crate::inst::{ArithOp, CmpOp, Compare, Inst, Num};
+    use crate::layout::{Case, Layout, Shape};
     use crate::program::{Arg, Function, HostOp, Local, Table, TableId};
     use crate::{ArgsId, HostOpId};
 
@@ -1137,6 +1166,8 @@ mod tests {
     /// — the second function [`program`] is given, in the tests that need
     /// one. See [`Check::check_closure_callee`].
     const CLOSURE: LayoutId = LayoutId(6);
+    /// A two-case enum, for the checks a case index needs an enum to make.
+    const ENUM: LayoutId = LayoutId(7);
 
     fn layouts() -> Vec<Layout> {
         vec![
@@ -1173,6 +1204,23 @@ mod tests {
                     function: FunctionId(1),
                     captures: Vec::new(),
                 },
+            ),
+            Layout::inline(
+                "m.E",
+                Shape::Enum {
+                    cases: vec![
+                        Case {
+                            name: Arc::from("A"),
+                            parts: Vec::new(),
+                        },
+                        Case {
+                            name: Arc::from("B"),
+                            parts: Vec::new(),
+                        },
+                    ],
+                    payload: vec![Repr::Int],
+                },
+                vec![Repr::Tag, Repr::Int],
             ),
         ]
     }
@@ -1473,6 +1521,132 @@ mod tests {
         );
     }
 
+    /// The whole of why a discriminant is a `Repr` of its own.
+    ///
+    /// A tag and an `Int` are the same bits in the same kind of word, and
+    /// before this they were the same *type*, so nothing stopped an enum's
+    /// case index being added to. Nothing rejects it at run time either —
+    /// the machine adds two words — so the only place it can be caught is
+    /// here.
+    #[test]
+    fn a_tag_cannot_be_added_to() {
+        let f = function(
+            vec![Repr::Int, Repr::Ref, Repr::Tag],
+            ANSWER,
+            vec![
+                Inst::Arith {
+                    num: Num::Int,
+                    op: ArithOp::Add,
+                    dst: 0,
+                    a: 2,
+                    b: 0,
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        assert_eq!(
+            faults(&program(vec![f])),
+            vec!["slot 2 holds tag, but this wants int or duration"]
+        );
+    }
+
+    /// And cannot be ordered, or compared against an integer.
+    ///
+    /// Equality is refused with the rest: two tags are compared by
+    /// dispatching on one, which is what [`Inst::Switch`] is, and a tag
+    /// against an `Int` is the confusion this separation exists to name.
+    #[test]
+    fn a_tag_cannot_be_ordered_or_compared_as_an_integer() {
+        let ordered = function(
+            vec![Repr::Int, Repr::Ref, Repr::Tag, Repr::Bool],
+            ANSWER,
+            vec![
+                Inst::Cmp {
+                    on: Compare::Int,
+                    op: CmpOp::Lt,
+                    dst: 3,
+                    a: 2,
+                    b: 0,
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        assert_eq!(
+            faults(&program(vec![ordered])),
+            vec!["slot 2 holds tag, but this wants int or duration"]
+        );
+
+        let equal = function(
+            vec![Repr::Int, Repr::Ref, Repr::Tag, Repr::Bool],
+            ANSWER,
+            vec![
+                Inst::Cmp {
+                    on: Compare::Int,
+                    op: CmpOp::Eq,
+                    dst: 3,
+                    a: 2,
+                    b: 0,
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        assert_eq!(
+            faults(&program(vec![equal])),
+            vec!["slot 2 holds tag, but this wants int or duration"]
+        );
+    }
+
+    /// What a tag *is* accepted by: the instruction that writes one, and the
+    /// one that dispatches on it. A test that only showed the refusals would
+    /// pass if the whole family were rejected.
+    #[test]
+    fn a_tag_is_written_and_dispatched_on() {
+        let f = function(
+            vec![Repr::Int, Repr::Ref, Repr::Tag],
+            ANSWER,
+            vec![
+                Inst::Tag {
+                    dst: 2,
+                    layout: ENUM,
+                    case: crate::CaseId(1),
+                },
+                Inst::Switch {
+                    on: 2,
+                    table: TableId(0),
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let mut held = program(vec![f]);
+        held.tables = vec![Table {
+            targets: vec![2, 2],
+            default: 2,
+        }];
+        assert_eq!(faults(&held), Vec::<String>::new());
+    }
+
+    /// A case index is bounded against the enum the same instruction names,
+    /// which is the check the untyped integer path had no way to make.
+    #[test]
+    fn a_tag_naming_a_case_the_enum_does_not_have_is_a_fault() {
+        let f = function(
+            vec![Repr::Int, Repr::Ref, Repr::Tag],
+            ANSWER,
+            vec![
+                Inst::Tag {
+                    dst: 2,
+                    layout: ENUM,
+                    case: crate::CaseId(7),
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        assert_eq!(
+            faults(&program(vec![f])),
+            vec!["names case7 of m.E, which has 2 case(s)"]
+        );
+    }
+
     #[test]
     fn a_switch_on_something_that_is_not_a_discriminant_word_is_a_fault() {
         // The discriminant of an enum location is its first word and is an
@@ -1495,7 +1669,10 @@ mod tests {
             targets: vec![1],
             default: 1,
         }];
-        assert_eq!(faults(&held), vec!["slot 1 holds ref, but this wants int"]);
+        assert_eq!(
+            faults(&held),
+            vec!["slot 1 holds ref, but this wants tag or int"]
+        );
     }
 
     #[test]

@@ -114,6 +114,7 @@ use super::{
 const CONST_UNIT: u8 = Op::ConstUnit.number();
 const CONST_BOOL: u8 = Op::ConstBool.number();
 const CONST_INT: u8 = Op::ConstInt.number();
+const CONST_TAG: u8 = Op::ConstTag.number();
 const FUNC_REF: u8 = Op::FuncRef.number();
 const CONST_FLOAT: u8 = Op::ConstFloat.number();
 const STR: u8 = Op::Str.number();
@@ -245,6 +246,7 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::ConstBool
         | Op::ConstInt
         | Op::FuncRef
+        | Op::ConstTag
         | Op::ConstFloat
         | Op::Str
         | Op::Copy
@@ -632,7 +634,12 @@ pub(super) fn dispatch<'s, 'a>(
             // The callee's dense id, written as a word — the same one store
             // `CONST_INT` makes, and no name lookup: `held.lo()` is already
             // the `FunctionId` the encoder put there.
-            FUNC_REF => machine.mem.set_slot(base, a!(), held.lo() as u64),
+            // A case index is written by the same arm a callee id is, and
+            // that is the whole of what the machine knows about either: both
+            // are one metadata number in the payload's low half, and neither
+            // has a runtime representation the loop can tell from the other.
+            // The distinction they carry is the verifier's and the printer's.
+            FUNC_REF | CONST_TAG => machine.mem.set_slot(base, a!(), held.lo() as u64),
             // A load of a precomputed address, exactly as `CONST_INT` loads
             // a precomputed word: `Machine::for_run` placed every literal
             // before this loop's first turn, so there is nothing here that

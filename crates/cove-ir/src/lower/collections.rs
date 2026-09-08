@@ -680,10 +680,14 @@ impl Body<'_> {
         );
         self.give_back(ok.slot, ok.layout);
 
+        // The `None` written above becomes a `Some`: the discriminant is the
+        // only word that changes, so this is a tag rather than the whole
+        // case.
         self.emit(
-            Inst::Int {
+            Inst::Tag {
                 dst: dst.slot,
-                value: 1,
+                layout,
+                case: crate::CaseId(1),
             },
             span,
         );

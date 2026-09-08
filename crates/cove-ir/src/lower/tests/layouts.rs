@@ -100,7 +100,7 @@ fn an_enums_payload_words_agree_across_its_cases() {
             "enum E { A(Int, String), B(Float) }\nfn f(x: Float) -> E { E.B(x) }",
             "m.E"
         ),
-        vec![Repr::Int, Repr::Int, Repr::Ref, Repr::Float]
+        vec![Repr::Tag, Repr::Int, Repr::Ref, Repr::Float]
     );
 }
 
@@ -111,7 +111,7 @@ fn two_cases_of_one_shape_share_their_payload_words() {
             "enum E { Left(Int), Right(Int) }\nfn f() -> E { E.Left(1) }",
             "m.E"
         ),
-        vec![Repr::Int, Repr::Int]
+        vec![Repr::Tag, Repr::Int]
     );
 }
 
@@ -125,8 +125,8 @@ fn a_layout_describes_a_family_rather_than_an_instantiation() {
     );
     let options: Vec<&Layout> = held.iter().filter(|it| &*it.name == "Option").collect();
     assert_eq!(options.len(), 2);
-    assert_eq!(options[0].words, vec![Repr::Int, Repr::Int]);
-    assert_eq!(options[1].words, vec![Repr::Int, Repr::Float]);
+    assert_eq!(options[0].words, vec![Repr::Tag, Repr::Int]);
+    assert_eq!(options[1].words, vec![Repr::Tag, Repr::Float]);
 }
 
 #[test]
@@ -232,6 +232,7 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             "Any",
             "Task",
             "TaskScope",
+            "<tag>",
         ]
     );
 }
@@ -312,7 +313,7 @@ fn a_field_s_type_is_read_where_the_declaration_wrote_it() {
         ),
         "\
 fn @app.f(shape.Tile) -> Int
-  frame 3: s0!:int s1!:int s2:int
+  frame 3: s0!:tag s1!:int s2:int
   local t -> s0:shape.Tile [0, 2)
      0  copy s2:int s1:int Int
      1  return s2:int Int

@@ -40,10 +40,10 @@ word 3   int       0x000000000000002a  42
 #1  debug_session.main at debug_session/main.cove:29:11
 >   29 |   println("answer {raise(total)}")?
 (cove) print total
-total = 20  (word 13)  0x0000000000000014
+total = 20  (word 12)  0x0000000000000014
 (cove) locals
-total = 0  (word 7, 1 word(s), shadowed)
-total = 20  (word 13, 1 word(s))
+total = 0  (word 11, 1 word(s), shadowed)
+total = 20  (word 12, 1 word(s))
 (cove) list 2
     27 |   let total = 0
     28 |   let total = total + 20
@@ -52,8 +52,8 @@ total = 20  (word 13, 1 word(s))
     31 |   Ok(())
 (cove) disassemble 1
 debug_session.main:
-     14 | call s14:int debug_session.raise (s13:Int) Int
-=>   15 | call-builtin s15:ref String.interpolate (s3:String s14:Int) String
-     16 | call-host s4:int console.println (s15:String) Result
+     12 | call s13:int debug_session.raise (s12:Int) Int
+=>   13 | call-builtin s14:ref String.interpolate (s3:String s13:Int) String
+     14 | call-host s4:tag console.println (s14:String) Result
 (cove) quit
-the run was halted after 18 instruction(s).
+the run was halted after 16 instruction(s).

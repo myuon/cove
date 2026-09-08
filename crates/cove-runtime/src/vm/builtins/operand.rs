@@ -267,6 +267,7 @@ pub(super) fn type_name(machine: &Machine, repr: Repr, word: u64) -> String {
         Repr::Host => "a host resource".to_string(),
         Repr::Task => "a task".to_string(),
         Repr::Scope => "a task scope".to_string(),
+        Repr::Tag => "an enum case".to_string(),
     }
 }
 

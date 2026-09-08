@@ -116,6 +116,9 @@ instruction that reads it, and the function's per-slot table.
 | `Ref`      | a heap address, or 0                                   | **yes** |
 | `Addr`     | a linear address                                       | no  |
 | `Host`     | an index into the run's host resource table            | no  |
+| `Task`     | one past an index into the task's scheduler table, or 0 | no  |
+| `Scope`    | the same, for a task scope                             | no  |
+| `Tag`      | an enum's case index                                    | no  |
 
 The collector derives a frame's roots from `Function::refs`, a static bitmap
 over the slot numbering: the slots whose `Repr` is `Ref`. It never inspects a
@@ -128,6 +131,50 @@ every temporary it mentions — but never by one of a different `Repr`.
 
 Frames are zeroed on entry, so a `Ref` slot that has not been written yet
 reads as null rather than as whatever the previous frame left there.
+
+### A `Repr` is what a word *means*, not what class of word it is
+
+Three of the rows above hold an integer and none of them is an integer:
+`Host` is a table index, `Task` and `Scope` are handles, and `Tag` is a case
+index. They are separate rows because **occupying the same kind of word and
+having the same semantics are two different facts**, and the second is the
+one a static check has to read.
+
+`Tag` is the clearest case and the one that made the distinction necessary. A
+discriminant was a `Repr::Int` because its bits are an integer's bits, and
+that made two things indistinguishable to the verifier: `add.int` accepted an
+enum's case index, an ordinary integer comparison accepted it, and nothing
+bounded the number written into it against the enum it was supposed to name.
+None of that is caught at run time — the machine adds two words either way —
+so the static side was the only place it could be caught, and it could not
+be while the two facts shared a name.
+
+Three things follow, and the third is the one that makes this affordable.
+
+**The physical word class does not change.** A `Tag` is one non-reference
+word, encoded exactly as it was, and `Repr::is_ref` answers `false` for it
+the way it does for `Int`. The collector's question and its answer are
+untouched.
+
+**The machine gains no dispatch path.** `Inst::Tag` — the one instruction
+that writes a discriminant — encodes to an opcode of its own so that the
+bytecode carries the distinction, and that opcode is answered by the *same*
+arm of the dispatch loop that answers `Inst::FuncRef`: both write one
+metadata number out of the payload's low half. The loop has no way to tell a
+case index from a callee id and does not need one.
+
+**A frame does not grow.** A slot is still reused only by a later value of
+the same `Repr`, so a `Tag` slot is not handed to an `Int` temporary — but a
+discriminant is always word 0 of an enum-shaped run, never a standalone
+integer temporary, so the two were never candidates for the same slot. The
+listings in this repository's lowering tests are the evidence: every one of
+them changed `s1:int` to `s1:tag` and not one changed its `frame N:`.
+
+The same argument applies to the other metadata-like integers this IR carries
+— a layout id, a function id — and neither has been given a `Repr` of its
+own. A `dyn` dispatch still switches on a layout id that is an `Int`, which
+is why `Inst::Switch` accepts a `Tag` **or** an `Int`. That is a second
+consumer for a separate change, not an exception to this one.
 
 ### A static map must not become a leak
 
@@ -210,8 +257,17 @@ object* needs a load.
 
 ### An enum is a discriminant and a payload region
 
-Payload word 0 is the case index. The words after it are the payload of
-whichever case the value is in, and the region is wide enough for every case.
+Word 0 is the case index and its `Repr` is `Tag`. The words after it are the
+payload of whichever case the value is in, and the region is wide enough for
+every case.
+
+The case index is written by `Inst::Tag`, which names the enum's layout and a
+`CaseId` rather than a number, so the verifier bounds the case against the
+enum that is supposed to have it. It is read by `Inst::Switch`, which is what
+a `match` dispatches with — and, since a discriminant is not an integer, what
+`?` and a nested case pattern dispatch with too. Both used to ask which case a
+value held as integer equality, materialising the index into a slot and
+comparing; each is now one switch and no temporary.
 
 Which raises the question the collector cannot be allowed to get wrong: a
 payload word cannot be a reference in one case and an integer in another,
@@ -229,7 +285,7 @@ enum E { A(Int, String), B(Float) }
 
 `A` takes word 1 for its `Int` and word 2 for its `String`; `B` cannot use
 either, so its `Float` takes word 3. The layout is
-`[Int, Int, Ref, Float]`, four words.
+`[Tag, Int, Ref, Float]`, four words.
 
 Two things follow. Constructing a case **zeroes the payload region** it does
 not fill, so a reference word belonging to another case reads null. And the
@@ -627,11 +683,11 @@ That is ADR 0001 verbatim, from one word-range copy.
 enum Shape { Dot, Line(Int), Box(Int, Int) }
 ~~~
 
-`[disc: Int, Int, Int]`, three words. `Dot` writes the discriminant and zeroes
+`[disc: Tag, Int, Int]`, three words. `Dot` writes the discriminant and zeroes
 the rest; `Box(3, 4)` writes all three. A copy copies three words.
 
 With a reference — `enum Msg { Ping, Text(String) }` — the layout is
-`[disc: Int, Ref]`, and `Ping` leaves the reference word null, so the
+`[disc: Tag, Ref]`, and `Ping` leaves the reference word null, so the
 collector reads null rather than a stale address.
 
 ### 5. Multiword parameters, returns, joins and captures

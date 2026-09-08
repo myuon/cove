@@ -208,7 +208,12 @@ fn word_out(machine: &Machine, repr: Repr, word: u64, depth: usize) -> Result<Va
         // reason of their own: neither may cross a *task* boundary, so
         // neither can cross this one either, and what the word indexes is
         // the scheduler table of one task of one run.
-        Repr::Addr | Repr::Task | Repr::Scope => {
+        //
+        // A tag is refused for a third reason, which is that it is not a
+        // value at all: it is word 0 of an enum, and an enum crosses whole,
+        // through its own layout, with the tag read as the case rather than
+        // as a number. A tag reaching here on its own is a lowering bug.
+        Repr::Addr | Repr::Task | Repr::Scope | Repr::Tag => {
             return Err(RuntimeError::new(
                 "this value cannot cross the boundary as it is represented",
             ))
@@ -1097,7 +1102,7 @@ fn fits(program: &Program, layout: LayoutId, value: &Value, precision: Precision
         // The one word a host is on both ends of. See `word_out`.
         Shape::Word(Repr::Host) => matches!(value.view(), ValueView::Resource(_)),
         // Not a value a host holds. See `word_out`.
-        Shape::Word(Repr::Addr | Repr::Task | Repr::Scope) | Shape::Free => false,
+        Shape::Word(Repr::Addr | Repr::Task | Repr::Scope | Repr::Tag) | Shape::Free => false,
         Shape::Str => matches!(value.view(), ValueView::Str(_)),
         Shape::Struct { fields, .. } if is_range(program, described) => {
             matches!(value.view(), ValueView::Range(_)) && fields.len() == 3

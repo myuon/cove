@@ -1744,6 +1744,14 @@ impl Body<'_> {
     /// A part's `at` is an offset within the payload region, which begins
     /// *after* the discriminant, so a part of the value is at
     /// `base + 1 + at`.
+    /// How many cases an enum-shaped layout has, for sizing a switch table.
+    fn case_count(&self, layout: LayoutId) -> Option<usize> {
+        match &self.pool.shapes.layout(layout).shape {
+            crate::layout::Shape::Enum { cases, .. } => Some(cases.len()),
+            _ => None,
+        }
+    }
+
     fn case_of(
         &self,
         layout: LayoutId,
