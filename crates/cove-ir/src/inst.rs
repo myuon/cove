@@ -42,7 +42,7 @@
 //! of it throws away.
 
 use crate::layout::LayoutId;
-use crate::{ArgsId, BuiltinId, FunctionId, HostOpId, StrId, TableId};
+use crate::{ArgsId, BuiltinId, CaseId, FunctionId, HostOpId, StrId, TableId};
 
 /// A slot in the current frame: `memory[frame_base + slot]`.
 pub type Slot = u32;
@@ -153,6 +153,31 @@ pub enum Inst {
     /// declaration changing `callee`'s numeric value no longer changes a
     /// single character of the listing.
     FuncRef { dst: Slot, callee: FunctionId },
+    /// `dst = <the index of `case` in `layout`>`, as an enum's discriminant.
+    ///
+    /// The one way a discriminant is written. It is not [`Inst::Int`], though
+    /// the word it writes is the number an `Int` of that value would write,
+    /// and the reason is [`Inst::FuncRef`]'s: a case index reached its slot
+    /// through the untyped integer path, where no verifier could tell it from
+    /// an ordinary number and nothing bounded it against the enum it was
+    /// supposed to name.
+    ///
+    /// Its destination is a [`Repr::Tag`](crate::Repr::Tag) word, which is
+    /// what makes the two facts separable at all: a tag is one non-reference
+    /// word, physically an integer, and is refused by arithmetic, ordering
+    /// and integer comparison because none of those accepts that `Repr`.
+    /// [`Inst::Switch`] accepts it, and so do copying and clearing, which
+    /// read a layout rather than a `Repr`.
+    ///
+    /// [`mod@crate::verify`] bounds `case` against `layout`'s own case list
+    /// and refuses a `layout` that is not an enum. [`crate::print`] renders
+    /// it by the case's name, so an unrelated case added before it changes no
+    /// character of a listing that does not mention it.
+    Tag {
+        dst: Slot,
+        layout: LayoutId,
+        case: CaseId,
+    },
     /// `dst = f64::from_bits(bits)`
     ///
     /// The bits rather than the `f64` so that [`Inst`] can be `Eq` and

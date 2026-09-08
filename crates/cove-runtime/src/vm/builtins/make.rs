@@ -128,60 +128,30 @@ fn error(program: &Program) -> Result<LayoutId, RuntimeError> {
     .ok_or_else(|| operand::unknown_family(ERROR.name))
 }
 
-/// The `Option` whose `Some` carries a `payload`, and the index of its
-/// `case`.
-fn option(
-    program: &Program,
-    payload: LayoutId,
-    case: &str,
-) -> Result<(LayoutId, u32), RuntimeError> {
-    two_case(program, OPTION.name, SOME_CASE.name, payload, case)
-        .ok_or_else(|| operand::unknown_family(OPTION.name))
-}
-
-/// The `Result` whose `Ok` carries an `ok`, and the index of its `case`.
+/// The index of `case` in `family`, which must be the enum the caller was
+/// told to answer.
 ///
-/// The `Err` side is not asked about: every `Result` a builtin answers is a
-/// `Result<T, Error>`, and an `Error` is one word whatever it holds.
-fn result(program: &Program, ok: LayoutId, case: &str) -> Result<(LayoutId, u32), RuntimeError> {
-    two_case(program, RESULT.name, OK_CASE.name, ok, case)
-        .ok_or_else(|| operand::unknown_family(RESULT.name))
-}
-
-/// The enum called `name` whose case `carrier` holds one `payload`, and the
-/// index of its case `wanted`.
-///
-/// The carrier is what tells one instantiation from another — `Option<Int>`
-/// and `Option<String>` are two layouts with one name, and only `Some` is
-/// different between them — so it is matched even when the case being asked
-/// for is the empty one. A `None` built to the wrong `Option` would be the
-/// same discriminant word, but the payload region would be the wrong width
-/// and everything that later read it would read the wrong words.
-fn two_case(
-    program: &Program,
+/// Nothing is searched for. Which `Option` or `Result` a builtin answers is
+/// carried by [`cove_ir::Inst::CallBuiltin`] and passed down from
+/// [`super::call`], because the alternative — looking for an enum of that
+/// name whose carrying case holds the right payload — cannot tell
+/// `Result<String, Error>` from `Result<String, cq.diag.Detail>`. Both are
+/// named `Result` and both carry a `String` in `Ok`, and they are two words
+/// and four; answering the wrong one is a word run written into a
+/// destination sized for the other.
+fn case_of(
+    machine: &Machine,
+    family: LayoutId,
     name: &str,
-    carrier: &str,
-    payload: LayoutId,
-    wanted: &str,
-) -> Option<(LayoutId, u32)> {
-    for (at, layout) in program.layouts.iter().enumerate() {
-        let Shape::Enum { cases, .. } = &layout.shape else {
-            continue;
-        };
-        if &*layout.name != name {
-            continue;
-        }
-        let carries = cases.iter().any(|case| {
-            &*case.name == carrier && case.parts.len() == 1 && case.parts[0].layout == payload
-        });
-        if !carries {
-            continue;
-        }
-        if let Some(index) = layout.case(wanted) {
-            return Some((LayoutId(at as u32), index));
-        }
-    }
-    None
+    case: &str,
+) -> Result<u32, RuntimeError> {
+    machine
+        .program()
+        .layouts
+        .get(family.index())
+        .filter(|layout| matches!(layout.shape, Shape::Enum { .. }))
+        .and_then(|layout| layout.case(case))
+        .ok_or_else(|| operand::unknown_family(name))
 }
 
 // --- building one ----------------------------------------------------------
@@ -213,45 +183,45 @@ fn case_words(
     Ok(words)
 }
 
-/// `None`, as an `Option` whose `Some` would carry a `payload`.
-pub(super) fn none(machine: &mut Machine, payload: LayoutId) -> Result<Vec<u64>, RuntimeError> {
-    let (id, case) = option(machine.program(), payload, NONE_CASE.name)?;
-    case_words(machine, id, case, &[])
+/// `None`, in the `Option` the caller was told to answer.
+pub(super) fn none(machine: &mut Machine, option: LayoutId) -> Result<Vec<u64>, RuntimeError> {
+    let case = case_of(machine, option, OPTION.name, NONE_CASE.name)?;
+    case_words(machine, option, case, &[])
 }
 
-/// `Some(words)`, where `words` is a value of `payload`.
+/// `Some(words)`, in the `Option` the caller was told to answer.
 pub(super) fn some(
     machine: &mut Machine,
-    payload: LayoutId,
+    option: LayoutId,
     words: &[u64],
 ) -> Result<Vec<u64>, RuntimeError> {
-    let (id, case) = option(machine.program(), payload, SOME_CASE.name)?;
-    case_words(machine, id, case, &[words])
+    let case = case_of(machine, option, OPTION.name, SOME_CASE.name)?;
+    case_words(machine, option, case, &[words])
 }
 
-/// `Ok(words)`, where `words` is a value of `ok`.
+/// `Ok(words)`, in the `Result` the caller was told to answer.
 pub(super) fn ok(
     machine: &mut Machine,
-    ok: LayoutId,
+    result: LayoutId,
     words: &[u64],
 ) -> Result<Vec<u64>, RuntimeError> {
-    let (id, case) = result(machine.program(), ok, OK_CASE.name)?;
-    case_words(machine, id, case, &[words])
+    let case = case_of(machine, result, RESULT.name, OK_CASE.name)?;
+    case_words(machine, result, case, &[words])
 }
 
-/// `Err(Error(message))`, in a `Result` whose `Ok` would carry an `ok`.
+/// `Err(Error(message))`, in the `Result` the caller was told to answer.
 ///
 /// One allocation — the message — because an `Error` is its one `String`
 /// field inline and a `Result` is words. That is two objects fewer than the
 /// same value cost when every value was an address.
 pub(super) fn failed(
     machine: &mut Machine,
-    ok: LayoutId,
+    result: LayoutId,
     message: &str,
 ) -> Result<Vec<u64>, RuntimeError> {
-    let (id, case) = result(machine.program(), ok, ERR_CASE.name)?;
+    let case = case_of(machine, result, RESULT.name, ERR_CASE.name)?;
     let carried = error_value(machine, message)?;
-    case_words(machine, id, case, &[&carried])
+    case_words(machine, result, case, &[&carried])
 }
 
 /// An `Error` carrying `message`, as its words.
@@ -355,16 +325,86 @@ mod tests {
         let ints = scalar(&program, Repr::Int);
         let text = program.str_layout;
 
+        let texts = crate::vm::builtins::tests::two_case(&program, "Option", "Some", text);
+        let counts = crate::vm::builtins::tests::two_case(&program, "Option", "Some", ints);
         let string = machine.new_string("x").unwrap();
-        let held = some(&mut machine, text, &[string]).unwrap();
-        let counted = some(&mut machine, ints, &[1]).unwrap();
+        let held = some(&mut machine, texts, &[string]).unwrap();
+        let counted = some(&mut machine, counts, &[1]).unwrap();
         assert_eq!(held, vec![1, string]);
         assert_eq!(counted, vec![1, 1]);
 
         // `None` fills nothing, and what it does not fill reads null — which
         // is what makes one static reference map right for both cases.
-        let empty = none(&mut machine, text).unwrap();
+        let empty = none(&mut machine, texts).unwrap();
         assert_eq!(empty, vec![0, 0]);
+    }
+
+    /// Two `Result`s can carry the same thing in `Ok` and differ in width,
+    /// and only the instruction says which one a builtin answers.
+    ///
+    /// `world()` declares `Result<String, Point>` before `Result<String,
+    /// Error>`; both are named `Result` and both carry a `String` in `Ok`, so
+    /// the search below cannot tell them apart and answers the first. That is
+    /// not a wrong discriminant — it is a word run one word too long, written
+    /// into a destination sized for the other, and in a real program it ran
+    /// off the end of the frame. `cq.json` hit it: `String.sliceBytes`
+    /// answers `Result<String, Error>` in a module that also has
+    /// `Result<String, cq.diag.Detail>`.
+    #[test]
+    fn a_builtin_answers_the_result_its_instruction_declares() {
+        let program = world();
+        let text = program.str_layout;
+        let narrow = results_carrying(&program, text)
+            .into_iter()
+            .min_by_key(|(_, width)| *width)
+            .expect("a `Result` carrying a `String`");
+        let wide = results_carrying(&program, text)
+            .into_iter()
+            .max_by_key(|(_, width)| *width)
+            .expect("a `Result` carrying a `String`");
+        assert_ne!(narrow.0, wide.0, "the fixture has to be ambiguous");
+        assert!(
+            wide.0.index() < narrow.0.index(),
+            "the wide one is found first"
+        );
+
+        let mut machine = Machine::new(&program, 1 << 14);
+        let source = machine.new_string("hello").unwrap();
+        let held = crate::vm::builtins::tests::answering(
+            &mut machine,
+            "String",
+            "sliceBytes",
+            narrow.0,
+            &[
+                (text, &[source]),
+                (scalar(&program, Repr::Int), &[0]),
+                (scalar(&program, Repr::Int), &[2]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            held.len(),
+            narrow.1 as usize,
+            "the answer is the declared `Result`'s width, not the wider one's"
+        );
+    }
+
+    /// Every `Result` in `program` whose `Ok` carries `payload`, with its
+    /// width.
+    fn results_carrying(program: &Program, payload: LayoutId) -> Vec<(LayoutId, u32)> {
+        program
+            .layouts
+            .iter()
+            .enumerate()
+            .filter(|(_, layout)| &*layout.name == "Result")
+            .filter(|(_, layout)| match &layout.shape {
+                Shape::Enum { cases, .. } => cases.iter().any(|case| {
+                    &*case.name == "Ok" && case.parts.len() == 1 && case.parts[0].layout == payload
+                }),
+                _ => false,
+            })
+            .map(|(at, layout)| (LayoutId(at as u32), layout.width()))
+            .collect()
     }
 
     #[test]
@@ -372,7 +412,8 @@ mod tests {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
         let ints = scalar(&program, Repr::Int);
-        let words = failed(&mut machine, ints, "it did not").unwrap();
+        let results = crate::vm::builtins::tests::two_case(&program, "Result", "Ok", ints);
+        let words = failed(&mut machine, results, "it did not").unwrap();
         // An `Error` is its one `String` field inline, so the payload word
         // *is* the message's address — one object where the old model needed
         // three. Where in the region that word sits is the payload-agreement

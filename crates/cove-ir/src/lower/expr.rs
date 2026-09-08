@@ -48,6 +48,7 @@ use super::collections;
 use super::frame::Val;
 use super::gap;
 use super::methods;
+use super::pattern::UNPLACED;
 use super::shapes;
 use super::{Body, Dest, Loop, PENDING};
 use crate::inst::{ArithOp, CmpOp, Compare, Inst, Num, Slot};
@@ -1226,9 +1227,10 @@ impl Body<'_> {
             return;
         };
         self.emit(
-            Inst::Int {
+            Inst::Tag {
                 dst,
-                value: index as i64,
+                layout,
+                case: crate::CaseId(index),
             },
             span,
         );
@@ -1309,34 +1311,22 @@ impl Body<'_> {
             self.release(subject, expr.span);
             return self.gap("`?` on a value that is not an enum here", expr);
         };
-        let wanted = self.temp(shapes::INT);
-        self.emit(
-            Inst::Int {
-                dst: wanted.slot,
-                value: index as i64,
+        // `?` asks which case the value holds, which is what a switch is
+        // for. It used to ask it as integer equality — materialise the case
+        // index into a slot, compare the discriminant against it, branch on
+        // the answer — and that was three instructions and two temporaries
+        // spelling one dispatch, possible only because a discriminant was an
+        // `Int` and could be compared like one. It is a [`Repr::Tag`] now and
+        // cannot, so this is a switch over the same word, which is both what
+        // it meant and one instruction.
+        let switch = self.emit(
+            Inst::Switch {
+                on: subject.slot,
+                table: UNPLACED,
             },
             expr.span,
         );
-        let ok = self.temp(shapes::BOOL);
-        self.emit(
-            Inst::Cmp {
-                on: Compare::Int,
-                op: CmpOp::Eq,
-                dst: ok.slot,
-                a: subject.slot,
-                b: wanted.slot,
-            },
-            expr.span,
-        );
-        self.give_back(wanted.slot, wanted.layout);
-        let branch = self.emit(
-            Inst::BranchFalse {
-                cond: ok.slot,
-                to: PENDING,
-            },
-            expr.span,
-        );
-        self.give_back(ok.slot, ok.layout);
+        let carrying_at = self.here();
 
         // The answer's layout is the payload's own, read off the case this
         // is unwrapping rather than off the type the checker settled for the
@@ -1361,7 +1351,29 @@ impl Body<'_> {
         let carry_on = self.emit(Inst::Jump { to: PENDING }, expr.span);
 
         let failing = self.here();
-        self.patch(branch, failing);
+        // Every case but the one that carries goes to the failure, and so
+        // does the default: a `Result` and an `Option` have two cases each,
+        // so the table is one entry of each kind, and the default is there
+        // because a switch always has one rather than because a third case
+        // could arrive.
+        let cases = self
+            .case_count(subject.layout)
+            .unwrap_or(index as usize + 1)
+            .max(index as usize + 1);
+        let targets = (0..cases)
+            .map(|case| {
+                if case == index as usize {
+                    carrying_at
+                } else {
+                    failing
+                }
+            })
+            .collect();
+        let table = self.pool.table(crate::Table {
+            targets,
+            default: failing,
+        });
+        self.place_table(switch, table);
         // The failure carries the payload of the case it found, which for a
         // `Result` is the error and for an `Option` is nothing at all. The
         // frame ends at the `Return`, so nothing here is cleared: a slot

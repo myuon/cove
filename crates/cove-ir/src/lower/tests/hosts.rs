@@ -73,11 +73,11 @@ fn a_host_call_names_the_module_and_the_operation_as_the_source_writes_them() {
         ),
         "\
 fn @m.f() -> Result
-  frame 7: s0:int s1:unit s2:ref s3:ref s4:int s5:unit s6:ref
+  frame 7: s0:tag s1:unit s2:ref s3:ref s4:tag s5:unit s6:ref
      0  str s3:ref \"hi\"
-     1  call-host s4:int console.println (s3:String) Result
-     2  copy s0:int s4:int Result
-     3  return s0:int Result
+     1  call-host s4:tag console.println (s3:String) Result
+     2  copy s0:tag s4:tag Result
+     3  return s0:tag Result
 "
     );
 }
@@ -96,12 +96,12 @@ fn the_answer_is_written_into_the_layout_the_schema_declared() {
         ),
         "\
 fn @m.f(String) -> String
-  frame 6: s0!:ref s1:ref s2:int s3:ref s4:ref s5:ref
+  frame 6: s0!:ref s1:ref s2:tag s3:ref s4:ref s5:ref
   local key -> s0:String [0, 6)
-     0  call-host s2:int env.get (s0:String) Option
+     0  call-host s2:tag env.get (s0:String) Option
      1  str s4:ref \"\"
      2  call s5:ref std.option.unwrapOr<String> (s2:Option s4:String) String
-     3  clear s2:int Option
+     3  clear s2:tag Option
      4  copy s1:ref s5:ref String
      5  return s1:ref String
 "
@@ -117,11 +117,11 @@ fn a_host_call_written_through_the_module_reaches_the_same_operation() {
         ),
         "\
 fn @m.f() -> Result
-  frame 7: s0:int s1:unit s2:ref s3:ref s4:int s5:unit s6:ref
+  frame 7: s0:tag s1:unit s2:ref s3:ref s4:tag s5:unit s6:ref
      0  str s3:ref \"hi\"
-     1  call-host s4:int console.println (s3:String) Result
-     2  copy s0:int s4:int Result
-     3  return s0:int Result
+     1  call-host s4:tag console.println (s3:String) Result
+     2  copy s0:tag s4:tag Result
+     3  return s0:tag Result
 "
     );
 }
@@ -144,11 +144,11 @@ fn a_host_resource_is_one_word_that_is_not_a_root() {
         ),
         "\
 fn @m.f() -> Result
-  frame 7: s0:int s1:host s2:ref s3:ref s4:int s5:host s6:ref
+  frame 7: s0:tag s1:host s2:ref s3:ref s4:tag s5:host s6:ref
      0  str s3:ref \"a.txt\"
-     1  call-host s4:int files.open (s3:String) Result
-     2  copy s0:int s4:int Result
-     3  return s0:int Result
+     1  call-host s4:tag files.open (s3:String) Result
+     2  copy s0:tag s4:tag Result
+     3  return s0:tag Result
 "
     );
 }
@@ -187,24 +187,22 @@ fn a_host_resource_is_a_case_s_payload_like_anything_else() {
         ),
         "\
 fn @m.f() -> Result
-  frame 17: s0:int s1:int s2:host s3:ref s4:ref s5:int s6:host s7:ref s8:int s9:bool s10:host s11:int s12:int s13:host s14:ref s15:int s16:host
+  frame 15: s0:tag s1:tag s2:host s3:ref s4:ref s5:tag s6:host s7:ref s8:host s9:tag s10:tag s11:host s12:ref s13:tag s14:host
      0  str s4:ref \"a\"
-     1  call-host s5:int files.create (s4:String) Result
-     2  int s8:int 0
-     3  eq.int s9:bool s5:int s8:int
-     4  branch-false s9:bool 7
-     5  copy s10:host s6:host <host>
-     6  jump 10
-     7  int s11:int 1
-     8  copy s14:ref s7:ref Error
-     9  return s11:int Result
-    10  clear s5:int Result
-    11  int s15:int 1
-    12  copy s16:host s10:host <host>
-    13  int s11:int 0
-    14  copy s12:int s15:int m.Sink
-    15  copy s0:int s11:int Result
-    16  return s0:int Result
+     1  call-host s5:tag files.create (s4:String) Result
+     2  switch s5:tag [3 5] else 5
+     3  copy s8:host s6:host <host>
+     4  jump 8
+     5  tag s9:tag Result.Err
+     6  copy s12:ref s7:ref Error
+     7  return s9:tag Result
+     8  clear s5:tag Result
+     9  tag s13:tag m.Sink.File
+    10  copy s14:host s8:host <host>
+    11  tag s9:tag Result.Ok
+    12  copy s10:tag s13:tag m.Sink
+    13  copy s0:tag s9:tag Result
+    14  return s0:tag Result
 "
     );
 }
@@ -230,12 +228,12 @@ fn an_operation_of_a_resource_is_addressed_to_the_handle() {
         ),
         "\
 fn @m.f(<host> String) -> Result
-  frame 8: s0!:host s1!:ref s2:int s3:unit s4:ref s5:int s6:unit s7:ref
+  frame 8: s0!:host s1!:ref s2:tag s3:unit s4:ref s5:tag s6:unit s7:ref
   local w -> s0:<host> [0, 3)
   local line -> s1:String [0, 3)
-     0  call-resource s5:int s0:host files.Writer.writeLine (s1:String) Result
-     1  copy s2:int s5:int Result
-     2  return s2:int Result
+     0  call-resource s5:tag s0:host files.Writer.writeLine (s1:String) Result
+     1  copy s2:tag s5:tag Result
+     2  return s2:tag Result
 "
     );
 }
@@ -253,35 +251,31 @@ fn a_resource_operation_reads_its_receiver_out_of_the_frame() {
         ),
         "\
 fn @m.f() -> Result
-  frame 17: s0:int s1:unit s2:ref s3:ref s4:int s5:host s6:ref s7:int s8:bool s9:host s10:int s11:unit s12:ref s13:unit s14:int s15:unit s16:ref
-  local reader -> s9:<host> [11, 26)
+  frame 15: s0:tag s1:unit s2:ref s3:ref s4:tag s5:host s6:ref s7:host s8:tag s9:unit s10:ref s11:unit s12:tag s13:unit s14:ref
+  local reader -> s7:<host> [9, 22)
      0  str s3:ref \"a.txt\"
-     1  call-host s4:int files.open (s3:String) Result
-     2  int s7:int 0
-     3  eq.int s8:bool s4:int s7:int
-     4  branch-false s8:bool 7
-     5  copy s9:host s5:host <host>
-     6  jump 10
-     7  int s10:int 1
-     8  copy s12:ref s6:ref Error
-     9  return s10:int Result
-    10  clear s4:int Result
-    11  call-resource s10:int s9:host files.Reader.close () Result
-    12  int s7:int 0
-    13  eq.int s8:bool s10:int s7:int
-    14  branch-false s8:bool 17
-    15  copy s13:unit s11:unit Unit
-    16  jump 20
-    17  int s14:int 1
-    18  copy s16:ref s12:ref Error
-    19  return s14:int Result
-    20  clear s10:int Result
-    21  unit s13:unit
-    22  int s10:int 0
-    23  clear s12:ref <ref>
-    24  copy s11:unit s13:unit Unit
-    25  copy s0:int s10:int Result
-    26  return s0:int Result
+     1  call-host s4:tag files.open (s3:String) Result
+     2  switch s4:tag [3 5] else 5
+     3  copy s7:host s5:host <host>
+     4  jump 8
+     5  tag s8:tag Result.Err
+     6  copy s10:ref s6:ref Error
+     7  return s8:tag Result
+     8  clear s4:tag Result
+     9  call-resource s8:tag s7:host files.Reader.close () Result
+    10  switch s8:tag [11 13] else 13
+    11  copy s11:unit s9:unit Unit
+    12  jump 16
+    13  tag s12:tag Result.Err
+    14  copy s14:ref s10:ref Error
+    15  return s12:tag Result
+    16  clear s8:tag Result
+    17  unit s11:unit
+    18  tag s8:tag Result.Ok
+    19  clear s10:ref <ref>
+    20  copy s9:unit s11:unit Unit
+    21  copy s0:tag s8:tag Result
+    22  return s0:tag Result
 "
     );
 }
@@ -326,12 +320,12 @@ fn a_resource_an_embedder_s_module_keeps_answers_its_own_operations() {
         ),
         "\
 fn @m.f(<host> ledger.Entry) -> Result
-  frame 9: s0!:host s1!:int s2!:ref s3:int s4:unit s5:ref s6:int s7:unit s8:ref
+  frame 9: s0!:host s1!:int s2!:ref s3:tag s4:unit s5:ref s6:tag s7:unit s8:ref
   local b -> s0:<host> [0, 3)
   local e -> s1:ledger.Entry [0, 3)
-     0  call-resource s6:int s0:host ledger.Book.record (s1:ledger.Entry) Result
-     1  copy s3:int s6:int Result
-     2  return s3:int Result
+     0  call-resource s6:tag s0:host ledger.Book.record (s1:ledger.Entry) Result
+     1  copy s3:tag s6:tag Result
+     2  return s3:tag Result
 "
     );
 }
@@ -390,20 +384,20 @@ fn a_host_field_declared_any_is_boxed_on_the_way_in() {
         ),
         "\
 fn @m.f() -> http.Route
-  frame 11: s0:int s1:ref s2:ref s3:int s4:ref s5:ref s6:int s7:ref s8:int s9:ref s10:ref
-     0  int s3:int 0
+  frame 11: s0:tag s1:ref s2:ref s3:tag s4:ref s5:ref s6:int s7:ref s8:tag s9:ref s10:ref
+     0  tag s3:tag http.Method.Get
      1  str s4:ref \"/health\"
      2  alloc s5:ref closure m.health<closure>
      3  func-ref s6:int @m.health
      4  store-field s5:ref +0 s6:int Int
      5  box s7:ref s5:ref fn
      6  clear s5:ref fn
-     7  copy s8:int s3:int http.Method
+     7  copy s8:tag s3:tag http.Method
      8  copy s9:ref s4:ref String
      9  copy s10:ref s7:ref Any
     10  clear s7:ref Any
-    11  copy s0:int s8:int http.Route
-    12  return s0:int http.Route
+    11  copy s0:tag s8:tag http.Route
+    12  return s0:tag http.Route
 "
     );
 }

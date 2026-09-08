@@ -79,7 +79,9 @@
 //! dead element left in the spare room would be a root, and a vector used as
 //! a work queue would retain everything it had ever held.
 
-use cove_ir::{LayoutId, Program, Repr, Shape};
+#[cfg(test)]
+use cove_ir::Program;
+use cove_ir::{LayoutId, Repr, Shape};
 
 use crate::error::RuntimeError;
 use crate::vm::builtins::operand::Operand;
@@ -170,20 +172,6 @@ fn vector(
         capacity: machine.object_len(store),
         store,
     })
-}
-
-/// The one-word family of `repr`, if this program declares one.
-fn word_layout(program: &Program, repr: Repr) -> Option<LayoutId> {
-    program
-        .layouts
-        .iter()
-        .position(|layout| layout.shape == Shape::Word(repr))
-        .map(|at| LayoutId(at as u32))
-}
-
-/// The `Int` family, which is what a position is a value of.
-fn ints(program: &Program) -> Result<LayoutId, RuntimeError> {
-    word_layout(program, Repr::Int).ok_or_else(|| operand::unknown_family("Int"))
 }
 
 /// The family of the value in `operand`.
@@ -278,6 +266,7 @@ fn position(
 /// payload region: an `Option<Point>` is `[disc, x, y]` and not an address.
 pub(super) fn array_get(
     machine: &mut Machine,
+    result: LayoutId,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (receiver, args) = operand::method("Array.get", operands, 1)?;
@@ -285,9 +274,9 @@ pub(super) fn array_get(
     match index(machine, "Array.get", args[0])? {
         Some(at) if at < items.len as usize => {
             let words = machine.payload_run(items.addr, at as u32 * items.stride, items.stride);
-            make::some(machine, items.elem, &words)
+            make::some(machine, result, &words)
         }
-        _ => make::none(machine, items.elem),
+        _ => make::none(machine, result),
     }
 }
 
@@ -324,11 +313,11 @@ pub(super) fn array_contains(
 /// `Array.indexOf(element) -> Option<Int>`.
 pub(super) fn array_index_of(
     machine: &mut Machine,
+    result: LayoutId,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (receiver, args) = operand::method("Array.indexOf", operands, 1)?;
     let items = array(machine, "indexOf", receiver)?;
-    let ints = ints(machine.program())?;
     match position(
         machine,
         items.elem,
@@ -337,8 +326,8 @@ pub(super) fn array_index_of(
         items.len,
         args[0],
     )? {
-        Some(at) => make::some(machine, ints, &[at as u64]),
-        None => make::none(machine, ints),
+        Some(at) => make::some(machine, result, &[at as u64]),
+        None => make::none(machine, result),
     }
 }
 
@@ -465,23 +454,24 @@ fn grow(machine: &mut Machine, items: &Growable) -> Result<u64, RuntimeError> {
 /// make the length depend on the index.
 pub(super) fn vector_set(
     machine: &mut Machine,
+    result: LayoutId,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (receiver, args) = operand::method("Vector.set", operands, 2)?;
     let items = vector(machine, "set", receiver)?;
     let element = operand::run_of(machine, "Vector.set", items.elem, args[1])?.to_vec();
     let Some(at) = index(machine, "Vector.set", args[0])? else {
-        return make::none(machine, items.elem);
+        return make::none(machine, result);
     };
     if at >= items.len as usize {
-        return make::none(machine, items.elem);
+        return make::none(machine, result);
     }
     let at = at as u32 * items.stride;
     // What the index held before, read out before it is overwritten:
     // `v.set(i, x)` answers what `v.get(i)` would have.
     let was = machine.payload_run(items.store, at, items.stride);
     machine.set_payload_run(items.store, at, &element);
-    make::some(machine, items.elem, &was)
+    make::some(machine, result, &was)
 }
 
 /// `Vector.pop() -> Option<T>`.
@@ -492,12 +482,13 @@ pub(super) fn vector_set(
 /// emptiness.
 pub(super) fn vector_pop(
     machine: &mut Machine,
+    result: LayoutId,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (receiver, _) = operand::method("Vector.pop", operands, 0)?;
     let items = vector(machine, "pop", receiver)?;
     if items.len == 0 {
-        return make::none(machine, items.elem);
+        return make::none(machine, result);
     }
     let at = items.len - 1;
     let was = machine.payload_run(items.store, at * items.stride, items.stride);
@@ -507,7 +498,7 @@ pub(super) fn vector_pop(
         &vec![0; items.stride as usize],
     );
     machine.set_payload(items.header, 0, at as u64);
-    make::some(machine, items.elem, &was)
+    make::some(machine, result, &was)
 }
 
 /// `Vector.remove(index) -> Option<T>`.
@@ -517,15 +508,16 @@ pub(super) fn vector_pop(
 /// vector no longer holds is zeroed out of the room it kept.
 pub(super) fn vector_remove(
     machine: &mut Machine,
+    result: LayoutId,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (receiver, args) = operand::method("Vector.remove", operands, 1)?;
     let items = vector(machine, "remove", receiver)?;
     let Some(at) = index(machine, "Vector.remove", args[0])? else {
-        return make::none(machine, items.elem);
+        return make::none(machine, result);
     };
     if at >= items.len as usize {
-        return make::none(machine, items.elem);
+        return make::none(machine, result);
     }
     let at = at as u32;
     let stride = items.stride;
@@ -542,12 +534,13 @@ pub(super) fn vector_remove(
         &vec![0; stride as usize],
     );
     machine.set_payload(items.header, 0, items.len as u64 - 1);
-    make::some(machine, items.elem, &was)
+    make::some(machine, result, &was)
 }
 
 /// `Vector.get(index) -> Option<T>`.
 pub(super) fn vector_get(
     machine: &mut Machine,
+    result: LayoutId,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (receiver, args) = operand::method("Vector.get", operands, 1)?;
@@ -555,9 +548,9 @@ pub(super) fn vector_get(
     match index(machine, "Vector.get", args[0])? {
         Some(at) if at < items.len as usize => {
             let words = machine.payload_run(items.store, at as u32 * items.stride, items.stride);
-            make::some(machine, items.elem, &words)
+            make::some(machine, result, &words)
         }
-        _ => make::none(machine, items.elem),
+        _ => make::none(machine, result),
     }
 }
 
@@ -582,11 +575,11 @@ pub(super) fn vector_contains(
 /// `Vector.indexOf(element) -> Option<Int>`.
 pub(super) fn vector_index_of(
     machine: &mut Machine,
+    result: LayoutId,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (receiver, args) = operand::method("Vector.indexOf", operands, 1)?;
     let items = vector(machine, "indexOf", receiver)?;
-    let ints = ints(machine.program())?;
     match position(
         machine,
         items.elem,
@@ -595,8 +588,8 @@ pub(super) fn vector_index_of(
         items.len,
         args[0],
     )? {
-        Some(at) => make::some(machine, ints, &[at as u64]),
-        None => make::none(machine, ints),
+        Some(at) => make::some(machine, result, &[at as u64]),
+        None => make::none(machine, result),
     }
 }
 

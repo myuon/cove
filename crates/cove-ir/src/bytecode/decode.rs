@@ -108,6 +108,11 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             dst: a,
             callee: FunctionId(lo),
         },
+        Op::ConstTag => Inst::Tag {
+            dst: a,
+            layout: LayoutId(hi),
+            case: crate::CaseId(lo),
+        },
         Op::ConstFloat => Inst::Float {
             dst: a,
             bits: code.payload(),

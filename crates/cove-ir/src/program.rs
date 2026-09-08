@@ -84,6 +84,17 @@ id!(
     TableId, "table"
 );
 id!(
+    /// Names one case of an enum layout: its position in
+    /// [`crate::layout::Shape::Enum::cases`].
+    ///
+    /// It is the number an enum's discriminant word holds, and it is a type
+    /// of its own for the reason [`crate::Repr::Tag`] is: the word is an
+    /// integer and the value is not one. Where the number is written into a
+    /// slot — [`crate::Inst::Tag`] — the id says which case it names, and the
+    /// verifier bounds it against the layout rather than against nothing.
+    CaseId, "case"
+);
+id!(
     /// Names a host operation in [`Program::host_ops`].
     HostOpId, "host"
 );

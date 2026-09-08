@@ -93,7 +93,14 @@ fn one_encoded_instruction_is_one_unit_of_fuel() {
     // executes four clears in its whole life, one of them stood before a
     // `return` and one zeroed a slot this frame had never written, and the
     // lowering emits neither.
-    assert_eq!(ran.instructions, 14_285_738);
+    //
+    // Two below that again, and for a reason that is the same shape: `?`
+    // asked which case its value held as integer equality — materialise the
+    // index, compare, branch — and asks it as one `switch` now that a
+    // discriminant is a `Repr::Tag` and cannot be compared as an integer.
+    // Three instructions to one, on a path this program takes once. See
+    // [ADR 0048](../../../docs/adr/0048-a-repr-says-what-a-word-means.md).
+    assert_eq!(ran.instructions, 14_285_736);
 }
 
 /// Source spans: a failing program points where the oracle points.

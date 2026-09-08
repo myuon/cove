@@ -127,27 +127,25 @@ fn a_question_mark_on_an_erased_result_answers_the_box() {
         ),
         "\
 fn @m.f() -> Result
-  frame 14: s0:int s1:int s2:ref s3:host s4:int s5:ref s6:int s7:bool s8:ref s9:int s10:int s11:ref s12:int s13:int
-  local s -> s3:<host> [1, 17)
-  local v -> s8:Any [11, 17)
+  frame 13: s0:tag s1:int s2:ref s3:host s4:tag s5:ref s6:ref s7:tag s8:int s9:ref s10:int s11:int s12:int
+  local s -> s3:<host> [1, 15)
+  local v -> s6:Any [9, 15)
      0  call-host s3:host oracle.open () <host>
-     1  call-resource s4:int s3:host oracle.Seat.next () Result
-     2  int s6:int 0
-     3  eq.int s7:bool s4:int s6:int
-     4  branch-false s7:bool 7
-     5  copy s8:ref s5:ref Any
-     6  jump 10
-     7  int s9:int 1
-     8  copy s11:ref s5:ref Error
-     9  return s9:int Result
-    10  clear s4:int Result
-    11  int s6:int 2
-    12  unbox s12:int s8:ref Int
-    13  mul.int s13:int s12:int s6:int
-    14  int s9:int 0
-    15  copy s10:int s13:int Int
-    16  copy s0:int s9:int Result
-    17  return s0:int Result
+     1  call-resource s4:tag s3:host oracle.Seat.next () Result
+     2  switch s4:tag [3 5] else 5
+     3  copy s6:ref s5:ref Any
+     4  jump 8
+     5  tag s7:tag Result.Err
+     6  copy s9:ref s5:ref Error
+     7  return s7:tag Result
+     8  clear s4:tag Result
+     9  int s10:int 2
+    10  unbox s11:int s6:ref Int
+    11  mul.int s12:int s11:int s10:int
+    12  tag s7:tag Result.Ok
+    13  copy s8:int s12:int Int
+    14  copy s0:tag s7:tag Result
+    15  return s0:tag Result
 "
     );
 }
@@ -329,26 +327,24 @@ fn an_annotation_says_what_an_erased_result_was_carrying() {
         ),
         "\
 fn @m.f() -> Result
-  frame 12: s0:int s1:int s2:ref s3:host s4:int s5:ref s6:int s7:bool s8:ref s9:int s10:int s11:ref
-  local s -> s3:<host> [1, 15)
-  local bounded -> s4:Result [2, 15)
-  local run -> s6:m.Run [12, 15)
+  frame 11: s0:tag s1:int s2:ref s3:host s4:tag s5:ref s6:ref s7:tag s8:int s9:ref s10:int
+  local s -> s3:<host> [1, 13)
+  local bounded -> s4:Result [2, 13)
+  local run -> s10:m.Run [10, 13)
      0  call-host s3:host oracle.open () <host>
-     1  call-resource s4:int s3:host oracle.Seat.next () Result
-     2  int s6:int 0
-     3  eq.int s7:bool s4:int s6:int
-     4  branch-false s7:bool 7
-     5  copy s8:ref s5:ref Any
-     6  jump 10
-     7  int s9:int 1
-     8  copy s11:ref s5:ref Error
-     9  return s9:int Result
-    10  unbox s6:int s8:ref m.Run
-    11  clear s8:ref Any
-    12  int s9:int 0
-    13  copy s10:int s6:int Int
-    14  copy s0:int s9:int Result
-    15  return s0:int Result
+     1  call-resource s4:tag s3:host oracle.Seat.next () Result
+     2  switch s4:tag [3 5] else 5
+     3  copy s6:ref s5:ref Any
+     4  jump 8
+     5  tag s7:tag Result.Err
+     6  copy s9:ref s5:ref Error
+     7  return s7:tag Result
+     8  unbox s10:int s6:ref m.Run
+     9  clear s6:ref Any
+    10  tag s7:tag Result.Ok
+    11  copy s8:int s10:int Int
+    12  copy s0:tag s7:tag Result
+    13  return s0:tag Result
 "
     );
 }
@@ -384,7 +380,7 @@ fn a_result_inside_an_erased_result_is_opened_where_it_is_used() {
         ),
         "\
 fn @m.f() -> Int
-  frame 12: s0:int s1:host s2:int s3:ref s4:int s5:ref s6:int s7:int s8:int s9:ref s10:int s11:ref
+  frame 12: s0:int s1:host s2:tag s3:ref s4:int s5:ref s6:int s7:tag s8:int s9:ref s10:int s11:ref
   local s -> s1:<host> [1, 26)
   local answer -> s2:Result [2, 26)
   local inner -> s5:Any [4, 17)
@@ -392,11 +388,11 @@ fn @m.f() -> Int
   local e -> s11:Error [10, 12)
   local e -> s5:Error [20, 22)
      0  call-host s1:host oracle.open () <host>
-     1  call-resource s2:int s1:host oracle.Seat.next () Result
-     2  switch s2:int [3 19] else 24
+     1  call-resource s2:tag s1:host oracle.Seat.next () Result
+     2  switch s2:tag [3 19] else 24
      3  copy s5:ref s3:ref Any
-     4  unbox s7:int s5:ref Result
-     5  switch s7:int [6 9] else 14
+     4  unbox s7:tag s5:ref Result
+     5  switch s7:tag [6 9] else 14
      6  copy s10:int s8:int Int
      7  copy s6:int s10:int Int
      8  jump 15
@@ -406,7 +402,7 @@ fn @m.f() -> Int
     12  clear s11:ref Error
     13  jump 15
     14  trap \"no `match` arm covers this value\"
-    15  clear s7:int Result
+    15  clear s7:tag Result
     16  copy s4:int s6:int Int
     17  clear s5:ref Any
     18  jump 25

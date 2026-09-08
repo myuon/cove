@@ -311,6 +311,7 @@ impl<'p> Flow<'p> {
             Inst::Unit { dst }
             | Inst::Bool { dst, .. }
             | Inst::Int { dst, .. }
+            | Inst::Tag { dst, .. }
             | Inst::FuncRef { dst, .. }
             | Inst::Float { dst, .. }
             | Inst::Str { dst, .. }
@@ -405,6 +406,7 @@ impl<'p> Flow<'p> {
             Inst::Unit { .. }
             | Inst::Bool { .. }
             | Inst::Int { .. }
+            | Inst::Tag { .. }
             | Inst::FuncRef { .. }
             | Inst::Float { .. }
             | Inst::Str { .. }

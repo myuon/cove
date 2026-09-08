@@ -89,6 +89,15 @@ pub enum Repr {
     /// the same disjointness by construction that keeps two stack segments
     /// apart.
     Scope,
+    /// An enum's case index: which case an enum value holds.
+    ///
+    /// Physically an integer word and semantically not an integer. It is
+    /// produced by [`Inst::Tag`](crate::Inst::Tag), consumed by
+    /// [`Inst::Switch`](crate::Inst::Switch), copied and cleared like any
+    /// other word, and refused by arithmetic, ordering and integer equality —
+    /// which is the whole of why it is a `Repr` of its own rather than
+    /// [`Repr::Int`] with a comment.
+    Tag,
 }
 
 impl Repr {
@@ -112,6 +121,7 @@ impl Repr {
             Repr::Host => "host",
             Repr::Task => "task",
             Repr::Scope => "scope",
+            Repr::Tag => "tag",
         }
     }
 }

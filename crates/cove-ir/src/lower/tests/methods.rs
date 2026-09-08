@@ -107,7 +107,7 @@ fn is_some_is_a_call_the_standard_library_implements() {
         listing("fn has(o: Option<Int>) -> Bool { o.isSome() }", "has"),
         "\
 fn @m.has(Option) -> Bool
-  frame 4: s0!:int s1!:int s2:bool s3:bool
+  frame 4: s0!:tag s1!:int s2:bool s3:bool
   local o -> s0:Option [0, 3)
      0  call s3:bool std.option.isSome<Int> (s0:Option) Bool
      1  copy s2:bool s3:bool Bool
@@ -130,7 +130,7 @@ fn unwrap_or_is_an_ordinary_call_into_the_standard_library() {
         ),
         "\
 fn @m.value(Option Int) -> Int
-  frame 5: s0!:int s1!:int s2!:int s3:int s4:int
+  frame 5: s0!:tag s1!:int s2!:int s3:int s4:int
   local o -> s0:Option [0, 3)
   local other -> s2:Int [0, 3)
      0  call s4:int std.option.unwrapOr<Int> (s0:Option s2:Int) Int
@@ -152,12 +152,12 @@ fn a_parser_answers_a_result_and_interns_the_error_it_may_carry() {
         ),
         "\
 fn @m.parse(String) -> Int
-  frame 7: s0!:ref s1:int s2:int s3:int s4:ref s5:int s6:int
+  frame 7: s0!:ref s1:int s2:tag s3:int s4:ref s5:int s6:int
   local s -> s0:String [0, 6)
-     0  call-builtin s2:int Int.parse (s0:String) Result
+     0  call-builtin s2:tag Int.parse (s0:String) Result
      1  int s5:int 0
      2  call s6:int std.result.unwrapOr<Int, Error> (s2:Result s5:Int) Int
-     3  clear s2:int Result
+     3  clear s2:tag Result
      4  copy s1:int s6:int Int
      5  return s1:int Int
 "
@@ -279,18 +279,18 @@ fn map_error_is_an_ordinary_call_into_the_standard_library() {
         ),
         "\
 fn @m.f(String) -> Result
-  frame 12: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:ref s7:ref s8:int s9:int s10:int s11:ref
+  frame 14: s0!:ref s1:tag s2:int s3:tag s4:ref s5:tag s6:int s7:ref s8:ref s9:int s10:tag s11:int s12:tag s13:ref
   local t -> s0:String [0, 10)
-     0  call-builtin s4:int Int.parse (s0:String) Result
-     1  alloc s7:ref closure m.f#0<closure>
-     2  func-ref s8:int @m.f#0
-     3  store-field s7:ref +0 s8:int Int
-     4  store-field s7:ref +1 s0:ref String
-     5  call s9:int std.result.mapError<Int, Error, m.E> (s4:Result s7:fn) Result
-     6  clear s7:ref fn
-     7  clear s4:int Result
-     8  copy s1:int s9:int Result
-     9  return s1:int Result
+     0  call-builtin s5:tag Int.parse (s0:String) Result
+     1  alloc s8:ref closure m.f#0<closure>
+     2  func-ref s9:int @m.f#0
+     3  store-field s8:ref +0 s9:int Int
+     4  store-field s8:ref +1 s0:ref String
+     5  call s10:tag std.result.mapError<Int, Error, m.E> (s5:Result s8:fn) Result
+     6  clear s8:ref fn
+     7  clear s5:tag Result
+     8  copy s1:tag s10:tag Result
+     9  return s1:tag Result
 "
     );
 }

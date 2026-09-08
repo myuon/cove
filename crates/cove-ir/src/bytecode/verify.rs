@@ -31,7 +31,7 @@
 //! it has not bounded, and nothing panics on any sixteen bytes at all.
 
 use crate::inst::{Inst, Len};
-use crate::layout::LayoutId;
+use crate::layout::{LayoutId, Shape};
 use crate::program::{Function, FunctionId, Program};
 use crate::repr::Repr;
 use crate::Slot;
@@ -186,7 +186,7 @@ impl Check<'_> {
         };
         for (half, value) in [(lo, bytes.lo()), (hi, bytes.hi())] {
             let len = match half {
-                Half::Unused | Half::Count | Half::Offset => continue,
+                Half::Unused | Half::Count | Half::Offset | Half::Case => continue,
                 Half::Function => self.program.functions.len(),
                 Half::Str => self.program.strings.len(),
                 Half::Layout => self.program.layouts.len(),
@@ -307,6 +307,44 @@ impl Check<'_> {
             // value the running program computes — so that is a run-time
             // question `Machine::allocate` answers the same way this does:
             // checked, and never a wraparound.
+            // A case index is the other half-pair this check can settle
+            // ahead of time, and for the same reason: the layout and the case
+            // are both in this instruction's payload, so whether the enum has
+            // that case is knowable without running anything.
+            //
+            // It is checked here rather than left to `crate::verify` because
+            // this verifier reads *bytes*. `crate::verify` reads an `Inst` the
+            // lowering built and can trust that a `CaseId` came from a case
+            // that exists; nothing may be trusted about a number decoded out
+            // of a payload half, and an out-of-range one would otherwise
+            // reach a `switch` and take its default — a wrong answer rather
+            // than a refusal.
+            Inst::Tag { layout, case, .. } => {
+                let Some(described) = self.program.layouts.get(layout.index()) else {
+                    return;
+                };
+                match &described.shape {
+                    Shape::Enum { cases, .. } => {
+                        if case.index() >= cases.len() {
+                            let count = cases.len();
+                            self.fault(
+                                at,
+                                format!(
+                                    "names {case} of `{}`, which has {count} case(s)",
+                                    described.name
+                                ),
+                            );
+                        }
+                    }
+                    _ => self.fault(
+                        at,
+                        format!(
+                            "writes a case of `{}`, which is not an enum",
+                            described.name
+                        ),
+                    ),
+                }
+            }
             Inst::Alloc {
                 layout,
                 len: Len::Count(count),
@@ -488,7 +526,7 @@ mod tests {
     use crate::bytecode::encode::{encode, encode_function, encode_program};
     use crate::bytecode::{instructions, EncodedInst};
     use crate::inst::{ArithOp, Num};
-    use crate::layout::{Layout, Shape};
+    use crate::layout::{Case, Layout, Shape};
     use crate::program::{Arg, Table};
     use crate::repr::RefMap;
     use crate::{ArgsId, LayoutId, StrId, TableId};
@@ -499,6 +537,8 @@ mod tests {
     /// end of.
     const POINT: LayoutId = LayoutId(2);
     const BOXED: LayoutId = LayoutId(3);
+    /// A two-case enum, for the one semantic check a case index needs.
+    const ENUM: LayoutId = LayoutId(4);
 
     fn layouts() -> Vec<Layout> {
         vec![
@@ -513,6 +553,23 @@ mod tests {
                 vec![Repr::Int, Repr::Int],
             ),
             Layout::object("Any", Shape::Boxed),
+            Layout::inline(
+                "m.E",
+                Shape::Enum {
+                    cases: vec![
+                        Case {
+                            name: Arc::from("A"),
+                            parts: Vec::new(),
+                        },
+                        Case {
+                            name: Arc::from("B"),
+                            parts: Vec::new(),
+                        },
+                    ],
+                    payload: vec![Repr::Int],
+                },
+                vec![Repr::Tag, Repr::Int],
+            ),
         ]
     }
 
@@ -538,6 +595,20 @@ mod tests {
             is_async: false,
             stub: false,
         }
+    }
+
+    /// The same, with a fifth slot that is a tag.
+    ///
+    /// A frame of its own rather than a wider shared one: two tests here turn
+    /// on the frame's exact width — a slot past it, and a value location
+    /// running off the top of it — and widening the fixture would have made
+    /// them pass for the wrong reason.
+    fn tagged_program(code: Vec<Inst>) -> Program {
+        let reprs = vec![Repr::Int, Repr::Int, Repr::Ref, Repr::Bool, Repr::Tag];
+        let mut held = program(code);
+        held.functions[0].refs = RefMap::of(&reprs);
+        held.functions[0].reprs = reprs;
+        held
     }
 
     fn program(code: Vec<Inst>) -> Program {
@@ -592,6 +663,55 @@ mod tests {
         assert_eq!(
             verify(&held, &encode_program(&held).expect("encodes")),
             Ok(())
+        );
+    }
+
+    /// A case index no encoder produced is refused here, not left to a
+    /// `switch` to answer wrongly.
+    ///
+    /// `crate::verify` makes the same check of an `Inst` the lowering built,
+    /// and that is not enough: this verifier is the "verify arbitrary bytes
+    /// once, then trust" boundary, and a case index is one half of a payload
+    /// — sixteen million values, of which two are cases of this enum. An
+    /// out-of-range one is not memory-unsafe, because `Op::Switch` reads a
+    /// table with a default; it is worse than a refusal in a different way,
+    /// which is that the program keeps running and takes a branch nothing
+    /// wrote.
+    #[test]
+    fn a_case_index_past_the_enums_cases_is_refused() {
+        let held = tagged_program(vec![Inst::Return { src: 0 }]);
+        let good = at(Inst::Tag {
+            dst: 4,
+            layout: ENUM,
+            case: crate::CaseId(1),
+        });
+        assert_eq!(faults(&held, &[good]), Vec::<String>::new());
+
+        // The payload's low half is the case, little end first, so one byte
+        // is the whole of the mutation.
+        let code = [with(good, 8, 7)];
+        assert_eq!(
+            faults(&held, &code),
+            ["names case7 of `m.E`, which has 2 case(s)"]
+        );
+    }
+
+    /// And a layout that is not an enum has no case for one to name.
+    ///
+    /// Reachable only by mutating the payload's *high* half, since the
+    /// lowering never writes a tag of a struct.
+    #[test]
+    fn a_case_of_something_that_is_not_an_enum_is_refused() {
+        let held = tagged_program(vec![Inst::Return { src: 0 }]);
+        let good = at(Inst::Tag {
+            dst: 4,
+            layout: ENUM,
+            case: crate::CaseId(0),
+        });
+        let code = [with(good, 12, POINT.0 as u8)];
+        assert_eq!(
+            faults(&held, &code),
+            ["writes a case of `Point`, which is not an enum"]
         );
     }
 
@@ -766,7 +886,7 @@ mod tests {
             src: 1,
             layout: LayoutId(40),
         })];
-        assert_eq!(faults(&held, &code), ["names layout 40, and there are 4"]);
+        assert_eq!(faults(&held, &code), ["names layout 40, and there are 5"]);
     }
 
     /// Issue #269: an `alloc.imm` carries its count in the payload's own

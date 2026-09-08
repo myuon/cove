@@ -79,7 +79,8 @@ mod base {
     pub const CONST_BOOL: u8 = CONST_UNIT + 1;
     pub const CONST_INT: u8 = CONST_BOOL + 1;
     pub const FUNC_REF: u8 = CONST_INT + 1;
-    pub const CONST_FLOAT: u8 = FUNC_REF + 1;
+    pub const CONST_TAG: u8 = FUNC_REF + 1;
+    pub const CONST_FLOAT: u8 = CONST_TAG + 1;
     pub const STR: u8 = CONST_FLOAT + 1;
     pub const COPY: u8 = STR + 1;
     pub const CLEAR: u8 = COPY + 1;
@@ -145,6 +146,7 @@ pub enum Op {
     ConstBool,
     ConstInt,
     FuncRef,
+    ConstTag,
     ConstFloat,
     Str,
     Copy,
@@ -238,6 +240,14 @@ const ADDR: &[Repr] = &[Repr::Addr];
 const HOST: &[Repr] = &[Repr::Host];
 const TASK: &[Repr] = &[Repr::Task];
 const SCOPE: &[Repr] = &[Repr::Scope];
+/// An enum's case index. Physically an integer word and semantically not
+/// one, so it is its own set and appears in exactly two opcodes.
+const TAG: &[Repr] = &[Repr::Tag];
+/// What a switch dispatches on: an enum's case, or the layout id a `dyn`
+/// dispatch reads out of a box. The second is still an `Int` — a layout id
+/// is the other metadata-like integer in this IR and giving it a `Repr` of
+/// its own is a separate change to a separate consumer.
+const SWITCHED: &[Repr] = &[Repr::Tag, Repr::Int];
 
 /// What the payload's eight bytes are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -272,6 +282,13 @@ pub enum Half {
     HostOp,
     /// An element count: `Len::Count`'s `n`.
     Count,
+    /// An enum's case index: [`crate::CaseId`]'s number.
+    ///
+    /// It is not bounds-checked here, for `Half::Count`'s reason: which
+    /// numbers are cases is a fact about the layout the same instruction
+    /// names, so [`mod@crate::bytecode::verify`]'s semantic pass checks it
+    /// against that layout rather than against a table of its own.
+    Case,
     /// A word offset into an object or into the value an address names.
     Offset,
 }
@@ -289,6 +306,7 @@ impl Half {
             Half::Builtin => "builtin",
             Half::HostOp => "host op",
             Half::Count => "count",
+            Half::Case => "case",
             Half::Offset => "offset",
         }
     }
@@ -357,6 +375,7 @@ impl Op {
             Op::ConstBool,
             Op::ConstInt,
             Op::FuncRef,
+            Op::ConstTag,
             Op::ConstFloat,
             Op::Str,
             Op::Copy,
@@ -433,6 +452,7 @@ impl Op {
             Op::ConstBool => base::CONST_BOOL,
             Op::ConstInt => base::CONST_INT,
             Op::FuncRef => base::FUNC_REF,
+            Op::ConstTag => base::CONST_TAG,
             Op::ConstFloat => base::CONST_FLOAT,
             Op::Str => base::STR,
             Op::Copy => base::COPY,
@@ -523,6 +543,13 @@ impl Op {
             // writes the id into `a` exactly as `Op::ConstInt` writes its
             // immediate.
             Op::FuncRef => fields(Operand::Word(INT), NONE, NONE, one(Half::Function)),
+            // The destination is the one place a `Repr::Tag` is produced.
+            Op::ConstTag => fields(
+                Operand::Word(TAG),
+                NONE,
+                NONE,
+                ids(Half::Case, Half::Layout),
+            ),
             Op::ConstFloat => fields(Operand::Word(FLOAT), NONE, NONE, Payload::Imm),
             Op::Str => fields(Operand::Word(REF), NONE, NONE, one(Half::Str)),
             Op::Copy => fields(Operand::Value, Operand::Value, NONE, one(Half::Layout)),
@@ -578,7 +605,7 @@ impl Op {
             Op::BranchFalse => fields(Operand::Word(BOOL), NONE, NONE, Payload::Displacement),
             // The discriminant of an enum location is its first word and is
             // an `Int`; so is the layout id a `dyn` dispatch switches on.
-            Op::Switch => fields(Operand::Word(INT), NONE, NONE, one(Half::Table)),
+            Op::Switch => fields(Operand::Word(SWITCHED), NONE, NONE, one(Half::Table)),
             // `src` is a value location of `Function::returns`, which is not
             // in the instruction: the width check is the verifier's, from the
             // function being checked.
@@ -741,9 +768,9 @@ mod tests {
     /// ADR 0041's count, which is the one number the format's headroom is
     /// argued from: a hundred and one opcodes out of the 256 a byte names.
     #[test]
-    fn there_are_a_hundred_and_one_opcodes() {
-        assert_eq!(Op::all().len(), 101);
-        assert_eq!(OPCODES, 101);
+    fn there_are_a_hundred_and_two_opcodes() {
+        assert_eq!(Op::all().len(), 102);
+        assert_eq!(OPCODES, 102);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

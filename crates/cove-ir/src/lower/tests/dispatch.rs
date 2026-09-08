@@ -49,7 +49,7 @@ fn @m.take(Any) -> String
   frame 7: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:int
   local v -> s0:Any [0, 12)
      0  load-field s2:int s0:ref +0 Int
-     1  switch s2:int [9 9 9 9 9 9 9 9 9 9 9 9 9 2 6] else 9
+     1  switch s2:int [9 9 9 9 9 9 9 9 9 9 9 9 9 9 2 6] else 9
      2  unbox s4:ref s0:ref m.Name
      3  call s3:ref m.Name.show (s4:m.Name) String
      4  clear s4:ref m.Name
@@ -104,7 +104,7 @@ fn @m.f() -> String
      3  copy s2:ref s1:ref Any
      4  clear s1:ref Any
      5  load-field s3:int s2:ref +0 Int
-     6  switch s3:int [14 14 14 14 14 14 14 14 14 14 14 14 14 7 11] else 14
+     6  switch s3:int [14 14 14 14 14 14 14 14 14 14 14 14 14 14 7 11] else 14
      7  unbox s4:ref s2:ref m.Name
      8  call s1:ref m.Name.show (s4:m.Name) String
      9  clear s4:ref m.Name

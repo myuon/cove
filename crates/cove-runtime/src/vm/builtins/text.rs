@@ -30,7 +30,7 @@ use cove_ir::{LayoutId, Repr, Shape};
 
 use crate::error::RuntimeError;
 use crate::vm::builtins::operand::Operand;
-use crate::vm::builtins::{make, operand, scalar};
+use crate::vm::builtins::{make, operand};
 use crate::vm::exec::Machine;
 
 /// The address of a `String` receiver, with nothing read out of it.
@@ -155,37 +155,37 @@ pub(super) fn byte_length(
 /// `String.codePointAtByte(offset) -> Option<Int>`.
 pub(super) fn code_point_at_byte(
     machine: &mut Machine,
+    result: LayoutId,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (self_, args) = operand::method("String.codePointAtByte", operands, 1)?;
     let addr = receiver_addr(machine, "codePointAtByte", self_)?;
     let offset = operand::int(machine, "String.codePointAtByte", "offset", args[0])?;
-    let int = scalar::word_layout(machine.program(), Repr::Int)?;
     let len = machine.object_len(addr) as usize;
     match usize::try_from(offset)
         .ok()
         .filter(|at| *at < len)
         .and_then(|at| decode(machine, addr, at, len))
     {
-        Some(scalar) => make::some(machine, int, &[scalar as u64]),
-        None => make::none(machine, int),
+        Some(scalar) => make::some(machine, result, &[scalar as u64]),
+        None => make::none(machine, result),
     }
 }
 
 /// `String.sliceBytes(from, to) -> Result<String, Error>`.
 pub(super) fn slice_bytes(
     machine: &mut Machine,
+    result: LayoutId,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (self_, args) = operand::method("String.sliceBytes", operands, 2)?;
     let addr = receiver_addr(machine, "sliceBytes", self_)?;
     let from = operand::int(machine, "String.sliceBytes", "from", args[0])?;
     let to = operand::int(machine, "String.sliceBytes", "to", args[1])?;
-    let string = machine.program().str_layout;
     let len = machine.object_len(addr) as usize;
     let (start, end) = match byte_range(machine, addr, len, from, to) {
         Ok(range) => range,
-        Err(message) => return make::failed(machine, string, &message),
+        Err(message) => return make::failed(machine, result, &message),
     };
     // Proportional to the answer rather than to the receiver, which is the
     // point: a field taken out of a long line copies the field.
@@ -193,7 +193,7 @@ pub(super) fn slice_bytes(
     let text = String::from_utf8(bytes)
         .map_err(|_| RuntimeError::new("this string's bytes are not valid UTF-8"))?;
     let word = machine.new_string(&text)?;
-    make::ok(machine, string, &[word])
+    make::ok(machine, result, &[word])
 }
 
 /// `String.length() -> Int`, in characters.
@@ -352,17 +352,17 @@ pub(super) fn ends_with(
 /// for both cases.
 pub(super) fn index_of(
     machine: &mut Machine,
+    result: LayoutId,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (self_, args) = operand::method("String.indexOf", operands, 1)?;
     let text = receiver(machine, "indexOf", self_)?;
     let needle = operand::text(machine, "String.indexOf", "text", args[0])?;
-    let int = scalar::word_layout(machine.program(), Repr::Int)?;
     match text.find(&needle) {
         // `find` answers a byte offset; the characters before it are counted
         // to convert that into the character index `length()` counts in.
-        Some(byte) => make::some(machine, int, &[text[..byte].chars().count() as u64]),
-        None => make::none(machine, int),
+        Some(byte) => make::some(machine, result, &[text[..byte].chars().count() as u64]),
+        None => make::none(machine, result),
     }
 }
 
@@ -415,15 +415,15 @@ pub(super) fn to_lower(
 /// than a bad one.
 pub(super) fn from_code_point(
     machine: &mut Machine,
+    result: LayoutId,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let args = operand::free("String.fromCodePoint", operands, 1)?;
     let code_point = operand::int(machine, "String.fromCodePoint", "codePoint", args[0])?;
-    let string = machine.program().str_layout;
     if (0xD800..=0xDFFF).contains(&code_point) {
         let message =
             format!("`{code_point}` is a surrogate half, which is not a character on its own");
-        return make::failed(machine, string, &message);
+        return make::failed(machine, result, &message);
     }
     match u32::try_from(code_point).ok().and_then(char::from_u32) {
         Some(character) => {
@@ -431,11 +431,11 @@ pub(super) fn from_code_point(
             // Nothing allocates between the string and the `Ok` around it,
             // because a `Result` is words: the case is built out of the
             // layout table and the word it was just handed.
-            make::ok(machine, string, &[text])
+            make::ok(machine, result, &[text])
         }
         None => {
             let message = format!("`{code_point}` is not a Unicode code point");
-            make::failed(machine, string, &message)
+            make::failed(machine, result, &message)
         }
     }
 }

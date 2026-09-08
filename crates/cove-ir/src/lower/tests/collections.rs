@@ -367,22 +367,22 @@ fn reading_a_vector_element_is_ordinary_instructions() {
         ),
         "\
 fn @m.head(Vector) -> Option
-  frame 10: s0!:ref s1:int s2:int s3:int s4:int s5:ref s6:int s7:int s8:int s9:bool
+  frame 10: s0!:ref s1:tag s2:int s3:int s4:int s5:ref s6:tag s7:int s8:int s9:bool
   local v -> s0:Vector [0, 14)
      0  int s3:int 0
      1  load-field s4:int s0:ref +0 Int
      2  load-field s5:ref s0:ref +1 <ref>
-     3  int s6:int 0
+     3  tag s6:tag Option.None
      4  int s8:int 0
      5  ge.int s9:bool s3:int s8:int
      6  branch-false s9:bool 11
      7  lt.int s9:bool s3:int s4:int
      8  branch-false s9:bool 11
-     9  int s6:int 1
+     9  tag s6:tag Option.Some
     10  load-elem s7:int s5:ref s3:int Int
     11  clear s5:ref <ref>
-    12  copy s1:int s6:int Option
-    13  return s1:int Option
+    12  copy s1:tag s6:tag Option
+    13  return s1:tag Option
 "
     );
 }
@@ -565,12 +565,12 @@ fn a_map_lookup_answers_the_option_s_words_rather_than_an_object() {
         ),
         "\
 fn @m.f(Map) -> Option
-  frame 6: s0!:ref s1:int s2:int s3:ref s4:int s5:int
+  frame 6: s0!:ref s1:tag s2:int s3:ref s4:tag s5:int
   local m -> s0:Map [0, 4)
      0  str s3:ref \"a\"
-     1  call-builtin s4:int Map.get (s0:Map s3:String) Option
-     2  copy s1:int s4:int Option
-     3  return s1:int Option
+     1  call-builtin s4:tag Map.get (s0:Map s3:String) Option
+     2  copy s1:tag s4:tag Option
+     3  return s1:tag Option
 "
     );
 }

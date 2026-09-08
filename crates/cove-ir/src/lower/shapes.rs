@@ -132,6 +132,7 @@ pub(super) fn scalar(repr: Repr) -> LayoutId {
         Repr::Host => HOST,
         Repr::Task => TASK,
         Repr::Scope => SCOPE,
+        Repr::Tag => TAG,
     }
 }
 
@@ -166,6 +167,14 @@ pub(super) const TASK: LayoutId = LayoutId(11);
 
 /// A task scope: one past an index into the same table.
 pub(super) const SCOPE: LayoutId = LayoutId(12);
+
+/// One word that is an enum's case index.
+///
+/// It exists for the same reason [`REF`] does: a payload word is zeroed
+/// through the layout of the `Repr` it holds, and word 0 of an enum is a
+/// [`Repr::Tag`]. Nothing else names it — an enum's discriminant is never a
+/// value of its own in the language, so no declaration produces this.
+pub(super) const TAG: LayoutId = LayoutId(13);
 
 /// Payload word 0 of a [`Shape::Closure`] object: the callee's `FunctionId`.
 pub(super) const CLOSURE_CALLEE: u32 = 0;
@@ -254,6 +263,7 @@ impl Shapes {
             Layout::object("Any", Shape::Boxed),
             Layout::word("Task", Repr::Task),
             Layout::word("TaskScope", Repr::Scope),
+            Layout::word("<tag>", Repr::Tag),
         ];
         Shapes {
             layouts,
@@ -810,7 +820,7 @@ impl Shapes {
     fn enum_shape(&self, name: &str, cases: &[(Arc<str>, Vec<LayoutId>)]) -> Layout {
         let (cases, payload) = enum_layout(cases, &self.layouts);
         let mut words = Vec::with_capacity(1 + payload.len());
-        words.push(Repr::Int);
+        words.push(Repr::Tag);
         words.extend_from_slice(&payload);
         Layout::inline(name, Shape::Enum { cases, payload }, words)
     }
