@@ -33,12 +33,12 @@ use crate::vm::builtins::operand::Operand;
 use crate::vm::builtins::{make, operand, scalar};
 use crate::vm::exec::Machine;
 
-/// The text of a `String` receiver.
-fn receiver(
+/// The address of a `String` receiver, with nothing read out of it.
+fn receiver_addr(
     machine: &Machine,
     method: &str,
     receiver: Operand<'_>,
-) -> Result<String, RuntimeError> {
+) -> Result<u64, RuntimeError> {
     let Some((Repr::Ref, addr)) = operand::as_word(machine, receiver) else {
         return Err(operand::no_method(machine, receiver, method));
     };
@@ -48,7 +48,152 @@ fn receiver(
     if !super::is_string(machine, addr) {
         return Err(operand::no_method(machine, receiver, method));
     }
-    super::string_of(machine, addr)
+    Ok(addr)
+}
+
+/// The text of a `String` receiver.
+///
+/// This copies the whole object and validates it, once per call, which is
+/// what every operation above wanted and what the three byte-counted ones
+/// below exist to not do: they take [`receiver_addr`] and read the words they
+/// actually need.
+fn receiver(
+    machine: &Machine,
+    method: &str,
+    receiver: Operand<'_>,
+) -> Result<String, RuntimeError> {
+    super::string_of(machine, receiver_addr(machine, method, receiver)?)
+}
+
+/// The byte at `at` in the string object at `addr`.
+///
+/// The payload holds eight bytes to a word, least-significant byte first —
+/// this is the inverse of `Machine::write_bytes` — so one byte is one word
+/// read and a shift, and no part of the object is copied.
+fn byte_at(machine: &Machine, addr: u64, at: usize) -> u8 {
+    (machine.payload(addr, (at / 8) as u32) >> ((at % 8) * 8)) as u8
+}
+
+/// The Unicode scalar value beginning at byte `at`, or `None` when `at` is
+/// inside a character.
+///
+/// Nothing writes a string object except from a Rust `&str`, so the bytes are
+/// valid UTF-8 in the shortest form and the lead byte alone gives the width.
+/// A continuation byte in the lead position is the whole of "this offset is
+/// not a character boundary".
+fn decode(machine: &Machine, addr: u64, at: usize, len: usize) -> Option<u32> {
+    let lead = byte_at(machine, addr, at);
+    let (width, mut scalar) = match lead {
+        0x00..=0x7F => return Some(lead as u32),
+        0xC0..=0xDF => (2usize, (lead & 0x1F) as u32),
+        0xE0..=0xEF => (3, (lead & 0x0F) as u32),
+        0xF0..=0xF7 => (4, (lead & 0x07) as u32),
+        _ => return None,
+    };
+    if at + width > len {
+        return None;
+    }
+    for step in 1..width {
+        scalar = (scalar << 6) | (byte_at(machine, addr, at + step) & 0x3F) as u32;
+    }
+    Some(scalar)
+}
+
+/// The byte range `sliceBytes(from, to)` names, or what is wrong with it.
+///
+/// The oracle's reading, in `crates/cove-runtime/src/builtins.rs`'s
+/// `byte_range` — the same four questions in the same order and the same
+/// words, so that `tests/e2e/values_string` can pin one `expected.out` for
+/// both backends. Neither reads the other; this comment is the join.
+fn byte_range(
+    machine: &Machine,
+    addr: u64,
+    len: usize,
+    from: i64,
+    to: i64,
+) -> Result<(usize, usize), String> {
+    let offset = |name: &str, value: i64| -> Result<usize, String> {
+        usize::try_from(value)
+            .ok()
+            .filter(|at| *at <= len)
+            .ok_or_else(|| {
+                format!("`{name}` is `{value}`, and a byte offset into this string is 0 to {len}")
+            })
+    };
+    let start = offset("from", from)?;
+    let end = offset("to", to)?;
+    if start > end {
+        return Err(format!(
+            "`from` is `{from}` and `to` is `{to}`, so this range runs backwards"
+        ));
+    }
+    for (name, at) in [("from", start), ("to", end)] {
+        // The end of the string is a boundary and has no byte to look at.
+        if at < len && byte_at(machine, addr, at) & 0xC0 == 0x80 {
+            return Err(format!(
+                "`{name}` is `{at}`, which is inside a character rather than at the start of one"
+            ));
+        }
+    }
+    Ok((start, end))
+}
+
+/// `String.byteLength() -> Int`.
+///
+/// The object header's own length field — one word, no decode, no
+/// allocation. `length()` above it still counts characters and still walks
+/// them, which is the whole difference between the two.
+pub(super) fn byte_length(
+    machine: &mut Machine,
+    operands: &[Operand<'_>],
+) -> Result<u64, RuntimeError> {
+    let (self_, _) = operand::method("byteLength", operands, 0)?;
+    let addr = receiver_addr(machine, "byteLength", self_)?;
+    Ok(machine.object_len(addr) as u64)
+}
+
+/// `String.codePointAtByte(offset) -> Option<Int>`.
+pub(super) fn code_point_at_byte(
+    machine: &mut Machine,
+    operands: &[Operand<'_>],
+) -> Result<Vec<u64>, RuntimeError> {
+    let (self_, args) = operand::method("String.codePointAtByte", operands, 1)?;
+    let addr = receiver_addr(machine, "codePointAtByte", self_)?;
+    let offset = operand::int(machine, "String.codePointAtByte", "offset", args[0])?;
+    let int = scalar::word_layout(machine.program(), Repr::Int)?;
+    let len = machine.object_len(addr) as usize;
+    match usize::try_from(offset)
+        .ok()
+        .filter(|at| *at < len)
+        .and_then(|at| decode(machine, addr, at, len))
+    {
+        Some(scalar) => make::some(machine, int, &[scalar as u64]),
+        None => make::none(machine, int),
+    }
+}
+
+/// `String.sliceBytes(from, to) -> Result<String, Error>`.
+pub(super) fn slice_bytes(
+    machine: &mut Machine,
+    operands: &[Operand<'_>],
+) -> Result<Vec<u64>, RuntimeError> {
+    let (self_, args) = operand::method("String.sliceBytes", operands, 2)?;
+    let addr = receiver_addr(machine, "sliceBytes", self_)?;
+    let from = operand::int(machine, "String.sliceBytes", "from", args[0])?;
+    let to = operand::int(machine, "String.sliceBytes", "to", args[1])?;
+    let string = machine.program().str_layout;
+    let len = machine.object_len(addr) as usize;
+    let (start, end) = match byte_range(machine, addr, len, from, to) {
+        Ok(range) => range,
+        Err(message) => return make::failed(machine, string, &message),
+    };
+    // Proportional to the answer rather than to the receiver, which is the
+    // point: a field taken out of a long line copies the field.
+    let bytes: Vec<u8> = (start..end).map(|at| byte_at(machine, addr, at)).collect();
+    let text = String::from_utf8(bytes)
+        .map_err(|_| RuntimeError::new("this string's bytes are not valid UTF-8"))?;
+    let word = machine.new_string(&text)?;
+    make::ok(machine, string, &[word])
 }
 
 /// `String.length() -> Int`, in characters.

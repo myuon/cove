@@ -306,6 +306,17 @@ region — a literal is an ordinary heap object at an ordinary heap address, so
 ADR 0034's two-region rule stands — and what it buys beyond the branch is that
 every task of a run shares one object per literal instead of allocating its
 own.
+[ADR 0046](docs/adr/0046-a-byte-offset-is-a-value-a-string-hands-out.md)
+adds three byte-counted `String` primitives — `byteLength`,
+`codePointAtByte` and `sliceBytes` — so that a scanner can walk UTF-8 without
+allocating a one-character `String` per character. `length`, `slice` and
+`indexOf` still count characters and do not change; what keeps the two index
+spaces apart is that a byte offset is a value those three hand out and take
+back, named so in every signature, rather than a way to index a `String`. A
+code point is an `Int` and there is no `Char`. It also settles two of the
+methods that were waiting on it by measuring them: a Cove `contains` is 101×
+the builtin, so `contains`, `startsWith` and `endsWith` stay primitive, while
+a Cove `Int.parse` is 6.3× and reads as arithmetic.
 
 Syntax is still provisional and may change.
 

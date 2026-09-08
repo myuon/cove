@@ -90,3 +90,44 @@ allow = []
 [run.conv_host]
 entry = "convention.hostReentry"
 allow = ["clock"]
+
+# `chars`'s loop written against the byte-counted primitives instead — issue
+# #292. `bytescan` writes the scalar's width out and `bytescan_call` puts it
+# behind a function, so the pair separates what the primitive costs from what
+# a call in the loop costs.
+
+[run.bytescan]
+entry = "bytescan.main"
+allow = []
+
+[run.bytescan_call]
+entry = "bytescan.viaCall"
+allow = []
+
+# `contains` and `Int.parse` written in Cove against the byte-counted
+# primitives, beside the builtins they would replace — issue #292. `main` is
+# the agreement check; the five rows are the measurement.
+
+[run.stringlib]
+entry = "stringlib.main"
+allow = []
+
+[run.contains_builtin]
+entry = "stringlib.containsBuiltinRow"
+allow = []
+
+[run.contains_scalar]
+entry = "stringlib.containsScalarRow"
+allow = []
+
+[run.contains_slice]
+entry = "stringlib.containsSliceRow"
+allow = []
+
+[run.parse_builtin]
+entry = "stringlib.parseBuiltinRow"
+allow = []
+
+[run.parse_cove]
+entry = "stringlib.parseCoveRow"
+allow = []
