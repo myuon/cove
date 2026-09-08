@@ -26,7 +26,7 @@
 //! `Int` arithmetic once nanoseconds are the only representation this
 //! machine has to know about.
 
-use cove_ir::{LayoutId, Program, Repr, Shape};
+use cove_ir::{LayoutId, Repr};
 
 use crate::error::RuntimeError;
 use crate::vm::builtins::operand::Operand;
@@ -57,25 +57,6 @@ fn float_receiver(
     }
 }
 
-/// The one-word layout of a scalar family.
-///
-/// An operation that answers a `Result<Int, Error>` has to name the `Int` its
-/// `Ok` carries, and [`cove_ir::Builtin`] carries no layout for it — so the
-/// family is found in the layout table, the way [`make`] finds the `Result`
-/// around it. A miss is the same missing family [`make`] reports and says so
-/// in the same words.
-///
-/// `pub(super)` because [`super::text`] needs the same one word: `indexOf`
-/// answers an `Option<Int>`.
-pub(super) fn word_layout(program: &Program, repr: Repr) -> Result<LayoutId, RuntimeError> {
-    program
-        .layouts
-        .iter()
-        .position(|layout| layout.shape == Shape::Word(repr))
-        .map(|at| LayoutId(at as u32))
-        .ok_or_else(|| operand::unknown_family(repr.name()))
-}
-
 // --- Int -------------------------------------------------------------------
 
 /// `Int.toFloat() -> Float`.
@@ -94,14 +75,14 @@ pub(super) fn int_to_float(
 /// an `Err` here.
 pub(super) fn int_parse(
     machine: &mut Machine,
+    result: LayoutId,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let args = operand::free("Int.parse", operands, 1)?;
     let text = operand::text(machine, "Int.parse", "text", args[0])?;
-    let int = word_layout(machine.program(), Repr::Int)?;
     match text.parse::<i64>() {
-        Ok(value) => make::ok(machine, int, &[value as u64]),
-        Err(_) => make::failed(machine, int, &format!("`{text}` is not an Int")),
+        Ok(value) => make::ok(machine, result, &[value as u64]),
+        Err(_) => make::failed(machine, result, &format!("`{text}` is not an Int")),
     }
 }
 
@@ -112,6 +93,7 @@ pub(super) fn int_parse(
 /// radix that does exist is the data's failure and answers `Err`.
 pub(super) fn int_parse_radix(
     machine: &mut Machine,
+    result: LayoutId,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let args = operand::free("Int.parseRadix", operands, 2)?;
@@ -120,12 +102,11 @@ pub(super) fn int_parse_radix(
     let Some(base) = (2..=36).contains(&radix).then_some(radix as u32) else {
         return Err(operand::radix(radix));
     };
-    let int = word_layout(machine.program(), Repr::Int)?;
     match i64::from_str_radix(&text, base) {
-        Ok(value) => make::ok(machine, int, &[value as u64]),
+        Ok(value) => make::ok(machine, result, &[value as u64]),
         Err(_) => {
             let message = format!("`{text}` is not an Int in radix {base}");
-            make::failed(machine, int, &message)
+            make::failed(machine, result, &message)
         }
     }
 }
@@ -135,28 +116,28 @@ pub(super) fn int_parse_radix(
 /// `Float.toInt() -> Result<Int, Error>`, truncating toward zero.
 pub(super) fn float_to_int(
     machine: &mut Machine,
+    result: LayoutId,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (self_, _) = operand::method("toInt", operands, 0)?;
     let x = float_receiver(machine, "toInt", self_)?;
-    let int = word_layout(machine.program(), Repr::Int)?;
     if x.is_nan() {
         return make::failed(
             machine,
-            int,
+            result,
             "`Float.toInt` cannot convert `NaN`, which is not a number",
         );
     }
     if x.is_infinite() {
         let message = format!("`Float.toInt` cannot convert `{x}`, which has no truncation");
-        return make::failed(machine, int, &message);
+        return make::failed(machine, result, &message);
     }
     let truncated = x.trunc();
     if truncated < i64::MIN as f64 || truncated >= i64::MAX as f64 {
         let message = format!("`Float.toInt` cannot convert `{x}`, which is outside Int's range");
-        return make::failed(machine, int, &message);
+        return make::failed(machine, result, &message);
     }
-    make::ok(machine, int, &[truncated as i64 as u64])
+    make::ok(machine, result, &[truncated as i64 as u64])
 }
 
 /// `Float.round() -> Float`.
@@ -239,14 +220,14 @@ pub(super) fn float_format(
 /// the same thing `Int.parse` does.
 pub(super) fn float_parse(
     machine: &mut Machine,
+    result: LayoutId,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let args = operand::free("Float.parse", operands, 1)?;
     let text = operand::text(machine, "Float.parse", "text", args[0])?;
-    let float = word_layout(machine.program(), Repr::Float)?;
     match text.parse::<f64>() {
-        Ok(value) => make::ok(machine, float, &[value.to_bits()]),
-        Err(_) => make::failed(machine, float, &format!("`{text}` is not a Float")),
+        Ok(value) => make::ok(machine, result, &[value.to_bits()]),
+        Err(_) => make::failed(machine, result, &format!("`{text}` is not a Float")),
     }
 }
 

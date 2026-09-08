@@ -71,10 +71,6 @@ pub(crate) fn call(
     builtin: &Builtin,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
-    // What the IR says this call answers. `make` needs it to tell two
-    // instantiations of one family apart, and this is the only place it is
-    // known — see `Machine::builtin_result`.
-    machine.expect_builtin_result(builtin.result);
     // One match over the pair the IR names, so that teaching the machine an
     // operation is adding an arm and nothing else.
     match (&*builtin.receiver, &*builtin.operation) {
@@ -118,26 +114,26 @@ pub(crate) fn call(
         // this backend has been taught reads as a table. What each one means
         // is in the module it delegates to, beside the reading of the oracle
         // it follows.
-        ("Array", "get") => seq::array_get(machine, operands),
+        ("Array", "get") => seq::array_get(machine, builtin.result, operands),
         ("Array", "length") => seq::array_length(machine, operands).map(one),
         // `Array.isEmpty` is not here: it is `std.array.isEmpty`, the first
         // builtin method whose body is Cove rather than a machine builtin —
         // see `cove_schema::builtins::standard_binding` and
         // `cove_ir::lower::methods::Body::call_std_binding`.
         ("Array", "contains") => seq::array_contains(machine, operands).map(one),
-        ("Array", "indexOf") => seq::array_index_of(machine, operands),
+        ("Array", "indexOf") => seq::array_index_of(machine, builtin.result, operands),
         ("Array", "slice") => seq::array_slice(machine, operands).map(one),
         ("Array", "toVector") => seq::array_to_vector(machine, operands).map(one),
 
         // ---- Vector ------------------------------------------------------
         ("Vector", "of") => seq::vector_of(machine, operands).map(one),
         ("Vector", "push") => seq::vector_push(machine, operands).map(one),
-        ("Vector", "set") => seq::vector_set(machine, operands),
-        ("Vector", "pop") => seq::vector_pop(machine, operands),
-        ("Vector", "remove") => seq::vector_remove(machine, operands),
-        ("Vector", "get") => seq::vector_get(machine, operands),
+        ("Vector", "set") => seq::vector_set(machine, builtin.result, operands),
+        ("Vector", "pop") => seq::vector_pop(machine, builtin.result, operands),
+        ("Vector", "remove") => seq::vector_remove(machine, builtin.result, operands),
+        ("Vector", "get") => seq::vector_get(machine, builtin.result, operands),
         ("Vector", "contains") => seq::vector_contains(machine, operands).map(one),
-        ("Vector", "indexOf") => seq::vector_index_of(machine, operands),
+        ("Vector", "indexOf") => seq::vector_index_of(machine, builtin.result, operands),
         ("Vector", "slice") => seq::vector_slice(machine, operands).map(one),
         ("Vector", "length") => seq::vector_length(machine, operands).map(one),
         // `Vector.isEmpty` is not here: it is `std.vector.isEmpty` — see
@@ -160,7 +156,7 @@ pub(crate) fn call(
 
         // ---- Map ---------------------------------------------------------
         ("Map", "of") => keyed::map_of(machine, operands).map(one),
-        ("Map", "get") => keyed::map_get(machine, operands),
+        ("Map", "get") => keyed::map_get(machine, builtin.result, operands),
         ("Map", "contains") => keyed::map_contains(machine, operands).map(one),
         ("Map", "length") => keyed::map_length(machine, operands).map(one),
         // `Map.isEmpty` is not here: it is `std.map.isEmpty` — see
@@ -183,35 +179,35 @@ pub(crate) fn call(
         ("String", "contains") => text::contains(machine, operands).map(one),
         ("String", "startsWith") => text::starts_with(machine, operands).map(one),
         ("String", "endsWith") => text::ends_with(machine, operands).map(one),
-        ("String", "indexOf") => text::index_of(machine, operands),
+        ("String", "indexOf") => text::index_of(machine, builtin.result, operands),
         ("String", "replace") => text::replace(machine, operands).map(one),
         ("String", "toUpper") => text::to_upper(machine, operands).map(one),
         ("String", "toLower") => text::to_lower(machine, operands).map(one),
-        ("String", "fromCodePoint") => text::from_code_point(machine, operands),
+        ("String", "fromCodePoint") => text::from_code_point(machine, builtin.result, operands),
         // The three that count bytes. Every one of them reads the object's
         // header or a word of its payload rather than decoding the whole
         // string, which is the only reason they are worth having.
         ("String", "byteLength") => text::byte_length(machine, operands).map(one),
-        ("String", "codePointAtByte") => text::code_point_at_byte(machine, operands),
-        ("String", "sliceBytes") => text::slice_bytes(machine, operands),
+        ("String", "codePointAtByte") => text::code_point_at_byte(machine, builtin.result, operands),
+        ("String", "sliceBytes") => text::slice_bytes(machine, builtin.result, operands),
 
         // ---- Int ---------------------------------------------------------
         ("Int", "toFloat") => scalar::int_to_float(machine, operands).map(one),
         // `Int.min`, `Int.max`, and `Int.abs` are not here: they are
         // `std.int.min`, `std.int.max`, and `std.int.abs` — see
         // `cove_schema::builtins::standard_binding`.
-        ("Int", "parse") => scalar::int_parse(machine, operands),
-        ("Int", "parseRadix") => scalar::int_parse_radix(machine, operands),
+        ("Int", "parse") => scalar::int_parse(machine, builtin.result, operands),
+        ("Int", "parseRadix") => scalar::int_parse_radix(machine, builtin.result, operands),
 
         // ---- Float -------------------------------------------------------
-        ("Float", "toInt") => scalar::float_to_int(machine, operands),
+        ("Float", "toInt") => scalar::float_to_int(machine, builtin.result, operands),
         ("Float", "round") => scalar::float_round(machine, operands).map(one),
         ("Float", "abs") => scalar::float_abs(machine, operands).map(one),
         ("Float", "sqrt") => scalar::float_sqrt(machine, operands).map(one),
         ("Float", "min") => scalar::float_min(machine, operands).map(one),
         ("Float", "max") => scalar::float_max(machine, operands).map(one),
         ("Float", "format") => scalar::float_format(machine, operands).map(one),
-        ("Float", "parse") => scalar::float_parse(machine, operands),
+        ("Float", "parse") => scalar::float_parse(machine, builtin.result, operands),
 
         // ---- Duration ----------------------------------------------------
         //
@@ -800,22 +796,89 @@ mod tests {
         operation: &str,
         operands: &[(LayoutId, &[u64])],
     ) -> Result<Vec<u64>, RuntimeError> {
-        let passed: Vec<Operand<'_>> = operands
+        let result = declared(machine.program(), receiver, operation, operands);
+        answering(machine, receiver, operation, result, operands)
+    }
+
+    /// The layout the lowering would have put in `Inst::CallBuiltin`.
+    ///
+    /// A fixture standing in for the lowering, and it is here rather than in
+    /// `make` on purpose: the machine is *given* the layout of the answer,
+    /// and a test that builds its operands by hand has to decide it the same
+    /// way. What this must not be is a search inside the builtin — that is
+    /// the bug `a_builtin_answers_the_result_its_instruction_declares` pins,
+    /// and the reason both this and production hand the layout down as data.
+    ///
+    /// Every operation that answers an `Option` or a `Result` is named here.
+    /// Anything else answers a value whose layout the builtin already knows,
+    /// so the free layout is right for it and is never read.
+    fn declared(
+        program: &Program,
+        receiver: &str,
+        operation: &str,
+        operands: &[(LayoutId, &[u64])],
+    ) -> LayoutId {
+        let ints = || word_layout(program, Repr::Int);
+        let held = |at: usize| operands.get(at).map(|(layout, _)| *layout);
+        // The payload of the sequence or map the call is on.
+        let inside = || {
+            let layout = program.layout(held(0)?);
+            match layout.shape {
+                Shape::Elements { elem, .. } | Shape::Vector { elem } => Some(elem),
+                Shape::Entries { value, .. } => Some(value),
+                _ => None,
+            }
+        };
+        let payload = match (receiver, operation) {
+            ("Array" | "Vector", "get" | "set" | "pop" | "remove") => inside(),
+            ("Map", "get") => inside(),
+            ("Array" | "Vector" | "String", "indexOf") => ints(),
+            ("String", "codePointAtByte") => ints(),
+            ("Int", "parse" | "parseRadix") | ("Float", "toInt") => ints(),
+            ("Float", "parse") => word_layout(program, Repr::Float),
+            ("String", "sliceBytes" | "fromCodePoint") => Some(program.str_layout),
+            _ => None,
+        };
+        let (family, carrier) = match (receiver, operation) {
+            ("Int", "parse" | "parseRadix")
+            | ("Float", "parse" | "toInt")
+            | ("String", "sliceBytes" | "fromCodePoint") => ("Result", "Ok"),
+            _ => ("Option", "Some"),
+        };
+        payload
+            .and_then(|payload| carrying(program, family, carrier, payload))
+            .unwrap_or(LayoutId::FREE)
+    }
+
+    /// The enum called `name` whose case `carrier` holds one `payload`.
+    fn carrying(
+        program: &Program,
+        name: &str,
+        carrier: &str,
+        payload: LayoutId,
+    ) -> Option<LayoutId> {
+        program
+            .layouts
             .iter()
-            .map(|(layout, words)| Operand {
-                layout: *layout,
-                words,
+            .enumerate()
+            .find(|(_, layout)| {
+                &*layout.name == name
+                    && matches!(&layout.shape, Shape::Enum { cases, .. } if cases.iter().any(|case| {
+                        &*case.name == carrier
+                            && case.parts.len() == 1
+                            && case.parts[0].layout == payload
+                    }))
             })
-            .collect();
-        call(
-            machine,
-            &Builtin {
-                receiver: Arc::from(receiver),
-                operation: Arc::from(operation),
-                result: LayoutId::FREE,
-            },
-            &passed,
-        )
+            .map(|(at, _)| LayoutId(at as u32))
+    }
+
+    /// The one-word layout of `repr`, where the program declares one.
+    fn word_layout(program: &Program, repr: Repr) -> Option<LayoutId> {
+        program
+            .layouts
+            .iter()
+            .position(|layout| layout.shape == Shape::Word(repr))
+            .map(|at| LayoutId(at as u32))
     }
 
     /// An operand naming the value location `words` of `layout`.

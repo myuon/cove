@@ -124,10 +124,20 @@ It had been latent for as long as both existed. Adding one layout to the table
 changed which of the two the search reached first, and `examples/cq`'s own test
 suite crashed the VM.
 
-**`Inst::CallBuiltin` has carried the answer's layout all along.** The machine
-now records it on entry to every builtin and `make` reads it instead of
-searching, which is exact and cannot be ambiguous. The search is still there
-for the callers that declare no enum.
+**`Inst::CallBuiltin` has carried the answer's layout all along.** It is
+passed down from `builtins::call` to the sixteen builtins that build one and
+on into `make`, which no longer searches at all: `make::ok`, `failed`, `some`
+and `none` take the enum they are answering and look up one case index in it.
+
+It is passed as an argument rather than recorded on the `Machine`, which is
+what it was first written as. Ambient state would have added a temporal
+invariant — every reader must have had it set immediately before — that is
+left deliberately stale after the call, would be overwritten by a builtin
+calling another builtin, and would make a direct test call take a different
+path. None of that is needed to fix the bug, and this ADR is the wrong place
+to hide a known fact in mutable state: **it is about carrying known meaning
+explicitly rather than inferring it from representation**, and the answer's
+layout is exactly such a fact.
 
 ## Consequences
 

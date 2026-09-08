@@ -542,6 +542,7 @@ fn mixed(machine: &Machine, entry: &Entry) -> RuntimeError {
 /// destination location the way a copy writes one.
 pub(super) fn map_get(
     machine: &mut Machine,
+    result: LayoutId,
     operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (receiver, args) = operand::method("Map.get", operands, 1)?;
@@ -558,9 +559,9 @@ pub(super) fn map_get(
     match found {
         Ok(at) => {
             let words = entries.value_words(machine, at);
-            make::some(machine, entries.value, &words)
+            make::some(machine, result, &words)
         }
-        Err(_) => make::none(machine, entries.value),
+        Err(_) => make::none(machine, result),
     }
 }
 
