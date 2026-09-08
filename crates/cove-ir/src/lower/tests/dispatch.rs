@@ -17,13 +17,13 @@ fn @m.f() -> String
   frame 7: s0:ref s1:int s2:int s3:int s4:int s5:ref s6:ref
      0  int s1:int 1
      1  int s2:int 2
-     2  copy s3:int s1:int Int
-     3  copy s4:int s2:int Int
-     4  box s5:ref s3:int m.Point
-     5  call s6:ref m.take (s5:Any) String
-     6  clear s5:ref Any
-     7  copy s0:ref s6:ref String
-     8  return s0:ref String
+     2  copy s3:Int s1:Int
+     3  copy s4:Int s2:Int
+     4  box s5:ref s3..s4:m.Point
+     5  call s6:String m.take (s5:Any)
+     6  clear s5:Any
+     7  copy s0:String s6:String
+     8  return s0:String
 "
     );
 }
@@ -48,18 +48,18 @@ fn a_dyn_call_switches_on_the_layout_the_box_records() {
 fn @m.take(Any) -> String
   frame 7: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:int
   local v -> s0:Any [0, 12)
-     0  load-field s2:int s0:ref +0 Int
+     0  load-field s2:Int s0:ref +0
      1  switch s2:int [9 9 9 9 9 9 9 9 9 9 9 9 9 9 2 6] else 9
-     2  unbox s4:ref s0:ref m.Name
-     3  call s3:ref m.Name.show (s4:m.Name) String
-     4  clear s4:ref m.Name
+     2  unbox s4:m.Name s0:ref
+     3  call s3:String m.Name.show (s4:m.Name)
+     4  clear s4:m.Name
      5  jump 10
-     6  unbox s5:int s0:ref m.Point
-     7  call s3:ref m.Point.show (s5:m.Point) String
+     6  unbox s5..s6:m.Point s0:ref
+     7  call s3:String m.Point.show (s5..s6:m.Point)
      8  jump 10
      9  trap \"no implementation of `Show.show` for this value\"
-    10  copy s1:ref s3:ref String
-    11  return s1:ref String
+    10  copy s1:String s3:String
+    11  return s1:String
 "
     );
 }
@@ -78,11 +78,11 @@ fn @m.mk() -> Any
   frame 6: s0:ref s1:int s2:int s3:int s4:int s5:ref
      0  int s1:int 1
      1  int s2:int 2
-     2  copy s3:int s1:int Int
-     3  copy s4:int s2:int Int
-     4  box s5:ref s3:int m.Point
-     5  copy s0:ref s5:ref Any
-     6  return s0:ref Any
+     2  copy s3:Int s1:Int
+     3  copy s4:Int s2:Int
+     4  box s5:ref s3..s4:m.Point
+     5  copy s0:Any s5:Any
+     6  return s0:Any
 "
     );
 }
@@ -99,22 +99,22 @@ fn @m.f() -> String
   frame 7: s0:ref s1:ref s2:ref s3:int s4:ref s5:int s6:int
   local h -> s2:m.Holder [5, 16)
      0  str s1:ref \"n\"
-     1  copy s2:ref s1:ref String
-     2  box s1:ref s2:ref m.Name
-     3  copy s2:ref s1:ref Any
-     4  clear s1:ref Any
-     5  load-field s3:int s2:ref +0 Int
+     1  copy s2:String s1:String
+     2  box s1:ref s2:m.Name
+     3  copy s2:Any s1:Any
+     4  clear s1:Any
+     5  load-field s3:Int s2:ref +0
      6  switch s3:int [14 14 14 14 14 14 14 14 14 14 14 14 14 14 7 11] else 14
-     7  unbox s4:ref s2:ref m.Name
-     8  call s1:ref m.Name.show (s4:m.Name) String
-     9  clear s4:ref m.Name
+     7  unbox s4:m.Name s2:ref
+     8  call s1:String m.Name.show (s4:m.Name)
+     9  clear s4:m.Name
     10  jump 15
-    11  unbox s5:int s2:ref m.Point
-    12  call s1:ref m.Point.show (s5:m.Point) String
+    11  unbox s5..s6:m.Point s2:ref
+    12  call s1:String m.Point.show (s5..s6:m.Point)
     13  jump 15
     14  trap \"no implementation of `Show.show` for this value\"
-    15  copy s0:ref s1:ref String
-    16  return s0:ref String
+    15  copy s0:String s1:String
+    16  return s0:String
 "
     );
 }
@@ -151,11 +151,11 @@ fn @m.Booking.line(m.Booking) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
   local self -> s0:m.Booking [0, 6)
      0  str s2:ref \"- \"
-     1  call s3:ref m.Booking.summarize (s0:m.Booking) String
-     2  call-builtin s4:ref String.interpolate (s2:String s3:String) String
-     3  clear s3:ref String
-     4  copy s1:ref s4:ref String
-     5  return s1:ref String
+     1  call s3:String m.Booking.summarize (s0:m.Booking)
+     2  call-builtin s4:String String.interpolate (s2:String s3:String)
+     3  clear s3:String
+     4  copy s1:String s4:String
+     5  return s1:String
 "
     );
     assert_eq!(
@@ -165,11 +165,11 @@ fn @m.Receipt.line(m.Receipt) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
   local self -> s0:m.Receipt [0, 6)
      0  str s2:ref \"- \"
-     1  call s3:ref m.Receipt.summarize (s0:m.Receipt) String
-     2  call-builtin s4:ref String.interpolate (s2:String s3:String) String
-     3  clear s3:ref String
-     4  copy s1:ref s4:ref String
-     5  return s1:ref String
+     1  call s3:String m.Receipt.summarize (s0:m.Receipt)
+     2  call-builtin s4:String String.interpolate (s2:String s3:String)
+     3  clear s3:String
+     4  copy s1:String s4:String
+     5  return s1:String
 "
     );
 }
@@ -193,11 +193,11 @@ fn @m.Receipt.line(m.Receipt) -> String
   frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
   local self -> s0:m.Receipt [0, 6)
      0  str s2:ref \"  $ \"
-     1  call s3:ref m.Receipt.summarize (s0:m.Receipt) String
-     2  call-builtin s4:ref String.interpolate (s2:String s3:String) String
-     3  clear s3:ref String
-     4  copy s1:ref s4:ref String
-     5  return s1:ref String
+     1  call s3:String m.Receipt.summarize (s0:m.Receipt)
+     2  call-builtin s4:String String.interpolate (s2:String s3:String)
+     3  clear s3:String
+     4  copy s1:String s4:String
+     5  return s1:String
 "
     );
 }

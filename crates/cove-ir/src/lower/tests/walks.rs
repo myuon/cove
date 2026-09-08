@@ -42,10 +42,10 @@ fn map_is_a_loop_that_clears_the_element_and_the_turn_s_answer() {
 fn @m.f(Array) -> Array
   frame 11: s0!:ref s1:ref s2:ref s3:ref s4:int s5:ref s6:int s7:int s8:bool s9:ref s10:ref
   local xs -> s0:Array [0, 22)
-     0  copy s2:ref s0:ref Array
+     0  copy s2:Array s0:Array
      1  alloc s3:ref closure m.f#0<closure>
      2  func-ref s4:int @m.f#0
-     3  store-field s3:ref +0 s4:int Int
+     3  store-field s3:ref +0 s4:Int
      4  len s4:int s2:ref
      5  alloc s5:ref Array<array> xs4:int
      6  int s6:int 0
@@ -54,16 +54,16 @@ fn @m.f(Array) -> Array
      9  add.int s6:int s6:int s7:int
     10  lt.int s8:bool s6:int s4:int
     11  branch-false s8:bool 18
-    12  load-elem s9:ref s2:ref s6:int String
+    12  load-elem s9:String s2:ref s6:int
     13  call-closure s10:ref s3:ref (s9:String)
-    14  store-elem s5:ref s6:int s10:ref String
-    15  clear s10:ref String
-    16  clear s9:ref String
+    14  store-elem s5:ref s6:int s10:String
+    15  clear s10:String
+    16  clear s9:String
     17  jump 9
-    18  clear s3:ref fn
-    19  clear s2:ref Array
-    20  copy s1:ref s5:ref Array
-    21  return s1:ref Array
+    18  clear s3:fn
+    19  clear s2:Array
+    20  copy s1:Array s5:Array
+    21  return s1:Array
 "
     );
 }
@@ -87,11 +87,11 @@ fn @m.f(Array) -> Array
   local xs -> s0:Array [0, 7)
      0  alloc s2:ref closure m.f#0<closure>
      1  func-ref s3:int @m.f#0
-     2  store-field s2:ref +0 s3:int Int
-     3  call s4:ref std.array.filter<String> (s0:Array s2:fn) Array
-     4  clear s2:ref fn
-     5  copy s1:ref s4:ref Array
-     6  return s1:ref Array
+     2  store-field s2:ref +0 s3:Int
+     3  call s4:Array std.array.filter<String> (s0:Array s2:fn)
+     4  clear s2:fn
+     5  copy s1:Array s4:Array
+     6  return s1:Array
 "
     );
 }
@@ -116,11 +116,11 @@ fn @m.f(Array) -> Int
      0  int s2:int 0
      1  alloc s3:ref closure m.f#0<closure>
      2  func-ref s4:int @m.f#0
-     3  store-field s3:ref +0 s4:int Int
-     4  call s4:int std.array.fold<String, Int> (s0:Array s2:Int s3:fn) Int
-     5  clear s3:ref fn
-     6  copy s1:int s4:int Int
-     7  return s1:int Int
+     3  store-field s3:ref +0 s4:Int
+     4  call s4:Int std.array.fold<String, Int> (s0:Array s2:Int s3:fn)
+     5  clear s3:fn
+     6  copy s1:Int s4:Int
+     7  return s1:Int
 "
     );
 }
@@ -143,10 +143,10 @@ fn a_vector_is_walked_through_a_copy_taken_before_the_first_call() {
 fn @m.f(Vector) -> Array
   frame 11: s0!:ref s1:ref s2:ref s3:ref s4:int s5:ref s6:int s7:int s8:bool s9:int s10:int
   local v -> s0:Vector [0, 20)
-     0  call-builtin s2:ref Vector.toArray (s0:Vector) Array
+     0  call-builtin s2:Array Vector.toArray (s0:Vector)
      1  alloc s3:ref closure m.f#0<closure>
      2  func-ref s4:int @m.f#0
-     3  store-field s3:ref +0 s4:int Int
+     3  store-field s3:ref +0 s4:Int
      4  len s4:int s2:ref
      5  alloc s5:ref Array<array> xs4:int
      6  int s6:int 0
@@ -155,14 +155,14 @@ fn @m.f(Vector) -> Array
      9  add.int s6:int s6:int s7:int
     10  lt.int s8:bool s6:int s4:int
     11  branch-false s8:bool 16
-    12  load-elem s9:int s2:ref s6:int Int
+    12  load-elem s9:Int s2:ref s6:int
     13  call-closure s10:int s3:ref (s9:Int)
-    14  store-elem s5:ref s6:int s10:int Int
+    14  store-elem s5:ref s6:int s10:Int
     15  jump 9
-    16  clear s3:ref fn
-    17  clear s2:ref Array
-    18  copy s1:ref s5:ref Array
-    19  return s1:ref Array
+    16  clear s3:fn
+    17  clear s2:Array
+    18  copy s1:Array s5:Array
+    19  return s1:Array
 "
     );
 }
@@ -184,10 +184,10 @@ fn a_declared_function_handed_to_map_is_the_same_loop() {
 fn @m.f(Array) -> Array
   frame 11: s0!:ref s1:ref s2:ref s3:ref s4:int s5:ref s6:int s7:int s8:bool s9:int s10:int
   local xs -> s0:Array [0, 20)
-     0  copy s2:ref s0:ref Array
+     0  copy s2:Array s0:Array
      1  alloc s3:ref closure m.double<closure>
      2  func-ref s4:int @m.double
-     3  store-field s3:ref +0 s4:int Int
+     3  store-field s3:ref +0 s4:Int
      4  len s4:int s2:ref
      5  alloc s5:ref Array<array> xs4:int
      6  int s6:int 0
@@ -196,14 +196,14 @@ fn @m.f(Array) -> Array
      9  add.int s6:int s6:int s7:int
     10  lt.int s8:bool s6:int s4:int
     11  branch-false s8:bool 16
-    12  load-elem s9:int s2:ref s6:int Int
+    12  load-elem s9:Int s2:ref s6:int
     13  call-closure s10:int s3:ref (s9:Int)
-    14  store-elem s5:ref s6:int s10:int Int
+    14  store-elem s5:ref s6:int s10:Int
     15  jump 9
-    16  clear s3:ref fn
-    17  clear s2:ref Array
-    18  copy s1:ref s5:ref Array
-    19  return s1:ref Array
+    16  clear s3:fn
+    17  clear s2:Array
+    18  copy s1:Array s5:Array
+    19  return s1:Array
 "
     );
 }
@@ -223,10 +223,10 @@ fn a_walk_over_multiword_elements_is_a_stride_rather_than_an_address() {
 fn @m.f(Array) -> Array
   frame 12: s0!:ref s1:ref s2:ref s3:ref s4:int s5:ref s6:int s7:int s8:bool s9:int s10:int s11:int
   local xs -> s0:Array [0, 20)
-     0  copy s2:ref s0:ref Array
+     0  copy s2:Array s0:Array
      1  alloc s3:ref closure m.f#0<closure>
      2  func-ref s4:int @m.f#0
-     3  store-field s3:ref +0 s4:int Int
+     3  store-field s3:ref +0 s4:Int
      4  len s4:int s2:ref
      5  alloc s5:ref Array<array> xs4:int
      6  int s6:int 0
@@ -235,14 +235,14 @@ fn @m.f(Array) -> Array
      9  add.int s6:int s6:int s7:int
     10  lt.int s8:bool s6:int s4:int
     11  branch-false s8:bool 16
-    12  load-elem s9:int s2:ref s6:int Int
+    12  load-elem s9:Int s2:ref s6:int
     13  call-closure s10:int s3:ref (s9:Int)
-    14  store-elem s5:ref s6:int s10:int m.Point
+    14  store-elem s5:ref s6:int s10..s11:m.Point
     15  jump 9
-    16  clear s3:ref fn
-    17  clear s2:ref Array
-    18  copy s1:ref s5:ref Array
-    19  return s1:ref Array
+    16  clear s3:fn
+    17  clear s2:Array
+    18  copy s1:Array s5:Array
+    19  return s1:Array
 "
     );
 }
@@ -284,74 +284,74 @@ fn sorted_is_a_bottom_up_stable_merge_over_two_runs() {
 fn @m.f(Array) -> Array
   frame 20: s0!:ref s1:ref s2:ref s3:ref s4:int s5:int s6:ref s7:int s8:int s9:int s10:int s11:int s12:int s13:int s14:int s15:bool s16:int s17:int s18:bool s19:ref
   local xs -> s0:Array [0, 68)
-     0  copy s2:ref s0:ref Array
+     0  copy s2:Array s0:Array
      1  alloc s3:ref closure m.f#0<closure>
      2  func-ref s4:int @m.f#0
-     3  store-field s3:ref +0 s4:int Int
+     3  store-field s3:ref +0 s4:Int
      4  len s4:int s2:ref
      5  int s5:int 0
-     6  call-builtin s6:ref Array.slice (s2:Array s5:Int s4:Int) Array
-     7  clear s2:ref Array
+     6  call-builtin s6:Array Array.slice (s2:Array s5:Int s4:Int)
+     7  clear s2:Array
      8  alloc s2:ref Array<array> xs4:int
      9  int s7:int 1
     10  int s8:int 1
     11  lt.int s15:bool s8:int s4:int
     12  branch-false s15:bool 64
-    13  copy s9:int s5:int Int
-    14  copy s10:int s5:int Int
+    13  copy s9:Int s5:Int
+    14  copy s10:Int s5:Int
     15  lt.int s15:bool s10:int s4:int
     16  branch-false s15:bool 58
     17  add.int s11:int s10:int s8:int
     18  add.int s12:int s11:int s8:int
     19  gt.int s18:bool s11:int s4:int
     20  branch-false s18:bool 22
-    21  copy s11:int s4:int Int
+    21  copy s11:Int s4:Int
     22  gt.int s18:bool s12:int s4:int
     23  branch-false s18:bool 25
-    24  copy s12:int s4:int Int
-    25  copy s13:int s10:int Int
-    26  copy s14:int s11:int Int
+    24  copy s12:Int s4:Int
+    25  copy s13:Int s10:Int
+    26  copy s14:Int s11:Int
     27  lt.int s15:bool s13:int s11:int
     28  branch-false s15:bool 42
     29  lt.int s15:bool s14:int s12:int
     30  branch-false s15:bool 42
-    31  load-elem s16:int s6:ref s14:int Int
-    32  load-elem s17:int s6:ref s13:int Int
+    31  load-elem s16:Int s6:ref s14:int
+    32  load-elem s17:Int s6:ref s13:int
     33  call-closure s15:bool s3:ref (s16:Int s17:Int)
     34  branch-false s15:bool 38
-    35  store-elem s2:ref s9:int s16:int Int
+    35  store-elem s2:ref s9:int s16:Int
     36  add.int s14:int s14:int s7:int
     37  jump 40
-    38  store-elem s2:ref s9:int s17:int Int
+    38  store-elem s2:ref s9:int s17:Int
     39  add.int s13:int s13:int s7:int
     40  add.int s9:int s9:int s7:int
     41  jump 27
     42  lt.int s18:bool s13:int s11:int
     43  branch-false s18:bool 49
-    44  load-elem s16:int s6:ref s13:int Int
-    45  store-elem s2:ref s9:int s16:int Int
+    44  load-elem s16:Int s6:ref s13:int
+    45  store-elem s2:ref s9:int s16:Int
     46  add.int s13:int s13:int s7:int
     47  add.int s9:int s9:int s7:int
     48  jump 42
     49  lt.int s18:bool s14:int s12:int
     50  branch-false s18:bool 56
-    51  load-elem s16:int s6:ref s14:int Int
-    52  store-elem s2:ref s9:int s16:int Int
+    51  load-elem s16:Int s6:ref s14:int
+    52  store-elem s2:ref s9:int s16:Int
     53  add.int s14:int s14:int s7:int
     54  add.int s9:int s9:int s7:int
     55  jump 49
-    56  copy s10:int s12:int Int
+    56  copy s10:Int s12:Int
     57  jump 15
-    58  copy s19:ref s6:ref Array
-    59  copy s6:ref s2:ref Array
-    60  copy s2:ref s19:ref Array
-    61  clear s19:ref Array
+    58  copy s19:Array s6:Array
+    59  copy s6:Array s2:Array
+    60  copy s2:Array s19:Array
+    61  clear s19:Array
     62  add.int s8:int s8:int s8:int
     63  jump 11
-    64  clear s2:ref Array
-    65  clear s3:ref fn
-    66  copy s1:ref s6:ref Array
-    67  return s1:ref Array
+    64  clear s2:Array
+    65  clear s3:fn
+    66  copy s1:Array s6:Array
+    67  return s1:Array
 "
     );
 }
@@ -371,8 +371,8 @@ fn a_sort_of_references_clears_both_elements_it_compared() {
         "f",
     );
     assert!(
-        text.contains("    41  clear s17:ref String\n    42  clear s16:ref String\n"),
+        text.contains("    41  clear s17:String\n    42  clear s16:String\n"),
         "{text}"
     );
-    assert_eq!(text.matches("clear s16:ref String").count(), 3, "{text}");
+    assert_eq!(text.matches("clear s16:String").count(), 3, "{text}");
 }

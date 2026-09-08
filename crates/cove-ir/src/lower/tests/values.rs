@@ -15,8 +15,8 @@ fn @m.double(Int) -> Int
   frame 3: s0!:int s1:int s2:int
   local n -> s0:Int [0, 3)
      0  mul.int.imm s2:int s0:int 2
-     1  copy s1:int s2:int Int
-     2  return s1:int Int
+     1  copy s1:Int s2:Int
+     2  return s1:Int
 "
     );
 }
@@ -40,14 +40,14 @@ fn @m.f(Int) -> Bool
   frame 6: s0!:int s1:bool s2:bool s3:bool s4:int s5:int
   local n -> s0:Int [0, 9)
      0  gt.int.imm s3:bool s0:int -1
-     1  copy s2:bool s3:bool Bool
+     1  copy s2:Bool s3:Bool
      2  branch-false s2:bool 7
      3  int s4:int 1
      4  add.int.imm s5:int s4:int 1
      5  lt.int s3:bool s0:int s5:int
-     6  copy s2:bool s3:bool Bool
-     7  copy s1:bool s2:bool Bool
-     8  return s1:bool Bool
+     6  copy s2:Bool s3:Bool
+     7  copy s1:Bool s2:Bool
+     8  return s1:Bool
 "
     );
 }
@@ -68,8 +68,8 @@ fn @m.ordered(Int Int) -> Bool
   local b -> s1:Int [0, 4)
      0  sub.int.imm s3:int s0:int 1
      1  le.int s4:bool s3:int s1:int
-     2  copy s2:bool s4:bool Bool
-     3  return s2:bool Bool
+     2  copy s2:Bool s4:Bool
+     3  return s2:Bool
 "
     );
 }
@@ -85,8 +85,8 @@ fn @m.half(Float) -> Float
      0  neg.float s2:float s0:float
      1  float s3:float 2
      2  div.float s4:float s2:float s3:float
-     3  copy s1:float s4:float Float
-     4  return s1:float Float
+     3  copy s1:Float s4:Float
+     4  return s1:Float
 "
     );
 }
@@ -103,8 +103,8 @@ fn @m.wait() -> Duration
   frame 3: s0:duration s1:duration s2:duration
      0  int s1:duration 5000000
      1  add.int.imm s2:duration s1:duration 3000000
-     2  copy s0:duration s2:duration Duration
-     3  return s0:duration Duration
+     2  copy s0:Duration s2:Duration
+     3  return s0:Duration
 "
     );
 }
@@ -118,8 +118,8 @@ fn @m.flip(Bool) -> Bool
   frame 3: s0!:bool s1:bool s2:bool
   local flag -> s0:Bool [0, 3)
      0  not s2:bool s0:bool
-     1  copy s1:bool s2:bool Bool
-     2  return s1:bool Bool
+     1  copy s1:Bool s2:Bool
+     2  return s1:Bool
 "
     );
 }
@@ -137,8 +137,8 @@ fn @m.same() -> Bool
      0  unit s1:unit
      1  unit s2:unit
      2  bool s3:bool true
-     3  copy s0:bool s3:bool Bool
-     4  return s0:bool Bool
+     3  copy s0:Bool s3:Bool
+     4  return s0:Bool
 "
     );
 }
@@ -160,10 +160,10 @@ fn @m.count() -> Int
   local n -> s1:Int [1, 5)
      0  int s1:int 0
      1  add.int.imm s2:int s1:int 1
-     2  copy s1:int s2:int Int
+     2  copy s1:Int s2:Int
      3  add.int.imm s1:int s1:int 2
-     4  copy s0:int s1:int Int
-     5  return s0:int Int
+     4  copy s0:Int s1:Int
+     5  return s0:Int
 "
     );
 }
@@ -176,7 +176,7 @@ fn a_body_that_falls_off_the_end_answers_unit() {
 fn @m.nothing() -> Unit
   frame 1: s0:unit
      0  unit s0:unit
-     1  return s0:unit Unit
+     1  return s0:Unit
 "
     );
 }
@@ -195,9 +195,9 @@ fn @m.scoped() -> Int
   local b -> s3:Int [2, 3)
      0  int s1:int 1
      1  int s3:int 2
-     2  copy s2:int s3:int Int
-     3  copy s0:int s2:int Int
-     4  return s0:int Int
+     2  copy s2:Int s3:Int
+     3  copy s0:Int s2:Int
+     4  return s0:Int
 "
     );
 }
@@ -215,11 +215,11 @@ fn @m.both(Bool Bool) -> Bool
   frame 4: s0!:bool s1!:bool s2:bool s3:bool
   local a -> s0:Bool [0, 5)
   local b -> s1:Bool [0, 5)
-     0  copy s3:bool s0:bool Bool
+     0  copy s3:Bool s0:Bool
      1  branch-false s3:bool 3
-     2  copy s3:bool s1:bool Bool
-     3  copy s2:bool s3:bool Bool
-     4  return s2:bool Bool
+     2  copy s3:Bool s1:Bool
+     3  copy s2:Bool s3:Bool
+     4  return s2:Bool
 "
     );
 }
@@ -233,12 +233,12 @@ fn @m.either(Bool Bool) -> Bool
   frame 4: s0!:bool s1!:bool s2:bool s3:bool
   local a -> s0:Bool [0, 6)
   local b -> s1:Bool [0, 6)
-     0  copy s3:bool s0:bool Bool
+     0  copy s3:Bool s0:Bool
      1  branch-false s3:bool 3
      2  jump 4
-     3  copy s3:bool s1:bool Bool
-     4  copy s2:bool s3:bool Bool
-     5  return s2:bool Bool
+     3  copy s3:Bool s1:Bool
+     4  copy s2:Bool s3:Bool
+     5  return s2:Bool
 "
     );
 }
@@ -261,10 +261,10 @@ fn @m.twice(Int) -> Int
   local a -> s2:Int [1, 4)
   local b -> s3:Int [2, 4)
      0  add.int.imm s2:int s0:int 1
-     1  copy s3:int s2:int Int
+     1  copy s3:Int s2:Int
      2  add.int s4:int s2:int s3:int
-     3  copy s1:int s4:int Int
-     4  return s1:int Int
+     3  copy s1:Int s4:Int
+     4  return s1:Int
 "
     );
 }

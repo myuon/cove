@@ -94,13 +94,13 @@ fn a_host_result_a_schema_declared_any_is_one_boxed_word() {
 fn @m.f() -> Int
   frame 6: s0:int s1:ref s2:ref s3:int s4:int s5:int
      0  str s1:ref \"n\"
-     1  call-host s2:ref oracle.ask (s1:String) Any
+     1  call-host s2:Any oracle.ask (s1:String)
      2  int s3:int 1
-     3  unbox s4:int s2:ref Int
-     4  clear s2:ref Any
+     3  unbox s4:Int s2:ref
+     4  clear s2:Any
      5  add.int s5:int s4:int s3:int
-     6  copy s0:int s5:int Int
-     7  return s0:int Int
+     6  copy s0:Int s5:Int
+     7  return s0:Int
 "
     );
 }
@@ -130,22 +130,22 @@ fn @m.f() -> Result
   frame 13: s0:tag s1:int s2:ref s3:host s4:tag s5:ref s6:ref s7:tag s8:int s9:ref s10:int s11:int s12:int
   local s -> s3:<host> [1, 15)
   local v -> s6:Any [9, 15)
-     0  call-host s3:host oracle.open () <host>
-     1  call-resource s4:tag s3:host oracle.Seat.next () Result
+     0  call-host s3:<host> oracle.open ()
+     1  call-resource s4..s5:Result s3:host oracle.Seat.next ()
      2  switch s4:tag [3 5] else 5
-     3  copy s6:ref s5:ref Any
+     3  copy s6:Any s5:Any
      4  jump 8
      5  tag s7:tag Result.Err
-     6  copy s9:ref s5:ref Error
-     7  return s7:tag Result
-     8  clear s4:tag Result
+     6  copy s9:Error s5:Error
+     7  return s7..s9:Result
+     8  clear s4..s5:Result
      9  int s10:int 2
-    10  unbox s11:int s6:ref Int
+    10  unbox s11:Int s6:ref
     11  mul.int s12:int s11:int s10:int
     12  tag s7:tag Result.Ok
-    13  copy s8:int s12:int Int
-    14  copy s0:tag s7:tag Result
-    15  return s0:tag Result
+    13  copy s8:Int s12:Int
+    14  copy s0..s2:Result s7..s9:Result
+    15  return s0..s2:Result
 "
     );
 }
@@ -169,12 +169,12 @@ fn a_declared_parameter_says_what_an_erased_argument_is_opened_at() {
 fn @m.f() -> Int
   frame 5: s0:int s1:ref s2:ref s3:int s4:int
      0  str s1:ref \"n\"
-     1  call-host s2:ref oracle.ask (s1:String) Any
-     2  unbox s3:int s2:ref Int
-     3  clear s2:ref Any
-     4  call s4:int m.g (s3:Int) Int
-     5  copy s0:int s4:int Int
-     6  return s0:int Int
+     1  call-host s2:Any oracle.ask (s1:String)
+     2  unbox s3:Int s2:ref
+     3  clear s2:Any
+     4  call s4:Int m.g (s3:Int)
+     5  copy s0:Int s4:Int
+     6  return s0:Int
 "
     );
 }
@@ -329,22 +329,22 @@ fn an_annotation_says_what_an_erased_result_was_carrying() {
 fn @m.f() -> Result
   frame 11: s0:tag s1:int s2:ref s3:host s4:tag s5:ref s6:ref s7:tag s8:int s9:ref s10:int
   local s -> s3:<host> [1, 13)
-  local bounded -> s4:Result [2, 13)
+  local bounded -> s4..s5:Result [2, 13)
   local run -> s10:m.Run [10, 13)
-     0  call-host s3:host oracle.open () <host>
-     1  call-resource s4:tag s3:host oracle.Seat.next () Result
+     0  call-host s3:<host> oracle.open ()
+     1  call-resource s4..s5:Result s3:host oracle.Seat.next ()
      2  switch s4:tag [3 5] else 5
-     3  copy s6:ref s5:ref Any
+     3  copy s6:Any s5:Any
      4  jump 8
      5  tag s7:tag Result.Err
-     6  copy s9:ref s5:ref Error
-     7  return s7:tag Result
-     8  unbox s10:int s6:ref m.Run
-     9  clear s6:ref Any
+     6  copy s9:Error s5:Error
+     7  return s7..s9:Result
+     8  unbox s10:m.Run s6:ref
+     9  clear s6:Any
     10  tag s7:tag Result.Ok
-    11  copy s8:int s10:int Int
-    12  copy s0:tag s7:tag Result
-    13  return s0:tag Result
+    11  copy s8:Int s10:Int
+    12  copy s0..s2:Result s7..s9:Result
+    13  return s0..s2:Result
 "
     );
 }
@@ -382,38 +382,38 @@ fn a_result_inside_an_erased_result_is_opened_where_it_is_used() {
 fn @m.f() -> Int
   frame 12: s0:int s1:host s2:tag s3:ref s4:int s5:ref s6:int s7:tag s8:int s9:ref s10:int s11:ref
   local s -> s1:<host> [1, 26)
-  local answer -> s2:Result [2, 26)
+  local answer -> s2..s3:Result [2, 26)
   local inner -> s5:Any [4, 17)
   local n -> s10:Int [7, 8)
   local e -> s11:Error [10, 12)
   local e -> s5:Error [20, 22)
-     0  call-host s1:host oracle.open () <host>
-     1  call-resource s2:tag s1:host oracle.Seat.next () Result
+     0  call-host s1:<host> oracle.open ()
+     1  call-resource s2..s3:Result s1:host oracle.Seat.next ()
      2  switch s2:tag [3 19] else 24
-     3  copy s5:ref s3:ref Any
-     4  unbox s7:tag s5:ref Result
+     3  copy s5:Any s3:Any
+     4  unbox s7..s9:Result s5:ref
      5  switch s7:tag [6 9] else 14
-     6  copy s10:int s8:int Int
-     7  copy s6:int s10:int Int
+     6  copy s10:Int s8:Int
+     7  copy s6:Int s10:Int
      8  jump 15
-     9  copy s11:ref s9:ref Error
-    10  call-builtin s10:int String.length (s11:String) Int
-    11  copy s6:int s10:int Int
-    12  clear s11:ref Error
+     9  copy s11:Error s9:Error
+    10  call-builtin s10:Int String.length (s11:String)
+    11  copy s6:Int s10:Int
+    12  clear s11:Error
     13  jump 15
     14  trap \"no `match` arm covers this value\"
-    15  clear s7:tag Result
-    16  copy s4:int s6:int Int
-    17  clear s5:ref Any
+    15  clear s7..s9:Result
+    16  copy s4:Int s6:Int
+    17  clear s5:Any
     18  jump 25
-    19  copy s5:ref s3:ref Error
-    20  call-builtin s6:int String.length (s5:String) Int
-    21  copy s4:int s6:int Int
-    22  clear s5:ref Error
+    19  copy s5:Error s3:Error
+    20  call-builtin s6:Int String.length (s5:String)
+    21  copy s4:Int s6:Int
+    22  clear s5:Error
     23  jump 25
     24  trap \"no `match` arm covers this value\"
-    25  copy s0:int s4:int Int
-    26  return s0:int Int
+    25  copy s0:Int s4:Int
+    26  return s0:Int
 "
     );
 }

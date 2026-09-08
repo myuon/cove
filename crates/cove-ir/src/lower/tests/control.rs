@@ -15,12 +15,12 @@ fn @m.pick(Bool) -> Int
   local c -> s0:Bool [0, 8)
      0  branch-false s0:bool 4
      1  int s3:int 1
-     2  copy s2:int s3:int Int
+     2  copy s2:Int s3:Int
      3  jump 6
      4  int s3:int 2
-     5  copy s2:int s3:int Int
-     6  copy s1:int s2:int Int
-     7  return s1:int Int
+     5  copy s2:Int s3:Int
+     6  copy s1:Int s2:Int
+     7  return s1:Int
 "
     );
 }
@@ -42,9 +42,9 @@ fn @m.maybe(Bool) -> Int
      0  int s2:int 0
      1  branch-false s0:bool 4
      2  int s3:int 1
-     3  copy s2:int s3:int Int
-     4  copy s1:int s2:int Int
-     5  return s1:int Int
+     3  copy s2:Int s3:Int
+     4  copy s1:Int s2:Int
+     5  return s1:Int
 "
     );
 }
@@ -60,14 +60,14 @@ fn a_branch_join_of_a_struct_is_two_copies_of_its_words() {
 fn @m.pick(Bool m.Point m.Point) -> m.Point
   frame 9: s0!:bool s1!:int s2!:int s3!:int s4!:int s5:int s6:int s7:int s8:int
   local c -> s0:Bool [0, 6)
-  local a -> s1:m.Point [0, 6)
-  local b -> s3:m.Point [0, 6)
+  local a -> s1..s2:m.Point [0, 6)
+  local b -> s3..s4:m.Point [0, 6)
      0  branch-false s0:bool 3
-     1  copy s7:int s1:int m.Point
+     1  copy s7..s8:m.Point s1..s2:m.Point
      2  jump 4
-     3  copy s7:int s3:int m.Point
-     4  copy s5:int s7:int m.Point
-     5  return s5:int m.Point
+     3  copy s7..s8:m.Point s3..s4:m.Point
+     4  copy s5..s6:m.Point s7..s8:m.Point
+     5  return s5..s6:m.Point
 "
     );
 }
@@ -90,10 +90,10 @@ fn @m.count(Int) -> Int
      1  lt.int s3:bool s2:int s0:int
      2  branch-false s3:bool 6
      3  add.int.imm s4:int s2:int 1
-     4  copy s2:int s4:int Int
+     4  copy s2:Int s4:Int
      5  jump 1
-     6  copy s1:int s2:int Int
-     7  return s1:int Int
+     6  copy s1:Int s2:Int
+     7  return s1:Int
 "
     );
 }
@@ -113,13 +113,13 @@ fn @m.first() -> Int
      1  bool s2:bool true
      2  branch-false s2:bool 9
      3  add.int.imm s3:int s1:int 1
-     4  copy s1:int s3:int Int
+     4  copy s1:Int s3:Int
      5  gt.int.imm s2:bool s1:int 3
      6  branch-false s2:bool 8
      7  jump 9
      8  jump 1
-     9  copy s0:int s1:int Int
-    10  return s0:int Int
+     9  copy s0:Int s1:Int
+    10  return s0:Int
 "
     );
 }
@@ -140,9 +140,9 @@ fn @m.early(Int) -> Int
      0  lt.int.imm s2:bool s0:int 0
      1  branch-false s2:bool 4
      2  int s3:int 0
-     3  return s3:int Int
-     4  copy s1:int s0:int Int
-     5  return s1:int Int
+     3  return s3:Int
+     4  copy s1:Int s0:Int
+     5  return s1:Int
 "
     );
 }
@@ -189,7 +189,7 @@ fn @m.f(Array) -> Int
   local total -> s2:Int [1, 27)
   local x -> s8:String [10, 23)
      0  int s2:int 0
-     1  copy s3:ref s0:ref Array
+     1  copy s3:Array s0:Array
      2  len s4:int s3:ref
      3  int s5:int 0
      4  int s6:int 1
@@ -197,25 +197,25 @@ fn @m.f(Array) -> Int
      6  add.int s5:int s5:int s6:int
      7  lt.int s7:bool s5:int s4:int
      8  branch-false s7:bool 25
-     9  load-elem s8:ref s3:ref s5:int String
-    10  call-builtin s9:ref String.interpolate (s8:String) String
+     9  load-elem s8:String s3:ref s5:int
+    10  call-builtin s9:String String.interpolate (s8:String)
     11  gt.int.imm s7:bool s2:int 0
     12  branch-false s7:bool 15
-    13  copy s10:ref s8:ref String
+    13  copy s10:String s8:String
     14  jump 19
-    15  clear s10:ref String
-    16  clear s9:ref String
-    17  clear s8:ref String
+    15  clear s10:String
+    16  clear s9:String
+    17  clear s8:String
     18  jump 25
-    19  call s12:int m.both (s9:String s10:String) Int
-    20  clear s10:ref String
-    21  clear s9:ref String
-    22  copy s2:int s12:int Int
-    23  clear s8:ref String
+    19  call s12:Int m.both (s9:String s10:String)
+    20  clear s10:String
+    21  clear s9:String
+    22  copy s2:Int s12:Int
+    23  clear s8:String
     24  jump 6
-    25  clear s3:ref Array
-    26  copy s1:int s2:int Int
-    27  return s1:int Int
+    25  clear s3:Array
+    26  copy s1:Int s2:Int
+    27  return s1:Int
 "
     );
 }

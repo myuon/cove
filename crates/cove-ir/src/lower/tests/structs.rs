@@ -24,10 +24,10 @@ fn @m.origin() -> m.Point
   frame 6: s0:int s1:int s2:int s3:int s4:int s5:int
      0  int s2:int 1
      1  int s3:int 2
-     2  copy s4:int s2:int Int
-     3  copy s5:int s3:int Int
-     4  copy s0:int s4:int m.Point
-     5  return s0:int m.Point
+     2  copy s4:Int s2:Int
+     3  copy s5:Int s3:Int
+     4  copy s0..s1:m.Point s4..s5:m.Point
+     5  return s0..s1:m.Point
 "
     );
 }
@@ -45,17 +45,17 @@ fn a_two_word_struct_is_copied_by_one_copy() {
         "\
 fn @m.f() -> Int
   frame 7: s0:int s1:int s2:int s3:int s4:int s5:int s6:int
-  local a -> s3:m.Point [4, 8)
-  local b -> s5:m.Point [5, 8)
+  local a -> s3..s4:m.Point [4, 8)
+  local b -> s5..s6:m.Point [5, 8)
      0  int s1:int 1
      1  int s2:int 2
-     2  copy s3:int s1:int Int
-     3  copy s4:int s2:int Int
-     4  copy s5:int s3:int m.Point
+     2  copy s3:Int s1:Int
+     3  copy s4:Int s2:Int
+     4  copy s5..s6:m.Point s3..s4:m.Point
      5  int s1:int 7
-     6  copy s5:int s1:int Int
-     7  copy s0:int s3:int Int
-     8  return s0:int Int
+     6  copy s5:Int s1:Int
+     7  copy s0:Int s3:Int
+     8  return s0:Int
 "
     );
 }
@@ -73,14 +73,14 @@ fn a_nested_struct_is_copied_whole() {
         "\
 fn @m.f(m.Line) -> Int
   frame 10: s0!:int s1!:int s2!:int s3!:int s4:int s5:int s6:int s7:int s8:int s9:int
-  local l -> s0:m.Line [0, 6)
-  local m -> s5:m.Line [1, 5)
-     0  copy s5:int s0:int m.Line
+  local l -> s0..s3:m.Line [0, 6)
+  local m -> s5..s8:m.Line [1, 5)
+     0  copy s5..s8:m.Line s0..s3:m.Line
      1  int s9:int 7
-     2  copy s5:int s9:int Int
+     2  copy s5:Int s9:Int
      3  add.int s9:int s0:int s5:int
-     4  copy s4:int s9:int Int
-     5  return s4:int Int
+     4  copy s4:Int s9:Int
+     5  return s4:Int
 "
     );
 }
@@ -97,9 +97,9 @@ fn a_field_of_a_field_is_arithmetic_and_emits_nothing() {
         "\
 fn @m.f(m.Line) -> Int
   frame 5: s0!:int s1!:int s2!:int s3!:int s4:int
-  local l -> s0:m.Line [0, 2)
-     0  copy s4:int s3:int Int
-     1  return s4:int Int
+  local l -> s0..s3:m.Line [0, 2)
+     0  copy s4:Int s3:Int
+     1  return s4:Int
 "
     );
 }
@@ -119,14 +119,14 @@ fn a_struct_holding_a_vector_copies_the_words_and_shares_the_address() {
         "\
 fn @m.f(m.Wrapper) -> Bool
   frame 9: s0!:int s1!:int s2!:ref s3:bool s4:int s5:int s6:ref s7:int s8:bool
-  local w -> s0:m.Wrapper [0, 6)
-  local other -> s4:m.Wrapper [1, 5)
-     0  copy s4:int s0:int m.Wrapper
+  local w -> s0..s2:m.Wrapper [0, 6)
+  local other -> s4..s6:m.Wrapper [1, 5)
+     0  copy s4..s6:m.Wrapper s0..s2:m.Wrapper
      1  int s7:int 7
-     2  copy s4:int s7:int Int
+     2  copy s4:Int s7:Int
      3  eq.identity s8:bool s6:ref s2:ref
-     4  copy s3:bool s8:bool Bool
-     5  return s3:bool Bool
+     4  copy s3:Bool s8:Bool
+     5  return s3:Bool
 "
     );
 }
@@ -143,10 +143,10 @@ fn a_field_of_a_call_s_answer_is_copied_out_of_the_temporary() {
         "\
 fn @m.f() -> Int
   frame 4: s0:int s1:int s2:int s3:int
-     0  call s1:int m.mk () m.Point
-     1  copy s3:int s2:int Int
-     2  copy s0:int s3:int Int
-     3  return s0:int Int
+     0  call s1..s2:m.Point m.mk ()
+     1  copy s3:Int s2:Int
+     2  copy s0:Int s3:Int
+     3  return s0:Int
 "
     );
 }
@@ -164,9 +164,9 @@ fn a_struct_returned_by_value_is_the_answer_location_s_words() {
 fn @m.f() -> m.Point
   frame 5: s0:int s1:int s2:int s3:int s4:int
      0  int s2:int 3
-     1  call s3:int m.mk (s2:Int) m.Point
-     2  copy s0:int s3:int m.Point
-     3  return s0:int m.Point
+     1  call s3..s4:m.Point m.mk (s2:Int)
+     2  copy s0..s1:m.Point s3..s4:m.Point
+     3  return s0..s1:m.Point
 "
     );
 }

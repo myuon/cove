@@ -24,17 +24,17 @@ fn a_case_writes_the_discriminant_and_zeroes_what_it_does_not_fill() {
         "\
 fn @m.f() -> m.Shape
   frame 8: s0:tag s1:int s2:int s3:int s4:int s5:tag s6:int s7:int
-  local wide -> s5:m.Shape [5, 5)
+  local wide -> s5..s7:m.Shape [5, 5)
      0  int s3:int 3
      1  int s4:int 4
      2  tag s5:tag m.Shape.Box
-     3  copy s6:int s3:int Int
-     4  copy s7:int s4:int Int
+     3  copy s6:Int s3:Int
+     4  copy s7:Int s4:Int
      5  tag s5:tag m.Shape.Dot
-     6  clear s6:int Int
-     7  clear s7:int Int
-     8  copy s0:tag s5:tag m.Shape
-     9  return s0:tag m.Shape
+     6  clear s6:Int
+     7  clear s7:Int
+     8  copy s0..s2:m.Shape s5..s7:m.Shape
+     9  return s0..s2:m.Shape
 "
     );
 }
@@ -52,10 +52,10 @@ fn @m.f() -> m.Shape
      0  int s3:int 3
      1  int s4:int 4
      2  tag s5:tag m.Shape.Box
-     3  copy s6:int s3:int Int
-     4  copy s7:int s4:int Int
-     5  copy s0:tag s5:tag m.Shape
-     6  return s0:tag m.Shape
+     3  copy s6:Int s3:Int
+     4  copy s7:Int s4:Int
+     5  copy s0..s2:m.Shape s5..s7:m.Shape
+     6  return s0..s2:m.Shape
 "
     );
 }
@@ -81,17 +81,17 @@ fn a_reference_word_of_another_case_reads_null() {
 fn @m.f(String) -> m.Msg
   frame 7: s0!:ref s1:tag s2:ref s3:ref s4:ref s5:tag s6:ref
   local what -> s0:String [0, 10)
-  local said -> s5:m.Msg [5, 5)
+  local said -> s5..s6:m.Msg [5, 5)
      0  str s3:ref \"!\"
-     1  call-builtin s4:ref String.interpolate (s0:String s3:String) String
+     1  call-builtin s4:String String.interpolate (s0:String s3:String)
      2  tag s5:tag m.Msg.Text
-     3  copy s6:ref s4:ref String
-     4  clear s4:ref String
-     5  clear s5:tag m.Msg
+     3  copy s6:String s4:String
+     4  clear s4:String
+     5  clear s5..s6:m.Msg
      6  tag s5:tag m.Msg.Ping
-     7  clear s6:ref <ref>
-     8  copy s1:tag s5:tag m.Msg
-     9  return s1:tag m.Msg
+     7  clear s6:<ref>
+     8  copy s1..s2:m.Msg s5..s6:m.Msg
+     9  return s1..s2:m.Msg
 "
     );
 }
@@ -113,9 +113,9 @@ fn @m.f(Float) -> m.E
   frame 9: s0!:float s1:tag s2:int s3:ref s4:float s5:tag s6:int s7:ref s8:float
   local x -> s0:Float [0, 4)
      0  tag s5:tag m.E.B
-     1  copy s8:float s0:float Float
-     2  copy s1:tag s5:tag m.E
-     3  return s1:tag m.E
+     1  copy s8:Float s0:Float
+     2  copy s1..s4:m.E s5..s8:m.E
+     3  return s1..s4:m.E
 "
     );
 }
@@ -134,25 +134,25 @@ fn a_match_reads_the_discriminant_at_offset_zero() {
         "\
 fn @m.f(m.Shape) -> Int
   frame 8: s0!:tag s1!:int s2!:int s3:int s4:int s5:int s6:int s7:int
-  local s -> s0:m.Shape [0, 15)
+  local s -> s0..s2:m.Shape [0, 15)
   local a -> s5:Int [5, 6)
   local a -> s5:Int [8, 11)
   local b -> s6:Int [9, 11)
      0  switch s0:tag [1 4 7] else 12
      1  int s5:int 0
-     2  copy s4:int s5:int Int
+     2  copy s4:Int s5:Int
      3  jump 13
-     4  copy s5:int s1:int Int
-     5  copy s4:int s5:int Int
+     4  copy s5:Int s1:Int
+     5  copy s4:Int s5:Int
      6  jump 13
-     7  copy s5:int s1:int Int
-     8  copy s6:int s2:int Int
+     7  copy s5:Int s1:Int
+     8  copy s6:Int s2:Int
      9  add.int s7:int s5:int s6:int
-    10  copy s4:int s7:int Int
+    10  copy s4:Int s7:Int
     11  jump 13
     12  trap \"no `match` arm covers this value\"
-    13  copy s3:int s4:int Int
-    14  return s3:int Int
+    13  copy s3:Int s4:Int
+    14  return s3:Int
 "
     );
 }
@@ -167,18 +167,18 @@ fn an_option_is_two_words_and_none_is_the_zeroed_one() {
         "\
 fn @m.f(Option) -> Int
   frame 5: s0!:tag s1!:int s2:int s3:int s4:int
-  local o -> s0:Option [0, 10)
+  local o -> s0..s1:Option [0, 10)
   local v -> s4:Int [2, 3)
      0  switch s0:tag [4 1] else 7
-     1  copy s4:int s1:int Int
-     2  copy s3:int s4:int Int
+     1  copy s4:Int s1:Int
+     2  copy s3:Int s4:Int
      3  jump 8
      4  int s4:int 0
-     5  copy s3:int s4:int Int
+     5  copy s3:Int s4:Int
      6  jump 8
      7  trap \"no `match` arm covers this value\"
-     8  copy s2:int s3:int Int
-     9  return s2:int Int
+     8  copy s2:Int s3:Int
+     9  return s2:Int
 "
     );
 }
@@ -195,11 +195,11 @@ fn a_case_is_copied_whole() {
         "\
 fn @m.f(m.Shape) -> m.Shape
   frame 9: s0!:tag s1!:int s2!:int s3:tag s4:int s5:int s6:tag s7:int s8:int
-  local s -> s0:m.Shape [0, 3)
-  local t -> s6:m.Shape [1, 2)
-     0  copy s6:tag s0:tag m.Shape
-     1  copy s3:tag s6:tag m.Shape
-     2  return s3:tag m.Shape
+  local s -> s0..s2:m.Shape [0, 3)
+  local t -> s6..s8:m.Shape [1, 2)
+     0  copy s6..s8:m.Shape s0..s2:m.Shape
+     1  copy s3..s5:m.Shape s6..s8:m.Shape
+     2  return s3..s5:m.Shape
 "
     );
 }
@@ -219,20 +219,20 @@ fn a_question_mark_leaves_through_the_enclosing_function_s_own_failure() {
 fn @m.f() -> Result
   frame 11: s0:tag s1:int s2:ref s3:tag s4:int s5:ref s6:int s7:tag s8:int s9:ref s10:int
   local v -> s6:Int [8, 13)
-     0  call s3:tag m.g () Result
+     0  call s3..s5:Result m.g ()
      1  switch s3:tag [2 4] else 4
-     2  copy s6:int s4:int Int
+     2  copy s6:Int s4:Int
      3  jump 7
      4  tag s7:tag Result.Err
-     5  copy s9:ref s5:ref Error
-     6  return s7:tag Result
-     7  clear s3:tag Result
+     5  copy s9:Error s5:Error
+     6  return s7..s9:Result
+     7  clear s3..s5:Result
      8  add.int.imm s10:int s6:int 1
      9  tag s3:tag Result.Ok
-    10  clear s5:ref <ref>
-    11  copy s4:int s10:int Int
-    12  copy s0:tag s3:tag Result
-    13  return s0:tag Result
+    10  clear s5:<ref>
+    11  copy s4:Int s10:Int
+    12  copy s0..s2:Result s3..s5:Result
+    13  return s0..s2:Result
 "
     );
 }
@@ -248,17 +248,17 @@ fn a_question_mark_on_an_option_leaves_through_none() {
 fn @m.f() -> Option
   frame 8: s0:tag s1:int s2:tag s3:int s4:int s5:tag s6:int s7:int
   local v -> s4:Int [6, 10)
-     0  call s2:tag m.g () Option
+     0  call s2..s3:Option m.g ()
      1  switch s2:tag [4 2] else 4
-     2  copy s4:int s3:int Int
+     2  copy s4:Int s3:Int
      3  jump 6
      4  tag s5:tag Option.None
-     5  return s5:tag Option
+     5  return s5..s6:Option
      6  add.int.imm s7:int s4:int 1
      7  tag s2:tag Option.Some
-     8  copy s3:int s7:int Int
-     9  copy s0:tag s2:tag Option
-    10  return s0:tag Option
+     8  copy s3:Int s7:Int
+     9  copy s0..s1:Option s2..s3:Option
+    10  return s0..s1:Option
 "
     );
 }
@@ -276,19 +276,19 @@ fn an_enum_inside_a_struct_is_inline_there_too() {
         "\
 fn @m.f(m.S) -> Int
   frame 7: s0!:tag s1!:int s2!:int s3:int s4:int s5:int s6:int
-  local s -> s0:m.S [0, 11)
+  local s -> s0..s2:m.S [0, 11)
   local v -> s5:Int [5, 7)
      0  switch s0:tag [1 4] else 8
      1  int s5:int 0
-     2  copy s4:int s5:int Int
+     2  copy s4:Int s5:Int
      3  jump 9
-     4  copy s5:int s1:int Int
+     4  copy s5:Int s1:Int
      5  add.int s6:int s5:int s2:int
-     6  copy s4:int s6:int Int
+     6  copy s4:Int s6:Int
      7  jump 9
      8  trap \"no `match` arm covers this value\"
-     9  copy s3:int s4:int Int
-    10  return s3:int Int
+     9  copy s3:Int s4:Int
+    10  return s3:Int
 "
     );
 }

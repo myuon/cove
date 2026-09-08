@@ -321,7 +321,8 @@ pub enum Inst {
     ///
     /// `src` is the *first* slot of that value location, and how many words
     /// follow it is [`crate::Function::returns`] — which is why a listing
-    /// names that layout after the slot.
+    /// writes that layout *on* the slot, and the whole run with it:
+    /// `return s0..s2:Result`.
     Return { src: Slot },
 
     // ---- calls ----------------------------------------------------------

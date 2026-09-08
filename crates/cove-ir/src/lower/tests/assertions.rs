@@ -25,15 +25,15 @@ fn @m.f(Int) -> Result
      1  branch-false s7:bool 6
      2  unit s8:unit
      3  tag s4:tag Result.Ok
-     4  copy s5:unit s8:unit Unit
+     4  copy s5:Unit s8:Unit
      5  jump 11
      6  str s9:ref \"assertion failed: `n > 0`\"
      7  assert.failed s9:ref
-     8  copy s10:ref s9:ref String
+     8  copy s10:String s9:String
      9  tag s4:tag Result.Err
-    10  copy s6:ref s10:ref Error
-    11  copy s1:tag s4:tag Result
-    12  return s1:tag Result
+    10  copy s6:Error s10:Error
+    11  copy s1..s3:Result s4..s6:Result
+    12  return s1..s3:Result
 "
     );
 }
@@ -122,9 +122,9 @@ fn a_gap_the_entry_does_not_reach_does_not_stop_it() {
         "\
 fn @m.main() -> Int
   frame 2: s0:int s1:int
-     0  call s1:int m.helper () Int
-     1  copy s0:int s1:int Int
-     2  return s0:int Int
+     0  call s1:Int m.helper ()
+     1  copy s0:Int s1:Int
+     2  return s0:Int
 "
     );
 }
@@ -139,7 +139,7 @@ fn what_the_slice_leaves_out_is_a_stub() {
         "\
 fn @m.unused() -> Unit
   frame 1: s0:unit
-     0  return s0:unit Unit
+     0  return s0:Unit
 "
     );
 }
@@ -201,8 +201,8 @@ fn @m.double(Int) -> Int
   frame 3: s0!:int s1:int s2:int
   local n -> s0:Int [0, 3)
      0  mul.int.imm s2:int s0:int 2
-     1  copy s1:int s2:int Int
-     2  return s1:int Int
+     1  copy s1:Int s2:Int
+     2  return s1:Int
 "
     );
 }
@@ -244,7 +244,7 @@ fn a_slice_over_several_roots_is_the_union_of_what_they_reach() {
         "\
 fn @m.wide() -> Unit
   frame 1: s0:unit
-     0  return s0:unit Unit
+     0  return s0:Unit
 "
     );
 }
@@ -265,8 +265,8 @@ fn a_root_that_names_nothing_contributes_nothing() {
 fn @m.main() -> Int
   frame 2: s0:int s1:int
      0  int s1:int 1
-     1  copy s0:int s1:int Int
-     2  return s0:int Int
+     1  copy s0:Int s1:Int
+     2  return s0:Int
 "
     );
 }

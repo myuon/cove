@@ -53,8 +53,8 @@ fn @m.area(Int Int) -> Int
   local w -> s0:Int [0, 3)
   local h -> s1:Int [0, 3)
      0  mul.int s3:int s0:int s1:int
-     1  copy s2:int s3:int Int
-     2  return s2:int Int
+     1  copy s2:Int s3:Int
+     2  return s2:Int
 "
     );
 }
@@ -114,12 +114,12 @@ fn @m.f() -> Int
      0  int s1:int 0
      1  int s2:int 1
      2  add.int s3:int s1:int s2:int
-     3  copy s1:int s3:int Int
+     3  copy s1:Int s3:Int
      4  int s2:int 2
      5  add.int s3:int s1:int s2:int
-     6  copy s1:int s3:int Int
-     7  copy s0:int s1:int Int
-     8  return s0:int Int
+     6  copy s1:Int s3:Int
+     7  copy s0:Int s1:Int
+     8  return s0:Int
 "
     );
 }
@@ -140,8 +140,8 @@ fn @m.f() -> Int
   local x -> s2:Int [2, 3)
      0  int s1:int 1
      1  add.int.imm s2:int s1:int 1
-     2  copy s0:int s2:int Int
-     3  return s0:int Int
+     2  copy s0:Int s2:Int
+     3  return s0:Int
 "
     );
 }

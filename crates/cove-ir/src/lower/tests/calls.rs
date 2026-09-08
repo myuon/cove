@@ -17,9 +17,9 @@ fn @m.f() -> Int
   frame 4: s0:int s1:int s2:int s3:int
      0  int s1:int 1
      1  int s2:int 2
-     2  call s3:int m.add (s1:Int s2:Int) Int
-     3  copy s0:int s3:int Int
-     4  return s0:int Int
+     2  call s3:Int m.add (s1:Int s2:Int)
+     3  copy s0:Int s3:Int
+     4  return s0:Int
 "
     );
 }
@@ -37,16 +37,16 @@ fn @m.fib(Int) -> Int
   local n -> s0:Int [0, 12)
      0  lt.int.imm s3:bool s0:int 2
      1  branch-false s3:bool 4
-     2  copy s2:int s0:int Int
+     2  copy s2:Int s0:Int
      3  jump 10
      4  sub.int.imm s4:int s0:int 1
-     5  call s5:int m.fib (s4:Int) Int
+     5  call s5:Int m.fib (s4:Int)
      6  sub.int.imm s4:int s0:int 2
-     7  call s6:int m.fib (s4:Int) Int
+     7  call s6:Int m.fib (s4:Int)
      8  add.int s4:int s5:int s6:int
-     9  copy s2:int s4:int Int
-    10  copy s1:int s2:int Int
-    11  return s1:int Int
+     9  copy s2:Int s4:Int
+    10  copy s1:Int s2:Int
+    11  return s1:Int
 "
     );
 }
@@ -65,13 +65,13 @@ fn multiword_parameters_occupy_the_frame_from_slot_zero_in_order() {
 fn @m.take(Int m.Point Int) -> Int
   frame 7: s0!:int s1!:int s2!:int s3!:int s4:int s5:int s6:int
   local a -> s0:Int [0, 5)
-  local p -> s1:m.Point [0, 5)
+  local p -> s1..s2:m.Point [0, 5)
   local b -> s3:Int [0, 5)
      0  add.int s5:int s0:int s1:int
      1  add.int s6:int s5:int s2:int
      2  add.int s5:int s6:int s3:int
-     3  copy s4:int s5:int Int
-     4  return s4:int Int
+     3  copy s4:Int s5:Int
+     4  return s4:Int
 "
     );
 }
@@ -89,12 +89,12 @@ fn @m.f() -> Int
      0  int s1:int 1
      1  int s2:int 2
      2  int s3:int 3
-     3  copy s4:int s2:int Int
-     4  copy s5:int s3:int Int
+     3  copy s4:Int s2:Int
+     4  copy s5:Int s3:Int
      5  int s2:int 4
-     6  call s3:int m.take (s1:Int s4:m.Point s2:Int) Int
-     7  copy s0:int s3:int Int
-     8  return s0:int Int
+     6  call s3:Int m.take (s1:Int s4..s5:m.Point s2:Int)
+     7  copy s0:Int s3:Int
+     8  return s0:Int
 "
     );
 }
@@ -109,12 +109,12 @@ fn a_var_parameter_is_a_slot_holding_an_address() {
 fn @m.bump(<addr>) -> Unit
   frame 5: s0!:addr s1:unit s2:int s3:int s4:unit
   local n -> s0:<addr> [0, 6)
-     0  load s2:int s0:addr Int
+     0  load s2:Int s0:addr
      1  add.int.imm s3:int s2:int 1
-     2  store s0:addr s3:int Int
+     2  store s0:addr s3:Int
      3  unit s4:unit
-     4  copy s1:unit s4:unit Unit
-     5  return s1:unit Unit
+     4  copy s1:Unit s4:Unit
+     5  return s1:Unit
 "
     );
 }
@@ -132,10 +132,10 @@ fn @m.f() -> Int
   local total -> s1:Int [1, 5)
      0  int s1:int 0
      1  addr-of-slot s2:addr s1:int
-     2  call s3:unit m.bump (s2:<addr>) Unit
-     3  clear s2:addr <addr>
-     4  copy s0:int s1:int Int
-     5  return s0:int Int
+     2  call s3:Unit m.bump (s2:<addr>)
+     3  clear s2:<addr>
+     4  copy s0:Int s1:Int
+     5  return s0:Int
 "
     );
 }
@@ -160,13 +160,13 @@ fn @m.shift(<addr>) -> Unit
   local p -> s0:<addr> [0, 9)
      0  int s2:int 7
      1  addr-of-part s3:addr s0:addr +1
-     2  store s3:addr s2:int Int
-     3  clear s3:addr <addr>
+     2  store s3:addr s2:Int
+     3  clear s3:<addr>
      4  addr-of-part s3:addr s0:addr +1
-     5  call s4:unit m.bump (s3:<addr>) Unit
-     6  clear s3:addr <addr>
-     7  copy s1:unit s4:unit Unit
-     8  return s1:unit Unit
+     5  call s4:Unit m.bump (s3:<addr>)
+     6  clear s3:<addr>
+     7  copy s1:Unit s4:Unit
+     8  return s1:Unit
 "
     );
 }
@@ -184,16 +184,16 @@ fn a_var_argument_naming_a_field_is_the_address_of_that_word() {
         "\
 fn @m.f() -> Int
   frame 7: s0:int s1:int s2:int s3:int s4:int s5:addr s6:unit
-  local p -> s3:m.Point [4, 8)
+  local p -> s3..s4:m.Point [4, 8)
      0  int s1:int 1
      1  int s2:int 2
-     2  copy s3:int s1:int Int
-     3  copy s4:int s2:int Int
+     2  copy s3:Int s1:Int
+     3  copy s4:Int s2:Int
      4  addr-of-slot s5:addr s4:int
-     5  call s6:unit m.bump (s5:<addr>) Unit
-     6  clear s5:addr <addr>
-     7  copy s0:int s4:int Int
-     8  return s0:int Int
+     5  call s6:Unit m.bump (s5:<addr>)
+     6  clear s5:<addr>
+     7  copy s0:Int s4:Int
+     8  return s0:Int
 "
     );
 }
@@ -212,9 +212,9 @@ fn @m.f() -> Int
   frame 4: s0:int s1:int s2:int s3:int
      0  int s1:int 2
      1  int s2:int 3
-     2  call s3:int m.scaled (s1:Int s2:Int) Int
-     3  copy s0:int s3:int Int
-     4  return s0:int Int
+     2  call s3:Int m.scaled (s1:Int s2:Int)
+     3  copy s0:Int s3:Int
+     4  return s0:Int
 "
     );
 }
@@ -245,16 +245,16 @@ fn @m.f() -> Int
      3  alloc s4:ref Array<array> x3
      4  int s5:int 1
      5  int s6:int 0
-     6  store-elem s4:ref s6:int s1:int Int
+     6  store-elem s4:ref s6:int s1:Int
      7  add.int s6:int s6:int s5:int
-     8  store-elem s4:ref s6:int s2:int Int
+     8  store-elem s4:ref s6:int s2:Int
      9  add.int s6:int s6:int s5:int
-    10  store-elem s4:ref s6:int s3:int Int
+    10  store-elem s4:ref s6:int s3:Int
     11  add.int s6:int s6:int s5:int
-    12  call s1:int m.total (s4:Array) Int
-    13  clear s4:ref Array
-    14  copy s0:int s1:int Int
-    15  return s0:int Int
+    12  call s1:Int m.total (s4:Array)
+    13  clear s4:Array
+    14  copy s0:Int s1:Int
+    15  return s0:Int
 "
     );
 }
@@ -273,10 +273,10 @@ fn a_variadic_parameter_given_nothing_is_an_empty_array() {
 fn @m.f() -> Int
   frame 3: s0:int s1:ref s2:int
      0  alloc s1:ref Array<array> x0
-     1  call s2:int m.total (s1:Array) Int
-     2  clear s1:ref Array
-     3  copy s0:int s2:int Int
-     4  return s0:int Int
+     1  call s2:Int m.total (s1:Array)
+     2  clear s1:Array
+     3  copy s0:Int s2:Int
+     4  return s0:Int
 "
     );
 }
@@ -309,23 +309,23 @@ fn @m.f(Array) -> Int
      5  alloc s6:ref Array<array> xs4:int
      6  int s5:int 1
      7  int s7:int 0
-     8  store-elem s6:ref s7:int s2:int Int
+     8  store-elem s6:ref s7:int s2:Int
      9  add.int s7:int s7:int s5:int
     10  len s8:int s0:ref
     11  int s9:int 0
     12  lt.int s10:bool s9:int s8:int
     13  branch-false s10:bool 19
-    14  load-elem s11:int s0:ref s9:int Int
-    15  store-elem s6:ref s7:int s11:int Int
+    14  load-elem s11:Int s0:ref s9:int
+    15  store-elem s6:ref s7:int s11:Int
     16  add.int s9:int s9:int s5:int
     17  add.int s7:int s7:int s5:int
     18  jump 12
-    19  store-elem s6:ref s7:int s3:int Int
+    19  store-elem s6:ref s7:int s3:Int
     20  add.int s7:int s7:int s5:int
-    21  call s2:int m.total (s6:Array) Int
-    22  clear s6:ref Array
-    23  copy s1:int s2:int Int
-    24  return s1:int Int
+    21  call s2:Int m.total (s6:Array)
+    22  clear s6:Array
+    23  copy s1:Int s2:Int
+    24  return s1:Int
 "
     );
 }
@@ -341,7 +341,7 @@ fn a_vector_spread_is_copied_out_before_it_is_walked() {
         "f",
     );
     assert!(
-        text.contains("     0  call-builtin s2:ref Vector.toArray (s0:Vector) Array\n"),
+        text.contains("     0  call-builtin s2:Array Vector.toArray (s0:Vector)\n"),
         "{text}"
     );
 }
@@ -368,9 +368,9 @@ fn @m.f() -> Int
   local n -> s1:Int [1, 2)
      0  int s1:int 3
      1  add.int.imm s2:int s1:int 1
-     2  call s3:int m.near (s1:Int s2:Int) Int
-     3  copy s0:int s3:int Int
-     4  return s0:int Int
+     2  call s3:Int m.near (s1:Int s2:Int)
+     3  copy s0:Int s3:Int
+     4  return s0:Int
 "
     );
 }
@@ -399,12 +399,12 @@ fn @m.f() -> Int
   local n -> s2:Int [4, 5)
      0  alloc s1:ref closure m.f#0<closure>
      1  func-ref s2:int @m.f#0
-     2  store-field s1:ref +0 s2:int Int
+     2  store-field s1:ref +0 s2:Int
      3  int s2:int 3
-     4  call s3:int m.base () Int
-     5  call s4:int m.scaled (s2:Int s3:Int) Int
-     6  copy s0:int s4:int Int
-     7  return s0:int Int
+     4  call s3:Int m.base ()
+     5  call s4:Int m.scaled (s2:Int s3:Int)
+     6  copy s0:Int s4:Int
+     7  return s0:Int
 "
     );
 }
@@ -425,9 +425,9 @@ fn @m.f(m.P) -> Int
   frame 3: s0!:int s1:int s2:int
   local p -> s0:m.P [0, 3)
   local self -> s0:m.P [0, 3)
-     0  call s2:int m.P.scaled (s0:m.P s0:Int) Int
-     1  copy s1:int s2:int Int
-     2  return s1:int Int
+     0  call s2:Int m.P.scaled (s0:m.P s0:Int)
+     1  copy s1:Int s2:Int
+     2  return s1:Int
 "
     );
 }
@@ -453,11 +453,11 @@ fn @m.f() -> Int
      0  int s1:int 1
      1  alloc s2:ref closure m.f#0<closure>
      2  func-ref s3:int @m.f#0
-     3  store-field s2:ref +0 s3:int Int
-     4  call s3:int m.twice (s1:Int s2:fn) Int
-     5  clear s2:ref fn
-     6  copy s0:int s3:int Int
-     7  return s0:int Int
+     3  store-field s2:ref +0 s3:Int
+     4  call s3:Int m.twice (s1:Int s2:fn)
+     5  clear s2:fn
+     6  copy s0:Int s3:Int
+     7  return s0:Int
 "
     );
 }
@@ -488,9 +488,9 @@ fn a_call_through_a_module_imported_whole_names_the_declaration_it_exports() {
 fn @app.f() -> Int
   frame 3: s0:int s1:int s2:int
      0  int s1:int 21
-     1  call s2:int greet.twice (s1:Int) Int
-     2  copy s0:int s2:int Int
-     3  return s0:int Int
+     1  call s2:Int greet.twice (s1:Int)
+     2  copy s0:Int s2:Int
+     3  return s0:Int
 "
     );
 }
@@ -521,10 +521,10 @@ fn @app.f() -> shape.Point
   frame 6: s0:int s1:int s2:int s3:int s4:int s5:int
      0  int s2:int 1
      1  int s3:int 2
-     2  copy s4:int s2:int Int
-     3  copy s5:int s3:int Int
-     4  copy s0:int s4:int shape.Point
-     5  return s0:int shape.Point
+     2  copy s4:Int s2:Int
+     3  copy s5:Int s3:Int
+     4  copy s0..s1:shape.Point s4..s5:shape.Point
+     5  return s0..s1:shape.Point
 "
     );
 }
