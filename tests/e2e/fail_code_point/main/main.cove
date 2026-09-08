@@ -1,0 +1,13 @@
+use console.println
+
+/// Every way a code-point literal can fail to name exactly one scalar.
+///
+/// A grapheme cluster is the case the rule exists for: `👨‍👩‍👦` is written as
+/// one character and is five scalar values joined by zero-width joiners, so
+/// there is no code point it could mean.
+export fn main() -> Result<Unit, Error> {
+  println("{''}")?
+  println("{'ab'}")?
+  println("{'👨‍👩‍👦'}")?
+  Ok(())
+}

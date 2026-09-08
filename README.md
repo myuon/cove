@@ -317,6 +317,12 @@ code point is an `Int` and there is no `Char`. It also settles two of the
 methods that were waiting on it by measuring them: a Cove `contains` is 101×
 the builtin, so `contains`, `startsWith` and `endsWith` stay primitive, while
 a Cove `Int.parse` is 6.3× and reads as arithmetic.
+[ADR 0047](docs/adr/0047-a-code-point-is-written-as-a-character-and-is-an-int.md)
+adds the way to write one: `'a'` is a literal whose type is `Int` and whose
+value is a Unicode scalar value, holding exactly one — `''`, `'ab'` and an
+emoji sequence are all errors. It is a spelling and not a type, so it lexes
+to the token `97` lexes to and nothing past the lexer knows the form exists,
+and `"{'a'}"` prints `97`.
 
 Syntax is still provisional and may change.
 

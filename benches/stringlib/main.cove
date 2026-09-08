@@ -122,10 +122,10 @@ fn parseCove(text: String) -> Result<Int, Error> {
   var negative = false
   match text.codePointAtByte(0) {
     Some(head) => {
-      if head == 45 {
+      if head == '-' {
         negative = true
         at = 1
-      } else if head == 43 {
+      } else if head == '+' {
         at = 1
       }
     }
@@ -140,10 +140,10 @@ fn parseCove(text: String) -> Result<Int, Error> {
   while at < end {
     match text.codePointAtByte(at) {
       Some(digit) => {
-        if digit < 48 || digit > 57 {
+        if digit < '0' || digit > '9' {
           return Err(Error("`{text}` is not an integer"))
         }
-        value = value * 10 + (digit - 48)
+        value = value * 10 + (digit - '0')
         at += 1
       }
       None => {

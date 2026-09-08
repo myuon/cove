@@ -1,0 +1,22 @@
+use console.println
+
+/// Prints the code-point literal, whose type is `Int`.
+///
+/// There is no `Char`: `'a'` is a literal for a Unicode scalar value and the
+/// scalar is an `Int`, so `'a'` and `97` are the same value written two ways
+/// and `"{'a'}"` prints a number. ADR 0047.
+export fn main() -> Result<Unit, Error> {
+  println("letters {'a'} {'Z'} {'0'}")?
+  println("punctuation {'{'} {'}'} {','} {'"'}")?
+  println("escapes {'\n'} {'\t'} {'\r'} {'\0'} {'\\'} {'\''}")?
+  println("space {' '}")?
+  println("multibyte {'é'} {'あ'} {'😀'}")?
+
+  let digit = '7'
+  println("value {digit - '0'} isDigit {digit >= '0' && digit <= '9'}")?
+  println("notADigit {'x' >= '0' && 'x' <= '9'}")?
+
+  println("roundTrip {String.fromCodePoint('a')} {"a".codePointAtByte(0)}")?
+  println("same {'a' == 97}")?
+  Ok(())
+}

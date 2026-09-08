@@ -475,6 +475,22 @@ impl<'a> Formatter<'a> {
         self.source.get(span.start as usize..span.end as usize)
     }
 
+    /// The source spelling of a code-point literal, so that `'a'` survives
+    /// formatting rather than being rewritten to `97`.
+    ///
+    /// A code-point literal is an `Int` and nothing past the lexer knows it
+    /// was written any other way, so without this the first `cove fmt` would
+    /// quietly delete the whole point of the form.
+    ///
+    /// It is a predicate of its own rather than a widening of `number_text`
+    /// because that one refuses a span holding whitespace, and `' '` is a
+    /// code-point literal whose entire content is a space.
+    fn code_point_text(&self, span: Span) -> Option<&'a str> {
+        let text = self.text(span)?;
+        let mut characters = text.chars();
+        (characters.next() == Some('\'') && characters.next_back() == Some('\'')).then_some(text)
+    }
+
     /// The source spelling of a numeric literal, so that `0xff`, `1_000`, and
     /// `60s` survive formatting.
     fn number_text(&self, span: Span) -> Option<&'a str> {
@@ -1752,6 +1768,7 @@ impl Formatter<'_> {
         match &expr.kind {
             ExprKind::Int(value) => self
                 .number_text(expr.span)
+                .or_else(|| self.code_point_text(expr.span))
                 .map(str::to_string)
                 .unwrap_or_else(|| value.to_string()),
             ExprKind::Float(value) => self
@@ -2495,6 +2512,29 @@ fn outer() {
     }
 
     // -- expressions -------------------------------------------------------
+
+    /// A code-point literal survives formatting.
+    ///
+    /// It is an `Int` by the time the formatter sees it, so without
+    /// `code_point_text` every one of these would come back as a number and
+    /// the first `cove fmt` would delete the form from the tree. `' '` is
+    /// here because the numeric predicate beside it refuses a span holding
+    /// whitespace, and a space is a code point.
+    #[test]
+    fn formats_a_code_point_literal_and_keeps_its_spelling() {
+        formatted(
+            "
+fn codePoints() {
+  let letters = ['a', 'Z', '0']
+  let punctuation = ['{', '}', ',', '\"']
+  let escapes = ['\\n', '\\t', '\\r', '\\0', '\\\\', '\\'']
+  let space = ' '
+  let multibyte = '\u{e9}'
+  space
+}
+",
+        );
+    }
 
     #[test]
     fn formats_literals_and_keeps_their_spelling() {

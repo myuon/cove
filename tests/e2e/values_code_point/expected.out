@@ -1,0 +1,9 @@
+letters 97 90 48
+punctuation 123 125 44 34
+escapes 10 9 13 0 92 39
+space 32
+multibyte 233 12354 128512
+value 7 isDigit true
+notADigit false
+roundTrip Ok(a) Some(97)
+same true
