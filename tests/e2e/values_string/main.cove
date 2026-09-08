@@ -71,5 +71,17 @@ export fn main() -> Result<Unit, Error> {
   println("chars {multibyte.chars()}")?
   println("slice {multibyte.slice(1, 3)}")?
   println("indexOf {multibyte.indexOf("b")} {multibyte.indexOf("う")}")?
+
+  // The three that count bytes instead, on the same string, so that the two
+  // index spaces can be read against each other: `length` says 5 and
+  // `byteLength` says 11, and the offsets below are the second kind.
+  println("byteLength {multibyte.byteLength()} {word.byteLength()}")?
+  println("codePointAtByte {multibyte.codePointAtByte(0)} {multibyte.codePointAtByte(1)}")?
+  println("codePointAtByte inside {multibyte.codePointAtByte(2)}")?
+  println("codePointAtByte past {multibyte.codePointAtByte(11)} {multibyte.codePointAtByte(-1)}")?
+  println("sliceBytes {multibyte.sliceBytes(1, 7)}")?
+  println("sliceBytes inside {multibyte.sliceBytes(0, 2)}")?
+  println("sliceBytes backwards {multibyte.sliceBytes(4, 1)}")?
+  println("sliceBytes past {multibyte.sliceBytes(0, 99)} {multibyte.sliceBytes(-1, 0)}")?
   Ok(())
 }

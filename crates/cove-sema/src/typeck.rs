@@ -11644,7 +11644,7 @@ fn run() -> Counter {
             error.help.unwrap(),
             "`String` has `length`, `isEmpty`, `words`, `chars`, `split`, `join`, `slice`, \
              `trim`, `contains`, `startsWith`, `endsWith`, `indexOf`, `replace`, `toUpper`, \
-             `toLower`, `snapshot`"
+             `toLower`, `byteLength`, `codePointAtByte`, `sliceBytes`, `snapshot`"
         );
     }
 

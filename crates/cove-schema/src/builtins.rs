@@ -1958,6 +1958,18 @@ pub const SET: BuiltinSchema = BuiltinSchema {
 /// answers, in `chars`, `slice`, and `indexOf`, counts the same way, so an
 /// API that mixed characters and bytes never has the chance to become a trap.
 ///
+/// Three operations count in **bytes** instead, and every one of them says so
+/// in its name: `byteLength`, `codePointAtByte` and `sliceBytes`. They exist
+/// because the representation is UTF-8 and a scanner that walks it should not
+/// have to allocate a one-character `String` per character to do so
+/// ([issue #292](https://github.com/myuon/cove/issues/292)). The rule that
+/// keeps them from becoming the trap the paragraph above avoids is the naming
+/// one: a byte offset is not a `String` index, it is a value one of these
+/// three answered and another takes back, and no method without `Byte` in its
+/// name accepts one. Mixing the two index spaces in the same call is
+/// therefore something a reader can see rather than something the types allow
+/// silently.
+///
 /// `join` lives here rather than on `Array<String>`, so that `", ".join(names)`
 /// reads receiver-first with the separator: [`BuiltinType`] has no way to
 /// constrain a receiver's type parameter, so an `Array<T>.join` would either
@@ -2153,6 +2165,74 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             params: &[],
             variadic: false,
             result: BuiltinType::String,
+            mutating: false,
+            fresh: false,
+        },
+        // The number of UTF-8 bytes, which is what the object actually
+        // holds — and, in the linear-memory backend, the object header's own
+        // length field rather than anything read out of the payload.
+        // `length()` beside it still counts characters and still walks them.
+        MethodSchema {
+            name: "byteLength",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Int,
+            mutating: false,
+            fresh: false,
+        },
+        // The Unicode scalar value beginning at `offset` bytes, or `None`.
+        //
+        // `None` means every way the offset does not begin a character: at or
+        // past the end, negative, or the interior of one. Those are
+        // deliberately one answer rather than several. A scanner that starts
+        // at 0 and advances by the width of what it read never produces the
+        // last two, and the width is a function of the scalar — a `String` is
+        // valid UTF-8 in its shortest form, so a value below 0x80 occupies
+        // one byte, below 0x800 two, below 0x10000 three, and four otherwise.
+        // That is why there is no `nextByteOffset` here to pair with it, and
+        // why this can answer a bare `Int`: the caller can already say where
+        // the next one starts.
+        //
+        // It is total. Nothing written over it inherits a trap.
+        MethodSchema {
+            name: "codePointAtByte",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "offset",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::Option(&BuiltinType::Int),
+            mutating: false,
+            fresh: false,
+        },
+        // The text between two byte offsets, which must both begin a
+        // character and be in range and in order.
+        //
+        // It refuses rather than clamps, which is the one place it parts from
+        // `slice`. `slice` clamps because a character position out of range
+        // is the caller's arithmetic about a sequence it can count; a byte
+        // offset out of range or inside a character is an offset this type
+        // never handed out, and quietly moving it to the nearest legal one
+        // would produce a `String` the caller did not ask for. The invariant
+        // that a `String` is valid UTF-8 is the thing being kept, and it is
+        // kept here rather than anywhere downstream.
+        MethodSchema {
+            name: "sliceBytes",
+            generics: &[],
+            params: &[
+                ParamSchema {
+                    name: "from",
+                    ty: BuiltinType::Int,
+                },
+                ParamSchema {
+                    name: "to",
+                    ty: BuiltinType::Int,
+                },
+            ],
+            variadic: false,
+            result: BuiltinType::Result(&BuiltinType::String, &BuiltinType::Error),
             mutating: false,
             fresh: false,
         },

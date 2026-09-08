@@ -848,6 +848,60 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Str(text.to_lowercase().into())))
             }
+            // The three byte-counted operations. Their diagnostics are
+            // written out again in `crates/cove-runtime/src/vm/builtins/text.rs`
+            // rather than shared, as every other builtin's are; what holds
+            // the two readings together is `tests/e2e/values_string`, which
+            // runs on both backends against one `expected.out`.
+            "byteLength" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value(Repr::Int(text.len() as i64)))
+            }
+            "codePointAtByte" => {
+                let args = expect_args("String.codePointAtByte", args, 1, span)?;
+                let Value(Repr::Int(offset)) = &args[0] else {
+                    return Err(type_error(
+                        "String.codePointAtByte",
+                        "offset",
+                        "Int",
+                        &args[0],
+                        span,
+                    ));
+                };
+                // Past the end, before the start, and inside a character are
+                // one answer on purpose: a scanner that advances by the width
+                // of what it read reaches none of them, and telling them
+                // apart would cost a `Result` on the one path this exists for.
+                Ok(
+                    match usize::try_from(*offset)
+                        .ok()
+                        .filter(|at| *at < text.len() && text.is_char_boundary(*at))
+                        .and_then(|at| text[at..].chars().next())
+                    {
+                        Some(character) => Value::some(Value(Repr::Int(character as i64))),
+                        None => Value::none(),
+                    },
+                )
+            }
+            "sliceBytes" => {
+                let args = expect_args("String.sliceBytes", args, 2, span)?;
+                let Value(Repr::Int(from)) = &args[0] else {
+                    return Err(type_error(
+                        "String.sliceBytes",
+                        "from",
+                        "Int",
+                        &args[0],
+                        span,
+                    ));
+                };
+                let Value(Repr::Int(to)) = &args[1] else {
+                    return Err(type_error("String.sliceBytes", "to", "Int", &args[1], span));
+                };
+                Ok(match byte_range(text, *from, *to) {
+                    Ok(range) => Value::ok(Value(Repr::Str(text[range].into()))),
+                    Err(message) => Value::err(Value::error(message)),
+                })
+            }
             _ => Err(no_method("String", name, span)),
         },
         Value(Repr::Range {
@@ -1409,6 +1463,41 @@ fn format_digits_error(digits: i64, span: Span) -> RuntimeError {
         .with_rule(
             "A Float carries at most 17 significant decimal digits, so `digits` must be between 0 and 17.",
         )
+}
+
+/// The byte range `sliceBytes(from, to)` names, or what is wrong with it.
+///
+/// Four things can be, and they are checked in the order a reader would ask
+/// them: is each end a byte offset into this string at all, do they run
+/// forwards, and does each begin a character. The last is the one `slice` has
+/// no equivalent of, and it is why this refuses where `slice` clamps — an
+/// offset inside a character was never handed out by `codePointAtByte`, so
+/// moving it to the nearest legal one would answer a question nobody asked.
+fn byte_range(text: &str, from: i64, to: i64) -> Result<std::ops::Range<usize>, String> {
+    let len = text.len();
+    let offset = |name: &str, value: i64| -> Result<usize, String> {
+        usize::try_from(value)
+            .ok()
+            .filter(|at| *at <= len)
+            .ok_or_else(|| {
+                format!("`{name}` is `{value}`, and a byte offset into this string is 0 to {len}")
+            })
+    };
+    let start = offset("from", from)?;
+    let end = offset("to", to)?;
+    if start > end {
+        return Err(format!(
+            "`from` is `{from}` and `to` is `{to}`, so this range runs backwards"
+        ));
+    }
+    for (name, at) in [("from", start), ("to", end)] {
+        if !text.is_char_boundary(at) {
+            return Err(format!(
+                "`{name}` is `{at}`, which is inside a character rather than at the start of one"
+            ));
+        }
+    }
+    Ok(start..end)
 }
 
 /// The one-character string `character` spells.

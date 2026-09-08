@@ -1,0 +1,92 @@
+/// `benches/chars`, scanned by byte offset instead.
+///
+/// The same line, the same 32,000 rounds and the same answer, so the only
+/// difference between the two rows is how a character is reached: `chars()`
+/// allocates an `Array<String>` and one heap string per character, and this
+/// allocates nothing at all and compares two `Int`s.
+///
+/// The width of a scalar is written out rather than called, because a call
+/// per character is what `examples/cq/README.md` measured as doubling this
+/// loop, and the question here is what the primitive costs, not what a call
+/// does. `benches/bytescanCall` beside it is the same loop with the call.
+export fn main() -> Result<Unit, Error> {
+  let line = "\{\"id\":\"B-000001\",\"nights\":5,\"rate\":129.5,\"status\":\"confirmed\"\}"
+  var quotes = 0
+  var round = 0
+  while round < 32000 {
+    let end = line.byteLength()
+    var at = 0
+    while at < end {
+      match line.codePointAtByte(at) {
+        Some(codePoint) => {
+          if codePoint == 34 {
+            quotes += 1
+          }
+          if codePoint < 128 {
+            at += 1
+          } else if codePoint < 2048 {
+            at += 2
+          } else if codePoint < 65536 {
+            at += 3
+          } else {
+            at += 4
+          }
+        }
+        None => {
+          at += 1
+        }
+      }
+    }
+    round += 1
+  }
+  assertEqual(quotes, 32000 * 12)?
+  Ok(())
+}
+
+/// The same, with the width behind a function call.
+///
+/// The pair is the measurement `examples/cq` asks for: a scanner written the
+/// natural way puts `width` in a function, and this is what that costs.
+export fn viaCall() -> Result<Unit, Error> {
+  let line = "\{\"id\":\"B-000001\",\"nights\":5,\"rate\":129.5,\"status\":\"confirmed\"\}"
+  var quotes = 0
+  var round = 0
+  while round < 32000 {
+    let end = line.byteLength()
+    var at = 0
+    while at < end {
+      match line.codePointAtByte(at) {
+        Some(codePoint) => {
+          if codePoint == 34 {
+            quotes += 1
+          }
+          at += width(codePoint)
+        }
+        None => {
+          at += 1
+        }
+      }
+    }
+    round += 1
+  }
+  assertEqual(quotes, 32000 * 12)?
+  Ok(())
+}
+
+/// The number of UTF-8 bytes the scalar `codePoint` occupies.
+///
+/// A `String` is valid UTF-8 in its shortest form, so this is a function of
+/// the value and needs no second look at the bytes — which is why
+/// `codePointAtByte` answers a bare `Int` and there is no `nextByteOffset`
+/// beside it.
+fn width(codePoint: Int) -> Int {
+  if codePoint < 128 {
+    1
+  } else if codePoint < 2048 {
+    2
+  } else if codePoint < 65536 {
+    3
+  } else {
+    4
+  }
+}

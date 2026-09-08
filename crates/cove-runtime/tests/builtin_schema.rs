@@ -387,6 +387,21 @@ static EXERCISES: &[Exercise] = &[
     },
     Exercise {
         ty: "String",
+        name: "byteLength",
+        body: "  let text = \"h\u{e9}\"\n  text.byteLength()",
+    },
+    Exercise {
+        ty: "String",
+        name: "codePointAtByte",
+        body: "  let text = \"hello\"\n  text.codePointAtByte(0).unwrapOr(-1)",
+    },
+    Exercise {
+        ty: "String",
+        name: "sliceBytes",
+        body: "  let text = \"hello\"\n  text.sliceBytes(1, 3).unwrapOr(\"\").length()",
+    },
+    Exercise {
+        ty: "String",
         name: "snapshot",
         body: "  let text = \"hello\"\n  text.snapshot().length()",
     },

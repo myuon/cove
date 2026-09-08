@@ -6,6 +6,12 @@ cq/data/bookings-large.jsonl
 cq/data/confirmed-large.jsonl
 cq/data/summary-large.csv
 
+# The same, for the CSV side, which has no generator: it is `rates.csv`'s
+# six rows repeated, and `docs/adr/0046-a-byte-offset-is-a-value-a-string-hands-out.md`
+# says the one line that makes it.
+cq/data/rates-large.csv
+cq/data/rates-out.jsonl
+
 # `cq.sample` writes here when it is run without a path, because that is
 # where the `files` capability is rooted from `examples/`. Same file, same
 # reason as the three above: generated from a seed, too large to keep.

@@ -184,6 +184,12 @@ pub(crate) fn call(
         ("String", "toUpper") => text::to_upper(machine, operands).map(one),
         ("String", "toLower") => text::to_lower(machine, operands).map(one),
         ("String", "fromCodePoint") => text::from_code_point(machine, operands),
+        // The three that count bytes. Every one of them reads the object's
+        // header or a word of its payload rather than decoding the whole
+        // string, which is the only reason they are worth having.
+        ("String", "byteLength") => text::byte_length(machine, operands).map(one),
+        ("String", "codePointAtByte") => text::code_point_at_byte(machine, operands),
+        ("String", "sliceBytes") => text::slice_bytes(machine, operands),
 
         // ---- Int ---------------------------------------------------------
         ("Int", "toFloat") => scalar::int_to_float(machine, operands).map(one),

@@ -314,7 +314,15 @@ use support::{Case, ModuleIndex, Prepared};
 /// to be filled, and the monomorphisation depth cap is a **refusal** that no
 /// later task removes. Teaching this file to tell a permanent refusal from a
 /// gap is the work that would let it come back into the corpus.
-const AGREEING_FLOOR: usize = 117;
+/// 117 to 127 with [ADR 0046](../../../docs/adr/0046-a-byte-offset-is-a-value-a-string-hands-out.md):
+/// ten programs, all of them `benches/`, added to measure what the three
+/// byte-counted `String` primitives cost against what they replace.
+/// `benches/bytescan` is `benches/chars`'s loop written against them, and
+/// `benches/stringlib` is a `contains` and an `Int.parse` written in Cove
+/// beside the builtins they would replace. Each is a program this survey runs
+/// on both evaluators like any other, which is the reason a benchmark is
+/// allowed in the corpus at all.
+const AGREEING_FLOOR: usize = 127;
 
 /// The code `cove_ir` raises a gap under.
 ///
