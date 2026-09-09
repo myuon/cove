@@ -10,10 +10,9 @@ fn a_literal_is_one_instruction_and_one_object_for_the_run() {
         listing("fn hello() -> String { \"hello\" }", "hello"),
         "\
 fn @m.hello() -> String
-  frame 2: s0:ref s1:ref
-     0  str s1:ref \"hello\"
-     1  copy s0:String s1:String
-     2  return s0:String
+  frame 1: s0:ref
+     0  str s0:ref \"hello\"
+     1  return s0:String
 "
     );
 }
@@ -30,13 +29,12 @@ fn an_interpolation_is_one_builtin_over_the_pieces() {
         ),
         "\
 fn @m.greet(String) -> String
-  frame 5: s0!:ref s1:ref s2:ref s3:ref s4:ref
-  local name -> s0:String [0, 5)
+  frame 4: s0!:ref s1:ref s2:ref s3:ref
+  local name -> s0:String [0, 4)
      0  str s2:ref \"hi \"
      1  str s3:ref \"!\"
-     2  call-builtin s4:String String.interpolate (s2:String s0:String s3:String)
-     3  copy s1:String s4:String
-     4  return s1:String
+     2  call-builtin s1:String String.interpolate (s2:String s0:String s3:String)
+     3  return s1:String
 "
     );
 }
@@ -58,12 +56,11 @@ fn an_inline_value_crosses_into_an_interpolation_where_it_sits() {
         ),
         "\
 fn @m.show(m.Point) -> String
-  frame 5: s0!:int s1!:int s2:ref s3:ref s4:ref
-  local p -> s0..s1:m.Point [0, 4)
+  frame 4: s0!:int s1!:int s2:ref s3:ref
+  local p -> s0..s1:m.Point [0, 3)
      0  str s3:ref \"p=\"
-     1  call-builtin s4:String String.interpolate (s3:String s0..s1:m.Point)
-     2  copy s2:String s4:String
-     3  return s2:String
+     1  call-builtin s2:String String.interpolate (s3:String s0..s1:m.Point)
+     2  return s2:String
 "
     );
 }

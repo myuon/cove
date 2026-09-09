@@ -148,14 +148,13 @@ fn a_var_local_is_one_location_written_again() {
         ),
         "\
 fn @m.count() -> Int
-  frame 3: s0:int s1:int s2:int
-  local n -> s1:Int [1, 5)
+  frame 2: s0:int s1:int
+  local n -> s1:Int [1, 4)
      0  int s1:int 0
-     1  add.int.imm s2:int s1:int 1
-     2  copy s1:Int s2:Int
-     3  add.int.imm s1:int s1:int 2
-     4  copy s0:Int s1:Int
-     5  return s0:Int
+     1  add.int.imm s1:int s1:int 1
+     2  add.int.imm s1:int s1:int 2
+     3  copy s0:Int s1:Int
+     4  return s0:Int
 "
     );
 }

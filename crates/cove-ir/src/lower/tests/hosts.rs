@@ -73,11 +73,10 @@ fn a_host_call_names_the_module_and_the_operation_as_the_source_writes_them() {
         ),
         "\
 fn @m.f() -> Result
-  frame 7: s0:tag s1:unit s2:ref s3:ref s4:tag s5:unit s6:ref
+  frame 4: s0:tag s1:unit s2:ref s3:ref
      0  str s3:ref \"hi\"
-     1  call-host s4..s6:Result console.println (s3:String)
-     2  copy s0..s2:Result s4..s6:Result
-     3  return s0..s2:Result
+     1  call-host s0..s2:Result console.println (s3:String)
+     2  return s0..s2:Result
 "
     );
 }
@@ -117,11 +116,10 @@ fn a_host_call_written_through_the_module_reaches_the_same_operation() {
         ),
         "\
 fn @m.f() -> Result
-  frame 7: s0:tag s1:unit s2:ref s3:ref s4:tag s5:unit s6:ref
+  frame 4: s0:tag s1:unit s2:ref s3:ref
      0  str s3:ref \"hi\"
-     1  call-host s4..s6:Result console.println (s3:String)
-     2  copy s0..s2:Result s4..s6:Result
-     3  return s0..s2:Result
+     1  call-host s0..s2:Result console.println (s3:String)
+     2  return s0..s2:Result
 "
     );
 }
@@ -144,11 +142,10 @@ fn a_host_resource_is_one_word_that_is_not_a_root() {
         ),
         "\
 fn @m.f() -> Result
-  frame 7: s0:tag s1:host s2:ref s3:ref s4:tag s5:host s6:ref
+  frame 4: s0:tag s1:host s2:ref s3:ref
      0  str s3:ref \"a.txt\"
-     1  call-host s4..s6:Result files.open (s3:String)
-     2  copy s0..s2:Result s4..s6:Result
-     3  return s0..s2:Result
+     1  call-host s0..s2:Result files.open (s3:String)
+     2  return s0..s2:Result
 "
     );
 }
@@ -228,12 +225,11 @@ fn an_operation_of_a_resource_is_addressed_to_the_handle() {
         ),
         "\
 fn @m.f(<host> String) -> Result
-  frame 8: s0!:host s1!:ref s2:tag s3:unit s4:ref s5:tag s6:unit s7:ref
-  local w -> s0:<host> [0, 3)
-  local line -> s1:String [0, 3)
-     0  call-resource s5..s7:Result s0:host files.Writer.writeLine (s1:String)
-     1  copy s2..s4:Result s5..s7:Result
-     2  return s2..s4:Result
+  frame 5: s0!:host s1!:ref s2:tag s3:unit s4:ref
+  local w -> s0:<host> [0, 2)
+  local line -> s1:String [0, 2)
+     0  call-resource s2..s4:Result s0:host files.Writer.writeLine (s1:String)
+     1  return s2..s4:Result
 "
     );
 }
@@ -320,12 +316,11 @@ fn a_resource_an_embedder_s_module_keeps_answers_its_own_operations() {
         ),
         "\
 fn @m.f(<host> ledger.Entry) -> Result
-  frame 9: s0!:host s1!:int s2!:ref s3:tag s4:unit s5:ref s6:tag s7:unit s8:ref
-  local b -> s0:<host> [0, 3)
-  local e -> s1..s2:ledger.Entry [0, 3)
-     0  call-resource s6..s8:Result s0:host ledger.Book.record (s1..s2:ledger.Entry)
-     1  copy s3..s5:Result s6..s8:Result
-     2  return s3..s5:Result
+  frame 6: s0!:host s1!:int s2!:ref s3:tag s4:unit s5:ref
+  local b -> s0:<host> [0, 2)
+  local e -> s1..s2:ledger.Entry [0, 2)
+     0  call-resource s3..s5:Result s0:host ledger.Book.record (s1..s2:ledger.Entry)
+     1  return s3..s5:Result
 "
     );
 }

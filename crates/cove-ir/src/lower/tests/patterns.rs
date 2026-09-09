@@ -50,18 +50,17 @@ fn a_binding_is_a_copy_of_the_words_it_names() {
         "\
 fn @m.f(m.Msg) -> String
   frame 4: s0!:tag s1!:ref s2:ref s3:ref
-  local m -> s0..s1:m.Msg [0, 10)
+  local m -> s0..s1:m.Msg [0, 9)
   local s -> s3:String [2, 3)
-     0  switch s0:tag [5 1] else 8
+     0  switch s0:tag [5 1] else 7
      1  copy s3:String s1:String
      2  copy s2:String s3:String
      3  clear s3:String
-     4  jump 9
-     5  str s3:ref \"\"
-     6  copy s2:String s3:String
-     7  jump 9
-     8  trap \"no `match` arm covers this value\"
-     9  return s2:String
+     4  jump 8
+     5  str s2:ref \"\"
+     6  jump 8
+     7  trap \"no `match` arm covers this value\"
+     8  return s2:String
 "
     );
 }
@@ -77,23 +76,20 @@ fn a_match_over_something_that_is_not_an_enum_is_a_chain() {
         ),
         "\
 fn @m.name(Int) -> String
-  frame 4: s0!:int s1:ref s2:bool s3:ref
-  local n -> s0:Int [0, 15)
+  frame 3: s0!:int s1:ref s2:bool
+  local n -> s0:Int [0, 12)
      0  eq.int.imm s2:bool s0:int 0
-     1  branch-false s2:bool 5
-     2  str s3:ref \"zero\"
-     3  copy s1:String s3:String
-     4  jump 14
-     5  eq.int.imm s2:bool s0:int 1
-     6  branch-false s2:bool 10
-     7  str s3:ref \"one\"
-     8  copy s1:String s3:String
-     9  jump 14
-    10  str s3:ref \"many\"
-    11  copy s1:String s3:String
-    12  jump 14
-    13  trap \"no `match` arm covers this value\"
-    14  return s1:String
+     1  branch-false s2:bool 4
+     2  str s1:ref \"zero\"
+     3  jump 11
+     4  eq.int.imm s2:bool s0:int 1
+     5  branch-false s2:bool 8
+     6  str s1:ref \"one\"
+     7  jump 11
+     8  str s1:ref \"many\"
+     9  jump 11
+    10  trap \"no `match` arm covers this value\"
+    11  return s1:String
 "
     );
 }

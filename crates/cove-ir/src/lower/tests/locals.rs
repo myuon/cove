@@ -106,19 +106,17 @@ fn a_slot_two_scopes_reused_carries_a_name_over_each_of_its_two_lives() {
         ),
         "\
 fn @m.f() -> Int
-  frame 4: s0:int s1:int s2:int s3:int
-  local t -> s1:Int [1, 8)
-  local a -> s2:Int [2, 4)
-  local b -> s2:Int [5, 7)
+  frame 3: s0:int s1:int s2:int
+  local t -> s1:Int [1, 6)
+  local a -> s2:Int [2, 3)
+  local b -> s2:Int [4, 5)
      0  int s1:int 0
      1  int s2:int 1
-     2  add.int s3:int s1:int s2:int
-     3  copy s1:Int s3:Int
-     4  int s2:int 2
-     5  add.int s3:int s1:int s2:int
-     6  copy s1:Int s3:Int
-     7  copy s0:Int s1:Int
-     8  return s0:Int
+     2  add.int s1:int s1:int s2:int
+     3  int s2:int 2
+     4  add.int s1:int s1:int s2:int
+     5  copy s0:Int s1:Int
+     6  return s0:Int
 "
     );
 }

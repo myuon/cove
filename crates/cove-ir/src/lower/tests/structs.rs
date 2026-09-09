@@ -45,17 +45,16 @@ fn a_two_word_struct_is_copied_by_one_copy() {
         "\
 fn @m.f() -> Int
   frame 7: s0:int s1:int s2:int s3:int s4:int s5:int s6:int
-  local a -> s3..s4:m.Point [4, 8)
-  local b -> s5..s6:m.Point [5, 8)
+  local a -> s3..s4:m.Point [4, 7)
+  local b -> s5..s6:m.Point [5, 7)
      0  int s1:int 1
      1  int s2:int 2
      2  copy s3:Int s1:Int
      3  copy s4:Int s2:Int
      4  copy s5..s6:m.Point s3..s4:m.Point
-     5  int s1:int 7
-     6  copy s5:Int s1:Int
-     7  copy s0:Int s3:Int
-     8  return s0:Int
+     5  int s5:int 7
+     6  copy s0:Int s3:Int
+     7  return s0:Int
 "
     );
 }
@@ -72,14 +71,13 @@ fn a_nested_struct_is_copied_whole() {
         ),
         "\
 fn @m.f(m.Line) -> Int
-  frame 10: s0!:int s1!:int s2!:int s3!:int s4:int s5:int s6:int s7:int s8:int s9:int
-  local l -> s0..s3:m.Line [0, 5)
-  local m -> s5..s8:m.Line [1, 4)
+  frame 9: s0!:int s1!:int s2!:int s3!:int s4:int s5:int s6:int s7:int s8:int
+  local l -> s0..s3:m.Line [0, 4)
+  local m -> s5..s8:m.Line [1, 3)
      0  copy s5..s8:m.Line s0..s3:m.Line
-     1  int s9:int 7
-     2  copy s5:Int s9:Int
-     3  add.int s4:int s0:int s5:int
-     4  return s4:Int
+     1  int s5:int 7
+     2  add.int s4:int s0:int s5:int
+     3  return s4:Int
 "
     );
 }
@@ -117,15 +115,14 @@ fn a_struct_holding_a_vector_copies_the_words_and_shares_the_address() {
         ),
         "\
 fn @m.f(m.Wrapper) -> Bool
-  frame 9: s0!:int s1!:int s2!:ref s3:bool s4:int s5:int s6:ref s7:int s8:bool
-  local w -> s0..s2:m.Wrapper [0, 6)
-  local other -> s4..s6:m.Wrapper [1, 5)
+  frame 8: s0!:int s1!:int s2!:ref s3:bool s4:int s5:int s6:ref s7:bool
+  local w -> s0..s2:m.Wrapper [0, 5)
+  local other -> s4..s6:m.Wrapper [1, 4)
      0  copy s4..s6:m.Wrapper s0..s2:m.Wrapper
-     1  int s7:int 7
-     2  copy s4:Int s7:Int
-     3  eq.identity s8:bool s6:ref s2:ref
-     4  copy s3:Bool s8:Bool
-     5  return s3:Bool
+     1  int s4:int 7
+     2  eq.identity s7:bool s6:ref s2:ref
+     3  copy s3:Bool s7:Bool
+     4  return s3:Bool
 "
     );
 }

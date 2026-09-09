@@ -141,7 +141,7 @@ impl Body<'_> {
             // host call it shares a boundary with.
             Ty::Host(qualified) => {
                 let qualified = qualified.to_string();
-                self.call_resource(expr, base, &qualified, name, args)
+                self.call_resource(expr, base, &qualified, name, args, want)
             }
             _ => {
                 let Some(receiver) = receiver_name(&ty) else {

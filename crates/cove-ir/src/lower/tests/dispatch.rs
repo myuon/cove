@@ -146,28 +146,24 @@ fn a_trait_method_s_default_body_is_lowered_once_per_conforming_type() {
         listing(source, "Booking.line"),
         "\
 fn @m.Booking.line(m.Booking) -> String
-  frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
-  local self -> s0:m.Booking [0, 6)
+  frame 4: s0!:int s1:ref s2:ref s3:ref
+  local self -> s0:m.Booking [0, 4)
      0  str s2:ref \"- \"
      1  call s3:String m.Booking.summarize (s0:m.Booking)
-     2  call-builtin s4:String String.interpolate (s2:String s3:String)
-     3  clear s3:String
-     4  copy s1:String s4:String
-     5  return s1:String
+     2  call-builtin s1:String String.interpolate (s2:String s3:String)
+     3  return s1:String
 "
     );
     assert_eq!(
         listing(source, "Receipt.line"),
         "\
 fn @m.Receipt.line(m.Receipt) -> String
-  frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
-  local self -> s0:m.Receipt [0, 6)
+  frame 4: s0!:int s1:ref s2:ref s3:ref
+  local self -> s0:m.Receipt [0, 4)
      0  str s2:ref \"- \"
      1  call s3:String m.Receipt.summarize (s0:m.Receipt)
-     2  call-builtin s4:String String.interpolate (s2:String s3:String)
-     3  clear s3:String
-     4  copy s1:String s4:String
-     5  return s1:String
+     2  call-builtin s1:String String.interpolate (s2:String s3:String)
+     3  return s1:String
 "
     );
 }
@@ -188,14 +184,12 @@ fn a_conformance_that_writes_its_own_body_does_not_get_the_default() {
         ),
         "\
 fn @m.Receipt.line(m.Receipt) -> String
-  frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
-  local self -> s0:m.Receipt [0, 6)
+  frame 4: s0!:int s1:ref s2:ref s3:ref
+  local self -> s0:m.Receipt [0, 4)
      0  str s2:ref \"  $ \"
      1  call s3:String m.Receipt.summarize (s0:m.Receipt)
-     2  call-builtin s4:String String.interpolate (s2:String s3:String)
-     3  clear s3:String
-     4  copy s1:String s4:String
-     5  return s1:String
+     2  call-builtin s1:String String.interpolate (s2:String s3:String)
+     3  return s1:String
 "
     );
 }

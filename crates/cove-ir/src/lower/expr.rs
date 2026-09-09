@@ -138,11 +138,42 @@ impl Body<'_> {
     /// and the two paths are one piece of code rather than two that can
     /// drift.
     pub(super) fn expr_into(&mut self, expr: &Expr, dst: Dest) {
-        let want = (!self.diverges(expr) && self.layout_of(expr) == dst.layout).then_some(dst);
-        let value = self.lowered(expr, want);
-        let value = self.unerased(value, expr);
+        let want = self.forwardable(expr, dst);
+        let value = self.expr_wanting(expr, want);
         self.store(dst, &value, expr);
         self.release(value, expr.span);
+    }
+
+    /// [`Body::expr`], against a destination a producer may write directly.
+    ///
+    /// The two halves are [`Body::expr`]'s two and in its order: what the
+    /// construct builds, then the reconciliation with the type the checker
+    /// settled. Only the first is offered the destination — the second opens
+    /// a box, which is a location of its own by construction.
+    fn expr_wanting(&mut self, expr: &Expr, want: Option<Dest>) -> Val {
+        let value = self.lowered(expr, want);
+        self.unerased(value, expr)
+    }
+
+    /// Whether `dst` is a destination `expr`'s producer may be handed, which
+    /// is the pair of conditions [`Body::store`] is already under.
+    ///
+    /// A **diverging** expression writes nothing, so there is no destination
+    /// to give it. A **layout that disagrees** is the language's one implicit
+    /// conversion, and erasing on the way in needs the value in a location of
+    /// its own first. Either way the temporary-and-copy path runs, which is
+    /// what "a producer that cannot accept the destination" means.
+    fn forwardable(&mut self, expr: &Expr, dst: Dest) -> Option<Dest> {
+        if self.diverges(expr) {
+            return None;
+        }
+        // The table is asked directly rather than through `Body::layout_of`,
+        // which reports a type it cannot build a layout for. The form itself
+        // reports that one in its own words a moment later; saying it here
+        // as well would name one expression twice for one mistake.
+        let ty = self.ty(expr)?;
+        let layout = self.pool.shapes.of(self.checked, self.module, &ty)?;
+        (layout == dst.layout).then_some(dst)
     }
 
     /// Opens an erased value at the type the checker settled for the place
@@ -235,7 +266,7 @@ impl Body<'_> {
                 self.constant(expr, want, |dst| Inst::Bool { dst, value })
             }
             ExprKind::Unit => self.constant(expr, want, |dst| Inst::Unit { dst }),
-            ExprKind::Str(parts) => self.string_expr(expr, parts),
+            ExprKind::Str(parts) => self.string_expr(expr, parts, want),
             ExprKind::Ident(name) => self.name(expr, name),
             ExprKind::Unary { op, operand } => self.unary(expr, *op, operand, want),
             ExprKind::Binary { op, lhs, rhs } => self.binary(expr, *op, lhs, rhs, want),
@@ -291,7 +322,7 @@ impl Body<'_> {
                 ..
             } => self.call(expr, callee, args, trailing.as_deref(), want),
             ExprKind::Field { base, name } => self.field(expr, base, &name.node),
-            ExprKind::Try(inner) => self.try_expr(expr, inner),
+            ExprKind::Try(inner) => self.try_expr(expr, inner, want),
 
             ExprKind::ArrayLit(items) => self.array_literal(expr, items),
             ExprKind::Range {
@@ -479,7 +510,7 @@ impl Body<'_> {
     /// out: the parser leaves one wherever an interpolation sits at an end
     /// of the literal, and joining it would be an allocation and an argument
     /// per `"{x}"` in the program.
-    fn string_expr(&mut self, expr: &Expr, parts: &[StrPart]) -> Val {
+    fn string_expr(&mut self, expr: &Expr, parts: &[StrPart], want: Option<Dest>) -> Val {
         let literal_only = parts.iter().all(|part| matches!(part, StrPart::Text(_)));
         if literal_only {
             let mut text = String::new();
@@ -489,7 +520,10 @@ impl Body<'_> {
                 }
             }
             let id = self.string(&text);
-            let dst = self.temp(shapes::STR);
+            // A literal is one word — the address of an object placed once
+            // for the whole run — so it goes straight into the location the
+            // surrounding form asked for. See `Body::expr_into`.
+            let dst = self.answer_at(want, shapes::STR);
             self.emit(
                 Inst::Str {
                     dst: dst.slot,
@@ -529,7 +563,9 @@ impl Body<'_> {
             operation: "interpolate".into(),
             result: shapes::STR,
         });
-        let dst = self.temp(shapes::STR);
+        // The pieces are in locations of their own by now, so the join
+        // writes the destination the surrounding form asked for.
+        let dst = self.answer_at(want, shapes::STR);
         self.emit(
             Inst::CallBuiltin {
                 dst: dst.slot,
@@ -1012,9 +1048,33 @@ impl Body<'_> {
             }
         }
         let source = match op {
+            // A plain `=` into a run of *this frame* is the one destination
+            // that is not a temporary or an answer: it is a binding that was
+            // alive before the right-hand side was lowered and stays alive
+            // after. It is still a destination, so the producer is handed it
+            // and `Body::write_place`'s copy becomes a copy of a run onto
+            // itself, which `Body::copy` does not emit — issue #302.
+            //
+            // Reading the binding while writing it is the question this
+            // raises, and every producer that takes a destination answers it
+            // the same way: the operands are in locations of their own before
+            // the destination is written. `x = x + 1` is `add s_x s_x 1`,
+            // `x = f(x)` copies the argument into the callee's frame and
+            // writes the answer on the way back, and an arm of an `if` that
+            // answers `x` is a copy onto itself. A producer that writes its
+            // destination and *then* reads an operand would break this, and
+            // there is none: an instruction reads before it writes.
+            //
+            // `Place::Through` is left alone. It is a `Store` through an
+            // address rather than a run of this frame, so there is no slot to
+            // hand over.
             None => {
-                let held = self.expr(value);
                 let into = place.layout();
+                let want = match place {
+                    Place::Here { slot, layout } => self.forwardable(value, Dest { slot, layout }),
+                    Place::Through { .. } => None,
+                };
+                let held = self.expr_wanting(value, want);
                 self.fit(held, into, span)
             }
             Some(op) => {
@@ -1367,7 +1427,7 @@ impl Body<'_> {
     /// The discriminant is word 0 of the value, so the question is a
     /// comparison against the location itself: no read is needed, because
     /// the words are already in the frame.
-    fn try_expr(&mut self, expr: &Expr, inner: &Expr) -> Val {
+    fn try_expr(&mut self, expr: &Expr, inner: &Expr, want: Option<Dest>) -> Val {
         let Some(ty) = self.settled_ty(inner) else {
             return self.dead(expr);
         };
@@ -1416,14 +1476,24 @@ impl Body<'_> {
         // `Ok` carries a box and the checker records the `?` as an
         // unconstrained unknown. What is copied decides how wide the
         // destination is, and what is copied is the part.
+        // The payload is copied out of the subject either way — the subject
+        // is cleared a few instructions later and the answer has to outlive
+        // it — but *where* it is copied to is the surrounding form's to say.
+        // A `f()?` at the tail of a body copies it straight into the
+        // function's answer rather than into a run of its own and then again.
+        //
+        // The subject is a location of its own by now and the destination is
+        // the surrounding form's, so the two runs cannot overlap: reaching
+        // one from the other would mean a binding assigned the payload of a
+        // `?` on itself, which is a binding of two types.
         let dst = match carrying.first() {
             Some(part) => {
-                let dst = self.temp(part.layout);
+                let dst = self.answer_at(want, part.layout);
                 self.copy(dst.slot, subject.slot + 1 + part.at, part.layout, expr.span);
                 dst
             }
             None => {
-                let dst = self.temp(shapes::UNIT);
+                let dst = self.answer_at(want, shapes::UNIT);
                 self.emit(Inst::Unit { dst: dst.slot }, expr.span);
                 dst
             }
@@ -1869,7 +1939,7 @@ impl Body<'_> {
             }
         }
         if let Some(module) = self.host_module_of(name) {
-            return self.call_host(expr, &module, name, args);
+            return self.call_host(expr, &module, name, args, want);
         }
         // The builtins that are called on nothing, asked of the shared table
         // once and asked last, which is where the interpreter asks: a
@@ -1928,7 +1998,7 @@ impl Body<'_> {
                     return self.struct_literal(expr, &ty, args);
                 }
             }
-            return self.call_host(expr, head, name, args);
+            return self.call_host(expr, head, name, args, want);
         }
         if let Some(ty) = self.ty(expr) {
             if shapes::case_at(self.checked, self.module, &ty, name).is_some() {
@@ -2005,7 +2075,14 @@ impl Body<'_> {
     /// it. A schema that declared `Any` gives a boxed layout: from that call
     /// onwards the program holds a value no schema described, so it is a box
     /// carrying its own description rather than a bare run of words.
-    fn call_host(&mut self, expr: &Expr, module: &str, operation: &str, args: &[Arg]) -> Val {
+    fn call_host(
+        &mut self,
+        expr: &Expr,
+        module: &str,
+        operation: &str,
+        args: &[Arg],
+        want: Option<Dest>,
+    ) -> Val {
         let Some(result) = self.host_result(expr, module, None, operation) else {
             return self.dead(expr);
         };
@@ -2024,7 +2101,12 @@ impl Body<'_> {
             held.push(self.expr(&arg.value));
         }
         let list = self.pool.args.intern(held.iter().map(Val::arg).collect());
-        let dst = self.temp(result);
+        // The boundary writes the answer where the surrounding form wants it
+        // — issue #302. The arguments are already materialised into
+        // locations of their own and the destination was allocated before
+        // this expression was lowered, so neither can be the run the host's
+        // answer is written back into. See `Body::expr_into`.
+        let dst = self.answer_at(want, result);
         self.emit(
             Inst::CallHost {
                 dst: dst.slot,
@@ -2066,6 +2148,7 @@ impl Body<'_> {
         qualified: &str,
         operation: &str,
         args: &[Arg],
+        want: Option<Dest>,
     ) -> Val {
         // A host type that is plain *data* has fields rather than
         // operations, and the checker has already refused a method call on
@@ -2103,7 +2186,10 @@ impl Body<'_> {
             held.push(self.expr(&arg.value));
         }
         let list = self.pool.args.intern(held.iter().map(Val::arg).collect());
-        let dst = self.temp(result);
+        // The same forwarding `Body::call_host` does, for the same reason:
+        // the receiver and the arguments are in locations of their own by
+        // now, and the destination is somebody else's run.
+        let dst = self.answer_at(want, result);
         self.emit(
             Inst::CallResource {
                 dst: dst.slot,

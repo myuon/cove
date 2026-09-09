@@ -121,18 +121,17 @@ fn a_local_holding_a_reference_is_cleared_when_its_scope_ends() {
         ),
         "\
 fn @m.f(String) -> Int
-  frame 6: s0!:ref s1:int s2:int s3:ref s4:ref s5:int
-  local what -> s0:String [0, 8)
-  local n -> s2:Int [1, 7)
-  local s -> s4:String [3, 5)
+  frame 5: s0!:ref s1:int s2:int s3:ref s4:ref
+  local what -> s0:String [0, 7)
+  local n -> s2:Int [1, 6)
+  local s -> s4:String [3, 4)
      0  int s2:int 0
      1  str s3:ref \"!\"
      2  call-builtin s4:String String.interpolate (s0:String s3:String)
-     3  call-builtin s5:Int String.length (s4:String)
-     4  copy s2:Int s5:Int
-     5  clear s4:String
-     6  copy s1:Int s2:Int
-     7  return s1:Int
+     3  call-builtin s2:Int String.length (s4:String)
+     4  clear s4:String
+     5  copy s1:Int s2:Int
+     6  return s1:Int
 "
     );
 }
