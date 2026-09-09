@@ -19,7 +19,7 @@ breakpoint 1, debug_session.twice at debug_session/main.cove:6:17
 (cove) backtrace
 #0  debug_session.twice at debug_session/main.cove:6:17
 #1  debug_session.raise at debug_session/main.cove:14:3
-#2  debug_session.main at debug_session/main.cove:29:11
+#2  debug_session.main at debug_session/main.cove:29:20
 (cove) print n
 n = 21  (word 0)  0x0000000000000015
 (cove) locals
@@ -27,17 +27,14 @@ n = 21  (word 0, 1 word(s))
 (cove) step
 debug_session.twice at debug_session/main.cove:7:3
 >    7 |   doubled
-(cove) step
-debug_session.twice at debug_session/main.cove:5:25
->    5 | fn twice(n: Int) -> Int {
 (cove) finish
 returned to debug_session.raise at debug_session/main.cove:14:3
 >   14 |   twice(raised)
 (cove) words
-word 1   int       0x0000000000000000  0
-word 3   int       0x000000000000002a  42
+word 1   int       0x000000000000002a  42
+word 2   int       0x0000000000000015  21
 (cove) frame 1
-#1  debug_session.main at debug_session/main.cove:29:11
+#1  debug_session.main at debug_session/main.cove:29:20
 >   29 |   println("answer {raise(total)}")?
 (cove) print total
 total = 20  (word 12)  0x0000000000000014
@@ -52,8 +49,8 @@ total = 20  (word 12, 1 word(s))
     31 |   Ok(())
 (cove) disassemble 1
 debug_session.main:
-     12 | call s13:Int debug_session.raise (s12:Int)
-=>   13 | call-builtin s14:String String.interpolate (s3:String s13:Int)
-     14 | call-host s4..s6:Result console.println (s14:String)
+     11 | str s3:ref "answer "
+=>   12 | call s13:Int debug_session.raise (s12:Int)
+     13 | call-builtin s14:String String.interpolate (s3:String s13:Int)
 (cove) quit
 the run was halted after 16 instruction(s).

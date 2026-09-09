@@ -41,7 +41,7 @@ use cove_syntax::ast::{Arg, Expr};
 
 use super::frame::Val;
 use super::shapes::{self, RANGE_END, RANGE_INCLUSIVE, RANGE_START};
-use super::{Body, PENDING};
+use super::{Body, Dest, PENDING};
 use crate::inst::{ArithOp, CmpOp, Compare, Inst, Num, Slot};
 use crate::layout::LayoutId;
 use crate::program::Builtin;
@@ -58,6 +58,7 @@ impl Body<'_> {
         base: &Expr,
         name: &str,
         args: &[Arg],
+        want: Option<Dest>,
     ) -> Val {
         let Some(ty) = self.settled_ty(base) else {
             return self.dead(expr);
@@ -111,14 +112,14 @@ impl Body<'_> {
             Ty::Range => self.range_method(expr, base, name, args),
             Ty::Array(elem) => {
                 let elem = (**elem).clone();
-                self.array_method(expr, base, &elem, name, args)
+                self.array_method(expr, base, &elem, name, args, want)
             }
             Ty::Vector(elem) => {
                 let elem = (**elem).clone();
-                self.vector_method(expr, base, &elem, name, args)
+                self.vector_method(expr, base, &elem, name, args, want)
             }
-            Ty::Set(_) => self.set_method(expr, base, name, args),
-            Ty::Map(..) => self.map_method(expr, base, name, args),
+            Ty::Set(_) => self.set_method(expr, base, name, args, want),
+            Ty::Map(..) => self.map_method(expr, base, name, args, want),
             // A scope and a task handle are the two values whose operations
             // are the scheduler's rather than the heap's, so they are
             // instructions rather than builtins: `cove_ir::lower::tasks` is
@@ -140,7 +141,7 @@ impl Body<'_> {
             // host call it shares a boundary with.
             Ty::Host(qualified) => {
                 let qualified = qualified.to_string();
-                self.call_resource(expr, base, &qualified, name, args)
+                self.call_resource(expr, base, &qualified, name, args, want)
             }
             _ => {
                 let Some(receiver) = receiver_name(&ty) else {
@@ -156,7 +157,7 @@ impl Body<'_> {
                 if !MACHINE_METHODS.contains(&(receiver, name)) {
                     return self.gap(&format!("`{receiver}.{name}`"), expr);
                 }
-                self.machine_call(expr, Some(base), receiver, name, args)
+                self.machine_call(expr, Some(base), receiver, name, args, want)
             }
         }
     }
@@ -211,7 +212,7 @@ impl Body<'_> {
             span: base.span,
         });
         written.extend_from_slice(args);
-        self.call_target(expr, id, None, &written)
+        self.call_target(expr, id, None, &written, None)
     }
 
     /// A call to an associated builtin function the standard library
@@ -242,7 +243,7 @@ impl Body<'_> {
                 expr,
             );
         };
-        self.call_target(expr, id, None, args)
+        self.call_target(expr, id, None, args, None)
     }
 
     /// `Int.parse(text)`, `Duration.millis(n)`: an operation of a builtin
@@ -264,6 +265,7 @@ impl Body<'_> {
         receiver: &str,
         operation: &str,
         args: &[Arg],
+        want: Option<Dest>,
     ) -> Val {
         if let Some(bad) = self.plain_arguments(args) {
             return self.gap(bad, expr);
@@ -273,7 +275,7 @@ impl Body<'_> {
         {
             return self.call_std_associated(expr, binding, args);
         }
-        self.machine_call(expr, None, receiver, operation, args)
+        self.machine_call(expr, None, receiver, operation, args, want)
     }
 
     pub(super) fn machine_call(
@@ -283,6 +285,7 @@ impl Body<'_> {
         receiver: &str,
         operation: &str,
         args: &[Arg],
+        want: Option<Dest>,
     ) -> Val {
         let Some(ty) = self.settled_ty(expr) else {
             return self.dead(expr);
@@ -303,7 +306,11 @@ impl Body<'_> {
         passed.extend(held_receiver.iter().map(Val::arg));
         passed.extend(held.iter().map(Val::arg));
 
-        let dst = self.temp(result);
+        // The receiver and the arguments are in locations of their own by
+        // now and the destination was allocated before this expression was
+        // lowered, so the builtin may write the run the surrounding form
+        // asked for. See `Body::expr_into`.
+        let dst = self.answer_at(want, result);
         self.emit_builtin(dst.slot, receiver, operation, &passed, result, expr.span);
         for value in held.into_iter().rev() {
             self.release(value, expr.span);

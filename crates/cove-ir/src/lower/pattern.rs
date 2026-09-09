@@ -224,11 +224,7 @@ impl Body<'_> {
         self.test(&arm.pattern, subject, layout, ty, dispatched, &mut failures);
         self.bind(&arm.pattern, subject, layout, ty, arm.pattern.span);
         match dst {
-            Some(dst) => {
-                let value = self.expr(&arm.body);
-                self.store(dst, &value, &arm.body);
-                self.release(value, arm.body.span);
-            }
+            Some(dst) => self.expr_into(&arm.body, dst),
             None => self.discard(&arm.body),
         }
         let at = self.here();

@@ -18,15 +18,14 @@ fn a_lambda_is_a_function_of_its_own_and_an_environment_naming_it() {
         listing(source, "f"),
         "\
 fn @m.f() -> Int
-  frame 4: s0:int s1:ref s2:int s3:int
-  local g -> s1:fn [3, 6)
+  frame 3: s0:int s1:ref s2:int
+  local g -> s1:fn [3, 5)
      0  alloc s1:ref closure m.f#0<closure>
      1  func-ref s2:int @m.f#0
      2  store-field s1:ref +0 s2:Int
      3  int s2:int 1
-     4  call-closure s3:Int s1:ref (s2:Int)
-     5  copy s0:Int s3:Int
-     6  return s0:Int
+     4  call-closure s0:Int s1:ref (s2:Int)
+     5  return s0:Int
 "
     );
     // The body is an ordinary function whose parameters occupy the frame from
@@ -35,11 +34,10 @@ fn @m.f() -> Int
         listing(source, "f#0"),
         "\
 fn @m.f#0(Int) -> Int
-  frame 3: s0!:int s1:int s2:int
-  local x -> s0:Int [0, 3)
-     0  add.int.imm s2:int s0:int 1
-     1  copy s1:Int s2:Int
-     2  return s1:Int
+  frame 2: s0!:int s1:int
+  local x -> s0:Int [0, 2)
+     0  add.int.imm s1:int s0:int 1
+     1  return s1:Int
 "
     );
 }
@@ -126,27 +124,25 @@ fn a_capture_is_inline_in_the_environment_at_its_own_width() {
         "\
 fn @m.f(m.Point) -> Int
   frame 5: s0!:int s1!:int s2:int s3:ref s4:int
-  local p -> s0..s1:m.Point [0, 7)
-  local g -> s3:fn [4, 6)
+  local p -> s0..s1:m.Point [0, 6)
+  local g -> s3:fn [4, 5)
      0  alloc s3:ref closure m.f#0<closure>
      1  func-ref s4:int @m.f#0
      2  store-field s3:ref +0 s4:Int
      3  store-field s3:ref +1 s0..s1:m.Point
-     4  call-closure s4:Int s3:ref ()
-     5  copy s2:Int s4:Int
-     6  return s2:Int
+     4  call-closure s2:Int s3:ref ()
+     5  return s2:Int
 "
     );
     assert_eq!(
         listing(source, "f#0"),
         "\
 fn @m.f#0() -> Int
-  frame 4: s0:int s1:int s2:int s3:int
+  frame 3: s0:int s1:int s2:int
   capture p -> s0..s1:m.Point
-  local p -> s0..s1:m.Point [0, 3)
-     0  add.int s3:int s0:int s1:int
-     1  copy s2:Int s3:Int
-     2  return s2:Int
+  local p -> s0..s1:m.Point [0, 2)
+     0  add.int s2:int s0:int s1:int
+     1  return s2:Int
 "
     );
 }
@@ -166,23 +162,21 @@ fn a_closure_that_captures_nothing_is_the_same_object_with_an_empty_list() {
         "\
 fn @m.f() -> Int
   frame 3: s0:int s1:ref s2:int
-  local g -> s1:fn [3, 5)
+  local g -> s1:fn [3, 4)
      0  alloc s1:ref closure m.f#0<closure>
      1  func-ref s2:int @m.f#0
      2  store-field s1:ref +0 s2:Int
-     3  call-closure s2:Int s1:ref ()
-     4  copy s0:Int s2:Int
-     5  return s0:Int
+     3  call-closure s0:Int s1:ref ()
+     4  return s0:Int
 "
     );
     assert_eq!(
         listing(source, "f#0"),
         "\
 fn @m.f#0() -> Int
-  frame 2: s0:int s1:int
-     0  int s1:int 1
-     1  copy s0:Int s1:Int
-     2  return s0:Int
+  frame 1: s0:int
+     0  int s0:int 1
+     1  return s0:Int
 "
     );
 }
@@ -204,15 +198,14 @@ fn a_declared_function_used_as_a_value_is_an_environment_naming_it() {
         ),
         "\
 fn @m.f() -> Int
-  frame 4: s0:int s1:ref s2:int s3:int
-  local g -> s1:fn [3, 6)
+  frame 3: s0:int s1:ref s2:int
+  local g -> s1:fn [3, 5)
      0  alloc s1:ref closure m.double<closure>
      1  func-ref s2:int @m.double
      2  store-field s1:ref +0 s2:Int
      3  int s2:int 3
-     4  call-closure s3:Int s1:ref (s2:Int)
-     5  copy s0:Int s3:Int
-     6  return s0:Int
+     4  call-closure s0:Int s1:ref (s2:Int)
+     5  return s0:Int
 "
     );
 }
@@ -230,12 +223,11 @@ fn a_call_through_a_function_value_names_the_slot_holding_it() {
         listing(source, "apply"),
         "\
 fn @m.apply(fn Int) -> Int
-  frame 4: s0!:ref s1!:int s2:int s3:int
-  local g -> s0:fn [0, 3)
-  local n -> s1:Int [0, 3)
-     0  call-closure s3:Int s0:ref (s1:Int)
-     1  copy s2:Int s3:Int
-     2  return s2:Int
+  frame 3: s0!:ref s1!:int s2:int
+  local g -> s0:fn [0, 2)
+  local n -> s1:Int [0, 2)
+     0  call-closure s2:Int s0:ref (s1:Int)
+     1  return s2:Int
 "
     );
     // The lambda is built at the call site and passed as an ordinary
@@ -244,15 +236,13 @@ fn @m.apply(fn Int) -> Int
         listing(source, "f"),
         "\
 fn @m.f() -> Int
-  frame 4: s0:int s1:ref s2:int s3:int
+  frame 3: s0:int s1:ref s2:int
      0  alloc s1:ref closure m.f#0<closure>
      1  func-ref s2:int @m.f#0
      2  store-field s1:ref +0 s2:Int
      3  int s2:int 2
-     4  call s3:Int m.apply (s1:fn s2:Int)
-     5  clear s1:fn
-     6  copy s0:Int s3:Int
-     7  return s0:Int
+     4  call s0:Int m.apply (s1:fn s2:Int)
+     5  return s0:Int
 "
     );
 }
@@ -274,27 +264,25 @@ fn a_lambda_inside_a_lambda_is_numbered_after_the_one_that_made_it() {
 fn @m.f#0() -> Int
   frame 4: s0:int s1:int s2:ref s3:int
   capture n -> s0:Int
-  local n -> s0:Int [0, 7)
-  local inner -> s2:fn [4, 6)
+  local n -> s0:Int [0, 6)
+  local inner -> s2:fn [4, 5)
      0  alloc s2:ref closure m.f#0#0<closure>
      1  func-ref s3:int @m.f#0#0
      2  store-field s2:ref +0 s3:Int
      3  store-field s2:ref +1 s0:Int
-     4  call-closure s3:Int s2:ref ()
-     5  copy s1:Int s3:Int
-     6  return s1:Int
+     4  call-closure s1:Int s2:ref ()
+     5  return s1:Int
 "
     );
     assert_eq!(
         listing(source, "f#0#0"),
         "\
 fn @m.f#0#0() -> Int
-  frame 3: s0:int s1:int s2:int
+  frame 2: s0:int s1:int
   capture n -> s0:Int
-  local n -> s0:Int [0, 3)
-     0  add.int.imm s2:int s0:int 1
-     1  copy s1:Int s2:Int
-     2  return s1:Int
+  local n -> s0:Int [0, 2)
+     0  add.int.imm s1:int s0:int 1
+     1  return s1:Int
 "
     );
 }
@@ -317,16 +305,15 @@ fn a_capture_of_a_var_parameter_is_the_value_behind_the_address() {
         "\
 fn @m.f(<addr>) -> Int
   frame 5: s0!:addr s1:int s2:int s3:ref s4:int
-  local n -> s0:<addr> [0, 8)
-  local g -> s3:fn [5, 7)
+  local n -> s0:<addr> [0, 7)
+  local g -> s3:fn [5, 6)
      0  load s2:Int s0:addr
      1  alloc s3:ref closure m.f#0<closure>
      2  func-ref s4:int @m.f#0
      3  store-field s3:ref +0 s4:Int
      4  store-field s3:ref +1 s2:Int
-     5  call-closure s2:Int s3:ref ()
-     6  copy s1:Int s2:Int
-     7  return s1:Int
+     5  call-closure s1:Int s3:ref ()
+     6  return s1:Int
 "
     );
     assert_eq!(
@@ -336,12 +323,11 @@ fn @m.f(<addr>) -> Int
         ),
         "\
 fn @m.f#0() -> Int
-  frame 3: s0:int s1:int s2:int
+  frame 2: s0:int s1:int
   capture n -> s0:Int
-  local n -> s0:Int [0, 3)
-     0  add.int.imm s2:int s0:int 1
-     1  copy s1:Int s2:Int
-     2  return s1:Int
+  local n -> s0:Int [0, 2)
+     0  add.int.imm s1:int s0:int 1
+     1  return s1:Int
 "
     );
 }
@@ -364,26 +350,24 @@ fn a_local_fn_is_the_closure_the_body_wrote_and_a_binding_of_its_scope() {
         listing(source, "f"),
         "\
 fn @m.f() -> Int
-  frame 4: s0:int s1:ref s2:int s3:int
-  local double -> s1:fn [3, 6)
+  frame 3: s0:int s1:ref s2:int
+  local double -> s1:fn [3, 5)
      0  alloc s1:ref closure m.f#0<closure>
      1  func-ref s2:int @m.f#0
      2  store-field s1:ref +0 s2:Int
      3  int s2:int 21
-     4  call-closure s3:Int s1:ref (s2:Int)
-     5  copy s0:Int s3:Int
-     6  return s0:Int
+     4  call-closure s0:Int s1:ref (s2:Int)
+     5  return s0:Int
 "
     );
     assert_eq!(
         listing(source, "f#0"),
         "\
 fn @m.f#0(Int) -> Int
-  frame 3: s0!:int s1:int s2:int
-  local n -> s0:Int [0, 3)
-     0  mul.int.imm s2:int s0:int 2
-     1  copy s1:Int s2:Int
-     2  return s1:Int
+  frame 2: s0!:int s1:int
+  local n -> s0:Int [0, 2)
+     0  mul.int.imm s1:int s0:int 2
+     1  return s1:Int
 "
     );
 }
@@ -398,13 +382,12 @@ fn a_local_fn_captures_the_bindings_around_it() {
         listing(source, "f#0"),
         "\
 fn @m.f#0(Int) -> Int
-  frame 4: s0!:int s1:int s2:int s3:int
+  frame 3: s0!:int s1:int s2:int
   capture base -> s1:Int
-  local base -> s1:Int [0, 3)
-  local n -> s0:Int [0, 3)
-     0  add.int s3:int s0:int s1:int
-     1  copy s2:Int s3:Int
-     2  return s2:Int
+  local base -> s1:Int [0, 2)
+  local n -> s0:Int [0, 2)
+     0  add.int s2:int s0:int s1:int
+     1  return s2:Int
 "
     );
 }

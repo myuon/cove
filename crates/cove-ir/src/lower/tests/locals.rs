@@ -49,12 +49,11 @@ fn a_parameter_is_named_from_the_first_instruction_to_the_last_of_the_whole_func
         listing("fn area(w: Int, h: Int) -> Int { w * h }", "area"),
         "\
 fn @m.area(Int Int) -> Int
-  frame 4: s0!:int s1!:int s2:int s3:int
-  local w -> s0:Int [0, 3)
-  local h -> s1:Int [0, 3)
-     0  mul.int s3:int s0:int s1:int
-     1  copy s2:Int s3:Int
-     2  return s2:Int
+  frame 3: s0!:int s1!:int s2:int
+  local w -> s0:Int [0, 2)
+  local h -> s1:Int [0, 2)
+     0  mul.int s2:int s0:int s1:int
+     1  return s2:Int
 "
     );
 }
@@ -107,19 +106,17 @@ fn a_slot_two_scopes_reused_carries_a_name_over_each_of_its_two_lives() {
         ),
         "\
 fn @m.f() -> Int
-  frame 4: s0:int s1:int s2:int s3:int
-  local t -> s1:Int [1, 8)
-  local a -> s2:Int [2, 4)
-  local b -> s2:Int [5, 7)
+  frame 3: s0:int s1:int s2:int
+  local t -> s1:Int [1, 6)
+  local a -> s2:Int [2, 3)
+  local b -> s2:Int [4, 5)
      0  int s1:int 0
      1  int s2:int 1
-     2  add.int s3:int s1:int s2:int
-     3  copy s1:Int s3:Int
-     4  int s2:int 2
-     5  add.int s3:int s1:int s2:int
-     6  copy s1:Int s3:Int
-     7  copy s0:Int s1:Int
-     8  return s0:Int
+     2  add.int s1:int s1:int s2:int
+     3  int s2:int 2
+     4  add.int s1:int s1:int s2:int
+     5  copy s0:Int s1:Int
+     6  return s0:Int
 "
     );
 }
@@ -160,16 +157,22 @@ fn the_last_local_that_matches_is_the_one_the_name_denotes() {
 /// A local's range ends where its scope does, not where the function does:
 /// the block's `b` is unanswerable at the instruction after the block, which
 /// is the whole point of carrying a range rather than a name per slot.
+///
+/// Something follows the block, because otherwise there is no pc that is
+/// after it and still inside the enclosing scope: since issue #302 the
+/// block's answer is written straight into the function's, so the block's
+/// last instruction and the body's are the same one and the two ranges end
+/// together. The trailing `a` is what keeps the question askable.
 #[test]
 fn a_local_is_not_bound_past_the_scope_that_declared_it() {
     let f = function(
-        "fn f() -> Int {\n  let a = 1\n  {\n    let b = 2\n    a + b\n  }\n}",
+        "fn f() -> Int {\n  let a = 1\n  {\n    let b = 2\n    a + b\n  }\n  a\n}",
         "f",
     );
     assert!(f.local_at("b", 2).is_some(), "inside the block");
-    assert_eq!(f.local_at("b", 4), None, "at the copy after it");
+    assert_eq!(f.local_at("b", 3), None, "at the copy after it");
     assert!(
-        f.local_at("a", 4).is_some(),
+        f.local_at("a", 3).is_some(),
         "where the enclosing one still is"
     );
 }

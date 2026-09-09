@@ -958,13 +958,15 @@ export fn main() -> Result<Int, Error> {
 fn a_straight_line_is_cut_off_mid_line_and_the_tree_walk_finishes_it() {
     let mut source =
         String::from("use probe\n\nexport fn main() -> Result<Int, Error> {\n  var t = 0\n");
-    // A thousand of them because the line has to outrun one
+    // Four thousand of them because the line has to outrun one
     // `SAFEPOINT_STRIDE`, and how many statements that takes depends on what
-    // a statement lowers to: `t = t + 1` was three instructions before
-    // `Inst::ArithImm` and is two after, so a count chosen against the old
-    // shape stopped making the point. A thousand is comfortably past the
-    // stride either way rather than exactly past it.
-    for _ in 0..1000 {
+    // a statement lowers to. `t = t + 1` was three instructions before
+    // `Inst::ArithImm`, two after it, and **one** since issue #302 handed the
+    // producer the destination — `add.int.imm s_t s_t 1` and no copy — so a
+    // count chosen against an older shape has stopped making the point twice
+    // now. Four times the stride is past it however few instructions a
+    // statement becomes next, short of none.
+    for _ in 0..4000 {
         source.push_str("  t = t + 1\n");
     }
     source.push_str("  Ok(t)\n}\n");
@@ -1018,7 +1020,7 @@ fn a_straight_line_is_cut_off_mid_line_and_the_tree_walk_finishes_it() {
         "the tree walk charges nothing for a straight line: {}",
         walked.answer
     );
-    assert_eq!(walked.answer, "Ok(1000)");
+    assert_eq!(walked.answer, "Ok(4000)");
 }
 
 /// **A Host call in a block whose budget will not cover it.** ADR 0030: no

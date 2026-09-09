@@ -92,15 +92,14 @@ fn a_host_result_a_schema_declared_any_is_one_boxed_word() {
         ),
         "\
 fn @m.f() -> Int
-  frame 6: s0:int s1:ref s2:ref s3:int s4:int s5:int
+  frame 5: s0:int s1:ref s2:ref s3:int s4:int
      0  str s1:ref \"n\"
      1  call-host s2:Any oracle.ask (s1:String)
      2  int s3:int 1
      3  unbox s4:Int s2:ref
      4  clear s2:Any
-     5  add.int s5:int s4:int s3:int
-     6  copy s0:Int s5:Int
-     7  return s0:Int
+     5  add.int s0:int s4:int s3:int
+     6  return s0:Int
 "
     );
 }
@@ -167,14 +166,13 @@ fn a_declared_parameter_says_what_an_erased_argument_is_opened_at() {
         ),
         "\
 fn @m.f() -> Int
-  frame 5: s0:int s1:ref s2:ref s3:int s4:int
+  frame 4: s0:int s1:ref s2:ref s3:int
      0  str s1:ref \"n\"
      1  call-host s2:Any oracle.ask (s1:String)
      2  unbox s3:Int s2:ref
      3  clear s2:Any
-     4  call s4:Int m.g (s3:Int)
-     5  copy s0:Int s4:Int
-     6  return s0:Int
+     4  call s0:Int m.g (s3:Int)
+     5  return s0:Int
 "
     );
 }
@@ -380,40 +378,36 @@ fn a_result_inside_an_erased_result_is_opened_where_it_is_used() {
         ),
         "\
 fn @m.f() -> Int
-  frame 12: s0:int s1:host s2:tag s3:ref s4:int s5:ref s6:int s7:tag s8:int s9:ref s10:int s11:ref
-  local s -> s1:<host> [1, 26)
-  local answer -> s2..s3:Result [2, 26)
-  local inner -> s5:Any [4, 17)
-  local n -> s10:Int [7, 8)
-  local e -> s11:Error [10, 12)
-  local e -> s5:Error [20, 22)
+  frame 10: s0:int s1:host s2:tag s3:ref s4:ref s5:tag s6:int s7:ref s8:int s9:ref
+  local s -> s1:<host> [1, 22)
+  local answer -> s2..s3:Result [2, 22)
+  local inner -> s4:Any [4, 15)
+  local n -> s8:Int [7, 8)
+  local e -> s9:Error [10, 11)
+  local e -> s4:Error [18, 19)
      0  call-host s1:<host> oracle.open ()
      1  call-resource s2..s3:Result s1:host oracle.Seat.next ()
-     2  switch s2:tag [3 19] else 24
-     3  copy s5:Any s3:Any
-     4  unbox s7..s9:Result s5:ref
-     5  switch s7:tag [6 9] else 14
-     6  copy s10:Int s8:Int
-     7  copy s6:Int s10:Int
-     8  jump 15
-     9  copy s11:Error s9:Error
-    10  call-builtin s10:Int String.length (s11:String)
-    11  copy s6:Int s10:Int
-    12  clear s11:Error
-    13  jump 15
-    14  trap \"no `match` arm covers this value\"
-    15  clear s7..s9:Result
-    16  copy s4:Int s6:Int
-    17  clear s5:Any
-    18  jump 25
-    19  copy s5:Error s3:Error
-    20  call-builtin s6:Int String.length (s5:String)
-    21  copy s4:Int s6:Int
-    22  clear s5:Error
-    23  jump 25
-    24  trap \"no `match` arm covers this value\"
-    25  copy s0:Int s4:Int
-    26  return s0:Int
+     2  switch s2:tag [3 17] else 21
+     3  copy s4:Any s3:Any
+     4  unbox s5..s7:Result s4:ref
+     5  switch s5:tag [6 9] else 13
+     6  copy s8:Int s6:Int
+     7  copy s0:Int s8:Int
+     8  jump 14
+     9  copy s9:Error s7:Error
+    10  call-builtin s0:Int String.length (s9:String)
+    11  clear s9:Error
+    12  jump 14
+    13  trap \"no `match` arm covers this value\"
+    14  clear s5..s7:Result
+    15  clear s4:Any
+    16  jump 22
+    17  copy s4:Error s3:Error
+    18  call-builtin s0:Int String.length (s4:String)
+    19  clear s4:Error
+    20  jump 22
+    21  trap \"no `match` arm covers this value\"
+    22  return s0:Int
 "
     );
 }

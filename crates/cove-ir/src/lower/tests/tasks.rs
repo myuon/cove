@@ -102,10 +102,9 @@ fn an_async_declaration_is_an_ordinary_function() {
         ),
         "\
 fn @m.g() -> Int async
-  frame 2: s0:int s1:int
-     0  int s1:int 1
-     1  copy s0:Int s1:Int
-     2  return s0:Int
+  frame 1: s0:int
+     0  int s0:int 1
+     1  return s0:Int
 "
     );
 }

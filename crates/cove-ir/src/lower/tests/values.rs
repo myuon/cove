@@ -12,11 +12,10 @@ fn a_parameter_is_the_run_a_caller_writes() {
         listing("fn double(n: Int) -> Int { n * 2 }", "double"),
         "\
 fn @m.double(Int) -> Int
-  frame 3: s0!:int s1:int s2:int
-  local n -> s0:Int [0, 3)
-     0  mul.int.imm s2:int s0:int 2
-     1  copy s1:Int s2:Int
-     2  return s1:Int
+  frame 2: s0!:int s1:int
+  local n -> s0:Int [0, 2)
+     0  mul.int.imm s1:int s0:int 2
+     1  return s1:Int
 "
     );
 }
@@ -37,17 +36,15 @@ fn a_negated_literal_is_an_immediate_and_a_sum_of_two_is_not_folded() {
         listing("fn f(n: Int) -> Bool { n > -1 && n < 1 + 1 }", "f"),
         "\
 fn @m.f(Int) -> Bool
-  frame 6: s0!:int s1:bool s2:bool s3:bool s4:int s5:int
-  local n -> s0:Int [0, 9)
-     0  gt.int.imm s3:bool s0:int -1
-     1  copy s2:Bool s3:Bool
-     2  branch-false s2:bool 7
-     3  int s4:int 1
-     4  add.int.imm s5:int s4:int 1
-     5  lt.int s3:bool s0:int s5:int
-     6  copy s2:Bool s3:Bool
-     7  copy s1:Bool s2:Bool
-     8  return s1:Bool
+  frame 5: s0!:int s1:bool s2:bool s3:int s4:int
+  local n -> s0:Int [0, 7)
+     0  gt.int.imm s2:bool s0:int -1
+     1  branch-false s2:bool 5
+     2  int s3:int 1
+     3  add.int.imm s4:int s3:int 1
+     4  lt.int s2:bool s0:int s4:int
+     5  copy s1:Bool s2:Bool
+     6  return s1:Bool
 "
     );
 }
@@ -63,13 +60,12 @@ fn arithmetic_and_comparison_read_the_operands_kind() {
         ),
         "\
 fn @m.ordered(Int Int) -> Bool
-  frame 5: s0!:int s1!:int s2:bool s3:int s4:bool
-  local a -> s0:Int [0, 4)
-  local b -> s1:Int [0, 4)
+  frame 4: s0!:int s1!:int s2:bool s3:int
+  local a -> s0:Int [0, 3)
+  local b -> s1:Int [0, 3)
      0  sub.int.imm s3:int s0:int 1
-     1  le.int s4:bool s3:int s1:int
-     2  copy s2:Bool s4:Bool
-     3  return s2:Bool
+     1  le.int s2:bool s3:int s1:int
+     2  return s2:Bool
 "
     );
 }
@@ -80,13 +76,12 @@ fn a_float_keeps_its_bits_and_reads_as_a_float() {
         listing("fn half(x: Float) -> Float { -x / 2.0 }", "half"),
         "\
 fn @m.half(Float) -> Float
-  frame 5: s0!:float s1:float s2:float s3:float s4:float
-  local x -> s0:Float [0, 5)
+  frame 4: s0!:float s1:float s2:float s3:float
+  local x -> s0:Float [0, 4)
      0  neg.float s2:float s0:float
      1  float s3:float 2
-     2  div.float s4:float s2:float s3:float
-     3  copy s1:Float s4:Float
-     4  return s1:Float
+     2  div.float s1:float s2:float s3:float
+     3  return s1:Float
 "
     );
 }
@@ -100,11 +95,10 @@ fn a_duration_is_nanoseconds_and_adds_like_an_integer() {
         listing("fn wait() -> Duration { 5ms + 3ms }", "wait"),
         "\
 fn @m.wait() -> Duration
-  frame 3: s0:duration s1:duration s2:duration
+  frame 2: s0:duration s1:duration
      0  int s1:duration 5000000
-     1  add.int.imm s2:duration s1:duration 3000000
-     2  copy s0:Duration s2:Duration
-     3  return s0:Duration
+     1  add.int.imm s0:duration s1:duration 3000000
+     2  return s0:Duration
 "
     );
 }
@@ -115,11 +109,10 @@ fn not_negates_a_bool() {
         listing("fn flip(flag: Bool) -> Bool { !flag }", "flip"),
         "\
 fn @m.flip(Bool) -> Bool
-  frame 3: s0!:bool s1:bool s2:bool
-  local flag -> s0:Bool [0, 3)
-     0  not s2:bool s0:bool
-     1  copy s1:Bool s2:Bool
-     2  return s1:Bool
+  frame 2: s0!:bool s1:bool
+  local flag -> s0:Bool [0, 2)
+     0  not s1:bool s0:bool
+     1  return s1:Bool
 "
     );
 }
@@ -133,12 +126,11 @@ fn comparing_two_units_is_the_answer_rather_than_an_instruction() {
         listing("fn same() -> Bool { () == () }", "same"),
         "\
 fn @m.same() -> Bool
-  frame 4: s0:bool s1:unit s2:unit s3:bool
+  frame 3: s0:bool s1:unit s2:unit
      0  unit s1:unit
      1  unit s2:unit
-     2  bool s3:bool true
-     3  copy s0:Bool s3:Bool
-     4  return s0:Bool
+     2  bool s0:bool true
+     3  return s0:Bool
 "
     );
 }
@@ -156,14 +148,13 @@ fn a_var_local_is_one_location_written_again() {
         ),
         "\
 fn @m.count() -> Int
-  frame 3: s0:int s1:int s2:int
-  local n -> s1:Int [1, 5)
+  frame 2: s0:int s1:int
+  local n -> s1:Int [1, 4)
      0  int s1:int 0
-     1  add.int.imm s2:int s1:int 1
-     2  copy s1:Int s2:Int
-     3  add.int.imm s1:int s1:int 2
-     4  copy s0:Int s1:Int
-     5  return s0:Int
+     1  add.int.imm s1:int s1:int 1
+     2  add.int.imm s1:int s1:int 2
+     3  copy s0:Int s1:Int
+     4  return s0:Int
 "
     );
 }
@@ -190,14 +181,13 @@ fn a_block_is_a_scope_whose_locals_die_with_it() {
         ),
         "\
 fn @m.scoped() -> Int
-  frame 4: s0:int s1:int s2:int s3:int
-  local a -> s1:Int [1, 4)
-  local b -> s3:Int [2, 3)
+  frame 3: s0:int s1:int s2:int
+  local a -> s1:Int [1, 3)
+  local b -> s2:Int [2, 3)
      0  int s1:int 1
-     1  int s3:int 2
-     2  copy s2:Int s3:Int
-     3  copy s0:Int s2:Int
-     4  return s0:Int
+     1  int s2:int 2
+     2  copy s0:Int s2:Int
+     3  return s0:Int
 "
     );
 }
@@ -256,15 +246,14 @@ fn a_binding_takes_over_the_temporary_its_initialiser_made() {
         ),
         "\
 fn @m.twice(Int) -> Int
-  frame 5: s0!:int s1:int s2:int s3:int s4:int
-  local n -> s0:Int [0, 5)
-  local a -> s2:Int [1, 4)
-  local b -> s3:Int [2, 4)
+  frame 4: s0!:int s1:int s2:int s3:int
+  local n -> s0:Int [0, 4)
+  local a -> s2:Int [1, 3)
+  local b -> s3:Int [2, 3)
      0  add.int.imm s2:int s0:int 1
      1  copy s3:Int s2:Int
-     2  add.int s4:int s2:int s3:int
-     3  copy s1:Int s4:Int
-     4  return s1:Int
+     2  add.int s1:int s2:int s3:int
+     3  return s1:Int
 "
     );
 }

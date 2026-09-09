@@ -121,10 +121,9 @@ fn a_gap_the_entry_does_not_reach_does_not_stop_it() {
         sliced(source, "main", "main"),
         "\
 fn @m.main() -> Int
-  frame 2: s0:int s1:int
-     0  call s1:Int m.helper ()
-     1  copy s0:Int s1:Int
-     2  return s0:Int
+  frame 1: s0:int
+     0  call s0:Int m.helper ()
+     1  return s0:Int
 "
     );
 }
@@ -198,11 +197,10 @@ fn a_declaration_used_as_a_function_value_is_pulled_into_the_slice() {
         sliced(source, "main", "double"),
         "\
 fn @m.double(Int) -> Int
-  frame 3: s0!:int s1:int s2:int
-  local n -> s0:Int [0, 3)
-     0  mul.int.imm s2:int s0:int 2
-     1  copy s1:Int s2:Int
-     2  return s1:Int
+  frame 2: s0!:int s1:int
+  local n -> s0:Int [0, 2)
+     0  mul.int.imm s1:int s0:int 2
+     1  return s1:Int
 "
     );
 }
@@ -263,10 +261,9 @@ fn a_root_that_names_nothing_contributes_nothing() {
         sliced_to(source, &["main", "nowhere"], "main"),
         "\
 fn @m.main() -> Int
-  frame 2: s0:int s1:int
-     0  int s1:int 1
-     1  copy s0:Int s1:Int
-     2  return s0:Int
+  frame 1: s0:int
+     0  int s0:int 1
+     1  return s0:Int
 "
     );
 }

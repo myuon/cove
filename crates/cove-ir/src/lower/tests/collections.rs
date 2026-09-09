@@ -86,10 +86,10 @@ fn a_for_over_an_exclusive_range_never_touches_the_bound() {
         ),
         "\
 fn @m.total(Int) -> Int
-  frame 12: s0!:int s1:int s2:int s3:int s4:int s5:int s6:bool s7:int s8:bool s9:int s10:bool s11:int
-  local n -> s0:Int [0, 24)
-  local t -> s2:Int [1, 23)
-  local i -> s3:Int [15, 17)
+  frame 11: s0!:int s1:int s2:int s3:int s4:int s5:int s6:bool s7:int s8:bool s9:int s10:bool
+  local n -> s0:Int [0, 23)
+  local t -> s2:Int [1, 22)
+  local i -> s3:Int [15, 16)
      0  int s2:int 0
      1  int s3:int 0
      2  copy s4:Int s3:Int
@@ -101,19 +101,18 @@ fn @m.total(Int) -> Int
      8  int s9:int 1
      9  jump 13
     10  lt.int s10:bool s3:int s7:int
-    11  branch-false s10:bool 22
+    11  branch-false s10:bool 21
     12  add.int s3:int s3:int s9:int
     13  lt.int s10:bool s3:int s7:int
-    14  branch-false s10:bool 18
-    15  add.int s11:int s2:int s3:int
-    16  copy s2:Int s11:Int
-    17  jump 10
-    18  branch-false s8:bool 22
-    19  eq.int s10:bool s3:int s7:int
-    20  branch-false s10:bool 22
-    21  jump 15
-    22  copy s1:Int s2:Int
-    23  return s1:Int
+    14  branch-false s10:bool 17
+    15  add.int s2:int s2:int s3:int
+    16  jump 10
+    17  branch-false s8:bool 21
+    18  eq.int s10:bool s3:int s7:int
+    19  branch-false s10:bool 21
+    20  jump 15
+    21  copy s1:Int s2:Int
+    22  return s1:Int
 "
     );
 }
@@ -130,10 +129,10 @@ fn a_for_over_an_inclusive_range_earns_one_more_turn_at_the_end() {
         ),
         "\
 fn @m.total(Int) -> Int
-  frame 12: s0!:int s1:int s2:int s3:int s4:int s5:int s6:bool s7:int s8:bool s9:int s10:bool s11:int
-  local n -> s0:Int [0, 24)
-  local t -> s2:Int [1, 23)
-  local i -> s3:Int [15, 17)
+  frame 11: s0!:int s1:int s2:int s3:int s4:int s5:int s6:bool s7:int s8:bool s9:int s10:bool
+  local n -> s0:Int [0, 23)
+  local t -> s2:Int [1, 22)
+  local i -> s3:Int [15, 16)
      0  int s2:int 0
      1  int s3:int 0
      2  copy s4:Int s3:Int
@@ -145,19 +144,18 @@ fn @m.total(Int) -> Int
      8  int s9:int 1
      9  jump 13
     10  lt.int s10:bool s3:int s7:int
-    11  branch-false s10:bool 22
+    11  branch-false s10:bool 21
     12  add.int s3:int s3:int s9:int
     13  lt.int s10:bool s3:int s7:int
-    14  branch-false s10:bool 18
-    15  add.int s11:int s2:int s3:int
-    16  copy s2:Int s11:Int
-    17  jump 10
-    18  branch-false s8:bool 22
-    19  eq.int s10:bool s3:int s7:int
-    20  branch-false s10:bool 22
-    21  jump 15
-    22  copy s1:Int s2:Int
-    23  return s1:Int
+    14  branch-false s10:bool 17
+    15  add.int s2:int s2:int s3:int
+    16  jump 10
+    17  branch-false s8:bool 21
+    18  eq.int s10:bool s3:int s7:int
+    19  branch-false s10:bool 21
+    20  jump 15
+    21  copy s1:Int s2:Int
+    22  return s1:Int
 "
     );
 }
@@ -174,10 +172,10 @@ fn a_for_over_an_array_walks_the_object_and_clears_the_element() {
         ),
         "\
 fn @m.count(Array) -> Int
-  frame 11: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int s10:int
-  local xs -> s0:Array [0, 18)
-  local t -> s2:Int [1, 17)
-  local x -> s8:String [10, 13)
+  frame 10: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int
+  local xs -> s0:Array [0, 17)
+  local t -> s2:Int [1, 16)
+  local x -> s8:String [10, 12)
      0  int s2:int 0
      1  copy s3:Array s0:Array
      2  len s4:int s3:ref
@@ -186,16 +184,15 @@ fn @m.count(Array) -> Int
      5  jump 7
      6  add.int s5:int s5:int s6:int
      7  lt.int s7:bool s5:int s4:int
-     8  branch-false s7:bool 15
+     8  branch-false s7:bool 14
      9  load-elem s8:String s3:ref s5:int
     10  call-builtin s9:Int String.length (s8:String)
-    11  add.int s10:int s2:int s9:int
-    12  copy s2:Int s10:Int
-    13  clear s8:String
-    14  jump 6
-    15  clear s3:Array
-    16  copy s1:Int s2:Int
-    17  return s1:Int
+    11  add.int s2:int s2:int s9:int
+    12  clear s8:String
+    13  jump 6
+    14  clear s3:Array
+    15  copy s1:Int s2:Int
+    16  return s1:Int
 "
     );
 }
@@ -212,10 +209,10 @@ fn a_for_over_a_vector_walks_a_snapshot() {
         ),
         "\
 fn @m.count(Vector) -> Int
-  frame 10: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int s9:int
-  local v -> s0:Vector [0, 16)
-  local t -> s2:Int [1, 15)
-  local x -> s8:Int [10, 12)
+  frame 9: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int
+  local v -> s0:Vector [0, 15)
+  local t -> s2:Int [1, 14)
+  local x -> s8:Int [10, 11)
      0  int s2:int 0
      1  call-builtin s3:Array Vector.toArray (s0:Vector)
      2  len s4:int s3:ref
@@ -224,14 +221,13 @@ fn @m.count(Vector) -> Int
      5  jump 7
      6  add.int s5:int s5:int s6:int
      7  lt.int s7:bool s5:int s4:int
-     8  branch-false s7:bool 13
+     8  branch-false s7:bool 12
      9  load-elem s8:Int s3:ref s5:int
-    10  add.int s9:int s2:int s8:int
-    11  copy s2:Int s9:Int
-    12  jump 6
-    13  clear s3:Array
-    14  copy s1:Int s2:Int
-    15  return s1:Int
+    10  add.int s2:int s2:int s8:int
+    11  jump 6
+    12  clear s3:Array
+    13  copy s1:Int s2:Int
+    14  return s1:Int
 "
     );
 }
@@ -248,10 +244,10 @@ fn a_break_out_of_a_for_clears_the_element_it_was_holding() {
         ),
         "\
 fn @m.first(Array) -> Int
-  frame 12: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:ref s10:unit s11:int
-  local xs -> s0:Array [0, 27)
-  local t -> s2:Int [1, 26)
-  local x -> s8:String [10, 22)
+  frame 11: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:ref s10:unit
+  local xs -> s0:Array [0, 26)
+  local t -> s2:Int [1, 25)
+  local x -> s8:String [10, 21)
      0  int s2:int 0
      1  copy s3:Array s0:Array
      2  len s4:int s3:ref
@@ -260,7 +256,7 @@ fn @m.first(Array) -> Int
      5  jump 7
      6  add.int s5:int s5:int s6:int
      7  lt.int s7:bool s5:int s4:int
-     8  branch-false s7:bool 24
+     8  branch-false s7:bool 23
      9  load-elem s8:String s3:ref s5:int
     10  str s9:ref \"\"
     11  eq.str s7:bool s8:ref s9:ref
@@ -271,14 +267,13 @@ fn @m.first(Array) -> Int
     16  eq.str s7:bool s8:ref s9:ref
     17  branch-false s7:bool 20
     18  clear s8:String
-    19  jump 24
-    20  add.int.imm s11:int s2:int 1
-    21  copy s2:Int s11:Int
-    22  clear s8:String
-    23  jump 6
-    24  clear s3:Array
-    25  copy s1:Int s2:Int
-    26  return s1:Int
+    19  jump 23
+    20  add.int.imm s2:int s2:int 1
+    21  clear s8:String
+    22  jump 6
+    23  clear s3:Array
+    24  copy s1:Int s2:Int
+    25  return s1:Int
 "
     );
 }
@@ -298,10 +293,10 @@ fn a_break_out_of_a_for_over_scalars_clears_nothing() {
         ),
         "\
 fn @m.first(Array) -> Int
-  frame 11: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int s9:unit s10:int
-  local xs -> s0:Array [0, 22)
-  local t -> s2:Int [1, 21)
-  local x -> s8:Int [10, 18)
+  frame 10: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int s9:unit
+  local xs -> s0:Array [0, 21)
+  local t -> s2:Int [1, 20)
+  local x -> s8:Int [10, 17)
      0  int s2:int 0
      1  copy s3:Array s0:Array
      2  len s4:int s3:ref
@@ -310,20 +305,19 @@ fn @m.first(Array) -> Int
      5  jump 7
      6  add.int s5:int s5:int s6:int
      7  lt.int s7:bool s5:int s4:int
-     8  branch-false s7:bool 19
+     8  branch-false s7:bool 18
      9  load-elem s8:Int s3:ref s5:int
     10  eq.int.imm s7:bool s8:int 0
     11  branch-false s7:bool 13
     12  jump 6
     13  eq.int.imm s7:bool s8:int 9
     14  branch-false s7:bool 16
-    15  jump 19
-    16  add.int.imm s10:int s2:int 1
-    17  copy s2:Int s10:Int
-    18  jump 6
-    19  clear s3:Array
-    20  copy s1:Int s2:Int
-    21  return s1:Int
+    15  jump 18
+    16  add.int.imm s2:int s2:int 1
+    17  jump 6
+    18  clear s3:Array
+    19  copy s1:Int s2:Int
+    20  return s1:Int
 "
     );
 }
@@ -403,12 +397,11 @@ fn two_inline_values_are_compared_where_they_sit() {
         ),
         "\
 fn @m.same(m.Point m.Point) -> Bool
-  frame 6: s0!:int s1!:int s2!:int s3!:int s4:bool s5:bool
-  local a -> s0..s1:m.Point [0, 3)
-  local b -> s2..s3:m.Point [0, 3)
-     0  call-builtin s5:Bool Any.equals (s0..s1:m.Point s2..s3:m.Point)
-     1  copy s4:Bool s5:Bool
-     2  return s4:Bool
+  frame 5: s0!:int s1!:int s2!:int s3!:int s4:bool
+  local a -> s0..s1:m.Point [0, 2)
+  local b -> s2..s3:m.Point [0, 2)
+     0  call-builtin s4:Bool Any.equals (s0..s1:m.Point s2..s3:m.Point)
+     1  return s4:Bool
 "
     );
 }
@@ -424,12 +417,11 @@ fn two_arrays_compare_without_being_boxed() {
         ),
         "\
 fn @m.same(Array Array) -> Bool
-  frame 4: s0!:ref s1!:ref s2:bool s3:bool
-  local a -> s0:Array [0, 3)
-  local b -> s1:Array [0, 3)
-     0  call-builtin s3:Bool Any.equals (s0:Array s1:Array)
-     1  copy s2:Bool s3:Bool
-     2  return s2:Bool
+  frame 3: s0!:ref s1!:ref s2:bool
+  local a -> s0:Array [0, 2)
+  local b -> s1:Array [0, 2)
+     0  call-builtin s2:Bool Any.equals (s0:Array s1:Array)
+     1  return s2:Bool
 "
     );
 }
@@ -541,12 +533,11 @@ fn an_immutable_update_is_the_machine_s_and_answers_a_new_set() {
         listing("fn f(s: Set<Int>) -> Set<Int> { s.inserted(4) }", "f"),
         "\
 fn @m.f(Set) -> Set
-  frame 4: s0!:ref s1:ref s2:int s3:ref
-  local s -> s0:Set [0, 4)
+  frame 3: s0!:ref s1:ref s2:int
+  local s -> s0:Set [0, 3)
      0  int s2:int 4
-     1  call-builtin s3:Set Set.inserted (s0:Set s2:Int)
-     2  copy s1:Set s3:Set
-     3  return s1:Set
+     1  call-builtin s1:Set Set.inserted (s0:Set s2:Int)
+     2  return s1:Set
 "
     );
 }
@@ -565,12 +556,11 @@ fn a_map_lookup_answers_the_option_s_words_rather_than_an_object() {
         ),
         "\
 fn @m.f(Map) -> Option
-  frame 6: s0!:ref s1:tag s2:int s3:ref s4:tag s5:int
-  local m -> s0:Map [0, 4)
+  frame 4: s0!:ref s1:tag s2:int s3:ref
+  local m -> s0:Map [0, 3)
      0  str s3:ref \"a\"
-     1  call-builtin s4..s5:Option Map.get (s0:Map s3:String)
-     2  copy s1..s2:Option s4..s5:Option
-     3  return s1..s2:Option
+     1  call-builtin s1..s2:Option Map.get (s0:Map s3:String)
+     2  return s1..s2:Option
 "
     );
 }
@@ -587,11 +577,10 @@ fn a_map_answers_its_keys_as_an_array() {
         ),
         "\
 fn @m.f(Map) -> Array
-  frame 3: s0!:ref s1:ref s2:ref
-  local m -> s0:Map [0, 3)
-     0  call-builtin s2:Array Map.keys (s0:Map)
-     1  copy s1:Array s2:Array
-     2  return s1:Array
+  frame 2: s0!:ref s1:ref
+  local m -> s0:Map [0, 2)
+     0  call-builtin s1:Array Map.keys (s0:Map)
+     1  return s1:Array
 "
     );
 }
@@ -613,10 +602,10 @@ fn a_for_over_a_set_walks_the_members_in_place() {
         ),
         "\
 fn @m.f(Set) -> Int
-  frame 10: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int s9:int
-  local s -> s0:Set [0, 16)
-  local n -> s2:Int [1, 15)
-  local x -> s8:Int [10, 12)
+  frame 9: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int
+  local s -> s0:Set [0, 15)
+  local n -> s2:Int [1, 14)
+  local x -> s8:Int [10, 11)
      0  int s2:int 0
      1  copy s3:Set s0:Set
      2  len s4:int s3:ref
@@ -625,14 +614,13 @@ fn @m.f(Set) -> Int
      5  jump 7
      6  add.int s5:int s5:int s6:int
      7  lt.int s7:bool s5:int s4:int
-     8  branch-false s7:bool 13
+     8  branch-false s7:bool 12
      9  load-elem s8:Int s3:ref s5:int
-    10  add.int s9:int s2:int s8:int
-    11  copy s2:Int s9:Int
-    12  jump 6
-    13  clear s3:Set
-    14  copy s1:Int s2:Int
-    15  return s1:Int
+    10  add.int s2:int s2:int s8:int
+    11  jump 6
+    12  clear s3:Set
+    13  copy s1:Int s2:Int
+    14  return s1:Int
 "
     );
 }
@@ -658,10 +646,10 @@ fn a_for_over_a_map_binds_one_entry_at_the_layout_s_width() {
         ),
         "\
 fn @m.f(Map) -> Int
-  frame 11: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int s10:int
-  local m -> s0:Map [0, 17)
-  local n -> s2:Int [1, 16)
-  local e -> s8..s9:MapEntry [10, 12)
+  frame 10: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int
+  local m -> s0:Map [0, 16)
+  local n -> s2:Int [1, 15)
+  local e -> s8..s9:MapEntry [10, 11)
      0  int s2:int 0
      1  copy s3:Map s0:Map
      2  len s4:int s3:ref
@@ -670,15 +658,14 @@ fn @m.f(Map) -> Int
      5  jump 7
      6  add.int s5:int s5:int s6:int
      7  lt.int s7:bool s5:int s4:int
-     8  branch-false s7:bool 14
+     8  branch-false s7:bool 13
      9  load-elem s8..s9:MapEntry s3:ref s5:int
-    10  add.int s10:int s2:int s9:int
-    11  copy s2:Int s10:Int
-    12  clear s8..s9:MapEntry
-    13  jump 6
-    14  clear s3:Map
-    15  copy s1:Int s2:Int
-    16  return s1:Int
+    10  add.int s2:int s2:int s9:int
+    11  clear s8..s9:MapEntry
+    12  jump 6
+    13  clear s3:Map
+    14  copy s1:Int s2:Int
+    15  return s1:Int
 "
     );
 }
@@ -736,7 +723,7 @@ fn an_array_literal_erases_each_element_the_written_type_erases() {
         "\
 fn @m.f(m.B) -> Int
   frame 6: s0!:int s1:int s2:ref s3:ref s4:ref s5:int
-  local b -> s0:m.B [0, 13)
+  local b -> s0:m.B [0, 11)
      0  box s2:ref s0:m.B
      1  box s3:ref s0:m.B
      2  alloc s4:ref Array<array> x2
@@ -746,10 +733,8 @@ fn @m.f(m.B) -> Int
      6  store-elem s4:ref s5:int s3:Any
      7  clear s3:Any
      8  clear s2:Any
-     9  call s5:Int m.r (s4:Array)
-    10  clear s4:Array
-    11  copy s1:Int s5:Int
-    12  return s1:Int
+     9  call s1:Int m.r (s4:Array)
+    10  return s1:Int
 "
     );
 }

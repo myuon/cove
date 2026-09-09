@@ -14,12 +14,11 @@ fn a_call_names_the_arguments_and_the_destination_location() {
         ),
         "\
 fn @m.f() -> Int
-  frame 4: s0:int s1:int s2:int s3:int
+  frame 3: s0:int s1:int s2:int
      0  int s1:int 1
      1  int s2:int 2
-     2  call s3:Int m.add (s1:Int s2:Int)
-     3  copy s0:Int s3:Int
-     4  return s0:Int
+     2  call s0:Int m.add (s1:Int s2:Int)
+     3  return s0:Int
 "
     );
 }
@@ -33,20 +32,18 @@ fn recursion_is_an_ordinary_call() {
         ),
         "\
 fn @m.fib(Int) -> Int
-  frame 7: s0!:int s1:int s2:int s3:bool s4:int s5:int s6:int
-  local n -> s0:Int [0, 12)
-     0  lt.int.imm s3:bool s0:int 2
-     1  branch-false s3:bool 4
-     2  copy s2:Int s0:Int
-     3  jump 10
-     4  sub.int.imm s4:int s0:int 1
-     5  call s5:Int m.fib (s4:Int)
-     6  sub.int.imm s4:int s0:int 2
-     7  call s6:Int m.fib (s4:Int)
-     8  add.int s4:int s5:int s6:int
-     9  copy s2:Int s4:Int
-    10  copy s1:Int s2:Int
-    11  return s1:Int
+  frame 6: s0!:int s1:int s2:bool s3:int s4:int s5:int
+  local n -> s0:Int [0, 10)
+     0  lt.int.imm s2:bool s0:int 2
+     1  branch-false s2:bool 4
+     2  copy s1:Int s0:Int
+     3  jump 9
+     4  sub.int.imm s3:int s0:int 1
+     5  call s4:Int m.fib (s3:Int)
+     6  sub.int.imm s3:int s0:int 2
+     7  call s5:Int m.fib (s3:Int)
+     8  add.int s1:int s4:int s5:int
+     9  return s1:Int
 "
     );
 }
@@ -64,14 +61,13 @@ fn multiword_parameters_occupy_the_frame_from_slot_zero_in_order() {
         "\
 fn @m.take(Int m.Point Int) -> Int
   frame 7: s0!:int s1!:int s2!:int s3!:int s4:int s5:int s6:int
-  local a -> s0:Int [0, 5)
-  local p -> s1..s2:m.Point [0, 5)
-  local b -> s3:Int [0, 5)
+  local a -> s0:Int [0, 4)
+  local p -> s1..s2:m.Point [0, 4)
+  local b -> s3:Int [0, 4)
      0  add.int s5:int s0:int s1:int
      1  add.int s6:int s5:int s2:int
-     2  add.int s5:int s6:int s3:int
-     3  copy s4:Int s5:Int
-     4  return s4:Int
+     2  add.int s4:int s6:int s3:int
+     3  return s4:Int
 "
     );
 }
@@ -92,9 +88,8 @@ fn @m.f() -> Int
      3  copy s4:Int s2:Int
      4  copy s5:Int s3:Int
      5  int s2:int 4
-     6  call s3:Int m.take (s1:Int s4..s5:m.Point s2:Int)
-     7  copy s0:Int s3:Int
-     8  return s0:Int
+     6  call s0:Int m.take (s1:Int s4..s5:m.Point s2:Int)
+     7  return s0:Int
 "
     );
 }
@@ -156,17 +151,15 @@ fn a_field_of_a_var_parameter_is_that_address_plus_the_offset() {
         ),
         "\
 fn @m.shift(<addr>) -> Unit
-  frame 5: s0!:addr s1:unit s2:int s3:addr s4:unit
-  local p -> s0:<addr> [0, 9)
+  frame 4: s0!:addr s1:unit s2:int s3:addr
+  local p -> s0:<addr> [0, 7)
      0  int s2:int 7
      1  addr-of-part s3:addr s0:addr +1
      2  store s3:addr s2:Int
      3  clear s3:<addr>
      4  addr-of-part s3:addr s0:addr +1
-     5  call s4:Unit m.bump (s3:<addr>)
-     6  clear s3:<addr>
-     7  copy s1:Unit s4:Unit
-     8  return s1:Unit
+     5  call s1:Unit m.bump (s3:<addr>)
+     6  return s1:Unit
 "
     );
 }
@@ -209,12 +202,11 @@ fn a_labelled_argument_is_not_a_permutation() {
         ),
         "\
 fn @m.f() -> Int
-  frame 4: s0:int s1:int s2:int s3:int
+  frame 3: s0:int s1:int s2:int
      0  int s1:int 2
      1  int s2:int 3
-     2  call s3:Int m.scaled (s1:Int s2:Int)
-     3  copy s0:Int s3:Int
-     4  return s0:Int
+     2  call s0:Int m.scaled (s1:Int s2:Int)
+     3  return s0:Int
 "
     );
 }
@@ -251,10 +243,8 @@ fn @m.f() -> Int
      9  add.int s6:int s6:int s5:int
     10  store-elem s4:ref s6:int s3:Int
     11  add.int s6:int s6:int s5:int
-    12  call s1:Int m.total (s4:Array)
-    13  clear s4:Array
-    14  copy s0:Int s1:Int
-    15  return s0:Int
+    12  call s0:Int m.total (s4:Array)
+    13  return s0:Int
 "
     );
 }
@@ -271,12 +261,10 @@ fn a_variadic_parameter_given_nothing_is_an_empty_array() {
         ),
         "\
 fn @m.f() -> Int
-  frame 3: s0:int s1:ref s2:int
+  frame 2: s0:int s1:ref
      0  alloc s1:ref Array<array> x0
-     1  call s2:Int m.total (s1:Array)
-     2  clear s1:Array
-     3  copy s0:Int s2:Int
-     4  return s0:Int
+     1  call s0:Int m.total (s1:Array)
+     2  return s0:Int
 "
     );
 }
@@ -300,7 +288,7 @@ fn a_spread_argument_is_counted_and_then_walked_into_the_run() {
         "\
 fn @m.f(Array) -> Int
   frame 12: s0!:ref s1:int s2:int s3:int s4:int s5:int s6:ref s7:int s8:int s9:int s10:bool s11:int
-  local xs -> s0:Array [0, 25)
+  local xs -> s0:Array [0, 23)
      0  int s2:int 0
      1  int s3:int 9
      2  int s4:int 2
@@ -322,10 +310,8 @@ fn @m.f(Array) -> Int
     18  jump 12
     19  store-elem s6:ref s7:int s3:Int
     20  add.int s7:int s7:int s5:int
-    21  call s2:Int m.total (s6:Array)
-    22  clear s6:Array
-    23  copy s1:Int s2:Int
-    24  return s1:Int
+    21  call s1:Int m.total (s6:Array)
+    22  return s1:Int
 "
     );
 }
@@ -364,13 +350,12 @@ fn a_default_reads_the_parameters_before_it() {
         ),
         "\
 fn @m.f() -> Int
-  frame 4: s0:int s1:int s2:int s3:int
+  frame 3: s0:int s1:int s2:int
   local n -> s1:Int [1, 2)
      0  int s1:int 3
      1  add.int.imm s2:int s1:int 1
-     2  call s3:Int m.near (s1:Int s2:Int)
-     3  copy s0:Int s3:Int
-     4  return s0:Int
+     2  call s0:Int m.near (s1:Int s2:Int)
+     3  return s0:Int
 "
     );
 }
@@ -394,17 +379,16 @@ fn a_default_does_not_see_what_the_caller_happens_to_have_bound() {
         ),
         "\
 fn @m.f() -> Int
-  frame 5: s0:int s1:ref s2:int s3:int s4:int
-  local base -> s1:fn [3, 7)
+  frame 4: s0:int s1:ref s2:int s3:int
+  local base -> s1:fn [3, 6)
   local n -> s2:Int [4, 5)
      0  alloc s1:ref closure m.f#0<closure>
      1  func-ref s2:int @m.f#0
      2  store-field s1:ref +0 s2:Int
      3  int s2:int 3
      4  call s3:Int m.base ()
-     5  call s4:Int m.scaled (s2:Int s3:Int)
-     6  copy s0:Int s4:Int
-     7  return s0:Int
+     5  call s0:Int m.scaled (s2:Int s3:Int)
+     6  return s0:Int
 "
     );
 }
@@ -422,12 +406,11 @@ fn a_default_on_a_method_reads_the_receiver() {
         ),
         "\
 fn @m.f(m.P) -> Int
-  frame 3: s0!:int s1:int s2:int
-  local p -> s0:m.P [0, 3)
-  local self -> s0:m.P [0, 3)
-     0  call s2:Int m.P.scaled (s0:m.P s0:Int)
-     1  copy s1:Int s2:Int
-     2  return s1:Int
+  frame 2: s0!:int s1:int
+  local p -> s0:m.P [0, 2)
+  local self -> s0:m.P [0, 2)
+     0  call s1:Int m.P.scaled (s0:m.P s0:Int)
+     1  return s1:Int
 "
     );
 }
@@ -454,10 +437,8 @@ fn @m.f() -> Int
      1  alloc s2:ref closure m.f#0<closure>
      2  func-ref s3:int @m.f#0
      3  store-field s2:ref +0 s3:Int
-     4  call s3:Int m.twice (s1:Int s2:fn)
-     5  clear s2:fn
-     6  copy s0:Int s3:Int
-     7  return s0:Int
+     4  call s0:Int m.twice (s1:Int s2:fn)
+     5  return s0:Int
 "
     );
 }
@@ -486,11 +467,10 @@ fn a_call_through_a_module_imported_whole_names_the_declaration_it_exports() {
         ),
         "\
 fn @app.f() -> Int
-  frame 3: s0:int s1:int s2:int
+  frame 2: s0:int s1:int
      0  int s1:int 21
-     1  call s2:Int greet.twice (s1:Int)
-     2  copy s0:Int s2:Int
-     3  return s0:Int
+     1  call s0:Int greet.twice (s1:Int)
+     2  return s0:Int
 "
     );
 }

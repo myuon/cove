@@ -7,7 +7,6 @@ backtrace
 print n
 locals
 step
-step
 finish
 words
 frame 1
