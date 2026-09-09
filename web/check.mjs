@@ -429,16 +429,17 @@ check(
       ["s1:int", "slot"],
       ["2", "number"],
       ["2", "number"],
+      // A `copy` and a `return` name value *locations*, and a location
+      // carries its own layout: `s0:Int` rather than `s0:int` with an `Int`
+      // parked after the operands. An `Int` is one word, so there is no
+      // range to write; issue #299's `s5..s7:Result` is the same operand
+      // three words wide.
       ["copy", "keyword"],
-      ["s0:int", "slot"],
-      ["s2:int", "slot"],
-      ["Int", "type"],
+      ["s0:Int", "slot"],
+      ["s2:Int", "slot"],
       ["3", "number"],
       ["return", "keyword"],
-      ["s0:int", "slot"],
-      // The layout of the answer, which is what says how many words `s0` is
-      // the head of. A `return` names it for the same reason a `copy` does.
-      ["Int", "type"],
+      ["s0:Int", "slot"],
     ]),
 );
 
@@ -467,13 +468,18 @@ check(
   printing.runs.filter(([text]) => text.includes("console.println")),
   (held) => held.length === 1 && held[0][1] === "plain",
 );
-// `Result` and not `String`: the layout on *this* line is the one the call
-// answers, and `s3:String` is a slot rather than a layout — one run, coloured
-// as a slot, which is what the check above is about. It used to read `String`
-// and match the `clear s3:ref String` that followed, which is a different
-// line and is no longer emitted: the literal is interned, so clearing the
-// slot that holds it releases nothing.
-check("and the layout beside it still is one", printing.runs, (held) =>
+// What the call answers is named on the destination it writes, all three
+// words of it. Until issue #299 this line ended in a bare `Result` while the
+// destination read `s4:tag`, so a reader was told the width of the answer but
+// not which slots it covered — and `s5` and `s6` looked like registers with
+// nothing to do with the call. The run is one piece and it is a slot.
+check("a multi-word answer names the whole run it writes", printing.runs, (held) =>
+  held.some(([text, kind]) => /^s\d+\.\.s\d+:Result$/.test(text) && kind === "slot"),
+);
+// And a bare layout is still coloured as one where the printer writes one:
+// the same `Result` in this function's header, which names a family rather
+// than a location.
+check("and a bare layout is still a type", printing.runs, (held) =>
   held.some(([text, kind]) => text === "Result" && kind === "type"),
 );
 
@@ -649,7 +655,7 @@ check("named", functions.map((f) => f.name).join(" "), "playground.main playgrou
 check(
   "the disassembly is the one `cove ir` prints",
   functions[1].code.map((line) => line.text).join(" | "),
-  "add.int s2:int s0:int s0:int | copy s1:int s2:int Int | return s1:int Int",
+  "add.int s2:int s0:int s0:int | copy s1:Int s2:Int | return s1:Int",
 );
 check(
   "every moment's pc is inside its function",

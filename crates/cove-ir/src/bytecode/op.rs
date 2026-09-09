@@ -213,8 +213,9 @@ pub enum Operand {
     /// One word of the frame, holding one of these [`Repr`]s.
     ///
     /// [`ANY`] is the empty list and means the opcode constrains nothing —
-    /// the destination of a closure call, whose width nothing static knows,
-    /// and the operand of an `addr.slot`, which is any location at all.
+    /// the destination of a call, whose `Repr` is the head word of whatever
+    /// the callee answers, and the operand of an `addr.slot`, which is any
+    /// location at all.
     Word(&'static [Repr]),
     /// The first slot of a value location whose width comes from the layout
     /// in the payload.
@@ -618,11 +619,16 @@ impl Op {
                 NONE,
                 ids(Half::Function, Half::Args),
             ),
+            // The destination is a value location like every other call's,
+            // and the layout it is measured against is the one in the
+            // payload rather than one read off a declared callee: a closure
+            // call names a word in a slot, so `Inst::CallClosure` carries
+            // the answer's layout itself.
             Op::CallClosure => fields(
-                Operand::Word(ANY),
+                Operand::Value,
                 Operand::Word(REF),
                 NONE,
-                one(Half::Args),
+                ids(Half::Args, Half::Layout),
             ),
             Op::CallHost => fields(
                 Operand::Word(ANY),

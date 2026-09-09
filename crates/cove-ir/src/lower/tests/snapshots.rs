@@ -22,9 +22,9 @@ fn an_immutable_value_answers_a_copy_of_its_own_words() {
 fn @m.n(Int) -> Int
   frame 3: s0!:int s1:int s2:int
   local x -> s0:Int [0, 3)
-     0  copy s2:int s0:int Int
-     1  copy s1:int s2:int Int
-     2  return s1:int Int
+     0  copy s2:Int s0:Int
+     1  copy s1:Int s2:Int
+     2  return s1:Int
 "
     );
 }
@@ -41,9 +41,9 @@ fn an_array_answers_itself_rather_than_being_walked() {
 fn @m.a(Array) -> Array
   frame 3: s0!:ref s1:ref s2:ref
   local xs -> s0:Array [0, 3)
-     0  copy s2:ref s0:ref Array
-     1  copy s1:ref s2:ref Array
-     2  return s1:ref Array
+     0  copy s2:Array s0:Array
+     1  copy s1:Array s2:Array
+     2  return s1:Array
 "
     );
 }
@@ -65,11 +65,11 @@ fn a_vector_of_immutable_elements_is_copied_out_and_back() {
 fn @m.v(Vector) -> Vector
   frame 4: s0!:ref s1:ref s2:ref s3:ref
   local xs -> s0:Vector [0, 5)
-     0  call-builtin s2:ref Vector.toArray (s0:Vector) Array
-     1  call-builtin s3:ref Array.toVector (s2:Array) Vector
-     2  clear s2:ref Array
-     3  copy s1:ref s3:ref Vector
-     4  return s1:ref Vector
+     0  call-builtin s2:Array Vector.toArray (s0:Vector)
+     1  call-builtin s3:Vector Array.toVector (s2:Array)
+     2  clear s2:Array
+     3  copy s1:Vector s3:Vector
+     4  return s1:Vector
 "
     );
 }

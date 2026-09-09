@@ -177,6 +177,7 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             dst: a,
             closure: b,
             args: ArgsId(lo),
+            result: LayoutId(hi),
         },
         Op::CallHost => Inst::CallHost {
             dst: a,

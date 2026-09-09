@@ -180,7 +180,7 @@ impl Body<'_> {
             span,
         );
         let turn = self.temp(made);
-        self.call_closure(turn.slot, closure.slot, vec![element_at.arg()], span);
+        self.call_closure(turn.slot, closure.slot, vec![element_at.arg()], made, span);
         self.emit(
             Inst::StoreElem {
                 obj: kept.slot,
@@ -344,7 +344,13 @@ impl Body<'_> {
         // `by(right, left)`: the right run's element goes first only when it
         // comes strictly before the left run's, which is the oracle's own
         // operand order and is what makes the sort stable.
-        self.call_closure(more.slot, closure.slot, vec![a.arg(), b.arg()], span);
+        self.call_closure(
+            more.slot,
+            closure.slot,
+            vec![a.arg(), b.arg()],
+            shapes::BOOL,
+            span,
+        );
         let take_left = self.branch(more.slot, span);
         self.store_elem(merged.slot, out.slot, a.slot, element, span);
         self.add(right.slot, right.slot, one.slot, span);

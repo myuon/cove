@@ -156,12 +156,17 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
         Inst::Call { dst, callee, args } => {
             build(Op::Call, slot(dst)?, 0, 0, halves(callee.0, args.0))
         }
-        Inst::CallClosure { dst, closure, args } => build(
+        Inst::CallClosure {
+            dst,
+            closure,
+            args,
+            result,
+        } => build(
             Op::CallClosure,
             slot(dst)?,
             slot(closure)?,
             0,
-            halves(args.0, 0),
+            halves(args.0, result.0),
         ),
         Inst::CallHost { dst, op, args } => {
             build(Op::CallHost, slot(dst)?, 0, 0, halves(op.0, args.0))
@@ -528,6 +533,7 @@ mod tests {
                     dst: 1,
                     closure: 2,
                     args: ArgsId(3),
+                    result: LayoutId(4),
                 },
             ),
             (

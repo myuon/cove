@@ -311,9 +311,9 @@ impl Check<'_> {
                     poison(&mut objects, dst, width);
                     poison(&mut funcs, dst, width);
                 }
-                Inst::CallClosure { dst, .. } => {
-                    poison(&mut objects, dst, 1);
-                    poison(&mut funcs, dst, 1);
+                Inst::CallClosure { dst, result, .. } => {
+                    poison(&mut objects, dst, words(result));
+                    poison(&mut funcs, dst, words(result));
                 }
                 Inst::CallHost { dst, op, .. } | Inst::CallResource { dst, op, .. } => {
                     let width = match self.program.host_ops.get(op.index()) {
@@ -596,9 +596,21 @@ impl Check<'_> {
                 }
                 self.check_args(at, args, &params, &name);
             }
-            Inst::CallClosure { dst, closure, args } => {
+            // The callee is a word read out of an object, and the answer's
+            // layout is not: the checker settled this call against the
+            // callee's function type, so how wide the destination has to be
+            // is as static here as at any other call. It is checked the same
+            // way, from the layout the instruction carries.
+            Inst::CallClosure {
+                dst,
+                closure,
+                args,
+                result,
+            } => {
                 self.expect(at, closure, &[Repr::Ref]);
-                self.repr(at, dst);
+                if self.layout_exists(at, result) {
+                    self.fits(at, dst, result, "the answer of a closure call");
+                }
                 self.each_arg(at, args);
             }
             Inst::CallHost { dst, op, args } => {
@@ -1749,6 +1761,61 @@ mod tests {
             faults(&held),
             vec!["argument 0 is `Point`, 2 words at slot 2, and the frame has 3"]
         );
+    }
+
+    /// A closure call's destination is checked like every other call's.
+    ///
+    /// Which body the call enters is a run-time fact and how wide its answer
+    /// is, is not: the checker settled the call against the callee's function
+    /// type, so `Inst::CallClosure` carries the layout and this asks the same
+    /// `fits` question of it. Before it did, a two-word answer written into
+    /// the last slot of a frame was checked by nothing here, and the machine
+    /// wrote the frame above it.
+    #[test]
+    fn a_closure_calls_answer_that_runs_off_the_end_of_the_frame_is_a_fault() {
+        let mut held = program(vec![function(
+            vec![Repr::Int, Repr::Ref, Repr::Int],
+            INT,
+            vec![
+                Inst::CallClosure {
+                    dst: 2,
+                    closure: 1,
+                    args: ArgsId(0),
+                    result: POINT,
+                },
+                Inst::Return { src: 0 },
+            ],
+        )]);
+        held.args.push(Vec::new());
+        assert_eq!(
+            faults(&held),
+            vec![
+                "the answer of a closure call is `Point`, 2 words at slot 2, and the frame has 3"
+                    .to_string()
+            ]
+        );
+    }
+
+    /// And the same call whose destination is a location of that layout has
+    /// nothing said about it. `Point` is two `Int` words and slots 0 and 1
+    /// are two.
+    #[test]
+    fn a_closure_call_whose_answer_fits_its_destination_is_well_formed() {
+        let mut held = program(vec![function(
+            vec![Repr::Int, Repr::Int, Repr::Ref],
+            INT,
+            vec![
+                Inst::CallClosure {
+                    dst: 0,
+                    closure: 2,
+                    args: ArgsId(0),
+                    result: POINT,
+                },
+                Inst::Return { src: 0 },
+            ],
+        )]);
+        held.args.push(Vec::new());
+        assert_eq!(faults(&held), Vec::<String>::new());
     }
 
     /// Two layouts can have the same words and not be the same family, and it

@@ -24,8 +24,8 @@ fn @m.total() -> Int
      1  add.int.imm s2:int s1:int 2
      2  add.int.imm s1:int s2:int 3
      3  add.int.imm s2:int s1:int 4
-     4  copy s0:int s2:int Int
-     5  return s0:int Int
+     4  copy s0:Int s2:Int
+     5  return s0:Int
 "
     );
 }
@@ -51,8 +51,8 @@ fn @m.mix(Int Float) -> Float
      1  float s4:float 1
      2  add.float s5:float s1:float s4:float
      3  add.int.imm s6:int s3:int 2
-     4  copy s2:float s5:float Float
-     5  return s2:float Float
+     4  copy s2:Float s5:Float
+     5  return s2:Float
 "
     );
 }
@@ -69,19 +69,19 @@ fn a_two_word_location_is_reused_only_by_a_two_word_one_of_the_same_shape() {
         "\
 fn @m.f() -> Int
   frame 7: s0:int s1:int s2:ref s3:int s4:ref s5:ref s6:int
-  local a -> s3:m.A [4, 10)
-  local b -> s5:m.B [8, 10)
+  local a -> s3..s4:m.A [4, 10)
+  local b -> s5..s6:m.B [8, 10)
      0  int s1:int 1
      1  str s2:ref \"x\"
-     2  copy s3:int s1:int Int
-     3  copy s4:ref s2:ref String
+     2  copy s3:Int s1:Int
+     3  copy s4:String s2:String
      4  str s2:ref \"y\"
      5  int s1:int 2
-     6  copy s5:ref s2:ref String
-     7  copy s6:int s1:int Int
+     6  copy s5:String s2:String
+     7  copy s6:Int s1:Int
      8  add.int s1:int s3:int s6:int
-     9  copy s0:int s1:int Int
-    10  return s0:int Int
+     9  copy s0:Int s1:Int
+    10  return s0:Int
 "
     );
 }
@@ -100,11 +100,11 @@ fn @m.shout(String String) -> Int
   frame 5: s0!:ref s1!:ref s2:int s3:ref s4:int
   local a -> s0:String [0, 5)
   local b -> s1:String [0, 5)
-     0  call-builtin s3:ref String.interpolate (s0:String s1:String) String
-     1  call-builtin s4:int String.length (s3:String) Int
-     2  clear s3:ref String
-     3  copy s2:int s4:int Int
-     4  return s2:int Int
+     0  call-builtin s3:String String.interpolate (s0:String s1:String)
+     1  call-builtin s4:Int String.length (s3:String)
+     2  clear s3:String
+     3  copy s2:Int s4:Int
+     4  return s2:Int
 "
     );
 }
@@ -131,12 +131,12 @@ fn @m.f(String) -> Int
   local s -> s4:String [3, 5)
      0  int s2:int 0
      1  str s3:ref \"!\"
-     2  call-builtin s4:ref String.interpolate (s0:String s3:String) String
-     3  call-builtin s5:int String.length (s4:String) Int
-     4  copy s2:int s5:int Int
-     5  clear s4:ref String
-     6  copy s1:int s2:int Int
-     7  return s1:int Int
+     2  call-builtin s4:String String.interpolate (s0:String s3:String)
+     3  call-builtin s5:Int String.length (s4:String)
+     4  copy s2:Int s5:Int
+     5  clear s4:String
+     6  copy s1:Int s2:Int
+     7  return s1:Int
 "
     );
 }
@@ -156,8 +156,8 @@ fn @m.f() -> Int
      0  int s1:int 1
      1  int s2:int 2
      2  add.int s3:int s1:int s2:int
-     3  copy s0:int s3:int Int
-     4  return s0:int Int
+     3  copy s0:Int s3:Int
+     4  return s0:Int
 "
     );
 }
@@ -180,16 +180,16 @@ fn a_location_with_one_reference_word_among_scalars_is_cleared_whole() {
 fn @m.f() -> Int
   frame 6: s0:int s1:int s2:ref s3:int s4:ref s5:int
   local n -> s1:Int [1, 8)
-  local u -> s4:m.User [5, 6)
+  local u -> s4..s5:m.User [5, 6)
      0  int s1:int 0
      1  str s2:ref \"a\"
      2  int s3:int 1
-     3  copy s4:ref s2:ref String
-     4  copy s5:int s3:int Int
-     5  copy s1:int s5:int Int
-     6  clear s4:ref m.User
-     7  copy s0:int s1:int Int
-     8  return s0:int Int
+     3  copy s4:String s2:String
+     4  copy s5:Int s3:Int
+     5  copy s1:Int s5:Int
+     6  clear s4..s5:m.User
+     7  copy s0:Int s1:Int
+     8  return s0:Int
 "
     );
 }

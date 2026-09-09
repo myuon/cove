@@ -191,7 +191,7 @@ impl Body<'_> {
             false => self.load_wrapped(&addr, value, span),
         };
         let dst = self.temp(answer);
-        self.call_closure(dst.slot, closure.slot, vec![operand.arg()], span);
+        self.call_closure(dst.slot, closure.slot, vec![operand.arg()], answer, span);
 
         // The copy the closure was handed, then the address it was reached
         // through, and only then the cell — an address into an object is live

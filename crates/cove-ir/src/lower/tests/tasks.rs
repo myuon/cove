@@ -104,8 +104,8 @@ fn an_async_declaration_is_an_ordinary_function() {
 fn @m.g() -> Int async
   frame 2: s0:int s1:int
      0  int s1:int 1
-     1  copy s0:int s1:int Int
-     2  return s0:int Int
+     1  copy s0:Int s1:Int
+     2  return s0:Int
 "
     );
 }
@@ -132,11 +132,11 @@ fn a_call_to_an_async_declaration_answers_a_settled_task() {
         "\
 fn @m.f() -> Int
   frame 3: s0:int s1:int s2:task
-     0  call s1:int m.g () Int
-     1  settled s2:task s1:int Int
-     2  await s1:int s2:task Int
-     3  copy s0:int s1:int Int
-     4  return s0:int Int
+     0  call s1:Int m.g ()
+     1  settled s2:task s1:Int
+     2  await s1:Int s2:task
+     3  copy s0:Int s1:Int
+     4  return s0:Int
 "
     );
 }
@@ -164,12 +164,12 @@ fn @m.f() -> Int
   local g -> s1:fn [3, 7)
      0  alloc s1:ref closure m.f#0<closure>
      1  func-ref s2:int @m.f#0
-     2  store-field s1:ref +0 s2:int Int
-     3  call-closure s2:int s1:ref ()
-     4  settled s3:task s2:int Int
-     5  await s2:int s3:task Int
-     6  copy s0:int s2:int Int
-     7  return s0:int Int
+     2  store-field s1:ref +0 s2:Int
+     3  call-closure s2:Int s1:ref ()
+     4  settled s3:task s2:Int
+     5  await s2:Int s3:task
+     6  copy s0:Int s2:Int
+     7  return s0:Int
 "
     );
 }

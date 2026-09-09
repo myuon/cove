@@ -22,11 +22,11 @@ fn @m.f() -> Int
   local g -> s1:fn [3, 6)
      0  alloc s1:ref closure m.f#0<closure>
      1  func-ref s2:int @m.f#0
-     2  store-field s1:ref +0 s2:int Int
+     2  store-field s1:ref +0 s2:Int
      3  int s2:int 1
-     4  call-closure s3:int s1:ref (s2:Int)
-     5  copy s0:int s3:int Int
-     6  return s0:int Int
+     4  call-closure s3:Int s1:ref (s2:Int)
+     5  copy s0:Int s3:Int
+     6  return s0:Int
 "
     );
     // The body is an ordinary function whose parameters occupy the frame from
@@ -38,8 +38,8 @@ fn @m.f#0(Int) -> Int
   frame 3: s0!:int s1:int s2:int
   local x -> s0:Int [0, 3)
      0  add.int.imm s2:int s0:int 1
-     1  copy s1:int s2:int Int
-     2  return s1:int Int
+     1  copy s1:Int s2:Int
+     2  return s1:Int
 "
     );
 }
@@ -126,15 +126,15 @@ fn a_capture_is_inline_in_the_environment_at_its_own_width() {
         "\
 fn @m.f(m.Point) -> Int
   frame 5: s0!:int s1!:int s2:int s3:ref s4:int
-  local p -> s0:m.Point [0, 7)
+  local p -> s0..s1:m.Point [0, 7)
   local g -> s3:fn [4, 6)
      0  alloc s3:ref closure m.f#0<closure>
      1  func-ref s4:int @m.f#0
-     2  store-field s3:ref +0 s4:int Int
-     3  store-field s3:ref +1 s0:int m.Point
-     4  call-closure s4:int s3:ref ()
-     5  copy s2:int s4:int Int
-     6  return s2:int Int
+     2  store-field s3:ref +0 s4:Int
+     3  store-field s3:ref +1 s0..s1:m.Point
+     4  call-closure s4:Int s3:ref ()
+     5  copy s2:Int s4:Int
+     6  return s2:Int
 "
     );
     assert_eq!(
@@ -142,11 +142,11 @@ fn @m.f(m.Point) -> Int
         "\
 fn @m.f#0() -> Int
   frame 4: s0:int s1:int s2:int s3:int
-  capture p -> s0:m.Point
-  local p -> s0:m.Point [0, 3)
+  capture p -> s0..s1:m.Point
+  local p -> s0..s1:m.Point [0, 3)
      0  add.int s3:int s0:int s1:int
-     1  copy s2:int s3:int Int
-     2  return s2:int Int
+     1  copy s2:Int s3:Int
+     2  return s2:Int
 "
     );
 }
@@ -169,10 +169,10 @@ fn @m.f() -> Int
   local g -> s1:fn [3, 5)
      0  alloc s1:ref closure m.f#0<closure>
      1  func-ref s2:int @m.f#0
-     2  store-field s1:ref +0 s2:int Int
-     3  call-closure s2:int s1:ref ()
-     4  copy s0:int s2:int Int
-     5  return s0:int Int
+     2  store-field s1:ref +0 s2:Int
+     3  call-closure s2:Int s1:ref ()
+     4  copy s0:Int s2:Int
+     5  return s0:Int
 "
     );
     assert_eq!(
@@ -181,8 +181,8 @@ fn @m.f() -> Int
 fn @m.f#0() -> Int
   frame 2: s0:int s1:int
      0  int s1:int 1
-     1  copy s0:int s1:int Int
-     2  return s0:int Int
+     1  copy s0:Int s1:Int
+     2  return s0:Int
 "
     );
 }
@@ -208,11 +208,11 @@ fn @m.f() -> Int
   local g -> s1:fn [3, 6)
      0  alloc s1:ref closure m.double<closure>
      1  func-ref s2:int @m.double
-     2  store-field s1:ref +0 s2:int Int
+     2  store-field s1:ref +0 s2:Int
      3  int s2:int 3
-     4  call-closure s3:int s1:ref (s2:Int)
-     5  copy s0:int s3:int Int
-     6  return s0:int Int
+     4  call-closure s3:Int s1:ref (s2:Int)
+     5  copy s0:Int s3:Int
+     6  return s0:Int
 "
     );
 }
@@ -233,9 +233,9 @@ fn @m.apply(fn Int) -> Int
   frame 4: s0!:ref s1!:int s2:int s3:int
   local g -> s0:fn [0, 3)
   local n -> s1:Int [0, 3)
-     0  call-closure s3:int s0:ref (s1:Int)
-     1  copy s2:int s3:int Int
-     2  return s2:int Int
+     0  call-closure s3:Int s0:ref (s1:Int)
+     1  copy s2:Int s3:Int
+     2  return s2:Int
 "
     );
     // The lambda is built at the call site and passed as an ordinary
@@ -247,12 +247,12 @@ fn @m.f() -> Int
   frame 4: s0:int s1:ref s2:int s3:int
      0  alloc s1:ref closure m.f#0<closure>
      1  func-ref s2:int @m.f#0
-     2  store-field s1:ref +0 s2:int Int
+     2  store-field s1:ref +0 s2:Int
      3  int s2:int 2
-     4  call s3:int m.apply (s1:fn s2:Int) Int
-     5  clear s1:ref fn
-     6  copy s0:int s3:int Int
-     7  return s0:int Int
+     4  call s3:Int m.apply (s1:fn s2:Int)
+     5  clear s1:fn
+     6  copy s0:Int s3:Int
+     7  return s0:Int
 "
     );
 }
@@ -278,11 +278,11 @@ fn @m.f#0() -> Int
   local inner -> s2:fn [4, 6)
      0  alloc s2:ref closure m.f#0#0<closure>
      1  func-ref s3:int @m.f#0#0
-     2  store-field s2:ref +0 s3:int Int
-     3  store-field s2:ref +1 s0:int Int
-     4  call-closure s3:int s2:ref ()
-     5  copy s1:int s3:int Int
-     6  return s1:int Int
+     2  store-field s2:ref +0 s3:Int
+     3  store-field s2:ref +1 s0:Int
+     4  call-closure s3:Int s2:ref ()
+     5  copy s1:Int s3:Int
+     6  return s1:Int
 "
     );
     assert_eq!(
@@ -293,8 +293,8 @@ fn @m.f#0#0() -> Int
   capture n -> s0:Int
   local n -> s0:Int [0, 3)
      0  add.int.imm s2:int s0:int 1
-     1  copy s1:int s2:int Int
-     2  return s1:int Int
+     1  copy s1:Int s2:Int
+     2  return s1:Int
 "
     );
 }
@@ -319,14 +319,14 @@ fn @m.f(<addr>) -> Int
   frame 5: s0!:addr s1:int s2:int s3:ref s4:int
   local n -> s0:<addr> [0, 8)
   local g -> s3:fn [5, 7)
-     0  load s2:int s0:addr Int
+     0  load s2:Int s0:addr
      1  alloc s3:ref closure m.f#0<closure>
      2  func-ref s4:int @m.f#0
-     3  store-field s3:ref +0 s4:int Int
-     4  store-field s3:ref +1 s2:int Int
-     5  call-closure s2:int s3:ref ()
-     6  copy s1:int s2:int Int
-     7  return s1:int Int
+     3  store-field s3:ref +0 s4:Int
+     4  store-field s3:ref +1 s2:Int
+     5  call-closure s2:Int s3:ref ()
+     6  copy s1:Int s2:Int
+     7  return s1:Int
 "
     );
     assert_eq!(
@@ -340,8 +340,8 @@ fn @m.f#0() -> Int
   capture n -> s0:Int
   local n -> s0:Int [0, 3)
      0  add.int.imm s2:int s0:int 1
-     1  copy s1:int s2:int Int
-     2  return s1:int Int
+     1  copy s1:Int s2:Int
+     2  return s1:Int
 "
     );
 }
@@ -368,11 +368,11 @@ fn @m.f() -> Int
   local double -> s1:fn [3, 6)
      0  alloc s1:ref closure m.f#0<closure>
      1  func-ref s2:int @m.f#0
-     2  store-field s1:ref +0 s2:int Int
+     2  store-field s1:ref +0 s2:Int
      3  int s2:int 21
-     4  call-closure s3:int s1:ref (s2:Int)
-     5  copy s0:int s3:int Int
-     6  return s0:int Int
+     4  call-closure s3:Int s1:ref (s2:Int)
+     5  copy s0:Int s3:Int
+     6  return s0:Int
 "
     );
     assert_eq!(
@@ -382,8 +382,8 @@ fn @m.f#0(Int) -> Int
   frame 3: s0!:int s1:int s2:int
   local n -> s0:Int [0, 3)
      0  mul.int.imm s2:int s0:int 2
-     1  copy s1:int s2:int Int
-     2  return s1:int Int
+     1  copy s1:Int s2:Int
+     2  return s1:Int
 "
     );
 }
@@ -403,8 +403,8 @@ fn @m.f#0(Int) -> Int
   local base -> s1:Int [0, 3)
   local n -> s0:Int [0, 3)
      0  add.int s3:int s0:int s1:int
-     1  copy s2:int s3:int Int
-     2  return s2:int Int
+     1  copy s2:Int s3:Int
+     2  return s2:Int
 "
     );
 }

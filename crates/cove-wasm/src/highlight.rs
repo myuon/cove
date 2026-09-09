@@ -569,6 +569,11 @@ fn literal(text: &str, at: usize, to: usize) -> usize {
 /// where the frame is too short to say what the word holds, `s10:<addr>`, and
 /// `s3:playground.Point` in an argument list where the annotation is the
 /// layout rather than the `Repr`.
+///
+/// `s5..s7:Result` is one of these and not three tokens. A value location
+/// wider than one word names its whole run, and the whole run is one operand
+/// — colouring the `..` as punctuation between two slots would say the
+/// instruction touched two locations rather than one.
 fn slot(bytes: &[u8], at: usize, to: usize) -> Option<usize> {
     if bytes[at] != b's' {
         return None;
@@ -579,6 +584,16 @@ fn slot(bytes: &[u8], at: usize, to: usize) -> Option<usize> {
     }
     if end == at + 1 {
         return None;
+    }
+    if end + 2 < to && &bytes[end..end + 3] == b"..s" {
+        let last = end;
+        end += 3;
+        while end < to && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end == last + 3 {
+            return None;
+        }
     }
     if end < to && bytes[end] == b'!' {
         end += 1;
@@ -871,6 +886,22 @@ mod tests {
         );
     }
 
+    /// A location wider than one word names its whole run, and the run is
+    /// one operand: `..` between two slot numbers is part of the token and
+    /// not punctuation between two of them.
+    #[test]
+    fn a_local_over_several_words_is_one_operand() {
+        assert_eq!(
+            lit("  local wide -> s5..s7:playground.Shape [5, 5)\n"),
+            vec![
+                ("local".into(), Kind::Keyword),
+                ("s5..s7:playground.Shape".into(), Kind::Slot),
+                ("5".into(), Kind::Number),
+                ("5".into(), Kind::Number),
+            ]
+        );
+    }
+
     #[test]
     fn a_capture_is_a_name_and_a_slot() {
         assert_eq!(
@@ -896,29 +927,56 @@ mod tests {
         );
     }
 
-    /// A layout named after its slots is a type; a callee is a name, and the
-    /// two are told apart by the argument list the printer writes after one
-    /// of them and never after the other.
+    /// A callee is a name and not a layout, and the two are told apart by
+    /// the argument list the printer writes after one of them and never
+    /// after the other.
     ///
-    /// Both are in this one line: `playground.greeting` is the callee and the
-    /// `String` after the arguments is the layout of what the call answers,
-    /// so a reader that told them apart by "a name in an instruction is a
-    /// layout" would colour one of them wrong.
+    /// This line used to end in a bare `String`, the layout of what the call
+    /// answered, and it was there that the two were most easily confused.
+    /// Issue #299 moved that layout onto the destination it describes, so
+    /// what is left for a reader to get wrong is the callee alone — it is
+    /// still the one name in an instruction that is not a type.
     #[test]
     fn a_callee_is_a_name_and_everything_else_that_is_named_is_a_layout() {
         assert_eq!(
-            lit("     1  call s4:ref playground.greeting (s3:String) String\n"),
+            lit("     1  call s4:String playground.greeting (s3:String)\n"),
             vec![
                 ("1".into(), Kind::Number),
                 ("call".into(), Kind::Keyword),
-                ("s4:ref".into(), Kind::Slot),
+                ("s4:String".into(), Kind::Slot),
                 ("s3:String".into(), Kind::Slot),
-                ("String".into(), Kind::Type),
+            ]
+        );
+        // Where a bare layout is still written it is a type: `spawn` names
+        // the answer of the body it starts, which is not a location in this
+        // frame and so is not written on one.
+        assert_eq!(
+            lit("     7  spawn s3:task s2:scope s4:ref Int\n").last(),
+            Some(&("Int".to_string(), Kind::Type))
+        );
+    }
+
+    /// The shape issue #299 is about: a destination three words wide, and
+    /// both ends of the run in the operand.
+    #[test]
+    fn a_multi_word_location_is_one_operand_and_not_two_slots() {
+        assert_eq!(
+            lit("    14  call-host s4..s6:Result console.println (s14:String)\n"),
+            vec![
+                ("14".into(), Kind::Number),
+                ("call-host".into(), Kind::Keyword),
+                ("s4..s6:Result".into(), Kind::Slot),
+                ("s14:String".into(), Kind::Slot),
             ]
         );
         assert_eq!(
-            lit("     5  copy s1:ref s4:ref String\n").last(),
-            Some(&("String".to_string(), Kind::Type))
+            lit("     8  copy s0..s2:playground.Shape s5..s7:playground.Shape\n"),
+            vec![
+                ("8".into(), Kind::Number),
+                ("copy".into(), Kind::Keyword),
+                ("s0..s2:playground.Shape".into(), Kind::Slot),
+                ("s5..s7:playground.Shape".into(), Kind::Slot),
+            ]
         );
     }
 
@@ -954,11 +1012,15 @@ mod tests {
     /// A layout the table names in brackets, which is what a bare `ref` or
     /// `addr` is called. It is a layout name and not a shape, and the two are
     /// told apart by whether a name is written against the bracket.
+    ///
+    /// On a location the brackets are inside the operand — `s13:<ref>` is one
+    /// token, the way `s13:String` is. A bare one is what a header writes,
+    /// and `a_header_names_its_layouts_and_leaves_the_function_plain` has it.
     #[test]
     fn a_bracketed_layout_is_a_layout_and_a_bracketed_shape_is_not() {
         assert_eq!(
-            lit("    18  clear s13:ref <ref>\n").last(),
-            Some(&("<ref>".to_string(), Kind::Type))
+            lit("    18  clear s13:<ref>\n").last(),
+            Some(&("s13:<ref>".to_string(), Kind::Slot))
         );
         // A layout name with a space in it — `closure playground.reading#0`
         // is one name — is coloured as the layout it is, both halves of it,
@@ -1007,11 +1069,11 @@ mod tests {
             Some(&("true".to_string(), Kind::Keyword))
         );
         assert_eq!(
-            lit("     6  store-field s1:ref +2 s0:int Int\n")
+            lit("     6  store-field s1:ref +2 s0:Int\n")
                 .iter()
                 .map(|(text, _)| text.as_str())
                 .collect::<Vec<_>>(),
-            vec!["6", "store-field", "s1:ref", "+2", "s0:int", "Int"]
+            vec!["6", "store-field", "s1:ref", "+2", "s0:Int"]
         );
     }
 
@@ -1048,14 +1110,14 @@ mod tests {
                     \x20 frame 3: s0!:int s1:int s2:int\n\
                     \x20 local n -> s0:Int [0, 3)\n\
                     \x20    0  add.int s2:int s0:int s0:int\n\
-                    \x20    1  copy s1:int s2:int Int\n\
-                    \x20    2  return s1:int Int\n\
+                    \x20    1  copy s1:Int s2:Int\n\
+                    \x20    2  return s1:Int\n\
                     \n\
                     fn @playground.main() -> Int\n\
                     \x20 frame 2: s0:int s1:int\n\
                     \x20    0  int s1:int 21\n\
-                    \x20    1  call s0:int playground.twice (s1:Int) Int\n\
-                    \x20    2  return s0:int Int\n";
+                    \x20    1  call s0:Int playground.twice (s1:Int)\n\
+                    \x20    2  return s0:Int\n";
         let painting = disassembly(text);
         assert!(painting.ok, "{:?}", painting.pieces);
         tiles(text, &painting);

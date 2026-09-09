@@ -728,6 +728,7 @@ impl Body<'_> {
                 dst: dst.slot,
                 closure: closure.slot,
                 args: list,
+                result: returns,
             },
             expr.span,
         );
@@ -747,15 +748,27 @@ impl Body<'_> {
 
     /// One [`Inst::CallClosure`] against a closure whose signature the caller
     /// has already read: the sequence loops build their own operand lists.
+    ///
+    /// `result` is the layout of what the call answers, which is the layout
+    /// of `dst` — the caller made that temporary and so already holds it.
     pub(super) fn call_closure(
         &mut self,
         dst: Slot,
         closure: Slot,
         operands: Vec<crate::program::Arg>,
+        result: LayoutId,
         span: Span,
     ) {
         let args = self.pool.args.intern(operands);
-        self.emit(Inst::CallClosure { dst, closure, args }, span);
+        self.emit(
+            Inst::CallClosure {
+                dst,
+                closure,
+                args,
+                result,
+            },
+            span,
+        );
     }
 
     /// The layouts a function type's parameters and answer occupy.

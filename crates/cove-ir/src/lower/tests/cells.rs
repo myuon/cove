@@ -19,9 +19,9 @@ fn @m.make() -> Shared
   frame 3: s0:ref s1:int s2:ref
      0  int s1:int 1
      1  alloc s2:ref Shared<shared>
-     2  store-field s2:ref +1 s1:int Int
-     3  copy s0:ref s2:ref Shared
-     4  return s0:ref Shared
+     2  store-field s2:ref +1 s1:Int
+     3  copy s0:Shared s2:Shared
+     4  return s0:Shared
 "
     );
 }
@@ -54,15 +54,15 @@ fn @m.bump(Shared) -> Int
   local cell -> s0:Shared [0, 11)
      0  alloc s2:ref closure m.bump#0<closure>
      1  func-ref s3:int @m.bump#0
-     2  store-field s2:ref +0 s3:int Int
+     2  store-field s2:ref +0 s3:Int
      3  shared.lock s0:ref
      4  addr-of-field s4:addr s0:ref +1
-     5  call-closure s3:int s2:ref (s4:<addr>)
-     6  clear s4:addr <addr>
+     5  call-closure s3:Int s2:ref (s4:<addr>)
+     6  clear s4:<addr>
      7  shared.unlock s0:ref
-     8  clear s2:ref fn
-     9  copy s1:int s3:int Int
-    10  return s1:int Int
+     8  clear s2:fn
+     9  copy s1:Int s3:Int
+    10  return s1:Int
 "
     );
 }
@@ -86,12 +86,12 @@ fn the_lock_closures_var_parameter_is_an_address() {
 fn @m.bump#0(<addr>) -> Int
   frame 4: s0!:addr s1:int s2:int s3:int
   local value -> s0:<addr> [0, 6)
-     0  load s2:int s0:addr Int
+     0  load s2:Int s0:addr
      1  add.int.imm s3:int s2:int 1
-     2  store s0:addr s3:int Int
-     3  load s3:int s0:addr Int
-     4  copy s1:int s3:int Int
-     5  return s1:int Int
+     2  store s0:addr s3:Int
+     3  load s3:Int s0:addr
+     4  copy s1:Int s3:Int
+     5  return s1:Int
 "
     );
 }
@@ -118,16 +118,16 @@ fn @m.read(Shared) -> Int
   local cell -> s0:Shared [0, 12)
      0  alloc s2:ref closure m.read#0<closure>
      1  func-ref s3:int @m.read#0
-     2  store-field s2:ref +0 s3:int Int
+     2  store-field s2:ref +0 s3:Int
      3  shared.lock s0:ref
      4  addr-of-field s4:addr s0:ref +1
-     5  load s3:int s4:addr Int
-     6  call-closure s5:int s2:ref (s3:Int)
-     7  clear s4:addr <addr>
+     5  load s3:Int s4:addr
+     6  call-closure s5:Int s2:ref (s3:Int)
+     7  clear s4:<addr>
      8  shared.unlock s0:ref
-     9  clear s2:ref fn
-    10  copy s1:int s5:int Int
-    11  return s1:int Int
+     9  clear s2:fn
+    10  copy s1:Int s5:Int
+    11  return s1:Int
 "
     );
 }
@@ -152,17 +152,17 @@ fn @m.count#0(<addr>) -> Int
   frame 5: s0!:addr s1:int s2:addr s3:int s4:int
   local value -> s0:<addr> [0, 12)
      0  addr-of-part s2:addr s0:addr +1
-     1  load s3:int s2:addr Int
-     2  clear s2:addr <addr>
+     1  load s3:Int s2:addr
+     2  clear s2:<addr>
      3  add.int.imm s4:int s3:int 1
      4  addr-of-part s2:addr s0:addr +1
-     5  store s2:addr s4:int Int
-     6  clear s2:addr <addr>
+     5  store s2:addr s4:Int
+     6  clear s2:<addr>
      7  addr-of-part s2:addr s0:addr +1
-     8  load s4:int s2:addr Int
-     9  clear s2:addr <addr>
-    10  copy s1:int s4:int Int
-    11  return s1:int Int
+     8  load s4:Int s2:addr
+     9  clear s2:<addr>
+    10  copy s1:Int s4:Int
+    11  return s1:Int
 "
     );
 }

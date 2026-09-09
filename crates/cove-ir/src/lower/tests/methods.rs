@@ -17,9 +17,9 @@ fn @m.parts(String) -> Array
   frame 4: s0!:ref s1:ref s2:ref s3:ref
   local s -> s0:String [0, 4)
      0  str s2:ref \",\"
-     1  call-builtin s3:ref String.split (s0:String s2:String) Array
-     2  copy s1:ref s3:ref Array
-     3  return s1:ref Array
+     1  call-builtin s3:Array String.split (s0:String s2:String)
+     2  copy s1:Array s3:Array
+     3  return s1:Array
 "
     );
 }
@@ -37,9 +37,9 @@ fn an_associated_function_has_no_receiver() {
 fn @m.wait() -> Duration
   frame 3: s0:duration s1:int s2:duration
      0  int s1:int 1
-     1  call-builtin s2:duration Duration.nanos (s1:Int) Duration
-     2  copy s0:duration s2:duration Duration
-     3  return s0:duration Duration
+     1  call-builtin s2:Duration Duration.nanos (s1:Int)
+     2  copy s0:Duration s2:Duration
+     3  return s0:Duration
 "
     );
 }
@@ -52,9 +52,9 @@ fn a_duration_reader_passes_its_receiver_as_operand_zero() {
 fn @m.ns(Duration) -> Int
   frame 3: s0!:duration s1:int s2:int
   local d -> s0:Duration [0, 3)
-     0  call-builtin s2:int Duration.nanos (s0:Duration) Int
-     1  copy s1:int s2:int Int
-     2  return s1:int Int
+     0  call-builtin s2:Int Duration.nanos (s0:Duration)
+     1  copy s1:Int s2:Int
+     2  return s1:Int
 "
     );
 }
@@ -72,9 +72,9 @@ fn a_duration_builder_is_a_call_the_standard_library_implements() {
 fn @m.wait() -> Duration
   frame 3: s0:duration s1:int s2:duration
      0  int s1:int 1
-     1  call s2:duration std.duration.ofMillis (s1:Int) Duration
-     2  copy s0:duration s2:duration Duration
-     3  return s0:duration Duration
+     1  call s2:Duration std.duration.ofMillis (s1:Int)
+     2  copy s0:Duration s2:Duration
+     3  return s0:Duration
 "
     );
 }
@@ -87,9 +87,9 @@ fn a_duration_reader_is_a_call_the_standard_library_implements() {
 fn @m.ms(Duration) -> Int
   frame 3: s0!:duration s1:int s2:int
   local d -> s0:Duration [0, 3)
-     0  call s2:int std.duration.millis (s0:Duration) Int
-     1  copy s1:int s2:int Int
-     2  return s1:int Int
+     0  call s2:Int std.duration.millis (s0:Duration)
+     1  copy s1:Int s2:Int
+     2  return s1:Int
 "
     );
 }
@@ -108,10 +108,10 @@ fn is_some_is_a_call_the_standard_library_implements() {
         "\
 fn @m.has(Option) -> Bool
   frame 4: s0!:tag s1!:int s2:bool s3:bool
-  local o -> s0:Option [0, 3)
-     0  call s3:bool std.option.isSome<Int> (s0:Option) Bool
-     1  copy s2:bool s3:bool Bool
-     2  return s2:bool Bool
+  local o -> s0..s1:Option [0, 3)
+     0  call s3:Bool std.option.isSome<Int> (s0..s1:Option)
+     1  copy s2:Bool s3:Bool
+     2  return s2:Bool
 "
     );
 }
@@ -131,11 +131,11 @@ fn unwrap_or_is_an_ordinary_call_into_the_standard_library() {
         "\
 fn @m.value(Option Int) -> Int
   frame 5: s0!:tag s1!:int s2!:int s3:int s4:int
-  local o -> s0:Option [0, 3)
+  local o -> s0..s1:Option [0, 3)
   local other -> s2:Int [0, 3)
-     0  call s4:int std.option.unwrapOr<Int> (s0:Option s2:Int) Int
-     1  copy s3:int s4:int Int
-     2  return s3:int Int
+     0  call s4:Int std.option.unwrapOr<Int> (s0..s1:Option s2:Int)
+     1  copy s3:Int s4:Int
+     2  return s3:Int
 "
     );
 }
@@ -154,12 +154,12 @@ fn a_parser_answers_a_result_and_interns_the_error_it_may_carry() {
 fn @m.parse(String) -> Int
   frame 7: s0!:ref s1:int s2:tag s3:int s4:ref s5:int s6:int
   local s -> s0:String [0, 6)
-     0  call-builtin s2:tag Int.parse (s0:String) Result
+     0  call-builtin s2..s4:Result Int.parse (s0:String)
      1  int s5:int 0
-     2  call s6:int std.result.unwrapOr<Int, Error> (s2:Result s5:Int) Int
-     3  clear s2:tag Result
-     4  copy s1:int s6:int Int
-     5  return s1:int Int
+     2  call s6:Int std.result.unwrapOr<Int, Error> (s2..s4:Result s5:Int)
+     3  clear s2..s4:Result
+     4  copy s1:Int s6:Int
+     5  return s1:Int
 "
     );
 }
@@ -176,10 +176,10 @@ fn a_method_on_a_declared_type_is_an_ordinary_call() {
         "\
 fn @m.f(m.Point) -> Int
   frame 4: s0!:int s1!:int s2:int s3:int
-  local p -> s0:m.Point [0, 3)
-     0  call s3:int m.Point.sum (s0:m.Point) Int
-     1  copy s2:int s3:int Int
-     2  return s2:int Int
+  local p -> s0..s1:m.Point [0, 3)
+     0  call s3:Int m.Point.sum (s0..s1:m.Point)
+     1  copy s2:Int s3:Int
+     2  return s2:Int
 "
     );
 }
@@ -201,9 +201,9 @@ fn a_method_the_standard_library_implements_is_an_ordinary_call() {
 fn @m.f(Array) -> Bool
   frame 3: s0!:ref s1:bool s2:bool
   local xs -> s0:Array [0, 3)
-     0  call s2:bool std.array.isEmpty<Int> (s0:Array) Bool
-     1  copy s1:bool s2:bool Bool
-     2  return s1:bool Bool
+     0  call s2:Bool std.array.isEmpty<Int> (s0:Array)
+     1  copy s1:Bool s2:Bool
+     2  return s1:Bool
 "
     );
 }
@@ -224,15 +224,15 @@ fn @m.Point.bump(<addr>) -> Unit
   frame 6: s0!:addr s1:unit s2:addr s3:int s4:int s5:unit
   local self -> s0:<addr> [0, 10)
      0  addr-of-part s2:addr s0:addr +1
-     1  load s3:int s2:addr Int
-     2  clear s2:addr <addr>
+     1  load s3:Int s2:addr
+     2  clear s2:<addr>
      3  add.int.imm s4:int s3:int 1
      4  addr-of-part s2:addr s0:addr +1
-     5  store s2:addr s4:int Int
-     6  clear s2:addr <addr>
+     5  store s2:addr s4:Int
+     6  clear s2:<addr>
      7  unit s5:unit
-     8  copy s1:unit s5:unit Unit
-     9  return s1:unit Unit
+     8  copy s1:Unit s5:Unit
+     9  return s1:Unit
 "
     );
 }
@@ -281,16 +281,16 @@ fn map_error_is_an_ordinary_call_into_the_standard_library() {
 fn @m.f(String) -> Result
   frame 14: s0!:ref s1:tag s2:int s3:tag s4:ref s5:tag s6:int s7:ref s8:ref s9:int s10:tag s11:int s12:tag s13:ref
   local t -> s0:String [0, 10)
-     0  call-builtin s5:tag Int.parse (s0:String) Result
+     0  call-builtin s5..s7:Result Int.parse (s0:String)
      1  alloc s8:ref closure m.f#0<closure>
      2  func-ref s9:int @m.f#0
-     3  store-field s8:ref +0 s9:int Int
-     4  store-field s8:ref +1 s0:ref String
-     5  call s10:tag std.result.mapError<Int, Error, m.E> (s5:Result s8:fn) Result
-     6  clear s8:ref fn
-     7  clear s5:tag Result
-     8  copy s1:tag s10:tag Result
-     9  return s1:tag Result
+     3  store-field s8:ref +0 s9:Int
+     4  store-field s8:ref +1 s0:String
+     5  call s10..s13:Result std.result.mapError<Int, Error, m.E> (s5..s7:Result s8:fn)
+     6  clear s8:fn
+     7  clear s5..s7:Result
+     8  copy s1..s4:Result s10..s13:Result
+     9  return s1..s4:Result
 "
     );
 }
