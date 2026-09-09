@@ -285,6 +285,11 @@ impl Check<'_> {
                 self.fits(at, dst, returns, "the destination of a call");
                 self.args_match(at, args, &params, &name);
             }
+            // Only the arguments. The destination is checked by the uniform
+            // pass above, from `Operand::Value` and the layout half this
+            // opcode's payload carries — there is no declared callee here to
+            // read an answer's layout off, which is why the instruction
+            // carries it.
             Inst::CallClosure { args, .. } => self.args_fit(at, args),
             Inst::CallHost { dst, op, args } | Inst::CallResource { dst, op, args, .. } => {
                 if let Some(op) = self.program.host_ops.get(op.index()) {

@@ -24,7 +24,7 @@ fn @m.f() -> Int
      1  func-ref s2:int @m.f#0
      2  store-field s1:ref +0 s2:Int
      3  int s2:int 1
-     4  call-closure s3:int s1:ref (s2:Int)
+     4  call-closure s3:Int s1:ref (s2:Int)
      5  copy s0:Int s3:Int
      6  return s0:Int
 "
@@ -132,7 +132,7 @@ fn @m.f(m.Point) -> Int
      1  func-ref s4:int @m.f#0
      2  store-field s3:ref +0 s4:Int
      3  store-field s3:ref +1 s0..s1:m.Point
-     4  call-closure s4:int s3:ref ()
+     4  call-closure s4:Int s3:ref ()
      5  copy s2:Int s4:Int
      6  return s2:Int
 "
@@ -170,7 +170,7 @@ fn @m.f() -> Int
      0  alloc s1:ref closure m.f#0<closure>
      1  func-ref s2:int @m.f#0
      2  store-field s1:ref +0 s2:Int
-     3  call-closure s2:int s1:ref ()
+     3  call-closure s2:Int s1:ref ()
      4  copy s0:Int s2:Int
      5  return s0:Int
 "
@@ -210,7 +210,7 @@ fn @m.f() -> Int
      1  func-ref s2:int @m.double
      2  store-field s1:ref +0 s2:Int
      3  int s2:int 3
-     4  call-closure s3:int s1:ref (s2:Int)
+     4  call-closure s3:Int s1:ref (s2:Int)
      5  copy s0:Int s3:Int
      6  return s0:Int
 "
@@ -233,7 +233,7 @@ fn @m.apply(fn Int) -> Int
   frame 4: s0!:ref s1!:int s2:int s3:int
   local g -> s0:fn [0, 3)
   local n -> s1:Int [0, 3)
-     0  call-closure s3:int s0:ref (s1:Int)
+     0  call-closure s3:Int s0:ref (s1:Int)
      1  copy s2:Int s3:Int
      2  return s2:Int
 "
@@ -280,7 +280,7 @@ fn @m.f#0() -> Int
      1  func-ref s3:int @m.f#0#0
      2  store-field s2:ref +0 s3:Int
      3  store-field s2:ref +1 s0:Int
-     4  call-closure s3:int s2:ref ()
+     4  call-closure s3:Int s2:ref ()
      5  copy s1:Int s3:Int
      6  return s1:Int
 "
@@ -324,7 +324,7 @@ fn @m.f(<addr>) -> Int
      2  func-ref s4:int @m.f#0
      3  store-field s3:ref +0 s4:Int
      4  store-field s3:ref +1 s2:Int
-     5  call-closure s2:int s3:ref ()
+     5  call-closure s2:Int s3:ref ()
      6  copy s1:Int s2:Int
      7  return s1:Int
 "
@@ -370,7 +370,7 @@ fn @m.f() -> Int
      1  func-ref s2:int @m.f#0
      2  store-field s1:ref +0 s2:Int
      3  int s2:int 21
-     4  call-closure s3:int s1:ref (s2:Int)
+     4  call-closure s3:Int s1:ref (s2:Int)
      5  copy s0:Int s3:Int
      6  return s0:Int
 "

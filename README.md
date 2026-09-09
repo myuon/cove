@@ -333,6 +333,16 @@ the enum it claims. The physical side is untouched — one non-reference word,
 never a GC root, and the dispatch loop answers it with the same arm that
 answers a function reference.
 
+[ADR 0049](docs/adr/0049-a-closure-call-answers-a-layout-the-program-knows.md)
+gives `CallClosure` the layout of what it answers. The callee is a word read
+out of a closure object at run time and the callee's *type* is not — the
+checker settled the call against a function type — so the width of the
+destination was a static fact the lowering was throwing away, and neither
+verifier could ask whether a closure call's answer fit the frame it was
+written into. It goes in the payload half
+[ADR 0041](docs/adr/0041-a-slot-number-fits-in-sixteen-bits.md) left free, so
+the instruction is the same eight bytes and the machine is untouched.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles

@@ -21,10 +21,11 @@
 //!
 //! So the layout is written once, on the location it describes, and a `copy`,
 //! a `clear`, a `return` and a call no longer repeat it after their operands.
-//! [`Inst::CallClosure`] is the one destination that stays a word: its callee
-//! is a function id read out of an object at run time, so nothing in the
-//! program says what a closure call answers, and a guessed layout would be
-//! worse than the gap.
+//! That includes [`Inst::CallClosure`], whose *callee* is a function id read
+//! out of an object at run time but whose *answer* is not: the checker
+//! settles a call through a value against the callee's function type, so the
+//! instruction carries the layout the destination has to be, and the line
+//! reads like every other call's.
 //!
 //! Which operands are locations is not a second opinion. It is where
 //! [`mod@crate::verify`] asks whether a run of words *fits* — the same layout, on
@@ -212,13 +213,19 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
                 args_of(program, *args)
             )
         }
-        // The one call with no layout after its arguments. Every other
-        // callee is named by the program — a `FunctionId`, a `HostOpId`, a
-        // `BuiltinId` — and this one is a word in a slot, read out of the
-        // closure object when the instruction runs. See the module docs.
-        Inst::CallClosure { dst, closure, args } => format!(
+        // The callee is a word in a slot, read out of the closure object
+        // when the instruction runs, and it is written as one. The answer is
+        // a location like every other call's: `Inst::CallClosure` carries
+        // that layout itself, because there is no declared callee to read it
+        // from. See the module docs.
+        Inst::CallClosure {
+            dst,
+            closure,
+            args,
+            result,
+        } => format!(
             "call-closure {} {} ({})",
-            s(*dst),
+            v(*dst, *result),
             s(*closure),
             args_of(program, *args)
         ),
@@ -676,6 +683,28 @@ mod tests {
                 &Inst::Return { src: 0 }
             ),
             "return s0..s2:Result"
+        );
+    }
+
+    /// A closure call reads like every other call. Its *callee* is a word in
+    /// a slot — that is the run-time fact — and its *answer* is a location,
+    /// because the instruction carries the layout the checker settled.
+    #[test]
+    fn a_closure_call_names_its_answer_and_leaves_its_callee_a_word() {
+        let mut held = program();
+        held.args.push(vec![Arg {
+            slot: 5,
+            layout: INT,
+        }]);
+        let inst = Inst::CallClosure {
+            dst: 0,
+            closure: 6,
+            args: ArgsId(0),
+            result: RESULT,
+        };
+        assert_eq!(
+            one(&held, &function(vec![inst.clone()]), &inst),
+            "call-closure s0..s2:Result s6:ref (s5:Int)"
         );
     }
 

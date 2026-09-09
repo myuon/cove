@@ -1,6 +1,9 @@
 # ADR 0041: A slot number fits in sixteen bits
 
-- Status: Accepted
+- Status: Accepted. Superseded in part by
+  [ADR 0049](0049-a-closure-call-answers-a-layout-the-program-knows.md), which
+  encodes `CallClosure`'s answer layout in the payload half this ADR left
+  unused
 - Date: 2026-09-05
 - Decides: the width and field layout of the fixed-width instruction
   [issue #245](https://github.com/myuon/cove/issues/245) asks for, an encoding

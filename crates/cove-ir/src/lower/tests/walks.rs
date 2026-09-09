@@ -55,7 +55,7 @@ fn @m.f(Array) -> Array
     10  lt.int s8:bool s6:int s4:int
     11  branch-false s8:bool 18
     12  load-elem s9:String s2:ref s6:int
-    13  call-closure s10:ref s3:ref (s9:String)
+    13  call-closure s10:String s3:ref (s9:String)
     14  store-elem s5:ref s6:int s10:String
     15  clear s10:String
     16  clear s9:String
@@ -156,7 +156,7 @@ fn @m.f(Vector) -> Array
     10  lt.int s8:bool s6:int s4:int
     11  branch-false s8:bool 16
     12  load-elem s9:Int s2:ref s6:int
-    13  call-closure s10:int s3:ref (s9:Int)
+    13  call-closure s10:Int s3:ref (s9:Int)
     14  store-elem s5:ref s6:int s10:Int
     15  jump 9
     16  clear s3:fn
@@ -197,7 +197,7 @@ fn @m.f(Array) -> Array
     10  lt.int s8:bool s6:int s4:int
     11  branch-false s8:bool 16
     12  load-elem s9:Int s2:ref s6:int
-    13  call-closure s10:int s3:ref (s9:Int)
+    13  call-closure s10:Int s3:ref (s9:Int)
     14  store-elem s5:ref s6:int s10:Int
     15  jump 9
     16  clear s3:fn
@@ -236,7 +236,7 @@ fn @m.f(Array) -> Array
     10  lt.int s8:bool s6:int s4:int
     11  branch-false s8:bool 16
     12  load-elem s9:Int s2:ref s6:int
-    13  call-closure s10:int s3:ref (s9:Int)
+    13  call-closure s10..s11:m.Point s3:ref (s9:Int)
     14  store-elem s5:ref s6:int s10..s11:m.Point
     15  jump 9
     16  clear s3:fn
@@ -317,7 +317,7 @@ fn @m.f(Array) -> Array
     30  branch-false s15:bool 42
     31  load-elem s16:Int s6:ref s14:int
     32  load-elem s17:Int s6:ref s13:int
-    33  call-closure s15:bool s3:ref (s16:Int s17:Int)
+    33  call-closure s15:Bool s3:ref (s16:Int s17:Int)
     34  branch-false s15:bool 38
     35  store-elem s2:ref s9:int s16:Int
     36  add.int s14:int s14:int s7:int

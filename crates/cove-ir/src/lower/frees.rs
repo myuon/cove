@@ -128,10 +128,17 @@
 //! An instruction's destination is a *run* of words, and this pass asks two
 //! different questions about that run: which words it *may* write, which has
 //! to be an over-estimate, and which it *definitely* writes, which has to be
-//! an under-estimate. They differ in one place. [`Inst::CallClosure`]'s
-//! callee is a word in an object, so the answer's width is not a static
-//! fact: the may-write is the widest answer any function in the program
-//! returns, and the definitely-writes is one word, which every call writes.
+//! an under-estimate. They differ in one place. [`Inst::CallClosure`] carries
+//! the layout of its answer, but this pass does not read it: the may-write is
+//! the widest answer any function in the program returns, and the
+//! definitely-writes is one word, which every call writes.
+//!
+//! That over-estimate is now wider than it has to be, and deliberately so
+//! here. Narrowing it to the instruction's own `result` removes the two
+//! questions' one difference — the `wide` argument below and the `widest`
+//! field with it — which is a change to what this pass *emits* and belongs
+//! with its own measurement rather than in the change that made the layout
+//! available. See issue #301.
 
 use crate::inst::{Inst, Len, Slot};
 use crate::layout::{Layout, LayoutId};
@@ -357,8 +364,10 @@ impl<'p> Flow<'p> {
                 };
                 f(dst, answer);
             }
-            // The one destination whose width is a run-time fact: the callee
-            // is a word in the closure object.
+            // The one destination this pass declines to size exactly. The
+            // instruction says how wide the answer is; the bound stays the
+            // widest answer in the program until narrowing it is measured.
+            // See the module documentation and issue #301.
             Inst::CallClosure { dst, .. } => f(dst, if wide { self.widest } else { 1 }),
             Inst::CallHost { dst, op, .. } | Inst::CallResource { dst, op, .. } => {
                 let answer = match self.program.host_ops.get(op.index()) {
@@ -1053,11 +1062,12 @@ mod tests {
         );
     }
 
-    /// `Inst::CallClosure`'s callee is a word in an object, so how many
-    /// words its destination takes is not a static fact. The widest answer
-    /// any function in the program returns is what bounds it, and here that
-    /// is the two-word `Pair` a second function answers — so the word *after*
-    /// the destination is unknown too.
+    /// This pass bounds an `Inst::CallClosure`'s destination by the widest
+    /// answer any function in the program returns rather than by the layout
+    /// the instruction carries — see the module documentation for why it
+    /// stays that way for now. Here that widest answer is the two-word `Pair`
+    /// a second function returns, so the word *after* the destination is
+    /// unknown too.
     #[test]
     fn a_closure_call_may_write_as_wide_as_the_widest_answer() {
         let mut wide = function(vec![Repr::Ref, Repr::Ref], vec![Inst::Return { src: 0 }]);
@@ -1073,6 +1083,7 @@ mod tests {
                     dst: 1,
                     closure: 3,
                     args: crate::ArgsId(0),
+                    result: PAIR,
                 },
                 Inst::Clear {
                     slot: 2,
@@ -1111,6 +1122,7 @@ mod tests {
                     dst: 2,
                     closure: 3,
                     args: crate::ArgsId(0),
+                    result: PAIR,
                 },
                 Inst::Clear {
                     slot: 1,
@@ -1139,6 +1151,7 @@ mod tests {
                     dst: 2,
                     closure: 3,
                     args: crate::ArgsId(0),
+                    result: PAIR,
                 },
                 Inst::Return { src: 0 },
             ]

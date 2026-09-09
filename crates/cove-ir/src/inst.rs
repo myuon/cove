@@ -342,10 +342,30 @@ pub enum Inst {
     ///
     /// The callee is the function id in the object's first payload word, and
     /// its captures are copied into the slots after the parameters.
+    ///
+    /// `result` is the layout of what the call answers, and it is the one
+    /// operand here that is not read off the object at run time. Which body
+    /// this enters is a run-time fact; how wide its answer is, is not. The
+    /// checker settles a call through a value against the callee's *function
+    /// type*, so the answer's type — and with it the run of words the
+    /// destination has to be — is as static as any other call's.
+    ///
+    /// It is carried rather than looked up because there is nowhere to look:
+    /// every other call names a callee the program declares — a
+    /// [`FunctionId`], a [`crate::HostOpId`], a [`crate::BuiltinId`] — and
+    /// the answer's layout is read from that declaration. A closure call
+    /// names a word in a slot. Without this field the destination's width
+    /// was known to the checker, thrown away by the lowering, and then
+    /// unavailable to everything downstream: `crate::verify` could ask only
+    /// that `dst` was a slot at all, the encoded verifier the same, and a
+    /// listing had to print the head word's `Repr` where every other call
+    /// prints the run. A two-word answer written into the last slot of a
+    /// frame was checked by nothing.
     CallClosure {
         dst: Slot,
         closure: Slot,
         args: ArgsId,
+        result: LayoutId,
     },
     /// `dst = <host op>(args...)`
     ///

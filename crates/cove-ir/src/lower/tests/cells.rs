@@ -57,7 +57,7 @@ fn @m.bump(Shared) -> Int
      2  store-field s2:ref +0 s3:Int
      3  shared.lock s0:ref
      4  addr-of-field s4:addr s0:ref +1
-     5  call-closure s3:int s2:ref (s4:<addr>)
+     5  call-closure s3:Int s2:ref (s4:<addr>)
      6  clear s4:<addr>
      7  shared.unlock s0:ref
      8  clear s2:fn
@@ -122,7 +122,7 @@ fn @m.read(Shared) -> Int
      3  shared.lock s0:ref
      4  addr-of-field s4:addr s0:ref +1
      5  load s3:Int s4:addr
-     6  call-closure s5:int s2:ref (s3:Int)
+     6  call-closure s5:Int s2:ref (s3:Int)
      7  clear s4:<addr>
      8  shared.unlock s0:ref
      9  clear s2:fn

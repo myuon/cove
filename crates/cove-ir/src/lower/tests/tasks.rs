@@ -165,7 +165,7 @@ fn @m.f() -> Int
      0  alloc s1:ref closure m.f#0<closure>
      1  func-ref s2:int @m.f#0
      2  store-field s1:ref +0 s2:Int
-     3  call-closure s2:int s1:ref ()
+     3  call-closure s2:Int s1:ref ()
      4  settled s3:task s2:Int
      5  await s2:Int s3:task
      6  copy s0:Int s2:Int
