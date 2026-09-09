@@ -403,12 +403,11 @@ fn two_inline_values_are_compared_where_they_sit() {
         ),
         "\
 fn @m.same(m.Point m.Point) -> Bool
-  frame 6: s0!:int s1!:int s2!:int s3!:int s4:bool s5:bool
-  local a -> s0..s1:m.Point [0, 3)
-  local b -> s2..s3:m.Point [0, 3)
-     0  call-builtin s5:Bool Any.equals (s0..s1:m.Point s2..s3:m.Point)
-     1  copy s4:Bool s5:Bool
-     2  return s4:Bool
+  frame 5: s0!:int s1!:int s2!:int s3!:int s4:bool
+  local a -> s0..s1:m.Point [0, 2)
+  local b -> s2..s3:m.Point [0, 2)
+     0  call-builtin s4:Bool Any.equals (s0..s1:m.Point s2..s3:m.Point)
+     1  return s4:Bool
 "
     );
 }
@@ -424,12 +423,11 @@ fn two_arrays_compare_without_being_boxed() {
         ),
         "\
 fn @m.same(Array Array) -> Bool
-  frame 4: s0!:ref s1!:ref s2:bool s3:bool
-  local a -> s0:Array [0, 3)
-  local b -> s1:Array [0, 3)
-     0  call-builtin s3:Bool Any.equals (s0:Array s1:Array)
-     1  copy s2:Bool s3:Bool
-     2  return s2:Bool
+  frame 3: s0!:ref s1!:ref s2:bool
+  local a -> s0:Array [0, 2)
+  local b -> s1:Array [0, 2)
+     0  call-builtin s2:Bool Any.equals (s0:Array s1:Array)
+     1  return s2:Bool
 "
     );
 }
@@ -541,12 +539,11 @@ fn an_immutable_update_is_the_machine_s_and_answers_a_new_set() {
         listing("fn f(s: Set<Int>) -> Set<Int> { s.inserted(4) }", "f"),
         "\
 fn @m.f(Set) -> Set
-  frame 4: s0!:ref s1:ref s2:int s3:ref
-  local s -> s0:Set [0, 4)
+  frame 3: s0!:ref s1:ref s2:int
+  local s -> s0:Set [0, 3)
      0  int s2:int 4
-     1  call-builtin s3:Set Set.inserted (s0:Set s2:Int)
-     2  copy s1:Set s3:Set
-     3  return s1:Set
+     1  call-builtin s1:Set Set.inserted (s0:Set s2:Int)
+     2  return s1:Set
 "
     );
 }
@@ -565,12 +562,11 @@ fn a_map_lookup_answers_the_option_s_words_rather_than_an_object() {
         ),
         "\
 fn @m.f(Map) -> Option
-  frame 6: s0!:ref s1:tag s2:int s3:ref s4:tag s5:int
-  local m -> s0:Map [0, 4)
+  frame 4: s0!:ref s1:tag s2:int s3:ref
+  local m -> s0:Map [0, 3)
      0  str s3:ref \"a\"
-     1  call-builtin s4..s5:Option Map.get (s0:Map s3:String)
-     2  copy s1..s2:Option s4..s5:Option
-     3  return s1..s2:Option
+     1  call-builtin s1..s2:Option Map.get (s0:Map s3:String)
+     2  return s1..s2:Option
 "
     );
 }
@@ -587,11 +583,10 @@ fn a_map_answers_its_keys_as_an_array() {
         ),
         "\
 fn @m.f(Map) -> Array
-  frame 3: s0!:ref s1:ref s2:ref
-  local m -> s0:Map [0, 3)
-     0  call-builtin s2:Array Map.keys (s0:Map)
-     1  copy s1:Array s2:Array
-     2  return s1:Array
+  frame 2: s0!:ref s1:ref
+  local m -> s0:Map [0, 2)
+     0  call-builtin s1:Array Map.keys (s0:Map)
+     1  return s1:Array
 "
     );
 }
@@ -736,7 +731,7 @@ fn an_array_literal_erases_each_element_the_written_type_erases() {
         "\
 fn @m.f(m.B) -> Int
   frame 6: s0!:int s1:int s2:ref s3:ref s4:ref s5:int
-  local b -> s0:m.B [0, 13)
+  local b -> s0:m.B [0, 11)
      0  box s2:ref s0:m.B
      1  box s3:ref s0:m.B
      2  alloc s4:ref Array<array> x2
@@ -746,10 +741,8 @@ fn @m.f(m.B) -> Int
      6  store-elem s4:ref s5:int s3:Any
      7  clear s3:Any
      8  clear s2:Any
-     9  call s5:Int m.r (s4:Array)
-    10  clear s4:Array
-    11  copy s1:Int s5:Int
-    12  return s1:Int
+     9  call s1:Int m.r (s4:Array)
+    10  return s1:Int
 "
     );
 }

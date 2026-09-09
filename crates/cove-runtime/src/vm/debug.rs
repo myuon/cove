@@ -220,9 +220,41 @@ impl<'m> Stop<'m> {
     }
 
     /// The call `at` levels out from this one, or `None` past the outermost.
+    ///
+    /// A frame that is not the innermost is suspended at *the instruction
+    /// after* the call that led one level deeper, and that resume address is
+    /// not where the frame *is*. The instruction it names is whatever runs
+    /// next — frequently the next statement's, or the `return` the body ends
+    /// with — so a line built from it points away from the call as often as
+    /// at it, and a name the call site had in scope may already have gone out
+    /// of it. `- 1` is always the call itself, because a `pc` is only ever
+    /// synced after the instruction it dispatched.
+    ///
+    /// This is the rule `Machine::calls`'s own documentation states for the
+    /// error chain, which had made the same choice for the same reason and
+    /// left this view alone. Issue #302 is what settled that the two should
+    /// agree: with the copy after a call gone, the resume address in a
+    /// one-expression body *is* the `return`, and a suspended frame answered
+    /// that its caller's locals were out of scope.
+    ///
+    /// The innermost frame keeps its own `pc`. It is not suspended at a
+    /// resume address — the machine is about to execute the instruction it
+    /// names — so there is nothing to look back past.
     pub fn frame(&self, at: usize) -> Option<Call> {
         let (id, base, pc) = *self.machine.calls().get(at)?;
-        Some(self.call(id, base, pc))
+        Some(self.call(id, base, Self::shown(at, pc)))
+    }
+
+    /// The pc a frame is *shown* at, out of the pc the machine holds for it.
+    ///
+    /// They are the same for the innermost frame and differ by one for every
+    /// other, for the reason [`Stop::frame`] gives. It is one function so
+    /// that the backtrace and the disassembly cannot answer differently.
+    fn shown(at: usize, pc: Pc) -> Pc {
+        match at {
+            0 => pc,
+            _ => pc.saturating_sub(1),
+        }
     }
 
     /// What the word `at` names, if it names an object of this run's heap.
@@ -260,15 +292,16 @@ impl<'m> Stop<'m> {
     /// mean rendering every instruction of every live function at every
     /// stop, and a backtrace is already the expensive view.
     ///
-    /// The pc it reads is the frame's own, so the line marked
-    /// [`Line::current`] is the instruction about to run for the innermost
-    /// frame and the one to return to for every other — which is what
-    /// [`Call::pc`] answers, and the same distinction.
+    /// The pc it reads is the one [`Stop::frame`] reports, which for a
+    /// suspended frame is the call it is waiting on rather than the resume
+    /// address after it. The two panes of a session are one view: a
+    /// backtrace naming a line and a disassembly marking a different
+    /// instruction would be the debugger disagreeing with itself.
     pub fn code(&self, at: usize, reach: usize) -> Vec<Line> {
         let Some((id, _, frame_pc)) = self.machine.calls().get(at).copied() else {
             return Vec::new();
         };
-        let frame_pc = frame_pc as usize;
+        let frame_pc = Self::shown(at, frame_pc) as usize;
         let program = self.machine.program();
         let function = program.function(id);
         // Both ends saturate. Only `from` did at first, which reads as a

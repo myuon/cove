@@ -1474,10 +1474,29 @@ fn lower_body(
         );
     }
     body.block(&decl.decl.body, Some(answer));
+    // The epilogue is written at the *tail*, not at the block: a `return`
+    // answers the expression the body ends with, and that is the line a
+    // reader stopped there wants named. The block's own span begins at its
+    // opening brace, which is the declaration's line and says nothing about
+    // where the answer came from.
+    //
+    // It was not visible until issue #302. The tail used to leave its answer
+    // in a temporary and a `copy` carried it into the answer's location, so
+    // the instruction a caller resumed at was that copy and it was written
+    // at the tail. Forwarding the destination removed the copy and left the
+    // `Return` standing where it had stood, which is how a debugger session
+    // came to name the declaration's brace instead of the call that had just
+    // answered.
+    let ends = decl
+        .decl
+        .body
+        .tail
+        .as_ref()
+        .map_or(decl.decl.body.span, |tail| tail.span);
     let end = body.here();
     let clears = body.frame.pop_scope(end);
-    body.clear(&clears, decl.decl.body.span);
-    body.emit(Inst::Return { src: answer.slot }, decl.decl.body.span);
+    body.clear(&clears, ends);
+    body.emit(Inst::Return { src: answer.slot }, ends);
 
     let reprs = body.frame.reprs().to_vec();
     let mut locals = body.frame.locals();

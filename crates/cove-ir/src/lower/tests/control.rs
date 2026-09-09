@@ -11,16 +11,13 @@ fn an_if_with_an_else_is_two_writes_into_one_destination() {
         listing("fn pick(c: Bool) -> Int { if c { 1 } else { 2 } }", "pick"),
         "\
 fn @m.pick(Bool) -> Int
-  frame 4: s0!:bool s1:int s2:int s3:int
-  local c -> s0:Bool [0, 8)
-     0  branch-false s0:bool 4
-     1  int s3:int 1
-     2  copy s2:Int s3:Int
-     3  jump 6
-     4  int s3:int 2
-     5  copy s2:Int s3:Int
-     6  copy s1:Int s2:Int
-     7  return s1:Int
+  frame 2: s0!:bool s1:int
+  local c -> s0:Bool [0, 5)
+     0  branch-false s0:bool 3
+     1  int s1:int 1
+     2  jump 4
+     3  int s1:int 2
+     4  return s1:Int
 "
     );
 }
@@ -58,16 +55,15 @@ fn a_branch_join_of_a_struct_is_two_copies_of_its_words() {
         ),
         "\
 fn @m.pick(Bool m.Point m.Point) -> m.Point
-  frame 9: s0!:bool s1!:int s2!:int s3!:int s4!:int s5:int s6:int s7:int s8:int
-  local c -> s0:Bool [0, 6)
-  local a -> s1..s2:m.Point [0, 6)
-  local b -> s3..s4:m.Point [0, 6)
+  frame 7: s0!:bool s1!:int s2!:int s3!:int s4!:int s5:int s6:int
+  local c -> s0:Bool [0, 5)
+  local a -> s1..s2:m.Point [0, 5)
+  local b -> s3..s4:m.Point [0, 5)
      0  branch-false s0:bool 3
-     1  copy s7..s8:m.Point s1..s2:m.Point
+     1  copy s5..s6:m.Point s1..s2:m.Point
      2  jump 4
-     3  copy s7..s8:m.Point s3..s4:m.Point
-     4  copy s5..s6:m.Point s7..s8:m.Point
-     5  return s5..s6:m.Point
+     3  copy s5..s6:m.Point s3..s4:m.Point
+     4  return s5..s6:m.Point
 "
     );
 }

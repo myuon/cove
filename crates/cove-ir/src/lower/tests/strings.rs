@@ -74,12 +74,11 @@ fn two_strings_compare_by_their_bytes() {
         listing("fn same(a: String, b: String) -> Bool { a == b }", "same"),
         "\
 fn @m.same(String String) -> Bool
-  frame 4: s0!:ref s1!:ref s2:bool s3:bool
-  local a -> s0:String [0, 3)
-  local b -> s1:String [0, 3)
-     0  eq.str s3:bool s0:ref s1:ref
-     1  copy s2:Bool s3:Bool
-     2  return s2:Bool
+  frame 3: s0!:ref s1!:ref s2:bool
+  local a -> s0:String [0, 2)
+  local b -> s1:String [0, 2)
+     0  eq.str s2:bool s0:ref s1:ref
+     1  return s2:Bool
 "
     );
 }

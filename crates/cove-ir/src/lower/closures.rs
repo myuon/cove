@@ -688,7 +688,13 @@ impl Body<'_> {
     /// settled, because that is the only thing a call site holds: the callee
     /// is a word, and which body it names is not known until the machine
     /// reads it.
-    pub(super) fn call_value(&mut self, expr: &Expr, callee: &Expr, args: &[Arg]) -> Val {
+    pub(super) fn call_value(
+        &mut self,
+        expr: &Expr,
+        callee: &Expr,
+        args: &[Arg],
+        want: Option<Dest>,
+    ) -> Val {
         let Some(Ty::Fn(func)) = self.settled_ty(callee) else {
             return self.dead(expr);
         };
@@ -722,7 +728,15 @@ impl Body<'_> {
             held.push(self.fit(value, params[index], arg.value.span));
         }
         let list = self.pool.args.intern(held.iter().map(Val::arg).collect());
-        let dst = self.temp(returns);
+        // Where the surrounding form asked for the answer, the call writes
+        // it there — issue #302. A call through an `async` function value
+        // answers a settled task rather than the value, exactly as a call to
+        // a declared `async fn` does, so it keeps a run of its own for the
+        // same reason `Body::call_target` gives.
+        let dst = match func.is_async {
+            true => self.temp(returns),
+            false => self.answer_at(want, returns),
+        };
         self.emit(
             Inst::CallClosure {
                 dst: dst.slot,

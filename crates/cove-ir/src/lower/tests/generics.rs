@@ -90,8 +90,8 @@ fn a_call_names_the_instantiation_it_reaches() {
         "\
 fn @m.f() -> Int
   frame 8: s0:int s1:int s2:int s3:int s4:int s5:int s6:int s7:int
-  local a -> s2:Int [2, 9)
-  local p -> s6..s7:m.Point [7, 9)
+  local a -> s2:Int [2, 8)
+  local p -> s6..s7:m.Point [7, 8)
      0  int s1:int 1
      1  call s2:Int m.id<Int> (s1:Int)
      2  int s1:int 2
@@ -99,9 +99,8 @@ fn @m.f() -> Int
      4  copy s4:Int s1:Int
      5  copy s5:Int s3:Int
      6  call s6..s7:m.Point m.id<m.Point> (s4..s5:m.Point)
-     7  add.int s1:int s2:int s6:int
-     8  copy s0:Int s1:Int
-     9  return s0:Int
+     7  add.int s0:int s2:int s6:int
+     8  return s0:Int
 "
     );
 }
@@ -162,11 +161,10 @@ fn an_explicit_type_argument_reaches_the_same_instantiation() {
         ),
         "\
 fn @m.f() -> Int
-  frame 3: s0:int s1:int s2:int
+  frame 2: s0:int s1:int
      0  int s1:int 1
-     1  call s2:Int m.id<Int> (s1:Int)
-     2  copy s0:Int s2:Int
-     3  return s0:Int
+     1  call s0:Int m.id<Int> (s1:Int)
+     2  return s0:Int
 "
     );
 }
@@ -247,22 +245,20 @@ fn a_bounded_parameter_dispatches_to_its_conformance() {
         listing(SUMMARY, "headline<m.Article>"),
         "\
 fn @m.headline<m.Article>(m.Article) -> String
-  frame 4: s0!:ref s1!:int s2:ref s3:ref
-  local entry -> s0..s1:m.Article [0, 3)
-     0  call s3:String m.Article.summary (s0..s1:m.Article)
-     1  copy s2:String s3:String
-     2  return s2:String
+  frame 3: s0!:ref s1!:int s2:ref
+  local entry -> s0..s1:m.Article [0, 2)
+     0  call s2:String m.Article.summary (s0..s1:m.Article)
+     1  return s2:String
 "
     );
     assert_eq!(
         listing(SUMMARY, "headline<m.Note>"),
         "\
 fn @m.headline<m.Note>(m.Note) -> String
-  frame 3: s0!:ref s1:ref s2:ref
-  local entry -> s0:m.Note [0, 3)
-     0  call s2:String m.Note.summary (s0:m.Note)
-     1  copy s1:String s2:String
-     2  return s1:String
+  frame 2: s0!:ref s1:ref
+  local entry -> s0:m.Note [0, 2)
+     0  call s1:String m.Note.summary (s0:m.Note)
+     1  return s1:String
 "
     );
 }

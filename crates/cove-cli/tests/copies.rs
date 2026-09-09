@@ -328,9 +328,16 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 ///
 /// 4319 is what the lowering emitted when this file was written, out of 13786
 /// copies and 71041 instructions: 31% of the copies and 6% of the whole
-/// corpus. It is an upper bound on what stage 2 can remove, for the reason
-/// the module documentation gives.
-const FORWARDABLE_COPIES: usize = 4319;
+/// corpus. Issue #302's stage 2 — destination forwarding — took it to 1890,
+/// out of 10892 copies and 67972 instructions.
+///
+/// It is an upper bound on what forwarding can remove and not a target, for
+/// the reason the module documentation gives. What is left is mostly two
+/// things: a producer this lowering does not hand a destination to yet (a
+/// host call, a string literal, an argument list assembled elsewhere), and a
+/// `copy` whose source is a **borrowed** location — a binding, a field — which
+/// is ADR 0001's value semantics and is not waste at all.
+const FORWARDABLE_COPIES: usize = 1890;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
@@ -339,7 +346,8 @@ fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
         "{} program(s), {} function(s), {} instruction(s), {} frame word(s)\n  \
          {} copy, {} clear\n  \
          {} copy after a producer ({} of them cleared straight after)\n  \
-         {} copy into the answer a `return` names",
+         {} copy into the answer a `return` names\n  \
+         {} of the two together, which is the ratchet",
         rows.len(),
         total.functions,
         total.instructions,
@@ -349,6 +357,7 @@ fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
         total.after_producer,
         total.after_producer_and_cleared,
         total.before_return,
+        total.forwardable(),
     );
     println!(
         "\n  {:>5} {:>5} {:>5} {:>5}  program",

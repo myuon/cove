@@ -69,7 +69,7 @@ use super::frame::Val;
 use super::gap;
 use super::pattern::UNPLACED;
 use super::shapes;
-use super::{Body, CallShape, PENDING};
+use super::{Body, CallShape, Dest, PENDING};
 use crate::inst::{CmpOp, Compare, Inst, Len, Slot};
 use crate::layout::LayoutId;
 use crate::program::{FunctionId, Table};
@@ -109,6 +109,7 @@ impl Body<'_> {
         id: FunctionId,
         base: Option<&Expr>,
         args: &[Arg],
+        want: Option<Dest>,
     ) -> Val {
         // A slice that left the callee out is this crate's mistake and not
         // the program's, so it is recorded and corrected rather than
@@ -138,7 +139,20 @@ impl Body<'_> {
 
         let held = self.operands(&shape, Some(id), base, args, &fills, expr.span);
         let list = self.pool.args.intern(held.iter().map(Val::arg).collect());
-        let dst = self.temp(shape.returns);
+        // The answer goes where the surrounding form wants it, where that is
+        // a location of the callee's answer layout — issue #302. The
+        // arguments are already in locations of their own by now, and the
+        // destination was allocated before this expression was lowered, so
+        // neither can be the run this writes.
+        //
+        // An `async fn` is the one exception, and it is not a special case
+        // so much as a different value: what the call *answers* is the task
+        // `Body::as_task` builds around what the body produced, so the run
+        // written here is not the run the surrounding form asked for.
+        let dst = match shape.is_async {
+            true => self.temp(shape.returns),
+            false => self.answer_at(want, shape.returns),
+        };
         self.emit(
             Inst::Call {
                 dst: dst.slot,
@@ -1018,6 +1032,7 @@ impl Body<'_> {
         target: &MethodTarget,
         base: &Expr,
         args: &[Arg],
+        want: Option<Dest>,
     ) -> Val {
         let Some(id) = self.plan.method(target) else {
             return self.gap(
@@ -1028,7 +1043,7 @@ impl Body<'_> {
                 expr,
             );
         };
-        self.call_target(expr, id, Some(base), args)
+        self.call_target(expr, id, Some(base), args, want)
     }
 
     // ---- a call through a trait object -----------------------------------

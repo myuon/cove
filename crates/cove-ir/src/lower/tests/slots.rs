@@ -23,9 +23,8 @@ fn @m.total() -> Int
      0  int s1:int 1
      1  add.int.imm s2:int s1:int 2
      2  add.int.imm s1:int s2:int 3
-     3  add.int.imm s2:int s1:int 4
-     4  copy s0:Int s2:Int
-     5  return s0:Int
+     3  add.int.imm s0:int s1:int 4
+     4  return s0:Int
 "
     );
 }
@@ -69,8 +68,8 @@ fn a_two_word_location_is_reused_only_by_a_two_word_one_of_the_same_shape() {
         "\
 fn @m.f() -> Int
   frame 7: s0:int s1:int s2:ref s3:int s4:ref s5:ref s6:int
-  local a -> s3..s4:m.A [4, 10)
-  local b -> s5..s6:m.B [8, 10)
+  local a -> s3..s4:m.A [4, 9)
+  local b -> s5..s6:m.B [8, 9)
      0  int s1:int 1
      1  str s2:ref \"x\"
      2  copy s3:Int s1:Int
@@ -79,9 +78,8 @@ fn @m.f() -> Int
      5  int s1:int 2
      6  copy s5:String s2:String
      7  copy s6:Int s1:Int
-     8  add.int s1:int s3:int s6:int
-     9  copy s0:Int s1:Int
-    10  return s0:Int
+     8  add.int s0:int s3:int s6:int
+     9  return s0:Int
 "
     );
 }
@@ -97,14 +95,12 @@ fn a_temporary_holding_a_reference_is_cleared_at_its_last_use() {
         ),
         "\
 fn @m.shout(String String) -> Int
-  frame 5: s0!:ref s1!:ref s2:int s3:ref s4:int
-  local a -> s0:String [0, 5)
-  local b -> s1:String [0, 5)
+  frame 4: s0!:ref s1!:ref s2:int s3:ref
+  local a -> s0:String [0, 3)
+  local b -> s1:String [0, 3)
      0  call-builtin s3:String String.interpolate (s0:String s1:String)
-     1  call-builtin s4:Int String.length (s3:String)
-     2  clear s3:String
-     3  copy s2:Int s4:Int
-     4  return s2:Int
+     1  call-builtin s2:Int String.length (s3:String)
+     2  return s2:Int
 "
     );
 }
@@ -150,14 +146,13 @@ fn a_scalar_is_never_cleared() {
         listing("fn f() -> Int {\n  let a = 1\n  let b = 2\n  a + b\n}", "f"),
         "\
 fn @m.f() -> Int
-  frame 4: s0:int s1:int s2:int s3:int
-  local a -> s1:Int [1, 4)
-  local b -> s2:Int [2, 4)
+  frame 3: s0:int s1:int s2:int
+  local a -> s1:Int [1, 3)
+  local b -> s2:Int [2, 3)
      0  int s1:int 1
      1  int s2:int 2
-     2  add.int s3:int s1:int s2:int
-     3  copy s0:Int s3:Int
-     4  return s0:Int
+     2  add.int s0:int s1:int s2:int
+     3  return s0:Int
 "
     );
 }

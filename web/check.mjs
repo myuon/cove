@@ -400,17 +400,16 @@ check(
       // holds. A slot and its annotation are one piece: `s1` alone would not
       // say whether the instruction moved a word or a `Point`.
       ["frame", "keyword"],
-      ["3", "number"],
+      ["2", "number"],
       ["s0:int", "slot"],
       ["s1:int", "slot"],
-      ["s2:int", "slot"],
       // The name a `local` binds is the source's own and is neither a layout
       // nor a callee; the range is the program counters it holds the slot
       // over, and program counters are numbers like any other.
       ["local", "keyword"],
       ["s1:Int", "slot"],
       ["1", "number"],
-      ["3", "number"],
+      ["2", "number"],
       // Then the code: a pc, an opcode, and operands.
       ["0", "number"],
       ["int", "keyword"],
@@ -425,19 +424,19 @@ check(
       // the colouring has to know, which is the point.
       ["1", "number"],
       ["mul.int.imm", "keyword"],
-      ["s2:int", "slot"],
+      ["s0:int", "slot"],
       ["s1:int", "slot"],
       ["2", "number"],
+      // A `return` names a value *location*, and a location carries its own
+      // layout: `s0:Int` rather than `s0:int` with an `Int` parked after the
+      // operands. An `Int` is one word, so there is no range to write;
+      // issue #299's `s5..s7:Result` is the same operand three words wide.
+      //
+      // The `copy` that stood between the multiplication and the `return` is
+      // gone, and the frame is a word narrower for it: issue #302 hands the
+      // producer the location the answer is wanted in, so `mul.int.imm`
+      // writes `s0` itself.
       ["2", "number"],
-      // A `copy` and a `return` name value *locations*, and a location
-      // carries its own layout: `s0:Int` rather than `s0:int` with an `Int`
-      // parked after the operands. An `Int` is one word, so there is no
-      // range to write; issue #299's `s5..s7:Result` is the same operand
-      // three words wide.
-      ["copy", "keyword"],
-      ["s0:Int", "slot"],
-      ["s2:Int", "slot"],
-      ["3", "number"],
       ["return", "keyword"],
       ["s0:Int", "slot"],
     ]),
@@ -592,15 +591,20 @@ check("has a recording", recorded.debug !== null, true);
 
 const { moments, functions } = recorded.debug;
 check("not truncated", recorded.debug.truncated, null);
+// Four, and it was six until issue #302. Two of the six were copies — the
+// callee's answer moved out of a temporary, and `main`'s moved into the
+// location the `return` names — and neither instruction exists now. A
+// `return` is also written at the tail it answers rather than at the
+// signature, so the line does not change again on the way out.
 check(
   "the moments the program ran, in order",
   moments.map((m) => m.why).join(" "),
-  "entry line call line return line",
+  "entry line call return",
 );
 check(
   "each moment names the line it was written at",
   moments.map((m) => m.line).join(" "),
-  "6 7 2 1 8 5",
+  "6 7 2 8",
 );
 check(
   "the instruction counts only go forwards",
@@ -655,7 +659,7 @@ check("named", functions.map((f) => f.name).join(" "), "playground.main playgrou
 check(
   "the disassembly is the one `cove ir` prints",
   functions[1].code.map((line) => line.text).join(" | "),
-  "add.int s2:int s0:int s0:int | copy s1:Int s2:Int | return s1:Int",
+  "add.int s1:int s0:int s0:int | return s1:Int",
 );
 check(
   "every moment's pc is inside its function",
@@ -663,18 +667,19 @@ check(
   true,
 );
 
-// The locals, at the moments they were those values. `total` is declared
-// before the call it is assigned from returns, so the moment inside `twice`
-// shows it holding zero and the moment after the return shows 42. That is
-// the stepping rule's stated limitation, not a defect: a moment is at the
-// first instruction carrying a new line, which is inside the expression.
+// The locals, at the moments they were those values. The moment inside
+// `twice` shows the caller's frame at the call it is waiting on, and `total`
+// is bound after that call answers — so it is not there yet, and the moment
+// after the return shows 42. It read as a zero until issue #302, which is
+// what a caller shown at its *resume* address answers: the slot the call is
+// about to write, named but not yet written.
 const inside = moments.find((m) => m.why === "call");
 const after = moments.find((m) => m.why === "return");
 const local = (moment, frame, name) =>
   moment.frames[frame].locals.find((held) => held.name === name)?.value;
 check("the callee's parameter", local(inside, 0, "n"), "21");
 check("the caller is still on the stack", inside.frames.length, 2);
-check("its `total` is not assigned yet", local(inside, 1, "total"), "0");
+check("its `total` is not bound yet", local(inside, 1, "total"), undefined);
 check("and is, once the call returned", local(after, 0, "total"), "42");
 check("the depth the moment records", inside.depth, 2);
 

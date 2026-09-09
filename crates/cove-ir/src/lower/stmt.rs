@@ -36,11 +36,7 @@ impl Body<'_> {
             self.stmt(stmt);
         }
         match (&block.tail, dst) {
-            (Some(tail), Some(dst)) => {
-                let value = self.expr(tail);
-                self.store(dst, &value, tail);
-                self.release(value, tail.span);
-            }
+            (Some(tail), Some(dst)) => self.expr_into(tail, dst),
             (Some(tail), None) => self.discard(tail),
             (None, Some(dst)) => {
                 // A block with no tail answers `()`. Where the surrounding

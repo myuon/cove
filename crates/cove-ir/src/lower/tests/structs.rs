@@ -73,14 +73,13 @@ fn a_nested_struct_is_copied_whole() {
         "\
 fn @m.f(m.Line) -> Int
   frame 10: s0!:int s1!:int s2!:int s3!:int s4:int s5:int s6:int s7:int s8:int s9:int
-  local l -> s0..s3:m.Line [0, 6)
-  local m -> s5..s8:m.Line [1, 5)
+  local l -> s0..s3:m.Line [0, 5)
+  local m -> s5..s8:m.Line [1, 4)
      0  copy s5..s8:m.Line s0..s3:m.Line
      1  int s9:int 7
      2  copy s5:Int s9:Int
-     3  add.int s9:int s0:int s5:int
-     4  copy s4:Int s9:Int
-     5  return s4:Int
+     3  add.int s4:int s0:int s5:int
+     4  return s4:Int
 "
     );
 }
@@ -162,11 +161,10 @@ fn a_struct_returned_by_value_is_the_answer_location_s_words() {
         ),
         "\
 fn @m.f() -> m.Point
-  frame 5: s0:int s1:int s2:int s3:int s4:int
+  frame 3: s0:int s1:int s2:int
      0  int s2:int 3
-     1  call s3..s4:m.Point m.mk (s2:Int)
-     2  copy s0..s1:m.Point s3..s4:m.Point
-     3  return s0..s1:m.Point
+     1  call s0..s1:m.Point m.mk (s2:Int)
+     2  return s0..s1:m.Point
 "
     );
 }

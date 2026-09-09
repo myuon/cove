@@ -361,6 +361,7 @@ impl Body<'_> {
         elem: &Ty,
         name: &str,
         args: &[Arg],
+        want: Option<Dest>,
     ) -> Val {
         match (name, args.len()) {
             ("length", 0) => self.header_length(expr, base, name),
@@ -391,7 +392,7 @@ impl Body<'_> {
                 self.walk_with(expr, obj, &elem, name, args)
             }
             _ if HANDED_OVER.contains(&("Array", name)) => {
-                self.machine_call(expr, Some(base), "Array", name, args)
+                self.machine_call(expr, Some(base), "Array", name, args, want)
             }
             _ => self.gap(&format!("`Array.{name}`"), expr),
         }
@@ -425,6 +426,7 @@ impl Body<'_> {
         elem: &Ty,
         name: &str,
         args: &[Arg],
+        want: Option<Dest>,
     ) -> Val {
         match (name, args.len()) {
             ("length", 0) => {
@@ -471,7 +473,7 @@ impl Body<'_> {
                 self.walk_with(expr, snapshot, &elem, name, args)
             }
             _ if HANDED_OVER.contains(&("Vector", name)) => {
-                self.machine_call(expr, Some(base), "Vector", name, args)
+                self.machine_call(expr, Some(base), "Vector", name, args, want)
             }
             _ => self.gap(&format!("`Vector.{name}`"), expr),
         }
@@ -494,11 +496,18 @@ impl Body<'_> {
     /// from here any more: `Body::call_builtin_method` resolves it to a
     /// standard-library call — `cove_schema::builtins::standard_binding`
     /// names `std.set.isEmpty` — before this function is ever called for it.
-    pub(super) fn set_method(&mut self, expr: &Expr, base: &Expr, name: &str, args: &[Arg]) -> Val {
+    pub(super) fn set_method(
+        &mut self,
+        expr: &Expr,
+        base: &Expr,
+        name: &str,
+        args: &[Arg],
+        want: Option<Dest>,
+    ) -> Val {
         match (name, args.len()) {
             ("length", 0) => self.header_length(expr, base, name),
             _ if HANDED_OVER.contains(&("Set", name)) => {
-                self.machine_call(expr, Some(base), "Set", name, args)
+                self.machine_call(expr, Some(base), "Set", name, args, want)
             }
             _ => self.gap(&format!("`Set.{name}`"), expr),
         }
@@ -514,11 +523,18 @@ impl Body<'_> {
     /// from here any more: `Body::call_builtin_method` resolves it to a
     /// standard-library call — `cove_schema::builtins::standard_binding`
     /// names `std.map.isEmpty` — before this function is ever called for it.
-    pub(super) fn map_method(&mut self, expr: &Expr, base: &Expr, name: &str, args: &[Arg]) -> Val {
+    pub(super) fn map_method(
+        &mut self,
+        expr: &Expr,
+        base: &Expr,
+        name: &str,
+        args: &[Arg],
+        want: Option<Dest>,
+    ) -> Val {
         match (name, args.len()) {
             ("length", 0) => self.header_length(expr, base, name),
             _ if HANDED_OVER.contains(&("Map", name)) => {
-                self.machine_call(expr, Some(base), "Map", name, args)
+                self.machine_call(expr, Some(base), "Map", name, args, want)
             }
             _ => self.gap(&format!("`Map.{name}`"), expr),
         }

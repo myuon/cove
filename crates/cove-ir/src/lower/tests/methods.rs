@@ -14,12 +14,11 @@ fn a_builtin_method_is_one_call_over_its_operands() {
         ),
         "\
 fn @m.parts(String) -> Array
-  frame 4: s0!:ref s1:ref s2:ref s3:ref
-  local s -> s0:String [0, 4)
+  frame 3: s0!:ref s1:ref s2:ref
+  local s -> s0:String [0, 3)
      0  str s2:ref \",\"
-     1  call-builtin s3:Array String.split (s0:String s2:String)
-     2  copy s1:Array s3:Array
-     3  return s1:Array
+     1  call-builtin s1:Array String.split (s0:String s2:String)
+     2  return s1:Array
 "
     );
 }
@@ -35,11 +34,10 @@ fn an_associated_function_has_no_receiver() {
         listing("fn wait() -> Duration { Duration.nanos(1) }", "wait"),
         "\
 fn @m.wait() -> Duration
-  frame 3: s0:duration s1:int s2:duration
+  frame 2: s0:duration s1:int
      0  int s1:int 1
-     1  call-builtin s2:Duration Duration.nanos (s1:Int)
-     2  copy s0:Duration s2:Duration
-     3  return s0:Duration
+     1  call-builtin s0:Duration Duration.nanos (s1:Int)
+     2  return s0:Duration
 "
     );
 }
@@ -50,11 +48,10 @@ fn a_duration_reader_passes_its_receiver_as_operand_zero() {
         listing("fn ns(d: Duration) -> Int { d.nanos() }", "ns"),
         "\
 fn @m.ns(Duration) -> Int
-  frame 3: s0!:duration s1:int s2:int
-  local d -> s0:Duration [0, 3)
-     0  call-builtin s2:Int Duration.nanos (s0:Duration)
-     1  copy s1:Int s2:Int
-     2  return s1:Int
+  frame 2: s0!:duration s1:int
+  local d -> s0:Duration [0, 2)
+     0  call-builtin s1:Int Duration.nanos (s0:Duration)
+     1  return s1:Int
 "
     );
 }
@@ -175,11 +172,10 @@ fn a_method_on_a_declared_type_is_an_ordinary_call() {
         ),
         "\
 fn @m.f(m.Point) -> Int
-  frame 4: s0!:int s1!:int s2:int s3:int
-  local p -> s0..s1:m.Point [0, 3)
-     0  call s3:Int m.Point.sum (s0..s1:m.Point)
-     1  copy s2:Int s3:Int
-     2  return s2:Int
+  frame 3: s0!:int s1!:int s2:int
+  local p -> s0..s1:m.Point [0, 2)
+     0  call s2:Int m.Point.sum (s0..s1:m.Point)
+     1  return s2:Int
 "
     );
 }

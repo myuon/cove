@@ -14,16 +14,14 @@ fn erasure_boxes_a_concrete_value_where_a_dyn_type_is_written() {
         ),
         "\
 fn @m.f() -> String
-  frame 7: s0:ref s1:int s2:int s3:int s4:int s5:ref s6:ref
+  frame 6: s0:ref s1:int s2:int s3:int s4:int s5:ref
      0  int s1:int 1
      1  int s2:int 2
      2  copy s3:Int s1:Int
      3  copy s4:Int s2:Int
      4  box s5:ref s3..s4:m.Point
-     5  call s6:String m.take (s5:Any)
-     6  clear s5:Any
-     7  copy s0:String s6:String
-     8  return s0:String
+     5  call s0:String m.take (s5:Any)
+     6  return s0:String
 "
     );
 }

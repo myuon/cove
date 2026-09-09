@@ -133,26 +133,23 @@ fn a_match_reads_the_discriminant_at_offset_zero() {
         ),
         "\
 fn @m.f(m.Shape) -> Int
-  frame 8: s0!:tag s1!:int s2!:int s3:int s4:int s5:int s6:int s7:int
-  local s -> s0..s2:m.Shape [0, 15)
-  local a -> s5:Int [5, 6)
-  local a -> s5:Int [8, 11)
-  local b -> s6:Int [9, 11)
-     0  switch s0:tag [1 4 7] else 12
-     1  int s5:int 0
-     2  copy s4:Int s5:Int
-     3  jump 13
-     4  copy s5:Int s1:Int
-     5  copy s4:Int s5:Int
-     6  jump 13
-     7  copy s5:Int s1:Int
-     8  copy s6:Int s2:Int
-     9  add.int s7:int s5:int s6:int
-    10  copy s4:Int s7:Int
-    11  jump 13
-    12  trap \"no `match` arm covers this value\"
-    13  copy s3:Int s4:Int
-    14  return s3:Int
+  frame 6: s0!:tag s1!:int s2!:int s3:int s4:int s5:int
+  local s -> s0..s2:m.Shape [0, 12)
+  local a -> s4:Int [4, 5)
+  local a -> s4:Int [7, 9)
+  local b -> s5:Int [8, 9)
+     0  switch s0:tag [1 3 6] else 10
+     1  int s3:int 0
+     2  jump 11
+     3  copy s4:Int s1:Int
+     4  copy s3:Int s4:Int
+     5  jump 11
+     6  copy s4:Int s1:Int
+     7  copy s5:Int s2:Int
+     8  add.int s3:int s4:int s5:int
+     9  jump 11
+    10  trap \"no `match` arm covers this value\"
+    11  return s3:Int
 "
     );
 }
@@ -166,19 +163,17 @@ fn an_option_is_two_words_and_none_is_the_zeroed_one() {
         ),
         "\
 fn @m.f(Option) -> Int
-  frame 5: s0!:tag s1!:int s2:int s3:int s4:int
-  local o -> s0..s1:Option [0, 10)
-  local v -> s4:Int [2, 3)
-     0  switch s0:tag [4 1] else 7
-     1  copy s4:Int s1:Int
-     2  copy s3:Int s4:Int
-     3  jump 8
-     4  int s4:int 0
-     5  copy s3:Int s4:Int
-     6  jump 8
-     7  trap \"no `match` arm covers this value\"
-     8  copy s2:Int s3:Int
-     9  return s2:Int
+  frame 4: s0!:tag s1!:int s2:int s3:int
+  local o -> s0..s1:Option [0, 8)
+  local v -> s3:Int [2, 3)
+     0  switch s0:tag [4 1] else 6
+     1  copy s3:Int s1:Int
+     2  copy s2:Int s3:Int
+     3  jump 7
+     4  int s2:int 0
+     5  jump 7
+     6  trap \"no `match` arm covers this value\"
+     7  return s2:Int
 "
     );
 }
@@ -275,20 +270,17 @@ fn an_enum_inside_a_struct_is_inline_there_too() {
         ),
         "\
 fn @m.f(m.S) -> Int
-  frame 7: s0!:tag s1!:int s2!:int s3:int s4:int s5:int s6:int
-  local s -> s0..s2:m.S [0, 11)
-  local v -> s5:Int [5, 7)
-     0  switch s0:tag [1 4] else 8
-     1  int s5:int 0
-     2  copy s4:Int s5:Int
-     3  jump 9
-     4  copy s5:Int s1:Int
-     5  add.int s6:int s5:int s2:int
-     6  copy s4:Int s6:Int
-     7  jump 9
-     8  trap \"no `match` arm covers this value\"
-     9  copy s3:Int s4:Int
-    10  return s3:Int
+  frame 5: s0!:tag s1!:int s2!:int s3:int s4:int
+  local s -> s0..s2:m.S [0, 8)
+  local v -> s4:Int [4, 5)
+     0  switch s0:tag [1 3] else 6
+     1  int s3:int 0
+     2  jump 7
+     3  copy s4:Int s1:Int
+     4  add.int s3:int s4:int s2:int
+     5  jump 7
+     6  trap \"no `match` arm covers this value\"
+     7  return s3:Int
 "
     );
 }

@@ -763,7 +763,7 @@ export fn main() -> Result<Unit, Error> {
 
     /// A program written so that every rule in [`record`]'s capture policy
     /// fires exactly once and in a knowable order: an entry, a new line, a
-    /// call, a line inside the callee, and the return.
+    /// call, and the return.
     const WALKED: &str = r#"export fn twice(n: Int) -> Int {
   n + n
 }
@@ -785,10 +785,15 @@ export fn main() -> Int {
         // `why` appears once per moment and nowhere else in the answer.
         assert_eq!(
             every(&json, "why"),
-            // Six and not five: the last is `return`'s own instruction,
-            // which the lowering writes at the function's signature line, so
-            // the line changes one more time on the way out.
-            ["entry", "line", "call", "line", "return", "line"],
+            // Four, and it was six until issue #302. Two of the six were
+            // copies: the callee's answer moved out of a temporary, and
+            // `main`'s moved into the location the `return` names. Neither
+            // instruction exists now — the producer writes the destination —
+            // and a `return` is written at the tail it answers rather than at
+            // the signature, so the line does not change again on the way
+            // out. A capture policy that fires on a new line fires fewer
+            // times over a program with fewer instructions on fewer lines.
+            ["entry", "line", "call", "return"],
             "{json}"
         );
 
@@ -804,19 +809,23 @@ export fn main() -> Int {
             "{json}"
         );
         assert!(says(&json, r#""truncated":null"#), "{json}");
-        assert!(says(&json, r#""kept":6"#), "{json}");
+        assert!(says(&json, r#""kept":4"#), "{json}");
     }
 
     /// The locals a moment holds are that moment's, and they change along
     /// the timeline.
     ///
-    /// `total` is declared before the call it is assigned from returns, so
-    /// the moment inside the callee shows it holding zero and the moment
-    /// after the return shows it holding 42. That is not a defect being
-    /// pinned: it is [`record`]'s stated limitation — a moment is at the
-    /// first instruction carrying a new line, which is inside the expression
-    /// rather than at the statement's start — and a test that showed 42 in
-    /// both would mean the recording was not per-moment at all.
+    /// The moment inside the callee shows `n`, and the caller's frame under
+    /// it shows the name it had already bound and not the one it is in the
+    /// middle of binding: a suspended frame is shown at the call it is
+    /// waiting on, and `total` is bound after that call answers. The moment
+    /// after the return shows it holding 42.
+    ///
+    /// It showed `total` as a zero until issue #302, which is what a caller
+    /// shown at its *resume* address answers — the slot the call is about to
+    /// write, named but not yet written. Both the destination forwarding and
+    /// the `- 1` in `Stop::frame` are that change; a test that showed 42 in
+    /// both moments would mean the recording was not per-moment at all.
     #[test]
     fn a_local_holds_what_it_held_at_that_moment() {
         let json = debug_json(WALKED, None, None, 0);
@@ -830,7 +839,8 @@ export fn main() -> Int {
             .find(|moment| moment.contains(r#""why":"return""#))
             .unwrap_or_else(|| panic!("a return moment: {json}"));
         assert!(inside.contains(r#""name":"n","value":"21""#), "{inside}");
-        assert!(inside.contains(r#""name":"total","value":"0""#), "{inside}");
+        assert!(inside.contains(r#""name":"one","value":"21""#), "{inside}");
+        assert!(!inside.contains(r#""name":"total""#), "{inside}");
         assert!(after.contains(r#""name":"total","value":"42""#), "{after}");
     }
 
