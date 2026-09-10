@@ -119,6 +119,7 @@ mod differential;
 mod erasure;
 pub(crate) mod exec;
 pub(crate) mod mem;
+pub mod profile;
 pub(crate) mod render;
 
 /// The words a run's heap region may grow to, for every [`Vm`] [`Vm::new`]

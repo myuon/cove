@@ -14,7 +14,7 @@ use cove_runtime::embed::{register_hosts, HostSetup};
 use cove_runtime::host::HostRegistry;
 use cove_runtime::interp::Interpreter;
 use cove_runtime::{
-    create_trace_file, Budget, Cancellation, HeapStats, JsonlSink, Limits, NullSink,
+    create_trace_file, Budget, Cancellation, HeapStats, JsonlSink, Limits, NullSink, Profiler,
     RecordingBackend, Runtime, TraceEvent, TraceHeader, TraceSink, ValueCapture, Vm,
 };
 use cove_sema::capability::open_reasons;
@@ -185,6 +185,7 @@ literal `--` is a program argument, even if it looks like a flag):
   --max-tasks <n>       stop the run when it would hold more than <n> tasks at once
   --backend <ast|vm>    which backend runs the entry: `vm`, the linear-memory backend of ADR 0034 and the default, or `ast`, the tree-walking interpreter and the semantic oracle
   --stats               print the backend's lowering and execution times and the instructions it executed, then fuel spent, host calls, irreversible writes, elapsed time, host-call wait, and the heap, to stderr
+  --profile             count every instruction the run executes and report which functions and which instructions they were, to stderr. A profiler is a debugger that never stops, so a run without it is unchanged and a run with it is several times slower; the counts are of instructions and not of time
   --files-root <path>   the one directory the `files` host may reach; defaults to `files/` in the package
   --allow-exec <path>   an absolute path `process.run` may start; repeat to allow more, and omit to allow none
 ";
@@ -1286,9 +1287,16 @@ pub(crate) fn execute_entry(
     // differs between one `--backend` and another is which evaluator is
     // built and nothing else about how it is called.
     let started = Instant::now();
+    // A profiler is a debugger that never stops, so it is installed the way a
+    // debugger is and the machine gains nothing for a run that asks for no
+    // profile. See `cove_runtime::vm::profile`.
+    let profiler = flags.profile.then(Profiler::new);
     let (outcome, memory, instructions) = match lowered.as_ref().map(|l| &l.program) {
         Some(ir) => {
-            let mut vm = Vm::new(&runtime, runtime.hosts(), ir);
+            let mut vm = match profiler.as_ref() {
+                Some(profiler) => Vm::debugged(&runtime, runtime.hosts(), ir, profiler),
+                None => Vm::new(&runtime, runtime.hosts(), ir),
+            };
             let outcome = vm.run_entry(module, entry, program_args);
             (
                 outcome,
@@ -1307,6 +1315,9 @@ pub(crate) fn execute_entry(
     };
     let execution = started.elapsed();
 
+    if let (Some(profiler), Some(held)) = (profiler.as_ref(), lowered.as_ref()) {
+        print_profile(&held.program, profiler);
+    }
     if flags.stats {
         print_backend_stats(flags.backend, lowered.as_ref(), execution, instructions);
         print_stats(runtime.hosts(), &wait_total, &memory);
@@ -1364,6 +1375,65 @@ enum Memory {
 /// The count is here, beside the timings, because it is what a change to the
 /// lowering is judged by: wall time moves for many reasons, and how many
 /// instructions a program needed moves for exactly one.
+/// What a run was made of, by the Cove that ran.
+///
+/// The report is two readings of one set of samples. **By function** is the
+/// question a person asks first — which of my code is this run? — and **by
+/// instruction** is the one they ask next, with the instruction rendered the
+/// way `cove debug`'s `disassemble` renders it, so a line here and a line
+/// there are the same line.
+///
+/// Percentages are of *instructions executed*, counted rather than sampled, so
+/// a function that runs many cheap instructions weighs more than one that runs
+/// few expensive ones. That is the right measure for "which Cove code is this
+/// run made of" and the wrong one for "which instruction is slow", and the
+/// note at the end says so rather than leaving a reader to find out.
+fn print_profile(program: &cove_ir::Program, profiler: &Profiler) {
+    let counted = profiler.counted();
+    if counted == 0 {
+        eprintln!("profile: nothing ran");
+        return;
+    }
+    let share = |n: u64| 100.0 * n as f64 / counted as f64;
+    eprintln!("profile: {counted} instruction(s) counted");
+    eprintln!("  by function:");
+    for (id, n) in profiler.by_function().iter().take(PROFILE_ROWS) {
+        eprintln!(
+            "  {:>10}  {:>6.2}%  {}",
+            n,
+            share(*n),
+            program.function(*id).qualified()
+        );
+    }
+    eprintln!("  by instruction:");
+    for ((id, pc), n) in profiler.hottest().iter().take(PROFILE_ROWS) {
+        let function = program.function(*id);
+        let at = *pc as usize;
+        let line = match function.code.get(at) {
+            Some(inst) => cove_ir::print::one(program, function, inst),
+            None => "<past the end of this function>".to_string(),
+        };
+        eprintln!(
+            "  {:>10}  {:>6.2}%  {}+{pc}  {line}",
+            n,
+            share(*n),
+            function.qualified()
+        );
+    }
+    eprintln!(
+        "  a count is of instructions and not of moments: a `call-builtin` that \
+         allocates and an `add.int` weigh the same here. What the *machine* spends \
+         its time on is a native profiler's question."
+    );
+}
+
+/// How many rows each half of a profile prints.
+///
+/// Enough to see the shape and few enough to read without a pager. A caller
+/// who wants all of them wants a file rather than a terminal, and that is a
+/// flag this does not have yet.
+const PROFILE_ROWS: usize = 12;
+
 fn print_backend_stats(
     backend: Backend,
     lowered: Option<&Lowered>,
@@ -1420,6 +1490,7 @@ pub(crate) struct RunFlags {
     /// How much of each host call the trace records.
     trace_values: ValueCapture,
     stats: bool,
+    profile: bool,
     /// The one directory the `files` host may reach.
     files_root: Option<PathBuf>,
     /// The executables `process.run` may start. Empty allows none.
@@ -1448,6 +1519,7 @@ impl RunFlags {
             trace: None,
             trace_values: ValueCapture::Full,
             stats: false,
+            profile: false,
             files_root: None,
             allow_exec: Vec::new(),
             program_args: Vec::new(),
@@ -1632,6 +1704,7 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
         trace: None,
         trace_values: ValueCapture::Full,
         stats: false,
+        profile: false,
         files_root: None,
         allow_exec: Vec::new(),
         program_args: Vec::new(),
@@ -1702,6 +1775,7 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
                 })?;
             }
             "--stats" => flags.stats = true,
+            "--profile" => flags.profile = true,
             "--files-root" => {
                 let value = flag_value(args, &mut i, "--files-root")?;
                 flags.files_root = Some(PathBuf::from(value));
