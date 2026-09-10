@@ -58,9 +58,13 @@
 //!
 //! The pair identifies a location because two instructions of two different
 //! functions at the same pc were written in two different places — except
-//! when they were not, which is the case of one generic function lowered
-//! twice. Then a breakpoint set on the source line stops in both
-//! instantiations, which is the answer a reader of the source would expect.
+//! when they were not, and there are two cases of that. One generic function
+//! lowered twice is the first: a breakpoint set on the source line stops in
+//! both instantiations, which is the answer a reader of the source would
+//! expect. A small leaf `cove_ir::lower::inline` expanded is the second, and
+//! it reads the same way — the leaf's own instruction and an expansion of it
+//! carry one span, so a breakpoint on the leaf's line stops wherever that
+//! line runs, in the leaf and in every caller it was written into.
 //!
 //! # What one `step` is
 //!
@@ -309,6 +313,16 @@ fn parse_debug_flags(args: &[String]) -> Result<Flags, CliError> {
 struct Site {
     pc: Pc,
     span: Span,
+    /// Where to *say* it is, which is `span` unless the site is a call
+    /// `lower::inline` expanded away.
+    ///
+    /// The two differ for exactly one kind of site and they have to: a
+    /// breakpoint fires by comparing `span` against the span the machine
+    /// reports, so `span` is the instruction's own and nothing else will
+    /// match — but the instruction at an expanded call is the *callee's*
+    /// first one, written on the callee's line, and a person who typed the
+    /// caller's line number wants to be told about the caller's line.
+    shown: Span,
 }
 
 /// Source line to instruction, built once before the run.
@@ -321,6 +335,19 @@ struct Site {
 ///
 /// It costs one pass over every instruction of the lowered program and holds
 /// one entry per distinct function-and-line pair.
+///
+/// # An expanded body is written twice
+///
+/// `cove_ir::lower::inline` expands a call to a small leaf where it is made,
+/// so one line of a leaf is written in the leaf *and* in every function that
+/// called it. Both are offered — the leaf's own copy may still run, and each
+/// expansion certainly does — which is why a line can resolve to more than one
+/// location. Each is named after the body it was written in and says which
+/// function it stands in, because two expansions of one leaf are otherwise
+/// two identical lines.
+///
+/// The other half is the line the *call* was on, which no instruction
+/// answers to any more. See the note beside the loop that seeds those.
 ///
 /// # A stub is not code
 ///
@@ -363,6 +390,7 @@ impl Sites {
                     Site {
                         pc: 0,
                         span: function.span_at(0),
+                        shown: function.span_at(0),
                     },
                     qualified.clone(),
                 ));
@@ -372,18 +400,60 @@ impl Sites {
             // twice in one function — two statements written on it, or an
             // `if` and its `else` — keeps only the earlier, which is the
             // limitation `help limits` names.
-            let mut seen: BTreeMap<(FileId, usize), Site> = BTreeMap::new();
+            let mut seen: BTreeMap<(FileId, usize), (Site, String)> = BTreeMap::new();
+            // The lines whose call is gone, first, so that they win the
+            // lowest-pc rule below.
+            //
+            // `lower::inline` expands a small leaf where it is called, and the
+            // `Inst::Call` written on the caller's line is then not there. The
+            // line does not stop being a place to break — it is where a person
+            // reading the source would put one — but nothing on it is the
+            // caller's any more, so without this the lowest pc on the line is
+            // whatever the *lowering* left there, which for a one-expression
+            // body is the `return` **after** the callee has already run.
+            //
+            // What the line means now is "the first instruction of the body
+            // that was called", and that is `Inlined::from`.
+            for held in &function.inlined {
+                let line = sources.get(held.site.file).line_col(held.site.start).0;
+                seen.entry((held.site.file, line)).or_insert((
+                    Site {
+                        pc: held.from,
+                        span: function.span_at(held.from as usize),
+                        shown: held.site,
+                    },
+                    qualified.clone(),
+                ));
+            }
             for pc in 0..function.code.len() {
                 let span = function.span_at(pc);
                 let line = sources.get(span.file).line_col(span.start).0;
-                seen.entry((span.file, line))
-                    .or_insert(Site { pc: pc as Pc, span });
+                // Whose body the instruction is. An expansion writes a leaf's
+                // instructions into its caller, so a line of the leaf is
+                // written in two functions now — the leaf's own copy and each
+                // expansion of it — and naming both after the function that
+                // *holds* them would list one line twice under a name that is
+                // neither the one the person typed nor the one that runs. The
+                // caller is named beside it, because two expansions of one
+                // leaf are otherwise two identical lines.
+                let named = match function.inlined_at(pc as Pc).last() {
+                    Some(held) => format!(
+                        "{} (inlined into {qualified})",
+                        ir.function(held.callee).qualified()
+                    ),
+                    None => qualified.clone(),
+                };
+                seen.entry((span.file, line)).or_insert((
+                    Site {
+                        pc: pc as Pc,
+                        span,
+                        shown: span,
+                    },
+                    named,
+                ));
             }
-            for (key, site) in seen {
-                by_line
-                    .entry(key)
-                    .or_default()
-                    .push((site, qualified.clone()));
+            for (key, found) in seen {
+                by_line.entry(key).or_default().push(found);
             }
         }
         Sites {
@@ -851,7 +921,7 @@ impl Session {
             if where_.len() == 1 { "" } else { "s" }
         );
         for (site, function) in &where_ {
-            println!("  {function} pc {} at {}", site.pc, self.place(site.span));
+            println!("  {function} pc {} at {}", site.pc, self.place(site.shown));
         }
         state.breakpoints.push(Breakpoint {
             number,
@@ -988,7 +1058,7 @@ impl Session {
                         b.number, b.spec, b.hits
                     );
                     for (site, function) in &b.where_ {
-                        println!("  {function} pc {} at {}", site.pc, self.place(site.span));
+                        println!("  {function} pc {} at {}", site.pc, self.place(site.shown));
                     }
                 }
             }
@@ -1184,7 +1254,15 @@ impl Session {
             println!("there is no frame #{}", state.frame);
             return;
         };
-        println!("{}:", call.function());
+        // Titled by whose instructions these are, and by whose *body* the
+        // frame is when the two differ: `lower::inline` expands a small leaf
+        // where it is called, so a frame can be `twice` and the stream it
+        // runs in can be `raise`. A header naming only the first would put
+        // `raise`'s listing under `twice`.
+        match call.within() == call.function() {
+            true => println!("{}:", call.function()),
+            false => println!("{} (inlined into {}):", call.function(), call.within()),
+        }
         for line in stop.code(state.frame, reach) {
             println!(
                 "{} {:>4} | {}",

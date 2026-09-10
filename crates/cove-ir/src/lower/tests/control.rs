@@ -177,7 +177,7 @@ fn a_break_clears_the_temporaries_the_turn_was_holding() {
         ),
         "\
 fn @m.f(Array) -> Int
-  frame 12: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:ref s10:ref s11:unit
+  frame 13: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:ref s10:ref s11:unit s12:int
   local xs -> s0:Array [0, 27)
   local total -> s2:Int [1, 26)
   local x -> s8:String [10, 22)
@@ -200,7 +200,7 @@ fn @m.f(Array) -> Int
     16  clear s9:String
     17  clear s8:String
     18  jump 24
-    19  call s2:Int m.both (s9:String s10:String)
+    19  int s2:int 0
     20  clear s10:String
     21  clear s9:String
     22  clear s8:String

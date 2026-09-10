@@ -73,6 +73,7 @@ mod expr;
 mod frame;
 mod frees;
 mod gap;
+mod inline;
 mod limits;
 mod methods;
 mod pattern;
@@ -367,6 +368,13 @@ fn finish(mut program: Program, errors: Vec<Diagnostic>) -> Result<Program, Vec<
     if !errors.is_empty() {
         return Err(only_once(errors));
     }
+
+    // A call to a small leaf is expanded where it is made, before the two
+    // passes below run: what an expansion leaves behind is exactly the shape
+    // they are for — a clear that frees nothing, and a clear a `return` was
+    // about to make pointless — and running them first would mean running
+    // them twice. See `inline`.
+    inline::expand_small_leaf_calls(&mut program);
 
     // A clear the `return` after it was going to make pointless is dropped
     // here rather than never emitted, because the emission sites are many and
@@ -1517,6 +1525,7 @@ fn lower_body(
         code: body.code,
         spans: body.spans,
         locals,
+        inlined: Vec::new(),
         span: decl.decl.span,
         is_async: decl.decl.is_async,
         stub: false,
@@ -1557,6 +1566,7 @@ fn stub(decl: &Decl) -> Function {
         code: vec![Inst::Return { src: 0 }],
         spans: vec![decl.decl.span],
         locals: Vec::new(),
+        inlined: Vec::new(),
         span: decl.decl.span,
         is_async: false,
         stub: true,

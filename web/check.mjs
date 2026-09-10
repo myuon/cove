@@ -591,20 +591,27 @@ check("has a recording", recorded.debug !== null, true);
 
 const { moments, functions } = recorded.debug;
 check("not truncated", recorded.debug.truncated, null);
-// Four, and it was six until issue #302. Two of the six were copies — the
-// callee's answer moved out of a temporary, and `main`'s moved into the
-// location the `return` names — and neither instruction exists now. A
-// `return` is also written at the tail it answers rather than at the
-// signature, so the line does not change again on the way out.
+// Three, and it was four until `lower::inline`, and six before that until
+// issue #302. Two of the six were copies — the callee's answer moved out of a
+// temporary, and `main`'s moved into the location the `return` names — and
+// neither instruction exists now. A `return` is also written at the tail it
+// answers rather than at the signature, so the line does not change again on
+// the way out.
+//
+// The `line` went with the call. `twice` is a small leaf, so its body is
+// written into `main`, and what used to be `main`'s `call` on line 7 is now
+// `twice`'s `n + n` on line 2 — line 7 has no instruction of its own left for
+// a new-line rule to fire on. The `call` is still here because the expansion
+// records what it removed, so the depth still rises where the body begins.
 check(
   "the moments the program ran, in order",
   moments.map((m) => m.why).join(" "),
-  "entry line call return",
+  "entry call return",
 );
 check(
   "each moment names the line it was written at",
   moments.map((m) => m.line).join(" "),
-  "6 7 2 8",
+  "6 2 8",
 );
 check(
   "the instruction counts only go forwards",
@@ -651,15 +658,20 @@ check(
   "21",
 );
 
-// Both functions, disassembled once each however many moments are in them.
-// This is where the format's size comes from: a loop of a thousand moments
-// carries its function's instructions once, not a thousand times.
-check("both functions interned", functions.length, 2);
-check("named", functions.map((f) => f.name).join(" "), "playground.main playground.twice");
+// Each disassembly held once however many moments are in it. This is where
+// the format's size comes from: a loop of a thousand moments carries its
+// function's instructions once, not a thousand times.
+//
+// One and not two, because `twice` is a small leaf whose body `lower::inline`
+// wrote into `main`. There is one instruction stream; a second entry could
+// only be `main`'s instructions under `twice`'s name. Which body a frame is
+// stays on the frame, as `body` below.
+check("each disassembly interned once", functions.length, 1);
+check("named", functions.map((f) => f.name).join(" "), "playground.main");
 check(
   "the disassembly is the one `cove ir` prints",
-  functions[1].code.map((line) => line.text).join(" | "),
-  "add.int s1:int s0:int s0:int | return s1:Int",
+  functions[0].code.map((line) => line.text).join(" | "),
+  "int s1:int 21 | add.int s2:int s1:int s1:int | copy s0:Int s2:Int | return s0:Int",
 );
 check(
   "every moment's pc is inside its function",
@@ -678,6 +690,7 @@ const after = moments.find((m) => m.why === "return");
 const local = (moment, frame, name) =>
   moment.frames[frame].locals.find((held) => held.name === name)?.value;
 check("the callee's parameter", local(inside, 0, "n"), "21");
+check("the frame says whose body it is", inside.frames[0].body, "playground.twice");
 check("the caller is still on the stack", inside.frames.length, 2);
 check("its `total` is not bound yet", local(inside, 1, "total"), undefined);
 check("and is, once the call returned", local(after, 0, "total"), "42");

@@ -11,10 +11,18 @@
 //!
 //! # What names a program counter
 //!
-//! Four things, and all four are rewritten: [`Inst::Jump`],
+//! Five things, and all five are rewritten: [`Inst::Jump`],
 //! [`Inst::BranchFalse`], the [`Table`] an [`Inst::Switch`] dispatches
-//! through, and the pair of counters that bound a [`Local`](crate::Local)'s
-//! live range.
+//! through, the pair of counters that bound a [`Local`](crate::Local)'s live
+//! range, and the pair that bound an [`Inlined`](crate::program::Inlined)
+//! body.
+//!
+//! The last two are the same shape and are easy to forget in the same way:
+//! nothing in a lowered function *reads* them, so a range left behind still
+//! verifies, still runs, and still answers — it just answers about the wrong
+//! instructions. An expanded body that had drifted two counters said an
+//! error had no caller at all, because the pc that failed was no longer
+//! inside the range that would have named one.
 //!
 //! Each is mapped through *the first surviving instruction at or after the
 //! old target*. A target that landed on an instruction that is still there
@@ -66,6 +74,14 @@ pub(super) fn rewrite(function: &mut Function, tables: &mut [Table], dropped: &[
     for local in &mut function.locals {
         local.from = moved[local.from as usize];
         local.to = moved[local.to as usize];
+    }
+    for held in &mut function.inlined {
+        held.from = moved[held.from as usize];
+        held.to = moved[held.to as usize];
+        for local in &mut held.locals {
+            local.from = moved[local.from as usize];
+            local.to = moved[local.to as usize];
+        }
     }
     count
 }

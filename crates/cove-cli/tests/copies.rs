@@ -332,13 +332,38 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// out of 10500 copies and 67441 instructions, and forwarding the destination
 /// of a short circuit as well took it to 1492.
 ///
+/// **It has risen twice, and that is the one direction this is not supposed
+/// to move.** Both times it was `lower::inline`, which expands a call to a
+/// small leaf where it is made — first by 21 and then, once the expansion
+/// could carry a call site and stopped refusing bodies that fail, to 1713.
+///
+/// What rose is not a copy the pass *introduced*. It is a copy the pass made
+/// **visible**. A call's answer was always copied from the callee's frame
+/// into the caller's destination; before an expansion that copy was performed
+/// by `Inst::Return` and by the machine's call protocol, and this survey
+/// counts `Inst::Copy`, so it never saw one. An expanded `Return` writes the
+/// same run of the same width with an instruction that has a name, and the
+/// survey counts it. The same is true of an argument copied into a parameter
+/// the body assigns: the call was already going to copy it into a fresh
+/// frame.
+///
+/// So the work did not grow — `examples:life` runs 232,724 instructions
+/// against 264,309, and `covefmt`'s lexer runs in 106 ms against 136 ms —
+/// and neither did the opportunity, exactly: what these 200 are is a real
+/// forwarding candidate that used to be hidden behind a call boundary where
+/// no lowering could have taken it. Now it is in the open and stage 3 can.
+///
+/// It is written down rather than smoothed over: a ratchet raised without a
+/// sentence is a ratchet worth nothing, and the sentence is that **1492 is
+/// still the number destination forwarding is measured against**.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 1492;
+const FORWARDABLE_COPIES: usize = 1713;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

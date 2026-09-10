@@ -9,6 +9,17 @@
 //! Every listing goes through [`crate::verify`] on the way, because a
 //! lowering that emitted a well-read but ill-formed program would otherwise
 //! be caught only when something ran it.
+//!
+//! # A listing is what `lower` answers, optimisations and all
+//!
+//! [`super::inline`] expands a call to a small leaf where it is made, so a
+//! case whose callee is two instructions shows the callee's body and not the
+//! call. That is not a gap in these tests, it is what they are for: the
+//! listing is what a program *is* after `lower`, and a listing that showed
+//! something else would be a test of an intermediate nobody runs.
+//!
+//! What it does mean is that a case whose subject is the call itself has to
+//! keep one, and [`calls`] says how — see its module header.
 
 mod assertions;
 mod bytecode;
@@ -23,6 +34,7 @@ mod erasure;
 mod gaps;
 mod generics;
 mod hosts;
+mod inlining;
 mod layouts;
 mod limits;
 mod locals;

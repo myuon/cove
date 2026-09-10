@@ -47,9 +47,15 @@
 //!   argues UTF-16 at length; the same argument holds here, and an em dash in
 //!   a comment above the marked line is enough to make it matter.
 //! - **Instructions**: an index into a shared table of disassembled
-//!   functions, and the pc inside it.
+//!   functions, and the pc inside it. The table is keyed by whose *code* a
+//!   frame runs — `Call::within` — because that is what a disassembly is of.
 //! - **Runtime**: the backtrace, innermost first — each frame's function,
-//!   pc, line and every local in scope there with its rendered value.
+//!   pc, line and every local in scope there with its rendered value, plus
+//!   the `body` it is. `body` is whose body the frame is and the index above
+//!   is whose code it runs in; the two differ for a small leaf `lower::inline`
+//!   expanded into its caller, where naming only the second would show one
+//!   function twice in a backtrace and one function's listing under the
+//!   other's name.
 //! - **Memory**: every heap object named by a `ref` word of one of those
 //!   locals, rendered with its fields, and on each local the addresses of
 //!   the words that named them.
@@ -460,6 +466,19 @@ impl Kept {
             let (from, to) = self.utf16(sources, call.span());
             frames.push(json::object([
                 ("function", function.to_string()),
+                // Whose body this frame is, which `function` above does not
+                // say: that is an index into the shared table of
+                // *disassemblies*, and `lower::inline` expands a small leaf
+                // where it is called, so a frame can be the leaf while the
+                // stream it runs in is the caller's. A backtrace built from
+                // the table alone would name the caller twice and lose the
+                // one thing the expansion's record was made to keep.
+                //
+                // `body` rather than `name`, because `name` already means two
+                // things in this payload — a disassembly's title and a
+                // local's spelling — and a third would make none of them
+                // findable.
+                ("body", json::string(call.function())),
                 ("pc", call.pc().to_string()),
                 ("line", at_line(sources, call.span()).0.to_string()),
                 // A selected frame moves the editor's mark to that frame's
@@ -505,8 +524,15 @@ impl Kept {
     /// length; two instantiations of the same length are shown as one, whose
     /// instructions are the same modulo the layouts named in them. The pc a
     /// pane marks is right either way.
+    ///
+    /// The name is [`Call::within`] and not [`Call::function`], because this
+    /// table holds *disassemblies*. A frame that is a body `lower::inline`
+    /// expanded runs the caller's instruction stream, so keying on the leaf's
+    /// name gave a pane titled `playground.twice` holding `playground.main`'s
+    /// four instructions. Which body a frame is remains on the frame, where
+    /// `Call::function` put it.
     fn intern(&mut self, stop: &Stop<'_>, sources: &SourceMap, at: usize, call: &Call) -> usize {
-        let name = call.function();
+        let name = call.within();
         if let Some(index) = self
             .functions
             .iter()

@@ -143,6 +143,23 @@ pub struct Stop<'m> {
     pc: usize,
 }
 
+/// One frame the debugger shows, which is not always one the machine pushed.
+///
+/// `function` and `base` say where the *words* are; `pc` says which of that
+/// function's instructions this frame is at; `named` says whose body those
+/// instructions are, which is `function` itself unless `lower::inline`
+/// expanded one here; `span` is where this frame's own call was written; and
+/// `locals` is the table of names to read at that pc, which for an expanded
+/// body is the one the expansion recorded rather than the function's own.
+struct Frame<'p> {
+    function: FunctionId,
+    base: u64,
+    pc: Pc,
+    named: FunctionId,
+    span: Span,
+    locals: &'p [cove_ir::Local],
+}
+
 impl<'m> Stop<'m> {
     /// The stop the dispatch loop is at, with `pc` already synced.
     pub(crate) fn new(machine: &'m Machine<'m>, function: FunctionId, pc: usize) -> Stop<'m> {
@@ -187,13 +204,27 @@ impl<'m> Stop<'m> {
 
     /// `module.name` of the function this stop is in.
     ///
+    /// The function the *source* would say it is in, which is not always the
+    /// one whose frame the machine pushed: an instruction inside a body
+    /// `lower::inline` expanded belongs to the body that was written, and a
+    /// session that named the caller would tell a person their breakpoint had
+    /// stopped somewhere they had not asked about. `Function::inlined` is what
+    /// says otherwise, and [`Stop::function_id`] is deliberately the other
+    /// answer.
+    ///
     /// A `String`, built here, because that is what a session prints and a
     /// name is what a person reads. A caller that will look the function up
     /// again — a profiler counting instructions, above all — wants
     /// [`Stop::function_id`] instead: this allocates, and a debugger that
     /// stops at every instruction would allocate at every instruction.
     pub fn function(&self) -> String {
-        self.machine.program().function(self.function).qualified()
+        let program = self.machine.program();
+        let named = program
+            .function(self.function)
+            .inlined_at(self.pc as Pc)
+            .last()
+            .map_or(self.function, |held| held.callee);
+        program.function(named).qualified()
     }
 
     /// Which function this stop is in, as the program names it.
@@ -201,11 +232,26 @@ impl<'m> Stop<'m> {
     /// The identity rather than the name: two stops in one function answer
     /// the same id, and an id indexes `Program::functions` — so a caller can
     /// hold one per stop without holding a string per stop.
+    ///
+    /// It is the *machine's* answer and not the source's: an instruction of an
+    /// expanded body reports the function whose frame and whose code hold it,
+    /// where [`Stop::function`] reports the body that was written. A profiler
+    /// keys a count by this and prints `function+pc`, and a pc is a counter of
+    /// the function this names; naming the callee there would make the pair
+    /// disagree.
     pub fn function_id(&self) -> FunctionId {
         self.function
     }
 
     /// Which instruction of that function is about to run.
+    ///
+    /// A counter of the function whose *code* holds it, which for an
+    /// instruction inside an expanded body is the caller's rather than the
+    /// body's: `lower::inline` wrote the body there and there is no other
+    /// numbering. So a stop reported as `m.inner` at pc 1 is not `m.inner`'s
+    /// second instruction, it is `m.inner`'s first, standing at `m.outer`'s
+    /// counter 1. [`Stop::code`] numbers the same way, which is what keeps a
+    /// listing and the pc beside it agreeing.
     pub fn pc(&self) -> u32 {
         self.pc as u32
     }
@@ -219,8 +265,79 @@ impl<'m> Stop<'m> {
     }
 
     /// How many calls are live, this one included.
+    ///
+    /// An expanded body counts. `lower::inline` writes a small leaf's
+    /// instructions into its caller's code and pushes no frame for them, and
+    /// a debugger that counted only the frames the machine pushed would say a
+    /// stop inside such a body was a stop in the caller — `finish` would run
+    /// past the body it was asked to finish, `next` would step over nothing,
+    /// and a backtrace would be one name short. `Function::inlined` is what
+    /// says otherwise, and this is the one place the count comes from.
+    ///
+    /// Counted rather than built, because `State::wanted` asks this at every
+    /// stop of a stepping session and the frames themselves are only wanted
+    /// when something is shown.
     pub fn depth(&self) -> usize {
-        self.machine.calls().len()
+        let program = self.machine.program();
+        self.machine
+            .calls()
+            .iter()
+            .enumerate()
+            .map(|(at, (id, _, pc))| {
+                let function = program.function(*id);
+                1 + function.inlined_at(Self::shown(at, *pc)).count()
+            })
+            .sum()
+    }
+
+    /// Every frame the debugger shows, innermost first — which is not every
+    /// frame the machine pushed.
+    ///
+    /// One real frame becomes one shown frame per expanded body its pc is
+    /// inside, plus itself. Each of them reads the *same* words of the *same*
+    /// frame, because that is where an expansion put them; what differs is
+    /// whose code the pc belongs to, which name to print, and where the call
+    /// below it was written.
+    ///
+    /// The pcs walk outwards the way the ranges nest. The innermost shown
+    /// frame is at the pc the machine is at; each one further out is at the
+    /// first counter of the body below it, which is where that body's call
+    /// stood before it was expanded — the exact analogue of a suspended real
+    /// frame being shown at its call rather than at its resume address.
+    fn shown_frames(&self) -> Vec<Frame<'m>> {
+        let program = self.machine.program();
+        let mut held = Vec::new();
+        for (at, (id, base, pc)) in self.machine.calls().iter().enumerate() {
+            let function = program.function(*id);
+            let pc = Self::shown(at, *pc);
+            let ranges: Vec<_> = function.inlined_at(pc).collect();
+            // Innermost first: the deepest range's callee is stopped at `pc`,
+            // and every range further out is stopped where the range inside
+            // it begins.
+            let mut here = pc;
+            let mut span = function.span_at(here as usize);
+            for range in ranges.iter().rev() {
+                held.push(Frame {
+                    function: *id,
+                    base: *base,
+                    pc: here,
+                    named: range.callee,
+                    span,
+                    locals: &range.locals,
+                });
+                here = range.from;
+                span = range.site;
+            }
+            held.push(Frame {
+                function: *id,
+                base: *base,
+                pc: here,
+                named: *id,
+                span,
+                locals: &function.locals,
+            });
+        }
+        held
     }
 
     /// Every live call, innermost first.
@@ -231,7 +348,11 @@ impl<'m> Stop<'m> {
     /// [`Stop::frame`] is the same view of one call, for a session that only
     /// shows what it was asked for.
     pub fn backtrace(&self) -> Vec<Call> {
-        (0..self.depth()).filter_map(|at| self.frame(at)).collect()
+        // Built once and walked, rather than `frame(at)` per level: an
+        // expanded body is not a frame the machine holds, so a shown frame
+        // has to be worked out rather than indexed, and asking for the `at`th
+        // of them works out the first `at` on the way.
+        self.shown_frames().iter().map(|f| self.call(f)).collect()
     }
 
     /// The call `at` levels out from this one, or `None` past the outermost.
@@ -256,8 +377,7 @@ impl<'m> Stop<'m> {
     /// resume address — the machine is about to execute the instruction it
     /// names — so there is nothing to look back past.
     pub fn frame(&self, at: usize) -> Option<Call> {
-        let (id, base, pc) = *self.machine.calls().get(at)?;
-        Some(self.call(id, base, Self::shown(at, pc)))
+        Some(self.call(&self.shown_frames().into_iter().nth(at)?))
     }
 
     /// The pc a frame is *shown* at, out of the pc the machine holds for it.
@@ -313,12 +433,12 @@ impl<'m> Stop<'m> {
     /// backtrace naming a line and a disassembly marking a different
     /// instruction would be the debugger disagreeing with itself.
     pub fn code(&self, at: usize, reach: usize) -> Vec<Line> {
-        let Some((id, _, frame_pc)) = self.machine.calls().get(at).copied() else {
+        let Some(frame) = self.shown_frames().into_iter().nth(at) else {
             return Vec::new();
         };
-        let frame_pc = Self::shown(at, frame_pc) as usize;
+        let frame_pc = frame.pc as usize;
         let program = self.machine.program();
-        let function = program.function(id);
+        let function = program.function(frame.function);
         // Both ends saturate. Only `from` did at first, which reads as a
         // decision and was an oversight: on a 32-bit target — which
         // `wasm32-unknown-unknown` is — a `reach` of `u32::MAX` made
@@ -344,12 +464,13 @@ impl<'m> Stop<'m> {
     }
 
     /// One frame, projected.
-    fn call(&self, id: FunctionId, base: u64, pc: u32) -> Call {
+    fn call(&self, frame: &Frame) -> Call {
+        let (base, pc) = (frame.base, frame.pc);
         let program = self.machine.program();
-        let function = program.function(id);
+        let function = program.function(frame.function);
         let mut named = vec![false; function.frame_size() as usize];
         let mut locals = Vec::new();
-        for local in &function.locals {
+        for local in frame.locals {
             if !(local.from <= pc && pc < local.to) {
                 continue;
             }
@@ -385,9 +506,10 @@ impl<'m> Stop<'m> {
             })
             .collect();
         Call {
-            function: function.qualified(),
+            function: program.function(frame.named).qualified(),
+            within: function.qualified(),
             pc,
-            span: function.span_at(pc as usize),
+            span: frame.span,
             locals,
             words,
         }
@@ -417,6 +539,7 @@ impl<'m> Stop<'m> {
 #[derive(Clone, Debug)]
 pub struct Call {
     function: String,
+    within: String,
     pc: Pc,
     span: Span,
     locals: Vec<Local>,
@@ -425,12 +548,33 @@ pub struct Call {
 
 impl Call {
     /// `module.name` of the function running here.
+    ///
+    /// The body that was *written*, which for a frame `lower::inline`
+    /// expanded is the leaf and not the function that holds its
+    /// instructions. [`Call::within`] is that other answer.
     pub fn function(&self) -> &str {
         &self.function
     }
 
+    /// `module.name` of the function whose code [`Call::pc`] is a counter of.
+    ///
+    /// The same as [`Call::function`] for a frame the machine pushed, and the
+    /// *caller* for one that is an expanded body: the expansion wrote the
+    /// leaf's instructions into the caller and there is no other numbering
+    /// for them.
+    ///
+    /// A reader showing a disassembly needs both, and showing one under the
+    /// other's name is the mistake this exists to stop — a pane titled
+    /// `playground.twice` holding `playground.main`'s four instructions,
+    /// which is what a table keyed on [`Call::function`] alone produced.
+    pub fn within(&self) -> &str {
+        &self.within
+    }
+
     /// Where in it this call is: the instruction about to run for the
     /// innermost call, and the one to return to for every other.
+    ///
+    /// A counter of [`Call::within`], not of [`Call::function`].
     pub fn pc(&self) -> Pc {
         self.pc
     }
@@ -452,6 +596,12 @@ impl Call {
     }
 
     /// The frame's own words that no name in scope covers.
+    ///
+    /// For a frame that is an expanded body, that includes every word the
+    /// *caller* holds. They are in the same physical frame — an expansion
+    /// appends the callee's run to the caller's rather than pushing one — and
+    /// they are not names this body bound, which is exactly what this reports:
+    /// a word no name in scope covers, whoever else may have a name for it.
     pub fn words(&self) -> &[Word] {
         &self.words
     }
@@ -963,7 +1113,13 @@ export fn main() -> Int {
         let held = first.0.lock().expect("a lock").clone();
         let (function, pc, code) = held.expect("the run entered `m.inner`");
         assert_eq!(function, "m.inner");
-        assert_eq!(pc, 0, "a call stops first at the callee's first pc");
+        // Not the callee's zero, because `m.inner` is a small leaf and
+        // `lower::inline` wrote its body into `m.outer`: there is no frame of
+        // its own for a counter to be zero of. [`Stop::function`] names the
+        // body that was written and [`Stop::pc`] numbers the code that holds
+        // it, which are two answers on purpose — and what this case is about
+        // is that they agree with the listing, which is the next assertion.
+        assert_eq!(pc, 1, "`m.inner`'s body begins at `m.outer`'s counter 1");
         let current: Vec<&Line> = code.iter().filter(|line| line.current()).collect();
         assert_eq!(current.len(), 1, "exactly one line is the one stopped at");
         assert_eq!(current[0].pc(), pc);
@@ -1250,10 +1406,18 @@ export fn main() -> Int {
     /// that frame's code. Reading the stopping function's would answer
     /// `frame 2` with frame 0's instructions — a listing that looks right,
     /// is wrong, and says nothing about which frame it is of.
+    ///
+    /// Frame 2 and not frame 1 for the "two listings are two" half of it.
+    /// Frame 1 is `m.outer` and frame 0 is `m.inner` expanded *into*
+    /// `m.outer`, so the two are one instruction stream and a disassembly of
+    /// either shows the same instructions with the same one marked. There is
+    /// nothing else they could honestly show — what an expansion removed was
+    /// the frame, not the code — so the case needs a frame the machine
+    /// actually pushed, and `m.main` is one.
     #[test]
     fn a_disassembly_is_of_the_frame_it_was_asked_for() {
-        /// The first stop inside `m.inner`: the innermost frame's code, its
-        /// caller's, that caller's own pc, and a frame that is not there.
+        /// The first stop inside `m.inner`: the innermost frame's code, the
+        /// outermost's, that frame's own pc, and a frame that is not there.
         #[derive(Default)]
         #[allow(clippy::type_complexity)]
         struct Frames(Mutex<Option<(Vec<Line>, Vec<Line>, Pc, Vec<Line>)>>);
@@ -1262,10 +1426,10 @@ export fn main() -> Int {
             fn at(&self, stop: &Stop<'_>) -> Resume {
                 let mut held = self.0.lock().expect("a lock");
                 if held.is_none() && stop.function() == "m.inner" {
-                    let caller = stop.frame(1).expect("`m.inner` was called from `m.outer`");
+                    let caller = stop.frame(2).expect("`m.outer` was called from `m.main`");
                     *held = Some((
                         stop.code(0, 2),
-                        stop.code(1, 2),
+                        stop.code(2, 2),
                         caller.pc(),
                         stop.code(9, 2),
                     ));
@@ -1291,7 +1455,11 @@ export fn main() -> Int {
             found[0].clone()
         };
 
-        assert_eq!(marked(&innermost).pc(), 0, "a call stops at the callee's 0");
+        assert_eq!(
+            marked(&innermost).pc(),
+            1,
+            "`m.inner`'s body begins at `m.outer`'s counter 1"
+        );
         assert_eq!(
             marked(&outer).pc(),
             caller_pc,

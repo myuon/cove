@@ -166,12 +166,12 @@ fn a_declared_parameter_says_what_an_erased_argument_is_opened_at() {
         ),
         "\
 fn @m.f() -> Int
-  frame 4: s0:int s1:ref s2:ref s3:int
+  frame 5: s0:int s1:ref s2:ref s3:int s4:int
      0  str s1:ref \"n\"
      1  call-host s2:Any oracle.ask (s1:String)
      2  unbox s3:Int s2:ref
      3  clear s2:Any
-     4  call s0:Int m.g (s3:Int)
+     4  copy s0:Int s3:Int
      5  return s0:Int
 "
     );

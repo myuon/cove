@@ -853,8 +853,17 @@
           return;
         }
         const held = recording.functions[frame.function];
+        // Titled by whose instructions these are, and by whose body the frame
+        // is when the two differ: a small leaf is expanded where it is
+        // called, so a frame can be `twice` while the stream it runs in is
+        // `main`. A title naming only one of them would put one function's
+        // listing under the other's name.
+        const title =
+          frame.body === held.name
+            ? held.name
+            : `${frame.body} (inlined into ${held.name})`;
         rows("pane-code", [
-          { text: held.name, quiet: true },
+          { text: title, quiet: true },
           ...held.code.map((line) => ({
             text: `${number(line.pc, 5)}  ${line.text}`,
             now: line.pc === frame.pc,
@@ -869,7 +878,10 @@
       function paintRuntime(moment, frames) {
         const lines = [];
         frames.forEach((frame, at) => {
-          const name = recording.functions[frame.function].name;
+          // The body the frame is, which is the leaf itself for one an
+          // expansion wrote into its caller. `frame.function` indexes the
+          // table of disassemblies and would name the caller here.
+          const name = frame.body;
           lines.push({
             text: `#${at} ${name}  pc ${frame.pc}  line ${frame.line}`,
             now: at === picked,

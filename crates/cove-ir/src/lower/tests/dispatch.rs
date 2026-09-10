@@ -44,16 +44,16 @@ fn a_dyn_call_switches_on_the_layout_the_box_records() {
         ),
         "\
 fn @m.take(Any) -> String
-  frame 7: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:int
+  frame 9: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:int s7:ref s8:ref
   local v -> s0:Any [0, 12)
      0  load-field s2:Int s0:ref +0
      1  switch s2:int [9 9 9 9 9 9 9 9 9 9 9 9 9 9 2 6] else 9
      2  unbox s4:m.Name s0:ref
-     3  call s3:String m.Name.show (s4:m.Name)
+     3  copy s3:String s4:String
      4  clear s4:m.Name
      5  jump 10
      6  unbox s5..s6:m.Point s0:ref
-     7  call s3:String m.Point.show (s5..s6:m.Point)
+     7  str s3:ref \"point\"
      8  jump 10
      9  trap \"no implementation of `Show.show` for this value\"
     10  copy s1:String s3:String
@@ -94,7 +94,7 @@ fn a_dyn_struct_field_holds_the_box() {
         ),
         "\
 fn @m.f() -> String
-  frame 7: s0:ref s1:ref s2:ref s3:int s4:ref s5:int s6:int
+  frame 9: s0:ref s1:ref s2:ref s3:int s4:ref s5:int s6:int s7:ref s8:ref
   local h -> s2:m.Holder [5, 16)
      0  str s1:ref \"n\"
      1  copy s2:String s1:String
@@ -104,11 +104,11 @@ fn @m.f() -> String
      5  load-field s3:Int s2:ref +0
      6  switch s3:int [14 14 14 14 14 14 14 14 14 14 14 14 14 14 7 11] else 14
      7  unbox s4:m.Name s2:ref
-     8  call s1:String m.Name.show (s4:m.Name)
+     8  copy s1:String s4:String
      9  clear s4:m.Name
     10  jump 15
     11  unbox s5..s6:m.Point s2:ref
-    12  call s1:String m.Point.show (s5..s6:m.Point)
+    12  str s1:ref \"point\"
     13  jump 15
     14  trap \"no implementation of `Show.show` for this value\"
     15  copy s0:String s1:String
@@ -128,11 +128,13 @@ fn @m.f() -> String
 /// generic declaration's `Ty::Param` needs, one parameter instead of
 /// several.
 ///
-/// `self.summarize()` inside it costs one ordinary [`crate::Inst::Call`]:
-/// the checker recorded no target — which implementation it reaches is
+/// `self.summarize()` inside it resolves statically, not dynamically: the
+/// checker recorded no target — which implementation it reaches is
 /// decided by the type — and this body is lowered for *one* type, so the
-/// bounded-call path finds `m.Receipt.summarize` statically. No dictionary,
-/// no vtable.
+/// bounded-call path finds `m.Booking.summarize` or `m.Receipt.summarize`
+/// by name. No dictionary, no vtable — and because each is a small leaf,
+/// `super::super::inline` expands it where `self.summarize()` was, so neither
+/// listing below still has a call for it.
 #[test]
 fn a_trait_method_s_default_body_is_lowered_once_per_conforming_type() {
     let source = "/// t\nexport trait Summary {\n  /// s\n  fn summarize(self) -> String\n\n  \
@@ -146,22 +148,23 @@ fn a_trait_method_s_default_body_is_lowered_once_per_conforming_type() {
         listing(source, "Booking.line"),
         "\
 fn @m.Booking.line(m.Booking) -> String
-  frame 4: s0!:int s1:ref s2:ref s3:ref
-  local self -> s0:m.Booking [0, 4)
+  frame 6: s0!:int s1:ref s2:ref s3:ref s4:ref s5:ref
+  local self -> s0:m.Booking [0, 5)
      0  str s2:ref \"- \"
-     1  call s3:String m.Booking.summarize (s0:m.Booking)
-     2  call-builtin s1:String String.interpolate (s2:String s3:String)
-     3  return s1:String
+     1  str s5:ref \"booking \"
+     2  call-builtin s3:String String.interpolate (s5:String s0:Int)
+     3  call-builtin s1:String String.interpolate (s2:String s3:String)
+     4  return s1:String
 "
     );
     assert_eq!(
         listing(source, "Receipt.line"),
         "\
 fn @m.Receipt.line(m.Receipt) -> String
-  frame 4: s0!:int s1:ref s2:ref s3:ref
+  frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
   local self -> s0:m.Receipt [0, 4)
      0  str s2:ref \"- \"
-     1  call s3:String m.Receipt.summarize (s0:m.Receipt)
+     1  str s3:ref \"receipt\"
      2  call-builtin s1:String String.interpolate (s2:String s3:String)
      3  return s1:String
 "
@@ -184,10 +187,10 @@ fn a_conformance_that_writes_its_own_body_does_not_get_the_default() {
         ),
         "\
 fn @m.Receipt.line(m.Receipt) -> String
-  frame 4: s0!:int s1:ref s2:ref s3:ref
+  frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
   local self -> s0:m.Receipt [0, 4)
      0  str s2:ref \"  $ \"
-     1  call s3:String m.Receipt.summarize (s0:m.Receipt)
+     1  str s3:ref \"receipt\"
      2  call-builtin s1:String String.interpolate (s2:String s3:String)
      3  return s1:String
 "
