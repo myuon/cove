@@ -122,6 +122,22 @@ test fn an_empty_source_is_no_tokens() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// A character wider than one byte does not end the run it is inside.
+///
+/// `codePointAtByte` answers nothing at an offset that is not a character
+/// boundary, so a rule stepping one byte at a time read that as the end of
+/// the file and cut its token short. It was a `—` inside a comment that found
+/// it, on a corpus rather than on a sample — and the tiling held either way,
+/// which is why the property is necessary and not sufficient.
+test fn a_wide_character_does_not_end_the_run_it_is_in(
+) -> Result<Unit, Error> {
+  assertEqual(shape("// an — dash\nx"), "line space word")?
+  assertEqual(shape("/* an — dash */"), "block")?
+  assertEqual(shape("\"an — dash\""), "str")?
+  assertEqual(shape("— x"), "unknown space word")?
+  Ok(())
+}
+
 /// The property the whole lexer exists for, over source with every form in
 /// it: the runs cover the text exactly, and joining them gives it back.
 ///

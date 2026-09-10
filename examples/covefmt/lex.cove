@@ -101,6 +101,8 @@ export fn tokens(source: String) -> Array<Token> {
       if width > 0 {
         kind = Kind.Punct
         to = at + width
+      } else {
+        to = at + utf8Width(c)
       }
     }
     out.push(Token(kind: kind, from: at, to: to))
@@ -136,5 +138,8 @@ export fn tiles(source: String, held: Array<Token>) -> Bool {
 
 /// The text a token names.
 export fn text(source: String, token: Token) -> String {
-  source.sliceBytes(token.from, token.to).unwrapOr("")
+  match source.sliceBytes(token.from, token.to) {
+    Ok(held) => held
+    Err(_) => ""
+  }
 }

@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:febbaf51c68e36a7
+hash fnv1a64:cace04d650e82238
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -269,6 +269,28 @@ module covefmt
     case Word
     case Punct
     case Unknown
+  /// What a node of the tree is.
+  ///
+  /// One kind per shape the item level of Cove has, plus the three a lossless
+  /// tree needs whatever the grammar says: a leaf, a run of trivia, and a run
+  /// no rule claimed.
+  export enum Node
+    case File
+    case Use
+    case Fn
+    case Struct
+    case Enum
+    case Impl
+    case Trait
+    case TypeAlias
+    case Name
+    case Generics
+    case Params
+    case Returns
+    case Body
+    case Trivia
+    case Leaf
+    case Error
   /// One run of source, named by its kind and its half-open byte range.
   ///
   /// A byte range and not a character range: `String` hands out byte offsets
@@ -278,6 +300,60 @@ module covefmt
     field kind: Kind
     field from: Int
     field to: Int
+  /// One node: what it is, the tokens it covers, and what it is made of.
+  ///
+  /// `from` and `to` are indices into the token array, half-open. The invariant
+  /// is [`tiles`]'s: **a node's children cover its range exactly, in order**,
+  /// and a node with no children is one token. It is the lexer's tiling one
+  /// level up, and it is what says the tree has lost nothing — a formatter that
+  /// walks it reaches every comment and every blank line, because they are in
+  /// it rather than beside it.
+  export struct Tree
+    field kind: Node
+    field from: Int
+    field to: Int
+    field children: Array<Tree>
+  /// Whether `tree` covers `[from, to)` and its children tile it.
+  ///
+  /// Named apart from `lex`'s `tiles` because a module holds one declaration
+  /// per name — there is no overloading — and these two are the same property
+  /// asked of two things.
+  ///
+  /// Recursive, because the property is: a node with children has them in order,
+  /// adjacent, beginning at its own start and ending at its own end; a node with
+  /// none is one token wide.
+  export fn covers(tree: Tree, from: Int, to: Int) -> Bool
+  /// A leaf: one token, no children.
+  export fn leafAt(at: Int) -> Tree
+  /// A node over `children`, which are assumed to be in order and adjacent.
+  export fn nodeOf(kind: Node, from: Int, to: Int, children: Array<Tree>) -> Tree
+  /// The tree of one source.
+  export fn parse(source: String) -> Tree
+  /// Turning a tree back into text.
+  ///
+  /// This slice makes no layout decision: it walks the tree and writes what each
+  /// token said. That is not the formatter — a formatter chooses where a line
+  /// breaks and how far it is indented — but it is the half of one that has to
+  /// be right first, and it is the half that can be checked *now*.
+  ///
+  /// The check is the repository itself. Every `.cove` file here passes
+  /// `cove fmt --check`, so every one of them is already what the formatter
+  /// should produce, and a formatter that is correct reproduces all 242 of them
+  /// byte for byte. `print(parse(source)) == source` is that, and it is a
+  /// stronger statement than the tiling: the tiling says the tree *covers* the
+  /// tokens, and this says a walk of it *reaches* them, in order, whole.
+  ///
+  /// The output is built by pushing each piece and joining once. Appending with
+  /// an interpolation is quadratic — `examples/cq/README.md` measured that, and
+  /// on a 200 KB output it is 29 seconds against 56 milliseconds — and a
+  /// formatter's whole output is one append after another. Cove has no string
+  /// builder, and a `Vector<String>` joined once is the shape of one.
+  /// The text a tree prints as.
+  export fn print(source: String, held: Array<Token>, tree: Tree) -> String
+  /// Whether printing the tree of `source` gives `source` back.
+  export fn roundTrips(source: String) -> Bool
+  /// How many nodes the tree holds, itself included.
+  export fn size(tree: Tree) -> Int
   /// The text a token names.
   export fn text(source: String, token: Token) -> String
   /// Whether `held` tiles `source`.

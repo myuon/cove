@@ -1,0 +1,65 @@
+/// Turning a tree back into text.
+///
+/// This slice makes no layout decision: it walks the tree and writes what each
+/// token said. That is not the formatter — a formatter chooses where a line
+/// breaks and how far it is indented — but it is the half of one that has to
+/// be right first, and it is the half that can be checked *now*.
+///
+/// The check is the repository itself. Every `.cove` file here passes
+/// `cove fmt --check`, so every one of them is already what the formatter
+/// should produce, and a formatter that is correct reproduces all 242 of them
+/// byte for byte. `print(parse(source)) == source` is that, and it is a
+/// stronger statement than the tiling: the tiling says the tree *covers* the
+/// tokens, and this says a walk of it *reaches* them, in order, whole.
+///
+/// The output is built by pushing each piece and joining once. Appending with
+/// an interpolation is quadratic — `examples/cq/README.md` measured that, and
+/// on a 200 KB output it is 29 seconds against 56 milliseconds — and a
+/// formatter's whole output is one append after another. Cove has no string
+/// builder, and a `Vector<String>` joined once is the shape of one.
+/// The text a tree prints as.
+export fn print(source: String, held: Array<Token>, tree: Tree) -> String {
+  var out = Vector.of()
+  emit(source, held, tree, var out)
+  "".join(out.toArray())
+}
+
+/// Pushes the text of `tree` and everything under it.
+///
+/// A leaf is one token's run of source. A node is its children in order — and
+/// because the children tile it, that is every token it covers and nothing
+/// else.
+fn emit(
+  source: String,
+  held: Array<Token>,
+  tree: Tree,
+  var out: Vector<String>,
+) {
+  if tree.children.length() == 0 {
+    if tree.kind == Node.Leaf {
+      match held.get(tree.from) {
+        Some(token) => out.push(text(source, token))
+        None => { }
+      }
+    }
+    return
+  }
+  // The count is read once. `length()` is a builtin call, and a `while` that
+  // asks for it every turn asks once per child of every node in the file.
+  let children = tree.children
+  let count = children.length()
+  var i = 0
+  while i < count {
+    match children.get(i) {
+      Some(child) => emit(source, held, child, var out)
+      None => { }
+    }
+    i = i + 1
+  }
+}
+
+/// Whether printing the tree of `source` gives `source` back.
+export fn roundTrips(source: String) -> Bool {
+  let held = tokens(source)
+  print(source, held, parse(source)) == source
+}

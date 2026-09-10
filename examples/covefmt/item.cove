@@ -1,0 +1,202 @@
+/// The item level: what a file is a list of.
+impl Parser {
+  /// One declaration, with whatever stands in front of it.
+  ///
+  /// The words a declaration may be preceded by — `export`, `test`, `opaque`
+  /// — are leaves of the item rather than a node of their own: they are one
+  /// token each and a formatter puts them back in the order it found them.
+  fn item(var self) -> Tree {
+    let from = self.at
+    var held = Vector.of()
+    self.trivia(var held)
+    if self.done() {
+      return nodeOf(Node.Trivia, from, self.at, held.toArray())
+    }
+
+    // The modifiers, then the word that says what this is.
+    while isWord(self.source, self.tokens, self.at, "export") ||
+      isWord(self.source, self.tokens, self.at, "test") ||
+      isWord(self.source, self.tokens, self.at, "async") ||
+      isWord(self.source, self.tokens, self.at, "opaque") {
+      held.push(self.leaf())
+      self.trivia(var held)
+    }
+
+    if isWord(self.source, self.tokens, self.at, "use") {
+      held.push(self.leaf())
+      return self.toEndOfLine(Node.Use, from, var held)
+    }
+    if isWord(self.source, self.tokens, self.at, "type") {
+      held.push(self.leaf())
+      return self.toEndOfLine(Node.TypeAlias, from, var held)
+    }
+    if isWord(self.source, self.tokens, self.at, "fn") {
+      held.push(self.leaf())
+      return self.function(from, var held)
+    }
+    for pair in declarations() {
+      if isWord(self.source, self.tokens, self.at, pair.word) {
+        held.push(self.leaf())
+        return self.braced(pair.kind, from, var held)
+      }
+    }
+
+    // Nothing above claimed it. Everything to the next declaration is an
+    // error node, so the tree still covers the file — which is what a file
+    // being typed looks like, and what a formatter must not lose.
+    self.toNextItem(from, var held)
+  }
+
+  /// A declaration named, then given a braced body: `struct`, `enum`,
+  /// `impl`, `trait`.
+  fn braced(var self, kind: Node, from: Int, var held: Vector<Tree>) -> Tree {
+    self.trivia(var held)
+    self.nameAndGenerics(var held)
+    // Everything up to the body — an `impl`'s trait and receiver, a `for` —
+    // is leaves, because it is a type expression and this slice does not read
+    // one.
+    while !self.done() && !isPunct(self.source, self.tokens, self.at, "\{") {
+      held.push(self.leaf())
+    }
+    if !self.done() {
+      held.push(self.balanced(Node.Body))
+    }
+    nodeOf(kind, from, self.at, held.toArray())
+  }
+
+  /// A function: a name, generics, parameters, an answer, and a body.
+  ///
+  /// A `trait`'s method has no body, and this answers where it stands
+  /// without one: the rules below take what is there, and a declaration that
+  /// ends at a line ends there.
+  fn function(var self, from: Int, var held: Vector<Tree>) -> Tree {
+    self.trivia(var held)
+    self.nameAndGenerics(var held)
+    self.trivia(var held)
+    if isPunct(self.source, self.tokens, self.at, "(") {
+      held.push(self.balanced(Node.Params))
+    }
+    self.trivia(var held)
+    if isPunct(self.source, self.tokens, self.at, "->") {
+      let at = self.at
+      var answer = Vector.of()
+      answer.push(self.leaf())
+      // A return type ends where the body begins, or at the end of the line
+      // for a method a trait only declares.
+      while !self.done() && !isPunct(self.source, self.tokens, self.at, "\{") &&
+        !self.startsLine() {
+        answer.push(self.leaf())
+      }
+      held.push(nodeOf(Node.Returns, at, self.at, answer.toArray()))
+    }
+    if isPunct(self.source, self.tokens, self.at, "\{") {
+      held.push(self.balanced(Node.Body))
+    }
+    nodeOf(Node.Fn, from, self.at, held.toArray())
+  }
+
+  /// The name of a declaration, and its generic parameters where it has any.
+  fn nameAndGenerics(var self, var held: Vector<Tree>) {
+    match self.tokens.get(self.at) {
+      Some(token) => {
+        if token.kind == Kind.Word {
+          let at = self.at
+          held.push(nodeOf(Node.Name, at, at + 1, [self.leaf()]))
+        }
+      }
+      None => { }
+    }
+    if isPunct(self.source, self.tokens, self.at, "<") {
+      held.push(self.balancedAngles())
+    }
+  }
+
+  /// `<T, E>`, counted over the angle brackets alone.
+  ///
+  /// Apart from `balanced` because a `<` is a comparison as often as it is a
+  /// bracket, and only here — immediately after a declaration's name — is it
+  /// certainly the second.
+  fn balancedAngles(var self) -> Tree {
+    let from = self.at
+    var held = Vector.of()
+    var depth = 0
+    while !self.done() {
+      let c = self.punctByte(self.at)
+      let opens = c == '<'
+      let closes = c == '>'
+      if opens {
+        depth = depth + 1
+      }
+      held.push(self.leaf())
+      if closes {
+        depth = depth - 1
+        if depth <= 0 {
+          return nodeOf(Node.Generics, from, self.at, held.toArray())
+        }
+      }
+    }
+    nodeOf(Node.Generics, from, self.at, held.toArray())
+  }
+
+  /// Whether the cursor is at a run of space holding a newline.
+  fn startsLine(self) -> Bool {
+    match self.tokens.get(self.at) {
+      Some(token) => token.kind == Kind.Space && endsLine(self.source, token)
+      None => false
+    }
+  }
+
+  /// Everything up to the next declaration, as one `Error`.
+  fn toNextItem(var self, from: Int, var held: Vector<Tree>) -> Tree {
+    held.push(self.leaf())
+    while !self.done() && !self.atDeclaration() {
+      held.push(self.leaf())
+    }
+    nodeOf(Node.Error, from, self.at, held.toArray())
+  }
+
+  /// Whether a declaration begins at the cursor.
+  fn atDeclaration(self) -> Bool {
+    if isWord(self.source, self.tokens, self.at, "export") ||
+      isWord(self.source, self.tokens, self.at, "test") ||
+      isWord(self.source, self.tokens, self.at, "async") ||
+      isWord(self.source, self.tokens, self.at, "use") ||
+      isWord(self.source, self.tokens, self.at, "type") ||
+      isWord(self.source, self.tokens, self.at, "fn") {
+      return true
+    }
+    for pair in declarations() {
+      if isWord(self.source, self.tokens, self.at, pair.word) {
+        return true
+      }
+    }
+    false
+  }
+}
+
+/// A word that introduces a declaration, and the node it makes.
+struct Declaration {
+  word: String
+  kind: Node
+}
+
+/// The four that are a name and a braced body.
+fn declarations() -> Array<Declaration> {
+  [
+    Declaration(word: "struct", kind: Node.Struct),
+    Declaration(word: "enum", kind: Node.Enum),
+    Declaration(word: "impl", kind: Node.Impl),
+    Declaration(word: "trait", kind: Node.Trait),
+  ]
+}
+
+/// The tree of one source.
+export fn parse(source: String) -> Tree {
+  let held = tokens(source)
+  var parser = Parser(source: source, tokens: held, at: 0)
+  var items = Vector.of()
+  while !parser.done() {
+    items.push(parser.item())
+  }
+  nodeOf(Node.File, 0, held.length(), items.toArray())
+}
