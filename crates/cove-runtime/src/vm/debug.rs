@@ -186,8 +186,23 @@ impl<'m> Stop<'m> {
     }
 
     /// `module.name` of the function this stop is in.
+    ///
+    /// A `String`, built here, because that is what a session prints and a
+    /// name is what a person reads. A caller that will look the function up
+    /// again — a profiler counting instructions, above all — wants
+    /// [`Stop::function_id`] instead: this allocates, and a debugger that
+    /// stops at every instruction would allocate at every instruction.
     pub fn function(&self) -> String {
         self.machine.program().function(self.function).qualified()
+    }
+
+    /// Which function this stop is in, as the program names it.
+    ///
+    /// The identity rather than the name: two stops in one function answer
+    /// the same id, and an id indexes `Program::functions` — so a caller can
+    /// hold one per stop without holding a string per stop.
+    pub fn function_id(&self) -> FunctionId {
+        self.function
     }
 
     /// Which instruction of that function is about to run.
@@ -649,7 +664,7 @@ pub(crate) fn halted(span: Span) -> RuntimeError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -730,14 +745,14 @@ export fn main() -> Int {
 
     /// Everything one run needs, held together so that the borrows it takes
     /// of each other outlive the [`Vm`] built on them.
-    struct World {
+    pub(crate) struct World {
         hosts: Arc<HostRegistry>,
         runtime: Runtime,
         program: cove_ir::Program,
     }
 
     impl World {
-        fn new(source: &str) -> World {
+        pub(crate) fn new(source: &str) -> World {
             let (sources, checked) = checked(source);
             let program = lowered(&sources, &checked);
             let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
@@ -750,12 +765,12 @@ export fn main() -> Int {
         }
 
         /// A run nothing is watching.
-        fn plain(&self) -> Vm<'_> {
+        pub(crate) fn plain(&self) -> Vm<'_> {
             Vm::new(&self.runtime, &self.hosts, &self.program)
         }
 
         /// A run `debugger` is watching.
-        fn watched<'w>(&'w self, debugger: &'w dyn Debugger) -> Vm<'w> {
+        pub(crate) fn watched<'w>(&'w self, debugger: &'w dyn Debugger) -> Vm<'w> {
             Vm::debugged(&self.runtime, &self.hosts, &self.program, debugger)
         }
     }
