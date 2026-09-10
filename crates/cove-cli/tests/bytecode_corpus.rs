@@ -175,9 +175,9 @@ fn every_program_the_repository_keeps_encodes_verifies_and_reads_back() {
     // The margin was 500× and is 400×, moved once and deliberately.
     // `lower::inline` expands a call to a small leaf where it is made, and an
     // expansion appends the callee's run to the caller's frame: the widest
-    // frame here went from 131 words to 145, an 11% cost paid for the frames
-    // that are no longer pushed at all. 452× is what that leaves, and what the
-    // ADR's argument needs is "nowhere near", which 452 is as much as 500 was.
+    // frame here went from 131 words to 147, a 12% cost paid for the frames
+    // that are no longer pushed at all. 445× is what that leaves, and what the
+    // ADR's argument needs is "nowhere near", which 445 is as much as 500 was.
     // A number that moved because a pass was added is worth moving with a
     // sentence rather than quietly widening to fit.
     assert!(

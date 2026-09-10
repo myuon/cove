@@ -166,14 +166,48 @@ fn a_session_starts_stopped_before_the_entry_s_first_instruction() {
 /// program maps source back to instructions, so `break <file>:<line>` is
 /// answered by a table `cove debug` computes and by nothing the compiler
 /// records.
+///
+/// **Two locations, and the second is the point.** `twice` is a small leaf,
+/// so `lower::inline` expanded it into `raise` — its line is written in two
+/// functions now, its own copy and the expansion, and the expansion is the
+/// one that runs. Both are offered and both are named `debug_session.twice`,
+/// because that is the body the line is written in; what tells them apart is
+/// where each one *stands*.
 #[test]
 fn a_breakpoint_set_on_a_source_line_stops_the_run_on_that_line() {
     let session = debug("break debug_session/main.cove:6\ncontinue\nquit\n");
-    session.says("breakpoint 1 at 1 location:");
+    session.says("breakpoint 1 at 2 locations:");
     session.says("debug_session.twice pc 0 at debug_session/main.cove:6:");
+    session.says(
+        "debug_session.twice (inlined into debug_session.raise) pc 1 at \
+         debug_session/main.cove:6:",
+    );
     session.says("breakpoint 1, debug_session.twice at debug_session/main.cove:6:");
     // Stopped at the line, and stopped *before* the program got past it.
     session.wrote("before");
+    session.never_wrote("after");
+    assert_eq!(session.code, Some(0));
+}
+
+/// **A line whose call was expanded away is still a line to break on, and it
+/// stops before the body rather than after it.**
+///
+/// `raise`'s `twice(raised)` is not an `Inst::Call` any more, so the lowest
+/// pc written on that line is the `return` the expansion left behind —
+/// *after* the callee has run. A breakpoint there would fire on the way out
+/// of a body a person meant to stop at the way in.
+///
+/// `Inlined::site` is what answers it: the line means the first counter of
+/// the body that was called, and stopping there is stopping inside `twice`
+/// with `raise` beneath it, which is where a `step` from the call would have
+/// arrived.
+#[test]
+fn a_breakpoint_on_a_line_whose_call_was_expanded_stops_inside_the_body() {
+    let session = debug("break debug_session/main.cove:14\ncontinue\nbacktrace\nquit\n");
+    session.says("breakpoint 1 at 1 location:");
+    session.says("debug_session.raise pc 1 at debug_session/main.cove:14:");
+    session.says("#0  debug_session.twice at debug_session/main.cove:6:");
+    session.says("#1  debug_session.raise at debug_session/main.cove:14:");
     session.never_wrote("after");
     assert_eq!(session.code, Some(0));
 }
@@ -304,17 +338,25 @@ fn finish_runs_the_frame_to_its_return_and_stops_in_the_caller() {
 ///
 /// The one difference between the two rules — `next` refuses to stop at a
 /// frame deeper than the one it was asked from — measured where it shows:
-/// stepping at the call in `raise`.
+/// stepping at the call in `main`.
+///
+/// It is `main`'s call to `raise` and not `raise`'s call to `twice`, because
+/// the latter is not a call any more: `lower::inline` expanded `twice`, and
+/// a line whose call was expanded stops *inside* the body — there is no
+/// instruction on it that runs before the callee does, so there is nothing
+/// for a `step` to step into or a `next` to step over. `raise` calls
+/// `println` and is not a leaf, so it is still a call and still the shape
+/// this rule is about.
 #[test]
 fn step_stops_inside_a_call_and_next_runs_it_to_completion() {
-    let into = debug("break debug_session/main.cove:14\ncontinue\nstep\nbacktrace\nquit\n");
-    into.says("#0  debug_session.twice");
+    let into = debug("break debug_session/main.cove:29\ncontinue\nstep\nbacktrace\nquit\n");
+    into.says("#0  debug_session.raise");
 
-    let over = debug("break debug_session/main.cove:14\ncontinue\nnext\nbacktrace\nquit\n");
-    over.never_says("#0  debug_session.twice");
-    // Still in `raise`, or already back in `main`; either way not deeper.
+    let over = debug("break debug_session/main.cove:29\ncontinue\nnext\nbacktrace\nquit\n");
+    over.never_says("#0  debug_session.raise");
+    // Already back in `main`; either way not deeper.
     assert!(
-        over.out.contains("#0  debug_session.raise") || over.out.contains("#0  debug_session.main"),
+        over.out.contains("#0  debug_session.main"),
         "`next` never stopped below the frame it was asked from:\n{}",
         over.out
     );
@@ -351,7 +393,7 @@ fn stepi_advances_one_instruction_and_the_count_says_so() {
 #[test]
 fn disassemble_marks_the_current_instruction_and_words_reports_the_unnamed_ones() {
     let session = debug("break debug_session/main.cove:6\ncontinue\ndisassemble 1\nwords\nquit\n");
-    session.says("debug_session.twice:");
+    session.says("debug_session.twice (inlined into debug_session.raise):");
     let marked: Vec<&str> = session
         .out
         .lines()
@@ -565,15 +607,24 @@ fn a_stop_in_a_spawned_task_says_whose_it_is_and_a_step_stays_in_that_task() {
 /// frame 0's instructions — a listing that looks right and is not. The stop
 /// can read any live frame's code; which one is the session's choice to
 /// make, and it makes the same one for every looking command.
+///
+/// Frame 2 and not frame 1, because frame 1 is `raise` and frame 0 is a body
+/// `lower::inline` expanded *into* `raise`: the two are one instruction
+/// stream, so a disassembly of either shows the same instructions with the
+/// same one marked. That is not a bug and there is nothing else it could
+/// honestly show — what the expansion removed was the frame, not the code.
+/// `main` is a frame the machine actually pushed, which is what makes two
+/// listings two.
 #[test]
 fn disassemble_shows_the_selected_frame_and_not_only_the_innermost() {
     let session = debug(
-        "break debug_session/main.cove:6\ncontinue\ndisassemble 1\nframe 1\ndisassemble 1\nquit\n",
+        "break debug_session/main.cove:6\ncontinue\ndisassemble 1\nframe 2\ndisassemble 1\nquit\n",
     );
-    session.wrote("debug_session.twice:");
-    session.wrote("debug_session.raise:");
+    session.wrote("debug_session.twice (inlined into debug_session.raise):");
+    session.wrote("debug_session.main:");
     assert!(
-        session.at("debug_session.twice:") < session.at("debug_session.raise:"),
+        session.at("debug_session.twice (inlined into debug_session.raise):")
+            < session.at("debug_session.main:"),
         "the innermost was shown first, and the selected frame after:\n{}",
         session.out
     );

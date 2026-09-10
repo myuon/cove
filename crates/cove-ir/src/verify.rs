@@ -431,6 +431,68 @@ impl Check<'_> {
                 );
             }
         }
+        // The same question about the same kind of table, asked of the bodies
+        // an expansion wrote here. `Inlined` is `Local`'s shape and is read by
+        // the same readers — an error's chain, a backtrace, a profile — so a
+        // range or a slot that names nothing is the same fault, and it is one
+        // nothing at run time would notice: an expansion is not executed
+        // *through* its record, it is merely described by it.
+        for index in 0..self.function.inlined.len() {
+            let held = self.function.inlined[index].clone();
+            let callee = held.callee.index();
+            let name = match self.program.functions.get(callee) {
+                Some(function) => function.qualified(),
+                None => {
+                    self.fault(
+                        None,
+                        format!("an expanded body names function {callee}, which is not one"),
+                    );
+                    continue;
+                }
+            };
+            if held.from > held.to {
+                self.fault(
+                    None,
+                    format!(
+                        "the expansion of `{name}` runs from {} to {}",
+                        held.from, held.to
+                    ),
+                );
+            } else if held.to as usize > self.function.code.len() {
+                self.fault(
+                    None,
+                    format!(
+                        "the expansion of `{name}` ends at {} and the function has {} \
+                         instructions",
+                        held.to,
+                        self.function.code.len()
+                    ),
+                );
+            }
+            for local in held.locals {
+                let bound = local.name;
+                if self.layout_exists(None, local.layout) {
+                    self.fits(
+                        None,
+                        local.slot,
+                        local.layout,
+                        &format!("local `{bound}` of the expanded `{name}`"),
+                    );
+                }
+                if local.from > local.to || local.to as usize > self.function.code.len() {
+                    self.fault(
+                        None,
+                        format!(
+                            "local `{bound}` of the expanded `{name}` is live from {} to {}, \
+                             and the function has {} instructions",
+                            local.from,
+                            local.to,
+                            self.function.code.len()
+                        ),
+                    );
+                }
+            }
+        }
         let _ = size;
     }
 
@@ -1253,6 +1315,7 @@ mod tests {
             captures: Vec::new(),
             code,
             locals: Vec::new(),
+            inlined: Vec::new(),
             span: span(),
             is_async: false,
             stub: false,

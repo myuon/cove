@@ -722,8 +722,8 @@ fn an_array_literal_erases_each_element_the_written_type_erases() {
         ),
         "\
 fn @m.f(m.B) -> Int
-  frame 6: s0!:int s1:int s2:ref s3:ref s4:ref s5:int
-  local b -> s0:m.B [0, 11)
+  frame 8: s0!:int s1:int s2:ref s3:ref s4:ref s5:int s6:int s7:int
+  local b -> s0:m.B [0, 12)
      0  box s2:ref s0:m.B
      1  box s3:ref s0:m.B
      2  alloc s4:ref Array<array> x2
@@ -733,8 +733,9 @@ fn @m.f(m.B) -> Int
      6  store-elem s4:ref s5:int s3:Any
      7  clear s3:Any
      8  clear s2:Any
-     9  call s1:Int m.r (s4:Array)
-    10  return s1:Int
+     9  len s7:int s4:ref
+    10  copy s1:Int s7:Int
+    11  return s1:Int
 "
     );
 }

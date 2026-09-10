@@ -67,11 +67,12 @@ fn a_duration_builder_is_a_call_the_standard_library_implements() {
         listing("fn wait() -> Duration { Duration.millis(1) }", "wait"),
         "\
 fn @m.wait() -> Duration
-  frame 3: s0:duration s1:int s2:duration
+  frame 5: s0:duration s1:int s2:duration s3:duration s4:int
      0  int s1:int 1
-     1  call s2:Duration std.duration.ofMillis (s1:Int)
-     2  copy s0:Duration s2:Duration
-     3  return s0:Duration
+     1  mul.int.imm s4:int s1:int 1000000
+     2  call-builtin s2:Duration Duration.nanos (s4:Int)
+     3  copy s0:Duration s2:Duration
+     4  return s0:Duration
 "
     );
 }
@@ -82,42 +83,53 @@ fn a_duration_reader_is_a_call_the_standard_library_implements() {
         listing("fn ms(d: Duration) -> Int { d.millis() }", "ms"),
         "\
 fn @m.ms(Duration) -> Int
-  frame 3: s0!:duration s1:int s2:int
-  local d -> s0:Duration [0, 3)
-     0  call s2:Int std.duration.millis (s0:Duration)
-     1  copy s1:Int s2:Int
-     2  return s1:Int
+  frame 5: s0!:duration s1:int s2:int s3:int s4:int
+  local d -> s0:Duration [0, 4)
+     0  call-builtin s4:Int Duration.nanos (s0:Duration)
+     1  div.int.imm s2:int s4:int 1000000
+     2  copy s1:Int s2:Int
+     3  return s1:Int
 "
     );
 }
 
-/// `Option.isSome` no longer compiles to an inline discriminant comparison:
-/// it is one of the methods `cove_schema::builtins::STANDARD_LIBRARY` names,
-/// so `o.isSome()` is an ordinary [`crate::Inst::Call`] into
-/// `std.option.isSome` and never a
+/// `Option.isSome` does not compile through the special-cased inline
+/// discriminant comparison: it is one of the methods
+/// `cove_schema::builtins::STANDARD_LIBRARY` names, so `o.isSome()`
+/// resolves to an ordinary call into `std.option.isSome`, never a
 /// [`Body::call_builtin_method`](super::super::Body::call_builtin_method)
-/// dispatch — the same path `a_method_the_standard_library_implements_is_an_ordinary_call`
-/// shows for `Array.isEmpty`.
+/// dispatch — the same path
+/// `a_method_the_standard_library_implements_is_an_ordinary_call` shows for
+/// `Array.isEmpty`. That target is a small leaf, so
+/// `super::super::inline` expands it where the call was; the `switch` below
+/// is `std.option.isSome`'s own body, not the special-cased dispatch
+/// this test is contrasting it with.
 #[test]
 fn is_some_is_a_call_the_standard_library_implements() {
     assert_eq!(
         listing("fn has(o: Option<Int>) -> Bool { o.isSome() }", "has"),
         "\
 fn @m.has(Option) -> Bool
-  frame 4: s0!:tag s1!:int s2:bool s3:bool
-  local o -> s0..s1:Option [0, 3)
-     0  call s3:Bool std.option.isSome<Int> (s0..s1:Option)
-     1  copy s2:Bool s3:Bool
-     2  return s2:Bool
+  frame 5: s0!:tag s1!:int s2:bool s3:bool s4:bool
+  local o -> s0..s1:Option [0, 8)
+     0  switch s0:tag [3 1] else 5
+     1  bool s3:bool true
+     2  jump 6
+     3  bool s3:bool false
+     4  jump 6
+     5  trap \"no `match` arm covers this value\"
+     6  copy s2:Bool s3:Bool
+     7  return s2:Bool
 "
     );
 }
 
-/// `Option.unwrapOr` migrated the same way: `o.unwrapOr(other)` is an
-/// ordinary [`crate::Inst::Call`] into `std.option.unwrapOr`, with `other`
-/// evaluated as an ordinary argument before the call — there is no branch
-/// here for the discriminant to drive, because the discriminant question is
-/// now inside the callee's own body rather than in this caller's listing.
+/// `Option.unwrapOr` migrated the same way: `o.unwrapOr(other)` resolves
+/// to an ordinary call into `std.option.unwrapOr`, with `other` evaluated
+/// as an ordinary argument before the call is prepared. `unwrapOr`'s body
+/// is a small leaf, so `super::super::inline` expands it where the call was,
+/// and the discriminant question that call used to hide inside its own
+/// frame is the `switch` this caller's listing shows instead.
 #[test]
 fn unwrap_or_is_an_ordinary_call_into_the_standard_library() {
     assert_eq!(
@@ -127,12 +139,18 @@ fn unwrap_or_is_an_ordinary_call_into_the_standard_library() {
         ),
         "\
 fn @m.value(Option Int) -> Int
-  frame 5: s0!:tag s1!:int s2!:int s3:int s4:int
-  local o -> s0..s1:Option [0, 3)
-  local other -> s2:Int [0, 3)
-     0  call s4:Int std.option.unwrapOr<Int> (s0..s1:Option s2:Int)
-     1  copy s3:Int s4:Int
-     2  return s3:Int
+  frame 7: s0!:tag s1!:int s2!:int s3:int s4:int s5:int s6:int
+  local o -> s0..s1:Option [0, 9)
+  local other -> s2:Int [0, 9)
+     0  switch s0:tag [4 1] else 6
+     1  copy s6:Int s1:Int
+     2  copy s4:Int s6:Int
+     3  jump 7
+     4  copy s4:Int s2:Int
+     5  jump 7
+     6  trap \"no `match` arm covers this value\"
+     7  copy s3:Int s4:Int
+     8  return s3:Int
 "
     );
 }
@@ -149,20 +167,30 @@ fn a_parser_answers_a_result_and_interns_the_error_it_may_carry() {
         ),
         "\
 fn @m.parse(String) -> Int
-  frame 7: s0!:ref s1:int s2:tag s3:int s4:ref s5:int s6:int
-  local s -> s0:String [0, 6)
+  frame 9: s0!:ref s1:int s2:tag s3:int s4:ref s5:int s6:int s7:int s8:int
+  local s -> s0:String [0, 12)
      0  call-builtin s2..s4:Result Int.parse (s0:String)
      1  int s5:int 0
-     2  call s6:Int std.result.unwrapOr<Int, Error> (s2..s4:Result s5:Int)
-     3  clear s2..s4:Result
-     4  copy s1:Int s6:Int
-     5  return s1:Int
+     2  switch s2:tag [3 6] else 8
+     3  copy s8:Int s3:Int
+     4  copy s6:Int s8:Int
+     5  jump 9
+     6  copy s6:Int s5:Int
+     7  jump 9
+     8  trap \"no `match` arm covers this value\"
+     9  clear s2..s4:Result
+    10  copy s1:Int s6:Int
+    11  return s1:Int
 "
     );
 }
 
 /// The receiver is the first parameter and the written parameters follow
-/// it. Nothing about a method needs a second calling convention.
+/// it, which is the calling convention a bounded call resolves against —
+/// nothing about a method needs a second one. `Point.sum` is a small
+/// leaf, so `super::super::inline` expands it where the call was, and the
+/// receiver's own slots become the `add.int`'s operands, with no call
+/// left to show the convention.
 #[test]
 fn a_method_on_a_declared_type_is_an_ordinary_call() {
     assert_eq!(
@@ -172,21 +200,23 @@ fn a_method_on_a_declared_type_is_an_ordinary_call() {
         ),
         "\
 fn @m.f(m.Point) -> Int
-  frame 3: s0!:int s1!:int s2:int
+  frame 4: s0!:int s1!:int s2:int s3:int
   local p -> s0..s1:m.Point [0, 2)
-     0  call s2:Int m.Point.sum (s0..s1:m.Point)
+     0  add.int s2:int s0:int s1:int
      1  return s2:Int
 "
     );
 }
 
 /// `Array.isEmpty` is not a machine builtin: it is the one method
-/// `cove_schema::builtins::STANDARD_LIBRARY` names, so `items.isEmpty()` is
-/// an ordinary [`crate::Inst::Call`] into `std.array.isEmpty` and never a
+/// `cove_schema::builtins::STANDARD_LIBRARY` names, so `items.isEmpty()`
+/// resolves to an ordinary call into `std.array.isEmpty`, never a
 /// [`Body::call_builtin_method`](super::super::Body::call_builtin_method)
 /// dispatch — the same lowering a bare `isEmpty(items)` written in Cove
-/// would reach, generic instantiation and all. This is the proof the
-/// mechanism reaches all the way through, alongside
+/// would reach, generic instantiation and all. That target is a small
+/// leaf, so `super::super::inline` expands it where the call was; `len` and
+/// `eq.int.imm` below are `std.array.isEmpty`'s own body, and the proof
+/// the mechanism reaches all the way through is this listing alongside
 /// `crates/cove-sema/src/stdlib.rs`'s and `crates/cove-schema/src/builtins.rs`'s
 /// own tests of the same table.
 #[test]
@@ -195,11 +225,12 @@ fn a_method_the_standard_library_implements_is_an_ordinary_call() {
         listing("fn f(xs: Array<Int>) -> Bool { xs.isEmpty() }", "f"),
         "\
 fn @m.f(Array) -> Bool
-  frame 3: s0!:ref s1:bool s2:bool
-  local xs -> s0:Array [0, 3)
-     0  call s2:Bool std.array.isEmpty<Int> (s0:Array)
-     1  copy s1:Bool s2:Bool
-     2  return s1:Bool
+  frame 5: s0!:ref s1:bool s2:bool s3:bool s4:int
+  local xs -> s0:Array [0, 4)
+     0  len s4:int s0:ref
+     1  eq.int.imm s2:bool s4:int 0
+     2  copy s1:Bool s2:Bool
+     3  return s1:Bool
 "
     );
 }

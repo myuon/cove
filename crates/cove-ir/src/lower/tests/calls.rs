@@ -1,4 +1,24 @@
 //! Calls, and the frame boundary they have to match.
+//!
+//! # `keep()`
+//!
+//! Several fixtures here declare a `fn keep() {}` and call it from the callee
+//! whose call they are about. It is not part of what any of them assert and it
+//! never appears in a listing, because every listing here is the *caller's*.
+//!
+//! `super::super::inline` expands a call to a small leaf where it is made,
+//! and a two-instruction callee is exactly the shape it expands. A fixture whose
+//! callee is that small has no `call` left in it, and a test of how a call
+//! lowers that holds no call is a test of nothing. Calling anything at all is
+//! what makes a function not a leaf, and `keep()` is the smallest thing there
+//! is to call.
+//!
+//! Where the callee's *own* listing is what a case is about — the multiword
+//! parameters one — the fixture is left alone, because nothing expands a
+//! function into itself. Where the *call* is incidental to what a case
+//! asserts — the two about defaults, whose subject is what a default reads —
+//! the fixture is left alone too and the listing shows the expansion, because
+//! a default read into an expanded body is still a default read.
 
 use super::listing;
 
@@ -9,7 +29,7 @@ use super::listing;
 fn a_call_names_the_arguments_and_the_destination_location() {
     assert_eq!(
         listing(
-            "fn add(a: Int, b: Int) -> Int { a + b }\nfn f() -> Int { add(1, 2) }",
+            "fn keep() {}\nfn add(a: Int, b: Int) -> Int { keep()\n  a + b }\nfn f() -> Int { add(1, 2) }",
             "f"
         ),
         "\
@@ -76,7 +96,7 @@ fn @m.take(Int m.Point Int) -> Int
 fn a_call_passing_a_multiword_argument_names_its_base_slot() {
     assert_eq!(
         listing(
-            "struct Point { x: Int, y: Int }\nfn take(a: Int, p: Point, b: Int) -> Int { a + p.x + p.y + b }\nfn f() -> Int { take(1, Point(x: 2, y: 3), 4) }",
+            "struct Point { x: Int, y: Int }\nfn keep() {}\nfn take(a: Int, p: Point, b: Int) -> Int { keep()\n  a + p.x + p.y + b }\nfn f() -> Int { take(1, Point(x: 2, y: 3), 4) }",
             "f"
         ),
         "\
@@ -197,7 +217,7 @@ fn @m.f() -> Int
 fn a_labelled_argument_is_not_a_permutation() {
     assert_eq!(
         listing(
-            "fn scaled(value: Int, by: Int) -> Int { value * by }\nfn f() -> Int { scaled(2, by: 3) }",
+            "fn keep() {}\nfn scaled(value: Int, by: Int) -> Int { keep()\n  value * by }\nfn f() -> Int { scaled(2, by: 3) }",
             "f"
         ),
         "\
@@ -225,7 +245,7 @@ fn @m.f() -> Int
 fn a_variadic_parameter_collects_its_arguments_into_an_array() {
     assert_eq!(
         listing(
-            "fn total(items: Int...) -> Int { items.length() }\nfn f() -> Int { total(1, 2, 3) }",
+            "fn keep() {}\nfn total(items: Int...) -> Int { keep()\n  items.length() }\nfn f() -> Int { total(1, 2, 3) }",
             "f"
         ),
         "\
@@ -256,7 +276,7 @@ fn @m.f() -> Int
 fn a_variadic_parameter_given_nothing_is_an_empty_array() {
     assert_eq!(
         listing(
-            "fn total(items: Int...) -> Int { items.length() }\nfn f() -> Int { total() }",
+            "fn keep() {}\nfn total(items: Int...) -> Int { keep()\n  items.length() }\nfn f() -> Int { total() }",
             "f"
         ),
         "\
@@ -281,7 +301,7 @@ fn @m.f() -> Int
 fn a_spread_argument_is_counted_and_then_walked_into_the_run() {
     assert_eq!(
         listing(
-            "fn total(items: Int...) -> Int { items.length() }\n\
+            "fn keep() {}\nfn total(items: Int...) -> Int { keep()\n  items.length() }\n\
              fn f(xs: Array<Int>) -> Int { total(0, ...xs, 9) }",
             "f"
         ),
@@ -322,7 +342,7 @@ fn @m.f(Array) -> Int
 #[test]
 fn a_vector_spread_is_copied_out_before_it_is_walked() {
     let text = listing(
-        "fn total(items: Int...) -> Int { items.length() }\n\
+        "fn keep() {}\nfn total(items: Int...) -> Int { keep()\n  items.length() }\n\
          fn f(xs: Vector<Int>) -> Int { total(...xs) }",
         "f",
     );
@@ -379,7 +399,7 @@ fn a_default_does_not_see_what_the_caller_happens_to_have_bound() {
         ),
         "\
 fn @m.f() -> Int
-  frame 5: s0:int s1:ref s2:int s3:int s4:int
+  frame 6: s0:int s1:ref s2:int s3:int s4:int s5:int
   local base -> s1:fn [3, 6)
   local n -> s2:Int [4, 5)
      0  alloc s1:ref closure m.f#0<closure>
@@ -387,7 +407,7 @@ fn @m.f() -> Int
      2  store-field s1:ref +0 s2:Int
      3  int s2:int 3
      4  int s3:int 7
-     5  call s0:Int m.scaled (s2:Int s3:Int)
+     5  mul.int s0:int s2:int s3:int
      6  return s0:Int
 "
     );
@@ -406,10 +426,10 @@ fn a_default_on_a_method_reads_the_receiver() {
         ),
         "\
 fn @m.f(m.P) -> Int
-  frame 2: s0!:int s1:int
+  frame 3: s0!:int s1:int s2:int
   local p -> s0:m.P [0, 2)
   local self -> s0:m.P [0, 2)
-     0  call s1:Int m.P.scaled (s0:m.P s0:Int)
+     0  mul.int s1:int s0:int s0:int
      1  return s1:Int
 "
     );
@@ -459,7 +479,10 @@ fn a_call_through_a_module_imported_whole_names_the_declaration_it_exports() {
     assert_eq!(
         super::listing_in(
             &[
-                ("greet", "export fn twice(n: Int) -> Int { n * 2 }\n"),
+                (
+                    "greet",
+                    "fn keep() {}\nexport fn twice(n: Int) -> Int { keep()\n  n * 2 }\n"
+                ),
                 ("app", "use greet\nfn f() -> Int { greet.twice(21) }\n"),
             ],
             "app",

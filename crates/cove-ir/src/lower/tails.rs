@@ -170,6 +170,7 @@ mod tests {
             captures: Vec::new(),
             code,
             locals,
+            inlined: Vec::new(),
             span: span(),
             is_async: false,
             stub: false,

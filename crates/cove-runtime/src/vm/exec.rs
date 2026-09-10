@@ -1867,9 +1867,12 @@ impl<'a> Machine<'a> {
     /// The call-site spans [`RuntimeError::with_chain`] wants, innermost
     /// first: every live frame above the one that is failing.
     ///
-    /// The innermost frame is excluded because its `pc` is the error's own
-    /// span, already `RuntimeError::span` — read there by whatever `fail!`
-    /// or `.at()` this error passed through, not here.
+    /// The innermost frame contributes no call site of its own: its `pc` is
+    /// the error's own span, already `RuntimeError::span` — read there by
+    /// whatever `fail!` or `.at()` this error passed through, not here. It
+    /// does contribute the *expanded bodies* that `pc` sits inside, because
+    /// each of those is a frame that would have been here and is not; see
+    /// [`Inlined`](cove_ir::program::Inlined).
     ///
     /// Every frame above it is suspended at *the instruction after* the call
     /// that led one level deeper — [`Frame::pc`] says so, and
@@ -1884,16 +1887,47 @@ impl<'a> Machine<'a> {
     /// alone; nothing here changes what a resume address is used to display
     /// there.
     ///
-    /// Lazy, so a bound below [`RuntimeError::with_chain`]'s
+    /// Lazy in the depth, so a bound below [`RuntimeError::with_chain`]'s
     /// [`crate::error::MAX_CALL_CHAIN`] never walks past it: nothing here
     /// builds a `Vec` sized to the recursion depth on its way to being
-    /// truncated back down.
+    /// truncated back down. One frame at a time does build a small one — an
+    /// expansion's sites come out of `inlined_at` outermost first and a
+    /// chain wants them the other way — and that one is bounded by how
+    /// deeply expansions nest at a single program counter, not by how deep
+    /// the recursion is.
     fn call_chain(&self) -> impl Iterator<Item = Span> + '_ {
-        self.frames.iter().rev().skip(1).map(|frame| {
-            self.program
-                .function(frame.function)
-                .span_at(frame.pc.saturating_sub(1) as usize)
-        })
+        // The bodies that were expanded into the frame this failed in come
+        // first, innermost outwards. `lower::inline` removes a frame that
+        // would otherwise be here, and `Function::inlined` is the record of
+        // what it removed: without it an error inside an expanded body named
+        // where it happened and nothing about where it was called from, and
+        // the oracle — which pushes a real frame — named both.
+        //
+        // Read at `frame.pc` and not one before it: `fail!` syncs the failing
+        // instruction's own program counter into the frame before it raises,
+        // where every frame above is left at the instruction it will *resume*
+        // at. The two are one apart and this is the one place both are read.
+        let innermost = self.frames.last().into_iter().flat_map(|frame| {
+            let function = self.program.function(frame.function);
+            let mut held: Vec<Span> = function
+                .inlined_at(frame.pc)
+                .map(|held| held.site)
+                .collect();
+            held.reverse();
+            held
+        });
+        // Then the frames above it, each read at the call it is waiting on —
+        // and each of *those* through the same record, because a call may
+        // stand inside an expanded body too.
+        let outer = self.frames.iter().rev().skip(1).flat_map(|frame| {
+            let function = self.program.function(frame.function);
+            let at = frame.pc.saturating_sub(1);
+            let mut held: Vec<Span> = function.inlined_at(at).map(|held| held.site).collect();
+            held.reverse();
+            held.insert(0, function.span_at(at as usize));
+            held
+        });
+        innermost.chain(outer)
     }
 
     /// `words` words of the frame based at `base`, from `at`.
@@ -3293,6 +3327,7 @@ pub(crate) mod tests {
                 code,
                 spans,
                 locals: Vec::new(),
+                inlined: Vec::new(),
                 span: nowhere,
                 is_async: false,
                 // A function a test builds by hand is a function with a

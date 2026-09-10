@@ -257,6 +257,37 @@ pub struct Local {
     pub to: Pc,
 }
 
+/// A body that was written elsewhere and expanded into this one.
+///
+/// `[from, to)` is the run of this function's program counters the expansion
+/// occupies — from where the call stood to where its answer landed —
+/// `callee` is whose instructions they are, and `site` is where the call was
+/// written.
+///
+/// `site` is the whole of what an error chain lost. `Machine::call_chain`
+/// walks the live frames and reads each one's call site; an expansion has no
+/// frame, so its call site was not there to read, and an error raised inside
+/// one named where it happened and not where it was called from. One span per
+/// expansion is what puts that back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Inlined {
+    pub from: Pc,
+    pub to: Pc,
+    pub callee: FunctionId,
+    pub site: Span,
+    /// The names the expanded body bound, in this function's slots and this
+    /// function's counters.
+    ///
+    /// Here rather than in [`Function::locals`], and that is not tidiness. A
+    /// caller's binding and an expanded body's parameter can be bound at the
+    /// *same* program counter — the caller's `let raised = n + 1` and the
+    /// callee's `n`, when the argument needed no copy — and a reader sorting
+    /// one table by "which expansion contains this counter" cannot tell them
+    /// apart. Which body declared a name is not something a counter answers,
+    /// so it is recorded rather than derived.
+    pub locals: Vec<Local>,
+}
+
 /// One lowered function.
 #[derive(Clone, Debug)]
 pub struct Function {
@@ -307,6 +338,25 @@ pub struct Function {
     /// many names as it binds — and empty is a legal answer for a body that
     /// binds none.
     pub locals: Vec<Local>,
+    /// The bodies this function holds that were written somewhere else.
+    ///
+    /// `lower::inline` expands a call to a small leaf where it is made, and
+    /// the frame that call would have pushed then does not exist. Nothing
+    /// downstream can tell: a run of instructions in the middle of this
+    /// function *is* another function, and every reader that walks frames —
+    /// an error's chain, a backtrace, a profile — sees one frame where there
+    /// were two.
+    ///
+    /// So the expansion writes down what it removed. This is that record, and
+    /// it is [`Local`]'s shape for [`Local`]'s reason: a slot number is not an
+    /// answer to "what did the source call this", and a program counter is not
+    /// an answer to "whose instruction is this".
+    ///
+    /// In the order the expansions were made, which is program-counter order,
+    /// and ranges nest rather than overlap. A reader takes the *last* range
+    /// that contains the pc, which is the innermost body — the same rule
+    /// [`Function::local_at`] follows, for the same reason.
+    pub inlined: Vec<Inlined>,
     /// Where the declaration itself is, for a diagnostic that is about the
     /// function rather than about one of its instructions.
     pub span: Span,
@@ -365,6 +415,19 @@ impl Function {
             .iter()
             .rev()
             .find(|local| &*local.name == name && local.from <= pc && pc < local.to)
+    }
+
+    /// The expanded bodies `pc` is inside, innermost last.
+    ///
+    /// A reader that wants one frame's worth of context wants the last of
+    /// them; a reader rebuilding a chain wants all of them, innermost first,
+    /// which is this reversed. Ranges nest, so "contains the pc" and "in the
+    /// order they were made" is enough to order them: an inner expansion is
+    /// always written after the outer one it sits in.
+    pub fn inlined_at(&self, pc: Pc) -> impl Iterator<Item = &Inlined> + '_ {
+        self.inlined
+            .iter()
+            .filter(move |held| held.from <= pc && pc < held.to)
     }
 
     /// `module.name`, as a diagnostic writes it.

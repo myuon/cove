@@ -658,6 +658,7 @@ impl Body<'_> {
             code: inner.code,
             spans: inner.spans,
             locals,
+            inlined: Vec::new(),
             span: body.span,
             // A record of how it was written, as `Function::is_async` is
             // for a declaration. The dispatch loop never reads it — what a

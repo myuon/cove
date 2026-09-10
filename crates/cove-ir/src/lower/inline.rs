@@ -5,7 +5,7 @@
 //! executed was inside a tiny leaf function**: `Scan.at` is eight instructions
 //! and ran 3.46 million times, `utf8Width` is four and ran 1.32 million times.
 //!
-//! Eight instructions is not what a call to `Scan.at` costs. The caller
+//! Eight instructions is not what a call to one of them costs. The caller
 //! evaluates the arguments, an `Inst::Call` pushes a frame and zeroes it,
 //! `self` — a two-word struct — is copied in, and a `Return` copies the answer
 //! out and pops. The native profile of the same run puts 22% in
@@ -27,6 +27,42 @@
 //! It must also be small ([`LIMIT`]), take no captures — a lambda's captures
 //! are copied by the call and are not arguments — and not be `async`, whose
 //! answer is a task the caller wraps rather than the value the body produced.
+//!
+//! # Why there is no second rule about failing
+//!
+//! There was one, and it is worth recording what it was and what removed it,
+//! because it is the rule anyone reaching for this pass will reach for again.
+//! A `RuntimeError` names where it happened *and the frames above it* —
+//! `Machine::call_chain` reads the live frames — and an expansion has no
+//! frame. So an error raised inside an expanded body kept its span and lost
+//! its chain, and `differential.rs` reported exactly that: the oracle named
+//! `std/int.cove` and the call site in `main`, and the machine named
+//! `std/int.cove` and nothing. ADR 0012 ranks the oracle above the backend,
+//! so that was the backend being wrong, and this pass first answered it by
+//! refusing to expand any body that could fail.
+//!
+//! That answer cost more than it looked like it did. `Scan.at` — 22% of the
+//! instructions `covefmt` executes on its own — holds four instructions such
+//! a rule refuses and **not one of them can fail**: a `neg` of the constant
+//! one, a builtin that answers an `Option` rather than stopping the run, a
+//! `switch` whose table holds every case of the enum it switches on, and the
+//! `trap` on the default that switch can therefore never take. Sharpening the
+//! rule until it could see all four is four small analyses, each of which is
+//! a thing to keep right.
+//!
+//! [`Inlined`] replaces the rule instead of sharpening it. Each expansion
+//! records the run of counters it wrote and the call site it removed, and
+//! `Machine::call_chain` reads that range and puts the site back. A body that
+//! fails no longer loses anything, so there is nothing left for a rule about
+//! failing to protect — and the record is worth having on the bodies that
+//! *cannot* fail too, because a debugger's backtrace and a profile's
+//! attribution ask the same question an error chain asks.
+//!
+//! The record is a pair of program counters, so it moves when they do:
+//! [`super::dropping`] renumbers it beside a [`Local`](crate::Local)'s pair.
+//! Nothing reads it during a run, which is what makes forgetting that easy
+//! and quiet — a range two counters out of place verifies, runs, and answers
+//! about the wrong instructions.
 //!
 //! # Where the callee's slots go
 //!
@@ -52,7 +88,7 @@
 
 use crate::inst::{Inst, Pc, Slot};
 use crate::layout::LayoutId;
-use crate::program::{Function, FunctionId, Program, Table};
+use crate::program::{Function, FunctionId, Inlined, Program, Table};
 use crate::repr::RefMap;
 
 use super::shapes;
@@ -91,60 +127,7 @@ fn is_expandable(f: &Function) -> bool {
     if f.params.contains(&shapes::ADDR) {
         return false;
     }
-    f.code.iter().all(reaches_nothing) && f.code.iter().all(cannot_fail)
-}
-
-/// Whether an instruction can end the run.
-///
-/// This is the second half of the rule, and it is here for a reason the
-/// oracle found rather than one this pass reasoned to. A `RuntimeError` names
-/// where it happened *and the frames above it* —
-/// `RuntimeError::with_chain` reads the live frames — and an expansion has no
-/// frame. So an error raised inside an expanded body keeps its span and loses
-/// its chain, and `differential.rs` reported exactly that: the oracle named
-/// `std/int.cove` and the call site in `main`, and the machine named
-/// `std/int.cove` and nothing.
-///
-/// ADR 0012 ranks the oracle above the backend, so that is the backend being
-/// wrong. A body that cannot fail cannot lose a chain, because no chain is
-/// ever built inside it — and the functions the profile named are exactly
-/// that shape: `startsWord`, `isSpace`, `utf8Width` are comparisons and
-/// branches and nothing else.
-///
-/// What it leaves out is `Scan.at`, the 22%, whose `switch` has a trap on its
-/// default and whose `call-builtin` may answer an error. Reaching that one
-/// means carrying, per expansion, the call site it came from — a table
-/// mapping a run of program counters to the frame that is not there — so that
-/// a chain can be rebuilt. That is a bigger decision than a pass, and it is
-/// the one to write down before it is made.
-fn cannot_fail(inst: &Inst) -> bool {
-    match inst {
-        Inst::Copy { .. }
-        | Inst::Clear { .. }
-        | Inst::Unit { .. }
-        | Inst::Bool { .. }
-        | Inst::Int { .. }
-        | Inst::Float { .. }
-        | Inst::Tag { .. }
-        | Inst::FuncRef { .. }
-        | Inst::Not { .. }
-        | Inst::CmpImm { .. }
-        | Inst::Jump { .. }
-        | Inst::BranchFalse { .. }
-        | Inst::Return { .. } => true,
-        // A comparison of two words the machine can read without following
-        // either. A `Compare::Str` follows two references and a `Compare` of
-        // anything else is one instruction over two words.
-        Inst::Cmp { on, .. } => matches!(
-            on,
-            crate::Compare::Int | crate::Compare::Float | crate::Compare::Bool
-        ),
-        // Everything else, and deliberately: arithmetic overflows, a division
-        // by zero stops the run, a `switch` traps on a case its table does
-        // not hold, a field or an element is bounds-checked, an allocation
-        // can find no memory, and a builtin answers for itself.
-        _ => false,
-    }
+    f.code.iter().all(reaches_nothing)
 }
 
 /// Whether an instruction leaves the function it is in.
@@ -255,9 +238,17 @@ struct Region {
     /// How many of the callee's leading slots are parameters it never writes.
     ///
     /// Those need no copy and no run of their own: the body can read the
-    /// caller's argument where it stands. `Scan.at(self, at)` is the shape
-    /// this is for — three words in, none of them assigned, and copying them
-    /// was three quarters of what the expansion emitted.
+    /// caller's argument where it stands.
+    ///
+    /// `fn id<T>(x: T) -> T { x }` is the shape at its smallest, and what it
+    /// costs afterwards is one instruction:
+    ///
+    /// ```text
+    /// call s2:Int m.id<Int> (s1:Int)   becomes   copy s2:Int s1:Int
+    /// ```
+    ///
+    /// the parameter read where the caller has it and the answer written
+    /// where the caller wanted it, with no frame between them.
     renamed: u32,
 }
 
@@ -287,6 +278,9 @@ fn expand(program: &mut Program, id: FunctionId, leaves: &[bool]) {
     let mut ends: Vec<(usize, usize)> = Vec::new();
     let mut tables: Vec<Table> = Vec::new();
     let mut lists: Vec<Vec<crate::program::Arg>> = Vec::new();
+    // What each expansion removed, so that a chain, a backtrace and a profile
+    // can put it back. See `Inlined`.
+    let mut records: Vec<Inlined> = Vec::new();
 
     for (at, inst) in caller.code.iter().enumerate() {
         moved.push(code.len() as Pc);
@@ -457,6 +451,30 @@ fn expand(program: &mut Program, id: FunctionId, leaves: &[bool]) {
             }
         }
 
+        records.push(Inlined {
+            from: moved[at],
+            to: code.len() as Pc,
+            callee: *callee,
+            site: span,
+            // The leaf's own names, through the two maps this expansion
+            // already built: `where_of` says where each of its slots went and
+            // `place` says where each of its counters went. Without them a
+            // stop inside an expanded body could name nothing the source had
+            // written — `print doubled` in a two-line function that binds
+            // `doubled`.
+            locals: leaf
+                .locals
+                .iter()
+                .map(|local| crate::Local {
+                    name: local.name.clone(),
+                    slot: where_of[local.slot as usize],
+                    layout: local.layout,
+                    from: place[local.from as usize] as Pc,
+                    to: place[local.to as usize] as Pc,
+                })
+                .collect(),
+        });
+
         // A reference the expansion leaves in the caller's frame is a root
         // until something overwrites it, because there is no frame to pop.
         // `super::frees` drops the ones that free nothing.
@@ -503,6 +521,12 @@ fn expand(program: &mut Program, id: FunctionId, leaves: &[bool]) {
     held.code = code;
     held.spans = spans;
     held.locals = locals;
+    // Already in the new numbering — an expansion knows where it put itself —
+    // and the `Clear`s that follow each body are *outside* its range, which is
+    // right: a reference the expansion left behind is the caller's to give up,
+    // and an error raised at one of those was not raised inside the callee.
+    // `super::dropping` moves these when it moves the locals.
+    held.inlined = records;
 }
 
 /// The target a jump this pass has not landed yet carries.

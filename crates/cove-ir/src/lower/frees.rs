@@ -704,6 +704,7 @@ mod tests {
             captures: Vec::new(),
             code,
             locals: Vec::new(),
+            inlined: Vec::new(),
             span: span(),
             is_async: false,
             stub: false,

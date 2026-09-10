@@ -785,31 +785,57 @@ export fn main() -> Int {
         // `why` appears once per moment and nowhere else in the answer.
         assert_eq!(
             every(&json, "why"),
-            // Four, and it was six until issue #302. Two of the six were
-            // copies: the callee's answer moved out of a temporary, and
-            // `main`'s moved into the location the `return` names. Neither
-            // instruction exists now — the producer writes the destination —
-            // and a `return` is written at the tail it answers rather than at
-            // the signature, so the line does not change again on the way
-            // out. A capture policy that fires on a new line fires fewer
-            // times over a program with fewer instructions on fewer lines.
-            ["entry", "line", "call", "return"],
+            // Three, and it was four until `lower::inline`, and six before
+            // that until issue #302. Two of the six were copies: the callee's
+            // answer moved out of a temporary, and `main`'s moved into the
+            // location the `return` names. Neither instruction exists now —
+            // the producer writes the destination — and a `return` is written
+            // at the tail it answers rather than at the signature, so the line
+            // does not change again on the way out.
+            //
+            // The `line` went with the call. `twice` is a small leaf, so its
+            // body is written into `main`, and the instruction that used to be
+            // `main`'s `call` on line 7 is now `twice`'s `n + n` written on
+            // line 2. Line 7 has no instruction of its own left for a new-line
+            // rule to fire on. The `call` is still here, and that is the
+            // record doing its work: `Stop::depth` counts an expanded body, so
+            // the moment where one begins is still a moment where the stack
+            // got deeper.
+            ["entry", "call", "return"],
             "{json}"
         );
 
-        // Two functions, disassembled once each however often they are in a
-        // moment: the interning that keeps a recording from repeating a loop
-        // body once per turn.
+        // One disassembly, held once however often it is in a moment: the
+        // interning that keeps a recording from repeating a loop body once
+        // per turn.
+        //
+        // One and not two, because `twice` is a small leaf and
+        // `lower::inline` wrote its body into `main`. There is one
+        // instruction stream and the table holds disassemblies, so a second
+        // entry could only be `main`'s four instructions under `twice`'s
+        // name — which is what keying the table on the frame's body rather
+        // than on the code's owner produced, and is the reason it does not.
         assert_eq!(
             every(&json, "name")
                 .iter()
                 .filter(|name| name.starts_with("playground."))
                 .count(),
-            2,
+            1,
+            "{json}"
+        );
+        // Which body each frame is, though, is still recorded — on the frame,
+        // where the expansion's own record put it. Without this the backtrace
+        // of a stop inside `twice` would name `main` twice.
+        assert_eq!(
+            every(&json, "body")
+                .iter()
+                .filter(|name| *name == "playground.twice")
+                .count(),
+            1,
             "{json}"
         );
         assert!(says(&json, r#""truncated":null"#), "{json}");
-        assert!(says(&json, r#""kept":4"#), "{json}");
+        assert!(says(&json, r#""kept":3"#), "{json}");
     }
 
     /// The locals a moment holds are that moment's, and they change along
