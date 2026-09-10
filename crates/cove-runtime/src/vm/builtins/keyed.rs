@@ -544,7 +544,8 @@ pub(super) fn map_get(
     machine: &mut Machine,
     result: LayoutId,
     operands: &[Operand<'_>],
-) -> Result<Vec<u64>, RuntimeError> {
+    out: &mut Vec<u64>,
+) -> Result<(), RuntimeError> {
     let (receiver, args) = operand::method("Map.get", operands, 1)?;
     let entries = map(machine, "get", receiver)?;
     key::check(machine, "Map.get", key::MAP_KEY, args[0])?;
@@ -559,9 +560,9 @@ pub(super) fn map_get(
     match found {
         Ok(at) => {
             let words = entries.value_words(machine, at);
-            make::some(machine, result, &words)
+            make::some(machine, result, &words, out)
         }
-        Err(_) => make::none(machine, result),
+        Err(_) => make::none(machine, result, out),
     }
 }
 

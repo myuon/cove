@@ -41,7 +41,7 @@ use cove_schema::builtins::{
 
 use crate::error::RuntimeError;
 use crate::vm::builtins::operand;
-use crate::vm::exec::Machine;
+use crate::vm::exec::{Machine, Wrapper};
 
 // --- finding a family ------------------------------------------------------
 
@@ -128,33 +128,24 @@ fn error(program: &Program) -> Result<LayoutId, RuntimeError> {
     .ok_or_else(|| operand::unknown_family(ERROR.name))
 }
 
-/// The index of `case` in `family`, which must be the enum the caller was
-/// told to answer.
-///
-/// Nothing is searched for. Which `Option` or `Result` a builtin answers is
-/// carried by [`cove_ir::Inst::CallBuiltin`] and passed down from
-/// [`super::call`], because the alternative — looking for an enum of that
-/// name whose carrying case holds the right payload — cannot tell
-/// `Result<String, Error>` from `Result<String, cq.diag.Detail>`. Both are
-/// named `Result` and both carry a `String` in `Ok`, and they are two words
-/// and four; answering the wrong one is a word run written into a
-/// destination sized for the other.
-fn case_of(
-    machine: &Machine,
-    family: LayoutId,
-    name: &str,
-    case: &str,
-) -> Result<u32, RuntimeError> {
-    machine
-        .program()
-        .layouts
-        .get(family.index())
-        .filter(|layout| matches!(layout.shape, Shape::Enum { .. }))
-        .and_then(|layout| layout.case(case))
-        .ok_or_else(|| operand::unknown_family(name))
-}
-
 // --- building one ----------------------------------------------------------
+
+/// The words a builder writes, as a value a test can hold.
+///
+/// A builder writes into a buffer the machine reuses rather than answering a
+/// `Vec`, because on a run that is one allocation per builtin call — 39 ns of
+/// an 86 ns call, measured. A test is not a run and wants the words to keep,
+/// so it brings its own buffer and takes it back.
+#[cfg(test)]
+pub(super) fn built(
+    machine: &mut Machine,
+    layout: LayoutId,
+    build: impl FnOnce(&mut Machine, LayoutId, &mut Vec<u64>) -> Result<(), RuntimeError>,
+) -> Vec<u64> {
+    let mut out = Vec::new();
+    build(machine, layout, &mut out).expect("the value builds");
+    out
+}
 
 /// The words of a case of the enum `layout`, with `parts` written into the
 /// payload region and the rest of it zero.
@@ -168,25 +159,31 @@ fn case_words(
     layout: LayoutId,
     index: u32,
     parts: &[&[u64]],
-) -> Result<Vec<u64>, RuntimeError> {
+    out: &mut Vec<u64>,
+) -> Result<(), RuntimeError> {
     let described = machine.program().layout(layout);
     let Shape::Enum { cases, .. } = &described.shape else {
         return Err(operand::unknown_family(&described.name));
     };
     let case = &cases[index as usize];
-    let mut words = vec![0; described.width() as usize];
-    words[0] = index as u64;
+    let at = out.len();
+    out.resize(at + described.width() as usize, 0);
+    out[at] = index as u64;
     for (part, held) in case.parts.iter().zip(parts) {
-        let at = 1 + part.at as usize;
-        words[at..at + held.len()].copy_from_slice(held);
+        let from = at + 1 + part.at as usize;
+        out[from..from + held.len()].copy_from_slice(held);
     }
-    Ok(words)
+    Ok(())
 }
 
 /// `None`, in the `Option` the caller was told to answer.
-pub(super) fn none(machine: &mut Machine, option: LayoutId) -> Result<Vec<u64>, RuntimeError> {
-    let case = case_of(machine, option, OPTION.name, NONE_CASE.name)?;
-    case_words(machine, option, case, &[])
+pub(super) fn none(
+    machine: &mut Machine,
+    option: LayoutId,
+    out: &mut Vec<u64>,
+) -> Result<(), RuntimeError> {
+    let case = machine.case_index(option, Wrapper::None, OPTION.name, NONE_CASE.name)?;
+    case_words(machine, option, case, &[], out)
 }
 
 /// `Some(words)`, in the `Option` the caller was told to answer.
@@ -194,9 +191,10 @@ pub(super) fn some(
     machine: &mut Machine,
     option: LayoutId,
     words: &[u64],
-) -> Result<Vec<u64>, RuntimeError> {
-    let case = case_of(machine, option, OPTION.name, SOME_CASE.name)?;
-    case_words(machine, option, case, &[words])
+    out: &mut Vec<u64>,
+) -> Result<(), RuntimeError> {
+    let case = machine.case_index(option, Wrapper::Some, OPTION.name, SOME_CASE.name)?;
+    case_words(machine, option, case, &[words], out)
 }
 
 /// `Ok(words)`, in the `Result` the caller was told to answer.
@@ -204,9 +202,10 @@ pub(super) fn ok(
     machine: &mut Machine,
     result: LayoutId,
     words: &[u64],
-) -> Result<Vec<u64>, RuntimeError> {
-    let case = case_of(machine, result, RESULT.name, OK_CASE.name)?;
-    case_words(machine, result, case, &[words])
+    out: &mut Vec<u64>,
+) -> Result<(), RuntimeError> {
+    let case = machine.case_index(result, Wrapper::Ok, RESULT.name, OK_CASE.name)?;
+    case_words(machine, result, case, &[words], out)
 }
 
 /// `Err(Error(message))`, in the `Result` the caller was told to answer.
@@ -218,10 +217,11 @@ pub(super) fn failed(
     machine: &mut Machine,
     result: LayoutId,
     message: &str,
-) -> Result<Vec<u64>, RuntimeError> {
-    let case = case_of(machine, result, RESULT.name, ERR_CASE.name)?;
+    out: &mut Vec<u64>,
+) -> Result<(), RuntimeError> {
+    let case = machine.case_index(result, Wrapper::Err, RESULT.name, ERR_CASE.name)?;
     let carried = error_value(machine, message)?;
-    case_words(machine, result, case, &[&carried])
+    case_words(machine, result, case, &[&carried], out)
 }
 
 /// An `Error` carrying `message`, as its words.
@@ -328,14 +328,14 @@ mod tests {
         let texts = crate::vm::builtins::tests::two_case(&program, "Option", "Some", text);
         let counts = crate::vm::builtins::tests::two_case(&program, "Option", "Some", ints);
         let string = machine.new_string("x").unwrap();
-        let held = some(&mut machine, texts, &[string]).unwrap();
-        let counted = some(&mut machine, counts, &[1]).unwrap();
+        let held = built(&mut machine, texts, |m, l, out| some(m, l, &[string], out));
+        let counted = built(&mut machine, counts, |m, l, out| some(m, l, &[1], out));
         assert_eq!(held, vec![1, string]);
         assert_eq!(counted, vec![1, 1]);
 
         // `None` fills nothing, and what it does not fill reads null — which
         // is what makes one static reference map right for both cases.
-        let empty = none(&mut machine, texts).unwrap();
+        let empty = built(&mut machine, texts, none);
         assert_eq!(empty, vec![0, 0]);
     }
 
@@ -413,7 +413,9 @@ mod tests {
         let mut machine = Machine::new(&program, 1 << 14);
         let ints = scalar(&program, Repr::Int);
         let results = crate::vm::builtins::tests::two_case(&program, "Result", "Ok", ints);
-        let words = failed(&mut machine, results, "it did not").unwrap();
+        let words = built(&mut machine, results, |m, l, out| {
+            failed(m, l, "it did not", out)
+        });
         // An `Error` is its one `String` field inline, so the payload word
         // *is* the message's address — one object where the old model needed
         // three. Where in the region that word sits is the payload-agreement
@@ -453,7 +455,7 @@ mod tests {
         let program = build.done();
         let mut machine = Machine::new(&program, 1 << 14);
 
-        let error = none(&mut machine, ints).unwrap_err();
+        let error = none(&mut machine, ints, &mut Vec::new()).unwrap_err();
         assert_eq!(
             error.message,
             "this program describes no `Option` for a value of that shape to be built as"

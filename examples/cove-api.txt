@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:961f46fd5b4d0144
+hash fnv1a64:e0cc573f4efd9912
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -325,6 +325,29 @@ module covefmt
   export fn covers(tree: Tree, from: Int, to: Int) -> Bool
   /// A leaf: one token, no children.
   export fn leafAt(at: Int) -> Tree
+  /// How long each phase of the formatter takes over a corpus of Cove source.
+  ///
+  /// # A phase is measured by difference, and that is the whole design
+  ///
+  /// The obvious way to time three phases is to run each one over a table of
+  /// what the phase before it produced. **That measures the table.** Reading a
+  /// `Vector<Prepared>` costs a copy per file per phase, and it is charged to
+  /// whichever phase does the reading — which put `print` at 327 ms here when
+  /// the whole pipeline, one loop, ran in 293.
+  ///
+  /// The same mistake had already been made once, the other way round: a first
+  /// version of this measurement called `tokens` and `parseTokens` again inside
+  /// the print loop, so "print" was lex and parse and print, and the conclusion
+  /// drawn from it — that the tree walk dominated — was wrong. Between them the
+  /// two are the reason this file exists rather than being retyped each time.
+  ///
+  /// So: three loops, each a single pass over the sources with no intermediate
+  /// to index. The first lexes, the second lexes and parses, the third does the
+  /// whole job the way `cove fmt` does. Each phase is the difference between
+  /// two of them, and the third is the number to compare against `cove fmt
+  /// --check`, which is the same work in Rust.
+  export fn main() -> Result<Unit, Error>
+    requires clock, console, files
   /// A node over `children`, which are assumed to be in order and adjacent.
   export fn nodeOf(kind: Node, from: Int, to: Int, children: Array<Tree>) -> Tree
   /// The tree of one source.

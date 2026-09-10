@@ -1,0 +1,93 @@
+use console.println
+use files
+use clock.now
+
+/// Every `.cove` file under `at`, depth-first.
+///
+/// A directory whose name holds a `.` is skipped, and so is `target`: what
+/// this is a measurement of is Cove source, and `target` holds hundreds of
+/// megabytes of build output that happens to include copies of it.
+fn walk(at: String) -> Vector<String> {
+  var found = Vector.of<String>()
+  let names = files.list(at).unwrapOr([])
+  for name in names {
+    let path = if at == "." {
+      name
+    } else {
+      "{at}/{name}"
+    }
+    if name.endsWith(".cove") {
+      found.push(path)
+    } else if !name.contains(".") && name != "target" {
+      for deeper in walk(path) {
+        found.push(deeper)
+      }
+    }
+  }
+  found
+}
+
+/// How long each phase of the formatter takes over a corpus of Cove source.
+///
+/// # A phase is measured by difference, and that is the whole design
+///
+/// The obvious way to time three phases is to run each one over a table of
+/// what the phase before it produced. **That measures the table.** Reading a
+/// `Vector<Prepared>` costs a copy per file per phase, and it is charged to
+/// whichever phase does the reading — which put `print` at 327 ms here when
+/// the whole pipeline, one loop, ran in 293.
+///
+/// The same mistake had already been made once, the other way round: a first
+/// version of this measurement called `tokens` and `parseTokens` again inside
+/// the print loop, so "print" was lex and parse and print, and the conclusion
+/// drawn from it — that the tree walk dominated — was wrong. Between them the
+/// two are the reason this file exists rather than being retyped each time.
+///
+/// So: three loops, each a single pass over the sources with no intermediate
+/// to index. The first lexes, the second lexes and parses, the third does the
+/// whole job the way `cove fmt` does. Each phase is the difference between
+/// two of them, and the third is the number to compare against `cove fmt
+/// --check`, which is the same work in Rust.
+export fn main() -> Result<Unit, Error> {
+  let paths = walk(".")
+  var sources = Vector.of<String>()
+  var bytes = 0
+  for path in paths {
+    let text = files.read(path)?
+    sources.push(text)
+    bytes = bytes + text.byteLength()
+  }
+  println("{sources.length()} file(s), {bytes} byte(s)")?
+
+  let lexFrom = now()
+  var counted = 0
+  for source in sources {
+    counted = counted + tokens(source).length()
+  }
+  let lexTo = now()
+
+  let parseFrom = now()
+  var nodes = 0
+  for source in sources {
+    nodes = nodes + parseTokens(source, tokens(source)).children.length()
+  }
+  let parseTo = now()
+
+  let wholeFrom = now()
+  var written = 0
+  for source in sources {
+    let held = tokens(source)
+    written = written +
+      print(source, held, parseTokens(source, held)).byteLength()
+  }
+  let wholeTo = now()
+
+  let lex = (lexTo - lexFrom).millis()
+  let lexAndParse = (parseTo - parseFrom).millis()
+  let whole = (wholeTo - wholeFrom).millis()
+  println("lex    {lex} ms ({counted} tokens)")?
+  println("parse  {lexAndParse - lex} ms ({nodes} top-level nodes)")?
+  println("print  {whole - lexAndParse} ms ({written} bytes)")?
+  println("whole  {whole} ms, which is what `cove fmt --check` does in Rust")?
+  Ok(())
+}

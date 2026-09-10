@@ -1042,9 +1042,13 @@ mod tests {
         let option = two_case(&program, "Option", "Some", int);
         let result = two_case(&program, "Result", "Ok", int);
 
-        let none = make::none(&mut machine, option).unwrap();
-        let one = make::some(&mut machine, option, &[1]).unwrap();
-        let two = make::some(&mut machine, option, &[2]).unwrap();
+        let none = make::built(&mut machine, option, make::none);
+        let one = make::built(&mut machine, option, |m, l, out| {
+            make::some(m, l, &[1], out)
+        });
+        let two = make::built(&mut machine, option, |m, l, out| {
+            make::some(m, l, &[2], out)
+        });
         assert_eq!(
             cmp_value(&machine, option, &none, &one).unwrap(),
             Ordering::Less
@@ -1056,7 +1060,7 @@ mod tests {
 
         // `"Option" < "Result"`, whatever either carries — and the two are
         // different layouts, so this is the comparison a box makes.
-        let ok = make::ok(&mut machine, result, &[1]).unwrap();
+        let ok = make::built(&mut machine, result, |m, l, out| make::ok(m, l, &[1], out));
         let held = boxed(&mut machine, option, &two);
         let other = boxed(&mut machine, result, &ok);
         assert_eq!(

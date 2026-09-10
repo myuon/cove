@@ -385,7 +385,7 @@ pub(super) fn reclaimed() -> RuntimeError {
 /// boundary's, this one is unreachable from a checked program — the operation
 /// whose result it is was type-checked, so the lowering interned the layout —
 /// which makes it a lowering bug rather than a host's mistake.
-pub(super) fn unknown_family(name: &str) -> RuntimeError {
+pub(crate) fn unknown_family(name: &str) -> RuntimeError {
     RuntimeError::new(format!(
         "this program describes no `{name}` for a value of that shape to be built as"
     ))
