@@ -160,3 +160,22 @@ test fn an_empty_source_is_an_empty_file() -> Result<Unit, Error> {
   assert(whole(""))?
   Ok(())
 }
+
+/// The strongest thing this front end can say: a walk of the tree reaches
+/// every token, in order, whole — so the text comes back.
+test fn printing_the_tree_gives_the_source_back() -> Result<Unit, Error> {
+  let source = "\n".join(["/// Doubles `n`.", "use console.println", "", "// a comment between declarations", "", "export struct Point \{", "  x: Int", "  y: Int", "\}", "", "impl Point \{", "  /// Moves it.", "  fn shift(self, by: Int) -> Point \{", "    Point(x: self.x + by, y: self.y)", "  \}", "\}", "", "export async fn main() -> Result<Unit, Error> \{", "  console.println(\"an — dash\")?", "  Ok(())", "\}", ""])
+  assert(roundTrips(source))?
+  Ok(())
+}
+
+/// Including source that does not parse: what an `Error` node holds comes
+/// back exactly as it went in, which is what a formatter must do with a file
+/// somebody is in the middle of typing.
+test fn printing_gives_back_source_that_does_not_parse(
+) -> Result<Unit, Error> {
+  assert(roundTrips("%%% not a declaration\nfn a() -> Int \{ 1 \}\n"))?
+  assert(roundTrips("fn open(\n"))?
+  assert(roundTrips(""))?
+  Ok(())
+}

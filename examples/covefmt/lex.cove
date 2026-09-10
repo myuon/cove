@@ -138,5 +138,8 @@ export fn tiles(source: String, held: Array<Token>) -> Bool {
 
 /// The text a token names.
 export fn text(source: String, token: Token) -> String {
-  source.sliceBytes(token.from, token.to).unwrapOr("")
+  match source.sliceBytes(token.from, token.to) {
+    Ok(held) => held
+    Err(_) => ""
+  }
 }

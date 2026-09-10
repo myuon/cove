@@ -43,48 +43,44 @@ A file that does not parse is not a failure. Tokens no rule claims become an
 `Error` node and the tree still covers them, which is what a file being typed
 looks like.
 
+## The repository is the oracle
+
+Every `.cove` file here passes `cove fmt --check`, so every one of them is
+already what a formatter should produce — and a correct formatter reproduces
+all 243 of them byte for byte. `print(parse(source)) == source` is that check,
+and it is available *now*, over half a megabyte of real source, before a single
+layout decision has been made.
+
+It is a stronger statement than the tiling. The tiling says the tree *covers*
+the tokens; this says a walk of it *reaches* them, in order, whole.
+
 ## Over this repository
 
-242 files, 493,736 bytes, 94,802 tokens, 100,326 nodes:
-
-| | |
-| --- | ---: |
-| lex | 241 ms |
-| parse | 635 ms |
-| **together** | **876 ms** |
-| scaled to all 695 KB of Cove here | ~1230 ms |
-| `cove fmt --check` on that 695 KB, in Rust: lex, parse, format *and* compare | **40–70 ms** |
-
-Every file parses and every tree covers its tokens. **One** `Error` node
-remains in the corpus, in `tests/e2e/fail_reserved_annotation`, which is a file
+243 files, 497,613 bytes, 95,402 tokens, 100,952 nodes. **Every file parses,
+every tree covers its tokens, and every file round-trips.** Exactly one `Error`
+node remains in the whole corpus — `tests/e2e/fail_reserved_annotation`, a file
 written not to parse.
 
-So the front end alone is eighteen to thirty times the whole Rust job, and the
-printer is not written. The target is 5×.
-
-## What it costs
-
-Over this repository — 238 files, 468,759 bytes, 90,502 tokens:
-
 | | |
 | --- | ---: |
-| lex, in Cove | **283 ms** |
-| per byte | 0.60 µs |
-| the same scaled to all 695 KB of Cove here | ~420 ms |
-| `cove fmt --check` over that 695 KB, in Rust: lex, parse, format *and* compare | **40–70 ms** |
+| lex | 246 ms |
+| parse | 639 ms |
+| print | 680 ms |
+| **together** | **1565 ms** |
+| scaled to all 695 KB of Cove here | ~2190 ms |
+| `cove fmt --check` on that 695 KB, in Rust: lex, parse, format *and* compare | **40–70 ms** |
 
-So the lexer alone is six to ten times the whole Rust job, and the parser and
-the printer are not written. The target is 5×; reaching it is a performance
-project rather than a consequence, and this program is the workload it should
-be argued from.
+So the whole pipeline is **31–55×** the Rust job, and it makes no layout
+decision yet. The target is 5×; reaching it is a performance project rather
+than a consequence, and this is the workload to argue it from.
 
-Two floors, measured on this tree:
+Two floors under the lexer, measured on this tree:
 
 - **0.15 µs per byte inspection** — `codePointAtByte` and a `match` and a
   comparison and a loop step. At the VM's 6.6 ns per instruction, that is about
   23 IR instructions per byte looked at.
-- **a lexer looks at each byte two to three times**, which is where 0.60 µs
-  comes from. Almost none of it is the program.
+- **a lexer looks at each byte two to three times**, which is where its
+  0.60 µs a byte comes from. Almost none of it is the program.
 
 ## What writing the parser found
 
@@ -112,6 +108,28 @@ own rule and this did not have it, so
 `type` and an error.
 
 `async` was simply missing from the words a declaration may be preceded by.
+
+## Where the printer's time goes, and where it does not
+
+**Almost all of it is the walk.** Printing with the text-building removed — the
+same recursion over the same 100,952 nodes, pushing nothing — takes **618 ms**
+of the 721 the first version took. Slicing each token's run out of the source,
+pushing it, and joining 95,402 pieces once is the remaining hundred.
+
+That is the opposite of what was expected, and it is worth having measured. The
+plan was that a formatter's cost is string building, and `cq/README.md`'s
+figure for appending by interpolation — 29 seconds against 56 milliseconds on
+200 KB — says why that was the plan. The `Vector` and one `join` is the cheap
+shape, and it is cheap; walking 100,952 nodes at about 6 µs each is not.
+
+**Why a node costs 6 µs is not yet known**, and two guesses have been measured
+and were wrong. Reading `length()` once instead of on every turn of the loop is
+worth 4%; replacing `Result::unwrapOr` — which is `std.result.unwrapOr`, a Cove
+call with a frame of its own — with a `match` is worth 6%. Both are kept and
+neither explains the rest. That is a profile's question rather than a guess's,
+and it is the next one to ask.
+
+## What writing the parser found, continued
 
 **Reading a byte once beats asking six questions.** A body is most of a file
 and every token of one is asked whether it opens or closes a bracket. Asked as
@@ -150,12 +168,13 @@ list of lines rather than one literal for that reason.
 
 ## What is not here yet
 
-The expression and statement grammar inside a body, and the printer. This is
-the front end and the measurement it establishes; nothing here formats
-anything.
+**Any layout decision.** The printer writes what each token said, which is the
+half of a formatter that has to be right first and the half that can be checked
+today. Choosing where a line breaks and how far it is indented needs the
+expression and statement grammar inside a body, and that is the next slice.
 
 ## Tests
 
-`cove test` runs twenty-one of them and they need no capability at all: the
-lexer takes a `String` and answers an `Array<Token>`, and the parser answers a
-`Tree`.
+`cove test` runs twenty-three of them and they need no capability at all: the
+lexer takes a `String` and answers an `Array<Token>`, the parser answers a
+`Tree`, and the printer answers a `String`.
