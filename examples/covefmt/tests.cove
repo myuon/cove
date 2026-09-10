@@ -1,0 +1,137 @@
+/// What the lexer promises, asserted over source rather than over samples.
+/// What a kind is called, so a failure names the shape it saw.
+fn named(kind: Kind) -> String {
+  match kind {
+    Kind.Space => "space"
+    Kind.LineComment => "line"
+    Kind.BlockComment => "block"
+    Kind.DocComment => "doc"
+    Kind.Str => "str"
+    Kind.Char => "char"
+    Kind.Number => "number"
+    Kind.Word => "word"
+    Kind.Punct => "punct"
+    Kind.Unknown => "unknown"
+  }
+}
+
+/// The kinds `source` cuts into, as one line.
+fn shape(source: String) -> String {
+  let held = tokens(source)
+  var parts = Vector.of()
+  var i = 0
+  while i < held.length() {
+    match held.get(i) {
+      Some(token) => parts.push(named(token.kind))
+      None => { }
+    }
+    i = i + 1
+  }
+  " ".join(parts.toArray())
+}
+
+/// The text of the tokens, joined — which is the file again, or the lexer has
+/// lost something.
+fn rejoined(source: String) -> String {
+  let held = tokens(source)
+  var parts = Vector.of()
+  var i = 0
+  while i < held.length() {
+    match held.get(i) {
+      Some(token) => parts.push(text(source, token))
+      None => { }
+    }
+    i = i + 1
+  }
+  "".join(parts.toArray())
+}
+
+/// A line of Cove cuts into the runs it is made of.
+test fn a_declaration_cuts_into_its_parts() -> Result<Unit, Error> {
+  assertEqual(
+    shape("fn twice(n: Int) -> Int"),
+    "word space word punct word punct space word punct space punct space word",
+  )?
+  Ok(())
+}
+
+/// The three comment forms are told apart, and `///` is not `//`.
+test fn the_comment_forms_are_told_apart() -> Result<Unit, Error> {
+  assertEqual(shape("// a"), "line")?
+  assertEqual(shape("/// a"), "doc")?
+  assertEqual(shape("/* a */"), "block")?
+  Ok(())
+}
+
+/// A block comment nests, so the first `*/` does not end an outer one.
+test fn a_block_comment_nests() -> Result<Unit, Error> {
+  let source = "/* outer /* inner */ still outer */x"
+  assertEqual(shape(source), "block word")?
+  Ok(())
+}
+
+/// A backslash escapes the character that would have ended the literal.
+test fn an_escape_does_not_end_a_literal() -> Result<Unit, Error> {
+  assertEqual(shape("\"a\\\"b\" x"), "str space word")?
+  assertEqual(shape("'\\''"), "char")?
+  Ok(())
+}
+
+/// An interpolation is inside the literal it is written in: what is between
+/// the braces is one more expression and is the parser's to take apart.
+test fn an_interpolation_stays_inside_its_literal() -> Result<Unit, Error> {
+  assertEqual(shape("\"a \{b\} c\""), "str")?
+  Ok(())
+}
+
+/// The longest operator wins: `..<` is one token and not three.
+test fn the_longest_operator_wins() -> Result<Unit, Error> {
+  assertEqual(shape("0..<n"), "number punct word")?
+  assertEqual(shape("a -> b"), "word space punct space word")?
+  assertEqual(shape("a ... b"), "word space punct space word")?
+  Ok(())
+}
+
+/// A number carries its fraction and its suffix, so `500ms` is one token.
+test fn a_number_carries_its_suffix() -> Result<Unit, Error> {
+  assertEqual(shape("500ms"), "number")?
+  assertEqual(shape("1.5"), "number")?
+  assertEqual(shape("1..2"), "number punct number")?
+  Ok(())
+}
+
+/// A byte the language does not spell is still a token, so the tiling holds
+/// for source that does not lex.
+test fn a_byte_no_rule_claims_is_still_a_token() -> Result<Unit, Error> {
+  assertEqual(shape("a # b"), "word space unknown space word")?
+  Ok(())
+}
+
+/// An unterminated literal runs to the end rather than failing, which is what
+/// a file being typed looks like.
+test fn an_unterminated_literal_reaches_the_end() -> Result<Unit, Error> {
+  assertEqual(shape("let x = \"open"), "word space word space punct space str")?
+  assertEqual(shape("/* open"), "block")?
+  Ok(())
+}
+
+/// Nothing cuts into nothing, and that tiles too.
+test fn an_empty_source_is_no_tokens() -> Result<Unit, Error> {
+  assertEqual(tokens("").length(), 0)?
+  assert(tiles("", tokens("")))?
+  Ok(())
+}
+
+/// The property the whole lexer exists for, over source with every form in
+/// it: the runs cover the text exactly, and joining them gives it back.
+///
+/// The sample is a list of lines rather than one literal because a `{` in a
+/// Cove string opens an interpolation, so Cove source written inside Cove
+/// source escapes its braces — `\\{` and `\\}` — and a page of that is
+/// unreadable. One line to a line is what a reader can check.
+test fn the_tokens_tile_the_source() -> Result<Unit, Error> {
+  let source = "\n".join(["/// Doubles `n`.", "fn twice(n: Int) -> Int \{", "  // a comment", "  /* and a /* nested */ one */", "  let tick = 500ms", "  let c = 'a'", "  let text = \"n is \{n\}\"", "  n * 2", "\}", ""])
+  assert(tiles(source, tokens(source)))?
+  assertEqual(rejoined(source), source)?
+  Ok(())
+}

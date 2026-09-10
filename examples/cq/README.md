@@ -521,6 +521,15 @@ Anything a program does per character in Cove is roughly a thousand times more
 expensive than the same work inside a builtin. That is the single most
 important thing this example learned.
 
+**Superseded.** The three figures above were measured before the linear-memory
+backend and before a code point became an `Int` a `String` hands out by byte
+offset. `examples/covefmt` measured the same three on 2026-09-10 and got
+**0.20 µs, 0.20 µs and 0.30 µs**: reaching a character is seven times cheaper,
+the struct-field penalty is gone entirely, and calling a method on a struct
+receiver costs 1.5× rather than doubling the loop. The measurements above are
+left as they were taken — they are what this example found, and what it found
+is why some of the work that made them obsolete was done.
+
 ### Building a string is quadratic, and the linear alternative is slower
 
 `+` on two strings is refused, and its help says to interpolate, so appending

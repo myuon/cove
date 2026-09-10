@@ -1,0 +1,53 @@
+/// What a run of source bytes is.
+///
+/// Enough kinds to **tile**: every byte of a file belongs to exactly one
+/// token, trivia included, so re-joining the runs reproduces the file exactly.
+/// That is this lexer's whole contract, and it is the one a formatter needs.
+///
+/// The Rust formatter does not have it. `cove_syntax::ast` carries `///` doc
+/// comments and drops `//`, `/* */` and the blank lines an author wrote, so
+/// `format_source` reads them back out of the source by position and
+/// re-attaches them — and its own documentation says a comment it cannot place
+/// exactly is moved to the nearest following boundary. A lossless token stream
+/// removes that whole class of difficulty rather than solving it again.
+export enum Kind {
+  /// Spaces, tabs, carriage returns and newlines. A blank line an author
+  /// wrote is a run of these, which is how it survives at all.
+  Space
+  /// `// ...` to the end of the line, the newline not included.
+  LineComment
+  /// `/* ... */`, which nests.
+  BlockComment
+  /// `/// ...`, which the parser attaches to what follows it.
+  DocComment
+  /// A `"..."` literal, interpolations and all. What is inside `{ }` is one
+  /// more expression and is the parser's to take apart; as a *run of source*
+  /// it belongs to the literal.
+  Str
+  /// A `'a'` code-point literal, which is an `Int` — ADR 0047.
+  Char
+  /// A number, its fraction and its duration suffix: `500ms` is one token.
+  Number
+  /// An identifier or a keyword. Which of the two is the parser's question:
+  /// a lexer that answered it would need the keyword list, and nothing here
+  /// is decided by it.
+  Word
+  /// One operator or one bracket, longest match first: `..<` is one token
+  /// and not three.
+  Punct
+  /// A byte no rule above claims. It is a token like any other so that the
+  /// tiling holds for a file that does not lex, which is the normal case
+  /// while somebody is typing.
+  Unknown
+}
+
+/// One run of source, named by its kind and its half-open byte range.
+///
+/// A byte range and not a character range: `String` hands out byte offsets
+/// (ADR 0046) and `sliceBytes` cuts the run back out, so a token costs three
+/// words and no copy of the text it names.
+export struct Token {
+  kind: Kind
+  from: Int
+  to: Int
+}

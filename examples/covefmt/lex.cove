@@ -1,0 +1,140 @@
+/// Cutting Cove source into the runs a formatter can put back together.
+///
+/// One rule decides everything here: **the tokens tile the source**. Each one
+/// begins where the last ended, the first at zero, the last at the end, and
+/// none is empty — so joining their text reproduces the file byte for byte.
+/// [`tiles`] is that property written down, and it is what the tests assert
+/// over real source rather than over samples somebody invented.
+///
+/// Losslessness is not a nicety. A formatter has to put every comment and
+/// every blank line back, and the cheapest way to be sure it can is for the
+/// token stream to have never lost one.
+/// How many bytes the operator beginning at `c0` takes, or zero where none
+/// begins there.
+///
+/// The set is `cove_syntax::lexer`'s own and longest-first is the whole of the
+/// rule: `..<` is one token and not `..` and `<`, `->` is not `-` and `>`.
+///
+/// It is written as comparisons rather than as a table, and that is not a
+/// style choice. Cove has no module-level constant and no module-level `let`,
+/// so a table inside a function is an `Array` literal **rebuilt on every
+/// call** — and this is called once per punctuation byte. The first draft did
+/// exactly that, walking thirty-six strings and cutting a `sliceBytes` out of
+/// the source to compare against each: it lexed this repository in 1275 ms
+/// against 278 ms for the same lexer with single-byte punctuation. A constant
+/// table that could be hoisted is the language-shaped hole here.
+fn operatorWidth(c0: Int, c1: Int, c2: Int) -> Int {
+  if c0 == '.' {
+    if c1 == '.' && (c2 == '.' || c2 == '<') {
+      return 3
+    }
+    if c1 == '.' {
+      return 2
+    }
+    return 1
+  }
+  if (c0 == '-' || c0 == '=') && c1 == '>' {
+    return 2
+  }
+  if c1 == '=' && takesEquals(c0) {
+    return 2
+  }
+  if c0 == '&' && c1 == '&' || c0 == '|' && c1 == '|' {
+    return 2
+  }
+  if isOperatorByte(c0) {
+    return 1
+  }
+  0
+}
+
+/// Whether `c` is an operator an `=` may follow: `==`, `!=`, `<=`, `>=`, and
+/// the five compound assignments.
+fn takesEquals(c: Int) -> Bool {
+  c == '=' || c == '!' || c == '<' || c == '>' || c == '+' || c == '-' ||
+    c == '*' || c == '/' || c == '%'
+}
+
+/// Whether `c` is an operator or a bracket the language spells on its own.
+fn isOperatorByte(c: Int) -> Bool {
+  c == '=' || c == '!' || c == '<' || c == '>' || c == '+' || c == '-' ||
+    c == '*' || c == '/' || c == '%' || c == '?' || c == '.' || c == ',' ||
+    c == ':' || c == '(' || c == ')' || c == '\{' || c == '\}' || c == '[' ||
+    c == ']'
+}
+
+/// Cuts `source` into tokens that tile it.
+export fn tokens(source: String) -> Array<Token> {
+  let scan = Scan(source: source, size: source.byteLength())
+  var out = Vector.of()
+  var at = 0
+  while at < scan.size {
+    let c = scan.at(at)
+    var kind = Kind.Unknown
+    var to = at + 1
+    if isSpace(c) {
+      kind = Kind.Space
+      to = scan.space(at)
+    } else if startsWord(c) {
+      kind = Kind.Word
+      to = scan.word(at)
+    } else if isDigit(c) {
+      kind = Kind.Number
+      to = scan.number(at)
+    } else if c == '"' {
+      kind = Kind.Str
+      to = scan.quoted(at, '"')
+    } else if c == '\'' {
+      kind = Kind.Char
+      to = scan.quoted(at, '\'')
+    } else if c == '/' && scan.at(at + 1) == '/' {
+      kind = Kind.LineComment
+      if scan.at(at + 2) == '/' {
+        kind = Kind.DocComment
+      }
+      to = scan.line(at)
+    } else if c == '/' && scan.at(at + 1) == '*' {
+      kind = Kind.BlockComment
+      to = scan.block(at)
+    } else {
+      let width = operatorWidth(c, scan.at(at + 1), scan.at(at + 2))
+      if width > 0 {
+        kind = Kind.Punct
+        to = at + width
+      }
+    }
+    out.push(Token(kind: kind, from: at, to: to))
+    at = to
+  }
+  out.toArray()
+}
+
+/// Whether `held` tiles `source`.
+///
+/// Every token begins where the last ended, none is empty, and the last ends
+/// at the end. A `true` here is the statement that joining the runs would
+/// reproduce the file, which is what a formatter needs to be able to rely on.
+export fn tiles(source: String, held: Array<Token>) -> Bool {
+  var covered = 0
+  var i = 0
+  while i < held.length() {
+    match held.get(i) {
+      Some(token) => {
+        if token.from != covered || token.to <= token.from {
+          return false
+        }
+        covered = token.to
+      }
+      None => {
+        return false
+      }
+    }
+    i = i + 1
+  }
+  covered == source.byteLength()
+}
+
+/// The text a token names.
+export fn text(source: String, token: Token) -> String {
+  source.sliceBytes(token.from, token.to).unwrapOr("")
+}
