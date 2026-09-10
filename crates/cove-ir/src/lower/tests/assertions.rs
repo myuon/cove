@@ -86,6 +86,16 @@ fn an_equality_assertion_on_a_struct_walks_it() {
 
 /// A declaration of the package wins over the shared table's name, exactly
 /// as it does on the interpreter.
+///
+/// What says so is that the *builtin* is not here: no `assert.failed`, no
+/// quoted source text, none of the shape the arms above pin. What is here is
+/// the declared function's own body — a `Result.Ok` it builds and answers.
+///
+/// It used to say so by finding a `call`, and that stopped being evidence
+/// when `super::super::inline` began expanding a small leaf where it is
+/// called: this `assert` is four instructions and calls nothing, so it is
+/// exactly what that pass takes. Its body being here is the same fact the
+/// call was, one step further along.
 #[test]
 fn a_package_that_declares_its_own_assert_gets_its_own() {
     let listed = listing(
@@ -93,7 +103,8 @@ fn a_package_that_declares_its_own_assert_gets_its_own() {
          fn f() -> Result<Unit, Error> { assert(true) }",
         "f",
     );
-    assert!(listed.contains("call"), "{listed}");
+    assert!(listed.contains("Result.Ok"), "{listed}");
+    assert!(!listed.contains("assert.failed"), "{listed}");
     assert!(!listed.contains("assertion failed"), "{listed}");
 }
 
@@ -121,8 +132,8 @@ fn a_gap_the_entry_does_not_reach_does_not_stop_it() {
         sliced(source, "main", "main"),
         "\
 fn @m.main() -> Int
-  frame 1: s0:int
-     0  call s0:Int m.helper ()
+  frame 2: s0:int s1:int
+     0  int s0:int 1
      1  return s0:Int
 "
     );

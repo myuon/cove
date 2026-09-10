@@ -332,13 +332,24 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// out of 10500 copies and 67441 instructions, and forwarding the destination
 /// of a short circuit as well took it to 1492.
 ///
+/// **It rose once, by 21, and that is the one direction this is not supposed
+/// to move.** `lower::inline` expands a call to a small leaf where it is made,
+/// and an expansion copies an argument into a parameter the body assigns, and
+/// copies an answer out where the destination could not be renamed. Those are
+/// copies a *different* mechanism introduced rather than ones destination
+/// forwarding left behind, and the same pass removed more instructions than it
+/// added — `examples:life` runs 252,319 against 264,309. It is written down
+/// rather than smoothed over: a ratchet raised without a sentence is a ratchet
+/// worth nothing, and the sentence is that 1492 is still the number
+/// destination forwarding is measured against.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 1492;
+const FORWARDABLE_COPIES: usize = 1513;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

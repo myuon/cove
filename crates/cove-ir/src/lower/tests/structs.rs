@@ -138,11 +138,15 @@ fn a_field_of_a_call_s_answer_is_copied_out_of_the_temporary() {
         ),
         "\
 fn @m.f() -> Int
-  frame 4: s0:int s1:int s2:int s3:int
-     0  call s1..s2:m.Point m.mk ()
-     1  copy s3:Int s2:Int
-     2  copy s0:Int s3:Int
-     3  return s0:Int
+  frame 10: s0:int s1:int s2:int s3:int s4:int s5:int s6:int s7:int s8:int s9:int
+     0  int s6:int 1
+     1  int s7:int 2
+     2  copy s8:Int s6:Int
+     3  copy s9:Int s7:Int
+     4  copy s1..s2:m.Point s8..s9:m.Point
+     5  copy s3:Int s2:Int
+     6  copy s0:Int s3:Int
+     7  return s0:Int
 "
     );
 }
@@ -158,10 +162,12 @@ fn a_struct_returned_by_value_is_the_answer_location_s_words() {
         ),
         "\
 fn @m.f() -> m.Point
-  frame 3: s0:int s1:int s2:int
+  frame 7: s0:int s1:int s2:int s3:int s4:int s5:int s6:int
      0  int s2:int 3
-     1  call s0..s1:m.Point m.mk (s2:Int)
-     2  return s0..s1:m.Point
+     1  copy s5:Int s2:Int
+     2  copy s6:Int s2:Int
+     3  copy s0..s1:m.Point s5..s6:m.Point
+     4  return s0..s1:m.Point
 "
     );
 }

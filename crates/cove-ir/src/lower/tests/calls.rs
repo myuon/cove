@@ -350,11 +350,11 @@ fn a_default_reads_the_parameters_before_it() {
         ),
         "\
 fn @m.f() -> Int
-  frame 3: s0:int s1:int s2:int
+  frame 4: s0:int s1:int s2:int s3:int
   local n -> s1:Int [1, 2)
      0  int s1:int 3
      1  add.int.imm s2:int s1:int 1
-     2  call s0:Int m.near (s1:Int s2:Int)
+     2  copy s0:Int s2:Int
      3  return s0:Int
 "
     );
@@ -379,14 +379,14 @@ fn a_default_does_not_see_what_the_caller_happens_to_have_bound() {
         ),
         "\
 fn @m.f() -> Int
-  frame 4: s0:int s1:ref s2:int s3:int
+  frame 5: s0:int s1:ref s2:int s3:int s4:int
   local base -> s1:fn [3, 6)
   local n -> s2:Int [4, 5)
      0  alloc s1:ref closure m.f#0<closure>
      1  func-ref s2:int @m.f#0
      2  store-field s1:ref +0 s2:Int
      3  int s2:int 3
-     4  call s3:Int m.base ()
+     4  int s3:int 7
      5  call s0:Int m.scaled (s2:Int s3:Int)
      6  return s0:Int
 "

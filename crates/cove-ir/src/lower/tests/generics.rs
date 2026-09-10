@@ -89,18 +89,19 @@ fn a_call_names_the_instantiation_it_reaches() {
         listing(IDENTITY, "f"),
         "\
 fn @m.f() -> Int
-  frame 8: s0:int s1:int s2:int s3:int s4:int s5:int s6:int s7:int
-  local a -> s2:Int [2, 8)
-  local p -> s6..s7:m.Point [7, 8)
+  frame 11: s0:int s1:int s2:int s3:int s4:int s5:int s6:int s7:int s8:int s9:int s10:int
+  local a -> s2:Int [2, 9)
+  local p -> s6..s7:m.Point [8, 9)
      0  int s1:int 1
-     1  call s2:Int m.id<Int> (s1:Int)
+     1  copy s2:Int s1:Int
      2  int s1:int 2
      3  int s3:int 3
      4  copy s4:Int s1:Int
      5  copy s5:Int s3:Int
-     6  call s6..s7:m.Point m.id<m.Point> (s4..s5:m.Point)
-     7  add.int s0:int s2:int s6:int
-     8  return s0:Int
+     6  copy s9..s10:m.Point s4..s5:m.Point
+     7  copy s6..s7:m.Point s9..s10:m.Point
+     8  add.int s0:int s2:int s6:int
+     9  return s0:Int
 "
     );
 }
@@ -161,9 +162,9 @@ fn an_explicit_type_argument_reaches_the_same_instantiation() {
         ),
         "\
 fn @m.f() -> Int
-  frame 2: s0:int s1:int
+  frame 3: s0:int s1:int s2:int
      0  int s1:int 1
-     1  call s0:Int m.id<Int> (s1:Int)
+     1  copy s0:Int s1:Int
      2  return s0:Int
 "
     );
@@ -245,9 +246,9 @@ fn a_bounded_parameter_dispatches_to_its_conformance() {
         listing(SUMMARY, "headline<m.Article>"),
         "\
 fn @m.headline<m.Article>(m.Article) -> String
-  frame 3: s0!:ref s1!:int s2:ref
+  frame 4: s0!:ref s1!:int s2:ref s3:ref
   local entry -> s0..s1:m.Article [0, 2)
-     0  call s2:String m.Article.summary (s0..s1:m.Article)
+     0  copy s2:String s0:String
      1  return s2:String
 "
     );
@@ -255,9 +256,9 @@ fn @m.headline<m.Article>(m.Article) -> String
         listing(SUMMARY, "headline<m.Note>"),
         "\
 fn @m.headline<m.Note>(m.Note) -> String
-  frame 2: s0!:ref s1:ref
+  frame 3: s0!:ref s1:ref s2:ref
   local entry -> s0:m.Note [0, 2)
-     0  call s1:String m.Note.summary (s0:m.Note)
+     0  copy s1:String s0:String
      1  return s1:String
 "
     );

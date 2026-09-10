@@ -212,22 +212,25 @@ fn a_question_mark_leaves_through_the_enclosing_function_s_own_failure() {
         ),
         "\
 fn @m.f() -> Result
-  frame 11: s0:tag s1:int s2:ref s3:tag s4:int s5:ref s6:int s7:tag s8:int s9:ref s10:int
-  local v -> s6:Int [8, 13)
-     0  call s3..s5:Result m.g ()
-     1  switch s3:tag [2 4] else 4
-     2  copy s6:Int s4:Int
-     3  jump 7
-     4  tag s7:tag Result.Err
-     5  copy s9:Error s5:Error
-     6  return s7..s9:Result
-     7  clear s3..s5:Result
-     8  add.int.imm s10:int s6:int 1
-     9  tag s3:tag Result.Ok
-    10  clear s5:<ref>
-    11  copy s4:Int s10:Int
-    12  copy s0..s2:Result s3..s5:Result
-    13  return s0..s2:Result
+  frame 18: s0:tag s1:int s2:ref s3:tag s4:int s5:ref s6:int s7:tag s8:int s9:ref s10:int s11:tag s12:int s13:ref s14:int s15:tag s16:int s17:ref
+  local v -> s6:Int [12, 16)
+     0  int s14:int 1
+     1  tag s15:tag Result.Ok
+     2  copy s16:Int s14:Int
+     3  copy s3..s5:Result s15..s17:Result
+     4  clear s15..s17:Result
+     5  switch s3:tag [6 8] else 8
+     6  copy s6:Int s4:Int
+     7  jump 11
+     8  tag s7:tag Result.Err
+     9  copy s9:Error s5:Error
+    10  return s7..s9:Result
+    11  clear s3..s5:Result
+    12  add.int.imm s10:int s6:int 1
+    13  tag s3:tag Result.Ok
+    14  copy s4:Int s10:Int
+    15  copy s0..s2:Result s3..s5:Result
+    16  return s0..s2:Result
 "
     );
 }
@@ -241,19 +244,22 @@ fn a_question_mark_on_an_option_leaves_through_none() {
         ),
         "\
 fn @m.f() -> Option
-  frame 8: s0:tag s1:int s2:tag s3:int s4:int s5:tag s6:int s7:int
-  local v -> s4:Int [6, 10)
-     0  call s2..s3:Option m.g ()
-     1  switch s2:tag [4 2] else 4
-     2  copy s4:Int s3:Int
-     3  jump 6
-     4  tag s5:tag Option.None
-     5  return s5..s6:Option
-     6  add.int.imm s7:int s4:int 1
-     7  tag s2:tag Option.Some
-     8  copy s3:Int s7:Int
-     9  copy s0..s1:Option s2..s3:Option
-    10  return s0..s1:Option
+  frame 13: s0:tag s1:int s2:tag s3:int s4:int s5:tag s6:int s7:int s8:tag s9:int s10:int s11:tag s12:int
+  local v -> s4:Int [9, 13)
+     0  int s10:int 1
+     1  tag s11:tag Option.Some
+     2  copy s12:Int s10:Int
+     3  copy s2..s3:Option s11..s12:Option
+     4  switch s2:tag [7 5] else 7
+     5  copy s4:Int s3:Int
+     6  jump 9
+     7  tag s5:tag Option.None
+     8  return s5..s6:Option
+     9  add.int.imm s7:int s4:int 1
+    10  tag s2:tag Option.Some
+    11  copy s3:Int s7:Int
+    12  copy s0..s1:Option s2..s3:Option
+    13  return s0..s1:Option
 "
     );
 }

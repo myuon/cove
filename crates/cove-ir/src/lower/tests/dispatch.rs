@@ -44,12 +44,12 @@ fn a_dyn_call_switches_on_the_layout_the_box_records() {
         ),
         "\
 fn @m.take(Any) -> String
-  frame 7: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:int
+  frame 8: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:int s7:ref
   local v -> s0:Any [0, 12)
      0  load-field s2:Int s0:ref +0
      1  switch s2:int [9 9 9 9 9 9 9 9 9 9 9 9 9 9 2 6] else 9
      2  unbox s4:m.Name s0:ref
-     3  call s3:String m.Name.show (s4:m.Name)
+     3  copy s3:String s4:String
      4  clear s4:m.Name
      5  jump 10
      6  unbox s5..s6:m.Point s0:ref
@@ -94,7 +94,7 @@ fn a_dyn_struct_field_holds_the_box() {
         ),
         "\
 fn @m.f() -> String
-  frame 7: s0:ref s1:ref s2:ref s3:int s4:ref s5:int s6:int
+  frame 8: s0:ref s1:ref s2:ref s3:int s4:ref s5:int s6:int s7:ref
   local h -> s2:m.Holder [5, 16)
      0  str s1:ref \"n\"
      1  copy s2:String s1:String
@@ -104,7 +104,7 @@ fn @m.f() -> String
      5  load-field s3:Int s2:ref +0
      6  switch s3:int [14 14 14 14 14 14 14 14 14 14 14 14 14 14 7 11] else 14
      7  unbox s4:m.Name s2:ref
-     8  call s1:String m.Name.show (s4:m.Name)
+     8  copy s1:String s4:String
      9  clear s4:m.Name
     10  jump 15
     11  unbox s5..s6:m.Point s2:ref
