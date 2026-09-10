@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:febbaf51c68e36a7
+hash fnv1a64:06ba58ce96eb5cc9
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -269,6 +269,28 @@ module covefmt
     case Word
     case Punct
     case Unknown
+  /// What a node of the tree is.
+  ///
+  /// One kind per shape the item level of Cove has, plus the three a lossless
+  /// tree needs whatever the grammar says: a leaf, a run of trivia, and a run
+  /// no rule claimed.
+  export enum Node
+    case File
+    case Use
+    case Fn
+    case Struct
+    case Enum
+    case Impl
+    case Trait
+    case TypeAlias
+    case Name
+    case Generics
+    case Params
+    case Returns
+    case Body
+    case Trivia
+    case Leaf
+    case Error
   /// One run of source, named by its kind and its half-open byte range.
   ///
   /// A byte range and not a character range: `String` hands out byte offsets
@@ -278,6 +300,37 @@ module covefmt
     field kind: Kind
     field from: Int
     field to: Int
+  /// One node: what it is, the tokens it covers, and what it is made of.
+  ///
+  /// `from` and `to` are indices into the token array, half-open. The invariant
+  /// is [`tiles`]'s: **a node's children cover its range exactly, in order**,
+  /// and a node with no children is one token. It is the lexer's tiling one
+  /// level up, and it is what says the tree has lost nothing — a formatter that
+  /// walks it reaches every comment and every blank line, because they are in
+  /// it rather than beside it.
+  export struct Tree
+    field kind: Node
+    field from: Int
+    field to: Int
+    field children: Array<Tree>
+  /// Whether `tree` covers `[from, to)` and its children tile it.
+  ///
+  /// Named apart from `lex`'s `tiles` because a module holds one declaration
+  /// per name — there is no overloading — and these two are the same property
+  /// asked of two things.
+  ///
+  /// Recursive, because the property is: a node with children has them in order,
+  /// adjacent, beginning at its own start and ending at its own end; a node with
+  /// none is one token wide.
+  export fn covers(tree: Tree, from: Int, to: Int) -> Bool
+  /// A leaf: one token, no children.
+  export fn leafAt(at: Int) -> Tree
+  /// A node over `children`, which are assumed to be in order and adjacent.
+  export fn nodeOf(kind: Node, from: Int, to: Int, children: Array<Tree>) -> Tree
+  /// The tree of one source.
+  export fn parse(source: String) -> Tree
+  /// How many nodes the tree holds, itself included.
+  export fn size(tree: Tree) -> Int
   /// The text a token names.
   export fn text(source: String, token: Token) -> String
   /// Whether `held` tiles `source`.

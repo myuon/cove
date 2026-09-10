@@ -1,6 +1,6 @@
 # covefmt
 
-The lexer of a Cove formatter, written in Cove.
+The front end of a Cove formatter, written in Cove: a lexer and a parser.
 
 The intent is replacement rather than a second implementation: if this reaches
 `cove fmt`'s output at an acceptable cost, the Rust formatter goes and the
@@ -26,6 +26,42 @@ unclosed block comment, a byte the language does not spell: each is a token,
 because the tiling has to hold for a file that does not lex, and while somebody
 is typing that is every file.
 
+## The tree tiles too
+
+The parser is recursive descent at the item level. `use`, `fn`, `struct`,
+`enum`, `impl`, `trait` and `type` are taken apart into the header a formatter
+has to lay out — the words in front of them, the name, the generics, the
+parameters, the answer — and their bodies are kept whole. What is inside a body
+is the next slice's; until then it is a `Body` of leaves, which is enough to be
+lossless and not enough to format.
+
+The invariant is the lexer's, one level up: **a node's children cover its range
+exactly, in order**, and a node with no children is one token. `covers` is that
+written down, and every file in this repository satisfies it.
+
+A file that does not parse is not a failure. Tokens no rule claims become an
+`Error` node and the tree still covers them, which is what a file being typed
+looks like.
+
+## Over this repository
+
+242 files, 493,736 bytes, 94,802 tokens, 100,326 nodes:
+
+| | |
+| --- | ---: |
+| lex | 241 ms |
+| parse | 635 ms |
+| **together** | **876 ms** |
+| scaled to all 695 KB of Cove here | ~1230 ms |
+| `cove fmt --check` on that 695 KB, in Rust: lex, parse, format *and* compare | **40–70 ms** |
+
+Every file parses and every tree covers its tokens. **One** `Error` node
+remains in the corpus, in `tests/e2e/fail_reserved_annotation`, which is a file
+written not to parse.
+
+So the front end alone is eighteen to thirty times the whole Rust job, and the
+printer is not written. The target is 5×.
+
 ## What it costs
 
 Over this repository — 238 files, 468,759 bytes, 90,502 tokens:
@@ -50,7 +86,42 @@ Two floors, measured on this tree:
 - **a lexer looks at each byte two to three times**, which is where 0.60 µs
   comes from. Almost none of it is the program.
 
-## What writing it found
+## What writing the parser found
+
+Three bugs, all of them found by the corpus rather than by a test, and all of
+them invisible to the tiling property — which is why a real corpus is worth
+more than a sample.
+
+**A character wider than one byte ended the run it was inside.**
+`codePointAtByte` answers nothing at an offset that is not a character
+boundary, and `Scan::at` reported that as the end of the file, so a comment
+containing a `—` ended at the dash. The tiling *held* either way, because a
+token that stops early is followed by another that starts there — so the
+property is necessary and not sufficient. `utf8Width` computes the step from
+the scalar already read rather than probing for the next boundary, which is
+arithmetic instead of a second call per character.
+
+**A `"` inside an interpolation ended the string.**
+`"\"\{field.replace("\"", "\"\"")\}\""` is one literal, and a rule that stopped
+at the first unescaped quote stopped in the middle of it. Braces nest, and a
+literal inside one is a literal.
+
+**A line break inside a bracket ended a declaration.** That is the language's
+own rule and this did not have it, so
+`export type Handler = async fn(\n  request: http.Request,\n) -> ...` became a
+`type` and an error.
+
+`async` was simply missing from the words a declaration may be preceded by.
+
+**Reading a byte once beats asking six questions.** A body is most of a file
+and every token of one is asked whether it opens or closes a bracket. Asked as
+six `isPunct` calls — each an `Option<Token>` and a loop over a word — the
+parse took 874 ms; reading the byte once and comparing it six times took
+**635 ms**. Materialising every token as a leaf, which was the suspect, turned
+out to cost 100 ms of the 874: the tree has 100,326 nodes for 94,802 tokens and
+dropping the leaves to 27,517 nodes bought 12%.
+
+## What writing the lexer found
 
 **There is no module-level constant, so a table cannot be hoisted.** The first
 draft matched operators against an `Array<String>` returned by a function, and
@@ -79,10 +150,12 @@ list of lines rather than one literal for that reason.
 
 ## What is not here yet
 
-The parser and the printer. This is the front end and the measurement it
-establishes; nothing here formats anything.
+The expression and statement grammar inside a body, and the printer. This is
+the front end and the measurement it establishes; nothing here formats
+anything.
 
 ## Tests
 
-`cove test` runs eleven of them and they need no capability at all: the lexer
-takes a `String` and answers an `Array<Token>`.
+`cove test` runs twenty-one of them and they need no capability at all: the
+lexer takes a `String` and answers an `Array<Token>`, and the parser answers a
+`Tree`.

@@ -1,0 +1,207 @@
+/// Recursive descent over the tokens, at the item level.
+///
+/// This slice takes a declaration apart into its header — the words in front
+/// of it, its name, its generics, its parameters, its answer — and keeps its
+/// body whole. What is inside a body is the next slice's; until then it is a
+/// `Body` of leaves, which is enough to be lossless and not enough to format.
+///
+/// Every rule ends where it began or later and never skips a token, so the
+/// tree tiles whatever the source says. A file that does not parse is not a
+/// failure here: the tokens no rule claimed become an `Error` node, and the
+/// tree still covers them.
+/// A cursor over the tokens of one source.
+struct Parser {
+  source: String
+  tokens: Array<Token>
+  at: Int
+}
+
+/// Whether the token at `at` is the word `word`.
+///
+/// Compared byte by byte rather than by cutting the run out: `sliceBytes`
+/// allocates a `String`, and a keyword test happens at every item and every
+/// word in front of one.
+fn isWord(source: String, tokens: Array<Token>, at: Int, word: String) -> Bool {
+  match tokens.get(at) {
+    Some(token) => {
+      if token.kind != Kind.Word || token.to - token.from != word.byteLength() {
+        return false
+      }
+      var i = 0
+      while i < word.byteLength() {
+        if source.codePointAtByte(token.from + i) != word.codePointAtByte(i) {
+          return false
+        }
+        i = i + 1
+      }
+      true
+    }
+    None => false
+  }
+}
+
+/// Whether the token at `at` is the punctuation `mark`.
+fn isPunct(
+  source: String,
+  tokens: Array<Token>,
+  at: Int,
+  mark: String,
+) -> Bool {
+  match tokens.get(at) {
+    Some(token) => {
+      if token.kind != Kind.Punct || token.to - token.from != mark.byteLength() {
+        return false
+      }
+      var i = 0
+      while i < mark.byteLength() {
+        if source.codePointAtByte(token.from + i) != mark.codePointAtByte(i) {
+          return false
+        }
+        i = i + 1
+      }
+      true
+    }
+    None => false
+  }
+}
+
+/// Whether the token at `at` is trivia: space, or one of the comment forms.
+fn isTrivia(tokens: Array<Token>, at: Int) -> Bool {
+  match tokens.get(at) {
+    Some(token) => token.kind == Kind.Space || token.kind == Kind.LineComment ||
+      token.kind == Kind.BlockComment || token.kind == Kind.DocComment
+    None => false
+  }
+}
+
+impl Parser {
+  /// Whether every token has been taken.
+  fn done(self) -> Bool {
+    self.at >= self.tokens.length()
+  }
+
+  /// The first token at or after `at` that is not trivia.
+  fn significant(self, at: Int) -> Int {
+    var i = at
+    while i < self.tokens.length() && isTrivia(self.tokens, i) {
+      i = i + 1
+    }
+    i
+  }
+
+  /// The byte of a one-byte punctuation token at `at`, or zero.
+  ///
+  /// One read where a chain of `isPunct` calls is six. A body is most of a
+  /// file and every token of one is asked whether it opens or closes a
+  /// bracket, so asking it as six calls — each of them an `Option<Token>` and
+  /// a loop over a word — was 774 ms of the 874 the parse took. Reading the
+  /// byte once and comparing it six times is the same question, answered.
+  fn punctByte(self, at: Int) -> Int {
+    match self.tokens.get(at) {
+      Some(token) => {
+        if token.kind != Kind.Punct || token.to - token.from != 1 {
+          return 0
+        }
+        match self.source.codePointAtByte(token.from) {
+          Some(c) => c
+          None => 0
+        }
+      }
+      None => 0
+    }
+  }
+
+  /// Takes one token as a leaf.
+  fn leaf(var self) -> Tree {
+    let at = self.at
+    self.at = at + 1
+    leafAt(at)
+  }
+
+  /// Takes the run of trivia at the cursor into `into`, and answers whether
+  /// there was any.
+  fn trivia(var self, var into: Vector<Tree>) -> Bool {
+    let from = self.at
+    while !self.done() && isTrivia(self.tokens, self.at) {
+      into.push(self.leaf())
+    }
+    self.at > from
+  }
+
+  /// Takes a balanced run beginning at an opening bracket, brackets included.
+  ///
+  /// Depth is counted over `{`, `[` and `(` together rather than per kind,
+  /// which is what a lexer's output supports: a `}` that closes nothing ends
+  /// the run, because a run that read past it would swallow the rest of the
+  /// file on one typo.
+  fn balanced(var self, kind: Node) -> Tree {
+    let from = self.at
+    var held = Vector.of()
+    var depth = 0
+    while !self.done() {
+      let c = self.punctByte(self.at)
+      let opens = c == '\{' || c == '[' || c == '('
+      let closes = c == '\}' || c == ']' || c == ')'
+      if opens {
+        depth = depth + 1
+      }
+      held.push(self.leaf())
+      if closes {
+        depth = depth - 1
+        if depth <= 0 {
+          return nodeOf(kind, from, self.at, held.toArray())
+        }
+      }
+    }
+    nodeOf(kind, from, self.at, held.toArray())
+  }
+
+  /// Takes the rest of the line as leaves, the newline excluded.
+  ///
+  /// What `use` and `type` end at: a statement ends at the end of a line, so
+  /// a declaration with no body does too.
+  ///
+  /// A line break inside a bracket ends nothing, which is the language's own
+  /// rule and not a nicety here: `export type Handler = async fn(\n  request:
+  /// http.Request,\n) -> ...` is one declaration, and a rule that stopped at
+  /// the first newline made it two and the second an error.
+  fn toEndOfLine(
+    var self,
+    kind: Node,
+    from: Int,
+    var held: Vector<Tree>,
+  ) -> Tree {
+    var depth = 0
+    while !self.done() {
+      match self.tokens.get(self.at) {
+        Some(token) => {
+          if depth <= 0 && token.kind == Kind.Space &&
+            endsLine(self.source, token) {
+            return nodeOf(kind, from, self.at, held.toArray())
+          }
+        }
+        None => { }
+      }
+      let c = self.punctByte(self.at)
+      if c == '(' || c == '[' || c == '\{' {
+        depth = depth + 1
+      } else if c == ')' || c == ']' || c == '\}' {
+        depth = depth - 1
+      }
+      held.push(self.leaf())
+    }
+    nodeOf(kind, from, self.at, held.toArray())
+  }
+}
+
+/// Whether a run of space holds a newline.
+fn endsLine(source: String, token: Token) -> Bool {
+  var i = token.from
+  while i < token.to {
+    if source.codePointAtByte(i) == Some('\n') {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}

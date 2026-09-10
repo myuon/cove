@@ -101,6 +101,8 @@ export fn tokens(source: String) -> Array<Token> {
       if width > 0 {
         kind = Kind.Punct
         to = at + width
+      } else {
+        to = at + utf8Width(c)
       }
     }
     out.push(Token(kind: kind, from: at, to: to))

@@ -1,0 +1,120 @@
+/// What a node of the tree is.
+///
+/// One kind per shape the item level of Cove has, plus the three a lossless
+/// tree needs whatever the grammar says: a leaf, a run of trivia, and a run
+/// no rule claimed.
+export enum Node {
+  /// The whole file.
+  File
+  /// `use console.println`.
+  Use
+  /// A function, with its header taken apart and its body left whole.
+  Fn
+  /// `struct`, `enum`, `impl`, `trait` — a name and a braced body.
+  Struct
+  Enum
+  Impl
+  Trait
+  /// `export type Handler = fn(...) -> ...`, which ends at a line.
+  TypeAlias
+  /// The word a declaration is called.
+  Name
+  /// `<T, E>` on a declaration.
+  Generics
+  /// `(a: Int, b: String)`.
+  Params
+  /// `-> Result<Unit, Error>`.
+  Returns
+  /// A balanced `{ ... }`. Its tokens are leaves: what is inside a body is
+  /// the next slice's, and until then it is kept rather than read.
+  Body
+  /// Space and comments, which are tokens like any other here.
+  Trivia
+  /// One token.
+  Leaf
+  /// Tokens no rule claimed, so that a file which does not parse still has a
+  /// tree that covers it.
+  Error
+}
+
+/// One node: what it is, the tokens it covers, and what it is made of.
+///
+/// `from` and `to` are indices into the token array, half-open. The invariant
+/// is [`tiles`]'s: **a node's children cover its range exactly, in order**,
+/// and a node with no children is one token. It is the lexer's tiling one
+/// level up, and it is what says the tree has lost nothing — a formatter that
+/// walks it reaches every comment and every blank line, because they are in
+/// it rather than beside it.
+export struct Tree {
+  kind: Node
+  from: Int
+  to: Int
+  children: Array<Tree>
+}
+
+/// A leaf: one token, no children.
+export fn leafAt(at: Int) -> Tree {
+  Tree(kind: Node.Leaf, from: at, to: at + 1, children: [])
+}
+
+/// A node over `children`, which are assumed to be in order and adjacent.
+export fn nodeOf(
+  kind: Node,
+  from: Int,
+  to: Int,
+  children: Array<Tree>,
+) -> Tree {
+  Tree(kind: kind, from: from, to: to, children: children)
+}
+
+/// Whether `tree` covers `[from, to)` and its children tile it.
+///
+/// Named apart from `lex`'s `tiles` because a module holds one declaration
+/// per name — there is no overloading — and these two are the same property
+/// asked of two things.
+///
+/// Recursive, because the property is: a node with children has them in order,
+/// adjacent, beginning at its own start and ending at its own end; a node with
+/// none is one token wide.
+export fn covers(tree: Tree, from: Int, to: Int) -> Bool {
+  if tree.from != from || tree.to != to {
+    return false
+  }
+  // A leaf is one token and has no children. Every other node is measured by
+  // its children, and a node with none covers nothing — which is what a file
+  // of nothing is, and what a rule that found nothing to take answers.
+  if tree.kind == Node.Leaf {
+    return tree.to == tree.from + 1 && tree.children.length() == 0
+  }
+  var covered = tree.from
+  var i = 0
+  while i < tree.children.length() {
+    match tree.children.get(i) {
+      Some(child) => {
+        if !covers(child, covered, child.to) {
+          return false
+        }
+        covered = child.to
+      }
+      None => {
+        return false
+      }
+    }
+    i = i + 1
+  }
+  covered == tree.to
+}
+
+/// How many nodes the tree holds, itself included.
+export fn size(tree: Tree) -> Int {
+  var total = 1
+  var i = 0
+  while i < tree.children.length() {
+    match tree.children.get(i) {
+      Some(child) => total = total + size(child)
+      None => { }
+    }
+    i = i + 1
+  }
+  total
+}

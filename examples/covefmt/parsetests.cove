@@ -1,0 +1,162 @@
+/// What the tree promises.
+/// The kinds of a file's items, as one line.
+fn items(source: String) -> String {
+  let tree = parse(source)
+  var parts = Vector.of()
+  var i = 0
+  while i < tree.children.length() {
+    match tree.children.get(i) {
+      Some(child) => parts.push(nodeNamed(child.kind))
+      None => { }
+    }
+    i = i + 1
+  }
+  " ".join(parts.toArray())
+}
+
+/// What a node kind is called, so a failure names what it saw.
+fn nodeNamed(kind: Node) -> String {
+  match kind {
+    Node.File => "file"
+    Node.Use => "use"
+    Node.Fn => "fn"
+    Node.Struct => "struct"
+    Node.Enum => "enum"
+    Node.Impl => "impl"
+    Node.Trait => "trait"
+    Node.TypeAlias => "type"
+    Node.Name => "name"
+    Node.Generics => "generics"
+    Node.Params => "params"
+    Node.Returns => "returns"
+    Node.Body => "body"
+    Node.Trivia => "trivia"
+    Node.Leaf => "leaf"
+    Node.Error => "error"
+  }
+}
+
+/// The kinds of one item's children.
+fn parts(source: String) -> String {
+  let tree = parse(source)
+  var out = Vector.of()
+  match tree.children.get(0) {
+    Some(item) => {
+      var i = 0
+      while i < item.children.length() {
+        match item.children.get(i) {
+          Some(child) => {
+            if child.kind != Node.Leaf {
+              out.push(nodeNamed(child.kind))
+            }
+          }
+          None => { }
+        }
+        i = i + 1
+      }
+    }
+    None => { }
+  }
+  " ".join(out.toArray())
+}
+
+/// Whether the tree covers every token of `source`.
+fn whole(source: String) -> Bool {
+  let tree = parse(source)
+  covers(tree, 0, tokens(source).length())
+}
+
+/// A file is a list of declarations, and the words in front of one belong to
+/// it rather than standing alone.
+///
+/// The trailing `trivia` is the newline after the last declaration. It has to
+/// live somewhere for the tree to be lossless, and an item of its own is
+/// where: attaching it to the declaration before it would make a formatter
+/// that moved that declaration move the file's last line with it.
+test fn a_file_is_a_list_of_declarations() -> Result<Unit, Error> {
+  let source = "\n".join([
+    "use console.println",
+    "",
+    "export fn main() -> Int \{",
+    "  1",
+    "\}",
+    "",
+  ])
+  assertEqual(items(source), "use fn trivia")?
+  Ok(())
+}
+
+/// A function is taken apart into the header a formatter has to lay out.
+test fn a_function_is_a_name_parameters_an_answer_and_a_body(
+) -> Result<Unit, Error> {
+  assertEqual(
+    parts("fn twice(n: Int) -> Int \{ n * 2 \}"),
+    "name params returns body",
+  )?
+  Ok(())
+}
+
+/// Generics are their own node, and the angle brackets are counted alone: a
+/// `<` after a name is a bracket, and everywhere else it is a comparison.
+test fn generics_are_their_own_node() -> Result<Unit, Error> {
+  assertEqual(
+    parts("fn first<T>(xs: Array<T>) -> Option<T> \{ xs.get(0) \}"),
+    "name generics params returns body",
+  )?
+  Ok(())
+}
+
+/// A method a trait only declares has no body, and the answer ends at the
+/// line rather than running into the next declaration.
+test fn a_declaration_without_a_body_ends_at_its_line() -> Result<Unit, Error> {
+  let source = "\n".join([
+    "trait Show \{",
+    "  fn show(self) -> String",
+    "\}",
+    "",
+  ])
+  assertEqual(items(source), "trait trivia")?
+  assert(whole(source))?
+  Ok(())
+}
+
+/// A `use` and a `type` end at a line, so the next declaration is a
+/// declaration of its own.
+test fn a_line_ended_declaration_does_not_swallow_the_next(
+) -> Result<Unit, Error> {
+  let source = "\n".join(["use console.println", "use clock", "export type Handler = fn(x: Int) -> Int", "struct S \{ n: Int \}", ""])
+  assertEqual(items(source), "use use type struct trivia")?
+  Ok(())
+}
+
+/// A brace that closes nothing ends the body rather than swallowing the rest
+/// of the file: one typo should cost one declaration.
+test fn an_unbalanced_brace_costs_one_declaration() -> Result<Unit, Error> {
+  let source = "\n".join(["fn a() -> Int \{ 1 \}", "fn b() -> Int \{ 2 \}", ""])
+  assertEqual(items(source), "fn fn trivia")?
+  Ok(())
+}
+
+/// Text no rule claims becomes an `Error`, and the tree still covers it.
+test fn text_no_rule_claims_is_still_in_the_tree() -> Result<Unit, Error> {
+  let source = "\n".join(["%%% not a declaration", "fn a() -> Int \{ 1 \}", ""])
+  assertEqual(items(source), "error fn trivia")?
+  assert(whole(source))?
+  Ok(())
+}
+
+/// The property the tree exists for: its children tile it, all the way down,
+/// so a walk of it reaches every token — every comment and every blank line
+/// included.
+test fn the_tree_covers_every_token() -> Result<Unit, Error> {
+  let source = "\n".join(["/// Doubles `n`.", "use console.println", "", "// a comment between declarations", "", "export struct Point \{", "  x: Int", "  y: Int", "\}", "", "impl Point \{", "  /// Moves it.", "  fn shift(self, by: Int) -> Point \{", "    Point(x: self.x + by, y: self.y)", "  \}", "\}", "", "export fn main() -> Result<Unit, Error> \{", "  console.println(\"hello\")?", "  Ok(())", "\}", ""])
+  assert(whole(source))?
+  Ok(())
+}
+
+/// Nothing parses to a file of nothing, and that covers nothing.
+test fn an_empty_source_is_an_empty_file() -> Result<Unit, Error> {
+  assertEqual(parse("").children.length(), 0)?
+  assert(whole(""))?
+  Ok(())
+}
