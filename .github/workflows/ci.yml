@@ -79,63 +79,41 @@ jobs:
             ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
             ${{ runner.os }}-cargo-
 
-      # A restored cache did not stop cargo rebuilding every crate in the
-      # workspace, and the reason is mtimes: `actions/checkout` writes the
-      # sources, `actions/cache` then extracts artifacts carrying an earlier
-      # run's timestamps, and cargo's freshness check for a path dependency
-      # is "is any source newer than what was built from it". Every source
-      # is, so the pipeline compiled the whole workspace on every run and the
-      # cache served only the registry — 112 seconds of a 176-second step,
-      # measured, on a commit whose Rust had not changed at all
-      # ([issue #257](https://github.com/myuon/cove/issues/257)). Confirmed
-      # rather than assumed: touching every `.rs` file without changing a
-      # byte recompiles seven crates.
+      # The cache carries the registry and the artifacts of everything the
+      # workspace depends on, and nothing more is asked of it.
       #
-      # Cargo can already decide this per crate. What was broken is the
-      # question it was being asked, so this fixes the question. The cache
-      # carries a list of what its artifacts were built from — one SHA-256
-      # per tracked source — and every file whose content still matches is
-      # dated into the past. A file that changed keeps its checkout
-      # timestamp, so cargo rebuilds its crate, and then rebuilds everything
-      # downstream of it by its own rules. **Nothing here decides what to
-      # reuse; it only stops lying to the thing that does.**
+      # It used to be asked for more. `actions/checkout` writes every source
+      # with a fresh timestamp and `actions/cache` extracts artifacts carrying
+      # an earlier run's, so cargo's freshness check — "is any source newer
+      # than what was built from it" — said yes to every crate and the
+      # pipeline recompiled the workspace on every run
+      # ([issue #257](https://github.com/myuon/cove/issues/257)). A step here
+      # answered that by *dating the sources back*: it kept a manifest of what
+      # the cache had been built from and touched every unchanged source to
+      # the year 2000, so cargo skipped it.
       #
-      # The safety is that a file is dated back only when its content hashes
-      # to what the cached artifacts were compiled from. A file that is new,
-      # deleted, or different is not in the intersection and is not touched.
+      # That was unsound, and it took three pull requests to see how
+      # ([issue #306](https://github.com/myuon/cove/issues/306)). The manifest
+      # was written from the **checkout** rather than from the build, and
+      # before the build rather than after it — so a job that restored older
+      # artifacts, rebuilt nothing, and saved the result left a cache claiming
+      # that this commit's sources had produced somebody else's artifacts. The
+      # claim then propagated: every later job trusted it and rebuilt nothing
+      # either.
       #
-      # `git-restore-mtime` is the usual reach here and it is wrong for this
-      # repository. It dates each file to the commit that last touched it,
-      # which is *always* earlier than the build time of any cache — so a
-      # branch restoring `main`'s cache through the prefix key above would
-      # look fresh while holding artifacts compiled from different code, and
-      # the run would test something that is not the commit. A commit date
-      # cannot tell those apart. A content hash can.
+      # What it looked like from outside was a `copies.rs` that measured the
+      # lowering as it stood before #302 while comparing it against #303's
+      # ratchet — a combination no single commit can produce — on every pull
+      # request that did not itself change `cove-ir`. The failure was
+      # deterministic, survived re-runs, and went away when the branch was
+      # rebased onto a `main` whose own run had rebuilt the crate.
       #
-      # `git ls-files` rather than `find`, because `examples/target` is one
-      # of the restored directories and must not be dated with the sources.
-      - name: Date back the sources this commit did not change
-        run: |
-          set -euo pipefail
-          export LC_ALL=C
-          manifest=target/.ci-source-hashes
-          git ls-files -z crates examples Cargo.toml Cargo.lock .cargo \
-            | xargs -0 sha256sum | sort > /tmp/sources-now
-          total=$(wc -l < /tmp/sources-now)
-          if [ -f "$manifest" ]; then
-            sort "$manifest" > /tmp/sources-cached
-            # A sha256sum line is 64 hex digits and two spaces before the path.
-            comm -12 /tmp/sources-now /tmp/sources-cached | cut -c 67- > /tmp/unchanged
-            same=$(wc -l < /tmp/unchanged)
-            echo "$same of $total tracked sources are what the cache was built from"
-            tr '\n' '\0' < /tmp/unchanged | xargs -0 -r touch -d '2000-01-01T00:00:00Z'
-          else
-            echo "no manifest in the restored cache; all $total sources keep their checkout timestamps"
-          fi
-          mkdir -p target
-          cp /tmp/sources-now "$manifest"
+      # A green run that is not about this commit is worse than a slow one, so
+      # the step is gone. Cargo rebuilds the workspace's own crates every run
+      # and the cache still serves the registry and the dependency artifacts,
+      # which is most of a cold build and cannot go stale: a dependency's
+      # fingerprint is its version and its features, not a timestamp.
 
-      # Formatting first: it is the cheapest check and the easiest to fix.
       - name: cargo fmt
         run: cargo fmt --all --check
 
@@ -313,31 +291,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}-
             ${{ runner.os }}-cargo-wasm-
-
-      # The same manifest as the job above, for the same reason, and it is
-      # worth having twice: this job compiles the whole workspace for a
-      # second target and was throwing all of it away too. The two caches
-      # are keyed apart, so each carries its own manifest and neither can
-      # date a source back against the other's artifacts.
-      - name: Date back the sources this commit did not change
-        run: |
-          set -euo pipefail
-          export LC_ALL=C
-          manifest=target/.ci-source-hashes
-          git ls-files -z crates examples Cargo.toml Cargo.lock .cargo \
-            | xargs -0 sha256sum | sort > /tmp/sources-now
-          total=$(wc -l < /tmp/sources-now)
-          if [ -f "$manifest" ]; then
-            sort "$manifest" > /tmp/sources-cached
-            comm -12 /tmp/sources-now /tmp/sources-cached | cut -c 67- > /tmp/unchanged
-            same=$(wc -l < /tmp/unchanged)
-            echo "$same of $total tracked sources are what the cache was built from"
-            tr '\n' '\0' < /tmp/unchanged | xargs -0 -r touch -d '2000-01-01T00:00:00Z'
-          else
-            echo "no manifest in the restored cache; all $total sources keep their checkout timestamps"
-          fi
-          mkdir -p target
-          cp /tmp/sources-now "$manifest"
 
       - name: Build the playground for wasm32-unknown-unknown
         run: cargo build -p cove-wasm --target wasm32-unknown-unknown --release
