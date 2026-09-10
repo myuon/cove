@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:cace04d650e82238
+hash fnv1a64:961f46fd5b4d0144
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -329,6 +329,14 @@ module covefmt
   export fn nodeOf(kind: Node, from: Int, to: Int, children: Array<Tree>) -> Tree
   /// The tree of one source.
   export fn parse(source: String) -> Tree
+  /// The tree of one source whose tokens have already been cut.
+  ///
+  /// A caller that already holds the tokens should not have to lex again, and a
+  /// measurement that made it do so is what made this exist: a benchmark timing
+  /// the three phases called `tokens` inside the print loop, so "print" was
+  /// lex and parse and print, and the numbers it reported counted two of them
+  /// three times.
+  export fn parseTokens(source: String, held: Array<Token>) -> Tree
   /// Turning a tree back into text.
   ///
   /// This slice makes no layout decision: it walks the tree and writes what each

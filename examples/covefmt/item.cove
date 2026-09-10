@@ -192,7 +192,17 @@ fn declarations() -> Array<Declaration> {
 
 /// The tree of one source.
 export fn parse(source: String) -> Tree {
-  let held = tokens(source)
+  parseTokens(source, tokens(source))
+}
+
+/// The tree of one source whose tokens have already been cut.
+///
+/// A caller that already holds the tokens should not have to lex again, and a
+/// measurement that made it do so is what made this exist: a benchmark timing
+/// the three phases called `tokens` inside the print loop, so "print" was
+/// lex and parse and print, and the numbers it reported counted two of them
+/// three times.
+export fn parseTokens(source: String, held: Array<Token>) -> Tree {
   var parser = Parser(source: source, tokens: held, at: 0)
   var items = Vector.of()
   while !parser.done() {

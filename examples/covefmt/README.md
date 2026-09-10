@@ -56,31 +56,78 @@ the tokens; this says a walk of it *reaches* them, in order, whole.
 
 ## Over this repository
 
-243 files, 497,613 bytes, 95,402 tokens, 100,952 nodes. **Every file parses,
+243 files, 497,340 bytes, 95,399 tokens, 100,949 nodes. **Every file parses,
 every tree covers its tokens, and every file round-trips.** Exactly one `Error`
 node remains in the whole corpus — `tests/e2e/fail_reserved_annotation`, a file
 written not to parse.
 
-| | |
+| | | of the pipeline |
+| --- | ---: | ---: |
+| lex | 239 ms | 49% |
+| parse | 142 ms | 29% |
+| print | 104 ms | 21% |
+| **together** | **485 ms** | |
+| scaled to all 695 KB of Cove here | ~680 ms | |
+| `cove fmt --check` on that 695 KB, in Rust: lex, parse, format *and* compare | **40–70 ms** | |
+
+So the whole pipeline is **10–17×** the Rust job, and it makes no layout
+decision yet. The target is 5×.
+
+### These numbers replace worse ones, and the correction is the point
+
+The first version of this measurement reported 1565 ms — lex 246, parse 639,
+print 680 — and concluded that the tree walk dominated. It did not. The
+benchmark called `tokens` and `parse` again inside the print loop, so "print"
+was lex *and* parse *and* print, and "parse" was lex and parse. Two phases were
+counted three times.
+
+What found it was a profile rather than a re-reading: `print`'s walk is 3.7% of
+everything the pipeline executes, which cannot be true of a phase that is 43%
+of its wall clock. `parseTokens` exists because of it — a caller that holds the
+tokens should not have to lex again — and the phases are now timed over what
+the phase before them produced.
+
+## Where the time actually goes
+
+Counting every instruction the pipeline executes, by the function that ran it:
+
+| | of all 125.9 M instructions |
 | --- | ---: |
-| lex | 246 ms |
-| parse | 639 ms |
-| print | 680 ms |
-| **together** | **1565 ms** |
-| scaled to all 695 KB of Cove here | ~2190 ms |
-| `cove fmt --check` on that 695 KB, in Rust: lex, parse, format *and* compare | **40–70 ms** |
+| `Scan.at` | **22.0%** |
+| `tokens` | 9.7% |
+| `Scan.line` | 8.8% |
+| `startsWord` | 7.0% |
+| `isSpace` | 6.0% |
+| `utf8Width` | 4.2% |
+| `isOperatorByte` | 4.0% |
+| `emit` — the tree walk | 3.7% |
 
-So the whole pipeline is **31–55×** the Rust job, and it makes no layout
-decision yet. The target is 5×; reaching it is a performance project rather
-than a consequence, and this is the workload to argue it from.
+**Tiny leaf functions are 43% of everything executed.** `Scan.at` is eight
+instructions and runs 3.46 million times; `utf8Width` is four and runs 1.32
+million times. Cove has no inlining, so each of those is a `call`, a frame
+pushed and zeroed, and a `return`.
 
-Two floors under the lexer, measured on this tree:
+Two of `Scan.at`'s eight instructions are copies:
 
-- **0.15 µs per byte inspection** — `codePointAtByte` and a `match` and a
-  comparison and a loop step. At the VM's 6.6 ns per instruction, that is about
-  23 IR instructions per byte looked at.
-- **a lexer looks at each byte two to three times**, which is where its
-  0.60 µs a byte comes from. Almost none of it is the program.
+```text
+   0  ge.int s4:bool s2:int s1:int
+   1  branch-false s4:bool 5
+   5  call-builtin s8..s9:Option String.codePointAtByte (s0:String s2:Int)
+   6  switch s8:tag [10 7] else 13
+   7  copy s6:Int s9:Int      <- `Some(c)` binds the payload
+   8  copy s3:Int s6:Int      <- the arm's body `c` into the answer
+   9  jump 14
+  14  return s3:Int
+```
+
+which is the shape issue #302's stage 3 is about — a pattern binding that
+aliases the subject's run rather than copying out of it — and it is 5.5% of
+the whole pipeline on its own.
+
+The native profile of the same run agrees about the shape: 34% in the dispatch
+loop, 22% in `Memory::read`, `Memory::write` and `Memory::copy_words`, 18% in
+`malloc`/`free`, and 5% in `open_frame`. That is what 3.5 million calls to an
+eight-instruction function look like from below.
 
 ## What writing the parser found
 
@@ -109,35 +156,14 @@ own rule and this did not have it, so
 
 `async` was simply missing from the words a declaration may be preceded by.
 
-## Where the printer's time goes, and where it does not
-
-**Almost all of it is the walk.** Printing with the text-building removed — the
-same recursion over the same 100,952 nodes, pushing nothing — takes **618 ms**
-of the 721 the first version took. Slicing each token's run out of the source,
-pushing it, and joining 95,402 pieces once is the remaining hundred.
-
-That is the opposite of what was expected, and it is worth having measured. The
-plan was that a formatter's cost is string building, and `cq/README.md`'s
-figure for appending by interpolation — 29 seconds against 56 milliseconds on
-200 KB — says why that was the plan. The `Vector` and one `join` is the cheap
-shape, and it is cheap; walking 100,952 nodes at about 6 µs each is not.
-
-**Why a node costs 6 µs is not yet known**, and two guesses have been measured
-and were wrong. Reading `length()` once instead of on every turn of the loop is
-worth 4%; replacing `Result::unwrapOr` — which is `std.result.unwrapOr`, a Cove
-call with a frame of its own — with a `match` is worth 6%. Both are kept and
-neither explains the rest. That is a profile's question rather than a guess's,
-and it is the next one to ask.
-
-## What writing the parser found, continued
-
 **Reading a byte once beats asking six questions.** A body is most of a file
 and every token of one is asked whether it opens or closes a bracket. Asked as
 six `isPunct` calls — each an `Option<Token>` and a loop over a word — the
-parse took 874 ms; reading the byte once and comparing it six times took
-**635 ms**. Materialising every token as a leaf, which was the suspect, turned
-out to cost 100 ms of the 874: the tree has 100,326 nodes for 94,802 tokens and
-dropping the leaves to 27,517 nodes bought 12%.
+parse took **874 ms** against **635 ms** — both of them measured before the
+double counting above was found, so read them as a ratio and not as a time.
+Materialising every token as a leaf, which was the suspect, turned out to be
+12%: the tree has 100,949 nodes for 95,399 tokens, and dropping the leaves to
+27,517 nodes bought that much and no more.
 
 ## What writing the lexer found
 
