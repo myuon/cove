@@ -70,7 +70,8 @@ pub(crate) fn call(
     machine: &mut Machine,
     builtin: &Builtin,
     operands: &[Operand<'_>],
-) -> Result<Vec<u64>, RuntimeError> {
+    out: &mut Vec<u64>,
+) -> Result<(), RuntimeError> {
     // One match over the pair the IR names, so that teaching the machine an
     // operation is adding an arm and nothing else.
     match (&*builtin.receiver, &*builtin.operation) {
@@ -79,7 +80,7 @@ pub(crate) fn call(
                 return Err(operand::operands("String.text", 1, operands.len()));
             };
             let text = render_value(machine, operand.layout, operand.words, 0)?;
-            machine.new_string(&text).map(one)
+            machine.new_string(&text).map(|word| out.push(word))
         }
         ("String", "concat") => {
             let mut text = String::new();
@@ -95,7 +96,7 @@ pub(crate) fn call(
                     }
                 }
             }
-            machine.new_string(&text).map(one)
+            machine.new_string(&text).map(|word| out.push(word))
         }
         // What `"{p}"` puts in the string. An operand is a value location, so
         // an inline struct or enum renders as the value it is rather than as
@@ -105,109 +106,115 @@ pub(crate) fn call(
             for operand in operands {
                 text.push_str(&render_value(machine, operand.layout, operand.words, 0)?);
             }
-            machine.new_string(&text).map(one)
+            machine.new_string(&text).map(|word| out.push(word))
         }
 
         // ---- Array -------------------------------------------------------
         //
         // Every arm below is one line, so that the whole set of operations
-        // this backend has been taught reads as a table. What each one means
+        // this backend has been taught reads as a table.
+        //
+        // A builtin's answer is a value location like any other, so what an
+        // arm produces is a *run of words* at the destination. Most answer
+        // one, and `out.push` is what says so. It used to be a `one()` helper
+        // making a `Vec` — which was an allocation per builtin call, and 39
+        // ns of an 86 ns call; see `Machine::builtin_answer`. What each one means
         // is in the module it delegates to, beside the reading of the oracle
         // it follows.
-        ("Array", "get") => seq::array_get(machine, builtin.result, operands),
-        ("Array", "length") => seq::array_length(machine, operands).map(one),
+        ("Array", "get") => seq::array_get(machine, builtin.result, operands, out),
+        ("Array", "length") => seq::array_length(machine, operands).map(|word| out.push(word)),
         // `Array.isEmpty` is not here: it is `std.array.isEmpty`, the first
         // builtin method whose body is Cove rather than a machine builtin —
         // see `cove_schema::builtins::standard_binding` and
         // `cove_ir::lower::methods::Body::call_std_binding`.
-        ("Array", "contains") => seq::array_contains(machine, operands).map(one),
-        ("Array", "indexOf") => seq::array_index_of(machine, builtin.result, operands),
-        ("Array", "slice") => seq::array_slice(machine, operands).map(one),
-        ("Array", "toVector") => seq::array_to_vector(machine, operands).map(one),
+        ("Array", "contains") => seq::array_contains(machine, operands).map(|word| out.push(word)),
+        ("Array", "indexOf") => seq::array_index_of(machine, builtin.result, operands, out),
+        ("Array", "slice") => seq::array_slice(machine, operands).map(|word| out.push(word)),
+        ("Array", "toVector") => seq::array_to_vector(machine, operands).map(|word| out.push(word)),
 
         // ---- Vector ------------------------------------------------------
-        ("Vector", "of") => seq::vector_of(machine, operands).map(one),
-        ("Vector", "push") => seq::vector_push(machine, operands).map(one),
-        ("Vector", "set") => seq::vector_set(machine, builtin.result, operands),
-        ("Vector", "pop") => seq::vector_pop(machine, builtin.result, operands),
-        ("Vector", "remove") => seq::vector_remove(machine, builtin.result, operands),
-        ("Vector", "get") => seq::vector_get(machine, builtin.result, operands),
-        ("Vector", "contains") => seq::vector_contains(machine, operands).map(one),
-        ("Vector", "indexOf") => seq::vector_index_of(machine, builtin.result, operands),
-        ("Vector", "slice") => seq::vector_slice(machine, operands).map(one),
-        ("Vector", "length") => seq::vector_length(machine, operands).map(one),
+        ("Vector", "of") => seq::vector_of(machine, operands).map(|word| out.push(word)),
+        ("Vector", "push") => seq::vector_push(machine, operands).map(|word| out.push(word)),
+        ("Vector", "set") => seq::vector_set(machine, builtin.result, operands, out),
+        ("Vector", "pop") => seq::vector_pop(machine, builtin.result, operands, out),
+        ("Vector", "remove") => seq::vector_remove(machine, builtin.result, operands, out),
+        ("Vector", "get") => seq::vector_get(machine, builtin.result, operands, out),
+        ("Vector", "contains") => seq::vector_contains(machine, operands).map(|word| out.push(word)),
+        ("Vector", "indexOf") => seq::vector_index_of(machine, builtin.result, operands, out),
+        ("Vector", "slice") => seq::vector_slice(machine, operands).map(|word| out.push(word)),
+        ("Vector", "length") => seq::vector_length(machine, operands).map(|word| out.push(word)),
         // `Vector.isEmpty` is not here: it is `std.vector.isEmpty` — see
         // `cove_schema::builtins::standard_binding`.
-        ("Vector", "toArray") => seq::vector_to_array(machine, operands).map(one),
-        ("Vector", "freeze") => seq::vector_freeze(machine, operands).map(one),
+        ("Vector", "toArray") => seq::vector_to_array(machine, operands).map(|word| out.push(word)),
+        ("Vector", "freeze") => seq::vector_freeze(machine, operands).map(|word| out.push(word)),
 
         // ---- Set ---------------------------------------------------------
         //
         // A `Set` and a `Map` are sorted runs, so every one of these is a
         // binary search over `key`'s order or a walk of a run already in it.
-        ("Set", "of") => keyed::set_of(machine, operands).map(one),
-        ("Set", "length") => keyed::set_length(machine, operands).map(one),
+        ("Set", "of") => keyed::set_of(machine, operands).map(|word| out.push(word)),
+        ("Set", "length") => keyed::set_length(machine, operands).map(|word| out.push(word)),
         // `Set.isEmpty` is not here: it is `std.set.isEmpty` — see
         // `cove_schema::builtins::standard_binding`.
-        ("Set", "contains") => keyed::set_contains(machine, operands).map(one),
-        ("Set", "toArray") => keyed::set_to_array(machine, operands).map(one),
-        ("Set", "inserted") => keyed::set_inserted(machine, operands).map(one),
-        ("Set", "removed") => keyed::set_removed(machine, operands).map(one),
+        ("Set", "contains") => keyed::set_contains(machine, operands).map(|word| out.push(word)),
+        ("Set", "toArray") => keyed::set_to_array(machine, operands).map(|word| out.push(word)),
+        ("Set", "inserted") => keyed::set_inserted(machine, operands).map(|word| out.push(word)),
+        ("Set", "removed") => keyed::set_removed(machine, operands).map(|word| out.push(word)),
 
         // ---- Map ---------------------------------------------------------
-        ("Map", "of") => keyed::map_of(machine, operands).map(one),
-        ("Map", "get") => keyed::map_get(machine, builtin.result, operands),
-        ("Map", "contains") => keyed::map_contains(machine, operands).map(one),
-        ("Map", "length") => keyed::map_length(machine, operands).map(one),
+        ("Map", "of") => keyed::map_of(machine, operands).map(|word| out.push(word)),
+        ("Map", "get") => keyed::map_get(machine, builtin.result, operands, out),
+        ("Map", "contains") => keyed::map_contains(machine, operands).map(|word| out.push(word)),
+        ("Map", "length") => keyed::map_length(machine, operands).map(|word| out.push(word)),
         // `Map.isEmpty` is not here: it is `std.map.isEmpty` — see
         // `cove_schema::builtins::standard_binding`.
-        ("Map", "keys") => keyed::map_keys(machine, operands).map(one),
-        ("Map", "values") => keyed::map_values(machine, operands).map(one),
-        ("Map", "inserted") => keyed::map_inserted(machine, operands).map(one),
-        ("Map", "removed") => keyed::map_removed(machine, operands).map(one),
+        ("Map", "keys") => keyed::map_keys(machine, operands).map(|word| out.push(word)),
+        ("Map", "values") => keyed::map_values(machine, operands).map(|word| out.push(word)),
+        ("Map", "inserted") => keyed::map_inserted(machine, operands).map(|word| out.push(word)),
+        ("Map", "removed") => keyed::map_removed(machine, operands).map(|word| out.push(word)),
 
         // ---- String ------------------------------------------------------
-        ("String", "length") => text::length(machine, operands).map(one),
+        ("String", "length") => text::length(machine, operands).map(|word| out.push(word)),
         // `String.isEmpty` is not here: it is `std.string.isEmpty` — see
         // `cove_schema::builtins::standard_binding`.
-        ("String", "words") => text::words(machine, operands).map(one),
-        ("String", "chars") => text::chars(machine, operands).map(one),
-        ("String", "split") => text::split(machine, operands).map(one),
-        ("String", "join") => text::join(machine, operands).map(one),
-        ("String", "slice") => text::slice(machine, operands).map(one),
-        ("String", "trim") => text::trim(machine, operands).map(one),
-        ("String", "contains") => text::contains(machine, operands).map(one),
-        ("String", "startsWith") => text::starts_with(machine, operands).map(one),
-        ("String", "endsWith") => text::ends_with(machine, operands).map(one),
-        ("String", "indexOf") => text::index_of(machine, builtin.result, operands),
-        ("String", "replace") => text::replace(machine, operands).map(one),
-        ("String", "toUpper") => text::to_upper(machine, operands).map(one),
-        ("String", "toLower") => text::to_lower(machine, operands).map(one),
-        ("String", "fromCodePoint") => text::from_code_point(machine, builtin.result, operands),
+        ("String", "words") => text::words(machine, operands).map(|word| out.push(word)),
+        ("String", "chars") => text::chars(machine, operands).map(|word| out.push(word)),
+        ("String", "split") => text::split(machine, operands).map(|word| out.push(word)),
+        ("String", "join") => text::join(machine, operands).map(|word| out.push(word)),
+        ("String", "slice") => text::slice(machine, operands).map(|word| out.push(word)),
+        ("String", "trim") => text::trim(machine, operands).map(|word| out.push(word)),
+        ("String", "contains") => text::contains(machine, operands).map(|word| out.push(word)),
+        ("String", "startsWith") => text::starts_with(machine, operands).map(|word| out.push(word)),
+        ("String", "endsWith") => text::ends_with(machine, operands).map(|word| out.push(word)),
+        ("String", "indexOf") => text::index_of(machine, builtin.result, operands, out),
+        ("String", "replace") => text::replace(machine, operands).map(|word| out.push(word)),
+        ("String", "toUpper") => text::to_upper(machine, operands).map(|word| out.push(word)),
+        ("String", "toLower") => text::to_lower(machine, operands).map(|word| out.push(word)),
+        ("String", "fromCodePoint") => text::from_code_point(machine, builtin.result, operands, out),
         // The three that count bytes. Every one of them reads the object's
         // header or a word of its payload rather than decoding the whole
         // string, which is the only reason they are worth having.
-        ("String", "byteLength") => text::byte_length(machine, operands).map(one),
-        ("String", "codePointAtByte") => text::code_point_at_byte(machine, builtin.result, operands),
-        ("String", "sliceBytes") => text::slice_bytes(machine, builtin.result, operands),
+        ("String", "byteLength") => text::byte_length(machine, operands).map(|word| out.push(word)),
+        ("String", "codePointAtByte") => text::code_point_at_byte(machine, builtin.result, operands, out),
+        ("String", "sliceBytes") => text::slice_bytes(machine, builtin.result, operands, out),
 
         // ---- Int ---------------------------------------------------------
-        ("Int", "toFloat") => scalar::int_to_float(machine, operands).map(one),
+        ("Int", "toFloat") => scalar::int_to_float(machine, operands).map(|word| out.push(word)),
         // `Int.min`, `Int.max`, and `Int.abs` are not here: they are
         // `std.int.min`, `std.int.max`, and `std.int.abs` — see
         // `cove_schema::builtins::standard_binding`.
-        ("Int", "parse") => scalar::int_parse(machine, builtin.result, operands),
-        ("Int", "parseRadix") => scalar::int_parse_radix(machine, builtin.result, operands),
+        ("Int", "parse") => scalar::int_parse(machine, builtin.result, operands, out),
+        ("Int", "parseRadix") => scalar::int_parse_radix(machine, builtin.result, operands, out),
 
         // ---- Float -------------------------------------------------------
-        ("Float", "toInt") => scalar::float_to_int(machine, builtin.result, operands),
-        ("Float", "round") => scalar::float_round(machine, operands).map(one),
-        ("Float", "abs") => scalar::float_abs(machine, operands).map(one),
-        ("Float", "sqrt") => scalar::float_sqrt(machine, operands).map(one),
-        ("Float", "min") => scalar::float_min(machine, operands).map(one),
-        ("Float", "max") => scalar::float_max(machine, operands).map(one),
-        ("Float", "format") => scalar::float_format(machine, operands).map(one),
-        ("Float", "parse") => scalar::float_parse(machine, builtin.result, operands),
+        ("Float", "toInt") => scalar::float_to_int(machine, builtin.result, operands, out),
+        ("Float", "round") => scalar::float_round(machine, operands).map(|word| out.push(word)),
+        ("Float", "abs") => scalar::float_abs(machine, operands).map(|word| out.push(word)),
+        ("Float", "sqrt") => scalar::float_sqrt(machine, operands).map(|word| out.push(word)),
+        ("Float", "min") => scalar::float_min(machine, operands).map(|word| out.push(word)),
+        ("Float", "max") => scalar::float_max(machine, operands).map(|word| out.push(word)),
+        ("Float", "format") => scalar::float_format(machine, operands).map(|word| out.push(word)),
+        ("Float", "parse") => scalar::float_parse(machine, builtin.result, operands, out),
 
         // ---- Duration ----------------------------------------------------
         //
@@ -221,7 +228,7 @@ pub(crate) fn call(
         // `Bool` is not below this line because `Bool` has no operations: the
         // schema gives it none beyond `snapshot`, and `!`, `&&` and `||` are
         // instructions rather than builtins.
-        ("Duration", "nanos") => scalar::duration_nanos(machine, operands).map(one),
+        ("Duration", "nanos") => scalar::duration_nanos(machine, operands).map(|word| out.push(word)),
 
         // ---- equality ----------------------------------------------------
         //
@@ -230,7 +237,7 @@ pub(crate) fn call(
         // language gives an equality, rather than a method a type declares —
         // `crates/cove-runtime/src/builtins.rs` has no entry for it, and
         // `crate::interp` reaches it as an operator.
-        ("Any", "equals") => equal::equals(machine, operands).map(one),
+        ("Any", "equals") => equal::equals(machine, operands).map(|word| out.push(word)),
 
         (receiver, operation) => Err(RuntimeError::new(format!(
             "`{receiver}.{operation}` is not an operation this backend has been taught"
@@ -513,15 +520,6 @@ fn joined(
     Ok(out)
 }
 
-/// One word, as the run a builtin answering a single word produces.
-///
-/// A builtin's answer is a value location like any other, so the machine
-/// writes a run of words at the destination base slot. Most operations
-/// answer one, and this is what says so at the one place that knows which.
-fn one(word: u64) -> Vec<u64> {
-    vec![word]
-}
-
 /// The word at `at` of a value location.
 fn at(words: &[u64], at: usize) -> Result<u64, RuntimeError> {
     words
@@ -779,6 +777,10 @@ mod tests {
                 words,
             })
             .collect();
+        // A test's own buffer, for the reason `make::built`'s note gives: a
+        // builtin writes into one the machine reuses, and a test wants what
+        // it wrote rather than a place to have written it.
+        let mut out = Vec::new();
         call(
             machine,
             &Builtin {
@@ -787,7 +789,9 @@ mod tests {
                 result,
             },
             &passed,
-        )
+            &mut out,
+        )?;
+        Ok(out)
     }
 
     pub(super) fn values(

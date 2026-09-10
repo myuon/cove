@@ -357,13 +357,28 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// sentence is a ratchet worth nothing, and the sentence is that **1492 is
 /// still the number destination forwarding is measured against**.
 ///
+/// **The third rise was the corpus, not the lowering,** and that is a fourth
+/// thing this number cannot tell apart by itself. Two programs joined the
+/// repository — `examples/covefmt/bench.cove` and `benches/builtincall` —
+/// and a program that is in the repository is in this survey, because "every
+/// program here" is what makes the survey worth reading. `covefmtBench`
+/// alone brought 138 of the 145: it is 4215 instructions holding 559 copies,
+/// which is a high rate because timing three phases of a pipeline means
+/// holding each phase's answer and handing it on.
+///
+/// So a corpus ratchet moves when the corpus moves, and nothing in the number
+/// says which happened. What says it is the per-program table this test
+/// prints: a rise that is one new row is not a rise in what the lowering
+/// emits, and the way to check is to look for the rows rather than to argue
+/// about the total.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 1713;
+const FORWARDABLE_COPIES: usize = 1858;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

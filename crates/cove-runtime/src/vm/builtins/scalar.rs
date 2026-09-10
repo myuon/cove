@@ -77,12 +77,13 @@ pub(super) fn int_parse(
     machine: &mut Machine,
     result: LayoutId,
     operands: &[Operand<'_>],
-) -> Result<Vec<u64>, RuntimeError> {
+    out: &mut Vec<u64>,
+) -> Result<(), RuntimeError> {
     let args = operand::free("Int.parse", operands, 1)?;
     let text = operand::text(machine, "Int.parse", "text", args[0])?;
     match text.parse::<i64>() {
-        Ok(value) => make::ok(machine, result, &[value as u64]),
-        Err(_) => make::failed(machine, result, &format!("`{text}` is not an Int")),
+        Ok(value) => make::ok(machine, result, &[value as u64], out),
+        Err(_) => make::failed(machine, result, &format!("`{text}` is not an Int"), out),
     }
 }
 
@@ -95,7 +96,8 @@ pub(super) fn int_parse_radix(
     machine: &mut Machine,
     result: LayoutId,
     operands: &[Operand<'_>],
-) -> Result<Vec<u64>, RuntimeError> {
+    out: &mut Vec<u64>,
+) -> Result<(), RuntimeError> {
     let args = operand::free("Int.parseRadix", operands, 2)?;
     let text = operand::text(machine, "Int.parseRadix", "text", args[0])?;
     let radix = operand::int(machine, "Int.parseRadix", "radix", args[1])?;
@@ -103,10 +105,10 @@ pub(super) fn int_parse_radix(
         return Err(operand::radix(radix));
     };
     match i64::from_str_radix(&text, base) {
-        Ok(value) => make::ok(machine, result, &[value as u64]),
+        Ok(value) => make::ok(machine, result, &[value as u64], out),
         Err(_) => {
             let message = format!("`{text}` is not an Int in radix {base}");
-            make::failed(machine, result, &message)
+            make::failed(machine, result, &message, out)
         }
     }
 }
@@ -118,7 +120,8 @@ pub(super) fn float_to_int(
     machine: &mut Machine,
     result: LayoutId,
     operands: &[Operand<'_>],
-) -> Result<Vec<u64>, RuntimeError> {
+    out: &mut Vec<u64>,
+) -> Result<(), RuntimeError> {
     let (self_, _) = operand::method("toInt", operands, 0)?;
     let x = float_receiver(machine, "toInt", self_)?;
     if x.is_nan() {
@@ -126,18 +129,19 @@ pub(super) fn float_to_int(
             machine,
             result,
             "`Float.toInt` cannot convert `NaN`, which is not a number",
+            out,
         );
     }
     if x.is_infinite() {
         let message = format!("`Float.toInt` cannot convert `{x}`, which has no truncation");
-        return make::failed(machine, result, &message);
+        return make::failed(machine, result, &message, out);
     }
     let truncated = x.trunc();
     if truncated < i64::MIN as f64 || truncated >= i64::MAX as f64 {
         let message = format!("`Float.toInt` cannot convert `{x}`, which is outside Int's range");
-        return make::failed(machine, result, &message);
+        return make::failed(machine, result, &message, out);
     }
-    make::ok(machine, result, &[truncated as i64 as u64])
+    make::ok(machine, result, &[truncated as i64 as u64], out)
 }
 
 /// `Float.round() -> Float`.
@@ -222,12 +226,13 @@ pub(super) fn float_parse(
     machine: &mut Machine,
     result: LayoutId,
     operands: &[Operand<'_>],
-) -> Result<Vec<u64>, RuntimeError> {
+    out: &mut Vec<u64>,
+) -> Result<(), RuntimeError> {
     let args = operand::free("Float.parse", operands, 1)?;
     let text = operand::text(machine, "Float.parse", "text", args[0])?;
     match text.parse::<f64>() {
-        Ok(value) => make::ok(machine, result, &[value.to_bits()]),
-        Err(_) => make::failed(machine, result, &format!("`{text}` is not a Float")),
+        Ok(value) => make::ok(machine, result, &[value.to_bits()], out),
+        Err(_) => make::failed(machine, result, &format!("`{text}` is not a Float"), out),
     }
 }
 

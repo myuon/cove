@@ -879,13 +879,10 @@ pub(super) fn dispatch<'s, 'a>(
             CALL_BUILTIN => {
                 machine.sync(pc - 1);
                 let dst = a!();
-                match machine.call_builtin(base, BuiltinId(held.lo()), ArgsId(held.hi())) {
-                    Ok(words) => {
-                        for (at, word) in words.iter().enumerate() {
-                            machine.mem.set_slot(base, dst + at as u32, *word);
-                        }
-                    }
-                    Err(error) => fail!(error),
+                if let Err(error) =
+                    machine.call_builtin(base, dst, BuiltinId(held.lo()), ArgsId(held.hi()))
+                {
+                    fail!(error)
                 }
             }
 

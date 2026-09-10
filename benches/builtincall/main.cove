@@ -1,0 +1,63 @@
+use console.println
+use clock.now
+
+/// One builtin call per turn, and nothing else the loop can be about.
+///
+/// The three shapes a builtin answers in, timed apart, because they do not
+/// cost the same: `byteLength` answers one word, `codePointAtByte` answers an
+/// `Option` the machine has to assemble, and `sliceBytes` answers a `Result`
+/// carrying a heap object it has to allocate.
+export fn main() -> Result<Unit, Error> {
+  let text = "the quick brown fox jumps over the lazy dog"
+  let rounds = 2000000
+
+  // The loop itself, with no builtin in it, so that what the three below
+  // report is the call and not the turn.
+  let bareFrom = now()
+  var sum = 0
+  var i = 0
+  while i < rounds {
+    sum = sum + i
+    i = i + 1
+  }
+  let bareTo = now()
+
+  let wordFrom = now()
+  var counted = 0
+  i = 0
+  while i < rounds {
+    counted = counted + text.byteLength()
+    i = i + 1
+  }
+  let wordTo = now()
+
+  let optionFrom = now()
+  var scalars = 0
+  i = 0
+  while i < rounds {
+    scalars = scalars + text.codePointAtByte(4).unwrapOr(0)
+    i = i + 1
+  }
+  let optionTo = now()
+
+  let sliceFrom = now()
+  var bytes = 0
+  i = 0
+  while i < rounds {
+    bytes = bytes + text.sliceBytes(4, 9).unwrapOr("").byteLength()
+    i = i + 1
+  }
+  let sliceTo = now()
+
+  let bare = (bareTo - bareFrom).micros()
+  let word = (wordTo - wordFrom).micros()
+  let option = (optionTo - optionFrom).micros()
+  let slice = (sliceTo - sliceFrom).micros()
+  println("bare loop            {bare * 1000 / rounds} ns/turn ({sum})")?
+  println(
+    "byteLength  (1 word) {(word - bare) * 1000 / rounds} ns/call ({counted})",
+  )?
+  println("codePointAtByte (Option) {(option - bare) * 1000 / rounds} ns/call ({scalars})")?
+  println("sliceBytes  (Result+heap) {(slice - bare) * 1000 / rounds} ns/call ({bytes})")?
+  Ok(())
+}

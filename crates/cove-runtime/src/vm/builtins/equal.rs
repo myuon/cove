@@ -745,10 +745,16 @@ mod tests {
         let int = scalar(&program, Repr::Int);
         let option = two_case(&program, "Option", "Some", int);
 
-        let some = make::some(&mut machine, option, &[1]).unwrap();
-        let alike = make::some(&mut machine, option, &[1]).unwrap();
-        let other = make::some(&mut machine, option, &[2]).unwrap();
-        let none = make::none(&mut machine, option).unwrap();
+        let some = make::built(&mut machine, option, |m, l, out| {
+            make::some(m, l, &[1], out)
+        });
+        let alike = make::built(&mut machine, option, |m, l, out| {
+            make::some(m, l, &[1], out)
+        });
+        let other = make::built(&mut machine, option, |m, l, out| {
+            make::some(m, l, &[2], out)
+        });
+        let none = make::built(&mut machine, option, make::none);
         assert!(same_value(&machine, option, &some, &alike).unwrap());
         assert!(!same_value(&machine, option, &some, &other).unwrap());
         assert!(!same_value(&machine, option, &some, &none).unwrap());
@@ -758,7 +764,7 @@ mod tests {
         // two layouts meet, since a box records the family of what it holds.
         let text = program.str_layout;
         let texts = two_case(&program, "Option", "Some", text);
-        let empty = make::none(&mut machine, texts).unwrap();
+        let empty = make::built(&mut machine, texts, make::none);
         let one = boxed(&mut machine, option, &none);
         let another = boxed(&mut machine, texts, &empty);
         assert!(equal(&mut machine, (Repr::Ref, one), (Repr::Ref, another)));

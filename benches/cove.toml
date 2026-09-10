@@ -131,3 +131,17 @@ allow = []
 [run.parse_cove]
 entry = "stringlib.parseCoveRow"
 allow = []
+
+# What one `Inst::CallBuiltin` costs, decomposed. Three loops over the same
+# 2,000,000 turns as `arith`, each with exactly one builtin in it, and a
+# fourth with none: the difference between the bare loop and one of the others
+# is that builtin's whole cost — the operand copy, the dispatch, the work, and
+# the words coming home.
+#
+# The three are not interchangeable. `byteLength` answers one word,
+# `codePointAtByte` answers an `Option` the machine assembles, and
+# `sliceBytes` answers a `Result` carrying a heap object it allocates, so the
+# three rows price the call, the wrapper and the allocation apart.
+[run.builtincall]
+entry = "builtincall.main"
+allow = ["console", "clock"]

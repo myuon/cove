@@ -53,3 +53,9 @@ allow = ["console", "files", "process"]
 [run.reviewPolicy]
 entry = "rules.main"
 allow = ["console"]
+
+# Run it from a directory of Cove source, which is what it walks:
+#   cd examples && cove run covefmtBench --files-root .
+[run.covefmtBench]
+entry = "covefmt.main"
+allow = ["console", "files", "clock"]

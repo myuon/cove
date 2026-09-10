@@ -633,6 +633,68 @@ pub(crate) struct Machine<'a> {
     /// the one left in this field, so the next call — nested or not — still
     /// finds a buffer large enough not to grow.
     builtin_words: Vec<u64>,
+    /// The same, for the words a builtin *answers* with.
+    ///
+    /// Every builtin used to build a fresh `Vec` for its answer, including
+    /// the ones that answer a single word: `Array.length` allocated a
+    /// one-element `Vec` and dropped it a few instructions later, once per
+    /// call. On `examples/covefmt` that was **39 ns of an 86 ns call** —
+    /// measured by adding a second such allocation to the path and watching
+    /// the call get 39 ns dearer — which is to say that nearly half of what
+    /// a builtin cost was the container its answer travelled home in.
+    ///
+    /// So a builtin writes into a buffer instead, and this is the one it
+    /// writes into. It is taken out and put back the way `builtin_words` is,
+    /// for the reasons that field's note gives at length; the two are
+    /// separate buffers because a builtin reads its operands out of the
+    /// first while it is filling the second.
+    builtin_answer: Vec<u64>,
+    /// The last case index each enum wrapper resolved to, and for which
+    /// layout.
+    ///
+    /// `make::some` and its three siblings find their case by *name* —
+    /// `Shape::Enum`'s cases are a run and `Layout::case` scans it comparing
+    /// strings — and they do it once per call. That was 11 ns of a 110 ns
+    /// `String.codePointAtByte`, which is a builtin the lexer in
+    /// `examples/covefmt` calls once per byte of the source it reads.
+    ///
+    /// A memo and not a table, because there is nothing to invalidate: a
+    /// [`Program`]'s layouts are fixed before its first instruction runs, so
+    /// a `(layout, name)` pair has one answer for the whole run. And one
+    /// entry per wrapper rather than a map, because the shape of the miss is
+    /// known — a loop calls one builtin with one result layout over and over,
+    /// so the entry it wants is the one it left there.
+    cases: [Option<(LayoutId, u32)>; 4],
+    /// How many words a value of each layout occupies, by [`LayoutId`].
+    ///
+    /// [`Machine::width`] was `program.layout(id).width()` — an index into
+    /// `Program::layouts`, then the length of that `Layout`'s `words` — and
+    /// the dispatch loop asks it fifteen times over, once per instruction
+    /// that names a value location. `Machine::call_builtin` asks it *twice
+    /// per argument*: once to copy the words out of the frame and once to
+    /// slice the buffer back into operands.
+    ///
+    /// Two chases became one index, which measured about 2.5 ns each — 10 ns
+    /// of a 98 ns `String.codePointAtByte`, a builtin the lexer in
+    /// `examples/covefmt` calls once per byte it reads.
+    ///
+    /// Built once, before the first instruction, because a [`Program`]'s
+    /// layouts are fixed by then: there is no invalidation to get wrong and
+    /// no entry that can be missing.
+    widths: Arc<[u32]>,
+}
+
+/// Which of [`Machine::cases`] a wrapper memoises into.
+///
+/// Four constants rather than a hash of the name: the callers are the four
+/// functions in [`crate::vm::builtins::make`] and nothing else, so the set is
+/// closed and naming it costs nothing at run time.
+#[derive(Clone, Copy)]
+pub(crate) enum Wrapper {
+    Some = 0,
+    None = 1,
+    Ok = 2,
+    Err = 3,
 }
 
 impl<'a> Machine<'a> {
@@ -708,6 +770,13 @@ impl<'a> Machine<'a> {
             // the field.
             encoded: encoded::prepare(program),
             builtin_words: Vec::new(),
+            builtin_answer: Vec::new(),
+            cases: [None; 4],
+            widths: program
+                .layouts
+                .iter()
+                .map(|layout| layout.width())
+                .collect(),
         };
         machine.literal_addrs = machine.place_literals();
         machine
@@ -741,6 +810,7 @@ impl<'a> Machine<'a> {
         task: u64,
         encoded: Arc<cove_ir::bytecode::Encoded>,
         literal_addrs: Arc<[u64]>,
+        widths: Arc<[u32]>,
     ) -> Machine<'a> {
         Machine {
             program,
@@ -773,6 +843,11 @@ impl<'a> Machine<'a> {
             // sharing.
             encoded: Ok(encoded),
             builtin_words: Vec::new(),
+            builtin_answer: Vec::new(),
+            cases: [None; 4],
+            // The parent's, for the reason `encoded` is: a table derived from
+            // a program the whole run shares is the same table in every task.
+            widths,
         }
     }
 
@@ -1249,8 +1324,45 @@ impl<'a> Machine<'a> {
     /// rather than a walk, because [`cove_ir::Layout`] caches the flattened
     /// words for exactly the readers that are on this path.
     #[inline]
+    /// The index of `case` in the enum `layout`, remembered.
+    ///
+    /// Nothing is searched for. Which `Option` or `Result` a builtin answers
+    /// is carried by [`cove_ir::Inst::CallBuiltin`] and passed down from
+    /// `vm::builtins::call`, because the alternative — looking for an enum of
+    /// that name whose carrying case holds the right payload — cannot tell
+    /// `Result<String, Error>` from `Result<String, cq.diag.Detail>`. Both are
+    /// named `Result` and both carry a `String` in `Ok`, and they are two
+    /// words and four; answering the wrong one is a word run written into a
+    /// destination sized for the other.
+    ///
+    /// What *is* remembered is which index the name resolves to; see
+    /// [`Machine::cases`]. `family` and `case` are the names a diagnostic uses
+    /// when `layout` is not the enum it was expected to be.
+    pub(crate) fn case_index(
+        &mut self,
+        layout: LayoutId,
+        wrapper: Wrapper,
+        family: &str,
+        case: &str,
+    ) -> Result<u32, RuntimeError> {
+        if let Some((held, index)) = self.cases[wrapper as usize] {
+            if held == layout {
+                return Ok(index);
+            }
+        }
+        let index = self
+            .program
+            .layouts
+            .get(layout.index())
+            .filter(|held| matches!(held.shape, Shape::Enum { .. }))
+            .and_then(|held| held.case(case))
+            .ok_or_else(|| crate::vm::builtins::operand::unknown_family(family))?;
+        self.cases[wrapper as usize] = Some((layout, index));
+        Ok(index)
+    }
+
     fn width(&self, layout: LayoutId) -> u32 {
-        self.program.layout(layout).width()
+        self.widths[layout.index()]
     }
 
     /// Allocates, collecting once if the first attempt does not fit.
@@ -1562,9 +1674,10 @@ impl<'a> Machine<'a> {
     fn call_builtin(
         &mut self,
         base: u64,
+        dst: Slot,
         builtin: BuiltinId,
         args: ArgsId,
-    ) -> Result<Vec<u64>, RuntimeError> {
+    ) -> Result<(), RuntimeError> {
         let program = self.program;
         let list = program.arg_list(args);
 
@@ -1619,14 +1732,31 @@ impl<'a> Machine<'a> {
             &spill
         };
 
-        let answer = builtins::call(self, program.builtin(builtin), operands);
+        let mut out = std::mem::take(&mut self.builtin_answer);
+        out.clear();
+        let answered = builtins::call(self, program.builtin(builtin), operands, &mut out);
 
-        // `words` may have grown past what was already here — keep whichever
-        // of the two has the larger capacity, per the field's doc comment.
+        // Written into the frame here rather than by the dispatch loop,
+        // because the buffer has to come back: handing the answer out as a
+        // `Vec` would hand out the allocation with it, and this field would
+        // find itself empty on the next call and allocate again — which is
+        // the whole thing it exists not to do.
+        if answered.is_ok() {
+            for (at, word) in out.iter().enumerate() {
+                self.mem.set_slot(base, dst + at as u32, *word);
+            }
+        }
+
+        // Both buffers may have grown past what was already here — keep
+        // whichever of each pair has the larger capacity, per the fields'
+        // doc comments.
         if words.capacity() >= self.builtin_words.capacity() {
             self.builtin_words = words;
         }
-        answer
+        if out.capacity() >= self.builtin_answer.capacity() {
+            self.builtin_answer = out;
+        }
+        answered
     }
 
     /// Places every entry of [`Program::strings`] into the heap, in
@@ -2167,10 +2297,13 @@ impl<'a> Machine<'a> {
         // every task of a run addresses the objects the entry placed, so
         // this is a clone of the `Arc` rather than a second placement.
         let literals = self.literals()?;
+        // And the same widths, for the reason the field gives: a table
+        // derived from a program the whole run shares is one table.
+        let widths = Arc::clone(&self.widths);
         let handle = threads.spawn(move || {
             run_task(
                 program, hosts, runtime, resources, segment, meter, flag, id, object, home, span,
-                watcher, form, literals,
+                watcher, form, literals, widths,
             )
         });
 
@@ -3003,6 +3136,7 @@ fn run_task(
     debugger: Option<&(dyn Debugger + Send + Sync)>,
     encoded: Arc<cove_ir::bytecode::Encoded>,
     literal_addrs: Arc<[u64]>,
+    widths: Arc<[u32]>,
 ) -> Outcome {
     let mut machine = Machine::for_task(
         program,
@@ -3014,6 +3148,7 @@ fn run_task(
         id,
         encoded,
         literal_addrs,
+        widths,
     );
     machine.watch(debugger);
     let started = Instant::now();
@@ -5347,6 +5482,7 @@ pub(crate) mod tests {
             1,
             entry.code().expect("this fixture encodes"),
             entry.literals().expect("the literals placed"),
+            Arc::clone(&entry.widths),
         );
 
         assert_eq!(

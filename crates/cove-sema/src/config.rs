@@ -331,6 +331,7 @@ mod tests {
                 "callbacks",
                 "config",
                 "covecheck",
+                "covefmtBench",
                 "cq",
                 "cqSample",
                 "hello",
