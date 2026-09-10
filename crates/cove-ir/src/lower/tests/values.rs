@@ -36,15 +36,14 @@ fn a_negated_literal_is_an_immediate_and_a_sum_of_two_is_not_folded() {
         listing("fn f(n: Int) -> Bool { n > -1 && n < 1 + 1 }", "f"),
         "\
 fn @m.f(Int) -> Bool
-  frame 5: s0!:int s1:bool s2:bool s3:int s4:int
-  local n -> s0:Int [0, 7)
-     0  gt.int.imm s2:bool s0:int -1
-     1  branch-false s2:bool 5
-     2  int s3:int 1
-     3  add.int.imm s4:int s3:int 1
-     4  lt.int s2:bool s0:int s4:int
-     5  copy s1:Bool s2:Bool
-     6  return s1:Bool
+  frame 4: s0!:int s1:bool s2:int s3:int
+  local n -> s0:Int [0, 6)
+     0  gt.int.imm s1:bool s0:int -1
+     1  branch-false s1:bool 5
+     2  int s2:int 1
+     3  add.int.imm s3:int s2:int 1
+     4  lt.int s1:bool s0:int s3:int
+     5  return s1:Bool
 "
     );
 }
@@ -202,14 +201,13 @@ fn short_circuiting_is_a_branch_over_the_right_hand_side() {
         listing("fn both(a: Bool, b: Bool) -> Bool { a && b }", "both"),
         "\
 fn @m.both(Bool Bool) -> Bool
-  frame 4: s0!:bool s1!:bool s2:bool s3:bool
-  local a -> s0:Bool [0, 5)
-  local b -> s1:Bool [0, 5)
-     0  copy s3:Bool s0:Bool
-     1  branch-false s3:bool 3
-     2  copy s3:Bool s1:Bool
-     3  copy s2:Bool s3:Bool
-     4  return s2:Bool
+  frame 3: s0!:bool s1!:bool s2:bool
+  local a -> s0:Bool [0, 4)
+  local b -> s1:Bool [0, 4)
+     0  copy s2:Bool s0:Bool
+     1  branch-false s2:bool 3
+     2  copy s2:Bool s1:Bool
+     3  return s2:Bool
 "
     );
 }
@@ -220,15 +218,14 @@ fn an_or_inverts_the_polarity_with_a_jump_rather_than_an_instruction() {
         listing("fn either(a: Bool, b: Bool) -> Bool { a || b }", "either"),
         "\
 fn @m.either(Bool Bool) -> Bool
-  frame 4: s0!:bool s1!:bool s2:bool s3:bool
-  local a -> s0:Bool [0, 6)
-  local b -> s1:Bool [0, 6)
-     0  copy s3:Bool s0:Bool
-     1  branch-false s3:bool 3
+  frame 3: s0!:bool s1!:bool s2:bool
+  local a -> s0:Bool [0, 5)
+  local b -> s1:Bool [0, 5)
+     0  copy s2:Bool s0:Bool
+     1  branch-false s2:bool 3
      2  jump 4
-     3  copy s3:Bool s1:Bool
-     4  copy s2:Bool s3:Bool
-     5  return s2:Bool
+     3  copy s2:Bool s1:Bool
+     4  return s2:Bool
 "
     );
 }

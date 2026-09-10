@@ -624,8 +624,8 @@ impl Body<'_> {
         want: Option<Dest>,
     ) -> Val {
         match op {
-            BinaryOp::And => self.short_circuit(expr, lhs, rhs, true),
-            BinaryOp::Or => self.short_circuit(expr, lhs, rhs, false),
+            BinaryOp::And => self.short_circuit(expr, lhs, rhs, true, want),
+            BinaryOp::Or => self.short_circuit(expr, lhs, rhs, false, want),
             BinaryOp::Is => self.identity(expr, lhs, rhs),
             _ => self.operator(expr, op, lhs, rhs, want),
         }
@@ -813,8 +813,25 @@ impl Body<'_> {
     /// right-hand side overwrites it only when it runs. `conjunction` says
     /// which way round: `&&` skips the right-hand side when the left is
     /// false, `||` when it is true.
-    fn short_circuit(&mut self, expr: &Expr, lhs: &Expr, rhs: &Expr, conjunction: bool) -> Val {
-        let dst = self.temp(shapes::BOOL);
+    fn short_circuit(
+        &mut self,
+        expr: &Expr,
+        lhs: &Expr,
+        rhs: &Expr,
+        conjunction: bool,
+        want: Option<Dest>,
+    ) -> Val {
+        // The answer is written where the surrounding form asked for it —
+        // issue #302, which threaded the destination into the *arms* of a
+        // short circuit and not into the short circuit itself. A chain of
+        // them is where that showed: `(a && b) || (c && d) || e` wrote each
+        // level into a location of its own and copied it out again, which was
+        // four copies and three words of frame for one `Bool`.
+        //
+        // Nothing here reads the destination before it writes it: the
+        // left-hand side writes it, the branch reads it, and the right-hand
+        // side overwrites it only where it runs.
+        let dst = self.answer_at(want, shapes::BOOL);
         self.expr_into(lhs, Dest::of(&dst));
 
         let branch = self.emit(
