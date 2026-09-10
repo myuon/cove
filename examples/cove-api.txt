@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:aec136443490c6f9
+hash fnv1a64:febbaf51c68e36a7
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -244,6 +244,50 @@ module covecheck
   /// The difference between the checks there were and the checks that started,
   /// which is the one number the array of verdicts does not carry on its own.
   export fn skipped(run: Run) -> Int
+
+module covefmt
+  /// What a run of source bytes is.
+  ///
+  /// Enough kinds to **tile**: every byte of a file belongs to exactly one
+  /// token, trivia included, so re-joining the runs reproduces the file exactly.
+  /// That is this lexer's whole contract, and it is the one a formatter needs.
+  ///
+  /// The Rust formatter does not have it. `cove_syntax::ast` carries `///` doc
+  /// comments and drops `//`, `/* */` and the blank lines an author wrote, so
+  /// `format_source` reads them back out of the source by position and
+  /// re-attaches them — and its own documentation says a comment it cannot place
+  /// exactly is moved to the nearest following boundary. A lossless token stream
+  /// removes that whole class of difficulty rather than solving it again.
+  export enum Kind
+    case Space
+    case LineComment
+    case BlockComment
+    case DocComment
+    case Str
+    case Char
+    case Number
+    case Word
+    case Punct
+    case Unknown
+  /// One run of source, named by its kind and its half-open byte range.
+  ///
+  /// A byte range and not a character range: `String` hands out byte offsets
+  /// (ADR 0046) and `sliceBytes` cuts the run back out, so a token costs three
+  /// words and no copy of the text it names.
+  export struct Token
+    field kind: Kind
+    field from: Int
+    field to: Int
+  /// The text a token names.
+  export fn text(source: String, token: Token) -> String
+  /// Whether `held` tiles `source`.
+  ///
+  /// Every token begins where the last ended, none is empty, and the last ends
+  /// at the end. A `true` here is the statement that joining the runs would
+  /// reproduce the file, which is what a formatter needs to be able to rely on.
+  export fn tiles(source: String, held: Array<Token>) -> Bool
+  /// Cuts `source` into tokens that tile it.
+  export fn tokens(source: String) -> Array<Token>
 
 module cq
   /// Runs one transformation over one file.

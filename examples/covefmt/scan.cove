@@ -1,0 +1,149 @@
+/// A source and how far into it a rule has read.
+///
+/// Cove source is UTF-8 *text*, so a lexer needs bytes and code points and not
+/// a byte array: `codePointAtByte` answers the scalar at an offset and
+/// `sliceBytes` cuts a run back out, both of them `String`'s own. A `Bytes`
+/// type would buy this nothing — a formatter never sees a byte that is not
+/// part of a character.
+struct Scan {
+  source: String
+  size: Int
+}
+
+// The bytes below are written as code-point literals, which are `Int`s
+// (ADR 0047), so a rule reads as the character it is about. They are inline
+// rather than named: Cove has no module-level constant, and a zero-argument
+// function per byte would be a call per byte in the hottest loop there is.
+
+/// Whether `c` can begin a word: a letter or an underscore.
+fn startsWord(c: Int) -> Bool {
+  c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_'
+}
+
+/// Whether `c` can continue one: that, or a digit.
+fn continuesWord(c: Int) -> Bool {
+  startsWord(c) || isDigit(c)
+}
+
+/// Whether `c` is a decimal digit.
+fn isDigit(c: Int) -> Bool {
+  c >= '0' && c <= '9'
+}
+
+/// Whether `c` is space, tab, carriage return or newline.
+fn isSpace(c: Int) -> Bool {
+  c == ' ' || c == '\t' || c == '\r' || c == '\n'
+}
+
+impl Scan {
+  /// The code point at `at`, or `-1` past the end.
+  ///
+  /// One number for "there is nothing here" rather than an `Option`, because
+  /// every caller asks the same question of it and `-1` fails every class test
+  /// above without a `match` at each one. It is also the hottest call in the
+  /// lexer: `Option::unwrapOr` is `std.option.unwrapOr`, a Cove call with a
+  /// frame of its own, and measured at 23% of this loop.
+  fn at(self, at: Int) -> Int {
+    if at >= self.size {
+      return -1
+    }
+    match self.source.codePointAtByte(at) {
+      Some(c) => c
+      None => -1
+    }
+  }
+
+  /// The end of the run of spaces beginning at `from`.
+  fn space(self, from: Int) -> Int {
+    var at = from
+    while isSpace(self.at(at)) {
+      at = at + 1
+    }
+    at
+  }
+
+  /// The end of the word beginning at `from`.
+  fn word(self, from: Int) -> Int {
+    var at = from
+    while continuesWord(self.at(at)) {
+      at = at + 1
+    }
+    at
+  }
+
+  /// The end of the number beginning at `from`.
+  ///
+  /// A digit run, an optional fraction, and an optional suffix, so that
+  /// `500ms` is one token and `1.5` is one. What a number *means* — which
+  /// suffixes name a `Duration`, whether the fraction makes it a `Float` — is
+  /// the parser's, and a lexer that decided it would be deciding it twice.
+  fn number(self, from: Int) -> Int {
+    var at = from
+    while isDigit(self.at(at)) {
+      at = at + 1
+    }
+    if self.at(at) == '.' && isDigit(self.at(at + 1)) {
+      at = at + 1
+      while isDigit(self.at(at)) {
+        at = at + 1
+      }
+    }
+    while startsWord(self.at(at)) {
+      at = at + 1
+    }
+    at
+  }
+
+  /// The end of the `//` comment beginning at `from`, the newline excluded:
+  /// the newline is space, and space is a token of its own.
+  fn line(self, from: Int) -> Int {
+    var at = from
+    while self.at(at) >= 0 && self.at(at) != '\n' {
+      at = at + 1
+    }
+    at
+  }
+
+  /// The end of the `/* ... */` beginning at `from`, nesting included.
+  ///
+  /// An unterminated one ends at the end of the file rather than failing.
+  /// Every rule here answers a range, because the tiling has to hold for a
+  /// file that does not lex — which is every file, while it is being typed.
+  fn block(self, from: Int) -> Int {
+    var at = from + 2
+    var depth = 1
+    while depth > 0 && self.at(at) >= 0 {
+      if self.at(at) == '/' && self.at(at + 1) == '*' {
+        depth = depth + 1
+        at = at + 2
+      } else if self.at(at) == '*' && self.at(at + 1) == '/' {
+        depth = depth - 1
+        at = at + 2
+      } else {
+        at = at + 1
+      }
+    }
+    at
+  }
+
+  /// The end of the literal beginning at `from` and ending at `closer`.
+  ///
+  /// One rule for `"..."` and `'...'`, because they differ only in which
+  /// character ends them: a backslash escapes the next byte in both, so
+  /// neither `\"` nor `\'` closes anything. An unterminated one runs to the
+  /// end of the file, for `block`'s reason.
+  fn quoted(self, from: Int, closer: Int) -> Int {
+    var at = from + 1
+    while self.at(at) >= 0 {
+      let c = self.at(at)
+      if c == '\\' {
+        at = at + 2
+      } else if c == closer {
+        return at + 1
+      } else {
+        at = at + 1
+      }
+    }
+    at
+  }
+}
