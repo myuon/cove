@@ -329,7 +329,8 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// 4319 is what the lowering emitted when this file was written, out of 13786
 /// copies and 71041 instructions: 31% of the copies and 6% of the whole
 /// corpus. Issue #302's stage 2 — destination forwarding — took it to 1539,
-/// out of 10500 copies and 67441 instructions.
+/// out of 10500 copies and 67441 instructions, and forwarding the destination
+/// of a short circuit as well took it to 1492.
 ///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
@@ -337,7 +338,7 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 1539;
+const FORWARDABLE_COPIES: usize = 1492;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
