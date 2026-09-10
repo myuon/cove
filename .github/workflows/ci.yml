@@ -65,6 +65,7 @@ jobs:
       # takes the most recent one that matches the prefix, which is what
       # the lockfile-keyed entry was meant to be doing all along.
       - name: Cache cargo registry and target
+        id: cache
         uses: actions/cache@v4
         with:
           path: |
@@ -74,45 +75,38 @@ jobs:
             target
             examples/target
             tests/e2e/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ github.run_id }}
+          # Every Rust source, every manifest, the lockfile and the cargo
+          # config. A key that holds all of them means an *exact* hit is a
+          # promise: these artifacts were built from these bytes.
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/*.rs', '**/Cargo.toml', 'Cargo.lock', '.cargo/**') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
             ${{ runner.os }}-cargo-
 
-      # The cache carries the registry and the artifacts of everything the
-      # workspace depends on, and nothing more is asked of it.
+      # `actions/cache` reports `cache-hit` true only for the exact key, and
+      # the exact key holds a hash of every Rust source in the tree. So a
+      # `true` here is a proof, not a belief: this `target/` was saved by a run
+      # whose Rust was byte for byte the Rust being checked now, and dating the
+      # sources back so cargo skips them cannot skip anything real.
       #
-      # It used to be asked for more. `actions/checkout` writes every source
-      # with a fresh timestamp and `actions/cache` extracts artifacts carrying
-      # an earlier run's, so cargo's freshness check — "is any source newer
-      # than what was built from it" — said yes to every crate and the
-      # pipeline recompiled the workspace on every run
-      # ([issue #257](https://github.com/myuon/cove/issues/257)). A step here
-      # answered that by *dating the sources back*: it kept a manifest of what
-      # the cache had been built from and touched every unchanged source to
-      # the year 2000, so cargo skipped it.
+      # That proof is the whole difference from what issue #306 removed. The
+      # step before this one kept a manifest *the job wrote about itself*,
+      # before the build rather than after, and a later job on a different
+      # commit trusted it — so a run could link artifacts that were not its
+      # own, and did, deterministically, on every pull request that did not
+      # touch `cove-ir`. Here the claim is the cache key, which no job can
+      # write about itself.
       #
-      # That was unsound, and it took three pull requests to see how
-      # ([issue #306](https://github.com/myuon/cove/issues/306)). The manifest
-      # was written from the **checkout** rather than from the build, and
-      # before the build rather than after it — so a job that restored older
-      # artifacts, rebuilt nothing, and saved the result left a cache claiming
-      # that this commit's sources had produced somebody else's artifacts. The
-      # claim then propagated: every later job trusted it and rebuilt nothing
-      # either.
-      #
-      # What it looked like from outside was a `copies.rs` that measured the
-      # lowering as it stood before #302 while comparing it against #303's
-      # ratchet — a combination no single commit can produce — on every pull
-      # request that did not itself change `cove-ir`. The failure was
-      # deterministic, survived re-runs, and went away when the branch was
-      # rebased onto a `main` whose own run had rebuilt the crate.
-      #
-      # A green run that is not about this commit is worse than a slow one, so
-      # the step is gone. Cargo rebuilds the workspace's own crates every run
-      # and the cache still serves the registry and the dependency artifacts,
-      # which is most of a cold build and cannot go stale: a dependency's
-      # fingerprint is its version and its features, not a timestamp.
+      # A miss restores whatever `restore-keys` finds and dates nothing back.
+      # The registry and the dependency artifacts are still warm — a
+      # dependency's fingerprint is its version and its features rather than a
+      # timestamp, and `actions/checkout` does not touch `~/.cargo` — so what
+      # a miss costs is the workspace and not the world.
+      - name: Date the sources back, on an exact hit only
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: |
+          set -euo pipefail
+          git ls-files -z | xargs -0 touch -d '2000-01-01T00:00:00Z'
+          echo "the cache is this commit's Rust; cargo has nothing to rebuild"
 
       - name: cargo fmt
         run: cargo fmt --all --check
@@ -279,7 +273,11 @@ jobs:
 
       # Keyed apart from the job above: this is a second target's artifacts
       # and sharing one key would have the two jobs overwrite each other's.
+      # Keyed apart from the job above — a second target's artifacts, and
+      # sharing one key would have the two jobs overwrite each other's — and
+      # keyed on the same sources, for the reason that job's comment gives.
       - name: Cache cargo registry and target
+        id: cache
         uses: actions/cache@v4
         with:
           path: |
@@ -287,10 +285,16 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}-${{ github.run_id }}
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/*.rs', '**/Cargo.toml', 'Cargo.lock', '.cargo/**') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}-
             ${{ runner.os }}-cargo-wasm-
+
+      - name: Date the sources back, on an exact hit only
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: |
+          set -euo pipefail
+          git ls-files -z | xargs -0 touch -d '2000-01-01T00:00:00Z'
+          echo "the cache is this commit's Rust; cargo has nothing to rebuild"
 
       - name: Build the playground for wasm32-unknown-unknown
         run: cargo build -p cove-wasm --target wasm32-unknown-unknown --release
