@@ -212,6 +212,12 @@ text as numbers — `digit - '0'` is a digit's value, and
 `c >= '0' && c <= '9'` is the classifier — beside `String.codePointAtByte` and
 `String.fromCodePoint`, which are the operations that produce and consume one.
 
+`String.byteAt` answers an `Int` too and is *not* one of those: a byte is not
+a character, and the two agree only below 128. A comparison against a
+code-point literal is still how a byte is read — `line.byteAt(at) == '\n'` is
+the idiom — because UTF-8 writes an ASCII character as itself, and every byte
+of a character that is not ASCII is at least 128 and equals no such literal.
+
 It takes the escapes a string takes and `\'` besides: `\\`, `\"`, `\'`,
 `\n`, `\t`, `\r`, `\0`, `\{`, `\}`. `\'` is legal in a string too,
 where the apostrophe needs no escaping, because there is one escape table.

@@ -243,6 +243,7 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             slot(src)?,
             halves(layout.0, 0),
         ),
+        Inst::ByteAt { dst, obj, at } => build(Op::ByteAt, slot(dst)?, slot(obj)?, slot(at)?, 0),
         Inst::Len { dst, obj } => build(Op::Len, slot(dst)?, slot(obj)?, 0, 0),
         Inst::LayoutOf { dst, obj } => build(Op::LayoutOf, slot(dst)?, slot(obj)?, 0, 0),
 
@@ -619,6 +620,14 @@ mod tests {
                     index: 2,
                     src: 3,
                     layout: L,
+                },
+            ),
+            (
+                0,
+                Inst::ByteAt {
+                    dst: 1,
+                    obj: 2,
+                    at: 3,
                 },
             ),
             (0, Inst::Len { dst: 1, obj: 2 }),

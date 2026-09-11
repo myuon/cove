@@ -216,6 +216,7 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::CmpImm { dst, .. }
             | Inst::Alloc { dst, .. }
             | Inst::Box { dst, .. }
+            | Inst::ByteAt { dst, .. }
             | Inst::Len { dst, .. }
             | Inst::LayoutOf { dst, .. }
             | Inst::AddrOfSlot { dst, .. }
@@ -223,8 +224,33 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::AddrOfElem { dst, .. }
             | Inst::AddrOfPart { dst, .. } => mark(dst, 1),
             // A store writes an object or an address rather than a frame
-            // word, and everything else `is_expandable` refused.
-            _ => {}
+            // word, so it marks nothing; the rest are what `reaches_nothing`
+            // refuses. Written out rather than caught by a `_` for the reason
+            // `slots_of`'s own tail gives at length: a `_` here is a promise
+            // that two lists are complements, and `Inst::ByteAt` is the
+            // instruction that broke it.
+            Inst::StoreField { .. }
+            | Inst::StoreElem { .. }
+            | Inst::Store { .. }
+            | Inst::Jump { .. }
+            | Inst::BranchFalse { .. }
+            | Inst::Switch { .. }
+            | Inst::Return { .. }
+            | Inst::Trap { .. }
+            | Inst::AssertFailed { .. }
+            | Inst::Call { .. }
+            | Inst::CallClosure { .. }
+            | Inst::CallHost { .. }
+            | Inst::CallResource { .. }
+            | Inst::Spawn { .. }
+            | Inst::Await { .. }
+            | Inst::Settled { .. }
+            | Inst::Cancel { .. }
+            | Inst::ScopeEnter { .. }
+            | Inst::ScopeLeave { .. }
+            | Inst::ScopeCancel { .. }
+            | Inst::SharedLock { .. }
+            | Inst::SharedUnlock { .. } => {}
         }
     }
     held
@@ -662,6 +688,7 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         Inst::StoreElem {
             obj, index, src, ..
         } => vec![obj, index, src],
+        Inst::ByteAt { dst, obj, at } => vec![dst, obj, at],
         Inst::Len { dst, obj } | Inst::LayoutOf { dst, obj } => vec![dst, obj],
         Inst::AddrOfSlot { dst, slot } => vec![dst, slot],
         Inst::AddrOfField { dst, obj, .. } => vec![dst, obj],
@@ -675,8 +702,34 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         Inst::CallBuiltin { dst, .. } => vec![dst],
         Inst::AssertFailed { message } => vec![message],
         Inst::Jump { .. } | Inst::Trap { .. } => Vec::new(),
-        // Every remaining variant is one `is_expandable` refused, so a leaf
-        // never holds one and this is unreachable rather than incomplete.
-        _ => Vec::new(),
+        // Every variant below is one `reaches_nothing` refuses, so a leaf
+        // never holds one and none of them can arrive here.
+        //
+        // Listed rather than caught by a `_`, and the difference is not
+        // tidiness. A `_` here makes this function's correctness depend on a
+        // *promise* made in `reaches_nothing` — that the two lists are each
+        // other's complement — and nothing checked it. `Inst::ByteAt` was
+        // added, `reaches_nothing` let it through because it reaches nothing,
+        // and this returned no slots for it: an expansion that renumbered
+        // every other instruction left that one pointing into the callee's
+        // frame. It was caught by `verify`, one layer further on, and only
+        // because the slot it kept happened to hold a `bool`.
+        //
+        // Written out, a new instruction fails to compile here until somebody
+        // says which of its fields are slots — which is what
+        // `vm::exec::encoded::implemented` does for the same reason.
+        Inst::Call { .. }
+        | Inst::CallClosure { .. }
+        | Inst::CallHost { .. }
+        | Inst::CallResource { .. }
+        | Inst::Spawn { .. }
+        | Inst::Await { .. }
+        | Inst::Settled { .. }
+        | Inst::Cancel { .. }
+        | Inst::ScopeEnter { .. }
+        | Inst::ScopeLeave { .. }
+        | Inst::ScopeCancel { .. }
+        | Inst::SharedLock { .. }
+        | Inst::SharedUnlock { .. } => Vec::new(),
     }
 }

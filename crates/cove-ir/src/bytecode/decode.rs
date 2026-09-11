@@ -234,6 +234,11 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             src: c,
             layout,
         },
+        Op::ByteAt => Inst::ByteAt {
+            dst: a,
+            obj: b,
+            at: c,
+        },
         Op::Len => Inst::Len { dst: a, obj: b },
         Op::LayoutOf => Inst::LayoutOf { dst: a, obj: b },
         Op::AddrOfSlot => Inst::AddrOfSlot { dst: a, slot: b },
