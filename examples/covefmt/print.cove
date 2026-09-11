@@ -20,7 +20,10 @@
 /// The text a tree prints as.
 export fn print(source: String, held: Array<Token>, tree: Tree) -> String {
   var out = Vector.of()
-  emit(source, held, tree, var out)
+  // `-1` is "nothing has been written", which is what makes a blank at the
+  // very top of a file fall under the same rule as a blank at the top of a
+  // block: both open on nothing.
+  emit(source, held, tree, -1, var out)
   "".join(out.toArray())
 }
 
@@ -33,35 +36,39 @@ fn emit(
   source: String,
   held: Array<Token>,
   tree: Tree,
+  after: Int,
   var out: Vector<String>,
-) {
+) -> Int {
   if tree.children.length() == 0 {
     if tree.kind == Node.Leaf {
       match held.get(tree.from) {
         Some(token) => {
           if token.kind == Kind.Space {
-            out.push(spacing(source, token))
+            out.push(spacing(source, token, opensBlock(source, held, after), after < 0))
           } else {
             out.push(text(source, token))
           }
+          return tree.from
         }
         None => { }
       }
     }
-    return
+    return after
   }
   // The count is read once. `length()` is a builtin call, and a `while` that
   // asks for it every turn asks once per child of every node in the file.
   let children = tree.children
   let count = children.length()
+  var last = after
   var i = 0
   while i < count {
     match children.get(i) {
-      Some(child) => emit(source, held, child, var out)
+      Some(child) => last = emit(source, held, child, last, var out)
       None => { }
     }
     i = i + 1
   }
+  last
 }
 
 /// Whether printing the tree of `source` gives `source` back.
@@ -85,33 +92,94 @@ export fn roundTrips(source: String) -> Bool {
 /// A run holding no newline is untouched. Space between two things on a line
 /// is not trailing, and deciding how much of it there should be is a
 /// different rule that reads what is on either side.
-fn spacing(source: String, token: Token) -> String {
+fn spacing(
+  source: String,
+  token: Token,
+  opening: Bool,
+  leading: Bool,
+) -> String {
   // The byte after the last newline. Everything from there to the end of the
   // run is the indentation of the line the run leaves behind, and everything
   // between two newlines was trailing.
   var lastBreak = -1
+  var breaks = 0
   var at = token.from
   while at < token.to {
     if source.byteAt(at) == '\n' {
       lastBreak = at
+      breaks = breaks + 1
     }
     at = at + 1
   }
   if lastBreak < 0 {
     return text(source, token)
   }
+  // `n` newlines leave `n - 1` blank lines behind them, and the formatter
+  // keeps at most one: `cove_syntax::format`'s `pending_blank` is a `bool`,
+  // so however many an author wrote, one is what comes back. Two newlines is
+  // that one blank line.
+  var most = maxBreaks()
+  if opening {
+    most = 1
+  }
+  if leading {
+    // The very top of a file keeps no newline at all, where the top of a
+    // block keeps the one that ends the brace's own line. `cove fmt` on
+    // "\n\n\nfn f() ..." answers "fn f() ...", which is the rule read off
+    // the tool rather than guessed at: `Out::newline` writes nothing when
+    // `self.lines` is empty, so a file's first line has no line above it to
+    // end.
+    most = 0
+  }
+  if breaks > most {
+    breaks = most
+  }
   var out = Vector.of<String>()
-  // One newline per newline, in order, with nothing between them.
-  at = token.from
-  while at <= lastBreak {
-    if source.byteAt(at) == '\n' {
-      out.push("\n")
-    }
-    at = at + 1
+  var written = 0
+  while written < breaks {
+    out.push("\n")
+    written = written + 1
   }
   match source.sliceBytes(lastBreak + 1, token.to) {
     Ok(indent) => out.push(indent)
     Err(_) => { }
   }
   "".join(out.toArray())
+}
+
+/// How many newlines a run of space may keep: one to end the line, and one
+/// more for the single blank line a formatter allows after it.
+///
+/// Cove has no module-level constant, so this is a function — and it is a
+/// function rather than a literal written twice because the number is a
+/// *rule*, and a rule with two spellings is a rule that can disagree with
+/// itself.
+fn maxBreaks() -> Int {
+  2
+}
+
+/// Whether the token at `after` opens something a blank line has nothing to
+/// separate a thing from.
+///
+/// `cove_syntax::format`'s `lead` takes an `allow_blank` that is false for
+/// the first thing in a file and the first thing in a block — `i > 0` at
+/// every call site that walks members. This is that rule read off the token
+/// stream instead: a blank above the first thing is a blank under an opening
+/// brace, or under nothing at all.
+///
+/// `after` is `-1` before anything has been written, which is the start of
+/// the file and is the other half of the same answer.
+fn opensBlock(source: String, held: Array<Token>, after: Int) -> Bool {
+  if after < 0 {
+    return true
+  }
+  match held.get(after) {
+    Some(token) => {
+      if token.kind != Kind.Punct || token.to - token.from != 1 {
+        return false
+      }
+      source.byteAt(token.from) == '\{'
+    }
+    None => false
+  }
 }
