@@ -23,7 +23,7 @@ export fn print(source: String, held: Array<Token>, tree: Tree) -> String {
   // `-1` is "nothing has been written", which is what makes a blank at the
   // very top of a file fall under the same rule as a blank at the top of a
   // block: both open on nothing.
-  emit(source, held, tree, -1, var out)
+  emit(source, held, tree, -1, 0, var out)
   "".join(out.toArray())
 }
 
@@ -37,6 +37,7 @@ fn emit(
   held: Array<Token>,
   tree: Tree,
   after: Int,
+  depth: Int,
   var out: Vector<String>,
 ) -> Int {
   if tree.children.length() == 0 {
@@ -44,7 +45,7 @@ fn emit(
       match held.get(tree.from) {
         Some(token) => {
           if token.kind == Kind.Space {
-            out.push(spacing(source, token, opensBlock(source, held, after), after < 0))
+            out.push(spacing(source, token, opensBlock(source, held, after), after < 0, depth))
           } else {
             out.push(text(source, token))
           }
@@ -55,6 +56,22 @@ fn emit(
     }
     return after
   }
+  // A `Node.Body` is the one node that indents what is inside it, and its
+  // own braces are not inside it: the `{` is written at the depth the body
+  // *opens* at and the `}` closes back to it. So the step is applied to the
+  // children between them and the braces are left where the enclosing depth
+  // put them, which is what `cove_syntax::format` does by passing
+  // `indent + INDENT` to the members and `indent` to `lead_close`.
+  let inner = if tree.kind == Node.Body {
+    depth + 1
+  } else {
+    depth
+  }
+  // A body's *last two* children get the outer depth: the closing brace
+  // itself, and the run of space in front of it that carries the newline the
+  // brace's line begins on. Indentation is written by the space before a
+  // line, so the depth a line is at is the depth of what comes *after* the
+  // break — and what comes after the last break of a body is its `}`.
   // The count is read once. `length()` is a builtin call, and a `while` that
   // asks for it every turn asks once per child of every node in the file.
   let children = tree.children
@@ -63,7 +80,28 @@ fn emit(
   var i = 0
   while i < count {
     match children.get(i) {
-      Some(child) => last = emit(source, held, child, last, var out)
+      Some(child) => {
+        // The closing brace is the body's last child and belongs to the
+        // depth the body opened at, not to the depth inside it.
+        var at = if tree.kind == Node.Body && i + 2 >= count {
+          depth
+        } else {
+          inner
+        }
+        // A line *inside a statement* is a line inside a group the tree
+        // cannot see into — a call's arguments, a parameter list, a type's
+        // generics — because a statement's own tokens are leaves. `-1` says
+        // so and `spacing` leaves such a line as it found it.
+        //
+        // The statement's nested bodies are the exception, and they are the
+        // reason this is here rather than on the statement as a whole: an
+        // `if`'s block *is* a `Node.Body`, its depth is known, and its lines
+        // are indented. Only the leaves between the bodies are unknown.
+        if holdsAGroup(tree.kind) && child.kind != Node.Body {
+          at = -1
+        }
+        last = emit(source, held, child, last, at, var out)
+      }
       None => { }
     }
     i = i + 1
@@ -97,6 +135,7 @@ fn spacing(
   token: Token,
   opening: Bool,
   leading: Bool,
+  depth: Int,
 ) -> String {
   // The byte after the last newline. Everything from there to the end of the
   // run is the indentation of the line the run leaves behind, and everything
@@ -140,9 +179,32 @@ fn spacing(
     out.push("\n")
     written = written + 1
   }
-  match source.sliceBytes(lastBreak + 1, token.to) {
-    Ok(indent) => out.push(indent)
-    Err(_) => { }
+  // The line this run leaves behind begins at the depth of whatever comes
+  // next, which is the depth this run was written at: a run of space is a
+  // child of the node whose members it separates, so `depth` is already that
+  // node's inside. Two spaces a step — `cove_syntax::format`'s `INDENT`.
+  //
+  // `depth < 0` is "this tree does not know": a line inside a `(`, `[` or
+  // `<` group is indented by the formatter too, and the tree has no node for
+  // a group's members — a call's arguments are leaves of the statement that
+  // holds them. Rewriting those from a depth of zero is how 85 files stopped
+  // matching, so what the tree cannot decide it leaves as it found it.
+  //
+  // That is not a formatter yet. It is a formatter that has taken the
+  // decisions it has the tree for and kept its hands off the rest, which is
+  // what makes the count below go up as the tree gets deeper rather than
+  // down.
+  if breaks > 0 && depth >= 0 {
+    var step = 0
+    while step < depth {
+      out.push("  ")
+      step = step + 1
+    }
+  } else {
+    match source.sliceBytes(lastBreak + 1, token.to) {
+      Ok(indent) => out.push(indent)
+      Err(_) => { }
+    }
   }
   "".join(out.toArray())
 }
@@ -182,4 +244,20 @@ fn opensBlock(source: String, held: Array<Token>, after: Int) -> Bool {
     }
     None => false
   }
+}
+
+/// Whether a node's own tokens are leaves the tree cannot see into.
+///
+/// A statement's tokens are leaves, and so are a parameter list's, a return
+/// type's and a generic list's: what is inside them is a group — `(`, `[`,
+/// `<` — and the tree has no node for a group's members. A line that a
+/// formatter indents *inside* one of those is a line this cannot decide, so
+/// it is left as it was found.
+///
+/// The bodies nested inside such a node are the exception and are not
+/// opaque: an `if`'s block is a `Node.Body`, its depth is known, and its
+/// lines are indented. Only the leaves between the bodies are unknown.
+fn holdsAGroup(kind: Node) -> Bool {
+  kind == Node.Stmt || kind == Node.Params || kind == Node.Returns ||
+    kind == Node.Generics || kind == Node.TypeAlias || kind == Node.Use
 }
