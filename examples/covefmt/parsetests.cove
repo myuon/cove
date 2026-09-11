@@ -262,10 +262,14 @@ test fn a_line_does_not_end_on_a_blank() -> Result<Unit, Error> {
     print("fn f() \{   \n  1\n\}   \n", held, tree),
     "fn f() \{\n  1\n\}\n",
   )?
-  // Space *within* a line is not trailing, and this rule leaves it alone:
-  // how much of it there should be is a different decision that reads what
-  // stands on either side.
-  assert(roundTrips("fn f(a: Int,  b: Int) -> Int \{\n  a\n\}\n"))?
+  // Space *within* a line is not trailing, and this rule leaves it to the
+  // one that reads what stands on either side — which now answers.
+  let wide = "fn f(a: Int,  b: Int) -> Int \{\n  a\n\}\n"
+  let heldWide = tokens(wide)
+  assertEqual(
+    print(wide, heldWide, parseTokens(wide, heldWide)),
+    "fn f(a: Int, b: Int) -> Int \{\n  a\n\}\n",
+  )?
   // A blank line is blank, not indented.
   let blank = "fn f() \{\n  1\n   \n  2\n\}\n"
   let heldBlank = tokens(blank)

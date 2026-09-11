@@ -201,6 +201,27 @@ export fn main() -> Result<Unit, Error> {
     }
   }
   println("{reopened} of {sources.length()} file(s) re-open a body")?
+
+  // # The one that touches no newline at all
+  //
+  // The four above all move a line break. This moves none: it doubles every
+  // run of space *inside* a line, which cannot change what the program means
+  // and cannot be repaired by any rule that only rewrites runs of space
+  // around newlines. It is what asks whether the printer decides how much
+  // space goes between two tokens, and for a long time the answer was that it
+  // did not — 0 of 246.
+  var respaced = 0
+  for source in sources {
+    let wide = spacedOut(source)
+    let held = tokens(wide)
+    if print(wide, held, parseTokens(wide, held)) == source {
+      respaced = respaced + 1
+    }
+  }
+  println("{respaced} of {sources.length()} file(s) re-space")?
+  if respaced < mustReSpace() {
+    return Err(Error(message: "{respaced} re-space, and {mustReSpace()} did"))
+  }
   if reopened < mustReOpen() {
     return Err(Error(message: "{reopened} re-open, and {mustReOpen()} did"))
   }
@@ -532,4 +553,39 @@ fn insideALiteral(source: String) -> Vector<Bool> {
     }
   }
   marked
+}
+
+/// How many of the corpus must survive having the space inside their lines
+/// doubled.
+///
+/// A ratchet, and one that may rise and never fall.
+fn mustReSpace() -> Int {
+  246
+}
+
+/// `source` with every run of space inside a line doubled.
+///
+/// Doubling and not squeezing: two tokens written against each other may be
+/// one token if the space between them goes, and `a b` is not `ab`. Doubling
+/// is safe for every pair there is, and a formatter that decides the space
+/// between two tokens puts back exactly one.
+fn spacedOut(source: String) -> String {
+  let held = tokens(source)
+  var out = Vector.of<String>()
+  for token in held {
+    match source.sliceBytes(token.from, token.to) {
+      Ok(text) => {
+        if token.kind == Kind.Space && holdsANewline(source, token) {
+          out.push(text)
+        } else if token.kind == Kind.Space {
+          out.push(text)
+          out.push(text)
+        } else {
+          out.push(text)
+        }
+      }
+      Err(_) => { }
+    }
+  }
+  "".join(out.toArray())
 }

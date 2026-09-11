@@ -24,6 +24,194 @@ export fn print(source: String, held: Array<Token>, tree: Tree) -> String {
   // very top of a file fall under the same rule as a blank at the top of a
   // block: both open on nothing.
   emit(source, held, tree, -1, 0, -1, var out)
+  let text = "".join(out.toArray())
+  // The alignment pass lexes its own output, which is the price of not
+  // lining up on a `//` inside a string. It is only owed when there is a
+  // trailing comment to line up, and whether there is one is already
+  // readable here: this printer never moves a comment from its line, so a
+  // source with none produces an output with none.
+  if !holdsATrailingComment(source, held) {
+    return text
+  }
+  aligned(text)
+}
+
+/// `text` with each run of consecutive trailing comments lined up.
+///
+/// `Out::finish` does this last of all, over the lines it has buffered: a run
+/// of lines that each carry a trailing comment is padded to the widest code in
+/// the run, and one space. So
+///
+/// ```text
+/// let a = 1   // aligned
+/// let bb = 2  // here
+/// ```
+///
+/// keeps its column whatever stands either side of it. It is the one rule that
+/// cannot be decided while writing, because it depends on lines that have not
+/// been written yet.
+///
+/// The output is lexed again rather than searched for `//`, because a `//`
+/// inside a string is not a comment and this would line up on it. What it does
+/// *not* do is cut the text into lines: a corpus is twenty thousand of them
+/// and almost none carry a trailing comment, so what is collected is the three
+/// offsets each of those few needs.
+fn aligned(text: String) -> String {
+  let held = tokens(text)
+  // For each line that carries one: where the line begins, where its code
+  // ends, and where its comment begins.
+  var opens = Vector.of<Int>()
+  var ends = Vector.of<Int>()
+  var comments = Vector.of<Int>()
+  var lineFrom = 0
+  var codeTo = 0
+  var open = false
+  var t = 0
+  while t < held.length() {
+    match held.get(t) {
+      Some(token) => {
+        if token.kind == Kind.Space {
+          var at = token.from
+          while at < token.to {
+            if text.byteAt(at) == '\n' {
+              lineFrom = at + 1
+              open = false
+            }
+            at = at + 1
+          }
+        } else {
+          // Trailing when something of this line already stands in front of
+          // it. A comment that opens its line is placed by the indentation
+          // rules and not by this one.
+          if open && isAComment(token) {
+            opens.push(lineFrom)
+            ends.push(codeTo)
+            comments.push(token.from)
+          }
+          codeTo = token.to
+          open = true
+        }
+      }
+      None => { }
+    }
+    t = t + 1
+  }
+  if opens.length() == 0 {
+    return text
+  }
+  padded(text, opens.freeze(), ends.freeze(), comments.freeze())
+}
+
+/// Whether `token` is a comment of any of the three forms.
+fn isAComment(token: Token) -> Bool {
+  token.kind == Kind.LineComment || token.kind == Kind.BlockComment ||
+    token.kind == Kind.DocComment
+}
+
+/// `text` with the space in front of each marked comment set so that a run of
+/// them lines up.
+///
+/// A run is the marked lines that follow one another: `opens` holds where each
+/// begins, and two are consecutive when the second begins where the first's
+/// comment line ended.
+fn padded(
+  text: String,
+  opens: Array<Int>,
+  ends: Array<Int>,
+  comments: Array<Int>,
+) -> String {
+  var out = Vector.of<String>()
+  var copied = 0
+  var i = 0
+  while i < opens.length() {
+    // The run this one opens, and the widest code in it.
+    var stop = i
+    var widest = 0
+    while stop < opens.length() && follows(text, comments, opens, stop, i) {
+      widest = wider(widest, at(ends, stop) - at(opens, stop))
+      stop = stop + 1
+    }
+    var w = i
+    while w < stop {
+      match text.sliceBytes(copied, at(ends, w)) {
+        Ok(piece) => out.push(piece)
+        Err(_) => { }
+      }
+      out.push(spaces(widest - (at(ends, w) - at(opens, w)) + 1))
+      copied = at(comments, w)
+      w = w + 1
+    }
+    i = stop
+  }
+  match text.sliceBytes(copied, text.byteLength()) {
+    Ok(rest) => out.push(rest)
+    Err(_) => { }
+  }
+  "".join(out.toArray())
+}
+
+/// Whether the marked line at `stop` carries on the run that began at `first`.
+///
+/// Consecutive lines, and nothing else: a line with no comment between two
+/// that have one ends the run, which is what `Out::finish`'s walk over its
+/// buffered lines does by stopping at the first line with no comment.
+fn follows(
+  text: String,
+  comments: Array<Int>,
+  opens: Array<Int>,
+  stop: Int,
+  first: Int,
+) -> Bool {
+  if stop == first {
+    return true
+  }
+  // The line before this one is marked, and its comment ran to the newline
+  // this line begins after.
+  let newline = at(opens, stop) - 1
+  if newline < 0 {
+    return false
+  }
+  let before = at(comments, stop - 1)
+  before < newline && noNewlineBetween(text, before, newline)
+}
+
+/// Whether `[from, to)` holds no newline.
+fn noNewlineBetween(text: String, from: Int, to: Int) -> Bool {
+  var i = from
+  while i < to {
+    if text.byteAt(i) == '\n' {
+      return false
+    }
+    i = i + 1
+  }
+  true
+}
+
+/// The value at `i`, or `0`.
+fn at(values: Array<Int>, i: Int) -> Int {
+  match values.get(i) {
+    Some(value) => value
+    None => 0
+  }
+}
+
+/// The larger of two.
+fn wider(a: Int, b: Int) -> Int {
+  if a > b {
+    a
+  } else {
+    b
+  }
+}
+
+/// `n` spaces.
+fn spaces(n: Int) -> String {
+  var out = Vector.of<String>()
+  var i = 0
+  while i < n {
+    out.push(" ")
+    i = i + 1
+  }
   "".join(out.toArray())
 }
 
@@ -46,8 +234,16 @@ fn emit(
       match held.get(tree.from) {
         Some(token) => {
           if token.kind == Kind.Space {
-            out.push(spacing(source, token, opensBlock(source, held, after), after < 0, depth))
+            out.push(spacing(source, token, opensBlock(source, held, after), after < 0, depth, held, tree.from))
           } else {
+            // A space the source has not got. Every other rule here rewrites
+            // a run that is already there; two tokens written against each
+            // other have no run to rewrite, and `n=1` stayed `n=1`.
+            if after >= 0 && after == tree.from - 1 &&
+              !isASpaceToken(held, after) &&
+              wantsASpaceBetween(source, held, after, tree.from) {
+              out.push(" ")
+            }
             out.push(text(source, token))
           }
           return tree.from
@@ -128,7 +324,10 @@ fn emit(
       let listed = isAnArray(source, held, tree)
       let hugs = !listed && hugsItsLast(source, held, tree, column(out))
       if fits || !listed && !worthBreaking(source, held, tree, depth) {
-        out.push(verbatim(source, held, tree))
+        // `flattened` and not `verbatim`: a group that keeps its line still
+        // has the space inside it decided, and `f( x , y )` is `f(x, y)`
+        // whether it was folded or left alone.
+        out.push(flattened(source, held, tree))
       } else if hugs {
         writeHugged(source, held, tree, depth, var out)
       } else {
@@ -367,6 +566,16 @@ fn emit(
         // The width is asked last and only of a body, because `&&` stops at
         // the first `false`: measured for every child of every node it is the
         // node's own size squared, and six seconds of the corpus.
+        // What no rule claimed is written back byte for byte. Deciding the
+        // space inside it would be deciding something about source this slice
+        // has already said it does not understand — `%%% not a declaration`
+        // came back as `% % % not a declaration`.
+        if child.kind == Node.Error {
+          out.push(verbatim(source, held, child))
+          last = child.to - 1
+          i = i + 1
+          continue
+        }
         if child.kind == Node.Body && writesBroken(source, held, child) &&
           (breaksAsABody(source, held, child, tree.from) ||
             overflows(source, held, tree.from, tree.to, began)) {
@@ -410,6 +619,8 @@ fn spacing(
   opening: Bool,
   leading: Bool,
   depth: Int,
+  held: Array<Token>,
+  index: Int,
 ) -> String {
   // The byte after the last newline. Everything from there to the end of the
   // run is the indentation of the line the run leaves behind, and everything
@@ -425,7 +636,14 @@ fn spacing(
     at = at + 1
   }
   if lastBreak < 0 {
-    return text(source, token)
+    // A run inside a line is not kept — it is decided. `cove fmt` writes
+    // `f(x, y)` for `f( x , y )`, and the width of what stands either side of
+    // the run is the whole of the question.
+    return if wantsASpaceBetween(source, held, index - 1, index + 1) {
+      " "
+    } else {
+      ""
+    }
   }
   // `n` newlines leave `n - 1` blank lines behind them, and the formatter
   // keeps at most one: `cove_syntax::format`'s `pending_blank` is a `bool`,
@@ -964,22 +1182,13 @@ fn restOfLine(source: String, held: Array<Token>, at: Int) -> Int {
   width
 }
 
-/// Whether the run of space at `at` survives flattening.
+/// Whether the run of space at `at` survives being written on one line.
 ///
-/// It does not against a bracket on either side, and it does not in front of
-/// a comma: `f(\n  a ,\n)` is `f(a)` — well, `f(a ,)` flattened is `f(a,)`,
-/// and the comma before the closing bracket goes with it. What is left is
-/// the space between two things that need telling apart.
+/// [`wantsASpaceBetween`] asked of what stands either side of the run. It was
+/// two cases — against a bracket, in front of a comma — and every other pair
+/// kept whatever the source had, so `f(a,  b)` flattened to `f(a,  b)`.
 fn wantsASpace(source: String, held: Array<Token>, at: Int) -> Bool {
-  let before = byteOfPunct(source, held, at - 1)
-  let after = byteOfPunct(source, held, at + 1)
-  if before == '(' || before == '[' || after == ')' || after == ']' {
-    return false
-  }
-  if after == ',' {
-    return false
-  }
-  true
+  wantsASpaceBetween(source, held, at - 1, at + 1)
 }
 
 /// The byte of a one-byte punctuation token at `at`, or zero.
@@ -1448,7 +1657,7 @@ fn writeHug(
   }
   for child in member.children {
     if child.kind == Node.Group && hasAMember(child) {
-      out.push(tokensBetween(source, held, member.from, child.from))
+      out.push(decided(source, held, member.from, child.from))
       // A hug inside a hug: `withObservability(app, async fn(request) \{ … \})`
       // keeps its own head whole and expands *its* last argument, which is
       // what makes `hug_head`'s recursion visible in the output.
@@ -1457,7 +1666,7 @@ fn writeHug(
       } else {
         writeBroken(source, held, child, depth, var out)
       }
-      out.push(tokensBetween(source, held, child.to, member.to))
+      out.push(decided(source, held, child.to, member.to))
       return
     }
   }
@@ -2281,7 +2490,12 @@ fn planBreaks(
     return
   }
   let after = columnAfter(source, held, from, lhsEnd, col, level, marks, levels)
-  if after + 1 + widthBetween(source, held, rhs, to) > maxWidth() {
+  // The operand, and not the run of space behind it that the *next* operator
+  // stands on. `binary` writes that operator after the operand without asking
+  // anything, which is how `cove fmt` comes to leave an 83-column line: the
+  // fit it checked was the 80 in front of it.
+  let operand = lastSignificantIn(held, rhs, to)
+  if after + 1 + widthBetween(source, held, rhs, operand) > maxWidth() {
     marks.push(rhs)
     levels.push(level + 1)
     planBreaks(
@@ -2467,6 +2681,254 @@ fn overflows(
       None => { }
     }
     at = at + 1
+  }
+  false
+}
+
+/// Whether a space goes between the tokens at `l` and `r`.
+///
+/// `cove_syntax::format` has no table for this — it writes each piece and the
+/// spaces fall out of the writers — so the table is read off what it produces.
+/// One space between two things, and none in these places:
+///
+/// - inside a bracket against the bracket: `f(x, y)`, `[1, 2]`;
+/// - in front of a `,`, a `:`, a `?`;
+/// - either side of a `.`, and either side of a range;
+/// - between a callee and the `(` of its call, or a name and the `[` of an
+///   index — but *not* in front of the `(` that `expr` writes for precedence,
+///   which is [`isParenthesised`]'s question;
+/// - inside a generic list, and between one and what it belongs to;
+/// - after a prefix `!` or `-`.
+///
+/// The generic list and the prefix operator are told apart the way the rest
+/// of this slice tells them apart: by what stands immediately against them.
+/// `Vector<T>` writes its `<` against the name and `a > b` does not, which is
+/// something `cove fmt` guarantees about every file this reads.
+fn wantsASpaceBetween(
+  source: String,
+  held: Array<Token>,
+  l: Int,
+  r: Int,
+) -> Bool {
+  let a = byteOfPunct(source, held, l)
+  let b = byteOfPunct(source, held, r)
+  if a == '(' || a == '[' || b == ')' || b == ']' {
+    return false
+  }
+  if b == ',' || b == ':' || b == '?' {
+    return false
+  }
+  if a == '.' || b == '.' {
+    return false
+  }
+  if isARange(source, held, l) || isARange(source, held, r) {
+    return false
+  }
+  // `f(` and `v[`, against what they belong to. A `(` that `expr` wrote for
+  // precedence belongs to nothing and keeps its space: `return (a || b)`.
+  if b == '(' && !opensForPrecedence(source, held, r) {
+    return false
+  }
+  if b == '[' && holdsSomething(source, held, l) {
+    return false
+  }
+  // `Vector<T>`, and the `(` or the `,` behind its `>`.
+  if a == '<' && closesAgainst(held, l) || b == '<' && closesAgainst(held, r) {
+    return false
+  }
+  if b == '>' && closesAgainst(held, r) {
+    return false
+  }
+  !prefixed(source, held, l)
+}
+
+/// Whether the token at `at` is `..` or `..<`.
+fn isARange(source: String, held: Array<Token>, at: Int) -> Bool {
+  match held.get(at) {
+    Some(token) => {
+      // `..` and `..<`, and not `...`: a variadic's ellipsis is written
+      // against the type in front of it and takes a space behind it.
+      token.kind == Kind.Punct && source.byteAt(token.from) == '.' &&
+        (token.to - token.from == 2 ||
+          token.to - token.from == 3 && source.byteAt(token.from + 2) == '<')
+    }
+    None => false
+  }
+}
+
+/// Whether the token at `at` is written against the one before it, with no
+/// run of space between.
+///
+/// What tells `Vector<T>` from `a > b`, and `f(x)` from `if (x)`.
+fn closesAgainst(held: Array<Token>, at: Int) -> Bool {
+  match held.get(at - 1) {
+    Some(token) => token.kind != Kind.Space
+    None => false
+  }
+}
+
+/// Whether the `(` at `at` is the one `expr` writes for precedence rather
+/// than a call's.
+fn opensForPrecedence(source: String, held: Array<Token>, at: Int) -> Bool {
+  !holdsSomething(source, held, previousSignificant(held, at))
+}
+
+/// Whether the token at `at` is something a `(` or a `[` can be written
+/// against: a name, or the close of one.
+fn holdsSomething(source: String, held: Array<Token>, at: Int) -> Bool {
+  match held.get(at) {
+    Some(token) => {
+      if token.kind == Kind.Word {
+        // A keyword is not a callee: `if (a || b) \{` keeps its space where
+        // `f(a)` does not. The lexer does not tell a keyword from a name —
+        // by design, it has no list — so the list is here, and it is only
+        // the words a `(` can follow.
+        return !isTheWord(source, token, "if") &&
+          !isTheWord(source, token, "while") && !isTheWord(source, token, "for") &&
+          !isTheWord(source, token, "match") &&
+          !isTheWord(source, token, "else") &&
+          !isTheWord(source, token, "return") && !isTheWord(source, token, "in") &&
+          !isTheWord(source, token, "is") && !isTheWord(source, token, "break")
+      }
+      let c = byteOfPunct(source, held, at)
+      c == ')' || c == ']' || c == '>' || c == '?'
+    }
+    None => false
+  }
+}
+
+/// Whether the token at `at` is a prefix operator — a `!`, or a `-` with
+/// nothing in front of it for it to subtract from.
+fn prefixed(source: String, held: Array<Token>, at: Int) -> Bool {
+  let c = byteOfPunct(source, held, at)
+  if c == '!' {
+    return true
+  }
+  if c != '-' {
+    return false
+  }
+  // A `-` that opens its line has nothing in front of it to subtract from.
+  // `previousSignificant` walks over the newline and finds the end of the
+  // line above — the `)` of the arm before `-1 => …` — and read that as a
+  // subtraction.
+  if opensItsLine(source, held, at) {
+    return true
+  }
+  let before = previousSignificant(held, at)
+  !holdsSomething(source, held, before) && !isALiteral(held, before)
+}
+
+/// Whether the token at `at` is a number, a string or a character.
+fn isALiteral(held: Array<Token>, at: Int) -> Bool {
+  match held.get(at) {
+    Some(token) => {
+      token.kind == Kind.Number || token.kind == Kind.Str ||
+        token.kind == Kind.Char
+    }
+    None => false
+  }
+}
+
+/// Whether the token at `at` is a run of space.
+fn isASpaceToken(held: Array<Token>, at: Int) -> Bool {
+  match held.get(at) {
+    Some(token) => token.kind == Kind.Space
+    None => false
+  }
+}
+
+/// Whether `token` is exactly `word`.
+fn isTheWord(source: String, token: Token, word: String) -> Bool {
+  match source.sliceBytes(token.from, token.to) {
+    Ok(text) => text == word
+    Err(_) => false
+  }
+}
+
+/// The tokens in `[from, to)` with the space between them decided.
+///
+/// What a hug writes either side of the group it expands: `tally: ` in front
+/// of it and a `?` behind. Copied byte for byte it kept whatever run of space
+/// the source had there, which is the one thing this printer no longer does.
+fn decided(source: String, held: Array<Token>, from: Int, to: Int) -> String {
+  var out = Vector.of<String>()
+  var at = from
+  while at < to {
+    match held.get(at) {
+      Some(token) => {
+        if token.kind == Kind.Space {
+          if wantsASpace(source, held, at) {
+            out.push(" ")
+          }
+        } else {
+          out.push(text(source, token))
+        }
+      }
+      None => { }
+    }
+    at = at + 1
+  }
+  "".join(out.toArray())
+}
+
+/// `text` without the spaces it ends on.
+fn withoutTrailingSpace(text: String) -> String {
+  var to = text.byteLength()
+  while to > 0 && (text.byteAt(to - 1) == ' ' || text.byteAt(to - 1) == '\t') {
+    to = to - 1
+  }
+  match text.sliceBytes(0, to) {
+    Ok(kept) => kept
+    Err(_) => text
+  }
+}
+
+/// Whether the token at `at` is the first thing on its line.
+fn opensItsLine(source: String, held: Array<Token>, at: Int) -> Bool {
+  match held.get(at - 1) {
+    Some(token) => token.kind == Kind.Space && endsLine(source, token)
+    None => true
+  }
+}
+
+/// One past the last token in `[from, to)` that is not a run of space.
+fn lastSignificantIn(held: Array<Token>, from: Int, to: Int) -> Int {
+  var at = to
+  while at > from {
+    match held.get(at - 1) {
+      Some(token) => {
+        if token.kind != Kind.Space {
+          return at
+        }
+      }
+      None => { }
+    }
+    at = at - 1
+  }
+  from
+}
+
+/// Whether any comment in `held` has something of its line in front of it.
+fn holdsATrailingComment(source: String, held: Array<Token>) -> Bool {
+  var open = false
+  var i = 0
+  while i < held.length() {
+    match held.get(i) {
+      Some(token) => {
+        if token.kind == Kind.Space {
+          if endsLine(source, token) {
+            open = false
+          }
+        } else {
+          if open && isAComment(token) {
+            return true
+          }
+          open = true
+        }
+      }
+      None => { }
+    }
+    i = i + 1
   }
   false
 }
