@@ -29,7 +29,7 @@ fn isWord(source: String, tokens: Array<Token>, at: Int, word: String) -> Bool {
       }
       var i = 0
       while i < word.byteLength() {
-        if source.codePointAtByte(token.from + i) != word.codePointAtByte(i) {
+        if source.byteAt(token.from + i) != word.byteAt(i) {
           return false
         }
         i = i + 1
@@ -54,7 +54,7 @@ fn isPunct(
       }
       var i = 0
       while i < mark.byteLength() {
-        if source.codePointAtByte(token.from + i) != mark.codePointAtByte(i) {
+        if source.byteAt(token.from + i) != mark.byteAt(i) {
           return false
         }
         i = i + 1
@@ -102,10 +102,7 @@ impl Parser {
         if token.kind != Kind.Punct || token.to - token.from != 1 {
           return 0
         }
-        match self.source.codePointAtByte(token.from) {
-          Some(c) => c
-          None => 0
-        }
+        self.source.byteAt(token.from)
       }
       None => 0
     }
@@ -566,10 +563,20 @@ impl Parser {
 }
 
 /// Whether a run of space holds a newline.
+///
+/// Bytes and not code points, which is what `Scan::at` says of the lexer and
+/// is just as true here: `String.byteAt` is an instruction where
+/// `codePointAtByte` is a builtin call that allocates the `Option` it answers
+/// with. A native profile of the printer put a third of the *whole run* in
+/// that allocation, and this loop is why — it reads every byte of every run
+/// of space, and a run of space is a third of the tokens in a file.
+///
+/// Every comparison here is against ASCII, where a byte and a code point are
+/// the same number.
 fn endsLine(source: String, token: Token) -> Bool {
   var i = token.from
   while i < token.to {
-    if source.codePointAtByte(i) == Some('\n') {
+    if source.byteAt(i) == '\n' {
       return true
     }
     i = i + 1
@@ -594,10 +601,8 @@ fn endsLine(source: String, token: Token) -> Bool {
 fn completes(source: String, token: Token) -> Bool {
   let width = token.to - token.from
   if width == 1 {
-    match source.codePointAtByte(token.from) {
-      Some(c) => c == ')' || c == ']' || c == '\}' || c == '?'
-      None => false
-    }
+    let c = source.byteAt(token.from)
+    c == ')' || c == ']' || c == '\}' || c == '?'
   } else {
     // `...` against `..<`, which the lexer gives the same width.
     width == 3 && source.byteAt(token.from) == '.' &&

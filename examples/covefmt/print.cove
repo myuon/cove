@@ -253,6 +253,11 @@ fn emit(
     }
     return after
   }
+  // Read once. Nothing of this node is written before the three places below
+  // that ask for it, so they are all the same number — and `column` walks
+  // back over the pieces of the line, reading every byte of each to find the
+  // newline it does not hold. Asked four times it was four walks.
+  let col = column(out)
   // Whether this group is written on one line, and whether it should be.
   //
   // # The decision propagates, and that is the whole of the rule
@@ -304,7 +309,7 @@ fn emit(
     } else {
       reservedFor(source, held, tree)
     }
-    let room = maxWidth() - column(out) - rest
+    let room = maxWidth() - col - rest
     let fits = !mustBreak(source, held, tree) &&
       flatWidth(source, held, tree) <= room
     if isBroken(source, held, tree) {
@@ -322,7 +327,7 @@ fn emit(
       // escape nor `hug_last`: `[async fn(event) \{ … \}, …]` breaks where the
       // same shape written as a call would hug.
       let listed = isAnArray(source, held, tree)
-      let hugs = !listed && hugsItsLast(source, held, tree, column(out))
+      let hugs = !listed && hugsItsLast(source, held, tree, col)
       if fits || !listed && !worthBreaking(source, held, tree, depth) {
         // `flattened` and not `verbatim`: a group that keeps its line still
         // has the space inside it decided, and `f( x , y )` is `f(x, y)`
@@ -348,7 +353,7 @@ fn emit(
     } else {
       0
     }
-    if flatWidth(source, held, tree) > maxWidth() - column(out) - rest &&
+    if flatWidth(source, held, tree) > maxWidth() - col - rest &&
       breaksAtItsDots(source, held, tree) {
       writeChain(source, held, tree, depth, var out)
       return tree.to - 1
@@ -388,7 +393,7 @@ fn emit(
   // the body is reached the column has come back to the closing bracket's,
   // and `) \{ http.fetch(check.url) \}` looks like it fits on a line it is
   // only on because the arguments above it broke.
-  let began = column(out)
+  let began = col
   // Where this node's run of leaves must break, and at what depth. Empty for
   // everything that already fits, which is almost everything.
   var marks = Vector.of<Int>()
