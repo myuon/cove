@@ -116,7 +116,7 @@ impl Body<'_> {
             // `split` or `replace`, and is most of what `byteAt` costs. See
             // [`Inst::ByteAt`].
             Ty::Str if name == "byteAt" && args.len() == 1 => {
-                self.byte_at(expr, base, &args[0].value)
+                self.byte_at(expr, base, &args[0].value, want)
             }
             Ty::Range => self.range_method(expr, base, name, args),
             Ty::Array(elem) => {
@@ -177,10 +177,16 @@ impl Body<'_> {
     /// the instruction's, because the machine is already holding the header
     /// it would be checked against and a check lowered here would read it a
     /// second time.
-    fn byte_at(&mut self, expr: &Expr, base: &Expr, index: &Expr) -> Val {
+    ///
+    /// The destination is the one the surrounding form asked for — issue
+    /// #302 — and not a temporary copied out of. A byte read is the whole of
+    /// a lexer's inner loop, so a copy per read is a copy per byte of every
+    /// file: `Scan.at` answered `byte-at s11`, `copy s8 s11`, `copy s6 s8`
+    /// before this took `want`.
+    fn byte_at(&mut self, expr: &Expr, base: &Expr, index: &Expr, want: Option<Dest>) -> Val {
         let obj = self.expr(base);
         let at = self.expr(index);
-        let dst = self.temp(shapes::INT);
+        let dst = self.answer_at(want, shapes::INT);
         self.emit(
             Inst::ByteAt {
                 dst: dst.slot,
