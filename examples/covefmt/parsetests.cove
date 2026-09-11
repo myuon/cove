@@ -273,3 +273,68 @@ test fn a_line_does_not_end_on_a_blank() -> Result<Unit, Error> {
   )?
   Ok(())
 }
+
+/// **Blank lines collapse to one.**
+///
+/// `cove_syntax::format` keeps blank lines in a `pending_blank: bool`, so
+/// however many an author wrote between two things, one is what comes back.
+/// Three newlines in a row are two blank lines and become one.
+///
+/// On its own test rather than only on the corpus, for the reason the
+/// trailing-whitespace rule needed one: every file in this repository is
+/// already `cove fmt`'s output, so it holds no run of blank lines for a
+/// correct rule to collapse — and a rule that collapsed nothing would pass
+/// there just as well.
+test fn blank_lines_collapse_to_one() -> Result<Unit, Error> {
+  let many = "fn a() \{ 1 \}\n\n\n\n\nfn b() \{ 2 \}\n"
+  let held = tokens(many)
+  assertEqual(
+    print(many, held, parseTokens(many, held)),
+    "fn a() \{ 1 \}\n\nfn b() \{ 2 \}\n",
+  )?
+  // One blank line is already one, and stays.
+  assert(roundTrips("fn a() \{ 1 \}\n\nfn b() \{ 2 \}\n"))?
+  // No blank line stays none: the rule is a ceiling, not a floor.
+  assert(roundTrips("fn a() \{ 1 \}\nfn b() \{ 2 \}\n"))?
+  // Inside a body too, and the indentation after the last newline is kept —
+  // what the rule takes out is newlines, not the line they leave behind.
+  let inside = "fn f() \{\n  1\n\n\n  2\n\}\n"
+  let heldInside = tokens(inside)
+  assertEqual(
+    print(inside, heldInside, parseTokens(inside, heldInside)),
+    "fn f() \{\n  1\n\n  2\n\}\n",
+  )?
+  Ok(())
+}
+
+/// A blank line at the top of a block is not kept.
+///
+/// `cove_syntax::format`'s `lead` takes an `allow_blank`, and it is `false`
+/// for the first thing in a file and the first thing in a block: `i > 0` at
+/// every call site that walks members. A blank there separates a thing from
+/// the brace above it, which is nothing to separate it from.
+test fn a_block_does_not_open_on_a_blank() -> Result<Unit, Error> {
+  let source = "fn f() \{\n\n  1\n\}\n"
+  let held = tokens(source)
+  assertEqual(
+    print(source, held, parseTokens(source, held)),
+    "fn f() \{\n  1\n\}\n",
+  )?
+  Ok(())
+}
+
+/// A file does not open on a blank either, which is the same rule reaching
+/// the other end of `allow_blank`.
+///
+/// It is the same question asked of "nothing has been written yet" rather
+/// than of a brace, and `print` starts the walk at `-1` so that both are one
+/// answer instead of two.
+test fn a_file_does_not_open_on_a_blank() -> Result<Unit, Error> {
+  let source = "\n\n\nfn f() \{ 1 \}\n"
+  let held = tokens(source)
+  assertEqual(
+    print(source, held, parseTokens(source, held)),
+    "fn f() \{ 1 \}\n",
+  )?
+  Ok(())
+}
