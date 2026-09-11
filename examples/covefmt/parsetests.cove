@@ -338,3 +338,56 @@ test fn a_file_does_not_open_on_a_blank() -> Result<Unit, Error> {
   )?
   Ok(())
 }
+
+/// **A body indents what is inside it, two spaces a step.**
+///
+/// `cove_syntax::format`'s `INDENT` is 2, and a body's members are written at
+/// `indent + INDENT` while its closing brace goes back to `indent`. Nesting
+/// multiplies: a block inside a block is four.
+///
+/// On its own test rather than only on the corpus, for the reason the two
+/// rules before it needed one: every file in this repository is already
+/// `cove fmt`'s output, so it holds no misindented line for a correct rule to
+/// straighten, and a rule that straightened nothing would pass there too.
+test fn a_body_indents_what_is_inside_it() -> Result<Unit, Error> {
+  let flat = "fn f() \{\nlet x = 1\nx\n\}\n"
+  let held = tokens(flat)
+  assertEqual(
+    print(flat, held, parseTokens(flat, held)),
+    "fn f() \{\n  let x = 1\n  x\n\}\n",
+  )?
+  // Nesting multiplies, and the closing braces walk back out.
+  let nested = "fn f() \{\nif a \{\nb\n\}\nc\n\}\n"
+  let heldNested = tokens(nested)
+  assertEqual(
+    print(nested, heldNested, parseTokens(nested, heldNested)),
+    "fn f() \{\n  if a \{\n    b\n  \}\n  c\n\}\n",
+  )?
+  // Over-indentation is straightened too: the rule sets the depth rather
+  // than adding to what was there.
+  let deep = "fn f() \{\n        let x = 1\n\}\n"
+  let heldDeep = tokens(deep)
+  assertEqual(
+    print(deep, heldDeep, parseTokens(deep, heldDeep)),
+    "fn f() \{\n  let x = 1\n\}\n",
+  )?
+  Ok(())
+}
+
+/// A line inside a group is left as it was found, because the tree has no
+/// node for a group's members.
+///
+/// This is the boundary of what this slice can decide, written down so that
+/// it is a *choice* and not an oversight. A call's arguments, a parameter
+/// list and a generic list are leaves of the node that holds them, so a line
+/// the formatter would indent inside one is a line with no depth to read.
+///
+/// Rewriting those from a depth of zero is how 85 of 246 files stopped
+/// matching `cove fmt` while this rule was being written. What the tree
+/// cannot decide it leaves alone, and the count goes up as the tree gets
+/// deeper rather than down.
+test fn a_group_keeps_the_indentation_it_had() -> Result<Unit, Error> {
+  assert(roundTrips("fn f(\n  a: Int,\n  b: Int,\n) -> Int \{\n  a\n\}\n"))?
+  assert(roundTrips("fn f() \{\n  g(\n    1,\n    2,\n  )\n\}\n"))?
+  Ok(())
+}
