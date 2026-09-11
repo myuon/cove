@@ -96,7 +96,8 @@ fn emit(
       // Already on one line. It stays there unless it is over the limit and
       // breaking would actually buy something, and either way the answer is
       // this group's *and everything inside it*.
-      if fits || !worthBreaking(source, held, tree, room) {
+      if fits || !worthBreaking(source, held, tree, room) ||
+        hugsItsLast(source, held, tree, room) {
         out.push(verbatim(source, held, tree))
       } else {
         out.push(broken(source, held, tree, depth))
@@ -766,4 +767,95 @@ fn indentOf(depth: Int) -> String {
     step = step + 1
   }
   "".join(out.toArray())
+}
+
+/// Whether the group keeps its head on one line and lets its last member
+/// expand below it.
+///
+/// `cove_syntax::format`'s `hug_last`, and its own comment says what it is
+/// for: *"A final closure, call, or array argument keeps the call's head on
+/// one line and expands below it, which is how a callback and a struct
+/// initializer read at the call site."*
+///
+/// `hug_head` names the three that can be hugged — a lambda, a non-empty
+/// array, a call with arguments — and each is a shape this tree has: a
+/// lambda is a `Node.Body` with a `)` in front of it, and the other two are
+/// a `Node.Group` with members. So the question is answerable without
+/// knowing which kind of expression the member is.
+///
+/// # Half of the rule, and the half is named
+///
+/// This answers only *whether* the group stays as it was written. It does
+/// not write the hugged form, so a call written on one line that should hug
+/// is left on one line rather than turned into
+///
+/// ```text
+/// spawnSomething(firstArgument, fn(value: Int) -> Int \{
+///   value * 2 + someMoreHere
+/// \})
+/// ```
+///
+/// which is what `cove fmt` produces from it. The corpus cannot see the
+/// difference — every file in it is already `cove fmt`'s output, so every
+/// call that should hug is already written hugged — and that is exactly why
+/// it is written down here instead. The missing half needs the printer to
+/// write a group's members itself rather than to keep them, which is the
+/// same machinery `broken` has and a different shape of it.
+fn hugsItsLast(
+  source: String,
+  held: Array<Token>,
+  tree: Tree,
+  room: Int,
+) -> Bool {
+  var last = tree
+  var members = 0
+  for child in tree.children {
+    if child.kind == Node.Member {
+      members = members + 1
+      last = child
+    }
+  }
+  if members == 0 {
+    return false
+  }
+  if !canBeHugged(source, held, last) {
+    return false
+  }
+  // Every earlier member has to fit, because they stay on the head's line.
+  // `hug_last` refuses when one of them breaks; here that is the same as one
+  // of them being too wide for what is left.
+  var seen = 0
+  for child in tree.children {
+    if child.kind == Node.Member {
+      seen = seen + 1
+      if seen < members && flatWidth(source, held, child) > room {
+        return false
+      }
+    }
+  }
+  true
+}
+
+/// Whether `member` is one of the three shapes a call may hug: a lambda, a
+/// non-empty array, or a call with arguments.
+fn canBeHugged(source: String, held: Array<Token>, member: Tree) -> Bool {
+  for child in member.children {
+    if child.kind == Node.Body {
+      return true
+    }
+    if child.kind == Node.Group && hasAMember(child) {
+      return true
+    }
+  }
+  false
+}
+
+/// Whether `tree` has a `Node.Member` among its children.
+fn hasAMember(tree: Tree) -> Bool {
+  for child in tree.children {
+    if child.kind == Node.Member {
+      return true
+    }
+  }
+  false
 }
