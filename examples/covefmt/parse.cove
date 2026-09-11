@@ -222,6 +222,15 @@ impl Parser {
         held.push(self.grouped(Node.Group))
         continue
       }
+      // And a `{ ... }` inside a member is a body: a lambda written as an
+      // argument — `items.filter(fn(item) \{ ... \})` — carries statements,
+      // and a formatter that could not see them would flatten a lambda with
+      // a body onto one line. `cove_syntax::format` refuses that in
+      // `breaks`: a lambda body that is not empty always breaks.
+      if depth <= 0 && c == '\{' {
+        held.push(self.body())
+        continue
+      }
       if c == '(' || c == '[' || c == '\{' {
         depth = depth + 1
       } else if c == ')' || c == ']' || c == '\}' {

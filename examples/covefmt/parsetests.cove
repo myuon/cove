@@ -408,19 +408,12 @@ test fn what_the_tree_cannot_see_is_left_alone() -> Result<Unit, Error> {
 /// declaration's parameters that it does not have for a call's arguments,
 /// and a test each is where those will go.
 test fn a_parameter_list_indents_its_members() -> Result<Unit, Error> {
-  let flat = "fn f(\na: Int,\nb: Int,\n) -> Int \{\n  a\n\}\n"
+  // Long enough that it does not fold, so what is being asserted is the
+  // indentation and not the width rule.
+  let flat = "\n".join(["fn aRatherLongFunctionName(", "firstParameter: String,", "secondParameter: String,", ") -> Result<Unit, Error> \{", "  Ok(())", "\}", ""])
+  let want = "\n".join(["fn aRatherLongFunctionName(", "  firstParameter: String,", "  secondParameter: String,", ") -> Result<Unit, Error> \{", "  Ok(())", "\}", ""])
   let held = tokens(flat)
-  assertEqual(
-    print(flat, held, parseTokens(flat, held)),
-    "fn f(\n  a: Int,\n  b: Int,\n) -> Int \{\n  a\n\}\n",
-  )?
-  // An over-indented one is straightened, the way a body's members are.
-  let deep = "fn f(\n      a: Int,\n) -> Int \{\n  a\n\}\n"
-  let heldDeep = tokens(deep)
-  assertEqual(
-    print(deep, heldDeep, parseTokens(deep, heldDeep)),
-    "fn f(\n  a: Int,\n) -> Int \{\n  a\n\}\n",
-  )?
+  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
   Ok(())
 }
 
@@ -432,18 +425,78 @@ test fn a_parameter_list_indents_its_members() -> Result<Unit, Error> {
 /// files hold such a line and 2,080 lines are inside a group; before this
 /// they were the lines covefmt left exactly as it found them.
 test fn an_argument_list_indents_its_members() -> Result<Unit, Error> {
-  let flat = "fn f() \{\n  g(\n1,\n2,\n)\n\}\n"
+  // A comment keeps the group broken whatever its width — see
+  // `a_body_never_folds` — so the indentation can be asserted without the
+  // width rule answering first.
+  let flat = "fn f() \{\n  g(\n// why\n1,\n2,\n)\n\}\n"
   let held = tokens(flat)
   assertEqual(
     print(flat, held, parseTokens(flat, held)),
-    "fn f() \{\n  g(\n    1,\n    2,\n  )\n\}\n",
+    "fn f() \{\n  g(\n    // why\n    1,\n    2,\n  )\n\}\n",
   )?
   // Nesting multiplies here as it does for a body.
-  let nested = "fn f() \{\n  g(\nh(\n1,\n),\n)\n\}\n"
+  let nested = "fn f() \{\n  g(\n// why\nh(\n1,\n),\n)\n\}\n"
   let heldNested = tokens(nested)
   assertEqual(
     print(nested, heldNested, parseTokens(nested, heldNested)),
-    "fn f() \{\n  g(\n    h(\n      1,\n    ),\n  )\n\}\n",
+    "fn f() \{\n  g(\n    // why\n    h(1),\n  )\n\}\n",
   )?
+  Ok(())
+}
+
+/// **A group that fits goes back onto one line.**
+///
+/// `cove_syntax::format` writes the flat form of a call when nothing in its
+/// arguments breaks and the flat form fits, and this is that read off the
+/// tokens: their widths are the flat width, because the tokens *are* the
+/// text. No tree walk builds a string to measure.
+///
+/// The trailing comma goes with the line breaks. A group written across
+/// lines ends every member with one, the last included, because each is on a
+/// line of its own; flattened there is no last line to end.
+test fn a_group_that_fits_goes_back_on_one_line() -> Result<Unit, Error> {
+  let broken = "fn f() \{\n  g(\n    1,\n    2,\n  )\n\}\n"
+  let held = tokens(broken)
+  assertEqual(
+    print(broken, held, parseTokens(broken, held)),
+    "fn f() \{\n  g(1, 2)\n\}\n",
+  )?
+  // A generic list folds too, which is the `<` case `cove fmt` settles by
+  // width rather than by structure.
+  let params = "fn f(\n  a: Int,\n  b: Int,\n) -> Int \{\n  a\n\}\n"
+  let heldParams = tokens(params)
+  assertEqual(
+    print(params, heldParams, parseTokens(params, heldParams)),
+    "fn f(a: Int, b: Int) -> Int \{\n  a\n\}\n",
+  )?
+  Ok(())
+}
+
+/// **What does not fit stays broken, and the rest of the line counts.**
+///
+/// A parameter list that fits on its own can still be one that does not fit:
+/// the `-> Result<T, F> \{` behind it is on the same line as the `)` that
+/// closes it. `cove_syntax::format` passes that in as `reserved`, and
+/// leaving it out is how 17 files folded a line past 80 columns while this
+/// was being written.
+test fn what_does_not_fit_stays_broken() -> Result<Unit, Error> {
+  // 84 columns flattened, so it stays as it was written.
+  let long = "\n".join(["fn aRatherLongFunctionName(", "  firstParameter: String,", "  secondParameter: String,", ") -> Result<Unit, Error> \{", "  Ok(())", "\}", ""])
+  assert(roundTrips(long))?
+  Ok(())
+}
+
+/// **A body never folds, however short it is.**
+///
+/// `cove_syntax::format`'s `breaks` calls itself a layout policy and not a
+/// limit: *"a declaration body, a control flow body, and a lambda body
+/// always read better broken"*. A lambda written as an argument is the case
+/// that catches a formatter out — `items.filter(fn(item) \{\n  item > 0\n\})`
+/// is short enough to fit and does not fold.
+test fn a_body_never_folds() -> Result<Unit, Error> {
+  assert(roundTrips("fn f() \{\n  items.filter(fn(item) \{\n    item > 0\n  \}).length()\n\}\n"))?
+  assert(roundTrips("fn f() \{\n  if a \{\n    b\n  \}\n\}\n"))?
+  // A comment can only stay where it was written if the group breaks.
+  assert(roundTrips("fn f() \{\n  g(\n    // why\n    1,\n  )\n\}\n"))?
   Ok(())
 }

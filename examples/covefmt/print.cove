@@ -56,6 +56,24 @@ fn emit(
     }
     return after
   }
+  // A group that was written across lines and need not be goes back onto
+  // one, which is `cove_syntax::format`'s first question about a call: it
+  // writes the flat form when nothing in the arguments breaks and the flat
+  // form fits. Both halves are below.
+  if indenting(tree.kind) && tree.kind != Node.Body &&
+    isBroken(source, held, tree) {
+    // What is left of the line after the group, which `cove_syntax::format`
+    // calls `reserved` and passes in: a parameter list that fits on its own
+    // still breaks when the `-> Result<T, F> \{` behind it would not. The
+    // rest of the line is the tokens from the group's end to the next
+    // newline, which the tiling makes readable without a tree.
+    let room = maxWidth() - column(out) - restOfLine(source, held, tree.to)
+    if isClosed(source, held, tree) && !mustBreak(source, held, tree) &&
+      flatWidth(source, held, tree) <= room {
+      out.push(flattened(source, held, tree))
+      return tree.to - 1
+    }
+  }
   // A `Node.Body` and a `Node.Params` indent what is inside them, and their
   // own brackets are not inside: the opener is written at the depth the node
   // *opens* at and the closer goes back to it. So the step is applied to the
@@ -270,4 +288,307 @@ fn holdsAGroup(kind: Node) -> Bool {
 /// of those is a line with no depth to read — see [`holdsAGroup`].
 fn indenting(kind: Node) -> Bool {
   kind == Node.Body || kind == Node.Params || kind == Node.Group
+}
+
+/// How wide `tree` is written on one line, in characters.
+///
+/// Every token it covers, with each run of space counted as the one space a
+/// flattened line would have — which is what `cove_syntax::format`'s `flat`
+/// builds by walking an expression and what this can read off the tokens
+/// instead. The tiling is why: a node's tokens *are* its text, so its width
+/// is their widths and no tree walk is needed to find them.
+///
+/// Characters and not bytes, because a column is what a width limit counts
+/// and `—` is one column and three bytes. `Token.to - Token.from` is bytes,
+/// so the text is measured rather than subtracted.
+fn flatWidth(source: String, held: Array<Token>, tree: Tree) -> Int {
+  var width = 0
+  var at = tree.from
+  while at < tree.to {
+    match held.get(at) {
+      Some(token) => {
+        if isTriviaKind(token.kind) {
+          // A run of space becomes one space, and a comment cannot be
+          // flattened at all — `breaks` says so and the caller asks that
+          // first, so the width it would have is not a question here.
+          width = width + 1
+        } else {
+          width = width + text(source, token).length()
+        }
+      }
+      None => { }
+    }
+    at = at + 1
+  }
+  width
+}
+
+/// Whether `kind` is space or a comment.
+fn isTriviaKind(kind: Kind) -> Bool {
+  kind == Kind.Space || kind == Kind.LineComment || kind == Kind.BlockComment ||
+    kind == Kind.DocComment
+}
+
+/// Whether `tree` must be written across lines whatever its width.
+///
+/// `cove_syntax::format`'s `breaks`, and its own comment says what kind of
+/// rule it is: *"This is a layout policy, not a limit: a declaration body, a
+/// control flow body, and a lambda body always read better broken, and an
+/// expression holding a comment can only keep it where it was written if it
+/// breaks."*
+///
+/// Two of those three this can answer exactly. A comment is a token, so a
+/// node holding one is found by looking; a block is a `Node.Body`, so a node
+/// holding one that is not empty is found the same way. The third — which
+/// *kind* of expression this is — the tree does not know, and it does not
+/// need to: an `if`, a `match`, a `for`, a `while` and a `scope` all break
+/// because they carry a body, and the body is what this sees.
+fn mustBreak(source: String, held: Array<Token>, tree: Tree) -> Bool {
+  var at = tree.from
+  while at < tree.to {
+    match held.get(at) {
+      Some(token) => {
+        if token.kind == Kind.LineComment || token.kind == Kind.BlockComment ||
+          token.kind == Kind.DocComment {
+          return true
+        }
+      }
+      None => { }
+    }
+    at = at + 1
+  }
+  holdsABody(tree)
+}
+
+/// Whether `tree` holds a `Node.Body` with anything in it.
+///
+/// An empty one does not break: `cove_syntax::format` asks
+/// `!block_is_empty(block)`, so `fn() \{ \}` stays on its line.
+fn holdsABody(tree: Tree) -> Bool {
+  for child in tree.children {
+    if child.kind == Node.Body {
+      // Two children is `{` and `}` and nothing between them.
+      if child.children.length() > 2 {
+        return true
+      }
+    }
+    if holdsABody(child) {
+      return true
+    }
+  }
+  false
+}
+
+/// The column the next character would be written at.
+///
+/// Read back out of what has been written rather than carried alongside it:
+/// `emit` already threads the token it last wrote and the depth it is at,
+/// and a third parameter for a number the output already holds is a third
+/// thing to keep in step.
+fn column(out: Vector<String>) -> Int {
+  var col = 0
+  var at = out.length() - 1
+  while at >= 0 {
+    match out.get(at) {
+      Some(piece) => {
+        let after = lastBreakIn(piece)
+        if after >= 0 {
+          return col + piece.length() - after
+        }
+        col = col + piece.length()
+      }
+      None => { }
+    }
+    at = at - 1
+  }
+  col
+}
+
+/// The character position just past the last newline of `piece`, or `-1`
+/// where it holds none.
+///
+/// One number rather than an `Option`, for `Scan::at`'s reason: every caller
+/// asks the same question of it and `-1` fails the test without a `match`.
+fn lastBreakIn(piece: String) -> Int {
+  var found = -1
+  var at = 0
+  let end = piece.byteLength()
+  while at < end {
+    if piece.byteAt(at) == '\n' {
+      found = at + 1
+    }
+    at = at + 1
+  }
+  found
+}
+
+/// The line width a formatter keeps within, in columns.
+///
+/// `cove_syntax::format::MAX_WIDTH`, which is 80. Cove has no module-level
+/// constant, so this is a function; see `maxBreaks` for the same shape and
+/// the same reason.
+fn maxWidth() -> Int {
+  80
+}
+
+/// Whether `tree` ends on the bracket that closes it.
+///
+/// A group that reaches the end of the file without one is a file somebody
+/// is in the middle of typing — `fn open(` and nothing after it — and it is
+/// not foldable: folding replaces its newlines with spaces, and the newline
+/// at the end of an unterminated group is the end of the file. The tiling
+/// holds either way and the text would not.
+///
+/// It is the same promise `balanced` makes one level down, and the one
+/// `printing_gives_back_source_that_does_not_parse` is about: what a
+/// formatter does with a file that does not parse is give it back.
+fn isClosed(source: String, held: Array<Token>, tree: Tree) -> Bool {
+  let last = tree.to - 1
+  let c = byteOfPunct(source, held, last)
+  c == ')' || c == ']'
+}
+
+/// Whether `tree` is written across more than one line.
+///
+/// A newline and not merely space: a group that is already on one line is
+/// left alone rather than rebuilt, and that is not an optimisation.
+/// Rebuilding it would be deciding the space *inside* it — `f(a,  b)` would
+/// become `f(a, b)` — and how much space goes between two tokens is a rule
+/// this slice has not got to. Asking about space rather than about newlines
+/// is how `a_line_does_not_end_on_a_blank` started failing while this was
+/// being written.
+fn isBroken(source: String, held: Array<Token>, tree: Tree) -> Bool {
+  var at = tree.from
+  while at < tree.to {
+    match held.get(at) {
+      Some(token) => {
+        if token.kind == Kind.Space && endsLine(source, token) {
+          return true
+        }
+      }
+      None => { }
+    }
+    at = at + 1
+  }
+  false
+}
+
+/// `tree` on one line: its tokens in order, each run of space one space.
+///
+/// A run of space becomes exactly one space and a run that stood against a
+/// bracket becomes none, which is what a flattened argument list looks like:
+/// `f(\n  a,\n  b,\n)` is `f(a, b)` and not `f( a, b, )`.
+fn flattened(source: String, held: Array<Token>, tree: Tree) -> String {
+  var out = Vector.of<String>()
+  var at = tree.from
+  while at < tree.to {
+    match held.get(at) {
+      Some(token) => {
+        if token.kind == Kind.Space {
+          if wantsASpace(source, held, at) {
+            out.push(" ")
+          }
+        } else if !isATrailingComma(source, held, at, tree.to) {
+          out.push(text(source, token))
+        }
+      }
+      None => { }
+    }
+    at = at + 1
+  }
+  "".join(out.toArray())
+}
+
+/// Whether the token at `at` is the comma a broken group ends its last
+/// member with.
+///
+/// A group written across lines puts a comma after every member, the last
+/// one included, because each is on a line of its own. Flattened there is no
+/// last line to end, and `f(a, b,)` is not what `cove fmt` writes — so the
+/// comma that stands against the closing bracket goes with the line breaks.
+fn isATrailingComma(
+  source: String,
+  held: Array<Token>,
+  at: Int,
+  end: Int,
+) -> Bool {
+  if byteOfPunct(source, held, at) != ',' {
+    return false
+  }
+  var i = at + 1
+  while i < end {
+    match held.get(i) {
+      Some(token) => {
+        if token.kind != Kind.Space {
+          return byteOfPunct(source, held, i) == ')' ||
+            byteOfPunct(source, held, i) == ']'
+        }
+      }
+      None => { }
+    }
+    i = i + 1
+  }
+  false
+}
+
+/// How many columns the tokens from `at` to the end of their line take.
+///
+/// What a group has to leave room for, and what `cove_syntax::format` is
+/// given as `reserved`: the `-> Result<T, F> \{` that follows a parameter
+/// list is on the same line as the `)` that closes it, so a list that fits
+/// on its own can still be one that does not fit.
+///
+/// It stops at the first run of space holding a newline, and counts a run
+/// that does not as the one space it is.
+fn restOfLine(source: String, held: Array<Token>, at: Int) -> Int {
+  var width = 0
+  var i = at
+  while i < held.length() {
+    match held.get(i) {
+      Some(token) => {
+        if token.kind == Kind.Space {
+          if endsLine(source, token) {
+            return width
+          }
+          width = width + 1
+        } else {
+          width = width + text(source, token).length()
+        }
+      }
+      None => { }
+    }
+    i = i + 1
+  }
+  width
+}
+
+/// Whether the run of space at `at` survives flattening.
+///
+/// It does not against a bracket on either side, and it does not in front of
+/// a comma: `f(\n  a ,\n)` is `f(a)` — well, `f(a ,)` flattened is `f(a,)`,
+/// and the comma before the closing bracket goes with it. What is left is
+/// the space between two things that need telling apart.
+fn wantsASpace(source: String, held: Array<Token>, at: Int) -> Bool {
+  let before = byteOfPunct(source, held, at - 1)
+  let after = byteOfPunct(source, held, at + 1)
+  if before == '(' || before == '[' || after == ')' || after == ']' {
+    return false
+  }
+  if after == ',' {
+    return false
+  }
+  true
+}
+
+/// The byte of a one-byte punctuation token at `at`, or zero.
+fn byteOfPunct(source: String, held: Array<Token>, at: Int) -> Int {
+  match held.get(at) {
+    Some(token) => {
+      if token.kind != Kind.Punct || token.to - token.from != 1 {
+        return 0
+      }
+      source.byteAt(token.from)
+    }
+    None => 0
+  }
 }
