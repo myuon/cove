@@ -99,7 +99,7 @@ fn emit(
     let rest = if reserved >= 0 {
       reserved
     } else {
-      restOfLine(source, held, tree.to)
+      reservedFor(source, held, tree)
     }
     let room = maxWidth() - column(out) - rest
     let fits = !mustBreak(source, held, tree) &&
@@ -763,10 +763,13 @@ fn isATrailingComma(
 
 /// How many columns the tokens from `at` to the end of their line take.
 ///
-/// What a group has to leave room for, and what `cove_syntax::format` is
-/// given as `reserved`: the `-> Result<T, F> \{` that follows a parameter
-/// list is on the same line as the `)` that closes it, so a list that fits
-/// on its own can still be one that does not fit.
+/// What a *declaration's* parameter list has to leave room for: `param_list`
+/// holds back `width(return_type) + 4 + 2`, and the rest of the source line
+/// after the `)` is exactly that — the `-> Result<T, F> \{` is on the same
+/// line as the `)` that closes the list, so a list that fits on its own can
+/// still be one that does not fit.
+///
+/// Not what a *call* leaves room for. See [`trailingBrace`].
 ///
 /// It stops at the first run of space holding a newline, and counts a run
 /// that does not as the one space it is.
@@ -881,8 +884,13 @@ fn worthBreaking(
       only = child
     }
   }
+  // `arg_list`'s escape is for one argument and for no other number of them.
+  // An empty list has none and breaks like any other: `test fn aVeryLongName(`
+  // and then `) -> Result<Unit, Error> \{` is two lines that fit where one did
+  // not, and `param_list` writes exactly that — its loop over the entries
+  // writes nothing and the `)` still goes on a line of its own.
   if members != 1 {
-    return members > 0
+    return true
   }
   // `arg_list` asks for a *bare* lone argument: a labelled one, a `var` one
   // or a spread breaks anyway, and so does one that would break on its own
@@ -1378,4 +1386,106 @@ fn breaksLine(source: String, held: Array<Token>, child: Tree) -> Bool {
 /// The one column a member of a broken group leaves behind it: its comma.
 fn oneComma() -> Int {
   1
+}
+
+/// How much of the line this group has to leave for what comes after it.
+///
+/// `cove_syntax::format` has two answers and they are not the same:
+///
+/// - `param_list`, for a *declaration's* parameters, holds back
+///   `width(return_type) + 4 + 2` — the `-> Result<T, F> \{` sits on the same
+///   line as the `)`, so a list that fits on its own can still be one that
+///   does not fit. The rest of the source line after the `)` is exactly that,
+///   which is what [`restOfLine`] reads.
+/// - `arg_list`, for a *call's* arguments, holds back *"Two more columns for
+///   the ` \{` of a trailing closure"* and nothing else. Not the `.name()`
+///   behind it, not the `\{` of an `if`'s block, not the `&&` and the operand
+///   after that. Whatever is out there is asked its own width question when
+///   it is reached, and that is what makes the outside-in walk greedy rather
+///   than a lookahead.
+///
+/// Reading the rest of the line for both made a call reserve two columns for
+/// every `if` header's brace, and `cove fmt` leaves one of those at 81
+/// columns rather than break what is in front of it.
+///
+/// Which one a group is cannot be asked of its kind. A method inside an
+/// `impl` has its parameters taken by `grouped`, because a declaration's
+/// members are read one to a line and the `(` on the way is a group like any
+/// other — so `Node.Params` is only some of them. The `->` behind it is what
+/// every parameter list has and no call does.
+fn reservedFor(source: String, held: Array<Token>, tree: Tree) -> Int {
+  if tree.kind == Node.Params {
+    return restOfLine(source, held, tree.to)
+  }
+  let after = nextSignificant(held, tree.to, held.length())
+  if after < 0 {
+    return 0
+  }
+  match held.get(after) {
+    Some(token) => {
+      if token.kind == Kind.Punct && token.to - token.from == 2 &&
+        source.byteAt(token.from) == '-' && source.byteAt(token.from + 1) == '>' {
+        return restOfLine(source, held, tree.to)
+      }
+      if byteOfPunct(source, held, after) == '\{' &&
+        !opensAHeader(source, held, tree) {
+        return 2
+      }
+      0
+    }
+    None => 0
+  }
+}
+
+/// Whether the `\{` behind this group closes a *header* rather than trailing
+/// the call.
+///
+/// `arg_list` is told `has_trailing` by the tree it walks. This one cannot
+/// be: `spawn(deadline) \{ … \}` and `if a != b.length() \{ … \}` both put a
+/// `\{` after a `)`, and the token before it says nothing. What does say it is
+/// the word the *line* opens on — `if`, `while`, `for`, `match`, `else` — and
+/// a header's brace belongs to the control flow, which `if_expr` writes after
+/// the condition without holding back a column for it.
+///
+/// Reserving those two columns anyway broke
+/// `if token.kind != Kind.Punct || token.to - token.from != mark.byteLength() \{`
+/// after the `()`, which is one column over and which `cove fmt` leaves.
+fn opensAHeader(source: String, held: Array<Token>, tree: Tree) -> Bool {
+  var i = tree.from - 1
+  var first = -1
+  while i >= 0 {
+    match held.get(i) {
+      Some(token) => {
+        if token.kind == Kind.Space && endsLine(source, token) {
+          i = -1
+        } else {
+          if !isTriviaKind(token.kind) {
+            first = i
+          }
+          i = i - 1
+        }
+      }
+      None => {
+        i = i - 1
+      }
+    }
+  }
+  if first < 0 {
+    return false
+  }
+  match held.get(first) {
+    Some(token) => {
+      if token.kind != Kind.Word {
+        return false
+      }
+      match source.sliceBytes(token.from, token.to) {
+        Ok(word) => {
+          word == "if" || word == "while" || word == "for" || word == "match" ||
+            word == "else"
+        }
+        Err(_) => false
+      }
+    }
+    None => false
+  }
 }
