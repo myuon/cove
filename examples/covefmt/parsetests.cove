@@ -552,3 +552,27 @@ test fn a_trailing_closure_of_one_statement_keeps_its_line(
   assert(roundTrips("fn f() \{\n  items.filter(fn(item) \{\n    item > 0\n  \})\n\}\n"))?
   Ok(())
 }
+
+/// **A call whose last argument can expand keeps its head on one line.**
+///
+/// `cove_syntax::format`'s `hug_last`: *"A final closure, call, or array
+/// argument keeps the call's head on one line and expands below it, which is
+/// how a callback and a struct initializer read at the call site."*
+///
+/// So a call past the limit is not always broken one argument to a line. The
+/// case below is 82 columns and `cove fmt` leaves it exactly as written —
+/// checked by running it rather than by reading this implementation, which
+/// is the rule `a_file_does_not_open_on_a_blank` was nearly got wrong by.
+///
+/// `hug_head` names the three shapes that can be hugged and each is one this
+/// tree has: a lambda is a `Node.Body` with a `)` in front of it, and a call
+/// or a non-empty array is a `Node.Group` with members.
+test fn a_call_hugs_a_last_argument_that_expands() -> Result<Unit, Error> {
+  let hugged = "\n".join(["fn f(tasks: Int) -> Int \{", "  spawnSomething(firstArgument, fn(value: Int) -> Int \{ value * 2 + someMoreHere \})", "\}", ""])
+  assert(roundTrips(hugged))?
+  // Without a huggable last argument the same width does break.
+  let plain = "\n".join(["fn f() -> Int \{", "  someFunction(aLongArgument, anotherLongArgument, aThirdOne, andYetMoreHereTools)", "\}", ""])
+  let held = tokens(plain)
+  assert(print(plain, held, parseTokens(plain, held)) != plain)?
+  Ok(())
+}
