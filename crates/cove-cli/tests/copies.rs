@@ -372,12 +372,14 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// emits, and the way to check is to look for the rows rather than to argue
 /// about the total.
 ///
-/// **The fourth rise was a row growing rather than appearing.** 1854 to 1862,
-/// and the table put all of it in `examples:covefmtBench`, which went from
-/// 10310 instructions to 11195 as covefmt learned to break an expression at
-/// its operator and a chain before its dots. The same reading applies: more
-/// Cove in the repository is more copies in the survey, and it says nothing
-/// about what the lowering does with the Cove that was already here.
+/// **The fourth rise was a row growing rather than appearing,** and so was the
+/// fifth. 1854 to 1862 to 1868, and the table put all of both in
+/// `examples:covefmtBench`: 10310 instructions, then 11195 as covefmt learned
+/// to break an expression at its operator and a chain before its dots, then
+/// 12152 as it learned how much space goes between two tokens. The same
+/// reading applies to a row that grows as to one that appears — more Cove in
+/// the repository is more copies in the survey, and it says nothing about what
+/// the lowering does with the Cove that was already here.
 ///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
@@ -385,7 +387,7 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 1862;
+const FORWARDABLE_COPIES: usize = 1868;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

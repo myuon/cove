@@ -123,7 +123,11 @@ impl Scan {
         at = at + 1
       }
     }
-    while startsWord(self.at(at)) {
+    // The tail takes digits as well as letters, because a separator is in the
+    // middle of them: `1_000` is one number and `1_` followed by `000` is two
+    // tokens the formatter would put a space between. `500ms` is the same
+    // loop and was what it was written for.
+    while startsWord(self.at(at)) || isDigit(self.at(at)) {
       at = at + 1
     }
     at
