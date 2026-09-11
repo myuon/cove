@@ -549,6 +549,54 @@ test fn a_break_that_buys_nothing_is_not_made() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// **A comma inside `<…>` belongs to the type, not to the group.**
+///
+/// `f(result: Result<T, E>, label: String)` has two members and not three.
+/// Split into three, a parameter list that broke came back with `Result<T,`
+/// ending a line and `E>,` on the next — valid Cove, and not what anybody
+/// wrote or what `cove fmt` writes.
+///
+/// The corpus never showed it, for the reason it never shows anything about
+/// breaking: it only ever *keeps* a group that is already broken, and a group
+/// it keeps is never split into members at all.
+///
+/// `opensGenerics` is the first heuristic in this slice and its doc says what
+/// it costs. The answer below was read off `cove fmt` by running it.
+test fn a_comma_inside_angles_stays_in_its_member() -> Result<Unit, Error> {
+  let flat = "\n".join(["fn wrap(result: Result<T, E>, label: String, fallback: Int, verbose: Bool) -> Int \{", "  1", "\}", ""])
+  let want = "\n".join(["fn wrap(", "  result: Result<T, E>,", "  label: String,", "  fallback: Int,", "  verbose: Bool,", ") -> Int \{", "  1", "\}", ""])
+  let held = tokens(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  Ok(())
+}
+
+/// **An array that does not fit breaks, whatever is in it.**
+///
+/// `expr` sends an expression that does not fit to `expr_broken`, and for an
+/// array that is `array_literal`, which writes an element to a line and
+/// nothing else. It has neither of the two escapes `arg_list` has: no
+/// lone-argument rule, and no `hug_last`.
+///
+/// So the two exceptions that keep a *call* on its line do not apply here.
+/// The element below is 76 columns and does not fit on a line of its own
+/// either — which is exactly when `arg_list` would leave the call alone — and
+/// `cove fmt` breaks the array all the same. Checked by running it.
+test fn an_array_that_does_not_fit_breaks() -> Result<Unit, Error> {
+  let wide = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  let flat = "\n".join(["fn f() -> Int \{", "  let x = [\"{wide}\"]", "\}", ""])
+  let want = "\n".join([
+    "fn f() -> Int \{",
+    "  let x = [",
+    "    \"{wide}\",",
+    "  ]",
+    "\}",
+    "",
+  ])
+  let held = tokens(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  Ok(())
+}
+
 /// **A call writes the hugged form, and not only keeps one.**
 ///
 /// The half that `a_call_hugs_a_last_argument_that_expands` names as missing,
