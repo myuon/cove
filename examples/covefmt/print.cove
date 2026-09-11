@@ -78,7 +78,7 @@ fn emit(
   // outer group only ever gives an inner one more room. There is no choice
   // upstream that a later line can regret.
   if indenting(tree.kind) && tree.kind != Node.Body &&
-    isClosed(source, held, tree) {
+    isClosed(source, held, tree) && !isAPattern(source, held, tree) {
     // What is left of the line after the group, which `cove_syntax::format`
     // calls `reserved` and passes in: a parameter list that fits on its own
     // still breaks when the `-> Result<T, F> \{` behind it would not. The
@@ -96,7 +96,7 @@ fn emit(
       // Already on one line. It stays there unless it is over the limit and
       // breaking would actually buy something, and either way the answer is
       // this group's *and everything inside it*.
-      if fits || !worthBreaking(source, held, tree, room) ||
+      if fits || !worthBreaking(source, held, tree, depth) ||
         hugsItsLast(source, held, tree, room) {
         out.push(verbatim(source, held, tree))
       } else {
@@ -782,27 +782,97 @@ fn verbatim(source: String, held: Array<Token>, tree: Tree) -> String {
 
 /// Whether breaking `tree` would make any line shorter.
 ///
-/// `cove_syntax::format` refuses one case: *"Breaking a lone argument that
-/// cannot itself break, and would not fit on a line of its own either, only
-/// makes the call longer."* The corpus says it of every member, not only a
-/// lone one: what is over the limit inside a group is over it one step
-/// further in too.
+/// `cove_syntax::format` refuses one case, and it is narrow: *"Breaking a
+/// lone argument that cannot itself break, and would not fit on a line of
+/// its own either, only makes the call longer."* One argument, bare, that
+/// does not break on its own account — `arg_list` tests
+/// `indent + INDENT + width(&value) + 1 > MAX_WIDTH`.
+///
+/// This said it of *every* member and measured each against the room left on
+/// the line the group is on now, on the reasoning that what is over the limit
+/// inside a group is over it one step further in too. That reasoning is
+/// wrong, and the corpus could not show it: a member is written from a column
+/// the *indent* decides, not from where the group happens to start, so an
+/// argument with 68 columns left beside it can have 76 on a line of its own.
+/// Measured on source whose line breaks had been taken out, this left
+/// `println("…74 characters…")` at 87 columns, which `cove fmt` breaks.
 fn worthBreaking(
   source: String,
   held: Array<Token>,
   tree: Tree,
-  room: Int,
+  depth: Int,
 ) -> Bool {
   var members = 0
+  var only = tree
   for child in tree.children {
     if child.kind == Node.Member {
       members = members + 1
-      if flatWidth(source, held, child) > room {
-        return false
-      }
+      only = child
     }
   }
-  members > 0
+  if members != 1 {
+    return members > 0
+  }
+  // `arg_list` asks for a *bare* lone argument: a labelled one, a `var` one
+  // or a spread breaks anyway, and so does one that would break on its own
+  // account whatever width it is at.
+  if isLabelled(source, held, only) || mustBreak(source, held, only) {
+    return true
+  }
+  // The width it would have on a line of its own, with the comma each broken
+  // member ends on. `indent + INDENT + width(&value) + 1`, in steps.
+  (depth + 1) * 2 + flatWidth(source, held, only) + 1 <= maxWidth()
+}
+
+/// Whether `tree` is the pattern of a match arm rather than a call.
+///
+/// `cove_syntax::format` has `pattern_flat` and nothing else: a pattern is
+/// always written on one line, however long the arm it opens turns out to be.
+/// `Ok(options) => "…"` at 89 columns is left at 89 columns.
+///
+/// The tree has no node for a pattern — `Ok(options)` is a name and a group,
+/// which is what a call is — so the `=>` behind it is what says so. Nothing
+/// else in the language is written with one.
+fn isAPattern(source: String, held: Array<Token>, tree: Tree) -> Bool {
+  let after = nextSignificant(held, tree.to, held.length())
+  if after < 0 {
+    return false
+  }
+  match held.get(after) {
+    Some(token) => {
+      token.kind == Kind.Punct && token.to - token.from == 2 &&
+        source.byteAt(token.from) == '=' && source.byteAt(token.from + 1) == '>'
+    }
+    None => false
+  }
+}
+
+/// Whether `member` is written with a name in front of it, as `name: value`.
+fn isLabelled(source: String, held: Array<Token>, member: Tree) -> Bool {
+  let first = nextSignificant(held, member.from, member.to)
+  if first < 0 {
+    return false
+  }
+  let second = nextSignificant(held, first + 1, member.to)
+  second >= 0 && byteOfPunct(source, held, second) == ':'
+}
+
+/// The first token at or after `at` and before `to` that is not trivia, or
+/// `-1` when there is none.
+fn nextSignificant(held: Array<Token>, at: Int, to: Int) -> Int {
+  var i = at
+  while i < to {
+    match held.get(i) {
+      Some(token) => {
+        if !isTriviaKind(token.kind) {
+          return i
+        }
+      }
+      None => { }
+    }
+    i = i + 1
+  }
+  -1
 }
 
 /// `tree` written one member to a line, at `depth`.

@@ -152,6 +152,30 @@ export fn main() -> Result<Unit, Error> {
     at = at + 1
   }
   println("{restored} of {sources.length()} file(s) re-indent to `cove fmt`")?
+
+  // # The other half of the same question
+  //
+  // Every input above differs from its answer in the space at the start of a
+  // line, so nothing in it asks covefmt where the *lines* go. This does: the
+  // line breaks inside a `(` or a `[` are taken out, and a correct formatter
+  // puts back the ones the width rule calls for.
+  //
+  // It found two on the day it was written. `worthBreaking` measured a lone
+  // argument against the room left beside the group rather than the width it
+  // would have on a line of its own, and a match arm's pattern was broken as
+  // though it were a call.
+  var rebroken = 0
+  for source in sources {
+    let joined = joinedUp(source)
+    let held = tokens(joined)
+    if print(joined, held, parseTokens(joined, held)) == source {
+      rebroken = rebroken + 1
+    }
+  }
+  println("{rebroken} of {sources.length()} file(s) re-break to `cove fmt`")?
+  if rebroken < mustReBreak() {
+    return Err(Error(message: "{rebroken} re-break, and {mustReBreak()} did"))
+  }
   if restored < mustReIndent() {
     let names = ", ".join(lost.toArray())
     return Err(Error(
@@ -210,4 +234,106 @@ fn deindented(source: String) -> String {
 /// not in yet.
 fn mustReIndent() -> Int {
   245
+}
+
+/// How many of the corpus must survive being joined up and re-broken.
+///
+/// A ratchet, and one that may rise and never fall. What most of the rest
+/// need is `hug_last`'s other half: covefmt declines to break
+/// `push(Route(method: …, path: …))` — which is right — but cannot write the
+/// `push(Route(\n  method: …,\n))` that `cove fmt` writes from the flat form.
+fn mustReBreak() -> Int {
+  217
+}
+
+/// `source` with the line breaks inside a `(` or a `[` taken out.
+///
+/// A brace is left alone: joining the lines inside one would run two
+/// statements together, where the language says a line break inside a bracket
+/// ends nothing. A line comment keeps its newline for the same reason — it
+/// would swallow whatever followed it.
+///
+/// Where the break goes, so does the space around it: `f(\n  a,\n)` joins to
+/// `f(a,)` and not to `f( a, )`. covefmt has no rule for the space between
+/// two tokens yet, so a file failing on that would be counted against the
+/// breaking rules this is here to measure, and the number would say something
+/// other than what it claims.
+fn joinedUp(source: String) -> String {
+  let held = tokens(source)
+  var out = Vector.of<String>()
+  var open = Vector.of<Int>()
+  var i = 0
+  while i < held.length() {
+    match held.get(i) {
+      Some(token) => {
+        let c = bracketOf(source, token)
+        if c == '(' || c == '[' || c == '\{' {
+          open.push(c)
+        } else if c == ')' || c == ']' || c == '\}' {
+          open.pop()
+        }
+        let top = match open.get(open.length() - 1) {
+          Some(b) => b
+          None => 0
+        }
+        if token.kind == Kind.Space && (top == '(' || top == '[') &&
+          holdsANewline(source, token) && !afterAComment(held, i) {
+          if written(source, held, i) {
+            out.push("")
+          } else {
+            out.push(" ")
+          }
+        } else {
+          match source.sliceBytes(token.from, token.to) {
+            Ok(text) => out.push(text)
+            Err(_) => { }
+          }
+        }
+      }
+      None => { }
+    }
+    i = i + 1
+  }
+  "".join(out.toArray())
+}
+
+/// Whether the tokens either side of the space at `i` are written with
+/// nothing between them: after an opener, before a closer, before a comma.
+fn written(source: String, held: Array<Token>, i: Int) -> Bool {
+  let before = match held.get(i - 1) {
+    Some(token) => bracketOf(source, token)
+    None => 0
+  }
+  let after = match held.get(i + 1) {
+    Some(token) => bracketOf(source, token)
+    None => 0
+  }
+  before == '(' || before == '[' || after == ')' || after == ']' || after == ','
+}
+
+/// The byte of a one-byte punctuation token, or `0`.
+fn bracketOf(source: String, token: Token) -> Int {
+  if token.kind != Kind.Punct || token.to - token.from != 1 {
+    return 0
+  }
+  source.byteAt(token.from)
+}
+
+fn holdsANewline(source: String, token: Token) -> Bool {
+  var at = token.from
+  while at < token.to {
+    if source.byteAt(at) == '\n' {
+      return true
+    }
+    at = at + 1
+  }
+  false
+}
+
+fn afterAComment(held: Array<Token>, i: Int) -> Bool {
+  match held.get(i - 1) {
+    Some(before) => before.kind == Kind.LineComment ||
+      before.kind == Kind.DocComment
+    None => false
+  }
 }
