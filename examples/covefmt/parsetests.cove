@@ -550,6 +550,25 @@ test fn a_break_that_buys_nothing_is_not_made() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// **A comparison is not an assignment.**
+///
+/// `closesAHeader` walks back from a brace to the word that opened the body,
+/// and stops where a header cannot have started — at a label, a separator, an
+/// assignment. `==`, `!=`, `<=` and `>=` are two bytes ending in `=` just as
+/// `+=` and `-=` are, and reading one of those as an assignment stopped the
+/// walk in `if i % 7 == 0 \{` before it ever reached the `if`.
+///
+/// So a one-statement `if` kept its line wherever its condition compared two
+/// things, which is most of them. The test that covered this rule used
+/// `if x > 0 \{ … \}` — one byte — and passed throughout.
+test fn a_comparison_is_not_an_assignment() -> Result<Unit, Error> {
+  let flat = "\n".join(["fn f() -> Int \{", "  var total = 0", "  var i = 0", "  while i < 10 \{", "    if i % 7 == 0 \{ total += 1 \}", "    i += 1", "  \}", "  total", "\}", ""])
+  let want = "\n".join(["fn f() -> Int \{", "  var total = 0", "  var i = 0", "  while i < 10 \{", "    if i % 7 == 0 \{", "      total += 1", "    \}", "    i += 1", "  \}", "  total", "\}", ""])
+  let held = tokens(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  Ok(())
+}
+
 /// **A modifier is not what declared the body, and a brace ends a
 /// reservation.**
 ///
