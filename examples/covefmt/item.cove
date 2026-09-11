@@ -59,7 +59,9 @@ impl Parser {
       held.push(self.leaf())
     }
     if !self.done() {
-      held.push(self.body())
+      // Everything between these braces is a declaration — a field, a
+      // variant, a method — and a declaration is one to a line.
+      held.push(self.bodyOf(true))
     }
     nodeOf(kind, from, self.at, held.toArray())
   }

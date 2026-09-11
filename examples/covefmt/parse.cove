@@ -255,6 +255,27 @@ impl Parser {
   /// reached from [`Parser::statement`], because a statement is where one
   /// can open.
   fn body(var self) -> Tree {
+    self.bodyOf(false)
+  }
+
+  /// A body, told whether what is between its braces is declarations.
+  ///
+  /// A `struct`'s fields, an `enum`'s variants and a `trait`'s or an `impl`'s
+  /// methods are declarations, and a declaration is one to a line. A
+  /// statement is not: it carries on past a line that ends on an operator,
+  /// which is what `continues` is for and what a declaration must not be
+  /// read by. `tokens: Array<Token>` and `fn appraise(self, pr: PullRequest)
+  /// -> Option<Finding>` both end on a `>`, and a statement ending on the
+  /// same `>` is a comparison whose operand is on the next line.
+  ///
+  /// The lexer cannot tell those two `>` apart — it has no parser to ask —
+  /// so the difference is made where it is actually known, which is the
+  /// declaration that opened the brace. Read as statements, every field after
+  /// the first went under the one above it as its continuation; teaching
+  /// `continues` that a `>` ends a line fixed the fields and broke
+  /// `if steps(a) >\n  steps(b) {`, which is the same ambiguity from the
+  /// other side. This is the version that has no other side.
+  fn bodyOf(var self, declaring: Bool) -> Tree {
     let from = self.at
     var held = Vector.of()
     if self.punctByte(self.at) != '\{' {
@@ -270,7 +291,7 @@ impl Parser {
         return nodeOf(Node.Body, from, self.at, held.toArray())
       }
       let before = self.at
-      held.push(self.statement())
+      held.push(self.statementOf(declaring))
       // A rule that took nothing would loop for ever. Nothing here can —
       // `statement` takes at least one token — and the check is the cheap
       // way to keep that true rather than to trust it.
@@ -308,6 +329,15 @@ impl Parser {
   /// when it *begins* on the keyword's own line. That is the one place a
   /// statement ends inside a group, and [`Parser::escapes`] is it.
   fn statement(var self) -> Tree {
+    self.statementOf(false)
+  }
+
+  /// One statement or one declaration, `declaring` saying which.
+  ///
+  /// A declaration ends at its line, full stop. Everything else here is the
+  /// same for both: a brace still opens a body, a bracket is still taken
+  /// whole as a group, and an unmatched closer still stops at itself.
+  fn statementOf(var self, declaring: Bool) -> Tree {
     let from = self.at
     var held = Vector.of()
     let escaping = self.escapes(self.at)
@@ -322,7 +352,7 @@ impl Parser {
         // ends: `if a \{ b \}` is over at the brace unless an `else` or a
         // method call follows on the same line. Reading on without asking
         // made the `c` under an `if` part of the `if`'s own statement.
-        if self.ends(depth, escaping) {
+        if self.ends(depth, escaping, declaring) {
           return nodeOf(Node.Stmt, from, self.at, held.toArray())
         }
         continue
@@ -345,7 +375,7 @@ impl Parser {
         // its own closing bracket: a statement that has taken a group is
         // back at its own level when it answers.
         held.push(self.grouped(Node.Group))
-        if self.ends(0, escaping) {
+        if self.ends(0, escaping, declaring) {
           return nodeOf(Node.Stmt, from, self.at, held.toArray())
         }
         continue
@@ -357,7 +387,7 @@ impl Parser {
         return nodeOf(Node.Stmt, from, self.at, held.toArray())
       }
       held.push(self.leaf())
-      if self.ends(depth, escaping) {
+      if self.ends(depth, escaping, declaring) {
         return nodeOf(Node.Stmt, from, self.at, held.toArray())
       }
     }
@@ -368,13 +398,20 @@ impl Parser {
   /// at `depth`.
   ///
   /// `escaping` says the statement began with `break`, `continue` or
-  /// `return`, which end at their line whatever encloses them.
-  fn ends(self, depth: Int, escaping: Bool) -> Bool {
-    if depth > 0 && !escaping {
+  /// `return`, which end at their line whatever encloses them. `declaring`
+  /// says this is a field, a variant or a method rather than a statement,
+  /// and those end at their line full stop — see [`Parser::bodyOf`].
+  fn ends(self, depth: Int, escaping: Bool, declaring: Bool) -> Bool {
+    if depth > 0 && !escaping && !declaring {
       return false
     }
     if !self.atLineEnd() {
       return false
+    }
+    // A declaration has no continuation rule to apply: it is one to a line,
+    // so the line ending is the whole of the question.
+    if declaring {
+      return true
     }
     // The two continuations. `escaping` overrides neither: a `return` ends
     // at its line, and an operator written at the end of that line is a
@@ -395,9 +432,9 @@ impl Parser {
 
   /// Whether the last token taken leaves the line unfinished.
   ///
-  /// Punctuation that is not a closing bracket: an operator, a comma, a
-  /// colon. A closer is how a line legitimately ends, and a name or a
-  /// literal is a complete expression.
+  /// Punctuation, unless it is punctuation that completes what it follows: an
+  /// operator, a comma or a colon leaves a line owing something, and a name
+  /// or a literal is already a complete expression.
   fn continues(self) -> Bool {
     var i = self.at - 1
     while i >= 0 && isTrivia(self.tokens, i) {
@@ -408,8 +445,7 @@ impl Parser {
         if token.kind != Kind.Punct {
           return false
         }
-        let c = self.punctByte(i)
-        c != ')' && c != ']' && c != '\}'
+        !completes(self.source, token)
       }
       None => false
     }
@@ -465,9 +501,22 @@ impl Parser {
         None => { }
       }
       let c = self.punctByte(self.at)
-      if c == '(' || c == '[' || c == '\{' {
+      // A group is taken whole, as its members, exactly as `statement` takes
+      // one: `async fn(\n  request: http.Request,\n)` written as a type is
+      // the same shape as a call written as an expression, and a formatter
+      // that can place the lines of one can place the lines of the other.
+      // Left as leaves, the `)` on its own line was a continuation of the
+      // line above and was indented a step it does not take.
+      //
+      // `grouped` runs to its own closing bracket, so the depth this counts
+      // is only ever a brace's.
+      if c == '(' || c == '[' {
+        held.push(self.grouped(Node.Group))
+        continue
+      }
+      if c == '\{' {
         depth = depth + 1
-      } else if c == ')' || c == ']' || c == '\}' {
+      } else if c == '\}' {
         depth = depth - 1
       }
       held.push(self.leaf())
@@ -486,4 +535,32 @@ fn endsLine(source: String, token: Token) -> Bool {
     i = i + 1
   }
   false
+}
+
+/// Whether punctuation completes the expression in front of it.
+///
+/// The three closing brackets and the two postfix operators. `?` and `...`
+/// are written *after* what they apply to, so a line ending in one has said
+/// everything it is going to; `..<` is written *between* two operands and has
+/// not.
+///
+/// This is the complement of `parser::ends_expression`, and it is written as
+/// a list of what completes rather than as "not a closing bracket" because
+/// the two are not the same list. As the negative it read `f(1)?` as a line
+/// that runs on, so the statement below it was taken into the one above and
+/// came out with no indentation of its own. The corpus never saw it: the file
+/// it read that from was indented already, and covefmt keeps a space it
+/// cannot place.
+fn completes(source: String, token: Token) -> Bool {
+  let width = token.to - token.from
+  if width == 1 {
+    match source.codePointAtByte(token.from) {
+      Some(c) => c == ')' || c == ']' || c == '\}' || c == '?'
+      None => false
+    }
+  } else {
+    // `...` against `..<`, which the lexer gives the same width.
+    width == 3 && source.byteAt(token.from) == '.' &&
+      source.byteAt(token.from + 2) == '.'
+  }
 }
