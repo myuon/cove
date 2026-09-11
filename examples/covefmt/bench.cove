@@ -238,19 +238,26 @@ fn mustReIndent() -> Int {
 
 /// How many of the corpus must survive being joined up and re-broken.
 ///
-/// A ratchet, and one that may rise and never fall. Two of the three things
-/// the fifteen wanted are in; what the twelve that are left need is the one
-/// this printer cannot do at all: **write a body broken**. Every rule so far
-/// rewrites a run of space that is already there, and a lambda whose body was
-/// written on one line has none to rewrite — `cove_syntax::format`'s `breaks`
-/// says a non-empty lambda body always breaks, and saying that here means
-/// putting a newline where the source has none.
+/// A ratchet, and one that may rise and never fall. What the twelve that are
+/// left need is one shape, approached from either end:
 ///
-/// `hug_last` for a lambda is the same machinery from the other side, and so
-/// is `isBroken`, which is true when there is a newline anywhere inside the
-/// group — a newline inside a body it holds included. So
-/// `Ok(Options(manifest: match … \{ … \}))` is taken for a group that is
-/// already laid out, and is never offered a decision at all.
+/// - **`isBroken` asks about every token it covers**, so
+///   `Ok(Options(manifest: match … \{ … \}, plan: …))` written on one line has
+///   a newline in the middle of it and is taken for a group that is already
+///   laid out — never offered a decision, and it keeps whatever line it came
+///   on. It should ask about its own members. Changed to ask that, it gains
+///   three files and loses four, and the four are the second item.
+/// - **`hug_head` recurses and this does not.** `builder.get("/health",
+///   withObservability(app, async fn(request) \{ … \}))` is a hug inside a
+///   hug: the outer call's last argument is not itself a closure, but its
+///   *head* bottoms out in one, and `hug_head` says so by calling itself.
+///   `isAClosure` asks one level and answers no.
+/// - **A body written on one line has to be broken**, which is the thing this
+///   printer cannot do at all: every rule here rewrites a run of space that
+///   is already there, and there is none to rewrite.
+///
+/// The first two are one change and were measured together. The third is a
+/// new capability.
 fn mustReBreak() -> Int {
   234
 }
