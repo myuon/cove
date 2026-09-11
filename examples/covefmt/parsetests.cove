@@ -549,6 +549,28 @@ test fn a_break_that_buys_nothing_is_not_made() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// **A call writes the hugged form, and not only keeps one.**
+///
+/// The half that `a_call_hugs_a_last_argument_that_expands` names as missing,
+/// for the case where what expands is a `Node.Group`. `hug_last` writes the
+/// last argument at the call's *own* indent — `self.expr(&last.value, …,
+/// indent)` and not `indent + INDENT` — so the nested group's members land one
+/// step in and its closing bracket comes back to the call's depth, where the
+/// call's own `)` joins it.
+///
+/// The corpus is blind to this by construction: every file in it is already
+/// `cove fmt`'s output, so every call that should hug is written hugged
+/// already and keeping it is indistinguishable from producing it. The input
+/// below is the flat form, and the answer was read off `cove fmt` by running
+/// it.
+test fn a_call_writes_the_hugged_form() -> Result<Unit, Error> {
+  let flat = "\n".join(["fn f() -> Int \{", "  self.routes.push(http.Route(method: http.Method.Get, path: path, handler: handler))", "\}", ""])
+  let want = "\n".join(["fn f() -> Int \{", "  self.routes.push(http.Route(", "    method: http.Method.Get,", "    path: path,", "    handler: handler,", "  ))", "\}", ""])
+  let held = tokens(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  Ok(())
+}
+
 /// **A trailing closure of one statement keeps its line; a lambda does not.**
 ///
 /// `cove_syntax::format`'s `trailing_breaks`: *"A trailing closure stays on
