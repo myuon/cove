@@ -606,6 +606,13 @@ fn breaksAsABody(
   if closesAHeader(source, held, body, from) {
     return true
   }
+  // A match arm's block. `match_expr` writes an arm whose body is a block
+  // with `block`, which always breaks. The `=>` in front of the brace is what
+  // says so, and it is also where `closesAHeader`'s walk stops — a header
+  // cannot have started before an arrow — so the two do not overlap.
+  if isAnArrowOrEquals(source, held, previousSignificant(held, body.from)) {
+    return true
+  }
   var statements = 0
   for child in body.children {
     if child.kind == Node.Stmt {
@@ -1647,9 +1654,16 @@ fn closesAHeader(
             i = from - 1
           }
         } else if depth == 0 {
-          // Where a header cannot have started before it: a label, a
-          // separator, a brace, an assignment, a match arm's arrow.
-          if c == ':' || c == ',' || c == '\{' || c == '\}' ||
+          // Where a header cannot have started before it: a label, a brace,
+          // an assignment, a match arm's arrow.
+          //
+          // A comma is *not* one. `export fn isEmpty<K, V>(entries: Map<K,
+          // V>) -> Bool \{` has one between its type parameters, and stopping
+          // there left the walk with nothing and the body unbroken. Every
+          // comma a header can hold is inside brackets the walk already
+          // counts, or inside the `<…>` it does not — and in neither case is
+          // it a place a declaration could have begun after.
+          if c == ':' || c == '\{' || c == '\}' ||
             isAnArrowOrEquals(source, held, i) {
             i = from - 1
           } else if token.kind == Kind.Word && !isAModifier(source, held, i) {

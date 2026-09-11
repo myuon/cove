@@ -550,6 +550,31 @@ test fn a_break_that_buys_nothing_is_not_made() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// **A match arm's block breaks, and a generic comma is not a full stop.**
+///
+/// Two more the fourth mutation found, both in `closesAHeader`'s walk back
+/// from a brace to the word that opened the body.
+///
+/// `None => \{ at + 1 \}` has no such word at all — the walk stops at the
+/// `=>`, because a header cannot have started before an arrow. The arm's
+/// block is written by `block` all the same, which always breaks, so the
+/// arrow is the answer rather than the end of the question.
+///
+/// `export fn isEmpty<K, V>(…) -> Bool \{` has a comma between its type
+/// parameters, and the walk stopped there with nothing found. A comma is not
+/// a place a declaration could have begun after: every one a header can hold
+/// is inside brackets the walk already counts, or inside a `<…>` it does not.
+///
+/// Both answers were read off `cove fmt` by running it, and it reported
+/// `formatted 1 file(s)` rather than skipping them.
+test fn a_match_arm_and_a_generic_comma() -> Result<Unit, Error> {
+  let flat = "\n".join(["export fn isEmpty<K, V>(entries: Map<K, V>) -> Bool \{ entries.length() == 0 \}", "", "fn step(at: Int, c: Option<Int>) -> Int \{", "  match c \{", "    Some(n) => n", "    None => \{ at + 1 \}", "  \}", "\}", ""])
+  let want = "\n".join(["export fn isEmpty<K, V>(entries: Map<K, V>) -> Bool \{", "  entries.length() == 0", "\}", "", "fn step(at: Int, c: Option<Int>) -> Int \{", "  match c \{", "    Some(n) => n", "    None => \{", "      at + 1", "    \}", "  \}", "\}", ""])
+  let held = tokens(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  Ok(())
+}
+
 /// **A comparison is not an assignment.**
 ///
 /// `closesAHeader` walks back from a brace to the word that opened the body,
