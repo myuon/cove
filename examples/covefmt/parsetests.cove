@@ -31,6 +31,8 @@ fn nodeNamed(kind: Node) -> String {
     Node.Returns => "returns"
     Node.Body => "body"
     Node.Stmt => "stmt"
+    Node.Group => "group"
+    Node.Member => "member"
     Node.Trivia => "trivia"
     Node.Leaf => "leaf"
     Node.Error => "error"
@@ -374,20 +376,74 @@ test fn a_body_indents_what_is_inside_it() -> Result<Unit, Error> {
   Ok(())
 }
 
-/// A line inside a group is left as it was found, because the tree has no
-/// node for a group's members.
+/// What is still left exactly as it was found, and why that is a choice.
 ///
-/// This is the boundary of what this slice can decide, written down so that
-/// it is a *choice* and not an oversight. A call's arguments, a parameter
-/// list and a generic list are leaves of the node that holds them, so a line
-/// the formatter would indent inside one is a line with no depth to read.
+/// `(` and `[` are groups the tree can see into now, and their lines are
+/// decided. `<` is not: a generic list is a run of leaves, because the lexer
+/// cannot tell `<` the bracket from `<` the comparison without the parser's
+/// help, and this slice has not given it that help.
 ///
-/// Rewriting those from a depth of zero is how 85 of 246 files stopped
-/// matching `cove fmt` while this rule was being written. What the tree
-/// cannot decide it leaves alone, and the count goes up as the tree gets
-/// deeper rather than down.
-test fn a_group_keeps_the_indentation_it_had() -> Result<Unit, Error> {
-  assert(roundTrips("fn f(\n  a: Int,\n  b: Int,\n) -> Int \{\n  a\n\}\n"))?
-  assert(roundTrips("fn f() \{\n  g(\n    1,\n    2,\n  )\n\}\n"))?
+/// A `use` and a `type` are runs of leaves for a different reason — they are
+/// taken to the end of a line and never taken apart — and `Node.Returns` for
+/// a third: it is whatever stands between `->` and the body.
+///
+/// Written down so that it is a boundary and not an oversight. What the tree
+/// can decide it decides; the count against `cove fmt` goes up as the tree
+/// gets deeper, never down.
+test fn what_the_tree_cannot_see_is_left_alone() -> Result<Unit, Error> {
+  assert(roundTrips("fn f<\n  T,\n  E,\n>(a: T) -> T \{\n  a\n\}\n"))?
+  assert(roundTrips("export type H = fn(\n  a: Int,\n) -> Int\n"))?
+  Ok(())
+}
+
+/// **A parameter list indents its members.**
+///
+/// The first group the tree can see into, and the first line inside a `(` it
+/// can decide. `cove_syntax::format` writes a parameter at `indent + INDENT`
+/// and the closing `)` back at `indent`; a `Node.Params` is now the members
+/// between its brackets, so covefmt can say the same thing.
+///
+/// It and `an_argument_list_indents_its_members` are two cases of one rule,
+/// kept apart because the nodes are: a formatter has rules for a
+/// declaration's parameters that it does not have for a call's arguments,
+/// and a test each is where those will go.
+test fn a_parameter_list_indents_its_members() -> Result<Unit, Error> {
+  let flat = "fn f(\na: Int,\nb: Int,\n) -> Int \{\n  a\n\}\n"
+  let held = tokens(flat)
+  assertEqual(
+    print(flat, held, parseTokens(flat, held)),
+    "fn f(\n  a: Int,\n  b: Int,\n) -> Int \{\n  a\n\}\n",
+  )?
+  // An over-indented one is straightened, the way a body's members are.
+  let deep = "fn f(\n      a: Int,\n) -> Int \{\n  a\n\}\n"
+  let heldDeep = tokens(deep)
+  assertEqual(
+    print(deep, heldDeep, parseTokens(deep, heldDeep)),
+    "fn f(\n  a: Int,\n) -> Int \{\n  a\n\}\n",
+  )?
+  Ok(())
+}
+
+/// **An argument list indents its members too.**
+///
+/// The same node one level in: a `(` written inside a statement is a
+/// `Node.Group`, its members are `Node.Member`, and the depth of a line
+/// inside it is the depth of the group plus one. 79 of this repository's 246
+/// files hold such a line and 2,080 lines are inside a group; before this
+/// they were the lines covefmt left exactly as it found them.
+test fn an_argument_list_indents_its_members() -> Result<Unit, Error> {
+  let flat = "fn f() \{\n  g(\n1,\n2,\n)\n\}\n"
+  let held = tokens(flat)
+  assertEqual(
+    print(flat, held, parseTokens(flat, held)),
+    "fn f() \{\n  g(\n    1,\n    2,\n  )\n\}\n",
+  )?
+  // Nesting multiplies here as it does for a body.
+  let nested = "fn f() \{\n  g(\nh(\n1,\n),\n)\n\}\n"
+  let heldNested = tokens(nested)
+  assertEqual(
+    print(nested, heldNested, parseTokens(nested, heldNested)),
+    "fn f() \{\n  g(\n    h(\n      1,\n    ),\n  )\n\}\n",
+  )?
   Ok(())
 }

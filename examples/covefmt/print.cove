@@ -56,13 +56,14 @@ fn emit(
     }
     return after
   }
-  // A `Node.Body` is the one node that indents what is inside it, and its
-  // own braces are not inside it: the `{` is written at the depth the body
-  // *opens* at and the `}` closes back to it. So the step is applied to the
-  // children between them and the braces are left where the enclosing depth
-  // put them, which is what `cove_syntax::format` does by passing
+  // A `Node.Body` and a `Node.Params` indent what is inside them, and their
+  // own brackets are not inside: the opener is written at the depth the node
+  // *opens* at and the closer goes back to it. So the step is applied to the
+  // children between them and the brackets are left where the enclosing
+  // depth put them, which is what `cove_syntax::format` does by passing
   // `indent + INDENT` to the members and `indent` to `lead_close`.
-  let inner = if tree.kind == Node.Body {
+  let indents = indenting(tree.kind)
+  let inner = if indents {
     depth + 1
   } else {
     depth
@@ -83,7 +84,7 @@ fn emit(
       Some(child) => {
         // The closing brace is the body's last child and belongs to the
         // depth the body opened at, not to the depth inside it.
-        var at = if tree.kind == Node.Body && i + 2 >= count {
+        var at = if indents && i + 2 >= count {
           depth
         } else {
           inner
@@ -97,7 +98,7 @@ fn emit(
         // reason this is here rather than on the statement as a whole: an
         // `if`'s block *is* a `Node.Body`, its depth is known, and its lines
         // are indented. Only the leaves between the bodies are unknown.
-        if holdsAGroup(tree.kind) && child.kind != Node.Body {
+        if holdsAGroup(tree.kind) && !indenting(child.kind) {
           at = -1
         }
         last = emit(source, held, child, last, at, var out)
@@ -258,6 +259,15 @@ fn opensBlock(source: String, held: Array<Token>, after: Int) -> Bool {
 /// opaque: an `if`'s block is a `Node.Body`, its depth is known, and its
 /// lines are indented. Only the leaves between the bodies are unknown.
 fn holdsAGroup(kind: Node) -> Bool {
-  kind == Node.Stmt || kind == Node.Params || kind == Node.Returns ||
+  kind == Node.Stmt || kind == Node.Member || kind == Node.Returns ||
     kind == Node.Generics || kind == Node.TypeAlias || kind == Node.Use
+}
+
+/// Whether a node decides the depth of the lines inside it.
+///
+/// The nodes a parser slice has taken apart far enough to know where their
+/// members begin. Everything else is a run of leaves, and a line inside one
+/// of those is a line with no depth to read — see [`holdsAGroup`].
+fn indenting(kind: Node) -> Bool {
+  kind == Node.Body || kind == Node.Params || kind == Node.Group
 }

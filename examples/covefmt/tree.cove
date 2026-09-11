@@ -31,6 +31,16 @@ export enum Node {
   /// ends. Its own tokens are leaves — what an expression is made of is the
   /// next slice's, and until then it is kept rather than read.
   Stmt
+  /// A `( ... )` or `[ ... ]` written inside a statement: an argument list,
+  /// an array literal, a parenthesised expression. `Params` is the same
+  /// shape on a declaration, named apart because a formatter has rules for
+  /// one that it does not have for the other.
+  Group
+  /// One member of a group: an argument, a parameter, an element. Its own
+  /// tokens are leaves, the way a statement's are; what this adds is where
+  /// one member ends and the next begins, which is the boundary a formatter
+  /// needs to put one on a line.
+  Member
   /// Space and comments, which are tokens like any other here.
   Trivia
   /// One token.

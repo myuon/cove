@@ -74,7 +74,7 @@ impl Parser {
     self.nameAndGenerics(var held)
     self.trivia(var held)
     if isPunct(self.source, self.tokens, self.at, "(") {
-      held.push(self.balanced(Node.Params))
+      held.push(self.grouped(Node.Params))
     }
     self.trivia(var held)
     if isPunct(self.source, self.tokens, self.at, "->") {
