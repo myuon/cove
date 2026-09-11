@@ -383,16 +383,26 @@ test fn a_body_indents_what_is_inside_it() -> Result<Unit, Error> {
 /// cannot tell `<` the bracket from `<` the comparison without the parser's
 /// help, and this slice has not given it that help.
 ///
-/// A `use` and a `type` are runs of leaves for a different reason — they are
-/// taken to the end of a line and never taken apart — and `Node.Returns` for
-/// a third: it is whatever stands between `->` and the body.
+/// A `use` is a run of leaves for a different reason — it is taken to the end
+/// of a line and never taken apart — and `Node.Returns` for a third: it is
+/// whatever stands between `->` and the body.
+///
+/// A `type` used to be on that list and no longer is: it takes its `(` as a
+/// group like a statement does, so the second case below now *decides* and
+/// the answer it gives is `cove fmt`'s — checked by running it.
 ///
 /// Written down so that it is a boundary and not an oversight. What the tree
 /// can decide it decides; the count against `cove fmt` goes up as the tree
 /// gets deeper, never down.
 test fn what_the_tree_cannot_see_is_left_alone() -> Result<Unit, Error> {
   assert(roundTrips("fn f<\n  T,\n  E,\n>(a: T) -> T \{\n  a\n\}\n"))?
-  assert(roundTrips("export type H = fn(\n  a: Int,\n) -> Int\n"))?
+  // `cove fmt` on the left-hand source answers the right-hand one.
+  let broken = "export type H = fn(\n  a: Int\n) -> Int\n"
+  let held = tokens(broken)
+  assertEqual(
+    print(broken, held, parseTokens(broken, held)),
+    "export type H = fn(a: Int) -> Int\n",
+  )?
   Ok(())
 }
 

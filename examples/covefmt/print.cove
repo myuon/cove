@@ -128,6 +128,11 @@ fn emit(
   let count = children.length()
   var last = after
   var i = 0
+  // The operators whose right operands this node is currently inside, and the
+  // depth each of them broke at. Only ever used by a node holding a run of
+  // leaves, which is the only place a continuation can happen.
+  var opened: Vector<Int> = Vector.of()
+  var nested: Vector<Int> = Vector.of()
   while i < count {
     match children.get(i) {
       Some(child) => {
@@ -138,17 +143,82 @@ fn emit(
         } else {
           inner
         }
-        // A line *inside a statement* is a line inside a group the tree
-        // cannot see into — a call's arguments, a parameter list, a type's
-        // generics — because a statement's own tokens are leaves. `-1` says
-        // so and `spacing` leaves such a line as it found it.
+        // A line *inside* a run of leaves is a continuation: the statement
+        // began on the line above and is still going, because it ended that
+        // line on an operator or opens this one with a `.`. It is written a
+        // step past the line it began on, which is what
+        // `cove_syntax::format` does by giving a continued operand
+        // `indent + INDENT`.
         //
         // The statement's nested bodies are the exception, and they are the
         // reason this is here rather than on the statement as a whole: an
         // `if`'s block *is* a `Node.Body`, its depth is known, and its lines
-        // are indented. Only the leaves between the bodies are unknown.
+        // are its own. Only the leaves between the bodies continue.
         if holdsAGroup(tree.kind) && !indenting(child.kind) {
+          // A line inside a `<…>`, a `use` path or a return type is still a
+          // line this cannot place: those are runs of leaves the tree has not
+          // split into members, so it does not know what encloses what. `-1`
+          // says so and `spacing` leaves such a line as it found it.
           at = -1
+        }
+        if continuing(tree.kind) && !indenting(child.kind) {
+          // A continuation is a break with something of this node's on *both*
+          // sides of it. The other two kinds of break in here are not:
+          //
+          // - the leading trivia, which every item takes, is the newline that
+          //   ended the item *above*. The line it begins is this node's first
+          //   line, and that is at this node's own depth.
+          // - the last child, where a statement stopped in front of the `}`
+          //   that closes the body it is in. The line that break begins
+          //   belongs to the brace, at the enclosing depth — which is the
+          //   same reason a body hands its own last two children `depth`.
+          //
+          // `previousSignificant` is asked rather than the child's position,
+          // because leading trivia is not one child: a doc comment, a
+          // newline and a blank line are three, and only "is any of this
+          // node's own content already behind me" tells them from a break in
+          // the middle.
+          // Only a child that *is* a break: a run of space between two of
+          // this node's own tokens holding a newline. A space within a line
+          // is not a continuation and must not be counted as one — counting
+          // it put the space between `if` and `a` on the stack and every
+          // continuation under it a step too deep.
+          let begun = previousSignificant(held, child.from) >= tree.from
+          if begun && i + 1 < count && breaksLine(source, held, child) {
+            // How *far* a continuation is indented is decided by the operator
+            // that broke the line. `cove_syntax::format`'s `binary` writes a
+            // broken right operand at `indent + INDENT` and then writes that
+            // operand *at* `indent + INDENT`, so a break inside it is a step
+            // further again — and a break at a looser operator has left that
+            // operand and is back where the looser one started.
+            //
+            // That is the whole of the nesting, and it needs the operators
+            // rather than an expression tree: the stack below is `binary`'s
+            // recursion, unrolled. `a && b +\n  c <\n  d` puts the `<` line
+            // level with the `+` line rather than one past it, because `<`
+            // binds looser and the `+` it follows is finished.
+            let binds = bindingOf(
+              source,
+              held,
+              previousSignificant(held, child.from),
+            )
+            while opened.length() > 0 && topOf(opened) >= binds {
+              opened.pop()
+              nested.pop()
+            }
+            at = if nested.length() > 0 {
+              topOf(nested) + 1
+            } else {
+              depth + 1
+            }
+            opened.push(binds)
+            nested.push(at)
+          } else {
+            // The leading trivia and the break a statement leaves in front of
+            // a `}`. Neither can have a stack behind it: the first comes
+            // before anything has been pushed, and the second is last.
+            at = depth
+          }
         }
         last = emit(source, held, child, last, at, var out)
       }
@@ -310,6 +380,18 @@ fn opensBlock(source: String, held: Array<Token>, after: Int) -> Bool {
 fn holdsAGroup(kind: Node) -> Bool {
   kind == Node.Stmt || kind == Node.Member || kind == Node.Returns ||
     kind == Node.Generics || kind == Node.TypeAlias || kind == Node.Use
+}
+
+/// Whether a line inside this node's leaves is a *continuation*: an
+/// expression that ended the line above on an operator and is still going.
+///
+/// Only where an expression lives. The other four [`holdsAGroup`] kinds hold
+/// a type or a path, and a line inside one of those is one this cannot place:
+/// `fn f<\n  T,\n  E,\n>` breaks at commas the tree has not made members of,
+/// and indenting the `>` as though it continued the `E,` above it is exactly
+/// the mistake `-1` is there to avoid.
+fn continuing(kind: Node) -> Bool {
+  kind == Node.Stmt || kind == Node.Member
 }
 
 /// Whether a node decides the depth of the lines inside it.
@@ -818,6 +900,15 @@ fn hugsItsLast(
   if members == 0 {
     return false
   }
+  // `hug_applies`: a *closure* last argument hugs wherever it is written,
+  // and anything else — a non-empty array, a call with arguments — hugs only
+  // when it is the call's sole argument. So `push(Route(…))` expands its
+  // initializer in place and `write(path, render(…))` breaks one argument to
+  // a line, which is the difference between a shape that reads as one call
+  // and a list that happens to end in a call.
+  if !(isAClosure(last) || members == 1) {
+    return false
+  }
   if !canBeHugged(source, held, last) {
     return false
   }
@@ -836,14 +927,28 @@ fn hugsItsLast(
   true
 }
 
-/// Whether `member` is one of the three shapes a call may hug: a lambda, a
-/// non-empty array, or a call with arguments.
+/// Whether `member` has a head to hug at all: a lambda's or trailing
+/// closure's brace, a non-empty array's `[`, or the `(` of a call that takes
+/// arguments. `hug_head` answers `None` for everything else, and a call whose
+/// last argument is a name or a literal has nothing to expand below it.
 fn canBeHugged(source: String, held: Array<Token>, member: Tree) -> Bool {
   for child in member.children {
     if child.kind == Node.Body {
       return true
     }
     if child.kind == Node.Group && hasAMember(child) {
+      return true
+    }
+  }
+  false
+}
+
+/// Whether `member` is a lambda or a trailing closure — what `hug_head`
+/// reports as `closure`, and the only shape that hugs when it is not the
+/// call's sole argument.
+fn isAClosure(member: Tree) -> Bool {
+  for child in member.children {
+    if child.kind == Node.Body {
       return true
     }
   }
@@ -858,4 +963,81 @@ fn hasAMember(tree: Tree) -> Bool {
     }
   }
   false
+}
+
+/// The top of a stack of depths, which is never asked of an empty one.
+fn topOf(stack: Vector<Int>) -> Int {
+  match stack.get(stack.length() - 1) {
+    Some(top) => top
+    None => 0
+  }
+}
+
+/// How tightly the operator at token `j` binds, loosest first, and `0` for
+/// anything that is not a binary operator.
+///
+/// `binary_prec`'s order, used here for what that order is for: telling a
+/// break that has descended into an operand from one that has climbed back
+/// out of it.
+///
+/// A `0` — a comma, an `=`, a leading `.` — is looser than everything, so it
+/// clears the stack and indents one step from the statement. That is right
+/// for all three: none of them is written inside a binary operand.
+fn bindingOf(source: String, held: Array<Token>, j: Int) -> Int {
+  match held.get(j) {
+    Some(token) => {
+      if token.kind == Kind.Word {
+        return if isWord(source, held, j, "is") {
+          3
+        } else {
+          0
+        }
+      }
+      if token.kind != Kind.Punct {
+        return 0
+      }
+      let width = token.to - token.from
+      let a = source.byteAt(token.from)
+      if width == 2 {
+        let b = source.byteAt(token.from + 1)
+        if a == '|' && b == '|' {
+          return 1
+        }
+        if a == '&' && b == '&' {
+          return 2
+        }
+        // `==`, `!=`, `<=`, `>=`. A `+=` is an assignment and not one of
+        // these, and its first byte is what says so.
+        if b == '=' && (a == '=' || a == '!' || a == '<' || a == '>') {
+          return 3
+        }
+        return 0
+      }
+      if width != 1 {
+        return 0
+      }
+      if a == '<' || a == '>' {
+        return 3
+      }
+      if a == '+' || a == '-' {
+        return 4
+      }
+      if a == '*' || a == '/' || a == '%' {
+        return 5
+      }
+      0
+    }
+    None => 0
+  }
+}
+
+/// Whether `child` is a run of space holding a newline.
+fn breaksLine(source: String, held: Array<Token>, child: Tree) -> Bool {
+  if child.to - child.from != 1 {
+    return false
+  }
+  match held.get(child.from) {
+    Some(token) => token.kind == Kind.Space && endsLine(source, token)
+    None => false
+  }
 }

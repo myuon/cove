@@ -95,8 +95,10 @@ export fn main() -> Result<Unit, Error> {
   // made it says something stronger and more useful — that covefmt reached
   // the same decision the formatter it is replacing reached, on real source.
   //
-  // So the number below is the one to watch. It is the whole corpus today,
-  // and a layout rule that is not yet right takes files out of it.
+  // So the number below is the one to watch, and it is checked rather than
+  // printed. It was printed, and in one sitting it fell from the whole corpus
+  // to 244 and back three times without anything failing — it was caught by
+  // hand each time, which is not a thing to rely on.
   var broken = 0
   var uncovered = 0
   for source in sources {
@@ -113,6 +115,49 @@ export fn main() -> Result<Unit, Error> {
     return Err(Error(message: "{uncovered} tree(s) do not cover their tokens"))
   }
   println("{sources.length() - broken} of {sources.length()} file(s) match `cove fmt`")?
+  if broken > 0 {
+    return Err(Error(message: "{broken} file(s) no longer match `cove fmt`"))
+  }
+
+  // # Why the check above is not enough on its own
+  //
+  // Every file in the corpus is already `cove fmt`'s output, so reproducing
+  // one says covefmt *kept* a layout. It cannot say covefmt would have
+  // *reached* it: a rule that decides nothing and a rule that decides
+  // correctly both leave an already-correct file alone. Measured against
+  // `cove fmt` on source that still needed formatting, a corpus scoring
+  // 246/246 here scored **42/246** — one line of the statement rule read
+  // `f(1)?` as unfinished, and every statement under one lost its
+  // indentation. Nothing above could see it.
+  //
+  // Stripping the indentation is the smallest input that needs deciding and
+  // whose answer is already known: it is a change to whitespace only, so the
+  // file still parses and still means the same thing, and the file it came
+  // from is what a correct formatter must hand back. No second formatter has
+  // to be run to know the answer.
+  var restored = 0
+  var lost = Vector.of<String>()
+  var at = 0
+  for source in sources {
+    let flat = deindented(source)
+    let held = tokens(flat)
+    if print(flat, held, parseTokens(flat, held)) == source {
+      restored = restored + 1
+    } else {
+      match paths.get(at) {
+        Some(path) => lost.push(path)
+        None => { }
+      }
+    }
+    at = at + 1
+  }
+  println("{restored} of {sources.length()} file(s) re-indent to `cove fmt`")?
+  if restored < mustReIndent() {
+    let names = ", ".join(lost.toArray())
+    return Err(Error(
+      message: "{restored} re-indent, {mustReIndent()} did: {names}",
+    ))
+  }
 
   let lex = (lexTo - lexFrom).millis()
   let lexAndParse = (parseTo - parseFrom).millis()
@@ -122,4 +167,47 @@ export fn main() -> Result<Unit, Error> {
   println("print  {whole - lexAndParse} ms ({written} bytes)")?
   println("whole  {whole} ms, which is what `cove fmt --check` does in Rust")?
   Ok(())
+}
+
+/// `source` with every line's indentation removed.
+///
+/// The whole of the difference between a file that has been formatted and one
+/// that has not, expressed in the one kind of edit that cannot change what the
+/// file means: the tokens are the same tokens but for the runs of space, so
+/// whatever comes back is the formatter's own judgement rather than the
+/// judgement already written down.
+fn deindented(source: String) -> String {
+  var out = Vector.of()
+  let n = source.byteLength()
+  var at = 0
+  while at < n {
+    var start = at
+    while start < n &&
+      (source.byteAt(start) == ' ' || source.byteAt(start) == '\t') {
+      start = start + 1
+    }
+    var stop = start
+    while stop < n && source.byteAt(stop) != '\n' {
+      stop = stop + 1
+    }
+    if stop < n {
+      stop = stop + 1
+    }
+    match source.sliceBytes(start, stop) {
+      Ok(piece) => out.push(piece)
+      Err(_) => { }
+    }
+    at = stop
+  }
+  "".join(out.toArray())
+}
+
+/// How many of the corpus must survive being de-indented and re-formatted.
+///
+/// A ratchet, and one that may rise and never fall. It is not the whole
+/// corpus: the last file needs the formatter to *write* a broken group rather
+/// than keep one it was given, which is the half of the layout rules that is
+/// not in yet.
+fn mustReIndent() -> Int {
+  245
 }
