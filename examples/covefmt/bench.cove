@@ -435,7 +435,7 @@ fn markBodies(held: Array<Token>, tree: Tree, var marked: Vector<Bool>) {
 /// never ask for, and this is the first number that says how much of it is
 /// there.
 fn mustReOpen() -> Int {
-  112
+  166
 }
 
 /// `source` with the lines inside every one-statement body taken out.

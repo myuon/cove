@@ -550,6 +550,38 @@ test fn a_break_that_buys_nothing_is_not_made() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// **A modifier is not what declared the body, and a brace ends a
+/// reservation.**
+///
+/// Two things the fourth mutation found the moment it existed, and neither is
+/// visible to a corpus of files whose bodies are laid out already.
+///
+/// `export fn greeting(…) -> String \{` opens on `export`, and the walk back
+/// from the brace reached the modifier and answered that nothing declared
+/// this body. The word that says what a body is stands behind the modifiers.
+///
+/// `fn classify(n: Int) -> String \{ … \}` broke its *parameter* list instead
+/// of its body, because `restOfLine` counted the whole rest of the source
+/// line — which carried the body, on that input. `param_list` holds back
+/// `width(return_type) + 4 + 2`, the `-> String \{` and no more.
+///
+/// Both answers were read off `cove fmt` by running it.
+test fn a_modifier_does_not_hide_the_declaration() -> Result<Unit, Error> {
+  let flat = "export fn greeting(name: String) -> String \{ \"Hello, \{name\}!\" \}\n"
+  let held = tokens(flat)
+  assertEqual(
+    print(flat, held, parseTokens(flat, held)),
+    "export fn greeting(name: String) -> String \{\n  \"Hello, \{name\}!\"\n\}\n",
+  )?
+  let nested = "fn classify(n: Int) -> String \{ if n < 0 \{ \"neg\" \} else \{ \"pos\" \} \}\n"
+  let heldNested = tokens(nested)
+  assertEqual(
+    print(nested, heldNested, parseTokens(nested, heldNested)),
+    "\n".join(["fn classify(n: Int) -> String \{", "  if n < 0 \{", "    \"neg\"", "  \} else \{", "    \"pos\"", "  \}", "\}", ""]),
+  )?
+  Ok(())
+}
+
 /// **A declaration's body is written broken, and a closure's is not.**
 ///
 /// The one place this printer puts a newline where the source has none.
@@ -558,15 +590,10 @@ test fn a_break_that_buys_nothing_is_not_made() -> Result<Unit, Error> {
 /// only moves whitespace inside brackets — could never ask for this.
 ///
 /// `breaks` reads *"a declaration body, a control flow body, and a lambda
-/// body always read better broken"*, and two of those three are what this
-/// does. The lambda is **not**: `cove fmt` keeps
-/// `spawnSomething(first, fn(v: Int) -> Int \{ v * 2 \})` at 83 columns, and
-/// so does `clock.timeout(1s) \{ render()? \}?`. Both were checked by running
-/// it, and the rule here is what the evidence supports rather than what the
-/// sentence says.
-///
-/// `fn` tells a declaration from a lambda by what follows it: a name, or a
-/// `(`.
+/// body always read better broken"*, and all three are what this does. A
+/// *trailing closure* of one statement is the exception, and it is
+/// `trailing_breaks` rather than `breaks`: `clock.timeout(1s) \{ render()? \}?`
+/// keeps its line, checked by running it.
 test fn a_declaration_body_is_written_broken() -> Result<Unit, Error> {
   let flat = "fn sum(a: Int) -> Int \{ a + 1 \}\n"
   let held = tokens(flat)
@@ -789,17 +816,28 @@ test fn a_trailing_closure_of_one_statement_keeps_its_line(
 /// argument keeps the call's head on one line and expands below it, which is
 /// how a callback and a struct initializer read at the call site."*
 ///
-/// So a call past the limit is not always broken one argument to a line. The
-/// case below is 82 columns and `cove fmt` leaves it exactly as written —
-/// checked by running it rather than by reading this implementation, which
-/// is the rule `a_file_does_not_open_on_a_blank` was nearly got wrong by.
+/// So a call past the limit is not broken one argument to a line: the head
+/// keeps its line and the lambda expands below it.
 ///
 /// `hug_head` names the three shapes that can be hugged and each is one this
 /// tree has: a lambda is a `Node.Body` with a `)` in front of it, and a call
 /// or a non-empty array is a `Node.Group` with members.
+///
+/// # The fixture this used to have did not parse
+///
+/// It was `fn(value: Int) -> Int \{ … \}`, and a lambda in Cove is not written
+/// with a return type. `cove fmt` reported *"skipped 1 file(s) that do not
+/// parse"* and left it alone, so "checked by running it" had checked that a
+/// file `cove fmt` never read came back unchanged — which any file does.
+///
+/// Two hours of work rested on the reading that came out of it: that a lambda
+/// body does *not* always break, against what `breaks` plainly says. On an
+/// input that parses, `cove fmt` breaks it at 72 columns.
 test fn a_call_hugs_a_last_argument_that_expands() -> Result<Unit, Error> {
-  let hugged = "\n".join(["fn f(tasks: Int) -> Int \{", "  spawnSomething(firstArgument, fn(value: Int) -> Int \{ value * 2 + someMoreHere \})", "\}", ""])
-  assert(roundTrips(hugged))?
+  let flat = "\n".join(["fn f(tasks: Int) -> Int \{", "  spawnSomething(firstArgument, fn(value) \{ value * 2 + someMoreHereToo \})", "\}", ""])
+  let want = "\n".join(["fn f(tasks: Int) -> Int \{", "  spawnSomething(firstArgument, fn(value) \{", "    value * 2 + someMoreHereToo", "  \})", "\}", ""])
+  let heldFlat = tokens(flat)
+  assertEqual(print(flat, heldFlat, parseTokens(flat, heldFlat)), want)?
   // Without a huggable last argument the same width does break.
   let plain = "\n".join(["fn f() -> Int \{", "  someFunction(aLongArgument, anotherLongArgument, aThirdOne, andYetMoreHereTools)", "\}", ""])
   let held = tokens(plain)

@@ -249,7 +249,7 @@ fn emit(
         // place this printer puts a newline where the source has none. Every
         // other rule rewrites a run of space that is already there.
         if child.kind == Node.Body && !isBroken(source, held, child) &&
-          closesAHeader(source, held, child, tree.from) &&
+          breaksAsABody(source, held, child, tree.from) &&
           writesBroken(source, held, child) {
           writeBrokenBody(source, held, child, at, var out)
           last = child.to - 1
@@ -820,6 +820,15 @@ fn restOfLine(source: String, held: Array<Token>, at: Int) -> Int {
           width = width + 1
         } else {
           width = width + text(source, token).length()
+          // And it stops at the brace. `param_list` holds back
+          // `width(return_type) + 4 + 2` — the `-> Result<T, F> \{` and no
+          // more — where the source line may carry the whole body behind it
+          // if that body happens to be written on one line. Counting it broke
+          // `fn classify(n: Int) -> String \{ … \}` into a parameter to a line
+          // when it was the body that needed to break.
+          if byteOfPunct(source, held, i) == '\{' {
+            return width
+          }
         }
       }
       None => { }
@@ -1643,7 +1652,7 @@ fn closesAHeader(
           if c == ':' || c == ',' || c == '\{' || c == '\}' ||
             isAnArrowOrEquals(source, held, i) {
             i = from - 1
-          } else if token.kind == Kind.Word {
+          } else if token.kind == Kind.Word && !isAModifier(source, held, i) {
             word = i
           }
         }
@@ -1662,11 +1671,10 @@ fn closesAHeader(
           // `breaks`: *"a declaration body, a control flow body, and a lambda
           // body always read better broken."* All three open on a word, and a
           // lambda's is the `fn` in front of its parameter list.
-          // A declaration body and a control flow body. `fn` opens one only
-          // when a *name* follows it: `fn(value: Int) \{ … \}` is a lambda,
-          // and `cove fmt` leaves one of those on its line — checked by
-          // running it on `spawnSomething(first, fn(v: Int) -> Int \{ … \})`,
-          // which it keeps at 83 columns.
+          // A declaration body and a control flow body. A lambda's is not
+          // here: `closesAParameterList` has already said yes to it, and the
+          // `fn` of `fn(value) \{ … \}` has a `(` behind it rather than a
+          // name.
           text == "if" || text == "while" || text == "for" || text == "match" ||
             text == "else" || text == "impl" || text == "trait" ||
             text == "struct" || text == "enum" ||
@@ -1847,4 +1855,14 @@ fn closesAParameterList(source: String, held: Array<Token>, at: Int) -> Bool {
 /// the word is the whole of the difference.
 fn opensALambda(source: String, held: Array<Token>, at: Int) -> Bool {
   byteOfPunct(source, held, nextSignificant(held, at + 1, held.length())) == '('
+}
+
+/// Whether the word at `i` is one a declaration may be written in front of.
+///
+/// `export fn greeting(…) -> String \{` opens on `export`, and the word that
+/// says what the body is belongs behind it. Left in, the walk reached the
+/// modifier and answered that nothing declared this.
+fn isAModifier(source: String, held: Array<Token>, i: Int) -> Bool {
+  isWord(source, held, i, "export") || isWord(source, held, i, "test") ||
+    isWord(source, held, i, "async") || isWord(source, held, i, "opaque")
 }
