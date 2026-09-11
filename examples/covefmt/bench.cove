@@ -82,6 +82,30 @@ export fn main() -> Result<Unit, Error> {
   }
   let wholeTo = now()
 
+  // The corpus is the oracle, and this is where it says so. Timing a
+  // formatter that has quietly stopped round-tripping is timing nothing, and
+  // `cove test` sees only the samples in `parsetests.cove` — a few hundred
+  // bytes against half a megabyte of the real thing. Every bug this file's
+  // numbers have been wrong about was found on the corpus and not there.
+  var broken = 0
+  var uncovered = 0
+  for source in sources {
+    let held = tokens(source)
+    let tree = parseTokens(source, held)
+    if print(source, held, tree) != source {
+      broken = broken + 1
+    }
+    if !covers(tree, 0, held.length()) {
+      uncovered = uncovered + 1
+    }
+  }
+  if broken > 0 || uncovered > 0 {
+    return Err(Error(message: "{broken} file(s) do not round-trip, {uncovered} tree(s) do not cover"))
+  }
+  println(
+    "{sources.length()} file(s) round-trip, and every tree covers its tokens",
+  )?
+
   let lex = (lexTo - lexFrom).millis()
   let lexAndParse = (parseTo - parseFrom).millis()
   let whole = (wholeTo - wholeFrom).millis()

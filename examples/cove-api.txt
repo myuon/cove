@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:e0cc573f4efd9912
+hash fnv1a64:a12abdfd21a5bfba
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -288,6 +288,7 @@ module covefmt
     case Params
     case Returns
     case Body
+    case Stmt
     case Trivia
     case Leaf
     case Error

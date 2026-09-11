@@ -134,6 +134,9 @@ impl Parser {
   /// which is what a lexer's output supports: a `}` that closes nothing ends
   /// the run, because a run that read past it would swallow the rest of the
   /// file on one typo.
+  ///
+  /// Everything inside is leaves. A `Node.Body` is taken by [`Parser::body`]
+  /// instead, which reads the same run as statements.
   fn balanced(var self, kind: Node) -> Tree {
     let from = self.at
     var held = Vector.of()
@@ -154,6 +157,193 @@ impl Parser {
       }
     }
     nodeOf(kind, from, self.at, held.toArray())
+  }
+
+  /// A `{ ... }` body: the braces, the trivia between statements, and the
+  /// statements themselves.
+  ///
+  /// One level and not all of them. A statement's own tokens stay leaves —
+  /// what an expression is made of is the next slice's work — so what this
+  /// adds is exactly the boundary a formatter needs first: where one
+  /// statement ends and the next begins. The tiling holds at the new level
+  /// the way it holds at every other, and `covers` is what says so.
+  ///
+  /// A nested `{ ... }` is a body too, which is what makes an `if`'s or a
+  /// `while`'s block hold statements rather than a run of leaves. It is
+  /// reached from [`Parser::statement`], because a statement is where one
+  /// can open.
+  fn body(var self) -> Tree {
+    let from = self.at
+    var held = Vector.of()
+    if self.punctByte(self.at) != '\{' {
+      return self.balanced(Node.Body)
+    }
+    held.push(self.leaf())
+    while !self.done() {
+      if self.trivia(var held) {
+        continue
+      }
+      if self.punctByte(self.at) == '\}' {
+        held.push(self.leaf())
+        return nodeOf(Node.Body, from, self.at, held.toArray())
+      }
+      let before = self.at
+      held.push(self.statement())
+      // A rule that took nothing would loop for ever. Nothing here can —
+      // `statement` takes at least one token — and the check is the cheap
+      // way to keep that true rather than to trust it.
+      if self.at == before {
+        held.push(self.leaf())
+      }
+    }
+    nodeOf(Node.Body, from, self.at, held.toArray())
+  }
+
+  /// One statement, ending where the language says a statement ends.
+  ///
+  /// # The rule, and why each half of it is here
+  ///
+  /// `docs/LANGUAGE_REFERENCE.md`: *"Statements end at the end of a line:
+  /// Cove has no `;`."* That sentence alone would cut `a +` from the `b`
+  /// under it, so three things qualify it and all three are below.
+  ///
+  /// **An operator at the end of a line carries the statement on.** `a +`
+  /// then `b` is one expression and `a` then `+ b` is two statements, so
+  /// which side of the break the operator is written on is the whole of the
+  /// difference — and it is the reason this asks about the token *before*
+  /// the newline rather than the one after.
+  ///
+  /// **A line beginning with `.` continues the chain above it.** So the
+  /// question is asked of the next line's first token too.
+  ///
+  /// **A line break inside `(`, `[` or `<` ends nothing**, which is what
+  /// lets an argument list span lines. A `{ }` block is not such a group:
+  /// its statements *do* end at line ends, which is why depth here counts
+  /// only the three and a brace opens a body instead.
+  ///
+  /// `break`, `continue` and `return` end at the end of their line whatever
+  /// encloses them, groups included — and an operand belongs to one only
+  /// when it *begins* on the keyword's own line. That is the one place a
+  /// statement ends inside a group, and [`Parser::escapes`] is it.
+  fn statement(var self) -> Tree {
+    let from = self.at
+    var held = Vector.of()
+    let escaping = self.escapes(self.at)
+    var depth = 0
+    while !self.done() {
+      // A brace at the top of a statement opens a body, which holds
+      // statements of its own. Inside a group it is a leaf like any other:
+      // `fn() { ... }` written as an argument is one argument.
+      if depth <= 0 && self.punctByte(self.at) == '\{' {
+        held.push(self.body())
+        // And then ask, because a block is where a statement most often
+        // ends: `if a \{ b \}` is over at the brace unless an `else` or a
+        // method call follows on the same line. Reading on without asking
+        // made the `c` under an `if` part of the `if`'s own statement.
+        if self.ends(depth, escaping) {
+          return nodeOf(Node.Stmt, from, self.at, held.toArray())
+        }
+        continue
+      }
+      let c = self.punctByte(self.at)
+      // The brace that closes the body this statement is in. It belongs to
+      // the body and not to the statement, so the statement ends in front of
+      // it — which is what makes `fn a() -> Int \{ 1 \}` one statement and a
+      // closing brace rather than a statement that ate the brace.
+      if depth <= 0 && c == '\}' {
+        return nodeOf(Node.Stmt, from, self.at, held.toArray())
+      }
+      if c == '(' || c == '[' {
+        depth = depth + 1
+      } else if c == ')' || c == ']' {
+        depth = depth - 1
+        if depth < 0 {
+          // A closer that closes nothing ends the statement rather than
+          // running past it, for `balanced`'s reason: one typo should cost
+          // one statement and not the rest of the file.
+          return nodeOf(Node.Stmt, from, self.at, held.toArray())
+        }
+      }
+      held.push(self.leaf())
+      if self.ends(depth, escaping) {
+        return nodeOf(Node.Stmt, from, self.at, held.toArray())
+      }
+    }
+    nodeOf(Node.Stmt, from, self.at, held.toArray())
+  }
+
+  /// Whether the statement is over at the cursor, having just taken a token
+  /// at `depth`.
+  ///
+  /// `escaping` says the statement began with `break`, `continue` or
+  /// `return`, which end at their line whatever encloses them.
+  fn ends(self, depth: Int, escaping: Bool) -> Bool {
+    if depth > 0 && !escaping {
+      return false
+    }
+    if !self.atLineEnd() {
+      return false
+    }
+    // The two continuations. `escaping` overrides neither: a `return` ends
+    // at its line, and an operator written at the end of that line is a
+    // `return` whose operand runs on — the reference's *"an operand that
+    // opens on the keyword's line may run over as many further lines as it
+    // needs"*.
+    !self.continues() && !self.opensWithDot()
+  }
+
+  /// Whether the token just taken is followed by a run of space holding a
+  /// newline.
+  fn atLineEnd(self) -> Bool {
+    match self.tokens.get(self.at) {
+      Some(token) => token.kind == Kind.Space && endsLine(self.source, token)
+      None => true
+    }
+  }
+
+  /// Whether the last token taken leaves the line unfinished.
+  ///
+  /// Punctuation that is not a closing bracket: an operator, a comma, a
+  /// colon. A closer is how a line legitimately ends, and a name or a
+  /// literal is a complete expression.
+  fn continues(self) -> Bool {
+    var i = self.at - 1
+    while i >= 0 && isTrivia(self.tokens, i) {
+      i = i - 1
+    }
+    match self.tokens.get(i) {
+      Some(token) => {
+        if token.kind != Kind.Punct {
+          return false
+        }
+        let c = self.punctByte(i)
+        c != ')' && c != ']' && c != '\}'
+      }
+      None => false
+    }
+  }
+
+  /// Whether the next line begins with `.`, which continues the chain above.
+  fn opensWithDot(self) -> Bool {
+    let next = self.significant(self.at)
+    self.punctByte(next) == '.'
+  }
+
+  /// Whether the statement beginning at `at` is a `break`, a `continue` or a
+  /// `return`.
+  fn escapes(self, at: Int) -> Bool {
+    match self.tokens.get(at) {
+      Some(token) => {
+        if token.kind != Kind.Word {
+          return false
+        }
+        match self.source.sliceBytes(token.from, token.to) {
+          Ok(word) => word == "break" || word == "continue" || word == "return"
+          Err(_) => false
+        }
+      }
+      None => false
+    }
   }
 
   /// Takes the rest of the line as leaves, the newline excluded.

@@ -28,12 +28,38 @@ is typing that is every file.
 
 ## The tree tiles too
 
-The parser is recursive descent at the item level. `use`, `fn`, `struct`,
-`enum`, `impl`, `trait` and `type` are taken apart into the header a formatter
-has to lay out — the words in front of them, the name, the generics, the
-parameters, the answer — and their bodies are kept whole. What is inside a body
-is the next slice's; until then it is a `Body` of leaves, which is enough to be
-lossless and not enough to format.
+The parser is recursive descent. `use`, `fn`, `struct`, `enum`, `impl`, `trait`
+and `type` are taken apart into the header a formatter has to lay out — the
+words in front of them, the name, the generics, the parameters, the answer —
+and a `Body` is the statements between its braces.
+
+One level and not all of them. A statement's own tokens are still leaves: what
+an expression is made of is the next slice's, and until then what the tree adds
+is exactly the boundary a formatter needs first — where one statement ends and
+the next begins. A `{ ... }` written inside a statement is a `Body` too, so an
+`if`'s block holds statements rather than a run of leaves.
+
+## Where a statement ends
+
+`docs/LANGUAGE_REFERENCE.md` gives the rule in four parts, and all four are in
+`Parser::statement` because they interact — the continuations are what stop the
+line rule from cutting an expression in half.
+
+| | |
+|---|---|
+| A statement ends at the end of a line; Cove has no `;` | `atLineEnd` |
+| An operator at the end of a line carries it on: `a +` then `b` is one expression, `a` then `+ b` is two statements | `continues`, which asks about the token *before* the newline |
+| A line beginning with `.` continues the chain above it | `opensWithDot` |
+| A break inside `(` or `[` ends nothing — but a `{ }` block is not such a group, and its statements *do* end at line ends | depth counts the two brackets; a brace opens a body |
+| `break`, `continue` and `return` end at their line whatever encloses them | `escapes` |
+
+Two things this got wrong first, both caught by a test and worth not repeating.
+A statement must end *in front of* the brace that closes the body it is in, or
+`fn a() -> Int { 1 }` becomes a statement that ate the brace. And a statement
+must be asked whether it is over *after* taking a nested block, because a block
+is where a statement most often ends: `if a { b }` is done at the brace unless
+an `else` or a method call follows on the same line, and reading on without
+asking made the line under an `if` part of the `if`.
 
 The invariant is the lexer's, one level up: **a node's children cover its range
 exactly, in order**, and a node with no children is one token. `covers` is that
@@ -47,9 +73,15 @@ looks like.
 
 Every `.cove` file here passes `cove fmt --check`, so every one of them is
 already what a formatter should produce — and a correct formatter reproduces
-all 243 of them byte for byte. `print(parse(source)) == source` is that check,
+all 247 of them byte for byte. `print(parse(source)) == source` is that check,
 and it is available *now*, over half a megabyte of real source, before a single
 layout decision has been made.
+
+**`benches/covefmtBench` asserts it**, which it did not at first, and the gap
+was the point: `cove test` sees the samples in `parsetests.cove` — a few
+hundred bytes — and the corpus is half a megabyte of source nobody wrote to be
+parsed. Every mistake this parser has made was found on the corpus and would
+have passed on the samples.
 
 It is a stronger statement than the tiling. The tiling says the tree *covers*
 the tokens; this says a walk of it *reaches* them, in order, whole.

@@ -59,7 +59,7 @@ impl Parser {
       held.push(self.leaf())
     }
     if !self.done() {
-      held.push(self.balanced(Node.Body))
+      held.push(self.body())
     }
     nodeOf(kind, from, self.at, held.toArray())
   }
@@ -90,7 +90,7 @@ impl Parser {
       held.push(nodeOf(Node.Returns, at, self.at, answer.toArray()))
     }
     if isPunct(self.source, self.tokens, self.at, "\{") {
-      held.push(self.balanced(Node.Body))
+      held.push(self.body())
     }
     nodeOf(Node.Fn, from, self.at, held.toArray())
   }
