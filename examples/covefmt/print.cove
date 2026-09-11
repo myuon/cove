@@ -38,7 +38,13 @@ fn emit(
   if tree.children.length() == 0 {
     if tree.kind == Node.Leaf {
       match held.get(tree.from) {
-        Some(token) => out.push(text(source, token))
+        Some(token) => {
+          if token.kind == Kind.Space {
+            out.push(spacing(source, token))
+          } else {
+            out.push(text(source, token))
+          }
+        }
         None => { }
       }
     }
@@ -62,4 +68,50 @@ fn emit(
 export fn roundTrips(source: String) -> Bool {
   let held = tokens(source)
   print(source, held, parse(source)) == source
+}
+
+/// A run of space, with the blanks a line ends on taken out.
+///
+/// The first layout decision this makes, and the one with no exceptions in
+/// it: `cove_syntax::format` says *"no tabs, no trailing whitespace, one
+/// trailing newline"*, and a blank before a newline is invisible in every
+/// editor and meaningful to nothing.
+///
+/// It is the whole run and not each line separately, because a run of space
+/// is one token and the newlines inside it are part of it. What is kept is
+/// every newline and whatever indentation follows the last of them; what
+/// goes is the space between a newline and the one before it.
+///
+/// A run holding no newline is untouched. Space between two things on a line
+/// is not trailing, and deciding how much of it there should be is a
+/// different rule that reads what is on either side.
+fn spacing(source: String, token: Token) -> String {
+  // The byte after the last newline. Everything from there to the end of the
+  // run is the indentation of the line the run leaves behind, and everything
+  // between two newlines was trailing.
+  var lastBreak = -1
+  var at = token.from
+  while at < token.to {
+    if source.byteAt(at) == '\n' {
+      lastBreak = at
+    }
+    at = at + 1
+  }
+  if lastBreak < 0 {
+    return text(source, token)
+  }
+  var out = Vector.of<String>()
+  // One newline per newline, in order, with nothing between them.
+  at = token.from
+  while at <= lastBreak {
+    if source.byteAt(at) == '\n' {
+      out.push("\n")
+    }
+    at = at + 1
+  }
+  match source.sliceBytes(lastBreak + 1, token.to) {
+    Ok(indent) => out.push(indent)
+    Err(_) => { }
+  }
+  "".join(out.toArray())
 }

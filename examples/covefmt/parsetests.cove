@@ -244,3 +244,32 @@ test fn a_nested_block_is_a_body() -> Result<Unit, Error> {
   assert(roundTrips("fn f() \{\n  if a \{\n    b\n    c\n  \} else \{\n    d\n  \}\n  e\n\}\n"))?
   Ok(())
 }
+
+/// **The first layout decision: a line does not end on a blank.**
+///
+/// `cove_syntax::format` says *"no tabs, no trailing whitespace, one trailing
+/// newline"*, and this is the half of that with no exceptions in it. It is
+/// asserted on source that *has* trailing whitespace, because the corpus
+/// check cannot see it: every file in this repository already passes
+/// `cove fmt --check`, so a rule that correctly changes nothing there is
+/// indistinguishable from a rule that does nothing at all.
+test fn a_line_does_not_end_on_a_blank() -> Result<Unit, Error> {
+  let held = tokens("fn f() \{   \n  1\n\}   \n")
+  let tree = parseTokens("fn f() \{   \n  1\n\}   \n", held)
+  assertEqual(
+    print("fn f() \{   \n  1\n\}   \n", held, tree),
+    "fn f() \{\n  1\n\}\n",
+  )?
+  // Space *within* a line is not trailing, and this rule leaves it alone:
+  // how much of it there should be is a different decision that reads what
+  // stands on either side.
+  assert(roundTrips("fn f(a: Int,  b: Int) -> Int \{ a \}\n"))?
+  // A blank line is blank, not indented.
+  let blank = "fn f() \{\n  1\n   \n  2\n\}\n"
+  let heldBlank = tokens(blank)
+  assertEqual(
+    print(blank, heldBlank, parseTokens(blank, heldBlank)),
+    "fn f() \{\n  1\n\n  2\n\}\n",
+  )?
+  Ok(())
+}
