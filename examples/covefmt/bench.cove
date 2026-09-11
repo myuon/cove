@@ -229,21 +229,22 @@ fn deindented(source: String) -> String {
 /// How many of the corpus must survive being de-indented and re-formatted.
 ///
 /// A ratchet, and one that may rise and never fall. It is not the whole
-/// corpus: the last file needs the formatter to *write* a broken group rather
-/// than keep one it was given, which is the half of the layout rules that is
-/// not in yet.
+/// corpus: the last file holds a lambda across three lines *inside a string
+/// interpolation*, and covefmt lexes a string as one token, so there are no
+/// newlines in there for it to place.
 fn mustReIndent() -> Int {
   245
 }
 
 /// How many of the corpus must survive being joined up and re-broken.
 ///
-/// A ratchet, and one that may rise and never fall. What most of the rest
-/// need is `hug_last`'s other half: covefmt declines to break
-/// `push(Route(method: …, path: …))` — which is right — but cannot write the
-/// `push(Route(\n  method: …,\n))` that `cove fmt` writes from the flat form.
+/// A ratchet, and one that may rise and never fall. `hug_last` writes its
+/// form now when what expands is a call or an array. What the rest need is
+/// the same for a *lambda*, a `<` counted as a bracket when a group is split
+/// at its commas — `Result<T, E>` is one member and comes out as two — and an
+/// array literal that breaks where a call would hug.
 fn mustReBreak() -> Int {
-  217
+  227
 }
 
 /// `source` with the line breaks inside a `(` or a `[` taken out.

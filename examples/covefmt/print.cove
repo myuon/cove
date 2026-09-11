@@ -96,8 +96,16 @@ fn emit(
       // Already on one line. It stays there unless it is over the limit and
       // breaking would actually buy something, and either way the answer is
       // this group's *and everything inside it*.
-      if fits || !worthBreaking(source, held, tree, depth) ||
-        hugsItsLast(source, held, tree, room) {
+      let hugs = hugsItsLast(source, held, tree, column(out))
+      if fits || !worthBreaking(source, held, tree, depth) {
+        out.push(verbatim(source, held, tree))
+      } else if hugs && headIsAGroup(tree) {
+        out.push(hugged(source, held, tree, depth))
+      } else if hugs {
+        // A closure hugs, and writing one means writing the statements of a
+        // body rather than the members of a group — which the emitting loop
+        // below already does and this does not. Keeping the line is what it
+        // can do, and is right for a source that already hugs.
         out.push(verbatim(source, held, tree))
       } else {
         out.push(broken(source, held, tree, depth))
@@ -405,6 +413,10 @@ fn indenting(kind: Node) -> Bool {
 
 /// How wide `tree` is written on one line, in characters.
 ///
+/// Exactly the length of what [`flattened`] would produce, and it has to be:
+/// a width that does not match the string it predicts is a width that answers
+/// a different question than the one the caller asked.
+///
 /// Every token it covers, with each run of space counted as the one space a
 /// flattened line would have — which is what `cove_syntax::format`'s `flat`
 /// builds by walking an expression and what this can read off the tokens
@@ -420,10 +432,18 @@ fn flatWidth(source: String, held: Array<Token>, tree: Tree) -> Int {
   while at < tree.to {
     match held.get(at) {
       Some(token) => {
-        if isTriviaKind(token.kind) {
-          // A run of space becomes one space, and a comment cannot be
-          // flattened at all — `breaks` says so and the caller asks that
-          // first, so the width it would have is not a question here.
+        if token.kind == Kind.Space {
+          // What [`flattened`] would write there, which is one space or none.
+          // Counting every run as one made a group a column wider than the
+          // line it would produce — `f(\n  a,\n)` measured as `f( a,)` — and
+          // the two runs against the brackets are exactly the two a call has.
+          if wantsASpace(source, held, at) {
+            width = width + 1
+          }
+        } else if isTriviaKind(token.kind) {
+          // A comment cannot be flattened at all — `breaks` says so and the
+          // caller asks that first, so the width it would have is not a
+          // question here.
           width = width + 1
         } else {
           width = width + text(source, token).length()
@@ -433,7 +453,35 @@ fn flatWidth(source: String, held: Array<Token>, tree: Tree) -> Int {
     }
     at = at + 1
   }
-  width
+  // The comma a broken group ends its last member with, taken off once. Asked
+  // of every token instead, it is two builtin calls per comma in the file and
+  // measured 11% of the whole run.
+  if endsOnATrailingComma(source, held, tree) {
+    width - 1
+  } else {
+    width
+  }
+}
+
+/// Whether `tree`'s closing bracket has a comma in front of it.
+fn endsOnATrailingComma(
+  source: String,
+  held: Array<Token>,
+  tree: Tree,
+) -> Bool {
+  var i = tree.to - 2
+  while i > tree.from {
+    match held.get(i) {
+      Some(token) => {
+        if token.kind != Kind.Space {
+          return byteOfPunct(source, held, i) == ','
+        }
+      }
+      None => { }
+    }
+    i = i - 1
+  }
+  false
 }
 
 /// Whether `kind` is space or a comment.
@@ -935,29 +983,24 @@ fn indentOf(depth: Int) -> String {
 /// a `Node.Group` with members. So the question is answerable without
 /// knowing which kind of expression the member is.
 ///
-/// # Half of the rule, and the half is named
+/// `col` is where the group's own `(` is written, which is what `hug_last`
+/// reads from `self.out.col()`. Both of its width tests are about the line
+/// the *head* ends up on, so neither can be asked of the room left beside the
+/// group as a whole.
 ///
-/// This answers only *whether* the group stays as it was written. It does
-/// not write the hugged form, so a call written on one line that should hug
-/// is left on one line rather than turned into
+/// # Half of the rule is still missing, and it is a different half
 ///
-/// ```text
-/// spawnSomething(firstArgument, fn(value: Int) -> Int \{
-///   value * 2 + someMoreHere
-/// \})
-/// ```
-///
-/// which is what `cove fmt` produces from it. The corpus cannot see the
-/// difference — every file in it is already `cove fmt`'s output, so every
-/// call that should hug is already written hugged — and that is exactly why
-/// it is written down here instead. The missing half needs the printer to
-/// write a group's members itself rather than to keep them, which is the
-/// same machinery `broken` has and a different shape of it.
+/// [`hugged`] writes the form when what expands is a `Node.Group` — a nested
+/// call or an array. When it is a `Node.Body` — a lambda, a trailing closure
+/// — this still only declines to *break* the group, which keeps a source that
+/// already hugs and does not produce one that does not. Writing that case
+/// means writing the statements of a body, which is the emitting loop's job
+/// and not `broken`'s.
 fn hugsItsLast(
   source: String,
   held: Array<Token>,
   tree: Tree,
-  room: Int,
+  col: Int,
 ) -> Bool {
   var last = tree
   var members = 0
@@ -982,19 +1025,201 @@ fn hugsItsLast(
   if !canBeHugged(source, held, last) {
     return false
   }
-  // Every earlier member has to fit, because they stay on the head's line.
-  // `hug_last` refuses when one of them breaks; here that is the same as one
-  // of them being too wide for what is left.
+  // The head: the `(`, then every earlier member and the `, ` behind it.
+  // They stay on the call's line, so `hug_last` refuses outright when one of
+  // them breaks rather than measuring it.
+  var seen = 0
+  var prefix = 1
+  for child in tree.children {
+    if child.kind == Node.Member {
+      seen = seen + 1
+      if seen < members {
+        if mustBreak(source, held, child) {
+          return false
+        }
+        prefix = prefix + flatWidth(source, held, child) + 2
+      }
+    }
+  }
+  let at = col + prefix
+  // The last member's own head has to fit beside all of that, or the line the
+  // hug is supposed to keep whole is not whole.
+  if at + headWidth(source, held, last) > maxWidth() {
+    return false
+  }
+  // `hug_last`: *"Hugging only helps when the argument really does expand
+  // below the head; one that still fits on this line would leave the call as
+  // long as it already was."*
+  if !mustBreak(source, held, last) &&
+    at + flatWidth(source, held, last) <= maxWidth() {
+    return false
+  }
+  true
+}
+
+/// The token index just past the bracket the last member expands below: the
+/// `\{` of a lambda, or the `(` or `[` of a nested call or array.
+///
+/// A lambda is asked for first because it has both — `fn(value: Int) \{` is a
+/// group and a body, and `hug_head` matches `Lambda` before `Call`. `-1` when
+/// the member has no such bracket, which is `hug_head`'s `None`.
+fn headEndOf(member: Tree) -> Int {
+  for child in member.children {
+    if child.kind == Node.Body {
+      return child.from + 1
+    }
+  }
+  for child in member.children {
+    if child.kind == Node.Group && hasAMember(child) {
+      return child.from + 1
+    }
+  }
+  -1
+}
+
+/// How wide the last member's head is: everything from its own first token —
+/// its label included — to the bracket it expands below.
+fn headWidth(source: String, held: Array<Token>, member: Tree) -> Int {
+  let stop = headEndOf(member)
+  if stop < 0 {
+    return 0
+  }
+  widthBetween(source, held, member.from, stop)
+}
+
+/// The width of the tokens in `[from, to)`, written flat.
+fn widthBetween(source: String, held: Array<Token>, from: Int, to: Int) -> Int {
+  var width = 0
+  var at = from
+  while at < to {
+    match held.get(at) {
+      Some(token) => {
+        width = width + if isTriviaKind(token.kind) {
+          1
+        } else {
+          text(source, token).length()
+        }
+      }
+      None => { }
+    }
+    at = at + 1
+  }
+  width
+}
+
+/// Whether what the last member expands below is a group rather than a body —
+/// the case [`hugged`] can write.
+fn headIsAGroup(tree: Tree) -> Bool {
+  var last = tree
+  var members = 0
+  for child in tree.children {
+    if child.kind == Node.Member {
+      members = members + 1
+      last = child
+    }
+  }
+  if members == 0 {
+    return false
+  }
+  // A lambda has both — `fn(value: Int) \{` is a group and a body — so the
+  // body is asked for first, the way `headEndOf` and `hug_head` ask.
+  for child in last.children {
+    if child.kind == Node.Body {
+      return false
+    }
+  }
+  for child in last.children {
+    if child.kind == Node.Group && hasAMember(child) {
+      return true
+    }
+  }
+  false
+}
+
+/// `tree` with its last member expanded below the call's head.
+///
+/// `hug_last` writes the head — the `(`, the earlier arguments flat, and the
+/// last argument up to its own opening bracket — and then writes that last
+/// argument **at the call's own indent**: `self.expr(&last.value, …, indent)`,
+/// not `indent + INDENT`. So the nested group's members land one step in and
+/// its closing bracket comes back to the call's own depth, where this call's
+/// `)` joins it and the line reads `))`.
+fn hugged(
+  source: String,
+  held: Array<Token>,
+  tree: Tree,
+  depth: Int,
+) -> String {
+  var out = Vector.of<String>()
+  match held.get(tree.from) {
+    Some(token) => out.push(text(source, token))
+    None => { }
+  }
+  var members = 0
+  for child in tree.children {
+    if child.kind == Node.Member {
+      members = members + 1
+    }
+  }
   var seen = 0
   for child in tree.children {
     if child.kind == Node.Member {
       seen = seen + 1
-      if seen < members && flatWidth(source, held, child) > room {
-        return false
+      if seen < members {
+        out.push(flattened(source, held, child))
+        out.push(", ")
+      } else {
+        writeHug(source, held, child, depth, var out)
       }
     }
   }
-  true
+  match held.get(tree.to - 1) {
+    Some(token) => out.push(text(source, token))
+    None => { }
+  }
+  "".join(out.toArray())
+}
+
+/// The last member, written with the group inside it broken: its own head,
+/// then that group one member to a line, then whatever it is followed by.
+///
+/// The tail is what makes this take the member rather than the group: `f(g(a,
+/// b)?)` has a `?` after the group and it belongs on the closing line.
+fn writeHug(
+  source: String,
+  held: Array<Token>,
+  member: Tree,
+  depth: Int,
+  var out: Vector<String>,
+) {
+  for child in member.children {
+    if child.kind == Node.Group && hasAMember(child) {
+      out.push(tokensBetween(source, held, member.from, child.from))
+      out.push(broken(source, held, child, depth))
+      out.push(tokensBetween(source, held, child.to, member.to))
+      return
+    }
+  }
+  out.push(flattened(source, held, member))
+}
+
+/// The tokens in `[from, to)`, exactly as they were written.
+fn tokensBetween(
+  source: String,
+  held: Array<Token>,
+  from: Int,
+  to: Int,
+) -> String {
+  var out = Vector.of<String>()
+  var at = from
+  while at < to {
+    match held.get(at) {
+      Some(token) => out.push(text(source, token))
+      None => { }
+    }
+    at = at + 1
+  }
+  "".join(out.toArray())
 }
 
 /// Whether `member` has a head to hug at all: a lambda's or trailing
