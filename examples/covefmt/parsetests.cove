@@ -549,6 +549,49 @@ test fn a_break_that_buys_nothing_is_not_made() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// **What a group reserves depends on what kind of group it is.**
+///
+/// `cove_syntax::format` has two answers and they are not the same.
+/// `param_list`, for a declaration's parameters, holds back
+/// `width(return_type) + 4 + 2` — the `-> Result<T, F> \{` is on the `)`'s own
+/// line, so a list that fits can still be one that does not. `arg_list`, for
+/// a call's arguments, holds back *"two more columns for the ` \{` of a
+/// trailing closure"* and nothing else at all.
+///
+/// Reading the rest of the source line for both made a call reserve two
+/// columns for every `if` header's brace. The header below is 81 columns and
+/// `cove fmt` leaves it there rather than break the `()` in front of the
+/// brace — checked by running it.
+///
+/// Which kind a group is cannot be asked of its node kind: a method inside an
+/// `impl` has its parameters taken by `grouped`, because a declaration's
+/// members are read one to a line and the `(` on the way is a group like any
+/// other. The `->` behind it is what every parameter list has and no call
+/// does.
+test fn a_call_reserves_only_a_trailing_closure() -> Result<Unit, Error> {
+  let source = "\n".join(["impl Parser \{", "  fn g(self, mark: String) -> Bool \{", "    for token in self.tokens \{", "      if token.kind != Kind.Punct || token.to - token.from != mark.byteLength() \{", "        return false", "      \}", "    \}", "    true", "  \}", "\}", ""])
+  assert(roundTrips(source))?
+  Ok(())
+}
+
+/// **A parameter list with nothing in it still breaks.**
+///
+/// `arg_list`'s one escape is for one argument and no other number of them,
+/// and `param_list` has no escape at all: its loop over the entries writes
+/// nothing when there are none, and the `)` still goes on a line of its own.
+/// `test fn aVeryLongName(` and then `) -> Result<Unit, Error> \{` is two
+/// lines that fit where one did not.
+///
+/// `worthBreaking` answered `members > 0`, which left the `()` on an
+/// 82-column line. The answer below was read off `cove fmt` by running it.
+test fn an_empty_parameter_list_still_breaks() -> Result<Unit, Error> {
+  let flat = "\n".join(["test fn writesADecimalsPlacesInCsvAndItsValueInJsonLines() -> Result<Unit, Error> \{", "  Ok(())", "\}", ""])
+  let want = "\n".join(["test fn writesADecimalsPlacesInCsvAndItsValueInJsonLines(", ") -> Result<Unit, Error> \{", "  Ok(())", "\}", ""])
+  let held = tokens(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  Ok(())
+}
+
 /// **A member of a broken group is asked the same question, one step in.**
 ///
 /// `broken` wrote each member with `flattened`, so a call that was still too
