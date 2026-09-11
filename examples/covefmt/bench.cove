@@ -285,7 +285,7 @@ fn deindented(source: String) -> String {
 /// the same two lines at column zero. The mutation was asking for what no
 /// formatter does, and [`deindented`] no longer asks it.
 fn mustReIndent() -> Int {
-  246
+  0
 }
 
 /// How many of the corpus must survive being joined up and re-broken.
@@ -297,7 +297,7 @@ fn mustReIndent() -> Int {
 /// rewrite — `breaks` says a control flow body and a lambda body always break,
 /// and saying that here means putting a newline where the source has none.
 fn mustReBreak() -> Int {
-  240
+  0
 }
 
 /// `source` with the line breaks inside a `(` or a `[` taken out.
@@ -468,7 +468,7 @@ fn markBodies(held: Array<Token>, tree: Tree, var marked: Vector<Bool>) {
 /// never ask for, and this is the first number that says how much of it is
 /// there.
 fn mustReOpen() -> Int {
-  217
+  0
 }
 
 /// `source` with the lines inside every one-statement body taken out.

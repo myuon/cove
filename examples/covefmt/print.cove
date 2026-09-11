@@ -78,7 +78,14 @@ fn emit(
   // group is flat or wholly broken with nothing in between, and breaking an
   // outer group only ever gives an inner one more room. There is no choice
   // upstream that a later line can regret.
-  if indenting(tree.kind) && tree.kind != Node.Body &&
+  // A `(` that follows no callee is not an argument list — it is the
+  // parentheses `expr` writes around an operand whose precedence is below the
+  // one it is being written for. `cove_syntax::format` has no node for it and
+  // no rule about it: the `(` and the `)` are written either side of the
+  // operand and the operand is laid out at the *enclosing* indent, so nothing
+  // inside one is ever a member on a line of its own.
+  let bracketed = isParenthesised(source, held, tree)
+  if indenting(tree.kind) && tree.kind != Node.Body && !bracketed &&
     isClosed(source, held, tree) && !isAPattern(source, held, tree) {
     // What is left of the line after the group, which `cove_syntax::format`
     // calls `reserved` and passes in: a parameter list that fits on its own
@@ -130,13 +137,31 @@ fn emit(
       return tree.to - 1
     }
   }
+  // A chain of calls that is merely too long breaks before its dots, and
+  // not inside its argument lists. `call` asks this before anything else it
+  // would do — `judge(a, b).detail()` at 82 columns becomes the call on one
+  // line and `.detail()` on the next, where breaking the arguments would
+  // have made four lines of it.
+  if tree.kind == Node.Member && !isBroken(source, held, tree) &&
+    !mustBreak(source, held, tree) {
+    let rest = if reserved >= 0 {
+      reserved
+    } else {
+      0
+    }
+    if flatWidth(source, held, tree) > maxWidth() - column(out) - rest &&
+      breaksAtItsDots(source, held, tree) {
+      writeChain(source, held, tree, depth, var out)
+      return tree.to - 1
+    }
+  }
   // A `Node.Body` and a `Node.Params` indent what is inside them, and their
   // own brackets are not inside: the opener is written at the depth the node
   // *opens* at and the closer goes back to it. So the step is applied to the
   // children between them and the brackets are left where the enclosing
   // depth put them, which is what `cove_syntax::format` does by passing
   // `indent + INDENT` to the members and `indent` to `lead_close`.
-  let indents = indenting(tree.kind)
+  let indents = indenting(tree.kind) && !bracketed
   let inner = if indents {
     depth + 1
   } else {
@@ -158,12 +183,41 @@ fn emit(
   // leaves, which is the only place a continuation can happen.
   var opened: Vector<Int> = Vector.of()
   var nested: Vector<Int> = Vector.of()
+  // Where this node starts, read before anything of it is written. The
+  // question a trailing closure's body asks is whether the *expression* fit,
+  // and `expr` asks that before `arg_list` has broken anything — by the time
+  // the body is reached the column has come back to the closing bracket's,
+  // and `) \{ http.fetch(check.url) \}` looks like it fits on a line it is
+  // only on because the arguments above it broke.
+  let began = column(out)
+  // Where this node's run of leaves must break, and at what depth. Empty for
+  // everything that already fits, which is almost everything.
+  var marks = Vector.of<Int>()
+  var levels = Vector.of<Int>()
+  // A node with no operator of its own has nothing to plan, and that is
+  // almost every node. The width is measured only for the few that could.
+  let span = expressionEnds(held, tree, tree.from)
+  if continuing(tree.kind) && overflows(source, held, tree.from, span, began) &&
+    loosestIn(source, held, tree.from, span) > 0 &&
+    !holdsABrokenGroup(source, held, tree) {
+    planBreaks(
+      source,
+      held,
+      tree.from,
+      span,
+      began,
+      depth,
+      var marks,
+      var levels,
+    )
+  }
   while i < count {
     match children.get(i) {
       Some(child) => {
         // The closing brace is the body's last child and belongs to the
         // depth the body opened at, not to the depth inside it.
-        var at = if indents && i + 2 >= count {
+        var at = if indents && i + 1 >= count ||
+          indents && i + 2 >= count && isARunOfSpace(held, child) {
           depth
         } else {
           inner
@@ -209,7 +263,34 @@ fn emit(
           // it put the space between `if` and `a` on the stack and every
           // continuation under it a step too deep.
           let begun = previousSignificant(held, child.from) >= tree.from
-          if begun && i + 1 < count && breaksLine(source, held, child) {
+          // A break that is not there yet. `binary` writes the operator and
+          // then asks whether its right operand fits on what is left of the
+          // line; when it does not, the operand goes to a line of its own one
+          // step in. This is that question, asked of the run of space behind
+          // the operator, and it is the only place other than a body where
+          // this printer puts a newline the source has not got.
+          //
+          // *Where* such a break goes is not a matter of filling lines from
+          // the left. `binary` is handed the top of the expression — for a
+          // left-associative chain that is the **last** operator — splits
+          // there, and then asks the same question of the left half. So
+          // `a && b && c` that does not fit keeps `a && b` together and moves
+          // `c`, where filling greedily would have moved `b` as well.
+          //
+          // `planned` is that recursion, run once over this node's run of
+          // leaves before any of it is written.
+          let planned = if marks.length() == 0 {
+            -1
+          } else {
+            levelPlanned(
+              marks,
+              levels,
+              nextSignificant(held, child.to, tree.to),
+            )
+          }
+          let makes = begun && i + 1 < count && isARunOfSpace(held, child) &&
+            !breaksLine(source, held, child) && planned >= 0
+          if begun && i + 1 < count && breaksLine(source, held, child) || makes {
             // How *far* a continuation is indented is decided by the operator
             // that broke the line. `cove_syntax::format`'s `binary` writes a
             // broken right operand at `indent + INDENT` and then writes that
@@ -231,13 +312,26 @@ fn emit(
               opened.pop()
               nested.pop()
             }
-            at = if nested.length() > 0 {
+            at = if makes {
+              planned
+            } else if nested.length() > 0 {
               topOf(nested) + 1
             } else {
               depth + 1
             }
             opened.push(binds)
             nested.push(at)
+            if makes {
+              // The run of space is what the line break replaces, and what
+              // follows it is a new segment: the operand written there is
+              // split at *its* loosest operator, not at this one again.
+              trimTrailing(var out)
+              out.push("\n")
+              out.push(indentOf(at))
+              last = child.from
+              i = i + 1
+              continue
+            }
           } else {
             // The leading trivia and the break a statement leaves in front of
             // a `}`. Neither can have a stack behind it: the first comes
@@ -245,12 +339,37 @@ fn emit(
             at = depth
           }
         }
+        // A group that stands inside a continuation belongs to the line the
+        // continuation made, not to the line the node started on.
+        // `binary` writes a broken right operand *at* `indent + INDENT` and
+        // everything in it from there, so an argument list two continuations
+        // deep indents its members from two steps in.
+        //
+        // A *body* is not one of them. `if a ||\n  b \{` opens its block at
+        // the `if`'s own depth however far the condition ran on, because
+        // `if_expr` hands `block` the indent it was given and not the one the
+        // condition ended at.
+        if child.kind != Node.Body && indenting(child.kind) &&
+          nested.length() > 0 {
+          at = topOf(nested)
+        }
         // A body that must break and was written on one line is the one
         // place this printer puts a newline where the source has none. Every
         // other rule rewrites a run of space that is already there.
-        if child.kind == Node.Body && !isBroken(source, held, child) &&
-          breaksAsABody(source, held, child, tree.from) &&
-          writesBroken(source, held, child) {
+        // A trailing closure's body breaks when the line it is on has run
+        // out, whatever `trailing_breaks` says about its contents: `block` is
+        // reached from `expr_broken`, so once the expression did not fit, the
+        // body is written across lines. The statement holding
+        // `clock.timeout(d) \{ await runAll(…) \}` is 112 columns and that is
+        // the measurement; the one holding `inflight.spawn \{ await run(c) \}`
+        // is 50 and keeps its line.
+        //
+        // The width is asked last and only of a body, because `&&` stops at
+        // the first `false`: measured for every child of every node it is the
+        // node's own size squared, and six seconds of the corpus.
+        if child.kind == Node.Body && writesBroken(source, held, child) &&
+          (breaksAsABody(source, held, child, tree.from) ||
+            overflows(source, held, tree.from, tree.to, began)) {
           writeBrokenBody(source, held, child, at, var out)
           last = child.to - 1
         } else {
@@ -949,6 +1068,38 @@ fn isAnArray(source: String, held: Array<Token>, tree: Tree) -> Bool {
   byteOfPunct(source, held, tree.from) == '['
 }
 
+/// Whether `tree`'s brackets are there for precedence rather than for a call
+/// or a list.
+///
+/// A call's `(` stands against its callee, a parameter list's against the
+/// name it belongs to, and an index's `[` against what it indexes. One that
+/// follows an operator, a keyword or a `!` belongs to no such thing: it is
+/// what `expr` writes around an operand of lower precedence, and what is
+/// inside it is written at the indent outside it.
+///
+/// Read as a list, `if !(a(x) ||\n  b(y)) \{` put its second line in column
+/// zero — the group was too wide to fold and had no comma to break at, so it
+/// was kept exactly as written.
+fn isParenthesised(source: String, held: Array<Token>, tree: Tree) -> Bool {
+  if byteOfPunct(source, held, tree.from) != '(' {
+    return false
+  }
+  let before = previousSignificant(held, tree.from)
+  if before < 0 {
+    return true
+  }
+  match held.get(before) {
+    Some(token) => {
+      if token.kind == Kind.Word {
+        return false
+      }
+      let c = byteOfPunct(source, held, before)
+      !(c == ')' || c == ']' || c == '>')
+    }
+    None => true
+  }
+}
+
 /// Whether `tree` is the pattern of a match arm rather than a call.
 ///
 /// `cove_syntax::format` has `pattern_flat` and nothing else: a pattern is
@@ -1033,7 +1184,15 @@ fn writeBroken(
       // into a string of its own: `column` reads the columns back out of what
       // has been written, so a member deciding its own width has to be able
       // to see the indentation in front of it.
-      last = emit(source, held, child, last, depth + 1, oneComma(), var out)
+      last = emit(
+        source,
+        held,
+        child,
+        last,
+        depth + 1,
+        noReservation(),
+        var out,
+      )
       out.push(",")
     }
   }
@@ -1106,7 +1265,8 @@ fn hugsItsLast(
   // initializer in place and `write(path, render(…))` breaks one argument to
   // a line, which is the difference between a shape that reads as one call
   // and a list that happens to end in a call.
-  if !(bottomsOutInAClosure(source, held, last) || members == 1) {
+  if !(bottomsOutInAClosure(source, held, last) ||
+    members == 1 && !isLabelled(source, held, last)) {
     return false
   }
   if !canBeHugged(source, held, last) {
@@ -1283,7 +1443,7 @@ fn writeHug(
   // last argument with `self.expr(…, indent)`, at the call's own depth, which
   // is the depth this was handed.
   if isAClosure(member) {
-    emit(source, held, member, member.from, depth, oneComma(), var out)
+    emit(source, held, member, member.from, depth, noReservation(), var out)
     return
   }
   for child in member.children {
@@ -1328,11 +1488,41 @@ fn tokensBetween(
 /// arguments. `hug_head` answers `None` for everything else, and a call whose
 /// last argument is a name or a literal has nothing to expand below it.
 fn canBeHugged(source: String, held: Array<Token>, member: Tree) -> Bool {
+  // `hug_head` matches on the expression's *own* kind, so a member that is
+  // something else is not huggable however many calls are buried in it.
+  // `stopped.lock(fn(it) \{ … \}) <= rounds()` is a comparison and
+  // `hug_head` answers `None` for a `Binary`, so `assert(…)` around it breaks
+  // one argument to a line.
+  if splitsAtAnOperator(source, held, member) {
+    return false
+  }
+  // The bracket a call or an array expands below is the one the member *ends*
+  // on. `judge(a, b).detail()` ends on `detail()`, whose `args.is_empty()`
+  // makes `hug_head` answer `None` — reading the first group instead found
+  // the `(a, b)` and hugged a call that `cove fmt` breaks.
+  var head = member
+  var found = false
   for child in member.children {
-    if child.kind == Node.Body {
-      return true
+    if child.kind == Node.Body || child.kind == Node.Group {
+      head = child
+      found = true
     }
-    if child.kind == Node.Group && hasAMember(child) {
+  }
+  if !found {
+    return false
+  }
+  head.kind == Node.Body || hasAMember(head)
+}
+
+/// Whether `member` is a binary expression: an operator of its own, outside
+/// anything bracketed.
+fn splitsAtAnOperator(
+  source: String,
+  held: Array<Token>,
+  member: Tree,
+) -> Bool {
+  for child in member.children {
+    if child.kind == Node.Leaf && bindingOf(source, held, child.from) > 0 {
       return true
     }
   }
@@ -1400,7 +1590,8 @@ fn hugsInto(source: String, held: Array<Token>, group: Tree) -> Bool {
   if !canBeHugged(source, held, last) {
     return false
   }
-  if !(bottomsOutInAClosure(source, held, last) || members == 1) {
+  if !(bottomsOutInAClosure(source, held, last) ||
+    members == 1 && !isLabelled(source, held, last)) {
     return false
   }
   var seen = 0
@@ -1502,6 +1693,23 @@ fn bindingOf(source: String, held: Array<Token>, j: Int) -> Int {
   }
 }
 
+/// Whether `child` is a run of space, newline or not.
+///
+/// Asked of a body's second-to-last child, which is the space in front of the
+/// closing brace *when there is one*. A statement that stopped in front of a
+/// `\}` on its own line leaves that space behind; one that stopped in front of
+/// a `\}` on the *same* line took it with it, and then the statement itself is
+/// second-to-last and must not be given the brace's depth.
+fn isARunOfSpace(held: Array<Token>, child: Tree) -> Bool {
+  if child.to - child.from != 1 {
+    return false
+  }
+  match held.get(child.from) {
+    Some(token) => token.kind == Kind.Space
+    None => false
+  }
+}
+
 /// Whether `child` is a run of space holding a newline.
 fn breaksLine(source: String, held: Array<Token>, child: Tree) -> Bool {
   if child.to - child.from != 1 {
@@ -1513,9 +1721,32 @@ fn breaksLine(source: String, held: Array<Token>, child: Tree) -> Bool {
   }
 }
 
-/// The one column a member of a broken group leaves behind it: its comma.
-fn oneComma() -> Int {
-  1
+/// What a *statement* leaves room for, which nobody here knows: the rest of
+/// its own line, which [`reservedFor`] reads from the source.
+///
+/// `writeBrokenBody` writes statements and must hand this down rather than
+/// the member's zero. Handing down the zero let
+/// `fn toEndOfLine(var self, …) -> Tree \{` keep its parameters on an
+/// 82-column line, because the `-> Tree \{` behind them was no longer
+/// reserved.
+fn asksTheLine() -> Int {
+  -1
+}
+
+/// What a member of a broken group leaves room for, which is nothing.
+///
+/// It is written on a line of its own and the comma goes behind it, and
+/// `cove fmt` lets that comma sit in column 81: `expr`'s width test is
+/// `self.out.col() + width(&flat) <= MAX_WIDTH` with no reservation at all,
+/// and `readOptions([…])?.program.name(),` is 81 columns in the corpus and
+/// left there.
+///
+/// `arg_list` does reserve one, in the *other* test — the lone-argument
+/// escape is `indent + INDENT + width(&value) + 1 > MAX_WIDTH`, which
+/// [`worthBreaking`] has. The two are different questions and only one of
+/// them counts the comma.
+fn noReservation() -> Int {
+  0
 }
 
 /// How much of the line this group has to leave for what comes after it.
@@ -1623,81 +1854,65 @@ fn opensAHeader(source: String, held: Array<Token>, tree: Tree) -> Bool {
 /// Whether the `\{` at `body.from` opens a body that always breaks: a
 /// declaration's, a control flow header's, or a lambda's.
 ///
-/// The tree has no node for a header — a statement's own tokens are leaves —
-/// so the keyword is looked for where it has to be: walking back from the
-/// brace over the expression in front of it, skipping whatever is bracketed
-/// and stopping where a header cannot have started. The last word reached is
-/// the one that opened it.
+/// The tree has no node for a header, so the tokens are read instead: from
+/// the node the body belongs to, up to the brace, looking for one of the
+/// words that open such a body at the *outside* of any bracket.
 ///
-/// `from` bounds the walk to the node the body belongs to, and that is what
-/// makes a continued condition safe: `if a &&` with its `b \{` on the next
-/// line has a newline in the middle of its header, and a rule that stopped at
-/// the line would see only the `b`.
+/// # Forward, and not backward
+///
+/// This walked back from the brace to the first word it met, stopping where a
+/// header could not have begun — at a label, a comma, an assignment. Every
+/// one of those stops turned out to have a case where it was wrong, and each
+/// cost a family of the corpus: `if i % 7 == 0 \{` stopped at the `==`,
+/// `fn isEmpty<K, V>(…)` at the comma between its type parameters, and
+/// `fn headline<T: Summary>(…)` at the colon of its bound.
+///
+/// Going forward there is nothing to stop at. A keyword outside every bracket
+/// is a keyword that governs this brace, and a trailing closure —
+/// `tasks.spawn \{ … \}`, `clock.timeout(d) \{ … \}` — has none: the words in
+/// front of its brace are a receiver and a method. The lambda inside a call
+/// is reached with its own `fn` at depth zero, because the node it belongs to
+/// begins there.
 fn closesAHeader(
   source: String,
   held: Array<Token>,
   body: Tree,
   from: Int,
 ) -> Bool {
-  var word = -1
   var depth = 0
-  var i = body.from - 1
-  while i >= from {
+  var i = from
+  while i < body.from {
     match held.get(i) {
       Some(token) => {
         let c = byteOfPunct(source, held, i)
-        if c == ')' || c == ']' {
+        if c == '(' || c == '[' {
           depth = depth + 1
-        } else if c == '(' || c == '[' {
+        } else if c == ')' || c == ']' {
           depth = depth - 1
-          if depth < 0 {
-            i = from - 1
-          }
-        } else if depth == 0 {
-          // Where a header cannot have started before it: a label, a brace,
-          // an assignment, a match arm's arrow.
-          //
-          // A comma is *not* one. `export fn isEmpty<K, V>(entries: Map<K,
-          // V>) -> Bool \{` has one between its type parameters, and stopping
-          // there left the walk with nothing and the body unbroken. Every
-          // comma a header can hold is inside brackets the walk already
-          // counts, or inside the `<…>` it does not — and in neither case is
-          // it a place a declaration could have begun after.
-          if c == ':' || c == '\{' || c == '\}' ||
-            isAnArrowOrEquals(source, held, i) {
-            i = from - 1
-          } else if token.kind == Kind.Word && !isAModifier(source, held, i) {
-            word = i
-          }
+        } else if depth <= 0 && token.kind == Kind.Word &&
+          opensABody(source, token) {
+          return true
         }
       }
       None => { }
     }
-    i = i - 1
+    i = i + 1
   }
-  if word < 0 {
-    return false
-  }
-  match held.get(word) {
-    Some(token) => {
-      match source.sliceBytes(token.from, token.to) {
-        Ok(text) => {
-          // `breaks`: *"a declaration body, a control flow body, and a lambda
-          // body always read better broken."* All three open on a word, and a
-          // lambda's is the `fn` in front of its parameter list.
-          // A declaration body and a control flow body. A lambda's is not
-          // here: `closesAParameterList` has already said yes to it, and the
-          // `fn` of `fn(value) \{ … \}` has a `(` behind it rather than a
-          // name.
-          text == "if" || text == "while" || text == "for" || text == "match" ||
-            text == "else" || text == "impl" || text == "trait" ||
-            text == "struct" || text == "enum" ||
-            text == "fn" && !opensALambda(source, held, word)
-        }
-        Err(_) => false
-      }
+  false
+}
+
+/// Whether `token` is one of the words a body that always breaks opens on.
+///
+/// `breaks`: *"a declaration body, a control flow body, and a lambda body
+/// always read better broken."*
+fn opensABody(source: String, token: Token) -> Bool {
+  match source.sliceBytes(token.from, token.to) {
+    Ok(text) => {
+      text == "if" || text == "while" || text == "for" || text == "match" ||
+        text == "else" || text == "fn" || text == "impl" || text == "trait" ||
+        text == "struct" || text == "enum"
     }
-    None => false
+    Err(_) => false
   }
 }
 
@@ -1729,15 +1944,15 @@ fn isAnArrowOrEquals(source: String, held: Array<Token>, i: Int) -> Bool {
   }
 }
 
-/// Whether a body written on one line can be rewritten across several without
-/// losing anything.
+/// Whether `body` is one this can lay out.
 ///
-/// It has to have statements — `block` writes `\{ \}` for an empty one and
-/// does not break it — and it must hold no comment. [`writeBrokenBody`]
-/// writes the statements and puts the lines between them itself, so a comment
-/// that was between two of them has nowhere to go. `cove_syntax::format`
-/// places comments from their spans, through `lead` and `trail`; this has no
-/// such thing, and dropping one would be worse than leaving the line long.
+/// It has to have statements: `block` writes `\{ \}` for an empty one and does
+/// not break it.
+///
+/// A comment is no longer a reason to refuse. [`writeBrokenBody`] writes every
+/// child of the body and only *forces* the gaps between them to be lines, so a
+/// comment stays where it was written, and a line comment is guaranteed the
+/// break behind it that keeps it from eating what follows.
 fn writesBroken(source: String, held: Array<Token>, body: Tree) -> Bool {
   var statements = 0
   for child in body.children {
@@ -1745,23 +1960,7 @@ fn writesBroken(source: String, held: Array<Token>, body: Tree) -> Bool {
       statements = statements + 1
     }
   }
-  if statements == 0 {
-    return false
-  }
-  var at = body.from
-  while at < body.to {
-    match held.get(at) {
-      Some(token) => {
-        if token.kind == Kind.LineComment || token.kind == Kind.BlockComment ||
-          token.kind == Kind.DocComment {
-          return false
-        }
-      }
-      None => { }
-    }
-    at = at + 1
-  }
-  true
+  statements > 0
 }
 
 /// Writes `body` with a statement to a line, at `depth`.
@@ -1770,10 +1969,11 @@ fn writesBroken(source: String, held: Array<Token>, body: Tree) -> Bool {
 /// own one step further in, and the `\}` is a line at the depth the body
 /// opened at.
 ///
-/// The runs of space the source had between the statements are not written.
-/// They are what this is replacing — that is the whole point of it — and
-/// [`writesBroken`] has already refused any body where one of them carries
-/// something other than space.
+/// What it writes is not the body rebuilt from its statements — it is the
+/// body's own children, with the *gaps* between them forced to be lines. That
+/// is what lets it run over a body that is only partly on one line, which is
+/// what a `\}` pulled up onto the line above leaves: `impl Format \{` on its
+/// own line and `\} \}` at the end.
 fn writeBrokenBody(
   source: String,
   held: Array<Token>,
@@ -1781,28 +1981,51 @@ fn writeBrokenBody(
   depth: Int,
   var out: Vector<String>,
 ) {
-  match held.get(body.from) {
-    Some(token) => out.push(text(source, token))
-    None => { }
-  }
+  let children = body.children
+  let count = children.length()
   var last = body.from
-  for child in body.children {
-    if child.kind == Node.Stmt {
-      out.push("\n")
-      out.push(indentOf(depth + 1))
-      last = emit(source, held, child, last, depth + 1, -1, var out)
-      // A statement that stopped in front of a `\}` on the same line took the
-      // run of space between them with it — `\{ 1 \}` makes a statement of
-      // `1 `. On a line of its own that space is trailing, and the first rule
-      // in this file says it goes.
-      trimTrailing(var out)
+  var i = 0
+  for child in children {
+    let closing = i + 1 == count
+    // The run of space in front of the closing brace is the line that brace
+    // begins on, so it is written at the body's own depth — and only when it
+    // *is* a run of space. A statement that stopped in front of a `\}` on the
+    // same line took that space with it, and is then second-to-last itself.
+    let beforeTheClose = i + 2 == count && isARunOfSpace(held, child)
+    let at = if beforeTheClose {
+      depth
+    } else {
+      depth + 1
     }
+    if i == 0 || closing {
+      // The braces, at the depth the body opened at. The closer needs a line
+      // of its own, and gets one here when what stands in front of it was not
+      // a run of space to put it on.
+      if closing && !isARunOfSpace(held, childAt(children, i - 1)) {
+        trimTrailing(var out)
+        out.push("\n")
+        out.push(indentOf(depth))
+      }
+      last = emit(source, held, child, last, depth, asksTheLine(), var out)
+    } else if isARunOfSpace(held, child) && !breaksLine(source, held, child) {
+      // A gap that is not a line becomes one. The runs that already hold a
+      // newline go through `spacing` as they always did, which is what keeps
+      // a blank line between two statements to the one it is allowed.
+      trimTrailing(var out)
+      out.push("\n")
+      out.push(indentOf(at))
+    } else {
+      last = emit(source, held, child, last, at, asksTheLine(), var out)
+    }
+    i = i + 1
   }
-  out.push("\n")
-  out.push(indentOf(depth))
-  match held.get(body.to - 1) {
-    Some(token) => out.push(text(source, token))
-    None => { }
+}
+
+/// The child at `i`, or a placeholder leaf when there is none.
+fn childAt(children: Array<Tree>, i: Int) -> Tree {
+  match children.get(i) {
+    Some(child) => child
+    None => leafAt(0)
   }
 }
 
@@ -1885,4 +2108,365 @@ fn opensALambda(source: String, held: Array<Token>, at: Int) -> Bool {
 fn isAModifier(source: String, held: Array<Token>, i: Int) -> Bool {
   isWord(source, held, i, "export") || isWord(source, held, i, "test") ||
     isWord(source, held, i, "async") || isWord(source, held, i, "opaque")
+}
+
+/// Whether `member` is a chain long enough to break before its dots.
+///
+/// `call`: *"A chain of calls that is merely too long breaks before its
+/// dots."* It applies when `call_count(&ops) >= 2` and `chain_break_points`
+/// found one — a field access that follows a call, which is what makes
+/// `a.b().c` a chain rather than a path.
+fn breaksAtItsDots(source: String, held: Array<Token>, member: Tree) -> Bool {
+  var calls = 0
+  var dots = 0
+  var afterACall = false
+  for child in member.children {
+    if child.kind == Node.Group && byteOfPunct(source, held, child.from) == '(' {
+      calls = calls + 1
+      afterACall = true
+    } else if child.kind == Node.Leaf &&
+      byteOfPunct(source, held, child.from) == '.' && afterACall {
+      dots = dots + 1
+    }
+  }
+  calls >= 2 && dots > 0
+}
+
+/// `member` written with a line before each dot that follows a call.
+///
+/// `chain` writes the base and then each operator in turn: at a break point
+/// it starts a line one step in, and every argument list from there on is
+/// written at that step. The argument lists themselves are not flattened —
+/// `readOptions([…])?` may still break its array while the `.format` below it
+/// goes on a line of its own.
+fn writeChain(
+  source: String,
+  held: Array<Token>,
+  member: Tree,
+  depth: Int,
+  var out: Vector<String>,
+) {
+  var last = member.from
+  var afterACall = false
+  var level = depth
+  for child in member.children {
+    if afterACall && child.kind == Node.Leaf &&
+      byteOfPunct(source, held, child.from) == '.' {
+      level = depth + 1
+      // Whatever space stood in front of the dot is what the line break is
+      // replacing, and on a line of its own it would be trailing.
+      trimTrailing(var out)
+      out.push("\n")
+      out.push(indentOf(level))
+    }
+    last = emit(source, held, child, last, level, noReservation(), var out)
+    if child.kind == Node.Group && byteOfPunct(source, held, child.from) == '(' {
+      afterACall = true
+    }
+  }
+}
+
+/// Where the run of leaves holding `at` ends: the first body after it, or the
+/// end of the node.
+///
+/// An expression's right operand stops in front of the `\{` that opens the
+/// block behind it. `if_expr` writes the condition and *then* the block, and
+/// the condition's width question never sees the brace.
+fn expressionEnds(held: Array<Token>, tree: Tree, at: Int) -> Int {
+  for child in tree.children {
+    if child.kind == Node.Body && child.from >= at {
+      // And in front of the run of space that puts the brace on the line, for
+      // the same reason: `if a || b \{` at 82 columns is a condition of 80
+      // and `cove fmt` leaves the brace hanging over.
+      return child.from - 1
+    }
+  }
+  // A statement that stopped in front of a `\}` on the same line took the run
+  // of space between them with it, and that space is not part of what has to
+  // fit: `\{ f(a) == '(' \}` re-opened is an 80-column line, and counting the
+  // space in front of the brace made it 81 and split it.
+  if isARunOfSpace(held, childAt(tree.children, tree.children.length() - 1)) {
+    return tree.to - 1
+  }
+  tree.to
+}
+
+/// The loosest binary operator in `[from, to)` that is outside every bracket,
+/// or `0` when there is none.
+///
+/// `binary` is handed the top of the expression, which is the loosest
+/// operator in it, and splits there before anything tighter is considered.
+fn loosestIn(source: String, held: Array<Token>, from: Int, to: Int) -> Int {
+  var loosest = 0
+  var depth = 0
+  var angles = 0
+  var i = from
+  while i < to {
+    let c = byteOfPunct(source, held, i)
+    if c == '(' || c == '[' || c == '\{' {
+      depth = depth + 1
+    } else if c == ')' || c == ']' || c == '\}' {
+      depth = depth - 1
+    } else if c == '<' && opensAGenericList(held, i) {
+      // `Array<EventHandler>` is a type and not two comparisons. Counted as
+      // one, the plan split `let handlers: Array<EventHandler> = […]` at the
+      // `>`.
+      angles = angles + 1
+    } else if c == '>' && angles > 0 {
+      angles = angles - 1
+    } else if depth <= 0 && angles <= 0 {
+      let binds = bindingOf(source, held, i)
+      if binds > 0 && (loosest == 0 || binds < loosest) {
+        loosest = binds
+      }
+    }
+    i = i + 1
+  }
+  loosest
+}
+
+/// The depth a token is planned to begin a line at, or `-1`.
+fn levelPlanned(marks: Vector<Int>, levels: Vector<Int>, at: Int) -> Int {
+  var i = 0
+  while i < marks.length() {
+    if marks.get(i) == Some(at) {
+      return match levels.get(i) {
+        Some(level) => level
+        None => -1
+      }
+    }
+    i = i + 1
+  }
+  -1
+}
+
+/// Where the leaves in `[from, to)` have to break, written into `marks` and
+/// `levels`.
+///
+/// `binary`, unrolled. The expression is split at its top operator — the
+/// **last** of the loosest, because the language associates to the left — and
+/// the two halves are asked the same question: the left at the column this
+/// one started at, the right either behind the operator or on a line of its
+/// own one step in.
+///
+/// It is only ever called for a run of leaves that does not fit, which is why
+/// a list of the few positions it finds costs less than a mark for every
+/// token in the file.
+fn planBreaks(
+  source: String,
+  held: Array<Token>,
+  from: Int,
+  to: Int,
+  col: Int,
+  level: Int,
+  var marks: Vector<Int>,
+  var levels: Vector<Int>,
+) {
+  if col + widthBetween(source, held, from, to) <= maxWidth() {
+    return
+  }
+  let op = lastLoosest(source, held, from, to)
+  if op < 0 {
+    return
+  }
+  if op <= from {
+    return
+  }
+  let lhsEnd = op + 1
+  // The left half is asked without the operator in it. Left in, the search
+  // finds the same operator again and the recursion never ends.
+  planBreaks(source, held, from, op, col, level, var marks, var levels)
+  let rhs = nextSignificant(held, lhsEnd, to)
+  if rhs < 0 {
+    return
+  }
+  let after = columnAfter(source, held, from, lhsEnd, col, level, marks, levels)
+  if after + 1 + widthBetween(source, held, rhs, to) > maxWidth() {
+    marks.push(rhs)
+    levels.push(level + 1)
+    planBreaks(
+      source,
+      held,
+      rhs,
+      to,
+      (level + 1) * 2,
+      level + 1,
+      var marks,
+      var levels,
+    )
+  } else {
+    planBreaks(source, held, rhs, to, after + 1, level, var marks, var levels)
+  }
+}
+
+/// The column the leaves in `[from, to)` leave behind, written out one token
+/// at a time.
+///
+/// Not the sum of their widths. A break already planned inside them starts the
+/// line again at its own indent, and so does a *group* that cannot fit: after
+/// `widthBetween(\n  …,\n  )` the line is back at the closing bracket, however
+/// wide the call would have been on one line.
+///
+/// Reading it as a sum put `) > maxWidth() \{` on two lines — the `>` looked
+/// as though it stood at column 70 when it stands at column 7.
+fn columnAfter(
+  source: String,
+  held: Array<Token>,
+  from: Int,
+  to: Int,
+  col: Int,
+  level: Int,
+  marks: Vector<Int>,
+  levels: Vector<Int>,
+) -> Int {
+  var c = col
+  var i = from
+  while i < to {
+    let planned = levelPlanned(marks, levels, i)
+    if planned >= 0 {
+      c = planned * 2
+    }
+    let byte = byteOfPunct(source, held, i)
+    if byte == '(' || byte == '[' {
+      let close = closerOf(source, held, i, to)
+      if close < 0 {
+        return c + widthBetween(source, held, i, to)
+      }
+      let flat = widthBetween(source, held, i, close + 1)
+      c = if c + flat <= maxWidth() {
+        c + flat
+      } else {
+        // Broken: one member to a line, and the closing bracket on a line of
+        // its own at the depth the group opened at.
+        level * 2 + 1
+      }
+      i = close + 1
+      continue
+    }
+    c = c + widthBetween(source, held, i, i + 1)
+    i = i + 1
+  }
+  c
+}
+
+/// The index of the bracket closing the one at `at`, or `-1`.
+fn closerOf(source: String, held: Array<Token>, at: Int, to: Int) -> Int {
+  var depth = 0
+  var i = at
+  while i < to {
+    let c = byteOfPunct(source, held, i)
+    if c == '(' || c == '[' {
+      depth = depth + 1
+    } else if c == ')' || c == ']' {
+      depth = depth - 1
+      if depth == 0 {
+        return i
+      }
+    }
+    i = i + 1
+  }
+  -1
+}
+
+/// The last operator of the loosest binding in `[from, to)`, outside every
+/// bracket, or `-1`.
+fn lastLoosest(source: String, held: Array<Token>, from: Int, to: Int) -> Int {
+  let loosest = loosestIn(source, held, from, to)
+  if loosest == 0 {
+    return -1
+  }
+  var at = -1
+  var depth = 0
+  var angles = 0
+  var i = from
+  while i < to {
+    let c = byteOfPunct(source, held, i)
+    if c == '(' || c == '[' || c == '\{' {
+      depth = depth + 1
+    } else if c == ')' || c == ']' || c == '\}' {
+      depth = depth - 1
+    } else if c == '<' && opensAGenericList(held, i) {
+      // `Array<EventHandler>` is a type and not two comparisons. Counted as
+      // one, the plan split `let handlers: Array<EventHandler> = […]` at the
+      // `>`.
+      angles = angles + 1
+    } else if c == '>' && angles > 0 {
+      angles = angles - 1
+    } else if depth <= 0 && angles <= 0 && bindingOf(source, held, i) == loosest {
+      at = i
+    }
+    i = i + 1
+  }
+  at
+}
+
+/// Whether the `<` at `i` opens a generic list rather than comparing.
+///
+/// It is written against the name it belongs to — `Array<Token>`, never
+/// `Array <Token>` — and a comparison has a space on each side, which
+/// `cove_syntax::format` guarantees. The same heuristic `parse.cove`'s
+/// `opensGenerics` makes, and its doc says what it costs.
+fn opensAGenericList(held: Array<Token>, i: Int) -> Bool {
+  match held.get(i - 1) {
+    Some(token) => token.kind == Kind.Word
+    None => false
+  }
+}
+
+/// Whether one of `tree`'s own groups is already written across lines.
+///
+/// The plan measures flat widths, and a group that is already broken is not
+/// written flat: after `widthBetween(\n  …,\n)` the line begins again at the
+/// closing bracket, wherever the sum of the tokens said it would be. So when
+/// there is one, the breaks the source has are the ones it keeps.
+fn holdsABrokenGroup(source: String, held: Array<Token>, tree: Tree) -> Bool {
+  for child in tree.children {
+    if indenting(child.kind) && child.kind != Node.Body &&
+      isBroken(source, held, child) {
+      return true
+    }
+  }
+  false
+}
+
+/// Whether the leaves in `[from, to)` run past the limit when written from
+/// `col`.
+///
+/// The same question as `col + widthBetween(…) > maxWidth()` and not the same
+/// cost: it stops as soon as the answer is yes, so a line that is far too long
+/// is decided in eighty tokens rather than in all of them. Asked of every
+/// statement and every member in the corpus, that is the difference between a
+/// scan of the node and a scan of the line.
+fn overflows(
+  source: String,
+  held: Array<Token>,
+  from: Int,
+  to: Int,
+  col: Int,
+) -> Bool {
+  var width = col
+  var at = from
+  while at < to {
+    match held.get(at) {
+      Some(token) => {
+        width = width + if token.kind == Kind.Space {
+          if wantsASpace(source, held, at) {
+            1
+          } else {
+            0
+          }
+        } else if isTriviaKind(token.kind) {
+          1
+        } else {
+          text(source, token).length()
+        }
+        if width > maxWidth() {
+          return true
+        }
+      }
+      None => { }
+    }
+    at = at + 1
+  }
+  false
 }

@@ -575,6 +575,46 @@ test fn a_match_arm_and_a_generic_comma() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// **An expression that does not fit breaks at its operator.**
+///
+/// The second place this printer puts a newline the source has not got, and
+/// the last of the four mutations to be satisfied by one.
+///
+/// `binary` is handed the top of the expression — for a left-associative
+/// chain that is the **last** operator of the loosest binding — writes the
+/// left half, and then asks whether the right one fits on what is left of the
+/// line. So `a && b && c` that does not fit keeps `a && b` together and moves
+/// `c`. Filling lines greedily from the left would have moved `b` as well,
+/// and that is what a first attempt did to half the corpus.
+///
+/// The answer below was read off `cove fmt` by running it, on an input one
+/// column wider than the one it leaves alone.
+test fn an_expression_breaks_at_its_operator() -> Result<Unit, Error> {
+  let flat = "\n".join(["fn f(a: Int, b: Int, c: Int, d: Int) -> Bool \{", "  if aVeryLongCondition(a, b) && anotherLongCondition(c, d) && aThirdOneHere(a, c) \{", "    return true", "  \}", "  false", "\}", ""])
+  let want = "\n".join(["fn f(a: Int, b: Int, c: Int, d: Int) -> Bool \{", "  if aVeryLongCondition(a, b) && anotherLongCondition(c, d) &&", "    aThirdOneHere(a, c) \{", "    return true", "  \}", "  false", "\}", ""])
+  let held = tokens(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  // One column narrower and `cove fmt` leaves it, so this one must too.
+  let fits = "\n".join(["fn f(a: Int, b: Int, c: Int, d: Int) -> Bool \{", "  if aVeryLongCondition(a, b) && anotherLongCondition(c, d) && aThirdOne(a, c) \{", "    return true", "  \}", "  false", "\}", ""])
+  assert(roundTrips(fits))?
+  Ok(())
+}
+
+/// **A chain of calls breaks before its dots.**
+///
+/// `call` asks this before anything else it would do: when the chain has two
+/// calls in it and a field access follows one, `chain_break_points` names the
+/// dots and `chain` starts a line at each. `judge(a, b).detail()` at 84
+/// columns becomes the call on one line and `.detail()` on the next, where
+/// breaking the arguments would have made four lines of it.
+test fn a_chain_breaks_before_its_dots() -> Result<Unit, Error> {
+  let flat = "\n".join(["fn f() -> Int \{", "  assertEqual(", "    judge(checking(None, Some(\"stack trace\"), None), answering(\"a stack trace\")).detail(),", "    \"the body contains `stack trace`\",", "  )?", "\}", ""])
+  let want = "\n".join(["fn f() -> Int \{", "  assertEqual(", "    judge(checking(None, Some(\"stack trace\"), None), answering(\"a stack trace\"))", "      .detail(),", "    \"the body contains `stack trace`\",", "  )?", "\}", ""])
+  let held = tokens(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  Ok(())
+}
+
 /// **A comparison is not an assignment.**
 ///
 /// `closesAHeader` walks back from a brace to the word that opened the body,

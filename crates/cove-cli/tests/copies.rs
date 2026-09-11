@@ -372,13 +372,20 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// emits, and the way to check is to look for the rows rather than to argue
 /// about the total.
 ///
+/// **The fourth rise was a row growing rather than appearing.** 1854 to 1862,
+/// and the table put all of it in `examples:covefmtBench`, which went from
+/// 10310 instructions to 11195 as covefmt learned to break an expression at
+/// its operator and a chain before its dots. The same reading applies: more
+/// Cove in the repository is more copies in the survey, and it says nothing
+/// about what the lowering does with the Cove that was already here.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 1858;
+const FORWARDABLE_COPIES: usize = 1862;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
