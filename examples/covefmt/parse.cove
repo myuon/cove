@@ -159,6 +159,79 @@ impl Parser {
     nodeOf(kind, from, self.at, held.toArray())
   }
 
+  /// A `( ... )`, `[ ... ]` or `< ... >` group: the brackets, the trivia
+  /// between members, and the members themselves.
+  ///
+  /// The same shape [`Parser::body`] gives a `{ ... }`, one level and not
+  /// all of them: a member's own tokens stay leaves, and what this adds is
+  /// where one member ends and the next begins. That is the boundary a
+  /// formatter needs to decide the *one thing* it cannot decide without it —
+  /// how far in a member sits when the group is written over several lines.
+  ///
+  /// A member ends at a comma at the group's own depth. Commas deeper than
+  /// that belong to a group inside this one — `f(g(a, b), c)` has three —
+  /// and a member that ends at the closing bracket has no comma at all.
+  fn grouped(var self, kind: Node) -> Tree {
+    let from = self.at
+    var held = Vector.of()
+    let opener = self.punctByte(self.at)
+    if opener != '(' && opener != '[' {
+      return self.balanced(kind)
+    }
+    held.push(self.leaf())
+    while !self.done() {
+      if self.trivia(var held) {
+        continue
+      }
+      let c = self.punctByte(self.at)
+      if c == ')' || c == ']' {
+        held.push(self.leaf())
+        return nodeOf(kind, from, self.at, held.toArray())
+      }
+      if c == ',' {
+        // A comma of this group belongs to the group and not to the member
+        // in front of it, the way a body's braces belong to the body.
+        held.push(self.leaf())
+        continue
+      }
+      let before = self.at
+      held.push(self.member())
+      if self.at == before {
+        held.push(self.leaf())
+      }
+    }
+    nodeOf(kind, from, self.at, held.toArray())
+  }
+
+  /// One member of a group, ending at a comma of the group's own depth or at
+  /// the bracket that closes it.
+  fn member(var self) -> Tree {
+    let from = self.at
+    var held = Vector.of()
+    var depth = 0
+    while !self.done() {
+      let c = self.punctByte(self.at)
+      if depth <= 0 && (c == ',' || c == ')' || c == ']') {
+        return nodeOf(Node.Member, from, self.at, held.toArray())
+      }
+      // A group inside a member is a group: `g(h(1))` is a call whose one
+      // argument holds another, and a formatter indents the inner one from
+      // the outer. Taking it whole here is what makes that depth readable
+      // rather than a run of leaves — the same split `statement` makes.
+      if depth <= 0 && (c == '(' || c == '[') {
+        held.push(self.grouped(Node.Group))
+        continue
+      }
+      if c == '(' || c == '[' || c == '\{' {
+        depth = depth + 1
+      } else if c == ')' || c == ']' || c == '\}' {
+        depth = depth - 1
+      }
+      held.push(self.leaf())
+    }
+    nodeOf(Node.Member, from, self.at, held.toArray())
+  }
+
   /// A `{ ... }` body: the braces, the trivia between statements, and the
   /// statements themselves.
   ///
@@ -254,15 +327,25 @@ impl Parser {
         return nodeOf(Node.Stmt, from, self.at, held.toArray())
       }
       if c == '(' || c == '[' {
-        depth = depth + 1
-      } else if c == ')' || c == ']' {
-        depth = depth - 1
-        if depth < 0 {
-          // A closer that closes nothing ends the statement rather than
-          // running past it, for `balanced`'s reason: one typo should cost
-          // one statement and not the rest of the file.
+        // A group is taken whole, as its members: a statement's own tokens
+        // are leaves, but a group inside one is a node the formatter can
+        // decide the depth of. It is the same split `body` makes — what the
+        // tree can see into, it does.
+        //
+        // Depth is not counted for it any more, because `grouped` runs to
+        // its own closing bracket: a statement that has taken a group is
+        // back at its own level when it answers.
+        held.push(self.grouped(Node.Group))
+        if self.ends(0, escaping) {
           return nodeOf(Node.Stmt, from, self.at, held.toArray())
         }
+        continue
+      }
+      if c == ')' || c == ']' {
+        // A closer that closes nothing ends the statement rather than
+        // running past it, for `balanced`'s reason: one typo should cost
+        // one statement and not the rest of the file.
+        return nodeOf(Node.Stmt, from, self.at, held.toArray())
       }
       held.push(self.leaf())
       if self.ends(depth, escaping) {
