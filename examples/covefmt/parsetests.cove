@@ -549,6 +549,45 @@ test fn a_break_that_buys_nothing_is_not_made() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// **A hug inside a hug.**
+///
+/// `hug_head` calls itself. The outer call's last argument here is not a
+/// closure — it is a call — but *its* last argument is one and it hugs, so the
+/// outer head runs all the way to the lambda's brace and the whole thing keeps
+/// its line. Asked one level deep the answer is no, and the outer call then
+/// breaks one argument to a line.
+///
+/// This became askable at all when `isBroken` started asking about a group's
+/// own members rather than about every token it covers. Before that the
+/// newline inside the lambda made the outer call look like a group that was
+/// already laid out, and it was never offered a decision — right answer, no
+/// reasoning, and nothing to get wrong.
+test fn a_hug_inside_a_hug() -> Result<Unit, Error> {
+  let source = "\n".join(["fn f() -> Int \{", "  builder.get(\"/health\", withObservability(app, async fn(request) \{", "    ok(request)", "  \}))", "\}", ""])
+  assert(roundTrips(source))?
+  Ok(())
+}
+
+/// **A control flow body always breaks, whatever is in it.**
+///
+/// `breaks`: *"a declaration body, a control flow body, and a lambda body
+/// always read better broken."* `breaksAsABody` had the trailing-closure rule
+/// only — one statement between the braces and no `)` in front of them keeps
+/// its line — and `if outside \{ 0 \}` has one statement too. Read as a closure
+/// it did not force its group to break, so
+/// `Ok(Options(…, food: if outside \{ 0 \}, …))` came out on whatever line it
+/// was written on.
+///
+/// The tree has no node for a header, so `closesAHeader` walks back from the
+/// brace to the word that opened it.
+test fn a_control_flow_body_always_breaks() -> Result<Unit, Error> {
+  let source = "\n".join(["fn f(world: World) -> Array<Patch> \{", "  var found = Vector.of()", "  for heading in headings() \{", "    found.push(Patch(heading: heading, food: if outside \{", "      0", "    \} else \{", "      foodAt(world)", "    \}, occupied: seen))", "  \}", "  found.freeze()", "\}", ""])
+  let want = "\n".join(["fn f(world: World) -> Array<Patch> \{", "  var found = Vector.of()", "  for heading in headings() \{", "    found.push(Patch(", "      heading: heading,", "      food: if outside \{", "        0", "      \} else \{", "        foodAt(world)", "      \},", "      occupied: seen,", "    ))", "  \}", "  found.freeze()", "\}", ""])
+  let held = tokens(source)
+  assertEqual(print(source, held, parseTokens(source, held)), want)?
+  Ok(())
+}
+
 /// **What a group reserves depends on what kind of group it is.**
 ///
 /// `cove_syntax::format` has two answers and they are not the same.

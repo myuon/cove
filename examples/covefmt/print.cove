@@ -122,14 +122,8 @@ fn emit(
       let hugs = !listed && hugsItsLast(source, held, tree, column(out))
       if fits || !listed && !worthBreaking(source, held, tree, depth) {
         out.push(verbatim(source, held, tree))
-      } else if hugs && headIsAGroup(tree) {
-        out.push(hugged(source, held, tree, depth))
       } else if hugs {
-        // A closure hugs, and writing one means writing the statements of a
-        // body rather than the members of a group — which the emitting loop
-        // below already does and this does not. Keeping the line is what it
-        // can do, and is right for a source that already hugs.
-        out.push(verbatim(source, held, tree))
+        writeHugged(source, held, tree, depth, var out)
       } else {
         writeBroken(source, held, tree, depth, var out)
       }
@@ -550,7 +544,7 @@ fn mustBreak(source: String, held: Array<Token>, tree: Tree) -> Bool {
 /// `!block_is_empty(block)`, so `fn() \{ \}` stays on its line.
 fn holdsABody(source: String, held: Array<Token>, tree: Tree) -> Bool {
   for child in tree.children {
-    if child.kind == Node.Body && breaksAsABody(source, held, child) {
+    if child.kind == Node.Body && breaksAsABody(source, held, child, tree.from) {
       return true
     }
     if holdsABody(source, held, child) {
@@ -575,11 +569,25 @@ fn holdsABody(source: String, held: Array<Token>, tree: Tree) -> Bool {
 /// "the tail" — a body's children are its braces, its trivia and its
 /// statements, and one statement between two braces is the shape the rule is
 /// about.
-fn breaksAsABody(source: String, held: Array<Token>, body: Tree) -> Bool {
+fn breaksAsABody(
+  source: String,
+  held: Array<Token>,
+  body: Tree,
+  from: Int,
+) -> Bool {
   // A lambda has a parameter list, and a trailing closure has nothing in
   // front of its brace but the call it trails. The token before the `{` is
   // what says which: `fn(item) { … }` closes one and `spawn { … }` does not.
   if byteOfPunct(source, held, previousSignificant(held, body.from)) == ')' {
+    return true
+  }
+  // A control flow body always breaks, whatever is in it. `breaks` says so —
+  // "a declaration body, a control flow body, and a lambda body always read
+  // better broken" — and the one-statement rule below is about a trailing
+  // closure and only about one. `if outside { 0 }` has one statement too, and
+  // reading it as a closure is how `Ok(Options(…, food: if outside { 0 } …))`
+  // came out on whatever line it was written on.
+  if closesAHeader(source, held, body, from) {
     return true
   }
   var statements = 0
@@ -678,27 +686,28 @@ fn isClosed(source: String, held: Array<Token>, tree: Tree) -> Bool {
   c == ')' || c == ']'
 }
 
-/// Whether `tree` is written across more than one line.
+/// Whether `tree`'s own members are written on lines of their own.
 ///
-/// A newline and not merely space: a group that is already on one line is
-/// left alone rather than rebuilt, and that is not an optimisation.
-/// Rebuilding it would be deciding the space *inside* it — `f(a,  b)` would
-/// become `f(a, b)` — and how much space goes between two tokens is a rule
-/// this slice has not got to. Asking about space rather than about newlines
-/// is how `a_line_does_not_end_on_a_blank` started failing while this was
-/// being written.
+/// A newline and not merely space: a group that is already laid out is left
+/// alone rather than rebuilt, and that is not an optimisation. Rebuilding it
+/// would be deciding the space *inside* it — `f(a,  b)` would become
+/// `f(a, b)` — and how much space goes between two tokens is a rule this
+/// slice has not got to. Asking about space rather than about newlines is how
+/// `a_line_does_not_end_on_a_blank` started failing while this was being
+/// written.
+///
+/// **Its own members, and not every token it covers.** A newline inside a
+/// body one of the members holds is that body's layout and says nothing about
+/// this group's: `Ok(Options(manifest: match … \{ … \}, plan: …))` written on
+/// one line has a newline in the middle of it, and answering "already laid
+/// out" to that meant the group was never offered a decision and kept
+/// whatever line it came on. The runs of space between the members are the
+/// ones this group put there.
 fn isBroken(source: String, held: Array<Token>, tree: Tree) -> Bool {
-  var at = tree.from
-  while at < tree.to {
-    match held.get(at) {
-      Some(token) => {
-        if token.kind == Kind.Space && endsLine(source, token) {
-          return true
-        }
-      }
-      None => { }
+  for child in tree.children {
+    if breaksLine(source, held, child) {
+      return true
     }
-    at = at + 1
   }
   false
 }
@@ -1065,7 +1074,7 @@ fn hugsItsLast(
   // initializer in place and `write(path, render(…))` breaks one argument to
   // a line, which is the difference between a shape that reads as one call
   // and a list that happens to end in a call.
-  if !(isAClosure(last) || members == 1) {
+  if !(bottomsOutInAClosure(source, held, last) || members == 1) {
     return false
   }
   if !canBeHugged(source, held, last) {
@@ -1190,13 +1199,13 @@ fn headIsAGroup(tree: Tree) -> Bool {
 /// not `indent + INDENT`. So the nested group's members land one step in and
 /// its closing bracket comes back to the call's own depth, where this call's
 /// `)` joins it and the line reads `))`.
-fn hugged(
+fn writeHugged(
   source: String,
   held: Array<Token>,
   tree: Tree,
   depth: Int,
-) -> String {
-  var out = Vector.of<String>()
+  var out: Vector<String>,
+) {
   match held.get(tree.from) {
     Some(token) => out.push(text(source, token))
     None => { }
@@ -1223,7 +1232,6 @@ fn hugged(
     Some(token) => out.push(text(source, token))
     None => { }
   }
-  "".join(out.toArray())
 }
 
 /// The last member, written with the group inside it broken: its own head,
@@ -1238,10 +1246,25 @@ fn writeHug(
   depth: Int,
   var out: Vector<String>,
 ) {
+  // A lambda or a trailing closure is written where it stands, its body
+  // placed by the emitting loop rather than rebuilt. `hug_last` writes the
+  // last argument with `self.expr(…, indent)`, at the call's own depth, which
+  // is the depth this was handed.
+  if isAClosure(member) {
+    emit(source, held, member, member.from, depth, oneComma(), var out)
+    return
+  }
   for child in member.children {
     if child.kind == Node.Group && hasAMember(child) {
       out.push(tokensBetween(source, held, member.from, child.from))
-      writeBroken(source, held, child, depth, var out)
+      // A hug inside a hug: `withObservability(app, async fn(request) \{ … \})`
+      // keeps its own head whole and expands *its* last argument, which is
+      // what makes `hug_head`'s recursion visible in the output.
+      if hugsInto(source, held, child) {
+        writeHugged(source, held, child, depth, var out)
+      } else {
+        writeBroken(source, held, child, depth, var out)
+      }
       out.push(tokensBetween(source, held, child.to, member.to))
       return
     }
@@ -1294,6 +1317,81 @@ fn isAClosure(member: Tree) -> Bool {
     }
   }
   false
+}
+
+/// Whether `member`'s head bottoms out in a closure — `hug_head`'s second
+/// answer, and the reason that function calls itself.
+///
+/// `builder.get("/health", withObservability(app, async fn(request) \{ … \}))`
+/// is a hug inside a hug. The outer call's last argument is not a closure; it
+/// is a call. But *its* last argument is one, and it hugs, so the outer head
+/// runs all the way to the lambda's brace and the whole thing keeps its line.
+///
+/// Asked one level deep the answer is no, and the outer call then breaks one
+/// argument to a line — which is what covefmt wrote before this, on four
+/// files of the corpus.
+fn bottomsOutInAClosure(
+  source: String,
+  held: Array<Token>,
+  member: Tree,
+) -> Bool {
+  if isAClosure(member) {
+    return true
+  }
+  for child in member.children {
+    if child.kind == Node.Group && hasAMember(child) {
+      return hugsInto(source, held, child) &&
+        bottomsOutInAClosure(source, held, lastMemberOf(child))
+    }
+  }
+  false
+}
+
+/// Whether `group`'s own last member is one it would hug — `hug_head`'s
+/// inner test, which is `hug_applies` and the refusal to hug past an earlier
+/// argument that breaks.
+///
+/// The two width tests are not here. They belong to `hug_last`, which decides
+/// whether the outermost call hugs at all; this one only asks what shape the
+/// head has.
+fn hugsInto(source: String, held: Array<Token>, group: Tree) -> Bool {
+  var members = 0
+  for child in group.children {
+    if child.kind == Node.Member {
+      members = members + 1
+    }
+  }
+  if members == 0 {
+    return false
+  }
+  let last = lastMemberOf(group)
+  if !canBeHugged(source, held, last) {
+    return false
+  }
+  if !(bottomsOutInAClosure(source, held, last) || members == 1) {
+    return false
+  }
+  var seen = 0
+  for child in group.children {
+    if child.kind == Node.Member {
+      seen = seen + 1
+      if seen < members && mustBreak(source, held, child) {
+        return false
+      }
+    }
+  }
+  true
+}
+
+/// `group`'s last member, which every caller here has already checked it has.
+fn lastMemberOf(group: Tree) -> Tree {
+  var last = group
+  for child in group.children {
+    if child.kind == Node.Member {
+      last = child
+    }
+  }
+  last
 }
 
 /// Whether `tree` has a `Node.Member` among its children.
@@ -1485,6 +1583,93 @@ fn opensAHeader(source: String, held: Array<Token>, tree: Tree) -> Bool {
         }
         Err(_) => false
       }
+    }
+    None => false
+  }
+}
+
+/// Whether the `\{` at `body.from` closes the header of an `if`, a `while`, a
+/// `for`, a `match` or an `else`.
+///
+/// The tree has no node for a header — a statement's own tokens are leaves —
+/// so the keyword is looked for where it has to be: walking back from the
+/// brace over the expression in front of it, skipping whatever is bracketed
+/// and stopping where a header cannot have started. The last word reached is
+/// the one that opened it.
+///
+/// `from` bounds the walk to the node the body belongs to, and that is what
+/// makes a continued condition safe: `if a &&` with its `b \{` on the next
+/// line has a newline in the middle of its header, and a rule that stopped at
+/// the line would see only the `b`.
+fn closesAHeader(
+  source: String,
+  held: Array<Token>,
+  body: Tree,
+  from: Int,
+) -> Bool {
+  var word = -1
+  var depth = 0
+  var i = body.from - 1
+  while i >= from {
+    match held.get(i) {
+      Some(token) => {
+        let c = byteOfPunct(source, held, i)
+        if c == ')' || c == ']' {
+          depth = depth + 1
+        } else if c == '(' || c == '[' {
+          depth = depth - 1
+          if depth < 0 {
+            i = from - 1
+          }
+        } else if depth == 0 {
+          // Where a header cannot have started before it: a label, a
+          // separator, a brace, an assignment, a match arm's arrow.
+          if c == ':' || c == ',' || c == '\{' || c == '\}' ||
+            isAnArrowOrEquals(source, held, i) {
+            i = from - 1
+          } else if token.kind == Kind.Word {
+            word = i
+          }
+        }
+      }
+      None => { }
+    }
+    i = i - 1
+  }
+  if word < 0 {
+    return false
+  }
+  match held.get(word) {
+    Some(token) => {
+      match source.sliceBytes(token.from, token.to) {
+        Ok(text) => {
+          text == "if" || text == "while" || text == "for" || text == "match" ||
+            text == "else"
+        }
+        Err(_) => false
+      }
+    }
+    None => false
+  }
+}
+
+/// Whether the token at `i` is `=`, `=>`, or a compound assignment.
+fn isAnArrowOrEquals(source: String, held: Array<Token>, i: Int) -> Bool {
+  match held.get(i) {
+    Some(token) => {
+      if token.kind != Kind.Punct {
+        return false
+      }
+      let width = token.to - token.from
+      if width != 1 && width != 2 {
+        return false
+      }
+      let a = source.byteAt(token.from)
+      if width == 1 {
+        return a == '='
+      }
+      source.byteAt(token.from + 1) == '=' ||
+        a == '=' && source.byteAt(token.from + 1) == '>'
     }
     None => false
   }
