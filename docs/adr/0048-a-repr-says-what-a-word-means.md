@@ -7,6 +7,10 @@
 - Supersedes nothing. [ADR 0034](0034-one-physical-word-stack.md) decided the
   word is untagged and its meaning lives in static metadata; this decides what
   that metadata is allowed to say, and changes nothing about the word
+- Superseded in part by
+  [ADR 0050](0050-two-case-indices-compare-as-the-words-they-are.md): its
+  rejection of a `Compare::Tag`, which that ADR adds for comparing two tags to
+  each other rather than a tag to an integer
 
 ## Context
 

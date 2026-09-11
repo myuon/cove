@@ -343,6 +343,15 @@ written into. It goes in the payload half
 [ADR 0041](docs/adr/0041-a-slot-number-fits-in-sixteen-bits.md) left free, so
 the instruction is the same eight bytes and the machine is untouched.
 
+[ADR 0050](docs/adr/0050-two-case-indices-compare-as-the-words-they-are.md)
+lets `==` on an enum with no payload be one instruction. Such a value is its
+discriminant and nothing else, so `Kind.Space == Kind.Word` is `1 == 2`, and
+walking it word by word through `Any.equals` cost 66 ns a comparison — 8% of a
+native profile of the formatter, which reads a token's kind in every loop it
+has. A sixth `Compare` admits a `Tag` on both sides and refuses everything
+else, so what [ADR 0048](docs/adr/0048-a-repr-says-what-a-word-means.md) was
+protecting — a case index read as a number — is refused where it always was.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles

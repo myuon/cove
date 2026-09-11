@@ -76,6 +76,22 @@ pub enum Compare {
     /// shared storage, and it is the one comparison that is allowed to look
     /// at a reference as bits, because that is what it is asking about.
     Identity,
+    /// Two case indices, as the integers they are.
+    ///
+    /// [`Inst::Tag`] says a tag is refused by arithmetic, ordering and
+    /// integer comparison, because none of those accepts that `Repr` — and
+    /// that refusal is what keeps a case index from being confused with a
+    /// number. This does not weaken it: it accepts a `Tag` and nothing else,
+    /// so the pairing a tag can take part in is still only with another tag.
+    ///
+    /// What it is for is `Kind.Space == Kind.Word`, which is `1 == 2`. An
+    /// enum with no payload is one word wide and that word is the
+    /// discriminant, so two of them are equal exactly when the two words are.
+    /// Walked instead by `Any.equals`, the same question measured 342 ms
+    /// against 210 for 2,000,000 comparisons — 66 ns of builtin call apiece,
+    /// and 8% of a native profile of a formatter that reads a token's kind in
+    /// every loop it has.
+    Tag,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

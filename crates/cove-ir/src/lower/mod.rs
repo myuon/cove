@@ -1827,6 +1827,24 @@ impl Body<'_> {
         )
     }
 
+    /// Whether a value of this layout is a case index and nothing else.
+    ///
+    /// An enum with no payload is one word wide and that word is the
+    /// discriminant, so `Kind.Space == Kind.Word` is `1 == 2`.
+    ///
+    /// Asked separately from [`Self::is_scalar`] because the layout is not a
+    /// [`Shape::Word`](crate::layout::Shape::Word): the shape says what a
+    /// value is *made of*, and an enum is made of a discriminant and a
+    /// payload region however empty that region turns out to be. What this
+    /// asks is narrower — whether the instruction set can compare it in one
+    /// step.
+    fn is_case_index(&self, layout: LayoutId) -> bool {
+        matches!(
+            &self.pool.shapes.layout(layout).shape,
+            crate::layout::Shape::Enum { payload, .. } if payload.is_empty()
+        )
+    }
+
     /// Whether `layout` is the string family.
     ///
     /// A `String` is the one heap value the language orders: `a < b` on two

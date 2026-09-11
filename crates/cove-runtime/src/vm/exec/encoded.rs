@@ -170,6 +170,12 @@ const LT_REF: u8 = Op::Cmp(Compare::Identity, CmpOp::Lt).number();
 const LE_REF: u8 = Op::Cmp(Compare::Identity, CmpOp::Le).number();
 const GT_REF: u8 = Op::Cmp(Compare::Identity, CmpOp::Gt).number();
 const GE_REF: u8 = Op::Cmp(Compare::Identity, CmpOp::Ge).number();
+const EQ_TAG: u8 = Op::Cmp(Compare::Tag, CmpOp::Eq).number();
+const NE_TAG: u8 = Op::Cmp(Compare::Tag, CmpOp::Ne).number();
+const LT_TAG: u8 = Op::Cmp(Compare::Tag, CmpOp::Lt).number();
+const LE_TAG: u8 = Op::Cmp(Compare::Tag, CmpOp::Le).number();
+const GT_TAG: u8 = Op::Cmp(Compare::Tag, CmpOp::Gt).number();
+const GE_TAG: u8 = Op::Cmp(Compare::Tag, CmpOp::Ge).number();
 
 const ADD_INT_IMM: u8 = Op::ArithImm(ArithOp::Add).number();
 const SUB_INT_IMM: u8 = Op::ArithImm(ArithOp::Sub).number();
@@ -705,11 +711,12 @@ pub(super) fn dispatch<'s, 'a>(
             GT_FLOAT => cmp_float!(|x, y| x > y),
             GE_FLOAT => cmp_float!(|x, y| x >= y),
 
-            EQ_BOOL | EQ_REF => cmp_word!(true),
-            NE_BOOL | NE_REF => cmp_word!(false),
-            LT_BOOL | LE_BOOL | GT_BOOL | GE_BOOL | LT_REF | LE_REF | GT_REF | GE_REF => {
-                not_ordered!()
-            }
+            // A case index is a word and compares as one, which is the whole
+            // of what `Kind.Space == Kind.Word` asks.
+            EQ_BOOL | EQ_REF | EQ_TAG => cmp_word!(true),
+            NE_BOOL | NE_REF | NE_TAG => cmp_word!(false),
+            LT_BOOL | LE_BOOL | GT_BOOL | GE_BOOL | LT_REF | LE_REF | GT_REF | GE_REF | LT_TAG
+            | LE_TAG | GT_TAG | GE_TAG => not_ordered!(),
 
             EQ_STR => cmp_str!(CmpOp::Eq),
             NE_STR => cmp_str!(CmpOp::Ne),

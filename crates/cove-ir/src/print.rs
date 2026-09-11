@@ -465,6 +465,7 @@ fn compare_name(on: Compare) -> &'static str {
         Compare::Float => "float",
         Compare::Bool => "bool",
         Compare::Str => "str",
+        Compare::Tag => "tag",
         Compare::Identity => "identity",
     }
 }

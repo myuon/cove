@@ -712,7 +712,15 @@ impl Body<'_> {
             op,
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
         );
-        if arith_of(op).is_none() && !self.is_scalar(a.layout) && !ordering {
+        // An enum with no payload is the discriminant and nothing else, and
+        // two of those are equal exactly when the two words are. It goes to
+        // the instruction below rather than to the walk, which for a token's
+        // kind read in every loop of a formatter was 8% of the run.
+        if arith_of(op).is_none()
+            && !self.is_scalar(a.layout)
+            && !ordering
+            && !self.is_case_index(a.layout)
+        {
             let equal = op == BinaryOp::Eq;
             self.compare_values(expr, equal, lhs, dst.slot, &a, &b);
             self.release(b, expr.span);
@@ -2470,6 +2478,7 @@ pub(super) fn compare_of(repr: Repr) -> Compare {
         Repr::Float => Compare::Float,
         Repr::Bool => Compare::Bool,
         Repr::Ref => Compare::Str,
+        Repr::Tag => Compare::Tag,
         _ => Compare::Int,
     }
 }
