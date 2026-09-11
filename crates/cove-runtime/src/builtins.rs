@@ -857,6 +857,28 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Int(text.len() as i64)))
             }
+            "byteAt" => {
+                let args = expect_args("String.byteAt", args, 1, span)?;
+                let Value(Repr::Int(offset)) = &args[0] else {
+                    return Err(type_error("String.byteAt", "offset", "Int", &args[0], span));
+                };
+                // Refused rather than answered, which is `sliceBytes`'s rule
+                // and not `codePointAtByte`'s: a byte offset out of range is
+                // one this type never handed out, and `byteLength()` is how a
+                // caller knows the range. The VM's `Inst::ByteAt` refuses in
+                // the same words.
+                match usize::try_from(*offset)
+                    .ok()
+                    .and_then(|at| text.as_bytes().get(at))
+                {
+                    Some(byte) => Ok(Value(Repr::Int(*byte as i64))),
+                    None => Err(RuntimeError::new(format!(
+                        "`byteAt` is `{offset}`, and a byte offset into this string is 0 to {}",
+                        text.len() as i64 - 1
+                    ))
+                    .at(span)),
+                }
+            }
             "codePointAtByte" => {
                 let args = expect_args("String.codePointAtByte", args, 1, span)?;
                 let Value(Repr::Int(offset)) = &args[0] else {

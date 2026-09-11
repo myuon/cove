@@ -392,6 +392,11 @@ static EXERCISES: &[Exercise] = &[
     },
     Exercise {
         ty: "String",
+        name: "byteAt",
+        body: "  let text = \"h\u{e9}\"\n  text.byteAt(1)",
+    },
+    Exercise {
+        ty: "String",
         name: "codePointAtByte",
         body: "  let text = \"hello\"\n  text.codePointAtByte(0).unwrapOr(-1)",
     },

@@ -1,0 +1,66 @@
+use console.println
+use clock.now
+
+/// The same scan two ways, over the same bytes, answering the same thing.
+///
+/// A lexer looking for an ASCII delimiter does not need a character: UTF-8 is
+/// self-synchronising, so a byte equal to `"` is a `"` and can be nothing
+/// else. What differs is how the loop reaches a byte — a builtin call that
+/// decodes a character and wraps it, or the instruction that reads the byte.
+export fn main() -> Result<Unit, Error> {
+  let line = "\{\"id\":\"B-000001\",\"nights\":5,\"rate\":129.5,\"status\":\"confirmed\"\}"
+  let rounds = 60000
+  let end = line.byteLength()
+
+  let pointFrom = now()
+  var points = 0
+  var round = 0
+  while round < rounds {
+    var at = 0
+    while at < end {
+      match line.codePointAtByte(at) {
+        Some(c) => {
+          if c == '"' {
+            points += 1
+          }
+          if c < 128 {
+            at += 1
+          } else if c < 2048 {
+            at += 2
+          } else if c < 65536 {
+            at += 3
+          } else {
+            at += 4
+          }
+        }
+        None => {
+          at += 1
+        }
+      }
+    }
+    round += 1
+  }
+  let pointTo = now()
+
+  let byteFrom = now()
+  var bytes = 0
+  round = 0
+  while round < rounds {
+    var at = 0
+    while at < end {
+      if line.byteAt(at) == 34 {
+        bytes += 1
+      }
+      at += 1
+    }
+    round += 1
+  }
+  let byteTo = now()
+
+  let per = end * rounds
+  let point = (pointTo - pointFrom).micros()
+  let byte = (byteTo - byteFrom).micros()
+  println("codePointAtByte + width  {point / 1000} ms  ({point * 1000 / per} ns/byte, {points})")?
+  println("byteAt                   {byte / 1000} ms  ({byte * 1000 / per} ns/byte, {bytes})")?
+  Ok(())
+}

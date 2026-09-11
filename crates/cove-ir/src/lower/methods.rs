@@ -109,6 +109,15 @@ impl Body<'_> {
             }
         }
         match &ty {
+            // `String.byteAt` is an instruction and every other `String`
+            // method is a builtin call, which is the same split
+            // `cove_ir::lower::collections` makes for a sequence and for the
+            // same reason: what a builtin call costs is worth paying for
+            // `split` or `replace`, and is most of what `byteAt` costs. See
+            // [`Inst::ByteAt`].
+            Ty::Str if name == "byteAt" && args.len() == 1 => {
+                self.byte_at(expr, base, &args[0].value, want)
+            }
             Ty::Range => self.range_method(expr, base, name, args),
             Ty::Array(elem) => {
                 let elem = (**elem).clone();
@@ -160,6 +169,35 @@ impl Body<'_> {
                 self.machine_call(expr, Some(base), receiver, name, args, want)
             }
         }
+    }
+
+    /// `s.byteAt(i)`, as [`Inst::ByteAt`].
+    ///
+    /// Two operands and a destination, and nothing else: the bounds check is
+    /// the instruction's, because the machine is already holding the header
+    /// it would be checked against and a check lowered here would read it a
+    /// second time.
+    ///
+    /// The destination is the one the surrounding form asked for — issue
+    /// #302 — and not a temporary copied out of. A byte read is the whole of
+    /// a lexer's inner loop, so a copy per read is a copy per byte of every
+    /// file: `Scan.at` answered `byte-at s11`, `copy s8 s11`, `copy s6 s8`
+    /// before this took `want`.
+    fn byte_at(&mut self, expr: &Expr, base: &Expr, index: &Expr, want: Option<Dest>) -> Val {
+        let obj = self.expr(base);
+        let at = self.expr(index);
+        let dst = self.answer_at(want, shapes::INT);
+        self.emit(
+            Inst::ByteAt {
+                dst: dst.slot,
+                obj: obj.slot,
+                at: at.slot,
+            },
+            expr.span,
+        );
+        self.release(at, expr.span);
+        self.release(obj, expr.span);
+        dst
     }
 
     /// A call to a builtin method the standard library implements rather

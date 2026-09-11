@@ -2195,6 +2195,32 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
         // the next one starts.
         //
         // It is total. Nothing written over it inherits a trap.
+        // The byte at an offset, as an `Int` in `0..=255`.
+        //
+        // It refuses an offset outside the string rather than answering
+        // `Option`, which is `sliceBytes`'s rule and not `get`'s: a byte
+        // offset out of range is one this type never handed out, where an
+        // index out of range is arithmetic a caller did about a sequence it
+        // can count. `byteLength()` is how a caller knows the range, and a
+        // scan that walks bytes already reads it once.
+        //
+        // The wrapper is what the rule is really about. A lexer asks this
+        // once per byte of its input, and an `Option` around one byte was
+        // measured costing more than the read: `benches/scanshape` puts a
+        // byte scan at 78 ns against 122 with the wrapper, over the same
+        // bytes answering the same question.
+        MethodSchema {
+            name: "byteAt",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "offset",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::Int,
+            mutating: false,
+            fresh: false,
+        },
         MethodSchema {
             name: "codePointAtByte",
             generics: &[],
