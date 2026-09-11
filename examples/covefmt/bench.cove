@@ -238,13 +238,30 @@ fn mustReIndent() -> Int {
 
 /// How many of the corpus must survive being joined up and re-broken.
 ///
-/// A ratchet, and one that may rise and never fall. What the rest need is
-/// almost all one thing: `broken` writes each member with `flattened`, so a
-/// member that must break — a lambda, a nested call that is still too wide —
-/// comes out on one line inside a group that did break. `hug_last` for a
-/// *lambda* is the same missing machinery seen from the other side.
+/// A ratchet, and one that may rise and never fall. What the rest need was
+/// read off the fifteen that fail, and it is three things and not one:
+///
+/// - **`isBroken` asks the wrong question.** It is true when there is a
+///   newline anywhere inside the group, a newline inside a body it holds
+///   included, so `Ok(Options(manifest: match … \{ … \}))` is taken for a
+///   group that is already laid out and is never offered a decision at all.
+///   What it means to ask is whether this group's own *members* are on lines
+///   of their own.
+/// - **`restOfLine` reserves what `cove fmt` does not.** An `if` writes its
+///   condition and then its block, and the ` \{` is not held back from the
+///   condition's width — so a header may end at 81 columns and `cove fmt`
+///   leaves it. Reserving it here made an empty `()` at the end of such a
+///   line break in two.
+/// - **A body written on one line has to be broken**, which is the one thing
+///   this printer cannot do at all: every rule so far rewrites a run of space
+///   that is already there, and there is none to rewrite. `hug_last` for a
+///   lambda is the same machinery seen from the other side.
+///
+/// The second and third are entangled: making an empty group break, which is
+/// what `arg_list` does with no arguments, is two lines of change and takes
+/// two files out of the round-trip check until the ` \{` is right.
 fn mustReBreak() -> Int {
-  229
+  231
 }
 
 /// `source` with the line breaks inside a `(` or a `[` taken out.
