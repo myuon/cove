@@ -806,13 +806,41 @@ impl Body<'_> {
         }
     }
 
-    /// `&&` and `||`, which are a branch over the right-hand side.
+    /// `&&` and `||`, which are a branch over everything to their right.
     ///
-    /// Both answer the left-hand side's word when it already settles the
-    /// question, so the answer is written before the branch and the
-    /// right-hand side overwrites it only when it runs. `conjunction` says
-    /// which way round: `&&` skips the right-hand side when the left is
-    /// false, `||` when it is true.
+    /// Both answer an operand's word as soon as it settles the question, so
+    /// the answer is written before the branch and the next operand
+    /// overwrites it only when it runs. `conjunction` says which way round:
+    /// `&&` is over when an operand is false, `||` when one is true.
+    ///
+    /// # A chain is one form, not one per operator
+    ///
+    /// `a || b || c || d` parses as `((a || b) || c) || d`, and lowering that
+    /// as three nested forms made each level escape to *its own* end — which
+    /// is the next level's branch, reading a word already known. An `a` that
+    /// answered `true` ran eleven instructions in `examples/covefmt`'s
+    /// `continuesWord`, of which six were re-reading that `true`:
+    ///
+    /// ```text
+    ///  +4  jump 8            the inner `||` skipping its right-hand side
+    ///  +8  branch-false 10   which lands on the next one's branch, not taken
+    ///  +9  jump 11           so it skips its right-hand side too
+    /// +11  branch-false 13   and so on, once per operator in the chain
+    /// +12  jump 16
+    /// ```
+    ///
+    /// 24% of that function's executed instructions were those jumps, and it
+    /// grows with the chain: `isOperatorByte` chains twenty of them.
+    ///
+    /// So the left spine is flattened first and the whole chain is lowered as
+    /// one form, with every escape aimed at one end. An operand that settles
+    /// it now costs one branch and one jump however long the chain is, and a
+    /// `&&` chain costs one branch and no jump at all — `branch-false` is the
+    /// instruction the set has, and a conjunction is already the polarity it
+    /// wants.
+    ///
+    /// Right-nesting — `a || (b || c)` — was never the quadratic case and is
+    /// unchanged: the inner chain's end already *is* the outer one's.
     fn short_circuit(
         &mut self,
         expr: &Expr,
@@ -828,38 +856,63 @@ impl Body<'_> {
         // level into a location of its own and copied it out again, which was
         // four copies and three words of frame for one `Bool`.
         //
-        // Nothing here reads the destination before it writes it: the
-        // left-hand side writes it, the branch reads it, and the right-hand
-        // side overwrites it only where it runs.
+        // Nothing here reads the destination before it writes it: an operand
+        // writes it, the branch reads it, and the next operand overwrites it
+        // only where it runs.
         let dst = self.answer_at(want, shapes::BOOL);
-        self.expr_into(lhs, Dest::of(&dst));
 
-        let branch = self.emit(
-            Inst::BranchFalse {
-                cond: dst.slot,
-                to: PENDING,
-            },
-            expr.span,
-        );
-        // `||` wants the opposite polarity, and the instruction set carries
-        // only one. Rather than add the other, the false case falls straight
-        // into the right-hand side and the jump that skips it is the one
-        // taken when the left-hand side already answered `true`.
-        let skip = if conjunction {
-            None
-        } else {
-            let skip = self.emit(Inst::Jump { to: PENDING }, expr.span);
-            let rest = self.here();
-            self.patch(branch, rest);
-            Some(skip)
-        };
+        // The operands of the chain, in the order they are evaluated. Only
+        // the *same* operator is flattened: `a && b || c` is two chains and
+        // the precedence between them is the parser's, already in the tree.
+        let mut operands = vec![rhs];
+        let mut spine = lhs;
+        while let ExprKind::Binary { op, lhs, rhs } = &spine.kind {
+            let same = match op {
+                BinaryOp::And => conjunction,
+                BinaryOp::Or => !conjunction,
+                _ => false,
+            };
+            if !same {
+                break;
+            }
+            operands.push(rhs);
+            spine = lhs;
+        }
+        operands.push(spine);
+        operands.reverse();
 
-        self.expr_into(rhs, Dest::of(&dst));
+        // Every way out of the chain, patched to the one end below.
+        let mut escapes = Vec::new();
+        let last = operands.len() - 1;
+        for (at, operand) in operands.into_iter().enumerate() {
+            self.expr_into(operand, Dest::of(&dst));
+            if at == last {
+                break;
+            }
+            let branch = self.emit(
+                Inst::BranchFalse {
+                    cond: dst.slot,
+                    to: PENDING,
+                },
+                expr.span,
+            );
+            if conjunction {
+                // False settles it, and `branch-false` is exactly that jump.
+                escapes.push(branch);
+            } else {
+                // True settles it, and the instruction set carries only the
+                // one polarity. Rather than add the other, the false case
+                // falls into the next operand and the jump that skips the
+                // rest is the one taken when this operand answered `true`.
+                escapes.push(self.emit(Inst::Jump { to: PENDING }, expr.span));
+                let rest = self.here();
+                self.patch(branch, rest);
+            }
+        }
 
         let end = self.here();
-        match skip {
-            Some(skip) => self.patch(skip, end),
-            None => self.patch(branch, end),
+        for escape in escapes {
+            self.patch(escape, end);
         }
         dst
     }
@@ -1664,9 +1717,22 @@ impl Body<'_> {
     fn return_expr(&mut self, value: Option<&Expr>, span: Span) {
         match value {
             Some(value) => {
+                // Into the function's own answer location — issue #302's
+                // destination forwarding, which reached the tail expression
+                // of a body and not the explicit `return`s. It matters twice
+                // over. Once as the copy it removes, and once because
+                // `lower::inline` lends a caller's destination to an expanded
+                // body only when *every* `Return` names one slot: a function
+                // whose tail wrote the answer and whose `return` wrote a
+                // temporary had two, so neither could be renamed and both
+                // became copies at every call site. `Scan.at` in
+                // `examples/covefmt` is that shape — `return -1` and a byte —
+                // and it is read once per byte of every file.
                 let answer = self.expr(value);
                 // A declared return type is a written type, so a `dyn Trait`
-                // one erases here.
+                // one erases here. Erasure boxes, so it answers a location of
+                // its own and the `Return` below names that instead; a body
+                // that erases is no worse off than before and no better.
                 let returns = self.returns.clone();
                 let answer = self.erase(answer, value, &returns);
                 // `return return x` leaves through the inner one, and the
