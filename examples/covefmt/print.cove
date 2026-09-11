@@ -56,21 +56,51 @@ fn emit(
     }
     return after
   }
-  // A group that was written across lines and need not be goes back onto
-  // one, which is `cove_syntax::format`'s first question about a call: it
-  // writes the flat form when nothing in the arguments breaks and the flat
-  // form fits. Both halves are below.
+  // Whether this group is written on one line, and whether it should be.
+  //
+  // # The decision propagates, and that is the whole of the rule
+  //
+  // `cove_syntax::format` is greedy from the outside in and never goes back:
+  // every one of its ten width tests is `col + width(flat) <= MAX_WIDTH`,
+  // write the flat form, return. When an outer group is written flat, the
+  // groups inside it go out as part of that string and are never asked
+  // anything.
+  //
+  // So a group left flat here returns without walking its children. That is
+  // not an optimisation. `Ok(Check(name: …, url: …, …))` is 150 columns and
+  // `cove fmt` leaves it alone, because breaking the `Ok` would leave the
+  // `Check` just as long one step further in — and descending into it anyway
+  // is how covefmt came to write `Ok(Check(` with the members below, which
+  // is a line `cove fmt` never writes.
+  //
+  // Greedy is also *optimal* here, which is why no search is needed: a
+  // group is flat or wholly broken with nothing in between, and breaking an
+  // outer group only ever gives an inner one more room. There is no choice
+  // upstream that a later line can regret.
   if indenting(tree.kind) && tree.kind != Node.Body &&
-    isBroken(source, held, tree) {
+    isClosed(source, held, tree) {
     // What is left of the line after the group, which `cove_syntax::format`
     // calls `reserved` and passes in: a parameter list that fits on its own
     // still breaks when the `-> Result<T, F> \{` behind it would not. The
     // rest of the line is the tokens from the group's end to the next
     // newline, which the tiling makes readable without a tree.
     let room = maxWidth() - column(out) - restOfLine(source, held, tree.to)
-    if isClosed(source, held, tree) && !mustBreak(source, held, tree) &&
-      flatWidth(source, held, tree) <= room {
-      out.push(flattened(source, held, tree))
+    let fits = !mustBreak(source, held, tree) &&
+      flatWidth(source, held, tree) <= room
+    if isBroken(source, held, tree) {
+      if fits {
+        out.push(flattened(source, held, tree))
+        return tree.to - 1
+      }
+    } else {
+      // Already on one line. It stays there unless it is over the limit and
+      // breaking would actually buy something, and either way the answer is
+      // this group's *and everything inside it*.
+      if fits || !worthBreaking(source, held, tree, room) {
+        out.push(verbatim(source, held, tree))
+      } else {
+        out.push(broken(source, held, tree, depth))
+      }
       return tree.to - 1
     }
   }
@@ -357,26 +387,72 @@ fn mustBreak(source: String, held: Array<Token>, tree: Tree) -> Bool {
     }
     at = at + 1
   }
-  holdsABody(tree)
+  holdsABody(source, held, tree)
 }
 
 /// Whether `tree` holds a `Node.Body` with anything in it.
 ///
 /// An empty one does not break: `cove_syntax::format` asks
 /// `!block_is_empty(block)`, so `fn() \{ \}` stays on its line.
-fn holdsABody(tree: Tree) -> Bool {
+fn holdsABody(source: String, held: Array<Token>, tree: Tree) -> Bool {
   for child in tree.children {
-    if child.kind == Node.Body {
-      // Two children is `{` and `}` and nothing between them.
-      if child.children.length() > 2 {
-        return true
-      }
+    if child.kind == Node.Body && breaksAsABody(source, held, child) {
+      return true
     }
-    if holdsABody(child) {
+    if holdsABody(source, held, child) {
       return true
     }
   }
   false
+}
+
+/// Whether a body with no parameter list in front of it forces its
+/// surroundings onto several lines.
+///
+/// Not every one does. `cove_syntax::format`'s `trailing_breaks`: *"A
+/// trailing closure stays on one line when its body is a single expression
+/// that fits, so `tasks.spawn \{ fetch() \}` reads as the one call it is."*
+/// So a trailing closure of one statement is not a break, and
+/// `running.push(inflight.spawn \{ await runCheck(check, tally) \})` keeps
+/// its line — while `items.filter(fn(item) \{ … \})` does not, because a
+/// *lambda* body always breaks and the `(item)` is what says it is one.
+///
+/// Counted rather than asked of a kind, because the tree has no node for
+/// "the tail" — a body's children are its braces, its trivia and its
+/// statements, and one statement between two braces is the shape the rule is
+/// about.
+fn breaksAsABody(source: String, held: Array<Token>, body: Tree) -> Bool {
+  // A lambda has a parameter list, and a trailing closure has nothing in
+  // front of its brace but the call it trails. The token before the `{` is
+  // what says which: `fn(item) { … }` closes one and `spawn { … }` does not.
+  if byteOfPunct(source, held, previousSignificant(held, body.from)) == ')' {
+    return true
+  }
+  var statements = 0
+  for child in body.children {
+    if child.kind == Node.Stmt {
+      statements = statements + 1
+    }
+  }
+  statements > 1
+}
+
+/// The token at or before `at` that is not trivia.
+fn previousSignificant(held: Array<Token>, at: Int) -> Int {
+  var i = at - 1
+  while i >= 0 {
+    match held.get(i) {
+      Some(token) => {
+        if token.kind != Kind.Space && token.kind != Kind.LineComment &&
+          token.kind != Kind.BlockComment && token.kind != Kind.DocComment {
+          return i
+        }
+      }
+      None => { }
+    }
+    i = i - 1
+  }
+  -1
 }
 
 /// The column the next character would be written at.
@@ -543,6 +619,15 @@ fn isATrailingComma(
 fn restOfLine(source: String, held: Array<Token>, at: Int) -> Int {
   var width = 0
   var i = at
+  // A `?` straight after the group is not counted. `cove_syntax::format`
+  // writes `Try(inner)` by writing `inner` and then the `?`, and `inner` is
+  // asked the width question with the `?` not yet on the line — so
+  // `println("…")?` at 81 columns keeps its line, because the `println(…)`
+  // inside it is 80. Counting the `?` here made covefmt break eight files'
+  // worth of lines that `cove fmt` leaves alone.
+  if byteOfPunct(source, held, i) == '?' {
+    i = i + 1
+  }
   while i < held.length() {
     match held.get(i) {
       Some(token) => {
@@ -591,4 +676,94 @@ fn byteOfPunct(source: String, held: Array<Token>, at: Int) -> Int {
     }
     None => 0
   }
+}
+
+/// `tree`'s tokens, exactly as they were written.
+///
+/// What a group left flat writes: there is no newline inside one, so none of
+/// the rules that read a run of space have anything to say about it, and
+/// leaving it alone is both the right answer and the whole answer. See the
+/// note in `emit` about the decision propagating.
+fn verbatim(source: String, held: Array<Token>, tree: Tree) -> String {
+  var out = Vector.of<String>()
+  var at = tree.from
+  while at < tree.to {
+    match held.get(at) {
+      Some(token) => out.push(text(source, token))
+      None => { }
+    }
+    at = at + 1
+  }
+  "".join(out.toArray())
+}
+
+/// Whether breaking `tree` would make any line shorter.
+///
+/// `cove_syntax::format` refuses one case: *"Breaking a lone argument that
+/// cannot itself break, and would not fit on a line of its own either, only
+/// makes the call longer."* The corpus says it of every member, not only a
+/// lone one: what is over the limit inside a group is over it one step
+/// further in too.
+fn worthBreaking(
+  source: String,
+  held: Array<Token>,
+  tree: Tree,
+  room: Int,
+) -> Bool {
+  var members = 0
+  for child in tree.children {
+    if child.kind == Node.Member {
+      members = members + 1
+      if flatWidth(source, held, child) > room {
+        return false
+      }
+    }
+  }
+  members > 0
+}
+
+/// `tree` written one member to a line, at `depth`.
+///
+/// The shape `cove_syntax::format` writes once it has refused the flat form:
+/// the opening bracket ends its line, every member is a line of its own one
+/// step further in and ends with a comma — the last one included, because
+/// each is a line — and the closing bracket is a line at the depth the group
+/// opened at.
+fn broken(
+  source: String,
+  held: Array<Token>,
+  tree: Tree,
+  depth: Int,
+) -> String {
+  var out = Vector.of<String>()
+  match held.get(tree.from) {
+    Some(token) => out.push(text(source, token))
+    None => { }
+  }
+  for child in tree.children {
+    if child.kind == Node.Member {
+      out.push("\n")
+      out.push(indentOf(depth + 1))
+      out.push(flattened(source, held, child))
+      out.push(",")
+    }
+  }
+  out.push("\n")
+  out.push(indentOf(depth))
+  match held.get(tree.to - 1) {
+    Some(token) => out.push(text(source, token))
+    None => { }
+  }
+  "".join(out.toArray())
+}
+
+/// `depth` steps of indentation, two spaces each.
+fn indentOf(depth: Int) -> String {
+  var out = Vector.of<String>()
+  var step = 0
+  while step < depth {
+    out.push("  ")
+    step = step + 1
+  }
+  "".join(out.toArray())
 }

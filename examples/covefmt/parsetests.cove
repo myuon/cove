@@ -500,3 +500,55 @@ test fn a_body_never_folds() -> Result<Unit, Error> {
   assert(roundTrips("fn f() \{\n  g(\n    // why\n    1,\n  )\n\}\n"))?
   Ok(())
 }
+
+/// **A group that does not fit is written one member to a line.**
+///
+/// The other direction of the fold, and the same question answered the other
+/// way. `cove_syntax::format` writes the broken form once its flat form is
+/// refused: the opening bracket ends its line, every member is a line of its
+/// own one step further in and ends with a comma — the last one included —
+/// and the closing bracket is a line at the depth the group opened at.
+test fn a_group_that_does_not_fit_is_broken() -> Result<Unit, Error> {
+  let long = "\n".join(["fn f() -> Int \{", "  someFunction(aLongArgument, anotherLongArgument, aThirdOne, andYetMoreHereTools)", "\}", ""])
+  let want = "\n".join(["fn f() -> Int \{", "  someFunction(", "    aLongArgument,", "    anotherLongArgument,", "    aThirdOne,", "    andYetMoreHereTools,", "  )", "\}", ""])
+  let held = tokens(long)
+  assertEqual(print(long, held, parseTokens(long, held)), want)?
+  Ok(())
+}
+
+/// **A break that buys nothing is not made, and the decision propagates.**
+///
+/// `cove_syntax::format` is greedy from the outside in: every one of its ten
+/// width tests writes the flat form and returns, so a group written flat
+/// carries the groups inside it out as part of that string and they are
+/// never asked anything.
+///
+/// `Ok(Check(name: …, url: …, …))` is the case that shows why it matters. It
+/// is 150 columns and `cove fmt` leaves it alone — breaking the `Ok` would
+/// leave the `Check` just as long one step further in — and descending into
+/// it anyway is how covefmt came to write `Ok(Check(`, a line `cove fmt`
+/// never writes.
+///
+/// Greedy is also optimal here, which is why no search is wanted: a group is
+/// flat or wholly broken with nothing in between, and breaking an outer
+/// group only ever gives an inner one more room. There is no choice upstream
+/// that a later line can regret.
+test fn a_break_that_buys_nothing_is_not_made() -> Result<Unit, Error> {
+  let held = "\n".join(["fn f(entry: Int) -> Int \{", "  Ok(Check(name: aaaaaaaaaaaaaaaa, url: bbbbbbbbbbbbbbbbbb, expect: cccccccccccccccc))", "\}", ""])
+  assert(roundTrips(held))?
+  Ok(())
+}
+
+/// **A trailing closure of one statement keeps its line; a lambda does not.**
+///
+/// `cove_syntax::format`'s `trailing_breaks`: *"A trailing closure stays on
+/// one line when its body is a single expression that fits, so
+/// `tasks.spawn \{ fetch() \}` reads as the one call it is."* A lambda body
+/// always breaks, and the `(item)` in front of the brace is what tells the
+/// two apart.
+test fn a_trailing_closure_of_one_statement_keeps_its_line(
+) -> Result<Unit, Error> {
+  assert(roundTrips("fn f() \{\n  running.push(inflight.spawn \{ await run(check) \})\n\}\n"))?
+  assert(roundTrips("fn f() \{\n  items.filter(fn(item) \{\n    item > 0\n  \})\n\}\n"))?
+  Ok(())
+}
