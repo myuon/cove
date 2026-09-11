@@ -549,6 +549,35 @@ test fn a_break_that_buys_nothing_is_not_made() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// **A member of a broken group is asked the same question, one step in.**
+///
+/// `broken` wrote each member with `flattened`, so a call that was still too
+/// wide at `depth + 1` came out on one line inside a group that had broken
+/// precisely because one line was not enough. The member is emitted now, and
+/// a group inside it decides for itself.
+///
+/// # Why it is not only a matter of calling `emit`
+///
+/// `room` is `maxWidth - column - restOfLine`, and `restOfLine` counts the
+/// tokens from the group's end to the next newline **in the source**. At the
+/// top of a statement that is right: what the printer writes on this line is
+/// what the source has on it. Inside a group that has broken it is not — the
+/// member is on a line of the printer's own making, and what follows it there
+/// is the comma, however long the line it came from was. Reading the source
+/// there put `event(census(world), hash(world))` — 29 columns with 75 to
+/// spare — through as a group that did not fit, and took twelve files of the
+/// corpus out of the join-up ratchet.
+///
+/// So `reserved` is threaded, which is what `cove_syntax::format` passes
+/// explicitly for the same reason.
+test fn a_member_of_a_broken_group_breaks_too() -> Result<Unit, Error> {
+  let flat = "\n".join(["fn f() -> Int \{", "  let x = [someVeryLongFunctionCallHere(aaaaaaaaaa, bbbbbbbbbb, cccccccccc, dddddddddddddd)]", "\}", ""])
+  let want = "\n".join(["fn f() -> Int \{", "  let x = [", "    someVeryLongFunctionCallHere(", "      aaaaaaaaaa,", "      bbbbbbbbbb,", "      cccccccccc,", "      dddddddddddddd,", "    ),", "  ]", "\}", ""])
+  let held = tokens(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  Ok(())
+}
+
 /// **A comma inside `<…>` belongs to the type, not to the group.**
 ///
 /// `f(result: Result<T, E>, label: String)` has two members and not three.

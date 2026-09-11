@@ -239,12 +239,15 @@ fn mustReIndent() -> Int {
 /// How many of the corpus must survive being joined up and re-broken.
 ///
 /// A ratchet, and one that may rise and never fall. What the rest need is
-/// almost all one thing: `broken` writes each member with `flattened`, so a
-/// member that must break — a lambda, a nested call that is still too wide —
-/// comes out on one line inside a group that did break. `hug_last` for a
-/// *lambda* is the same missing machinery seen from the other side.
+/// almost all one thing, and it is the one thing this printer cannot do at
+/// all: **write a body broken**. Every rule so far rewrites a run of space
+/// that is already there, and a lambda whose body was written on one line has
+/// no run of space to rewrite — `cove_syntax::format`'s `breaks` says a
+/// non-empty lambda body always breaks, and saying it here means putting a
+/// newline where the source has none. `hug_last` for a lambda is the same
+/// machinery seen from the other side.
 fn mustReBreak() -> Int {
-  229
+  231
 }
 
 /// `source` with the line breaks inside a `(` or a `[` taken out.

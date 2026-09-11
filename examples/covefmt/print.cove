@@ -23,7 +23,7 @@ export fn print(source: String, held: Array<Token>, tree: Tree) -> String {
   // `-1` is "nothing has been written", which is what makes a blank at the
   // very top of a file fall under the same rule as a blank at the top of a
   // block: both open on nothing.
-  emit(source, held, tree, -1, 0, var out)
+  emit(source, held, tree, -1, 0, -1, var out)
   "".join(out.toArray())
 }
 
@@ -38,6 +38,7 @@ fn emit(
   tree: Tree,
   after: Int,
   depth: Int,
+  reserved: Int,
   var out: Vector<String>,
 ) -> Int {
   if tree.children.length() == 0 {
@@ -84,7 +85,23 @@ fn emit(
     // still breaks when the `-> Result<T, F> \{` behind it would not. The
     // rest of the line is the tokens from the group's end to the next
     // newline, which the tiling makes readable without a tree.
-    let room = maxWidth() - column(out) - restOfLine(source, held, tree.to)
+    // What is left of the line after the group, which `cove_syntax::format`
+    // calls `reserved` and passes in. `-1` is "nobody said", and then the
+    // source's own line is the best guess there is — right at the top of a
+    // statement, where what the printer writes on this line is what the
+    // source has on it.
+    //
+    // It is *not* right inside a group that has broken: the member is on a
+    // line of the printer's own making and what follows it there is the
+    // comma, however long the line it came from was. Reading the source there
+    // put `event(census(world), hash(world))` — 29 columns with 75 to spare —
+    // through as a group that did not fit.
+    let rest = if reserved >= 0 {
+      reserved
+    } else {
+      restOfLine(source, held, tree.to)
+    }
+    let room = maxWidth() - column(out) - rest
     let fits = !mustBreak(source, held, tree) &&
       flatWidth(source, held, tree) <= room
     if isBroken(source, held, tree) {
@@ -114,7 +131,7 @@ fn emit(
         // can do, and is right for a source that already hugs.
         out.push(verbatim(source, held, tree))
       } else {
-        out.push(broken(source, held, tree, depth))
+        writeBroken(source, held, tree, depth, var out)
       }
       return tree.to - 1
     }
@@ -234,7 +251,7 @@ fn emit(
             at = depth
           }
         }
-        last = emit(source, held, child, last, at, var out)
+        last = emit(source, held, child, last, at, reserved, var out)
       }
       None => { }
     }
@@ -934,29 +951,40 @@ fn nextSignificant(held: Array<Token>, at: Int, to: Int) -> Int {
   -1
 }
 
-/// `tree` written one member to a line, at `depth`.
+/// Writes `tree` one member to a line, at `depth`.
 ///
 /// The shape `cove_syntax::format` writes once it has refused the flat form:
 /// the opening bracket ends its line, every member is a line of its own one
 /// step further in and ends with a comma — the last one included, because
 /// each is a line — and the closing bracket is a line at the depth the group
 /// opened at.
-fn broken(
+fn writeBroken(
   source: String,
   held: Array<Token>,
   tree: Tree,
   depth: Int,
-) -> String {
-  var out = Vector.of<String>()
+  var out: Vector<String>,
+) {
   match held.get(tree.from) {
     Some(token) => out.push(text(source, token))
     None => { }
   }
+  var last = tree.from
   for child in tree.children {
     if child.kind == Node.Member {
       out.push("\n")
       out.push(indentOf(depth + 1))
-      out.push(flattened(source, held, child))
+      // The member is *emitted*, not flattened: a group inside it is asked
+      // the same question this one was just asked, one step further in and
+      // with a whole line to answer it. Flattened, a call that is still too
+      // wide at `depth + 1` came out on one line inside a group that had
+      // broken precisely because it did not fit on one.
+      //
+      // This is why the writing happens into the caller's `out` rather than
+      // into a string of its own: `column` reads the columns back out of what
+      // has been written, so a member deciding its own width has to be able
+      // to see the indentation in front of it.
+      last = emit(source, held, child, last, depth + 1, oneComma(), var out)
       out.push(",")
     }
   }
@@ -966,7 +994,6 @@ fn broken(
     Some(token) => out.push(text(source, token))
     None => { }
   }
-  "".join(out.toArray())
 }
 
 /// `depth` steps of indentation, two spaces each.
@@ -1206,7 +1233,7 @@ fn writeHug(
   for child in member.children {
     if child.kind == Node.Group && hasAMember(child) {
       out.push(tokensBetween(source, held, member.from, child.from))
-      out.push(broken(source, held, child, depth))
+      writeBroken(source, held, child, depth, var out)
       out.push(tokensBetween(source, held, child.to, member.to))
       return
     }
@@ -1346,4 +1373,9 @@ fn breaksLine(source: String, held: Array<Token>, child: Tree) -> Bool {
     Some(token) => token.kind == Kind.Space && endsLine(source, token)
     None => false
   }
+}
+
+/// The one column a member of a broken group leaves behind it: its comma.
+fn oneComma() -> Int {
+  1
 }
