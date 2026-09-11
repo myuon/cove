@@ -603,6 +603,7 @@ impl Check<'_> {
                     // `is` compares words, and the only words whose identity
                     // is a language-level question are references.
                     Compare::Identity => &[Repr::Ref],
+                    Compare::Tag => &[Repr::Tag],
                 };
                 self.expect(at, a, want);
                 self.expect(at, b, want);

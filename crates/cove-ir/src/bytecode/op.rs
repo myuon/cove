@@ -9,7 +9,7 @@
 //! dispatch by doing so. ADR 0041 decides the enumeration:
 //!
 //! - [`Inst::Arith`](crate::Inst::Arith) becomes ten, `Num` × `ArithOp`;
-//! - [`Inst::Cmp`](crate::Inst::Cmp) becomes thirty, `Compare` × `CmpOp`;
+//! - [`Inst::Cmp`](crate::Inst::Cmp) becomes thirty-six, `Compare` × `CmpOp`;
 //! - [`Inst::ArithImm`](crate::Inst::ArithImm) five and
 //!   [`Inst::CmpImm`](crate::Inst::CmpImm) six, the operator alone;
 //! - [`Inst::Neg`](crate::Inst::Neg) two, [`Convert`] two;
@@ -57,12 +57,13 @@ const CMP_OPS: [CmpOp; 6] = [
     CmpOp::Ge,
 ];
 /// Every [`Compare`], in opcode order.
-const COMPARES: [Compare; 5] = [
+const COMPARES: [Compare; 6] = [
     Compare::Int,
     Compare::Float,
     Compare::Bool,
     Compare::Str,
     Compare::Identity,
+    Compare::Tag,
 ];
 /// Every [`Convert`], in opcode order.
 const CONVERTS: [Convert; 2] = [Convert::IntToFloat, Convert::FloatToInt];
@@ -774,6 +775,7 @@ fn compared(on: Compare) -> &'static [Repr] {
         // `is` compares words, and the only words whose identity is a
         // language-level question are references.
         Compare::Identity => REF,
+        Compare::Tag => TAG,
     }
 }
 
@@ -782,16 +784,17 @@ mod tests {
     use super::*;
 
     /// ADR 0041's count, which is the one number the format's headroom is
-    /// argued from: a hundred and three opcodes out of the 256 a byte names.
+    /// argued from: a hundred and nine opcodes out of the 256 a byte names.
     ///
-    /// It was a hundred and two until `Op::ByteAt`, and what the number is
-    /// for is that a reader can see the headroom rather than be told about
-    /// it: half the byte is still unspent, so the format has room for what
-    /// comes and this test is where that claim is kept honest.
+    /// It was a hundred and two until `Op::ByteAt`, a hundred and three until
+    /// `Compare::Tag` brought its six. What the number is for is that a
+    /// reader can see the headroom rather than be told about it: more than
+    /// half the byte is still unspent, so the format has room for what comes
+    /// and this test is where that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_three_opcodes() {
-        assert_eq!(Op::all().len(), 103);
-        assert_eq!(OPCODES, 103);
+    fn there_are_a_hundred_and_nine_opcodes() {
+        assert_eq!(Op::all().len(), 109);
+        assert_eq!(OPCODES, 109);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic
@@ -839,7 +842,7 @@ mod tests {
         let all = Op::all();
         let count = |f: fn(&Op) -> bool| all.iter().filter(|op| f(op)).count();
         assert_eq!(count(|op| matches!(op, Op::Arith(_, _))), 10);
-        assert_eq!(count(|op| matches!(op, Op::Cmp(_, _))), 30);
+        assert_eq!(count(|op| matches!(op, Op::Cmp(_, _))), 36);
         assert_eq!(count(|op| matches!(op, Op::ArithImm(_))), 5);
         assert_eq!(count(|op| matches!(op, Op::CmpImm(_))), 6);
         assert_eq!(count(|op| matches!(op, Op::Neg(_))), 2);

@@ -445,6 +445,7 @@ mod tests {
             Compare::Bool,
             Compare::Str,
             Compare::Identity,
+            Compare::Tag,
         ] {
             for op in [
                 CmpOp::Eq,
