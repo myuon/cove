@@ -235,12 +235,24 @@ export fn main() -> Result<Unit, Error> {
 /// whatever comes back is the formatter's own judgement rather than the
 /// judgement already written down.
 fn deindented(source: String) -> String {
+  let inside = insideALiteral(source)
   var out = Vector.of()
   let n = source.byteLength()
   var at = 0
   while at < n {
     var start = at
-    while start < n &&
+    // A line that begins inside a string keeps whatever space it was written
+    // with. `cove fmt` writes a string literal by handing back the source
+    // text of its span — `ExprKind::Str` is `string_text(expr.span)` — so the
+    // lines of a lambda written across an interpolation are not laid out by
+    // anything, and asking for them back is asking for what no formatter
+    // does. Run on the same de-indented file, `cove fmt` leaves those two
+    // lines at column zero exactly as covefmt does.
+    let held = match inside.get(start) {
+      Some(yes) => yes
+      None => false
+    }
+    while !held && start < n &&
       (source.byteAt(start) == ' ' || source.byteAt(start) == '\t') {
       start = start + 1
     }
@@ -262,12 +274,18 @@ fn deindented(source: String) -> String {
 
 /// How many of the corpus must survive being de-indented and re-formatted.
 ///
-/// A ratchet, and one that may rise and never fall. It is not the whole
-/// corpus: the last file holds a lambda across three lines *inside a string
-/// interpolation*, and covefmt lexes a string as one token, so there are no
-/// newlines in there for it to place.
+/// A ratchet, and one that may rise and never fall. It is the whole corpus.
+///
+/// It sat at 245 for a while, with the last file written down as a covefmt
+/// shortcoming: a lambda across three lines *inside a string interpolation*,
+/// which covefmt cannot lay out because it lexes a string as one token. The
+/// mechanism was right and the conclusion was wrong. `cove fmt` writes a
+/// string literal by handing back the source text of its span, so it does not
+/// lay those lines out either — run on the same de-indented file it leaves
+/// the same two lines at column zero. The mutation was asking for what no
+/// formatter does, and [`deindented`] no longer asks it.
 fn mustReIndent() -> Int {
-  245
+  246
 }
 
 /// How many of the corpus must survive being joined up and re-broken.
@@ -490,4 +508,28 @@ fn closedUp(source: String) -> String {
     i = i + 1
   }
   "".join(out.toArray())
+}
+
+/// For every byte, whether it falls inside a string or character literal.
+///
+/// Byte-wise rather than token-wise because [`deindented`] is: it cuts lines,
+/// and a line inside a multi-line string begins in the middle of one token.
+fn insideALiteral(source: String) -> Vector<Bool> {
+  var marked = Vector.of<Bool>()
+  let n = source.byteLength()
+  var i = 0
+  while i < n {
+    marked.push(false)
+    i = i + 1
+  }
+  for token in tokens(source) {
+    if token.kind == Kind.Str || token.kind == Kind.Char {
+      var at = token.from + 1
+      while at < token.to {
+        marked.set(at, true)
+        at = at + 1
+      }
+    }
+  }
+  marked
 }
