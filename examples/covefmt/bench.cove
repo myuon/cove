@@ -367,9 +367,24 @@ fn holdsANewline(source: String, token: Token) -> Bool {
 }
 
 fn afterAComment(held: Array<Token>, i: Int) -> Bool {
-  match held.get(i - 1) {
-    Some(before) => before.kind == Kind.LineComment ||
-      before.kind == Kind.DocComment
+  beside(held, i - 1) || beside(held, i + 1)
+}
+
+/// Whether the token at `i` is a comment that runs to the end of its line.
+///
+/// A run of space with one on either side cannot be joined. Taken out in
+/// front of one, the rest of the line joins the comment; taken out behind
+/// one, the comment eats what follows. `impl Cursor \{` and
+/// `/// Reads the field.` became one line, and the declaration under it was
+/// commented away.
+///
+/// A mutation that changes what the program means is not measuring the
+/// formatter. This one was scoring files as failures that had nothing wrong
+/// with them.
+fn beside(held: Array<Token>, i: Int) -> Bool {
+  match held.get(i) {
+    Some(token) => token.kind == Kind.LineComment ||
+      token.kind == Kind.DocComment
     None => false
   }
 }
@@ -435,7 +450,7 @@ fn markBodies(held: Array<Token>, tree: Tree, var marked: Vector<Bool>) {
 /// never ask for, and this is the first number that says how much of it is
 /// there.
 fn mustReOpen() -> Int {
-  166
+  187
 }
 
 /// `source` with the lines inside every one-statement body taken out.

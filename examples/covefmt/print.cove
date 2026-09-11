@@ -1702,8 +1702,14 @@ fn isAnArrowOrEquals(source: String, held: Array<Token>, i: Int) -> Bool {
       if width == 1 {
         return a == '='
       }
-      source.byteAt(token.from + 1) == '=' ||
-        a == '=' && source.byteAt(token.from + 1) == '>'
+      let b = source.byteAt(token.from + 1)
+      // A compound assignment, and not a comparison. `==`, `!=`, `<=` and
+      // `>=` are two bytes ending in `=` as well, and reading one of those as
+      // an assignment stopped the walk in `if i % 7 == 0 \{` before it reached
+      // the `if` — so a one-statement `if` among several kept its line, on
+      // half the corpus.
+      b == '=' && (a == '+' || a == '-' || a == '*' || a == '/' || a == '%') ||
+        a == '=' && b == '>'
     }
     None => false
   }
