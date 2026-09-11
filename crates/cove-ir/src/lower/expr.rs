@@ -1728,7 +1728,8 @@ impl Body<'_> {
                 // became copies at every call site. `Scan.at` in
                 // `examples/covefmt` is that shape — `return -1` and a byte —
                 // and it is read once per byte of every file.
-                let answer = self.expr(value);
+                let answer = self.answer;
+                let answer = self.expr_wanting(value, Some(answer));
                 // A declared return type is a written type, so a `dyn Trait`
                 // one erases here. Erasure boxes, so it answers a location of
                 // its own and the `Return` below names that instead; a body

@@ -413,19 +413,32 @@ fn expand(program: &mut Program, id: FunctionId, leaves: &[bool]) {
             }
         }
 
-        // Where each of the leaf's instructions lands. A `Return` becomes a
-        // copy *and* a jump, so the leaf's program counters are not the new
-        // ones shifted by a constant — and a rule that shifted them by one
-        // was the bug this found: `utf8Width` returns from three places, so
-        // every branch past them landed one, two and three instructions
+        // Where each of the leaf's instructions lands. A `Return` becomes up
+        // to a copy *and* a jump, so the leaf's program counters are not the
+        // new ones shifted by a constant — and a rule that shifted them by
+        // one was the bug this found: `utf8Width` returns from three places,
+        // so every branch past them landed one, two and three instructions
         // early, and a comment holding a `—` ended at the dash again.
+        //
+        // The two conditions below are the two the emitting loop applies, and
+        // they have to be the same two: the copy is skipped when the answer
+        // is already where the call wanted it, and the jump is skipped when
+        // the `return` is the last instruction and falls out of the body
+        // rather than leaving it. A prediction that assumed both would be
+        // emitted was a second bug of the same kind, found by the assertion
+        // below once `return` began forwarding its destination and a leaf
+        // started answering in place.
         let body = code.len();
         let mut place: Vec<usize> = Vec::with_capacity(leaf.code.len() + 1);
         let mut at_new = body;
         for (pc, held) in leaf.code.iter().enumerate() {
             place.push(at_new);
             at_new += match held {
-                Inst::Return { .. } if pc + 1 < leaf.code.len() => 2,
+                Inst::Return { src } => {
+                    let copies = usize::from(where_of[*src as usize] != *dst);
+                    let jumps = usize::from(pc + 1 < leaf.code.len());
+                    copies + jumps
+                }
                 _ => 1,
             };
         }
