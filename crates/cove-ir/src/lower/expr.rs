@@ -1717,9 +1717,23 @@ impl Body<'_> {
     fn return_expr(&mut self, value: Option<&Expr>, span: Span) {
         match value {
             Some(value) => {
-                let answer = self.expr(value);
+                // Into the function's own answer location — issue #302's
+                // destination forwarding, which reached the tail expression
+                // of a body and not the explicit `return`s. It matters twice
+                // over. Once as the copy it removes, and once because
+                // `lower::inline` lends a caller's destination to an expanded
+                // body only when *every* `Return` names one slot: a function
+                // whose tail wrote the answer and whose `return` wrote a
+                // temporary had two, so neither could be renamed and both
+                // became copies at every call site. `Scan.at` in
+                // `examples/covefmt` is that shape — `return -1` and a byte —
+                // and it is read once per byte of every file.
+                let answer = self.answer;
+                let answer = self.expr_wanting(value, Some(answer));
                 // A declared return type is a written type, so a `dyn Trait`
-                // one erases here.
+                // one erases here. Erasure boxes, so it answers a location of
+                // its own and the `Return` below names that instead; a body
+                // that erases is no worse off than before and no better.
                 let returns = self.returns.clone();
                 let answer = self.erase(answer, value, &returns);
                 // `return return x` leaves through the inner one, and the
