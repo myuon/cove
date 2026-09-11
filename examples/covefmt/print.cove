@@ -96,8 +96,14 @@ fn emit(
       // Already on one line. It stays there unless it is over the limit and
       // breaking would actually buy something, and either way the answer is
       // this group's *and everything inside it*.
-      let hugs = hugsItsLast(source, held, tree, column(out))
-      if fits || !worthBreaking(source, held, tree, depth) {
+      // An array is not an argument list and does not borrow its rules.
+      // `expr` sends one that does not fit to `array_literal`, which writes
+      // an element to a line and has neither `arg_list`'s lone-argument
+      // escape nor `hug_last`: `[async fn(event) \{ … \}, …]` breaks where the
+      // same shape written as a call would hug.
+      let listed = isAnArray(source, held, tree)
+      let hugs = !listed && hugsItsLast(source, held, tree, column(out))
+      if fits || !listed && !worthBreaking(source, held, tree, depth) {
         out.push(verbatim(source, held, tree))
       } else if hugs && headIsAGroup(tree) {
         out.push(hugged(source, held, tree, depth))
@@ -870,6 +876,11 @@ fn worthBreaking(
   // The width it would have on a line of its own, with the comma each broken
   // member ends on. `indent + INDENT + width(&value) + 1`, in steps.
   (depth + 1) * 2 + flatWidth(source, held, only) + 1 <= maxWidth()
+}
+
+/// Whether `tree` is an array literal rather than an argument list.
+fn isAnArray(source: String, held: Array<Token>, tree: Tree) -> Bool {
+  byteOfPunct(source, held, tree.from) == '['
 }
 
 /// Whether `tree` is the pattern of a match arm rather than a call.

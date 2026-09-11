@@ -238,13 +238,13 @@ fn mustReIndent() -> Int {
 
 /// How many of the corpus must survive being joined up and re-broken.
 ///
-/// A ratchet, and one that may rise and never fall. `hug_last` writes its
-/// form now when what expands is a call or an array. What the rest need is
-/// the same for a *lambda*, a `<` counted as a bracket when a group is split
-/// at its commas — `Result<T, E>` is one member and comes out as two — and an
-/// array literal that breaks where a call would hug.
+/// A ratchet, and one that may rise and never fall. What the rest need is
+/// almost all one thing: `broken` writes each member with `flattened`, so a
+/// member that must break — a lambda, a nested call that is still too wide —
+/// comes out on one line inside a group that did break. `hug_last` for a
+/// *lambda* is the same missing machinery seen from the other side.
 fn mustReBreak() -> Int {
-  227
+  229
 }
 
 /// `source` with the line breaks inside a `(` or a `[` taken out.
