@@ -25,9 +25,12 @@ export enum Node {
   Params
   /// `-> Result<Unit, Error>`.
   Returns
-  /// A balanced `{ ... }`. Its tokens are leaves: what is inside a body is
-  /// the next slice's, and until then it is kept rather than read.
+  /// A balanced `{ ... }`: the braces, and the statements between them.
   Body
+  /// One statement of a body, ending where the language says a statement
+  /// ends. Its own tokens are leaves — what an expression is made of is the
+  /// next slice's, and until then it is kept rather than read.
+  Stmt
   /// Space and comments, which are tokens like any other here.
   Trivia
   /// One token.

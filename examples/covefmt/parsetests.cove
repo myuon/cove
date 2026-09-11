@@ -30,6 +30,7 @@ fn nodeNamed(kind: Node) -> String {
     Node.Params => "params"
     Node.Returns => "returns"
     Node.Body => "body"
+    Node.Stmt => "stmt"
     Node.Trivia => "trivia"
     Node.Leaf => "leaf"
     Node.Error => "error"
@@ -177,5 +178,69 @@ test fn printing_gives_back_source_that_does_not_parse(
   assert(roundTrips("%%% not a declaration\nfn a() -> Int \{ 1 \}\n"))?
   assert(roundTrips("fn open(\n"))?
   assert(roundTrips(""))?
+  Ok(())
+}
+
+/// The kinds of a body's children, so a body's shape reads as one line.
+fn bodyShape(source: String) -> String {
+  let tree = parse(source)
+  var out = Vector.of<String>()
+  for item in tree.children {
+    for child in item.children {
+      if child.kind == Node.Body {
+        for part in child.children {
+          out.push(nodeNamed(part.kind))
+        }
+      }
+    }
+  }
+  " ".join(out.toArray())
+}
+
+/// **A body is statements, and a statement ends where the language says.**
+///
+/// `docs/LANGUAGE_REFERENCE.md` gives the rule in four parts and each line
+/// below is one of them. They are asserted together because they interact:
+/// the continuation rules are what stop the line rule from cutting an
+/// expression in half, and a test of the line rule alone would pass on a
+/// parser that had neither.
+test fn a_body_is_statements() -> Result<Unit, Error> {
+  // The plain rule: a statement ends at the end of its line.
+  assertEqual(
+    bodyShape("fn f() \{\n  let a = 1\n  let b = 2\n  a\n\}\n"),
+    "leaf leaf stmt leaf stmt leaf stmt leaf leaf",
+  )?
+  // An operator at the end of a line carries the statement on, so the two
+  // lines below are one statement and not two.
+  assertEqual(
+    bodyShape("fn f() \{\n  let a = 1 +\n    2\n  a\n\}\n"),
+    "leaf leaf stmt leaf stmt leaf leaf",
+  )?
+  // A line beginning with `.` continues the chain above it.
+  assertEqual(
+    bodyShape("fn f() \{\n  let a = x\n    .y()\n  a\n\}\n"),
+    "leaf leaf stmt leaf stmt leaf leaf",
+  )?
+  // A line break inside `(` or `[` ends nothing, which is what lets an
+  // argument list span lines.
+  assertEqual(
+    bodyShape("fn f() \{\n  g(\n    1,\n    2,\n  )\n\}\n"),
+    "leaf leaf stmt leaf leaf",
+  )?
+  Ok(())
+}
+
+/// A `{ ... }` inside a body is a body of its own, so an `if`'s block holds
+/// statements rather than a run of leaves.
+///
+/// This is the half that makes the tree worth deepening: a formatter laying
+/// out an `if` needs to know where its block's statements are, and a block
+/// of leaves would make it find them again.
+test fn a_nested_block_is_a_body() -> Result<Unit, Error> {
+  assertEqual(
+    bodyShape("fn f() \{\n  if a \{\n    b\n  \}\n  c\n\}\n"),
+    "leaf leaf stmt leaf stmt leaf leaf",
+  )?
+  assert(roundTrips("fn f() \{\n  if a \{\n    b\n    c\n  \} else \{\n    d\n  \}\n  e\n\}\n"))?
   Ok(())
 }
