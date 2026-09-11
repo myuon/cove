@@ -119,6 +119,17 @@ fn @m.first() -> Int
 
 /// The frame ends at the `Return`, so nothing is cleared on the way out: a
 /// location whose frame is gone retains nothing.
+///
+/// Both `return`s name `s1`, which is the function's answer location, and
+/// that is destination forwarding reaching an explicit `return` — issue #302,
+/// which had reached a body's tail expression and not this. It used to build
+/// the `0` in a slot of its own and answer that, so the two `return`s named
+/// two slots and the frame was a word wider.
+///
+/// The width is the small half of it. `lower::inline` lends a caller's
+/// destination to an expanded body only when *every* `Return` names one
+/// slot, so a function shaped like this one could not be renamed into its
+/// caller and every call site copied the answer back out.
 #[test]
 fn a_return_leaves_without_clearing_what_the_frame_was_holding() {
     assert_eq!(
@@ -128,12 +139,12 @@ fn a_return_leaves_without_clearing_what_the_frame_was_holding() {
         ),
         "\
 fn @m.early(Int) -> Int
-  frame 5: s0!:int s1:int s2:bool s3:int s4:unit
+  frame 4: s0!:int s1:int s2:bool s3:unit
   local n -> s0:Int [0, 6)
      0  lt.int.imm s2:bool s0:int 0
      1  branch-false s2:bool 4
-     2  int s3:int 0
-     3  return s3:Int
+     2  int s1:int 0
+     3  return s1:Int
      4  copy s1:Int s0:Int
      5  return s1:Int
 "
