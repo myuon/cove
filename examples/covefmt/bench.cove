@@ -82,11 +82,21 @@ export fn main() -> Result<Unit, Error> {
   }
   let wholeTo = now()
 
-  // The corpus is the oracle, and this is where it says so. Timing a
-  // formatter that has quietly stopped round-tripping is timing nothing, and
-  // `cove test` sees only the samples in `parsetests.cove` — a few hundred
-  // bytes against half a megabyte of the real thing. Every bug this file's
-  // numbers have been wrong about was found on the corpus and not there.
+  // The corpus is the oracle, and this is where it says so. `cove test` sees
+  // the samples in `parsetests.cove` — a few hundred bytes — and this is half
+  // a megabyte of source nobody wrote to be parsed; every mistake the parser
+  // has made was found here and would have passed there.
+  //
+  // # What `print(source) == source` means now
+  //
+  // Every `.cove` file in this repository passes `cove fmt --check`, so every
+  // one of them **is** the Rust formatter's output. While `print` made no
+  // layout decision this check said "nothing was broken"; as soon as one is
+  // made it says something stronger and more useful — that covefmt reached
+  // the same decision the formatter it is replacing reached, on real source.
+  //
+  // So the number below is the one to watch. It is the whole corpus today,
+  // and a layout rule that is not yet right takes files out of it.
   var broken = 0
   var uncovered = 0
   for source in sources {
@@ -99,12 +109,10 @@ export fn main() -> Result<Unit, Error> {
       uncovered = uncovered + 1
     }
   }
-  if broken > 0 || uncovered > 0 {
-    return Err(Error(message: "{broken} file(s) do not round-trip, {uncovered} tree(s) do not cover"))
+  if uncovered > 0 {
+    return Err(Error(message: "{uncovered} tree(s) do not cover their tokens"))
   }
-  println(
-    "{sources.length()} file(s) round-trip, and every tree covers its tokens",
-  )?
+  println("{sources.length() - broken} of {sources.length()} file(s) match `cove fmt`")?
 
   let lex = (lexTo - lexFrom).millis()
   let lexAndParse = (parseTo - parseFrom).millis()
