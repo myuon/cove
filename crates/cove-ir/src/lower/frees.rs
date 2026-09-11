@@ -329,6 +329,7 @@ impl<'p> Flow<'p> {
             | Inst::ArithImm { dst, .. }
             | Inst::CmpImm { dst, .. }
             | Inst::Convert { dst, .. }
+            | Inst::ByteAt { dst, .. }
             | Inst::Len { dst, .. }
             | Inst::LayoutOf { dst, .. }
             | Inst::Alloc { dst, .. }
@@ -467,6 +468,7 @@ impl<'p> Flow<'p> {
                 }
             }
             Inst::LoadField { obj, .. }
+            | Inst::ByteAt { obj, .. }
             | Inst::Len { obj, .. }
             | Inst::LayoutOf { obj, .. }
             | Inst::AddrOfField { obj, .. } => f(obj, 1),

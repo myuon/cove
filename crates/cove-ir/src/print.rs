@@ -301,6 +301,9 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             src,
             layout,
         } => format!("store-elem {} {} {}", s(*obj), s(*index), v(*src, *layout)),
+        Inst::ByteAt { dst, obj, at } => {
+            format!("byte-at {} {} {}", s(*dst), s(*obj), s(*at))
+        }
         Inst::Len { dst, obj } => format!("len {} {}", s(*dst), s(*obj)),
         Inst::LayoutOf { dst, obj } => format!("layout-of {} {}", s(*dst), s(*obj)),
         Inst::AddrOfSlot { dst, slot } => format!("addr-of-slot {} {}", s(*dst), s(*slot)),

@@ -16,7 +16,7 @@ unless the run was granted the capability it names.
 | | |
 | --- | --- |
 | builtin types | 18 |
-| builtin methods | 101 |
+| builtin methods | 102 |
 | builtin associated functions | 13 |
 | free builtins | 7 |
 | host modules | 8 |
@@ -174,6 +174,7 @@ written as a namespace.
 | `toUpper() -> String` |  |  |  | `machine` |
 | `toLower() -> String` |  |  |  | `machine` |
 | `byteLength() -> Int` |  |  |  | `machine` |
+| `byteAt(offset: Int) -> Int` |  |  |  | `machine` |
 | `codePointAtByte(offset: Int) -> Option<Int>` |  |  |  | `machine` |
 | `sliceBytes(from: Int, to: Int) -> Result<String, Error>` |  |  |  | `machine` |
 | `snapshot() -> Self` |  |  |  | `machine` |

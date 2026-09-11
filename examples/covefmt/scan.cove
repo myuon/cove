@@ -1,10 +1,18 @@
 /// A source and how far into it a rule has read.
 ///
-/// Cove source is UTF-8 *text*, so a lexer needs bytes and code points and not
-/// a byte array: `codePointAtByte` answers the scalar at an offset and
-/// `sliceBytes` cuts a run back out, both of them `String`'s own. A `Bytes`
-/// type would buy this nothing — a formatter never sees a byte that is not
-/// part of a character.
+/// Every rule here reads *bytes*, and that is not a shortcut. UTF-8 is
+/// self-synchronising: every byte of a character past the first is at least
+/// `0x80`, so a byte equal to `"` is a `"` and can be nothing else, and a
+/// scanner looking for an ASCII terminator finds the right one without
+/// decoding anything. What a rule cannot do byte-wise is *classify* a
+/// character — and it never needs to, because every class this lexer has is
+/// ASCII: a letter, a digit, a space, a delimiter.
+///
+/// It used to read code points, and the cost was not the decoding — for
+/// ASCII, `codePointAtByte` reads one byte and returns. It was the shape:
+/// a builtin call answering an `Option`, once per byte, where a byte read is
+/// an instruction. `benches/scanshape` is the same scan both ways, 119 ns a
+/// byte against 35.
 struct Scan {
   source: String
   size: Int
@@ -30,26 +38,28 @@ fn isDigit(c: Int) -> Bool {
   c >= '0' && c <= '9'
 }
 
-/// How many bytes the character `c` takes in UTF-8.
+/// How many bytes the character whose first byte is `lead` takes.
 ///
-/// A rule that consumes *anything* until a terminator — a comment, a string —
-/// has to step by this rather than by one. `codePointAtByte` answers `None`
-/// at an offset that is not a character boundary, and [`Scan::at`] reports
-/// that as `-1`, so a scanner stepping one byte at a time ended its token in
-/// the middle of the first character that was not ASCII. It happened on a
-/// `—` inside a comment and the whole repository has them.
+/// From the lead byte and not from a decoded scalar, which is the difference
+/// that makes it free: UTF-8 writes the width into the top bits of the first
+/// byte, so this is the same four comparisons the old one did and needs
+/// nothing decoded to do them.
 ///
-/// The width is computed from the scalar rather than found by probing,
-/// because probing is a second `codePointAtByte` per character and this is
-/// arithmetic on a number already read.
-fn utf8Width(c: Int) -> Int {
-  if c < 128 {
+/// Only one caller has any use for it. A rule that scans *until a terminator*
+/// steps one byte at a time and is right to — every byte of a character past
+/// the first is at least `0x80`, so none of them is the ASCII byte the rule
+/// is looking for. What needs a width is the token made of a character no
+/// rule claimed: a `—` written where an operator would go is one unknown
+/// token, and three would tile the source just as well and say something
+/// less true.
+fn utf8Width(lead: Int) -> Int {
+  if lead < 128 {
     return 1
   }
-  if c < 2048 {
+  if lead < 224 {
     return 2
   }
-  if c < 65536 {
+  if lead < 240 {
     return 3
   }
   4
@@ -61,21 +71,21 @@ fn isSpace(c: Int) -> Bool {
 }
 
 impl Scan {
-  /// The code point at `at`, or `-1` past the end.
+  /// The byte at `at`, or `-1` past the end.
   ///
   /// One number for "there is nothing here" rather than an `Option`, because
-  /// every caller asks the same question of it and `-1` fails every class test
-  /// above without a `match` at each one. It is also the hottest call in the
-  /// lexer: `Option::unwrapOr` is `std.option.unwrapOr`, a Cove call with a
-  /// frame of its own, and measured at 23% of this loop.
+  /// every caller asks the same question of it and `-1` fails every class
+  /// test above without a `match` at each one.
+  ///
+  /// A byte and not a code point, which is the whole shape of this file.
+  /// `String.byteAt` is an instruction where `codePointAtByte` is a builtin
+  /// call answering an `Option`, and this is the hottest call in the lexer:
+  /// `benches/scanshape` puts the same scan at 35 ns a byte against 119.
   fn at(self, at: Int) -> Int {
     if at >= self.size {
       return -1
     }
-    match self.source.codePointAtByte(at) {
-      Some(c) => c
-      None => -1
-    }
+    self.source.byteAt(at)
   }
 
   /// The end of the run of spaces beginning at `from`.
@@ -142,7 +152,7 @@ impl Scan {
         depth = depth - 1
         at = at + 1
       } else {
-        at = at + utf8Width(c)
+        at = at + 1
       }
     }
     at
@@ -157,7 +167,7 @@ impl Scan {
       if c < 0 || c == '\n' {
         return at
       }
-      at = at + utf8Width(c)
+      at = at + 1
     }
     at
   }
@@ -182,7 +192,7 @@ impl Scan {
         depth = depth - 1
         at = at + 2
       } else {
-        at = at + utf8Width(c)
+        at = at + 1
       }
     }
     at
@@ -209,13 +219,13 @@ impl Scan {
       }
       if c == '\\' {
         // The escaped character may be wider than the backslash.
-        at = at + 1 + utf8Width(self.at(at + 1))
+        at = at + 2
       } else if c == '\{' && closer == '"' {
         at = self.interpolation(at)
       } else if c == closer {
         return at + 1
       } else {
-        at = at + utf8Width(c)
+        at = at + 1
       }
     }
     at

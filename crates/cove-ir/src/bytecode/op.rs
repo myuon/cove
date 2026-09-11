@@ -107,7 +107,8 @@ mod base {
     pub const STORE_FIELD: u8 = LOAD_FIELD + 1;
     pub const LOAD_ELEM: u8 = STORE_FIELD + 1;
     pub const STORE_ELEM: u8 = LOAD_ELEM + 1;
-    pub const LEN: u8 = STORE_ELEM + 1;
+    pub const BYTE_AT: u8 = STORE_ELEM + 1;
+    pub const LEN: u8 = BYTE_AT + 1;
     pub const LAYOUT_OF: u8 = LEN + 1;
     pub const ADDR_OF_SLOT: u8 = LAYOUT_OF + 1;
     pub const ADDR_OF_FIELD: u8 = ADDR_OF_SLOT + 1;
@@ -174,6 +175,7 @@ pub enum Op {
     StoreField,
     LoadElem,
     StoreElem,
+    ByteAt,
     Len,
     LayoutOf,
     AddrOfSlot,
@@ -414,6 +416,7 @@ impl Op {
             Op::StoreField,
             Op::LoadElem,
             Op::StoreElem,
+            Op::ByteAt,
             Op::Len,
             Op::LayoutOf,
             Op::AddrOfSlot,
@@ -487,6 +490,7 @@ impl Op {
             Op::StoreField => base::STORE_FIELD,
             Op::LoadElem => base::LOAD_ELEM,
             Op::StoreElem => base::STORE_ELEM,
+            Op::ByteAt => base::BYTE_AT,
             Op::Len => base::LEN,
             Op::LayoutOf => base::LAYOUT_OF,
             Op::AddrOfSlot => base::ADDR_OF_SLOT,
@@ -685,6 +689,12 @@ impl Op {
                 Operand::Value,
                 one(Half::Layout),
             ),
+            Op::ByteAt => fields(
+                Operand::Word(INT),
+                Operand::Word(REF),
+                Operand::Word(INT),
+                Payload::Empty,
+            ),
             Op::Len => fields(Operand::Word(INT), Operand::Word(REF), NONE, Payload::Empty),
             Op::LayoutOf => fields(Operand::Word(INT), Operand::Word(REF), NONE, Payload::Empty),
             Op::AddrOfSlot => fields(
@@ -772,11 +782,16 @@ mod tests {
     use super::*;
 
     /// ADR 0041's count, which is the one number the format's headroom is
-    /// argued from: a hundred and one opcodes out of the 256 a byte names.
+    /// argued from: a hundred and three opcodes out of the 256 a byte names.
+    ///
+    /// It was a hundred and two until `Op::ByteAt`, and what the number is
+    /// for is that a reader can see the headroom rather than be told about
+    /// it: half the byte is still unspent, so the format has room for what
+    /// comes and this test is where that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_two_opcodes() {
-        assert_eq!(Op::all().len(), 102);
-        assert_eq!(OPCODES, 102);
+    fn there_are_a_hundred_and_three_opcodes() {
+        assert_eq!(Op::all().len(), 103);
+        assert_eq!(OPCODES, 103);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

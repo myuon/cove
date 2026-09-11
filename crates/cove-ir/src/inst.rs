@@ -462,6 +462,28 @@ pub enum Inst {
         src: Slot,
         layout: LayoutId,
     },
+    /// `dst = <byte `at` of the string `obj`>`, as an `Int` in `0..=255`.
+    ///
+    /// The one instruction that reaches *inside* a word. Everything else here
+    /// addresses a value location or a payload word, because a word is what a
+    /// frame and a heap object are made of — but a `String`'s payload is
+    /// bytes, eight to a word, and the only shape that reads one is this.
+    ///
+    /// It is an instruction and not a builtin, and the difference is the
+    /// whole reason it exists. `String.byteAt` as a `call-builtin` measured
+    /// 58 ns of which 48 ns was *being a builtin call* — the operands copied
+    /// into a buffer, the operand array built, the dispatch by two strings,
+    /// the answer written back — for work that is one payload word, a shift
+    /// and a mask. `benches/builtincall` is where those two numbers are.
+    ///
+    /// `at` is bounds-checked against the receiver's byte length, and an
+    /// offset outside it stops the run. That is `String.sliceBytes`'s rule
+    /// and not `Array.get`'s: a byte offset out of range is one this type
+    /// never handed out, where an index out of range is arithmetic a caller
+    /// did about a sequence it can count. Answering an `Option` here would
+    /// also be answering it eight times per word of a lexer's inner loop,
+    /// and the wrapper was measured at more than the read.
+    ByteAt { dst: Slot, obj: Slot, at: Slot },
     /// `dst = <obj's header length>`: an element count, or a string's bytes.
     Len { dst: Slot, obj: Slot },
     /// `dst = <the [`LayoutId`] in obj's header>`, as an `Int`.

@@ -271,7 +271,7 @@ impl Check<'_> {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
-                Inst::Len { dst, .. } | Inst::LayoutOf { dst, .. } => {
+                Inst::ByteAt { dst, .. } | Inst::Len { dst, .. } | Inst::LayoutOf { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
@@ -800,6 +800,15 @@ impl Check<'_> {
                 if self.layout_exists(at, layout) {
                     self.fits(at, src, layout, "what an element is written from");
                 }
+            }
+            Inst::ByteAt {
+                dst,
+                obj,
+                at: offset,
+            } => {
+                self.expect(at, obj, &[Repr::Ref]);
+                self.expect(at, offset, &[Repr::Int]);
+                self.expect(at, dst, &[Repr::Int]);
             }
             Inst::Len { dst, obj } => {
                 self.expect(at, obj, &[Repr::Ref]);

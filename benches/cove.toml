@@ -145,3 +145,7 @@ allow = []
 [run.builtincall]
 entry = "builtincall.main"
 allow = ["console", "clock"]
+
+[run.scanshape]
+entry = "scanshape.main"
+allow = ["console", "clock"]
