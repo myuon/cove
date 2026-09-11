@@ -245,7 +245,17 @@ fn emit(
             at = depth
           }
         }
-        last = emit(source, held, child, last, at, reserved, var out)
+        // A body that must break and was written on one line is the one
+        // place this printer puts a newline where the source has none. Every
+        // other rule rewrites a run of space that is already there.
+        if child.kind == Node.Body && !isBroken(source, held, child) &&
+          closesAHeader(source, held, child, tree.from) &&
+          writesBroken(source, held, child) {
+          writeBrokenBody(source, held, child, at, var out)
+          last = child.to - 1
+        } else {
+          last = emit(source, held, child, last, at, reserved, var out)
+        }
       }
       None => { }
     }
@@ -575,10 +585,16 @@ fn breaksAsABody(
   body: Tree,
   from: Int,
 ) -> Bool {
-  // A lambda has a parameter list, and a trailing closure has nothing in
-  // front of its brace but the call it trails. The token before the `{` is
-  // what says which: `fn(item) { … }` closes one and `spawn { … }` does not.
-  if byteOfPunct(source, held, previousSignificant(held, body.from)) == ')' {
+  // A lambda's brace follows its *parameter* list, and a lambda body always
+  // breaks. A trailing closure's follows the call it trails, and one of a
+  // single statement keeps its line.
+  //
+  // A `)` in front of the brace does not tell them apart. `clock.timeout(1s)
+  // { render()? }` has one and is a trailing closure; what says `fn(item) { …
+  // }` is a lambda is the `fn` in front of the `(` that the `)` closes. The
+  // `)` alone was the test here until a body could be written broken, and
+  // then it put `clock.timeout(1s) \{ render("bookings")? \}?` on three lines.
+  if closesAParameterList(source, held, previousSignificant(held, body.from)) {
     return true
   }
   // A control flow body always breaks, whatever is in it. `breaks` says so —
@@ -1588,8 +1604,8 @@ fn opensAHeader(source: String, held: Array<Token>, tree: Tree) -> Bool {
   }
 }
 
-/// Whether the `\{` at `body.from` closes the header of an `if`, a `while`, a
-/// `for`, a `match` or an `else`.
+/// Whether the `\{` at `body.from` opens a body that always breaks: a
+/// declaration's, a control flow header's, or a lambda's.
 ///
 /// The tree has no node for a header — a statement's own tokens are leaves —
 /// so the keyword is looked for where it has to be: walking back from the
@@ -1643,8 +1659,18 @@ fn closesAHeader(
     Some(token) => {
       match source.sliceBytes(token.from, token.to) {
         Ok(text) => {
+          // `breaks`: *"a declaration body, a control flow body, and a lambda
+          // body always read better broken."* All three open on a word, and a
+          // lambda's is the `fn` in front of its parameter list.
+          // A declaration body and a control flow body. `fn` opens one only
+          // when a *name* follows it: `fn(value: Int) \{ … \}` is a lambda,
+          // and `cove fmt` leaves one of those on its line — checked by
+          // running it on `spawnSomething(first, fn(v: Int) -> Int \{ … \})`,
+          // which it keeps at 83 columns.
           text == "if" || text == "while" || text == "for" || text == "match" ||
-            text == "else"
+            text == "else" || text == "impl" || text == "trait" ||
+            text == "struct" || text == "enum" ||
+            text == "fn" && !opensALambda(source, held, word)
         }
         Err(_) => false
       }
@@ -1673,4 +1699,152 @@ fn isAnArrowOrEquals(source: String, held: Array<Token>, i: Int) -> Bool {
     }
     None => false
   }
+}
+
+/// Whether a body written on one line can be rewritten across several without
+/// losing anything.
+///
+/// It has to have statements — `block` writes `\{ \}` for an empty one and
+/// does not break it — and it must hold no comment. [`writeBrokenBody`]
+/// writes the statements and puts the lines between them itself, so a comment
+/// that was between two of them has nowhere to go. `cove_syntax::format`
+/// places comments from their spans, through `lead` and `trail`; this has no
+/// such thing, and dropping one would be worse than leaving the line long.
+fn writesBroken(source: String, held: Array<Token>, body: Tree) -> Bool {
+  var statements = 0
+  for child in body.children {
+    if child.kind == Node.Stmt {
+      statements = statements + 1
+    }
+  }
+  if statements == 0 {
+    return false
+  }
+  var at = body.from
+  while at < body.to {
+    match held.get(at) {
+      Some(token) => {
+        if token.kind == Kind.LineComment || token.kind == Kind.BlockComment ||
+          token.kind == Kind.DocComment {
+          return false
+        }
+      }
+      None => { }
+    }
+    at = at + 1
+  }
+  true
+}
+
+/// Writes `body` with a statement to a line, at `depth`.
+///
+/// `block`'s shape: the `\{` ends its line, every statement is a line of its
+/// own one step further in, and the `\}` is a line at the depth the body
+/// opened at.
+///
+/// The runs of space the source had between the statements are not written.
+/// They are what this is replacing — that is the whole point of it — and
+/// [`writesBroken`] has already refused any body where one of them carries
+/// something other than space.
+fn writeBrokenBody(
+  source: String,
+  held: Array<Token>,
+  body: Tree,
+  depth: Int,
+  var out: Vector<String>,
+) {
+  match held.get(body.from) {
+    Some(token) => out.push(text(source, token))
+    None => { }
+  }
+  var last = body.from
+  for child in body.children {
+    if child.kind == Node.Stmt {
+      out.push("\n")
+      out.push(indentOf(depth + 1))
+      last = emit(source, held, child, last, depth + 1, -1, var out)
+      // A statement that stopped in front of a `\}` on the same line took the
+      // run of space between them with it — `\{ 1 \}` makes a statement of
+      // `1 `. On a line of its own that space is trailing, and the first rule
+      // in this file says it goes.
+      trimTrailing(var out)
+    }
+  }
+  out.push("\n")
+  out.push(indentOf(depth))
+  match held.get(body.to - 1) {
+    Some(token) => out.push(text(source, token))
+    None => { }
+  }
+}
+
+/// Drops the pieces at the end of `out` that are nothing but space.
+fn trimTrailing(var out: Vector<String>) {
+  while out.length() > 0 {
+    let done = match out.get(out.length() - 1) {
+      Some(piece) => {
+        if isOnlySpace(piece) {
+          out.pop()
+          false
+        } else {
+          true
+        }
+      }
+      None => true
+    }
+    if done {
+      return
+    }
+  }
+}
+
+/// Whether `piece` is a non-empty run of spaces and tabs.
+fn isOnlySpace(piece: String) -> Bool {
+  let n = piece.byteLength()
+  if n == 0 {
+    return false
+  }
+  var at = 0
+  while at < n {
+    let c = piece.byteAt(at)
+    if c != ' ' && c != '\t' {
+      return false
+    }
+    at = at + 1
+  }
+  true
+}
+
+/// Whether the token at `at` is a `)` closing a `fn(…)` parameter list.
+///
+/// Walks back to the `(` it closes and asks what stands in front of it. The
+/// brackets in between are counted, so `fn(a: Array<Int>, b: (Int, Int))`
+/// answers about its own `(` and not about one of the pairs inside it.
+fn closesAParameterList(source: String, held: Array<Token>, at: Int) -> Bool {
+  if byteOfPunct(source, held, at) != ')' {
+    return false
+  }
+  var depth = 0
+  var i = at
+  while i >= 0 {
+    let c = byteOfPunct(source, held, i)
+    if c == ')' || c == ']' {
+      depth = depth + 1
+    } else if c == '(' || c == '[' {
+      depth = depth - 1
+      if depth == 0 {
+        return isWord(source, held, previousSignificant(held, i), "fn")
+      }
+    }
+    i = i - 1
+  }
+  false
+}
+
+/// Whether the `fn` at `at` is a lambda's rather than a declaration's.
+///
+/// A declaration is `fn name(…)` and a lambda is `fn(…)`, so the token after
+/// the word is the whole of the difference.
+fn opensALambda(source: String, held: Array<Token>, at: Int) -> Bool {
+  byteOfPunct(source, held, nextSignificant(held, at + 1, held.length())) == '('
 }

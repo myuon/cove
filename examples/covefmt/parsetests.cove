@@ -177,7 +177,7 @@ test fn printing_the_tree_gives_the_source_back() -> Result<Unit, Error> {
 /// somebody is in the middle of typing.
 test fn printing_gives_back_source_that_does_not_parse(
 ) -> Result<Unit, Error> {
-  assert(roundTrips("%%% not a declaration\nfn a() -> Int \{ 1 \}\n"))?
+  assert(roundTrips("%%% not a declaration\nfn a() -> Int \{\n  1\n\}\n"))?
   assert(roundTrips("fn open(\n"))?
   assert(roundTrips(""))?
   Ok(())
@@ -265,7 +265,7 @@ test fn a_line_does_not_end_on_a_blank() -> Result<Unit, Error> {
   // Space *within* a line is not trailing, and this rule leaves it alone:
   // how much of it there should be is a different decision that reads what
   // stands on either side.
-  assert(roundTrips("fn f(a: Int,  b: Int) -> Int \{ a \}\n"))?
+  assert(roundTrips("fn f(a: Int,  b: Int) -> Int \{\n  a\n\}\n"))?
   // A blank line is blank, not indented.
   let blank = "fn f() \{\n  1\n   \n  2\n\}\n"
   let heldBlank = tokens(blank)
@@ -288,16 +288,17 @@ test fn a_line_does_not_end_on_a_blank() -> Result<Unit, Error> {
 /// correct rule to collapse — and a rule that collapsed nothing would pass
 /// there just as well.
 test fn blank_lines_collapse_to_one() -> Result<Unit, Error> {
-  let many = "fn a() \{ 1 \}\n\n\n\n\nfn b() \{ 2 \}\n"
+  // The bodies are written broken because a declaration body always is, and
+  // an input whose body had to break as well would be two rules at once.
+  let a = "fn a() \{\n  1\n\}"
+  let b = "fn b() \{\n  2\n\}"
+  let many = "{a}\n\n\n\n\n{b}\n"
   let held = tokens(many)
-  assertEqual(
-    print(many, held, parseTokens(many, held)),
-    "fn a() \{ 1 \}\n\nfn b() \{ 2 \}\n",
-  )?
+  assertEqual(print(many, held, parseTokens(many, held)), "{a}\n\n{b}\n")?
   // One blank line is already one, and stays.
-  assert(roundTrips("fn a() \{ 1 \}\n\nfn b() \{ 2 \}\n"))?
+  assert(roundTrips("{a}\n\n{b}\n"))?
   // No blank line stays none: the rule is a ceiling, not a floor.
-  assert(roundTrips("fn a() \{ 1 \}\nfn b() \{ 2 \}\n"))?
+  assert(roundTrips("{a}\n{b}\n"))?
   // Inside a body too, and the indentation after the last newline is kept —
   // what the rule takes out is newlines, not the line they leave behind.
   let inside = "fn f() \{\n  1\n\n\n  2\n\}\n"
@@ -332,11 +333,11 @@ test fn a_block_does_not_open_on_a_blank() -> Result<Unit, Error> {
 /// than of a brace, and `print` starts the walk at `-1` so that both are one
 /// answer instead of two.
 test fn a_file_does_not_open_on_a_blank() -> Result<Unit, Error> {
-  let source = "\n\n\nfn f() \{ 1 \}\n"
+  let source = "\n\n\nfn f() \{\n  1\n\}\n"
   let held = tokens(source)
   assertEqual(
     print(source, held, parseTokens(source, held)),
-    "fn f() \{ 1 \}\n",
+    "fn f() \{\n  1\n\}\n",
   )?
   Ok(())
 }
@@ -546,6 +547,44 @@ test fn a_group_that_does_not_fit_is_broken() -> Result<Unit, Error> {
 test fn a_break_that_buys_nothing_is_not_made() -> Result<Unit, Error> {
   let held = "\n".join(["fn f(entry: Int) -> Int \{", "  Ok(Check(name: aaaaaaaaaaaaaaaa, url: bbbbbbbbbbbbbbbbbb, expect: cccccccccccccccc))", "\}", ""])
   assert(roundTrips(held))?
+  Ok(())
+}
+
+/// **A declaration's body is written broken, and a closure's is not.**
+///
+/// The one place this printer puts a newline where the source has none.
+/// Every other rule rewrites a run of space that is already there, which is
+/// why a corpus of `cove fmt`'s own output — and every mutation of it that
+/// only moves whitespace inside brackets — could never ask for this.
+///
+/// `breaks` reads *"a declaration body, a control flow body, and a lambda
+/// body always read better broken"*, and two of those three are what this
+/// does. The lambda is **not**: `cove fmt` keeps
+/// `spawnSomething(first, fn(v: Int) -> Int \{ v * 2 \})` at 83 columns, and
+/// so does `clock.timeout(1s) \{ render()? \}?`. Both were checked by running
+/// it, and the rule here is what the evidence supports rather than what the
+/// sentence says.
+///
+/// `fn` tells a declaration from a lambda by what follows it: a name, or a
+/// `(`.
+test fn a_declaration_body_is_written_broken() -> Result<Unit, Error> {
+  let flat = "fn sum(a: Int) -> Int \{ a + 1 \}\n"
+  let held = tokens(flat)
+  assertEqual(
+    print(flat, held, parseTokens(flat, held)),
+    "fn sum(a: Int) -> Int \{\n  a + 1\n\}\n",
+  )?
+  // A control flow body too, and at the depth it is written at.
+  let nested = "fn f(x: Int) -> Int \{\n  if x > 0 \{ 1 \} else \{ 2 \}\n\}\n"
+  let heldNested = tokens(nested)
+  assertEqual(
+    print(nested, heldNested, parseTokens(nested, heldNested)),
+    "fn f(x: Int) -> Int \{\n  if x > 0 \{\n    1\n  \} else \{\n    2\n  \}\n\}\n",
+  )?
+  // A trailing closure of one statement keeps its line.
+  assert(roundTrips(
+    "fn f() -> Int \{\n  clock.timeout(1s) \{ render()? \}?\n\}\n",
+  ))?
   Ok(())
 }
 

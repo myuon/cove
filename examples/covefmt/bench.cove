@@ -165,16 +165,50 @@ export fn main() -> Result<Unit, Error> {
   // would have on a line of its own, and a match arm's pattern was broken as
   // though it were a call.
   var rebroken = 0
+  var unbroken = Vector.of<String>()
+  var where = 0
   for source in sources {
     let joined = joinedUp(source)
     let held = tokens(joined)
     if print(joined, held, parseTokens(joined, held)) == source {
       rebroken = rebroken + 1
+    } else {
+      match paths.get(where) {
+        Some(path) => unbroken.push(path)
+        None => { }
+      }
     }
+    where = where + 1
   }
   println("{rebroken} of {sources.length()} file(s) re-break to `cove fmt`")?
+
+  // # And the one mutation that reaches a body
+  //
+  // Joining the lines inside a `(` or a `[` never touches a `\{`, so nothing
+  // above asks the printer to lay out a *body*. This does, for the one shape
+  // that can be joined without changing what the program means: a body of a
+  // single statement. Two run together would be one statement and a different
+  // program, because the language ends a statement at the end of its line.
+  //
+  // It is the one place this printer puts a newline where the source has
+  // none, and it is the hardest of the four by a long way.
+  var reopened = 0
+  for source in sources {
+    let closed = closedUp(source)
+    let held = tokens(closed)
+    if print(closed, held, parseTokens(closed, held)) == source {
+      reopened = reopened + 1
+    }
+  }
+  println("{reopened} of {sources.length()} file(s) re-open a body")?
+  if reopened < mustReOpen() {
+    return Err(Error(message: "{reopened} re-open, and {mustReOpen()} did"))
+  }
   if rebroken < mustReBreak() {
-    return Err(Error(message: "{rebroken} re-break, and {mustReBreak()} did"))
+    let names = ", ".join(unbroken.toArray())
+    return Err(Error(
+      message: "{rebroken} re-break, {mustReBreak()} did: {names}",
+    ))
   }
   if restored < mustReIndent() {
     let names = ", ".join(lost.toArray())
@@ -338,4 +372,107 @@ fn afterAComment(held: Array<Token>, i: Int) -> Bool {
       before.kind == Kind.DocComment
     None => false
   }
+}
+
+/// For every token, whether it is a run of space a body of *one* statement put
+/// between its braces.
+///
+/// A body of several cannot be joined up: the language ends a statement at the
+/// end of its line, so running two together would be one statement and a
+/// different program. One is safe, and it is the shape the rule is about —
+/// `fn a() \{\n  1\n\}` joins to `fn a() \{ 1 \}`, and a correct formatter
+/// breaks it again, because a declaration body always breaks and a control
+/// flow body does too. Only a *trailing closure* of one statement keeps its
+/// line, which is the distinction this is here to hold the printer to.
+///
+/// The tree is asked rather than the brackets counted, because "one
+/// statement" is not something a bracket stack knows.
+fn insideABodyOfOne(source: String, held: Array<Token>) -> Vector<Bool> {
+  var marked = Vector.of<Bool>()
+  var i = 0
+  while i < held.length() {
+    marked.push(false)
+    i = i + 1
+  }
+  markBodies(held, parseTokens(source, held), var marked)
+  marked
+}
+
+/// Marks the direct space children of every one-statement body under `tree`.
+fn markBodies(held: Array<Token>, tree: Tree, var marked: Vector<Bool>) {
+  if tree.kind == Node.Body {
+    var statements = 0
+    for child in tree.children {
+      if child.kind == Node.Stmt {
+        statements = statements + 1
+      }
+    }
+    if statements == 1 {
+      for child in tree.children {
+        if child.to - child.from == 1 {
+          match held.get(child.from) {
+            Some(token) => {
+              if token.kind == Kind.Space {
+                marked.set(child.from, true)
+              }
+            }
+            None => { }
+          }
+        }
+      }
+    }
+  }
+  for child in tree.children {
+    markBodies(held, child, var marked)
+  }
+}
+
+/// How many of the corpus must survive having their one-statement bodies
+/// joined up and laid out again.
+///
+/// A ratchet, and one that may rise and never fall. It starts low and that is
+/// the point of it: writing a body is a capability the other three mutations
+/// never ask for, and this is the first number that says how much of it is
+/// there.
+fn mustReOpen() -> Int {
+  112
+}
+
+/// `source` with the lines inside every one-statement body taken out.
+///
+/// A body of several cannot be joined: the language ends a statement at the
+/// end of its line, so running two together would be one statement and a
+/// different program. One is safe, and it is the shape the rule is about —
+/// `fn a() \{\n  1\n\}` joins to `fn a() \{ 1 \}`, and a correct formatter
+/// breaks it again because a declaration body always breaks.
+///
+/// The tree is asked rather than the brackets counted, because "one
+/// statement" is not something a bracket stack knows.
+fn closedUp(source: String) -> String {
+  let held = tokens(source)
+  let alone = insideABodyOfOne(source, held)
+  var out = Vector.of<String>()
+  var i = 0
+  while i < held.length() {
+    match held.get(i) {
+      Some(token) => {
+        let joins = match alone.get(i) {
+          Some(yes) => yes
+          None => false
+        }
+        if token.kind == Kind.Space && joins && holdsANewline(source, token) &&
+          !afterAComment(held, i) {
+          out.push(" ")
+        } else {
+          match source.sliceBytes(token.from, token.to) {
+            Ok(text) => out.push(text)
+            Err(_) => { }
+          }
+        }
+      }
+      None => { }
+    }
+    i = i + 1
+  }
+  "".join(out.toArray())
 }
