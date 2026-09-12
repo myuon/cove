@@ -352,6 +352,20 @@ has. A sixth `Compare` admits a `Tag` on both sides and refuses everything
 else, so what [ADR 0048](docs/adr/0048-a-repr-says-what-a-word-means.md) was
 protecting — a case index read as a number — is refused where it always was.
 
+[ADR 0051](docs/adr/0051-a-string-is-built-as-a-byte-run.md) lets the IR say
+how a string is *made*. It could name one, read a byte of one and ask its
+length, but construction was hidden behind `String.sliceBytes`, `Vector.push`
+and `String.join` — 26.1% of the formatter's profile above its
+per-instruction floor, and removing one intermediate allocation moved the wall
+clock not at all, because the calls, the vector of handles and the final copy
+all remained. So the heap gains an internal packed byte run and lowering gains
+`alloc-bytes`, `write-byte`, `copy-bytes` and `finish-string`: a join
+allocates its exact length once, a slice consumed only by a larger
+construction never becomes a heap object, and the copying is still one native
+run copy rather than an interpreted loop over bytes. A run under construction
+is not a `String` — finishing is what validates UTF-8 and establishes the
+invariant — and `Array<Byte>` is left word-sized and undecided.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles
