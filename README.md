@@ -366,6 +366,22 @@ run copy rather than an interpreted loop over bytes. A run under construction
 is not a `String` — finishing is what validates UTF-8 and establishes the
 invariant — and `Array<Byte>` is left word-sized and undecided.
 
+[ADR 0052](docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)
+generalises that run, because a fixed one answered the wrong question. All
+three hot joins in the formatter are filled by data-dependent loops and the
+largest is a `var out` threaded through recursive calls, so the length is known
+only *after* the writes — and a capacity is not a length: expose it as one and
+elements nothing appended become observable, make exceeding it an error and a
+tuning estimate becomes semantics. The answer is the shape `Vector` already
+has: a stable owner holding a logical length and a reference to a replaceable
+store, which grows by swapping the store under an identity that does not move,
+and finishes by relabelling the live prefix downward without copying it. So the
+VM learns `FixedRun<E>` and `Buffer<E>` and stops knowing `String`, `Array` and
+`Vector` by name — the migration is done when replacing one of them in the
+standard library needs no new VM shape and no dispatch arm. A byte builder is
+the typed owner the formatter can pass through its recursive calls; the raw
+store still cannot cross one.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles

@@ -12,6 +12,12 @@
 - Preserves: [ADR 0034](0034-one-physical-word-stack.md)'s one linear memory.
   A byte run is an object in its heap region, not a side buffer or a third
   value store
+- Superseded in part by
+  [ADR 0052](0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md):
+  its String-specific fixed byte-run vocabulary, which that ADR generalises to
+  a nominally neutral `FixedRun<E>` and `Buffer<E>`, and its refusal to let
+  unfinished construction cross a Cove call, which that ADR permits for a
+  typed owner while keeping it for the raw store
 
 ## Context
 
