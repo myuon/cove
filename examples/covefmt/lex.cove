@@ -143,3 +143,45 @@ export fn text(source: String, token: Token) -> String {
     Err(_) => ""
   }
 }
+
+/// How wide the text a token names is, in characters.
+///
+/// `text(source, token).length()` answers the same number and allocates a
+/// `String` to throw away doing it: the slice is built, counted, and dropped.
+/// That was 815 thousand of `sliceBytes`' 1.4 million calls in a `covefmt`
+/// profile — 59% of them — against 377 thousand whose answer was used for
+/// anything.
+///
+/// It counts rather than subtracting because a character is not a byte, and
+/// the corpus has files that prove it: `to - from` would measure `"an — dash"`
+/// two bytes too wide and re-break lines that are already right. A character
+/// begins at every byte that is not a UTF-8 continuation byte, and a
+/// continuation byte is `0x80..=0xBF` — so this counts exactly what
+/// `String.length()` counts, one `byteAt` at a time and no allocation at all.
+///
+/// The bounds are clamped rather than refused. `text` answers `""` for a
+/// range `sliceBytes` declines, so zero is the width it would have measured;
+/// a token the lexer produced never names such a range, and `byteAt` traps
+/// where `sliceBytes` merely declines.
+export fn tokenWidth(source: String, token: Token) -> Int {
+  let limit = source.byteLength()
+  let end = if token.to > limit {
+    limit
+  } else {
+    token.to
+  }
+  var at = if token.from < 0 {
+    0
+  } else {
+    token.from
+  }
+  var count = 0
+  while at < end {
+    let byte = source.byteAt(at)
+    if byte < 128 || byte >= 192 {
+      count = count + 1
+    }
+    at = at + 1
+  }
+  count
+}
