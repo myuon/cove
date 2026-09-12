@@ -24,7 +24,9 @@
 //! that also caught non-leaves would buy the rest of the tail and cost the
 //! proof.
 //!
-//! It must also be small ([`LIMIT`]), take no captures — a lambda's captures
+//! It must also be small enough for where it is being put — [`LIMIT`] at a
+//! site that runs once and [`HOT_LIMIT`] at one a loop reaches, which is what
+//! [`hot_functions`] decides — take no captures — a lambda's captures
 //! are copied by the call and are not arguments — and not be `async`, whose
 //! answer is a task the caller wraps rather than the value the body produced.
 //!
@@ -93,31 +95,205 @@ use crate::repr::RefMap;
 
 use super::shapes;
 
-/// How many instructions a function may hold and still be expanded.
+/// How many instructions a function may hold and still be expanded into a
+/// call site that runs once.
 ///
 /// Sixteen, which is `Scan.at`'s eight and `utf8Width`'s four with room, and
 /// which is under the size at which a second copy of a body starts to cost
 /// more in instruction cache than it saves in frames. It is a number chosen
 /// against the workload that asked for the pass rather than derived, and the
 /// measurement in `examples/covefmt/README.md` is what would move it.
+///
+/// It is the limit for a *cold* site now. What a call costs is the same
+/// wherever it stands, but what expanding one costs is a copy of the body per
+/// site, and what it buys is a frame per time the site runs — so the two are
+/// weighed against different numbers and want different limits. See
+/// [`HOT_LIMIT`] and [`hot_functions`].
 const LIMIT: usize = 16;
 
 /// Expands every call this pass is willing to expand.
 pub(super) fn expand_small_leaf_calls(program: &mut Program) {
-    let leaves: Vec<bool> = (0..program.functions.len())
-        .map(|at| is_expandable(&program.functions[at]))
-        .collect();
-    if !leaves.iter().any(|held| *held) {
-        return;
-    }
-    for at in 0..program.functions.len() {
-        expand(program, FunctionId(at as u32), &leaves);
+    for _ in 0..ROUNDS {
+        let small: Vec<bool> = (0..program.functions.len())
+            .map(|at| is_expandable(&program.functions[at], LIMIT))
+            .collect();
+        let wide: Vec<bool> = (0..program.functions.len())
+            .map(|at| is_expandable(&program.functions[at], HOT_LIMIT))
+            .collect();
+        if !wide.iter().any(|held| *held) {
+            return;
+        }
+        let hot = hot_functions(program);
+        let before: usize = program.functions.iter().map(|f| f.code.len()).sum();
+        for (at, called_often) in hot.iter().enumerate() {
+            expand(program, FunctionId(at as u32), &small, &wide, *called_often);
+        }
+        if program
+            .functions
+            .iter()
+            .map(|f| f.code.len())
+            .sum::<usize>()
+            == before
+        {
+            return;
+        }
     }
 }
 
+/// How many times the pass is run over its own answer.
+///
+/// A body that took a leaf's instructions may be a leaf itself now — `Scan.at`
+/// is expanded into `Scan.word`, and `Scan.word` called nothing else — so the
+/// question is asked again. It terminates on its own: a round that expanded
+/// nothing is the last, and the cap is here for the reader rather than for the
+/// loop.
+///
+/// **Rounds alone are worth nothing**, and that is worth writing down because
+/// it is the obvious half to reach for. Measured on `examples/covefmt`, with
+/// [`LIMIT`] where it was, iterating changed the instruction count the run
+/// executed by *zero* — 281,263,951 either way — while adding 1,839
+/// instructions of code. Everything a second round finds has grown by exactly
+/// what it absorbed, so nothing new fits under a limit the first round was
+/// already measuring against. The rounds pay only beside the budget below.
+const ROUNDS: usize = 8;
+
+/// How many words of frame one caller may take on from everything it expands.
+///
+/// The callee's slots are appended to the caller's frame, so a caller that
+/// absorbs many of them is a caller whose every call zeroes a wider frame —
+/// and `open_frame` zeroes it whether the expansion runs or not.
+///
+/// Without this, `examples/covefmt`'s `emit` went from 66 words to 223. It is
+/// the hottest function there is in that program and it recurses once per node
+/// of the tree, so what a wide budget bought in frames it was handing back in
+/// the zeroing of the one frame that is pushed most. The whole run was still
+/// 5% faster, which is the sort of number that hides a mistake rather than
+/// showing it.
+///
+/// Ninety-six, which is where the curve stops. Swept against the same corpus:
+///
+/// | budget | widest frame | `cove fmt --check`'s work |
+/// |---:|---:|---:|
+/// | none (16, one round) | 66 | 905 ms |
+/// | 64 | 63 | 880 ms |
+/// | **96** | **93** | **864 ms** |
+/// | 128 | 122 | 864 ms |
+/// | 192 | 174 | 865 ms |
+/// | unbounded | 223 | 864 ms |
+///
+/// Everything past ninety-six is frame words for nothing. The unbounded pass
+/// looked like the fastest one until the curve was swept, and it was not: it
+/// was the same speed having also tripled the frame of the function that is
+/// pushed most.
+///
+/// The ratchet in `crates/cove-cli/tests/bytecode_corpus.rs` watches the rest,
+/// and this keeps it where it was.
+const FRAME_BUDGET: usize = 96;
+
+/// How many instructions a function may hold and still be expanded into a
+/// call site that runs often.
+///
+/// [`LIMIT`] was chosen against the lexer, where `Scan.at` is seven
+/// instructions and `utf8Width` is four. The printer's hot leaves are not that
+/// shape at all: they are the functions that take a byte or a token and answer
+/// a small thing, and every one of them is over it —
+///
+/// | | instructions | call sites | share of the run |
+/// |---|---:|---:|---:|
+/// | `byteOfPunct` | 29 | 29 | 5.3% |
+/// | `previousSignificant` | 38 | 9 | 2.0% |
+/// | `isTrivia` | 33 | 4 | 2.3% |
+/// | `isARange` | 35 | 3 | 1.6% |
+/// | `isOperatorByte` | 56 | 2 | 1.5% |
+///
+/// Forty-eight reaches four of the five. It is a number measured against that
+/// table rather than derived, as [`LIMIT`] is, and the same measurement is
+/// what would move it.
+const HOT_LIMIT: usize = 48;
+
+/// Which functions are reached from a loop, and so run often enough to spend
+/// code size on.
+///
+/// Two rules, and they refer to each other:
+///
+/// - a **call site** is hot when it stands inside a loop, or when the function
+///   holding it is hot;
+/// - a **function** is hot when a hot call site calls it.
+///
+/// A fixed point over the call graph, which terminates because the set only
+/// grows and is bounded by the functions there are.
+///
+/// # Why the loop a function holds is not the question
+///
+/// `wantsASpaceBetween` holds no loop at all — it is a run of `if`s — and it
+/// is 2.1% of what `examples/covefmt` executes, because `emit` walks a loop
+/// that reaches it through `spacing`. Read one function at a time, its call to
+/// `byteOfPunct` is a call that happens once. Read through the graph, it is
+/// the 5.3% that `byteOfPunct` turned out to be.
+///
+/// Measured at the [`FRAME_BUDGET`] below, that is the difference between the
+/// loop a function holds and the loops that reach it: 901 ms against 872 for
+/// the same corpus, three runs each.
+///
+/// # What it is not
+///
+/// It is reachability and not a count. A heavy function called once from
+/// `main` stays cold, and a function called once from inside a loop is as hot
+/// as one called forty times there. `BlockFrequencyInfo` weighs a loop as ten
+/// turns and carries a number; this carries a bit. The next grain of this is a
+/// weight per loop depth, and what would ask for it is a program where the
+/// budget is spent in the wrong place.
+fn hot_functions(program: &Program) -> Vec<bool> {
+    let loops: Vec<Vec<bool>> = program.functions.iter().map(inside_a_loop).collect();
+    let mut hot = vec![false; program.functions.len()];
+    loop {
+        let mut moved = false;
+        for (at, f) in program.functions.iter().enumerate() {
+            for (pc, inst) in f.code.iter().enumerate() {
+                let Inst::Call { callee, .. } = inst else {
+                    continue;
+                };
+                if (loops[at][pc] || hot[at]) && !hot[callee.index()] {
+                    hot[callee.index()] = true;
+                    moved = true;
+                }
+            }
+        }
+        if !moved {
+            return hot;
+        }
+    }
+}
+
+/// The pcs a backward jump encloses.
+///
+/// Every loop the lowering emits closes with a jump back to its own head, so
+/// the range between a jump and its target is the body of one. It is the
+/// whole of the loop analysis this pass has, and the whole of what it needs:
+/// what the budget asks is whether a call runs many times, and being inside a
+/// backward jump is the only way the instruction stream says so.
+fn inside_a_loop(f: &Function) -> Vec<bool> {
+    let mut held = vec![false; f.code.len()];
+    for (at, inst) in f.code.iter().enumerate() {
+        let back = match inst {
+            Inst::Jump { to } => Some(*to as usize),
+            Inst::BranchFalse { to, .. } => Some(*to as usize),
+            _ => None,
+        };
+        if let Some(to) = back {
+            if to <= at {
+                for held in held.iter_mut().take(at + 1).skip(to) {
+                    *held = true;
+                }
+            }
+        }
+    }
+    held
+}
+
 /// Whether a call to this function may be expanded where it is made.
-fn is_expandable(f: &Function) -> bool {
-    if f.stub || f.is_async || !f.captures.is_empty() || f.code.len() > LIMIT {
+fn is_expandable(f: &Function, limit: usize) -> bool {
+    if f.stub || f.is_async || !f.captures.is_empty() || f.code.len() > limit {
         return false;
     }
     // A `var` parameter is an address into the *caller's* frame, which an
@@ -279,13 +455,46 @@ struct Region {
 }
 
 /// Expands the calls in one function.
-fn expand(program: &mut Program, id: FunctionId, leaves: &[bool]) {
+fn expand(program: &mut Program, id: FunctionId, small: &[bool], wide: &[bool], called_hot: bool) {
     let caller = program.function(id).clone();
+    let hot: Vec<bool> = if called_hot {
+        vec![true; caller.code.len()]
+    } else {
+        inside_a_loop(&caller)
+    };
+    // What this caller may still take on. A callee's run is appended once
+    // however many sites call it, so the budget is spent per *callee* and the
+    // sites after the first are free.
+    let mut room = FRAME_BUDGET.saturating_sub(caller.reprs.len());
+    let mut taken: Vec<FunctionId> = Vec::new();
     let wanted: Vec<bool> = caller
         .code
         .iter()
-        .map(|inst| match inst {
-            Inst::Call { callee, .. } => *callee != id && leaves[callee.index()],
+        .enumerate()
+        .map(|(at, inst)| match inst {
+            Inst::Call { callee, .. } => {
+                if *callee == id {
+                    return false;
+                }
+                let eligible = if hot[at] {
+                    wide[callee.index()]
+                } else {
+                    small[callee.index()]
+                };
+                if !eligible {
+                    return false;
+                }
+                if taken.contains(callee) {
+                    return true;
+                }
+                let words = program.function(*callee).reprs.len();
+                if words > room {
+                    return false;
+                }
+                room -= words;
+                taken.push(*callee);
+                true
+            }
             _ => false,
         })
         .collect();
@@ -514,6 +723,34 @@ fn expand(program: &mut Program, id: FunctionId, leaves: &[bool]) {
                 .collect(),
         });
 
+        // A leaf may hold expansions of its own — `twice` is inside `raise`
+        // before `raise` is inside `main` — and a round that dropped them
+        // would leave a chain one call short of the truth while looking
+        // complete. `Function::inlined_at` reads nesting ranges outermost
+        // first, so these go in after the record for the body holding them.
+        let nested: Vec<Inlined> = leaf
+            .inlined
+            .iter()
+            .map(|held| Inlined {
+                from: place[held.from as usize] as Pc,
+                to: place[held.to as usize] as Pc,
+                callee: held.callee,
+                site: held.site,
+                locals: held
+                    .locals
+                    .iter()
+                    .map(|local| crate::Local {
+                        name: local.name.clone(),
+                        slot: where_of[local.slot as usize],
+                        layout: local.layout,
+                        from: place[local.from as usize] as Pc,
+                        to: place[local.to as usize] as Pc,
+                    })
+                    .collect(),
+            })
+            .collect();
+        records.extend(nested);
+
         // A reference the expansion leaves in the caller's frame is a root
         // until something overwrites it, because there is no frame to pop.
         // `super::frees` drops the ones that free nothing.
@@ -560,12 +797,32 @@ fn expand(program: &mut Program, id: FunctionId, leaves: &[bool]) {
     held.code = code;
     held.spans = spans;
     held.locals = locals;
-    // Already in the new numbering — an expansion knows where it put itself —
-    // and the `Clear`s that follow each body are *outside* its range, which is
-    // right: a reference the expansion left behind is the caller's to give up,
-    // and an error raised at one of those was not raised inside the callee.
-    // `super::dropping` moves these when it moves the locals.
-    held.inlined = records;
+    // What an earlier round of this pass already recorded, in the numbering
+    // this round produced. Without it a second round is a round that forgets:
+    // the chain would be right after one expansion and short after two, and
+    // nothing reads these during a run to say so.
+    //
+    // These come first because a new expansion is never inside an old one —
+    // an expanded body is a leaf's, and a leaf holds no call to expand — so
+    // the two groups do not nest and the order between them is free, while
+    // the order *within* each is what `inlined_at` reads.
+    let mut inlined = caller.inlined.clone();
+    for record in inlined.iter_mut() {
+        record.from = moved[record.from as usize];
+        record.to = moved[record.to as usize];
+        for local in record.locals.iter_mut() {
+            local.from = moved[local.from as usize];
+            local.to = moved[local.to as usize];
+        }
+    }
+    // The rest are already in the new numbering — an expansion knows where it
+    // put itself — and the `Clear`s that follow each body are *outside* its
+    // range, which is right: a reference the expansion left behind is the
+    // caller's to give up, and an error raised at one of those was not raised
+    // inside the callee. `super::dropping` moves these when it moves the
+    // locals.
+    inlined.extend(records);
+    held.inlined = inlined;
 }
 
 /// The target a jump this pass has not landed yet carries.

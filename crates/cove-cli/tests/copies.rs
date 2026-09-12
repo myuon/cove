@@ -381,13 +381,35 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// the repository is more copies in the survey, and it says nothing about what
 /// the lowering does with the Cove that was already here.
 ///
+/// **The sixth rise is the first one the lowering caused**, and it is worth
+/// separating from the five above it because they were all the corpus moving
+/// and this one is not. Expanding a call to a small leaf where a loop reaches
+/// it copies the callee's body into every site it expands, and a body holding
+/// a producer-then-copy holds one per copy of it. 1867 to 2096, and every one
+/// of the 229 is in the `prod` column with the `ret` column unmoved at 1326:
+///
+/// | | producer copies, before | after |
+/// |---|---:|---:|
+/// | `examples:cq`, `examples:cqSample` | 103 each | 165 |
+/// | `examples:covecheck` | 102 | 156 |
+/// | `examples:covefmtBench` | 45 | 71 |
+/// | `examples:life` | 32 | 52 |
+///
+/// No new *kind* of copy appeared — the same shapes are at more sites. And
+/// this survey counts the instructions a program **holds**, not the ones it
+/// runs: the expansion removed a frame, an argument copy and a return copy at
+/// each of those sites, and `cove fmt --check` over this repository went from
+/// 905 ms to 864. A ratchet on static copies is the right ratchet for issue
+/// #302, which is about what forwarding could remove, and it is the wrong one
+/// for asking whether a run got cheaper.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 1868;
+const FORWARDABLE_COPIES: usize = 2096;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

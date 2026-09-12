@@ -5,6 +5,14 @@ use super::listing;
 /// This is the language's one implicit conversion, and it happens where a
 /// type is *written*: a parameter, a declared return type, a struct field,
 /// an enum payload, an annotated `let`.
+///
+/// Here it is a parameter, and `take` is small enough that `lower::inline`
+/// expands it into this caller — so the listing runs on past the `box` into
+/// the dispatch the next test is about. That is worth having rather than
+/// working around: the `box` at pc 4 is the conversion, and what this shows
+/// is that it is still made at the boundary after the boundary's function
+/// has been expanded away. A pass that dropped it would leave a raw `Point`
+/// where the switch reads a box's first word.
 #[test]
 fn erasure_boxes_a_concrete_value_where_a_dyn_type_is_written() {
     assert_eq!(
@@ -14,14 +22,25 @@ fn erasure_boxes_a_concrete_value_where_a_dyn_type_is_written() {
         ),
         "\
 fn @m.f() -> String
-  frame 6: s0:ref s1:int s2:int s3:int s4:int s5:ref
+  frame 14: s0:ref s1:int s2:int s3:int s4:int s5:ref s6:ref s7:int s8:ref s9:ref \
+s10:int s11:int s12:ref s13:ref
      0  int s1:int 1
      1  int s2:int 2
      2  copy s3:Int s1:Int
      3  copy s4:Int s2:Int
      4  box s5:ref s3..s4:m.Point
-     5  call s0:String m.take (s5:Any)
-     6  return s0:String
+     5  load-field s7:Int s5:ref +0
+     6  switch s7:int [14 14 14 14 14 14 14 14 14 14 14 14 14 14 7 11] else 14
+     7  unbox s9:m.Name s5:ref
+     8  copy s8:String s9:String
+     9  clear s9:m.Name
+    10  jump 15
+    11  unbox s10..s11:m.Point s5:ref
+    12  str s8:ref \"point\"
+    13  jump 15
+    14  trap \"no implementation of `Show.show` for this value\"
+    15  copy s0:String s8:String
+    16  return s0:String
 "
     );
 }

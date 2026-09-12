@@ -136,8 +136,11 @@ Counting every instruction the pipeline executes, by the function that ran it:
 
 **Tiny leaf functions are 43% of everything executed.** `Scan.at` is eight
 instructions and runs 3.46 million times; `utf8Width` is four and runs 1.32
-million times. Cove has no inlining, so each of those is a `call`, a frame
-pushed and zeroed, and a `return`.
+million times. Each of those was a `call`, a frame pushed and zeroed, and a
+`return`, and this profile is what asked the lowering for
+`crates/cove-ir/src/lower/inline.rs` — which expands a small leaf where it is
+called, and expands a larger one where a loop reaches the call. The numbers
+below are from before it existed.
 
 Two of `Scan.at`'s eight instructions are copies:
 

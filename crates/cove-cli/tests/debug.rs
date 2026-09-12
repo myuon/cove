@@ -28,6 +28,22 @@
 //! end-to-end case and doubles as this suite's fixture: three functions deep,
 //! a name bound twice in one frame, and a declaration the entry never
 //! reaches.
+//!
+//! # Why `raise` calls itself
+//!
+//! Because otherwise the fixture is not three functions deep when it runs.
+//! `lower::inline` expands a small leaf into its caller and repeats until
+//! nothing more fits: `twice` goes into `raise`, and then `raise` — which
+//! calls nothing any more — goes into `main`. A program with no `Inst::Call`
+//! left in it cannot be asked what `finish` returns to, what `step` steps
+//! into, or whose frame `frame 1` selects.
+//!
+//! A function that can reach itself is never a leaf, so the self-call is the
+//! structural reason that call survives, and it is written into the fixture
+//! rather than worked around here. The expansion of `twice` is *kept*,
+//! because half of what this suite asks is what the debugger says about an
+//! expanded body — a breakpoint on its line, a backtrace through it, a local
+//! it bound.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -178,9 +194,15 @@ fn a_breakpoint_set_on_a_source_line_stops_the_run_on_that_line() {
     let session = debug("break debug_session/main.cove:6\ncontinue\nquit\n");
     session.says("breakpoint 1 at 2 locations:");
     session.says("debug_session.twice pc 0 at debug_session/main.cove:6:");
-    session.says(
-        "debug_session.twice (inlined into debug_session.raise) pc 1 at \
-         debug_session/main.cove:6:",
+    // Named without its pc, which is wherever `raise` happens to hold the
+    // expanded body and moves whenever anything above it in that function
+    // does. What the location means is the function, the expansion it is
+    // inside, and the line.
+    let inlined = session.line_with("(inlined into debug_session.raise)");
+    assert!(
+        inlined.contains("debug_session.twice")
+            && inlined.ends_with("debug_session/main.cove:6:17"),
+        "{inlined}"
     );
     session.says("breakpoint 1, debug_session.twice at debug_session/main.cove:6:");
     // Stopped at the line, and stopped *before* the program got past it.
@@ -203,11 +225,13 @@ fn a_breakpoint_set_on_a_source_line_stops_the_run_on_that_line() {
 /// arrived.
 #[test]
 fn a_breakpoint_on_a_line_whose_call_was_expanded_stops_inside_the_body() {
-    let session = debug("break debug_session/main.cove:14\ncontinue\nbacktrace\nquit\n");
+    let session = debug("break debug_session/main.cove:17\ncontinue\nbacktrace\nquit\n");
     session.says("breakpoint 1 at 1 location:");
-    session.says("debug_session.raise pc 1 at debug_session/main.cove:14:");
+    // Its pc, like the one above, is not what the location means.
+    let only = session.line_with("debug_session.raise pc");
+    assert!(only.ends_with("at debug_session/main.cove:17:5"), "{only}");
     session.says("#0  debug_session.twice at debug_session/main.cove:6:");
-    session.says("#1  debug_session.raise at debug_session/main.cove:14:");
+    session.says("#1  debug_session.raise at debug_session/main.cove:17:");
     session.never_wrote("after");
     assert_eq!(session.code, Some(0));
 }
@@ -225,8 +249,8 @@ fn a_breakpoint_on_a_line_with_no_lowered_instruction_is_refused_rather_than_acc
     blank.says("no instruction was lowered for debug_session/main.cove:2");
     blank.says("no breakpoints");
 
-    let unreached = debug("break debug_session/main.cove:19\nquit\n");
-    unreached.says("no instruction was lowered for debug_session/main.cove:19");
+    let unreached = debug("break debug_session/main.cove:23\nquit\n");
+    unreached.says("no instruction was lowered for debug_session/main.cove:23");
     unreached.says("`debug_session.unreached` is declared there");
 }
 
@@ -251,7 +275,7 @@ fn a_breakpoint_on_a_declaration_the_entry_never_calls_says_which_of_the_two_it_
 fn a_backtrace_in_a_nested_call_names_the_functions_outermost_last() {
     let session = debug("break debug_session/main.cove:6\ncontinue\nbacktrace\nquit\n");
     session.says("#0  debug_session.twice at debug_session/main.cove:6:");
-    session.says("#1  debug_session.raise at debug_session/main.cove:14:");
+    session.says("#1  debug_session.raise at debug_session/main.cove:17:");
     session.says("#2  debug_session.main at debug_session/main.cove:");
     assert!(
         session.at("#0  debug_session.twice") < session.at("#1  debug_session.raise")
@@ -344,15 +368,15 @@ fn finish_runs_the_frame_to_its_return_and_stops_in_the_caller() {
 /// the latter is not a call any more: `lower::inline` expanded `twice`, and
 /// a line whose call was expanded stops *inside* the body — there is no
 /// instruction on it that runs before the callee does, so there is nothing
-/// for a `step` to step into or a `next` to step over. `raise` calls
-/// `println` and is not a leaf, so it is still a call and still the shape
-/// this rule is about.
+/// for a `step` to step into or a `next` to step over. `raise` can call
+/// itself and is not a leaf, so it is still a call and still the shape this
+/// rule is about — see the module documentation.
 #[test]
 fn step_stops_inside_a_call_and_next_runs_it_to_completion() {
-    let into = debug("break debug_session/main.cove:29\ncontinue\nstep\nbacktrace\nquit\n");
+    let into = debug("break debug_session/main.cove:33\ncontinue\nstep\nbacktrace\nquit\n");
     into.says("#0  debug_session.raise");
 
-    let over = debug("break debug_session/main.cove:29\ncontinue\nnext\nbacktrace\nquit\n");
+    let over = debug("break debug_session/main.cove:33\ncontinue\nnext\nbacktrace\nquit\n");
     over.never_says("#0  debug_session.raise");
     // Already back in `main`; either way not deeper.
     assert!(
