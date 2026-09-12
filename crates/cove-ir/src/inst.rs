@@ -552,40 +552,42 @@ pub enum Inst {
     /// bytes moved, which ADR 0051's "why a byte loop in IR is not enough"
     /// rejects. One instruction, one native run copy.
     ///
-    /// # What this does not yet charge
+    /// # What it costs, and what it is charged
     ///
-    /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)
-    /// asks that copying be charged proportionally to the bytes or words it
-    /// examines, and that it cooperate with
-    /// [ADR 0024](../../../docs/adr/0024-a-stop-is-a-bound-not-a-point.md)'s
-    /// stop bounds in bounded chunks. **Neither is implemented.** One
-    /// `copy-bytes` is one unit of fuel however many bytes it moves, and
-    /// nothing polls part way through one.
+    /// One dispatch and one unit of work per payload word moved, which is
+    /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
+    /// "charged proportionally to the bytes or words examined". A word is the
+    /// unit because a word is what the memory moves.
     ///
-    /// The first half of the fix has landed: the dispatch loop's safepoint is
-    /// now elapsed work since the last charge rather than equality with a
-    /// multiple of the stride, so a bulk charge can no longer step over a poll
-    /// and lose the cancellation check, the fuel accounting and the
-    /// collector's poll together. What is *not* done is the charge itself, and
-    /// it is deliberately not done alone: charging after an arbitrarily large
-    /// copy would let one instruction overshoot by an arbitrarily large
-    /// amount, and
+    /// The charge is not folded into the count of instructions dispatched.
+    /// That number is a public observable — the debugger, the trace, the
+    /// profile and `cove-bench` all report it, and `crate::vm::profile`'s own
+    /// test asserts its per-opcode totals sum to it — so weighted work has a
+    /// coordinate of its own.
+    ///
+    /// The copy is made in bounded chunks with a safepoint between them, and
+    /// that is not a refinement of the charge but the thing that makes it
+    /// sound. A charge taken only *after* an arbitrarily large copy would let
+    /// one instruction run arbitrarily far past a fuel or cancellation bound
+    /// before anything looked, which
     /// [ADR 0040](../../../docs/adr/0040-a-bound-outlives-its-backend.md)'s
-    /// table already promises `S + T` of Cove work after a bound becomes true
-    /// and `S + T` of fuel overspend. A proportional charge is only sound
-    /// alongside chunked copying that polls between chunks, so the two belong
-    /// in one change.
+    /// `S + T` forbids. One chunk is one stride of work, so a stopped run gets
+    /// no further than a stride past the bound whatever length it was given.
     ///
-    /// The count it would charge into is also the wrong one. `Machine::
-    /// instructions` is a public observable — the debugger, the trace, the
-    /// profile and `cove-bench` all report it, and
-    /// `crate::vm::profile`'s own test asserts that the profiler's per-opcode
-    /// totals sum to it — so weighted work needs a coordinate of its own
-    /// rather than being folded into the count of instructions dispatched.
+    /// A collection may therefore happen with the destination half written.
+    /// That is safe for the reason ADR 0051 gave for the run's payload holding
+    /// no references, and rooted for a second one: the caller has already
+    /// `sync`ed, and both objects are named by frame slots this instruction
+    /// read them out of, so the walk finds them where it finds every other
+    /// live reference.
     ///
-    /// Until all of that, this is no worse than the `String.join` and
-    /// `String.sliceBytes` builtins it is meant to replace, which copy an
-    /// unbounded range inside one dispatch today and always have.
+    /// [`Inst::AllocBytes`] and [`Inst::FinishString`] are **not** charged
+    /// this way and not chunked. Their bulk work is inside the allocator's
+    /// zeroing and inside one `from_utf8` over a copy of the run, neither of
+    /// which this could interrupt, and charging an operation that cannot be
+    /// interrupted only makes its overshoot visible rather than bounded. They
+    /// remain one unit each, which is what an ordinary [`Inst::Alloc`] of a
+    /// large `Array` has always been.
     ///
     /// `src` may be a `String` **or** another [`crate::Shape::Bytes`] run — a fused
     /// slice copies straight out of the run that produced it, without
