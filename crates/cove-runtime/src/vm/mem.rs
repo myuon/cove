@@ -1725,15 +1725,32 @@ impl Memory {
     }
 
     /// The word at `slot` of the frame based at `base`.
-    #[inline]
+    ///
+    /// Straight into the segment, with no [`is_stack`] between. A frame is
+    /// pushed onto the stack and nowhere else, so `base + slot` is a stack
+    /// address by construction and the region decoder has nothing to decide —
+    /// but `base` is a run-time value, so nothing in the type system says so
+    /// and [`Memory::read`]'s branch cannot be folded away by a compiler that
+    /// only sees the addition. Saying it here is what removes it, and the
+    /// `debug_assert` is what keeps the claim honest: `--profile checked`
+    /// carries debug assertions, so the whole suite and every dogfood run
+    /// checks it.
+    #[inline(always)]
     pub(crate) fn slot(&self, base: u64, slot: u32) -> u64 {
-        self.read(base + slot as u64)
+        let at = base + slot as u64;
+        debug_assert!(is_stack(at), "a frame slot is a stack address");
+        self.stack.words[self.stack.at(at)]
     }
 
     /// Writes `word` to `slot` of the frame based at `base`.
-    #[inline]
+    ///
+    /// [`Memory::slot`]'s reason, in the other direction.
+    #[inline(always)]
     pub(crate) fn set_slot(&mut self, base: u64, slot: u32, word: u64) {
-        self.write(base + slot as u64, word);
+        let at = base + slot as u64;
+        debug_assert!(is_stack(at), "a frame slot is a stack address");
+        let index = self.stack.at(at);
+        self.stack.words[index] = word;
     }
 
     /// How many words of this task's segment are committed.
