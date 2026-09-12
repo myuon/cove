@@ -933,6 +933,11 @@ impl<'a> Machine<'a> {
         self.mem.allocated_words()
     }
 
+    /// Objects handed out over the whole run, reuse counted each time.
+    pub(crate) fn allocations(&self) -> u64 {
+        self.mem.allocations()
+    }
+
     /// How long this machine has waited on hosts.
     pub(crate) fn host_wait(&self) -> Duration {
         self.host_wait

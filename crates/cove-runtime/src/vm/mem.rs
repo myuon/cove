@@ -387,6 +387,12 @@ struct Alloc {
     /// collector may touch in the same place.
     marks: Vec<u64>,
     allocated_words: u64,
+    /// Objects handed out over the whole run, reuse counted each time.
+    ///
+    /// Beside the words rather than derived from them because the two answer
+    /// different questions: a profile wants to know whether a site allocates
+    /// *often* or allocates *large*, and one number cannot say which.
+    allocations: u64,
     collections: u64,
 }
 
@@ -538,6 +544,7 @@ impl Space {
                 free: Vec::new(),
                 marks: Vec::new(),
                 allocated_words: 0,
+                allocations: 0,
                 collections: 0,
             }),
             stw: Mutex::new(Stw {
@@ -734,6 +741,7 @@ impl Space {
         };
         self.store(addr, header(layout, len));
         alloc.allocated_words += words;
+        alloc.allocations += 1;
         Some(addr)
     }
 
@@ -1262,6 +1270,11 @@ impl Space {
     /// Words handed out over the whole run, reuse counted each time.
     fn allocated_words(&self) -> u64 {
         self.allocator().allocated_words
+    }
+
+    /// Objects handed out over the whole run, reuse counted each time.
+    fn allocations(&self) -> u64 {
+        self.allocator().allocations
     }
 
     /// How many collections this run has run.
@@ -1829,6 +1842,11 @@ impl Memory {
     /// Words handed out over the whole run, reuse counted each time.
     pub(crate) fn allocated_words(&self) -> u64 {
         self.space.allocated_words()
+    }
+
+    /// Objects handed out over the whole run, reuse counted each time.
+    pub(crate) fn allocations(&self) -> u64 {
+        self.space.allocations()
     }
 
     /// How many collections have run.

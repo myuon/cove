@@ -64,5 +64,5 @@ pub use value::{Value, ValueView};
 // the representation `vm` exists to keep in.
 pub use vm::debug::{Call, Debugger, Field, Line, Local, Object, Resume, Stop, Word};
 pub use vm::exec::SAFEPOINT_STRIDE;
-pub use vm::profile::Profiler;
+pub use vm::profile::{Cost, Profiler};
 pub use vm::Vm;

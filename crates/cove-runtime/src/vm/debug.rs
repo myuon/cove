@@ -179,6 +179,26 @@ impl<'m> Stop<'m> {
         self.machine.instructions()
     }
 
+    /// Words this task's heap has handed out, reuse counted each time.
+    ///
+    /// Read at the moment the instruction about to run was counted, so the
+    /// difference between two consecutive stops is what the instruction
+    /// between them allocated. That is how [`crate::vm::profile::Profiler`]
+    /// attributes a heap to the code that asked for it: there is no seam
+    /// inside `Memory::alloc` that knows which instruction it is serving, and
+    /// a difference needs none.
+    pub fn allocated_words(&self) -> u64 {
+        self.machine.allocated_words()
+    }
+
+    /// Objects this task's heap has handed out, reuse counted each time.
+    ///
+    /// Beside [`Stop::allocated_words`] because allocating often and
+    /// allocating large are different faults with different repairs.
+    pub fn allocations(&self) -> u64 {
+        self.machine.allocations()
+    }
+
     /// Which task this stop is in.
     ///
     /// Everything else a `Stop` answers is one task's — the count, the
