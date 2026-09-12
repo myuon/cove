@@ -109,7 +109,14 @@ mod base {
     pub const LOAD_ELEM: u8 = STORE_FIELD + 1;
     pub const STORE_ELEM: u8 = LOAD_ELEM + 1;
     pub const BYTE_AT: u8 = STORE_ELEM + 1;
-    pub const LEN: u8 = BYTE_AT + 1;
+    /// [ADR 0051](../../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
+    /// four byte-run instructions, in the order [`crate::Inst`] declares
+    /// them.
+    pub const ALLOC_BYTES: u8 = BYTE_AT + 1;
+    pub const WRITE_BYTE: u8 = ALLOC_BYTES + 1;
+    pub const COPY_BYTES: u8 = WRITE_BYTE + 1;
+    pub const FINISH_STRING: u8 = COPY_BYTES + 1;
+    pub const LEN: u8 = FINISH_STRING + 1;
     pub const LAYOUT_OF: u8 = LEN + 1;
     pub const ADDR_OF_SLOT: u8 = LAYOUT_OF + 1;
     pub const ADDR_OF_FIELD: u8 = ADDR_OF_SLOT + 1;
@@ -177,6 +184,10 @@ pub enum Op {
     LoadElem,
     StoreElem,
     ByteAt,
+    AllocBytes,
+    WriteByte,
+    CopyBytes,
+    FinishString,
     Len,
     LayoutOf,
     AddrOfSlot,
@@ -418,6 +429,10 @@ impl Op {
             Op::LoadElem,
             Op::StoreElem,
             Op::ByteAt,
+            Op::AllocBytes,
+            Op::WriteByte,
+            Op::CopyBytes,
+            Op::FinishString,
             Op::Len,
             Op::LayoutOf,
             Op::AddrOfSlot,
@@ -492,6 +507,10 @@ impl Op {
             Op::LoadElem => base::LOAD_ELEM,
             Op::StoreElem => base::STORE_ELEM,
             Op::ByteAt => base::BYTE_AT,
+            Op::AllocBytes => base::ALLOC_BYTES,
+            Op::WriteByte => base::WRITE_BYTE,
+            Op::CopyBytes => base::COPY_BYTES,
+            Op::FinishString => base::FINISH_STRING,
             Op::Len => base::LEN,
             Op::LayoutOf => base::LAYOUT_OF,
             Op::AddrOfSlot => base::ADDR_OF_SLOT,
@@ -696,6 +715,25 @@ impl Op {
                 Operand::Word(INT),
                 Payload::Empty,
             ),
+            // No `Half::Layout` here, for `Op::Str`'s reason: the layout is
+            // always `Program::bytes_layout`, a program-wide constant rather
+            // than a fact this opcode has to carry.
+            Op::AllocBytes => fields(Operand::Word(REF), Operand::Word(INT), NONE, Payload::Empty),
+            Op::WriteByte => fields(
+                Operand::Word(REF),
+                Operand::Word(INT),
+                Operand::Word(INT),
+                Payload::Empty,
+            ),
+            // All five operands — `dst`, `dst_at`, `src`, `src_at`, `len` —
+            // live behind the `ArgsId`, because a sixteen-byte instruction
+            // has room for three slot operands and this needs five. See
+            // `Inst::CopyBytes`'s doc for why the argument-list machinery a
+            // call already has is what carries the other two.
+            Op::CopyBytes => fields(NONE, NONE, NONE, one(Half::Args)),
+            Op::FinishString => {
+                fields(Operand::Word(REF), Operand::Word(REF), NONE, Payload::Empty)
+            }
             Op::Len => fields(Operand::Word(INT), Operand::Word(REF), NONE, Payload::Empty),
             Op::LayoutOf => fields(Operand::Word(INT), Operand::Word(REF), NONE, Payload::Empty),
             Op::AddrOfSlot => fields(
@@ -784,17 +822,20 @@ mod tests {
     use super::*;
 
     /// ADR 0041's count, which is the one number the format's headroom is
-    /// argued from: a hundred and nine opcodes out of the 256 a byte names.
+    /// argued from: a hundred and thirteen opcodes out of the 256 a byte
+    /// names.
     ///
     /// It was a hundred and two until `Op::ByteAt`, a hundred and three until
-    /// `Compare::Tag` brought its six. What the number is for is that a
-    /// reader can see the headroom rather than be told about it: more than
-    /// half the byte is still unspent, so the format has room for what comes
-    /// and this test is where that claim is kept honest.
+    /// `Compare::Tag` brought its six, and a hundred and thirteen once ADR
+    /// 0051's `AllocBytes`, `WriteByte`, `CopyBytes` and `FinishString`
+    /// brought four more. What the number is for is that a reader can see
+    /// the headroom rather than be told about it: more than half the byte is
+    /// still unspent, so the format has room for what comes and this test is
+    /// where that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_nine_opcodes() {
-        assert_eq!(Op::all().len(), 109);
-        assert_eq!(OPCODES, 109);
+    fn there_are_a_hundred_and_thirteen_opcodes() {
+        assert_eq!(Op::all().len(), 113);
+        assert_eq!(OPCODES, 113);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

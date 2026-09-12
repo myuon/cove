@@ -144,6 +144,9 @@ pub(crate) fn parts(machine: &Machine, addr: u64) -> Option<(String, Vec<(String
     let fields = match &described.shape {
         Shape::Free => vec![("words".to_string(), len.to_string())],
         Shape::Str => vec![("text".to_string(), string_of(machine, addr))],
+        // A run under construction: not a Cove value, so the debugger shows
+        // its length rather than its bytes, which may not be valid UTF-8.
+        Shape::Bytes => vec![("length".to_string(), len.to_string())],
         Shape::Word(_) | Shape::Struct { .. } | Shape::Enum { .. } => {
             match payload(machine, addr, 0, described.width()) {
                 Some(words) => inline_parts(machine, id, described, &words, &mut inside),
@@ -329,6 +332,9 @@ fn object(machine: &Machine, addr: u64, depth: usize, inside: &mut Vec<u64>) -> 
     let out = match &described.shape {
         Shape::Free => RECLAIMED.to_string(),
         Shape::Str => clip(&format!("\"{}\"", string_of(machine, addr))),
+        // Not yet a String, and may not hold valid UTF-8, so it is shown by
+        // its length rather than as text.
+        Shape::Bytes => format!("<byte run: {len}>"),
         // A layout the lowering broke a recursion at holds the value's own
         // inline words as its payload, so the payload is read as a location.
         Shape::Word(_) | Shape::Struct { .. } | Shape::Enum { .. } => {

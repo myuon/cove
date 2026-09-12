@@ -305,6 +305,17 @@ impl Check<'_> {
                 }
                 self.args_fit(at, args);
             }
+            // `Op::CopyBytes`'s five operands live behind this `ArgsId`
+            // rather than in `a`, `b` and `c`, and `args_fit` is the same
+            // uniform check every other call's arguments get: each one's
+            // location is a value of the layout it was given. There is no
+            // declared callee to check the *count* or the individual layouts
+            // against — `crate::verify`'s `check_copy_bytes_args` is where
+            // the fixed shape (`dst`, `dst_at`, `src`, `src_at`, `len`) is a
+            // lowering-time fact — so this only re-derives the one thing a
+            // malformed encoding could still get wrong: an argument whose
+            // slot does not fit the width its own carried layout claims.
+            Inst::CopyBytes { args } => self.args_fit(at, args),
             // `Len::Count` is the one `Len` form this check can settle ahead
             // of time: both halves of the payload are right here, so the
             // layout `Op::AllocImm` names and the count it carries are known

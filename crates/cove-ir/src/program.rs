@@ -492,6 +492,14 @@ pub struct Program {
     /// answer, and a table it has to check for emptiness first is a branch
     /// on a path that always takes the same side.
     pub str_layout: LayoutId,
+    /// The layout every byte run under construction shares.
+    ///
+    /// A program-wide constant for the reason [`Program::str_layout`] is one:
+    /// [`Inst::AllocBytes`] should not have to be told this layout per call
+    /// site, and [ADR 0051](../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)
+    /// gives every run the same [`crate::layout::Shape::Bytes`] shape whatever
+    /// string it will become.
+    pub bytes_layout: LayoutId,
     /// The layout every [`Inst::Box`] allocates its object as.
     ///
     /// A program-wide constant for the same reason [`Program::str_layout`]

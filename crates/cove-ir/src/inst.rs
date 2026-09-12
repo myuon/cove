@@ -500,6 +500,125 @@ pub enum Inst {
     /// also be answering it eight times per word of a lexer's inner loop,
     /// and the wrapper was measured at more than the read.
     ByteAt { dst: Slot, obj: Slot, at: Slot },
+    /// `dst = <a new, zeroed byte run of `len` bytes>`.
+    ///
+    /// [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
+    /// allocation. It always allocates [`crate::Program::bytes_layout`] —
+    /// the one shape every run under construction shares — so unlike
+    /// [`Inst::Alloc`] it carries no [`LayoutId`] of its own, for
+    /// [`Inst::Str`]'s reason: a program-wide constant should not have to be
+    /// named at every call site that always means the same one.
+    ///
+    /// The payload is zeroed exactly as [`Inst::Alloc`]'s is, so a run that
+    /// is collected before it is filled walks safely — not because a
+    /// half-written byte is meaningful, but because [`crate::Shape::Bytes`] holds no
+    /// references for the collector to chase either way.
+    ///
+    /// `len` is a byte count and a run-time value, because the whole point
+    /// of ADR 0051's construction is a length computed by summing the pieces
+    /// a `join` was given — a fixed length would have made this
+    /// [`Inst::Alloc`] with a [`Len::Count`] instead. A negative or oversized
+    /// `len` fails through the same "this run has no memory left" refusal
+    /// every other allocation does.
+    AllocBytes { dst: Slot, len: Slot },
+    /// `bytes[at] = value`, one checked byte of a run under construction.
+    ///
+    /// The scalar half of [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
+    /// two write primitives, and deliberately the smaller one: it exists for
+    /// a delimiter or an encoded scalar a lowering writes one at a time, not
+    /// as how a `join` is expected to move text. Copying more than a
+    /// handful of bytes through this would replace one native copy with as
+    /// many dispatches as there are bytes, which is exactly the shape
+    /// [`Inst::CopyBytes`] exists to avoid.
+    ///
+    /// `bytes` must name a live [`crate::Shape::Bytes`] object — writing into a
+    /// `String` is refused, because a `String`'s bytes are the invariant
+    /// [`Inst::FinishString`] exists to establish and never to reopen.
+    /// `at` is bounds-checked against the run's declared length the same way
+    /// [`Inst::ByteAt`]'s is, and `value` must be a byte, `0..=255`: neither
+    /// bound is optional here the way it would be reading back a value this
+    /// run already produced, because this is the instruction that puts an
+    /// arbitrary integer into memory another instruction will one day read
+    /// back and trust.
+    WriteByte { bytes: Slot, at: Slot, value: Slot },
+    /// A bulk range copy into a run under construction: `dst[dst_at
+    /// .. dst_at+len] = src[src_at .. src_at+len]`.
+    ///
+    /// This is [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
+    /// principal instruction — the one a `join` or a fused `sliceBytes`
+    /// lowers to instead of `sliceBytes -> Vector.push -> join`'s hidden
+    /// allocations — and the reason it exists at all is that a byte loop
+    /// over [`Inst::WriteByte`] would multiply dispatch by the number of
+    /// bytes moved, which ADR 0051's "why a byte loop in IR is not enough"
+    /// rejects. One instruction, one native run copy.
+    ///
+    /// # What this does not yet charge
+    ///
+    /// ADR 0051 asks that copying be "charged proportionally to the bytes
+    /// they examine or write", and that a large copy "cooperate with the stop
+    /// bounds decided by [ADR 0024](../../../docs/adr/0024-a-stop-is-a-bound-not-a-point.md)".
+    /// **Neither is implemented here.** One `copy-bytes` is one unit of fuel
+    /// however many bytes it moves, and nothing polls for cancellation part
+    /// way through one.
+    ///
+    /// It is written down rather than quietly left because the fix is not
+    /// local. `crates/cove-runtime/src/vm/exec/encoded.rs`'s loop reaches a
+    /// safepoint when `instructions.is_multiple_of(SAFEPOINT_STRIDE)`, so
+    /// adding a run's word count to `instructions` would step *over* the
+    /// multiple and skip the safepoint altogether — losing the cancellation
+    /// check, the fuel accounting and the collector's poll in one go, and
+    /// only under load. Charging proportionally means first making that
+    /// condition a difference rather than a multiple, which is ADR 0024 and
+    /// ADR 0040 machinery and `crates/cove-runtime/tests/responsiveness.rs`'s
+    /// timing assertions.
+    ///
+    /// Until then this is no worse than the `String.join` and
+    /// `String.sliceBytes` builtins it is meant to replace, which copy an
+    /// unbounded range inside one dispatch today and always have.
+    ///
+    /// `src` may be a `String` **or** another [`crate::Shape::Bytes`] run — a fused
+    /// slice copies straight out of the run that produced it, without
+    /// finishing it as a `String` first — but `dst` must always be a
+    /// [`crate::Shape::Bytes`] run under construction: writing into a `String` is
+    /// refused for [`Inst::WriteByte`]'s reason. Bounds are checked against
+    /// both objects' declared lengths rather than left to whatever the
+    /// native copy routine happens to do with an out-of-range range.
+    ///
+    /// # Why five operands live behind an [`ArgsId`]
+    ///
+    /// An encoded instruction has room for three slot-sized operands and a
+    /// payload, and this needs five: `dst`, `dst_at`, `src`, `src_at` and
+    /// `len`. Rather than spend a fifth [`Inst`] variant or a second
+    /// instruction pair to carry the overflow, this reuses the machinery a
+    /// call's argument list already is — [`ArgsId`] names a row of
+    /// [`crate::Program::args`], and a call already demonstrates that an
+    /// arity larger than three operands is a solved problem in this format.
+    /// The row holds exactly five [`crate::Arg`]s, in the order `dst`,
+    /// `dst_at`, `src`, `src_at`, `len`, and carries each one's layout the
+    /// same way a call's arguments do, so the verifier checks them by the
+    /// same rule rather than by a new one.
+    CopyBytes { args: ArgsId },
+    /// `dst = <the run at `bytes`, validated and turned into an immutable
+    /// String, in place>`.
+    ///
+    /// The instruction [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)
+    /// closes construction with. `bytes` must name a live [`crate::Shape::Bytes`]
+    /// run; its packed payload is read and checked as UTF-8 exactly once,
+    /// because a run assembled from [`Inst::WriteByte`] and [`Inst::CopyBytes`]
+    /// may hold anything a byte can hold, and ADR 0051 refuses to skip that
+    /// check for an arbitrary run. Invalid UTF-8 fails with the same error a
+    /// source-level string operation already raises for it.
+    ///
+    /// On success the run becomes the answer **without copying its
+    /// payload**: a [`crate::Shape::Bytes`] object and a [`crate::Shape::Str`] object of
+    /// the same byte length occupy the same number of words, so finishing is
+    /// a re-label of the object's header — its layout changes from
+    /// [`crate::Program::bytes_layout`] to [`crate::Program::str_layout`] and
+    /// its `len` does not change at all — rather than an allocation and a
+    /// copy. Not copying the payload is the whole performance argument this
+    /// ADR makes: every byte a `join` moves is moved once, by
+    /// [`Inst::CopyBytes`], and finishing moves none of them again.
+    FinishString { dst: Slot, bytes: Slot },
     /// `dst = <obj's header length>`: an element count, or a string's bytes.
     Len { dst: Slot, obj: Slot },
     /// `dst = <the [`LayoutId`] in obj's header>`, as an `Int`.

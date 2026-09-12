@@ -169,6 +169,35 @@ pub enum Shape {
     /// the byte count, so the payload is `len.div_ceil(8)` words and the
     /// trailing bytes of the last word are zero.
     Str,
+    /// Packed bytes, eight to a word, little end first, exactly like
+    /// [`Shape::Str`]'s payload — but not yet a `String`.
+    ///
+    /// [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)
+    /// gives lowering an internal construction run: an object [`crate::Inst::AllocBytes`]
+    /// allocates, [`crate::Inst::WriteByte`] and [`crate::Inst::CopyBytes`] fill, and
+    /// [`crate::Inst::FinishString`] turns into a `String` without copying. It is an
+    /// IR/runtime value, not a Cove type — no declaration names it and no
+    /// source expression produces one.
+    ///
+    /// The header's `len` is a byte count, the same as [`Shape::Str`]'s, which
+    /// is what lets the runtime's `Machine::relabel` turn a finished run into
+    /// a `String` of the same header length without touching a payload word.
+    /// Its payload holds no references — arbitrary
+    /// written bytes are never a `LayoutId` or an address — so a run that is
+    /// only half filled is exactly as safe for the collector to walk as a
+    /// finished one: [`Layout::may_hold_refs`] answers `false` for it below,
+    /// the same answer it gives [`Shape::Str`].
+    ///
+    /// This is deliberately **not** `Shape::Str`. ADR 0051 says "a run under
+    /// construction is not a `String`", and giving it a different shape is how
+    /// that is enforced without a runtime tag check on every ordinary
+    /// reference operation: `is_string` at
+    /// `crates/cove-runtime/src/vm/builtins.rs:564` matches on `Shape::Str`
+    /// alone, so a `Bytes` run fails it and every place that asks "is this
+    /// really a string" — the Host boundary, a call argument, a captured
+    /// value — refuses it for the ordinary reason a `Str`-only match already
+    /// refuses anything else, not because of a tag this shape adds.
+    Bytes,
     /// The header's `len` elements, each `elem`'s words, contiguous.
     ///
     /// One shape covers `Array<T>` for every `T`, and is also what a
@@ -342,7 +371,7 @@ impl Layout {
         }
         match &self.shape {
             Shape::Free => len,
-            Shape::Str => len.div_ceil(8),
+            Shape::Str | Shape::Bytes => len.div_ceil(8),
             Shape::Elements { elem, .. } | Shape::Members { elem } => {
                 len * layouts[elem.index()].width()
             }
@@ -395,7 +424,7 @@ impl Layout {
         // one shape is not a reason to assume it for another.
         let words: Option<u64> = match &self.shape {
             Shape::Free => Some(u64::from(len)),
-            Shape::Str => Some(u64::from(len).div_ceil(8)),
+            Shape::Str | Shape::Bytes => Some(u64::from(len).div_ceil(8)),
             Shape::Elements { elem, .. } | Shape::Members { elem } => {
                 u64::from(len).checked_mul(u64::from(layouts[elem.index()].width()))
             }
@@ -441,6 +470,7 @@ impl Layout {
             ),
             Shape::Free
             | Shape::Str
+            | Shape::Bytes
             | Shape::Elements { .. }
             | Shape::Members { .. }
             | Shape::Entries { .. }
@@ -454,7 +484,7 @@ impl Layout {
     /// words: a string, an `Array<Int>` and a boxed scalar are all leaves.
     pub fn may_hold_refs(&self, layouts: &[Layout]) -> bool {
         match &self.shape {
-            Shape::Free | Shape::Str => false,
+            Shape::Free | Shape::Str | Shape::Bytes => false,
             Shape::Word(repr) => repr.is_ref(),
             Shape::Struct { .. } | Shape::Enum { .. } => {
                 self.words.iter().any(|repr| repr.is_ref())

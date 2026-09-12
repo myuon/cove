@@ -312,6 +312,16 @@ fn is_expandable(f: &Function, limit: usize) -> bool {
 /// *runtime* in a way an expansion would have to think about: a scope is a
 /// stack discipline the machine keeps per frame, and a cell's lock is held by
 /// a task rather than by a frame.
+///
+/// This is a `matches!` exclusion list rather than an exhaustive match, so
+/// nothing here forces a new [`Inst`] variant to be considered — unlike
+/// [`written`] and [`slots_of`] below, a variant left out compiles silently.
+/// [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
+/// `AllocBytes`, `WriteByte`, `CopyBytes` and `FinishString` make no call and
+/// touch no scope or cell, so they belong in the list of things this refuses
+/// nothing for — correctly left out of the `matches!` above — but that is a
+/// fact worth writing down here precisely because the compiler cannot check
+/// it.
 fn reaches_nothing(inst: &Inst) -> bool {
     !matches!(
         inst,
@@ -393,6 +403,8 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::Alloc { dst, .. }
             | Inst::Box { dst, .. }
             | Inst::ByteAt { dst, .. }
+            | Inst::AllocBytes { dst, .. }
+            | Inst::FinishString { dst, .. }
             | Inst::Len { dst, .. }
             | Inst::LayoutOf { dst, .. }
             | Inst::AddrOfSlot { dst, .. }
@@ -408,6 +420,8 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             Inst::StoreField { .. }
             | Inst::StoreElem { .. }
             | Inst::Store { .. }
+            | Inst::WriteByte { .. }
+            | Inst::CopyBytes { .. }
             | Inst::Jump { .. }
             | Inst::BranchFalse { .. }
             | Inst::Switch { .. }
@@ -778,7 +792,7 @@ fn expand(program: &mut Program, id: FunctionId, small: &[bool], wide: &[bool], 
             Inst::Switch { table, .. } if table.0 >= PLACED => {
                 *table = crate::TableId(first + (table.0 - PLACED));
             }
-            Inst::CallBuiltin { args, .. } if args.0 >= PLACED => {
+            Inst::CallBuiltin { args, .. } | Inst::CopyBytes { args } if args.0 >= PLACED => {
                 *args = crate::ArgsId(listed + (args.0 - PLACED));
             }
             _ => {}
@@ -850,9 +864,10 @@ fn relocated(
         Inst::BranchFalse { to, .. } => *to = place[*to as usize] as Pc,
         // An argument list is `Program::args` and not part of the
         // instruction, so shifting the slots the instruction names does not
-        // reach it. A builtin is the one call a leaf may hold, and this is
-        // the list it names, relocated into a list of its own.
-        Inst::CallBuiltin { args, .. } => {
+        // reach it. A builtin is the one call a leaf may hold, and
+        // `Inst::CopyBytes` is the one non-call instruction that also names
+        // one — both are the list relocated into a list of its own.
+        Inst::CallBuiltin { args, .. } | Inst::CopyBytes { args } => {
             lists.push(
                 program
                     .arg_list(*args)
@@ -959,6 +974,14 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
             obj, index, src, ..
         } => vec![obj, index, src],
         Inst::ByteAt { dst, obj, at } => vec![dst, obj, at],
+        Inst::AllocBytes { dst, len } => vec![dst, len],
+        Inst::WriteByte { bytes, at, value } => vec![bytes, at, value],
+        Inst::FinishString { dst, bytes } => vec![dst, bytes],
+        // The five operands live in the args row rather than on the
+        // instruction, exactly as a call's do — `relocated` moves that row
+        // and repoints `args` at the copy, the same way it does for
+        // `Inst::CallBuiltin`.
+        Inst::CopyBytes { .. } => Vec::new(),
         Inst::Len { dst, obj } | Inst::LayoutOf { dst, obj } => vec![dst, obj],
         Inst::AddrOfSlot { dst, slot } => vec![dst, slot],
         Inst::AddrOfField { dst, obj, .. } => vec![dst, obj],
