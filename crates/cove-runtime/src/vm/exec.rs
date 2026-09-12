@@ -451,11 +451,11 @@ pub(crate) struct Machine<'a> {
     /// The instruction count at which the loop next asks a question.
     ///
     /// The whole of what a debugger costs the dispatch loop, and it is
-    /// nothing: the loop's one comparison already existed as
-    /// `instructions % SAFEPOINT_STRIDE == 0`, and this is the same
-    /// comparison against a number that answers *both* questions. With no
-    /// debugger installed it is the next multiple of [`SAFEPOINT_STRIDE`]
-    /// and the loop behaves exactly as it did; with one installed it is
+    /// nothing: the loop's one comparison already existed, and this is the
+    /// same comparison against a number that answers *both* questions. With
+    /// no debugger installed it is [`SAFEPOINT_STRIDE`] past the last count
+    /// the run was charged at and the loop behaves exactly as it did while
+    /// every instruction cost one; with one installed it is
     /// `instructions + 1`, so the machine asks before every instruction and
     /// the safepoint still fires on its own schedule inside.
     ///
@@ -905,16 +905,23 @@ impl<'a> Machine<'a> {
     /// The instruction count at which the loop next asks its one question.
     ///
     /// The two questions folded into one comparison. Without a debugger it is
-    /// the next multiple of [`SAFEPOINT_STRIDE`] — the same counts
-    /// `self.instructions % SAFEPOINT_STRIDE == 0` fired at, which is
-    /// contract arithmetic and may not move by one instruction. With a
-    /// debugger it is the very next instruction, and the safepoint's own
+    /// [`SAFEPOINT_STRIDE`] past the last count the run was charged at; with
+    /// a debugger it is the very next instruction, and the safepoint's own
     /// schedule is unchanged underneath it.
+    ///
+    /// This used to be the next *multiple* of [`SAFEPOINT_STRIDE`], and while
+    /// every instruction cost one it was the same number: `charged` is set to
+    /// `instructions` at every safepoint, so a stride past it is the stride's
+    /// next multiple. The two part company only when something charges more
+    /// than one, which is what
+    /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)
+    /// asks for and what the multiple could not survive — see the safepoint
+    /// condition in [`crate::vm::exec::encoded`].
     #[inline]
     fn next_question(&self) -> u64 {
         match self.debugger {
             Some(_) => self.instructions + 1,
-            None => (self.instructions / SAFEPOINT_STRIDE + 1) * SAFEPOINT_STRIDE,
+            None => self.charged + SAFEPOINT_STRIDE,
         }
     }
 
@@ -7904,5 +7911,57 @@ pub(crate) mod tests {
         assert!(machine.held.is_empty());
         let addr = machine.mem.slot(machine.frames[0].base, 1);
         assert_eq!(cell::holder(&machine.mem, addr), 0);
+    }
+
+    // --- ADR 0052: the safepoint schedule is work, not a multiple ----------
+
+    /// **A stride past the last charge is the stride's next multiple, while
+    /// every instruction costs one — and stays a stride of work when one does
+    /// not.**
+    ///
+    /// The schedule is contract arithmetic:
+    /// `docs/adr/0040-a-bound-outlives-its-backend.md` states every stop
+    /// bound in multiples of [`SAFEPOINT_STRIDE`] and `tests/responsiveness.rs`
+    /// measures each one, so the change from `instructions % S == 0` to
+    /// `instructions - charged >= S` may not move a single count today.
+    /// `crate::vm::debug`'s `the_safepoint_fires_at_the_same_counts_as_it_did_before`
+    /// proves that end to end through the fuel limit; this proves the
+    /// arithmetic itself, including the case that end-to-end test cannot reach
+    /// because nothing charges in bulk yet.
+    #[test]
+    fn the_next_question_is_a_stride_of_work_past_the_last_charge() {
+        let program = Build::default().done();
+        let mut machine = Machine::new(&program, 1 << 12);
+
+        // While every instruction costs one, `charged` lands on a multiple at
+        // every safepoint, so the next question is the next multiple — which
+        // is what the condition used to say in so many words.
+        for turn in 0..4u64 {
+            machine.charged = turn * SAFEPOINT_STRIDE;
+            machine.instructions = machine.charged + 1;
+            assert_eq!(
+                machine.next_question(),
+                (turn + 1) * SAFEPOINT_STRIDE,
+                "with {} charged, the question is the next multiple",
+                machine.charged
+            );
+        }
+
+        // And when something charges more than one, the question is still a
+        // stride of *work* away rather than a multiple the charge may have
+        // stepped clean over. `2500` is past `2048` and is not a multiple of
+        // `1024`: the old rule would have answered false here and skipped the
+        // safepoint entirely.
+        machine.charged = 0;
+        machine.instructions = 2500;
+        assert_eq!(machine.next_question(), SAFEPOINT_STRIDE);
+        assert!(
+            machine.instructions - machine.charged >= SAFEPOINT_STRIDE,
+            "2500 units of work since the last charge is a safepoint"
+        );
+        assert!(
+            !machine.instructions.is_multiple_of(SAFEPOINT_STRIDE),
+            "and 2500 is not a multiple of the stride, which is the bug"
+        );
     }
 }
