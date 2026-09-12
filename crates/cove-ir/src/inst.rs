@@ -554,25 +554,36 @@ pub enum Inst {
     ///
     /// # What this does not yet charge
     ///
-    /// ADR 0051 asks that copying be "charged proportionally to the bytes
-    /// they examine or write", and that a large copy "cooperate with the stop
-    /// bounds decided by [ADR 0024](../../../docs/adr/0024-a-stop-is-a-bound-not-a-point.md)".
-    /// **Neither is implemented here.** One `copy-bytes` is one unit of fuel
-    /// however many bytes it moves, and nothing polls for cancellation part
-    /// way through one.
+    /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)
+    /// asks that copying be charged proportionally to the bytes or words it
+    /// examines, and that it cooperate with
+    /// [ADR 0024](../../../docs/adr/0024-a-stop-is-a-bound-not-a-point.md)'s
+    /// stop bounds in bounded chunks. **Neither is implemented.** One
+    /// `copy-bytes` is one unit of fuel however many bytes it moves, and
+    /// nothing polls part way through one.
     ///
-    /// It is written down rather than quietly left because the fix is not
-    /// local. `crates/cove-runtime/src/vm/exec/encoded.rs`'s loop reaches a
-    /// safepoint when `instructions.is_multiple_of(SAFEPOINT_STRIDE)`, so
-    /// adding a run's word count to `instructions` would step *over* the
-    /// multiple and skip the safepoint altogether — losing the cancellation
-    /// check, the fuel accounting and the collector's poll in one go, and
-    /// only under load. Charging proportionally means first making that
-    /// condition a difference rather than a multiple, which is ADR 0024 and
-    /// ADR 0040 machinery and `crates/cove-runtime/tests/responsiveness.rs`'s
-    /// timing assertions.
+    /// The first half of the fix has landed: the dispatch loop's safepoint is
+    /// now elapsed work since the last charge rather than equality with a
+    /// multiple of the stride, so a bulk charge can no longer step over a poll
+    /// and lose the cancellation check, the fuel accounting and the
+    /// collector's poll together. What is *not* done is the charge itself, and
+    /// it is deliberately not done alone: charging after an arbitrarily large
+    /// copy would let one instruction overshoot by an arbitrarily large
+    /// amount, and
+    /// [ADR 0040](../../../docs/adr/0040-a-bound-outlives-its-backend.md)'s
+    /// table already promises `S + T` of Cove work after a bound becomes true
+    /// and `S + T` of fuel overspend. A proportional charge is only sound
+    /// alongside chunked copying that polls between chunks, so the two belong
+    /// in one change.
     ///
-    /// Until then this is no worse than the `String.join` and
+    /// The count it would charge into is also the wrong one. `Machine::
+    /// instructions` is a public observable — the debugger, the trace, the
+    /// profile and `cove-bench` all report it, and
+    /// `crate::vm::profile`'s own test asserts that the profiler's per-opcode
+    /// totals sum to it — so weighted work needs a coordinate of its own
+    /// rather than being folded into the count of instructions dispatched.
+    ///
+    /// Until all of that, this is no worse than the `String.join` and
     /// `String.sliceBytes` builtins it is meant to replace, which copy an
     /// unbounded range inside one dispatch today and always have.
     ///

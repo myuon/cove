@@ -488,7 +488,19 @@ pub(super) fn dispatch<'s, 'a>(
             if machine.debugger.is_some() {
                 machine.ask(id, pc)?;
             }
-            if machine.instructions.is_multiple_of(SAFEPOINT_STRIDE) {
+            // Elapsed work since the last charge, not equality with a
+            // multiple of it. An instruction that charges for the bytes it
+            // moved steps *over* the multiple it would have landed on, and
+            // the old condition then answered false — losing the
+            // cancellation check, the fuel accounting and the collector's
+            // poll together, and only for a run that did bulk work.
+            // `charged` is set to `instructions` right below, so while every
+            // instruction costs one this fires at exactly the counts the
+            // multiple fired at, which
+            // `debug::tests::the_safepoint_fires_at_the_same_counts_as_it_did_before`
+            // is the proof of. ADR 0052 asks for this; ADR 0051 shipped the
+            // gap.
+            if machine.instructions - machine.charged >= SAFEPOINT_STRIDE {
                 stopped_here(
                     machine.cancellation.as_ref(),
                     &machine.stops,
