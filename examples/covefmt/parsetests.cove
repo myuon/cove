@@ -11,7 +11,7 @@ fn items(source: String) -> String {
     }
     i = i + 1
   }
-  " ".join(parts.toArray())
+  " ".join(parts.freeze())
 }
 
 /// What a node kind is called, so a failure names what it saw.
@@ -60,7 +60,7 @@ fn parts(source: String) -> String {
     }
     None => { }
   }
-  " ".join(out.toArray())
+  " ".join(out.freeze())
 }
 
 /// Whether the tree covers every token of `source`.
@@ -196,7 +196,7 @@ fn bodyShape(source: String) -> String {
       }
     }
   }
-  " ".join(out.toArray())
+  " ".join(out.freeze())
 }
 
 /// **A body is statements, and a statement ends where the language says.**

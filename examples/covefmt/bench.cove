@@ -226,13 +226,13 @@ export fn main() -> Result<Unit, Error> {
     return Err(Error(message: "{reopened} re-open, and {mustReOpen()} did"))
   }
   if rebroken < mustReBreak() {
-    let names = ", ".join(unbroken.toArray())
+    let names = ", ".join(unbroken.freeze())
     return Err(Error(
       message: "{rebroken} re-break, {mustReBreak()} did: {names}",
     ))
   }
   if restored < mustReIndent() {
-    let names = ", ".join(lost.toArray())
+    let names = ", ".join(lost.freeze())
     return Err(Error(
       message: "{restored} re-indent, {mustReIndent()} did: {names}",
     ))
@@ -290,7 +290,7 @@ fn deindented(source: String) -> String {
     }
     at = stop
   }
-  "".join(out.toArray())
+  "".join(out.freeze())
 }
 
 /// How many of the corpus must survive being de-indented and re-formatted.
@@ -369,7 +369,7 @@ fn joinedUp(source: String) -> String {
     }
     i = i + 1
   }
-  "".join(out.toArray())
+  "".join(out.freeze())
 }
 
 /// Whether the tokens either side of the space at `i` are written with
@@ -528,7 +528,7 @@ fn closedUp(source: String) -> String {
     }
     i = i + 1
   }
-  "".join(out.toArray())
+  "".join(out.freeze())
 }
 
 /// For every byte, whether it falls inside a string or character literal.
@@ -587,5 +587,5 @@ fn spacedOut(source: String) -> String {
       Err(_) => { }
     }
   }
-  "".join(out.toArray())
+  "".join(out.freeze())
 }

@@ -27,7 +27,7 @@ fn shape(source: String) -> String {
     }
     i = i + 1
   }
-  " ".join(parts.toArray())
+  " ".join(parts.freeze())
 }
 
 /// The text of the tokens, joined — which is the file again, or the lexer has
@@ -43,7 +43,7 @@ fn rejoined(source: String) -> String {
     }
     i = i + 1
   }
-  "".join(parts.toArray())
+  "".join(parts.freeze())
 }
 
 /// A line of Cove cuts into the runs it is made of.

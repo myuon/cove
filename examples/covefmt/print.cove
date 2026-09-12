@@ -24,7 +24,7 @@ export fn print(source: String, held: Array<Token>, tree: Tree) -> String {
   // very top of a file fall under the same rule as a blank at the top of a
   // block: both open on nothing.
   emit(source, held, tree, -1, 0, -1, var out)
-  let text = "".join(out.toArray())
+  let text = "".join(out.freeze())
   // The alignment pass lexes its own output, which is the price of not
   // lining up on a `//` inside a string. It is only owed when there is a
   // trailing comment to line up, and whether there is one is already
@@ -147,7 +147,7 @@ fn padded(
     Ok(rest) => out.push(rest)
     Err(_) => { }
   }
-  "".join(out.toArray())
+  "".join(out.freeze())
 }
 
 /// Whether the marked line at `stop` carries on the run that began at `first`.
@@ -212,7 +212,7 @@ fn spaces(n: Int) -> String {
     out.push(" ")
     i = i + 1
   }
-  "".join(out.toArray())
+  "".join(out.freeze())
 }
 
 /// Pushes the text of `tree` and everything under it.
@@ -703,7 +703,7 @@ fn spacing(
       Err(_) => { }
     }
   }
-  "".join(out.toArray())
+  "".join(out.freeze())
 }
 
 /// How many newlines a run of space may keep: one to end the line, and one
@@ -1100,7 +1100,7 @@ fn flattened(source: String, held: Array<Token>, tree: Tree) -> String {
     }
     at = at + 1
   }
-  "".join(out.toArray())
+  "".join(out.freeze())
 }
 
 /// Whether the token at `at` is the comma a broken group ends its last
@@ -1225,7 +1225,7 @@ fn verbatim(source: String, held: Array<Token>, tree: Tree) -> String {
     }
     at = at + 1
   }
-  "".join(out.toArray())
+  "".join(out.freeze())
 }
 
 /// Whether breaking `tree` would make any line shorter.
@@ -1426,7 +1426,7 @@ fn indentOf(depth: Int) -> String {
     out.push("  ")
     step = step + 1
   }
-  "".join(out.toArray())
+  "".join(out.freeze())
 }
 
 /// Whether the group keeps its head on one line and lets its last member
@@ -1694,7 +1694,7 @@ fn tokensBetween(
     }
     at = at + 1
   }
-  "".join(out.toArray())
+  "".join(out.freeze())
 }
 
 /// Whether `member` has a head to hug at all: a lambda's or trailing
@@ -2873,7 +2873,7 @@ fn decided(source: String, held: Array<Token>, from: Int, to: Int) -> String {
     }
     at = at + 1
   }
-  "".join(out.toArray())
+  "".join(out.freeze())
 }
 
 /// `text` without the spaces it ends on.
