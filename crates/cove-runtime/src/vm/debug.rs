@@ -845,7 +845,11 @@ export fn main() -> Int {
 }
 ";
 
-    /// Three frames, and a name bound in each of them.
+    /// Three functions, a name bound in each, and — since `lower::inline`
+    /// expands a small leaf and then repeats — one frame at run time, with
+    /// `inner` written into `outer` and `outer` into `main`. That is what
+    /// these cases want: what a debugger says about a stop that has no frame
+    /// of its own is exactly the question.
     const NESTED: &str = "
 fn inner(a: Int) -> Int {
   let doubled = a * 2
@@ -1114,12 +1118,15 @@ export fn main() -> Int {
         let (function, pc, code) = held.expect("the run entered `m.inner`");
         assert_eq!(function, "m.inner");
         // Not the callee's zero, because `m.inner` is a small leaf and
-        // `lower::inline` wrote its body into `m.outer`: there is no frame of
-        // its own for a counter to be zero of. [`Stop::function`] names the
-        // body that was written and [`Stop::pc`] numbers the code that holds
-        // it, which are two answers on purpose — and what this case is about
-        // is that they agree with the listing, which is the next assertion.
-        assert_eq!(pc, 1, "`m.inner`'s body begins at `m.outer`'s counter 1");
+        // `lower::inline` wrote its body into `m.outer` — and then wrote
+        // `m.outer`, which had become a leaf itself, into `m.main`. There is
+        // no frame of its own for a counter to be zero of, and the counter
+        // this reports is one of `m.main`'s. [`Stop::function`] names the
+        // innermost body that was written and [`Stop::pc`] numbers the code
+        // that holds it, which are two answers on purpose — and what this
+        // case is about is that they agree with the listing, which is the
+        // next assertion.
+        assert_eq!(pc, 2, "`m.inner`'s body begins at `m.main`'s counter 2");
         let current: Vec<&Line> = code.iter().filter(|line| line.current()).collect();
         assert_eq!(current.len(), 1, "exactly one line is the one stopped at");
         assert_eq!(current[0].pc(), pc);
@@ -1457,8 +1464,8 @@ export fn main() -> Int {
 
         assert_eq!(
             marked(&innermost).pc(),
-            1,
-            "`m.inner`'s body begins at `m.outer`'s counter 1"
+            2,
+            "`m.inner`'s body begins at `m.main`'s counter 2"
         );
         assert_eq!(
             marked(&outer).pc(),

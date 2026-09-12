@@ -8,10 +8,14 @@ fn twice(n: Int) -> Int {
 }
 
 /// Hands `n` on, so that a backtrace taken in `twice` has three frames to
-/// name and `finish` has somewhere to come back to.
+/// name; it can call itself, which is what leaves that call a call.
 fn raise(n: Int) -> Int {
   let raised = n + 1
-  twice(raised)
+  if raised > 100 {
+    raise(0)
+  } else {
+    twice(raised)
+  }
 }
 
 /// Never called from `main`, so the lowering leaves it a stub: a breakpoint
