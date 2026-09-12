@@ -417,7 +417,7 @@ fn open_frame(
         let width = machine.width(*layout);
         machine
             .mem
-            .copy_words(callee_base + at as u64, base + arg.slot as u64, width);
+            .copy_slots(callee_base + at as u64, base + arg.slot as u64, width);
         at += width;
     }
     // The object stays reachable across every one of these reads because it
@@ -464,6 +464,7 @@ pub(super) fn dispatch<'s, 'a>(
     let top = machine.frames.last().expect("run pushed a frame");
     let mut id = top.function;
     let mut base = top.base;
+    let mut base_at = machine.mem.stack_index(base);
     let mut pc = top.pc as usize;
     let mut code = encoded.function(id);
 
@@ -531,22 +532,24 @@ pub(super) fn dispatch<'s, 'a>(
         // folds away because the operator is known.
         macro_rules! int_op {
             ($op:expr) => {{
-                let x = machine.mem.slot(base, b!()) as i64;
-                let y = machine.mem.slot(base, c!()) as i64;
+                let x = machine.mem.word_at(base_at + (b!() as usize)) as i64;
+                let y = machine.mem.word_at(base_at + (c!() as usize)) as i64;
                 // The same question `Inst::Arith` asks, for the same reason:
                 // which of the two the operands are decides only what a
                 // failure calls the operation.
                 let duration = machine.repr(id, a!()) == Some(Repr::Duration);
                 match int_arith($op, x, y, duration) {
-                    Ok(value) => machine.mem.set_slot(base, a!(), value as u64),
+                    Ok(value) => machine
+                        .mem
+                        .set_word_at(base_at + (a!()) as usize, value as u64),
                     Err(error) => fail!(error),
                 }
             }};
         }
         macro_rules! float_op {
             ($op:expr) => {{
-                let x = f64::from_bits(machine.mem.slot(base, b!()));
-                let y = f64::from_bits(machine.mem.slot(base, c!()));
+                let x = f64::from_bits(machine.mem.word_at(base_at + (b!() as usize)));
+                let y = f64::from_bits(machine.mem.word_at(base_at + (c!() as usize)));
                 machine
                     .mem
                     .set_slot(base, a!(), float_arith($op, x, y).to_bits());
@@ -554,44 +557,54 @@ pub(super) fn dispatch<'s, 'a>(
         }
         macro_rules! arith_imm {
             ($op:expr) => {{
-                let x = machine.mem.slot(base, b!());
+                let x = machine.mem.word_at(base_at + (b!() as usize));
                 let duration = machine.repr(id, a!()) == Some(Repr::Duration);
                 match int_arith($op, x as i64, held.payload() as i64, duration) {
-                    Ok(value) => machine.mem.set_slot(base, a!(), value as u64),
+                    Ok(value) => machine
+                        .mem
+                        .set_word_at(base_at + (a!()) as usize, value as u64),
                     Err(error) => fail!(error),
                 }
             }};
         }
         macro_rules! cmp_imm {
             ($op:expr) => {{
-                let x = machine.mem.slot(base, b!()) as i64;
+                let x = machine.mem.word_at(base_at + (b!() as usize)) as i64;
                 let answer = compare($op, x.cmp(&(held.payload() as i64)));
-                machine.mem.set_slot(base, a!(), answer as u64);
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, answer as u64);
             }};
         }
         macro_rules! cmp_int {
             ($op:expr) => {{
-                let x = machine.mem.slot(base, b!()) as i64;
-                let y = machine.mem.slot(base, c!()) as i64;
+                let x = machine.mem.word_at(base_at + (b!() as usize)) as i64;
+                let y = machine.mem.word_at(base_at + (c!() as usize)) as i64;
                 let answer = compare($op, x.cmp(&y));
-                machine.mem.set_slot(base, a!(), answer as u64);
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, answer as u64);
             }};
         }
         macro_rules! cmp_float {
             ($answer:expr) => {{
-                let x = f64::from_bits(machine.mem.slot(base, b!()));
-                let y = f64::from_bits(machine.mem.slot(base, c!()));
+                let x = f64::from_bits(machine.mem.word_at(base_at + (b!() as usize)));
+                let y = f64::from_bits(machine.mem.word_at(base_at + (c!() as usize)));
                 #[allow(clippy::redundant_closure_call)]
                 let answer = ($answer)(x, y);
-                machine.mem.set_slot(base, a!(), answer as u64);
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, answer as u64);
             }};
         }
         macro_rules! cmp_str {
             ($op:expr) => {{
-                let x = machine.mem.slot(base, b!());
-                let y = machine.mem.slot(base, c!());
+                let x = machine.mem.word_at(base_at + (b!() as usize));
+                let y = machine.mem.word_at(base_at + (c!() as usize));
                 let answer = compare($op, machine.compare_strings(x, y));
-                machine.mem.set_slot(base, a!(), answer as u64);
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, answer as u64);
             }};
         }
         // A `Bool` and an identity answer `Eq` and `Ne` and nothing else,
@@ -603,8 +616,8 @@ pub(super) fn dispatch<'s, 'a>(
         // none of them.
         macro_rules! cmp_word {
             ($equal:expr) => {{
-                let x = machine.mem.slot(base, b!());
-                let y = machine.mem.slot(base, c!());
+                let x = machine.mem.word_at(base_at + (b!() as usize));
+                let y = machine.mem.word_at(base_at + (c!() as usize));
                 machine
                     .mem
                     .set_slot(base, a!(), ((x == y) == $equal) as u64);
@@ -628,6 +641,7 @@ pub(super) fn dispatch<'s, 'a>(
                 });
                 id = $callee;
                 base = $callee_base;
+                base_at = machine.mem.stack_index(base);
                 pc = 0;
                 code = encoded.function(id);
             }};
@@ -635,10 +649,10 @@ pub(super) fn dispatch<'s, 'a>(
 
         match held.opcode() {
             // ---- constants and moves ---------------------------------
-            CONST_UNIT => machine.mem.set_slot(base, a!(), 0),
-            CONST_BOOL | CONST_INT | CONST_FLOAT => {
-                machine.mem.set_slot(base, a!(), held.payload())
-            }
+            CONST_UNIT => machine.mem.set_word_at(base_at + (a!()) as usize, 0),
+            CONST_BOOL | CONST_INT | CONST_FLOAT => machine
+                .mem
+                .set_word_at(base_at + (a!()) as usize, held.payload()),
             // The callee's dense id, written as a word — the same one store
             // `CONST_INT` makes, and no name lookup: `held.lo()` is already
             // the `FunctionId` the encoder put there.
@@ -647,7 +661,9 @@ pub(super) fn dispatch<'s, 'a>(
             // are one metadata number in the payload's low half, and neither
             // has a runtime representation the loop can tell from the other.
             // The distinction they carry is the verifier's and the printer's.
-            FUNC_REF | CONST_TAG => machine.mem.set_slot(base, a!(), held.lo() as u64),
+            FUNC_REF | CONST_TAG => machine
+                .mem
+                .set_word_at(base_at + (a!()) as usize, held.lo() as u64),
             // A load of a precomputed address, exactly as `CONST_INT` loads
             // a precomputed word: `Machine::for_run` placed every literal
             // before this loop's first turn, so there is nothing here that
@@ -660,7 +676,7 @@ pub(super) fn dispatch<'s, 'a>(
                 let width = machine.width(LayoutId(held.lo()));
                 machine
                     .mem
-                    .copy_words(base + held.a() as u64, base + held.b() as u64, width);
+                    .copy_slots(base + held.a() as u64, base + held.b() as u64, width);
             }
             // The one instruction whose whole purpose is what it stops
             // happening: a reference the frame no longer needs is not a root.
@@ -671,15 +687,19 @@ pub(super) fn dispatch<'s, 'a>(
 
             // ---- scalar operations -----------------------------------
             NEG_INT => {
-                let x = machine.mem.slot(base, b!()) as i64;
+                let x = machine.mem.word_at(base_at + (b!() as usize)) as i64;
                 match x.checked_neg() {
-                    Some(value) => machine.mem.set_slot(base, a!(), value as u64),
+                    Some(value) => machine
+                        .mem
+                        .set_word_at(base_at + (a!()) as usize, value as u64),
                     None => fail!(overflowed("negation")),
                 }
             }
             NEG_FLOAT => {
-                let x = f64::from_bits(machine.mem.slot(base, b!()));
-                machine.mem.set_slot(base, a!(), (-x).to_bits());
+                let x = f64::from_bits(machine.mem.word_at(base_at + (b!() as usize)));
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, (-x).to_bits());
             }
 
             ADD_INT => int_op!(ArithOp::Add),
@@ -739,16 +759,22 @@ pub(super) fn dispatch<'s, 'a>(
             GE_INT_IMM => cmp_imm!(CmpOp::Ge),
 
             NOT => {
-                let x = machine.mem.slot(base, b!());
-                machine.mem.set_slot(base, a!(), (x == 0) as u64);
+                let x = machine.mem.word_at(base_at + (b!() as usize));
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, (x == 0) as u64);
             }
             INT_TO_FLOAT => {
-                let x = machine.mem.slot(base, b!()) as i64;
-                machine.mem.set_slot(base, a!(), (x as f64).to_bits());
+                let x = machine.mem.word_at(base_at + (b!() as usize)) as i64;
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, (x as f64).to_bits());
             }
             FLOAT_TO_INT => {
-                let x = f64::from_bits(machine.mem.slot(base, b!()));
-                machine.mem.set_slot(base, a!(), x as i64 as u64);
+                let x = f64::from_bits(machine.mem.word_at(base_at + (b!() as usize)));
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, x as i64 as u64);
             }
 
             // ---- control flow ----------------------------------------
@@ -756,7 +782,7 @@ pub(super) fn dispatch<'s, 'a>(
             // the instruction, so this is one addition and no table.
             JUMP => pc = pc.wrapping_add_signed(held.payload() as i64 as isize),
             BRANCH_FALSE => {
-                if machine.mem.slot(base, a!()) == 0 {
+                if machine.mem.word_at(base_at + (a!() as usize)) == 0 {
                     pc = pc.wrapping_add_signed(held.payload() as i64 as isize);
                 }
             }
@@ -764,7 +790,7 @@ pub(super) fn dispatch<'s, 'a>(
             // targets — ADR 0041's one exception to relative control flow,
             // because a table read from a `TableId` has no pc of its own.
             SWITCH => {
-                let index = machine.mem.slot(base, a!()) as usize;
+                let index = machine.mem.word_at(base_at + (a!() as usize)) as usize;
                 let table = program.table(TableId(held.lo()));
                 pc = *table.targets.get(index).unwrap_or(&table.default) as usize;
             }
@@ -794,6 +820,7 @@ pub(super) fn dispatch<'s, 'a>(
                         );
                         machine.mem.pop_frame(base);
                         base = caller_base;
+                        base_at = machine.mem.stack_index(base);
                     }
                 }
             }
@@ -814,7 +841,7 @@ pub(super) fn dispatch<'s, 'a>(
             // `Function::captures` names.
             CALL_CLOSURE => {
                 let dst = a!();
-                let object = machine.mem.slot(base, b!());
+                let object = machine.mem.word_at(base_at + (b!() as usize));
                 let callee = match machine.callee_of(object) {
                     Ok(callee) => callee,
                     Err(error) => fail!(error),
@@ -852,7 +879,9 @@ pub(super) fn dispatch<'s, 'a>(
                 ) {
                     Ok(words) => {
                         for (at, word) in words.iter().enumerate() {
-                            machine.mem.set_slot(base, dst + at as u32, *word);
+                            machine
+                                .mem
+                                .set_word_at(base_at + (dst + at as u32) as usize, *word);
                         }
                     }
                     Err(error) => fail!(error),
@@ -876,7 +905,9 @@ pub(super) fn dispatch<'s, 'a>(
                 ) {
                     Ok(words) => {
                         for (at, word) in words.iter().enumerate() {
-                            machine.mem.set_slot(base, dst + at as u32, *word);
+                            machine
+                                .mem
+                                .set_word_at(base_at + (dst + at as u32) as usize, *word);
                         }
                     }
                     Err(error) => fail!(error),
@@ -910,11 +941,11 @@ pub(super) fn dispatch<'s, 'a>(
                 let len = match held.opcode() {
                     ALLOC_FIXED => 0,
                     ALLOC_IMM => held.hi() as i64,
-                    _ => machine.mem.slot(base, b!()) as i64,
+                    _ => machine.mem.word_at(base_at + (b!() as usize)) as i64,
                 };
                 machine.sync(pc - 1);
                 match machine.allocate(LayoutId(held.lo()), len) {
-                    Ok(addr) => machine.mem.set_slot(base, a!(), addr),
+                    Ok(addr) => machine.mem.set_word_at(base_at + (a!()) as usize, addr),
                     Err(error) => fail!(error),
                 }
             }
@@ -922,7 +953,7 @@ pub(super) fn dispatch<'s, 'a>(
             // offset. A field of an inline struct is not here at all: it is a
             // slot number the lowering computed.
             LOAD_FIELD => {
-                let addr = machine.mem.slot(base, b!());
+                let addr = machine.mem.word_at(base_at + (b!() as usize));
                 let at = held.lo();
                 let width = machine.width(LayoutId(held.hi()));
                 match machine.checked(addr, at, width) {
@@ -935,7 +966,7 @@ pub(super) fn dispatch<'s, 'a>(
                 }
             }
             STORE_FIELD => {
-                let addr = machine.mem.slot(base, a!());
+                let addr = machine.mem.word_at(base_at + (a!() as usize));
                 let at = held.lo();
                 let width = machine.width(LayoutId(held.hi()));
                 match machine.checked(addr, at, width) {
@@ -950,8 +981,8 @@ pub(super) fn dispatch<'s, 'a>(
             // The stride is the element layout's width, so an `Array<Point>`
             // is a run of two-word elements rather than a run of addresses.
             LOAD_ELEM => {
-                let addr = machine.mem.slot(base, b!());
-                let index = machine.mem.slot(base, c!()) as i64;
+                let addr = machine.mem.word_at(base_at + (b!() as usize));
+                let index = machine.mem.word_at(base_at + (c!() as usize)) as i64;
                 let width = machine.width(LayoutId(held.lo()));
                 match machine.element(addr, index, width) {
                     Ok(at) => machine.mem.copy_words(
@@ -963,8 +994,8 @@ pub(super) fn dispatch<'s, 'a>(
                 }
             }
             STORE_ELEM => {
-                let addr = machine.mem.slot(base, a!());
-                let index = machine.mem.slot(base, b!()) as i64;
+                let addr = machine.mem.word_at(base_at + (a!() as usize));
+                let index = machine.mem.word_at(base_at + (b!() as usize)) as i64;
                 let width = machine.width(LayoutId(held.lo()));
                 match machine.element(addr, index, width) {
                     Ok(at) => machine.mem.copy_words(
@@ -981,11 +1012,11 @@ pub(super) fn dispatch<'s, 'a>(
             // builtin because as a builtin it measured 58 ns of which 48 was
             // the calling and 10 was the reading. See `Inst::ByteAt`.
             BYTE_AT => {
-                let addr = machine.mem.slot(base, b!());
+                let addr = machine.mem.word_at(base_at + (b!() as usize));
                 if addr == 0 {
                     fail!(null_object());
                 }
-                let at = machine.mem.slot(base, c!()) as i64;
+                let at = machine.mem.word_at(base_at + (c!() as usize)) as i64;
                 let len = machine.mem.object_len(addr) as i64;
                 if at < 0 || at >= len {
                     machine.sync(pc - 1);
@@ -997,52 +1028,56 @@ pub(super) fn dispatch<'s, 'a>(
                 let at = at as u32;
                 let word = machine.mem.payload(addr, at / 8);
                 let byte = (word >> ((at % 8) * 8)) & 0xFF;
-                machine.mem.set_slot(base, a!(), byte);
+                machine.mem.set_word_at(base_at + (a!()) as usize, byte);
             }
             LEN => {
-                let addr = machine.mem.slot(base, b!());
+                let addr = machine.mem.word_at(base_at + (b!() as usize));
                 if addr == 0 {
                     fail!(null_object());
                 }
                 let len = machine.mem.object_len(addr) as i64;
-                machine.mem.set_slot(base, a!(), len as u64);
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, len as u64);
             }
             // The other half of the header word `len` reads. What an object
             // *is* is an `Int` here, so a dispatch over it is an ordinary
             // `switch`.
             LAYOUT_OF => {
-                let addr = machine.mem.slot(base, b!());
+                let addr = machine.mem.word_at(base_at + (b!() as usize));
                 if addr == 0 {
                     fail!(null_object());
                 }
                 let layout = machine.mem.object_layout(addr).0 as i64;
-                machine.mem.set_slot(base, a!(), layout as u64);
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, layout as u64);
             }
 
             // ---- places ----------------------------------------------
             ADDR_OF_SLOT => {
                 let word = base + held.b() as u64;
-                machine.mem.set_slot(base, a!(), word);
+                machine.mem.set_word_at(base_at + (a!()) as usize, word);
             }
             ADDR_OF_FIELD => {
-                let addr = machine.mem.slot(base, b!());
+                let addr = machine.mem.word_at(base_at + (b!() as usize));
                 let at = held.lo();
                 match machine.checked(addr, at, 1) {
                     Ok(()) => {
                         let word = machine.mem.payload_addr(addr, at);
-                        machine.mem.set_slot(base, a!(), word);
+                        machine.mem.set_word_at(base_at + (a!()) as usize, word);
                     }
                     Err(error) => fail!(error),
                 }
             }
             ADDR_OF_ELEM => {
-                let addr = machine.mem.slot(base, b!());
-                let index = machine.mem.slot(base, c!()) as i64;
+                let addr = machine.mem.word_at(base_at + (b!() as usize));
+                let index = machine.mem.word_at(base_at + (c!() as usize)) as i64;
                 let width = machine.width(LayoutId(held.lo()));
                 match machine.element(addr, index, width) {
                     Ok(at) => {
                         let word = machine.mem.payload_addr(addr, at);
-                        machine.mem.set_slot(base, a!(), word);
+                        machine.mem.set_word_at(base_at + (a!()) as usize, word);
                     }
                     Err(error) => fail!(error),
                 }
@@ -1051,16 +1086,18 @@ pub(super) fn dispatch<'s, 'a>(
             // location, and a value location's parts are at static offsets
             // from its first word.
             ADDR_OF_PART => {
-                let word = machine.mem.slot(base, b!());
-                machine.mem.set_slot(base, a!(), word + held.lo() as u64);
+                let word = machine.mem.word_at(base_at + (b!() as usize));
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, word + held.lo() as u64);
             }
             LOAD => {
-                let addr = machine.mem.slot(base, b!());
+                let addr = machine.mem.word_at(base_at + (b!() as usize));
                 let width = machine.width(LayoutId(held.lo()));
                 machine.mem.copy_words(base + held.a() as u64, addr, width);
             }
             STORE => {
-                let addr = machine.mem.slot(base, a!());
+                let addr = machine.mem.word_at(base_at + (a!() as usize));
                 let width = machine.width(LayoutId(held.lo()));
                 machine.mem.copy_words(addr, base + held.b() as u64, width);
             }
@@ -1083,11 +1120,11 @@ pub(super) fn dispatch<'s, 'a>(
                     base + held.b() as u64,
                     width,
                 );
-                machine.mem.set_slot(base, a!(), boxed);
+                machine.mem.set_word_at(base_at + (a!()) as usize, boxed);
             }
             UNBOX => {
                 let layout = LayoutId(held.lo());
-                let addr = machine.mem.slot(base, b!());
+                let addr = machine.mem.word_at(base_at + (b!() as usize));
                 if addr == 0 {
                     fail!(null_object());
                 }
@@ -1115,7 +1152,7 @@ pub(super) fn dispatch<'s, 'a>(
                 // One past the index, so a `Repr::Scope` slot a zeroed frame
                 // has not written names no scope.
                 let word = machine.scopes.len() as u64;
-                machine.mem.set_slot(base, a!(), word);
+                machine.mem.set_word_at(base_at + (a!()) as usize, word);
             }
             // The body reached its end, so this is the exit that waits. What
             // it answers about a failing child is a value here rather than
@@ -1123,13 +1160,13 @@ pub(super) fn dispatch<'s, 'a>(
             SCOPE_LEAVE => {
                 machine.sync(pc - 1);
                 let span = machine.span(id, pc - 1);
-                let word = machine.mem.slot(base, a!());
+                let word = machine.mem.word_at(base_at + (a!() as usize));
                 match machine.leave_scope(word, running, span) {
-                    Ok(None) => machine.mem.set_slot(base, b!(), 0),
+                    Ok(None) => machine.mem.set_word_at(base_at + (b!()) as usize, 0),
                     Ok(Some(child)) => {
                         let into = base + held.c() as u64;
                         match machine.write_child_error(child, into, LayoutId(held.lo())) {
-                            Ok(()) => machine.mem.set_slot(base, b!(), 1),
+                            Ok(()) => machine.mem.set_word_at(base_at + (b!()) as usize, 1),
                             Err(error) => fail!(error),
                         }
                     }
@@ -1141,7 +1178,7 @@ pub(super) fn dispatch<'s, 'a>(
             // say.
             SCOPE_CANCEL => {
                 machine.sync(pc - 1);
-                let word = machine.mem.slot(base, a!());
+                let word = machine.mem.word_at(base_at + (a!() as usize));
                 match machine.scope_at(word, machine.span(id, pc - 1)) {
                     Ok(at) => machine.cancel_scope(at, running),
                     Err(error) => fail!(error),
@@ -1150,8 +1187,8 @@ pub(super) fn dispatch<'s, 'a>(
             SPAWN => {
                 machine.sync(pc - 1);
                 let span = machine.span(id, pc - 1);
-                let scope_word = machine.mem.slot(base, b!());
-                let object = machine.mem.slot(base, c!());
+                let scope_word = machine.mem.word_at(base_at + (b!() as usize));
+                let object = machine.mem.word_at(base_at + (c!() as usize));
                 match machine.spawn(
                     scope_word,
                     object,
@@ -1161,7 +1198,7 @@ pub(super) fn dispatch<'s, 'a>(
                     threads,
                     running,
                 ) {
-                    Ok(word) => machine.mem.set_slot(base, a!(), word),
+                    Ok(word) => machine.mem.set_word_at(base_at + (a!()) as usize, word),
                     Err(error) => fail!(error),
                 }
             }
@@ -1169,11 +1206,13 @@ pub(super) fn dispatch<'s, 'a>(
                 machine.sync(pc - 1);
                 let dst = a!();
                 let span = machine.span(id, pc - 1);
-                let word = machine.mem.slot(base, b!());
+                let word = machine.mem.word_at(base_at + (b!() as usize));
                 match machine.settle(word, LayoutId(held.lo()), running, span) {
                     Ok(words) => {
                         for (at, one) in words.iter().enumerate() {
-                            machine.mem.set_slot(base, dst + at as u32, *one);
+                            machine
+                                .mem
+                                .set_word_at(base_at + (dst + at as u32) as usize, *one);
                         }
                     }
                     Err(error) => fail!(error),
@@ -1188,14 +1227,14 @@ pub(super) fn dispatch<'s, 'a>(
                     .mem
                     .read_words(base + held.b() as u64, machine.width(answer));
                 match machine.settled(&words, answer, running) {
-                    Ok(word) => machine.mem.set_slot(base, a!(), word),
+                    Ok(word) => machine.mem.set_word_at(base_at + (a!()) as usize, word),
                     Err(error) => fail!(error),
                 }
             }
             // Asking is all it does. Whether the task stopped or had already
             // finished is known only where something waits for it.
             CANCEL => {
-                let word = machine.mem.slot(base, a!());
+                let word = machine.mem.word_at(base_at + (a!() as usize));
                 match machine.child_at(word, machine.span(id, pc - 1)) {
                     Ok(at) => {
                         if matches!(machine.children[at].state, ChildState::Running) {
@@ -1212,7 +1251,7 @@ pub(super) fn dispatch<'s, 'a>(
             // length of the wait, because a task waiting for a cell cannot
             // reach a safepoint of its own.
             SHARED_LOCK => {
-                let addr = machine.mem.slot(base, a!());
+                let addr = machine.mem.word_at(base_at + (a!() as usize));
                 if addr == 0 {
                     fail!(null_object());
                 }
@@ -1227,7 +1266,7 @@ pub(super) fn dispatch<'s, 'a>(
                 }
             }
             SHARED_UNLOCK => {
-                let addr = machine.mem.slot(base, a!());
+                let addr = machine.mem.word_at(base_at + (a!() as usize));
                 if addr == 0 {
                     fail!(null_object());
                 }
@@ -1250,7 +1289,7 @@ pub(super) fn dispatch<'s, 'a>(
             // assertion and the object holding them is unreachable as soon as
             // the arm clears its slot.
             ASSERT_FAILED => {
-                let addr = machine.mem.slot(base, a!());
+                let addr = machine.mem.word_at(base_at + (a!() as usize));
                 let text = String::from_utf8_lossy(&machine.string_bytes(addr)).into_owned();
                 machine.assertion_failure = Some((machine.span(id, pc - 1), text));
             }

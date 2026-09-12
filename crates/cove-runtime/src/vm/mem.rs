@@ -1725,15 +1725,88 @@ impl Memory {
     }
 
     /// The word at `slot` of the frame based at `base`.
-    #[inline]
+    ///
+    /// Straight into the segment, with no [`is_stack`] between. A frame is
+    /// pushed onto the stack and nowhere else, so `base + slot` is a stack
+    /// address by construction and the region decoder has nothing to decide —
+    /// but `base` is a run-time value, so nothing in the type system says so
+    /// and [`Memory::read`]'s branch cannot be folded away by a compiler that
+    /// only sees the addition. Saying it here is what removes it, and the
+    /// `debug_assert` is what keeps the claim honest: `--profile checked`
+    /// carries debug assertions, so the whole suite and every dogfood run
+    /// checks it.
+    #[inline(always)]
     pub(crate) fn slot(&self, base: u64, slot: u32) -> u64 {
-        self.read(base + slot as u64)
+        let at = base + slot as u64;
+        debug_assert!(is_stack(at), "a frame slot is a stack address");
+        self.stack.words[self.stack.at(at)]
     }
 
     /// Writes `word` to `slot` of the frame based at `base`.
-    #[inline]
+    ///
+    /// [`Memory::slot`]'s reason, in the other direction.
+    #[inline(always)]
     pub(crate) fn set_slot(&mut self, base: u64, slot: u32, word: u64) {
-        self.write(base + slot as u64, word);
+        let at = base + slot as u64;
+        debug_assert!(is_stack(at), "a frame slot is a stack address");
+        let index = self.stack.at(at);
+        self.stack.words[index] = word;
+    }
+
+    /// Copies `words` words from one frame slot to another.
+    ///
+    /// [`Memory::slot`]'s reason for a run rather than a word. Both addresses
+    /// are slots, so both regions are decided, and the four-way match in
+    /// [`Memory::copy_words`] has one arm that can be taken — but `dst` and
+    /// `src` are run-time values and nothing says so to a compiler. It moves
+    /// rather than smears, because two slots of one frame may overlap and a
+    /// lowering is free to emit that rather than having to prove it does not.
+    #[inline]
+    pub(crate) fn copy_slots(&mut self, dst: u64, src: u64, words: u32) {
+        if words == 0 || dst == src {
+            return;
+        }
+        debug_assert!(
+            is_stack(dst) && is_stack(src) && self.holds(dst, words) && self.holds(src, words),
+            "a {words}-word slot copy between {src} and {dst} stays on the stack"
+        );
+        let (d, s) = (self.stack.at(dst), self.stack.at(src));
+        if words == 1 {
+            // The common width by a long way — every scalar, every reference,
+            // every address — and `copy_within` is a range, a bounds check
+            // and a `memmove` where this is a load and a store. Leaving it
+            // out measured **6.14 s against 5.98** on `examples/covefmt`,
+            // which is the whole of what the two entry points above buy.
+            self.stack.words[d] = self.stack.words[s];
+            return;
+        }
+        self.stack.words.copy_within(s..s + words as usize, d);
+    }
+
+    /// Where `base` sits in this task's segment.
+    ///
+    /// The subtraction [`Memory::slot`] makes, made once. A frame's base does
+    /// not move while the frame is on top, so a dispatch loop that is about
+    /// to read fifty slots of it can hold this instead of recomputing it —
+    /// and the segment growing under a `push_frame` does not invalidate it,
+    /// because what it is relative to is the origin and the origin is fixed
+    /// for the life of the task.
+    #[inline(always)]
+    pub(crate) fn stack_index(&self, base: u64) -> usize {
+        debug_assert!(is_stack(base), "a frame base is a stack address");
+        self.stack.at(base)
+    }
+
+    /// The word at `index` of this task's segment.
+    #[inline(always)]
+    pub(crate) fn word_at(&self, index: usize) -> u64 {
+        self.stack.words[index]
+    }
+
+    /// Writes `word` at `index` of this task's segment.
+    #[inline(always)]
+    pub(crate) fn set_word_at(&mut self, index: usize, word: u64) {
+        self.stack.words[index] = word;
     }
 
     /// How many words of this task's segment are committed.
