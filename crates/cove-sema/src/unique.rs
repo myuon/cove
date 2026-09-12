@@ -962,9 +962,12 @@ impl<'a> Walk<'a, '_> {
                 .enumerate()
                 .any(|(j, held)| *held && j != at)
         };
-        let inout = args.iter().any(|arg| arg.is_var);
         let offset = usize::from(receiver.is_some());
         for (at, arg) in args.iter().enumerate() {
+            let inout = args
+                .iter()
+                .enumerate()
+                .any(|(j, other)| other.is_var && j != at);
             let retained = if result_holds {
                 Some("escapes into a call that may answer with it")
             } else if inout {
@@ -1334,6 +1337,60 @@ fn build(items: Array<Int>) -> Result<Array<Int>, Error> {
 
     /// A callee that cannot keep the handle is not an escape; the three
     /// ways one can are.
+    /// **A vector handed to a call as its own `var` argument is still the
+    /// caller's afterwards.**
+    ///
+    /// A `var` argument is a write-through borrow that ends when the call
+    /// returns, and the three ways a handle outlives a call are the three
+    /// this module's `call` documents: the callee's result, another `var`
+    /// argument the caller can see, or another operand that is a container.
+    /// For the `var` argument *itself* the second route would mean writing
+    /// it into itself, which needs a `Vector<T>` whose `T` is that same
+    /// `Vector<T>` and is not a type Cove can write.
+    ///
+    /// This was refused, and the refusal cost the one pattern the language
+    /// has for building a sequence: fill a `Vector` through a call, then
+    /// `freeze` it. `examples/covefmt` wrote `"".join(out.toArray())` at nine
+    /// sites because of it, and `toArray` copies the whole store where
+    /// `freeze` re-labels it in place.
+    #[test]
+    fn a_var_argument_is_not_made_shared_by_being_the_var_argument() {
+        proves(
+            "\
+fn fill(var into: Vector<Int>) {
+  into.push(1)
+}
+
+fn build() -> Array<Int> {
+  var items = Vector.of(1, 2)
+  fill(var items)
+  items.freeze()
+}
+",
+        );
+        // A *second* container beside it is the case that still escapes: the
+        // callee may write that one into this one, and which way round the
+        // types would allow is not something this asks.
+        let beside = refuses(
+            "\
+fn fill(var into: Vector<Vector<Int>>, from: Vector<Int>) {
+  into.push(from)
+}
+
+fn build() -> Array<Int> {
+  var rows = Vector.of<Vector<Int>>()
+  var items = Vector.of(1, 2)
+  fill(var rows, items)
+  items.freeze()
+}
+",
+        );
+        assert_eq!(
+            beside.labels[0].message,
+            "`items` escapes into a call that writes through a `var` argument here"
+        );
+    }
+
     #[test]
     fn a_call_escapes_only_when_the_callee_could_keep_the_handle() {
         proves(

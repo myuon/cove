@@ -108,7 +108,7 @@ export fn tokens(source: String) -> Array<Token> {
     out.push(Token(kind: kind, from: at, to: to))
     at = to
   }
-  out.toArray()
+  out.freeze()
 }
 
 /// Whether `held` tiles `source`.

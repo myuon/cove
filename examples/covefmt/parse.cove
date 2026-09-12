@@ -153,7 +153,7 @@ impl Parser {
         }
       }
     }
-    nodeOf(kind, from, self.at, held.toArray())
+    nodeOf(kind, from, self.at, held.freeze())
   }
 
   /// A `( ... )`, `[ ... ]` or `< ... >` group: the brackets, the trivia
@@ -197,7 +197,7 @@ impl Parser {
         held.push(self.leaf())
       }
     }
-    nodeOf(kind, from, self.at, held.toArray())
+    nodeOf(kind, from, self.at, held.freeze())
   }
 
   /// One member of a group, ending at a comma of the group's own depth or at
@@ -249,7 +249,7 @@ impl Parser {
       }
       held.push(self.leaf())
     }
-    nodeOf(Node.Member, from, self.at, held.toArray())
+    nodeOf(Node.Member, from, self.at, held.freeze())
   }
 
   /// Whether the `<` at `at` opens a generic list rather than comparing two
@@ -336,7 +336,7 @@ impl Parser {
         held.push(self.leaf())
       }
     }
-    nodeOf(Node.Body, from, self.at, held.toArray())
+    nodeOf(Node.Body, from, self.at, held.freeze())
   }
 
   /// One statement, ending where the language says a statement ends.
@@ -428,7 +428,7 @@ impl Parser {
         return nodeOf(Node.Stmt, from, self.at, held.toArray())
       }
     }
-    nodeOf(Node.Stmt, from, self.at, held.toArray())
+    nodeOf(Node.Stmt, from, self.at, held.freeze())
   }
 
   /// Whether the statement is over at the cursor, having just taken a token

@@ -10,7 +10,7 @@ impl Parser {
     var held = Vector.of()
     self.trivia(var held)
     if self.done() {
-      return nodeOf(Node.Trivia, from, self.at, held.toArray())
+      return nodeOf(Node.Trivia, from, self.at, held.freeze())
     }
 
     // The modifiers, then the word that says what this is.
@@ -89,7 +89,7 @@ impl Parser {
         !self.startsLine() {
         answer.push(self.leaf())
       }
-      held.push(nodeOf(Node.Returns, at, self.at, answer.toArray()))
+      held.push(nodeOf(Node.Returns, at, self.at, answer.freeze()))
     }
     if isPunct(self.source, self.tokens, self.at, "\{") {
       held.push(self.body())
@@ -137,7 +137,7 @@ impl Parser {
         }
       }
     }
-    nodeOf(Node.Generics, from, self.at, held.toArray())
+    nodeOf(Node.Generics, from, self.at, held.freeze())
   }
 
   /// Whether the cursor is at a run of space holding a newline.
@@ -210,5 +210,5 @@ export fn parseTokens(source: String, held: Array<Token>) -> Tree {
   while !parser.done() {
     items.push(parser.item())
   }
-  nodeOf(Node.File, 0, held.length(), items.toArray())
+  nodeOf(Node.File, 0, held.length(), items.freeze())
 }
