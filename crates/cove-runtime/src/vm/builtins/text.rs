@@ -190,11 +190,13 @@ pub(super) fn slice_bytes(
         Err(message) => return make::failed(machine, result, &message, out),
     };
     // Proportional to the answer rather than to the receiver, which is the
-    // point: a field taken out of a long line copies the field.
-    let bytes: Vec<u8> = (start..end).map(|at| byte_at(machine, addr, at)).collect();
-    let text = String::from_utf8(bytes)
-        .map_err(|_| RuntimeError::new("this string's bytes are not valid UTF-8"))?;
-    let word = machine.new_string(&text)?;
+    // point: a field taken out of a long line copies the field. It copies it
+    // eight bytes a turn and it never becomes a Rust `String` on the way:
+    // `byte_range` has already refused a cut inside a character, so a slice
+    // of valid UTF-8 between two boundaries is valid UTF-8 and validating it
+    // again would be walking the answer a second time to be told so.
+    let word = machine.new_string_of((end - start) as i64)?;
+    machine.copy_string_bytes(word, 0, addr, start, end - start);
     make::ok(machine, result, &[word], out)
 }
 
@@ -242,7 +244,7 @@ pub(super) fn split(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u
 /// `String.join(parts) -> String`, where the receiver is the separator.
 pub(super) fn join(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
     let (self_, args) = operand::method("String.join", operands, 1)?;
-    let separator = receiver(machine, "join", self_)?;
+    let separator_addr = receiver_addr(machine, "join", self_)?;
     let items = args[0];
     let addr = match operand::as_word(machine, items) {
         Some((Repr::Ref, addr)) if addr != 0 => addr,
@@ -262,6 +264,10 @@ pub(super) fn join(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u6
     // so an array whose elements are not strings is refused by what it holds
     // rather than by how wide it is.
     let stride = machine.words_of(elem);
+    if let Some(parts) = string_run(machine, addr, elem, stride, len) {
+        return joined_bytes(machine, separator_addr, &parts);
+    }
+    let separator = super::string_of(machine, separator_addr)?;
     let mut joined = String::new();
     for at in 0..len {
         if at > 0 {
@@ -275,6 +281,72 @@ pub(super) fn join(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u6
         joined.push_str(&operand::text(machine, "String.join", "parts", held)?);
     }
     machine.new_string(&joined)
+}
+
+/// The addresses of an `Array<String>`'s elements, or `None` when this is not
+/// one.
+///
+/// `Array<String>` is a run of one-word references and the element layout
+/// says so once for the whole array, so the parts can be collected without
+/// asking each of them what it is. Anything else — a wider element, an
+/// element that is not a string, a null — answers `None` and leaves the
+/// caller to the reader that produces the error message for it. That is why
+/// this refuses a null rather than treating it as the empty string: the
+/// slower path's wording is the wording the corpus has pinned, and there is
+/// no reason for two.
+fn string_run(
+    machine: &Machine,
+    addr: u64,
+    elem: LayoutId,
+    stride: u32,
+    len: u32,
+) -> Option<Vec<u64>> {
+    if elem != machine.program().str_layout || stride != 1 {
+        return None;
+    }
+    let mut parts = Vec::with_capacity(len as usize);
+    for at in 0..len {
+        let part = machine.payload(addr, at);
+        if part == 0 {
+            return None;
+        }
+        parts.push(part);
+    }
+    Some(parts)
+}
+
+/// `parts` joined by the string at `separator`, as one allocation and a run
+/// of copies.
+///
+/// The lengths are summed before anything is allocated, so the answer is
+/// allocated once at exactly its size and no part is ever copied twice. The
+/// previous shape of this read every part into a Rust `String`, validating
+/// UTF-8 it had itself written, appended it to a buffer that grew as it went,
+/// and then packed the whole thing back into a Cove object — four passes over
+/// the bytes where this has one.
+///
+/// Summing in `i64` and handing the total to `new_string_of` is what refuses
+/// a join too long to have a length, through the error an exhausted heap
+/// already raises.
+fn joined_bytes(machine: &mut Machine, separator: u64, parts: &[u64]) -> Result<u64, RuntimeError> {
+    let width = |addr: u64| machine.object_len(addr) as i64;
+    let separator_len = width(separator);
+    let mut total = separator_len * (parts.len() as i64 - 1).max(0);
+    for part in parts {
+        total += width(*part);
+    }
+    let result = machine.new_string_of(total)?;
+    let mut at = 0usize;
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 && separator_len > 0 {
+            machine.copy_string_bytes(result, at, separator, 0, separator_len as usize);
+            at += separator_len as usize;
+        }
+        let len = machine.object_len(*part) as usize;
+        machine.copy_string_bytes(result, at, *part, 0, len);
+        at += len;
+    }
+    Ok(result)
 }
 
 /// The element layout and length of the `Array` at `addr`.
@@ -545,6 +617,165 @@ mod tests {
 
     /// The receiver is the separator and the argument is the parts, which is
     /// the way round the schema declares it.
+    /// `sliceBytes` copies eight bytes a turn, so every combination of
+    /// alignments has to answer what a byte-at-a-time reading of the same
+    /// range answers.
+    ///
+    /// The interesting cases are not the ends but the middles: a source
+    /// offset that is not a multiple of eight makes each output word two
+    /// payload reads shifted against each other, and an off-by-one in that
+    /// shift produces a string that is the right *length* and the wrong
+    /// bytes — which a test that only checked a round trip of `"hello"`
+    /// would not see. So this walks every range of a string long enough to
+    /// have several words and compares against the bytes themselves.
+    #[test]
+    fn slice_bytes_answers_the_same_range_at_every_alignment() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 18);
+        // Deliberately not a multiple of eight, so the last word is partial.
+        let source: String = (0..29u8).map(|n| (b'a' + n % 26) as char).collect();
+        let bytes = source.as_bytes().to_vec();
+        for from in 0..=bytes.len() {
+            for to in from..=bytes.len() {
+                let self_ = machine.new_string(&source).unwrap();
+                let answer = run(
+                    &mut machine,
+                    "String",
+                    "sliceBytes",
+                    &[
+                        (Repr::Ref, self_),
+                        (Repr::Int, from as u64),
+                        (Repr::Int, to as u64),
+                    ],
+                )
+                .unwrap();
+                let (case, payload) = result_of(&program, program.str_layout, &answer);
+                assert_eq!(case, "Ok", "an ASCII cut is on a boundary");
+                let word = payload[0];
+                let want = std::str::from_utf8(&bytes[from..to]).unwrap();
+                assert_eq!(
+                    read(&machine, word),
+                    want,
+                    "sliceBytes({from}, {to}) of a {}-byte string",
+                    bytes.len()
+                );
+                // The header has to agree with the bytes, because `eq.str`
+                // reads the length and then the words.
+                assert_eq!(machine.object_len(word) as usize, to - from);
+            }
+        }
+    }
+
+    /// A copy must not leave anything in the tail of the answer's last word.
+    ///
+    /// `eq.str` compares payload words, not bytes, so two strings with the
+    /// same text and different padding would be unequal. Allocation zeroes
+    /// the payload and the copy is asked never to write past the length; this
+    /// checks the two together by cutting a range whose length is not a
+    /// multiple of eight out of a longer string and comparing it against the
+    /// same text built the other way.
+    #[test]
+    fn a_slice_is_equal_to_the_same_text_written_directly() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 18);
+        let source = machine.new_string("0123456789abcdefghij").unwrap();
+        for (from, to) in [(0usize, 3usize), (1, 4), (7, 9), (8, 13), (3, 20), (19, 20)] {
+            let answer = run(
+                &mut machine,
+                "String",
+                "sliceBytes",
+                &[
+                    (Repr::Ref, source),
+                    (Repr::Int, from as u64),
+                    (Repr::Int, to as u64),
+                ],
+            )
+            .unwrap();
+            let (case, payload) = result_of(&program, program.str_layout, &answer);
+            assert_eq!(case, "Ok");
+            let cut = payload[0];
+            let direct = machine
+                .new_string(&"0123456789abcdefghij"[from..to])
+                .unwrap();
+            assert_eq!(
+                machine.object_len(cut),
+                machine.object_len(direct),
+                "{from}..{to} lengths"
+            );
+            let words = machine.object_len(direct).div_ceil(8);
+            for at in 0..words {
+                assert_eq!(
+                    machine.payload(cut, at),
+                    machine.payload(direct, at),
+                    "{from}..{to} payload word {at}: a cut and a written string must be \
+                     the same words, padding included"
+                );
+            }
+        }
+    }
+
+    /// A join sizes its answer by summing the parts, so every part and every
+    /// separator lands at an offset the previous ones decided. A separator
+    /// whose length is not a multiple of eight is what makes those offsets
+    /// unaligned, and that is the case worth walking.
+    #[test]
+    fn join_agrees_with_rust_at_every_separator_width() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 18);
+        let layout = elements(&program, program.str_layout, false);
+        let cases: &[&[&str]] = &[
+            &[],
+            &[""],
+            &["a"],
+            &["", ""],
+            &["a", ""],
+            &["", "b"],
+            &["one", "two", "three"],
+            &["12345678", "12345678"],
+            &["1234567", "123456789"],
+            &["h\u{e9}llo", "w\u{f6}rld", "\u{1f600}"],
+            &["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+        ];
+        for separator in ["", " ", ", ", "--", "1234567", "12345678", "123456789"] {
+            for parts in cases {
+                let items = machine.new_object(layout, parts.len() as u32).unwrap();
+                for (at, part) in parts.iter().enumerate() {
+                    let word = machine.new_string(part).unwrap();
+                    machine.set_payload(items, at as u32, word);
+                }
+                let joined = on(&mut machine, separator, "join", &[(Repr::Ref, items)]);
+                assert_eq!(
+                    read(&machine, joined),
+                    parts.join(separator),
+                    "{parts:?} joined by {separator:?}"
+                );
+            }
+        }
+    }
+
+    /// An `Array<String>` holding a null is not a string run, and the reader
+    /// that refuses it is the one whose wording the corpus has pinned.
+    #[test]
+    fn a_join_over_a_null_part_is_refused_as_it_was() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 14);
+        let layout = elements(&program, program.str_layout, false);
+        let items = machine.new_object(layout, 1).unwrap();
+        machine.set_payload(items, 0, 0);
+        let self_ = machine.new_string(", ").unwrap();
+        let error = run(
+            &mut machine,
+            "String",
+            "join",
+            &[(Repr::Ref, self_), (Repr::Ref, items)],
+        )
+        .unwrap_err();
+        assert!(
+            !error.message.is_empty(),
+            "a null part is refused rather than joined as an empty string"
+        );
+    }
+
     #[test]
     fn join_puts_the_receiver_between_the_parts() {
         let program = world();

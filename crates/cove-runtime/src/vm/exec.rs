@@ -1979,6 +1979,105 @@ impl<'a> Machine<'a> {
         }
     }
 
+    /// A new string object of `len` zero bytes, for a caller that will fill
+    /// it itself.
+    ///
+    /// The payload is zero on both of the paths that can answer it — a
+    /// reused free block is filled and a fresh chunk is committed zeroed —
+    /// which is what lets a caller write only the bytes it has and leave the
+    /// tail of the last word alone. That tail matters: `eq.str` compares
+    /// payload words rather than bytes, so a string whose final word held
+    /// anything past its length would be unequal to the same text written
+    /// some other way.
+    ///
+    /// Nothing roots the answer, so a caller must fill it without allocating
+    /// again. That is not a restriction in practice — the point of asking for
+    /// an exact length is to have counted first.
+    pub(crate) fn new_string_of(&mut self, len: i64) -> Result<u64, RuntimeError> {
+        self.allocate(self.program.str_layout, len)
+    }
+
+    /// The eight bytes of the string object at `addr` beginning at byte `at`,
+    /// least-significant byte first, and zero past `len`.
+    ///
+    /// One payload read when `at` is word-aligned and two when it is not.
+    /// The second read is guarded by `len` rather than by the object's
+    /// payload width because a string's last word is the last word it has:
+    /// reading past it would read whatever the heap put there next.
+    fn bytes_word(&self, addr: u64, at: usize, len: usize) -> u64 {
+        let shift = (at % 8) * 8;
+        let word = self.mem.payload(addr, (at / 8) as u32) >> shift;
+        if shift == 0 {
+            return word;
+        }
+        let next = at - (at % 8) + 8;
+        if next >= len {
+            return word;
+        }
+        word | (self.mem.payload(addr, (next / 8) as u32) << (64 - shift))
+    }
+
+    /// Writes the low `count` bytes of `bytes` into payload word `word` of
+    /// the object at `addr`, at byte `offset`, leaving the rest of the word
+    /// as it was.
+    ///
+    /// A whole aligned word is one store and no load, which is the case a
+    /// copy between two strings spends nearly all of its time in.
+    fn blend(&mut self, addr: u64, word: u32, offset: usize, count: usize, bytes: u64) {
+        debug_assert!(count > 0 && offset + count <= 8);
+        if offset == 0 && count == 8 {
+            self.mem.set_payload(addr, word, bytes);
+            return;
+        }
+        let mask = ((1u64 << (count * 8)) - 1) << (offset * 8);
+        let held = self.mem.payload(addr, word);
+        self.mem.set_payload(
+            addr,
+            word,
+            (held & !mask) | ((bytes << (offset * 8)) & mask),
+        );
+    }
+
+    /// Copies `len` bytes of the string object at `src`, from byte `src_at`,
+    /// into the one at `dst`, from byte `dst_at`.
+    ///
+    /// Eight bytes a turn rather than one. The byte-at-a-time version this
+    /// replaced read a word and shifted it for every byte it copied, which
+    /// made a copy of *n* bytes *n* payload reads and *n* stores; this makes
+    /// it *n*/8 of each when both ends are aligned, and at most twice that
+    /// when neither is.
+    ///
+    /// The caller owns the bounds. Every caller here has already established
+    /// them — a slice from [`crate::vm::builtins::text`]'s `byte_range`, a
+    /// join from the lengths it summed to size the answer — and an
+    /// out-of-range write would be a payload write past the object, which is
+    /// the one thing this must not be asked to check per byte if it is to be
+    /// worth writing at all.
+    pub(crate) fn copy_string_bytes(
+        &mut self,
+        dst: u64,
+        dst_at: usize,
+        src: u64,
+        src_at: usize,
+        len: usize,
+    ) {
+        let src_len = self.mem.object_len(src) as usize;
+        let mut done = 0;
+        while done < len {
+            let take = (len - done).min(8);
+            let bytes = self.bytes_word(src, src_at + done, src_len);
+            let at = dst_at + done;
+            let word = (at / 8) as u32;
+            let offset = at % 8;
+            let first = take.min(8 - offset);
+            self.blend(dst, word, offset, first, bytes);
+            if first < take {
+                self.blend(dst, word + 1, 0, take - first, bytes >> (first * 8));
+            }
+            done += take;
+        }
+    }
+
     /// The program this machine runs.
     pub(crate) fn program(&self) -> &'a Program {
         self.program
