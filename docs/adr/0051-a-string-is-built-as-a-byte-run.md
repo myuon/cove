@@ -5,8 +5,10 @@
 - Decides: that the executable IR can allocate, fill and finish packed byte
   runs, and that string construction lowers to those operations instead of
   remaining opaque behind collection and string builtins
-- Extends: [ADR 0019](0019-executable-ir-and-vm.md)'s executable IR with the
-  variable-sized scalar storage it did not decide
+- Supersedes nothing. It extends
+  [ADR 0019](0019-executable-ir-and-vm.md)'s executable IR with the
+  variable-sized scalar storage it did not decide, and contradicts none of
+  what that ADR settled
 - Preserves: [ADR 0034](0034-one-physical-word-stack.md)'s one linear memory.
   A byte run is an object in its heap region, not a side buffer or a third
   value store
