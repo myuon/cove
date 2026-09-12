@@ -245,6 +245,14 @@ fn object_to_value(machine: &Machine, addr: u64, depth: usize) -> Result<Value, 
             })?;
             Ok(Value::string(text))
         }
+        // ADR 0051: "a run under construction is not a `String`". Reaching
+        // here at all is a lowering bug — the run should have been finished
+        // before it could be named as a value crossing this boundary — so
+        // this refuses rather than guesses whether the bytes happen to be
+        // valid UTF-8 yet.
+        Shape::Bytes => Err(RuntimeError::new(
+            "a byte run under construction is not a value and cannot cross the boundary",
+        )),
         // A struct, an enum or a scalar whose *object* this is: a layout the
         // lowering deliberately broke a recursion at holds the value's own
         // inline words as its payload, and `Layout::payload_words` answers
@@ -1103,6 +1111,10 @@ fn fits(program: &Program, layout: LayoutId, value: &Value, precision: Precision
         Shape::Word(Repr::Host) => matches!(value.view(), ValueView::Resource(_)),
         // Not a value a host holds. See `word_out`.
         Shape::Word(Repr::Addr | Repr::Task | Repr::Scope | Repr::Tag) | Shape::Free => false,
+        // No `Value` ever names a byte run under construction: it is not a
+        // Cove type, and `fits` is answering whether a *value* could occupy
+        // this position.
+        Shape::Bytes => false,
         Shape::Str => matches!(value.view(), ValueView::Str(_)),
         Shape::Struct { fields, .. } if is_range(program, described) => {
             matches!(value.view(), ValueView::Range(_)) && fields.len() == 3

@@ -275,6 +275,21 @@ impl Check<'_> {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
+                // `AllocBytes` always allocates `Program::bytes_layout`, but
+                // this poisons `dst` exactly as `ByteAt` does rather than
+                // `identify`ing it the way `Inst::Alloc` and `Inst::Str` do:
+                // a byte run under construction is not a value this pass
+                // needs to reason about by layout, only by `Repr`, and
+                // `FinishString` immediately relabels the same slot to a
+                // `Str` object anyway.
+                Inst::AllocBytes { dst, .. } | Inst::FinishString { dst, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                }
+                // Neither writes a frame slot: `WriteByte` writes a byte of
+                // the object `bytes` already names, and `CopyBytes` writes
+                // into the object its `args` table's `dst` already names.
+                Inst::WriteByte { .. } | Inst::CopyBytes { .. } => {}
                 // Forming the address of a slot is also a write to it, as
                 // far as this is concerned: a `var` argument is that address
                 // handed to a callee, and what the callee stores through it
@@ -811,6 +826,24 @@ impl Check<'_> {
                 self.expect(at, offset, &[Repr::Int]);
                 self.expect(at, dst, &[Repr::Int]);
             }
+            Inst::AllocBytes { dst, len } => {
+                self.expect(at, dst, &[Repr::Ref]);
+                self.expect(at, len, &[Repr::Int]);
+            }
+            Inst::WriteByte {
+                bytes,
+                at: offset,
+                value,
+            } => {
+                self.expect(at, bytes, &[Repr::Ref]);
+                self.expect(at, offset, &[Repr::Int]);
+                self.expect(at, value, &[Repr::Int]);
+            }
+            Inst::CopyBytes { args } => self.check_copy_bytes_args(at, args),
+            Inst::FinishString { dst, bytes } => {
+                self.expect(at, dst, &[Repr::Ref]);
+                self.expect(at, bytes, &[Repr::Ref]);
+            }
             Inst::Len { dst, obj } => {
                 self.expect(at, obj, &[Repr::Ref]);
                 self.expect(at, dst, &[Repr::Int]);
@@ -1204,6 +1237,40 @@ impl Check<'_> {
                 *layout,
                 &format!("argument {index} of `{name}`"),
             );
+        }
+    }
+
+    /// [`Inst::CopyBytes`]'s five arguments: `dst`, `dst_at`, `src`,
+    /// `src_at`, `len`, in that order.
+    ///
+    /// Checked by `Repr` rather than by [`Self::check_args`]'s declared
+    /// [`LayoutId`], because `dst` and `src` do not have one: `src` may be a
+    /// `String` or another [`crate::Shape::Bytes`] run, and which of the two
+    /// is a run-time fact rather than something a lowering could declare the
+    /// way a call declares its parameters. What is static is that both are
+    /// references and the other three are integers, so that is what this
+    /// asks.
+    fn check_copy_bytes_args(&mut self, at: Option<usize>, args: crate::ArgsId) {
+        if !self.in_range(at, args.index(), self.program.args.len(), "argument list") {
+            return;
+        }
+        const NAMES: [&str; 5] = ["dst", "dst_at", "src", "src_at", "len"];
+        const WANTS: [Repr; 5] = [Repr::Ref, Repr::Int, Repr::Ref, Repr::Int, Repr::Int];
+        let passed = self.program.arg_list(args).to_vec();
+        if passed.len() != NAMES.len() {
+            self.fault(
+                at,
+                format!(
+                    "copies bytes with {} argument(s), and this needs {} ({})",
+                    passed.len(),
+                    NAMES.len(),
+                    NAMES.join(", ")
+                ),
+            );
+            return;
+        }
+        for (arg, want) in passed.iter().zip(WANTS) {
+            self.expect(at, arg.slot, &[want]);
         }
     }
 

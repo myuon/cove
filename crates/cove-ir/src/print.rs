@@ -304,6 +304,14 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::ByteAt { dst, obj, at } => {
             format!("byte-at {} {} {}", s(*dst), s(*obj), s(*at))
         }
+        Inst::AllocBytes { dst, len } => format!("alloc-bytes {} {}", s(*dst), s(*len)),
+        Inst::WriteByte { bytes, at, value } => {
+            format!("write-byte {} {} {}", s(*bytes), s(*at), s(*value))
+        }
+        Inst::CopyBytes { args } => format!("copy-bytes ({})", args_of(program, *args)),
+        Inst::FinishString { dst, bytes } => {
+            format!("finish-string {} {}", s(*dst), s(*bytes))
+        }
         Inst::Len { dst, obj } => format!("len {} {}", s(*dst), s(*obj)),
         Inst::LayoutOf { dst, obj } => format!("layout-of {} {}", s(*dst), s(*obj)),
         Inst::AddrOfSlot { dst, slot } => format!("addr-of-slot {} {}", s(*dst), s(*slot)),
@@ -496,6 +504,7 @@ fn shape_name(shape: &Shape) -> &'static str {
         Shape::Free => "free",
         Shape::Word(_) => "word",
         Shape::Str => "str",
+        Shape::Bytes => "bytes",
         Shape::Struct { .. } => "struct",
         Shape::Enum { .. } => "enum",
         Shape::Elements {

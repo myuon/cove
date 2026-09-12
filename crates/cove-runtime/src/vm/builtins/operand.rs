@@ -308,6 +308,10 @@ pub(super) fn layout_name(machine: &Machine, layout: LayoutId, first: u64, depth
     match &described.shape {
         Shape::Word(repr) => type_name(machine, *repr, first),
         Shape::Str => "String".to_string(),
+        // Reached only by a debugger or an internal error message: no source
+        // expression ever holds one of these, so there is no name a Cove
+        // program would recognise. See `Shape::Bytes`.
+        Shape::Bytes => "<byte run>".to_string(),
         Shape::Struct { .. } | Shape::Enum { .. } => described.name.to_string(),
         Shape::Elements { growable, .. } => if *growable { "Vector" } else { "Array" }.to_string(),
         Shape::Vector { .. } => "Vector".to_string(),

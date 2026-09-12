@@ -93,7 +93,7 @@ use cove_diag::Span;
 use cove_ir::bytecode::{disasm, encode_program, verify, Encoded, EncodedInst, Op};
 use cove_ir::{
     ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Convert, FunctionId, HostOpId, LayoutId, Num,
-    Program, Repr, Slot, StrId, TableId,
+    Program, Repr, Shape, Slot, StrId, TableId,
 };
 
 use crate::budget::Meter;
@@ -213,6 +213,10 @@ const STORE_FIELD: u8 = Op::StoreField.number();
 const LOAD_ELEM: u8 = Op::LoadElem.number();
 const STORE_ELEM: u8 = Op::StoreElem.number();
 const BYTE_AT: u8 = Op::ByteAt.number();
+const ALLOC_BYTES: u8 = Op::AllocBytes.number();
+const WRITE_BYTE: u8 = Op::WriteByte.number();
+const COPY_BYTES: u8 = Op::CopyBytes.number();
+const FINISH_STRING: u8 = Op::FinishString.number();
 const LEN: u8 = Op::Len.number();
 const LAYOUT_OF: u8 = Op::LayoutOf.number();
 
@@ -278,6 +282,10 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::AllocImm
         | Op::AllocSlot
         | Op::ByteAt
+        | Op::AllocBytes
+        | Op::WriteByte
+        | Op::CopyBytes
+        | Op::FinishString
         | Op::LoadField
         | Op::StoreField
         | Op::LoadElem
@@ -1030,6 +1038,148 @@ pub(super) fn dispatch<'s, 'a>(
                 let byte = (word >> ((at % 8) * 8)) & 0xFF;
                 machine.mem.set_word_at(base_at + (a!()) as usize, byte);
             }
+            // ADR 0051's allocation. `Program::bytes_layout` is a
+            // program-wide constant exactly as `Program::str_layout` is —
+            // see `Op::AllocBytes`'s fields — so unlike `ALLOC_SLOT` there is
+            // no `Half::Layout` to read out of the payload, only the length.
+            // `Machine::allocate` is what rejects a negative or oversized
+            // `len` through the "no memory left" refusal every other
+            // allocation shares.
+            ALLOC_BYTES => {
+                let len = machine.mem.word_at(base_at + (b!() as usize)) as i64;
+                machine.sync(pc - 1);
+                match machine.allocate(program.bytes_layout, len) {
+                    Ok(addr) => machine.mem.set_word_at(base_at + (a!()) as usize, addr),
+                    Err(error) => fail!(error),
+                }
+            }
+            // One checked byte of a run under construction. Bounds and range
+            // are both checked ahead of the write, the same way `BYTE_AT`
+            // checks `at` ahead of its read: an out-of-range offset or an
+            // out-of-range value would otherwise write past the object or
+            // write a word another `Inst::FinishString` would trust as a
+            // byte.
+            WRITE_BYTE => {
+                let bytes = machine.mem.word_at(base_at + (a!() as usize));
+                if bytes == 0 {
+                    fail!(null_object());
+                }
+                let at = machine.mem.word_at(base_at + (b!() as usize)) as i64;
+                let len = machine.mem.object_len(bytes) as i64;
+                if at < 0 || at >= len {
+                    machine.sync(pc - 1);
+                    fail!(RuntimeError::new(format!(
+                        "`writeByte`'s `at` is `{at}`, and a byte offset into this run is 0 to {}",
+                        len - 1
+                    )));
+                }
+                let value = machine.mem.word_at(base_at + (c!() as usize)) as i64;
+                if !(0..=255).contains(&value) {
+                    machine.sync(pc - 1);
+                    fail!(RuntimeError::new(format!(
+                        "`writeByte`'s value is `{value}`, and a byte is 0 to 255"
+                    )));
+                }
+                let at = at as u32;
+                let word_at = at / 8;
+                let shift = (at % 8) * 8;
+                let word = machine.mem.payload(bytes, word_at);
+                let mask = 0xFFu64 << shift;
+                machine
+                    .mem
+                    .set_payload(bytes, word_at, (word & !mask) | ((value as u64) << shift));
+            }
+            // The bulk copy ADR 0051 exists for. All five operands — `dst`,
+            // `dst_at`, `src`, `src_at`, `len` — live behind the `ArgsId` in
+            // the payload's low half rather than in `a`, `b` and `c`; see
+            // `Inst::CopyBytes`'s doc for why.
+            //
+            // `Machine::copy_string_bytes` documents its caller as owning
+            // every bound it copies within, so everything below the read of
+            // the five words is a check this dispatch arm must make before
+            // calling it — nothing past this point may fail.
+            COPY_BYTES => {
+                machine.sync(pc - 1);
+                let args = program.arg_list(ArgsId(held.lo()));
+                let dst = machine.mem.slot(base, args[0].slot);
+                let dst_at = machine.mem.slot(base, args[1].slot) as i64;
+                let src = machine.mem.slot(base, args[2].slot);
+                let src_at = machine.mem.slot(base, args[3].slot) as i64;
+                let len = machine.mem.slot(base, args[4].slot) as i64;
+                if dst == 0 {
+                    fail!(null_object());
+                }
+                if src == 0 {
+                    fail!(null_object());
+                }
+                if len < 0 {
+                    fail!(RuntimeError::new(format!(
+                        "`copyBytes`'s length is `{len}`, and a copy cannot have a negative \
+                         length"
+                    )));
+                }
+                if !matches!(
+                    program.layout(machine.mem.object_layout(dst)).shape,
+                    Shape::Bytes
+                ) {
+                    fail!(RuntimeError::new(
+                        "`copyBytes`'s destination is not a byte run under construction, and \
+                         only one of those may be written into"
+                    ));
+                }
+                if !matches!(
+                    program.layout(machine.mem.object_layout(src)).shape,
+                    Shape::Str | Shape::Bytes
+                ) {
+                    fail!(RuntimeError::new(
+                        "`copyBytes`'s source is neither a `String` nor a byte run under \
+                         construction"
+                    ));
+                }
+                let src_len = machine.mem.object_len(src) as i64;
+                if src_at < 0 || src_at.checked_add(len).is_none_or(|end| end > src_len) {
+                    fail!(RuntimeError::new(format!(
+                        "`copyBytes` reads {len} byte(s) from {src_at} of a source of {src_len}"
+                    )));
+                }
+                let dst_len = machine.mem.object_len(dst) as i64;
+                if dst_at < 0 || dst_at.checked_add(len).is_none_or(|end| end > dst_len) {
+                    fail!(RuntimeError::new(format!(
+                        "`copyBytes` writes {len} byte(s) to {dst_at} of a destination of \
+                         {dst_len}"
+                    )));
+                }
+                machine.copy_string_bytes(dst, dst_at as usize, src, src_at as usize, len as usize);
+            }
+            // ADR 0051's finish: validated once, and turned into the answer
+            // without copying its payload. A `Shape::Bytes` run and a
+            // `Shape::Str` of the same byte length occupy the same number of
+            // words — both are `len.div_ceil(8)` payload words — so this is a
+            // header re-label with `spare` zero rather than an allocation and
+            // a copy. Not copying the payload is the whole performance
+            // argument the ADR makes.
+            FINISH_STRING => {
+                let bytes = machine.mem.word_at(base_at + (b!() as usize));
+                if bytes == 0 {
+                    fail!(null_object());
+                }
+                machine.sync(pc - 1);
+                if !matches!(
+                    program.layout(machine.mem.object_layout(bytes)).shape,
+                    Shape::Bytes
+                ) {
+                    fail!(RuntimeError::new(
+                        "`finishString` needs a byte run under construction, and this is not one"
+                    ));
+                }
+                let text = machine.string_bytes(bytes);
+                if std::str::from_utf8(&text).is_err() {
+                    fail!(RuntimeError::new("this string's bytes are not valid UTF-8"));
+                }
+                let len = machine.mem.object_len(bytes);
+                machine.relabel(bytes, program.str_layout, len, 0);
+                machine.mem.set_word_at(base_at + (a!()) as usize, bytes);
+            }
             LEN => {
                 let addr = machine.mem.word_at(base_at + (b!() as usize));
                 if addr == 0 {
@@ -1311,7 +1461,7 @@ pub(super) fn dispatch<'s, 'a>(
 mod tests {
     use cove_ir::{Convert as ConvertTo, Inst, Len, Shape};
 
-    use super::super::tests::{run_words, Build};
+    use super::super::tests::{budget, run_words, Build};
     use super::*;
 
     /// Every opcode ADR 0041 defines has an implementation.
@@ -1427,5 +1577,525 @@ mod tests {
             missing.len(),
             Op::all().len(),
         );
+    }
+
+    // ---- ADR 0051: the byte-run instructions --------------------------
+
+    /// A program with every function [ADR 0051](../../../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
+    /// tests share, so each test builds a fixture and none builds a
+    /// compiler.
+    ///
+    /// - `alloc_bytes_case(len) -> Ref` allocates and answers a byte run.
+    /// - `write_byte_case(bytes, at, value) -> Ref` writes one byte and
+    ///   answers the same run, so a caller can inspect it afterward.
+    /// - `finish_string_case(bytes) -> Ref` finishes a run into a `String`.
+    /// - `copy_into(dst, dst_at, src, src_at, len) -> Ref` copies and
+    ///   answers `dst`, so both the successful matrix and every refusal path
+    ///   run through one function.
+    struct Fixture {
+        program: Program,
+        alloc_bytes_case: FunctionId,
+        write_byte_case: FunctionId,
+        finish_string_case: FunctionId,
+        copy_into: FunctionId,
+    }
+
+    fn fixture() -> Fixture {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        build.string_layout();
+        let bytes = build.bytes_layout();
+
+        let alloc_bytes_case = build.function(
+            "alloc_bytes_case",
+            &[int],
+            &[Repr::Int, Repr::Ref],
+            bytes,
+            vec![Inst::AllocBytes { dst: 1, len: 0 }, Inst::Return { src: 1 }],
+        );
+        let write_byte_case = build.function(
+            "write_byte_case",
+            &[bytes, int, int],
+            &[Repr::Ref, Repr::Int, Repr::Int],
+            bytes,
+            vec![
+                Inst::WriteByte {
+                    bytes: 0,
+                    at: 1,
+                    value: 2,
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let finish_string_case = build.function(
+            "finish_string_case",
+            &[bytes],
+            &[Repr::Ref],
+            bytes,
+            vec![
+                Inst::FinishString { dst: 0, bytes: 0 },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let args = build.args(&[(0, bytes), (1, int), (2, bytes), (3, int), (4, int)]);
+        let copy_into = build.function(
+            "copy_into",
+            &[bytes, int, bytes, int, int],
+            &[Repr::Ref, Repr::Int, Repr::Ref, Repr::Int, Repr::Int],
+            bytes,
+            vec![Inst::CopyBytes { args }, Inst::Return { src: 0 }],
+        );
+        let program = build.done();
+        Fixture {
+            program,
+            alloc_bytes_case,
+            write_byte_case,
+            finish_string_case,
+            copy_into,
+        }
+    }
+
+    /// `AllocBytes`, a sequence of `WriteByte`s and `FinishString`, chained
+    /// by hand in one function, answer the expected string — and the result
+    /// is `eq.str`-equal to the same text written directly, padding of the
+    /// last partial word included. That last part is the one a `relabel`
+    /// leaving the tail of the old `Bytes` allocation dirty would fail: the
+    /// text is thirteen bytes, so the last of its two payload words is only
+    /// five bytes full.
+    #[test]
+    fn alloc_write_finish_answers_the_expected_string() {
+        let mut build = Build::default();
+        build.string_layout();
+        let bytes = build.bytes_layout();
+        let text = "Hello, World!";
+        assert_eq!(text.len(), 13, "a length whose last word is partial");
+        let mut code = vec![Inst::Int {
+            dst: 1,
+            value: text.len() as i64,
+        }];
+        code.push(Inst::AllocBytes { dst: 0, len: 1 });
+        for (at, byte) in text.bytes().enumerate() {
+            code.push(Inst::Int {
+                dst: 2,
+                value: at as i64,
+            });
+            code.push(Inst::Int {
+                dst: 3,
+                value: byte as i64,
+            });
+            code.push(Inst::WriteByte {
+                bytes: 0,
+                at: 2,
+                value: 3,
+            });
+        }
+        code.push(Inst::FinishString { dst: 0, bytes: 0 });
+        code.push(Inst::Return { src: 0 });
+        let entry = build.function(
+            "round_trip",
+            &[],
+            &[Repr::Ref, Repr::Int, Repr::Int, Repr::Int],
+            bytes,
+            code,
+        );
+        let program = build.done();
+
+        let mut machine = Machine::new(&program, 1 << 16);
+        let finished = machine.run(entry, &[], &budget()).unwrap()[0];
+        assert_eq!(
+            machine.object_layout(finished),
+            program.str_layout,
+            "finishing relabels the run to `String` in place"
+        );
+        assert_eq!(
+            String::from_utf8(machine.string_bytes(finished)).unwrap(),
+            text
+        );
+
+        let direct = machine.new_string(text).unwrap();
+        assert_eq!(machine.object_len(finished), machine.object_len(direct));
+        for at in 0..machine.object_len(direct).div_ceil(8) {
+            assert_eq!(
+                machine.payload(finished, at),
+                machine.payload(direct, at),
+                "word {at}: a finished run and a written string must be the same words, \
+                 padding included"
+            );
+        }
+    }
+
+    #[test]
+    fn alloc_bytes_of_zero_length_works_without_error() {
+        let Fixture {
+            program,
+            alloc_bytes_case,
+            ..
+        } = fixture();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let addr = machine.run(alloc_bytes_case, &[0], &budget()).unwrap()[0];
+        assert_ne!(addr, 0);
+        assert_eq!(machine.object_layout(addr), program.bytes_layout);
+        assert_eq!(machine.object_len(addr), 0);
+    }
+
+    #[test]
+    fn alloc_bytes_of_a_negative_length_is_the_shared_no_memory_refusal() {
+        let Fixture {
+            program,
+            alloc_bytes_case,
+            ..
+        } = fixture();
+        let error = run_words(&program, alloc_bytes_case, &[(-1i64) as u64]).unwrap_err();
+        assert_eq!(error.message, "this run has no memory left");
+    }
+
+    #[test]
+    fn write_byte_refuses_a_null_run() {
+        let Fixture {
+            program,
+            write_byte_case,
+            ..
+        } = fixture();
+        let error = run_words(&program, write_byte_case, &[0, 0, 0]).unwrap_err();
+        assert_eq!(error.message, null_object().message);
+    }
+
+    #[test]
+    fn write_byte_refuses_an_out_of_range_at() {
+        let Fixture {
+            program,
+            alloc_bytes_case,
+            write_byte_case,
+            ..
+        } = fixture();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let addr = machine.run(alloc_bytes_case, &[3], &budget()).unwrap()[0];
+        for at in [3u64, (-1i64) as u64] {
+            let error = machine
+                .run(write_byte_case, &[addr, at, 65], &budget())
+                .unwrap_err();
+            assert!(
+                error.message.contains("writeByte") && error.message.contains("byte offset"),
+                "{at}: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn write_byte_refuses_a_value_above_255() {
+        let Fixture {
+            program,
+            alloc_bytes_case,
+            write_byte_case,
+            ..
+        } = fixture();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let addr = machine.run(alloc_bytes_case, &[3], &budget()).unwrap()[0];
+        for value in [256u64, (-1i64) as u64] {
+            let error = machine
+                .run(write_byte_case, &[addr, 0, value], &budget())
+                .unwrap_err();
+            assert!(
+                error.message.contains("writeByte") && error.message.contains("0 to 255"),
+                "{value}: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn finish_string_refuses_a_null_run() {
+        let Fixture {
+            program,
+            finish_string_case,
+            ..
+        } = fixture();
+        let error = run_words(&program, finish_string_case, &[0]).unwrap_err();
+        assert_eq!(error.message, null_object().message);
+    }
+
+    #[test]
+    fn finish_string_refuses_a_value_that_is_not_a_byte_run() {
+        let Fixture {
+            program,
+            finish_string_case,
+            ..
+        } = fixture();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let string = machine.new_string("already a string").unwrap();
+        let error = machine
+            .run(finish_string_case, &[string], &budget())
+            .unwrap_err();
+        assert!(error.message.contains("byte run"), "{}", error.message);
+    }
+
+    #[test]
+    fn finish_string_refuses_invalid_utf8() {
+        let Fixture {
+            program,
+            alloc_bytes_case,
+            write_byte_case,
+            finish_string_case,
+            ..
+        } = fixture();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let addr = machine.run(alloc_bytes_case, &[1], &budget()).unwrap()[0];
+        // 0xFF is not a valid UTF-8 lead byte on its own.
+        machine
+            .run(write_byte_case, &[addr, 0, 0xFF], &budget())
+            .unwrap();
+        let error = machine
+            .run(finish_string_case, &[addr], &budget())
+            .unwrap_err();
+        assert_eq!(error.message, "this string's bytes are not valid UTF-8");
+    }
+
+    #[test]
+    fn copy_bytes_refuses_a_null_destination() {
+        let Fixture {
+            program, copy_into, ..
+        } = fixture();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let src = machine.new_string("source").unwrap();
+        let error = machine
+            .run(copy_into, &[0, 0, src, 0, 3], &budget())
+            .unwrap_err();
+        assert_eq!(error.message, null_object().message);
+    }
+
+    #[test]
+    fn copy_bytes_refuses_a_null_source() {
+        let Fixture {
+            program,
+            alloc_bytes_case,
+            copy_into,
+            ..
+        } = fixture();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let dst = machine.run(alloc_bytes_case, &[3], &budget()).unwrap()[0];
+        let error = machine
+            .run(copy_into, &[dst, 0, 0, 0, 3], &budget())
+            .unwrap_err();
+        assert_eq!(error.message, null_object().message);
+    }
+
+    #[test]
+    fn copy_bytes_refuses_a_negative_length() {
+        let Fixture {
+            program,
+            alloc_bytes_case,
+            copy_into,
+            ..
+        } = fixture();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let dst = machine.run(alloc_bytes_case, &[3], &budget()).unwrap()[0];
+        let src = machine.new_string("abc").unwrap();
+        let error = machine
+            .run(copy_into, &[dst, 0, src, 0, (-1i64) as u64], &budget())
+            .unwrap_err();
+        assert!(
+            error.message.contains("negative length"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn copy_bytes_refuses_a_string_destination() {
+        let Fixture {
+            program, copy_into, ..
+        } = fixture();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let dst = machine.new_string("already a string").unwrap();
+        let src = machine.new_string("abc").unwrap();
+        let error = machine
+            .run(copy_into, &[dst, 0, src, 0, 3], &budget())
+            .unwrap_err();
+        assert!(error.message.contains("destination"), "{}", error.message);
+    }
+
+    #[test]
+    fn copy_bytes_refuses_an_out_of_range_source() {
+        let Fixture {
+            program,
+            alloc_bytes_case,
+            copy_into,
+            ..
+        } = fixture();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let dst = machine.run(alloc_bytes_case, &[10], &budget()).unwrap()[0];
+        let src = machine.new_string("abc").unwrap();
+        let error = machine
+            .run(copy_into, &[dst, 0, src, 2, 5], &budget())
+            .unwrap_err();
+        assert!(
+            error.message.contains("reads") && error.message.contains("source"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn copy_bytes_refuses_an_out_of_range_destination() {
+        let Fixture {
+            program,
+            alloc_bytes_case,
+            copy_into,
+            ..
+        } = fixture();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let dst = machine.run(alloc_bytes_case, &[3], &budget()).unwrap()[0];
+        let src = machine.new_string("abcdef").unwrap();
+        let error = machine
+            .run(copy_into, &[dst, 2, src, 0, 5], &budget())
+            .unwrap_err();
+        assert!(
+            error.message.contains("writes") && error.message.contains("destination"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// `CopyBytes` from a `String` source and from another `Shape::Bytes`
+    /// run, at aligned and unaligned `dst_at`/`src_at`, agrees with Rust's
+    /// own byte-slicing of the same data — including the zero-length copy,
+    /// which is the one case that touches no byte at all.
+    #[test]
+    fn copy_bytes_agrees_with_rust_at_every_alignment() {
+        let Fixture {
+            program,
+            alloc_bytes_case,
+            copy_into,
+            ..
+        } = fixture();
+        let mut machine = Machine::new(&program, 1 << 16);
+        let text = "abcdefghijklmnopqrstuvwxyz";
+        let as_string = machine.new_string(text).unwrap();
+        let as_bytes_run = machine
+            .allocate(program.bytes_layout, text.len() as i64)
+            .unwrap();
+        machine.write_bytes(as_bytes_run, text.as_bytes());
+
+        const DST_LEN: usize = 16;
+        let cases: &[(usize, usize, usize)] = &[
+            (0, 0, 5),
+            (3, 0, 5),
+            (0, 7, 9),
+            (8, 10, 6),
+            (1, 1, 10),
+            (0, 0, 0),
+            (5, 5, 0),
+        ];
+        for &source in &[as_string, as_bytes_run] {
+            for &(dst_at, src_at, len) in cases {
+                let dst = machine
+                    .run(alloc_bytes_case, &[DST_LEN as u64], &budget())
+                    .unwrap()[0];
+                let result = machine
+                    .run(
+                        copy_into,
+                        &[dst, dst_at as u64, source, src_at as u64, len as u64],
+                        &budget(),
+                    )
+                    .unwrap()[0];
+                assert_eq!(result, dst);
+                let mut want = vec![0u8; DST_LEN];
+                want[dst_at..dst_at + len].copy_from_slice(&text.as_bytes()[src_at..src_at + len]);
+                assert_eq!(
+                    machine.string_bytes(result),
+                    want,
+                    "source {source} dst_at={dst_at} src_at={src_at} len={len}"
+                );
+            }
+        }
+    }
+
+    // --- ADR 0051: the two cases the sweep above cannot make ----------
+
+    /// `Inst::WriteByte`s that write `text` into the run at `bytes`, one
+    /// byte at a time, using `at` and `value` as scratch slots.
+    fn write_text(bytes: Slot, at: Slot, value: Slot, text: &[u8]) -> Vec<Inst> {
+        let mut code = Vec::new();
+        for (index, byte) in text.iter().enumerate() {
+            code.push(Inst::Int {
+                dst: at,
+                value: index as i64,
+            });
+            code.push(Inst::Int {
+                dst: value,
+                value: i64::from(*byte),
+            });
+            code.push(Inst::WriteByte { bytes, at, value });
+        }
+        code
+    }
+
+    /// The catch for a `relabel` that left the tail of the last word dirty:
+    /// seven bytes is short of a whole word, so the top byte of that word is
+    /// padding, and this compares payload words rather than only the text.
+    #[test]
+    fn a_finished_string_matches_the_same_text_written_directly_padding_included() {
+        let text: &[u8] = b"hello!!";
+        let mut build = Build::default();
+        let str_layout = build.string_layout();
+        build.bytes_layout();
+        let mut code = vec![
+            Inst::Int {
+                dst: 0,
+                value: text.len() as i64,
+            },
+            Inst::AllocBytes { dst: 1, len: 0 },
+        ];
+        code.extend(write_text(1, 2, 3, text));
+        code.push(Inst::FinishString { dst: 1, bytes: 1 });
+        code.push(Inst::Return { src: 1 });
+        let f = build.function(
+            "build",
+            &[],
+            &[Repr::Int, Repr::Ref, Repr::Int, Repr::Int],
+            str_layout,
+            code,
+        );
+        let program = build.done();
+        let mut machine = Machine::new(&program, 1 << 12);
+        let words = machine.run(f, &[], &budget()).unwrap();
+        let from_bytes = words[0];
+        let direct = machine
+            .new_string(std::str::from_utf8(text).unwrap())
+            .unwrap();
+        let len = machine.object_len(from_bytes);
+        assert_eq!(len, machine.object_len(direct));
+        for word in 0..len.div_ceil(8) {
+            assert_eq!(
+                machine.payload(from_bytes, word),
+                machine.payload(direct, word),
+                "payload word {word} should match, padding included"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_length_run_finishes_to_the_empty_string() {
+        let mut build = Build::default();
+        let str_layout = build.string_layout();
+        build.bytes_layout();
+        let f = build.function(
+            "empty",
+            &[],
+            &[Repr::Int, Repr::Ref],
+            str_layout,
+            vec![
+                Inst::Int { dst: 0, value: 0 },
+                Inst::AllocBytes { dst: 1, len: 0 },
+                Inst::FinishString { dst: 1, bytes: 1 },
+                Inst::Return { src: 1 },
+            ],
+        );
+        let program = build.done();
+        let mut machine = Machine::new(&program, 1 << 12);
+        let words = machine.run(f, &[], &budget()).unwrap();
+        assert_eq!(machine.string_bytes(words[0]), Vec::<u8>::new());
+        assert_eq!(machine.object_len(words[0]), 0);
     }
 }

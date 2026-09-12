@@ -3638,6 +3638,29 @@ pub(crate) mod tests {
             self.done()
         }
 
+        /// `String`'s layout, declared and recorded as `Program::str_layout`
+        /// the way `cove_ir::lower` records it — `Inst::Str` and
+        /// [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
+        /// `Inst::FinishString` read the field rather than being told the
+        /// layout at each call site, so a fixture that only declared the
+        /// shape without recording it here would allocate strings the
+        /// dispatch loop could not finish into.
+        pub(crate) fn string_layout(&mut self) -> LayoutId {
+            let id = self.layout("String", Shape::Str);
+            self.program.str_layout = id;
+            id
+        }
+
+        /// [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
+        /// byte-run layout, declared and recorded as `Program::bytes_layout`
+        /// for `string_layout`'s reason: `Inst::AllocBytes` always allocates
+        /// this field's layout rather than one named in the instruction.
+        pub(crate) fn bytes_layout(&mut self) -> LayoutId {
+            let id = self.layout("Bytes", Shape::Bytes);
+            self.program.bytes_layout = id;
+            id
+        }
+
         /// The one-word layout of `repr`, declared once per fixture.
         pub(crate) fn scalar(&mut self, repr: Repr) -> LayoutId {
             if let Some(at) = self

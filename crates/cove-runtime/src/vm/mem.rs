@@ -985,7 +985,7 @@ impl Space {
         }
         let len = self.object_len(addr);
         match &layout.shape {
-            Shape::Free | Shape::Str => {}
+            Shape::Free | Shape::Str | Shape::Bytes => {}
             // A scalar, a struct or an enum in the heap is a value whose
             // payload *is* the value, laid out exactly as it would be in a
             // frame. `Layout::payload_words` answers the same width for the

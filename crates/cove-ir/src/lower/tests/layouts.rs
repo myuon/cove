@@ -233,8 +233,22 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             "Task",
             "TaskScope",
             "<tag>",
+            "Bytes",
         ]
     );
+}
+
+/// [ADR 0051](../../../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
+/// `Program::bytes_layout` names the `Shape::Bytes` layout seeded above, and
+/// that shape's payload holds no references — the fact that lets a
+/// half-filled run be collected as safely as a finished `String`.
+#[test]
+fn the_program_names_a_bytes_layout_whose_shape_holds_no_references() {
+    let (sources, checked) = checked("fn f() {}");
+    let program = lower(&checked, &sources, &HostSchemas::new()).expect("the program lowers");
+    let described = program.layout(program.bytes_layout);
+    assert_eq!(described.shape, Shape::Bytes);
+    assert!(!described.may_hold_refs(&program.layouts));
 }
 
 /// `docs/LINEAR_VM.md`'s table: a `Set<T>` is `Members { elem }`, one layout

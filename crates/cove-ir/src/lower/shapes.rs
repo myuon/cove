@@ -104,6 +104,14 @@ use crate::FunctionId;
 
 /// The layout every string object shares.
 pub(super) const STR: LayoutId = LayoutId(1);
+/// The layout every byte run under construction shares.
+///
+/// See [`crate::layout::Shape::Bytes`] and
+/// [ADR 0051](../../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md).
+/// Seeded fixed at index 14, after the scalars every program declares — it is
+/// a program-wide fact rather than something interned on first use, the same
+/// reason [`STR`] is fixed rather than found by comparing shapes.
+pub(super) const BYTES: LayoutId = LayoutId(14);
 pub(super) const UNIT: LayoutId = LayoutId(2);
 pub(super) const BOOL: LayoutId = LayoutId(3);
 pub(super) const INT: LayoutId = LayoutId(4);
@@ -264,6 +272,7 @@ impl Shapes {
             Layout::word("Task", Repr::Task),
             Layout::word("TaskScope", Repr::Scope),
             Layout::word("<tag>", Repr::Tag),
+            Layout::object("Bytes", Shape::Bytes),
         ];
         Shapes {
             layouts,
