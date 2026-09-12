@@ -815,7 +815,7 @@ fn flatWidth(source: String, held: Array<Token>, tree: Tree) -> Int {
           // question here.
           width = width + 1
         } else {
-          width = width + text(source, token).length()
+          width = width + tokenWidth(source, token)
         }
       }
       None => { }
@@ -1168,7 +1168,7 @@ fn restOfLine(source: String, held: Array<Token>, at: Int) -> Int {
           }
           width = width + 1
         } else {
-          width = width + text(source, token).length()
+          width = width + tokenWidth(source, token)
           // And it stops at the brace. `param_list` holds back
           // `width(return_type) + 4 + 2` — the `-> Result<T, F> \{` and no
           // more — where the source line may carry the whole body behind it
@@ -1558,7 +1558,7 @@ fn widthBetween(source: String, held: Array<Token>, from: Int, to: Int) -> Int {
         width = width + if isTriviaKind(token.kind) {
           1
         } else {
-          text(source, token).length()
+          tokenWidth(source, token)
         }
       }
       None => { }
@@ -2677,7 +2677,7 @@ fn overflows(
         } else if isTriviaKind(token.kind) {
           1
         } else {
-          text(source, token).length()
+          tokenWidth(source, token)
         }
         if width > maxWidth() {
           return true
