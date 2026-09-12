@@ -417,7 +417,7 @@ fn open_frame(
         let width = machine.width(*layout);
         machine
             .mem
-            .copy_words(callee_base + at as u64, base + arg.slot as u64, width);
+            .copy_slots(callee_base + at as u64, base + arg.slot as u64, width);
         at += width;
     }
     // The object stays reachable across every one of these reads because it
@@ -660,7 +660,7 @@ pub(super) fn dispatch<'s, 'a>(
                 let width = machine.width(LayoutId(held.lo()));
                 machine
                     .mem
-                    .copy_words(base + held.a() as u64, base + held.b() as u64, width);
+                    .copy_slots(base + held.a() as u64, base + held.b() as u64, width);
             }
             // The one instruction whose whole purpose is what it stops
             // happening: a reference the frame no longer needs is not a root.

@@ -1753,6 +1753,36 @@ impl Memory {
         self.stack.words[index] = word;
     }
 
+    /// Copies `words` words from one frame slot to another.
+    ///
+    /// [`Memory::slot`]'s reason for a run rather than a word. Both addresses
+    /// are slots, so both regions are decided, and the four-way match in
+    /// [`Memory::copy_words`] has one arm that can be taken — but `dst` and
+    /// `src` are run-time values and nothing says so to a compiler. It moves
+    /// rather than smears, because two slots of one frame may overlap and a
+    /// lowering is free to emit that rather than having to prove it does not.
+    #[inline]
+    pub(crate) fn copy_slots(&mut self, dst: u64, src: u64, words: u32) {
+        if words == 0 || dst == src {
+            return;
+        }
+        debug_assert!(
+            is_stack(dst) && is_stack(src) && self.holds(dst, words) && self.holds(src, words),
+            "a {words}-word slot copy between {src} and {dst} stays on the stack"
+        );
+        let (d, s) = (self.stack.at(dst), self.stack.at(src));
+        if words == 1 {
+            // The common width by a long way — every scalar, every reference,
+            // every address — and `copy_within` is a range, a bounds check
+            // and a `memmove` where this is a load and a store. Leaving it
+            // out measured **6.14 s against 5.98** on `examples/covefmt`,
+            // which is the whole of what the two entry points above buy.
+            self.stack.words[d] = self.stack.words[s];
+            return;
+        }
+        self.stack.words.copy_within(s..s + words as usize, d);
+    }
+
     /// How many words of this task's segment are committed.
     ///
     /// Reached only from this crate's own tests, which assert it grows and
