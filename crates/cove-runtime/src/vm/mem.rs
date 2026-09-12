@@ -1783,6 +1783,32 @@ impl Memory {
         self.stack.words.copy_within(s..s + words as usize, d);
     }
 
+    /// Where `base` sits in this task's segment.
+    ///
+    /// The subtraction [`Memory::slot`] makes, made once. A frame's base does
+    /// not move while the frame is on top, so a dispatch loop that is about
+    /// to read fifty slots of it can hold this instead of recomputing it —
+    /// and the segment growing under a `push_frame` does not invalidate it,
+    /// because what it is relative to is the origin and the origin is fixed
+    /// for the life of the task.
+    #[inline(always)]
+    pub(crate) fn stack_index(&self, base: u64) -> usize {
+        debug_assert!(is_stack(base), "a frame base is a stack address");
+        self.stack.at(base)
+    }
+
+    /// The word at `index` of this task's segment.
+    #[inline(always)]
+    pub(crate) fn word_at(&self, index: usize) -> u64 {
+        self.stack.words[index]
+    }
+
+    /// Writes `word` at `index` of this task's segment.
+    #[inline(always)]
+    pub(crate) fn set_word_at(&mut self, index: usize, word: u64) {
+        self.stack.words[index] = word;
+    }
+
     /// How many words of this task's segment are committed.
     ///
     /// Reached only from this crate's own tests, which assert it grows and
