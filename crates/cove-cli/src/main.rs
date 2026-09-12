@@ -14,8 +14,8 @@ use cove_runtime::embed::{register_hosts, HostSetup};
 use cove_runtime::host::HostRegistry;
 use cove_runtime::interp::Interpreter;
 use cove_runtime::{
-    create_trace_file, Budget, Cancellation, HeapStats, JsonlSink, Limits, NullSink, Profiler,
-    RecordingBackend, Runtime, TraceEvent, TraceHeader, TraceSink, ValueCapture, Vm,
+    create_trace_file, Budget, Cancellation, Cost, HeapStats, JsonlSink, Limits, NullSink,
+    Profiler, RecordingBackend, Runtime, TraceEvent, TraceHeader, TraceSink, ValueCapture, Vm,
 };
 use cove_sema::capability::open_reasons;
 use cove_sema::config::RunConfig;
@@ -1377,55 +1377,195 @@ enum Memory {
 /// instructions a program needed moves for exactly one.
 /// What a run was made of, by the Cove that ran.
 ///
-/// The report is two readings of one set of samples. **By function** is the
-/// question a person asks first — which of my code is this run? — and **by
-/// instruction** is the one they ask next, with the instruction rendered the
-/// way `cove debug`'s `disassemble` renders it, so a line here and a line
-/// there are the same line.
+/// Three readings of one set of measurements. **By function** is the question
+/// a person asks first — which of my code is this run? — **by opcode** is the
+/// one that says whether an expensive kind of instruction is what a function
+/// is made of, and **by instruction** is the one they ask last, with the
+/// instruction rendered the way `cove debug`'s `disassemble` renders it, so a
+/// line here and a line there are the same line.
 ///
-/// Percentages are of *instructions executed*, counted rather than sampled, so
-/// a function that runs many cheap instructions weighs more than one that runs
-/// few expensive ones. That is the right measure for "which Cove code is this
-/// run made of" and the wrong one for "which instruction is slow", and the
-/// note at the end says so rather than leaving a reader to find out.
+/// Percentages are of instructions executed, counted rather than sampled, so
+/// they are exact. `ns` is not: see [`Profiler`]'s documentation for what the
+/// interval holds and why the figure to read is the ratio rather than the
+/// number. The footer says the short version of it, because a reader who
+/// takes an absolute nanosecond from here will be wrong by the profiler's own
+/// weight.
 fn print_profile(program: &cove_ir::Program, profiler: &Profiler) {
-    let counted = profiler.counted();
-    if counted == 0 {
+    use std::cmp::Ordering;
+    use std::collections::HashMap;
+    let total = profiler.total();
+    if total.ran == 0 {
         eprintln!("profile: nothing ran");
         return;
     }
-    let share = |n: u64| 100.0 * n as f64 / counted as f64;
-    eprintln!("profile: {counted} instruction(s) counted");
-    eprintln!("  by function:");
-    for (id, n) in profiler.by_function().iter().take(PROFILE_ROWS) {
+    let share = |n: u64| 100.0 * n as f64 / total.ran as f64;
+    // The share of the *attributed* time, which is not the run's wall clock:
+    // the profiler's own bookkeeping is deliberately outside every interval.
+    // A share of it is still the right reading, because what the bookkeeping
+    // costs is the same for every instruction.
+    let spent = |n: u64| 100.0 * n as f64 / total.nanos.max(1) as f64;
+    // Nanoseconds an instruction of this row took on average. Every one of
+    // them carries the same floor, so this sorts a dear opcode above a cheap
+    // one and says nothing trustworthy about either on its own.
+    let each = |cost: &Cost| cost.nanos as f64 / cost.ran.max(1) as f64;
+    eprintln!(
+        "profile: {} instruction(s), {} allocation(s), {} word(s) allocated, \
+         {:.0} ms attributed",
+        total.ran,
+        total.allocations,
+        total.words,
+        total.nanos as f64 / 1_000_000.0
+    );
+
+    // How many times each function was entered, read off the `call`s that
+    // named it rather than counted at the callee. A function's own counter 0
+    // will not do: a `while` at the top of a body puts the loop's head there,
+    // and the jump back to it would be counted as a call.
+    let mut calls: HashMap<cove_ir::FunctionId, u64> = HashMap::new();
+    let at: HashMap<(cove_ir::FunctionId, u32), Cost> = profiler.rows().into_iter().collect();
+    for (index, function) in program.functions.iter().enumerate() {
+        let id = cove_ir::FunctionId(index as u32);
+        for (pc, inst) in function.code.iter().enumerate() {
+            if let cove_ir::inst::Inst::Call { callee, .. } = inst {
+                if let Some(cost) = at.get(&(id, pc as u32)) {
+                    *calls.entry(*callee).or_insert(0) += cost.ran;
+                }
+            }
+        }
+    }
+
+    let mut by_time = profiler.by_function();
+    by_time.sort_by(|a, b| b.1.nanos.cmp(&a.1.nanos).then(a.0.cmp(&b.0)));
+    eprintln!("  by function, most time first:");
+    eprintln!(
+        "  {:>13} {:>7} {:>7} {:>6} {:>11} {:>12}  function",
+        "instr", "instr%", "time%", "ns/in", "calls", "words"
+    );
+    for (id, cost) in by_time.iter().take(PROFILE_ROWS) {
         eprintln!(
-            "  {:>10}  {:>6.2}%  {}",
-            n,
-            share(*n),
+            "  {:>13} {:>6.2}% {:>6.2}% {:>6.0} {:>11} {:>12}  {}",
+            cost.ran,
+            share(cost.ran),
+            spent(cost.nanos),
+            each(cost),
+            calls.get(id).copied().unwrap_or(0),
+            cost.words,
             program.function(*id).qualified()
         );
     }
-    eprintln!("  by instruction:");
-    for ((id, pc), n) in profiler.hottest().iter().take(PROFILE_ROWS) {
+
+    let mut per: HashMap<String, Cost> = HashMap::new();
+    for ((id, pc), cost) in at.iter() {
+        per.entry(opcode_of(program, *id, *pc))
+            .or_default()
+            .add(cost);
+    }
+    // Dearest first, and not most-time-first: where the time went is what the
+    // table above already answers, and what this one is for is the *price
+    // list* — whether a function is slow because it runs a great many cheap
+    // instructions or a few expensive ones, which is the question a count
+    // cannot answer and the question that matters when a change swaps one
+    // kind of instruction for another.
+    //
+    // An opcode that ran a handful of times is left out. Its `ns/in` is one
+    // or two intervals rather than an average of millions, and it would sort
+    // above everything real on nothing but noise.
+    let mut opcodes: Vec<(String, Cost)> = per
+        .into_iter()
+        .filter(|(_, cost)| cost.ran >= OPCODE_FLOOR)
+        .collect();
+    opcodes.sort_by(|a, b| {
+        let (x, y) = (each(&b.1), each(&a.1));
+        x.partial_cmp(&y)
+            .unwrap_or(Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+    eprintln!("  by opcode, dearest first, of those that ran {OPCODE_FLOOR} times or more:");
+    eprintln!(
+        "  {:>13} {:>7} {:>7} {:>6} {:>11} {:>12}  opcode",
+        "instr", "instr%", "time%", "ns/in", "allocs", "words"
+    );
+    for (name, cost) in opcodes.iter().take(PROFILE_ROWS) {
+        eprintln!(
+            "  {:>13} {:>6.2}% {:>6.2}% {:>6.0} {:>11} {:>12}  {name}",
+            cost.ran,
+            share(cost.ran),
+            spent(cost.nanos),
+            each(cost),
+            cost.allocations,
+            cost.words,
+        );
+    }
+
+    let mut hottest = profiler.hottest();
+    hottest.sort_by(|a, b| b.1.nanos.cmp(&a.1.nanos).then(a.0.cmp(&b.0)));
+    eprintln!("  by instruction, most time first:");
+    eprintln!(
+        "  {:>13} {:>7} {:>7} {:>6}  instruction",
+        "instr", "instr%", "time%", "ns/in"
+    );
+    for ((id, pc), cost) in hottest.iter().take(PROFILE_ROWS) {
         let function = program.function(*id);
-        let at = *pc as usize;
-        let line = match function.code.get(at) {
+        let line = match function.code.get(*pc as usize) {
             Some(inst) => cove_ir::print::one(program, function, inst),
             None => "<past the end of this function>".to_string(),
         };
         eprintln!(
-            "  {:>10}  {:>6.2}%  {}+{pc}  {line}",
-            n,
-            share(*n),
+            "  {:>13} {:>6.2}% {:>6.2}% {:>6.0}  {}+{pc}  {line}",
+            cost.ran,
+            share(cost.ran),
+            spent(cost.nanos),
+            each(cost),
             function.qualified()
         );
     }
     eprintln!(
-        "  a count is of instructions and not of moments: a `call-builtin` that \
-         allocates and an `add.int` weigh the same here. What the *machine* spends \
-         its time on is a native profiler's question."
+        "  a count is exact and a nanosecond is not: every instruction carries the \
+         same floor, which the cheapest opcode in the table above is a reading of, \
+         so `ns/in` ranks one opcode against another and is worth nothing on its \
+         own. The attributed time is not the run's wall clock either — the \
+         profiler's own bookkeeping is outside every interval, and the run being \
+         measured is several times slower than the run you care about. What the \
+         *machine* spends its time on is still a native profiler's question."
     );
 }
+
+/// What to call the instruction at `pc`, for a report that groups by kind.
+///
+/// The mnemonic `cove_ir::print::one` renders, which is the name a reader has
+/// already seen in a `disassemble`, taken from the front of the line rather
+/// than from a table of its own — a second table would be a second thing to
+/// keep in step, and this one cannot fall out of step with the disassembly
+/// because it *is* the disassembly.
+///
+/// A `call-builtin` keeps the builtin it calls. Grouping every one of them
+/// together would put `String.contains`, which searches, beside
+/// `Int.toString`, which allocates, and answering *which builtin is dear* is
+/// most of what this reading is for.
+fn opcode_of(program: &cove_ir::Program, id: cove_ir::FunctionId, pc: u32) -> String {
+    let function = program.function(id);
+    let Some(inst) = function.code.get(pc as usize) else {
+        return "<past the end>".to_string();
+    };
+    let line = cove_ir::print::one(program, function, inst);
+    let mut words = line.split_whitespace();
+    let head = words.next().unwrap_or("?");
+    if head == "call-builtin" {
+        // `call-builtin <destination> <Receiver>.<operation> (<arguments>)`,
+        // and a destination never holds a space.
+        if let Some(builtin) = words.nth(1) {
+            return format!("{head} {builtin}");
+        }
+    }
+    head.to_string()
+}
+
+/// How often an opcode has to have run to be worth a price.
+///
+/// An average of a thousand intervals is an average; an average of three is
+/// three readings of a clock, and the dearest-first order would be a list of
+/// whichever rare instruction happened to land beside a context switch.
+const OPCODE_FLOOR: u64 = 1_000;
 
 /// How many rows each half of a profile prints.
 ///
