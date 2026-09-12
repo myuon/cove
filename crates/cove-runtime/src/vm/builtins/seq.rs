@@ -91,6 +91,54 @@ use crate::vm::exec::Machine;
 /// The smallest store a `push` onto a full one asks for.
 const MIN_CAPACITY: u32 = 4;
 
+/// A value's words, off the operand and out of the way of a `&mut Machine`.
+///
+/// An operand's words point into the machine's own memory, so a write that
+/// needs `&mut Machine` cannot hold them. Copying them out is the whole of
+/// the answer and `to_vec()` was how, which is a `malloc` and a `free` for
+/// **every `push`** — `examples/covefmt` makes five million of them, and the
+/// profile priced one at 287 ns against a floor of 53.
+///
+/// A value is a run of words its layout describes, and the layouts a
+/// collection holds are small: a `String` handle is one word, a `Point` is
+/// two, `examples/covefmt`'s `Token` is three. So the run goes on the stack,
+/// and a value wider than [`INLINE`] — which nothing in the corpus is —
+/// falls back to the heap rather than being refused.
+struct Held {
+    inline: [u64; INLINE],
+    spilled: Vec<u64>,
+    len: usize,
+}
+
+/// How many words of a value are copied without touching the heap.
+///
+/// Eight, which is two more than the widest element layout in the corpus and
+/// sixty-four bytes of stack in a function that is called five million times.
+const INLINE: usize = 8;
+
+impl Held {
+    fn new() -> Held {
+        Held {
+            inline: [0; INLINE],
+            spilled: Vec::new(),
+            len: 0,
+        }
+    }
+
+    /// `words`, copied out, and a borrow of the copy.
+    fn take(&mut self, words: &[u64]) -> &[u64] {
+        self.len = words.len();
+        if self.len <= INLINE {
+            self.inline[..self.len].copy_from_slice(words);
+            &self.inline[..self.len]
+        } else {
+            self.spilled.clear();
+            self.spilled.extend_from_slice(words);
+            &self.spilled
+        }
+    }
+}
+
 // --- reading a receiver ----------------------------------------------------
 
 /// The elements of an `Array`.
@@ -410,13 +458,19 @@ pub(super) fn vector_push(
 ) -> Result<u64, RuntimeError> {
     let (receiver, args) = operand::method("push", operands, 1)?;
     let items = vector(machine, "push", receiver)?;
-    let element = operand::run_of(machine, "Vector.push", items.elem, args[0])?.to_vec();
+    let mut held = Held::new();
+    let element = held.take(operand::run_of(
+        machine,
+        "Vector.push",
+        items.elem,
+        args[0],
+    )?);
     let store = if items.len < items.capacity {
         items.store
     } else {
         grow(machine, &items)?
     };
-    machine.set_payload_run(store, items.len * items.stride, &element);
+    machine.set_payload_run(store, items.len * items.stride, element);
     machine.set_payload(items.header, 0, items.len as u64 + 1);
     Ok(0)
 }
@@ -462,7 +516,8 @@ pub(super) fn vector_set(
 ) -> Result<(), RuntimeError> {
     let (receiver, args) = operand::method("Vector.set", operands, 2)?;
     let items = vector(machine, "set", receiver)?;
-    let element = operand::run_of(machine, "Vector.set", items.elem, args[1])?.to_vec();
+    let mut held = Held::new();
+    let element = held.take(operand::run_of(machine, "Vector.set", items.elem, args[1])?);
     let Some(at) = index(machine, "Vector.set", args[0])? else {
         return make::none(machine, result, out);
     };
@@ -473,7 +528,7 @@ pub(super) fn vector_set(
     // What the index held before, read out before it is overwritten:
     // `v.set(i, x)` answers what `v.get(i)` would have.
     let was = machine.payload_run(items.store, at, items.stride);
-    machine.set_payload_run(items.store, at, &element);
+    machine.set_payload_run(items.store, at, element);
     make::some(machine, result, &was, out)
 }
 
