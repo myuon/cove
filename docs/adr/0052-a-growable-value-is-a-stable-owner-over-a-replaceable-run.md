@@ -2,12 +2,13 @@
 
 - Status: Accepted
 - Date: 2026-09-12
-- Decides: one growable backing-store discipline for packed bytes and
-  layout-sized elements, used by string construction and by mutable sequence
-  construction
+- Decides: `FixedRun<E>` and `Buffer<E>` as the packed, nominally neutral
+  storage foundation over which the standard library can implement String,
+  Array, Vector and later ordinary collections
 - Supersedes: [ADR 0051](0051-a-string-is-built-as-a-byte-run.md)'s
-  prohibition on passing an unfinished run to a Cove call, narrowly: the raw
-  run still cannot cross one, but its typed growable owner can
+  String-specific fixed byte-run vocabulary and its prohibition on passing
+  unfinished construction to a Cove call. Its packed-byte, bulk-copy, UTF-8,
+  fuel and cancellation requirements survive in the generic foundation
 - Preserves: [ADR 0001](0001-mvp-language-design.md)'s immutable fixed-length
   Array, mutable growable Vector and O(1) unique `Vector.freeze()`
 - Extends: [ADR 0034](0034-one-physical-word-stack.md)'s one heap with no new
@@ -56,8 +57,86 @@ difference between them is the storage unit and the reference map:
 - an element run stores values at the element layout's word stride and is
   traced by that layout.
 
-## Decision
+## The endpoint: library collections over VM runs
 
+The profile motivates doing this now; String is not the architectural fact.
+The VM must not permanently know nominal `String`, `Array` or `Vector`
+operations. It knows two smaller representation foundations:
+
+```text
+FixedRun<E>                         Buffer<E>
+  immutable                          shared mutable identity
+  logical length                     logical length
+  packed payload                     capacity
+                                     replaceable packed store
+```
+
+`FixedRun<E>` is an immutable, exactly-sized contiguous run. `Buffer<E>` is
+a stable identity over a growable contiguous run and uniquely finishes to a
+`FixedRun<E>` without copying the live prefix.
+
+The target standard library can define, schematically:
+
+```cove
+export opaque struct Array<T> {
+    run: FixedRun<T>
+}
+
+export opaque struct Vector<T> {
+    buffer: Buffer<T>
+}
+
+export opaque struct String {
+    bytes: FixedRun<Byte>
+}
+```
+
+These are schematic because `FixedRun` and `Buffer` are privileged intrinsic
+types: ordinary code cannot forge their layouts. A one-field Array or String
+wrapper may be representation-transparent, so each remains one reference
+word and pays no wrapper allocation. Vector's Buffer reference preserves its
+observable alias identity when the ordinary value wrapper is copied.
+
+Migration is complete only when replacing one of these standard-library
+implementations requires no new VM object shape or builtin dispatch arm.
+Lowering may target collection protocols and foundation intrinsics; it must
+not recognise a collection by comparing its nominal name.
+
+## Packing is the one ordinary collection representation
+
+`Packed` means that elements occupy one contiguous payload at the physical
+stride chosen by their settled layout. It does not mean every type occupies
+one byte:
+
+- `Byte` has an eight-bit stride, so eight bytes occupy one VM word;
+- word scalars and references have a one-word stride;
+- an inline struct repeats its flattened word layout with no per-element box;
+- an object-valued element is one reference because that is the element's own
+  representation, not because the collection added a box.
+
+The first element-layout descriptions are therefore:
+
+```text
+PackedByte | Words(LayoutId)
+```
+
+There is no per-element boxed fallback. If a type has no valid packed element
+layout, a collection of it is refused until that layout exists. The Rust
+implementation may specialise byte and word loops; the shared abstraction
+does not require a dynamic branch per element.
+
+A packed sub-word value is read and written through run operations. It does
+not manufacture a `Repr::Addr` into the middle of a word. This ADR commits
+only Byte to a sub-word layout; bit-packing Bool or another scalar requires
+its own addressability and mutation decision.
+
+Array, Vector and String use one run. Set and Map also use packed runs of
+members or inline key/value entries; a hash table may use several packed runs
+for control bytes, keys and values. A separately named rope, linked list or
+persistent tree may choose its own representation, but it is not a hidden
+alternate representation of an ordinary Array, Vector or String.
+
+## Decision
 ### One growable-run discipline
 
 A growable value consists of:
@@ -72,12 +151,12 @@ The runtime implements allocation, capacity checks, growth, live-prefix copy,
 vacated-region clearing and finishing once over a storage description:
 
 ```text
-storage unit = PackedBytes | Elements(LayoutId)
+element layout = PackedByte | Words(LayoutId)
 ```
 
-This is one algorithm and one set of invariants. It need not be one Rust type
-if doing so makes the hot path generic or indirect; byte and element entry
-points may be monomorphised or specialised around the shared rules.
+This is one algorithm and one set of invariants below builtin dispatch. It
+need not be one Rust type if that makes a hot path generic or indirect; byte
+and word entry points may be specialised around the shared contract.
 
 Growth uses the existing Vector policy initially: when full, allocate twice
 the capacity from a small floor, copy the live prefix and replace the owner's
@@ -112,10 +191,9 @@ let array = values.freeze()
 `toArray` semantics are unchanged.
 
 The growable-run implementation replaces the private growth machinery beneath
-Vector rather than adding another collection beside it. Sets, maps or later
-builders may adopt the same backing discipline where they have a stable owner
-and a well-defined storage unit; this ADR does not change their public
-semantics merely to share code.
+Vector rather than adding another collection beside it. The uniqueness proof
+and finish transition belong to Buffer, not to Vector by nominal name, so a
+standard-library wrapper can forward them.
 
 ### A byte builder is the typed owner of a packed run
 
@@ -135,10 +213,9 @@ appendByte(Int)
 finish() -> Result<String, Error>
 ```
 
-The standard API's final nominal name may be `StringBuilder` or an equivalent
-name chosen consistently with the builtin namespace. The semantic distinction
-is fixed here: it is a builder owner, not an Array and not a String under
-construction.
+The standard library chooses the public builder name; that name does not
+appear in IR or VM dispatch. Its representation is an opaque wrapper over
+`Buffer<Byte>`, not an Array and not a String under construction.
 
 - `append` copies a valid String into the live suffix in bulk.
 - `appendSlice` checks the same bounds and UTF-8 boundaries as
@@ -225,9 +302,10 @@ sliceBytes(source, from, to) -> append
 
 with one checked append from that source range.
 
-The common abstraction belongs below builtin dispatch. A String builder,
-Vector and future Array construction should not each implement their own
-capacity arithmetic, allocation and live-prefix copy in separate builtins.
+The common abstraction belongs below builtin dispatch. Standard-library
+String construction, Vector and Array construction call the same foundation
+intrinsics rather than each implementing capacity arithmetic, allocation and
+live-prefix copying in nominal builtins.
 
 ### Bulk work remains proportionally charged
 
@@ -261,9 +339,15 @@ algorithms merely because Vector has them.
 in place while another alias remains mutable. The existing Vector proof is
 reused rather than adding reference counts or copy-on-write.
 
-**Specialised packed storage.** Packed bytes and layout-sized elements share
-ownership and growth, not element addressing. `Repr::Addr` remains a word
-address and no general sub-word place is introduced.
+**Layout-specialised packed access.** PackedByte access differs from word-run
+access. Verified metadata or specialised opcodes choose it once; no ordinary
+reference operation gains a tag check. `Repr::Addr` remains a word address and
+no general sub-word place is introduced.
+
+**A privileged substrate.** Collections become replaceable standard-library
+values, but FixedRun, Buffer and element layouts remain intrinsic. Native
+contiguous allocation and precise GC tracing cannot be implemented safely by
+ordinary Cove code over no memory primitive.
 
 ## Alternatives considered
 
@@ -301,6 +385,13 @@ and joined more than once. Replacing it with a byte builder requires
 whole-program proof across recursive calls. The explicit append-only owner
 states the intended construction and makes the fast path local.
 
+### Keep String, Array and Vector as VM nominal shapes
+
+This preserves working code and prevents their replacement in the standard
+library: every implementation change needs another VM shape or name-dispatch
+arm. Existing shapes are migration evidence, not the final ownership of
+collection semantics.
+
 ### Give bytes and elements independent growth implementations
 
 That duplicates the capacity arithmetic, overflow rules, allocator
@@ -310,6 +401,12 @@ map.
 
 ## Consequences
 
+- All ordinary collection payloads are contiguous packed runs at the element
+  layout's stride; there is no collection-imposed per-element box.
+- The VM intrinsically knows FixedRun, Buffer and element layouts rather than
+  nominal String, Array and Vector operations.
+- Array and String may be transparent standard-library wrappers over FixedRun;
+  Vector is an opaque wrapper over Buffer.
 - String construction and mutable sequence construction use one stable-owner
   and replaceable-store architecture.
 - An initial capacity avoids known early reallocations without becoming a
@@ -323,6 +420,9 @@ map.
   intermediate slices.
 - Array elements remain word-addressed and String bytes remain packed; shared
   growth machinery does not conflate their element representations.
+- Migration additionally requires Array, Vector and String behaviour to be
+  implemented in standard-library source over foundation intrinsics, with no
+  VM dispatch by those nominal names on the migrated path.
 - The implementation gate is `examples/covefmt` rewritten to the builder,
   with identical output and all formatter ratchets passing. It reports wall
   time, instruction count, allocations and allocated words against the
