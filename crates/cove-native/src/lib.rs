@@ -77,14 +77,38 @@
 //! - [`Inst::Return`](cove_ir::Inst::Return);
 //! - [`Inst::Trap`](cove_ir::Inst::Trap).
 //!
+//! And then, for the second raced slice, exactly what
+//! `examples/covefmt`'s `wantsASpaceBetween` and `byteOfPunct` need and not one
+//! instruction more — which was settled by lowering the two and reading the
+//! listing, not by guessing:
+//!
+//! - [`Repr::Ref`](cove_ir::Repr::Ref) frame slots, and so `String` and `Array`
+//!   parameters;
+//! - [`Inst::Tag`](cove_ir::Inst::Tag) and
+//!   [`Inst::Switch`](cove_ir::Inst::Switch), which are an enum's discriminant
+//!   and the `match` over it;
+//! - [`Compare::Tag`](cove_ir::Compare::Tag) equality, which is
+//!   `token.kind == Kind.Punct`;
+//! - [`Inst::Not`](cove_ir::Inst::Not);
+//! - [`Inst::Len`](cove_ir::Inst::Len),
+//!   [`Inst::LoadElem`](cove_ir::Inst::LoadElem) and
+//!   [`Inst::ByteAt`](cove_ir::Inst::ByteAt), which are the three heap reads —
+//!   each with the bounds check, the tag range and the null refusal
+//!   `cove_runtime::vm::exec::encoded` performs, because a native `load-elem`
+//!   that skips a check the VM makes is a wrong answer and not a fast one;
+//! - [`Inst::Call`](cove_ir::Inst::Call), which is handed to
+//!   [`NativeHelpers::call`] whole.
+//!
 //! **A function containing any other instruction compiles to `None`.** Not
 //! partly: `Jit::compile` answers `None` and the caller runs the whole
 //! function on the encoded VM, which is ADR 0055's "The initial
 //! implementation does not split one function into native and interpreted
-//! regions." Calls are absent from that list, so this slice compiles leaf
-//! functions only — the entry table that makes VM-to-native and
-//! native-to-native calls work is the next slice's, and nothing here
-//! prejudges it.
+//! regions."
+//!
+//! Allocation is deliberately not on that list. ADR 0055 keeps it a runtime
+//! helper, so it would be *one identical call in both arms* — which cannot
+//! separate two code generators, and a subset made of such calls would measure
+//! the runtime and report it as a code-generator difference.
 //!
 //! `Jit` and `Jit::compile` are named above without links on purpose: they
 //! exist only under a code generator's feature, and an intra-doc link to an
@@ -97,7 +121,10 @@
 
 pub mod abi;
 
-pub use abi::{Entry, NativeCtx, NativeHelpers, Outcome, Raise, SafepointFn};
+pub use abi::{
+    CallFn, Entry, NativeCtx, NativeHelpers, Outcome, Raise, SafepointFn, HEAP_CHUNK_SHIFT,
+    HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
+};
 
 /// Native execution is not available here.
 ///

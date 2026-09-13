@@ -7,6 +7,21 @@ license.workspace = true
 [dependencies]
 cove-diag.workspace = true
 cove-ir.workspace = true
+# The native tier's ABI declarations, and nothing else.
+#
+# `cove-native`'s code generators are optional features of *that* crate and both
+# are off by default, so this edge pulls in `abi.rs` and no executable-memory
+# dependency: ADR 0055's "a build without the native feature has no
+# executable-memory dependency" is a fact about `cargo tree`, and this does not
+# change it. What it buys is that `vm::native` — the runtime's half of the
+# boundary — can be written against the declarations rather than against a copy
+# of them, which is the whole reason `abi` is compiled whether a code generator
+# is or not.
+#
+# The edge runs this way and only this way. `cove-native` must not depend on
+# `cove-runtime`, which is why the helpers are function pointers; see that
+# crate's documentation.
+cove-native.workspace = true
 cove-schema.workspace = true
 cove-syntax.workspace = true
 cove-sema.workspace = true

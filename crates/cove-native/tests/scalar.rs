@@ -116,3 +116,53 @@ fn a_boolean_constant_is_a_word() {
 fn one_code_generator_holds_many_functions() {
     suite::one_code_generator_holds_many_functions::<Cranelift>();
 }
+
+#[test]
+fn a_reference_slot_is_inside_the_slice() {
+    suite::a_reference_slot_is_inside_the_slice::<Cranelift>();
+}
+
+#[test]
+fn a_tag_is_the_case_index_as_a_word() {
+    suite::a_tag_is_the_case_index_as_a_word::<Cranelift>();
+}
+
+#[test]
+fn a_tag_comparison_is_a_word_comparison() {
+    suite::a_tag_comparison_is_a_word_comparison::<Cranelift>();
+}
+
+#[test]
+fn not_tests_the_whole_word() {
+    suite::not_tests_the_whole_word::<Cranelift>();
+}
+
+#[test]
+fn a_len_reads_the_header_and_refuses_null() {
+    suite::a_len_reads_the_header_and_refuses_null::<Cranelift>();
+}
+
+#[test]
+fn a_load_elem_strides_and_bounds_its_index() {
+    suite::a_load_elem_strides_and_bounds_its_index::<Cranelift>();
+}
+
+#[test]
+fn a_byte_at_reads_one_byte_and_bounds_it() {
+    suite::a_byte_at_reads_one_byte_and_bounds_it::<Cranelift>();
+}
+
+#[test]
+fn a_switch_takes_its_case_or_the_default() {
+    suite::a_switch_takes_its_case_or_the_default::<Cranelift>();
+}
+
+#[test]
+fn a_call_hands_over_and_an_outcome_travels_out() {
+    suite::a_call_hands_over_and_an_outcome_travels_out::<Cranelift>();
+}
+
+#[test]
+fn a_reference_is_in_its_slot_at_every_safepoint() {
+    suite::a_reference_is_in_its_slot_at_every_safepoint::<Cranelift>();
+}

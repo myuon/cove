@@ -80,26 +80,67 @@
 //! promotion is an optimisation to be measured later, and when it is added it
 //! will bring the spill discipline with it.
 //!
-//! # There are no references here yet
+//! # References are live here, and the frame is why that is safe
 //!
-//! This slice compiles only scalar slots — [`cove_ir::Repr::Unit`],
-//! [`Bool`](cove_ir::Repr::Bool), [`Int`](cove_ir::Repr::Int),
-//! [`Float`](cove_ir::Repr::Float), [`Duration`](cove_ir::Repr::Duration) and
-//! [`Tag`](cove_ir::Repr::Tag). A function with a
-//! [`Repr::Ref`](cove_ir::Repr::Ref) slot in its frame is refused outright.
+//! This slice compiles [`Repr::Ref`](cove_ir::Repr::Ref) slots: a `String` and
+//! an `Array` reach a function as parameters, and reading an element out of one
+//! is what the covefmt slice is for. So ADR 0055's "Collection uses the VM
+//! stack as the first root map" is now load-bearing rather than vacuous.
 //!
-//! **So there is nothing to spill, and that is why the collector question
-//! does not arise — not because it has been answered.** A compiled function
-//! here holds no reference in a register because it holds no reference at
-//! all. The moment allocation, object fields or strings are lowered, ADR
-//! 0055's "Collection uses the VM stack as the first root map" becomes real
-//! work: every live reference materialised in its slot before the safepoint,
-//! and every reference reloaded after it. None of that is implemented, and
-//! nothing here should be read as evidence that it is.
+//! It is honoured by the rule above and by nothing else. **Neither code
+//! generator keeps a Cove value in a register across an instruction
+//! boundary**, so at the two places a collection can happen — the safepoint
+//! helper and the call helper, which are the only calls either arm emits —
+//! every live reference is already in the slot the frame's static
+//! `Function::refs` map names. The collector walks exactly what it walks for
+//! an encoded frame, and there is no spill sequence, because there is nothing
+//! anywhere else to spill.
+//!
+//! The intermediate an instruction computes *inside* one template — the object
+//! address a `load-elem` derives, the header word a `len` reads — is in a
+//! register, and is not a root: it is a copy of the reference the slot it was
+//! loaded from still holds, and no template contains a call, so no collection
+//! can happen between the load and the last use. Register promotion across
+//! instructions is what would end that argument, and neither arm does it.
+//!
+//! # The heap is addressed through a table of chunk bases
+//!
+//! A frame is a run of words in a `Vec` and one pointer reaches all of it. The
+//! *heap* is not: `cove_runtime::vm::mem` holds it as a fixed spine of
+//! separately allocated chunks, because the run's tasks all read it at once and
+//! a growing `Vec` would move words out from under a reader. So a heap word is
+//! two indexings rather than one, and compiled code does the same two:
+//!
+//! ```text
+//! index = addr - HEAP_ORIGIN_WORDS
+//! chunk = ctx.chunks[index >> HEAP_CHUNK_SHIFT]
+//! word  = chunk[index & (HEAP_CHUNK_WORDS - 1)]
+//! ```
+//!
+//! [`NativeCtx::chunks`] is that table: one pointer per *committed* chunk, in
+//! order, which the runtime maintains and re-publishes for the same reason it
+//! re-publishes [`NativeCtx::words`] — a helper may have allocated, and an
+//! allocation may have committed a chunk the table did not have. The three
+//! constants are declared here, beside the layout they describe, and the
+//! runtime asserts they are its own.
 //!
 //! [ADR 0034]: ../../../../docs/adr/0034-one-physical-word-stack.md
 
 use std::ffi::c_void;
+
+/// The first word of the heap region, in the one linear address space.
+///
+/// `cove_runtime::vm::mem`'s `STACK_WORDS`: every stack segment, back to back,
+/// and the heap above them. An address below it is a frame word and an address
+/// at or above it is a heap word, which is the whole of the region decoder —
+/// and it is why zero can mean null for a [`Repr::Ref`](cove_ir::Repr::Ref).
+pub const HEAP_ORIGIN_WORDS: u64 = 1 << 32;
+
+/// How many bits of a heap index name the word inside its chunk.
+pub const HEAP_CHUNK_SHIFT: u32 = 13;
+
+/// How many words one committed heap chunk holds.
+pub const HEAP_CHUNK_WORDS: u64 = 1 << HEAP_CHUNK_SHIFT;
 
 /// A compiled function's entry point.
 ///
@@ -200,6 +241,33 @@ pub enum Raise {
     /// `program.string(StrId(detail))`, where `detail` is
     /// [`NativeCtx::raise_detail`].
     Trapped = 9,
+    /// `null_object()` — a reference read before it was given one.
+    ///
+    /// What `encoded.rs`'s `LEN`, `BYTE_AT` and `Machine::element` each answer
+    /// for a zero address, in that one word: the message is one sentence with
+    /// no operand in it, so this variant carries nothing.
+    NullObject = 10,
+    /// `Machine::element`'s "index {a} is outside a collection of {b}", where
+    /// the two numbers are [`NativeCtx::raise_a`] and [`NativeCtx::raise_b`].
+    IndexOutOfRange = 11,
+    /// `encoded.rs`'s `BYTE_AT` refusal: "`byteAt` is `{a}`, and a byte offset
+    /// into this string is 0 to `{b} - 1`".
+    ///
+    /// `raise_b` is the string's byte length rather than the last legal offset,
+    /// because that is the number the encoded arm has in hand and subtracts
+    /// from; doing the subtraction here would put the `- 1` in two places.
+    ByteOffset = 12,
+    /// A callee raised, and the runtime already holds the error.
+    ///
+    /// The one variant that names no message, because there is none to name:
+    /// [`NativeHelpers::call`] ran a callee which failed, and what failed is a
+    /// whole `RuntimeError` — a span, a rule, a call chain — that the runtime
+    /// built and kept. Compiled code learns only that it must leave, and
+    /// leaves; the caller re-raises what it stashed.
+    ///
+    /// This is the same division as every other variant here, taken to its
+    /// end: this crate names errors and never builds one.
+    Called = 13,
 }
 
 impl Raise {
@@ -221,6 +289,10 @@ impl Raise {
             7 => Some(Raise::DividedByZero),
             8 => Some(Raise::RemainderByZero),
             9 => Some(Raise::Trapped),
+            10 => Some(Raise::NullObject),
+            11 => Some(Raise::IndexOutOfRange),
+            12 => Some(Raise::ByteOffset),
+            13 => Some(Raise::Called),
             _ => None,
         }
     }
@@ -253,6 +325,54 @@ impl Raise {
 /// [ADR 0040]: ../../../../docs/adr/0040-a-bound-outlives-its-backend.md
 pub type SafepointFn = unsafe extern "C" fn(ctx: *mut NativeCtx, pc: u32, work: u64) -> bool;
 
+/// What a call helper is.
+///
+/// [`Inst::Call`](cove_ir::Inst::Call), handed back to the runtime whole.
+/// Compiled code does not open the callee's frame, copy its arguments or choose
+/// its tier: the runtime's `open_frame` already does all three for an encoded
+/// caller, and a second copy of the calling convention in a code generator —
+/// in *two* code generators — is the thing this signature exists to prevent.
+/// ADR 0055's entry table is the runtime's to consult, so a callee may be
+/// encoded or native and the caller cannot tell.
+///
+/// - `base` is the **caller's** frame, as a word index, because the answer goes
+///   into `dst` of it and the arguments are read out of it.
+/// - `pc` is the index of the `call` instruction, which is the pc a
+///   synchronised frame has to carry and the span a failure is reported at.
+/// - `callee` is a `FunctionId` and `args` an `ArgsId`, both as the plain `u32`
+///   the IR carries — this crate does not resolve either.
+/// - `dst` is the caller's slot the answer's words go into, at the callee's
+///   return width, which is the callee's declaration's to know.
+///
+/// Six integer arguments, which is exactly what the System V ABI passes in
+/// registers, and the template arm's call sequence depends on that.
+///
+/// The answer is an [`Outcome`] as a `u32`. [`Outcome::Returned`] means the
+/// words are in `dst` already and compiled code carries on; the other two are
+/// returned from the compiled function unchanged, so a raise or a stop from
+/// eight frames down leaves through one `ret` per frame and no unwinding.
+///
+/// The helper is handed the unpaid work in [`NativeCtx::pending_work`] rather
+/// than as a seventh argument, and it charges and clears it: a call may
+/// allocate and an allocation may collect, so ADR 0055's "around allocation or
+/// runtime calls which may collect" makes this a safepoint whether or not the
+/// callee reaches one of its own.
+///
+/// # Safety
+///
+/// As [`SafepointFn`]: `ctx` is the pointer the entry point was called with.
+/// The helper may grow the stack and may commit a heap chunk, so it must store
+/// the current [`NativeCtx::words`] and [`NativeCtx::chunks`] before it
+/// returns, and the generated code re-derives both afterwards.
+pub type CallFn = unsafe extern "C" fn(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    callee: u32,
+    args: u32,
+    dst: u32,
+) -> u32;
+
 /// The runtime's side of the boundary, as function pointers.
 ///
 /// This table is the whole reason `cove-native` does not depend on
@@ -266,6 +386,8 @@ pub type SafepointFn = unsafe extern "C" fn(ctx: *mut NativeCtx, pc: u32, work: 
 pub struct NativeHelpers {
     /// See [`SafepointFn`].
     pub safepoint: SafepointFn,
+    /// See [`CallFn`].
+    pub call: CallFn,
 }
 
 /// The mutable state one native call reads and writes.
@@ -291,6 +413,18 @@ pub struct NativeCtx {
     /// reallocates, so a helper that grows the stack must store the new
     /// pointer here before it returns.
     pub words: *mut u64,
+    /// One pointer per committed heap chunk, in order.
+    ///
+    /// The heap's answer to [`NativeCtx::words`], and it is a table rather than
+    /// a pointer for the reason the module documentation gives: the heap is a
+    /// spine of separately allocated chunks, so there is no one pointer that
+    /// reaches every heap word. `HEAP_CHUNK_WORDS` words per entry, and only
+    /// the committed prefix is present — an entry is never null.
+    ///
+    /// Re-loaded wherever [`NativeCtx::words`] is, and for the same reason one
+    /// step further out: a helper may have allocated, an allocation may have
+    /// committed a chunk, and committing one may have moved the table.
+    pub chunks: *const *mut u64,
     /// IR instructions executed since the last safepoint and not yet charged.
     ///
     /// Written on every exit — a return, a raise and a stop alike — which is
@@ -318,6 +452,23 @@ pub struct NativeCtx {
     /// The one number a raise carries: a `StrId` for [`Raise::Trapped`], and
     /// unused by every other variant.
     pub raise_detail: u32,
+    /// The IR instruction a raise happened at.
+    ///
+    /// The span every runtime error carries is `Function::span_at(pc)`, which
+    /// is the *program's* fact and so the runtime's to look up — but only
+    /// compiled code knows which instruction it was executing. `encoded.rs`
+    /// has the answer in a local; here it has to be stored, and it is stored
+    /// on the raising path only, so the ordinary path pays nothing for it.
+    pub raise_pc: u32,
+    /// The first of the two numbers an out-of-range refusal names.
+    ///
+    /// The offending index for [`Raise::IndexOutOfRange`], the offending byte
+    /// offset for [`Raise::ByteOffset`], and unused by everything else. Signed,
+    /// because the refusal is *for* a negative one as much as for a large one
+    /// and the message prints what it was given.
+    pub raise_a: i64,
+    /// The second: the collection's length, or the string's.
+    pub raise_b: i64,
 }
 
 impl NativeCtx {
@@ -327,15 +478,34 @@ impl NativeCtx {
     /// `raise_code` at zero, which [`Raise::from_abi`] rejects — so a test
     /// that reads one without the matching [`Outcome`] reads an obvious
     /// wrong answer rather than a plausible stale one.
+    /// The heap table starts empty — a null pointer and no entries — because a
+    /// caller with no heap is a caller whose compiled code touches none, and a
+    /// null that is dereferenced is a loud failure where a dangling table would
+    /// be a quiet one. [`NativeCtx::over_heap`] is how a caller with a heap
+    /// says so.
     pub fn new(host: *mut c_void, words: *mut u64) -> Self {
         NativeCtx {
             host,
             words,
+            chunks: std::ptr::null(),
             pending_work: 0,
             return_slot: u32::MAX,
             raise_code: 0,
             raise_detail: 0,
+            raise_pc: u32::MAX,
+            raise_a: 0,
+            raise_b: 0,
         }
+    }
+
+    /// The same context, over the heap `chunks` describes.
+    ///
+    /// See [`NativeCtx::chunks`]: the table has to stay valid, and to be
+    /// re-published by any helper that could have grown it, for as long as the
+    /// compiled code is running.
+    pub fn over_heap(mut self, chunks: *const *mut u64) -> Self {
+        self.chunks = chunks;
+        self
     }
 
     /// Which error was raised, if the outcome was [`Outcome::Raised`].
@@ -370,12 +540,16 @@ mod tests {
             (7, Raise::DividedByZero),
             (8, Raise::RemainderByZero),
             (9, Raise::Trapped),
+            (10, Raise::NullObject),
+            (11, Raise::IndexOutOfRange),
+            (12, Raise::ByteOffset),
+            (13, Raise::Called),
         ] {
             assert_eq!(raise.abi(), code);
             assert_eq!(Raise::from_abi(code), Some(raise));
         }
         assert_eq!(Raise::from_abi(0), None);
-        assert_eq!(Raise::from_abi(10), None);
+        assert_eq!(Raise::from_abi(14), None);
     }
 
     /// Zero is not a raise, which is what makes a fresh context's

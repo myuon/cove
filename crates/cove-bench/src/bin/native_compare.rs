@@ -178,6 +178,9 @@ fn run() -> Result<(), String> {
     }
     println!();
     println!("every arm's answer was checked against the VM's on every iteration");
+
+    println!();
+    covefmt(iterations, dump)?;
     Ok(())
 }
 
@@ -538,9 +541,40 @@ unsafe extern "C" fn safepoint(_ctx: *mut cove_native::NativeCtx, _pc: u32, _wor
     true
 }
 
+/// The call helper the *arith* scenario binds, which nothing reaches.
+///
+/// arith's loop holds no call — the whole reason the raced unit is the loop and
+/// not `main` is that `main`'s `assertEqual` is one — and this arm is entered with
+/// no runtime behind it: `ctx.host` is null, because the frame is a `Vec<u64>`
+/// this program owns and there is no `Machine` at all. So a real helper could not
+/// be bound here, and this one answers "raised", which the entry below asserts
+/// against. A call that was somehow reached fails the run loudly rather than
+/// answering something.
+///
+/// The covefmt scenario binds `cove_runtime::native_helpers()`, which is the real
+/// pair, over a real machine.
+///
+/// # Safety
+///
+/// Reads nothing through any of its arguments.
+#[cfg(any(feature = "cranelift", feature = "template"))]
+unsafe extern "C" fn no_call(
+    _ctx: *mut cove_native::NativeCtx,
+    _base: u64,
+    _pc: u32,
+    _callee: u32,
+    _args: u32,
+    _dst: u32,
+) -> u32 {
+    cove_native::Outcome::Raised.abi()
+}
+
 #[cfg(any(feature = "cranelift", feature = "template"))]
 fn helpers() -> cove_native::NativeHelpers {
-    cove_native::NativeHelpers { safepoint }
+    cove_native::NativeHelpers {
+        safepoint,
+        call: no_call,
+    }
 }
 
 /// Every arm that was compiled in, with its initialization and compilation
@@ -568,6 +602,17 @@ struct Measured {
 
 #[cfg(any(feature = "cranelift", feature = "template"))]
 impl Measured {
+    /// The compile samples alone, for the second scenario: it compiles every
+    /// function of a slice once rather than one function ten times, so it has no
+    /// initialization samples of its own and no one code size.
+    fn of(compile: Vec<u64>) -> Measured {
+        Measured {
+            init: Vec::new(),
+            compile,
+            code_bytes: 0,
+        }
+    }
+
     fn report(&self, arm: &str) {
         line(&format!("{arm} init"), &self.init, Scale::Micros);
         line(&format!("{arm} compile"), &self.compile, Scale::Micros);
@@ -786,4 +831,806 @@ fn flag_u32(name: &str) -> Option<u32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let at = args.iter().position(|arg| arg == name)?;
     args.get(at + 1)?.parse().ok().filter(|value| *value > 0)
+}
+
+// --- the covefmt slice -------------------------------------------------------
+//
+// The second raced scenario, and the one that measures the *prediction*. The
+// first scenario's verdict — the two arms within 6% on `arith`'s loop — left the
+// case for Cranelift resting on richer code: register allocation, many live
+// values, branches. Two functions out of `examples/covefmt/print.cove`'s own
+// profile are that richer code.
+//
+// # Why these two
+//
+// `byteOfPunct` is 5.3% of covefmt's run over 29 call sites, and it is where the
+// interesting instructions are: an `Array` element read at a three-word stride,
+// an `Option`'s tag and its `switch`, an enum tag comparison, inline-struct field
+// loads (which are slot reads, because an inline struct *is* slots),
+// `String.byteAt`, a length, and `Repr::Ref` parameters.
+//
+// `wantsASpaceBetween` is 5.5% over 313,741 calls, it *calls* `byteOfPunct`, and
+// it is branchy with many live values. So it exercises native-to-native and
+// native-to-VM calls, and it is where register allocation should show if it is
+// going to.
+//
+// # Allocation is deliberately excluded, and that is not an oversight
+//
+// ADR 0055 keeps allocation, collection, Host calls and string building as
+// runtime helpers. An allocation is therefore *one identical helper call in both
+// arms*, and it cannot separate two code generators — a scenario built out of
+// them would measure the runtime and report it as a code-generator difference.
+// The instructions raced here are the ones each arm emits itself.
+//
+// # What the harness itself costs, and why the arm-against-arm figure survives it
+//
+// Every call — the VM's and both arms' — goes through `Vm::native_session`, which
+// pushes a frame, writes the parameter words, runs the function and hands back the
+// answer's words in a fresh `Vec`. That `Vec` is one allocation per call and it is
+// inside the timer, and a native-to-VM call pays one more thing besides: the
+// nested `std::thread::scope` `Machine::drive_from` opens, because a `spawn`
+// starts its children in one.
+//
+// None of that is separated out, and it does not have to be. **It is the same
+// runtime doing the same thing on every row**, so the difference between the two
+// arms is the difference between the code they emit and nothing else. What the
+// shared cost does do is compress the *ratios*: a row's native-against-VM figure
+// is a lower bound on what removing dispatch is worth, which is why `arith`'s
+// row — one entry, two million loop turns, no per-call cost at all — is the one to
+// read for that question and these rows are the ones to read for the other.
+
+/// The file the real inputs are lexed out of.
+///
+/// covefmt's own printer, which is the file the two raced functions are declared
+/// in and 120 KB of real Cove source. Nothing about the data is synthetic: the
+/// `String` is this file and the `Array<Token>` is what covefmt's own lexer makes
+/// of it, run on the VM.
+const CORPUS: &str = "../../examples/covefmt/print.cove";
+
+/// The module the two raced functions are in.
+const COVEFMT: &str = "covefmt";
+/// The lexer, which builds the `Array<Token>`.
+const LEXER: &str = "tokens";
+/// The raced entry, which calls the other one.
+const WANTS: &str = "wantsASpaceBetween";
+/// The function it calls, which is the one with the heap reads in it.
+const BYTE_OF_PUNCT: &str = "byteOfPunct";
+
+/// How many `(l, r)` pairs one iteration calls over.
+///
+/// Every pair is a real one — `wantsASpace` asks `wantsASpaceBetween(source,
+/// held, at - 1, at + 1)` for a run boundary at `at`, and these are those pairs
+/// over the corpus's own tokens — and there are as many of them as the corpus has
+/// tokens. The bound is here so an iteration is milliseconds rather than seconds;
+/// what it costs is that the pairs raced are a prefix of the file rather than all
+/// of it, and every arm and the VM race exactly the same prefix.
+const PAIRS: usize = 20_000;
+
+fn covefmt(iterations: u32, dump: bool) -> Result<(), String> {
+    heading_line("the second raced slice: covefmt's `wantsASpaceBetween` and `byteOfPunct`");
+
+    let (sources, checked) = examples_package()?;
+    let ir = cove_ir::lower_roots(
+        &checked,
+        &sources,
+        &HostSchemas::new(),
+        &[(COVEFMT, LEXER), (COVEFMT, WANTS)],
+    )
+    .map_err(|items| render(&sources, &items))?;
+    let wants = entry_of(&ir, COVEFMT, WANTS)?;
+    let byte_of_punct = entry_of(&ir, COVEFMT, BYTE_OF_PUNCT)?;
+    report_ir("the lowered slice", &ir);
+    println!(
+        "  the two raced functions are {} IR instructions: {} in `{WANTS}`, {} in `{BYTE_OF_PUNCT}`",
+        ir.function(wants).code.len() + ir.function(byte_of_punct).code.len(),
+        ir.function(wants).code.len(),
+        ir.function(byte_of_punct).code.len()
+    );
+    if dump {
+        println!("{}", cove_ir::print::function(&ir, wants));
+        println!("{}", cove_ir::print::function(&ir, byte_of_punct));
+    }
+    println!(
+        "  allocation is deliberately outside the raced subset: ADR 0055 keeps it a runtime \
+         helper, so it is one identical call in both arms and cannot separate them"
+    );
+    println!();
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(CORPUS);
+    let source =
+        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+
+    let ir = Arc::new(ir);
+    let sources = Arc::new(sources);
+    let checked = Arc::new(checked);
+    let mut hosts = fake_hosts();
+    hosts.set_budget(Budget::with_cancellation(
+        Limits::default(),
+        Cancellation::new(),
+    ));
+    hosts.set_trace(Arc::new(NullSink));
+    let hosts = Arc::new(hosts);
+    let runtime = Runtime::new(
+        Arc::clone(&checked),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let mut vm = Vm::new(&runtime, &hosts, &ir);
+
+    // The real inputs, built by covefmt's own lexer on the VM.
+    let started = Instant::now();
+    let held = vm
+        .invoke(COVEFMT, LEXER, vec![cove_runtime::Value::string(&*source)])
+        .map_err(|error| format!("`{COVEFMT}.{LEXER}` failed: {}", error.message))?;
+    let lexed = started.elapsed();
+    let count = held
+        .items()
+        .ok_or_else(|| format!("`{COVEFMT}.{LEXER}` did not answer an `Array`"))?
+        .len();
+    println!("the real inputs");
+    println!(
+        "  {} bytes of `{}`, lexed on the vm in {} into {count} token(s)",
+        source.len(),
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        Scale::Millis.of(lexed.as_nanos() as u64)
+    );
+    // `wantsASpace(source, held, at)` asks about `at - 1` and `at + 1`, so these
+    // are the pairs the formatter itself asks about, in the order it asks them.
+    let pairs: Vec<(u64, u64)> = (1..count.saturating_sub(1))
+        .take(PAIRS)
+        .map(|at| ((at - 1) as u64, (at + 1) as u64))
+        .collect();
+    println!(
+        "  {} `(l, r)` pair(s) per iteration, which are the pairs `wantsASpace` asks about",
+        pairs.len()
+    );
+    println!();
+
+    let arms = Compiled::all(&ir)?;
+    arms.report();
+    arms.raced(&ir, wants, byte_of_punct);
+    println!();
+
+    collects_and_agrees(&ir, &sources, &checked, &source, &arms)?;
+    println!();
+
+    // Two races rather than one, and the reason is the second table below.
+    //
+    // `byteOfPunct` holds **no call**: an `Array` element read, an `Option`'s tag
+    // and switch, a tag comparison, a `String.byteAt`, a length, and branches. So
+    // racing it alone is the two code generators' *emitted code* against each
+    // other with nothing else in the measurement — which is the question the
+    // comparison exists to answer.
+    //
+    // `wantsASpaceBetween` calls it, and five other functions besides, so racing
+    // it is the call protocol and the branchy many-live-values code the prediction
+    // was about. It is also, as the numbers show, dominated by call machinery both
+    // tiers share — which is itself worth knowing and is not visible from one
+    // table.
+    {
+        let mut inner = vm
+            .native_session(
+                COVEFMT,
+                BYTE_OF_PUNCT,
+                vec![
+                    cove_runtime::Value::string(&*source),
+                    held.clone(),
+                    cove_runtime::Value::int(0),
+                ],
+            )
+            .map_err(|error| format!("the native session refused: {}", error.message))?;
+        let words = inner.arguments().to_vec();
+        let calls: Vec<Vec<u64>> = pairs
+            .iter()
+            .map(|(l, _)| vec![words[0], words[1], *l])
+            .collect();
+        race(
+            &format!("`{BYTE_OF_PUNCT}` alone, which holds no call"),
+            &mut inner,
+            &arms,
+            iterations,
+            &calls,
+        )?;
+    }
+    println!();
+
+    let mut session = vm
+        .native_session(
+            COVEFMT,
+            WANTS,
+            vec![
+                cove_runtime::Value::string(&*source),
+                held,
+                cove_runtime::Value::int(0),
+                cove_runtime::Value::int(0),
+            ],
+        )
+        .map_err(|error| format!("the native session refused: {}", error.message))?;
+    let words = session.arguments().to_vec();
+    if words.len() != 4 {
+        return Err(format!(
+            "`{COVEFMT}.{WANTS}` takes four words and this lowering gives it {}",
+            words.len()
+        ));
+    }
+    let calls: Vec<Vec<u64>> = pairs
+        .iter()
+        .map(|(l, r)| vec![words[0], words[1], *l, *r])
+        .collect();
+    race(
+        &format!("`{WANTS}`, which calls `{BYTE_OF_PUNCT}` and five others"),
+        &mut session,
+        &arms,
+        iterations,
+        &calls,
+    )?;
+    Ok(())
+}
+
+/// How many words the collecting pass's heap may grow to.
+///
+/// Small enough that the corpus's own tokens and the strings `isTheWord` builds
+/// do not fit in it at once, so a collection is forced — and large enough that
+/// what is live does fit, so the run does not fail for want of memory. Tuned by
+/// running it: the assertion below is that a collection *happened*, so a number
+/// that stopped forcing one would be caught rather than quietly skipped.
+const COLLECTING_HEAP_WORDS: usize = 1 << 18;
+
+/// The most calls the collecting pass will make waiting for a second collection.
+///
+/// It stops as soon as it has one, so this is a *bound* and not a count: a cap is
+/// here so that a change which stopped the slice allocating fails the pass
+/// instead of looping.
+const COLLECTING_CAP: usize = 400_000;
+
+/// The pass that makes ADR 0055's collector claim a *measurement*.
+///
+/// "Collection uses the VM stack as the first root map" is only exercised by a run
+/// that collects, and the timed races below do not: their heap is the default one
+/// and nothing they allocate fills it. So the same calls are made again over a
+/// heap small enough to collect, and the answers are compared again.
+///
+/// What it proves is the thing the widened subset put at risk. `wantsASpaceBetween`
+/// takes a `String` and an `Array<Token>` as `Repr::Ref` parameters, it calls a
+/// function the subset refuses (`holdsSomething`, which reaches
+/// `String.sliceBytes` and so allocates), and the allocation can collect while a
+/// *native* frame is on the stack holding both references. If either arm kept a
+/// reference only in a register across the call helper, the collector would sweep
+/// a live object and the answers would stop agreeing — which is exactly what this
+/// checks, and it checks it against the VM's own answer for every call.
+fn collects_and_agrees(
+    ir: &Arc<cove_ir::Program>,
+    sources: &Arc<SourceMap>,
+    checked: &Arc<Checked>,
+    source: &str,
+    arms: &Compiled,
+) -> Result<(), String> {
+    println!("a collecting pass, over a heap of {COLLECTING_HEAP_WORDS} word(s)");
+    let mut hosts = fake_hosts();
+    hosts.set_budget(Budget::with_cancellation(
+        Limits::default(),
+        Cancellation::new(),
+    ));
+    hosts.set_trace(Arc::new(NullSink));
+    let hosts = Arc::new(hosts);
+    let runtime = Runtime::new(Arc::clone(checked), Arc::clone(sources), Arc::clone(&hosts));
+    let mut vm = Vm::with_heap_words(&runtime, &hosts, ir, COLLECTING_HEAP_WORDS);
+    let held = vm
+        .invoke(COVEFMT, LEXER, vec![cove_runtime::Value::string(source)])
+        .map_err(|error| {
+            format!(
+                "`{COVEFMT}.{LEXER}` failed on a small heap: {}",
+                error.message
+            )
+        })?;
+    let count = held
+        .items()
+        .ok_or_else(|| format!("`{COVEFMT}.{LEXER}` did not answer an `Array`"))?
+        .len();
+    let mut session = vm
+        .native_session(
+            COVEFMT,
+            WANTS,
+            vec![
+                cove_runtime::Value::string(source),
+                held,
+                cove_runtime::Value::int(0),
+                cove_runtime::Value::int(0),
+            ],
+        )
+        .map_err(|error| format!("the native session refused: {}", error.message))?;
+    let words = session.arguments().to_vec();
+    let pairs: Vec<(u64, u64)> = (1..count.saturating_sub(1))
+        .map(|at| ((at - 1) as u64, (at + 1) as u64))
+        .collect();
+
+    // Which calls allocate, asked rather than guessed. The native tier allocates
+    // nothing itself — allocation is a runtime helper and deliberately outside the
+    // raced subset — so a collection can only be triggered by a callee the subset
+    // refused, and only some `(l, r)` pairs reach one. `holdsSomething` is that
+    // callee: it reaches `String.sliceBytes`, which allocates, and it is reached
+    // when the token at `r` is a `[`.
+    let mut allocating: Vec<(u64, u64)> = Vec::new();
+    for (l, r) in &pairs {
+        let before = session.allocations();
+        session
+            .call(
+                &cove_runtime::NothingCompiled,
+                &[words[0], words[1], *l, *r],
+            )
+            .map_err(|error| format!("the vm refused a call: {}", error.message))?;
+        if session.allocations() > before {
+            allocating.push((*l, *r));
+        }
+    }
+    if allocating.is_empty() {
+        return Err(
+            "no call in the slice allocates, so no collection can be forced and this pass \
+             cannot prove anything; the slice has changed shape"
+                .to_string(),
+        );
+    }
+
+    let before = session.collections();
+    let mut disagreed = 0usize;
+    let mut made = 0usize;
+    // Two rather than one, because the first collection is the one that proves the
+    // walk ran and the second is the one that proves the objects it did not free
+    // are still there to be read.
+    while session.collections() - before < 2 && made < COLLECTING_CAP {
+        for (l, r) in &allocating {
+            let args = [words[0], words[1], *l, *r];
+            let expected = session
+                .call(&cove_runtime::NothingCompiled, &args)
+                .map_err(|error| format!("the vm refused a collecting call: {}", error.message))?;
+            for arm in arms.names() {
+                let answered = session.call(arms.entries(arm)?, &args).map_err(|error| {
+                    format!("{arm} refused a collecting call: {}", error.message)
+                })?;
+                if answered != expected {
+                    disagreed += 1;
+                }
+            }
+            made += 1;
+        }
+    }
+    let collections = session.collections() - before;
+    println!(
+        "  {} of {} pair(s) allocate; {made} call(s) per arm forced {collections} collection(s) \
+         while a native frame held the `String` and the `Array`",
+        allocating.len(),
+        pairs.len()
+    );
+    if disagreed > 0 {
+        return Err(format!(
+            "{disagreed} answer(s) differed from the VM's under collection, which means a \
+             reference was not where the root walk looks for it"
+        ));
+    }
+    if collections == 0 && !arms.names().is_empty() {
+        return Err(
+            "no collection ran in `COLLECTING_CAP` calls, so this pass proved nothing about the \
+             root walk"
+                .to_string(),
+        );
+    }
+    println!("  every answer agreed with the VM's");
+    Ok(())
+}
+
+/// One function, raced over `calls` by the VM and by every arm, interleaved.
+///
+/// The VM goes first in each iteration and its answers are the oracle; every arm's
+/// answer is compared against it for **every call**, because a performance number
+/// from a run that computed the wrong thing is worse than no number.
+///
+/// The comparison is after the timed loop rather than inside it, so the timer
+/// measures the call and not the check. It still checks every call: the answers are
+/// collected into a `Vec` reserved before the loop.
+fn race(
+    what: &str,
+    session: &mut cove_runtime::NativeSession<'_, '_>,
+    arms: &Compiled,
+    iterations: u32,
+    calls: &[Vec<u64>],
+) -> Result<(), String> {
+    let mut vm_samples = Vec::with_capacity(iterations as usize);
+    let mut oracle: Vec<u64> = Vec::with_capacity(calls.len());
+    let mut mine: Vec<u64> = Vec::with_capacity(calls.len());
+    let mut native: Vec<(&'static str, Vec<u64>)> = arms
+        .names()
+        .into_iter()
+        .map(|name| (name, Vec::with_capacity(iterations as usize)))
+        .collect();
+    let mut dispatched = 0u64;
+    let before_tiers = session.tiers();
+
+    for iteration in 0..iterations {
+        oracle.clear();
+        let before = session.instructions();
+        let started = Instant::now();
+        for args in calls {
+            let answer = session
+                .call(&cove_runtime::NothingCompiled, args)
+                .map_err(|error| format!("the vm refused the raced slice: {}", error.message))?;
+            oracle.push(answer[0]);
+        }
+        vm_samples.push(started.elapsed().as_nanos() as u64);
+        dispatched += session.instructions() - before;
+
+        for (arm, samples) in &mut native {
+            let entries = arms.entries(arm)?;
+            mine.clear();
+            let started = Instant::now();
+            for args in calls {
+                let answer = session
+                    .call(entries, args)
+                    .map_err(|error| format!("{arm} refused the raced slice: {}", error.message))?;
+                mine.push(answer[0]);
+            }
+            samples.push(started.elapsed().as_nanos() as u64);
+            for (at, (answered, expected)) in mine.iter().zip(&oracle).enumerate() {
+                if answered != expected {
+                    return Err(format!(
+                        "{arm} answered {answered} for call {at} of iteration {iteration} and the \
+                         VM answered {expected}; a run whose answer differs is a failure, not a \
+                         data point"
+                    ));
+                }
+            }
+        }
+    }
+
+    let tiers = session.tiers();
+    println!(
+        "execution: {what}, {iterations} iterations of {} call(s), interleaved",
+        calls.len()
+    );
+    println!(
+        "  {:<18} {:<11} {:<11} {:<11} {:<11} {:<11}",
+        "arm", "cold", "min", "median", "mean", "max"
+    );
+    line("vm", &vm_samples, Scale::Millis);
+    for (arm, samples) in &native {
+        line(arm, samples, Scale::Millis);
+    }
+    let made = u64::from(iterations) * calls.len() as u64;
+    let arms_here = arms.names().len().max(1) as u64;
+    println!(
+        "  per call, at the median: vm {:.0}ns{}",
+        median(&vm_samples) as f64 / calls.len() as f64,
+        native
+            .iter()
+            .map(|(arm, samples)| format!(
+                ", {arm} {:.0}ns",
+                median(samples) as f64 / calls.len() as f64
+            ))
+            .collect::<String>()
+    );
+    println!(
+        "  the vm's own iterations dispatched {:.0} IR instruction(s) per call",
+        dispatched as f64 / made as f64
+    );
+    // The VM's own iterations are `made` encoded calls of the raced function
+    // itself, and they are taken off so the figures are about the *arms*: what a
+    // native arm's call divided into.
+    let native_calls = tiers.native - before_tiers.native;
+    let encoded_calls = (tiers.encoded - before_tiers.encoded).saturating_sub(made);
+    println!(
+        "  each arm's calls divided by tier: {:.1} native and {:.1} encoded per raced call \
+         ({native_calls} and {encoded_calls} in total)",
+        native_calls as f64 / (made * arms_here) as f64,
+        encoded_calls as f64 / (made * arms_here) as f64
+    );
+    println!("  every arm's answer was checked against the VM's on every one of those calls");
+    // ADR 0055's "Collection uses the VM stack as the first root map" is only
+    // exercised by a run that collected. Whether this one did is reported rather
+    // than assumed, because a scenario that never collected has not tested it.
+    match session.collections() {
+        0 => println!(
+            "  no collection ran here, which is what a default heap and a slice that barely \
+             allocates come to; the collecting pass above is where the root walk is exercised"
+        ),
+        collections => println!(
+            "  {collections} collection(s) ran with native frames on the stack, and every answer \
+             still agreed"
+        ),
+    }
+    Ok(())
+}
+
+/// The median of `samples`, which is what the per-call figures above divide.
+fn median(samples: &[u64]) -> u64 {
+    let warm = if samples.len() > 1 {
+        &samples[1..]
+    } else {
+        samples
+    };
+    let mut sorted = warm.to_vec();
+    sorted.sort_unstable();
+    sorted.get(sorted.len() / 2).copied().unwrap_or(0)
+}
+
+/// `examples/`, checked.
+fn examples_package() -> Result<(SourceMap, Checked), String> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let mut sources = SourceMap::new();
+    let package =
+        cove_sema::package::load(&root, &mut sources).map_err(|items| render(&sources, &items))?;
+    let checked = cove_sema::Compiler::new()
+        .compile(&package)
+        .map_err(|items| render(&sources, &items))?;
+    Ok((sources, checked))
+}
+
+fn heading_line(what: &str) {
+    println!("{what}");
+}
+
+/// Every arm, with every function of the slice it could compile already
+/// compiled.
+///
+/// Every function rather than only the two raced ones, and that is what makes the
+/// tier counts mean something: whatever `byteOfPunct` and `wantsASpaceBetween`
+/// call is compiled too if the shared subset admits it, and run by the VM if it
+/// does not. A run that compiled only the two would report `encoded` calls that
+/// were an artefact of the harness rather than of the subset.
+struct Compiled {
+    #[cfg(feature = "cranelift")]
+    cranelift: (cove_native::Jit, Tier, Measured),
+    #[cfg(feature = "template")]
+    template: (cove_native::template::Jit, Tier, Measured),
+}
+
+/// One arm's `Program + FunctionId -> native entry` table.
+///
+/// ADR 0055's entry table, as the one question the runtime asks of it. `None`
+/// means the callee runs on the encoded VM.
+///
+/// A build with no code generator constructs none of these, and the type is still
+/// compiled: the tier table is the *runtime's* shape and not a code generator's,
+/// which is the same reason `cove_native::abi` is compiled without one.
+#[cfg_attr(
+    not(any(feature = "cranelift", feature = "template")),
+    allow(dead_code)
+)]
+struct Tier {
+    entries: Vec<Option<cove_runtime::NativeEntry>>,
+    compiled: usize,
+    /// What it would not compile, by name.
+    ///
+    /// Named rather than counted, because a count cannot say whether the slice's
+    /// hot callees ran natively: a run in which `byteOfPunct` was refused would
+    /// look like full coverage and measure the VM.
+    refused: Vec<String>,
+    bytes: u32,
+    /// The machine code of each function, by id, for the per-function figure the
+    /// arith scenario reports and the totals above cannot give.
+    bytes_of: std::collections::BTreeMap<cove_ir::FunctionId, u32>,
+}
+
+impl cove_runtime::Tiered for Tier {
+    fn entry(&self, id: cove_ir::FunctionId) -> Option<cove_runtime::NativeEntry> {
+        self.entries.get(id.index()).copied().flatten()
+    }
+}
+
+#[cfg_attr(
+    not(any(feature = "cranelift", feature = "template")),
+    allow(dead_code)
+)]
+impl Tier {
+    fn report(&self, arm: &str) {
+        println!(
+            "  {arm:<10} compiled {} function(s) and refused {}, emitting {} bytes of machine code",
+            self.compiled,
+            self.refused.len(),
+            self.bytes
+        );
+    }
+
+    fn refusals(&self, arm: &str) {
+        println!("  {arm} refused: {}", self.refused.join(", "));
+    }
+
+    fn sizes(
+        &self,
+        arm: &str,
+        ir: &cove_ir::Program,
+        wants: cove_ir::FunctionId,
+        inner: cove_ir::FunctionId,
+    ) {
+        println!(
+            "  {arm:<10} emitted {} bytes for `{}` and {} for `{}`",
+            self.bytes_of.get(&wants).copied().unwrap_or(0),
+            ir.function(wants).name,
+            self.bytes_of.get(&inner).copied().unwrap_or(0),
+            ir.function(inner).name
+        );
+    }
+}
+
+/// Which functions of `ir` an arm is asked about: every lowered one.
+///
+/// Unreachable in a build with no arm, for [`Tier`]'s reason.
+///
+/// A stub is not a body, so it is not offered — the shared subset refuses one
+/// anyway, and counting it as a refusal would inflate the refusals with
+/// declarations no path leads to.
+#[cfg_attr(
+    not(any(feature = "cranelift", feature = "template")),
+    allow(dead_code)
+)]
+fn candidates(ir: &cove_ir::Program) -> Vec<cove_ir::FunctionId> {
+    (0..ir.functions.len())
+        .map(|at| cove_ir::FunctionId(at as u32))
+        .filter(|id| !ir.function(*id).is_stub())
+        .collect()
+}
+
+impl Compiled {
+    #[allow(unused_variables, clippy::let_and_return)]
+    fn all(ir: &Arc<cove_ir::Program>) -> Result<Compiled, String> {
+        let held = Compiled {
+            #[cfg(feature = "cranelift")]
+            cranelift: {
+                let mut jit = cove_native::Jit::new(cove_runtime::native_helpers())
+                    .map_err(|error| format!("cranelift: {error}"))?;
+                let mut tier = Tier {
+                    entries: vec![None; ir.functions.len()],
+                    compiled: 0,
+                    refused: Vec::new(),
+                    bytes: 0,
+                    bytes_of: std::collections::BTreeMap::new(),
+                };
+                let mut compile = Vec::new();
+                let mut done = Vec::new();
+                for id in candidates(ir) {
+                    let started = Instant::now();
+                    let compiled = jit.compile(ir, id);
+                    let elapsed = started.elapsed().as_nanos() as u64;
+                    match compiled {
+                        Some(compiled) => {
+                            compile.push(elapsed);
+                            tier.compiled += 1;
+                            tier.bytes += compiled.code_bytes;
+                            tier.bytes_of.insert(id, compiled.code_bytes);
+                            done.push((id, compiled));
+                        }
+                        None => tier.refused.push(ir.function(id).qualified()),
+                    }
+                }
+                jit.finalize()
+                    .map_err(|error| format!("cranelift: {error}"))?;
+                for (id, compiled) in done {
+                    tier.entries[id.index()] = Some(jit.entry(compiled));
+                }
+                (jit, tier, Measured::of(compile))
+            },
+            #[cfg(feature = "template")]
+            template: {
+                let mut jit = cove_native::template::Jit::new(cove_runtime::native_helpers())
+                    .map_err(|error| format!("template: {error}"))?;
+                let mut tier = Tier {
+                    entries: vec![None; ir.functions.len()],
+                    compiled: 0,
+                    refused: Vec::new(),
+                    bytes: 0,
+                    bytes_of: std::collections::BTreeMap::new(),
+                };
+                let mut compile = Vec::new();
+                let mut done = Vec::new();
+                for id in candidates(ir) {
+                    let started = Instant::now();
+                    let compiled = jit.compile(ir, id);
+                    let elapsed = started.elapsed().as_nanos() as u64;
+                    match compiled {
+                        Some(compiled) => {
+                            compile.push(elapsed);
+                            tier.compiled += 1;
+                            tier.bytes += compiled.code_bytes;
+                            tier.bytes_of.insert(id, compiled.code_bytes);
+                            done.push((id, compiled));
+                        }
+                        None => tier.refused.push(ir.function(id).qualified()),
+                    }
+                }
+                jit.finalize()
+                    .map_err(|error| format!("template: {error}"))?;
+                for (id, compiled) in done {
+                    tier.entries[id.index()] = Some(jit.entry(compiled));
+                }
+                (jit, tier, Measured::of(compile))
+            },
+        };
+        Ok(held)
+    }
+
+    fn names(&self) -> Vec<&'static str> {
+        [
+            #[cfg(feature = "cranelift")]
+            "cranelift",
+            #[cfg(feature = "template")]
+            "template",
+        ]
+        .to_vec()
+    }
+
+    #[allow(unused_variables)]
+    fn entries(&self, arm: &str) -> Result<&dyn cove_runtime::Tiered, String> {
+        match arm {
+            #[cfg(feature = "cranelift")]
+            "cranelift" => Ok(&self.cranelift.1),
+            #[cfg(feature = "template")]
+            "template" => Ok(&self.template.1),
+            other => Err(format!("there is no `{other}` arm in this build")),
+        }
+    }
+
+    fn report(&self) {
+        println!("compilation, one sample per function");
+        println!(
+            "  {:<18} {:<11} {:<11} {:<11} {:<11} {:<11}",
+            "arm", "first", "min", "median", "mean", "max"
+        );
+        #[cfg(feature = "cranelift")]
+        line(
+            "cranelift compile",
+            &self.cranelift.2.compile,
+            Scale::Micros,
+        );
+        #[cfg(feature = "template")]
+        line("template compile", &self.template.2.compile, Scale::Micros);
+        #[cfg(feature = "cranelift")]
+        self.cranelift.1.report("cranelift");
+        #[cfg(feature = "template")]
+        self.template.1.report("template");
+        // The subset is one shared predicate, so the two sets are the same set —
+        // and the refusals are printed once rather than twice to say so. A
+        // comparison over two different subsets would not be one.
+        #[cfg(all(feature = "cranelift", feature = "template"))]
+        assert_eq!(
+            self.cranelift.1.refused, self.template.1.refused,
+            "the two arms share one subset predicate, so they refuse one set"
+        );
+        #[cfg(feature = "cranelift")]
+        self.cranelift.1.refusals("both arms");
+        #[cfg(all(feature = "template", not(feature = "cranelift")))]
+        self.template.1.refusals("template");
+        if self.names().is_empty() {
+            println!("  no native arm was compiled in; build with `--features cranelift,template`");
+        }
+    }
+
+    /// Whether the two raced functions are compiled, and how many bytes each
+    /// came to.
+    ///
+    /// The first is the one fact a reader has to have before believing the
+    /// execution table: if either function is refused, what was raced is the VM.
+    /// The second is the per-function code size the arith scenario reports for
+    /// its one function — the totals above are over every function of the slice,
+    /// and the two raced ones are what the execution tables are about.
+    ///
+    /// Initialization is not measured again here. It is once per process and per
+    /// code generator, so the figure is the arith scenario's above and repeating
+    /// it would be reporting the same measurement twice.
+    fn raced(&self, ir: &cove_ir::Program, wants: cove_ir::FunctionId, inner: cove_ir::FunctionId) {
+        for arm in self.names() {
+            let entries = self.entries(arm).expect("the arm is in this build");
+            for id in [wants, inner] {
+                println!(
+                    "  {arm}: `{}` {}",
+                    ir.function(id).qualified(),
+                    match cove_runtime::Tiered::entry(entries, id) {
+                        Some(_) => "is compiled",
+                        None => "IS REFUSED, so what this arm raced is the VM",
+                    }
+                );
+            }
+        }
+        #[cfg(feature = "cranelift")]
+        self.cranelift.1.sizes("cranelift", ir, wants, inner);
+        #[cfg(feature = "template")]
+        self.template.1.sizes("template", ir, wants, inner);
+    }
 }

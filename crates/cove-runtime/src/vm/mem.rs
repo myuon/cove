@@ -195,6 +195,24 @@ const CHUNK_SHIFT: u32 = 13;
 const CHUNK_WORDS: u64 = 1 << CHUNK_SHIFT;
 const CHUNK_MASK: u64 = CHUNK_WORDS - 1;
 
+// The three numbers compiled code forms a heap address from are declared in
+// `cove_native::abi`, beside the layout they describe, and these are the
+// declarations they describe. A mismatch would be a native tier reading the
+// wrong word of the right heap, which no test could usefully diagnose, so it is
+// a build failure instead.
+const _: () = assert!(
+    STACK_WORDS == cove_native::HEAP_ORIGIN_WORDS,
+    "the heap begins where `cove_native` says it does"
+);
+const _: () = assert!(
+    CHUNK_SHIFT == cove_native::HEAP_CHUNK_SHIFT,
+    "a heap chunk is the size `cove_native` says it is"
+);
+const _: () = assert!(
+    CHUNK_WORDS == cove_native::HEAP_CHUNK_WORDS,
+    "a heap chunk is the size `cove_native` says it is"
+);
+
 /// Whether a linear address names a word of the stack region.
 ///
 /// This one comparison is the entire region decoder, and the entire knowledge
@@ -345,6 +363,40 @@ impl Words {
             .get()
             .expect("a committed heap word is in a chunk that exists");
         &chunk[(index & CHUNK_MASK) as usize..]
+    }
+
+    /// How many chunks this store could ever hold.
+    ///
+    /// The whole spine, committed or not, which is what a reader that wants a
+    /// table it can size once needs — see [`Memory::chunk_bases`].
+    fn chunk_capacity(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// Appends the base pointer of every committed chunk this `into` does not
+    /// already hold.
+    ///
+    /// The committed chunks are a *prefix*: [`commit`](Words::commit) runs from
+    /// the bump pointer upward and the free list hands back words inside chunks
+    /// that already exist, so a chunk is committed only after every chunk below
+    /// it is. That is what makes this incremental — it resumes at `into.len()`
+    /// and stops at the first chunk that is not there — and what makes stopping
+    /// correct rather than a guess.
+    ///
+    /// The pointers are `*mut u64` rather than `*mut AtomicU64`, and that is the
+    /// whole of what compiled code is told about the heap. An `AtomicU64` has the
+    /// size and alignment of a `u64`, and a `Relaxed` load or store of one is a
+    /// plain load or store on every target Cove's native tier runs on; the
+    /// ordering that makes one task's writes visible to another is the
+    /// release/acquire pair on a cell's lock word, as it already was. See
+    /// [`Words`]'s own note.
+    fn bases(&self, into: &mut Vec<*mut u64>) {
+        while into.len() < self.chunks.len() {
+            match self.chunks[into.len()].get() {
+                Some(chunk) => into.push(chunk.as_ptr().cast_mut().cast::<u64>()),
+                None => break,
+            }
+        }
     }
 
     /// Commits every chunk holding a word in `[from, to)`.
@@ -605,6 +657,16 @@ impl Space {
     #[inline]
     fn load(&self, addr: u64) -> u64 {
         self.words.at(addr - STACK_WORDS).load(Ordering::Relaxed)
+    }
+
+    /// See [`Words::bases`].
+    fn chunk_bases(&self, into: &mut Vec<*mut u64>) {
+        self.words.bases(into);
+    }
+
+    /// See [`Words::chunk_capacity`].
+    fn chunk_capacity(&self) -> usize {
+        self.words.chunk_capacity()
     }
 
     #[inline]
@@ -1802,6 +1864,32 @@ impl Memory {
     pub(crate) fn stack_index(&self, base: u64) -> usize {
         debug_assert!(is_stack(base), "a frame base is a stack address");
         self.stack.at(base)
+    }
+
+    /// The first word of this task's segment, as a pointer.
+    ///
+    /// The whole of what compiled code is told about the stack: a slot of a frame
+    /// at word index `n` is this pointer plus `n`. It is *not* stable — the `Vec`
+    /// behind it reallocates whenever a frame is pushed — which is why
+    /// `cove_native::NativeCtx` holds it in a field the generated code re-loads
+    /// rather than in a register, and why every helper that can push a frame
+    /// stores the current one back before it returns.
+    pub(crate) fn words_ptr(&mut self) -> *mut u64 {
+        self.stack.words.as_mut_ptr()
+    }
+
+    /// See [`Words::bases`]: one pointer per committed heap chunk, appended to
+    /// what `into` already holds.
+    pub(crate) fn chunk_bases(&self, into: &mut Vec<*mut u64>) {
+        self.space.chunk_bases(into);
+    }
+
+    /// How many chunks this run's heap could ever hold.
+    ///
+    /// What a caller reserves a [`Memory::chunk_bases`] table with, so that the
+    /// table's *address* never changes while compiled code holds it.
+    pub(crate) fn chunk_capacity(&self) -> usize {
+        self.space.chunk_capacity()
     }
 
     /// The word at `index` of this task's segment.

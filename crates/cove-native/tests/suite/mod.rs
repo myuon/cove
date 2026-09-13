@@ -33,10 +33,11 @@ use std::sync::Arc;
 
 use cove_diag::{FileId, Span};
 use cove_ir::{
-    ArithOp, CmpOp, Compare, Function, FunctionId, Inst, Layout, LayoutId, Num, Program, RefMap,
-    Repr, StrId,
+    Arg, ArgsId, ArithOp, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout, LayoutId,
+    Num, Program, RefMap, Repr, StrId, Table, TableId,
 };
 use cove_native::{Entry, NativeCtx, NativeHelpers, Outcome, Raise};
+use cove_native::{HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS};
 
 // --- the safepoint helper -----------------------------------------------------
 
@@ -52,6 +53,16 @@ thread_local! {
     pub static POLLS: RefCell<Vec<(u32, u64)>> = const { RefCell::new(Vec::new()) };
     /// How many safepoints to allow before answering "stop".
     pub static POLLS_ALLOWED: Cell<usize> = const { Cell::new(usize::MAX) };
+    /// A word of the frame the safepoint helper reads, by index into `words`.
+    ///
+    /// How the claim in `cove_native::abi` — "at a safepoint every live reference
+    /// is already in the slot the frame's static map names" — is *tested* rather
+    /// than argued: the helper is the collector's stand-in, and what it can see
+    /// is exactly what a root walk can see. If an arm kept a reference only in a
+    /// register across the call, the word this reads would be stale or zero.
+    pub static WATCHED: Cell<Option<usize>> = const { Cell::new(None) };
+    /// What [`WATCHED`] held at each safepoint, in order.
+    pub static WATCHED_SAW: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The runtime's half of the boundary, as a test double.
@@ -62,14 +73,116 @@ thread_local! {
 /// what compiled code can observe about it.
 ///
 /// [ADR 0040]: ../../../../docs/adr/0040-a-bound-outlives-its-backend.md
-unsafe extern "C" fn safepoint(_ctx: *mut NativeCtx, pc: u32, work: u64) -> bool {
+unsafe extern "C" fn safepoint(ctx: *mut NativeCtx, pc: u32, work: u64) -> bool {
     POLLS.with(|polls| polls.borrow_mut().push((pc, work)));
+    if let Some(at) = WATCHED.with(Cell::get) {
+        // Safety: the caller set `at` to an index inside the `words` it handed
+        // the entry point.
+        let word = (*ctx).words.add(at).read();
+        WATCHED_SAW.with(|saw| saw.borrow_mut().push(word));
+    }
     let taken = POLLS.with(|polls| polls.borrow().len());
     taken < POLLS_ALLOWED.with(Cell::get)
 }
 
+/// One call compiled code made through [`CallFn`](cove_native::CallFn).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Called {
+    pub base: u64,
+    pub pc: u32,
+    pub callee: u32,
+    pub args: u32,
+    pub dst: u32,
+    /// The unpaid work the caller published before handing over.
+    ///
+    /// A call is a safepoint — a callee may allocate and an allocation may
+    /// collect — so the work goes over with it, and this is what says the arm
+    /// published it rather than dropping it.
+    pub work: u64,
+}
+
+thread_local! {
+    /// Every call this thread's compiled code has made, in order.
+    pub static CALLS: RefCell<Vec<Called>> = const { RefCell::new(Vec::new()) };
+    /// What the next call answers, and the one after it: an [`Outcome`] as its
+    /// ABI number, taken from the front.
+    ///
+    /// Empty means "return", which is what a leaf answer is. A script is how a
+    /// raise and a stop coming *out of a callee* are tested without a runtime to
+    /// raise one.
+    pub static CALL_ANSWERS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The runtime's call helper, as a test double.
+///
+/// A real one opens the callee's frame with the runtime's own `open_frame` and
+/// runs it on whichever tier it is on. This one records the hand-over and writes
+/// one word — `callee * 1000 + dst`, a number no other part of a frame holds —
+/// into the destination slot, which is enough to say that the caller named the
+/// slot the IR named and that the answer arrived where the next instruction
+/// reads it.
+///
+/// # Safety
+///
+/// `ctx` is the pointer the entry point was called with, and `base + dst` is a
+/// slot of the caller's frame, which `crate::subset`'s `supported` bounded.
+unsafe extern "C" fn call(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    callee: u32,
+    args: u32,
+    dst: u32,
+) -> u32 {
+    let work = (*ctx).pending_work;
+    CALLS.with(|calls| {
+        calls.borrow_mut().push(Called {
+            base,
+            pc,
+            callee,
+            args,
+            dst,
+            work,
+        })
+    });
+    // A real helper charges what it was handed, so a real one clears it.
+    (*ctx).pending_work = 0;
+    let scripted = CALL_ANSWERS.with(|answers| {
+        let mut answers = answers.borrow_mut();
+        if answers.is_empty() {
+            None
+        } else {
+            Some(answers.remove(0))
+        }
+    });
+    match scripted {
+        None | Some(0) => {
+            let at = (*ctx).words.add((base + u64::from(dst)) as usize);
+            at.write(u64::from(callee) * 1000 + u64::from(dst));
+            Outcome::Returned.abi()
+        }
+        Some(other) => other,
+    }
+}
+
 pub fn helpers() -> NativeHelpers {
-    NativeHelpers { safepoint }
+    NativeHelpers { safepoint, call }
+}
+
+pub fn calls() -> Vec<Called> {
+    CALLS.with(|calls| calls.borrow().clone())
+}
+
+pub fn forget_calls() {
+    CALLS.with(|calls| calls.borrow_mut().clear());
+    CALL_ANSWERS.with(|answers| answers.borrow_mut().clear());
+}
+
+/// Scripts what the next calls answer. See [`CALL_ANSWERS`].
+pub fn calls_answer(outcomes: &[Outcome]) {
+    CALL_ANSWERS.with(|answers| {
+        *answers.borrow_mut() = outcomes.iter().map(|outcome| outcome.abi()).collect()
+    });
 }
 
 pub fn polls() -> Vec<(u32, u64)> {
@@ -79,6 +192,17 @@ pub fn polls() -> Vec<(u32, u64)> {
 pub fn forget_polls() {
     POLLS.with(|polls| polls.borrow_mut().clear());
     POLLS_ALLOWED.with(|allowed| allowed.set(usize::MAX));
+    WATCHED.with(|watched| watched.set(None));
+    WATCHED_SAW.with(|saw| saw.borrow_mut().clear());
+}
+
+/// Asks the safepoint helper to read word `at` of the frame's segment.
+pub fn watch(at: usize) {
+    WATCHED.with(|watched| watched.set(Some(at)));
+}
+
+pub fn watched() -> Vec<u64> {
+    WATCHED_SAW.with(|saw| saw.borrow().clone())
 }
 
 // --- the arm under test -------------------------------------------------------
@@ -111,6 +235,12 @@ pub const PAIR: LayoutId = LayoutId(4);
 pub const DURATION: LayoutId = LayoutId(5);
 /// An `Int` and a reference inline, which is a `struct Pair { n: Int, s: String }`.
 pub const REF_PAIR: LayoutId = LayoutId(6);
+/// One `Repr::Tag` word, which is what an enum with no payload is.
+pub const TAG: LayoutId = LayoutId(7);
+/// One reference word.
+pub const REF: LayoutId = LayoutId(8);
+/// An `Int` and a `Repr::Host` word inline, which no arm lowers.
+pub const HOST_PAIR: LayoutId = LayoutId(9);
 
 pub fn span() -> Span {
     Span::new(FileId(0), 0, 0)
@@ -160,9 +290,39 @@ pub fn program(function: Function) -> Program {
                 },
                 vec![Repr::Int, Repr::Ref],
             ),
+            Layout::word("Kind", Repr::Tag),
+            Layout::word("Ref", Repr::Ref),
+            Layout::inline(
+                "HostPair",
+                cove_ir::Shape::Struct {
+                    fields: Vec::new(),
+                    opaque: false,
+                },
+                vec![Repr::Int, Repr::Host],
+            ),
         ],
+        // `ArgsId(0)` is the empty argument list, which is what a call in these
+        // tests hands over: the double records the hand-over and does not read
+        // the list, and a table with nothing in it would panic the subset
+        // predicate that bounds every argument's slot.
+        args: vec![Vec::new()],
         ..Program::default()
     }
+}
+
+/// The same program, with switch tables.
+pub fn program_with_tables(function: Function, tables: Vec<Table>) -> Program {
+    Program {
+        tables,
+        ..program(function)
+    }
+}
+
+/// The same program, with one non-empty argument list at `ArgsId(1)`.
+pub fn program_with_args(function: Function, args: Vec<Arg>) -> Program {
+    let mut held = program(function);
+    held.args.push(args);
+    held
 }
 
 /// What one entry into compiled code answered.
@@ -171,6 +331,11 @@ pub struct Answer {
     pub return_slot: u32,
     pub raise: Option<Raise>,
     pub raise_detail: u32,
+    /// Which instruction raised, and the two numbers an out-of-range message
+    /// names. See [`NativeCtx::raise_pc`].
+    pub raise_pc: u32,
+    pub raise_a: i64,
+    pub raise_b: i64,
     pub pending_work: u64,
 }
 
@@ -188,8 +353,87 @@ pub fn run<A: Arm>(program: &Program, words: &mut [u64], base: u64) -> Answer {
     enter(&jit, compiled, words, base)
 }
 
+/// A heap for the tests, in the shape compiled code addresses one.
+///
+/// One `Vec<u64>` per chunk and a table of their base pointers, which is what
+/// [`NativeCtx::chunks`] is. The real heap's chunks are `AtomicU64` and are
+/// committed by the allocator; these are plain words and all of them exist,
+/// which is a difference no emitted instruction can see — a `Relaxed` load of an
+/// `AtomicU64` is a plain load, and the table says nothing about how a chunk
+/// came to be there.
+///
+/// It holds more than one chunk on purpose. The whole of the chunk arithmetic is
+/// only exercised by an object whose words are *not* all in chunk zero, and an
+/// object that straddles a boundary is the case a single-chunk heap would have
+/// let through.
+pub struct Heap {
+    held: Vec<Vec<u64>>,
+    table: Vec<*mut u64>,
+}
+
+impl Heap {
+    pub fn new(chunks: usize) -> Heap {
+        let mut held: Vec<Vec<u64>> = (0..chunks)
+            .map(|_| vec![0u64; HEAP_CHUNK_WORDS as usize])
+            .collect();
+        let table = held.iter_mut().map(|chunk| chunk.as_mut_ptr()).collect();
+        Heap { held, table }
+    }
+
+    /// The linear address of heap word `index`, which is what a `Repr::Ref` slot
+    /// holds.
+    pub fn addr(&self, index: u64) -> u64 {
+        HEAP_ORIGIN_WORDS + index
+    }
+
+    pub fn set(&mut self, index: u64, word: u64) {
+        let chunk = (index / HEAP_CHUNK_WORDS) as usize;
+        let at = (index % HEAP_CHUNK_WORDS) as usize;
+        self.held[chunk][at] = word;
+    }
+
+    pub fn get(&self, index: u64) -> u64 {
+        let chunk = (index / HEAP_CHUNK_WORDS) as usize;
+        let at = (index % HEAP_CHUNK_WORDS) as usize;
+        self.held[chunk][at]
+    }
+
+    /// An object's header at `index`, and its payload from `index + 1`.
+    ///
+    /// `mem::header`: the layout in the high half and the length field in the
+    /// low one. The length means whatever the layout says — a byte count for a
+    /// string, an element count for an array.
+    pub fn object(&mut self, index: u64, layout: LayoutId, len: u32) -> u64 {
+        self.set(index, (u64::from(layout.0) << 32) | u64::from(len));
+        self.addr(index)
+    }
+
+    pub fn table(&self) -> *const *mut u64 {
+        self.table.as_ptr()
+    }
+}
+
+pub fn run_over<A: Arm>(program: &Program, words: &mut [u64], base: u64, heap: &Heap) -> Answer {
+    let mut jit = A::new(helpers());
+    let compiled = jit
+        .compile(program, FunctionId(0))
+        .expect("the function is inside the slice");
+    jit.finalize();
+    enter_over(&jit, compiled, words, base, heap.table())
+}
+
 pub fn enter<A: Arm>(jit: &A, compiled: A::Handle, words: &mut [u64], base: u64) -> Answer {
-    let mut ctx = NativeCtx::new(std::ptr::null_mut(), words.as_mut_ptr());
+    enter_over(jit, compiled, words, base, std::ptr::null())
+}
+
+pub fn enter_over<A: Arm>(
+    jit: &A,
+    compiled: A::Handle,
+    words: &mut [u64],
+    base: u64,
+    chunks: *const *mut u64,
+) -> Answer {
+    let mut ctx = NativeCtx::new(std::ptr::null_mut(), words.as_mut_ptr()).over_heap(chunks);
     let entry = jit.entry(compiled);
     // Safety: `ctx.words` is `words`, `base` indexes into it, and the
     // functions below are all built with frames that fit inside it.
@@ -199,6 +443,9 @@ pub fn enter<A: Arm>(jit: &A, compiled: A::Handle, words: &mut [u64], base: u64)
         return_slot: ctx.return_slot,
         raise: ctx.raise(),
         raise_detail: ctx.raise_detail,
+        raise_pc: ctx.raise_pc,
+        raise_a: ctx.raise_a,
+        raise_b: ctx.raise_b,
         pending_work: ctx.pending_work,
     }
 }
@@ -835,37 +1082,21 @@ pub fn anything_outside_the_slice_refuses_the_whole_function<A: Arm>() {
             )),
         ),
         (
-            "a call, which needs the entry table the next slice builds",
+            "a frame holding a host handle, however scalar its instructions are",
             program(function(
-                vec![Repr::Int],
-                INT,
-                vec![
-                    Inst::Call {
-                        dst: 0,
-                        callee: FunctionId(0),
-                        args: cove_ir::ArgsId(0),
-                    },
-                    Inst::Return { src: 0 },
-                ],
-            )),
-        ),
-        (
-            "a frame holding a reference, however scalar its instructions are",
-            program(function(
-                vec![Repr::Int, Repr::Ref],
+                vec![Repr::Int, Repr::Host],
                 INT,
                 vec![Inst::Int { dst: 0, value: 1 }, Inst::Return { src: 0 }],
             )),
         ),
-        // The two reference checks overlap in any *real* program — a function
-        // that copies a layout holding a reference has a reference slot to
-        // copy it into, so the frame check above would already have refused
-        // it. This row exercises the layout check on its own, which is why its
-        // frame is scalar and the program is one no lowering would emit: a
-        // check that is only ever reached behind another check is a check
-        // nothing tests.
+        // The two `Repr` checks overlap in any *real* program — a function that
+        // copies a layout holding a host handle has a `Repr::Host` slot to copy
+        // it into, so the frame check above would already have refused it. This
+        // row exercises the layout check on its own, which is why its frame is
+        // scalar and the program is one no lowering would emit: a check that is
+        // only ever reached behind another check is a check nothing tests.
         (
-            "a copy of a layout holding a reference",
+            "a copy of a layout holding a host handle",
             program(function(
                 vec![Repr::Int, Repr::Int, Repr::Int, Repr::Int],
                 INT,
@@ -873,12 +1104,21 @@ pub fn anything_outside_the_slice_refuses_the_whole_function<A: Arm>() {
                     Inst::Copy {
                         dst: 2,
                         src: 0,
-                        layout: REF_PAIR,
+                        layout: HOST_PAIR,
                     },
                     Inst::Return { src: 2 },
                 ],
             )),
         ),
+        ("a stub, which stands in for a body no lowering lowered", {
+            let mut held = program(function(
+                vec![Repr::Int],
+                INT,
+                vec![Inst::Int { dst: 0, value: 1 }, Inst::Return { src: 0 }],
+            ));
+            held.functions[0].stub = true;
+            held
+        }),
         (
             "a jump past the end, which the IR verifier refuses too",
             program(function(
@@ -987,4 +1227,418 @@ pub fn one_code_generator_holds_many_functions<A: Arm>() {
         Outcome::Returned
     );
     assert_eq!(words[1], 10);
+}
+
+// --- the covefmt slice -------------------------------------------------------
+//
+// Everything below was added for the second raced slice: `covefmt.byteOfPunct`
+// and `covefmt.wantsASpaceBetween`, which between them need an `Array` element
+// read, an enum's tag and switch, a tag comparison, `String.byteAt`, a length,
+// and calls. Every expectation cites the arm of
+// `crates/cove-runtime/src/vm/exec/encoded.rs` it mirrors, as the ones above do.
+
+/// A reference slot is inside the slice, which is the other half of the
+/// `Repr::Host` refusal above.
+///
+/// It is worth asserting on its own because it was a refusal one slice ago, and
+/// what changed is not a code generator but the collector argument: the frame is
+/// the canonical home of every value at every instruction boundary, so a
+/// `Repr::Ref` slot is a root the existing walk already finds. See
+/// `cove_native::abi`'s "References are live here".
+pub fn a_reference_slot_is_inside_the_slice<A: Arm>() {
+    let held = program(function(
+        vec![Repr::Ref, Repr::Ref],
+        REF,
+        vec![
+            Inst::Copy {
+                dst: 1,
+                src: 0,
+                layout: REF,
+            },
+            Inst::Return { src: 1 },
+        ],
+    ));
+    assert!(compiles::<A>(&held));
+    let mut words = vec![0u64, 0, 0xfeed_beef, 0];
+    let answer = run::<A>(&held, &mut words, 2);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(answer.return_slot, 1);
+    assert_eq!(words[3], 0xfeed_beef, "the reference was copied as a word");
+}
+
+/// `encoded.rs`'s `FUNC_REF | CONST_TAG` arm (line 1071): a case index is
+/// written by the same store a constant is.
+pub fn a_tag_is_the_case_index_as_a_word<A: Arm>() {
+    let held = program(function(
+        vec![Repr::Tag],
+        TAG,
+        vec![
+            Inst::Tag {
+                dst: 0,
+                layout: TAG,
+                case: CaseId(3),
+            },
+            Inst::Return { src: 0 },
+        ],
+    ));
+    let mut words = vec![0u64; 4];
+    let answer = run::<A>(&held, &mut words, 3);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[3], 3);
+}
+
+/// `encoded.rs`'s `EQ_TAG`/`NE_TAG` arms (line 1143), which are `cmp_word!`:
+/// two case indices compare as the words they are.
+pub fn a_tag_comparison_is_a_word_comparison<A: Arm>() {
+    for (a, b, same) in [(1u64, 1u64, 1u64), (1, 2, 0), (0, 0, 1)] {
+        let held = program(function(
+            vec![Repr::Tag, Repr::Tag, Repr::Bool],
+            BOOL,
+            vec![
+                Inst::Cmp {
+                    on: Compare::Tag,
+                    op: CmpOp::Eq,
+                    dst: 2,
+                    a: 0,
+                    b: 1,
+                },
+                Inst::Return { src: 2 },
+            ],
+        ));
+        let mut words = vec![a, b, 0xdead];
+        let answer = run::<A>(&held, &mut words, 0);
+        assert_eq!(answer.outcome, Outcome::Returned);
+        assert_eq!(words[2], same, "{a} == {b}");
+    }
+}
+
+/// `encoded.rs`'s `NOT` arm (line 1170), which tests the whole *word* against
+/// zero rather than its low byte.
+pub fn not_tests_the_whole_word<A: Arm>() {
+    for (given, answer) in [(0u64, 1u64), (1, 0), (0x100, 0), (u64::MAX, 0)] {
+        let held = program(function(
+            vec![Repr::Bool, Repr::Bool],
+            BOOL,
+            vec![Inst::Not { dst: 1, a: 0 }, Inst::Return { src: 1 }],
+        ));
+        let mut words = vec![given, 0xdead];
+        assert_eq!(run::<A>(&held, &mut words, 0).outcome, Outcome::Returned);
+        assert_eq!(words[1], answer, "!{given:#x}");
+    }
+}
+
+/// `encoded.rs`'s `LEN` arm (line 1620): the header's length field, and a null
+/// reference refused first.
+pub fn a_len_reads_the_header_and_refuses_null<A: Arm>() {
+    let held = program(function(
+        vec![Repr::Ref, Repr::Int],
+        INT,
+        vec![Inst::Len { dst: 1, obj: 0 }, Inst::Return { src: 1 }],
+    ));
+
+    // An object in the *second* chunk, so the chunk arithmetic is exercised
+    // rather than a heap whose every word is in chunk zero.
+    let at = HEAP_CHUNK_WORDS + 17;
+    let mut heap = Heap::new(2);
+    let addr = heap.object(at, INT, 4242);
+    let mut words = vec![addr, 0];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[1], 4242);
+
+    let mut words = vec![0u64, 0];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Raised);
+    assert_eq!(answer.raise, Some(Raise::NullObject));
+    assert_eq!(answer.raise_pc, 0);
+}
+
+/// `encoded.rs`'s `LOAD_ELEM` arm (line 1425), which is `Machine::element` and
+/// then a copy at the element layout's stride.
+///
+/// The element is two words wide, so this is also the assertion that the stride
+/// is the *element's* width and not one: `Machine::element` answers
+/// `at as u32 * width`.
+pub fn a_load_elem_strides_and_bounds_its_index<A: Arm>() {
+    let held = program(function(
+        vec![Repr::Ref, Repr::Int, Repr::Int, Repr::Int],
+        PAIR,
+        vec![
+            Inst::LoadElem {
+                dst: 2,
+                obj: 0,
+                index: 1,
+                layout: PAIR,
+            },
+            Inst::Return { src: 2 },
+        ],
+    ));
+
+    // Three two-word elements, laid out so the last of them is in the next
+    // chunk: an object that straddles a boundary is the case one chunk would
+    // have let through.
+    let at = HEAP_CHUNK_WORDS - 4;
+    let build = || {
+        let mut heap = Heap::new(2);
+        heap.object(at, PAIR, 3);
+        for word in 0..6u64 {
+            heap.set(at + 1 + word, 100 + word);
+        }
+        heap
+    };
+
+    for (index, first, second) in [(0i64, 100u64, 101u64), (1, 102, 103), (2, 104, 105)] {
+        let heap = build();
+        let mut words = vec![heap.addr(at), index as u64, 0, 0];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "index {index}");
+        assert_eq!(answer.return_slot, 2);
+        assert_eq!((words[2], words[3]), (first, second), "index {index}");
+    }
+
+    // `Machine::element`: "index {at} is outside a collection of {len}", for a
+    // negative index as much as for a large one.
+    for index in [3i64, -1, i64::MIN] {
+        let heap = build();
+        let mut words = vec![heap.addr(at), index as u64, 0, 0];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Raised, "index {index}");
+        assert_eq!(answer.raise, Some(Raise::IndexOutOfRange));
+        assert_eq!(answer.raise_a, index);
+        assert_eq!(answer.raise_b, 3);
+    }
+
+    let heap = build();
+    let mut words = vec![0u64, 0, 0, 0];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.raise, Some(Raise::NullObject));
+}
+
+/// `encoded.rs`'s `BYTE_AT` arm (line 1456): a payload read, a shift and a mask,
+/// eight bytes to a word and least-significant byte first.
+pub fn a_byte_at_reads_one_byte_and_bounds_it<A: Arm>() {
+    let held = program(function(
+        vec![Repr::Ref, Repr::Int, Repr::Int],
+        INT,
+        vec![
+            Inst::ByteAt {
+                dst: 2,
+                obj: 0,
+                at: 1,
+            },
+            Inst::Return { src: 2 },
+        ],
+    ));
+
+    // Ten bytes over two payload words, and the object placed so the second of
+    // them is in the next chunk.
+    let bytes: [u8; 10] = [7, 8, 9, 10, 200, 0, 255, 1, 42, 43];
+    let at = HEAP_CHUNK_WORDS - 2;
+    let build = || {
+        let mut heap = Heap::new(2);
+        heap.object(at, INT, bytes.len() as u32);
+        for (word, run) in bytes.chunks(8).enumerate() {
+            let mut packed = 0u64;
+            for (byte, value) in run.iter().enumerate() {
+                packed |= u64::from(*value) << (byte * 8);
+            }
+            heap.set(at + 1 + word as u64, packed);
+        }
+        heap
+    };
+
+    for (offset, byte) in bytes.iter().enumerate() {
+        let heap = build();
+        let mut words = vec![heap.addr(at), offset as u64, 0xdead];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "byte {offset}");
+        assert_eq!(words[2], u64::from(*byte), "byte {offset}");
+    }
+
+    for offset in [10i64, -1] {
+        let heap = build();
+        let mut words = vec![heap.addr(at), offset as u64, 0];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Raised, "byte {offset}");
+        assert_eq!(answer.raise, Some(Raise::ByteOffset));
+        assert_eq!(answer.raise_a, offset);
+        assert_eq!(answer.raise_b, 10, "the length, not the last legal offset");
+    }
+}
+
+/// `encoded.rs`'s `SWITCH` arm (line 1234):
+/// `targets.get(index).unwrap_or(&default)`.
+///
+/// The word above `u32::MAX` is the case that matters. It is what a switch reads
+/// out of a slot the program filled, the machine does not take the lowering's
+/// word for what is in it, and one arm reaches its jump table through an `i32`.
+pub fn a_switch_takes_its_case_or_the_default<A: Arm>() {
+    let held = program_with_tables(
+        function(
+            vec![Repr::Tag, Repr::Int],
+            INT,
+            vec![
+                Inst::Switch {
+                    on: 0,
+                    table: TableId(0),
+                },
+                Inst::Int { dst: 1, value: 11 },
+                Inst::Return { src: 1 },
+                Inst::Int { dst: 1, value: 22 },
+                Inst::Return { src: 1 },
+                Inst::Int { dst: 1, value: 33 },
+                Inst::Return { src: 1 },
+            ],
+        ),
+        vec![Table {
+            targets: vec![1, 3],
+            default: 5,
+        }],
+    );
+    for (index, answer) in [
+        (0u64, 11u64),
+        (1, 22),
+        (2, 33),
+        (1 << 32, 33),
+        ((1 << 32) | 1, 33),
+        (u64::MAX, 33),
+    ] {
+        let mut words = vec![index, 0];
+        let left = run::<A>(&held, &mut words, 0);
+        assert_eq!(left.outcome, Outcome::Returned, "case {index}");
+        assert_eq!(words[1], answer, "case {index}");
+    }
+}
+
+/// A call is handed to the runtime whole, and what comes back decides.
+///
+/// The helper is a double — see [`call`] — so what is asserted here is the
+/// *protocol* and not a callee's answer: the caller's frame and the call's own
+/// pc go over, the unpaid work goes with them, the answer lands in the slot the
+/// IR named, and an outcome that is not `Returned` leaves the function carrying
+/// that outcome.
+pub fn a_call_hands_over_and_an_outcome_travels_out<A: Arm>() {
+    let held = program_with_args(
+        function(
+            vec![Repr::Int, Repr::Int, Repr::Int],
+            INT,
+            vec![
+                Inst::Int { dst: 0, value: 5 },
+                Inst::Call {
+                    dst: 2,
+                    callee: FunctionId(0),
+                    args: ArgsId(1),
+                },
+                Inst::Return { src: 2 },
+            ],
+        ),
+        vec![Arg {
+            slot: 0,
+            layout: INT,
+        }],
+    );
+
+    forget_polls();
+    forget_calls();
+    let mut words = vec![0u64; 7];
+    let answer = run::<A>(&held, &mut words, 4);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(answer.return_slot, 2);
+    // The double writes `callee * 1000 + dst`, which for `FunctionId(0)` into
+    // slot 2 is 2 — a number no other word of this frame holds.
+    assert_eq!(words[6], 2, "the answer landed in `dst`");
+    assert_eq!(
+        calls(),
+        vec![Called {
+            base: 4,
+            pc: 1,
+            callee: 0,
+            args: 1,
+            dst: 2,
+            // Three instructions in the one block, charged at its entry and
+            // still unpaid when the call handed over.
+            work: 3,
+        }]
+    );
+
+    // A raise out of a callee leaves this function with the callee's outcome,
+    // and does not overwrite what the helper recorded about it.
+    forget_calls();
+    calls_answer(&[Outcome::Raised]);
+    let mut words = vec![0u64; 7];
+    let answer = run::<A>(&held, &mut words, 4);
+    assert_eq!(answer.outcome, Outcome::Raised);
+    assert_eq!(answer.raise, None, "the runtime holds the error, not this");
+
+    // And so does a stop.
+    forget_calls();
+    calls_answer(&[Outcome::Stopped]);
+    let mut words = vec![0u64; 7];
+    assert_eq!(run::<A>(&held, &mut words, 4).outcome, Outcome::Stopped);
+}
+
+/// A reference is in its slot at every safepoint, and that is checked rather
+/// than reasoned about.
+///
+/// ADR 0055's "Collection uses the VM stack as the first root map" is only true
+/// if every live reference is materialised in its Cove slot before a safepoint.
+/// Neither arm register-promotes, so it *should* be true at every instruction
+/// boundary — but "should" is what this test is for: the safepoint helper stands
+/// where the collector stands and reads the frame word the reference lives in.
+///
+/// The loop is what makes there be safepoints at all: they go on backedges, and a
+/// function with no loop reaches one only at a call. So this is a counting loop
+/// that never touches the reference, which is the case a register allocator would
+/// get wrong — a value nothing in the loop reads is exactly the one an optimiser
+/// would be happiest to leave somewhere else.
+pub fn a_reference_is_in_its_slot_at_every_safepoint<A: Arm>() {
+    forget_polls();
+    let held = program(function(
+        vec![Repr::Ref, Repr::Int, Repr::Int, Repr::Bool],
+        INT,
+        vec![
+            Inst::Int { dst: 2, value: 0 },
+            Inst::Cmp {
+                on: Compare::Int,
+                op: CmpOp::Lt,
+                dst: 3,
+                a: 2,
+                b: 1,
+            },
+            Inst::BranchFalse { cond: 3, to: 5 },
+            Inst::ArithImm {
+                op: ArithOp::Add,
+                dst: 2,
+                a: 2,
+                value: 1,
+            },
+            Inst::Jump { to: 1 },
+            Inst::Return { src: 2 },
+        ],
+    ));
+
+    // The frame does not begin at word zero, so a slot address formed as if it
+    // did would read the wrong word and this test would notice.
+    let base = 3usize;
+    let sentinel = 0x1234_5678_9abc_def0u64;
+    let mut words = vec![0u64; base + 4];
+    words[base] = sentinel;
+    words[base + 1] = 5;
+    // Slot 0 of the frame, which is where the reference is and where the frame's
+    // static `refs` map says a collector will look for it.
+    watch(base);
+
+    let answer = run::<A>(&held, &mut words, base as u64);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[base + 2], 5, "the loop ran");
+    assert_eq!(
+        words[base], sentinel,
+        "the reference is still in its slot when the function leaves"
+    );
+    let saw = watched();
+    assert_eq!(saw.len(), 5, "one safepoint per backedge");
+    assert!(
+        saw.iter().all(|word| *word == sentinel),
+        "the reference was in its slot at every safepoint, and what was seen was {saw:?}"
+    );
 }

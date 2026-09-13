@@ -27,17 +27,24 @@ use std::ptr;
 
 use cove_ir::{ArithOp, CmpOp, Function, FunctionId, Inst, Num, Program, Slot};
 
-use crate::abi::{Entry, NativeCtx, NativeHelpers, Outcome, Raise};
+use crate::abi::{
+    Entry, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
+    HEAP_ORIGIN_WORDS,
+};
 use crate::subset::{by_zero_of, leaders, overflow_of, slot_offset, supported};
 use crate::Unavailable;
 
 // The `NativeCtx` field offsets, read from the declaration rather than written
 // out, exactly as the Cranelift arm reads them.
 const OFF_WORDS: i32 = offset_of!(NativeCtx, words) as i32;
+const OFF_CHUNKS: i32 = offset_of!(NativeCtx, chunks) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
 const OFF_RETURN_SLOT: i32 = offset_of!(NativeCtx, return_slot) as i32;
 const OFF_RAISE_CODE: i32 = offset_of!(NativeCtx, raise_code) as i32;
 const OFF_RAISE_DETAIL: i32 = offset_of!(NativeCtx, raise_detail) as i32;
+const OFF_RAISE_PC: i32 = offset_of!(NativeCtx, raise_pc) as i32;
+const OFF_RAISE_A: i32 = offset_of!(NativeCtx, raise_a) as i32;
+const OFF_RAISE_B: i32 = offset_of!(NativeCtx, raise_b) as i32;
 
 // Register numbers, as the encoding uses them.
 const RAX: u8 = 0;
@@ -46,25 +53,38 @@ const RDX: u8 = 2;
 const RBX: u8 = 3;
 const RSI: u8 = 6;
 const RDI: u8 = 7;
+const R8: u8 = 8;
+const R9: u8 = 9;
 const R12: u8 = 12;
 const R13: u8 = 13;
 const R14: u8 = 14;
 const R15: u8 = 15;
 
 // What the four long-lived registers hold. All are callee-saved, so they
-// survive the safepoint call; `RAX`, `RCX` and `RDX` are the scratch the
-// templates compute in, and `RDX` is also what `idiv` clobbers.
-//
-// `R15` holds nothing. It is pushed so that five pushes leave `rsp` 16-byte
-// aligned at a `call`, which the System V ABI requires.
+// survive the safepoint and call helpers; `RAX`, `RCX` and `RDX` are the scratch
+// the templates compute in, and `RDX` is also what `idiv` clobbers.
 const CTX: u8 = RBX;
 const BASE_BYTES: u8 = R12;
 const WORK: u8 = R13;
 const FRAME: u8 = R14;
-const PAD: u8 = R15;
+
+// The three registers a heap word's address is formed in, which is the one
+// template that needs more than the three scratch above: the chunk table, the
+// chunk, and the index inside it are three live values at once.
+//
+// `RSI` and `RDI` are caller-saved and hold nothing between instructions — they
+// are written at a `call` and nowhere else — so using them here costs nothing.
+// `R15` is pushed by the prologue and is the fifth push, which is what leaves
+// `rsp` 16-byte aligned at a `call` as the System V ABI requires; it used to
+// hold nothing at all, and holding a scratch value inside one template does not
+// change what it is for.
+const HEAP_TABLE: u8 = RSI;
+const HEAP_INDEX: u8 = RDI;
+const HEAP_SPARE: u8 = R15;
 
 // Condition codes, as the low nibble of a `jcc`/`setcc` opcode.
 const CC_NO: u8 = 0x1;
+const CC_B: u8 = 0x2;
 const CC_E: u8 = 0x4;
 const CC_NE: u8 = 0x5;
 const CC_L: u8 = 0xc;
@@ -172,9 +192,19 @@ fn page_size() -> usize {
 /// makes: a freed page under a running Cove frame is not a bug anything could
 /// diagnose.
 pub struct Jit {
-    safepoint: usize,
+    helpers: Helpers,
     code: Vec<Mapping>,
     finalized: bool,
+}
+
+/// The helper addresses, as the numbers a `movabs` carries.
+///
+/// This arm's equivalent of the Cranelift arm's relocations: there is no linker
+/// here, so a helper's address is an immediate in the instruction stream.
+#[derive(Clone, Copy)]
+struct Helpers {
+    safepoint: usize,
+    call: usize,
 }
 
 impl Jit {
@@ -191,9 +221,10 @@ impl Jit {
             )));
         }
         Ok(Jit {
-            // The helper is bound as an address a `movabs` carries, which is
-            // this arm's equivalent of the Cranelift arm's relocation.
-            safepoint: helpers.safepoint as usize,
+            helpers: Helpers {
+                safepoint: helpers.safepoint as usize,
+                call: helpers.call as usize,
+            },
             code: Vec::new(),
             finalized: false,
         })
@@ -206,7 +237,7 @@ impl Jit {
         if !supported(program, function) {
             return None;
         }
-        let code = Emit::new(program, function, self.safepoint).run();
+        let code = Emit::new(program, function, &self.helpers).run();
         let mapping = Mapping::write(&code)?;
         self.code.push(mapping);
         self.finalized = false;
@@ -275,6 +306,13 @@ struct Emit<'a> {
     program: &'a Program,
     function: &'a Function,
     safepoint: usize,
+    call: usize,
+    /// Which IR instruction is being emitted.
+    ///
+    /// Only a raise reads it — [`NativeCtx::raise_pc`] is how the runtime finds
+    /// the span — and a raise is emitted from three methods down, so it is a
+    /// field rather than an argument threaded through each of them.
+    pc: usize,
     code: Vec<u8>,
     /// Every `rel32` emitted, patched in [`Emit::patch`] once the whole body is
     /// out — which is why a forward jump needs no second pass over the IR.
@@ -293,12 +331,14 @@ struct Emit<'a> {
 }
 
 impl<'a> Emit<'a> {
-    fn new(program: &'a Program, function: &'a Function, safepoint: usize) -> Self {
-        let blocks = leaders(function);
+    fn new(program: &'a Program, function: &'a Function, helpers: &Helpers) -> Self {
+        let blocks = leaders(program, function);
         Emit {
             program,
             function,
-            safepoint,
+            safepoint: helpers.safepoint,
+            call: helpers.call,
+            pc: 0,
             code: Vec::new(),
             fixups: Vec::new(),
             labels: Vec::new(),
@@ -318,6 +358,7 @@ impl<'a> Emit<'a> {
                 self.frame_live = false;
                 self.charge(length);
             }
+            self.pc = pc;
             self.inst(pc);
         }
         self.patch();
@@ -330,7 +371,7 @@ impl<'a> Emit<'a> {
     /// it is the byte offset, so the shift is paid once here rather than at
     /// every block that re-derives the frame pointer.
     fn prologue(&mut self) {
-        for reg in [CTX, BASE_BYTES, WORK, FRAME, PAD] {
+        for reg in [CTX, BASE_BYTES, WORK, FRAME, HEAP_SPARE] {
             self.push(reg);
         }
         self.mov_rr(CTX, RDI);
@@ -360,9 +401,42 @@ impl<'a> Emit<'a> {
                 self.mov_imm64(RAX, *value);
                 self.store_slot(*dst, RAX);
             }
+            // The same store `Inst::Int` makes, of a number the layout already
+            // fixed: `encoded.rs` shares its `FUNC_REF | CONST_TAG` arm with
+            // that one.
+            Inst::Tag { dst, case, .. } => {
+                self.mov_imm64(RAX, i64::from(case.0));
+                self.store_slot(*dst, RAX);
+            }
             Inst::Copy { dst, src, layout } => {
                 self.copy(*dst, *src, self.program.layout(*layout).width());
             }
+            // `encoded.rs`'s `NOT` arm tests the whole *word* against zero, not
+            // the low byte, so that is what is tested here.
+            Inst::Not { dst, a } => {
+                self.load_slot(RAX, *a);
+                self.test_rr(RAX, RAX);
+                self.setcc(CC_E);
+                self.movzx_eax_al();
+                self.store_slot(*dst, RAX);
+            }
+            Inst::Len { dst, obj } => {
+                self.load_slot(RAX, *obj);
+                self.refuse_null(RAX);
+                self.object_len(RAX);
+                self.store_slot(*dst, RAX);
+            }
+            Inst::LoadElem {
+                dst,
+                obj,
+                index,
+                layout,
+            } => {
+                self.load_elem(*dst, *obj, *index, self.program.layout(*layout).width());
+            }
+            Inst::ByteAt { dst, obj, at } => self.byte_at(*dst, *obj, *at),
+            Inst::Call { dst, callee, args } => self.callee(*dst, callee.0, args.0),
+            Inst::Switch { on, table } => self.switch(*on, *table),
             Inst::Arith {
                 num: Num::Int,
                 op,
@@ -468,6 +542,143 @@ impl<'a> Emit<'a> {
         self.frame();
         let at = slot_offset(slot).expect("`supported` bounded every slot");
         self.store(FRAME, at, from);
+    }
+
+    /// The heap word at the linear address in `reg`, into `reg`.
+    ///
+    /// `Memory::read`'s heap half, which is `Space::load`: subtract the heap
+    /// origin, find the chunk, and index inside it. The `Relaxed` atomic load
+    /// that Rust half performs is a plain `mov` on x86-64.
+    ///
+    /// **Eleven instructions, and the table is re-loaded from the context every
+    /// time.** That is this arm being a template compiler rather than an
+    /// oversight: the Cranelift arm computes the index once and loads the table
+    /// once for all three words of a `load-elem` of a `Token`, because it has a
+    /// value graph to common those loads out of, and this has a sequence of
+    /// templates. The difference is real code and is one of the things the
+    /// comparison is for.
+    ///
+    /// `reg` must not be one of the three heap scratch registers, which every
+    /// caller below satisfies by using `RAX`, `RCX` or `RDX`.
+    fn heap_word(&mut self, reg: u8) {
+        debug_assert!(
+            reg != HEAP_TABLE && reg != HEAP_INDEX && reg != HEAP_SPARE,
+            "a heap address is formed in the scratch, so it cannot live in it"
+        );
+        // The index into the heap region, which is what the chunk spine is
+        // addressed by. `HEAP_ORIGIN_WORDS` does not fit an `imm32`, so it is a
+        // `movabs` and a register subtraction rather than a `sub imm32`.
+        self.mov_rr(HEAP_INDEX, reg);
+        self.mov_imm64(HEAP_SPARE, HEAP_ORIGIN_WORDS as i64);
+        self.sub_rr(HEAP_INDEX, HEAP_SPARE);
+        // `chunks[index >> HEAP_CHUNK_SHIFT]`, addressed by adds rather than by
+        // a scaled-index `mov`: a `SIB` byte is a second addressing form and
+        // this encoder has one.
+        self.load(HEAP_TABLE, CTX, OFF_CHUNKS);
+        self.mov_rr(HEAP_SPARE, HEAP_INDEX);
+        self.shr_imm8(HEAP_SPARE, HEAP_CHUNK_SHIFT as u8);
+        self.shl_imm8(HEAP_SPARE, 3);
+        self.add_rr(HEAP_TABLE, HEAP_SPARE);
+        self.load(HEAP_TABLE, HEAP_TABLE, 0);
+        // And the word inside the chunk.
+        self.and_imm32(HEAP_INDEX, (HEAP_CHUNK_WORDS - 1) as i32);
+        self.shl_imm8(HEAP_INDEX, 3);
+        self.add_rr(HEAP_TABLE, HEAP_INDEX);
+        self.load(reg, HEAP_TABLE, 0);
+    }
+
+    /// `Memory::object_len`: the header's low half, in `reg`, as a non-negative
+    /// `Int`.
+    ///
+    /// `mov r32, r32` is the mask. A 32-bit move zeroes the upper half of its
+    /// destination, so this is the `as u32` and the `as i64` together in two
+    /// bytes — and `and r64, imm32` could not have been, because `0xFFFFFFFF` as
+    /// an `imm32` is sign-extended to `-1`.
+    fn object_len(&mut self, reg: u8) {
+        self.heap_word(reg);
+        self.mov_rr32(reg, reg);
+    }
+
+    /// Refuses a null reference, which every reader of an object does first.
+    ///
+    /// `Machine::element`, `encoded.rs`'s `LEN` and its `BYTE_AT` each begin
+    /// with `if addr == 0` and each answers `null_object()`.
+    fn refuse_null(&mut self, reg: u8) {
+        self.test_rr(reg, reg);
+        self.raise_unless(CC_NE, Raise::NullObject);
+    }
+
+    /// Raises unless `a` is below `b` as an unsigned comparison, carrying both
+    /// numbers out for the message.
+    ///
+    /// One comparison for `Machine::element`'s `at < 0 || at >= len`, and it is
+    /// exact rather than clever: a negative `i64` read as unsigned is larger
+    /// than any length, and a length is a `u32` masked out of a header.
+    fn raise_unless_below(&mut self, code: Raise, a: u8, b: u8) {
+        let fine = self.label();
+        self.cmp_rr(a, b);
+        self.jcc(CC_B, Target::Label(fine));
+        self.store(CTX, OFF_RAISE_A, a);
+        self.store(CTX, OFF_RAISE_B, b);
+        self.raise(code, 0);
+        self.bind(fine);
+    }
+
+    /// `encoded.rs`'s `LOAD_ELEM` arm: `Machine::element`, and then a copy of
+    /// `width` words out of the payload.
+    ///
+    /// `RAX` holds the object for the whole template and `RCX` the element's
+    /// payload offset; `RDX` is where each word is formed. No load is held back
+    /// as [`Emit::copy`] holds them back, because the source is the heap and the
+    /// destination is the frame: two regions, so there is nothing to overlap.
+    fn load_elem(&mut self, dst: Slot, obj: Slot, index: Slot, width: u32) {
+        self.load_slot(RAX, obj);
+        self.refuse_null(RAX);
+        self.load_slot(RCX, index);
+        self.mov_rr(RDX, RAX);
+        self.object_len(RDX);
+        self.raise_unless_below(Raise::IndexOutOfRange, RCX, RDX);
+        // The stride, which is what makes an `Array<Point>` a run of two-word
+        // elements. `Machine::element` multiplies in `u32`; this multiplies in
+        // `u64`, which agrees on every product the check above admits.
+        self.mov_imm64(RDX, i64::from(width));
+        self.imul_rr(RCX, RDX);
+        for word in 0..width {
+            self.mov_rr(RDX, RAX);
+            self.add_rr(RDX, RCX);
+            // The header is one word, so a payload word is one past it.
+            self.add_imm32(RDX, 1 + word as i32);
+            self.heap_word(RDX);
+            self.store_slot(dst + word, RDX);
+        }
+    }
+
+    /// `encoded.rs`'s `BYTE_AT` arm: a payload read, a shift and a mask.
+    ///
+    /// The bound is the string's *byte* length and the refusal is not
+    /// `Array.get`'s — see [`Inst::ByteAt`](cove_ir::Inst::ByteAt) for why a
+    /// byte offset out of range stops the run rather than answering an `Option`.
+    fn byte_at(&mut self, dst: Slot, obj: Slot, at: Slot) {
+        self.load_slot(RAX, obj);
+        self.refuse_null(RAX);
+        self.load_slot(RCX, at);
+        self.mov_rr(RDX, RAX);
+        self.object_len(RDX);
+        self.raise_unless_below(Raise::ByteOffset, RCX, RDX);
+        // Eight bytes to a word, least-significant byte first, so the word is
+        // `at / 8` and the byte inside it is `at % 8`.
+        self.mov_rr(RDX, RCX);
+        self.shr_imm8(RDX, 3);
+        self.add_imm32(RDX, 1);
+        self.add_rr(RDX, RAX);
+        self.heap_word(RDX);
+        // `shr` by a variable amount reads `cl` and nothing else, which is why
+        // the offset was left in `RCX`.
+        self.and_imm32(RCX, 7);
+        self.shl_imm8(RCX, 3);
+        self.shr_cl(RDX);
+        self.and_imm32(RDX, 0xFF);
+        self.store_slot(dst, RDX);
     }
 
     /// ADR 0001's field-wise shallow copy, which `encoded.rs`'s `COPY` arm
@@ -616,6 +827,73 @@ impl<'a> Emit<'a> {
         self.frame_live = false;
     }
 
+    /// `encoded.rs`'s `SWITCH` arm:
+    /// `targets.get(index).unwrap_or(&default)`.
+    ///
+    /// A compare chain, which is what a template compiler has: there is no jump
+    /// table here, and building one would be choosing between two encodings from
+    /// the shape of the table, which is the peephole this arm does not have. See
+    /// `compile.rs`'s `switch` for the `br_table` the other arm emits, and the
+    /// harness's report for what the difference measured.
+    ///
+    /// It needs no range check, and that is a property of the comparison rather
+    /// than an omission: `cmp r64, imm32` compares the whole word against a small
+    /// non-negative case index, so a word larger than any case — including one
+    /// above `u32::MAX`, which is what forces the other arm's check — equals none
+    /// of them and falls through to the default.
+    fn switch(&mut self, on: Slot, table: cove_ir::TableId) {
+        let table = self.program.table(table);
+        let targets: Vec<u32> = table.targets.clone();
+        let default = table.default;
+        self.load_slot(RAX, on);
+        for (case, target) in targets.iter().enumerate() {
+            self.cmp_imm32(RAX, case as i32);
+            self.jcc(CC_E, Target::Pc(*target));
+        }
+        self.jmp(Target::Pc(default));
+    }
+
+    /// [`Inst::Call`](cove_ir::Inst::Call), handed to the runtime whole.
+    ///
+    /// See [`crate::abi::CallFn`] for why the frame is not opened here. The six
+    /// arguments are the six the System V ABI passes in registers, which is what
+    /// makes this a call sequence and not a stack layout.
+    ///
+    /// `base` is handed over as the *word index* the ABI is written in terms of,
+    /// so the byte offset this function keeps is shifted back down — the one
+    /// place the prologue's decision to keep bytes rather than words costs an
+    /// instruction.
+    fn callee(&mut self, dst: Slot, callee: u32, args: u32) {
+        // A call may allocate and an allocation may collect, so this is a
+        // safepoint whether the callee reaches one or not: the unpaid work is
+        // published and the accumulator cleared, and the helper charges it.
+        self.store(CTX, OFF_PENDING_WORK, WORK);
+        self.xor_rr(WORK, WORK);
+
+        self.mov_rr(RDI, CTX);
+        self.mov_rr(RSI, BASE_BYTES);
+        self.shr_imm8(RSI, 3);
+        self.mov_imm32(RDX, self.pc as i32);
+        self.mov_imm32(RCX, callee as i32);
+        self.mov_imm32(R8, args as i32);
+        self.mov_imm32(R9, dst as i32);
+        self.mov_imm64(RAX, self.call as i64);
+        self.call(RAX);
+
+        // `eax` is the callee's `Outcome`. Anything but `Returned` leaves, and
+        // leaves *with that outcome*: a raise eight frames down travels out
+        // through one `ret` per frame, and every field it needs the helper has
+        // already written.
+        let on = self.label();
+        self.test_rr32(RAX, RAX);
+        self.jcc(CC_E, Target::Label(on));
+        self.leave_answered();
+        self.bind(on);
+        // The helper is allowed to have grown the stack, so the frame pointer
+        // derived before the call is not to be used after it.
+        self.frame_live = false;
+    }
+
     /// `encoded.rs`'s `RETURN` arm, minus the copy: the slot is reported and the
     /// caller does the copying, because the caller's frame is the caller's.
     fn ret(&mut self, src: Slot) {
@@ -629,6 +907,10 @@ impl<'a> Emit<'a> {
         self.store(CTX, OFF_PENDING_WORK, WORK);
         self.store_imm32(CTX, OFF_RAISE_CODE, code.abi() as i32);
         self.store_imm32(CTX, OFF_RAISE_DETAIL, detail as i32);
+        // The span every runtime error carries is `Function::span_at(pc)`, and
+        // only compiled code knows which instruction it was on. Stored on this
+        // path only, so the ordinary path pays nothing for it.
+        self.store_imm32(CTX, OFF_RAISE_PC, self.pc as i32);
         self.leave(Outcome::Raised);
     }
 
@@ -653,7 +935,16 @@ impl<'a> Emit<'a> {
     /// [`Emit::copy`] and it pops what it pushed before the instruction ends.
     fn leave(&mut self, outcome: Outcome) {
         self.mov_imm32(RAX, outcome.abi() as i32);
-        for reg in [PAD, FRAME, WORK, BASE_BYTES, CTX] {
+        self.leave_answered();
+    }
+
+    /// The same epilogue, for an outcome that is already in `eax`.
+    ///
+    /// The one caller is [`Emit::callee`]: what it returns is the callee's
+    /// outcome rather than one this function chose. None of the five pops names
+    /// `RAX`, so the answer survives them.
+    fn leave_answered(&mut self) {
+        for reg in [HEAP_SPARE, FRAME, WORK, BASE_BYTES, CTX] {
             self.pop(reg);
         }
         self.ret_near();
@@ -725,6 +1016,15 @@ impl<'a> Emit<'a> {
     /// `mov r64, r64`
     fn mov_rr(&mut self, dst: u8, src: u8) {
         self.rex(true, src, dst);
+        self.byte(0x89);
+        self.modrm_reg(src, dst);
+    }
+
+    /// `mov r32, r32`, which zeroes the upper half of its destination.
+    ///
+    /// Which is what makes it the `u32` mask [`Emit::object_len`] needs.
+    fn mov_rr32(&mut self, dst: u8, src: u8) {
+        self.rex(false, src, dst);
         self.byte(0x89);
         self.modrm_reg(src, dst);
     }
@@ -803,6 +1103,41 @@ impl<'a> Emit<'a> {
         self.byte(by);
     }
 
+    /// `shr r64, imm8`, which is the logical shift: a heap index and a byte
+    /// offset are both non-negative, and `Space::load` shifts an unsigned one.
+    fn shr_imm8(&mut self, dst: u8, by: u8) {
+        self.rex(true, 0, dst);
+        self.byte(0xc1);
+        self.modrm_reg(5, dst);
+        self.byte(by);
+    }
+
+    /// `shr r64, cl`
+    fn shr_cl(&mut self, dst: u8) {
+        self.rex(true, 0, dst);
+        self.byte(0xd3);
+        self.modrm_reg(5, dst);
+    }
+
+    /// `and r64, imm32`, sign-extended — so every mask emitted through it is
+    /// one whose top bit is clear. `Emit::object_len` is the mask that is not,
+    /// and it is a `mov r32, r32` instead.
+    fn and_imm32(&mut self, dst: u8, value: i32) {
+        debug_assert!(value >= 0, "a sign-extended mask sets the upper half");
+        self.rex(true, 0, dst);
+        self.byte(0x81);
+        self.modrm_reg(4, dst);
+        self.code.extend_from_slice(&value.to_le_bytes());
+    }
+
+    /// `cmp r64, imm32`, which sets the flags for `r - imm`.
+    fn cmp_imm32(&mut self, reg: u8, value: i32) {
+        self.rex(true, 0, reg);
+        self.byte(0x81);
+        self.modrm_reg(7, reg);
+        self.code.extend_from_slice(&value.to_le_bytes());
+    }
+
     /// `xor r64, r64`
     fn xor_rr(&mut self, dst: u8, src: u8) {
         self.rex(true, src, dst);
@@ -820,6 +1155,13 @@ impl<'a> Emit<'a> {
     /// `test a, b`
     fn test_rr(&mut self, a: u8, b: u8) {
         self.rex(true, b, a);
+        self.byte(0x85);
+        self.modrm_reg(b, a);
+    }
+
+    /// `test r32, r32`, for the `Outcome` a helper answers in `eax`.
+    fn test_rr32(&mut self, a: u8, b: u8) {
+        self.rex(false, b, a);
         self.byte(0x85);
         self.modrm_reg(b, a);
     }

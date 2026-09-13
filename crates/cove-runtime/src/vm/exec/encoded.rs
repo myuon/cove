@@ -459,7 +459,7 @@ fn refusal(program: &Program, id: FunctionId, pc: usize, held: EncodedInst) -> R
 /// callee's frame from slot 0 at the *parameter's* width, and a capture goes
 /// into the slot `Function::captures` names.
 #[inline(never)]
-fn open_frame(
+pub(super) fn open_frame(
     machine: &mut Machine<'_>,
     budget: &Meter,
     base: u64,

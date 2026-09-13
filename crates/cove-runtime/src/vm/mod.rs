@@ -100,6 +100,7 @@ use crate::host::HostRegistry;
 use crate::runtime::Runtime;
 use crate::trace::{RunOutcome, Timing, TraceEvent};
 use crate::vm::debug::Debugger;
+use crate::vm::exec::native;
 use crate::vm::exec::Machine;
 // The public `Value` reaches this file for the one reason ADR 0034 allows it
 // to reach any of them: this is a boundary. An entry's arguments and its
@@ -344,6 +345,44 @@ impl<'a> Vm<'a> {
     /// was built over.
     fn bind_budget(&mut self) {
         self.budget = meter_of(self.hosts);
+    }
+
+    /// A native-tier session over `module.name`, with `args` converted once.
+    ///
+    /// [`Vm::invoke`] is the way an application calls a Cove function, and this
+    /// is not a second one. It is the boundary ADR 0055's *comparison* needs,
+    /// and the difference is the one thing about it worth knowing: `invoke`
+    /// converts its arguments, runs the entry, converts the answer back and is
+    /// over, and a benchmark that calls one function three hundred thousand
+    /// times over the same `String` and the same `Array` cannot use it — the
+    /// conversion allocates a fresh object every time, which would be the
+    /// measurement.
+    ///
+    /// So a session converts the arguments once and holds the references in a
+    /// frame, which is what keeps them alive; see
+    /// [`Session`](crate::NativeSession). Each call is then an ordinary frame on
+    /// top of that one, entered on whichever tier
+    /// [`Tiered`](crate::Tiered) names.
+    ///
+    /// Nothing here makes the native tier selectable. The VM remains the
+    /// default, `cove run` does not reach this, and a build with no code
+    /// generator has only [`NothingCompiled`](crate::NothingCompiled) to hand it
+    /// — which answers that nothing is compiled, so every call runs on the
+    /// encoded tier and the session is a slower `invoke`.
+    pub fn native_session(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<native::Session<'_, 'a>, RuntimeError> {
+        crate::invoke::check(self.runtime.program(), module, name, &args)?;
+        let id = self.lowered(module, name)?;
+        let function = self.program.function(id);
+        let words = self.words_of(function, &args).map_err(|error| {
+            let span = self.program.function(id).span;
+            error.at(span)
+        })?;
+        native::Session::open(&mut self.machine, &self.budget, id, words)
     }
 
     /// How many instructions this run has executed.

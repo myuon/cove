@@ -15,33 +15,46 @@ use cove_ir::{ArithOp, CmpOp, Compare, Function, Inst, Num, Program, Repr, Slot}
 
 use crate::abi::Raise;
 
-/// The widest [`Inst::Copy`] this slice lowers, in words.
+/// The widest run of words this slice moves in one instruction.
 ///
-/// A copy is emitted as a run of loads and then a run of stores — see
-/// each arm's `copy` for why it is in that order — so the code it produces is
+/// An [`Inst::Copy`], an [`Inst::LoadElem`]'s element and an [`Inst::Call`]'s
+/// answer are each emitted as a run of loads and a run of stores — see each
+/// arm's `copy` for why a copy is in that order — so the code they produce is
 /// linear in the width and there is no memmove helper to fall back to yet. A
 /// bound is therefore worth having, and it is deliberately generous: sixteen
-/// words is a wider inline value than anything the corpus lowers.
-const MAX_COPY_WORDS: u32 = 16;
+/// words is a wider inline value than anything the corpus lowers, and a
+/// `covefmt.Token` is three.
+const MAX_RUN_WORDS: u32 = 16;
 
 /// Whether a slot of this `Repr` is one this slice will touch.
 ///
-/// The scalars, and deliberately not [`Repr::Ref`] — see [`crate::abi`]'s
-/// "There are no references here yet". [`Repr::Addr`], [`Host`](Repr::Host),
-/// [`Task`](Repr::Task) and [`Scope`](Repr::Scope) are excluded for a
-/// different reason: they are not roots, so they are not a collector problem,
-/// but every operation that produces or consumes one is a runtime call this
-/// slice does not lower, so a frame holding one is a frame whose function
-/// will be refused anyway.
+/// The scalars, and [`Repr::Ref`] — see [`crate::abi`]'s "References are live
+/// here, and the frame is why that is safe". A reference is admitted because
+/// the frame is the canonical home of every value at every instruction
+/// boundary, so a `Repr::Ref` slot is a root the existing walk already finds,
+/// and because the covefmt slice takes a `String` and an `Array` as its
+/// parameters: refusing a reference would refuse the measurement.
+///
+/// [`Repr::Addr`], [`Host`](Repr::Host), [`Task`](Repr::Task) and
+/// [`Scope`](Repr::Scope) are excluded, and for a reason that has nothing to do
+/// with the collector: they are not roots, but every operation that produces or
+/// consumes one is a runtime call this slice does not lower, so a frame holding
+/// one is a frame whose function will be refused anyway.
 ///
 /// [`Repr::Float`] is admitted although no float *operation* is lowered. A
 /// float slot that is only copied is a run of bits like any other, and
 /// refusing the whole function because one of its frame slots is a `Float`
 /// would refuse it for a reason that is not true.
-fn is_scalar(repr: Repr) -> bool {
+fn is_lowered(repr: Repr) -> bool {
     match repr {
-        Repr::Unit | Repr::Bool | Repr::Int | Repr::Float | Repr::Duration | Repr::Tag => true,
-        Repr::Ref | Repr::Addr | Repr::Host | Repr::Task | Repr::Scope => false,
+        Repr::Unit
+        | Repr::Bool
+        | Repr::Int
+        | Repr::Float
+        | Repr::Duration
+        | Repr::Tag
+        | Repr::Ref => true,
+        Repr::Addr | Repr::Host | Repr::Task | Repr::Scope => false,
     }
 }
 
@@ -66,17 +79,22 @@ pub(crate) fn slot_offset(slot: Slot) -> Option<i32> {
 /// emitting one would be lowering a refusal. Refusing the function instead
 /// leaves it to the tier that already has the message.
 ///
+/// [`Compare::Tag`] takes equality only, and for exactly the same reason: it
+/// shares `encoded.rs`'s `EQ_BOOL | EQ_REF | EQ_TAG => cmp_word!(true)` arm and
+/// its `LT_TAG | LE_TAG | GT_TAG | GE_TAG => not_ordered!()` neighbour. It is
+/// here because `token.kind != Kind.Punct` is what a formatter asks in every
+/// loop it has — see [`cove_ir::Compare::Tag`]'s own note on what walking it
+/// instead cost.
+///
 /// Everything else — [`Compare::Float`], [`Str`](Compare::Str),
-/// [`Identity`](Compare::Identity), [`Tag`](Compare::Tag) — is outside the
-/// slice. `Identity` and `Tag` would each be one integer comparison, but
-/// `Identity` reads a [`Repr::Ref`] word and `Tag` a [`Repr::Tag`] one, and
-/// this slice's claim that it never touches a reference is worth more than
-/// two instructions.
+/// [`Identity`](Compare::Identity) — is outside the slice. `Identity` would be
+/// one integer comparison and is left out because nothing the raced slice does
+/// asks it, which is the rule this predicate is widened by.
 fn comparison_supported(on: Compare, op: CmpOp) -> bool {
     match on {
         Compare::Int => true,
-        Compare::Bool => matches!(op, CmpOp::Eq | CmpOp::Ne),
-        Compare::Float | Compare::Str | Compare::Identity | Compare::Tag => false,
+        Compare::Bool | Compare::Tag => matches!(op, CmpOp::Eq | CmpOp::Ne),
+        Compare::Float | Compare::Str | Compare::Identity => false,
     }
 }
 
@@ -87,7 +105,14 @@ fn comparison_supported(on: Compare, op: CmpOp) -> bool {
 /// decision and have to agree: a form admitted here and not lowered there is
 /// a panic, which is why that arm is `unreachable!` and says so.
 pub(crate) fn supported(program: &Program, function: &Function) -> bool {
-    if !function.reprs.iter().copied().all(is_scalar) {
+    if !function.reprs.iter().copied().all(is_lowered) {
+        return false;
+    }
+    // A stub is a stand-in for a body the lowering did not lower, so there is
+    // nothing to compile: `lower::stub` leaves a `return` of a cleared slot.
+    // Compiling it would answer the same thing the encoded tier answers, and
+    // it would also present a run as more native than it is.
+    if function.stub {
         return false;
     }
     // The verifier requires it, and the lowering depends on it: a function
@@ -95,7 +120,7 @@ pub(crate) fn supported(program: &Program, function: &Function) -> bool {
     // its last basic block, and there is nowhere for it to fall to.
     if !matches!(
         function.code.last(),
-        Some(Inst::Return { .. } | Inst::Jump { .. } | Inst::Trap { .. })
+        Some(Inst::Return { .. } | Inst::Jump { .. } | Inst::Trap { .. } | Inst::Switch { .. })
     ) {
         return false;
     }
@@ -116,13 +141,19 @@ fn inst_supported(program: &Program, function: &Function, inst: &Inst) -> bool {
     };
     match inst {
         Inst::Bool { dst, .. } | Inst::Int { dst, .. } => slot(*dst),
+        // A case index is one word and the word is a compile-time constant, so
+        // this is `encoded.rs`'s `FUNC_REF | CONST_TAG` arm: the same store
+        // `CONST_INT` makes, of a number the layout already fixed. The layout
+        // and the case are bounded by `cove_ir::verify` before this is reached.
+        Inst::Tag { dst, .. } => slot(*dst),
         Inst::Copy { dst, src, layout } => {
             let layout = program.layout(*layout);
-            layout.width() <= MAX_COPY_WORDS
-                && layout.words.iter().copied().all(is_scalar)
+            layout.width() <= MAX_RUN_WORDS
+                && layout.words.iter().copied().all(is_lowered)
                 && run(*dst, layout.width())
                 && run(*src, layout.width())
         }
+        Inst::Not { dst, a } => slot(*dst) && slot(*a),
         Inst::Arith {
             num: Num::Int,
             dst,
@@ -146,6 +177,62 @@ fn inst_supported(program: &Program, function: &Function, inst: &Inst) -> bool {
         Inst::CmpImmBranch { dst, a, target, .. } => slot(*dst) && slot(*a) && *target < end,
         Inst::Jump { to } => *to < end,
         Inst::BranchFalse { cond, to } => slot(*cond) && *to < end,
+        // Every target and the default, because the machine does not take the
+        // lowering's word for the index it reads out of a slot: `encoded.rs`
+        // takes `targets.get(index).unwrap_or(&default)`, so the default is as
+        // reachable as any target and is bounded with them.
+        Inst::Switch { on, table } => {
+            let table = program.table(*table);
+            // The case count has to fit an `i32`, and that is a bound the
+            // *template* arm needs rather than a bound on the language: its
+            // compare chain tests `cmp r64, imm32`, whose immediate is
+            // sign-extended, so a case index above `i32::MAX` would be compared
+            // against a negative number. No enum has two billion cases and
+            // `cove_ir::lower` could not build one, so this refuses nothing real —
+            // but an arm that was silently wrong above a threshold is worse than
+            // one that refuses at it, and the two arms share this predicate so
+            // neither may admit what the other cannot lower.
+            i32::try_from(table.targets.len()).is_ok()
+                && slot(*on)
+                && table.default < end
+                && table.targets.iter().all(|target| *target < end)
+        }
+        Inst::Len { dst, obj } => slot(*dst) && slot(*obj),
+        // The stride is the element layout's width and the destination is that
+        // many words wide, so an `Array<Token>` writes three slots and an
+        // `Array<Int>` one. The element's own words have to be ones this slice
+        // can hold in a frame, which is `Inst::Copy`'s rule for the same
+        // reason: what arrives is a run of words and they land in slots.
+        Inst::LoadElem {
+            dst,
+            obj,
+            index,
+            layout,
+        } => {
+            let layout = program.layout(*layout);
+            layout.width() <= MAX_RUN_WORDS
+                && layout.words.iter().copied().all(is_lowered)
+                && run(*dst, layout.width())
+                && slot(*obj)
+                && slot(*index)
+        }
+        Inst::ByteAt { dst, obj, at } => slot(*dst) && slot(*obj) && slot(*at),
+        // A call is admitted whatever the callee is: it is handed to
+        // `NativeHelpers::call`, which opens the frame with the runtime's own
+        // `open_frame` and runs the callee on whichever tier it is on. So the
+        // callee's *body* is not this function's business and is not examined —
+        // only that the callee exists, that the arguments name slots this frame
+        // has, and that the answer fits where it is going.
+        Inst::Call { dst, callee, args } => {
+            let answer = program.layout(program.function(*callee).returns).width();
+            callee.index() < program.functions.len()
+                && answer <= MAX_RUN_WORDS
+                && run(*dst, answer)
+                && program.arg_list(*args).iter().all(|arg| {
+                    let width = program.layout(arg.layout).width();
+                    width <= MAX_RUN_WORDS && run(arg.slot, width)
+                })
+        }
         Inst::Return { src } => run(*src, program.layout(function.returns).width()),
         Inst::Trap { .. } => true,
         _ => false,
@@ -163,7 +250,7 @@ fn inst_supported(program: &Program, function: &Function, inst: &Inst) -> bool {
 /// instruction after any terminator. That last clause is what makes a
 /// conditional branch's fall-through a block of its own, which Cranelift
 /// needs because its `brif` names both successors explicitly.
-pub(crate) fn leaders(function: &Function) -> Vec<Option<u32>> {
+pub(crate) fn leaders(program: &Program, function: &Function) -> Vec<Option<u32>> {
     let end = function.code.len();
     let mut leader = vec![false; end];
     if end > 0 {
@@ -186,6 +273,17 @@ pub(crate) fn leaders(function: &Function) -> Vec<Option<u32>> {
             }
             Inst::CmpBranch { target, .. } | Inst::CmpImmBranch { target, .. } => {
                 mark(&mut leader, *target as usize);
+                mark(&mut leader, pc + 1);
+            }
+            // Every case and the default, and then the fall-through — which a
+            // `switch` has none of, but marking `pc + 1` is what makes the
+            // instruction after a terminator a block whether anything jumps to
+            // it or not, and a `switch` is a terminator.
+            Inst::Switch { table, .. } => {
+                let table = program.table(*table);
+                for target in table.targets.iter().chain(std::iter::once(&table.default)) {
+                    mark(&mut leader, *target as usize);
+                }
                 mark(&mut leader, pc + 1);
             }
             Inst::Return { .. } | Inst::Trap { .. } => mark(&mut leader, pc + 1),

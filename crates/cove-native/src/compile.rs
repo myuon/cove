@@ -36,7 +36,7 @@ use std::mem::offset_of;
 use cove_ir::{ArithOp, CmpOp, Function, FunctionId, Inst, Num, Program, Slot};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
-    types, AbiParam, Block, FuncRef, InstBuilder, MemFlagsData, Signature,
+    types, AbiParam, Block, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData, Signature,
 };
 use cranelift_codegen::ir::{Type, Value};
 use cranelift_codegen::Context;
@@ -44,7 +44,10 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module, ModuleError};
 
-use crate::abi::{Entry, NativeCtx, NativeHelpers, Outcome, Raise};
+use crate::abi::{
+    Entry, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
+    HEAP_ORIGIN_WORDS,
+};
 use crate::subset::{by_zero_of, leaders, overflow_of, slot_offset, supported};
 use crate::Unavailable;
 
@@ -57,16 +60,26 @@ use crate::Unavailable;
 /// same [`NativeHelpers`] differently.
 const SAFEPOINT: &str = "cove_native_safepoint";
 
+/// The name the call helper is imported under. [`SAFEPOINT`]'s note applies.
+const CALL: &str = "cove_native_call";
+
 // The `NativeCtx` field offsets, read from the declaration rather than
 // written out. `offset_of!` is a const expression, so the numbers compiled
 // into the machine code and the numbers Rust uses to read the struct are the
 // same numbers by construction; reordering the fields cannot desynchronise
 // them.
 const OFF_WORDS: i32 = offset_of!(NativeCtx, words) as i32;
+const OFF_CHUNKS: i32 = offset_of!(NativeCtx, chunks) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
 const OFF_RETURN_SLOT: i32 = offset_of!(NativeCtx, return_slot) as i32;
 const OFF_RAISE_CODE: i32 = offset_of!(NativeCtx, raise_code) as i32;
 const OFF_RAISE_DETAIL: i32 = offset_of!(NativeCtx, raise_detail) as i32;
+const OFF_RAISE_PC: i32 = offset_of!(NativeCtx, raise_pc) as i32;
+const OFF_RAISE_A: i32 = offset_of!(NativeCtx, raise_a) as i32;
+const OFF_RAISE_B: i32 = offset_of!(NativeCtx, raise_b) as i32;
+
+/// The low half of an object header, which is its length field.
+const LEN_MASK: i64 = u32::MAX as i64;
 
 impl From<ModuleError> for Unavailable {
     fn from(error: ModuleError) -> Self {
@@ -105,6 +118,7 @@ pub struct Jit {
     ctx: Context,
     builder: FunctionBuilderContext,
     safepoint: FuncId,
+    call: FuncId,
     /// How many functions have been declared, which is how the symbol names
     /// are kept distinct. Compiling the same [`FunctionId`] twice is a
     /// caller's policy question, not an error here, so the name cannot be
@@ -125,6 +139,7 @@ impl Jit {
         // because a function pointer is not castable to a data pointer in one
         // step; the integer in between is the same address either way.
         builder.symbol(SAFEPOINT, helpers.safepoint as usize as *const u8);
+        builder.symbol(CALL, helpers.call as usize as *const u8);
         let mut module = JITModule::new(builder);
 
         // Pointers are added to a `u64` word index scaled by eight, so a
@@ -140,11 +155,14 @@ impl Jit {
 
         let signature = safepoint_signature(&module);
         let safepoint = module.declare_function(SAFEPOINT, Linkage::Import, &signature)?;
+        let signature = call_signature(&module);
+        let call = module.declare_function(CALL, Linkage::Import, &signature)?;
         Ok(Jit {
             ctx: module.make_context(),
             module,
             builder: FunctionBuilderContext::new(),
             safepoint,
+            call,
             declared: 0,
             finalized: false,
         })
@@ -178,7 +196,8 @@ impl Jit {
             let safepoint = self
                 .module
                 .declare_func_in_func(self.safepoint, builder.func);
-            Lower::new(&mut builder, program, function, safepoint).run();
+            let call = self.module.declare_func_in_func(self.call, builder.func);
+            Lower::new(&mut builder, program, function, safepoint, call).run();
             builder.seal_all_blocks();
             builder.finalize(self.module.target_config());
         }
@@ -264,12 +283,33 @@ fn safepoint_signature(module: &JITModule) -> Signature {
     signature
 }
 
+/// [`crate::abi::CallFn`], in Cranelift's terms.
+///
+/// `I32` for the answer because it is an [`Outcome`], which is `#[repr(u32)]`,
+/// and the same `I32` an entry point returns — a raise or a stop from a callee
+/// is returned from this function unchanged, so the two widths have to be the
+/// one width.
+fn call_signature(module: &JITModule) -> Signature {
+    let mut signature = module.make_signature();
+    signature
+        .params
+        .push(AbiParam::new(module.target_config().pointer_type()));
+    // `base`, then `pc`, `callee`, `args`, `dst`.
+    signature.params.push(AbiParam::new(types::I64));
+    for _ in 0..4 {
+        signature.params.push(AbiParam::new(types::I32));
+    }
+    signature.returns.push(AbiParam::new(types::I32));
+    signature
+}
+
 /// One function's lowering.
 struct Lower<'a, 'f> {
     b: &'a mut FunctionBuilder<'f>,
     program: &'a Program,
     function: &'a Function,
     safepoint: FuncRef,
+    call: FuncRef,
     pointer: Type,
     /// The two entry parameters. Defined in the entry block, which dominates
     /// every other, so they are readable from anywhere without a block
@@ -290,6 +330,22 @@ struct Lower<'a, 'f> {
     /// whole of the discipline `crate::abi` describes: `NativeCtx::words` is
     /// a `Vec`'s buffer and a helper may have reallocated it.
     frame: Option<Value>,
+    /// The heap's chunk-base table, as a pointer, if it has been loaded in the
+    /// block being emitted.
+    ///
+    /// [`Lower::frame`]'s discipline for the other region: the table may be
+    /// reallocated by a helper that allocates, so it is re-loaded from
+    /// [`NativeCtx::chunks`] at every block and after every call. Cached within
+    /// a block because a `load-elem` of a three-word element reads four heap
+    /// words and would otherwise load the table four times.
+    chunks: Option<Value>,
+    /// Which IR instruction is being emitted.
+    ///
+    /// Only a raise reads it — [`NativeCtx::raise_pc`] is how the runtime finds
+    /// the span — and a raise can be emitted from four methods down, so it is a
+    /// field rather than an argument threaded through `arith`, `element` and
+    /// `bytes` alike.
+    pc: usize,
     /// Per instruction: the block that begins there and its length, or `None`
     /// if no block begins there.
     blocks: Vec<Option<(Block, u32)>>,
@@ -301,9 +357,10 @@ impl<'a, 'f> Lower<'a, 'f> {
         program: &'a Program,
         function: &'a Function,
         safepoint: FuncRef,
+        call: FuncRef,
     ) -> Self {
         let pointer = b.func.signature.params[0].value_type;
-        let blocks: Vec<Option<(Block, u32)>> = leaders(function)
+        let blocks: Vec<Option<(Block, u32)>> = leaders(program, function)
             .into_iter()
             .map(|length| length.map(|length| (b.create_block(), length)))
             .collect();
@@ -327,11 +384,14 @@ impl<'a, 'f> Lower<'a, 'f> {
             program,
             function,
             safepoint,
+            call,
             pointer,
             ctx,
             base,
             work,
             frame: None,
+            chunks: None,
+            pc: 0,
             blocks,
         }
     }
@@ -348,10 +408,11 @@ impl<'a, 'f> Lower<'a, 'f> {
                         self.b.ins().jump(block, &[]);
                     }
                     self.b.switch_to_block(block);
-                    self.frame = None;
+                    self.forget();
                     self.charge(length);
                 }
             }
+            self.pc = pc;
             terminated = self.inst(pc);
         }
         debug_assert!(
@@ -392,9 +453,53 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.store_slot(*dst, word);
                 false
             }
+            // The same store `Inst::Int` makes, of a number the layout already
+            // fixed: `encoded.rs` shares its `FUNC_REF | CONST_TAG` arm with
+            // that one.
+            Inst::Tag { dst, case, .. } => {
+                let word = self.b.ins().iconst(types::I64, i64::from(case.0));
+                self.store_slot(*dst, word);
+                false
+            }
             Inst::Copy { dst, src, layout } => {
                 self.copy(*dst, *src, self.program.layout(*layout).width());
                 false
+            }
+            // `encoded.rs`'s `NOT` arm tests the whole *word* against zero, not
+            // the low byte, so that is what is tested here.
+            Inst::Not { dst, a } => {
+                let x = self.load_slot(*a);
+                let answer = self.b.ins().icmp_imm_s(IntCC::Equal, x, 0);
+                self.store_flag(*dst, answer);
+                false
+            }
+            Inst::Len { dst, obj } => {
+                let addr = self.load_slot(*obj);
+                self.refuse_null(addr);
+                let len = self.object_len(addr);
+                self.store_slot(*dst, len);
+                false
+            }
+            Inst::LoadElem {
+                dst,
+                obj,
+                index,
+                layout,
+            } => {
+                self.load_elem(*dst, *obj, *index, self.program.layout(*layout).width());
+                false
+            }
+            Inst::ByteAt { dst, obj, at } => {
+                self.byte_at(*dst, *obj, *at);
+                false
+            }
+            Inst::Call { dst, callee, args } => {
+                self.callee(*dst, callee.0, args.0);
+                false
+            }
+            Inst::Switch { on, table } => {
+                self.switch(*on, *table);
+                true
             }
             Inst::Arith {
                 num: Num::Int,
@@ -517,6 +622,150 @@ impl<'a, 'f> Lower<'a, 'f> {
         let frame = self.b.ins().iadd(words, bytes);
         self.frame = Some(frame);
         frame
+    }
+
+    /// Forgets everything a block cannot carry into the next one.
+    ///
+    /// Both cached pointers, in one place, because both are cached for exactly
+    /// as long and the cost of forgetting one and not the other is a load of
+    /// stale memory rather than a compile failure.
+    fn forget(&mut self) {
+        self.frame = None;
+        self.chunks = None;
+    }
+
+    /// The heap's chunk-base table, as a pointer.
+    ///
+    /// See [`Lower::chunks`]. The table is not the heap: it is one pointer per
+    /// committed chunk, which is what makes a heap word two indexings.
+    fn heap_chunks(&mut self) -> Value {
+        if let Some(chunks) = self.chunks {
+            return chunks;
+        }
+        let chunks = self
+            .b
+            .ins()
+            .load(self.pointer, MemFlagsData::trusted(), self.ctx, OFF_CHUNKS);
+        self.chunks = Some(chunks);
+        chunks
+    }
+
+    /// The heap word at the linear address `addr`.
+    ///
+    /// `Memory::read`'s heap half, which is `Space::load`: subtract the heap
+    /// origin, find the chunk, and index inside it. The `Relaxed` atomic load
+    /// that Rust half performs is a plain load on every target either arm runs
+    /// on, and ADR 0034's argument for why `Relaxed` is enough — the ordering
+    /// that makes one task's writes visible to another is the release/acquire
+    /// pair on a cell's lock word — is unchanged by the load being emitted here
+    /// instead.
+    fn heap_word(&mut self, addr: Value) -> Value {
+        let chunks = self.heap_chunks();
+        let index = self.b.ins().iadd_imm_s(addr, -(HEAP_ORIGIN_WORDS as i64));
+        let which = self.b.ins().ushr_imm_u(index, i64::from(HEAP_CHUNK_SHIFT));
+        let at = self.b.ins().ishl_imm_u(which, 3);
+        let entry = self.b.ins().iadd(chunks, at);
+        let chunk = self
+            .b
+            .ins()
+            .load(self.pointer, MemFlagsData::trusted(), entry, 0);
+        let inside = self
+            .b
+            .ins()
+            .band_imm_u(index, (HEAP_CHUNK_WORDS - 1) as i64);
+        let offset = self.b.ins().ishl_imm_u(inside, 3);
+        let word = self.b.ins().iadd(chunk, offset);
+        self.b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), word, 0)
+    }
+
+    /// `Memory::payload`: payload word `at` of the object whose header is at
+    /// `addr`, where `at` is a run-time value.
+    ///
+    /// The header is one word, so a payload word is one past it. That `+ 1` is
+    /// `Memory::payload_addr`'s and is written once here rather than at each of
+    /// the three instructions that reads a payload.
+    fn payload(&mut self, addr: Value, at: Value) -> Value {
+        let one = self.b.ins().iadd_imm_s(at, 1);
+        let word = self.b.ins().iadd(addr, one);
+        self.heap_word(word)
+    }
+
+    /// `Memory::object_len`: the low half of the header, as a non-negative
+    /// `Int`.
+    ///
+    /// A `u32` masked out of a word, so the `as i64` the encoded arms all
+    /// perform on it is already done: the answer cannot be negative and the
+    /// unsigned comparisons below depend on that.
+    fn object_len(&mut self, addr: Value) -> Value {
+        let header = self.heap_word(addr);
+        self.b.ins().band_imm_u(header, LEN_MASK)
+    }
+
+    /// Refuses a null reference, which every reader of an object does first.
+    ///
+    /// `Machine::element`, `encoded.rs`'s `LEN` and its `BYTE_AT` each begin
+    /// with `if addr == 0`, and each answers `null_object()`. One method,
+    /// because one message.
+    fn refuse_null(&mut self, addr: Value) {
+        let null = self.b.ins().icmp_imm_s(IntCC::Equal, addr, 0);
+        self.raise_if(null, Raise::NullObject, 0);
+    }
+
+    /// `encoded.rs`'s `LOAD_ELEM` arm, which is `Machine::element` and then a
+    /// copy of `width` words.
+    ///
+    /// The index check is *one* unsigned comparison and that is exact rather
+    /// than clever: `Machine::element` refuses `at < 0 || at >= len`, and a
+    /// negative `i64` read as unsigned is larger than any `len` — which is a
+    /// `u32` masked out of a header and so below 2^32. One compare answers both
+    /// halves and cannot answer either of them wrongly.
+    fn load_elem(&mut self, dst: Slot, obj: Slot, index: Slot, width: u32) {
+        let addr = self.load_slot(obj);
+        self.refuse_null(addr);
+        let index = self.load_slot(index);
+        let len = self.object_len(addr);
+        let outside = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, index, len);
+        self.raise_range(outside, Raise::IndexOutOfRange, index, len);
+        // The stride, which is what makes an `Array<Point>` a run of two-word
+        // elements. `Machine::element` multiplies in `u32`; this multiplies in
+        // `u64`, which agrees on every product the check above admits.
+        let at = self.b.ins().imul_imm_s(index, i64::from(width));
+        for word in 0..width {
+            let at = self.b.ins().iadd_imm_s(at, i64::from(word));
+            let value = self.payload(addr, at);
+            self.store_slot(dst + word, value);
+        }
+    }
+
+    /// `encoded.rs`'s `BYTE_AT` arm: a payload read, a shift and a mask.
+    ///
+    /// The bound is the string's *byte* length and the refusal is not
+    /// `Array.get`'s — see [`Inst::ByteAt`](cove_ir::Inst::ByteAt) for why a
+    /// byte offset out of range stops the run rather than answering an
+    /// `Option`. The one unsigned comparison is [`Lower::load_elem`]'s.
+    fn byte_at(&mut self, dst: Slot, obj: Slot, at: Slot) {
+        let addr = self.load_slot(obj);
+        self.refuse_null(addr);
+        let at = self.load_slot(at);
+        let len = self.object_len(addr);
+        let outside = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, at, len);
+        self.raise_range(outside, Raise::ByteOffset, at, len);
+        // Eight bytes to a word, least-significant byte first.
+        let which = self.b.ins().ushr_imm_u(at, 3);
+        let word = self.payload(addr, which);
+        let inside = self.b.ins().band_imm_u(at, 7);
+        let shift = self.b.ins().ishl_imm_u(inside, 3);
+        let moved = self.b.ins().ushr(word, shift);
+        let byte = self.b.ins().band_imm_u(moved, 0xFF);
+        self.store_slot(dst, byte);
     }
 
     fn load_slot(&mut self, slot: Slot) -> Value {
@@ -651,7 +900,7 @@ impl<'a, 'f> Lower<'a, 'f> {
             let edge = self.b.create_block();
             self.b.ins().brif(word, through, &[], edge, &[]);
             self.b.switch_to_block(edge);
-            self.frame = None;
+            self.forget();
             self.safepoint(target);
             self.b.ins().jump(taken, &[]);
         } else {
@@ -684,10 +933,11 @@ impl<'a, 'f> Lower<'a, 'f> {
         // Charged, so no longer pending — on both sides of the branch below.
         let zero = self.b.ins().iconst(types::I64, 0);
         self.b.def_var(self.work, zero);
-        // The helper is allowed to have grown the stack, so the frame pointer
-        // derived before the call is not to be used after it. This one line
-        // is the whole of the reallocation discipline; see `crate::abi`.
-        self.frame = None;
+        // The helper is allowed to have grown the stack and to have committed a
+        // heap chunk, so neither pointer derived before the call is to be used
+        // after it. This one line is the whole of the reallocation discipline;
+        // see `crate::abi`.
+        self.forget();
 
         let stop = self.b.create_block();
         let on = self.b.create_block();
@@ -701,7 +951,7 @@ impl<'a, 'f> Lower<'a, 'f> {
         self.leave(Outcome::Stopped);
 
         self.b.switch_to_block(on);
-        self.frame = None;
+        self.forget();
     }
 
     /// `encoded.rs`'s `RETURN` arm, minus the copy.
@@ -721,6 +971,11 @@ impl<'a, 'f> Lower<'a, 'f> {
     }
 
     /// Leaves with a runtime error named rather than built.
+    ///
+    /// The pc goes out with it, because the span every runtime error carries is
+    /// `Function::span_at(pc)` and only compiled code knows which instruction
+    /// it was on. It is stored on this path only, so the ordinary path pays
+    /// nothing for it.
     fn raise(&mut self, code: Raise, detail: u32) {
         let work = self.b.use_var(self.work);
         self.store_ctx(OFF_PENDING_WORK, work);
@@ -728,7 +983,127 @@ impl<'a, 'f> Lower<'a, 'f> {
         self.store_ctx(OFF_RAISE_CODE, named);
         let carried = self.b.ins().iconst(types::I32, i64::from(detail));
         self.store_ctx(OFF_RAISE_DETAIL, carried);
+        let at = self.b.ins().iconst(types::I32, self.pc as i64);
+        self.store_ctx(OFF_RAISE_PC, at);
         self.leave(Outcome::Raised);
+    }
+
+    /// [`Lower::raise_if`] for the two refusals whose message names numbers.
+    ///
+    /// "index {a} is outside a collection of {b}" and "`byteAt` is {a}, and a
+    /// byte offset into this string is 0 to {b} - 1" are the two, and both
+    /// numbers are run-time values, so they go out through
+    /// [`NativeCtx::raise_a`] and [`NativeCtx::raise_b`] rather than through the
+    /// `u32` a `Raise` otherwise carries. The runtime writes the sentence; this
+    /// hands it the operands, which is the same division as every other raise.
+    fn raise_range(&mut self, flag: Value, code: Raise, a: Value, b: Value) {
+        let bad = self.b.create_block();
+        let good = self.b.create_block();
+        self.b.ins().brif(flag, bad, &[], good, &[]);
+        self.b.switch_to_block(bad);
+        self.store_ctx(OFF_RAISE_A, a);
+        self.store_ctx(OFF_RAISE_B, b);
+        self.raise(code, 0);
+        self.b.switch_to_block(good);
+    }
+
+    /// [`Inst::Call`](cove_ir::Inst::Call), handed to the runtime whole.
+    ///
+    /// See [`crate::abi::CallFn`] for why the frame is not opened here. What is
+    /// emitted is the hand-over and the three things around it:
+    ///
+    /// - the unpaid work is published before the call and the accumulator
+    ///   cleared, because a call may allocate and an allocation may collect, so
+    ///   this is a safepoint whether the callee reaches one or not;
+    /// - an outcome that is not [`Outcome::Returned`] is returned from this
+    ///   function unchanged, so a raise eight frames down leaves through one
+    ///   `ret` per frame and there is no unwinding;
+    /// - both cached pointers are dropped, because the callee may have grown the
+    ///   stack and may have committed a heap chunk.
+    fn callee(&mut self, dst: Slot, callee: u32, args: u32) {
+        let work = self.b.use_var(self.work);
+        self.store_ctx(OFF_PENDING_WORK, work);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        self.b.def_var(self.work, zero);
+
+        let at = self.b.ins().iconst(types::I32, self.pc as i64);
+        let callee = self.b.ins().iconst(types::I32, i64::from(callee));
+        let args = self.b.ins().iconst(types::I32, i64::from(args));
+        let into = self.b.ins().iconst(types::I32, i64::from(dst));
+        let call = self
+            .b
+            .ins()
+            .call(self.call, &[self.ctx, self.base, at, callee, args, into]);
+        let outcome = self.b.inst_results(call)[0];
+        self.forget();
+
+        let left = self.b.create_block();
+        let on = self.b.create_block();
+        let returned =
+            self.b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, outcome, i64::from(Outcome::Returned.abi()));
+        self.b.ins().brif(returned, on, &[], left, &[]);
+
+        self.b.switch_to_block(left);
+        // Not `leave`: what this returns is the callee's outcome and not one
+        // this function chose, and every field that outcome needs — the raise,
+        // the pending work — the helper has already written.
+        self.b.ins().return_(&[outcome]);
+
+        self.b.switch_to_block(on);
+        self.forget();
+    }
+
+    /// `encoded.rs`'s `SWITCH` arm:
+    /// `targets.get(index).unwrap_or(&default)`.
+    ///
+    /// A jump table, which is the facility this code generator has and the
+    /// other arm does not — see `template.rs`'s `switch` for the compare chain
+    /// it emits instead, and the harness's report for what the difference
+    /// measured.
+    ///
+    /// The range check in front of it is not redundant. `br_table` selects on an
+    /// `i32` and the index is a whole word, so a word above `u32::MAX` would be
+    /// truncated into the table; `encoded.rs` takes the default for it. One
+    /// unsigned comparison against the table length says so first, and it is
+    /// also the comparison that sends a case index past the last case to the
+    /// default the way that arm does.
+    fn switch(&mut self, on: Slot, table: cove_ir::TableId) {
+        let table = self.program.table(table);
+        let (default, _) =
+            self.blocks[table.default as usize].expect("a switch default begins a block");
+        let index = self.load_slot(on);
+        let outside = self.b.ins().icmp_imm_u(
+            IntCC::UnsignedGreaterThanOrEqual,
+            index,
+            table.targets.len() as i64,
+        );
+        let inside = self.b.create_block();
+        self.b.ins().brif(outside, default, &[], inside, &[]);
+        self.b.switch_to_block(inside);
+
+        let targets: Vec<Block> = table
+            .targets
+            .iter()
+            .map(|target| {
+                self.blocks[*target as usize]
+                    .expect("a switch target begins a block")
+                    .0
+            })
+            .collect();
+        let pool = &mut self.b.func.dfg.value_lists;
+        let calls: Vec<BlockCall> = targets
+            .iter()
+            .map(|block| BlockCall::new(*block, [], pool))
+            .collect();
+        let fallback = BlockCall::new(default, [], pool);
+        let jump = self
+            .b
+            .func
+            .create_jump_table(JumpTableData::new(fallback, &calls));
+        let small = self.b.ins().ireduce(types::I32, index);
+        self.b.ins().br_table(small, jump);
     }
 
     /// Raises when `flag` is set, and carries on in a fresh block otherwise.
