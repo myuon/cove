@@ -1,0 +1,165 @@
+/// A string being built, whose identity does not move while it grows.
+///
+/// A `String` is immutable, so assembling one out of pieces means choosing
+/// where the pieces are kept until the last one arrives. `"".join(parts)` keeps
+/// them in an `Array<String>`, which is one allocation per piece and one more
+/// for the join; a `sliceBytes` chain reallocates the whole prefix per append.
+/// This keeps them in one packed run of bytes and appends into it, so a string
+/// built of a thousand pieces is a handful of allocations and every byte is
+/// moved once.
+///
+/// # Why the owner is stable, and why that is the whole point
+///
+/// A builder is a *handle* to a growable run rather than the run itself. When
+/// an append does not fit, the run beneath the handle is replaced by a larger
+/// one and the handle does not move — which is what makes this work:
+///
+/// ```cove
+/// fn emit(node: Tree, var out: StringBuilder) {
+///   out.appendSlice(source, node.from, node.to)
+///   emit(node.first, var out)
+///   emit(node.second, var out)
+/// }
+/// ```
+///
+/// `out` is the same builder in every frame of that recursion, and the growth
+/// that happens three levels down is visible to the caller three levels up,
+/// because there is nothing to be visible *of*: they are all naming one owner.
+/// A builder that reallocated itself would leave every `var` address behind it
+/// stale, and a builder sized up front would have to be sized by a caller that
+/// does not know the answer — the formatter's output length is known only once
+/// the writes have happened.
+///
+/// That is [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md),
+/// and `ByteBuffer` below is the intrinsic it decides. Contiguous packed
+/// allocation and precise collection cannot be written in ordinary Cove over no
+/// memory primitive; everything in this file can, and is.
+///
+/// # A copy is an alias, as a `Vector`'s is
+///
+/// Two holders of one builder append to one run, and each sees the other's
+/// bytes. That follows from the owner being the value: copying a handle copies
+/// the handle. It is the same rule a `Vector` has, for the same reason, and it
+/// is why `finish()` has to prove that nothing else is holding the builder
+/// before it can hand the bytes over as an immutable `String`.
+///
+/// # Building one that can be finished
+///
+/// [`withCapacity`] is how a builder is made, and there is no other way:
+///
+/// ```cove
+/// var out = StringBuilder.withCapacity(64)
+/// out.append("hello, ")
+/// out.append("world")
+/// let text = out.finish()
+/// ```
+///
+/// `finish()` consumes, so the checker has to prove the builder is reached
+/// through one place — the same conservative local proof `Vector.freeze()`
+/// needs, and `crates/cove-sema/src/unique.rs` is where it is made. That proof
+/// trusts a creation it can *see*, and a call to `withCapacity` is one: the
+/// uniqueness pass reads this body, finds that its only answer is a struct
+/// literal built here out of a fresh `ByteBuffer`, and derives the fact. It is
+/// not taking this file's word for anything — no declaration here claims
+/// freshness and none could, because a claim would be unchecked.
+///
+/// That derivation is what lets the type be `opaque`. `ByteBuffer` is the
+/// memory primitive ADR 0052 decides and it has no business in a program that
+/// only wants to assemble a string; while the proof needed a creation written
+/// at the use site, the field had to be public so callers could write one, and
+/// the intrinsic leaked into every body that finished a builder. Now the name
+/// and the methods are the whole of what this module publishes.
+export opaque struct StringBuilder {
+  /// The packed run the appends go into.
+  ///
+  /// One field, one reference word: a `StringBuilder` costs what the buffer
+  /// costs and the wrapper is a name. Nothing outside this module can read it
+  /// or write it — that is what `opaque` says — so `ByteBuffer` appears here
+  /// and in the bodies below and nowhere else.
+  buffer: ByteBuffer
+}
+
+impl StringBuilder {
+  /// A builder with room for `capacity` bytes before its first growth.
+  ///
+  /// `capacity` is a hint and never a bound. Appending past it grows the run,
+  /// so an estimate that is too small costs a copy and changes no answer, and
+  /// one that is too large is given back by [`finish`] — which hands over the
+  /// run relabelled down to the length that was actually written.
+  ///
+  /// **A builder this answered can be finished by its caller**, which is the
+  /// only reason an `opaque` builder is usable at all. The uniqueness pass
+  /// derives that from this body rather than being told it: the single
+  /// expression below is a struct literal whose only field is a freshly
+  /// allocated run, so nothing else can be holding what comes back. Change it
+  /// to answer a builder it was handed instead and the derivation stops —
+  /// correctly, and with no annotation anywhere to fall out of date.
+  export fn withCapacity(capacity: Int) -> StringBuilder {
+    StringBuilder(buffer: ByteBuffer.allocate(capacity))
+  }
+
+  /// How many bytes have been appended.
+  ///
+  /// Bytes and not characters, and it is the *written* length rather than the
+  /// room that was asked for: a builder made with room for a thousand bytes and
+  /// given two answers two. Spare capacity is not value, which is the whole of
+  /// ADR 0052's "capacity is not an Array length" as a program can observe it.
+  export fn length(self) -> Int {
+    self.buffer.length()
+  }
+
+  /// Appends the whole of `text`.
+  ///
+  /// The bytes are copied straight out of `text` in one operation. Nothing is
+  /// allocated: the intermediate `String` a `slice` would have produced is
+  /// exactly what a builder exists to avoid.
+  export fn append(var self, text: String) {
+    self.buffer.appendSlice(text, 0, text.byteLength())
+  }
+
+  /// Appends the bytes of `text` from `from` up to but not including `to`.
+  ///
+  /// The offsets are **byte** offsets, the ones `byteLength` and
+  /// `codePointAtByte` deal in, and they are held to `sliceBytes`'s rule: each
+  /// has to be inside the string and at the start of a character. This is the
+  /// operation a formatter wants — a token is a range of its source, and
+  /// copying it out through a `String` would allocate one string per token to
+  /// throw away.
+  ///
+  /// A range that breaks either rule **stops the run** rather than answering.
+  /// Ask `String` about a range you are unsure of; a builder's job is to copy
+  /// one that is already known to be a range.
+  export fn appendSlice(var self, text: String, from: Int, to: Int) {
+    self.buffer.appendSlice(text, from, to)
+  }
+
+  /// Appends one byte, `0` through `255`.
+  ///
+  /// For a delimiter or a character a caller already has as a code point —
+  /// `out.appendByte('\n')` — where making a one-character `String` to append
+  /// would be an allocation per separator.
+  ///
+  /// It is the one operation that can put something in the run that no `String`
+  /// would contain, because the bytes of one character have to be appended
+  /// together to mean that character. [`finish`] is where a run that is not
+  /// valid UTF-8 is caught.
+  export fn appendByte(var self, value: Int) {
+    self.buffer.appendByte(value)
+  }
+
+  /// The bytes appended so far, as a `String`, consuming the builder.
+  ///
+  /// Nothing is copied. The run *becomes* the string: it is relabelled down
+  /// from the room it holds to the length that was written, and the spare tail
+  /// goes back to the allocator — the same O(1) transition `Vector.freeze()`
+  /// makes for elements.
+  ///
+  /// **This consumes**, so the builder is not usable afterwards and the checker
+  /// must be able to prove that nothing else was holding it. A builder copied
+  /// into a second binding, captured by a closure, or passed somewhere that
+  /// could keep it is refused here rather than silently leaving a second holder
+  /// naming bytes that have become a string.
+  export fn finish(var self) -> String {
+    self.buffer.finish()
+  }
+}

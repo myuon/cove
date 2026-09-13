@@ -26,7 +26,9 @@ use cove_schema::builtins::{FreeBuiltinKind, FreeBuiltinSchema, MAP_ENTRY};
 
 use crate::error::RuntimeError;
 use crate::shared::SharedCell;
-use crate::value::{InvalidKey, MapKey, RangeBounds, Repr, Value, VectorStorage};
+use crate::value::{
+    ByteBufferStorage, InvalidKey, MapKey, RangeBounds, Repr, Value, VectorStorage,
+};
 
 /// Type names a program may write as a namespace, such as `Vector.of`.
 ///
@@ -361,6 +363,43 @@ pub fn call_associated(
             }
             Ok(Value(Repr::Set(Rc::new(set))))
         }
+        // `ByteBuffer.allocate(capacity)`: ADR 0052's owner, empty, with room
+        // for `capacity` bytes.
+        //
+        // A `Vec<u8>` *is* the ADR's owner-over-a-replaceable-store: a stable
+        // handle whose run it may reallocate on growth, which is why this side
+        // has one object where the linear-memory backend has two. So the
+        // capacity is passed to `Vec::with_capacity` and is a hint in exactly
+        // the ADR's sense — nothing a program can ask reads it back, and
+        // exceeding it grows.
+        //
+        // A negative capacity is refused rather than clamped, for the reason
+        // `Machine::alloc_buffer` refuses one: it is nonsense rather than a
+        // small number, and answering an empty buffer would make the one
+        // arithmetic a caller could not have meant a silent success.
+        ("ByteBuffer", "allocate") => {
+            let args = expect_args("ByteBuffer.allocate", args, 1, span)?;
+            let Value(Repr::Int(capacity)) = &args[0] else {
+                return Err(type_error(
+                    "ByteBuffer.allocate",
+                    "capacity",
+                    "Int",
+                    &args[0],
+                    span,
+                ));
+            };
+            let Ok(capacity) = usize::try_from(*capacity) else {
+                return Err(RuntimeError::new(format!(
+                    "`ByteBuffer.allocate`'s capacity is `{capacity}`, and a capacity is 0 or more"
+                ))
+                .at(span)
+                .with_rule(
+                    "A capacity is a hint for the first allocation, so it is a count of bytes.",
+                )
+                .with_help("pass 0 for a buffer whose size is not worth estimating"));
+            };
+            Ok(Value(Repr::ByteBuffer(ByteBufferStorage::new(capacity))))
+        }
         // `Duration.nanos(count)`: the one primitive builder left.
         // `micros` through `hours` are `std.duration.ofMicros` and its four
         // neighbours now — see `cove_schema::builtins::standard_associated_binding`
@@ -618,6 +657,98 @@ pub fn call_method(
                     walk_with(host, "Vector", elements, name, args, span)
                 }
                 _ => Err(no_method("Vector", name, span)),
+            }
+        }
+        // ADR 0052's byte buffer. Four operations and no more: it appends, it
+        // reports how many bytes are value, and it finishes. What it is *not*
+        // is a second collection — see `cove_schema::builtins::BYTE_BUFFER`.
+        Value(Repr::ByteBuffer(storage)) => {
+            check_buffer_live(storage, name, span)?;
+            match name {
+                // The *logical* length, which is the only length a program can
+                // ask about. `Vec`'s capacity is unobservable here for the same
+                // reason the store's header length is unobservable there: ADR
+                // 0052's "capacity is not an Array length".
+                "length" => {
+                    expect_args(name, args, 0, span)?;
+                    Ok(Value(Repr::Int(storage.len() as i64)))
+                }
+                // One byte at the logical length. A value outside `0..=255` is
+                // not a byte, and it stops the run rather than being masked
+                // down: `Machine::append_byte` refuses it in these words, and
+                // the two backends must refuse the same argument.
+                "appendByte" => {
+                    let args = expect_args("appendByte", args, 1, span)?;
+                    let Value(Repr::Int(value)) = &args[0] else {
+                        return Err(type_error("appendByte", "value", "Int", &args[0], span));
+                    };
+                    let Ok(byte) = u8::try_from(*value) else {
+                        return Err(RuntimeError::new(format!(
+                            "`appendByte`'s value is `{value}`, and a byte is 0 to 255"
+                        ))
+                        .at(span));
+                    };
+                    storage.bytes.borrow_mut().push(byte);
+                    Ok(Value(Repr::Unit))
+                }
+                // The bulk append, and the reason a builder is worth having:
+                // the range is copied straight out of `text` and the slice is
+                // never materialised.
+                //
+                // The bounds and the character-boundary rule are
+                // `String.sliceBytes`'s, from `byte_range`, which ADR 0052
+                // requires in as many words. What differs from `sliceBytes` is
+                // what a refusal *is*: `sliceBytes` answers a `Result` because
+                // a caller asked for a value, and this stops the run because
+                // `Inst::AppendBytes` does and the schema declares `Unit`.
+                "appendSlice" => {
+                    let args = expect_args("appendSlice", args, 3, span)?;
+                    let Value(Repr::Str(text)) = &args[0] else {
+                        return Err(type_error("appendSlice", "text", "String", &args[0], span));
+                    };
+                    let Value(Repr::Int(from)) = &args[1] else {
+                        return Err(type_error("appendSlice", "from", "Int", &args[1], span));
+                    };
+                    let Value(Repr::Int(to)) = &args[2] else {
+                        return Err(type_error("appendSlice", "to", "Int", &args[2], span));
+                    };
+                    let range = byte_range(text, *from, *to)
+                        .map_err(|message| RuntimeError::new(message).at(span))?;
+                    storage
+                        .bytes
+                        .borrow_mut()
+                        .extend_from_slice(text[range].as_bytes());
+                    Ok(Value(Repr::Unit))
+                }
+                // The finish, which consumes: the bytes are validated once and
+                // become the `String`, and the owner is emptied so a read after
+                // it is refused rather than answered as an empty buffer.
+                //
+                // **There is no uniqueness check here, and that is deliberate.**
+                // `Vector.freeze` counts `Rc` handles because it can — the
+                // evaluator hands it the storage where it lives. A buffer
+                // arrives as a value read out of a place, which is already a
+                // second handle, so counting here would refuse every call.
+                // Uniqueness is `cove_sema::unique`'s proof for both backends;
+                // `Machine::finish_buffer` does not count handles either, and
+                // what both keep is the liveness check below.
+                "finish" => {
+                    expect_args("finish", args, 0, span)?;
+                    let bytes = storage.bytes.take();
+                    *storage.finished.borrow_mut() = true;
+                    match String::from_utf8(bytes) {
+                        Ok(text) => Ok(Value(Repr::Str(text.into()))),
+                        Err(_) => Err(RuntimeError::new("this string's bytes are not valid UTF-8")
+                            .at(span)
+                            .with_rule(
+                                "A `String` is valid UTF-8, and `appendByte` accepts any byte.",
+                            )
+                            .with_help(
+                                "append text with `appendSlice`, or append the bytes of a whole character together",
+                            )),
+                    }
+                }
+                _ => Err(no_method("ByteBuffer", name, span)),
             }
         }
         Value(Repr::Map(entries)) => match name {
@@ -1288,6 +1419,28 @@ pub fn check_live(
         .at(span)
         .with_rule("`freeze()` consumes its vector; the source vector is no longer usable.")
         .with_help("use the `Array` that `freeze()` returned, or build a new vector"));
+    }
+    Ok(())
+}
+
+/// A buffer consumed by `finish()` is no longer usable.
+///
+/// [`check_live`]'s sentence for a buffer, and the same refusal
+/// `Machine::buffer` makes when it finds a null store: a consumed buffer read
+/// as an empty one would turn a uniqueness proof that let something through
+/// into a silently wrong answer.
+fn check_buffer_live(
+    storage: &Rc<ByteBufferStorage>,
+    method: &str,
+    span: Span,
+) -> Result<(), RuntimeError> {
+    if *storage.finished.borrow() {
+        return Err(RuntimeError::new(format!(
+            "`{method}` was called on a byte buffer that `finish()` already consumed"
+        ))
+        .at(span)
+        .with_rule("`finish()` consumes its buffer; the source buffer is no longer usable.")
+        .with_help("use the `String` that `finish()` returned, or build a new buffer"));
     }
     Ok(())
 }

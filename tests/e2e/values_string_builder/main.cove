@@ -1,0 +1,82 @@
+use console.println
+use std.stringbuilder.StringBuilder
+
+/// One node of a tree whose rendering is what a builder is for.
+///
+/// Named `Twig` rather than `Node` because `unique.rs` merges declared type
+/// names across the whole package without their modules, and this package has
+/// three `Node`s already — one of which bears a `Vector`, which would make
+/// every argument beside a builder here look like somewhere the builder could
+/// be stored.
+struct Twig {
+  label: String
+  children: Array<Twig>
+}
+
+/// Writes `node` and everything under it into `out`.
+///
+/// **`out` is a `var` argument and the recursion is the point.** Every frame of
+/// this walk appends to the same builder, and the builder's run is replaced by a
+/// larger one several times on the way — ADR 0052's stable owner is what makes
+/// those two sentences compatible. A builder that reallocated itself would leave
+/// the caller's `var` address naming bytes that had moved.
+fn emit(node: Twig, var out: StringBuilder, depth: Int) {
+  var at = 0
+  while at < depth {
+    out.append("  ")
+    at = at + 1
+  }
+  out.append(node.label)
+  out.appendByte('\n')
+  for child in node.children {
+    emit(child, var out, depth + 1)
+  }
+}
+
+/// Renders `tree` with two bytes of room, so the run grows many times.
+///
+/// The capacity is deliberately absurd. It is a hint and not a bound, so what
+/// this proves is that an underestimate costs copies and changes no answer.
+///
+/// `withCapacity` is the only way to get one — `StringBuilder` is opaque, so
+/// nothing in this file names the memory primitive underneath it — and the
+/// builder it answers is still this body's to `finish()`, because `unique.rs`
+/// proves from `withCapacity`'s own body that what comes back was built there.
+fn render(tree: Twig) -> String {
+  var out = StringBuilder.withCapacity(2)
+  emit(tree, var out, 0)
+  out.finish()
+}
+
+/// A tree three levels deep.
+fn sample() -> Twig {
+  let leaves = [
+    Twig(label: "left", children: []),
+    Twig(label: "right", children: []),
+  ]
+  Twig(label: "root", children: [Twig(label: "branch", children: leaves)])
+}
+
+/// Builds strings with a `StringBuilder`, including through a recursion.
+export fn main() -> Result<Unit, Error> {
+  println(render(sample()))?
+
+  // A byte range copied straight out of its source: the slice is never
+  // materialised, and the offsets are byte offsets.
+  var pieces = StringBuilder.withCapacity(16)
+  pieces.appendSlice("the quick brown fox", 4, 9)
+  pieces.appendByte('-')
+  pieces.appendSlice("the quick brown fox", 16, 19)
+  println("sliced {pieces.length()} bytes: {pieces.finish()}")?
+
+  // Nothing appended, and a capacity of zero: an empty finish answers "".
+  var empty = StringBuilder.withCapacity(0)
+  println("empty length {empty.length()} text `{empty.finish()}`")?
+
+  // A character outside ASCII, appended as text rather than as bytes, so its
+  // length is the bytes it takes and not the characters it is.
+  var wide = StringBuilder.withCapacity(1)
+  wide.append("héllo")
+  println("bytes {wide.length()} chars {wide.finish().length()}")?
+  Ok(())
+}

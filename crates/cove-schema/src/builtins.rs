@@ -101,6 +101,9 @@ pub enum BuiltinType {
     Error,
     /// `Duration`, a signed count of nanoseconds.
     Duration,
+    /// `ByteBuffer`, the growable packed byte run ADR 0052 builds a `String`
+    /// in. Non-generic because its storage unit is a byte and nothing else.
+    ByteBuffer,
     /// `Array<T>`, the fixed-length immutable sequence.
     Array(&'static BuiltinType),
     /// `Vector<T>`, the growable one.
@@ -149,6 +152,7 @@ impl fmt::Display for BuiltinType {
             BuiltinType::String => f.write_str("String"),
             BuiltinType::Error => f.write_str("Error"),
             BuiltinType::Duration => f.write_str("Duration"),
+            BuiltinType::ByteBuffer => f.write_str("ByteBuffer"),
             BuiltinType::Array(item) => write!(f, "Array<{item}>"),
             BuiltinType::Vector(item) => write!(f, "Vector<{item}>"),
             BuiltinType::Set(item) => write!(f, "Set<{item}>"),
@@ -489,8 +493,25 @@ impl FreeBuiltinSchema {
 /// The order is the order the associated functions read out in a diagnostic
 /// that has to list them, which is why the collections come first.
 pub static BUILTINS: &[BuiltinSchema] = &[
-    ARRAY, VECTOR, MAP, MAP_ENTRY, SET, STRING, RANGE, OPTION, RESULT, INT, FLOAT, BOOL, UNIT,
-    DURATION, ERROR, TASK, SHARED, SCOPE,
+    ARRAY,
+    VECTOR,
+    MAP,
+    MAP_ENTRY,
+    SET,
+    STRING,
+    BYTE_BUFFER,
+    RANGE,
+    OPTION,
+    RESULT,
+    INT,
+    FLOAT,
+    BOOL,
+    UNIT,
+    DURATION,
+    ERROR,
+    TASK,
+    SHARED,
+    SCOPE,
 ];
 
 /// Every builtin type the language defines.
@@ -2291,6 +2312,138 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
     }],
 };
 
+// -------------------------------------------------------------- ByteBuffer
+
+/// `ByteBuffer`: the growable packed byte run a `String` is assembled in.
+///
+/// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)
+/// is what this is, and the ADR's own words for it are "a stable owner over a
+/// replaceable run": the value a program holds is a two-word owner, and the
+/// packed bytes live in a store beneath it that a growth may replace. The
+/// owner not moving is the whole point — a buffer passed as a `var` argument
+/// down a recursion keeps working while the store under it doubles, which is
+/// what `examples/covefmt` needs and what a fixed run sized up front cannot
+/// give.
+///
+/// # It is the substrate and not the API
+///
+/// Nothing in a program is expected to write `ByteBuffer` directly. The type
+/// the standard library publishes is `std.stringbuilder`'s `StringBuilder`, an
+/// `opaque struct` whose one field is one of these, and the reason there are
+/// two names is the reason ADR 0052 gives for a privileged substrate:
+/// contiguous packed allocation and precise tracing cannot be written in
+/// ordinary Cove over no memory primitive, but everything above them can. So
+/// this entry is deliberately the smallest set of operations the builder needs
+/// and not a second collection: it appends, it reports a length, and it
+/// finishes. It has no indexing, no removal and no `snapshot`, because a
+/// shared mutable owner has no copy that means anything and nothing here asks
+/// for one.
+///
+/// It is a namespace because the standard library writes
+/// `ByteBuffer.allocate(capacity)`, and that is the only reason: a mistyped
+/// `ByteBuffer.withCapacity(...)` should be told what `ByteBuffer` is rather
+/// than that the name is undeclared.
+///
+/// # Why `appendSlice` answers `Unit` and `finish` does not fail
+///
+/// `appendSlice` checks its range the way `String.sliceBytes` checks one —
+/// bounds and character boundaries both — and a range that fails those checks
+/// **stops the run**. That is not a narrowing of ADR 0052; it is what
+/// `Inst::AppendBytes` does, and a `Result` declared here would be a `Result`
+/// no instruction can produce. A caller that wants to *ask* whether a range is
+/// appendable asks `String` about it before appending.
+///
+/// `finish` answers a `String` rather than a `Result<String, Error>` for the
+/// same reason read off the other instruction: invalid UTF-8 in the live prefix
+/// is a broken invariant `Inst::FinishBuffer` refuses, in the words every other
+/// string operation refuses it in. Only `appendByte` can put a byte there that
+/// no `String` would have, so the fallibility ADR 0052 anticipated belongs to
+/// whoever calls that — and until a program does something with it, declaring a
+/// `Result` every caller would immediately unwrap is surface that has not
+/// earned its place.
+pub const BYTE_BUFFER: BuiltinSchema = BuiltinSchema {
+    name: "ByteBuffer",
+    parameters: &[],
+    // `ByteBuffer.allocate(capacity)` is how the standard library makes one.
+    namespace: true,
+    cases: &[],
+    fields: &[],
+    methods: &[
+        // How many bytes are *value*, which is the owner's own word and never
+        // the store's capacity. ADR 0052's "capacity is not an Array length"
+        // is this method answering two after two appends whatever the store
+        // was sized to.
+        LENGTH,
+        // One byte, at the logical length, which then becomes one more. There
+        // is no offset to pass: a buffer cannot leave a hole below its length,
+        // which is what makes it a buffer rather than a run with a cursor.
+        MethodSchema {
+            name: "appendByte",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "value",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::Unit,
+            mutating: true,
+            fresh: false,
+        },
+        // The bulk append, and the one that matters: one dispatch moves the
+        // whole range straight out of `text` without materialising the slice.
+        MethodSchema {
+            name: "appendSlice",
+            generics: &[],
+            params: &[
+                ParamSchema {
+                    name: "text",
+                    ty: BuiltinType::String,
+                },
+                ParamSchema {
+                    name: "from",
+                    ty: BuiltinType::Int,
+                },
+                ParamSchema {
+                    name: "to",
+                    ty: BuiltinType::Int,
+                },
+            ],
+            variadic: false,
+            result: BuiltinType::Unit,
+            mutating: true,
+            fresh: false,
+        },
+        // `mutating` because it *consumes*: the owner is emptied, and a buffer
+        // read after a finish is refused rather than read as an empty one. It
+        // is `Vector.freeze()` in a buffer's vocabulary, and
+        // `cove_sema::unique` proves the same local uniqueness for both.
+        MethodSchema {
+            name: "finish",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::String,
+            mutating: true,
+            fresh: false,
+        },
+    ],
+    associated: &[MethodSchema {
+        name: "allocate",
+        generics: &[],
+        params: &[ParamSchema {
+            name: "capacity",
+            ty: BuiltinType::Int,
+        }],
+        variadic: false,
+        result: BuiltinType::ByteBuffer,
+        // A fresh owner nothing else holds, which is what lets
+        // `cove_sema::unique` prove the `finish()` that consumes it — the same
+        // assertion `Vector.of` makes for the same pass.
+        mutating: false,
+        fresh: true,
+    }],
+};
+
 // ------------------------------------------------------------------- Range
 
 /// `Range`: what `0..n` and `0..=n` produce.
@@ -3120,8 +3273,19 @@ mod tests {
         assert_eq!(
             namespaces,
             [
-                "Array", "Vector", "Map", "Set", "String", "Option", "Result", "Int", "Float",
-                "Bool", "Duration", "Error"
+                "Array",
+                "Vector",
+                "Map",
+                "Set",
+                "String",
+                "ByteBuffer",
+                "Option",
+                "Result",
+                "Int",
+                "Float",
+                "Bool",
+                "Duration",
+                "Error"
             ]
         );
         assert!(is_builtin_type("Vector"));
@@ -3167,14 +3331,19 @@ mod tests {
         assert_eq!(read, built);
     }
 
-    /// `push`, `set`, `pop`, `remove`, and `freeze` are the language's only
-    /// `var self` methods, and the call site asks by name because it has no
-    /// receiver type yet.
+    /// The language's `var self` methods, and the call site asks by name
+    /// because it has no receiver type yet.
     ///
     /// Every one of them is an imperative verb, which is the half of the
     /// naming rule this can state: a past participle in this list would be a
     /// name that says it answers a new collection while writing through the
     /// receiver.
+    ///
+    /// `appendByte`, `appendSlice` and `finish` are ADR 0052's byte buffer, and
+    /// `finish` is the entry worth looking twice at: it *consumes*, as `freeze`
+    /// does, and a consuming transition is mutating because the owner it leaves
+    /// behind is empty. So the two transitions the language has are both in this
+    /// list, and neither is a past participle.
     #[test]
     fn the_mutating_methods_are_the_ones_that_write_through_the_receiver() {
         let mut mutating: Vec<&str> = BUILTINS
@@ -3184,7 +3353,19 @@ mod tests {
             .map(|method| method.name)
             .collect();
         mutating.sort_unstable();
-        assert_eq!(mutating, ["freeze", "pop", "push", "remove", "set"]);
+        assert_eq!(
+            mutating,
+            [
+                "appendByte",
+                "appendSlice",
+                "finish",
+                "freeze",
+                "pop",
+                "push",
+                "remove",
+                "set"
+            ]
+        );
         assert!(is_mutating_method("push"));
         assert!(is_mutating_method("set"));
         assert!(is_mutating_method("pop"));
@@ -3395,9 +3576,20 @@ mod tests {
             .filter(|entry| declares_length(entry.name))
             .map(|entry| entry.name)
             .collect();
+        // A `ByteBuffer` is here because it answers `length()`, which is the
+        // whole of the question: a program that wrote `out.count()` on one
+        // should be told the spelling rather than told there is no such method.
         assert_eq!(
             sequences,
-            ["Array", "Vector", "Map", "Set", "String", "Range"]
+            [
+                "Array",
+                "Vector",
+                "Map",
+                "Set",
+                "String",
+                "ByteBuffer",
+                "Range"
+            ]
         );
         assert!(!declares_length("Option"));
         assert!(!declares_length("Nothing"));

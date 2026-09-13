@@ -235,6 +235,12 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             "<tag>",
             "Bytes",
             "ByteBuffer",
+            // The one *declaration* in this list, and it is here because
+            // `lower` lowers a whole package: `std.stringbuilder` is attached
+            // to every package, and a method of it names its own receiver, so
+            // the wrapper's layout is interned however little the program under
+            // test has to do with it.
+            "std.stringbuilder.StringBuilder",
         ]
     );
 }

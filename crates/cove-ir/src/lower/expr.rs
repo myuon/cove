@@ -44,6 +44,7 @@ use cove_schema::builtins::FreeBuiltinKind;
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Arg, BinaryOp, Block, Expr, ExprKind, StrPart, UnaryOp};
 
+use super::buffers;
 use super::collections;
 use super::frame::Val;
 use super::gap;
@@ -2101,6 +2102,12 @@ impl Body<'_> {
             // type's own name rather than through a value.
             if name == "of" && collections::namespace_of(head, &ty) {
                 return self.collection_of(expr, head, args);
+            }
+            // `ByteBuffer.allocate(capacity)`: ADR 0052's owner and its store,
+            // which is one instruction rather than a builtin call for
+            // `Vector.of`'s reason — see `Body::buffer_allocate`.
+            if buffers::namespace_allocate(head, name, &ty) {
+                return self.buffer_allocate(expr, args, want);
             }
             // `Int.parse(text)`, `Duration.millis(n)`: the rest of them,
             // which the machine performs rather than the instruction set.
