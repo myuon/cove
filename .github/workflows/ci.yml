@@ -138,6 +138,29 @@ jobs:
       - name: cargo test (the doc examples)
         run: cargo test --workspace --doc --profile checked
 
+      # The native tier, which every step above builds with its code
+      # generator absent.
+      #
+      # `cove-native`'s Cranelift dependency is an optional feature that is
+      # *off by default*, because ADR 0055's adoption gate asks that "a build
+      # without the native feature has no executable-memory dependency" and
+      # that is a fact about the dependency graph rather than about which
+      # functions compile. The consequence is that `--workspace` compiles a
+      # crate of ABI declarations and runs none of the lowering's tests, so
+      # they need a pass of their own — a test no gate runs is not a test.
+      #
+      # Three commands in one step because they are one dependency graph:
+      # Cranelift is about thirty seconds of compilation and this is the only
+      # step that pays it, so splitting them would pay it once and report it
+      # three times.
+      - name: cargo clippy, doc and test (the native tier)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo clippy -p cove-native --all-targets --features native --profile checked -- -D warnings
+          cargo doc -p cove-native --no-deps --features native --profile checked
+          cargo test -p cove-native --features native --profile checked
+
       # The `#[ignore]`d cases, which live in `crates/cove-cli/tests/` —
       # `vm_coverage.rs`, `bytecode_corpus.rs` and `build.rs`. The first is
       # the roadmap: it runs every program in the repository on the
