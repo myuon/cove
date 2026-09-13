@@ -312,6 +312,16 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::FinishString { dst, bytes } => {
             format!("finish-string {} {}", s(*dst), s(*bytes))
         }
+        Inst::AllocBuffer { dst, capacity } => {
+            format!("alloc-buffer {} {}", s(*dst), s(*capacity))
+        }
+        Inst::AppendByte { buffer, value } => {
+            format!("append-byte {} {}", s(*buffer), s(*value))
+        }
+        Inst::AppendBytes { args } => format!("append-bytes ({})", args_of(program, *args)),
+        Inst::FinishBuffer { dst, buffer } => {
+            format!("finish-buffer {} {}", s(*dst), s(*buffer))
+        }
         Inst::Len { dst, obj } => format!("len {} {}", s(*dst), s(*obj)),
         Inst::LayoutOf { dst, obj } => format!("layout-of {} {}", s(*dst), s(*obj)),
         Inst::AddrOfSlot { dst, slot } => format!("addr-of-slot {} {}", s(*dst), s(*slot)),
@@ -512,6 +522,7 @@ fn shape_name(shape: &Shape) -> &'static str {
         } => "array",
         Shape::Elements { growable: true, .. } => "store",
         Shape::Vector { .. } => "vector",
+        Shape::ByteBuffer => "buffer",
         Shape::Members { .. } => "set",
         Shape::Entries { .. } => "map",
         Shape::Closure { .. } => "closure",

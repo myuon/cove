@@ -312,6 +312,9 @@ pub(super) fn layout_name(machine: &Machine, layout: LayoutId, first: u64, depth
         // expression ever holds one of these, so there is no name a Cove
         // program would recognise. See `Shape::Bytes`.
         Shape::Bytes => "<byte run>".to_string(),
+        // Likewise: an owner is named by the standard-library wrapper a program
+        // declares over it, and until there is one there is no name to give.
+        Shape::ByteBuffer => "<byte buffer>".to_string(),
         Shape::Struct { .. } | Shape::Enum { .. } => described.name.to_string(),
         Shape::Elements { growable, .. } => if *growable { "Vector" } else { "Array" }.to_string(),
         Shape::Vector { .. } => "Vector".to_string(),

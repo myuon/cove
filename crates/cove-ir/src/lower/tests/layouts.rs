@@ -234,6 +234,7 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             "TaskScope",
             "<tag>",
             "Bytes",
+            "ByteBuffer",
         ]
     );
 }

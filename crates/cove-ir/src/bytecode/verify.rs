@@ -316,6 +316,11 @@ impl Check<'_> {
             // malformed encoding could still get wrong: an argument whose
             // slot does not fit the width its own carried layout claims.
             Inst::CopyBytes { args } => self.args_fit(at, args),
+            // `Op::AppendBytes`'s four operands live behind an `ArgsId` for the
+            // same reason and are checked by the same uniform rule;
+            // `crate::verify`'s `check_append_bytes_args` is where the fixed
+            // shape (`buffer`, `src`, `from`, `to`) is a lowering-time fact.
+            Inst::AppendBytes { args } => self.args_fit(at, args),
             // `Len::Count` is the one `Len` form this check can settle ahead
             // of time: both halves of the payload are right here, so the
             // layout `Op::AllocImm` names and the count it carries are known

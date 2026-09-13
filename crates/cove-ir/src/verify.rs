@@ -286,10 +286,22 @@ impl Check<'_> {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
+                // ADR 0052's two, and the same answer for the same reason:
+                // `AllocBuffer` always allocates `Program::buffer_layout` and
+                // `FinishBuffer` answers the store its owner was holding,
+                // relabelled to a `Str` object. Neither is a layout this pass
+                // reasons about, only a `Repr`.
+                Inst::AllocBuffer { dst, .. } | Inst::FinishBuffer { dst, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                }
                 // Neither writes a frame slot: `WriteByte` writes a byte of
                 // the object `bytes` already names, and `CopyBytes` writes
                 // into the object its `args` table's `dst` already names.
                 Inst::WriteByte { .. } | Inst::CopyBytes { .. } => {}
+                // Nor do the growable appends: what each changes is the store
+                // the owner in `buffer` names, and the owner's own length word.
+                Inst::AppendByte { .. } | Inst::AppendBytes { .. } => {}
                 // Forming the address of a slot is also a write to it, as
                 // far as this is concerned: a `var` argument is that address
                 // handed to a callee, and what the callee stores through it
@@ -844,6 +856,19 @@ impl Check<'_> {
                 self.expect(at, dst, &[Repr::Ref]);
                 self.expect(at, bytes, &[Repr::Ref]);
             }
+            Inst::AllocBuffer { dst, capacity } => {
+                self.expect(at, dst, &[Repr::Ref]);
+                self.expect(at, capacity, &[Repr::Int]);
+            }
+            Inst::AppendByte { buffer, value } => {
+                self.expect(at, buffer, &[Repr::Ref]);
+                self.expect(at, value, &[Repr::Int]);
+            }
+            Inst::AppendBytes { args } => self.check_append_bytes_args(at, args),
+            Inst::FinishBuffer { dst, buffer } => {
+                self.expect(at, dst, &[Repr::Ref]);
+                self.expect(at, buffer, &[Repr::Ref]);
+            }
             Inst::Len { dst, obj } => {
                 self.expect(at, obj, &[Repr::Ref]);
                 self.expect(at, dst, &[Repr::Int]);
@@ -1262,6 +1287,38 @@ impl Check<'_> {
                 at,
                 format!(
                     "copies bytes with {} argument(s), and this needs {} ({})",
+                    passed.len(),
+                    NAMES.len(),
+                    NAMES.join(", ")
+                ),
+            );
+            return;
+        }
+        for (arg, want) in passed.iter().zip(WANTS) {
+            self.expect(at, arg.slot, &[want]);
+        }
+    }
+
+    /// [`Inst::AppendBytes`]'s four arguments: `buffer`, `src`, `from`, `to`,
+    /// in that order.
+    ///
+    /// Checked by `Repr` rather than by declared [`LayoutId`], for
+    /// [`Self::check_copy_bytes_args`]'s reason: `src` may be a `String` or a
+    /// [`crate::Shape::Bytes`] run and which of the two is a run-time fact. So
+    /// is whether `buffer` names a real owner; what is static is that both are
+    /// references and both offsets are integers.
+    fn check_append_bytes_args(&mut self, at: Option<usize>, args: crate::ArgsId) {
+        if !self.in_range(at, args.index(), self.program.args.len(), "argument list") {
+            return;
+        }
+        const NAMES: [&str; 4] = ["buffer", "src", "from", "to"];
+        const WANTS: [Repr; 4] = [Repr::Ref, Repr::Ref, Repr::Int, Repr::Int];
+        let passed = self.program.arg_list(args).to_vec();
+        if passed.len() != NAMES.len() {
+            self.fault(
+                at,
+                format!(
+                    "appends bytes with {} argument(s), and this needs {} ({})",
                     passed.len(),
                     NAMES.len(),
                     NAMES.join(", ")

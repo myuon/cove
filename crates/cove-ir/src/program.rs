@@ -500,6 +500,16 @@ pub struct Program {
     /// gives every run the same [`crate::layout::Shape::Bytes`] shape whatever
     /// string it will become.
     pub bytes_layout: LayoutId,
+    /// The layout every byte buffer's owner shares.
+    ///
+    /// A program-wide constant for [`Program::bytes_layout`]'s reason, and the
+    /// other half of the pair: an owner and its store are allocated together
+    /// by [`Inst::AllocBuffer`], so neither layout is named at a call site.
+    /// [ADR 0052](../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)
+    /// gives every buffer the same [`crate::layout::Shape::ByteBuffer`] shape
+    /// whatever bytes it will hold, because an owner's two words are a length
+    /// and a reference whatever the store's capacity.
+    pub buffer_layout: LayoutId,
     /// The layout every [`Inst::Box`] allocates its object as.
     ///
     /// A program-wide constant for the same reason [`Program::str_layout`]

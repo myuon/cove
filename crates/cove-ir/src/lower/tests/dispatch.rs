@@ -30,7 +30,7 @@ s10:int s11:int s12:ref s13:ref
      3  copy s4:Int s2:Int
      4  box s5:ref s3..s4:m.Point
      5  load-field s7:Int s5:ref +0
-     6  switch s7:int [14 14 14 14 14 14 14 14 14 14 14 14 14 14 14 7 11] else 14
+     6  switch s7:int [14 14 14 14 14 14 14 14 14 14 14 14 14 14 14 14 7 11] else 14
      7  unbox s9:m.Name s5:ref
      8  copy s8:String s9:String
      9  clear s9:m.Name
@@ -66,7 +66,7 @@ fn @m.take(Any) -> String
   frame 9: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:int s7:ref s8:ref
   local v -> s0:Any [0, 12)
      0  load-field s2:Int s0:ref +0
-     1  switch s2:int [9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 2 6] else 9
+     1  switch s2:int [9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 2 6] else 9
      2  unbox s4:m.Name s0:ref
      3  copy s3:String s4:String
      4  clear s4:m.Name
@@ -121,7 +121,7 @@ fn @m.f() -> String
      3  copy s2:Any s1:Any
      4  clear s1:Any
      5  load-field s3:Int s2:ref +0
-     6  switch s3:int [14 14 14 14 14 14 14 14 14 14 14 14 14 14 14 7 11] else 14
+     6  switch s3:int [14 14 14 14 14 14 14 14 14 14 14 14 14 14 14 14 7 11] else 14
      7  unbox s4:m.Name s2:ref
      8  copy s1:String s4:String
      9  clear s4:m.Name

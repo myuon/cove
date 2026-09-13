@@ -147,6 +147,25 @@ pub(crate) fn parts(machine: &Machine, addr: u64) -> Option<(String, Vec<(String
         // A run under construction: not a Cove value, so the debugger shows
         // its length rather than its bytes, which may not be valid UTF-8.
         Shape::Bytes => vec![("length".to_string(), len.to_string())],
+        // The owner's own two words, which is the whole of what a debugger can
+        // usefully say: the *logical* length, and the capacity of the store
+        // beneath it. The bytes themselves may not be valid UTF-8 yet, so they
+        // are counted rather than shown, exactly as a `Shape::Bytes` run's are.
+        Shape::ByteBuffer => {
+            let (count, store) = match payload(machine, addr, 0, 2) {
+                Some(words) => (words[0], words[1]),
+                None => (0, 0),
+            };
+            let capacity = if store != 0 && machine.readable(store, 1) {
+                machine.object_len(store).to_string()
+            } else {
+                "0".to_string()
+            };
+            vec![
+                ("length".to_string(), count.to_string()),
+                ("capacity".to_string(), capacity),
+            ]
+        }
         Shape::Word(_) | Shape::Struct { .. } | Shape::Enum { .. } => {
             match payload(machine, addr, 0, described.width()) {
                 Some(words) => inline_parts(machine, id, described, &words, &mut inside),
@@ -335,6 +354,16 @@ fn object(machine: &Machine, addr: u64, depth: usize, inside: &mut Vec<u64>) -> 
         // Not yet a String, and may not hold valid UTF-8, so it is shown by
         // its length rather than as text.
         Shape::Bytes => format!("<byte run: {len}>"),
+        // The logical length, taken from the owner and not from the store: a
+        // store is as long as the last growth made it, and the bytes past the
+        // length are spare room rather than value.
+        Shape::ByteBuffer => {
+            let count = match payload(machine, addr, 0, 1) {
+                Some(words) => words[0],
+                None => 0,
+            };
+            format!("<byte buffer: {count}>")
+        }
         // A layout the lowering broke a recursion at holds the value's own
         // inline words as its payload, so the payload is read as a location.
         Shape::Word(_) | Shape::Struct { .. } | Shape::Enum { .. } => {

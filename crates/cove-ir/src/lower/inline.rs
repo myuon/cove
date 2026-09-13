@@ -321,7 +321,10 @@ fn is_expandable(f: &Function, limit: usize) -> bool {
 /// touch no scope or cell, so they belong in the list of things this refuses
 /// nothing for — correctly left out of the `matches!` above — but that is a
 /// fact worth writing down here precisely because the compiler cannot check
-/// it.
+/// it. The same is true of
+/// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
+/// `AllocBuffer`, `AppendByte`, `AppendBytes` and `FinishBuffer`: they
+/// allocate and they copy, and an allocation is not a call.
 fn reaches_nothing(inst: &Inst) -> bool {
     !matches!(
         inst,
@@ -405,6 +408,8 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::ByteAt { dst, .. }
             | Inst::AllocBytes { dst, .. }
             | Inst::FinishString { dst, .. }
+            | Inst::AllocBuffer { dst, .. }
+            | Inst::FinishBuffer { dst, .. }
             | Inst::Len { dst, .. }
             | Inst::LayoutOf { dst, .. }
             | Inst::AddrOfSlot { dst, .. }
@@ -422,6 +427,8 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::Store { .. }
             | Inst::WriteByte { .. }
             | Inst::CopyBytes { .. }
+            | Inst::AppendByte { .. }
+            | Inst::AppendBytes { .. }
             | Inst::Jump { .. }
             | Inst::BranchFalse { .. }
             | Inst::Switch { .. }
@@ -792,7 +799,11 @@ fn expand(program: &mut Program, id: FunctionId, small: &[bool], wide: &[bool], 
             Inst::Switch { table, .. } if table.0 >= PLACED => {
                 *table = crate::TableId(first + (table.0 - PLACED));
             }
-            Inst::CallBuiltin { args, .. } | Inst::CopyBytes { args } if args.0 >= PLACED => {
+            Inst::CallBuiltin { args, .. }
+            | Inst::CopyBytes { args }
+            | Inst::AppendBytes { args }
+                if args.0 >= PLACED =>
+            {
                 *args = crate::ArgsId(listed + (args.0 - PLACED));
             }
             _ => {}
@@ -865,9 +876,10 @@ fn relocated(
         // An argument list is `Program::args` and not part of the
         // instruction, so shifting the slots the instruction names does not
         // reach it. A builtin is the one call a leaf may hold, and
-        // `Inst::CopyBytes` is the one non-call instruction that also names
-        // one — both are the list relocated into a list of its own.
-        Inst::CallBuiltin { args, .. } | Inst::CopyBytes { args } => {
+        // `Inst::CopyBytes` and `Inst::AppendBytes` are the non-call
+        // instructions that also name one — each is the list relocated into a
+        // list of its own.
+        Inst::CallBuiltin { args, .. } | Inst::CopyBytes { args } | Inst::AppendBytes { args } => {
             lists.push(
                 program
                     .arg_list(*args)
@@ -977,11 +989,14 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         Inst::AllocBytes { dst, len } => vec![dst, len],
         Inst::WriteByte { bytes, at, value } => vec![bytes, at, value],
         Inst::FinishString { dst, bytes } => vec![dst, bytes],
+        Inst::AllocBuffer { dst, capacity } => vec![dst, capacity],
+        Inst::AppendByte { buffer, value } => vec![buffer, value],
+        Inst::FinishBuffer { dst, buffer } => vec![dst, buffer],
         // The five operands live in the args row rather than on the
         // instruction, exactly as a call's do — `relocated` moves that row
         // and repoints `args` at the copy, the same way it does for
         // `Inst::CallBuiltin`.
-        Inst::CopyBytes { .. } => Vec::new(),
+        Inst::CopyBytes { .. } | Inst::AppendBytes { .. } => Vec::new(),
         Inst::Len { dst, obj } | Inst::LayoutOf { dst, obj } => vec![dst, obj],
         Inst::AddrOfSlot { dst, slot } => vec![dst, slot],
         Inst::AddrOfField { dst, obj, .. } => vec![dst, obj],

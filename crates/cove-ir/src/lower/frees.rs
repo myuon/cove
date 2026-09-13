@@ -332,6 +332,8 @@ impl<'p> Flow<'p> {
             | Inst::ByteAt { dst, .. }
             | Inst::AllocBytes { dst, .. }
             | Inst::FinishString { dst, .. }
+            | Inst::AllocBuffer { dst, .. }
+            | Inst::FinishBuffer { dst, .. }
             | Inst::Len { dst, .. }
             | Inst::LayoutOf { dst, .. }
             | Inst::Alloc { dst, .. }
@@ -395,6 +397,8 @@ impl<'p> Flow<'p> {
             | Inst::StoreElem { .. }
             | Inst::WriteByte { .. }
             | Inst::CopyBytes { .. }
+            | Inst::AppendByte { .. }
+            | Inst::AppendBytes { .. }
             | Inst::ScopeCancel { .. }
             | Inst::Cancel { .. }
             | Inst::SharedLock { .. }
@@ -486,6 +490,15 @@ impl<'p> Flow<'p> {
             // do, so they are read the same way.
             Inst::CopyBytes { args: list } => args(list, f),
             Inst::FinishString { bytes, .. } => f(bytes, 1),
+            Inst::AllocBuffer { capacity, .. } => f(capacity, 1),
+            Inst::AppendByte { buffer, value } => {
+                f(buffer, 1);
+                f(value, 1);
+            }
+            // All four operands live in the args row, exactly as
+            // `Inst::CopyBytes`'s five do.
+            Inst::AppendBytes { args: list } => args(list, f),
+            Inst::FinishBuffer { buffer, .. } => f(buffer, 1),
             Inst::StoreField {
                 obj, src, layout, ..
             } => {
