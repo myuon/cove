@@ -365,17 +365,33 @@ module covefmt
   export fn parseTokens(source: String, held: Array<Token>) -> Tree
   /// Turning a tree back into text.
   ///
-  /// This slice makes no layout decision: it walks the tree and writes what each
-  /// token said. That is not the formatter — a formatter chooses where a line
-  /// breaks and how far it is indented — but it is the half of one that has to
-  /// be right first, and it is the half that can be checked *now*.
+  /// It began by making no layout decision — walking the tree and writing what
+  /// each token said — because that is the half of a formatter that has to be
+  /// right first. It makes them now: where a line breaks, how far it is
+  /// indented, how much space goes between two tokens, when a body of one
+  /// statement closes up, when a chain breaks at its dots and when a call hugs
+  /// its last argument.
+  ///
+  /// It makes them without an expression grammar, which is the thing about this
+  /// file worth knowing before reading it. `Tree` stops at `Stmt`, `Group` and
+  /// `Member` — a statement's own tokens are leaves — so every rule below asks
+  /// its question of a *run of tokens* and of the boundaries the item level
+  /// gave it, not of a parsed expression. `loosestIn` finds the operator a
+  /// binary expression breaks at by scanning for it; `breaksAtItsDots` decides
+  /// a chain from where the dots fall. That is a narrower instrument than
+  /// `cove_syntax::format`, which dispatches on `ExprKind`, and the measurement
+  /// below is what says it reaches the same answers.
   ///
   /// The check is the repository itself. Every `.cove` file here passes
   /// `cove fmt --check`, so every one of them is already what the formatter
-  /// should produce, and a formatter that is correct reproduces all 242 of them
-  /// byte for byte. `print(parse(source)) == source` is that, and it is a
-  /// stronger statement than the tiling: the tiling says the tree *covers* the
-  /// tokens, and this says a walk of it *reaches* them, in order, whole.
+  /// should produce. `print(parse(source)) == source` on all 246 is the
+  /// weakest form of that and the one to distrust — a formatter's own output
+  /// is a fixed point of anything that leaves it alone. `bench.cove` damages
+  /// the corpus four ways that cannot change what a program means, and asks
+  /// for the original back: the indentation stripped, the breaks inside
+  /// brackets joined up, a body of one statement closed up, every run of space
+  /// doubled. All four reach 246 of 246, and it is those that say the rules
+  /// are rules rather than a copy.
   ///
   /// The output is built by pushing each piece and joining once. Appending with
   /// an interpolation is quadratic — `examples/cq/README.md` measured that, and
