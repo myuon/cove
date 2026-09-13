@@ -50,7 +50,9 @@ caller's settled destination — the copy would move, not disappear.
 
 ## Decision
 
-**A native call is given the destination to write, and writes it.**
+**A native call is given the destination to write, and copies its answer
+there itself** — rather than reporting a slot for the runtime to allocate a
+vector from and copy twice.
 
 The logical entry ABI gains a hidden destination, as *stable word indices*
 rather than raw pointers:
@@ -95,6 +97,23 @@ Phase 1 removes the owned vector; Phase 2 gives the callee the destination.
 They land separately because they are two different claims about where the
 time goes, and one number covering both would let a change that did nothing
 hide behind a change that did.
+
+### What this does not do
+
+The copy from the callee's return slot to the caller's destination remains. It
+is one copy of a statically known width, made by generated code, and this ADR
+does not remove it.
+
+Removing it means making the callee compute its answer *into* the caller's
+destination in the first place — return-destination propagation, or slot
+coalescing. That is not an ABI change and it cannot be one: a callee may have
+several `Return`s, they may sit on different branches, and the value it is
+about to return may be read again before it does. Deciding when the return
+slot and the destination can be the same place is an optimisation over the
+callee's own body, and it belongs with the other work that reasons about where
+a value lives rather than with the calling convention. It is recorded here so
+that "the answer is written into the destination" is not read as "the answer
+is never copied".
 
 ## What this costs
 
@@ -141,8 +160,13 @@ there as anywhere. A rule with an exception is two rules.
 
 ## Consequences
 
-- An internal Cove call allocates nothing to return a value.
-- The result is written once, into the place the lowering already chose.
+- An internal Cove call allocates nothing to return a value: the owned
+  `Vec<u64>` and the runtime's second copy out of it are both gone.
+- **This is not zero-copy, and the difference is worth stating.** The callee
+  still copies its answer word by word from its own return slot to the
+  caller's destination; what was removed is the allocation and the *extra*
+  copy the runtime made after it. One copy remains, and it is generated code
+  rather than a runtime step.
 - `Inst::Call`'s `dst` becomes part of the native ABI rather than something
   the runtime applies afterwards.
 - The callee writes into its caller's frame, under stable indices.

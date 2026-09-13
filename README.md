@@ -456,7 +456,12 @@ into the destination the lowering had already settled on `Inst::Call`'s `dst` â€
 so native execution was 2.44x the VM on code holding no call and **1.08x** on
 code that did. Removing the vector alone took the call-shaped row 26% down;
 handing the callee the destination took another 6%, and together they leave
-native **1.53x** the VM where it was 1.08x. The destination is a pair of word
+native **1.53x** the VM where it was 1.08x. What went is the allocation and
+the runtime's second copy â€” not the copy itself, which the callee still makes
+from its own return slot into the destination. Removing *that* means the
+callee computing its answer into the destination to begin with, which is slot
+coalescing over a body that may return from several branches, and is an
+optimisation rather than a calling convention. The destination is a pair of word
 indices and never a pointer, for the same reason a frame base is: the Cove
 stack is a `Vec` that reallocates, and a test deliberately moves it. The
 callee writes into its caller's frame before its own is popped, which is a
