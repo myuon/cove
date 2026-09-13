@@ -61,7 +61,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cove_ir::{ArgsId, FunctionId, Slot, StrId};
-use cove_native::{Entry, NativeCtx, NativeHelpers, Outcome, Raise};
+use cove_native::{Entry, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
 
 use super::{divided_by_zero, null_object, overflowed, Frame, Machine, Overflow};
 use crate::budget::Meter;
@@ -895,7 +895,12 @@ impl<'v, 'a> Session<'v, 'a> {
 /// between two code generators would be a difference in the *runtime* presented
 /// as a difference in the code they emit.
 pub fn helpers() -> NativeHelpers {
-    NativeHelpers { safepoint, call }
+    NativeHelpers {
+        safepoint,
+        call,
+        open,
+        close,
+    }
 }
 
 /// Which component of the call path a variant of the helper does **twice**.
@@ -982,6 +987,8 @@ pub fn helpers_ablated<const MASK: u64>() -> NativeHelpers {
     NativeHelpers {
         safepoint,
         call: call_ablated::<MASK>,
+        open,
+        close,
     }
 }
 
@@ -1001,7 +1008,182 @@ unsafe extern "C" fn call_ablated<const MASK: u64>(
     call_body::<MASK>(ctx, base, pc, callee, args, dst)
 }
 
-/// One component of the call path, again, and each one out of line.
+/// The open half of a direct call: [ADR 0055]'s "Direct native-to-native calls",
+/// which it names as a later optimisation of the first tier and this is.
+///
+/// [`call`] does ten things and generated code waits for all of them. This does
+/// the ones only the runtime can do and hands back the two facts emitted code
+/// needs to do the rest itself — where the callee's code is, and where its frame
+/// is. What moves into generated code is the argument copy, which the lowering
+/// settled and a code generator therefore knows statically; what stays here is
+/// everything that touches a `Vec` the runtime owns or an account it keeps.
+///
+/// # What it does not skip, and why that is the whole of the claim
+///
+/// Issue #365's decomposition measured the tier hop at 1.3% of the native arm and
+/// the *safepoint* at 9.1%, so a direct call that dropped the poll would be a
+/// speedup that was really a missing check. This takes it, in
+/// [ADR 0040]'s order, with the same charge, at the same point in the call:
+///
+/// 1. the unpaid work goes from [`NativeCtx::pending_work`] into `bulk_work`;
+/// 2. the frame's program counter is synchronised, so a collection walks a
+///    current frame;
+/// 3. cancellation, then fuel and the deadline, then the collector rendezvous;
+/// 4. `admit_frame` against the embedder's `max_call_depth`, and `push_frame`,
+///    whose `Overflow` is the stack segment's own bound. **Both** of the two
+///    checks a runaway recursion is refused by are still here and still in that
+///    order;
+/// 5. the callee's `Frame`, pushed before a word of the callee runs, because a
+///    frame is what makes the callee's reference slots walkable.
+///
+/// What it leaves out of `open_frame` is the argument copy and the arity compare
+/// — the compare because a code generator that emitted a direct call has already
+/// made it, and a mismatch falls back to [`call`] and its `wrong_arity`.
+///
+/// # A mixed call keeps the path it had
+///
+/// A callee with no compiled entry is not this function's business, and it does
+/// not try: it calls [`call`] — the whole mediated helper, unchanged, arguments
+/// and tier and answer and frame — and answers `entry: None` with the outcome.
+/// That is the constraint #365 sets, and it is met by *calling the old path*
+/// rather than by reimplementing it.
+///
+/// # Safety
+///
+/// As [`call`].
+///
+/// [ADR 0040]: ../../../../../docs/adr/0040-a-bound-outlives-its-backend.md
+/// [ADR 0055]: ../../../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+unsafe extern "C" fn open(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    callee: u32,
+    args: u32,
+    dst: u32,
+) -> Opened {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+    let budget = (*host).budget;
+    let id = FunctionId(callee);
+
+    let Some(entry) = (*host).entries.entry(id) else {
+        // The mediated helper, whole. A mixed call is the path it always was.
+        return Opened {
+            entry: None,
+            base: u64::from(call(ctx, base, pc, callee, args, dst)),
+        };
+    };
+
+    let work = (*ctx).pending_work;
+    (*ctx).pending_work = 0;
+    let opened = {
+        let machine = &mut *machine;
+        machine.bulk_work += work;
+        machine.sync(pc as usize);
+        let caller = machine
+            .frames
+            .last()
+            .copied()
+            .expect("a native frame is executing");
+        debug_assert_eq!(
+            machine.mem.stack_index(caller.base) as u64,
+            base,
+            "compiled code and the frame stack disagree about which frame is calling"
+        );
+        let span = machine.span(caller.function, pc as usize);
+        machine
+            .safepoint(budget, caller.function, pc as usize)
+            .and_then(|()| machine.admit_frame(budget, span))
+            .and_then(|()| {
+                let size = machine.program.function(id).frame_size();
+                // `open_frame`'s own line, and its bare error: the two refusals
+                // are told apart by their class and not by a span, and the
+                // mediated path attaches none here either.
+                machine
+                    .mem
+                    .push_frame(size)
+                    .map_err(|Overflow| machine.too_deep_error())
+            })
+    };
+    let callee_base = match opened {
+        Ok(base) => base,
+        Err(error) => {
+            (*host).left = Some(error);
+            return Opened {
+                entry: None,
+                base: u64::from(Outcome::Raised.abi()),
+            };
+        }
+    };
+    let index = {
+        let machine = &mut *machine;
+        machine.frames.push(Frame {
+            function: id,
+            base: callee_base,
+            pc: 0,
+            dst: dst as Slot,
+        });
+        (*host).tiers.native += 1;
+        // Taken after the frame was pushed, and an index rather than a pointer,
+        // which is ADR 0057's rule and is why a `push_frame` below this one is
+        // harmless.
+        machine.mem.stack_index(callee_base) as u64
+    };
+    // `push_frame` may have moved the words, and generated code is about to store
+    // the arguments through the pointer it finds here.
+    republish(ctx, host);
+    Opened {
+        entry: Some(entry),
+        base: index,
+    }
+}
+
+/// The close half of a direct call: the frame comes off, and the error the callee
+/// named is built.
+///
+/// See [`cove_native::CloseFn`]. This is the half of [`enter`] that is not the
+/// entry: the charge on every exit, the frame removed on a return and left
+/// standing on anything else, and the callee's [`Raise`] turned into the sentence
+/// the encoded tier would have produced.
+///
+/// Nothing is republished, and that is a property of the direct path rather than
+/// an omission. A direct call hands the callee the *caller's* context, so every
+/// helper the callee reached — its own safepoints, its own calls — stored the
+/// current words pointer and chunk table into the context the caller will re-read.
+/// `pop_frame` is a truncation and moves nothing. [`call`] republishes because the
+/// callee it entered was given a context of its own.
+///
+/// # Safety
+///
+/// As [`call`]. The top frame is the callee's, which is what [`open`] left.
+unsafe extern "C" fn close(ctx: *mut NativeCtx, outcome: u32, callee: u32) -> u32 {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = &mut *(*host).machine;
+    // Pending work is charged on every exit — a return, a raise and a stop alike,
+    // which is ADR 0055's own requirement and `enter`'s own line.
+    machine.bulk_work += (*ctx).pending_work;
+    (*ctx).pending_work = 0;
+    if outcome == Outcome::Returned.abi() {
+        // The answer is already where it belongs: the callee wrote it before it
+        // returned, so all that is left is to take its frame away.
+        let frame = machine
+            .frames
+            .pop()
+            .expect("a direct call's callee has a frame");
+        machine.mem.pop_frame(frame.base);
+    } else if outcome == Outcome::Raised.abi() {
+        // A failure leaves its frames standing, because that is what the error's
+        // call chain is read out of. The error is whole by the time it is stashed,
+        // and if the runtime is already holding one it is the callee's and this
+        // hands it straight back.
+        let error = raised(machine, (*host).left.take(), FunctionId(callee), &*ctx);
+        (*host).left = Some(error);
+    }
+    outcome
+}
+
+/// One component of the call path, again, and each one out of line./// One component of the call path, again, and each one out of line.
 ///
 /// `#[inline(never)]` on every one of them is method rather than style, and it
 /// was arrived at by getting it wrong first. Inlined into [`call_body`], a

@@ -122,8 +122,8 @@
 pub mod abi;
 
 pub use abi::{
-    CallFn, Entry, NativeCtx, NativeHelpers, Outcome, Raise, SafepointFn, HEAP_CHUNK_SHIFT,
-    HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
+    CallFn, CloseFn, Entry, NativeCtx, NativeHelpers, OpenFn, Opened, Outcome, Raise, SafepointFn,
+    HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 
 /// Native execution is not available here.

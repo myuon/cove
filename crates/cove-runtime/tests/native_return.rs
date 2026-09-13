@@ -41,7 +41,8 @@ use cove_diag::SourceMap;
 use cove_ir::{ArithOp, CmpOp, FunctionId, Inst, Num, Program as Lowered, Slot};
 use cove_native::{NativeCtx, NativeHelpers, Outcome, Raise};
 use cove_runtime::{
-    native_helpers, Grants, HostRegistry, NativeEntry, NothingCompiled, Runtime, Tiered, Value, Vm,
+    native_helpers, Budget, Cancellation, Grants, HostRegistry, Limits, NativeEntry,
+    NothingCompiled, Runtime, Tiered, Value, Vm,
 };
 use cove_sema::package::{Module, Package, Unit};
 use cove_sema::{Compiler, Config};
@@ -192,6 +193,15 @@ thread_local! {
     /// through the same `return` a wrong answer would, and the frame it wrote
     /// into is popped behind it.
     static WITNESS: RefCell<Vec<Seen>> = const { RefCell::new(Vec::new()) };
+    /// Whether a call is made the *direct* way: `open`, the callee's entry, and
+    /// `close`, rather than the one mediated `call` helper.
+    ///
+    /// Issue #365's Part 2. The two protocols are both the runtime's, and this
+    /// tier exercises either — which is what makes the direct one testable in the
+    /// ordinary `cargo t`, with no code generator and no executable page. What a
+    /// code generator adds on top is the argument copy, and this does that copy
+    /// too, at the same widths out of the same slots.
+    static DIRECT: Cell<bool> = const { Cell::new(false) };
     /// Whether to fill a destination with [`SENTINEL`] before each call.
     ///
     /// Off by default, because it is not something emitted code does. On for the
@@ -445,7 +455,11 @@ unsafe fn interpret(
                 // the helper charges it.
                 (*ctx).pending_work = work;
                 work = 0;
-                let outcome = (helpers.call)(ctx, base, pc as u32, callee.0, args.0, *dst);
+                let outcome = if DIRECT.with(Cell::get) {
+                    direct(&helpers, &program, ctx, base, pc, *callee, *args, *dst)
+                } else {
+                    (helpers.call)(ctx, base, pc as u32, callee.0, args.0, *dst)
+                };
 
                 // Read whatever the outcome was: this frame is still this
                 // function's until it returns, so the destination is readable on
@@ -486,6 +500,57 @@ unsafe fn interpret(
             ),
         }
     }
+}
+
+/// One call, made the way generated code makes a direct one.
+///
+/// The protocol of `cove_native::OpenFn` and `cove_native::CloseFn`, in the order
+/// emitted code performs it and with the one step that belongs to the *code*
+/// rather than to the runtime done here too: the arguments, copied out of the
+/// caller's slots into the frame `open` answered, at the widths the callee's
+/// parameters declare. A code generator knows those statically; this reads them
+/// out of the program, which is the same numbers by a slower route.
+///
+/// `entry: None` is the runtime saying it finished the call itself — a callee
+/// with no compiled code — and then there is nothing to enter and nothing to
+/// close.
+///
+/// # Safety
+///
+/// As [`interpret`].
+#[allow(clippy::too_many_arguments)]
+unsafe fn direct(
+    helpers: &NativeHelpers,
+    program: &Arc<Lowered>,
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: usize,
+    callee: FunctionId,
+    args: cove_ir::ArgsId,
+    dst: Slot,
+) -> u32 {
+    let opened = (helpers.open)(ctx, base, pc as u32, callee.0, args.0, dst);
+    let Some(entry) = opened.entry else {
+        return opened.base as u32;
+    };
+    // The words pointer is re-read for every one of these, because `open` pushed
+    // a frame and a `Vec::resize` moves the words. Emitted code re-derives it
+    // once, after the call, for the same reason.
+    let target = program.function(callee);
+    let mut at = 0;
+    for (arg, layout) in program.arg_list(args).iter().zip(&target.params) {
+        let width = program.layout(*layout).width();
+        for word_at in 0..width {
+            let held = word(ctx, base, arg.slot + word_at);
+            set(ctx, opened.base, at + word_at, held);
+        }
+        at += width;
+    }
+    // The call itself, and the destination is the caller's frame and the slot the
+    // lowering settled: ADR 0057's two indices, handed down rather than reported
+    // back.
+    let answered = entry(ctx, opened.base, base, dst);
+    (helpers.close)(ctx, answered.abi(), callee.0)
 }
 
 /// How many words of a destination a case watches.
@@ -605,6 +670,53 @@ fn with_vm(heap_words: usize, body: impl FnOnce(&mut Vm<'_>, &Arc<Lowered>)) {
     );
     let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, heap_words);
     body(&mut vm, &lowered);
+}
+
+/// The same, over a run the embedder bounded.
+///
+/// `with_vm` grants `Limits::default()`, which bounds nothing — "A `None` field
+/// imposes nothing" — and the one case that needs a bound is the runaway
+/// recursion: `max_call_depth` is what refuses it, and a default budget has none.
+/// The budget is installed *before* the `Vm` is built, because the meter is taken
+/// where a run begins.
+fn with_limited_vm(
+    heap_words: usize,
+    limits: Limits,
+    body: impl FnOnce(&mut Vm<'_>, &Arc<Lowered>),
+) {
+    let (sources, checked) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&checked, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let mut hosts = HostRegistry::new(Grants::new(Vec::<&str>::new()));
+    hosts.set_budget(Budget::with_cancellation(limits, Cancellation::new()));
+    let hosts = Arc::new(hosts);
+    let runtime = Runtime::new(
+        Arc::clone(&checked),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, heap_words);
+    body(&mut vm, &lowered);
+}
+
+/// Runs `body` with every call in it made the direct way, and puts the switch
+/// back.
+///
+/// See [`DIRECT`]. A guard rather than two lines at each end of a case, because a
+/// case that failed between them would leave the switch on for whatever ran next
+/// in the same thread.
+fn directly<T>(body: impl FnOnce() -> T) -> T {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DIRECT.with(|on| on.set(false));
+        }
+    }
+    let _restore = Restore;
+    DIRECT.with(|on| on.set(true));
+    body()
 }
 
 /// What `Vm::new` uses, so that a case which does not care about collection gets
@@ -1106,6 +1218,259 @@ fn every_component_done_twice_answers_the_same() {
             "a frame is at least as wide as the parameters written into it"
         );
         cove_runtime::census_reset();
+    });
+}
+
+/// A direct call answers what a mediated one answers, on every shape of return
+/// this file has.
+///
+/// Issue #365's Part 2. A direct call is the same call: the same frame, the same
+/// arguments, the same destination, the same answer. The way to say that is to
+/// make each call three times — once on the VM, once through the mediated helper,
+/// once through `open`, the callee's entry and `close` — and compare all three.
+///
+/// The shapes are the ones that would notice something: two words, a reference,
+/// no words at all, a callee the subset refused (so the direct path's
+/// `entry: None` branch is taken and the mediated helper finishes the call), and
+/// a raise travelling out through a frame the direct path did not pop.
+#[test]
+fn a_direct_call_answers_what_a_mediated_one_answers() {
+    with_vm(ORDINARY_HEAP_WORDS, |vm, lowered| {
+        for (entry, names, arguments) in [
+            (
+                "passesPair",
+                &["passesPair", "makesPair"][..],
+                vec![Value::int(41)],
+            ),
+            // Only the caller compiled, so the callee is reached the way a mixed
+            // call always was: `open` answers `entry: None` and the mediated
+            // helper has already finished the call.
+            ("passesPair", &["passesPair"][..], vec![Value::int(41)]),
+            (
+                "passesEmpty",
+                &["passesEmpty", "makesEmpty"][..],
+                vec![Value::int(5)],
+            ),
+            (
+                "passesEcho",
+                &["passesEcho", "echoes"][..],
+                vec![Value::string("a string"), Value::int(0)],
+            ),
+            ("counts", &["counts"][..], vec![Value::int(7)]),
+        ] {
+            let mut session = vm
+                .native_session(MODULE, entry, arguments)
+                .expect("the session opens");
+            let words = session.arguments().to_vec();
+            let expected = session
+                .call(&NothingCompiled, &words)
+                .expect("the vm answers");
+            let tier = hand(lowered, names);
+            let mediated = session.call(&tier, &words).expect("the mediated helper");
+            let tier = hand(lowered, names);
+            let direct = directly(|| session.call(&tier, &words)).expect("the direct call");
+            assert_eq!(mediated, expected, "`{entry}`, mediated");
+            assert_eq!(direct, expected, "`{entry}`, direct");
+        }
+
+        // A raise, which is the one outcome that leaves the callee's frame
+        // standing: the error's call chain is read out of it.
+        let mut session = vm
+            .native_session(MODULE, "passesRefusal", vec![Value::int(0)])
+            .expect("the session opens");
+        let refused = session
+            .call(&NothingCompiled, &[0])
+            .expect_err("dividing by zero is refused");
+        let tier = hand(lowered, &["passesRefusal", "refuses"]);
+        let direct = directly(|| session.call(&tier, &[0])).expect_err("the direct call refuses");
+        assert_eq!(
+            direct.message, refused.message,
+            "the sentence a direct call raises is the sentence the VM raises"
+        );
+        // And the session still works, which is what says the frames the raise
+        // left standing were put back.
+        let after = directly(|| session.call(&tier, &[4])).expect("a divisor that works");
+        assert_eq!(after, vec![25]);
+    });
+}
+
+/// Recursion through direct calls, returning through a reallocation of the
+/// stack.
+///
+/// `a_return_finds_a_destination_a_reallocation_moved`'s case, made the direct
+/// way. It is the one that would catch a frame index turned into a pointer
+/// anywhere in the new path — `open` answers an index, emitted code stores the
+/// arguments through it, and the entry is given it — because 300 frames is
+/// several `Vec::resize`s and every destination below is pending across them.
+#[test]
+fn a_direct_chain_returns_through_a_reallocation() {
+    with_vm(ORDINARY_HEAP_WORDS, |vm, lowered| {
+        const DEEP: i64 = 300;
+        let mut session = vm
+            .native_session(MODULE, "counts", vec![Value::int(DEEP)])
+            .expect("the session opens");
+        // The hand tier first, for the reason the mediated case gives: a `Vec`
+        // keeps its capacity, so a VM run of the same depth would leave nothing
+        // to reallocate.
+        let tier = hand(lowered, &["counts"]);
+        let answered = directly(|| session.call(&tier, &[DEEP as u64])).expect("the direct chain");
+        let expected = session
+            .call(&NothingCompiled, &[DEEP as u64])
+            .expect("the vm answers");
+        assert_eq!(expected, vec![DEEP as u64]);
+        assert_eq!(answered, expected, "{DEEP} direct frames answered");
+        assert!(
+            segments() > 1,
+            "the stack did not reallocate under {DEEP} direct frames, so this case did not test \
+             what it is for"
+        );
+        assert_eq!(
+            session.tiers().native,
+            DEEP as u64 + 1,
+            "every frame of the recursion was entered directly bar the outermost"
+        );
+    });
+}
+
+/// A runaway recursion is refused rather than left to run, and the direct path is
+/// where it is refused.
+///
+/// What catches it is `admit_frame`, against the embedder's
+/// [`Limits::max_call_depth`], and then `push_frame`'s `Overflow` against the
+/// task's stack segment — both of them, in that order, inside `open`, which is
+/// the same two checks in the same order the mediated helper makes inside
+/// `open_frame`. Nothing about a direct call skips either: the frame is still a
+/// `Vec::resize` the runtime performs, and the depth is still counted in the
+/// frames the runtime holds.
+///
+/// The bound this asserts is the configured one, and that is a choice about what
+/// can be tested rather than about what exists. A recursion deep enough to
+/// exhaust a *segment* — a million words, and `counts` needs six of them a frame
+/// — has by then nested a hundred and seventy thousand machine frames of helper
+/// and entry, which exhausts the thread's own stack first. That is true of the
+/// mediated path too and is not this change's: it is the reason an embedder is
+/// given `max_call_depth` at all.
+#[test]
+fn a_runaway_recursion_is_still_refused() {
+    const LIMIT: usize = 64;
+    let limits = Limits {
+        max_call_depth: Some(LIMIT),
+        ..Limits::default()
+    };
+    with_limited_vm(ORDINARY_HEAP_WORDS, limits, |vm, lowered| {
+        const RUNAWAY: i64 = 100_000;
+        let mut session = vm
+            .native_session(MODULE, "counts", vec![Value::int(RUNAWAY)])
+            .expect("the session opens");
+        let refused = session
+            .call(&NothingCompiled, &[RUNAWAY as u64])
+            .expect_err("the vm refuses a recursion past the limit");
+        let tier = hand(lowered, &["counts"]);
+        let direct = directly(|| session.call(&tier, &[RUNAWAY as u64]))
+            .expect_err("a direct chain past the limit is refused too");
+        assert!(
+            refused.message.contains(&LIMIT.to_string()),
+            "the VM's refusal names the limit: {}",
+            refused.message
+        );
+        assert_eq!(
+            direct.message, refused.message,
+            "a direct call is refused by the same check with the same sentence"
+        );
+        // The process is still here and so is the session, which is the other
+        // half of "refused rather than crashing".
+        let answered = directly(|| session.call(&tier, &[10])).expect("a depth inside the limit");
+        assert_eq!(answered, vec![10]);
+    });
+}
+
+/// A collection during a direct chain, with references live in several frames.
+///
+/// `a_returned_reference_survives_a_collection`'s case, made the direct way, and
+/// the thing it puts at risk is new: a direct call hands the callee the
+/// *caller's* context and stores the arguments through the index `open` answered,
+/// so a reference that was live in three frames at once has to still be in the
+/// slot `Function::refs` names when the allocation inside `allocates` collects.
+/// If it were anywhere else — a register, a stale pointer, a word above the frame
+/// — the string would be swept and the byte read would answer something else.
+#[test]
+fn a_collection_during_a_direct_chain_keeps_every_reference() {
+    const SMALL_HEAP_WORDS: usize = 1 << 13;
+    with_vm(SMALL_HEAP_WORDS, |vm, lowered| {
+        let text = "a string long enough that slicing it fills a heap chunk, and long enough \
+                    that a byte can be read out of the middle of it without asking whether it \
+                    is there: sixty-four bytes in is well inside this sentence.";
+        const AT: i64 = 64;
+        let mut session = vm
+            .native_session(
+                MODULE,
+                "refThroughCollection",
+                vec![Value::string(text), Value::int(AT)],
+            )
+            .expect("the session opens");
+        let words = session.arguments().to_vec();
+        let expected = session
+            .call(&NothingCompiled, &words)
+            .expect("the vm answers");
+        assert_eq!(expected, vec![u64::from(text.as_bytes()[AT as usize])]);
+
+        let tier = hand(lowered, &["refThroughCollection", "echoes"]);
+        let before = session.collections();
+        let mut calls = 0;
+        while session.collections() == before && calls < 20_000 {
+            let answered = directly(|| session.call(&tier, &words)).expect("the direct chain");
+            assert_eq!(answered, expected, "direct call {calls} answered wrongly");
+            calls += 1;
+        }
+        assert!(
+            session.collections() > before,
+            "no collection ran in {calls} direct call(s), so this case proved nothing"
+        );
+    });
+}
+
+/// A chain that crosses the tiers: native to native to encoded, and the answer
+/// comes back through all of it.
+///
+/// `refThroughCollection` is entered directly, calls `echoes` directly, and calls
+/// `allocates` — which the subset refuses, because it reaches `String.sliceBytes`
+/// — so that call is the mediated helper and the encoded dispatch loop. Both
+/// callees answer into destinations in frames the direct path opened.
+///
+/// The fourth hop the issue asks for, **encoded back into native**, does not
+/// exist in this slice and cannot be constructed: the encoded `CALL` arm consults
+/// no tier table, as `a_vm_caller_does_not_reach_the_tier_table` asserts. So the
+/// chain is three tiers deep and the tier counts below say which hop was which.
+#[test]
+fn a_mixed_chain_crosses_the_tiers_and_answers() {
+    with_vm(ORDINARY_HEAP_WORDS, |vm, lowered| {
+        let text = "a string with rather more than sixty-four bytes in it, so that a byte can \
+                    be read out of the middle without asking whether it is there at all.";
+        const AT: i64 = 16;
+        let mut session = vm
+            .native_session(
+                MODULE,
+                "refThroughCollection",
+                vec![Value::string(text), Value::int(AT)],
+            )
+            .expect("the session opens");
+        let words = session.arguments().to_vec();
+        let expected = session
+            .call(&NothingCompiled, &words)
+            .expect("the vm answers");
+        let before = session.tiers();
+        let tier = hand(lowered, &["refThroughCollection", "echoes"]);
+        let answered = directly(|| session.call(&tier, &words)).expect("the mixed chain");
+        assert_eq!(answered, expected, "the chain answers what the VM answers");
+        let tiers = session.tiers();
+        assert!(
+            tiers.native - before.native >= 2,
+            "the caller and `echoes` were both entered natively"
+        );
+        assert!(
+            tiers.encoded - before.encoded >= 1,
+            "at least one callee was run by the encoded tier"
+        );
     });
 }
 

@@ -570,11 +570,51 @@ unsafe extern "C" fn no_call(
     cove_native::Outcome::Raised.abi()
 }
 
+/// The open half, for the *arith* scenario, which reaches no call either.
+///
+/// `no_call`'s reason, one step along: arith's loop holds no call, so a direct
+/// one cannot be reached, and this answers "the runtime finished it, and it
+/// raised" — which the entry below asserts against.
+///
+/// # Safety
+///
+/// Reads nothing through any of its arguments.
+#[cfg(any(feature = "cranelift", feature = "template"))]
+unsafe extern "C" fn no_open(
+    _ctx: *mut cove_native::NativeCtx,
+    _base: u64,
+    _pc: u32,
+    _callee: u32,
+    _args: u32,
+    _dst: u32,
+) -> cove_native::Opened {
+    cove_native::Opened {
+        entry: None,
+        base: u64::from(cove_native::Outcome::Raised.abi()),
+    }
+}
+
+/// The close half, for a call that cannot happen. See [`no_open`].
+///
+/// # Safety
+///
+/// Reads nothing through any of its arguments.
+#[cfg(any(feature = "cranelift", feature = "template"))]
+unsafe extern "C" fn no_close(
+    _ctx: *mut cove_native::NativeCtx,
+    outcome: u32,
+    _callee: u32,
+) -> u32 {
+    outcome
+}
+
 #[cfg(any(feature = "cranelift", feature = "template"))]
 fn helpers() -> cove_native::NativeHelpers {
     cove_native::NativeHelpers {
         safepoint,
         call: no_call,
+        open: no_open,
+        close: no_close,
     }
 }
 
@@ -847,9 +887,13 @@ fn enter(entry: cove_native::Entry, words: &mut [u64], base: u64) -> (u64, i64) 
 fn compile_slice(
     ir: &Arc<cove_ir::Program>,
     helpers: cove_native::NativeHelpers,
+    direct: bool,
 ) -> Result<(cove_native::template::Jit, Tier, Measured), String> {
     let mut jit =
         cove_native::template::Jit::new(helpers).map_err(|error| format!("template: {error}"))?;
+    if direct {
+        jit = jit.calling_directly();
+    }
     let mut tier = Tier {
         entries: vec![None; ir.functions.len()],
         compiled: 0,
@@ -1013,9 +1057,12 @@ fn decomposed(
     // words are copied, and how often `push_frame` reallocates rather than
     // fitting. A timer cannot answer the last one, and "almost never" is a term
     // of the decomposition rather than a detail.
+    // Mediated, every one of them: what the decomposition attributes is the
+    // mediated helper's work, and a direct call does not reach it.
     let (_census_jit, census_tier, _) = compile_slice(
         ir,
         cove_runtime::native_helpers_ablated::<{ cove_runtime::native_ablate::CENSUS }>(),
+        false,
     )?;
     cove_runtime::census_reset();
     for args in calls {
@@ -1058,7 +1105,7 @@ fn decomposed(
     let variants = variants();
     let tiers: Vec<(cove_native::template::Jit, Tier, Measured)> = variants
         .iter()
-        .map(|variant| compile_slice(ir, variant.helpers))
+        .map(|variant| compile_slice(ir, variant.helpers, false))
         .collect::<Result<Vec<_>, String>>()?;
     let mut samples: Vec<Vec<u64>> = vec![Vec::with_capacity(iterations as usize); variants.len()];
     let mut vm_samples = Vec::with_capacity(iterations as usize);
@@ -1728,6 +1775,17 @@ struct Compiled {
     cranelift: (cove_native::Jit, Tier, Measured),
     #[cfg(feature = "template")]
     template: (cove_native::template::Jit, Tier, Measured),
+    /// The same slice, compiled by the same arm, emitting a **direct call**
+    /// wherever the callee has compiled code.
+    ///
+    /// Issue #365's Part 2, and it is a second `Jit` rather than a flag on the
+    /// first for a reason the harness cannot do without: the two forms have to be
+    /// *interleaved* against each other and against the VM, and a flag would give
+    /// one run of one of them. Everything else about it is the same — the same
+    /// lowering, the same subset, the same helper table — so the difference
+    /// between the two rows is the difference between the two call sequences.
+    #[cfg(feature = "template")]
+    template_direct: (cove_native::template::Jit, Tier, Measured),
 }
 
 /// One arm's `Program + FunctionId -> native entry` table.
@@ -1856,7 +1914,9 @@ impl Compiled {
                 (jit, tier, Measured::of(compile))
             },
             #[cfg(feature = "template")]
-            template: compile_slice(ir, cove_runtime::native_helpers())?,
+            template: compile_slice(ir, cove_runtime::native_helpers(), false)?,
+            #[cfg(feature = "template")]
+            template_direct: compile_slice(ir, cove_runtime::native_helpers(), true)?,
         };
         Ok(held)
     }
@@ -1867,6 +1927,8 @@ impl Compiled {
             "cranelift",
             #[cfg(feature = "template")]
             "template",
+            #[cfg(feature = "template")]
+            "template direct",
         ]
         .to_vec()
     }
@@ -1878,6 +1940,8 @@ impl Compiled {
             "cranelift" => Ok(&self.cranelift.1),
             #[cfg(feature = "template")]
             "template" => Ok(&self.template.1),
+            #[cfg(feature = "template")]
+            "template direct" => Ok(&self.template_direct.1),
             other => Err(format!("there is no `{other}` arm in this build")),
         }
     }
@@ -1896,10 +1960,18 @@ impl Compiled {
         );
         #[cfg(feature = "template")]
         line("template compile", &self.template.2.compile, Scale::Micros);
+        #[cfg(feature = "template")]
+        line(
+            "direct compile",
+            &self.template_direct.2.compile,
+            Scale::Micros,
+        );
         #[cfg(feature = "cranelift")]
         self.cranelift.1.report("cranelift");
         #[cfg(feature = "template")]
         self.template.1.report("template");
+        #[cfg(feature = "template")]
+        self.template_direct.1.report("template direct");
         // The subset is one shared predicate, so the two sets are the same set —
         // and the refusals are printed once rather than twice to say so. A
         // comparison over two different subsets would not be one.
@@ -1947,5 +2019,9 @@ impl Compiled {
         self.cranelift.1.sizes("cranelift", ir, wants, inner);
         #[cfg(feature = "template")]
         self.template.1.sizes("template", ir, wants, inner);
+        #[cfg(feature = "template")]
+        self.template_direct
+            .1
+            .sizes("template direct", ir, wants, inner);
     }
 }

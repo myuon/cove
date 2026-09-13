@@ -36,7 +36,7 @@ use cove_ir::{
     Arg, ArgsId, ArithOp, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout, LayoutId,
     Num, Program, RefMap, Repr, StrId, Table, TableId,
 };
-use cove_native::{Entry, NativeCtx, NativeHelpers, Outcome, Raise};
+use cove_native::{Entry, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
 use cove_native::{HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS};
 
 // --- the safepoint helper -----------------------------------------------------
@@ -165,8 +165,61 @@ unsafe extern "C" fn call(
     }
 }
 
+/// The runtime's open half, as a test double: the runtime finishes the call.
+///
+/// A direct call asks where the callee's code is and this answers *nowhere* —
+/// `entry: None`, which is the ordinary answer for a callee the tier has not
+/// compiled and means the runtime made the whole call itself. So it does: the
+/// same recording and the same one recognisable word [`call`] writes, and that
+/// call's outcome in [`Opened::base`].
+///
+/// Every expectation in this file therefore holds whether the arm under test
+/// emitted a direct call or a mediated one, which is what lets the one arm that
+/// can emit both be held to the same suite twice. A double that handed back a
+/// real entry would need a real callee and a real frame to give it, and that is
+/// a test about the *direct* protocol rather than about the slice — it lives in
+/// `tests/template.rs`, beside the only arm that emits one.
+///
+/// # Safety
+///
+/// As [`call`].
+unsafe extern "C" fn open(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    callee: u32,
+    args: u32,
+    dst: u32,
+) -> Opened {
+    Opened {
+        entry: None,
+        base: u64::from(call(ctx, base, pc, callee, args, dst)),
+    }
+}
+
+/// The runtime's close half, as a test double, and it is a tripwire.
+///
+/// This file's [`open`] never opens a frame, so nothing in this file can reach
+/// this: a direct call that got here would be one whose caller entered a callee
+/// that was never handed to it. Answering something would let that pass quietly.
+///
+/// # Safety
+///
+/// Reads nothing through any of its arguments.
+unsafe extern "C" fn close(_ctx: *mut NativeCtx, outcome: u32, callee: u32) -> u32 {
+    panic!(
+        "the close helper was reached for callee {callee} with outcome {outcome}, and this \
+         suite's `open` never opens a frame for one"
+    )
+}
+
 pub fn helpers() -> NativeHelpers {
-    NativeHelpers { safepoint, call }
+    NativeHelpers {
+        safepoint,
+        call,
+        open,
+        close,
+    }
 }
 
 pub fn calls() -> Vec<Called> {
