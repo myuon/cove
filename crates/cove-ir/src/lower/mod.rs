@@ -332,6 +332,7 @@ fn emit<'a>(
         layouts: pool.shapes.into_table(),
         str_layout: shapes::STR,
         bytes_layout: shapes::BYTES,
+        buffer_layout: shapes::BYTE_BUFFER,
         boxed_layout: shapes::BOXED,
         strings: pool.strings,
         args: pool.args.lists,

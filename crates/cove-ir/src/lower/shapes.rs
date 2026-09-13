@@ -112,6 +112,14 @@ pub(super) const STR: LayoutId = LayoutId(1);
 /// a program-wide fact rather than something interned on first use, the same
 /// reason [`STR`] is fixed rather than found by comparing shapes.
 pub(super) const BYTES: LayoutId = LayoutId(14);
+/// The layout every byte buffer's owner shares.
+///
+/// See [`crate::layout::Shape::ByteBuffer`] and
+/// [ADR 0052](../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md).
+/// Seeded fixed at index 15, beside [`BYTES`] and for its reason: an owner's
+/// shape says nothing about what it will hold, so it is one program-wide
+/// layout rather than something interned on first use.
+pub(super) const BYTE_BUFFER: LayoutId = LayoutId(15);
 pub(super) const UNIT: LayoutId = LayoutId(2);
 pub(super) const BOOL: LayoutId = LayoutId(3);
 pub(super) const INT: LayoutId = LayoutId(4);
@@ -273,6 +281,7 @@ impl Shapes {
             Layout::word("TaskScope", Repr::Scope),
             Layout::word("<tag>", Repr::Tag),
             Layout::object("Bytes", Shape::Bytes),
+            Layout::object("ByteBuffer", Shape::ByteBuffer),
         ];
         Shapes {
             layouts,

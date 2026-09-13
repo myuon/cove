@@ -1006,7 +1006,14 @@ impl Space {
             // Word 0 is the length and word 1 is the store, whose own layout
             // says what its elements are. A vector's header is a leaf apart
             // from the one reference that makes it growable.
-            Shape::Vector { .. } => {
+            //
+            // A byte buffer's owner is the same two words and is traced the
+            // same way — ADR 0052 gives both growable families one ownership
+            // shape — with the difference that its store is a `Shape::Bytes`
+            // run and so is itself a leaf. Word 0 is not followed here for
+            // either: a length read as an address would chase an integer into
+            // the heap.
+            Shape::Vector { .. } | Shape::ByteBuffer => {
                 let store = self.payload(addr, 1);
                 self.enqueue(alloc, store, work)
             }

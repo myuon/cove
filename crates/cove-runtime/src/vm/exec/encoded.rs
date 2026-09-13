@@ -103,7 +103,7 @@ use crate::vm::mem::Overflow;
 
 use super::{
     compare, float_arith, int_arith, null_object, overflowed, reentrant_lock, wrong_arity,
-    ChildState, Frame, Live, Machine, Outcome, ScopeEntry, SAFEPOINT_STRIDE,
+    ChildState, Frame, Live, Machine, Outcome, ScopeEntry, BUFFER_LEN, SAFEPOINT_STRIDE,
 };
 
 // The opcodes this path runs, by the name ADR 0041 gives them rather than by
@@ -216,6 +216,10 @@ const ALLOC_BYTES: u8 = Op::AllocBytes.number();
 const WRITE_BYTE: u8 = Op::WriteByte.number();
 const COPY_BYTES: u8 = Op::CopyBytes.number();
 const FINISH_STRING: u8 = Op::FinishString.number();
+const ALLOC_BUFFER: u8 = Op::AllocBuffer.number();
+const APPEND_BYTE: u8 = Op::AppendByte.number();
+const APPEND_BYTES: u8 = Op::AppendBytes.number();
+const FINISH_BUFFER: u8 = Op::FinishBuffer.number();
 const LEN: u8 = Op::Len.number();
 const LAYOUT_OF: u8 = Op::LayoutOf.number();
 
@@ -285,6 +289,10 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::WriteByte
         | Op::CopyBytes
         | Op::FinishString
+        | Op::AllocBuffer
+        | Op::AppendByte
+        | Op::AppendBytes
+        | Op::FinishBuffer
         | Op::LoadField
         | Op::StoreField
         | Op::LoadElem
@@ -591,6 +599,147 @@ fn copy_bytes(
             machine.next_check = machine.next_question();
         }
     }
+    Ok(())
+}
+
+/// [`Inst::AppendBytes`], checked, grown once and copied in bounded chunks.
+///
+/// Out of line and out of the dispatch loop's body for [`copy_bytes`]'s
+/// reason, which is the only reason that matters here: this loop is sensitive
+/// to how much code sits in it, not only to what that code does.
+///
+/// # What is checked, and in whose words
+///
+/// The bounds and the character-boundary rule are `String.sliceBytes`'s, in
+/// `String.sliceBytes`'s sentences —
+/// [`crate::vm::builtins::text`]'s `byte_range` is where they are written, and
+/// ADR 0052 requires that `appendSlice` "checks the same bounds and UTF-8
+/// boundaries as `String.sliceBytes`". Two operations that make the same
+/// refusal in different words are two rules a reader has to learn.
+///
+/// The boundary check applies to a `String` source and not to a
+/// [`Shape::Bytes`] one, because a run under construction is not claiming to be
+/// text: the bytes it holds are checked once, at
+/// [`Inst::FinishBuffer`](cove_ir::Inst::FinishBuffer).
+///
+/// # Why the growth happens once, before the first chunk
+///
+/// The whole range is reserved up front. A growth part way through would have
+/// to copy a prefix the earlier chunks had already written into a store that is
+/// about to be replaced, which is the same bytes moved twice; worse, it would
+/// put an allocation inside the loop that a safepoint already makes collectable,
+/// for no gain over asking for the final length at the start.
+///
+/// After the reservation nothing here allocates, so the chunk loop's safepoints
+/// are safe for the reason [`copy_bytes`]'s are and one more: the store is
+/// reachable from the owner's word 1 and the owner is a frame slot this read it
+/// out of, so a collection walking mid-copy finds both ends of the copy where it
+/// finds every other live reference.
+///
+/// The owner's length word is written **last**, after the final chunk. A run
+/// stopped by a safepoint part way through therefore leaves the appended bytes
+/// above the logical length, where they are spare room rather than value.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn append_bytes(
+    machine: &mut Machine<'_>,
+    program: &Program,
+    budget: &Meter,
+    base: u64,
+    args: &[cove_ir::Arg],
+    id: FunctionId,
+    pc: usize,
+) -> Result<(), RuntimeError> {
+    let refuse = |machine: &Machine<'_>, error: RuntimeError| error.at(machine.span(id, pc));
+    let owner = machine.mem.slot(base, args[0].slot);
+    let src = machine.mem.slot(base, args[1].slot);
+    let from = machine.mem.slot(base, args[2].slot) as i64;
+    let to = machine.mem.slot(base, args[3].slot) as i64;
+    if owner == 0 || src == 0 {
+        return Err(refuse(machine, null_object()));
+    }
+    let buffer = machine.buffer("appendBytes", owner).map_err(|error| {
+        // `Machine::buffer` reports without a span, because two of its three
+        // callers are dispatch arms that have one to add.
+        refuse(machine, error)
+    })?;
+    let is_text = match program.layout(machine.mem.object_layout(src)).shape {
+        Shape::Str => true,
+        Shape::Bytes => false,
+        _ => return Err(refuse(
+            machine,
+            RuntimeError::new(
+                "`appendBytes`'s source is neither a `String` nor a byte run under construction",
+            ),
+        )),
+    };
+    let len = machine.mem.object_len(src) as i64;
+    // `byte_range`'s two refusals, in `byte_range`'s words.
+    for (name, value) in [("from", from), ("to", to)] {
+        if value < 0 || value > len {
+            return Err(refuse(
+                machine,
+                RuntimeError::new(format!(
+                    "`{name}` is `{value}`, and a byte offset into this string is 0 to {len}"
+                )),
+            ));
+        }
+    }
+    if from > to {
+        return Err(refuse(
+            machine,
+            RuntimeError::new(format!(
+                "`from` is `{from}` and `to` is `{to}`, so this range runs backwards"
+            )),
+        ));
+    }
+    if is_text {
+        for (name, at) in [("from", from), ("to", to)] {
+            // The end of the string is a boundary and has no byte to look at.
+            if at < len && machine.byte_of(src, at as usize) & 0xC0 == 0x80 {
+                return Err(refuse(
+                    machine,
+                    RuntimeError::new(format!(
+                        "`{name}` is `{at}`, which is inside a character rather than at the \
+                         start of one"
+                    )),
+                ));
+            }
+        }
+    }
+    // `checked_add` rather than a plain `+`, even though both operands came out
+    // of `u32`-wide header lengths: a sum that wrapped would under-reserve and
+    // then be written to by a loop sized from the original, which is the one
+    // arithmetic mistake in here that would be a write past an object rather
+    // than a wrong answer.
+    let take = to - from;
+    let Some(needed) = u64::from(buffer.len).checked_add(take as u64) else {
+        return Err(refuse(
+            machine,
+            RuntimeError::new("this run has no memory left"),
+        ));
+    };
+    let store = machine
+        .reserve_bytes(&buffer, needed)
+        .map_err(|error| refuse(machine, error))?;
+    let mut done: i64 = 0;
+    while done < take {
+        let chunk = (take - done).min(BULK_CHUNK_BYTES);
+        machine.copy_string_bytes(
+            store,
+            buffer.len as usize + done as usize,
+            src,
+            (from + done) as usize,
+            chunk as usize,
+        );
+        machine.bulk_work += words_of_bytes(chunk);
+        done += chunk;
+        if machine.work() - machine.charged_work >= SAFEPOINT_STRIDE {
+            machine.safepoint(budget, id, pc)?;
+            machine.next_check = machine.next_question();
+        }
+    }
+    machine.set_payload(buffer.owner, BUFFER_LEN, needed);
     Ok(())
 }
 
@@ -1269,6 +1418,51 @@ pub(super) fn dispatch<'s, 'a>(
                 machine.relabel(bytes, program.str_layout, len, 0);
                 machine.mem.set_word_at(base_at + (a!()) as usize, bytes);
             }
+            // ADR 0052's four. Each arm is a read of its operands and one call,
+            // for `COPY_BYTES`'s reason: the checks, the capacity arithmetic and
+            // the growth are far more code than a dispatch arm should put in the
+            // way of the arms around it. `Machine::alloc_buffer` documents which
+            // of its two allocations happens first and why nothing is lost
+            // between them.
+            ALLOC_BUFFER => {
+                let capacity = machine.mem.word_at(base_at + (b!() as usize)) as i64;
+                machine.sync(pc - 1);
+                match machine.alloc_buffer(capacity) {
+                    Ok(owner) => machine.mem.set_word_at(base_at + (a!()) as usize, owner),
+                    Err(error) => fail!(error),
+                }
+            }
+            // One checked byte at the logical length, which then becomes one
+            // more. There is no `at` to bounds-check — that is the difference
+            // between a buffer and `WRITE_BYTE`'s fixed run — and no capacity to
+            // check either, because a full store grows.
+            APPEND_BYTE => {
+                let owner = machine.mem.word_at(base_at + (a!() as usize));
+                let value = machine.mem.word_at(base_at + (b!() as usize)) as i64;
+                machine.sync(pc - 1);
+                if let Err(error) = machine.append_byte(owner, value) {
+                    fail!(error);
+                }
+            }
+            // The bulk append. All four operands — `buffer`, `src`, `from`,
+            // `to` — live behind the `ArgsId` in the payload's low half rather
+            // than in `a`, `b` and `c`; see `Inst::AppendBytes`'s doc for why.
+            APPEND_BYTES => {
+                machine.sync(pc - 1);
+                let args = program.arg_list(ArgsId(held.lo()));
+                append_bytes(machine, program, budget, base, args, id, pc - 1)?;
+            }
+            // ADR 0052's finish: the *live prefix* validated once, and the store
+            // relabelled down from its capacity to that length without copying a
+            // byte. The owner is then emptied, because finishing consumes.
+            FINISH_BUFFER => {
+                let owner = machine.mem.word_at(base_at + (b!() as usize));
+                machine.sync(pc - 1);
+                match machine.finish_buffer(owner) {
+                    Ok(text) => machine.mem.set_word_at(base_at + (a!()) as usize, text),
+                    Err(error) => fail!(error),
+                }
+            }
             LEN => {
                 let addr = machine.mem.word_at(base_at + (b!() as usize));
                 if addr == 0 {
@@ -1551,6 +1745,7 @@ mod tests {
     use cove_ir::{Convert as ConvertTo, Inst, Len, Shape};
 
     use super::super::tests::{budget, run_words, Build};
+    use super::super::MIN_BUFFER_BYTES;
     use super::*;
 
     /// Every opcode ADR 0041 defines has an implementation.
@@ -2449,5 +2644,722 @@ mod tests {
         let words = machine.run(f, &[], &budget()).unwrap();
         assert_eq!(machine.string_bytes(words[0]), Vec::<u8>::new());
         assert_eq!(machine.object_len(words[0]), 0);
+    }
+
+    // --- ADR 0052: the byte-buffer instructions ----------------------------
+
+    /// A program with every function ADR 0052's tests share, so each test
+    /// builds a fixture and none builds a compiler.
+    ///
+    /// - `alloc(capacity) -> Ref` answers a new owner.
+    /// - `append_byte(buffer, value) -> Ref` answers the same owner, so a
+    ///   caller can keep appending to what it got back and watch the address
+    ///   not move.
+    /// - `append_bytes(buffer, src, from, to) -> Ref` likewise.
+    /// - `finish(buffer) -> Ref` answers the `String`.
+    struct Buffers {
+        program: Program,
+        alloc: FunctionId,
+        append_byte: FunctionId,
+        append_bytes: FunctionId,
+        finish: FunctionId,
+    }
+
+    fn buffers() -> Buffers {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let str_layout = build.string_layout();
+        let bytes = build.bytes_layout();
+        let owner = build.buffer_layout();
+
+        let alloc = build.function(
+            "alloc",
+            &[int],
+            &[Repr::Int, Repr::Ref],
+            owner,
+            vec![
+                Inst::AllocBuffer {
+                    dst: 1,
+                    capacity: 0,
+                },
+                Inst::Return { src: 1 },
+            ],
+        );
+        let append_byte = build.function(
+            "append_byte",
+            &[owner, int],
+            &[Repr::Ref, Repr::Int],
+            owner,
+            vec![
+                Inst::AppendByte {
+                    buffer: 0,
+                    value: 1,
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let args = build.args(&[(0, owner), (1, bytes), (2, int), (3, int)]);
+        let append_bytes = build.function(
+            "append_bytes",
+            &[owner, bytes, int, int],
+            &[Repr::Ref, Repr::Ref, Repr::Int, Repr::Int],
+            owner,
+            vec![Inst::AppendBytes { args }, Inst::Return { src: 0 }],
+        );
+        let finish = build.function(
+            "finish",
+            &[owner],
+            &[Repr::Ref],
+            str_layout,
+            vec![
+                Inst::FinishBuffer { dst: 0, buffer: 0 },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let program = build.done();
+        Buffers {
+            program,
+            alloc,
+            append_byte,
+            append_bytes,
+            finish,
+        }
+    }
+
+    /// **The words a finish gives back are handed out again.**
+    ///
+    /// `spare` is the whole reason `finish-buffer` passes anything to
+    /// `relabel` beyond the new length: a buffer that reserved 4 KB and kept
+    /// eight bytes of it is holding 510 words the run has no further use for.
+    /// The heap here is a little over one such store, so the second buffer
+    /// only fits if the first one's tail really was released.
+    #[test]
+    fn the_capacity_a_finish_gives_back_is_allocated_again() {
+        let f = buffers();
+        // One 4 KB store is 513 words; two do not fit in this heap.
+        let mut machine = Machine::new(&f.program, 700);
+        let owner = machine.run(f.alloc, &[4096], &budget()).unwrap()[0];
+        for byte in b"hello!!!" {
+            machine
+                .run(f.append_byte, &[owner, u64::from(*byte)], &budget())
+                .unwrap();
+        }
+        let text = machine.run(f.finish, &[owner], &budget()).unwrap()[0];
+        assert_eq!(machine.string_bytes(text), b"hello!!!".to_vec());
+        // The same reservation again. Without the tail back this is
+        // "this run has no memory left".
+        let second = machine
+            .run(f.alloc, &[4096], &budget())
+            .expect("the tail the finish released is available again")[0];
+        assert_ne!(second, 0);
+    }
+
+    /// A buffer of `capacity`, and the bytes of `text` appended one at a time.
+    fn built(machine: &mut Machine<'_>, f: &Buffers, capacity: i64, text: &[u8]) -> u64 {
+        let owner = machine
+            .run(f.alloc, &[capacity as u64], &budget())
+            .expect("a buffer fits")[0];
+        for byte in text {
+            let answered = machine
+                .run(f.append_byte, &[owner, u64::from(*byte)], &budget())
+                .expect("an append fits")[0];
+            assert_eq!(answered, owner, "an append must not move the owner");
+        }
+        owner
+    }
+
+    #[test]
+    fn a_buffer_of_zero_capacity_is_allocated_and_answers_the_empty_string() {
+        let f = buffers();
+        let mut machine = Machine::new(&f.program, 1 << 16);
+        let owner = machine.run(f.alloc, &[0], &budget()).unwrap()[0];
+        assert_ne!(owner, 0);
+        assert_eq!(machine.object_layout(owner), f.program.buffer_layout);
+        // Zero capacity is a hint of nothing, not a store of nothing: the floor
+        // is what the allocator is asked for.
+        let store = machine.payload(owner, 1);
+        assert_ne!(store, 0);
+        assert_eq!(machine.object_layout(store), f.program.bytes_layout);
+        assert_eq!(u64::from(machine.object_len(store)), MIN_BUFFER_BYTES);
+        assert_eq!(machine.payload(owner, 0), 0, "and it holds nothing yet");
+
+        let text = machine.run(f.finish, &[owner], &budget()).unwrap()[0];
+        assert_eq!(machine.object_layout(text), f.program.str_layout);
+        assert_eq!(machine.object_len(text), 0);
+        assert_eq!(machine.string_bytes(text), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn an_empty_buffer_finishes_to_the_empty_string_and_consumes_its_owner() {
+        let f = buffers();
+        let mut machine = Machine::new(&f.program, 1 << 16);
+        let owner = machine.run(f.alloc, &[0], &budget()).unwrap()[0];
+        let text = machine.run(f.finish, &[owner], &budget()).unwrap()[0];
+        assert_eq!(machine.string_bytes(text), Vec::<u8>::new());
+        // `freeze()`'s ending, for a buffer: length zero and store null.
+        assert_eq!(machine.payload(owner, 0), 0);
+        assert_eq!(machine.payload(owner, 1), 0);
+        let error = machine.run(f.finish, &[owner], &budget()).unwrap_err();
+        assert!(
+            error.message.contains("already consumed"),
+            "{}",
+            error.message
+        );
+        // And the heap is still a walkable sequence of objects afterwards. A
+        // finish of an empty buffer relabels a store of `MIN_BUFFER_BYTES` down
+        // to nothing, which is the largest `spare` a finish can release relative
+        // to what it keeps — so a free block written one word wrong would leave
+        // the sweep walking into the middle of an object, and this is where that
+        // fails rather than in whatever allocates next.
+        machine.collect();
+    }
+
+    #[test]
+    fn a_negative_capacity_is_the_shared_no_memory_refusal() {
+        let f = buffers();
+        let error = run_words(&f.program, f.alloc, &[(-1i64) as u64]).unwrap_err();
+        assert_eq!(error.message, "this run has no memory left");
+    }
+
+    /// **The owner's address does not change when the store does.**
+    ///
+    /// This is the property the whole design exists for — ADR 0052's "if the
+    /// object itself moves when it grows, every alias and `var` address to it
+    /// goes stale" — so it is asserted directly rather than inferred from the
+    /// answer being right. A capacity of zero gives a store of
+    /// `MIN_BUFFER_BYTES`, and 200 appends double it five times, so the store
+    /// address is asserted to have actually moved as well: a test that watched
+    /// an owner not move while nothing grew would pass for the wrong reason.
+    #[test]
+    fn an_owner_keeps_its_address_across_several_growths() {
+        let f = buffers();
+        let mut machine = Machine::new(&f.program, 1 << 16);
+        let owner = machine.run(f.alloc, &[0], &budget()).unwrap()[0];
+        let first_store = machine.payload(owner, 1);
+        let mut stores = vec![first_store];
+        for at in 0..200u64 {
+            let answered = machine
+                .run(f.append_byte, &[owner, b'a' as u64 + at % 26], &budget())
+                .unwrap()[0];
+            assert_eq!(answered, owner, "the owner moved at append {at}");
+            assert_eq!(
+                machine.payload(owner, 0),
+                at + 1,
+                "and its length is what was appended"
+            );
+            let store = machine.payload(owner, 1);
+            if store != *stores.last().unwrap() {
+                stores.push(store);
+            }
+        }
+        assert!(
+            stores.len() >= 5,
+            "200 appends from a floor of {MIN_BUFFER_BYTES} should have grown \
+             several times, and grew {} time(s)",
+            stores.len() - 1
+        );
+        let want: Vec<u8> = (0..200).map(|at| b'a' + (at % 26) as u8).collect();
+        let text = machine.run(f.finish, &[owner], &budget()).unwrap()[0];
+        assert_eq!(machine.string_bytes(text), want);
+    }
+
+    /// **An underestimated capacity grows rather than failing.**
+    ///
+    /// ADR 0052's "capacity is a performance hint: exceeding it grows rather
+    /// than changes the program's result", which is the whole reason capacity
+    /// is not an `Array` length.
+    #[test]
+    fn an_underestimated_capacity_grows_and_answers_the_same_text() {
+        let f = buffers();
+        let text = b"the estimate was three";
+        for capacity in [0i64, 1, 3, 21, 22, 64] {
+            let mut machine = Machine::new(&f.program, 1 << 16);
+            let owner = built(&mut machine, &f, capacity, text);
+            let answer = machine.run(f.finish, &[owner], &budget()).unwrap()[0];
+            assert_eq!(
+                machine.string_bytes(answer),
+                text.to_vec(),
+                "capacity {capacity}"
+            );
+        }
+    }
+
+    /// **A finished String is the same payload words as the same text written
+    /// directly, padding included — after a growth.**
+    ///
+    /// The catch for a bad `spare` or a dirty tail. Twenty bytes from a floor
+    /// of sixteen forces one growth, and twenty bytes is two whole payload
+    /// words and four bytes of a third — so the top four bytes of the last word
+    /// are padding that a growth copy is in a position to have dirtied.
+    /// `eq.str` compares payload words, so a string unequal here is a string
+    /// unequal to itself written another way.
+    #[test]
+    fn a_finished_string_matches_the_same_text_written_directly_after_a_growth() {
+        let f = buffers();
+        let text = "twenty bytes exactly";
+        assert_eq!(text.len(), 20, "two whole words and part of a third");
+        let mut machine = Machine::new(&f.program, 1 << 16);
+        let owner = built(&mut machine, &f, 0, text.as_bytes());
+        assert!(
+            machine.object_len(machine.payload(owner, 1)) > 20,
+            "the store grew past the length, so there is a tail to be dirty"
+        );
+        let built = machine.run(f.finish, &[owner], &budget()).unwrap()[0];
+        let direct = machine.new_string(text).unwrap();
+        assert_eq!(machine.object_len(built), machine.object_len(direct));
+        for word in 0..machine.object_len(direct).div_ceil(8) {
+            assert_eq!(
+                machine.payload(built, word),
+                machine.payload(direct, word),
+                "payload word {word} should match, padding included"
+            );
+        }
+    }
+
+    /// The same property for the bulk path, which is the one that copies whole
+    /// words rather than writing single bytes.
+    #[test]
+    fn a_bulk_append_leaves_the_tail_of_the_last_word_zero() {
+        let f = buffers();
+        let text = "twenty bytes exactly";
+        let mut machine = Machine::new(&f.program, 1 << 16);
+        let src = machine.new_string(text).unwrap();
+        let owner = machine.run(f.alloc, &[0], &budget()).unwrap()[0];
+        machine
+            .run(
+                f.append_bytes,
+                &[owner, src, 0, text.len() as u64],
+                &budget(),
+            )
+            .unwrap();
+        let built = machine.run(f.finish, &[owner], &budget()).unwrap()[0];
+        let direct = machine.new_string(text).unwrap();
+        for word in 0..machine.object_len(direct).div_ceil(8) {
+            assert_eq!(
+                machine.payload(built, word),
+                machine.payload(direct, word),
+                "payload word {word} should match, padding included"
+            );
+        }
+    }
+
+    #[test]
+    fn finishing_refuses_invalid_utf8() {
+        let f = buffers();
+        let mut machine = Machine::new(&f.program, 1 << 16);
+        // 0xFF is not a valid UTF-8 lead byte on its own.
+        let owner = built(&mut machine, &f, 0, &[b'o', b'k', 0xFF]);
+        let error = machine.run(f.finish, &[owner], &budget()).unwrap_err();
+        assert_eq!(error.message, "this string's bytes are not valid UTF-8");
+    }
+
+    /// **Only the live prefix is validated.**
+    ///
+    /// The store is longer than the length after a growth, and the bytes above
+    /// the length are spare room. A `finish` that validated the whole store
+    /// would read zero bytes past the text and still pass — so this one writes
+    /// a byte *into* the spare room behind the buffer's back and checks that
+    /// the finish neither sees it nor keeps it.
+    #[test]
+    fn finishing_validates_the_live_prefix_and_not_the_spare_room() {
+        let f = buffers();
+        let mut machine = Machine::new(&f.program, 1 << 16);
+        let owner = built(&mut machine, &f, 0, b"short");
+        let store = machine.payload(owner, 1);
+        assert!(machine.object_len(store) > 5);
+        // A byte the program never appended, in the spare room. Not reachable
+        // from the instructions — which is the point: it stands in for whatever
+        // a previous, longer occupant of a reused block left there.
+        machine.put_bytes(store, 7, 1, 0xFF);
+        let text = machine.run(f.finish, &[owner], &budget()).unwrap()[0];
+        assert_eq!(machine.string_bytes(text), b"short".to_vec());
+        assert_eq!(machine.object_len(text), 5);
+    }
+
+    /// **`append-bytes` agrees with Rust's own slicing, from a `String` and
+    /// from another buffer's store, at every alignment.**
+    ///
+    /// The destination offset is the buffer's own logical length, so the
+    /// unaligned cases are made by appending a prefix first; the source offset
+    /// is `from`. Every case below is checked against
+    /// `prefix + &text[from..to]`.
+    #[test]
+    fn a_bulk_append_agrees_with_rust_at_every_alignment() {
+        let f = buffers();
+        let text = "abcdefghijklmnopqrstuvwxyz";
+        let mut machine = Machine::new(&f.program, 1 << 16);
+        let as_string = machine.new_string(text).unwrap();
+        // Another buffer's store, which is a `Shape::Bytes` run: ADR 0052's
+        // "appendSlice ... copies directly from the source String" and ADR
+        // 0051's fused slice both want a source that is not finished yet.
+        let other = built(&mut machine, &f, text.len() as i64, text.as_bytes());
+        let as_run = machine.payload(other, 1);
+
+        let cases: &[(usize, usize, usize)] = &[
+            (0, 0, 5),
+            (3, 0, 5),
+            (0, 7, 16),
+            (8, 10, 16),
+            (1, 1, 11),
+            (0, 0, 0),
+            (5, 5, 5),
+            (7, 0, 26),
+        ];
+        for &source in &[as_string, as_run] {
+            for &(prefix, from, to) in cases {
+                let owner = built(&mut machine, &f, 0, &text.as_bytes()[..prefix]);
+                let answered = machine
+                    .run(
+                        f.append_bytes,
+                        &[owner, source, from as u64, to as u64],
+                        &budget(),
+                    )
+                    .unwrap()[0];
+                assert_eq!(answered, owner);
+                let answer = machine.run(f.finish, &[owner], &budget()).unwrap()[0];
+                let mut want = text.as_bytes()[..prefix].to_vec();
+                want.extend_from_slice(&text.as_bytes()[from..to]);
+                assert_eq!(
+                    machine.string_bytes(answer),
+                    want,
+                    "source {source} prefix={prefix} from={from} to={to}"
+                );
+            }
+        }
+    }
+
+    /// **A `from` or `to` inside a character is refused in
+    /// `String.sliceBytes`'s words.**
+    ///
+    /// ADR 0052: "`appendSlice` checks the same bounds and UTF-8 boundaries as
+    /// `String.sliceBytes`". Two operations that make the same refusal in
+    /// different words are two rules a reader has to learn, so the sentence is
+    /// pinned rather than paraphrased. A `Shape::Bytes` source is held to no
+    /// such rule, and that half is asserted too.
+    #[test]
+    fn a_bulk_append_refuses_an_offset_inside_a_character() {
+        let f = buffers();
+        // `a` is one byte, `é` is two and `漢` is three, so the boundaries are
+        // 0, 1, 3 and 6, and 2, 4 and 5 are each inside a character.
+        let text = "aé漢";
+        assert_eq!(text.len(), 6);
+        let mut machine = Machine::new(&f.program, 1 << 16);
+        let as_string = machine.new_string(text).unwrap();
+        let as_run = {
+            let owner = built(&mut machine, &f, 6, text.as_bytes());
+            machine.payload(owner, 1)
+        };
+
+        for (from, to, name, at) in [(2u64, 6u64, "from", 2u64), (0, 4, "to", 4)] {
+            let owner = machine.run(f.alloc, &[0], &budget()).unwrap()[0];
+            let error = machine
+                .run(f.append_bytes, &[owner, as_string, from, to], &budget())
+                .unwrap_err();
+            assert_eq!(
+                error.message,
+                format!(
+                    "`{name}` is `{at}`, which is inside a character rather than at the \
+                     start of one"
+                )
+            );
+            // The same offsets out of a run under construction are ordinary
+            // bytes, because a run is not claiming to be text.
+            let owner = machine.run(f.alloc, &[0], &budget()).unwrap()[0];
+            machine
+                .run(f.append_bytes, &[owner, as_run, from, to], &budget())
+                .expect("a byte run has no character boundaries");
+        }
+    }
+
+    #[test]
+    fn a_bulk_append_refuses_an_out_of_range_or_backwards_slice() {
+        let f = buffers();
+        let mut machine = Machine::new(&f.program, 1 << 16);
+        let src = machine.new_string("abcdef").unwrap();
+        for (from, to, want) in [
+            (
+                0u64,
+                7u64,
+                "`to` is `7`, and a byte offset into this string is 0 to 6".to_string(),
+            ),
+            (
+                (-1i64) as u64,
+                3,
+                "`from` is `-1`, and a byte offset into this string is 0 to 6".to_string(),
+            ),
+            (
+                4,
+                2,
+                "`from` is `4` and `to` is `2`, so this range runs backwards".to_string(),
+            ),
+        ] {
+            let owner = machine.run(f.alloc, &[0], &budget()).unwrap()[0];
+            let error = machine
+                .run(f.append_bytes, &[owner, src, from, to], &budget())
+                .unwrap_err();
+            assert_eq!(error.message, want);
+        }
+    }
+
+    #[test]
+    fn every_buffer_instruction_refuses_a_null_owner() {
+        let f = buffers();
+        let mut machine = Machine::new(&f.program, 1 << 16);
+        let src = machine.new_string("abc").unwrap();
+        for error in [
+            machine.run(f.append_byte, &[0, 65], &budget()).unwrap_err(),
+            machine
+                .run(f.append_bytes, &[0, src, 0, 3], &budget())
+                .unwrap_err(),
+            machine.run(f.finish, &[0], &budget()).unwrap_err(),
+        ] {
+            assert_eq!(error.message, null_object().message);
+        }
+    }
+
+    #[test]
+    fn a_bulk_append_refuses_a_null_source() {
+        let f = buffers();
+        let mut machine = Machine::new(&f.program, 1 << 16);
+        let owner = machine.run(f.alloc, &[0], &budget()).unwrap()[0];
+        let error = machine
+            .run(f.append_bytes, &[owner, 0, 0, 0], &budget())
+            .unwrap_err();
+        assert_eq!(error.message, null_object().message);
+    }
+
+    #[test]
+    fn a_bulk_append_refuses_a_source_that_is_neither_a_string_nor_a_run() {
+        let f = buffers();
+        let mut machine = Machine::new(&f.program, 1 << 16);
+        let owner = machine.run(f.alloc, &[0], &budget()).unwrap()[0];
+        let other = machine.run(f.alloc, &[0], &budget()).unwrap()[0];
+        // An owner is not a run: the raw store never leaves it.
+        let error = machine
+            .run(f.append_bytes, &[owner, other, 0, 0], &budget())
+            .unwrap_err();
+        assert!(
+            error.message.contains("neither a `String` nor a byte run"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn every_buffer_instruction_refuses_a_value_that_is_not_a_buffer() {
+        let f = buffers();
+        let mut machine = Machine::new(&f.program, 1 << 16);
+        let string = machine.new_string("already a string").unwrap();
+        for error in [
+            machine
+                .run(f.append_byte, &[string, 65], &budget())
+                .unwrap_err(),
+            machine
+                .run(f.append_bytes, &[string, string, 0, 3], &budget())
+                .unwrap_err(),
+            machine.run(f.finish, &[string], &budget()).unwrap_err(),
+        ] {
+            assert!(error.message.contains("byte buffer"), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn appending_to_a_finished_buffer_is_refused_rather_than_read_as_empty() {
+        let f = buffers();
+        let mut machine = Machine::new(&f.program, 1 << 16);
+        let src = machine.new_string("abc").unwrap();
+        let owner = built(&mut machine, &f, 0, b"done");
+        machine.run(f.finish, &[owner], &budget()).unwrap();
+        for error in [
+            machine
+                .run(f.append_byte, &[owner, 65], &budget())
+                .unwrap_err(),
+            machine
+                .run(f.append_bytes, &[owner, src, 0, 3], &budget())
+                .unwrap_err(),
+        ] {
+            assert!(
+                error.message.contains("already consumed"),
+                "{}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn appending_refuses_a_value_outside_a_byte() {
+        let f = buffers();
+        let mut machine = Machine::new(&f.program, 1 << 16);
+        let owner = machine.run(f.alloc, &[0], &budget()).unwrap()[0];
+        for value in [256u64, (-1i64) as u64] {
+            let error = machine
+                .run(f.append_byte, &[owner, value], &budget())
+                .unwrap_err();
+            assert!(
+                error.message.contains("appendByte") && error.message.contains("0 to 255"),
+                "{value}: {}",
+                error.message
+            );
+        }
+    }
+
+    /// **A growth that collects keeps the buffer and every byte already
+    /// appended.**
+    ///
+    /// The heap is small and the fixture allocates garbage on purpose, so the
+    /// growths *must* collect — and the assertion on `collections` is what
+    /// makes the test mean anything. A version of this without it passes when
+    /// no collection happens at all.
+    ///
+    /// What it walks is the owner: the collector reaches it through the frame
+    /// slot holding it, and reaches the store through the owner's word 1 and
+    /// nowhere else. A trace that followed word 0 instead, or skipped the owner
+    /// as a leaf, would lose the store and the bytes with it.
+    #[test]
+    fn a_growth_that_collects_keeps_every_byte_appended() {
+        const BYTES: i64 = 200;
+        const GARBAGE: i64 = 512;
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let str_layout = build.string_layout();
+        let run = build.bytes_layout();
+        let owner = build.buffer_layout();
+        // s0: the capacity and then the garbage length; s1: the owner;
+        // s2: the byte appended; s3: garbage, cleared between allocations so
+        // the previous one is unreachable when the next is asked for.
+        let mut code = vec![
+            Inst::Int { dst: 0, value: 0 },
+            Inst::AllocBuffer {
+                dst: 1,
+                capacity: 0,
+            },
+            Inst::Int {
+                dst: 2,
+                value: i64::from(b'x'),
+            },
+            Inst::Int {
+                dst: 0,
+                value: GARBAGE,
+            },
+        ];
+        for at in 0..BYTES {
+            code.push(Inst::AppendByte {
+                buffer: 1,
+                value: 2,
+            });
+            // Garbage between every append, so no growth has a quiet heap.
+            if at % 8 == 0 {
+                code.push(Inst::AllocBytes { dst: 3, len: 0 });
+                code.push(Inst::Clear {
+                    slot: 3,
+                    layout: run,
+                });
+            }
+        }
+        code.push(Inst::FinishBuffer { dst: 1, buffer: 1 });
+        code.push(Inst::Return { src: 1 });
+        let entry = build.function(
+            "grow_under_pressure",
+            &[],
+            &[Repr::Int, Repr::Ref, Repr::Int, Repr::Ref],
+            str_layout,
+            code,
+        );
+        let _ = (int, owner);
+        let program = build.done();
+
+        // Room for the buffer, one piece of garbage and a little slack, so a
+        // second piece cannot be handed out until the first is reclaimed —
+        // which is what makes the collection certain rather than merely
+        // possible.
+        let mut machine = Machine::new(&program, 320);
+        let before = machine.collected().collections;
+        let answer = machine
+            .run(entry, &[], &budget())
+            .expect("the run answers a string");
+        let after = machine.collected().collections;
+        assert!(
+            after > before,
+            "this fixture exists to collect while a buffer grows, and it \
+             collected {} time(s)",
+            after - before
+        );
+        assert_eq!(
+            machine.string_bytes(answer[0]),
+            vec![b'x'; BYTES as usize],
+            "every byte appended before the collection survived it"
+        );
+    }
+
+    /// A run that appends `BYTES` bytes in one `append-bytes`, with a fixture
+    /// whose only other instructions are the two allocations and a return.
+    fn one_big_append() -> (Program, FunctionId) {
+        const BYTES: i64 = 1 << 20;
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        build.string_layout();
+        let run = build.bytes_layout();
+        let owner = build.buffer_layout();
+        let args = build.args(&[(1, owner), (2, run), (4, int), (3, int)]);
+        let entry = build.function(
+            "appender",
+            &[],
+            &[Repr::Int, Repr::Ref, Repr::Ref, Repr::Int, Repr::Int],
+            owner,
+            vec![
+                Inst::Int {
+                    dst: 3,
+                    value: BYTES,
+                },
+                Inst::AllocBytes { dst: 2, len: 3 },
+                Inst::Int { dst: 0, value: 0 },
+                Inst::AllocBuffer {
+                    dst: 1,
+                    capacity: 0,
+                },
+                Inst::Int { dst: 4, value: 0 },
+                Inst::AppendBytes { args },
+                Inst::Return { src: 1 },
+            ],
+        );
+        (build.done(), entry)
+    }
+
+    /// **A bulk append is charged for the words it moves, and overspends its
+    /// fuel by less than one chunk plus one stride — not by the length of the
+    /// append.**
+    ///
+    /// `a_bulk_copy_overspends_its_fuel_by_less_than_one_chunk` for the
+    /// growable path. Asserting only that the run *stops* would pass just as
+    /// well for an append that ran to the end of a megabyte first, which is what
+    /// ADR 0040's `S + T` forbids and what an unchunked append would do.
+    #[test]
+    fn a_bulk_append_overspends_its_fuel_by_less_than_one_chunk() {
+        const BYTES: u64 = 1 << 20;
+        let (program, entry) = one_big_append();
+        let words = BYTES.div_ceil(8);
+        for limit in [1_024u64, 8_192, 40_000] {
+            let budget = crate::budget::Budget::new(crate::budget::Limits {
+                fuel: Some(limit),
+                ..crate::budget::Limits::default()
+            });
+            let mut machine = Machine::new(&program, 1 << 22);
+            let error = machine
+                .run(entry, &[], &budget.meter())
+                .expect_err("an append past its fuel is stopped");
+            assert_eq!(error.outcome, crate::trace::RunOutcome::Fuel);
+
+            let bound = limit + words_of_bytes(BULK_CHUNK_BYTES) + SAFEPOINT_STRIDE;
+            let spent = budget.fuel_spent();
+            assert!(
+                spent <= bound,
+                "a {BYTES}-byte append under a fuel limit of {limit} spent {spent}, \
+                 past the bound of {bound}; the whole append would have been {words}"
+            );
+            assert!(
+                spent < words,
+                "and it must not have appended the whole {words} words first"
+            );
+        }
     }
 }

@@ -214,6 +214,44 @@ pub enum Shape {
     /// stays where it is and the store beneath it is replaced by a larger
     /// one. An `Array` needs none of that and pays none of it.
     Vector { elem: LayoutId },
+    /// Payload word 0 is the logical length in bytes; word 1 is a reference to
+    /// a [`Shape::Bytes`] store whose own header length is its **capacity**.
+    ///
+    /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
+    /// stable owner, for bytes. The reason it is two objects rather than one
+    /// is the reason [`Shape::Vector`] is: growth replaces the store, and the
+    /// owner does not move, so every alias and every `var` address to it is
+    /// still the same address afterwards. A run that grew by reallocating
+    /// *itself* would leave a formatter's `var out` parameter pointing at the
+    /// object it used to be, which is exactly the failure the ADR's
+    /// "if the object itself moves when it grows, every alias and `var`
+    /// address to it goes stale" names.
+    ///
+    /// The split is also what keeps capacity out of the language. A store's
+    /// header length has to be its capacity, because the allocator and the
+    /// collector walk whole physical objects; the *logical* length lives in
+    /// the owner, so the spare room `[length, capacity)` is unobservable and
+    /// exceeding an initial capacity grows rather than changing what a
+    /// program answers.
+    ///
+    /// This is the byte case of what [`Shape::Vector`] already is for word
+    /// elements. The two differ in the storage unit and in the reference map
+    /// and in nothing else: a byte run packs eight bytes to a word and holds
+    /// no references, an element run stores values at the element layout's
+    /// stride and is traced by that layout. ADR 0052's generic `Buffer<E>`
+    /// will subsume both, and this is deliberately *not* generalised before
+    /// the second case exists — the ADR's own reason for doing bytes first is
+    /// that a shared abstraction with one instance is a guess about the
+    /// second.
+    ///
+    /// Word 1 is always a reference, so [`Layout::may_hold_refs`] answers
+    /// `true` and a collection traces word 1 and only word 1: word 0 is a
+    /// length, and reading it as an address would chase an integer. The
+    /// payload is a fixed two words whatever the store's capacity, exactly as
+    /// [`Shape::Vector`]'s is — [`Layout::fixed_payload_words`] answers `2`
+    /// rather than `None`, which is what lets a static reader bound an access
+    /// into an owner without a header to consult.
+    ByteBuffer,
     /// The header's `len` members, ascending and distinct.
     Members { elem: LayoutId },
     /// The header's `len` entries — key then value — ascending by key.
@@ -457,7 +495,10 @@ impl Layout {
             // A struct or an enum stored as an object is that value's own
             // inline words, because a boxed value's payload *is* the value.
             Shape::Word(_) | Shape::Struct { .. } | Shape::Enum { .. } => Some(self.width()),
-            Shape::Vector { .. } => Some(2),
+            // A length and a store reference, whatever the store holds. Both
+            // growable owners answer the same two words for the same reason;
+            // see `Shape::ByteBuffer`.
+            Shape::Vector { .. } | Shape::ByteBuffer => Some(2),
             // The lock word and then the value, inline. A fact about the
             // layout alone, which is what lets [`mod@crate::verify`] bound the
             // address a `lock` forms without a header to read.
@@ -496,8 +537,11 @@ impl Layout {
                 layouts[key.index()].words.iter().any(|r| r.is_ref())
                     || layouts[value.index()].words.iter().any(|r| r.is_ref())
             }
-            // Word 1 is always a reference to the store.
-            Shape::Vector { .. } => true,
+            // Word 1 is always a reference to the store. True of both growable
+            // owners, and of a `ByteBuffer` even though its *store* holds no
+            // references at all: what the collector must follow is the owner's
+            // one word naming that store, and word 0 is a length it must not.
+            Shape::Vector { .. } | Shape::ByteBuffer => true,
             // The lock word is never one, so a `Shared<Int>` is a leaf and a
             // `Shared<Metrics>` is whatever `Metrics` is.
             Shape::Shared { value } => layouts[value.index()].words.iter().any(|r| r.is_ref()),

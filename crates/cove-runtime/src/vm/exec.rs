@@ -107,6 +107,43 @@ pub const SAFEPOINT_STRIDE: u64 = 1024;
 /// instead of raising this for everyone else's sake.
 const INLINE_OPERANDS: usize = 8;
 
+/// Payload word 0 of a [`Shape::ByteBuffer`] owner: how many of its store's
+/// bytes are value.
+const BUFFER_LEN: u32 = 0;
+
+/// Payload word 1 of a [`Shape::ByteBuffer`] owner: the [`Shape::Bytes`] store
+/// holding them, whose own header length is the capacity.
+const BUFFER_STORE: u32 = 1;
+
+/// The smallest store [`Inst::AllocBuffer`] asks for, and the floor a growth
+/// doubles up from.
+///
+/// [ADR 0052](../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)
+/// says "twice the capacity from a small floor" and leaves the floor to the
+/// storage unit. `seq.rs`'s `MIN_CAPACITY` is four *elements*; sixteen is the
+/// byte-sized answer to the same question, and the reason it is not four is
+/// that four bytes is less than one word. A byte store packs eight bytes to a
+/// word and costs a header word whatever it holds, so a capacity below eight
+/// buys nothing at all and a capacity of eight buys one growth's worth of
+/// nothing: sixteen is two payload words, which covers the punctuation-sized
+/// appends a formatter makes between the ones that are worth reallocating for.
+const MIN_BUFFER_BYTES: u64 = 16;
+
+/// A live byte buffer: its owner, its store, and how much of the store is
+/// value rather than spare room.
+///
+/// `seq.rs`'s `Growable` for bytes, and the same three-part reading of ADR
+/// 0052's one growable-run discipline — a stable owner, a replaceable store,
+/// and a live prefix `[0, len)` inside a capacity. `len` and `capacity` are
+/// both byte counts, as the owner's word 0 and the store's own header state
+/// them; there is no stride, because the storage unit is the byte.
+struct ByteBuffer {
+    owner: u64,
+    store: u64,
+    len: u32,
+    capacity: u32,
+}
+
 /// One live call.
 ///
 /// The top of [`Machine::frames`] is the frame currently executing, not the
@@ -2032,6 +2069,16 @@ impl<'a> Machine<'a> {
         out
     }
 
+    /// The byte at `at` of the packed run at `addr`.
+    ///
+    /// The payload holds eight bytes to a word, least-significant byte first —
+    /// the inverse of [`Machine::write_bytes`] — so one byte is one payload read
+    /// and a shift, and no part of the object is copied. The caller owns the
+    /// bound, as every reader of a packed run here does.
+    pub(crate) fn byte_of(&self, addr: u64, at: usize) -> u8 {
+        (self.mem.payload(addr, (at / 8) as u32) >> ((at % 8) * 8)) as u8
+    }
+
     /// A new string object holding `text`.
     ///
     /// Unlike [`Machine::place_literals`] this allocates every time, and is
@@ -2072,6 +2119,233 @@ impl<'a> Machine<'a> {
     /// an exact length is to have counted first.
     pub(crate) fn new_string_of(&mut self, len: i64) -> Result<u64, RuntimeError> {
         self.allocate(self.program.str_layout, len)
+    }
+
+    // ---- ADR 0052's byte buffer -------------------------------------------
+
+    /// [`Inst::AllocBuffer`]: a new, empty byte buffer whose store has room for
+    /// `capacity` bytes.
+    ///
+    /// Two objects, because [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
+    /// growable value is a stable owner over a replaceable store. Neither
+    /// layout is a choice: the owner is `Program::buffer_layout` and its
+    /// payload is a fixed two words, and the store is `Program::bytes_layout`
+    /// with the capacity as its header length.
+    ///
+    /// # Which is allocated first, and why nothing is lost
+    ///
+    /// Two allocations means a collection may happen between them, and
+    /// whichever object exists first is reachable from nothing the collector
+    /// walks — a Rust local is not a root. So the **store is allocated first
+    /// and held by [`Machine::push_temp`]** for exactly the window in which
+    /// the owner is allocated, which is the discipline
+    /// [`crate::vm::boundary`] already uses for a half-built object and the
+    /// reason `push_temp` exists.
+    ///
+    /// The other order was available and is worse. Allocating the owner first
+    /// is safe only if something names it, which means writing it into the
+    /// destination slot before the object it owns exists — leaving a buffer
+    /// with a null store visible to a debugger stopped at the allocation, and
+    /// making the arm's correctness depend on the frame slot rather than on
+    /// this method. One temporary root costs a push and a truncate.
+    ///
+    /// A negative or oversized `capacity` fails through the same "this run has
+    /// no memory left" refusal every other allocation does, and it fails
+    /// before the owner exists rather than leaving one behind.
+    pub(crate) fn alloc_buffer(&mut self, capacity: i64) -> Result<u64, RuntimeError> {
+        // A capacity below the floor is raised to it, because a capacity is a
+        // hint and a small one is still a hint. A *negative* capacity is not
+        // raised: it is nonsense rather than a small number, and clamping it
+        // would turn the one arithmetic a caller could not have meant into a
+        // silent success. `Machine::allocate` already has the answer for a
+        // length nothing could satisfy.
+        let capacity = if capacity < 0 {
+            capacity
+        } else {
+            capacity.max(MIN_BUFFER_BYTES as i64)
+        };
+        let mark = self.temps();
+        let store = self.allocate(self.program.bytes_layout, capacity)?;
+        self.push_temp(store);
+        // The owner's payload is two words and its header length is zero: a
+        // fixed-size object's length field says nothing, exactly as a
+        // `Shape::Vector` header's does not.
+        let owner = self.allocate(self.program.buffer_layout, 0);
+        self.release_temps(mark);
+        let owner = owner?;
+        // Zeroed by the allocator, so word 0 is already the empty length; it is
+        // written anyway rather than relied upon, because the one word that
+        // says how much of the store is value should be set where it is decided.
+        self.set_payload(owner, BUFFER_LEN, 0);
+        self.set_payload(owner, BUFFER_STORE, store);
+        Ok(owner)
+    }
+
+    /// A live buffer at `owner`: its store, its logical length and its
+    /// capacity.
+    ///
+    /// Every one of the three checks is one this machine must make rather than
+    /// one the verifier could. A slot's `Repr` is `Ref` and nothing static says
+    /// which family the object behind it belongs to, so reading an arbitrary
+    /// object's payload word 1 as an address is how a wrong program becomes a
+    /// write into the middle of the heap. `Inst::CopyBytes` checks its
+    /// destination's shape for the same reason.
+    ///
+    /// A null store is a buffer [`Inst::FinishBuffer`] already consumed. For a
+    /// checked program that is unreachable — the uniqueness proof is
+    /// `cove_sema`'s — so reaching it means the proof let one through, and an
+    /// internal invariant that reports is better than one that reads a null
+    /// store as an empty buffer. It is `Vector`'s `operand::frozen` in the
+    /// vocabulary of a buffer.
+    fn buffer(&self, shown: &str, owner: u64) -> Result<ByteBuffer, RuntimeError> {
+        if owner == 0 {
+            return Err(null_object());
+        }
+        if !matches!(
+            self.program.layout(self.mem.object_layout(owner)).shape,
+            Shape::ByteBuffer
+        ) {
+            return Err(RuntimeError::new(format!(
+                "`{shown}` needs a byte buffer under construction, and this is not one"
+            )));
+        }
+        let store = self.mem.payload(owner, BUFFER_STORE);
+        if store == 0 {
+            return Err(RuntimeError::new(format!(
+                "`{shown}` was called on a byte buffer that `finish()` already consumed"
+            ))
+            .with_rule("`finish()` consumes its buffer; the source buffer is no longer usable.")
+            .with_help("use the `String` that `finish()` returned, or build a new buffer"));
+        }
+        let len = self.mem.payload(owner, BUFFER_LEN);
+        let capacity = self.mem.object_len(store);
+        if len > u64::from(capacity) {
+            return Err(RuntimeError::new(format!(
+                "`{shown}` found a byte buffer of {len} byte(s) in a store of {capacity}"
+            )));
+        }
+        Ok(ByteBuffer {
+            owner,
+            store,
+            len: len as u32,
+            capacity,
+        })
+    }
+
+    /// The store of `buffer`, grown if `needed` bytes will not fit in it.
+    ///
+    /// The new capacity is `max(needed, capacity * 2, MIN_BUFFER_BYTES)`, which
+    /// is ADR 0052's "growth uses the existing Vector policy initially" with
+    /// the one addition a bulk append needs: a doubling that still would not
+    /// hold the range is not two growths, it is one growth to the length that
+    /// fits.
+    ///
+    /// Arithmetic overflow is rejected before anything is mutated, and it is
+    /// rejected by the allocator rather than here. `needed` is a `u64` and the
+    /// doubling is `saturating_mul`, so the only value that can reach
+    /// [`Machine::allocate`] out of range is one too large to be a header
+    /// length or too large for `try_payload_words` to size — and both of those
+    /// answer "this run has no memory left" *before* the owner's store word or
+    /// its length word is touched. So a refused growth leaves the buffer
+    /// exactly as it was.
+    ///
+    /// The old store is reachable from the owner, which this read out of a
+    /// frame slot, so the allocation below cannot free it — `seq.rs`'s `grow`
+    /// makes the same argument for a `Vector`. The new store is unrooted for
+    /// exactly the copy, which allocates nothing.
+    ///
+    /// The copy is the live prefix and nothing else. That is what keeps the
+    /// spare tail zero: a fresh store is zeroed, and `copy_string_bytes` blends
+    /// masked bytes rather than whole words, so the bytes of the last partial
+    /// word above `len` are left as the allocator left them.
+    fn reserve_bytes(&mut self, buffer: &ByteBuffer, needed: u64) -> Result<u64, RuntimeError> {
+        if needed <= u64::from(buffer.capacity) {
+            return Ok(buffer.store);
+        }
+        let want = needed
+            .max(u64::from(buffer.capacity).saturating_mul(2))
+            .max(MIN_BUFFER_BYTES);
+        let store = self.allocate(
+            self.program.bytes_layout,
+            i64::try_from(want).unwrap_or(i64::MAX),
+        )?;
+        self.copy_string_bytes(store, 0, buffer.store, 0, buffer.len as usize);
+        self.set_payload(buffer.owner, BUFFER_STORE, store);
+        Ok(store)
+    }
+
+    /// [`Inst::AppendByte`]: one checked byte onto the end of a buffer.
+    pub(crate) fn append_byte(&mut self, owner: u64, value: i64) -> Result<(), RuntimeError> {
+        let buffer = self.buffer("appendByte", owner)?;
+        if !(0..=255).contains(&value) {
+            return Err(RuntimeError::new(format!(
+                "`appendByte`'s value is `{value}`, and a byte is 0 to 255"
+            )));
+        }
+        let store = self.reserve_bytes(&buffer, u64::from(buffer.len) + 1)?;
+        self.put_bytes(store, buffer.len as usize, 1, value as u64);
+        self.set_payload(buffer.owner, BUFFER_LEN, u64::from(buffer.len) + 1);
+        Ok(())
+    }
+
+    /// [`Inst::FinishBuffer`]: the buffer's live prefix, validated and
+    /// relabelled into a `String`, and the owner emptied.
+    ///
+    /// The prefix is `[0, len)` and the store may be longer, so only the prefix
+    /// is validated: the bytes above the logical length are spare room the
+    /// program never appended and must not be asked to account for.
+    ///
+    /// Then ADR 0052's "finishing reuses the store". A `Shape::Bytes` run and a
+    /// `Shape::Str` object of the same byte length occupy the same number of
+    /// words, so the store *is* the answer — relabelled down from the capacity
+    /// to the logical length, with the words in between released as a free
+    /// block the next sweep folds back in. `spare` is the difference in
+    /// *payload words* rather than in bytes, because a free block is measured
+    /// in words; `vector_freeze` computes the same difference in elements
+    /// times a stride.
+    ///
+    /// The tail of the last partial word is zero, which is what makes the
+    /// answer equal word-for-word to the same text written by
+    /// [`Machine::new_string`]: allocation zeroes, every append writes only the
+    /// live prefix, and a growth copies only the live prefix into another
+    /// zeroed store. `eq.str` compares payload words, so a dirty tail would be
+    /// a string unequal to itself written another way.
+    ///
+    /// Finally the owner is emptied — length zero, store null — because
+    /// finishing *consumes*, exactly as `Vector.freeze()` empties the vector it
+    /// consumed.
+    pub(crate) fn finish_buffer(&mut self, owner: u64) -> Result<u64, RuntimeError> {
+        let buffer = self.buffer("finishBuffer", owner)?;
+        let text = self.buffer_bytes(&buffer);
+        if std::str::from_utf8(&text).is_err() {
+            return Err(RuntimeError::new("this string's bytes are not valid UTF-8"));
+        }
+        let spare = self.payload_words(self.program.bytes_layout, buffer.capacity)
+            - self.payload_words(self.program.str_layout, buffer.len);
+        self.relabel(buffer.store, self.program.str_layout, buffer.len, spare);
+        self.set_payload(buffer.owner, BUFFER_LEN, 0);
+        self.set_payload(buffer.owner, BUFFER_STORE, 0);
+        Ok(buffer.store)
+    }
+
+    /// The live prefix of `buffer`, as bytes.
+    ///
+    /// [`Machine::string_bytes`]' read bounded by the *owner's* length rather
+    /// than the store's, which is the whole difference between a buffer and a
+    /// run: the store's header length is its capacity.
+    fn buffer_bytes(&self, buffer: &ByteBuffer) -> Vec<u8> {
+        let len = buffer.len as usize;
+        let mut out = Vec::with_capacity(len);
+        for at in 0..len.div_ceil(8) {
+            let word = self.mem.payload(buffer.store, at as u32);
+            for byte in 0..8 {
+                if out.len() == len {
+                    break;
+                }
+                out.push((word >> (byte * 8)) as u8);
+            }
+        }
+        out
     }
 
     /// The eight bytes of the string object at `addr` beginning at byte `at`,
@@ -3788,6 +4062,18 @@ pub(crate) mod tests {
         pub(crate) fn bytes_layout(&mut self) -> LayoutId {
             let id = self.layout("Bytes", Shape::Bytes);
             self.program.bytes_layout = id;
+            id
+        }
+
+        /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
+        /// byte-buffer owner layout, declared and recorded as
+        /// `Program::buffer_layout` for `bytes_layout`'s reason:
+        /// `Inst::AllocBuffer` allocates both of the field's layouts rather
+        /// than any named in the instruction, so a fixture that declared only
+        /// the shape would allocate owners the dispatch loop could not read.
+        pub(crate) fn buffer_layout(&mut self) -> LayoutId {
+            let id = self.layout("ByteBuffer", Shape::ByteBuffer);
+            self.program.buffer_layout = id;
             id
         }
 

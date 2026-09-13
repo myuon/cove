@@ -71,7 +71,7 @@ fn receiver(
 /// this is the inverse of `Machine::write_bytes` — so one byte is one word
 /// read and a shift, and no part of the object is copied.
 fn byte_at(machine: &Machine, addr: u64, at: usize) -> u8 {
-    (machine.payload(addr, (at / 8) as u32) >> ((at % 8) * 8)) as u8
+    machine.byte_of(addr, at)
 }
 
 /// The Unicode scalar value beginning at byte `at`, or `None` when `at` is

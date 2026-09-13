@@ -116,7 +116,14 @@ mod base {
     pub const WRITE_BYTE: u8 = ALLOC_BYTES + 1;
     pub const COPY_BYTES: u8 = WRITE_BYTE + 1;
     pub const FINISH_STRING: u8 = COPY_BYTES + 1;
-    pub const LEN: u8 = FINISH_STRING + 1;
+    /// [ADR 0052](../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
+    /// four byte-buffer instructions, in the order [`crate::Inst`] declares
+    /// them and directly after the four fixed-run ones they grow.
+    pub const ALLOC_BUFFER: u8 = FINISH_STRING + 1;
+    pub const APPEND_BYTE: u8 = ALLOC_BUFFER + 1;
+    pub const APPEND_BYTES: u8 = APPEND_BYTE + 1;
+    pub const FINISH_BUFFER: u8 = APPEND_BYTES + 1;
+    pub const LEN: u8 = FINISH_BUFFER + 1;
     pub const LAYOUT_OF: u8 = LEN + 1;
     pub const ADDR_OF_SLOT: u8 = LAYOUT_OF + 1;
     pub const ADDR_OF_FIELD: u8 = ADDR_OF_SLOT + 1;
@@ -188,6 +195,10 @@ pub enum Op {
     WriteByte,
     CopyBytes,
     FinishString,
+    AllocBuffer,
+    AppendByte,
+    AppendBytes,
+    FinishBuffer,
     Len,
     LayoutOf,
     AddrOfSlot,
@@ -433,6 +444,10 @@ impl Op {
             Op::WriteByte,
             Op::CopyBytes,
             Op::FinishString,
+            Op::AllocBuffer,
+            Op::AppendByte,
+            Op::AppendBytes,
+            Op::FinishBuffer,
             Op::Len,
             Op::LayoutOf,
             Op::AddrOfSlot,
@@ -511,6 +526,10 @@ impl Op {
             Op::WriteByte => base::WRITE_BYTE,
             Op::CopyBytes => base::COPY_BYTES,
             Op::FinishString => base::FINISH_STRING,
+            Op::AllocBuffer => base::ALLOC_BUFFER,
+            Op::AppendByte => base::APPEND_BYTE,
+            Op::AppendBytes => base::APPEND_BYTES,
+            Op::FinishBuffer => base::FINISH_BUFFER,
             Op::Len => base::LEN,
             Op::LayoutOf => base::LAYOUT_OF,
             Op::AddrOfSlot => base::ADDR_OF_SLOT,
@@ -734,6 +753,21 @@ impl Op {
             Op::FinishString => {
                 fields(Operand::Word(REF), Operand::Word(REF), NONE, Payload::Empty)
             }
+            // No `Half::Layout` on either of the two allocating buffer
+            // opcodes, for `Op::AllocBytes`' reason twice over: an owner is
+            // always `Program::buffer_layout` and its store is always
+            // `Program::bytes_layout`.
+            Op::AllocBuffer => fields(Operand::Word(REF), Operand::Word(INT), NONE, Payload::Empty),
+            Op::AppendByte => fields(Operand::Word(REF), Operand::Word(INT), NONE, Payload::Empty),
+            // All four operands — `buffer`, `src`, `from`, `to` — live behind
+            // the `ArgsId`, because a sixteen-byte instruction has room for
+            // three slot operands and this needs four. See
+            // `Inst::AppendBytes`'s doc, and `Op::CopyBytes` above for the same
+            // arrangement at five.
+            Op::AppendBytes => fields(NONE, NONE, NONE, one(Half::Args)),
+            Op::FinishBuffer => {
+                fields(Operand::Word(REF), Operand::Word(REF), NONE, Payload::Empty)
+            }
             Op::Len => fields(Operand::Word(INT), Operand::Word(REF), NONE, Payload::Empty),
             Op::LayoutOf => fields(Operand::Word(INT), Operand::Word(REF), NONE, Payload::Empty),
             Op::AddrOfSlot => fields(
@@ -822,20 +856,22 @@ mod tests {
     use super::*;
 
     /// ADR 0041's count, which is the one number the format's headroom is
-    /// argued from: a hundred and thirteen opcodes out of the 256 a byte
+    /// argued from: a hundred and seventeen opcodes out of the 256 a byte
     /// names.
     ///
     /// It was a hundred and two until `Op::ByteAt`, a hundred and three until
-    /// `Compare::Tag` brought its six, and a hundred and thirteen once ADR
+    /// `Compare::Tag` brought its six, a hundred and thirteen once ADR
     /// 0051's `AllocBytes`, `WriteByte`, `CopyBytes` and `FinishString`
-    /// brought four more. What the number is for is that a reader can see
-    /// the headroom rather than be told about it: more than half the byte is
-    /// still unspent, so the format has room for what comes and this test is
-    /// where that claim is kept honest.
+    /// brought four more, and a hundred and seventeen once ADR 0052's
+    /// `AllocBuffer`, `AppendByte`, `AppendBytes` and `FinishBuffer` brought
+    /// the growable four beside them. What the number is for is that a reader
+    /// can see the headroom rather than be told about it: more than half the
+    /// byte is still unspent, so the format has room for what comes and this
+    /// test is where that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_thirteen_opcodes() {
-        assert_eq!(Op::all().len(), 113);
-        assert_eq!(OPCODES, 113);
+    fn there_are_a_hundred_and_seventeen_opcodes() {
+        assert_eq!(Op::all().len(), 117);
+        assert_eq!(OPCODES, 117);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

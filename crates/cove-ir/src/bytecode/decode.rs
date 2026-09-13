@@ -247,6 +247,16 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
         },
         Op::CopyBytes => Inst::CopyBytes { args: ArgsId(lo) },
         Op::FinishString => Inst::FinishString { dst: a, bytes: b },
+        Op::AllocBuffer => Inst::AllocBuffer {
+            dst: a,
+            capacity: b,
+        },
+        Op::AppendByte => Inst::AppendByte {
+            buffer: a,
+            value: b,
+        },
+        Op::AppendBytes => Inst::AppendBytes { args: ArgsId(lo) },
+        Op::FinishBuffer => Inst::FinishBuffer { dst: a, buffer: b },
         Op::Len => Inst::Len { dst: a, obj: b },
         Op::LayoutOf => Inst::LayoutOf { dst: a, obj: b },
         Op::AddrOfSlot => Inst::AddrOfSlot { dst: a, slot: b },

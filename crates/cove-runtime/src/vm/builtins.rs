@@ -408,6 +408,9 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
         // Not a Cove value, so nothing renders it deliberately — reached only
         // from a debugger inspecting a run under construction.
         Shape::Bytes => out.push_str("<byte run>"),
+        // Nor this, for the same reason. A buffer's bytes may not be valid
+        // UTF-8, so the owner shows as the handle it is.
+        Shape::ByteBuffer => out.push_str("<byte buffer>"),
         // A value whose *object* this is: a layout the lowering broke a
         // recursion at holds the value's own inline words as its payload, and
         // `Layout::payload_words` answers that same width.

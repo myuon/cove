@@ -632,6 +632,129 @@ pub enum Inst {
     /// ADR makes: every byte a `join` moves is moved once, by
     /// [`Inst::CopyBytes`], and finishing moves none of them again.
     FinishString { dst: Slot, bytes: Slot },
+    /// `dst = <a new, empty byte buffer whose store has room for `capacity`
+    /// bytes>`.
+    ///
+    /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
+    /// allocation, and the first of the four instructions that replace
+    /// [`Inst::AllocBytes`] wherever the final length is not known before the
+    /// writes. ADR 0051's fixed run is enough when it *is* known; it is not
+    /// enough for `examples/covefmt`, whose three hot joins are filled by
+    /// data-dependent loops and whose largest is a `var out` parameter passed
+    /// through recursive calls.
+    ///
+    /// Two objects are allocated, because that is what a stable owner is: the
+    /// owner is [`crate::Program::buffer_layout`], two payload words holding a
+    /// logical length and a reference; the store is
+    /// [`crate::Program::bytes_layout`], the same packed run ADR 0051 already
+    /// has, whose *header* length is the capacity. Neither layout is named
+    /// here, for [`Inst::AllocBytes`]'s reason: both are program-wide
+    /// constants, and a call site that always means the same one should not
+    /// have to say so.
+    ///
+    /// `capacity` is a **hint** and not a bound. Exceeding it grows the store
+    /// rather than failing, so a tuning estimate cannot change what a program
+    /// answers — which is the whole of ADR 0052's "capacity is not an Array
+    /// length". A capacity below the runtime's own floor is raised to it, and a
+    /// negative or oversized one fails through the same "this run has no memory
+    /// left" refusal every other allocation does.
+    AllocBuffer { dst: Slot, capacity: Slot },
+    /// `buffer.append(value)`, one checked byte onto the end of a buffer.
+    ///
+    /// The scalar half of ADR 0052's append pair, and [`Inst::WriteByte`]'s
+    /// counterpart for a growable run — with the one difference that makes a
+    /// buffer a buffer: there is no offset. A write goes at the logical length
+    /// and the logical length becomes one more, so a caller never names a
+    /// position and can never leave a hole below one.
+    ///
+    /// It exists for a delimiter or an encoded scalar a lowering emits one at a
+    /// time, not as how text is expected to move: copying a run of bytes
+    /// through this would be as many dispatches as there are bytes, which is
+    /// what [`Inst::AppendBytes`] is for.
+    ///
+    /// `buffer` must name a live owner and `value` must be a byte, `0..=255`,
+    /// for [`Inst::WriteByte`]'s reason — this is an instruction that puts an
+    /// arbitrary integer into memory that [`Inst::FinishBuffer`] will later
+    /// read back and validate. Nothing is bounds-checked against the capacity,
+    /// because there is no bound to check: a full store grows.
+    AppendByte { buffer: Slot, value: Slot },
+    /// A bulk range append: `buffer.append(src[from .. to])`.
+    ///
+    /// ADR 0052's principal instruction, and [`Inst::CopyBytes`]'s growable
+    /// counterpart. One dispatch moves the whole range, for the reason ADR
+    /// 0051 gave when it refused a byte loop in IR: a loop of
+    /// [`Inst::AppendByte`] would multiply dispatch by the number of bytes.
+    ///
+    /// `src` may be a `String` **or** a [`crate::Shape::Bytes`] run, which is
+    /// what lets a fused slice copy straight out of the run or the string that
+    /// produced it. The ADR's own example is the optimisation this enables:
+    /// `sliceBytes(source, from, to) -> append` becomes one checked append
+    /// from that source range and never materialises the slice.
+    ///
+    /// Where `src` is a `String`, `from` and `to` are checked to be character
+    /// boundaries and not merely in range — the same check, in the same words,
+    /// that `String.sliceBytes` makes. ADR 0052 requires it: "`appendSlice`
+    /// checks the same bounds and UTF-8 boundaries as `String.sliceBytes`".
+    /// Without it a program could assemble a run of valid pieces that is not
+    /// valid UTF-8, and discover it only at [`Inst::FinishBuffer`], where the
+    /// offset that did it is long gone. A [`crate::Shape::Bytes`] source is
+    /// held to no such rule, because a run under construction is not claiming
+    /// to be text.
+    ///
+    /// # What it costs, and what it is charged
+    ///
+    /// [`Inst::CopyBytes`]'s answer, unchanged: one unit of work per payload
+    /// word moved, in bounded chunks with a safepoint between them, so a
+    /// stopped run gets no further than a stride past the bound whatever length
+    /// it was given. Growth is charged as the allocation it is.
+    ///
+    /// The store is grown **once, up front**, for the whole range rather than
+    /// per chunk. That is not only cheaper: a growth part way through would
+    /// have to copy a prefix that the chunks before it had already written, and
+    /// the one allocation before the first chunk is what keeps the copy a copy.
+    ///
+    /// # Why four operands live behind an [`ArgsId`]
+    ///
+    /// [`Inst::CopyBytes`]'s reason at one fewer operand: an encoded
+    /// instruction has room for three slot-sized operands and this needs four —
+    /// `buffer`, `src`, `from` and `to`. Rather than spend a second instruction
+    /// to carry the overflow, this reuses the machinery a call's argument list
+    /// already is. The row holds exactly four [`crate::Arg`]s in the order
+    /// `buffer`, `src`, `from`, `to`, and carries each one's layout the way a
+    /// call's arguments do, so the verifier checks them by the same rule.
+    AppendBytes { args: ArgsId },
+    /// `dst = <the buffer at `buffer`, consumed, its store validated and
+    /// relabelled into an immutable String>`.
+    ///
+    /// ADR 0052's finish, and [`Inst::FinishString`]'s counterpart for a
+    /// growable run. The bytes are read and checked as UTF-8 exactly once,
+    /// because a run assembled from [`Inst::AppendByte`] may hold anything a
+    /// byte can hold, and invalid UTF-8 fails with the same error a
+    /// source-level string operation already raises for it.
+    ///
+    /// What is validated and what is answered is the **live prefix**
+    /// `[0, length)`. A store is as long as the last growth made it, and ADR
+    /// 0052's "finishing reuses the store" is what happens to the rest: the
+    /// store is relabelled from [`crate::Program::bytes_layout`] to
+    /// [`crate::Program::str_layout`] with the *logical* length, and the words
+    /// between the two lengths become a free block the next sweep folds back
+    /// in. Nothing is copied, which is the same O(1) transition
+    /// `Vector.freeze()` already makes for elements.
+    ///
+    /// The owner is then emptied — length zero, store null — exactly as
+    /// `Vector.freeze()` empties a vector, because finishing *consumes*. That
+    /// the consumed buffer has no second live holder is
+    /// [`cove_sema`](../../../crates/cove-sema/src/unique.rs)'s conservative
+    /// local uniqueness proof and not something this machine can answer; what
+    /// the machine keeps is the liveness check, so a buffer used after a finish
+    /// is refused rather than read as an empty one.
+    ///
+    /// [`crate::Shape::Bytes`] cannot cross a Cove call and neither can the
+    /// owner cross the Host boundary, but the owner *can* cross a call, which
+    /// is the whole reason it is a value rather than a raw run: the formatter's
+    /// `fn emit(node: Tree, var out: StringBuilder)` needs to pass a partly
+    /// built string down a recursion.
+    FinishBuffer { dst: Slot, buffer: Slot },
     /// `dst = <obj's header length>`: an element count, or a string's bytes.
     Len { dst: Slot, obj: Slot },
     /// `dst = <the [`LayoutId`] in obj's header>`, as an `Int`.
