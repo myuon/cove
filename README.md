@@ -382,6 +382,22 @@ standard library needs no new VM shape and no dispatch arm. A byte builder is
 the typed owner the formatter can pass through its recursive calls; the raw
 store still cannot cross one.
 
+[ADR 0053](docs/adr/0053-a-gate-names-what-can-be-measured.md) replaces
+[ADR 0052](docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
+implementation gate, because that gate asked for a rewrite the same ADR
+forbids. `examples/covefmt`'s output is not an append-only sink: `column`
+reads it back to find the last newline, which is how every line break is
+decided, and `trimTrailing` unwrites the whitespace at its end. Giving the
+builder the operations for those was measured rather than assumed and refused
+on the numbers — `column` stops at the newline and walks 2.1 pieces a call,
+against 410,949 writes that would each have to maintain it, so carrying the
+column is 2.4 times the work it replaces. What the builder *could* be given
+took eleven per cent of every allocation in the run out, and the wall clock
+did not move. That is the fourth measurement in a row saying this program's
+time is instructions and not string allocation, so the gate now names the
+sites the builder can serve and asks for the numbers, and the search moves to
+the instruction count itself.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles
