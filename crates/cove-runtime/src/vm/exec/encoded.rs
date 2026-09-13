@@ -195,6 +195,60 @@ const FLOAT_TO_INT: u8 = Op::Convert(Convert::FloatToInt).number();
 
 const JUMP: u8 = Op::Jump.number();
 const BRANCH_FALSE: u8 = Op::BranchFalse.number();
+
+// ADR 0054's fused pair, one name per member of the two families they mirror.
+// The four that compare a `Bool` or a reference for order are here because the
+// cross product is generated rather than hand-picked, exactly as `Op::Cmp`'s
+// are, and the lowering emits none of them either.
+const EQ_INT_BRANCH: u8 = Op::CmpBranch(Compare::Int, CmpOp::Eq).number();
+const NE_INT_BRANCH: u8 = Op::CmpBranch(Compare::Int, CmpOp::Ne).number();
+const LT_INT_BRANCH: u8 = Op::CmpBranch(Compare::Int, CmpOp::Lt).number();
+const LE_INT_BRANCH: u8 = Op::CmpBranch(Compare::Int, CmpOp::Le).number();
+const GT_INT_BRANCH: u8 = Op::CmpBranch(Compare::Int, CmpOp::Gt).number();
+const GE_INT_BRANCH: u8 = Op::CmpBranch(Compare::Int, CmpOp::Ge).number();
+
+const EQ_FLOAT_BRANCH: u8 = Op::CmpBranch(Compare::Float, CmpOp::Eq).number();
+const NE_FLOAT_BRANCH: u8 = Op::CmpBranch(Compare::Float, CmpOp::Ne).number();
+const LT_FLOAT_BRANCH: u8 = Op::CmpBranch(Compare::Float, CmpOp::Lt).number();
+const LE_FLOAT_BRANCH: u8 = Op::CmpBranch(Compare::Float, CmpOp::Le).number();
+const GT_FLOAT_BRANCH: u8 = Op::CmpBranch(Compare::Float, CmpOp::Gt).number();
+const GE_FLOAT_BRANCH: u8 = Op::CmpBranch(Compare::Float, CmpOp::Ge).number();
+
+const EQ_BOOL_BRANCH: u8 = Op::CmpBranch(Compare::Bool, CmpOp::Eq).number();
+const NE_BOOL_BRANCH: u8 = Op::CmpBranch(Compare::Bool, CmpOp::Ne).number();
+const LT_BOOL_BRANCH: u8 = Op::CmpBranch(Compare::Bool, CmpOp::Lt).number();
+const LE_BOOL_BRANCH: u8 = Op::CmpBranch(Compare::Bool, CmpOp::Le).number();
+const GT_BOOL_BRANCH: u8 = Op::CmpBranch(Compare::Bool, CmpOp::Gt).number();
+const GE_BOOL_BRANCH: u8 = Op::CmpBranch(Compare::Bool, CmpOp::Ge).number();
+
+const EQ_STR_BRANCH: u8 = Op::CmpBranch(Compare::Str, CmpOp::Eq).number();
+const NE_STR_BRANCH: u8 = Op::CmpBranch(Compare::Str, CmpOp::Ne).number();
+const LT_STR_BRANCH: u8 = Op::CmpBranch(Compare::Str, CmpOp::Lt).number();
+const LE_STR_BRANCH: u8 = Op::CmpBranch(Compare::Str, CmpOp::Le).number();
+const GT_STR_BRANCH: u8 = Op::CmpBranch(Compare::Str, CmpOp::Gt).number();
+const GE_STR_BRANCH: u8 = Op::CmpBranch(Compare::Str, CmpOp::Ge).number();
+
+const EQ_REF_BRANCH: u8 = Op::CmpBranch(Compare::Identity, CmpOp::Eq).number();
+const NE_REF_BRANCH: u8 = Op::CmpBranch(Compare::Identity, CmpOp::Ne).number();
+const LT_REF_BRANCH: u8 = Op::CmpBranch(Compare::Identity, CmpOp::Lt).number();
+const LE_REF_BRANCH: u8 = Op::CmpBranch(Compare::Identity, CmpOp::Le).number();
+const GT_REF_BRANCH: u8 = Op::CmpBranch(Compare::Identity, CmpOp::Gt).number();
+const GE_REF_BRANCH: u8 = Op::CmpBranch(Compare::Identity, CmpOp::Ge).number();
+
+const EQ_TAG_BRANCH: u8 = Op::CmpBranch(Compare::Tag, CmpOp::Eq).number();
+const NE_TAG_BRANCH: u8 = Op::CmpBranch(Compare::Tag, CmpOp::Ne).number();
+const LT_TAG_BRANCH: u8 = Op::CmpBranch(Compare::Tag, CmpOp::Lt).number();
+const LE_TAG_BRANCH: u8 = Op::CmpBranch(Compare::Tag, CmpOp::Le).number();
+const GT_TAG_BRANCH: u8 = Op::CmpBranch(Compare::Tag, CmpOp::Gt).number();
+const GE_TAG_BRANCH: u8 = Op::CmpBranch(Compare::Tag, CmpOp::Ge).number();
+
+const EQ_INT_IMM_BRANCH: u8 = Op::CmpImmBranch(CmpOp::Eq).number();
+const NE_INT_IMM_BRANCH: u8 = Op::CmpImmBranch(CmpOp::Ne).number();
+const LT_INT_IMM_BRANCH: u8 = Op::CmpImmBranch(CmpOp::Lt).number();
+const LE_INT_IMM_BRANCH: u8 = Op::CmpImmBranch(CmpOp::Le).number();
+const GT_INT_IMM_BRANCH: u8 = Op::CmpImmBranch(CmpOp::Gt).number();
+const GE_INT_IMM_BRANCH: u8 = Op::CmpImmBranch(CmpOp::Ge).number();
+
 const SWITCH: u8 = Op::Switch.number();
 const RETURN: u8 = Op::Return.number();
 
@@ -274,6 +328,8 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::Convert(_)
         | Op::Jump
         | Op::BranchFalse
+        | Op::CmpBranch(_, _)
+        | Op::CmpImmBranch(_)
         | Op::Switch
         | Op::Return
         | Op::Call
@@ -911,6 +967,69 @@ pub(super) fn dispatch<'s, 'a>(
                     .set_slot(base, a!(), ((x == y) == $equal) as u64);
             }};
         }
+        // ADR 0054's fused comparison, which is the comparison above and then
+        // the branch below it, in that order and with no condition: the `Bool`
+        // is written exactly as the unfused pair wrote it, and *then* the
+        // target is taken when it is false. Nothing here asks whether anything
+        // reads the slot — see `Inst::CmpBranch` for why that question is not
+        // worth its answer — so these arms are the `cmp_*` ones above with two
+        // lines added.
+        macro_rules! took {
+            ($answer:expr) => {{
+                let answer: bool = $answer;
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, answer as u64);
+                if !answer {
+                    pc = pc.wrapping_add_signed(held.payload() as i64 as isize);
+                }
+            }};
+        }
+        macro_rules! cmp_int_branch {
+            ($op:expr) => {{
+                let x = machine.mem.word_at(base_at + (b!() as usize)) as i64;
+                let y = machine.mem.word_at(base_at + (c!() as usize)) as i64;
+                took!(compare($op, x.cmp(&y)))
+            }};
+        }
+        macro_rules! cmp_float_branch {
+            ($answer:expr) => {{
+                let x = f64::from_bits(machine.mem.word_at(base_at + (b!() as usize)));
+                let y = f64::from_bits(machine.mem.word_at(base_at + (c!() as usize)));
+                #[allow(clippy::redundant_closure_call)]
+                let answer = ($answer)(x, y);
+                took!(answer)
+            }};
+        }
+        macro_rules! cmp_str_branch {
+            ($op:expr) => {{
+                let x = machine.mem.word_at(base_at + (b!() as usize));
+                let y = machine.mem.word_at(base_at + (c!() as usize));
+                took!(compare($op, machine.compare_strings(x, y)))
+            }};
+        }
+        macro_rules! cmp_word_branch {
+            ($equal:expr) => {{
+                let x = machine.mem.word_at(base_at + (b!() as usize));
+                let y = machine.mem.word_at(base_at + (c!() as usize));
+                took!((x == y) == $equal)
+            }};
+        }
+        // The immediate form's payload is two halves rather than one word, so
+        // the displacement is `hi` and read as an `i32`. That is the whole of
+        // what ADR 0054's narrowing costs at run time.
+        macro_rules! cmp_imm_branch {
+            ($op:expr) => {{
+                let x = machine.mem.word_at(base_at + (b!() as usize)) as i64;
+                let answer = compare($op, x.cmp(&i64::from(held.lo() as i32)));
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, answer as u64);
+                if !answer {
+                    pc = pc.wrapping_add_signed(held.hi() as i32 as isize);
+                }
+            }};
+        }
         macro_rules! not_ordered {
             () => {{
                 fail!(RuntimeError::new(
@@ -1074,6 +1193,41 @@ pub(super) fn dispatch<'s, 'a>(
                     pc = pc.wrapping_add_signed(held.payload() as i64 as isize);
                 }
             }
+
+            EQ_INT_BRANCH => cmp_int_branch!(CmpOp::Eq),
+            NE_INT_BRANCH => cmp_int_branch!(CmpOp::Ne),
+            LT_INT_BRANCH => cmp_int_branch!(CmpOp::Lt),
+            LE_INT_BRANCH => cmp_int_branch!(CmpOp::Le),
+            GT_INT_BRANCH => cmp_int_branch!(CmpOp::Gt),
+            GE_INT_BRANCH => cmp_int_branch!(CmpOp::Ge),
+
+            EQ_FLOAT_BRANCH => cmp_float_branch!(|x, y| x == y),
+            NE_FLOAT_BRANCH => cmp_float_branch!(|x: f64, y: f64| x != y),
+            LT_FLOAT_BRANCH => cmp_float_branch!(|x, y| x < y),
+            LE_FLOAT_BRANCH => cmp_float_branch!(|x, y| x <= y),
+            GT_FLOAT_BRANCH => cmp_float_branch!(|x, y| x > y),
+            GE_FLOAT_BRANCH => cmp_float_branch!(|x, y| x >= y),
+
+            EQ_BOOL_BRANCH | EQ_REF_BRANCH | EQ_TAG_BRANCH => cmp_word_branch!(true),
+            NE_BOOL_BRANCH | NE_REF_BRANCH | NE_TAG_BRANCH => cmp_word_branch!(false),
+            LT_BOOL_BRANCH | LE_BOOL_BRANCH | GT_BOOL_BRANCH | GE_BOOL_BRANCH | LT_REF_BRANCH
+            | LE_REF_BRANCH | GT_REF_BRANCH | GE_REF_BRANCH | LT_TAG_BRANCH | LE_TAG_BRANCH
+            | GT_TAG_BRANCH | GE_TAG_BRANCH => not_ordered!(),
+
+            EQ_STR_BRANCH => cmp_str_branch!(CmpOp::Eq),
+            NE_STR_BRANCH => cmp_str_branch!(CmpOp::Ne),
+            LT_STR_BRANCH => cmp_str_branch!(CmpOp::Lt),
+            LE_STR_BRANCH => cmp_str_branch!(CmpOp::Le),
+            GT_STR_BRANCH => cmp_str_branch!(CmpOp::Gt),
+            GE_STR_BRANCH => cmp_str_branch!(CmpOp::Ge),
+
+            EQ_INT_IMM_BRANCH => cmp_imm_branch!(CmpOp::Eq),
+            NE_INT_IMM_BRANCH => cmp_imm_branch!(CmpOp::Ne),
+            LT_INT_IMM_BRANCH => cmp_imm_branch!(CmpOp::Lt),
+            LE_INT_IMM_BRANCH => cmp_imm_branch!(CmpOp::Le),
+            GT_INT_IMM_BRANCH => cmp_imm_branch!(CmpOp::Gt),
+            GE_INT_IMM_BRANCH => cmp_imm_branch!(CmpOp::Ge),
+
             // A switch table stays immutable program metadata with absolute
             // targets — ADR 0041's one exception to relative control flow,
             // because a table read from a `TableId` has no pc of its own.
@@ -1847,6 +2001,146 @@ mod tests {
         // Seven, out to `Float` and back, plus the layout the object says it
         // has: every one of the four opcodes contributes to it.
         assert_eq!(answer, vec![7 + u64::from(ints.0)]);
+    }
+
+    /// **ADR 0054's fused comparison is the two instructions it replaces, in
+    /// that order.**
+    ///
+    /// Three fixtures, because the instruction makes three claims and a test
+    /// of one of them would pass while another was wrong:
+    ///
+    /// - `answered` branches to the instruction *after* itself, so the branch
+    ///   is a no-op whichever way it goes and what comes back is the `Bool` it
+    ///   wrote. That is the claim the ADR rests the whole design on — the
+    ///   write is kept — and it is the one an implementation that skipped the
+    ///   store would fail here rather than somewhere downstream.
+    /// - `took` answers 1 where it fell through and 2 where it branched, which
+    ///   is the branch itself, in both directions.
+    /// - `took_imm` is the same question of the immediate form, whose target
+    ///   is in the payload's high half rather than in the whole word.
+    ///
+    /// Built in the IR directly, because nothing lowers a fused comparison: it
+    /// is a peephole over finished code, so a fixture written in Cove would be
+    /// testing that the peephole fired as well as what the instruction does.
+    #[test]
+    fn a_fused_comparison_writes_its_bool_and_then_branches() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let boolean = build.scalar(Repr::Bool);
+        let lt = |target| Inst::CmpBranch {
+            on: Compare::Int,
+            op: CmpOp::Lt,
+            dst: 2,
+            a: 0,
+            b: 1,
+            target,
+        };
+        let answered = build.function(
+            "answered",
+            &[int, int],
+            &[Repr::Int, Repr::Int, Repr::Bool],
+            boolean,
+            // The target is the next instruction, so the branch cannot be told
+            // from the fall-through and the answer is the `Bool` alone.
+            vec![lt(1), Inst::Return { src: 2 }],
+        );
+        let took = build.function(
+            "took",
+            &[int, int],
+            &[Repr::Int, Repr::Int, Repr::Bool, Repr::Int],
+            int,
+            vec![
+                lt(3),
+                Inst::Int { dst: 3, value: 1 },
+                Inst::Return { src: 3 },
+                Inst::Int { dst: 3, value: 2 },
+                Inst::Return { src: 3 },
+            ],
+        );
+        let took_imm = build.function(
+            "took_imm",
+            &[int],
+            &[Repr::Int, Repr::Bool, Repr::Int],
+            int,
+            vec![
+                Inst::CmpImmBranch {
+                    op: CmpOp::Eq,
+                    dst: 1,
+                    a: 0,
+                    value: 32,
+                    target: 3,
+                },
+                Inst::Int { dst: 2, value: 1 },
+                Inst::Return { src: 2 },
+                Inst::Int { dst: 2, value: 2 },
+                Inst::Return { src: 2 },
+            ],
+        );
+        let program = build.done();
+
+        // The `Bool`, which is what the fused instruction wrote and nothing
+        // else touched.
+        assert_eq!(
+            run_words(&program, answered, &[1, 2]).expect("the fixture runs"),
+            vec![1]
+        );
+        assert_eq!(
+            run_words(&program, answered, &[2, 1]).expect("the fixture runs"),
+            vec![0]
+        );
+        assert_eq!(
+            run_words(&program, answered, &[2, 2]).expect("the fixture runs"),
+            vec![0]
+        );
+        // And the branch: false takes the target, true falls through.
+        assert_eq!(
+            run_words(&program, took, &[1, 2]).expect("the fixture runs"),
+            vec![1]
+        );
+        assert_eq!(
+            run_words(&program, took, &[2, 1]).expect("the fixture runs"),
+            vec![2]
+        );
+        assert_eq!(
+            run_words(&program, took_imm, &[32]).expect("the fixture runs"),
+            vec![1]
+        );
+        assert_eq!(
+            run_words(&program, took_imm, &[33]).expect("the fixture runs"),
+            vec![2]
+        );
+        // A negative immediate, because the low half is an `i32` and a reading
+        // that lost the sign would call every negative bound enormous.
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let negative = build.function(
+            "negative",
+            &[int],
+            &[Repr::Int, Repr::Bool, Repr::Int],
+            int,
+            vec![
+                Inst::CmpImmBranch {
+                    op: CmpOp::Lt,
+                    dst: 1,
+                    a: 0,
+                    value: -5,
+                    target: 3,
+                },
+                Inst::Int { dst: 2, value: 1 },
+                Inst::Return { src: 2 },
+                Inst::Int { dst: 2, value: 2 },
+                Inst::Return { src: 2 },
+            ],
+        );
+        let program = build.done();
+        assert_eq!(
+            run_words(&program, negative, &[(-6i64) as u64]).expect("the fixture runs"),
+            vec![1]
+        );
+        assert_eq!(
+            run_words(&program, negative, &[0]).expect("the fixture runs"),
+            vec![2]
+        );
     }
 
     #[test]

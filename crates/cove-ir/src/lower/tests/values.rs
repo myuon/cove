@@ -37,13 +37,12 @@ fn a_negated_literal_is_an_immediate_and_a_sum_of_two_is_not_folded() {
         "\
 fn @m.f(Int) -> Bool
   frame 4: s0!:int s1:bool s2:int s3:int
-  local n -> s0:Int [0, 6)
-     0  gt.int.imm s1:bool s0:int -1
-     1  branch-false s1:bool 5
-     2  int s2:int 1
-     3  add.int.imm s3:int s2:int 1
-     4  lt.int s1:bool s0:int s3:int
-     5  return s1:Bool
+  local n -> s0:Int [0, 5)
+     0  gt.int.imm.branch s1:bool s0:int -1 4
+     1  int s2:int 1
+     2  add.int.imm s3:int s2:int 1
+     3  lt.int s1:bool s0:int s3:int
+     4  return s1:Bool
 "
     );
 }

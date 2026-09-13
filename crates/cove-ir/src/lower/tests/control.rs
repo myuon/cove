@@ -79,15 +79,14 @@ fn a_while_re_decides_the_condition_every_turn() {
         "\
 fn @m.count(Int) -> Int
   frame 4: s0!:int s1:int s2:int s3:bool
-  local n -> s0:Int [0, 7)
-  local t -> s2:Int [1, 6)
+  local n -> s0:Int [0, 6)
+  local t -> s2:Int [1, 5)
      0  int s2:int 0
-     1  lt.int s3:bool s2:int s0:int
-     2  branch-false s3:bool 5
-     3  add.int.imm s2:int s2:int 1
-     4  jump 1
-     5  copy s1:Int s2:Int
-     6  return s1:Int
+     1  lt.int.branch s3:bool s2:int s0:int 4
+     2  add.int.imm s2:int s2:int 1
+     3  jump 1
+     4  copy s1:Int s2:Int
+     5  return s1:Int
 "
     );
 }
@@ -102,17 +101,16 @@ fn a_break_leaves_the_loop_and_its_jump_is_patched_at_the_end() {
         "\
 fn @m.first() -> Int
   frame 4: s0:int s1:int s2:bool s3:unit
-  local t -> s1:Int [1, 9)
+  local t -> s1:Int [1, 8)
      0  int s1:int 0
      1  bool s2:bool true
-     2  branch-false s2:bool 8
+     2  branch-false s2:bool 7
      3  add.int.imm s1:int s1:int 1
-     4  gt.int.imm s2:bool s1:int 3
-     5  branch-false s2:bool 7
-     6  jump 8
-     7  jump 1
-     8  copy s0:Int s1:Int
-     9  return s0:Int
+     4  gt.int.imm.branch s2:bool s1:int 3 6
+     5  jump 7
+     6  jump 1
+     7  copy s0:Int s1:Int
+     8  return s0:Int
 "
     );
 }
@@ -140,13 +138,12 @@ fn a_return_leaves_without_clearing_what_the_frame_was_holding() {
         "\
 fn @m.early(Int) -> Int
   frame 4: s0!:int s1:int s2:bool s3:unit
-  local n -> s0:Int [0, 6)
-     0  lt.int.imm s2:bool s0:int 0
-     1  branch-false s2:bool 4
-     2  int s1:int 0
-     3  return s1:Int
-     4  copy s1:Int s0:Int
-     5  return s1:Int
+  local n -> s0:Int [0, 5)
+     0  lt.int.imm.branch s2:bool s0:int 0 3
+     1  int s1:int 0
+     2  return s1:Int
+     3  copy s1:Int s0:Int
+     4  return s1:Int
 "
     );
 }
@@ -189,9 +186,9 @@ fn a_break_clears_the_temporaries_the_turn_was_holding() {
         "\
 fn @m.f(Array) -> Int
   frame 13: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:ref s10:ref s11:unit s12:int
-  local xs -> s0:Array [0, 27)
-  local total -> s2:Int [1, 26)
-  local x -> s8:String [10, 22)
+  local xs -> s0:Array [0, 25)
+  local total -> s2:Int [1, 24)
+  local x -> s8:String [9, 20)
      0  int s2:int 0
      1  copy s3:Array s0:Array
      2  len s4:int s3:ref
@@ -199,26 +196,24 @@ fn @m.f(Array) -> Int
      4  int s6:int 1
      5  jump 7
      6  add.int s5:int s5:int s6:int
-     7  lt.int s7:bool s5:int s4:int
-     8  branch-false s7:bool 24
-     9  load-elem s8:String s3:ref s5:int
-    10  call-builtin s9:String String.interpolate (s8:String)
-    11  gt.int.imm s7:bool s2:int 0
-    12  branch-false s7:bool 15
-    13  copy s10:String s8:String
-    14  jump 19
-    15  clear s10:String
-    16  clear s9:String
-    17  clear s8:String
-    18  jump 24
-    19  int s2:int 0
-    20  clear s10:String
-    21  clear s9:String
-    22  clear s8:String
-    23  jump 6
-    24  clear s3:Array
-    25  copy s1:Int s2:Int
-    26  return s1:Int
+     7  lt.int.branch s7:bool s5:int s4:int 22
+     8  load-elem s8:String s3:ref s5:int
+     9  call-builtin s9:String String.interpolate (s8:String)
+    10  gt.int.imm.branch s7:bool s2:int 0 13
+    11  copy s10:String s8:String
+    12  jump 17
+    13  clear s10:String
+    14  clear s9:String
+    15  clear s8:String
+    16  jump 22
+    17  int s2:int 0
+    18  clear s10:String
+    19  clear s9:String
+    20  clear s8:String
+    21  jump 6
+    22  clear s3:Array
+    23  copy s1:Int s2:Int
+    24  return s1:Int
 "
     );
 }

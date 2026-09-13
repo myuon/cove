@@ -13,6 +13,11 @@
   Array, mutable growable Vector and O(1) unique `Vector.freeze()`
 - Extends: [ADR 0034](0034-one-physical-word-stack.md)'s one heap with no new
   value store
+- Superseded in part by
+  [ADR 0053](0053-a-gate-names-what-can-be-measured.md): its implementation
+  gate, which named a rewrite of `examples/covefmt` that this ADR's own
+  append-only API forbids, because that formatter reads its output back and
+  unwrites it. Nothing else here is disturbed
 
 ## Context
 

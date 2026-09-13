@@ -1,4 +1,5 @@
-//! The hundred and one opcodes, and what each one makes of the four fields.
+//! The hundred and fifty-nine opcodes, and what each one makes of the four
+//! fields.
 //!
 //! # One opcode per concrete operation
 //!
@@ -9,9 +10,13 @@
 //! dispatch by doing so. ADR 0041 decides the enumeration:
 //!
 //! - [`Inst::Arith`](crate::Inst::Arith) becomes ten, `Num` × `ArithOp`;
-//! - [`Inst::Cmp`](crate::Inst::Cmp) becomes thirty-six, `Compare` × `CmpOp`;
-//! - [`Inst::ArithImm`](crate::Inst::ArithImm) five and
-//!   [`Inst::CmpImm`](crate::Inst::CmpImm) six, the operator alone;
+//! - [`Inst::Cmp`](crate::Inst::Cmp) becomes thirty-six, `Compare` × `CmpOp`,
+//!   and [`Inst::CmpBranch`](crate::Inst::CmpBranch) thirty-six more beside
+//!   it;
+//! - [`Inst::ArithImm`](crate::Inst::ArithImm) five,
+//!   [`Inst::CmpImm`](crate::Inst::CmpImm) six and
+//!   [`Inst::CmpImmBranch`](crate::Inst::CmpImmBranch) six, the operator
+//!   alone;
 //! - [`Inst::Neg`](crate::Inst::Neg) two, [`Convert`] two;
 //! - [`Inst::Alloc`](crate::Inst::Alloc) three, one per [`Len`](crate::Len)
 //!   form, so no discriminant is stored anywhere.
@@ -94,7 +99,12 @@ mod base {
     pub const CONVERT: u8 = NOT + 1;
     pub const JUMP: u8 = CONVERT + CONVERTS.len() as u8;
     pub const BRANCH_FALSE: u8 = JUMP + 1;
-    pub const SWITCH: u8 = BRANCH_FALSE + 1;
+    /// [ADR 0054](../../../../docs/adr/0054-a-comparison-that-only-feeds-a-branch-is-the-branch.md)'s
+    /// two fused families, which mirror `CMP` and `CMP_IMM` member for
+    /// member: thirty-six and six.
+    pub const CMP_BRANCH: u8 = BRANCH_FALSE + 1;
+    pub const CMP_IMM_BRANCH: u8 = CMP_BRANCH + (COMPARES.len() * CMP_OPS.len()) as u8;
+    pub const SWITCH: u8 = CMP_IMM_BRANCH + CMP_OPS.len() as u8;
     pub const RETURN: u8 = SWITCH + 1;
     pub const CALL: u8 = RETURN + 1;
     pub const CALL_CLOSURE: u8 = CALL + 1;
@@ -176,6 +186,8 @@ pub enum Op {
     Convert(Convert),
     Jump,
     BranchFalse,
+    CmpBranch(Compare, CmpOp),
+    CmpImmBranch(CmpOp),
     Switch,
     Return,
     Call,
@@ -289,6 +301,18 @@ pub enum Payload {
     Displacement,
     /// Two 32-bit halves, low first.
     Halves(Half, Half),
+    /// The low half is an `i32` immediate and the high half is a
+    /// `Displacement` — `to - (pc + 1)`, two's complement, in thirty-two bits
+    /// rather than sixty-four.
+    ///
+    /// [`Op::CmpImmBranch`] alone, and it is not [`Payload::Halves`] because
+    /// neither half is an id: [`Half`] narrows nothing and indexes a table,
+    /// and both of these are numbers the instruction itself means. The
+    /// narrowing is what
+    /// [ADR 0054](../../../../docs/adr/0054-a-comparison-that-only-feeds-a-branch-is-the-branch.md)
+    /// pays for the fusion, and it is why a wider immediate stays the unfused
+    /// pair.
+    ImmAndDisplacement,
 }
 
 /// What one 32-bit half of a payload holds.
@@ -422,9 +446,14 @@ impl Op {
         all.extend(CMP_OPS.map(Op::CmpImm));
         all.push(Op::Not);
         all.extend(CONVERTS.map(Op::Convert));
+        all.extend([Op::Jump, Op::BranchFalse]);
+        for on in COMPARES {
+            for op in CMP_OPS {
+                all.push(Op::CmpBranch(on, op));
+            }
+        }
+        all.extend(CMP_OPS.map(Op::CmpImmBranch));
         all.extend([
-            Op::Jump,
-            Op::BranchFalse,
             Op::Switch,
             Op::Return,
             Op::Call,
@@ -507,6 +536,12 @@ impl Op {
             Op::Convert(to) => base::CONVERT + index_of!(CONVERTS, to),
             Op::Jump => base::JUMP,
             Op::BranchFalse => base::BRANCH_FALSE,
+            Op::CmpBranch(on, op) => {
+                base::CMP_BRANCH
+                    + index_of!(COMPARES, on) * CMP_OPS.len() as u8
+                    + index_of!(CMP_OPS, op)
+            }
+            Op::CmpImmBranch(op) => base::CMP_IMM_BRANCH + index_of!(CMP_OPS, op),
             Op::Switch => base::SWITCH,
             Op::Return => base::RETURN,
             Op::Call => base::CALL,
@@ -647,6 +682,27 @@ impl Op {
             }
             Op::Jump => fields(NONE, NONE, NONE, Payload::Displacement),
             Op::BranchFalse => fields(Operand::Word(BOOL), NONE, NONE, Payload::Displacement),
+            // The comparison's three slots, unchanged, and the target in the
+            // payload word `Op::Cmp` leaves empty. Nothing moved: ADR 0054's
+            // fusion fits the sixteen bytes as they are.
+            Op::CmpBranch(on, _) => {
+                let want = compared(on);
+                fields(
+                    Operand::Word(BOOL),
+                    Operand::Word(want),
+                    Operand::Word(want),
+                    Payload::Displacement,
+                )
+            }
+            // Two slots, and the payload split between the immediate and the
+            // target — which is why this one's immediate is an `i32` where
+            // `Op::CmpImm`'s is an `i64`.
+            Op::CmpImmBranch(_) => fields(
+                Operand::Word(BOOL),
+                Operand::Word(INT),
+                NONE,
+                Payload::ImmAndDisplacement,
+            ),
             // The discriminant of an enum location is its first word and is
             // an `Int`; so is the layout id a `dyn` dispatch switches on.
             Op::Switch => fields(Operand::Word(SWITCHED), NONE, NONE, one(Half::Table)),
@@ -856,22 +912,26 @@ mod tests {
     use super::*;
 
     /// ADR 0041's count, which is the one number the format's headroom is
-    /// argued from: a hundred and seventeen opcodes out of the 256 a byte
+    /// argued from: a hundred and fifty-nine opcodes out of the 256 a byte
     /// names.
     ///
     /// It was a hundred and two until `Op::ByteAt`, a hundred and three until
     /// `Compare::Tag` brought its six, a hundred and thirteen once ADR
     /// 0051's `AllocBytes`, `WriteByte`, `CopyBytes` and `FinishString`
-    /// brought four more, and a hundred and seventeen once ADR 0052's
+    /// brought four more, a hundred and seventeen once ADR 0052's
     /// `AllocBuffer`, `AppendByte`, `AppendBytes` and `FinishBuffer` brought
-    /// the growable four beside them. What the number is for is that a reader
-    /// can see the headroom rather than be told about it: more than half the
-    /// byte is still unspent, so the format has room for what comes and this
-    /// test is where that claim is kept honest.
+    /// the growable four beside them, and a hundred and fifty-nine once ADR
+    /// 0054's `CmpBranch` and `CmpImmBranch` mirrored `Cmp` and `CmpImm`
+    /// member for member — thirty-six and six, the largest single growth this
+    /// table has had and the one the ADR makes a measurement the condition
+    /// of. What the number is for is that a reader can see the headroom
+    /// rather than be told about it: more than a third of the byte is still
+    /// unspent, so the format has room for what comes and this test is where
+    /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_seventeen_opcodes() {
-        assert_eq!(Op::all().len(), 117);
-        assert_eq!(OPCODES, 117);
+    fn there_are_a_hundred_and_fifty_nine_opcodes() {
+        assert_eq!(Op::all().len(), 159);
+        assert_eq!(OPCODES, 159);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic
@@ -922,6 +982,10 @@ mod tests {
         assert_eq!(count(|op| matches!(op, Op::Cmp(_, _))), 36);
         assert_eq!(count(|op| matches!(op, Op::ArithImm(_))), 5);
         assert_eq!(count(|op| matches!(op, Op::CmpImm(_))), 6);
+        // ADR 0054's two mirror those two rather than covering the subset one
+        // benchmark happens to execute, so the counts are the same counts.
+        assert_eq!(count(|op| matches!(op, Op::CmpBranch(_, _))), 36);
+        assert_eq!(count(|op| matches!(op, Op::CmpImmBranch(_))), 6);
         assert_eq!(count(|op| matches!(op, Op::Neg(_))), 2);
         assert_eq!(count(|op| matches!(op, Op::Convert(_))), 2);
         assert_eq!(

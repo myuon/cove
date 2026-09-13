@@ -3,7 +3,7 @@ entering debug_session.main at debug_session/main.cove:30:11
 >   30 |   println("before")?
 (cove) break debug_session/main.cove:6
 breakpoint 1 at 2 locations:
-  debug_session.twice (inlined into debug_session.raise) pc 6 at debug_session/main.cove:6:17
+  debug_session.twice (inlined into debug_session.raise) pc 5 at debug_session/main.cove:6:17
   debug_session.twice pc 0 at debug_session/main.cove:6:17
 (cove) break debug_session/main.cove:2
 no instruction was lowered for debug_session/main.cove:2
@@ -12,7 +12,7 @@ no instruction was lowered for debug_session/main.cove:2
 `debug_session.unreached` is declared, but this entry does not reach it: `cove debug` lowers only what the entry can call, so it has no instructions to break on
 (cove) info breakpoints
 breakpoint 1 at `debug_session/main.cove:6`, hit 0 time(s)
-  debug_session.twice (inlined into debug_session.raise) pc 6 at debug_session/main.cove:6:17
+  debug_session.twice (inlined into debug_session.raise) pc 5 at debug_session/main.cove:6:17
   debug_session.twice pc 0 at debug_session/main.cove:6:17
 (cove) continue
 before
@@ -59,4 +59,4 @@ debug_session.main:
 =>   12 | call s13:Int debug_session.raise (s12:Int)
      13 | call-builtin s14:String String.interpolate (s3:String s13:Int)
 (cove) quit
-the run was halted after 16 instruction(s).
+the run was halted after 15 instruction(s).

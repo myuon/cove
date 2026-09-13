@@ -327,6 +327,59 @@ pub enum Inst {
     /// all lower through it, and the lowering inverts the condition rather
     /// than the instruction set carrying both polarities.
     BranchFalse { cond: Slot, to: Pc },
+    /// [`Inst::Cmp`] and then [`Inst::BranchFalse`] on what it wrote, as one
+    /// instruction.
+    ///
+    /// `dst = a op b`, answering a `Bool`, and then continue at `target` when
+    /// that `Bool` is false. It is **exactly the two instructions it
+    /// replaces, in that order, with no condition attached** — the `Bool` is
+    /// still written to `dst`, and anything that reads `dst` afterwards reads
+    /// what the unfused pair would have left there.
+    ///
+    /// That is the whole of its correctness argument, and
+    /// [ADR 0054](../../../docs/adr/0054-a-comparison-that-only-feeds-a-branch-is-the-branch.md)
+    /// chooses it over the alternative deliberately. An instruction that
+    /// skipped the write would be sound only where nothing reads `dst`, which
+    /// is a liveness question, and what the fusion saves is the *dispatch*
+    /// rather than the store. Not asking the question costs one slot write on
+    /// the paths where the answer would have been "nothing reads it" and buys
+    /// a rule with no side conditions.
+    ///
+    /// Nothing lowers to this. [`mod@crate::lower`]'s peephole recognises the
+    /// pair in finished code — a comparison, the `branch-false` beside it
+    /// reading the slot it wrote, and no jump, branch or switch in the
+    /// function naming that `branch-false` — so a form the peephole cannot
+    /// see is a missed fusion rather than a wrong one.
+    CmpBranch {
+        on: Compare,
+        op: CmpOp,
+        dst: Slot,
+        a: Slot,
+        b: Slot,
+        target: Pc,
+    },
+    /// [`Inst::CmpImm`] and then [`Inst::BranchFalse`] on what it wrote, as
+    /// one instruction.
+    ///
+    /// [`Inst::CmpBranch`]'s other half, with the same semantics and the same
+    /// argument: the `Bool` is written to `dst` and then `target` is taken
+    /// when it is false.
+    ///
+    /// **The immediate is an `i32` here and an `i64` on [`Inst::CmpImm`].**
+    /// The sixteen-byte instruction spends two slots on `dst` and `a` and
+    /// then has one payload word left for two numbers, so the immediate and
+    /// the target are its two halves. A comparison against a wider immediate
+    /// is left as the unfused pair, which is the existing instructions doing
+    /// what they already do — and the narrowing is *checked* rather than
+    /// assumed, because a fusion that dropped the high bits would be a wrong
+    /// answer and not a slow one.
+    CmpImmBranch {
+        op: CmpOp,
+        dst: Slot,
+        a: Slot,
+        value: i32,
+        target: Pc,
+    },
     /// Continue at the entry of `table` selected by the `Int` in `on`.
     ///
     /// This is how a `match` over an enum's cases dispatches: `on` is the

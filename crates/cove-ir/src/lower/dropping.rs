@@ -11,11 +11,18 @@
 //!
 //! # What names a program counter
 //!
-//! Five things, and all five are rewritten: [`Inst::Jump`],
-//! [`Inst::BranchFalse`], the [`Table`] an [`Inst::Switch`] dispatches
-//! through, the pair of counters that bound a [`Local`](crate::Local)'s live
-//! range, and the pair that bound an [`Inlined`](crate::program::Inlined)
-//! body.
+//! Six things, and all six are rewritten: [`Inst::Jump`],
+//! [`Inst::BranchFalse`], the target a fused [`Inst::CmpBranch`] or
+//! [`Inst::CmpImmBranch`] carries, the [`Table`] an [`Inst::Switch`]
+//! dispatches through, the pair of counters that bound a
+//! [`Local`](crate::Local)'s live range, and the pair that bound an
+//! [`Inlined`](crate::program::Inlined) body.
+//!
+//! The fused pair is here even though the pass that *makes* one runs after
+//! the two that drop clears, so nothing in the current sequence hands this a
+//! `CmpBranch`. It is a target and this is the function that moves targets;
+//! leaving it out would make the omission a fact about an ordering rather
+//! than about the edit.
 //!
 //! The last two are the same shape and are easy to forget in the same way:
 //! nothing in a lowered function *reads* them, so a range left behind still
@@ -57,6 +64,9 @@ pub(super) fn rewrite(function: &mut Function, tables: &mut [Table], dropped: &[
         let mut inst = inst.clone();
         match &mut inst {
             Inst::Jump { to } | Inst::BranchFalse { to, .. } => *to = moved[*to as usize],
+            Inst::CmpBranch { target, .. } | Inst::CmpImmBranch { target, .. } => {
+                *target = moved[*target as usize]
+            }
             Inst::Switch { table, .. } => {
                 let table = &mut tables[table.index()];
                 for target in &mut table.targets {

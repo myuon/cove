@@ -100,7 +100,15 @@ fn one_encoded_instruction_is_one_unit_of_fuel() {
     // discriminant is a `Repr::Tag` and cannot be compared as an integer.
     // Three instructions to one, on a path this program takes once. See
     // [ADR 0048](../../../docs/adr/0048-a-repr-says-what-a-word-means.md).
-    assert_eq!(ran.instructions, 14_285_736);
+    //
+    // And four million below *that*, which is not a path taken once: ADR 0054
+    // fuses a comparison that only feeds the branch beside it, and `arith`'s
+    // two loops run two million turns apiece with a `while` condition in each.
+    // The two instructions a turn become one, and the figure is what says so —
+    // a 28% fall in what this program executes, against the 18.8% the ADR
+    // measured on a formatter, because a benchmark of a tight loop is the best
+    // case for the fusion and a formatter is the honest one.
+    assert_eq!(ran.instructions, 10_285_734);
 }
 
 /// Source spans: a failing program points where the oracle points.

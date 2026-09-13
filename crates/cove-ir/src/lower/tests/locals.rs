@@ -198,9 +198,9 @@ fn a_break_leaves_the_element_s_range_rather_than_cutting_it_short() {
         "f",
     );
     let x = f
-        .local_at("x", 12)
+        .local_at("x", 10)
         .expect("the element is named in the body");
-    let leaves = match f.code[12] {
+    let leaves = match f.code[10] {
         crate::Inst::Jump { to } => to,
         ref other => panic!("the `break` is a jump, not a {other:?}"),
     };

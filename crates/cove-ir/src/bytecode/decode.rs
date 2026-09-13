@@ -163,6 +163,24 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             cond: a,
             to: target(pc, code.payload() as i64)?,
         },
+        Op::CmpBranch(on, op) => Inst::CmpBranch {
+            on,
+            op,
+            dst: a,
+            a: b,
+            b: c,
+            target: target(pc, code.payload() as i64)?,
+        },
+        // The immediate is the low half read back as the `i32` it was
+        // written as, and the target is the high half as a narrow
+        // displacement. See `Inst::CmpImmBranch`.
+        Op::CmpImmBranch(op) => Inst::CmpImmBranch {
+            op,
+            dst: a,
+            a: b,
+            value: lo as i32,
+            target: target(pc, i64::from(hi as i32))?,
+        },
         Op::Switch => Inst::Switch {
             on: a,
             table: TableId(lo),
@@ -362,7 +380,7 @@ fn canonical(code: EncodedInst, op: Op) -> Result<(), Malformed> {
         }
         // A `Bool` payload's own range is checked where it is read, so that
         // the fault names the constant rather than the field.
-        Payload::Bool | Payload::Imm | Payload::Displacement => {}
+        Payload::Bool | Payload::Imm | Payload::Displacement | Payload::ImmAndDisplacement => {}
         Payload::Halves(lo, hi) => {
             for (half, (name, held)) in [lo, hi]
                 .into_iter()

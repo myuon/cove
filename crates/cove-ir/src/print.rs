@@ -193,6 +193,37 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         ),
         Inst::Jump { to } => format!("jump {to}"),
         Inst::BranchFalse { cond, to } => format!("branch-false {} {to}", s(*cond)),
+        // A fused comparison prints as the comparison it is, with `.branch`
+        // on the opcode and the target where a `branch-false`'s target goes:
+        // `lt.int.branch s4:bool s2:int s1:int 12` is `lt.int` and
+        // `branch-false s4:bool 12` on one line, and reads as both.
+        Inst::CmpBranch {
+            on,
+            op,
+            dst,
+            a,
+            b,
+            target,
+        } => format!(
+            "{}.{}.branch {} {} {} {target}",
+            cmp_name(*op),
+            compare_name(*on),
+            s(*dst),
+            s(*a),
+            s(*b)
+        ),
+        Inst::CmpImmBranch {
+            op,
+            dst,
+            a,
+            value,
+            target,
+        } => format!(
+            "{}.int.imm.branch {} {} {value} {target}",
+            cmp_name(*op),
+            s(*dst),
+            s(*a)
+        ),
         Inst::Switch { on, table } => {
             let table = program.table(*table);
             let targets: Vec<String> = table.targets.iter().map(|to| to.to_string()).collect();

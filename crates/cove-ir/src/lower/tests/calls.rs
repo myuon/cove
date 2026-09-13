@@ -53,17 +53,16 @@ fn recursion_is_an_ordinary_call() {
         "\
 fn @m.fib(Int) -> Int
   frame 6: s0!:int s1:int s2:bool s3:int s4:int s5:int
-  local n -> s0:Int [0, 10)
-     0  lt.int.imm s2:bool s0:int 2
-     1  branch-false s2:bool 4
-     2  copy s1:Int s0:Int
-     3  jump 9
-     4  sub.int.imm s3:int s0:int 1
-     5  call s4:Int m.fib (s3:Int)
-     6  sub.int.imm s3:int s0:int 2
-     7  call s5:Int m.fib (s3:Int)
-     8  add.int s1:int s4:int s5:int
-     9  return s1:Int
+  local n -> s0:Int [0, 9)
+     0  lt.int.imm.branch s2:bool s0:int 2 3
+     1  copy s1:Int s0:Int
+     2  jump 8
+     3  sub.int.imm s3:int s0:int 1
+     4  call s4:Int m.fib (s3:Int)
+     5  sub.int.imm s3:int s0:int 2
+     6  call s5:Int m.fib (s3:Int)
+     7  add.int s1:int s4:int s5:int
+     8  return s1:Int
 "
     );
 }
@@ -308,7 +307,7 @@ fn a_spread_argument_is_counted_and_then_walked_into_the_run() {
         "\
 fn @m.f(Array) -> Int
   frame 12: s0!:ref s1:int s2:int s3:int s4:int s5:int s6:ref s7:int s8:int s9:int s10:bool s11:int
-  local xs -> s0:Array [0, 23)
+  local xs -> s0:Array [0, 22)
      0  int s2:int 0
      1  int s3:int 9
      2  int s4:int 2
@@ -321,17 +320,16 @@ fn @m.f(Array) -> Int
      9  add.int s7:int s7:int s5:int
     10  len s8:int s0:ref
     11  int s9:int 0
-    12  lt.int s10:bool s9:int s8:int
-    13  branch-false s10:bool 19
-    14  load-elem s11:Int s0:ref s9:int
-    15  store-elem s6:ref s7:int s11:Int
-    16  add.int s9:int s9:int s5:int
-    17  add.int s7:int s7:int s5:int
-    18  jump 12
-    19  store-elem s6:ref s7:int s3:Int
-    20  add.int s7:int s7:int s5:int
-    21  call s1:Int m.total (s6:Array)
-    22  return s1:Int
+    12  lt.int.branch s10:bool s9:int s8:int 18
+    13  load-elem s11:Int s0:ref s9:int
+    14  store-elem s6:ref s7:int s11:Int
+    15  add.int s9:int s9:int s5:int
+    16  add.int s7:int s7:int s5:int
+    17  jump 12
+    18  store-elem s6:ref s7:int s3:Int
+    19  add.int s7:int s7:int s5:int
+    20  call s1:Int m.total (s6:Array)
+    21  return s1:Int
 "
     );
 }
