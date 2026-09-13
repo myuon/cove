@@ -178,6 +178,27 @@ impl<'m, 'a> Bridge<'m, 'a> {
     }
 }
 
+/// Where a call's answer goes: the run of words its caller named for it.
+///
+/// [ADR 0057]: the destination of a call is settled by the lowering, before the
+/// call is made — it is `Inst::Call`'s `dst` — so there is nothing for a return
+/// path to decide and nothing for it to allocate. It is carried **as two
+/// indices and never as a pointer**, for the reason `cove_native::abi` gives
+/// about `base`: the stack's `Vec` reallocates under a `push_frame`, so a
+/// pointer at the destination taken before the callee's frame was opened would
+/// be dangling by the time the callee returned. A frame's linear address is
+/// relative to a segment origin that is fixed for the life of the task, and a
+/// slot within it is a number, so neither moves.
+///
+/// [ADR 0057]: ../../../../../docs/adr/0057-a-native-call-returns-into-the-destination-its-caller-named.md
+#[derive(Clone, Copy)]
+struct Destination {
+    /// The *caller's* frame, as `Memory` addresses one.
+    base: u64,
+    /// The slot of it the answer's words begin at.
+    slot: u32,
+}
+
 /// Re-publishes both pointers compiled code re-loads, after anything that could
 /// have moved either.
 ///
@@ -257,9 +278,14 @@ unsafe extern "C" fn safepoint(ctx: *mut NativeCtx, pc: u32, work: u64) -> bool 
 /// 2. `open_frame` opens the callee's frame and copies its arguments, which is
 ///    the *same function* the dispatch loop calls;
 /// 3. the callee runs on whichever tier it is on;
-/// 4. the answer is copied into the caller's `dst` at the callee's return width,
-///    which is the half of `encoded.rs`'s `RETURN` arm that belongs to the
-///    caller.
+/// 4. the answer is published into the caller's `dst` at the callee's return
+///    width, which is the half of `encoded.rs`'s `RETURN` arm that belongs to
+///    the caller. [`Destination`] is that `dst`, handed *down* rather than
+///    applied afterwards: a native callee is given the two indices and writes
+///    the words itself, before its frame is removed, and nothing is allocated to
+///    carry them. An encoded callee still hands its answer back as a `Vec`,
+///    because that is the convention of the tier that runs it, and the helper
+///    publishes that.
 ///
 /// # Safety
 ///
@@ -337,35 +363,47 @@ unsafe extern "C" fn call(
         });
     }
 
+    let into = Destination {
+        base: caller_base,
+        slot: dst,
+    };
     let entry = (*host).entries.entry(callee);
     let answered = match entry {
         Some(entry) => {
             (*host).tiers.native += 1;
-            enter(host, entry, callee, callee_base)
+            enter(host, entry, callee, callee_base, into)
         }
         None => {
             (*host).tiers.encoded += 1;
             let machine = &mut *machine;
             let floor = machine.frames.len() - 1;
-            match machine.code() {
+            let answered = match machine.code() {
                 // The dispatch loop pops the callee's frame and its words on the
                 // way out, and hands back the answer — which is `encoded.rs`'s
                 // `RETURN` arm reaching `None` for its caller, and is the same
                 // shape `Machine::run` is handed an answer in.
                 Ok(code) => machine.drive_from(&code, budget, floor),
                 Err(error) => Err(error),
-            }
+            };
+            // The one return path that still materialises a run of words, and it
+            // is the *VM's* convention rather than this boundary's: `RETURN` at
+            // the floor is how the encoded tier hands a value to a host, and
+            // teaching it to write a destination instead is a change to the
+            // calling convention of the tier that is not being changed. ADR 0057
+            // allows it in as many words — "a native/VM boundary may materialise
+            // slot frames" — and it is 0.8% of the calls this path measures.
+            answered.map(|words| {
+                for (at, word) in words.iter().enumerate() {
+                    machine
+                        .mem
+                        .set_slot(into.base, into.slot + at as u32, *word);
+                }
+            })
         }
     };
 
     let outcome = match answered {
-        Ok(words) => {
-            let machine = &mut *machine;
-            for (at, word) in words.iter().enumerate() {
-                machine.mem.set_slot(caller_base, dst + at as u32, *word);
-            }
-            Outcome::Returned.abi()
-        }
+        Ok(()) => Outcome::Returned.abi(),
         Err(error) => {
             (*host).left = Some(error);
             Outcome::Raised.abi()
@@ -377,22 +415,34 @@ unsafe extern "C" fn call(
     outcome
 }
 
-/// Runs the frame on top of the stack as compiled code, and answers its words.
+/// Runs the frame on top of the stack as compiled code, publishing its answer
+/// into `into`.
 ///
 /// The frame is already pushed and its arguments are already in it, which is what
 /// makes this the same entry for the outermost call and for a native-to-native
 /// one: ADR 0055's "No parameters are passed in registers."
 ///
+/// `into` is where the answer goes and it is the caller's to choose, which is
+/// ADR 0057: it is handed to the callee as two indices and **the callee writes
+/// it**, out of its own slot and into the destination the lowering settled,
+/// before its frame is removed. Nothing is allocated to carry the words, nothing
+/// copies them twice, and nothing is published unless the outcome is
+/// [`Outcome::Returned`] — the only path that writes the destination is the
+/// callee's return path, where no safepoint intervenes.
+///
 /// # Safety
 ///
 /// `host` is a live [`Bridge`], `entry` is a finalized entry point of a function
-/// `cove_native` compiled for `callee`, and `base` is that call's frame.
+/// `cove_native` compiled for `callee`, and `base` is that call's frame. `into`
+/// names a run of `Function::returns`' width in a frame that outlives the call —
+/// in practice the caller's own, which is below `base` and cannot overlap it.
 unsafe fn enter(
     host: *mut Bridge<'_, '_>,
     entry: Entry,
     callee: FunctionId,
     base: u64,
-) -> Result<Vec<u64>, RuntimeError> {
+    into: Destination,
+) -> Result<(), RuntimeError> {
     let machine = (*host).machine;
     let index = {
         let machine = &mut *machine;
@@ -400,13 +450,19 @@ unsafe fn enter(
         // moves and the index does not. See `cove_native::abi`.
         machine.mem.stack_index(base) as u64
     };
-    let mut ctx = {
+    let (mut ctx, into_index) = {
         let machine = &mut *machine;
-        NativeCtx::new(host.cast::<c_void>(), machine.mem.words_ptr()).over_heap((*host).table())
+        let ctx = NativeCtx::new(host.cast::<c_void>(), machine.mem.words_ptr())
+            .over_heap((*host).table());
+        // The destination as the callee is given it: a word index, taken *after*
+        // the frame was pushed and stable whatever a later `push_frame` does to
+        // the `Vec`. This is the line ADR 0057's "never pointers" is about.
+        (ctx, machine.mem.stack_index(into.base) as u64)
     };
     // Safety: the context is this call's, the frame at `index` is the callee's,
-    // and the code was emitted for exactly `Entry`'s shape.
-    let outcome = entry(&mut ctx, index);
+    // the destination is `into`'s width of words outside that frame, and the code
+    // was emitted for exactly `Entry`'s shape.
+    let outcome = entry(&mut ctx, index, into_index, into.slot);
 
     let machine = &mut *machine;
     // Pending work is charged on every exit — a return, a raise and a stop
@@ -414,14 +470,12 @@ unsafe fn enter(
     machine.bulk_work += ctx.pending_work;
     ctx.pending_work = 0;
     match outcome {
+        // The answer is already where it belongs: the callee wrote it before it
+        // returned, so all that is left is to take its frame away.
         Outcome::Returned => {
-            let width = machine.width(machine.program.function(callee).returns);
-            let words = machine
-                .mem
-                .read_words(base + u64::from(ctx.return_slot), width);
             machine.frames.pop();
             machine.mem.pop_frame(base);
-            Ok(words)
+            Ok(())
         }
         Outcome::Raised => Err(raised(machine, (*host).left.take(), callee, &ctx)),
         Outcome::Stopped => Err((*host).left.take().unwrap_or_else(|| {
@@ -513,6 +567,22 @@ pub struct Session<'v, 'a> {
     /// The holder frame's base. Its slots `[0, arguments.len())` hold
     /// `arguments`, which is what roots the objects they name.
     holder: u64,
+    /// Where an outermost call publishes its answer.
+    ///
+    /// A call inside a Cove program has a destination its lowering settled, and
+    /// [`Destination`] is how it reaches the callee. A call made *from Rust* has
+    /// none, so the session provides one: a run of the return width, pushed once
+    /// above the holder and below every call's frame, never popped, and read out
+    /// after the call returns.
+    ///
+    /// It is not a [`Frame`], so it is not walked by the collector — a reference
+    /// answer sitting here roots nothing. That is exactly the `Vec<u64>` this
+    /// replaced: a run of words a benchmark holds was never a root either (see
+    /// this type's own documentation), and the caller reads the words out before
+    /// anything else can run.
+    result: u64,
+    /// How wide an answer is, which is static: `Function::returns`.
+    width: u32,
     tiers: Tiers,
     /// The heap's chunk table, reserved once. See [`Bridge::chunks`].
     chunks: Vec<*mut u64>,
@@ -533,6 +603,7 @@ impl<'v, 'a> Session<'v, 'a> {
         let function = machine.program.function(id);
         let span = function.span;
         let size = function.frame_size();
+        let returns = function.returns;
         let chunks = Vec::with_capacity(machine.mem.chunk_capacity());
         machine.literals().map_err(|error| error.at(span))?;
         machine.give_cells_back(0);
@@ -552,12 +623,22 @@ impl<'v, 'a> Session<'v, 'a> {
             pc: 0,
             dst: 0,
         });
+        // See [`Session::result`]. One word at least, even for a `Unit` return,
+        // so that the address names a word of this segment rather than the first
+        // word of whatever frame is pushed next.
+        let width = machine.width(returns);
+        let result = machine
+            .mem
+            .push_frame(width.max(1))
+            .map_err(|Overflow| machine.too_deep(span))?;
         Ok(Session {
             machine,
             budget,
             id,
             arguments,
             holder,
+            result,
+            width,
             tiers: Tiers::default(),
             chunks,
         })
@@ -609,19 +690,30 @@ impl<'v, 'a> Session<'v, 'a> {
         );
         let answer = match entries.entry(self.id) {
             Some(entry) => {
-                let mut bridge = Bridge::new(self.machine, self.budget, entries, &mut self.chunks);
-                bridge.tiers.native += 1;
-                let held: *mut Bridge = &mut bridge;
-                // Safety: `held` is this stack frame's bridge and outlives the
-                // call below; `entry` was compiled for `self.id`, whose frame is
-                // the one just pushed.
-                let answer = unsafe { enter(held, entry, self.id, base) };
-                // Added rather than assigned: a bridge counts one call chain and
-                // a session makes many, and `= bridge.tiers` reported the last
-                // chain's count as the session's.
-                self.tiers.native += bridge.tiers.native;
-                self.tiers.encoded += bridge.tiers.encoded;
-                answer
+                let into = Destination {
+                    base: self.result,
+                    slot: 0,
+                };
+                let published = {
+                    let mut bridge =
+                        Bridge::new(self.machine, self.budget, entries, &mut self.chunks);
+                    bridge.tiers.native += 1;
+                    let held: *mut Bridge = &mut bridge;
+                    // Safety: `held` is this stack frame's bridge and outlives
+                    // the call below; `entry` was compiled for `self.id`, whose
+                    // frame is the one just pushed; and `into` is the session's
+                    // own result run, which is below that frame and outlives it.
+                    let published = unsafe { enter(held, entry, self.id, base, into) };
+                    // Added rather than assigned: a bridge counts one call chain
+                    // and a session makes many, and `= bridge.tiers` reported the
+                    // last chain's count as the session's.
+                    self.tiers.native += bridge.tiers.native;
+                    self.tiers.encoded += bridge.tiers.encoded;
+                    published
+                };
+                // The one `Vec` a session still builds, and it is the boundary's
+                // rather than the call's: a Rust caller asked for the words.
+                published.map(|()| self.machine.mem.read_words(self.result, self.width))
             }
             None => {
                 self.tiers.encoded += 1;

@@ -36,21 +36,35 @@
 //! # What the entry point is
 //!
 //! ```text
-//! extern "C" fn(ctx: *mut NativeCtx, base: u64) -> Outcome
+//! extern "C" fn(
+//!     ctx: *mut NativeCtx,
+//!     base: u64,
+//!     return_base: u64,
+//!     return_slot: u32,
+//! ) -> Outcome
 //! ```
 //!
-//! [`Entry`] is that signature. Two arguments and a small integer result,
-//! and every one of the four choices in it is load-bearing:
+//! [`Entry`] is that signature. Four arguments and a small integer result,
+//! and every one of the choices in it is load-bearing:
 //!
 //! - **`ctx` is a pointer to mutable per-call state**, not a set of separate
 //!   arguments, because everything the callee has to tell the caller that is
-//!   not "which of three ways did you leave" is a field of it: which slot
-//!   holds the answer, which runtime error to raise, how much unpaid work to
-//!   charge. Adding one of those later costs a field rather than a new
-//!   signature, and a signature is what both tiers are pinned to.
+//!   not "which of three ways did you leave" is a field of it: which runtime
+//!   error to raise, how much unpaid work to charge. Adding one of those later
+//!   costs a field rather than a new signature, and a signature is what both
+//!   tiers are pinned to.
 //! - **`base` is `u64` and is a word index**, for the reason above. It is not
 //!   the linear address `Memory::push_frame` answers, and it is not a
 //!   pointer.
+//! - **`return_base` and `return_slot` are the destination**, and they are
+//!   [ADR 0057]: the callee writes its answer into the run of words its
+//!   caller named rather than reporting a slot for the caller to copy out of.
+//!   They are indices for exactly the reason `base` is one — the stack `Vec`
+//!   reallocates under a `push_frame`, so a *pointer* at the destination,
+//!   taken before the callee's frame was opened, would be dangling by the
+//!   time the callee returned — and they are two numbers rather than one
+//!   because the caller's frame and the slot within it are what the lowering
+//!   settled separately.
 //! - **The result is a three-way [`Outcome`] rather than a `bool` or a
 //!   `Result`.** "Returned", "raised" and "must stop" are three different
 //!   things the caller does three different things with, and a `Result` is
@@ -125,6 +139,7 @@
 //! runtime asserts they are its own.
 //!
 //! [ADR 0034]: ../../../../docs/adr/0034-one-physical-word-stack.md
+//! [ADR 0057]: ../../../../docs/adr/0057-a-native-call-returns-into-the-destination-its-caller-named.md
 
 use std::ffi::c_void;
 
@@ -149,15 +164,36 @@ pub const HEAP_CHUNK_WORDS: u64 = 1 << HEAP_CHUNK_SHIFT;
 /// `Memory::push_frame` does. See the module documentation for why it is an
 /// index.
 ///
+/// `return_base` and `return_slot` are the same kind of number and name the
+/// destination: on [`Outcome::Returned`] the callee has written
+/// `Function::returns`' width of words at `return_base + return_slot`, and on
+/// any other outcome it has written nothing there. A zero-width return writes
+/// nothing at all, and `return_slot` may then be a slot the caller's frame does
+/// not even have — the lowering gives a width-0 destination the next free slot
+/// number — so the address is not to be formed unless there are words to store.
+///
 /// # Safety
 ///
 /// The caller promises that `ctx` is a valid, uniquely borrowed
 /// [`NativeCtx`]; that `ctx.words` points at the first word of the segment
 /// `base` indexes into; that the frame at `base` is at least
 /// `Function::frame_size()` words long; and that the parameters occupy
-/// `[0, width)` of it in declaration order. The callee promises to touch no
-/// word outside that frame.
-pub type Entry = unsafe extern "C" fn(ctx: *mut NativeCtx, base: u64) -> Outcome;
+/// `[0, width)` of it in declaration order.
+///
+/// It promises one thing more, and it is the widest part of this contract: that
+/// `return_base + return_slot` names `Function::returns`' width of words which
+/// are **live for the whole call and do not overlap the frame at `base`**. In
+/// practice they are the caller's own frame, which is below the callee's and
+/// therefore cannot overlap it; the callee interleaves loads from its frame with
+/// stores to the destination and does not prove the two runs are disjoint.
+///
+/// The callee promises to touch no word outside its frame and that destination.
+pub type Entry = unsafe extern "C" fn(
+    ctx: *mut NativeCtx,
+    base: u64,
+    return_base: u64,
+    return_slot: u32,
+) -> Outcome;
 
 /// How a compiled function left.
 ///
@@ -170,10 +206,10 @@ pub type Entry = unsafe extern "C" fn(ctx: *mut NativeCtx, base: u64) -> Outcome
 pub enum Outcome {
     /// The function reached an [`Inst::Return`](cove_ir::Inst::Return).
     ///
-    /// The answer is at slot [`NativeCtx::return_slot`] of the frame, and it
-    /// is `Function::returns`' width wide. The caller copies it out, exactly
-    /// as the encoded `RETURN` arm copies `width` words from `base + src` to
-    /// `caller_base + dst`.
+    /// The answer is **already in the destination**: `Function::returns`' width
+    /// of words at `return_base + return_slot`, written before the callee's
+    /// frame was removed. There is nothing for the caller to copy — which is
+    /// ADR 0057, and is why this variant carries no slot.
     Returned = 0,
     /// The function raised a runtime error.
     ///
@@ -342,7 +378,10 @@ pub type SafepointFn = unsafe extern "C" fn(ctx: *mut NativeCtx, pc: u32, work: 
 /// - `callee` is a `FunctionId` and `args` an `ArgsId`, both as the plain `u32`
 ///   the IR carries — this crate does not resolve either.
 /// - `dst` is the caller's slot the answer's words go into, at the callee's
-///   return width, which is the callee's declaration's to know.
+///   return width, which is the callee's declaration's to know. The helper turns
+///   it into the destination it hands the callee — `base + dst` is
+///   [`Entry`]'s `return_base + return_slot` — so `dst` is part of the ABI now
+///   rather than something the runtime applies afterwards.
 ///
 /// Six integer arguments, which is exactly what the System V ABI passes in
 /// registers, and the template arm's call sequence depends on that.
@@ -438,14 +477,6 @@ pub struct NativeCtx {
     /// backend-specific, and "aggregated static IR-work counts … are a
     /// different metric with a different name".
     pub pending_work: u64,
-    /// Which slot holds the answer, when the outcome is
-    /// [`Outcome::Returned`].
-    ///
-    /// A run-time field rather than a compile-time fact about the function,
-    /// because a function may have several `Inst::Return`s naming different
-    /// slots. The width is static — `Function::returns` — and is the
-    /// caller's to look up.
-    pub return_slot: u32,
     /// Which error, when the outcome is [`Outcome::Raised`]. See
     /// [`Raise::from_abi`].
     pub raise_code: u32,
@@ -474,7 +505,7 @@ pub struct NativeCtx {
 impl NativeCtx {
     /// A context over `words`, for `host`.
     ///
-    /// The three answer fields start at values no exit leaves behind —
+    /// The answer fields start at values no exit leaves behind —
     /// `raise_code` at zero, which [`Raise::from_abi`] rejects — so a test
     /// that reads one without the matching [`Outcome`] reads an obvious
     /// wrong answer rather than a plausible stale one.
@@ -489,7 +520,6 @@ impl NativeCtx {
             words,
             chunks: std::ptr::null(),
             pending_work: 0,
-            return_slot: u32::MAX,
             raise_code: 0,
             raise_detail: 0,
             raise_pc: u32::MAX,

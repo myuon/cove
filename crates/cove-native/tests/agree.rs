@@ -88,7 +88,10 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
     let template_calls = suite::calls();
 
     assert_eq!(cranelift.outcome, template.outcome, "outcome: {what}");
-    assert_eq!(cranelift.return_slot, template.return_slot, "slot: {what}");
+    assert_eq!(
+        cranelift.returned, template.returned,
+        "the destination, word for word: {what}"
+    );
     assert_eq!(cranelift.raise, template.raise, "raise: {what}");
     assert_eq!(
         cranelift.raise_detail, template.raise_detail,
@@ -134,7 +137,10 @@ fn agree_over(what: &str, program: &Program, words: &[u64], base: u64, build: im
     let template_polls = suite::polls();
 
     assert_eq!(cranelift.outcome, template.outcome, "outcome: {what}");
-    assert_eq!(cranelift.return_slot, template.return_slot, "slot: {what}");
+    assert_eq!(
+        cranelift.returned, template.returned,
+        "the destination, word for word: {what}"
+    );
     assert_eq!(cranelift.raise, template.raise, "raise: {what}");
     assert_eq!(cranelift.raise_pc, template.raise_pc, "raise pc: {what}");
     assert_eq!(cranelift.raise_a, template.raise_a, "raise a: {what}");
