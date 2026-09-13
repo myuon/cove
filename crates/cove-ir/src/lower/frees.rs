@@ -286,7 +286,14 @@ impl<'p> Flow<'p> {
         match self.function.code[pc] {
             Inst::Return { .. } | Inst::Trap { .. } => {}
             Inst::Jump { to } => f(to as usize),
-            Inst::BranchFalse { to, .. } => {
+            // A fused comparison is a branch and goes both ways, exactly as
+            // the `branch-false` it absorbed did. A pass that read it as a
+            // plain store would lose one of the two edges, and what it would
+            // lose is silent: a clear dropped because a path nothing walked
+            // said the word was already null.
+            Inst::BranchFalse { to, .. }
+            | Inst::CmpBranch { target: to, .. }
+            | Inst::CmpImmBranch { target: to, .. } => {
                 f(to as usize);
                 if pc < last {
                     f(pc + 1);
@@ -328,6 +335,8 @@ impl<'p> Flow<'p> {
             | Inst::Cmp { dst, .. }
             | Inst::ArithImm { dst, .. }
             | Inst::CmpImm { dst, .. }
+            | Inst::CmpBranch { dst, .. }
+            | Inst::CmpImmBranch { dst, .. }
             | Inst::Convert { dst, .. }
             | Inst::ByteAt { dst, .. }
             | Inst::AllocBytes { dst, .. }
@@ -444,8 +453,9 @@ impl<'p> Flow<'p> {
             | Inst::Not { a, .. }
             | Inst::ArithImm { a, .. }
             | Inst::CmpImm { a, .. }
+            | Inst::CmpImmBranch { a, .. }
             | Inst::Convert { a, .. } => f(a, 1),
-            Inst::Arith { a, b, .. } | Inst::Cmp { a, b, .. } => {
+            Inst::Arith { a, b, .. } | Inst::Cmp { a, b, .. } | Inst::CmpBranch { a, b, .. } => {
                 f(a, 1);
                 f(b, 1);
             }

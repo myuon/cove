@@ -267,6 +267,12 @@ impl Check<'_> {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
+                // A fused comparison writes the `Bool` its unfused pair
+                // wrote, so it poisons `dst` exactly as the comparison does.
+                Inst::CmpBranch { dst, .. } | Inst::CmpImmBranch { dst, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                }
                 Inst::Convert { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
@@ -622,16 +628,7 @@ impl Check<'_> {
             }
             Inst::Cmp { on, dst, a, b, .. } => {
                 self.expect(at, dst, &[Repr::Bool]);
-                let want: &[Repr] = match on {
-                    Compare::Int => &[Repr::Int, Repr::Duration],
-                    Compare::Float => &[Repr::Float],
-                    Compare::Bool => &[Repr::Bool],
-                    Compare::Str => &[Repr::Ref],
-                    // `is` compares words, and the only words whose identity
-                    // is a language-level question are references.
-                    Compare::Identity => &[Repr::Ref],
-                    Compare::Tag => &[Repr::Tag],
-                };
+                let want = Self::compared(on);
                 self.expect(at, a, want);
                 self.expect(at, b, want);
             }
@@ -651,6 +648,30 @@ impl Check<'_> {
             Inst::BranchFalse { cond, to } => {
                 self.expect(at, cond, &[Repr::Bool]);
                 self.target(at, to);
+            }
+            // Exactly `Inst::Cmp` and `Inst::CmpImm`'s claims, and exactly
+            // `Inst::BranchFalse`'s — which is what "the fused instruction is
+            // semantically the two it replaces" means to a verifier. `dst`
+            // does not have to be asked about as a condition: it was just
+            // required to be a `Bool` as the destination.
+            Inst::CmpBranch {
+                on,
+                dst,
+                a,
+                b,
+                target,
+                ..
+            } => {
+                self.expect(at, dst, &[Repr::Bool]);
+                let want = Self::compared(on);
+                self.expect(at, a, want);
+                self.expect(at, b, want);
+                self.target(at, target);
+            }
+            Inst::CmpImmBranch { dst, a, target, .. } => {
+                self.expect(at, dst, &[Repr::Bool]);
+                self.expect(at, a, &[Repr::Int, Repr::Duration]);
+                self.target(at, target);
             }
             Inst::Switch { on, table } => {
                 // The discriminant of an enum location is its first word and
@@ -1009,6 +1030,24 @@ impl Check<'_> {
             // integers. Only the boundary cares what the answer is called.
             Num::Int => &[Repr::Int, Repr::Duration],
             Num::Float => &[Repr::Float],
+        }
+    }
+
+    /// What a comparison's two operands may hold.
+    ///
+    /// One table for `Inst::Cmp` and `Inst::CmpBranch` both, because the
+    /// fused form compares what the comparison compares: two copies would be
+    /// a place for the rule to be relaxed on one of them alone.
+    fn compared(on: Compare) -> &'static [Repr] {
+        match on {
+            Compare::Int => &[Repr::Int, Repr::Duration],
+            Compare::Float => &[Repr::Float],
+            Compare::Bool => &[Repr::Bool],
+            Compare::Str => &[Repr::Ref],
+            // `is` compares words, and the only words whose identity is a
+            // language-level question are references.
+            Compare::Identity => &[Repr::Ref],
+            Compare::Tag => &[Repr::Tag],
         }
     }
 

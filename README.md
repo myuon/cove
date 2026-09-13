@@ -398,6 +398,22 @@ time is instructions and not string allocation, so the gate now names the
 sites the builder can serve and asks for the numbers, and the search moves to
 the instruction count itself.
 
+[ADR 0054](docs/adr/0054-a-comparison-that-only-feeds-a-branch-is-the-branch.md)
+fuses a comparison into the branch beside it. `branch-false` was **26.4% of
+every instruction** the formatter executed and control flow a third of the
+run, because a comparison answers a `Bool` into a slot and almost every
+comparison a program writes is a condition — read once, by the branch on the
+next line, and never again. Counting the pairs rather than assuming them:
+1,040 sites, 111 million executions, 18.8% of the run, with 27 million more
+adjacent but unfusable because the branch is itself a jump target and has to
+stay reachable. The fused form is *exactly the two instructions in order* and
+still writes the `Bool`, so it needs no liveness question and has no side
+condition; the target goes in the payload word `Inst::Cmp` was leaving empty,
+so nothing about ADR 0041's sixteen bytes moves. It cost forty-two opcodes,
+which ADR 0051 had already measured as a real risk, so the decision was
+written to be accepted only on wall time and not on the instruction count —
+593.1 M instructions to 486.2 M, and 3.94s to 3.75s.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles

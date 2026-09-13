@@ -259,6 +259,12 @@ impl Check<'_> {
     fn meaning(&mut self, at: Option<usize>, inst: &Inst) {
         match *inst {
             Inst::Jump { to } | Inst::BranchFalse { to, .. } => self.target(at, to),
+            // A fused comparison is a branch, so its target is checked
+            // exactly as a `branch-false`'s is. The `Repr`s of its operands
+            // are `slots` above, off the same table `Op::Cmp`'s come from.
+            Inst::CmpBranch { target, .. } | Inst::CmpImmBranch { target, .. } => {
+                self.target(at, target)
+            }
             Inst::Switch { table, .. } => {
                 // The table stays immutable program metadata with absolute
                 // targets, and this is where absolute breaks loudly if a

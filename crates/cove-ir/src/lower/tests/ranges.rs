@@ -72,16 +72,15 @@ fn contains_leaves_the_first_comparison_as_the_answer_when_it_fails() {
         "\
 fn @m.c(Range Int) -> Bool
   frame 6: s0!:int s1!:int s2!:bool s3!:int s4:bool s5:bool
-  local r -> s0..s2:Range [0, 8)
-  local v -> s3:Int [0, 8)
-     0  le.int s5:bool s0:int s3:int
-     1  branch-false s5:bool 6
-     2  branch-false s2:bool 5
-     3  le.int s5:bool s3:int s1:int
-     4  jump 6
-     5  lt.int s5:bool s3:int s1:int
-     6  copy s4:Bool s5:Bool
-     7  return s4:Bool
+  local r -> s0..s2:Range [0, 7)
+  local v -> s3:Int [0, 7)
+     0  le.int.branch s5:bool s0:int s3:int 5
+     1  branch-false s2:bool 4
+     2  le.int s5:bool s3:int s1:int
+     3  jump 5
+     4  lt.int s5:bool s3:int s1:int
+     5  copy s4:Bool s5:Bool
+     6  return s4:Bool
 "
     );
 }

@@ -29,11 +29,15 @@ pub enum TooWide {
     /// declaration, so a program that reached the encoder cannot hold one.
     /// This is the assertion that says so.
     Slot { slot: Slot },
-    /// A branch whose displacement is not an `i64`.
+    /// A branch whose displacement the field it goes in cannot hold.
     ///
-    /// Unreachable while [`Pc`] is a `u32`: every representable pair of
-    /// program counters has a representable difference. It is checked so that
-    /// a wider `Pc` is a refusal here rather than a wrong jump somewhere else.
+    /// Unreachable for [`Inst::Jump`] and [`Inst::BranchFalse`] while [`Pc`]
+    /// is a `u32`: every representable pair of program counters has a
+    /// representable `i64` difference. ADR 0054's fused forms carry the
+    /// displacement in a 32-bit half, so for those it is a real bound — one a
+    /// function of two billion instructions would have to reach. It is
+    /// checked in both cases so that a wider `Pc` is a refusal here rather
+    /// than a wrong jump somewhere else.
     Displacement { from: Pc, to: Pc },
 }
 
@@ -148,6 +152,39 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             0,
             0,
             displacement(pc, to)? as u64,
+        ),
+        // The comparison's own three slots and its opcode's own operator,
+        // with the target in the payload word `Op::Cmp` leaves empty. See
+        // `Inst::CmpBranch`.
+        Inst::CmpBranch {
+            on,
+            op,
+            dst,
+            a,
+            b,
+            target,
+        } => build(
+            Op::CmpBranch(on, op),
+            slot(dst)?,
+            slot(a)?,
+            slot(b)?,
+            displacement(pc, target)? as u64,
+        ),
+        // Two halves rather than one word: the immediate low, the
+        // displacement high, and both narrowed to thirty-two bits with the
+        // narrowing checked. See `Inst::CmpImmBranch`.
+        Inst::CmpImmBranch {
+            op,
+            dst,
+            a,
+            value,
+            target,
+        } => build(
+            Op::CmpImmBranch(op),
+            slot(dst)?,
+            slot(a)?,
+            0,
+            halves(value as u32, narrow(pc, target)? as u32),
         ),
         Inst::Switch { on, table } => build(Op::Switch, slot(on)?, 0, 0, halves(table.0, 0)),
         Inst::Return { src } => build(Op::Return, slot(src)?, 0, 0, 0),
@@ -357,6 +394,15 @@ fn halves(lo: u32, hi: u32) -> u64 {
     u64::from(lo) | (u64::from(hi) << 32)
 }
 
+/// The same displacement in the thirty-two bits a fused comparison's half
+/// gives it.
+///
+/// A function of more than two billion instructions is the only thing that
+/// reaches the refusal, and a frame limit is what stops one long before.
+fn narrow(from: Pc, to: Pc) -> Result<i32, TooWide> {
+    i32::try_from(displacement(from, to)?).map_err(|_| TooWide::Displacement { from, to })
+}
+
 /// `to - (pc + 1)`, which is what a relative branch carries.
 fn displacement(from: Pc, to: Pc) -> Result<i64, TooWide> {
     i64::from(to)
@@ -517,6 +563,79 @@ mod tests {
                     dst: 1,
                     a: 2,
                     value: 11,
+                },
+            ));
+        }
+        // ADR 0054's two fused families, iterated the way the two they mirror
+        // are. The pc is nonzero and the targets are on both sides of it, so a
+        // displacement that had lost its sign would not survive the round
+        // trip.
+        for on in [
+            Compare::Int,
+            Compare::Float,
+            Compare::Bool,
+            Compare::Str,
+            Compare::Identity,
+            Compare::Tag,
+        ] {
+            for op in [
+                CmpOp::Eq,
+                CmpOp::Ne,
+                CmpOp::Lt,
+                CmpOp::Le,
+                CmpOp::Gt,
+                CmpOp::Ge,
+            ] {
+                held.push((
+                    5,
+                    Inst::CmpBranch {
+                        on,
+                        op,
+                        dst: 1,
+                        a: 2,
+                        b: 3,
+                        target: 9,
+                    },
+                ));
+                held.push((
+                    9,
+                    Inst::CmpBranch {
+                        on,
+                        op,
+                        dst: 1,
+                        a: 2,
+                        b: 3,
+                        target: 5,
+                    },
+                ));
+            }
+        }
+        for op in [
+            CmpOp::Eq,
+            CmpOp::Ne,
+            CmpOp::Lt,
+            CmpOp::Le,
+            CmpOp::Gt,
+            CmpOp::Ge,
+        ] {
+            held.push((
+                5,
+                Inst::CmpImmBranch {
+                    op,
+                    dst: 1,
+                    a: 2,
+                    value: 11,
+                    target: 9,
+                },
+            ));
+            held.push((
+                9,
+                Inst::CmpImmBranch {
+                    op,
+                    dst: 1,
+                    a: 2,
+                    value: -11,
+                    target: 5,
                 },
             ));
         }
@@ -908,7 +1027,94 @@ mod tests {
                     len: Len::Count(u32::MAX),
                 },
             ),
+            // The fused immediate comparison's two narrow halves at their
+            // extremes: an `i32` immediate either way, and the widest
+            // displacement a 32-bit half can carry.
+            (
+                0,
+                Inst::CmpImmBranch {
+                    op: CmpOp::Lt,
+                    dst: top,
+                    a: top,
+                    value: i32::MIN,
+                    target: 1,
+                },
+            ),
+            (
+                0,
+                Inst::CmpImmBranch {
+                    op: CmpOp::Lt,
+                    dst: 0,
+                    a: 0,
+                    value: i32::MAX,
+                    target: i32::MAX as Pc,
+                },
+            ),
+            (
+                i32::MAX as Pc,
+                Inst::CmpImmBranch {
+                    op: CmpOp::Gt,
+                    dst: 0,
+                    a: 0,
+                    value: 0,
+                    target: 0,
+                },
+            ),
+            (
+                0,
+                Inst::CmpBranch {
+                    on: Compare::Int,
+                    op: CmpOp::Lt,
+                    dst: top,
+                    a: top,
+                    b: top,
+                    target: Pc::MAX,
+                },
+            ),
         ]
+    }
+
+    /// The narrow half is a real bound, and it is a *refusal* rather than a
+    /// wrapped displacement.
+    ///
+    /// Nothing reaches it: a function of two billion instructions is what it
+    /// would take, and the frame limit stops one long before. It is checked
+    /// because a fused branch that had silently wrapped would be a jump into
+    /// the middle of a function, which is the one failure in this file that
+    /// would not look like an encoding bug.
+    #[test]
+    fn a_fused_branch_past_the_thirty_second_bit_is_refused() {
+        let held = |target| Inst::CmpImmBranch {
+            op: CmpOp::Lt,
+            dst: 0,
+            a: 1,
+            value: 0,
+            target,
+        };
+        // The displacement is `to - (pc + 1)`, so the last target that fits is
+        // one past `i32::MAX`.
+        assert!(encode(&held(i32::MAX as Pc + 1), 0).is_ok());
+        assert_eq!(
+            encode(&held(i32::MAX as Pc + 2), 0),
+            Err(TooWide::Displacement {
+                from: 0,
+                to: i32::MAX as Pc + 2
+            })
+        );
+        // `Inst::CmpBranch` keeps the whole payload, so the same target is
+        // nothing to it.
+        assert!(encode(
+            &Inst::CmpBranch {
+                on: Compare::Int,
+                op: CmpOp::Lt,
+                dst: 0,
+                a: 1,
+                b: 2,
+                target: Pc::MAX,
+            },
+            0
+        )
+        .is_ok());
     }
 
     /// Every one of the hundred and two opcodes is produced by some sample.

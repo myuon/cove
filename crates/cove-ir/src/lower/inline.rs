@@ -278,6 +278,9 @@ fn inside_a_loop(f: &Function) -> Vec<bool> {
         let back = match inst {
             Inst::Jump { to } => Some(*to as usize),
             Inst::BranchFalse { to, .. } => Some(*to as usize),
+            Inst::CmpBranch { target, .. } | Inst::CmpImmBranch { target, .. } => {
+                Some(*target as usize)
+            }
             _ => None,
         };
         if let Some(to) = back {
@@ -403,6 +406,8 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::Cmp { dst, .. }
             | Inst::ArithImm { dst, .. }
             | Inst::CmpImm { dst, .. }
+            | Inst::CmpBranch { dst, .. }
+            | Inst::CmpImmBranch { dst, .. }
             | Inst::Alloc { dst, .. }
             | Inst::Box { dst, .. }
             | Inst::ByteAt { dst, .. }
@@ -873,6 +878,16 @@ fn relocated(
     match &mut held {
         Inst::Jump { to } => *to = place[*to as usize] as Pc,
         Inst::BranchFalse { to, .. } => *to = place[*to as usize] as Pc,
+        // A fused comparison's target is a program counter of the *leaf* and
+        // has to move like every other. The arms of this match are the
+        // instructions that name one, and it is the one place in this pass
+        // where a missing arm is silent rather than a compile error: the slot
+        // walk above is exhaustive, this is not. An expansion that left a
+        // fused branch pointing into the leaf's own numbering would branch
+        // into the middle of the caller.
+        Inst::CmpBranch { target, .. } | Inst::CmpImmBranch { target, .. } => {
+            *target = place[*target as usize] as Pc
+        }
         // An argument list is `Program::args` and not part of the
         // instruction, so shifting the slots the instruction names does not
         // reach it. A builtin is the one call a leaf may hold, and
@@ -937,6 +952,18 @@ fn renumber(
                     to: moved[*target as usize],
                 };
             }
+            // The caller's own fused branches, moved for the reason its jumps
+            // are: instructions were inserted in front of them. Written as an
+            // edit of the copy already at `to` rather than as a rebuild,
+            // because the two variants have five fields between them that are
+            // not the target and none of them changes.
+            Inst::CmpBranch { target, .. } | Inst::CmpImmBranch { target, .. } => {
+                if let Inst::CmpBranch { target: held, .. }
+                | Inst::CmpImmBranch { target: held, .. } = &mut code[to]
+                {
+                    *held = moved[*target as usize];
+                }
+            }
             Inst::Switch { on, table } => {
                 let held = program.table(*table);
                 tables.push(Table {
@@ -970,6 +997,8 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         }
         Inst::ArithImm { dst, a, .. } | Inst::CmpImm { dst, a, .. } => vec![dst, a],
         Inst::Arith { dst, a, b, .. } | Inst::Cmp { dst, a, b, .. } => vec![dst, a, b],
+        Inst::CmpImmBranch { dst, a, .. } => vec![dst, a],
+        Inst::CmpBranch { dst, a, b, .. } => vec![dst, a, b],
         Inst::BranchFalse { cond, .. } => vec![cond],
         Inst::Switch { on, .. } => vec![on],
         Inst::Return { src } => vec![src],

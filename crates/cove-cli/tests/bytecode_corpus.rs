@@ -140,17 +140,18 @@ fn every_program_the_repository_keeps_encodes_verifies_and_reads_back() {
         "the fixed-width encoding over {} corpus program(s):\n  \
            {} functions, {} instructions, {} bytes encoded\n  \
            widest frame {} words, against a limit of {MAX_FRAME_WORDS}\n  \
-           {} of the 100 opcodes are reached",
+           {} of the {} opcodes are reached",
         found.lowered,
         found.functions,
         found.instructions,
         found.instructions * cove_ir::EncodedInst::BYTES,
         found.widest_frame,
         found.reached.len(),
+        Op::all().len(),
     );
-    // And which ones it does not, by name. The count alone says a sixth of
-    // the instruction set is untested by every harness that walks this
-    // corpus — `differential.rs` and `vm_coverage.rs` both — and does not say
+    // And which ones it does not, by name. The count alone says that most of
+    // a third of the instruction set is untested by every harness that walks
+    // this corpus — `differential.rs` and `vm_coverage.rs` both — and does not say
     // *which* sixth, which is the only form in which that fact is actionable.
     // It is printed rather than asserted: an opcode no program reaches is a
     // statement about what the corpus contains, not a fault.

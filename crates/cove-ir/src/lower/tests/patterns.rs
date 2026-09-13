@@ -77,19 +77,17 @@ fn a_match_over_something_that_is_not_an_enum_is_a_chain() {
         "\
 fn @m.name(Int) -> String
   frame 3: s0!:int s1:ref s2:bool
-  local n -> s0:Int [0, 12)
-     0  eq.int.imm s2:bool s0:int 0
-     1  branch-false s2:bool 4
-     2  str s1:ref \"zero\"
-     3  jump 11
-     4  eq.int.imm s2:bool s0:int 1
-     5  branch-false s2:bool 8
-     6  str s1:ref \"one\"
-     7  jump 11
-     8  str s1:ref \"many\"
-     9  jump 11
-    10  trap \"no `match` arm covers this value\"
-    11  return s1:String
+  local n -> s0:Int [0, 10)
+     0  eq.int.imm.branch s2:bool s0:int 0 3
+     1  str s1:ref \"zero\"
+     2  jump 9
+     3  eq.int.imm.branch s2:bool s0:int 1 6
+     4  str s1:ref \"one\"
+     5  jump 9
+     6  str s1:ref \"many\"
+     7  jump 9
+     8  trap \"no `match` arm covers this value\"
+     9  return s1:String
 "
     );
 }
@@ -104,16 +102,15 @@ fn a_match_over_strings_compares_bytes() {
         "\
 fn @m.score(String) -> Int
   frame 4: s0!:ref s1:int s2:ref s3:bool
-  local s -> s0:String [0, 9)
+  local s -> s0:String [0, 8)
      0  str s2:ref \"a\"
-     1  eq.str s3:bool s0:ref s2:ref
-     2  branch-false s3:bool 5
-     3  int s1:int 1
-     4  jump 8
-     5  int s1:int 0
-     6  jump 8
-     7  trap \"no `match` arm covers this value\"
-     8  return s1:Int
+     1  eq.str.branch s3:bool s0:ref s2:ref 4
+     2  int s1:int 1
+     3  jump 7
+     4  int s1:int 0
+     5  jump 7
+     6  trap \"no `match` arm covers this value\"
+     7  return s1:Int
 "
     );
 }
