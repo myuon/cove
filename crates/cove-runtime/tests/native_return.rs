@@ -250,6 +250,16 @@ impl Tiered for Hand {
 
 /// Installs `names` as the hand-written tier over `program`.
 fn hand(program: &Arc<Lowered>, names: &[&str]) -> Hand {
+    hand_with(program, names, native_helpers())
+}
+
+/// The same, over a helper table a case chose.
+///
+/// The one case that chooses is the ablation case below: issue #365's
+/// decomposition measures variants of the call helper, and a variant that
+/// answered something else would make the measurement worthless in the one way a
+/// measurement cannot survive.
+fn hand_with(program: &Arc<Lowered>, names: &[&str], helpers: NativeHelpers) -> Hand {
     assert!(
         names.len() <= ENTRIES.len(),
         "there are {} entry points and this case asked for {}",
@@ -257,7 +267,7 @@ fn hand(program: &Arc<Lowered>, names: &[&str]) -> Hand {
         names.len()
     );
     PROGRAM.with(|held| *held.borrow_mut() = Some(Arc::clone(program)));
-    HELPERS.with(|held| held.set(Some(native_helpers())));
+    HELPERS.with(|held| held.set(Some(helpers)));
     SEGMENTS.with(|seen| seen.borrow_mut().clear());
     WITNESS.with(|seen| seen.borrow_mut().clear());
     let mut ids = Vec::new();
@@ -956,6 +966,146 @@ fn a_return_finds_a_destination_a_reallocation_moved() {
                 "frame {at} returned rather than left"
             );
         }
+    });
+}
+
+/// Every component the decomposition does twice answers what doing it once
+/// answers.
+///
+/// Issue #365's Part 1 attributes the per-call cost by ablation, and the ablation
+/// adds work rather than removing it: a variant of the call helper does one
+/// component of the path a second time and the difference is that component. The
+/// whole method rests on one claim — that doing a component twice computes the
+/// same program — and this is where that claim is checked rather than asserted.
+///
+/// Every bit at once, which is the strongest form of it: a second span, a second
+/// admission, a second safepoint, a second frame pushed and popped, a second zero
+/// fill, a second argument copy, a whole second `open_frame`, a second context, a
+/// second truncation, a second republication, the whole mediation again, a second
+/// owned run of words at the encoded floor, an extra C-ABI hop, and the census
+/// counting all of it.
+///
+/// The fixtures are the ones that would notice: a multi-word return, a native
+/// callee and an encoded one, and three hundred frames of recursion through a
+/// reallocation of the stack — because a second `push_frame` that did not undo
+/// itself, or a second copy into the wrong slot, would land in exactly those.
+#[test]
+fn every_component_done_twice_answers_the_same() {
+    use cove_runtime::native_ablate as it;
+    const ALL: u64 = it::AGAIN_SPAN
+        | it::AGAIN_ADMIT
+        | it::AGAIN_SAFEPOINT
+        | it::AGAIN_PUSH_POP
+        | it::AGAIN_ZERO
+        | it::AGAIN_ARG_COPY
+        | it::AGAIN_ARG_LOOKUP
+        | it::AGAIN_OPEN_FRAME
+        | it::AGAIN_FRAMES
+        | it::AGAIN_CTX
+        | it::AGAIN_POP
+        | it::AGAIN_REPUBLISH
+        | it::AGAIN_MEDIATION
+        | it::AGAIN_FLOOR_VEC
+        | it::AGAIN_HOP
+        | it::CENSUS;
+
+    with_vm(ORDINARY_HEAP_WORDS, |vm, lowered| {
+        cove_runtime::census_reset();
+        let mut made = 0u64;
+        // `passesPair` is two words over a native callee; `passesEcho` is a
+        // reference; `refThroughCollection` reaches a callee the subset refuses,
+        // so it is the encoded floor and its owned `Vec`.
+        for (entry, names, arguments) in [
+            (
+                "passesPair",
+                &["passesPair", "makesPair"][..],
+                vec![Value::int(41)],
+            ),
+            ("passesPair", &["passesPair"][..], vec![Value::int(41)]),
+            (
+                "passesEcho",
+                &["passesEcho", "echoes"][..],
+                vec![Value::string("abc"), Value::int(3)],
+            ),
+            (
+                "refThroughCollection",
+                &["refThroughCollection", "echoes"][..],
+                vec![
+                    Value::string("a string with more than a few bytes in it"),
+                    Value::int(4),
+                ],
+            ),
+        ] {
+            let mut session = vm
+                .native_session(MODULE, entry, arguments)
+                .expect("the session opens");
+            let arguments: Vec<u64> = session.arguments().to_vec();
+            let expected = session
+                .call(&NothingCompiled, &arguments)
+                .expect("the vm answers");
+            let production = hand(lowered, names);
+            let once = session
+                .call(&production, &arguments)
+                .expect("the production helper answers");
+            let twice = hand_with(
+                lowered,
+                names,
+                cove_runtime::native_helpers_ablated::<ALL>(),
+            );
+            let again = session
+                .call(&twice, &arguments)
+                .expect("the ablated helper answers");
+            assert_eq!(once, expected, "`{entry}` on the production helper");
+            assert_eq!(again, expected, "`{entry}` with every component done twice");
+            made += 2;
+        }
+
+        // Three hundred frames, and the hand tier first for the reason
+        // `a_return_finds_a_destination_a_reallocation_moved` gives: a `Vec` keeps
+        // its capacity, so the VM going first would leave nothing to reallocate.
+        const DEEP: i64 = 300;
+        let mut session = vm
+            .native_session(MODULE, "counts", vec![Value::int(DEEP)])
+            .expect("the session opens");
+        let twice = hand_with(
+            lowered,
+            &["counts"],
+            cove_runtime::native_helpers_ablated::<ALL>(),
+        );
+        let again = session
+            .call(&twice, &[DEEP as u64])
+            .expect("the ablated helper answers");
+        let expected = session
+            .call(&NothingCompiled, &[DEEP as u64])
+            .expect("the vm answers");
+        assert_eq!(expected, vec![DEEP as u64]);
+        assert_eq!(
+            again, expected,
+            "{DEEP} frames of recursion, every component of every call done twice"
+        );
+        assert!(
+            segments() > 1,
+            "the stack did not reallocate, so this case did not test the case indices exist for"
+        );
+        made += DEEP as u64;
+
+        // The census counted what it saw. The counters are one per process rather
+        // than one per case, so what is assertable here is that they moved and
+        // that nothing stopped — a stop would mean a duplicated safepoint had
+        // swallowed one, which is the one thing that would make the figures in the
+        // report unreadable.
+        let census = cove_runtime::census_taken();
+        assert!(
+            census.calls >= made,
+            "the census counted {} call(s) and at least {made} were made",
+            census.calls
+        );
+        assert_eq!(census.stops, 0, "nothing stopped, so nothing was swallowed");
+        assert!(
+            census.frame_words >= census.param_words,
+            "a frame is at least as wide as the parameters written into it"
+        );
+        cove_runtime::census_reset();
     });
 }
 

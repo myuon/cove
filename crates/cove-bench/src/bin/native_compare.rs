@@ -87,6 +87,7 @@ fn run() -> Result<(), String> {
     let iterations = flag_u32("--iterations").unwrap_or(DEFAULT_ITERATIONS);
     let dump = flag("--dump");
     let disasm = flag("--disasm");
+    let decompose = flag("--decompose");
 
     conditions(iterations);
 
@@ -180,7 +181,7 @@ fn run() -> Result<(), String> {
     println!("every arm's answer was checked against the VM's on every iteration");
 
     println!();
-    covefmt(iterations, dump)?;
+    covefmt(iterations, dump, decompose)?;
     Ok(())
 }
 
@@ -832,6 +833,338 @@ fn enter(entry: cove_native::Entry, words: &mut [u64], base: u64) -> (u64, i64) 
     (elapsed.as_nanos() as u64, answer)
 }
 
+/// Every function of the slice the template arm admits, compiled against
+/// `helpers`.
+///
+/// The one place that loop is written. It takes the helper table rather than
+/// asking [`cove_runtime::native_helpers`] for it, because the decomposition
+/// below compiles the same slice a dozen times over a dozen *ablated* tables and
+/// the code is otherwise byte for byte the same — the only difference between
+/// two arms of it is the address in the `movabs` that loads the call helper,
+/// which is what makes the difference between two arms the difference between
+/// the helpers and nothing else.
+#[cfg(feature = "template")]
+fn compile_slice(
+    ir: &Arc<cove_ir::Program>,
+    helpers: cove_native::NativeHelpers,
+) -> Result<(cove_native::template::Jit, Tier, Measured), String> {
+    let mut jit =
+        cove_native::template::Jit::new(helpers).map_err(|error| format!("template: {error}"))?;
+    let mut tier = Tier {
+        entries: vec![None; ir.functions.len()],
+        compiled: 0,
+        refused: Vec::new(),
+        bytes: 0,
+        bytes_of: std::collections::BTreeMap::new(),
+    };
+    let mut compile = Vec::new();
+    let mut done = Vec::new();
+    for id in candidates(ir) {
+        let started = Instant::now();
+        let compiled = jit.compile(ir, id);
+        let elapsed = started.elapsed().as_nanos() as u64;
+        match compiled {
+            Some(compiled) => {
+                compile.push(elapsed);
+                tier.compiled += 1;
+                tier.bytes += compiled.code_bytes;
+                tier.bytes_of.insert(id, compiled.code_bytes);
+                done.push((id, compiled));
+            }
+            None => tier.refused.push(ir.function(id).qualified()),
+        }
+    }
+    jit.finalize()
+        .map_err(|error| format!("template: {error}"))?;
+    for (id, compiled) in done {
+        tier.entries[id.index()] = Some(jit.entry(compiled));
+    }
+    Ok((jit, tier, Measured::of(compile)))
+}
+
+// --- the decomposition of the call path --------------------------------------
+//
+// Issue #365's Part 1. The question is what a native call *costs*, attributed to
+// the parts of the path rather than to a suspect named first, and the method is
+// ablation: `cove_runtime::native_ablate` names components, a variant of the call
+// helper does one of them **twice**, and the difference between a variant and the
+// baseline is one instance of that component.
+//
+// Three properties are what make the attribution worth believing, and each one is
+// a deliberate choice rather than a convenience:
+//
+// - **the baseline is the production helper.** `native_helpers_ablated::<0>()` is
+//   `native_helpers()` — one function body, one instantiation, every ablation
+//   branch folded away by a constant. The table prints both anyway, and the
+//   difference between those two rows is the *instrumentation's* own cost,
+//   measured rather than argued.
+// - **every variant computes the same program.** A variant adds work; it never
+//   removes it. So every answer is still checked against the VM's on every call,
+//   which is the one check a performance number cannot do without.
+// - **the arms are interleaved**, VM first and then every variant, one iteration
+//   at a time, exactly as the races above are.
+//
+// What it costs is stated where the numbers are: a doubled component is warm the
+// second time, so every figure is a lower bound.
+
+/// One arm of the decomposition: a name, and the helpers it binds.
+#[cfg(feature = "template")]
+struct Variant {
+    what: &'static str,
+    helpers: cove_native::NativeHelpers,
+}
+
+/// The arms, in the order one iteration runs them.
+///
+/// A mask is a *const* parameter, so every arm is written out: there is no way to
+/// turn a run-time `u64` into an instantiation, and writing them out is also what
+/// keeps the name beside the mask it names.
+#[cfg(feature = "template")]
+fn variants() -> Vec<Variant> {
+    use cove_runtime::native_ablate as it;
+    use cove_runtime::{native_helpers, native_helpers_ablated as ablated};
+    vec![
+        Variant {
+            what: "production",
+            helpers: native_helpers(),
+        },
+        Variant {
+            what: "baseline (mask 0)",
+            helpers: ablated::<0>(),
+        },
+        Variant {
+            what: "+ span",
+            helpers: ablated::<{ it::AGAIN_SPAN }>(),
+        },
+        Variant {
+            what: "+ admit_frame",
+            helpers: ablated::<{ it::AGAIN_ADMIT }>(),
+        },
+        Variant {
+            what: "+ safepoint",
+            helpers: ablated::<{ it::AGAIN_SAFEPOINT }>(),
+        },
+        Variant {
+            what: "+ push_frame/pop",
+            helpers: ablated::<{ it::AGAIN_PUSH_POP }>(),
+        },
+        Variant {
+            what: "+ zero fill",
+            helpers: ablated::<{ it::AGAIN_ZERO }>(),
+        },
+        Variant {
+            what: "+ argument lookups",
+            helpers: ablated::<{ it::AGAIN_ARG_LOOKUP }>(),
+        },
+        Variant {
+            what: "+ argument copy",
+            helpers: ablated::<{ it::AGAIN_ARG_COPY }>(),
+        },
+        Variant {
+            what: "+ open_frame, whole",
+            helpers: ablated::<{ it::AGAIN_OPEN_FRAME }>(),
+        },
+        Variant {
+            what: "+ frames push/pop",
+            helpers: ablated::<{ it::AGAIN_FRAMES }>(),
+        },
+        Variant {
+            what: "+ ctx and indices",
+            helpers: ablated::<{ it::AGAIN_CTX }>(),
+        },
+        Variant {
+            what: "+ pop_frame",
+            helpers: ablated::<{ it::AGAIN_POP }>(),
+        },
+        Variant {
+            what: "+ republish",
+            helpers: ablated::<{ it::AGAIN_REPUBLISH }>(),
+        },
+        Variant {
+            what: "+ floor Vec",
+            helpers: ablated::<{ it::AGAIN_FLOOR_VEC }>(),
+        },
+        Variant {
+            what: "+ one C-ABI hop",
+            helpers: ablated::<{ it::AGAIN_HOP }>(),
+        },
+        Variant {
+            what: "+ mediation, whole",
+            helpers: ablated::<{ it::AGAIN_MEDIATION }>(),
+        },
+    ]
+}
+
+/// The decomposition, on the template arm.
+///
+/// `calls` is the same slice of real `(l, r)` pairs the race above ran, and
+/// `session` is the same session, so the frames, the heap and the arguments are
+/// the ones already measured.
+#[cfg(feature = "template")]
+fn decomposed(
+    ir: &Arc<cove_ir::Program>,
+    session: &mut cove_runtime::NativeSession<'_, '_>,
+    iterations: u32,
+    calls: &[Vec<u64>],
+) -> Result<(), String> {
+    heading_line("the call path, decomposed: each arm does one component twice");
+
+    // The census first, and untimed: how wide the frames are, how many parameter
+    // words are copied, and how often `push_frame` reallocates rather than
+    // fitting. A timer cannot answer the last one, and "almost never" is a term
+    // of the decomposition rather than a detail.
+    let (_census_jit, census_tier, _) = compile_slice(
+        ir,
+        cove_runtime::native_helpers_ablated::<{ cove_runtime::native_ablate::CENSUS }>(),
+    )?;
+    cove_runtime::census_reset();
+    for args in calls {
+        session
+            .call(&census_tier, args)
+            .map_err(|error| format!("the census pass refused a call: {}", error.message))?;
+    }
+    let census = cove_runtime::census_taken();
+    let nested = census.calls as f64 / calls.len() as f64;
+    println!(
+        "  the census, over one untimed pass of {} call(s): {} nested call(s) through the helper, \
+         {nested:.2} per raced call",
+        calls.len(),
+        census.calls
+    );
+    println!(
+        "  frames: {:.1} word(s) per callee frame, of which {:.2} are parameter words over \
+         {:.2} parameter(s); deepest {} frame(s)",
+        census.frame_words as f64 / census.calls as f64,
+        census.param_words as f64 / census.calls as f64,
+        census.params as f64 / census.calls as f64,
+        census.deepest
+    );
+    println!(
+        "  `push_frame` reallocated on {} of {} call(s) ({:.4}%), and stopped {} of them",
+        census.reallocations,
+        census.calls,
+        100.0 * census.reallocations as f64 / census.calls as f64,
+        census.stops
+    );
+    if census.stops > 0 {
+        return Err(
+            "a call stopped during the census, so the ablation numbers below are not readable: \
+             a duplicated safepoint swallows the stop it saw"
+                .to_string(),
+        );
+    }
+    println!();
+
+    let variants = variants();
+    let tiers: Vec<(cove_native::template::Jit, Tier, Measured)> = variants
+        .iter()
+        .map(|variant| compile_slice(ir, variant.helpers))
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut samples: Vec<Vec<u64>> = vec![Vec::with_capacity(iterations as usize); variants.len()];
+    let mut vm_samples = Vec::with_capacity(iterations as usize);
+    let mut oracle: Vec<u64> = Vec::with_capacity(calls.len());
+    let mut mine: Vec<u64> = Vec::with_capacity(calls.len());
+
+    for iteration in 0..iterations {
+        oracle.clear();
+        let started = Instant::now();
+        for args in calls {
+            let answer = session
+                .call(&cove_runtime::NothingCompiled, args)
+                .map_err(|error| format!("the vm refused the raced slice: {}", error.message))?;
+            oracle.push(answer[0]);
+        }
+        vm_samples.push(started.elapsed().as_nanos() as u64);
+
+        for (at, (_, tier, _)) in tiers.iter().enumerate() {
+            mine.clear();
+            let started = Instant::now();
+            for args in calls {
+                let answer = session
+                    .call(tier, args)
+                    .map_err(|error| format!("{}: {}", variants[at].what, error.message))?;
+                mine.push(answer[0]);
+            }
+            samples[at].push(started.elapsed().as_nanos() as u64);
+            for (which, (answered, expected)) in mine.iter().zip(&oracle).enumerate() {
+                if answered != expected {
+                    return Err(format!(
+                        "`{}` answered {answered} for call {which} of iteration {iteration} and \
+                         the VM answered {expected}; a run whose answer differs is a failure, not \
+                         a data point",
+                        variants[at].what
+                    ));
+                }
+            }
+        }
+    }
+
+    println!(
+        "execution: {iterations} iterations of {} call(s) each, interleaved, the vm first",
+        calls.len()
+    );
+    println!(
+        "  {:<22} {:<11} {:<11} {:<11} {:<11} {:<11} {:<11}",
+        "arm", "cold", "min", "median", "mean", "max", "ns/call"
+    );
+    line("vm", &vm_samples, Scale::Millis);
+    let baseline = median(&samples[1]);
+    for (at, variant) in variants.iter().enumerate() {
+        let held = &samples[at];
+        let cold = held.first().copied().unwrap_or(0);
+        let warm = if held.len() > 1 {
+            &held[1..]
+        } else {
+            &held[..]
+        };
+        let mut sorted = warm.to_vec();
+        sorted.sort_unstable();
+        let middle = median(held);
+        let delta = middle as f64 - baseline as f64;
+        println!(
+            "  {:<22} {:<11} {:<11} {:<11} {:<11} {:<11} {:+.2}",
+            variant.what,
+            Scale::Millis.of(cold),
+            Scale::Millis.of(sorted.first().copied().unwrap_or(0)),
+            Scale::Millis.of(middle),
+            Scale::Millis.of(sorted.iter().sum::<u64>() / sorted.len().max(1) as u64),
+            Scale::Millis.of(sorted.last().copied().unwrap_or(0)),
+            delta / (calls.len() as f64 * nested)
+        );
+    }
+    println!(
+        "  the last column is the median difference from `baseline (mask 0)` divided by the \
+         {:.0} nested call(s) the pass makes, in nanoseconds: one instance of the component the \
+         arm does twice",
+        calls.len() as f64 * nested
+    );
+    println!(
+        "  every arm's answer was checked against the VM's on every one of {} call(s)",
+        u64::from(iterations) * calls.len() as u64 * (variants.len() + 1) as u64
+    );
+    println!(
+        "  a doubled component is warm the second time, so every figure is a lower bound; \
+         `production` against `baseline (mask 0)` is the instrumentation's own cost"
+    );
+    println!(
+        "  every ablation is out of line, so every figure also carries one direct call and \
+         return: `+ one C-ABI hop` bounds that at its own figure, and the components whose \
+         figures are near it are the ones that cost nothing"
+    );
+    Ok(())
+}
+
+/// The decomposition needs the template arm, which is the tier's code generator.
+#[cfg(not(feature = "template"))]
+fn decomposed(
+    _ir: &Arc<cove_ir::Program>,
+    _session: &mut cove_runtime::NativeSession<'_, '_>,
+    _iterations: u32,
+    _calls: &[Vec<u64>],
+) -> Result<(), String> {
+    Err("`--decompose` needs `--features template`, which is the tier's code generator".to_string())
+}
+
 // --- arguments ---------------------------------------------------------------
 
 fn flag(name: &str) -> bool {
@@ -917,7 +1250,7 @@ const BYTE_OF_PUNCT: &str = "byteOfPunct";
 /// of it, and every arm and the VM race exactly the same prefix.
 const PAIRS: usize = 20_000;
 
-fn covefmt(iterations: u32, dump: bool) -> Result<(), String> {
+fn covefmt(iterations: u32, dump: bool, decompose: bool) -> Result<(), String> {
     heading_line("the second raced slice: covefmt's `wantsASpaceBetween` and `byteOfPunct`");
 
     let (sources, checked) = examples_package()?;
@@ -1075,6 +1408,10 @@ fn covefmt(iterations: u32, dump: bool) -> Result<(), String> {
         iterations,
         &calls,
     )?;
+    if decompose {
+        println!();
+        decomposed(&ir, &mut session, iterations, &calls)?;
+    }
     Ok(())
 }
 
@@ -1519,40 +1856,7 @@ impl Compiled {
                 (jit, tier, Measured::of(compile))
             },
             #[cfg(feature = "template")]
-            template: {
-                let mut jit = cove_native::template::Jit::new(cove_runtime::native_helpers())
-                    .map_err(|error| format!("template: {error}"))?;
-                let mut tier = Tier {
-                    entries: vec![None; ir.functions.len()],
-                    compiled: 0,
-                    refused: Vec::new(),
-                    bytes: 0,
-                    bytes_of: std::collections::BTreeMap::new(),
-                };
-                let mut compile = Vec::new();
-                let mut done = Vec::new();
-                for id in candidates(ir) {
-                    let started = Instant::now();
-                    let compiled = jit.compile(ir, id);
-                    let elapsed = started.elapsed().as_nanos() as u64;
-                    match compiled {
-                        Some(compiled) => {
-                            compile.push(elapsed);
-                            tier.compiled += 1;
-                            tier.bytes += compiled.code_bytes;
-                            tier.bytes_of.insert(id, compiled.code_bytes);
-                            done.push((id, compiled));
-                        }
-                        None => tier.refused.push(ir.function(id).qualified()),
-                    }
-                }
-                jit.finalize()
-                    .map_err(|error| format!("template: {error}"))?;
-                for (id, compiled) in done {
-                    tier.entries[id.index()] = Some(jit.entry(compiled));
-                }
-                (jit, tier, Measured::of(compile))
-            },
+            template: compile_slice(ir, cove_runtime::native_helpers())?,
         };
         Ok(held)
     }

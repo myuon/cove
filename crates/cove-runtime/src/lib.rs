@@ -73,7 +73,9 @@ pub use vm::debug::{Call, Debugger, Field, Line, Local, Object, Resume, Stop, Wo
 // doing exactly that.
 pub use cove_native::Entry as NativeEntry;
 pub use vm::exec::native::{
-    helpers as native_helpers, NothingCompiled, Session as NativeSession, Tiered, Tiers,
+    ablate as native_ablate, census_reset, census_taken, helpers as native_helpers,
+    helpers_ablated as native_helpers_ablated, Census, NothingCompiled, Session as NativeSession,
+    Tiered, Tiers,
 };
 pub use vm::exec::SAFEPOINT_STRIDE;
 pub use vm::profile::{Cost, Profiler};
