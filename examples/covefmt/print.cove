@@ -1,3 +1,5 @@
+use std.stringbuilder.StringBuilder
+
 /// Turning a tree back into text.
 ///
 /// This slice makes no layout decision: it walks the tree and writes what each
@@ -670,10 +672,13 @@ fn spacing(
   if breaks > most {
     breaks = most
   }
-  var out = Vector.of<String>()
+  // Newlines, then either the indent the tree decided or the one the source
+  // already had — a handful of bytes, so the capacity is the answer's own
+  // size and this never grows.
+  var out = StringBuilder.withCapacity(breaks + 2 * depth.max(0))
   var written = 0
   while written < breaks {
-    out.push("\n")
+    out.append("\n")
     written = written + 1
   }
   // The line this run leaves behind begins at the depth of whatever comes
@@ -694,16 +699,15 @@ fn spacing(
   if breaks > 0 && depth >= 0 {
     var step = 0
     while step < depth {
-      out.push("  ")
+      out.append("  ")
       step = step + 1
     }
   } else {
-    match source.sliceBytes(lastBreak + 1, token.to) {
-      Ok(indent) => out.push(indent)
-      Err(_) => { }
-    }
+    // The indentation the line already had, copied out of the source rather
+    // than cut out of it and copied twice.
+    out.appendSlice(source, lastBreak + 1, token.to)
   }
-  "".join(out.freeze())
+  out.finish()
 }
 
 /// How many newlines a run of space may keep: one to end the line, and one
@@ -1082,25 +1086,48 @@ fn isBroken(source: String, held: Array<Token>, tree: Tree) -> Bool {
 /// A run of space becomes exactly one space and a run that stood against a
 /// bracket becomes none, which is what a flattened argument list looks like:
 /// `f(\n  a,\n  b,\n)` is `f(a, b)` and not `f( a, b, )`.
+/// How many bytes of source the tokens `tree` covers span.
+///
+/// A capacity is a hint, so this is the cheap over-estimate rather than the
+/// exact answer: it counts the trivia a flattening drops, and it is two
+/// lookups instead of a walk.
+fn byteSpan(held: Array<Token>, tree: Tree) -> Int {
+  match held.get(tree.from) {
+    Some(first) => match held.get(tree.to - 1) {
+      Some(last) => last.to - first.from
+      None => 0
+    }
+    None => 0
+  }
+}
+
 fn flattened(source: String, held: Array<Token>, tree: Tree) -> String {
-  var out = Vector.of<String>()
+  // The byte span the tokens cover is the answer's size to within the spaces
+  // this drops, and it is two lookups. Sizing it with `flatWidth` instead
+  // measured *slower* than the vector it replaced: that walks every token of
+  // the tree, which is a second pass over the whole thing to choose a number
+  // that only has to be close.
+  var out = StringBuilder.withCapacity(byteSpan(held, tree))
   var at = tree.from
   while at < tree.to {
     match held.get(at) {
       Some(token) => {
         if token.kind == Kind.Space {
           if wantsASpace(source, held, at) {
-            out.push(" ")
+            out.append(" ")
           }
         } else if !isATrailingComma(source, held, at, tree.to) {
-          out.push(text(source, token))
+          // The token's own bytes, copied straight out of the source. A
+          // `text()` here would cut a `String` out first and drop it as soon
+          // as it had been copied a second time.
+          out.appendSlice(source, token.from, token.to)
         }
       }
       None => { }
     }
     at = at + 1
   }
-  "".join(out.freeze())
+  out.finish()
 }
 
 /// Whether the token at `at` is the comma a broken group ends its last
