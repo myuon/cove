@@ -72,38 +72,73 @@ looks like.
 ## The repository is the oracle
 
 Every `.cove` file here passes `cove fmt --check`, so every one of them is
-already what a formatter should produce — and a correct formatter reproduces
-all 247 of them byte for byte. `print(parse(source)) == source` is that check,
-and it is available *now*, over half a megabyte of real source, before a single
-layout decision has been made.
+already what a formatter should produce, and a correct formatter reproduces
+all 246 byte for byte. That is `print(parse(source)) == source`, over half a
+megabyte of real source, and it is the **weakest** of the five checks —
+the one to distrust.
 
-**`benches/covefmtBench` asserts it**, which it did not at first, and the gap
-was the point: `cove test` sees the samples in `parsetests.cove` — a few
+A formatter's own output is a fixed point of anything that leaves it alone. A
+rule that decides nothing and a rule that decides correctly both reproduce an
+already-correct file, so reproducing the corpus says covefmt *kept* a layout
+and cannot say it would have *reached* one. Measured against source that still
+needed formatting, a corpus scoring 246/246 on this check scored **42/246**.
+
+So the corpus is damaged four ways that cannot change what a program means,
+and the original is the answer. No second implementation runs:
+
+| | what is done to the source | what it asks |
+| --- | --- | --- |
+| `deindented` | every line's leading whitespace stripped | does it re-indent? |
+| `joinedUp` | newlines inside `(` and `[` removed | does it re-break? |
+| `closedUp` | a body of exactly one statement joined onto its line | does it re-open? |
+| `spacedOut` | every run of space inside a line doubled | does it re-space? |
+
+Each is chosen so that the damage cannot be right: `deindented` leaves a line
+that begins inside a string literal alone, because `cove fmt` does not lay
+those out either; `joinedUp` takes `(` and `[` and not `{`, because a brace
+would merge two statements; `spacedOut` doubles rather than squeezes, because
+doubling can never merge two tokens.
+
+All five are at **246 of 246**, and each has its own ratchet in `bench.cove`
+that may rise and never fall.
+
+**`benches/covefmtBench` asserts them**, which it did not at first, and the
+gap was the point: `cove test` sees the samples in `parsetests.cove` — a few
 hundred bytes — and the corpus is half a megabyte of source nobody wrote to be
 parsed. Every mistake this parser has made was found on the corpus and would
-have passed on the samples.
-
-It is a stronger statement than the tiling. The tiling says the tree *covers*
-the tokens; this says a walk of it *reaches* them, in order, whole.
+have passed on the samples. The round-trip number was *printed* rather than
+checked for a while, and in one sitting it fell from the whole corpus to 244
+and back three times without anything failing.
 
 ## Over this repository
 
-243 files, 497,340 bytes, 95,399 tokens, 100,949 nodes. **Every file parses,
-every tree covers its tokens, and every file round-trips.** Exactly one `Error`
-node remains in the whole corpus — `tests/e2e/fail_reserved_annotation`, a file
-written not to parse.
+246 files, 683,514 bytes, 126,394 tokens. **Every file parses, every tree
+covers its tokens, and every file round-trips.**
 
 | | | of the pipeline |
 | --- | ---: | ---: |
-| lex | 239 ms | 49% |
-| parse | 142 ms | 29% |
-| print | 104 ms | 21% |
-| **together** | **485 ms** | |
-| scaled to all 695 KB of Cove here | ~680 ms | |
-| `cove fmt --check` on that 695 KB, in Rust: lex, parse, format *and* compare | **40–70 ms** | |
+| lex | 99 ms | 12% |
+| parse | 184 ms | 21% |
+| print | 576 ms | 67% |
+| **together** | **859 ms** | |
+| `cove fmt --check` over the same 246 files, in Rust: lex, parse, format *and* compare | **60 ms** | |
 
-So the whole pipeline is **10–17×** the Rust job, and it makes no layout
-decision yet. The target is 5×.
+So the whole pipeline is **14×** the Rust job, layout decisions included. Both
+walks skip `target` and any directory whose name begins with a dot, so the two
+numbers are over the same bytes — that was checked rather than assumed.
+
+Three of the 246 are files the Rust formatter *refuses*: `fail_code_point`,
+`fail_export_test` and `fail_reserved_annotation` under `tests/e2e`, written
+not to parse. `cove fmt` skips a file it cannot parse and leaves it alone, so
+for those three the corpus is not the formatter's output and reproducing them
+says only that the tiling holds. It is three files out of 246 and it is
+written down because the opposite mistake — reading "it skipped that" as "it
+agreed with that" — is the one this corpus makes easy.
+
+The phase shares are worth reading against the old ones. Lexing was 49% and is
+12%: `Scan.at` reads bytes rather than code points, and `lower::inline`
+expands it where it is called. Printing was 21% and is 67%, which is what
+having layout rules costs — and it is where the remaining 14× is.
 
 ### These numbers replace worse ones, and the correction is the point
 
@@ -229,13 +264,27 @@ list of lines rather than one literal for that reason.
 
 ## What is not here yet
 
-**Any layout decision.** The printer writes what each token said, which is the
-half of a formatter that has to be right first and the half that can be checked
-today. Choosing where a line breaks and how far it is indented needs the
-expression and statement grammar inside a body, and that is the next slice.
+**An expression grammar.** The tree stops at `Stmt`, `Group` and `Member`: a
+statement's own tokens are leaves. Every layout rule therefore asks its
+question of a run of tokens and of the boundaries the item level gave it,
+rather than of a parsed expression — `loosestIn` finds the operator a binary
+breaks at by scanning for it, `breaksAtItsDots` decides a chain from where the
+dots fall. `cove_syntax::format` dispatches on `ExprKind` and this does not.
+
+That is the open risk in replacing it, and it is worth naming plainly: a
+narrower instrument that reaches the same answers on 246 files might not reach
+them on the 247th. What is *not* missing is the layout itself — where a line
+breaks, how far it is indented, how much space goes between two tokens, when a
+body of one closes up, when a chain breaks at its dots, when a call hugs its
+last argument. Those are all here, and the section below is how they are
+checked.
+
+This section previously said the opposite — that no layout decision was made
+at all — for long enough that a reader of it got the answer backwards. The
+prose is the part that rots; the numbers below are run by `cove test`.
 
 ## Tests
 
-`cove test` runs twenty-three of them and they need no capability at all: the
+`cove test` runs fifty-four of them and they need no capability at all: the
 lexer takes a `String` and answers an `Array<Token>`, the parser answers a
 `Tree`, and the printer answers a `String`.
