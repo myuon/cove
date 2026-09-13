@@ -61,6 +61,31 @@ sets the variable and so does `pages.yml`. This has already been got wrong
 once, on a link to a private item from another module, and the failure mode is
 the worst kind: a gate that passes and a pull request that is red.
 
+### `cove-native` is behind a feature, so the five commands do not reach it
+
+`crates/cove-native` — the native execution tier of ADR 0055 — has its whole
+Cranelift dependency edge behind a `native` feature that is **off by
+default**, because the ADR's adoption gate asks that "a build without the
+native feature has no executable-memory dependency" and that is a fact about
+the dependency graph rather than about which functions compile. So
+`--workspace` builds it as a crate of ABI declarations, `cargo t` runs two of
+its eighteen tests, and the lowering itself is compiled by none of the five
+commands.
+
+Three more, then, after a change under `crates/cove-native/`:
+
+```console
+$ cargo clippy -p cove-native --all-targets --features native --profile checked -- -D warnings
+$ RUSTDOCFLAGS="-D warnings" cargo doc -p cove-native --no-deps --features native --profile checked
+$ cargo test -p cove-native --features native --profile checked
+```
+
+CI runs exactly those three, in one step, for the same reason it runs the
+other five: a run there and a run here are the same run. Cranelift is about
+twenty seconds of compilation the first time and nothing after, so this is
+cheap to run and cheap to forget — and forgetting it is a green gate over an
+untested code generator.
+
 ### The five commands are not the whole job
 
 CI's `test, lint, and dogfood` job runs the five above and then **runs the

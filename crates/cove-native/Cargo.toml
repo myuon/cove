@@ -1,0 +1,46 @@
+[package]
+name = "cove-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The whole Cranelift dependency edge is optional and off by default.
+#
+# ADR 0055's adoption gate asks that "a build without the native feature has
+# no executable-memory dependency". That is a fact about the *dependency
+# graph*, not about which functions are compiled, so it has to be bought with
+# `optional = true` on the dependencies themselves — a `cfg(feature = ...)`
+# inside a `.rs` file would still have built `cranelift-jit`, and
+# `cranelift-jit` is the crate that maps an executable page.
+#
+# Default off, so the ordinary `cargo t` and the ordinary `cargo build` of
+# this workspace compile none of it. What that costs is that this crate's own
+# tests are behind the feature too, and the price is paid deliberately: the
+# ADR's requirement is about the *default* build, and a feature that is on by
+# default is not one anybody would remember to turn off. `.github/workflows/
+# ci.yml` runs the suite a second time with `--features cove-native/native`,
+# which is where the tests below are executed.
+[features]
+default = []
+native = [
+  "dep:cranelift-codegen",
+  "dep:cranelift-frontend",
+  "dep:cranelift-jit",
+  "dep:cranelift-module",
+]
+
+[dependencies]
+cove-ir = { workspace = true }
+
+# Pinned to one minor line rather than left open. Cranelift's IR builder and
+# its `Module` trait both change across minor releases, and this crate is a
+# lowering written against them.
+cranelift-codegen = { version = "0.135", optional = true }
+cranelift-frontend = { version = "0.135", optional = true }
+cranelift-jit = { version = "0.135", optional = true }
+cranelift-module = { version = "0.135", optional = true }
+
+[dev-dependencies]
+# `cove_ir::Function` carries a `Span` per instruction, so a hand-built
+# function needs one. Only the tests build functions by hand.
+cove-diag = { workspace = true }
