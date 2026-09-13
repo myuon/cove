@@ -81,6 +81,7 @@ use crate::value::Value;
 /// crate. The loop over the same machine is exactly as privileged as the
 /// machine, and nothing else is.
 pub(crate) mod encoded;
+pub(crate) mod native;
 
 /// How many instructions run between two budget checks.
 ///
@@ -150,6 +151,12 @@ struct ByteBuffer {
 /// caller of it. That costs a write of `pc` before anything that can collect
 /// or fail, and it buys a collector and an error reporter that need no
 /// special case for "and also the one in the local variables".
+///
+/// `Copy`, so that a reader that needs the caller's four numbers while the
+/// machine is borrowed mutably can take them rather than hold the borrow. The
+/// native call helper is that reader: it has to open a frame with the caller's
+/// base, and `open_frame` takes `&mut Machine`.
+#[derive(Clone, Copy)]
 struct Frame {
     function: FunctionId,
     /// The linear address of slot 0.
@@ -1156,6 +1163,34 @@ impl<'a> Machine<'a> {
     /// has a second body to be about — but what it established is that this
     /// closure's contents are a cost every instruction pays, and the
     /// attribute is what keeps that from being re-decided by an inliner.
+    /// Runs the frame on top of the stack until the stack is back to `floor`.
+    ///
+    /// [`Machine::drive`] without the things that belong to the *end of a run*:
+    /// no cells are given back, no scope is stopped, and no pending fuel is
+    /// spent, because this is a call inside a run and the run is still going.
+    /// What it shares is the thread scope, which has to be opened around any
+    /// dispatch because a `spawn` starts its children in one.
+    ///
+    /// The one caller is [`native::call`]: a native function calling an
+    /// uncompiled one hands the callee to the dispatch loop, and the loop needs a
+    /// floor to stop at. A nested scope with nothing spawned in it is a handful
+    /// of atomic operations, which is a cost the native arm pays and the encoded
+    /// arm does not — see the comparison harness's own report, which says so.
+    fn drive_from(
+        &mut self,
+        code: &cove_ir::bytecode::Encoded,
+        budget: &Meter,
+        floor: usize,
+    ) -> Result<Vec<u64>, RuntimeError> {
+        std::thread::scope(|threads| {
+            let mut running: Vec<Option<ScopedJoinHandle<'_, Outcome>>> = Vec::new();
+            let answer = encoded::dispatch(self, code, budget, threads, &mut running, floor);
+            let answer = answer.map_err(|error| error.with_chain(self.call_chain()));
+            self.stop_all(&mut running);
+            answer
+        })
+    }
+
     #[inline(never)]
     fn drive(
         &mut self,

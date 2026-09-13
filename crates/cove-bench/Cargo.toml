@@ -8,8 +8,29 @@ license.workspace = true
 name = "cove-bench"
 path = "src/main.rs"
 
+# The native-tier comparison, which is a bin of its own rather than a
+# subcommand of the one above: it is an experiment with its own features, its
+# own output and no baseline, and `cove-bench`'s gate has neither.
+#
+# It lives in this crate because the comparison needs all three arms in one
+# process — the VM arm needs `cove-runtime`, which `cove-native` must not
+# depend on, and this crate already depends on both.
+[[bin]]
+name = "cove-native-compare"
+path = "src/bin/native_compare.rs"
+
+# One feature per arm, mirroring `cove-native`'s own, and both off by default
+# so that the ordinary `cargo build` of this workspace has no
+# executable-memory dependency.
+[features]
+default = []
+cranelift = ["dep:cove-native", "cove-native/cranelift"]
+template = ["dep:cove-native", "cove-native/template"]
+
 [dependencies]
 cove-diag.workspace = true
 cove-sema.workspace = true
+cove-syntax.workspace = true
 cove-ir.workspace = true
 cove-runtime.workspace = true
+cove-native = { workspace = true, optional = true }

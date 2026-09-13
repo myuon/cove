@@ -63,6 +63,18 @@ pub use value::{Value, ValueView};
 // and the owned snapshots a stop hands out — no word, no frame, no piece of
 // the representation `vm` exists to keep in.
 pub use vm::debug::{Call, Debugger, Field, Line, Local, Object, Resume, Stop, Word};
+// The one ABI type the native boundary's public surface names.
+//
+// `Tiered::entry` answers one, so a crate that implements `Tiered` has to be able
+// to name it — and an arm's features are `cove-native`'s, not that crate's. So it
+// is re-exported here rather than left to every caller to depend on `cove-native`
+// for: the whole point of `abi` being compiled without a code generator is that
+// the boundary can be written against it, and this is a caller of the boundary
+// doing exactly that.
+pub use cove_native::Entry as NativeEntry;
+pub use vm::exec::native::{
+    helpers as native_helpers, NothingCompiled, Session as NativeSession, Tiered, Tiers,
+};
 pub use vm::exec::SAFEPOINT_STRIDE;
 pub use vm::profile::{Cost, Profiler};
 pub use vm::Vm;
