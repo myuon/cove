@@ -58,9 +58,10 @@
 //! [ADR 0055]: ../../../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use cove_ir::{ArgsId, FunctionId, Slot, StrId};
-use cove_native::{Entry, NativeCtx, NativeHelpers, Outcome, Raise};
+use cove_native::{Entry, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
 
 use super::{divided_by_zero, null_object, overflowed, Frame, Machine, Overflow};
 use crate::budget::Meter;
@@ -299,6 +300,48 @@ unsafe extern "C" fn call(
     args: u32,
     dst: u32,
 ) -> u32 {
+    call_body::<0>(ctx, base, pc, callee, args, dst)
+}
+
+/// The call helper's body, over a compile-time mask of *extra* work.
+///
+/// `MASK == 0` is the helper above and nothing else: every `MASK & …` below is
+/// a constant, so a mask of zero folds each one away and the production path is
+/// this function with no ablation in it at all. That is deliberate and it is the
+/// discipline [issue #365](https://github.com/myuon/cove/issues/365) asks for —
+/// the baseline row of the decomposition is *the same function* the runtime
+/// uses, not a copy of it that might have drifted.
+///
+/// # Why every variant adds work rather than taking it away
+///
+/// A decomposition wants the cost of one component. Two ways to get it: leave
+/// the component out and difference, or do it **twice** and difference. Every
+/// variant here is the second kind, and the reason is correctness: a call whose
+/// frame was not zeroed, whose arguments were not copied or whose depth was not
+/// admitted computes a different program, and a performance number from a run
+/// that computed the wrong thing is worse than no number. Doing a component
+/// twice is idempotent for every one of them — a second `span` lookup answers
+/// the same span, a second `admit_frame` the same admission, a second argument
+/// copy the same words, a second `pop_frame` the same truncation — so every
+/// variant answers exactly what the production helper answers, and the harness
+/// checks that against the VM on every call.
+///
+/// What it costs is that each figure is a **lower bound**: the second instance
+/// of a component runs with the first one's cache lines and branch history
+/// already warm. Where the number matters that is said again beside it.
+///
+/// # Safety
+///
+/// As [`call`].
+#[inline(always)]
+unsafe fn call_body<const MASK: u64>(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    callee: u32,
+    args: u32,
+    dst: u32,
+) -> u32 {
     let host = (*ctx).host.cast::<Bridge>();
     let machine = (*host).machine;
     let budget = (*host).budget;
@@ -309,6 +352,22 @@ unsafe extern "C" fn call(
     // dropped if the safepoint stops the run.
     let work = (*ctx).pending_work;
     (*ctx).pending_work = 0;
+
+    if MASK & ablate::AGAIN_HOP != 0 {
+        // One more six-argument C-ABI indirect call and its return, into a
+        // helper that does nothing: the *shape* of the tier hop with none of the
+        // runtime in it. See [`nothing`].
+        let hop = std::hint::black_box(nothing as unsafe extern "C" fn(_, _, _, _, _, _) -> u32);
+        std::hint::black_box(hop(ctx, base, pc, callee.0, args, dst));
+    }
+    if MASK & ablate::AGAIN_MEDIATION != 0 {
+        mediation_again(ctx, host, base, pc, callee, args, dst);
+    }
+    let capacity_before = if MASK & ablate::CENSUS != 0 {
+        (*machine).mem.stack_capacity()
+    } else {
+        0
+    };
 
     // Step 1 and step 2, in one borrow that ends before anything can run Cove
     // code again. See the module's aliasing note.
@@ -327,6 +386,15 @@ unsafe extern "C" fn call(
             "compiled code and the frame stack disagree about which frame is calling"
         );
         let span = machine.span(caller.function, pc as usize);
+        if MASK & ablate::AGAIN_SPAN != 0 {
+            again_span(machine, caller.function, pc as usize);
+        }
+        if MASK & ablate::AGAIN_ADMIT != 0 {
+            again_admit(machine, budget, span);
+        }
+        if MASK & ablate::AGAIN_SAFEPOINT != 0 {
+            again_safepoint(machine, budget, caller.function, pc as usize);
+        }
         machine
             .safepoint(budget, caller.function, pc as usize)
             .and_then(|()| {
@@ -345,10 +413,37 @@ unsafe extern "C" fn call(
     let (caller_base, callee_base) = match opened {
         Ok(bases) => bases,
         Err(error) => {
+            if MASK & ablate::CENSUS != 0 {
+                STOPS.fetch_add(1, Ordering::Relaxed);
+            }
             (*host).left = Some(error);
             return Outcome::Raised.abi();
         }
     };
+    if MASK & ablate::CENSUS != 0 {
+        census(&mut *machine, callee, ArgsId(args), capacity_before);
+    }
+    if MASK & ablate::AGAIN_PUSH_POP != 0 {
+        again_push_pop(&mut *machine, callee);
+    }
+    if MASK & ablate::AGAIN_ZERO != 0 {
+        again_zero(&mut *machine, callee, callee_base);
+    }
+    if MASK & ablate::AGAIN_ARG_LOOKUP != 0 {
+        again_arg_lookup(&*machine, callee, ArgsId(args));
+    }
+    if MASK & ablate::AGAIN_ARG_COPY != 0 {
+        again_arg_copy(
+            &mut *machine,
+            callee,
+            ArgsId(args),
+            caller_base,
+            callee_base,
+        );
+    }
+    if MASK & ablate::AGAIN_OPEN_FRAME != 0 {
+        again_open_frame(&mut *machine, budget, callee, ArgsId(args), caller_base);
+    }
 
     // The callee's frame joins the stack before it runs, whichever tier runs it:
     // a frame is what roots the callee's reference slots, and `open_frame` has
@@ -361,6 +456,9 @@ unsafe extern "C" fn call(
             pc: 0,
             dst: dst as Slot,
         });
+        if MASK & ablate::AGAIN_FRAMES != 0 {
+            again_frames(machine, callee, callee_base, dst);
+        }
     }
 
     let into = Destination {
@@ -371,7 +469,7 @@ unsafe extern "C" fn call(
     let answered = match entry {
         Some(entry) => {
             (*host).tiers.native += 1;
-            enter(host, entry, callee, callee_base, into)
+            enter::<MASK>(host, entry, callee, callee_base, into)
         }
         None => {
             (*host).tiers.encoded += 1;
@@ -392,13 +490,17 @@ unsafe extern "C" fn call(
             // calling convention of the tier that is not being changed. ADR 0057
             // allows it in as many words — "a native/VM boundary may materialise
             // slot frames" — and it is 0.8% of the calls this path measures.
-            answered.map(|words| {
+            let published = answered.map(|words| {
                 for (at, word) in words.iter().enumerate() {
                     machine
                         .mem
                         .set_slot(into.base, into.slot + at as u32, *word);
                 }
-            })
+            });
+            if MASK & ablate::AGAIN_FLOOR_VEC != 0 && published.is_ok() {
+                again_floor_vec(machine, callee, into);
+            }
+            published
         }
     };
 
@@ -409,6 +511,11 @@ unsafe extern "C" fn call(
             Outcome::Raised.abi()
         }
     };
+    if MASK & ablate::AGAIN_REPUBLISH != 0 {
+        // One more `republish`: the chunk-table walk and the two stores compiled
+        // code re-reads after every helper.
+        republish(ctx, host);
+    }
     // Whatever the callee did, the pointers compiled code cached before the
     // hand-over are not to be used after it.
     republish(ctx, host);
@@ -436,7 +543,7 @@ unsafe extern "C" fn call(
 /// `cove_native` compiled for `callee`, and `base` is that call's frame. `into`
 /// names a run of `Function::returns`' width in a frame that outlives the call —
 /// in practice the caller's own, which is below `base` and cannot overlap it.
-unsafe fn enter(
+unsafe fn enter<const MASK: u64>(
     host: *mut Bridge<'_, '_>,
     entry: Entry,
     callee: FunctionId,
@@ -450,6 +557,9 @@ unsafe fn enter(
         // moves and the index does not. See `cove_native::abi`.
         machine.mem.stack_index(base) as u64
     };
+    if MASK & ablate::AGAIN_CTX != 0 {
+        again_ctx(host, &mut *machine, base, into);
+    }
     let (mut ctx, into_index) = {
         let machine = &mut *machine;
         let ctx = NativeCtx::new(host.cast::<c_void>(), machine.mem.words_ptr())
@@ -475,6 +585,9 @@ unsafe fn enter(
         Outcome::Returned => {
             machine.frames.pop();
             machine.mem.pop_frame(base);
+            if MASK & ablate::AGAIN_POP != 0 {
+                again_pop(machine, base);
+            }
             Ok(())
         }
         Outcome::Raised => Err(raised(machine, (*host).left.take(), callee, &ctx)),
@@ -703,7 +816,7 @@ impl<'v, 'a> Session<'v, 'a> {
                     // the call below; `entry` was compiled for `self.id`, whose
                     // frame is the one just pushed; and `into` is the session's
                     // own result run, which is below that frame and outlives it.
-                    let published = unsafe { enter(held, entry, self.id, base, into) };
+                    let published = unsafe { enter::<0>(held, entry, self.id, base, into) };
                     // Added rather than assigned: a bridge counts one call chain
                     // and a session makes many, and `= bridge.tiers` reported the
                     // last chain's count as the session's.
@@ -782,5 +895,693 @@ impl<'v, 'a> Session<'v, 'a> {
 /// between two code generators would be a difference in the *runtime* presented
 /// as a difference in the code they emit.
 pub fn helpers() -> NativeHelpers {
-    NativeHelpers { safepoint, call }
+    NativeHelpers {
+        safepoint,
+        call,
+        open,
+        close,
+    }
+}
+
+/// Which component of the call path a variant of the helper does **twice**.
+///
+/// [Issue #365](https://github.com/myuon/cove/issues/365) asks for the per-call
+/// cost of the native call path attributed to its parts rather than to a
+/// suspect named first. This module is how that attribution is taken, and the
+/// shape of it is the whole argument for believing the numbers:
+///
+/// - the baseline arm is [`helpers`] itself, so nothing has to be assumed about
+///   an instrumented copy being like the real thing — mask zero *is* the real
+///   thing, because the one call helper body folds every branch these constants
+///   guard;
+/// - every variant **adds** one instance of one component rather than removing
+///   it, so every variant computes the program the production helper computes
+///   and the harness can keep checking every answer against the VM's. A frame
+///   that was not zeroed or an argument that was not copied would be a
+///   different program, and a number from a run that computed the wrong thing
+///   looks like a number;
+/// - each component is idempotent in the state it touches: the same span, the
+///   same admission, the same words into the same slots, the same truncation to
+///   the same base.
+///
+/// The cost of that shape is that each figure is a **lower bound** on the
+/// component's real cost, because the second instance runs with the first one's
+/// cache lines and branch history warm. It also means two variants may overlap
+/// — [`ablate::AGAIN_OPEN_FRAME`] contains [`ablate::AGAIN_PUSH_POP`] and
+/// [`ablate::AGAIN_ARG_COPY`] —
+/// and that is on purpose: a sum of parts that misses a term still adds up, and
+/// the containing variant is the cross-check that finds it.
+///
+/// [`ablate::CENSUS`] is not a timing variant. It is the pass that *counts*: how wide
+/// the frames are, how many parameter words are copied, and how often
+/// `push_frame`'s `Vec::resize` reallocates rather than fitting — a question a
+/// timer cannot answer, because the answer is "almost never" and the almost is
+/// the point.
+pub mod ablate {
+    /// `Machine::span` for the call, a second time.
+    pub const AGAIN_SPAN: u64 = 1 << 0;
+    /// `Machine::admit_frame`, a second time.
+    pub const AGAIN_ADMIT: u64 = 1 << 1;
+    /// `Machine::safepoint` — ADR 0040's three steps — a second time.
+    pub const AGAIN_SAFEPOINT: u64 = 1 << 2;
+    /// `Memory::push_frame` at the callee's width, and the `pop_frame` undoing
+    /// it.
+    pub const AGAIN_PUSH_POP: u64 = 1 << 3;
+    /// `push_frame`'s zero fill, over the callee frame's non-parameter words.
+    pub const AGAIN_ZERO: u64 = 1 << 4;
+    /// `open_frame`'s two program lookups, arity compare and per-parameter
+    /// `copy_slots`.
+    pub const AGAIN_ARG_COPY: u64 = 1 << 5;
+    /// The same, short of the copies: the two program lookups, the arity compare
+    /// and the per-parameter width read.
+    ///
+    /// [`AGAIN_ARG_COPY`] less this one is the words themselves, which is the
+    /// question of whether an argument copy is the *copy* or the looking up of
+    /// what to copy — and they point at different fixes.
+    pub const AGAIN_ARG_LOOKUP: u64 = 1 << 15;
+    /// The whole of `open_frame`, into a duplicate frame that is then dropped.
+    pub const AGAIN_OPEN_FRAME: u64 = 1 << 6;
+    /// One more `Frame` pushed onto the frame stack and popped off it.
+    pub const AGAIN_FRAMES: u64 = 1 << 7;
+    /// One more `NativeCtx` and one more pair of `stack_index` derivations.
+    pub const AGAIN_CTX: u64 = 1 << 8;
+    /// One more `Memory::pop_frame`, to the base it is already at.
+    pub const AGAIN_POP: u64 = 1 << 9;
+    /// One more `republish` of the words pointer and the chunk table.
+    pub const AGAIN_REPUBLISH: u64 = 1 << 10;
+    /// The whole Rust-side mediation again, short of entering the callee.
+    pub const AGAIN_MEDIATION: u64 = 1 << 11;
+    /// One more owned `Vec` of the answer's width, on the encoded floor only.
+    pub const AGAIN_FLOOR_VEC: u64 = 1 << 12;
+    /// One more six-argument C-ABI indirect call into a helper that returns.
+    pub const AGAIN_HOP: u64 = 1 << 13;
+    /// Count what the call path did instead of adding to what it costs.
+    pub const CENSUS: u64 = 1 << 14;
+}
+
+/// The helpers with a call that does `MASK`'s components twice.
+///
+/// See [`ablate`]. `helpers_ablated::<0>()` is [`helpers`]: the same helper body,
+/// instantiated at a mask that folds every ablation away.
+pub fn helpers_ablated<const MASK: u64>() -> NativeHelpers {
+    NativeHelpers {
+        safepoint,
+        call: call_ablated::<MASK>,
+        open,
+        close,
+    }
+}
+
+/// [`call_body`] at a mask, as something a code generator can bind.
+///
+/// # Safety
+///
+/// As [`call`].
+unsafe extern "C" fn call_ablated<const MASK: u64>(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    callee: u32,
+    args: u32,
+    dst: u32,
+) -> u32 {
+    call_body::<MASK>(ctx, base, pc, callee, args, dst)
+}
+
+/// The open half of a direct call: [ADR 0055]'s "Direct native-to-native calls",
+/// which it names as a later optimisation of the first tier and this is.
+///
+/// [`call`] does ten things and generated code waits for all of them. This does
+/// the ones only the runtime can do and hands back the two facts emitted code
+/// needs to do the rest itself — where the callee's code is, and where its frame
+/// is. What moves into generated code is the argument copy, which the lowering
+/// settled and a code generator therefore knows statically; what stays here is
+/// everything that touches a `Vec` the runtime owns or an account it keeps.
+///
+/// # What it does not skip, and why that is the whole of the claim
+///
+/// Issue #365's decomposition measured the tier hop at 1.3% of the native arm and
+/// the *safepoint* at 9.1%, so a direct call that dropped the poll would be a
+/// speedup that was really a missing check. This takes it, in
+/// [ADR 0040]'s order, with the same charge, at the same point in the call:
+///
+/// 1. the unpaid work goes from [`NativeCtx::pending_work`] into `bulk_work`;
+/// 2. the frame's program counter is synchronised, so a collection walks a
+///    current frame;
+/// 3. cancellation, then fuel and the deadline, then the collector rendezvous;
+/// 4. `admit_frame` against the embedder's `max_call_depth`, and `push_frame`,
+///    whose `Overflow` is the stack segment's own bound. **Both** of the two
+///    checks a runaway recursion is refused by are still here and still in that
+///    order;
+/// 5. the callee's `Frame`, pushed before a word of the callee runs, because a
+///    frame is what makes the callee's reference slots walkable.
+///
+/// What it leaves out of `open_frame` is the argument copy and the arity compare
+/// — the compare because a code generator that emitted a direct call has already
+/// made it, and a mismatch falls back to [`call`] and its `wrong_arity`.
+///
+/// # A mixed call keeps the path it had
+///
+/// A callee with no compiled entry is not this function's business, and it does
+/// not try: it calls [`call`] — the whole mediated helper, unchanged, arguments
+/// and tier and answer and frame — and answers `entry: None` with the outcome.
+/// That is the constraint #365 sets, and it is met by *calling the old path*
+/// rather than by reimplementing it.
+///
+/// # Safety
+///
+/// As [`call`].
+///
+/// [ADR 0040]: ../../../../../docs/adr/0040-a-bound-outlives-its-backend.md
+/// [ADR 0055]: ../../../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+unsafe extern "C" fn open(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    callee: u32,
+    args: u32,
+    dst: u32,
+) -> Opened {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+    let budget = (*host).budget;
+    let id = FunctionId(callee);
+
+    let Some(entry) = (*host).entries.entry(id) else {
+        // The mediated helper, whole. A mixed call is the path it always was.
+        return Opened {
+            entry: None,
+            base: u64::from(call(ctx, base, pc, callee, args, dst)),
+        };
+    };
+
+    let work = (*ctx).pending_work;
+    (*ctx).pending_work = 0;
+    let opened = {
+        let machine = &mut *machine;
+        machine.bulk_work += work;
+        machine.sync(pc as usize);
+        let caller = machine
+            .frames
+            .last()
+            .copied()
+            .expect("a native frame is executing");
+        debug_assert_eq!(
+            machine.mem.stack_index(caller.base) as u64,
+            base,
+            "compiled code and the frame stack disagree about which frame is calling"
+        );
+        let span = machine.span(caller.function, pc as usize);
+        machine
+            .safepoint(budget, caller.function, pc as usize)
+            .and_then(|()| machine.admit_frame(budget, span))
+            .and_then(|()| {
+                let size = machine.program.function(id).frame_size();
+                // `open_frame`'s own line, and its bare error: the two refusals
+                // are told apart by their class and not by a span, and the
+                // mediated path attaches none here either.
+                machine
+                    .mem
+                    .push_frame(size)
+                    .map_err(|Overflow| machine.too_deep_error())
+            })
+    };
+    let callee_base = match opened {
+        Ok(base) => base,
+        Err(error) => {
+            (*host).left = Some(error);
+            return Opened {
+                entry: None,
+                base: u64::from(Outcome::Raised.abi()),
+            };
+        }
+    };
+    let index = {
+        let machine = &mut *machine;
+        machine.frames.push(Frame {
+            function: id,
+            base: callee_base,
+            pc: 0,
+            dst: dst as Slot,
+        });
+        (*host).tiers.native += 1;
+        // Taken after the frame was pushed, and an index rather than a pointer,
+        // which is ADR 0057's rule and is why a `push_frame` below this one is
+        // harmless.
+        machine.mem.stack_index(callee_base) as u64
+    };
+    // `push_frame` may have moved the words, and generated code is about to store
+    // the arguments through the pointer it finds here.
+    republish(ctx, host);
+    Opened {
+        entry: Some(entry),
+        base: index,
+    }
+}
+
+/// The close half of a direct call: the frame comes off, and the error the callee
+/// named is built.
+///
+/// See [`cove_native::CloseFn`]. This is the half of [`enter`] that is not the
+/// entry: the charge on every exit, the frame removed on a return and left
+/// standing on anything else, and the callee's [`Raise`] turned into the sentence
+/// the encoded tier would have produced.
+///
+/// Nothing is republished, and that is a property of the direct path rather than
+/// an omission. A direct call hands the callee the *caller's* context, so every
+/// helper the callee reached — its own safepoints, its own calls — stored the
+/// current words pointer and chunk table into the context the caller will re-read.
+/// `pop_frame` is a truncation and moves nothing. [`call`] republishes because the
+/// callee it entered was given a context of its own.
+///
+/// # Safety
+///
+/// As [`call`]. The top frame is the callee's, which is what [`open`] left.
+unsafe extern "C" fn close(ctx: *mut NativeCtx, outcome: u32, callee: u32) -> u32 {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = &mut *(*host).machine;
+    // Pending work is charged on every exit — a return, a raise and a stop alike,
+    // which is ADR 0055's own requirement and `enter`'s own line.
+    machine.bulk_work += (*ctx).pending_work;
+    (*ctx).pending_work = 0;
+    if outcome == Outcome::Returned.abi() {
+        // The answer is already where it belongs: the callee wrote it before it
+        // returned, so all that is left is to take its frame away.
+        let frame = machine
+            .frames
+            .pop()
+            .expect("a direct call's callee has a frame");
+        machine.mem.pop_frame(frame.base);
+    } else if outcome == Outcome::Raised.abi() {
+        // A failure leaves its frames standing, because that is what the error's
+        // call chain is read out of. The error is whole by the time it is stashed,
+        // and if the runtime is already holding one it is the callee's and this
+        // hands it straight back.
+        let error = raised(machine, (*host).left.take(), FunctionId(callee), &*ctx);
+        (*host).left = Some(error);
+    }
+    outcome
+}
+
+/// One component of the call path, again, and each one out of line./// One component of the call path, again, and each one out of line.
+///
+/// `#[inline(never)]` on every one of them is method rather than style, and it
+/// was arrived at by getting it wrong first. Inlined into [`call_body`], a
+/// duplicated argument copy measured **22.6 ns** while the whole of
+/// `open_frame` — which contains that copy, and an admission and a frame push
+/// besides — measured 21.7. A part cannot cost more than the whole that holds
+/// it, so the extra was not the component: it was three more inlined copies of
+/// `copy_slots` and its debug assertions sitting in a function the measured loop
+/// runs a hundred thousand times, paid in instruction fetch. Out of line, a
+/// variant costs its component and one direct call, and the call is what the
+/// `+ one C-ABI hop` row bounds.
+///
+/// The arguments that go through [`std::hint::black_box`] are there to stop the
+/// optimiser commoning a second pure read with the first — a second `span` of
+/// the same function at the same pc is exactly the expression an optimiser is
+/// entitled to compute once, and a variant that measured nothing would report a
+/// zero rather than a refusal.
+///
+/// A whole `Result<(), RuntimeError>` is never given to `black_box`, only
+/// `is_err()` of one: holding the `Result` forces the error's own bytes into
+/// memory on a path that never has an error, which measures the holding.
+///
+/// # Safety
+///
+/// Each takes what its caller already holds; none dereferences anything the
+/// caller did not.
+#[inline(never)]
+fn again_span(machine: &Machine<'_>, id: FunctionId, pc: usize) {
+    let id = std::hint::black_box(id);
+    let pc = std::hint::black_box(pc);
+    std::hint::black_box(machine.span(id, pc).start);
+}
+
+/// See [`again_span`].
+#[inline(never)]
+fn again_admit(machine: &Machine<'_>, budget: &Meter, span: cove_diag::Span) {
+    let span = std::hint::black_box(span);
+    std::hint::black_box(machine.admit_frame(budget, span).is_err());
+}
+
+/// See [`again_span`].
+#[inline(never)]
+fn again_safepoint(machine: &mut Machine<'_>, budget: &Meter, id: FunctionId, pc: usize) {
+    let id = std::hint::black_box(id);
+    let pc = std::hint::black_box(pc);
+    std::hint::black_box(machine.safepoint(budget, id, pc).is_err());
+}
+
+/// `Memory::push_frame` at the callee's width, and the `pop_frame` undoing it.
+///
+/// See [`again_span`].
+#[inline(never)]
+fn again_push_pop(machine: &mut Machine<'_>, callee: FunctionId) {
+    let size = machine.program.function(callee).frame_size();
+    if let Ok(duplicate) = machine.mem.push_frame(size) {
+        machine.mem.pop_frame(duplicate);
+    }
+}
+
+/// `push_frame`'s zero fill, over the words of the callee's frame that are not
+/// its parameters.
+///
+/// Those are the words `push_frame` zeroed and nothing has written since, so
+/// writing zeroes over them a second time is the same frame. The parameters are
+/// left alone because zeroing *them* would be a different program.
+///
+/// See [`again_span`].
+#[inline(never)]
+fn again_zero(machine: &mut Machine<'_>, callee: FunctionId, callee_base: u64) {
+    let function = machine.program.function(callee);
+    let size = function.frame_size();
+    let params: u32 = function
+        .params
+        .iter()
+        .map(|layout| machine.width(*layout))
+        .sum();
+    machine
+        .mem
+        .clear_words(callee_base + u64::from(params), size - params);
+}
+
+/// The looking up, without the copying: `Program::function`,
+/// `Program::arg_list`, the arity compare and one width read per parameter.
+///
+/// See [`again_span`].
+#[inline(never)]
+fn again_arg_lookup(machine: &Machine<'_>, callee: FunctionId, args: ArgsId) {
+    let program = machine.program;
+    let target = program.function(std::hint::black_box(callee));
+    let list = program.arg_list(std::hint::black_box(args));
+    std::hint::black_box(list.len() == target.params.len());
+    let mut at = 0;
+    for (arg, layout) in list.iter().zip(&target.params) {
+        at += machine.width(*layout);
+        std::hint::black_box(arg.slot);
+    }
+    std::hint::black_box(at);
+}
+
+/// `open_frame`'s argument loop, again and word for word.
+///
+/// Copying the same words to the same slots is the frame the callee already has.
+///
+/// See [`again_span`].
+#[inline(never)]
+fn again_arg_copy(
+    machine: &mut Machine<'_>,
+    callee: FunctionId,
+    args: ArgsId,
+    caller_base: u64,
+    callee_base: u64,
+) {
+    let program = machine.program;
+    let target = program.function(callee);
+    let list = program.arg_list(args);
+    if list.len() != target.params.len() {
+        return;
+    }
+    let mut at = 0;
+    for (arg, layout) in list.iter().zip(&target.params) {
+        let width = machine.width(*layout);
+        machine.mem.copy_slots(
+            callee_base + u64::from(at),
+            caller_base + u64::from(arg.slot),
+            width,
+        );
+        at += width;
+    }
+}
+
+/// The whole of `open_frame` again, into a frame above the callee's which is
+/// then dropped.
+///
+/// The cross-check on the four parts above, because a sum of parts that misses a
+/// term still adds up. The span it is given is the callee's declaration, which is
+/// a field read rather than a lookup, so this variant does not quietly contain
+/// [`again_span`] as well.
+///
+/// See [`again_span`].
+#[inline(never)]
+fn again_open_frame(
+    machine: &mut Machine<'_>,
+    budget: &Meter,
+    callee: FunctionId,
+    args: ArgsId,
+    caller_base: u64,
+) {
+    let span = machine.program.function(callee).span;
+    if let Ok(duplicate) =
+        super::encoded::open_frame(machine, budget, caller_base, span, callee, args, None)
+    {
+        machine.mem.pop_frame(duplicate);
+    }
+}
+
+/// One more `Frame` onto the stack of frames, and off it again: the bookkeeping
+/// either tier does to make a callee's slots walkable.
+///
+/// See [`again_span`].
+#[inline(never)]
+fn again_frames(machine: &mut Machine<'_>, callee: FunctionId, callee_base: u64, dst: u32) {
+    machine.frames.push(Frame {
+        function: callee,
+        base: callee_base,
+        pc: 0,
+        dst: dst as Slot,
+    });
+    machine.frames.pop();
+}
+
+/// One more `NativeCtx` and one more pair of index derivations: what this tier
+/// builds to hand a compiled callee its frame and its destination.
+///
+/// # Safety
+///
+/// As [`enter`]: `host` is a live [`Bridge`].
+#[inline(never)]
+unsafe fn again_ctx(
+    host: *mut Bridge<'_, '_>,
+    machine: &mut Machine<'_>,
+    base: u64,
+    into: Destination,
+) {
+    let ctx =
+        NativeCtx::new(host.cast::<c_void>(), machine.mem.words_ptr()).over_heap((*host).table());
+    std::hint::black_box(&ctx);
+    std::hint::black_box(machine.mem.stack_index(base) as u64);
+    std::hint::black_box(machine.mem.stack_index(into.base) as u64);
+}
+
+/// The truncation again, to the base it is already at: `pop_frame` alone, apart
+/// from the `push_frame` that pairs with it.
+///
+/// See [`again_span`].
+#[inline(never)]
+fn again_pop(machine: &mut Machine<'_>, base: u64) {
+    machine.mem.pop_frame(base);
+}
+
+/// One more owned run of words of exactly the width the encoded floor
+/// materialises, read out of the destination the answer is now in: the
+/// allocation and the copy, and nothing else.
+///
+/// See [`again_span`].
+#[inline(never)]
+fn again_floor_vec(machine: &mut Machine<'_>, callee: FunctionId, into: Destination) {
+    let width = machine.width(machine.program.function(callee).returns);
+    std::hint::black_box(machine.mem.read_words(into.base, width));
+}
+
+/// A call helper that does nothing, for [`ablate::AGAIN_HOP`].
+///
+/// Six integer arguments in registers, a `ret`, and an answer compiled code
+/// ignores — which is the hop without the runtime: the argument set-up the
+/// generated call sequence pays, the indirect `call`, the callee's own entry and
+/// return. It is a *floor* on the hop and not the hop: the generated code around
+/// the real helper is emitted once per call site and is not doubled by this, and
+/// the entry into compiled code — its seven pushes and seven pops — is not here
+/// either. Part 2 of #365 is what measures those, by removing them.
+///
+/// # Safety
+///
+/// Reads nothing through any of its arguments.
+unsafe extern "C" fn nothing(
+    _ctx: *mut NativeCtx,
+    _base: u64,
+    _pc: u32,
+    _callee: u32,
+    _args: u32,
+    _dst: u32,
+) -> u32 {
+    Outcome::Returned.abi()
+}
+
+/// Everything the call helper does in Rust, a second time, short of entering the
+/// callee.
+///
+/// [`ablate::AGAIN_MEDIATION`]: the charge, the `sync`, the frame the caller is
+/// read out of, the span, the safepoint, `open_frame`, the frame pushed for the
+/// callee, the context and the two indices a compiled callee is handed, the pop
+/// and the republish. The callee is *not* entered, because entering it twice
+/// would run the program twice; what is left out is therefore exactly the two
+/// hops — the generated call sequence and the entry into compiled code — and
+/// that is the one term of the decomposition this cannot reach.
+///
+/// The duplicate frame is opened above the caller's and dropped again, so
+/// nothing the callee or the caller can read is different afterwards. A stop the
+/// duplicate safepoint reports is ignored: the real safepoint that follows it
+/// reports the same stop, from the same meter, and acts on it. A workload that
+/// stops is therefore not one to take these numbers from, and [`Census::stops`]
+/// is what says whether the measured one did.
+///
+/// # Safety
+///
+/// As [`call`].
+#[inline(never)]
+unsafe fn mediation_again(
+    ctx: *mut NativeCtx,
+    host: *mut Bridge<'_, '_>,
+    base: u64,
+    pc: u32,
+    callee: FunctionId,
+    args: u32,
+    dst: u32,
+) {
+    let machine = (*host).machine;
+    let budget = (*host).budget;
+    let opened = {
+        let machine = &mut *machine;
+        // The charge itself is not repeated: `bulk_work` is fuel, and doubling a
+        // charge would move a safepoint rather than cost one add.
+        machine.sync(pc as usize);
+        let caller = machine
+            .frames
+            .last()
+            .copied()
+            .expect("a native frame is executing");
+        debug_assert_eq!(machine.mem.stack_index(caller.base) as u64, base);
+        let span = machine.span(caller.function, pc as usize);
+        std::hint::black_box(
+            machine
+                .safepoint(budget, caller.function, pc as usize)
+                .is_err(),
+        );
+        super::encoded::open_frame(
+            machine,
+            budget,
+            caller.base,
+            span,
+            callee,
+            ArgsId(args),
+            None,
+        )
+        .map(|callee_base| (caller.base, callee_base))
+    };
+    let Ok((caller_base, callee_base)) = opened else {
+        return;
+    };
+    {
+        let machine = &mut *machine;
+        machine.frames.push(Frame {
+            function: callee,
+            base: callee_base,
+            pc: 0,
+            dst: dst as Slot,
+        });
+        let held = NativeCtx::new(host.cast::<c_void>(), machine.mem.words_ptr())
+            .over_heap((*host).table());
+        std::hint::black_box(&held);
+        std::hint::black_box(machine.mem.stack_index(callee_base) as u64);
+        std::hint::black_box(machine.mem.stack_index(caller_base) as u64);
+        machine.frames.pop();
+        machine.mem.pop_frame(callee_base);
+    }
+    republish(ctx, host);
+}
+
+/// What the call path did, counted rather than timed.
+///
+/// The questions a timer cannot answer, and one of them is why this exists:
+/// `push_frame` grows a `Vec`, and how often that `Vec` *reallocates* rather
+/// than fitting inside the capacity it already has is the difference between a
+/// term of the decomposition and a rounding error. See [`ablate::CENSUS`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Census {
+    /// Calls the helper opened a frame for.
+    pub calls: u64,
+    /// Words of callee frame `push_frame` was asked for, summed.
+    pub frame_words: u64,
+    /// Parameter words copied into those frames, summed.
+    pub param_words: u64,
+    /// Parameters copied, summed — so that the per-parameter figure is a
+    /// measured average and not an assumed one.
+    pub params: u64,
+    /// Calls whose `push_frame` made the stack's `Vec` reallocate.
+    pub reallocations: u64,
+    /// The deepest the frame stack got.
+    pub deepest: u64,
+    /// Calls the safepoint or the frame refused.
+    ///
+    /// A run with any is a run whose ablation numbers are not to be read: a
+    /// duplicated safepoint swallows the stop it saw. Nought is the only figure
+    /// that makes the rest of the table meaningful.
+    pub stops: u64,
+}
+
+static CALLS: AtomicU64 = AtomicU64::new(0);
+static FRAME_WORDS: AtomicU64 = AtomicU64::new(0);
+static PARAM_WORDS: AtomicU64 = AtomicU64::new(0);
+static PARAMS: AtomicU64 = AtomicU64::new(0);
+static REALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static DEEPEST: AtomicU64 = AtomicU64::new(0);
+static STOPS: AtomicU64 = AtomicU64::new(0);
+
+/// Counts one call. See [`ablate::CENSUS`].
+fn census(machine: &mut Machine<'_>, callee: FunctionId, args: ArgsId, capacity_before: usize) {
+    let program = machine.program;
+    let target = program.function(callee);
+    let size = target.frame_size();
+    let params: u32 = target
+        .params
+        .iter()
+        .map(|layout| machine.width(*layout))
+        .sum();
+    CALLS.fetch_add(1, Ordering::Relaxed);
+    FRAME_WORDS.fetch_add(u64::from(size), Ordering::Relaxed);
+    PARAM_WORDS.fetch_add(u64::from(params), Ordering::Relaxed);
+    PARAMS.fetch_add(program.arg_list(args).len() as u64, Ordering::Relaxed);
+    if machine.mem.stack_capacity() != capacity_before {
+        REALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+    }
+    DEEPEST.fetch_max(machine.frames.len() as u64, Ordering::Relaxed);
+}
+
+/// What the census has counted since [`census_reset`].
+pub fn census_taken() -> Census {
+    Census {
+        calls: CALLS.load(Ordering::Relaxed),
+        frame_words: FRAME_WORDS.load(Ordering::Relaxed),
+        param_words: PARAM_WORDS.load(Ordering::Relaxed),
+        params: PARAMS.load(Ordering::Relaxed),
+        reallocations: REALLOCATIONS.load(Ordering::Relaxed),
+        deepest: DEEPEST.load(Ordering::Relaxed),
+        stops: STOPS.load(Ordering::Relaxed),
+    }
+}
+
+/// Forgets what the census counted, so that one pass is one figure.
+pub fn census_reset() {
+    for counter in [
+        &CALLS,
+        &FRAME_WORDS,
+        &PARAM_WORDS,
+        &PARAMS,
+        &REALLOCATIONS,
+        &DEEPEST,
+        &STOPS,
+    ] {
+        counter.store(0, Ordering::Relaxed);
+    }
 }

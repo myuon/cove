@@ -178,3 +178,357 @@ fn a_call_hands_over_and_an_outcome_travels_out() {
 fn a_reference_is_in_its_slot_at_every_safepoint() {
     suite::a_reference_is_in_its_slot_at_every_safepoint::<Template>();
 }
+
+// --- the direct call ---------------------------------------------------------
+//
+// Issue #365's Part 2, and the one part of it no shared suite case can reach:
+// `Jit::calling_directly` is this arm's alone, so the expectations are here.
+//
+// What is being tested is the *protocol* rather than the runtime: the doubles
+// below are `open` and `close` as a test owns them, so the case can say what
+// emitted code did — which entry it called, which frame it stored the arguments
+// into, and which outcome it handed to `close` — without a `Machine` anywhere.
+// `crates/cove-runtime/tests/native_return.rs` is the other half, where the
+// helpers are real and the frames are a real stack.
+
+use std::cell::{Cell, RefCell};
+use std::sync::Arc;
+
+use cove_ir::{Arg, ArgsId, ArithOp, Inst, Num, Repr};
+use cove_native::{NativeCtx, Opened, Outcome};
+
+thread_local! {
+    /// What the double answers as the callee's compiled entry.
+    ///
+    /// `None` is the ordinary answer for a callee the tier has not compiled, and
+    /// means the runtime finished the call itself.
+    static CALLEE: Cell<Option<Entry>> = const { Cell::new(None) };
+    /// The frame the double hands back, as a word index.
+    static CALLEE_FRAME: Cell<u64> = const { Cell::new(0) };
+    /// What the double answers when it answers no entry.
+    static FINISHED_WITH: Cell<u32> = const { Cell::new(0) };
+    /// Every `open` emitted code reached.
+    static OPENS: RefCell<Vec<Handed>> = const { RefCell::new(Vec::new()) };
+    /// Every `close`: the outcome and the callee it named.
+    static CLOSES: RefCell<Vec<(u32, u32)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// One hand-over to `open`, as the double recorded it.
+///
+/// What a case reads to say that emitted code handed over the numbers the IR
+/// named: the caller's frame, the instruction, the callee, its argument list, the
+/// destination slot, and the unpaid work a real helper would charge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Handed {
+    base: u64,
+    pc: u32,
+    callee: u32,
+    args: u32,
+    dst: u32,
+    work: u64,
+}
+
+/// A safepoint that always carries on. No fixture below has a backedge, so
+/// nothing reaches it; it is here because the table needs one.
+///
+/// # Safety
+///
+/// Reads nothing through any of its arguments.
+unsafe extern "C" fn safepoint(_ctx: *mut NativeCtx, _pc: u32, _work: u64) -> bool {
+    true
+}
+
+/// A mediated call helper that must not be reached.
+///
+/// Every call site in this file is a direct one, so reaching this would mean the
+/// generator emitted the wrong form — which a test that answered something would
+/// pass anyway.
+///
+/// # Safety
+///
+/// Reads nothing through any of its arguments.
+unsafe extern "C" fn call(
+    _ctx: *mut NativeCtx,
+    _base: u64,
+    _pc: u32,
+    callee: u32,
+    _args: u32,
+    _dst: u32,
+) -> u32 {
+    panic!("the mediated helper was reached for callee {callee}, and every call here is direct")
+}
+
+/// `open`, as a test owns it: it answers whatever the case asked it to.
+///
+/// # Safety
+///
+/// `ctx` is the pointer the entry point was called with.
+unsafe extern "C" fn open(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    callee: u32,
+    args: u32,
+    dst: u32,
+) -> Opened {
+    OPENS.with(|held| {
+        held.borrow_mut().push(Handed {
+            base,
+            pc,
+            callee,
+            args,
+            dst,
+            work: (*ctx).pending_work,
+        })
+    });
+    // A real one charges what it was handed, so a real one clears it.
+    (*ctx).pending_work = 0;
+    match CALLEE.with(Cell::get) {
+        Some(entry) => Opened {
+            entry: Some(entry),
+            base: CALLEE_FRAME.with(Cell::get),
+        },
+        None => Opened {
+            entry: None,
+            base: u64::from(FINISHED_WITH.with(Cell::get)),
+        },
+    }
+}
+
+/// `close`, as a test owns it: it records and answers the outcome it was given.
+///
+/// # Safety
+///
+/// As [`open`].
+unsafe extern "C" fn close(ctx: *mut NativeCtx, outcome: u32, callee: u32) -> u32 {
+    CLOSES.with(|held| held.borrow_mut().push((outcome, callee)));
+    (*ctx).pending_work = 0;
+    outcome
+}
+
+fn direct_helpers() -> NativeHelpers {
+    NativeHelpers {
+        safepoint,
+        call,
+        open,
+        close,
+    }
+}
+
+/// A caller whose whole body is `g(7, 35)`, and a `g` that adds its two
+/// parameters.
+///
+/// Two parameters rather than one because the whole of what emitted code took
+/// over is *packing* them: the second one has to land in the callee's slot 1
+/// however far apart the caller's slots are, and one argument cannot tell a
+/// packed frame from a copied word.
+fn adding_program() -> cove_ir::Program {
+    let caller = suite::function(
+        vec![Repr::Int, Repr::Int, Repr::Int],
+        suite::INT,
+        vec![
+            Inst::Int { dst: 0, value: 7 },
+            Inst::Int { dst: 1, value: 35 },
+            Inst::Call {
+                dst: 2,
+                callee: FunctionId(1),
+                args: ArgsId(1),
+            },
+            Inst::Return { src: 2 },
+        ],
+    );
+    let mut program = suite::program_with_args(
+        caller,
+        vec![
+            Arg {
+                slot: 0,
+                layout: suite::INT,
+            },
+            Arg {
+                slot: 1,
+                layout: suite::INT,
+            },
+        ],
+    );
+    let mut callee = suite::function(
+        vec![Repr::Int, Repr::Int, Repr::Int],
+        suite::INT,
+        vec![
+            Inst::Arith {
+                num: Num::Int,
+                op: ArithOp::Add,
+                dst: 2,
+                a: 0,
+                b: 1,
+            },
+            Inst::Return { src: 2 },
+        ],
+    );
+    callee.params = vec![suite::INT, suite::INT];
+    callee.name = Arc::from("g");
+    program.functions.push(callee);
+    program
+}
+
+/// Where the frames and the destination sit in the words a case owns.
+///
+/// None of them is zero and none of them is adjacent to another: a frame formed
+/// as if it began at word zero, or a destination formed without its slot, lands
+/// somewhere this case reads and finds wrong.
+const CALLER_AT: u64 = 8;
+const CALLEE_AT: u64 = 32;
+const DESTINATION_AT: u64 = 48;
+const DESTINATION_SLOT: u32 = 3;
+
+/// Compiles both functions, hands the double the callee's entry, and enters the
+/// caller.
+fn run_directly(program: &cove_ir::Program, words: &mut [u64], compiled_callee: bool) -> Outcome {
+    let mut jit = Jit::new(direct_helpers())
+        .expect("this host is x86-64")
+        .calling_directly();
+    let caller = jit
+        .compile(program, FunctionId(0))
+        .expect("the caller is inside the slice");
+    let callee = jit
+        .compile(program, FunctionId(1))
+        .expect("the callee is inside the slice");
+    jit.finalize().expect("the code finalizes");
+    OPENS.with(|held| held.borrow_mut().clear());
+    CLOSES.with(|held| held.borrow_mut().clear());
+    CALLEE.with(|held| {
+        held.set(if compiled_callee {
+            Some(jit.entry(callee))
+        } else {
+            None
+        })
+    });
+    CALLEE_FRAME.with(|held| held.set(CALLEE_AT));
+    let mut ctx = NativeCtx::new(std::ptr::null_mut(), words.as_mut_ptr());
+    let entry = jit.entry(caller);
+    // Safety: `ctx.words` is `words`, every frame and the destination fit inside
+    // it, and the code was emitted for exactly `Entry`'s shape.
+    unsafe { entry(&mut ctx, CALLER_AT, DESTINATION_AT, DESTINATION_SLOT) }
+}
+
+/// Emitted code reaches the callee's own entry, the arguments arrive packed, and
+/// the answer comes back through the destination the caller named.
+#[test]
+fn a_direct_call_enters_the_callee_itself() {
+    let program = adding_program();
+    let mut words = vec![0u64; 64];
+    let outcome = run_directly(&program, &mut words, true);
+    assert_eq!(outcome, Outcome::Returned);
+    assert_eq!(
+        words[(DESTINATION_AT + u64::from(DESTINATION_SLOT)) as usize],
+        42,
+        "`g(7, 35)` answered into the destination the entry was given"
+    );
+    assert_eq!(
+        (words[CALLEE_AT as usize], words[CALLEE_AT as usize + 1]),
+        (7, 35),
+        "both arguments were stored into the callee's frame, packed from slot zero"
+    );
+    assert_eq!(
+        words[CALLER_AT as usize + 2],
+        42,
+        "the callee wrote the caller's `dst`, which is what ADR 0057 hands it"
+    );
+    let opens = OPENS.with(|held| held.borrow().clone());
+    assert_eq!(
+        opens,
+        vec![Handed {
+            base: CALLER_AT,
+            pc: 2,
+            callee: 1,
+            args: 1,
+            dst: 2,
+            work: 4,
+        }],
+        "one `open`, for callee 1 at pc 2 with `dst` 2, handed the block's four \
+         instructions of unpaid work"
+    );
+    assert_eq!(
+        CLOSES.with(|held| held.borrow().clone()),
+        vec![(Outcome::Returned.abi(), 1)],
+        "one `close`, naming the callee and the outcome the entry answered"
+    );
+}
+
+/// A callee with no compiled code: the runtime finished the call, and emitted
+/// code neither enters anything nor closes anything.
+#[test]
+fn a_direct_call_falls_back_to_the_runtime() {
+    let program = adding_program();
+    let mut words = vec![0u64; 64];
+    FINISHED_WITH.with(|held| held.set(Outcome::Returned.abi()));
+    let outcome = run_directly(&program, &mut words, false);
+    assert_eq!(outcome, Outcome::Returned);
+    assert_eq!(
+        words[CALLEE_AT as usize], 0,
+        "no argument was stored, because no frame was opened for one"
+    );
+    assert!(
+        CLOSES.with(|held| held.borrow().is_empty()),
+        "nothing was closed, because nothing was entered"
+    );
+    assert_eq!(OPENS.with(|held| held.borrow().len()), 1);
+}
+
+/// An outcome the runtime answers instead of a frame travels straight out of the
+/// compiled function.
+#[test]
+fn a_refusal_from_the_open_helper_leaves() {
+    for leaving in [Outcome::Raised, Outcome::Stopped] {
+        let program = adding_program();
+        let mut words = vec![0u64; 64];
+        FINISHED_WITH.with(|held| held.set(leaving.abi()));
+        let outcome = run_directly(&program, &mut words, false);
+        assert_eq!(
+            outcome, leaving,
+            "`{leaving:?}` from `open` left through the caller unchanged"
+        );
+        assert_eq!(
+            words[(DESTINATION_AT + u64::from(DESTINATION_SLOT)) as usize],
+            0,
+            "a call that did not happen published nothing"
+        );
+    }
+}
+
+/// The same arm, emitting direct calls, is still held to the suite's call case.
+///
+/// The suite's `open` answers "the runtime finished it", so what this exercises
+/// is the fallback half of the direct sequence over every expectation that case
+/// makes — the outcome that travels out, the destination the helper wrote, and
+/// the work the hand-over carried.
+#[test]
+fn a_direct_arm_still_hands_over_and_an_outcome_travels_out() {
+    suite::a_call_hands_over_and_an_outcome_travels_out::<TemplateDirect>();
+}
+
+/// The template arm with [`Jit::calling_directly`] on.
+struct TemplateDirect(Jit);
+
+impl Arm for TemplateDirect {
+    type Handle = Compiled;
+
+    fn new(helpers: NativeHelpers) -> Self {
+        TemplateDirect(
+            Jit::new(helpers)
+                .expect("this host is x86-64")
+                .calling_directly(),
+        )
+    }
+
+    fn compile(&mut self, program: &Program, id: FunctionId) -> Option<Compiled> {
+        self.0.compile(program, id)
+    }
+
+    fn finalize(&mut self) {
+        self.0.finalize().expect("the code finalizes");
+    }
+
+    fn entry(&self, handle: Compiled) -> Entry {
+        self.0.entry(handle)
+    }
+}

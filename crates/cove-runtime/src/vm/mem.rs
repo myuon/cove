@@ -1884,6 +1884,17 @@ impl Memory {
         self.space.chunk_bases(into);
     }
 
+    /// How many words the stack's `Vec` has room for.
+    ///
+    /// Not used by execution. It is read by the native boundary's census — see
+    /// `vm::exec::native::ablate` — to answer how often `push_frame`'s
+    /// `Vec::resize` *reallocates* rather than fitting inside the room it
+    /// already has, which is a question about the allocator that no timing of
+    /// `push_frame` can separate out.
+    pub(crate) fn stack_capacity(&self) -> usize {
+        self.stack.words.capacity()
+    }
+
     /// How many chunks this run's heap could ever hold.
     ///
     /// What a caller reserves a [`Memory::chunk_bases`] table with, so that the

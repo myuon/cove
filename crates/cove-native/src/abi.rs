@@ -412,6 +412,108 @@ pub type CallFn = unsafe extern "C" fn(
     dst: u32,
 ) -> u32;
 
+/// What a direct call was given: where the callee's code is, and the frame it is
+/// to run in.
+///
+/// The answer of an [`OpenFn`], and the reason a direct call is possible at all.
+/// Two words, so the System V ABI hands it back in two registers and generated
+/// code reads it without a memory round trip.
+///
+/// `entry` is null when **the runtime has finished the call itself**, and that is
+/// not a failure: a callee with no compiled code runs on the encoded VM, which is
+/// a complete execution path, and the mediated helper is how it is reached. Then
+/// `base` is the [`Outcome`] of the finished call rather than a frame, and there
+/// is nothing for generated code to enter.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Opened {
+    /// The callee's compiled entry point, or null when the call is already over.
+    pub entry: Option<Entry>,
+    /// The callee's frame as a **word index**, or the finished call's
+    /// [`Outcome`] when `entry` is null.
+    ///
+    /// An index for [`Entry`]'s reason: the stack's `Vec` reallocated under the
+    /// `push_frame` that made this frame, and will reallocate again under the
+    /// next one.
+    pub base: u64,
+}
+
+/// What opens a callee's frame for a call generated code will make itself.
+///
+/// [`CallFn`] hands the runtime one `Inst::Call` whole and gets back an outcome:
+/// the runtime opens the frame, copies the arguments, chooses the tier, enters
+/// the callee, publishes the answer and pops the frame. This splits that in half
+/// at the one point a code generator can do better than a runtime, which is that
+/// **it knows the callee's shape at compile time**.
+///
+/// What this does, and what it leaves to emitted code:
+///
+/// - it charges the unpaid work in [`NativeCtx::pending_work`] and takes
+///   [ADR 0040]'s safepoint, exactly as [`CallFn`] does and in the same order.
+///   A direct call is a safepoint for the same reason a mediated one is;
+/// - it admits the frame against the embedder's call-depth limit and pushes it,
+///   so a runaway recursion is refused by the same two checks — the configured
+///   limit and the stack segment's own bound — as before;
+/// - it pushes the callee's `Frame`, so the callee's reference slots are walkable
+///   by the collector before a word of it runs;
+/// - it does **not** copy the arguments. Their slots and widths are settled by
+///   the lowering, so emitted code stores them itself;
+/// - it does **not** enter the callee, and it does not pop anything. The entry it
+///   answers is called by generated code, and [`CloseFn`] is the other half.
+///
+/// When the callee has no compiled entry, this is the mediated helper and nothing
+/// else: the whole of [`CallFn`] runs, arguments and tier and answer and frame,
+/// and the answer is `entry: None` with the outcome in [`Opened::base`]. A mixed
+/// call keeps the path it had.
+///
+/// # Safety
+///
+/// As [`CallFn`]. On any answer but `entry: None`, the caller must enter the
+/// entry it was given with the frame it was given, and must reach [`CloseFn`]
+/// afterwards whatever that entry answered: the frame is on the stack until it
+/// does.
+///
+/// [ADR 0040]: ../../../../docs/adr/0040-a-bound-outlives-its-backend.md
+pub type OpenFn = unsafe extern "C" fn(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    callee: u32,
+    args: u32,
+    dst: u32,
+) -> Opened;
+
+/// What finishes a call generated code made itself.
+///
+/// The other half of [`OpenFn`], and it is a helper rather than emitted code for
+/// one reason: the frame stack and the word stack are Rust `Vec`s, and only Rust
+/// may change how long they are.
+///
+/// - it charges whatever the callee left in [`NativeCtx::pending_work`], which is
+///   ADR 0055's "pending work charged on every exit" and is done on a return, a
+///   raise and a stop alike;
+/// - on [`Outcome::Returned`] it removes the callee's frame — the top one, whose
+///   answer is already in the caller's destination, because the callee wrote it
+///   there before returning;
+/// - on any other outcome it leaves the frames standing, because that is what a
+///   runtime error's call chain is read out of, and it builds the error the
+///   callee named if the runtime is not already holding one.
+///
+/// It answers the outcome it was given, unchanged, so that generated code can
+/// test it once.
+///
+/// Nothing is republished. A direct call hands the callee **the caller's own
+/// context**, so every helper the callee reached stored the current words pointer
+/// and chunk table into the very context the caller will re-read — which is the
+/// difference from [`CallFn`], where the callee is given a context of its own and
+/// the caller's is therefore stale when it returns.
+///
+/// # Safety
+///
+/// As [`CallFn`]. `outcome` is what the entry answered and `callee` is the
+/// function it was.
+pub type CloseFn = unsafe extern "C" fn(ctx: *mut NativeCtx, outcome: u32, callee: u32) -> u32;
+
 /// The runtime's side of the boundary, as function pointers.
 ///
 /// This table is the whole reason `cove-native` does not depend on
@@ -427,6 +529,11 @@ pub struct NativeHelpers {
     pub safepoint: SafepointFn,
     /// See [`CallFn`].
     pub call: CallFn,
+    /// See [`OpenFn`]. A code generator that makes no direct call binds it and
+    /// never reaches it.
+    pub open: OpenFn,
+    /// See [`CloseFn`].
+    pub close: CloseFn,
 }
 
 /// The mutable state one native call reads and writes.

@@ -25,7 +25,7 @@
 use std::mem::offset_of;
 use std::ptr;
 
-use cove_ir::{ArithOp, CmpOp, Function, FunctionId, Inst, Num, Program, Slot};
+use cove_ir::{ArgsId, ArithOp, CmpOp, Function, FunctionId, Inst, Num, Program, Slot};
 
 use crate::abi::{
     Entry, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
@@ -206,6 +206,17 @@ pub struct Jit {
     helpers: Helpers,
     code: Vec<Mapping>,
     finalized: bool,
+    /// Whether a call whose callee is compiled is made by emitted code itself.
+    ///
+    /// Off by default, which is [ADR 0055]'s order of business: it names direct
+    /// native-to-native calls as "later optimizations, not requirements of the
+    /// first tier", and a switch is what lets the two be raced against each
+    /// other in one process over one lowering — which is how
+    /// [issue #365](https://github.com/myuon/cove/issues/365) asks for the
+    /// answer. See [`Jit::calling_directly`] and [`Emit::callee_direct`].
+    ///
+    /// [ADR 0055]: ../../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+    direct: bool,
 }
 
 /// The helper addresses, as the numbers a `movabs` carries.
@@ -216,6 +227,8 @@ pub struct Jit {
 struct Helpers {
     safepoint: usize,
     call: usize,
+    open: usize,
+    close: usize,
 }
 
 impl Jit {
@@ -235,10 +248,27 @@ impl Jit {
             helpers: Helpers {
                 safepoint: helpers.safepoint as usize,
                 call: helpers.call as usize,
+                open: helpers.open as usize,
+                close: helpers.close as usize,
             },
             code: Vec::new(),
             finalized: false,
+            direct: false,
         })
+    }
+
+    /// The same code generator, emitting a **direct call** where the callee has
+    /// compiled code.
+    ///
+    /// See `Emit::callee_direct` for what that is, and the `direct` field this
+    /// sets for why it is a choice rather than the only way — [`crate::abi::OpenFn`]
+    /// is the contract either way. Every function compiled after
+    /// this answers is emitted the new way; nothing already compiled changes, so
+    /// a caller that wants one of each compiles the slice twice over two `Jit`s,
+    /// which is what the comparison harness does.
+    pub fn calling_directly(mut self) -> Self {
+        self.direct = true;
+        self
     }
 
     /// Compiles `program`'s function `id`, or answers `None` if any part of it
@@ -248,7 +278,7 @@ impl Jit {
         if !supported(program, function) {
             return None;
         }
-        let code = Emit::new(program, function, &self.helpers).run();
+        let code = Emit::new(program, function, &self.helpers, self.direct).run();
         let mapping = Mapping::write(&code)?;
         self.code.push(mapping);
         self.finalized = false;
@@ -318,6 +348,10 @@ struct Emit<'a> {
     function: &'a Function,
     safepoint: usize,
     call: usize,
+    open: usize,
+    close: usize,
+    /// Whether a compiled callee is reached by emitted code. See [`Jit::direct`].
+    direct: bool,
     /// Which IR instruction is being emitted.
     ///
     /// Only a raise reads it — [`NativeCtx::raise_pc`] is how the runtime finds
@@ -342,13 +376,16 @@ struct Emit<'a> {
 }
 
 impl<'a> Emit<'a> {
-    fn new(program: &'a Program, function: &'a Function, helpers: &Helpers) -> Self {
+    fn new(program: &'a Program, function: &'a Function, helpers: &Helpers, direct: bool) -> Self {
         let blocks = leaders(program, function);
         Emit {
             program,
             function,
             safepoint: helpers.safepoint,
             call: helpers.call,
+            open: helpers.open,
+            close: helpers.close,
+            direct,
             pc: 0,
             code: Vec::new(),
             fixups: Vec::new(),
@@ -882,6 +919,47 @@ impl<'a> Emit<'a> {
         self.jmp(Target::Pc(default));
     }
 
+    /// [`Inst::Call`](cove_ir::Inst::Call), one of two ways.
+    ///
+    /// [`Emit::callee_direct`] where this generator was asked for direct calls
+    /// and the call site admits one, and [`Emit::callee_mediated`] otherwise.
+    /// Which one a *particular call* takes at run time is a third question, and
+    /// the runtime answers it: a callee with no compiled code is reached through
+    /// the mediated helper whatever this emitted.
+    fn callee(&mut self, dst: Slot, callee: u32, args: u32) {
+        if self.direct && self.direct_admits(callee, args) {
+            self.callee_direct(dst, callee, args);
+        } else {
+            self.callee_mediated(dst, callee, args);
+        }
+    }
+
+    /// Whether a direct call can be emitted for this call site.
+    ///
+    /// Two conditions, and both are about what emitted code has to know
+    /// *statically* to copy the arguments itself:
+    ///
+    /// - the arity matches. A mismatch is a lowering bug, and the runtime has
+    ///   the sentence for it — `wrong_arity` — inside `open_frame`, which only
+    ///   the mediated path reaches. So a mismatched call site is emitted the old
+    ///   way and refused by the old message rather than given a second one here;
+    /// - every parameter word of the callee's frame is at an offset the encoder
+    ///   can name. The subset already bounds the *caller's* slots; this is the
+    ///   callee's, which this function is the first thing to address.
+    fn direct_admits(&self, callee: u32, args: u32) -> bool {
+        let target = self.program.function(FunctionId(callee));
+        let list = self.program.arg_list(ArgsId(args));
+        if list.len() != target.params.len() {
+            return false;
+        }
+        let words: u32 = target
+            .params
+            .iter()
+            .map(|layout| self.program.layout(*layout).width())
+            .sum();
+        words == 0 || slot_offset(words - 1).is_some()
+    }
+
     /// [`Inst::Call`](cove_ir::Inst::Call), handed to the runtime whole.
     ///
     /// See [`crate::abi::CallFn`] for why the frame is not opened here. The six
@@ -892,7 +970,7 @@ impl<'a> Emit<'a> {
     /// so the byte offset this function keeps is shifted back down — the one
     /// place the prologue's decision to keep bytes rather than words costs an
     /// instruction.
-    fn callee(&mut self, dst: Slot, callee: u32, args: u32) {
+    fn callee_mediated(&mut self, dst: Slot, callee: u32, args: u32) {
         // A call may allocate and an allocation may collect, so this is a
         // safepoint whether the callee reaches one or not: the unpaid work is
         // published and the accumulator cleared, and the helper charges it.
@@ -920,6 +998,147 @@ impl<'a> Emit<'a> {
         self.bind(on);
         // The helper is allowed to have grown the stack, so the frame pointer
         // derived before the call is not to be used after it.
+        self.frame_live = false;
+    }
+
+    /// [`Inst::Call`](cove_ir::Inst::Call) where the callee's code is reached
+    /// **by this code**, rather than by the runtime on its behalf.
+    ///
+    /// See [`crate::abi::OpenFn`] and [`crate::abi::CloseFn`] for the two halves
+    /// the runtime keeps and why it keeps them: everything that changes how long
+    /// a `Vec` the runtime owns is, and everything [ADR 0040] counts. What moves
+    /// here is the part the lowering settled and a code generator therefore knows
+    /// without asking — the arguments, at their slots and their widths — and the
+    /// entry itself.
+    ///
+    /// ```text
+    ///   publish the unpaid work          (the helper charges it)
+    ///   open(ctx, base, pc, callee, args, dst)
+    ///   rax = the callee's entry, or null if the runtime finished the call
+    ///   rdx = the callee's frame, as a word index, or that call's outcome
+    ///   ---- rax != 0: the frame is open and empty ----
+    ///   r15 = the frame; store each parameter word into it from this frame
+    ///   entry(ctx, r15, this frame, dst)   -- the call, and it is a `call`
+    ///   close(ctx, outcome, callee)        (the frame comes off)
+    ///   ---- rax == 0 ----
+    ///   the outcome is in rdx and there is nothing to enter
+    ///   ---- both ----
+    ///   anything but `Returned` leaves, with that outcome
+    /// ```
+    ///
+    /// Three things in it are load-bearing and none is obvious.
+    ///
+    /// **The callee is handed this function's own `ctx`.** A mediated call builds
+    /// the callee a context of its own, which is why it has to republish the
+    /// caller's afterwards; sharing one means every helper the callee reached
+    /// already stored the current words pointer and chunk table where this
+    /// function will look. `pending_work` is not shared state between them
+    /// either, because each frame accumulates its own in [`WORK`] and only
+    /// publishes it at a hand-over.
+    ///
+    /// **`r15` holds the callee's frame across the entry call**, and it is
+    /// [`HEAP_SPARE`] — a register that holds a value only *inside* the heap
+    /// address template, so there is nothing live in it here. It is callee-saved,
+    /// so the compiled callee's own prologue preserves it, and no value is pushed
+    /// to keep it: the seven pushes of the prologue are what leave `rsp` aligned
+    /// at a `call`, and a push here would undo that.
+    ///
+    /// **The frame pointer is dead twice**, once after `open` — which pushed a
+    /// frame, so the words may have moved before the arguments are stored — and
+    /// once after `close`.
+    ///
+    /// [ADR 0040]: ../../../../docs/adr/0040-a-bound-outlives-its-backend.md
+    fn callee_direct(&mut self, dst: Slot, callee: u32, args: u32) {
+        // A call is a safepoint, whichever way it is made: the unpaid work is
+        // published and the accumulator cleared, and `open` charges it.
+        self.store(CTX, OFF_PENDING_WORK, WORK);
+        self.xor_rr(WORK, WORK);
+
+        self.mov_rr(RDI, CTX);
+        self.mov_rr(RSI, BASE_BYTES);
+        self.shr_imm8(RSI, 3);
+        self.mov_imm32(RDX, self.pc as i32);
+        self.mov_imm32(RCX, callee as i32);
+        self.mov_imm32(R8, args as i32);
+        self.mov_imm32(R9, dst as i32);
+        self.mov_imm64(RAX, self.open as i64);
+        self.call(RAX);
+
+        let finished = self.label();
+        let joined = self.label();
+        self.test_rr(RAX, RAX);
+        self.jcc(CC_E, Target::Label(finished));
+
+        // The frame `open` made, kept where the entry call cannot clobber it.
+        self.mov_rr(HEAP_SPARE, RDX);
+        // `push_frame` is a `Vec::resize`, so the pointer derived before the
+        // hand-over is not to be used after it.
+        self.frame_live = false;
+
+        let target = self.program.function(FunctionId(callee));
+        let widths: Vec<u32> = target
+            .params
+            .iter()
+            .map(|layout| self.program.layout(*layout).width())
+            .collect();
+        let slots: Vec<Slot> = self
+            .program
+            .arg_list(ArgsId(args))
+            .iter()
+            .map(|arg| arg.slot)
+            .collect();
+        if widths.iter().any(|width| *width > 0) {
+            // `rdi` is the callee frame's first word. `RDI` is caller-saved and
+            // holds nothing between instructions, and nothing below calls
+            // anything until the stores are done.
+            self.load(RDX, CTX, OFF_WORDS);
+            self.mov_rr(RDI, HEAP_SPARE);
+            self.shl_imm8(RDI, 3);
+            self.add_rr(RDI, RDX);
+            let mut at = 0;
+            for (slot, width) in slots.iter().zip(&widths) {
+                for word in 0..*width {
+                    // Out of this frame and into the callee's, one word at a
+                    // time: the two runs are in different frames and cannot
+                    // overlap, so nothing has to be held first — which is the
+                    // difference from [`Emit::copy`].
+                    self.load_slot(RDX, slot + word);
+                    let into = slot_offset(at + word).expect("`direct_admits` bounded every word");
+                    self.store(RDI, into, RDX);
+                }
+                at += width;
+            }
+        }
+
+        // The call: `entry(ctx, callee_base, return_base, return_slot)`, and the
+        // destination is this frame and the slot the lowering settled — ADR
+        // 0057's two indices, taken from the register the prologue put them in.
+        self.mov_rr(RDI, CTX);
+        self.mov_rr(RSI, HEAP_SPARE);
+        self.mov_rr(RDX, BASE_BYTES);
+        self.shr_imm8(RDX, 3);
+        self.mov_imm32(RCX, dst as i32);
+        self.call(RAX);
+
+        // `close(ctx, outcome, callee)`, which answers the outcome it was given.
+        self.mov_rr(RDI, CTX);
+        self.mov_rr32(RSI, RAX);
+        self.mov_imm32(RDX, callee as i32);
+        self.mov_imm64(RAX, self.close as i64);
+        self.call(RAX);
+        self.jmp(Target::Label(joined));
+
+        // The runtime finished the call itself — an encoded callee, or a refusal
+        // — and the outcome is the second word it answered.
+        self.bind(finished);
+        self.mov_rr32(RAX, RDX);
+
+        self.bind(joined);
+        let on = self.label();
+        self.test_rr32(RAX, RAX);
+        self.jcc(CC_E, Target::Label(on));
+        self.leave_answered();
+        self.bind(on);
         self.frame_live = false;
     }
 
