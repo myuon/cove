@@ -98,7 +98,6 @@ use cove_ir::{
 
 use crate::budget::Meter;
 use crate::error::RuntimeError;
-use crate::interp::stopped_here;
 use crate::vm::cell;
 use crate::vm::mem::Overflow;
 
@@ -460,6 +459,141 @@ fn open_frame(
 /// `floor` is the frame depth this turn of the loop was entered at, which a
 /// `return` below is what ends it — one loop serves both a whole run and a
 /// host's callback into the middle of one.
+/// How many payload words a run of `bytes` bytes touches, as a unit of work.
+///
+/// A word is the unit because a word is what the memory moves: charging per
+/// byte would price a one-word copy at eight and make a byte run eight times
+/// dearer than the `Array` it shares a heap with.
+#[inline]
+fn words_of_bytes(bytes: i64) -> u64 {
+    (bytes.max(0) as u64).div_ceil(8)
+}
+
+/// How many bytes a bulk operation moves between two safepoints.
+///
+/// One [`SAFEPOINT_STRIDE`] of work, expressed in bytes, so a chunk costs
+/// exactly the stride and the poll that follows it is due. This is the `T` of
+/// [ADR 0040](../../../../docs/adr/0040-a-bound-outlives-its-backend.md)'s
+/// `S + T` for a bulk operation: a cancelled or out-of-fuel run gets no
+/// further than one chunk past the bound, whatever the length it was asked
+/// to copy.
+const BULK_CHUNK_BYTES: i64 = (SAFEPOINT_STRIDE * 8) as i64;
+
+/// [`Inst::CopyBytes`], checked and copied in bounded chunks.
+///
+/// Out of line, and out of the dispatch loop's body, for the reason
+/// [`crate::vm::debug`] records: this loop is sensitive to how much code sits
+/// in it, not only to what that code does.
+///
+/// The chunking is the correctness argument rather than a refinement of it.
+/// One `copy-bytes` may move far more than a stride of work, and charging for
+/// all of it afterwards would let a cancelled or out-of-fuel run copy the
+/// whole range first —
+/// [ADR 0040](../../../../docs/adr/0040-a-bound-outlives-its-backend.md)
+/// promises `S + T` of Cove work once a bound becomes true, not `S + T` plus
+/// the length of the copy.
+///
+/// The caller has already `sync`ed, so a collection reached from inside here
+/// walks a current frame, and `dst` and `src` are rooted by the slots this
+/// read them out of.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn copy_bytes(
+    machine: &mut Machine<'_>,
+    program: &Program,
+    budget: &Meter,
+    base: u64,
+    args: &[cove_ir::Arg],
+    id: FunctionId,
+    pc: usize,
+) -> Result<(), RuntimeError> {
+    let refuse = |machine: &Machine<'_>, error: RuntimeError| error.at(machine.span(id, pc));
+    let dst = machine.mem.slot(base, args[0].slot);
+    let dst_at = machine.mem.slot(base, args[1].slot) as i64;
+    let src = machine.mem.slot(base, args[2].slot);
+    let src_at = machine.mem.slot(base, args[3].slot) as i64;
+    let len = machine.mem.slot(base, args[4].slot) as i64;
+    if dst == 0 || src == 0 {
+        return Err(refuse(machine, null_object()));
+    }
+    if len < 0 {
+        return Err(refuse(
+            machine,
+            RuntimeError::new(format!(
+                "`copyBytes`'s length is `{len}`, and a copy cannot have a negative length"
+            )),
+        ));
+    }
+    if !matches!(
+        program.layout(machine.mem.object_layout(dst)).shape,
+        Shape::Bytes
+    ) {
+        return Err(refuse(
+            machine,
+            RuntimeError::new(
+                "`copyBytes`'s destination is not a byte run under construction, and only one \
+                 of those may be written into",
+            ),
+        ));
+    }
+    if !matches!(
+        program.layout(machine.mem.object_layout(src)).shape,
+        Shape::Str | Shape::Bytes
+    ) {
+        return Err(refuse(
+            machine,
+            RuntimeError::new(
+                "`copyBytes`'s source is neither a `String` nor a byte run under construction",
+            ),
+        ));
+    }
+    let src_len = machine.mem.object_len(src) as i64;
+    if src_at < 0 || src_at.checked_add(len).is_none_or(|end| end > src_len) {
+        return Err(refuse(
+            machine,
+            RuntimeError::new(format!(
+                "`copyBytes` reads {len} byte(s) from {src_at} of a source of {src_len}"
+            )),
+        ));
+    }
+    let dst_len = machine.mem.object_len(dst) as i64;
+    if dst_at < 0 || dst_at.checked_add(len).is_none_or(|end| end > dst_len) {
+        return Err(refuse(
+            machine,
+            RuntimeError::new(format!(
+                "`copyBytes` writes {len} byte(s) to {dst_at} of a destination of {dst_len}"
+            )),
+        ));
+    }
+    // The chunks run in the direction the whole copy runs in. Splitting a
+    // `memmove` into pieces does not preserve its meaning by itself: copying
+    // a run's bytes to a higher offset in *itself*, front first, makes each
+    // chunk overwrite the input of the next — and every chunk being correct
+    // in isolation does not save it. So an overlapping forward shift is
+    // chunked from the tail, which is the same reason
+    // `Machine::copy_string_bytes` walks it backwards inside one chunk.
+    let descending = dst == src && dst_at > src_at;
+    let mut done: i64 = 0;
+    while done < len {
+        let take = (len - done).min(BULK_CHUNK_BYTES);
+        let offset = if descending { len - done - take } else { done };
+        machine.copy_string_bytes(
+            dst,
+            (dst_at + offset) as usize,
+            src,
+            (src_at + offset) as usize,
+            take as usize,
+        );
+        machine.bulk_work += words_of_bytes(take);
+        done += take;
+        if machine.work() - machine.charged_work >= SAFEPOINT_STRIDE {
+            machine.safepoint(budget, id, pc)?;
+            machine.next_check = machine.next_question();
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn dispatch<'s, 'a>(
     machine: &mut Machine<'a>,
     encoded: &Encoded,
@@ -478,41 +612,26 @@ pub(super) fn dispatch<'s, 'a>(
 
     loop {
         machine.instructions += 1;
-        // The same one comparison the enum loop makes, answering the same two
-        // questions: `next_check` is the smaller of the next safepoint and
-        // the next debug stop. Everything inside is that loop's lines in that
-        // loop's order, because a second accounting would be a second thing
-        // to keep in step with ADR 0024 and ADR 0040.
+        // One increment and one comparison, which is what this loop has
+        // always been and what it measurably has to stay: `next_check` is the
+        // smaller of the next safepoint and the next debug stop, and it is in
+        // *instruction* coordinates so that the bulk work of ADR 0052 is
+        // absorbed by the threshold rather than by a second counter here.
+        // Everything inside is that loop's lines in that loop's order,
+        // because a second accounting would be a second thing to keep in step
+        // with ADR 0024 and ADR 0040.
         if machine.instructions >= machine.next_check {
             machine.sync(pc);
             if machine.debugger.is_some() {
                 machine.ask(id, pc)?;
             }
             // Elapsed work since the last charge, not equality with a
-            // multiple of it. An instruction that charges for the bytes it
+            // multiple of it: an instruction that charges for the words it
             // moved steps *over* the multiple it would have landed on, and
-            // the old condition then answered false — losing the
-            // cancellation check, the fuel accounting and the collector's
-            // poll together, and only for a run that did bulk work.
-            // `charged` is set to `instructions` right below, so while every
-            // instruction costs one this fires at exactly the counts the
-            // multiple fired at, which
-            // `debug::tests::the_safepoint_fires_at_the_same_counts_as_it_did_before`
-            // is the proof of. ADR 0052 asks for this; ADR 0051 shipped the
-            // gap.
-            if machine.instructions - machine.charged >= SAFEPOINT_STRIDE {
-                stopped_here(
-                    machine.cancellation.as_ref(),
-                    &machine.stops,
-                    machine.span(id, pc),
-                )?;
-                let gathered = machine.instructions - machine.charged;
-                machine.charged = machine.instructions;
-                if let Err(stopped) = budget.safepoint(gathered) {
-                    return Err(budget.to_runtime_error(stopped).at(machine.span(id, pc)));
-                }
-                let live = Live(machine);
-                machine.mem.poll(&live);
+            // the old condition then answered false, losing the cancellation
+            // check, the fuel accounting and the collector's poll together.
+            if machine.work() - machine.charged_work >= SAFEPOINT_STRIDE {
+                machine.safepoint(budget, id, pc)?;
             }
             machine.next_check = machine.next_question();
         }
@@ -1112,56 +1231,14 @@ pub(super) fn dispatch<'s, 'a>(
             // calling it — nothing past this point may fail.
             COPY_BYTES => {
                 machine.sync(pc - 1);
+                // The whole of this instruction lives behind one call. The
+                // bounds checks and the chunk loop together are far more code
+                // than a dispatch arm should put in the way of the arms around
+                // it — ADR 0051 named that cost when it added the opcodes, and
+                // `crate::vm::debug` measured 4.3% for a smaller body in this
+                // same loop.
                 let args = program.arg_list(ArgsId(held.lo()));
-                let dst = machine.mem.slot(base, args[0].slot);
-                let dst_at = machine.mem.slot(base, args[1].slot) as i64;
-                let src = machine.mem.slot(base, args[2].slot);
-                let src_at = machine.mem.slot(base, args[3].slot) as i64;
-                let len = machine.mem.slot(base, args[4].slot) as i64;
-                if dst == 0 {
-                    fail!(null_object());
-                }
-                if src == 0 {
-                    fail!(null_object());
-                }
-                if len < 0 {
-                    fail!(RuntimeError::new(format!(
-                        "`copyBytes`'s length is `{len}`, and a copy cannot have a negative \
-                         length"
-                    )));
-                }
-                if !matches!(
-                    program.layout(machine.mem.object_layout(dst)).shape,
-                    Shape::Bytes
-                ) {
-                    fail!(RuntimeError::new(
-                        "`copyBytes`'s destination is not a byte run under construction, and \
-                         only one of those may be written into"
-                    ));
-                }
-                if !matches!(
-                    program.layout(machine.mem.object_layout(src)).shape,
-                    Shape::Str | Shape::Bytes
-                ) {
-                    fail!(RuntimeError::new(
-                        "`copyBytes`'s source is neither a `String` nor a byte run under \
-                         construction"
-                    ));
-                }
-                let src_len = machine.mem.object_len(src) as i64;
-                if src_at < 0 || src_at.checked_add(len).is_none_or(|end| end > src_len) {
-                    fail!(RuntimeError::new(format!(
-                        "`copyBytes` reads {len} byte(s) from {src_at} of a source of {src_len}"
-                    )));
-                }
-                let dst_len = machine.mem.object_len(dst) as i64;
-                if dst_at < 0 || dst_at.checked_add(len).is_none_or(|end| end > dst_len) {
-                    fail!(RuntimeError::new(format!(
-                        "`copyBytes` writes {len} byte(s) to {dst_at} of a destination of \
-                         {dst_len}"
-                    )));
-                }
-                machine.copy_string_bytes(dst, dst_at as usize, src, src_at as usize, len as usize);
+                copy_bytes(machine, program, budget, base, args, id, pc - 1)?;
             }
             // ADR 0051's finish: validated once, and turned into the answer
             // without copying its payload. A `Shape::Bytes` run and a
@@ -2020,6 +2097,269 @@ mod tests {
                     "source {source} dst_at={dst_at} src_at={src_at} len={len}"
                 );
             }
+        }
+    }
+
+    // --- ADR 0052: bulk work is bounded work -------------------------------
+
+    /// A run that copies `bytes` bytes in one `copy-bytes`, with a fixture
+    /// whose only other instructions are the two allocations and a return.
+    fn one_big_copy(bytes: i64) -> (cove_ir::Program, cove_ir::FunctionId) {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        build.string_layout();
+        let run = build.bytes_layout();
+        let copy = build.args(&[(1, run), (3, int), (2, run), (3, int), (0, int)]);
+        let entry = build.function(
+            "copier",
+            &[int],
+            &[Repr::Int, Repr::Ref, Repr::Ref, Repr::Int],
+            run,
+            vec![
+                Inst::AllocBytes { dst: 1, len: 0 },
+                Inst::AllocBytes { dst: 2, len: 0 },
+                Inst::Int { dst: 3, value: 0 },
+                Inst::CopyBytes { args: copy },
+                Inst::Return { src: 1 },
+            ],
+        );
+        let _ = bytes;
+        (build.done(), entry)
+    }
+
+    /// **A copy is charged for the words it moves, and overspends its fuel by
+    /// less than one chunk plus one stride — not by the length of the copy.**
+    ///
+    /// This is `responsiveness.rs`'s
+    /// `an_exhausted_fuel_budget_is_overspent_by_less_than_one_gathering`
+    /// for an instruction no Cove source can reach yet, and it is the
+    /// assertion that makes the proportional charge honest. Asserting only
+    /// that the run *stops* would pass just as well for a copy that ran to
+    /// the end of a megabyte first, which is what ADR 0040's `S + T` forbids.
+    #[test]
+    fn a_bulk_copy_overspends_its_fuel_by_less_than_one_chunk() {
+        const BYTES: i64 = 1 << 20;
+        let (program, entry) = one_big_copy(BYTES);
+        let words = (BYTES as u64).div_ceil(8);
+        for limit in [1_024u64, 8_192, 40_000] {
+            let budget = crate::budget::Budget::new(crate::budget::Limits {
+                fuel: Some(limit),
+                ..crate::budget::Limits::default()
+            });
+            let mut machine = Machine::new(&program, 1 << 22);
+            let error = machine
+                .run(entry, &[BYTES as u64], &budget.meter())
+                .expect_err("a copy past its fuel is stopped");
+            assert_eq!(error.outcome, crate::trace::RunOutcome::Fuel);
+
+            // The bound: one chunk of work, plus the stride the loop may
+            // gather before it looks. Emphatically not `words`.
+            let bound = limit + words_of_bytes(BULK_CHUNK_BYTES) + SAFEPOINT_STRIDE;
+            let spent = budget.fuel_spent();
+            assert!(
+                spent <= bound,
+                "a {BYTES}-byte copy under a fuel limit of {limit} spent {spent}, \
+                 past the bound of {bound}; the whole copy would have been {words}"
+            );
+            assert!(
+                spent < words,
+                "and it must not have copied the whole {words} words first"
+            );
+        }
+    }
+
+    /// **A cancelled run stops inside a large copy rather than after it.**
+    ///
+    /// The flag is set before the run begins, so the first safepoint the copy
+    /// reaches is the one that answers. Without chunking there is no safepoint
+    /// until the copy has finished, and the assertion on `work` is what tells
+    /// the two apart: a megabyte is 131,072 words, and a run that stopped
+    /// promptly has done a few thousand.
+    #[test]
+    fn a_cancelled_run_stops_inside_a_large_copy() {
+        const BYTES: i64 = 1 << 20;
+        let (program, entry) = one_big_copy(BYTES);
+        let budget = crate::budget::Budget::new(crate::budget::Limits::default());
+        budget.cancellation().cancel();
+        let mut machine = Machine::new(&program, 1 << 22);
+        let error = machine
+            .run(entry, &[BYTES as u64], &budget.meter())
+            .expect_err("a cancelled run does not answer");
+        assert_eq!(error.outcome, crate::trace::RunOutcome::Cancelled);
+        let bound = words_of_bytes(BULK_CHUNK_BYTES) + SAFEPOINT_STRIDE;
+        assert!(
+            machine.work() <= bound,
+            "a cancelled run did {} words of work inside a {}-word copy, past \
+             the bound of {bound}",
+            machine.work(),
+            (BYTES as u64).div_ceil(8)
+        );
+    }
+
+    /// **A collection with a half-filled run live keeps it, and keeps every
+    /// byte already written into it.**
+    ///
+    /// The heap is small and the run allocates garbage on purpose, so the
+    /// allocation between the two copies *must* collect — and the assertion on
+    /// `collections` is what makes this test mean anything. Without it the test
+    /// passes when no collection happens at all, which is what the first
+    /// version of it did.
+    ///
+    /// The collection lands between two `copy-bytes` rather than inside one,
+    /// and that is not a weaker test than it sounds: it is the only place a
+    /// single-task run can put one. `Memory::poll` collects when another task
+    /// has *requested* a stop-the-world, and a copy allocates nothing, so
+    /// nothing raises that request mid-copy here — the chunk poll is where
+    /// this task would join a collection another task asked for. What the
+    /// property needs either way is that a `Shape::Bytes` run half full of
+    /// bytes is traced as a live object and found through the frame slot
+    /// holding it, and that is what this walks.
+    #[test]
+    fn a_collection_with_a_half_filled_run_live_keeps_every_byte_written() {
+        const BYTES: i64 = 1024;
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let str_layout = build.string_layout();
+        let run = build.bytes_layout();
+        // s1 is the run being filled; s2 is the source; s5 is garbage,
+        // reallocated on every turn of a loop so the heap has to collect.
+        let first = build.args(&[(1, run), (3, int), (2, run), (3, int), (4, int)]);
+        let second = build.args(&[(1, run), (4, int), (2, run), (4, int), (4, int)]);
+        let entry = build.function(
+            "half",
+            &[],
+            &[
+                Repr::Int,
+                Repr::Ref,
+                Repr::Ref,
+                Repr::Int,
+                Repr::Int,
+                Repr::Ref,
+            ],
+            str_layout,
+            vec![
+                Inst::Int {
+                    dst: 0,
+                    value: BYTES,
+                },
+                Inst::AllocBytes { dst: 1, len: 0 },
+                Inst::AllocBytes { dst: 2, len: 0 },
+                Inst::Int { dst: 3, value: 0 },
+                Inst::Int {
+                    dst: 4,
+                    value: BYTES / 2,
+                },
+                // The first half, so the run is half written from here on.
+                Inst::CopyBytes { args: first },
+                // Garbage, cleared between allocations so the previous one
+                // is unreachable when the next is asked for. The heap holds
+                // the two runs and one spare, so every allocation after the
+                // first has to reclaim before it fits.
+                Inst::AllocBytes { dst: 5, len: 0 },
+                Inst::Clear {
+                    slot: 5,
+                    layout: run,
+                },
+                Inst::AllocBytes { dst: 5, len: 0 },
+                Inst::Clear {
+                    slot: 5,
+                    layout: run,
+                },
+                Inst::AllocBytes { dst: 5, len: 0 },
+                Inst::Clear {
+                    slot: 5,
+                    layout: run,
+                },
+                // And the second half, into a run a collection has now walked.
+                Inst::CopyBytes { args: second },
+                Inst::FinishString { dst: 1, bytes: 1 },
+                Inst::Return { src: 1 },
+            ],
+        );
+        let program = build.done();
+        // Two runs of 129 words each and room for about one more, so the
+        // second piece of garbage cannot be handed out until the first is
+        // reclaimed — which is what makes the collection certain rather than
+        // merely possible.
+        let mut machine = Machine::new(&program, 400);
+        let before = machine.collected().collections;
+        let answer = machine
+            .run(entry, &[], &budget())
+            .expect("the run answers a string");
+        let after = machine.collected().collections;
+        assert!(
+            after > before,
+            "this fixture exists to collect with a half-filled run live, and \
+             it collected {} time(s)",
+            after - before
+        );
+        let text = answer[0];
+        assert_eq!(machine.object_len(text) as i64, BYTES);
+        assert_eq!(machine.string_bytes(text), vec![0u8; BYTES as usize]);
+    }
+
+    /// **An overlapping copy answers the source as it was, in both directions
+    /// and across chunk boundaries.**
+    ///
+    /// `Inst::CopyBytes` admits a `Shape::Bytes` source, so `src` and `dst` may
+    /// be one run and the ranges may overlap. A range copy means `memmove`: a
+    /// forward shift has to be walked from the tail, or each write lands on a
+    /// byte the copy has not read yet.
+    ///
+    /// Chunking is the reason the lengths here are what they are. Splitting a
+    /// `memmove` into chunks does not preserve its meaning by itself — chunk
+    /// each piece correctly, front first, and the pieces still overwrite one
+    /// another. So every case below is longer than `BULK_CHUNK_BYTES` and each
+    /// overlap straddles a chunk boundary, which is exactly what a
+    /// per-chunk-only fix passes and this does not.
+    #[test]
+    fn an_overlapping_copy_moves_bytes_as_memmove_does() {
+        const BYTES: i64 = 3 * BULK_CHUNK_BYTES;
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        build.string_layout();
+        let run = build.bytes_layout();
+        // shift(run, dst_at, src_at, len) over one object.
+        let args = build.args(&[(0, run), (1, int), (0, run), (2, int), (3, int)]);
+        let entry = build.function(
+            "shift",
+            &[run, int, int, int],
+            &[Repr::Ref, Repr::Int, Repr::Int, Repr::Int],
+            run,
+            vec![Inst::CopyBytes { args }, Inst::Return { src: 0 }],
+        );
+        let program = build.done();
+
+        let pattern: Vec<u8> = (0..BYTES).map(|n| (n % 251) as u8).collect();
+        // Forward and backward shifts, each crossing at least one chunk edge.
+        for (dst_at, src_at, len) in [
+            (BULK_CHUNK_BYTES + 3, 0i64, 2 * BULK_CHUNK_BYTES - 3),
+            (0, BULK_CHUNK_BYTES + 3, 2 * BULK_CHUNK_BYTES - 3),
+            (9, 1, 2 * BULK_CHUNK_BYTES),
+            (1, 9, 2 * BULK_CHUNK_BYTES),
+            (BULK_CHUNK_BYTES, BULK_CHUNK_BYTES - 1, BULK_CHUNK_BYTES + 1),
+        ] {
+            let mut machine = Machine::new(&program, 1 << 16);
+            let obj = machine
+                .allocate(program.bytes_layout, BYTES)
+                .expect("a run fits");
+            machine.write_bytes(obj, &pattern);
+            machine
+                .run(
+                    entry,
+                    &[obj, dst_at as u64, src_at as u64, len as u64],
+                    &budget(),
+                )
+                .expect("a copy within its bounds answers");
+
+            let mut want = pattern.clone();
+            want.copy_within(src_at as usize..(src_at + len) as usize, dst_at as usize);
+            assert_eq!(
+                machine.string_bytes(obj),
+                want,
+                "copy_within({src_at}..{}, {dst_at}) over {BYTES} bytes",
+                src_at + len
+            );
         }
     }
 

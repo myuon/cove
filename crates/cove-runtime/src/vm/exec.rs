@@ -447,7 +447,36 @@ pub(crate) struct Machine<'a> {
     /// run, because a task id is a trace identity and two tasks spawned at
     /// the same time on two threads must not share one.
     next_task: u64,
+    /// Instructions dispatched, exactly.
+    ///
+    /// This is an *observable*: `cove-bench` reports it, so does
+    /// `cove run --profile`, so does the debugger, and
+    /// [`crate::vm::profile`] asserts that its per-opcode totals sum to it.
+    /// It counts opcodes and nothing else, so a `copy-bytes` that moved a
+    /// megabyte is one, the same as an `add.int`.
+    ///
+    /// What a run is *charged* is [`Machine::work`], which is a different
+    /// question and now a different number.
     instructions: u64,
+    /// Work charged beyond one per instruction.
+    ///
+    /// Only the bulk byte operations of
+    /// [ADR 0052](../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)
+    /// add to it, one per payload word they move, which is that ADR's
+    /// "charged proportionally to the bytes or words examined".
+    /// [`Machine::work`] is `instructions + bulk_work` and is the coordinate
+    /// fuel, the safepoint schedule and every stop bound are stated in.
+    ///
+    /// It is an *offset* rather than a parallel counter for one measured
+    /// reason: the dispatch loop must keep exactly the one increment and the
+    /// one comparison it already had. Maintaining a second counter beside
+    /// `instructions` in the loop cost 3% on `examples/covefmt` — 4.05s
+    /// against 3.93s, interleaved, four runs an arm twice — which is the same
+    /// order as the 2.4% `docs/VM_ARCHITECTURE.md` measured for a second
+    /// per-instruction branch. Keeping it here means the loop is untouched
+    /// and `next_check` absorbs the offset instead, since it is recomputed
+    /// only when something charges in bulk.
+    bulk_work: u64,
     /// The instruction count at which the loop next asks a question.
     ///
     /// The whole of what a debugger costs the dispatch loop, and it is
@@ -492,7 +521,7 @@ pub(crate) struct Machine<'a> {
     /// [ADR 0024](../../../../docs/adr/0024-a-stop-is-a-bound-not-a-point.md)
     /// says pending fuel is never lost, and this is the counter that makes
     /// that checkable.
-    charged: u64,
+    charged_work: u64,
     /// How long this machine has spent inside host calls.
     ///
     /// The oracle charges the same measurement against every open timing
@@ -756,7 +785,8 @@ impl<'a> Machine<'a> {
             task: ENTRY_TASK,
             next_task: 1,
             instructions: 0,
-            charged: 0,
+            charged_work: 0,
+            bulk_work: 0,
             host_wait: Duration::ZERO,
             collected: Collected::default(),
             held: Vec::new(),
@@ -829,7 +859,8 @@ impl<'a> Machine<'a> {
             task,
             next_task: 1,
             instructions: 0,
-            charged: 0,
+            charged_work: 0,
+            bulk_work: 0,
             host_wait: Duration::ZERO,
             collected: Collected::default(),
             held: Vec::new(),
@@ -917,11 +948,50 @@ impl<'a> Machine<'a> {
     /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)
     /// asks for and what the multiple could not survive — see the safepoint
     /// condition in [`crate::vm::exec::encoded`].
+    /// What this run has been charged for: one per instruction, plus the
+    /// words the bulk operations moved.
+    #[inline]
+    fn work(&self) -> u64 {
+        self.instructions + self.bulk_work
+    }
+
+    /// Cancellation, fuel and the collector's rendezvous, at `pc`.
+    ///
+    /// Lifted out of [`crate::vm::exec::encoded`]'s loop so that a bulk
+    /// operation can reach one *while it is running*. That is
+    /// [ADR 0052](../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
+    /// requirement and
+    /// [ADR 0040](../../../../docs/adr/0040-a-bound-outlives-its-backend.md)'s
+    /// arithmetic: a copy that charged for a megabyte only when it had
+    /// finished copying it would overshoot a fuel or cancellation bound by a
+    /// megabyte, however promptly the loop polled afterwards.
+    ///
+    /// The order is the loop's order and may not be rearranged — cancellation
+    /// before fuel, because a run that was asked to stop is not out of fuel;
+    /// then the collector, which must see a frame this caller has already
+    /// `sync`ed.
+    fn safepoint(&mut self, budget: &Meter, id: FunctionId, pc: usize) -> Result<(), RuntimeError> {
+        stopped_here(self.cancellation.as_ref(), &self.stops, self.span(id, pc))?;
+        let gathered = self.work() - self.charged_work;
+        self.charged_work = self.work();
+        if let Err(stopped) = budget.safepoint(gathered) {
+            return Err(budget.to_runtime_error(stopped).at(self.span(id, pc)));
+        }
+        let live = Live(self);
+        self.mem.poll(&live);
+        Ok(())
+    }
+
     #[inline]
     fn next_question(&self) -> u64 {
         match self.debugger {
             Some(_) => self.instructions + 1,
-            None => self.charged + SAFEPOINT_STRIDE,
+            // Instruction coordinates, because that is what the loop
+            // compares: the count at which `work()` will have reached a
+            // stride past the last charge. It saturates because a bulk charge
+            // can already have passed it, and a check that is due now is
+            // exactly what zero asks for.
+            None => (self.charged_work + SAFEPOINT_STRIDE).saturating_sub(self.bulk_work),
         }
     }
 
@@ -1118,9 +1188,9 @@ impl<'a> Machine<'a> {
     /// fuel from the run's budget rather than giving each task one of its
     /// own.
     fn spend_pending_fuel(&mut self, budget: &Meter) {
-        let pending = self.instructions - self.charged;
+        let pending = self.work() - self.charged_work;
         if pending != 0 {
-            self.charged = self.instructions;
+            self.charged_work = self.work();
             budget.spend(pending);
         }
     }
@@ -1171,8 +1241,8 @@ impl<'a> Machine<'a> {
     /// make an unpredictable sweep part of the cost of reaching the outside
     /// world, for a reason the budget never asked for.
     fn charge_at_host_boundary(&mut self, budget: &Meter, span: Span) -> Result<(), RuntimeError> {
-        let pending = self.instructions - self.charged;
-        self.charged = self.instructions;
+        let pending = self.work() - self.charged_work;
+        self.charged_work = self.work();
         if let Err(stopped) = budget.safepoint(pending) {
             return Err(budget.to_runtime_error(stopped).at(span));
         }
@@ -2068,20 +2138,73 @@ impl<'a> Machine<'a> {
         src_at: usize,
         len: usize,
     ) {
+        // A range copy answers the source as it *was*, which is `memmove` and
+        // not `memcpy`. The two only differ when the ranges overlap, which
+        // they can: `Inst::CopyBytes` admits a `Shape::Bytes` source, so `src`
+        // and `dst` may be the same run — a builder shifting its own bytes
+        // along is the obvious use and there is no reason for it to be the one
+        // shape of copy that corrupts.
+        //
+        // Overlap only matters within one object, and only in one direction:
+        // writing *forward* into a range that begins later than the source
+        // overwrites bytes the copy has not read yet. Everything else — two
+        // different objects, or a destination at or before the source — is
+        // safe read-then-write in ascending order.
+        if dst == src && dst_at > src_at {
+            self.copy_bytes_descending(dst, dst_at, src, src_at, len);
+        } else {
+            self.copy_bytes_ascending(dst, dst_at, src, src_at, len);
+        }
+    }
+
+    /// Eight bytes a turn, from the front.
+    fn copy_bytes_ascending(
+        &mut self,
+        dst: u64,
+        dst_at: usize,
+        src: u64,
+        src_at: usize,
+        len: usize,
+    ) {
         let src_len = self.mem.object_len(src) as usize;
         let mut done = 0;
         while done < len {
             let take = (len - done).min(8);
             let bytes = self.bytes_word(src, src_at + done, src_len);
-            let at = dst_at + done;
-            let word = (at / 8) as u32;
-            let offset = at % 8;
-            let first = take.min(8 - offset);
-            self.blend(dst, word, offset, first, bytes);
-            if first < take {
-                self.blend(dst, word + 1, 0, take - first, bytes >> (first * 8));
-            }
+            self.put_bytes(dst, dst_at + done, take, bytes);
             done += take;
+        }
+    }
+
+    /// Eight bytes a turn, from the back, for a copy that shifts a run's bytes
+    /// to a higher offset in itself.
+    fn copy_bytes_descending(
+        &mut self,
+        dst: u64,
+        dst_at: usize,
+        src: u64,
+        src_at: usize,
+        len: usize,
+    ) {
+        let src_len = self.mem.object_len(src) as usize;
+        let mut done = len;
+        while done > 0 {
+            let take = done.min(8);
+            done -= take;
+            let bytes = self.bytes_word(src, src_at + done, src_len);
+            self.put_bytes(dst, dst_at + done, take, bytes);
+        }
+    }
+
+    /// Writes the low `take` bytes of `bytes` at byte `at` of the run at
+    /// `dst`, which may straddle two payload words.
+    fn put_bytes(&mut self, dst: u64, at: usize, take: usize, bytes: u64) {
+        let word = (at / 8) as u32;
+        let offset = at % 8;
+        let first = take.min(8 - offset);
+        self.blend(dst, word, offset, first, bytes);
+        if first < take {
+            self.blend(dst, word + 1, 0, take - first, bytes >> (first * 8));
         }
     }
 
@@ -7920,47 +8043,51 @@ pub(crate) mod tests {
     /// not.**
     ///
     /// The schedule is contract arithmetic:
-    /// `docs/adr/0040-a-bound-outlives-its-backend.md` states every stop
-    /// bound in multiples of [`SAFEPOINT_STRIDE`] and `tests/responsiveness.rs`
-    /// measures each one, so the change from `instructions % S == 0` to
-    /// `instructions - charged >= S` may not move a single count today.
+    /// `docs/adr/0040-a-bound-outlives-its-backend.md` states every stop bound
+    /// in multiples of [`SAFEPOINT_STRIDE`] and `tests/responsiveness.rs`
+    /// measures each one, so neither the change from `instructions % S == 0`
+    /// to a difference nor the move into the `work` coordinate may shift a
+    /// single count while every instruction still costs one.
     /// `crate::vm::debug`'s `the_safepoint_fires_at_the_same_counts_as_it_did_before`
     /// proves that end to end through the fuel limit; this proves the
-    /// arithmetic itself, including the case that end-to-end test cannot reach
-    /// because nothing charges in bulk yet.
+    /// arithmetic, including the bulk case that test cannot reach.
     #[test]
     fn the_next_question_is_a_stride_of_work_past_the_last_charge() {
         let program = Build::default().done();
         let mut machine = Machine::new(&program, 1 << 12);
 
-        // While every instruction costs one, `charged` lands on a multiple at
-        // every safepoint, so the next question is the next multiple — which
-        // is what the condition used to say in so many words.
+        // While every instruction costs one, `charged_work` lands on a
+        // multiple at every safepoint, so the next question is the next
+        // multiple — which is what the condition used to say in so many words.
         for turn in 0..4u64 {
-            machine.charged = turn * SAFEPOINT_STRIDE;
-            machine.instructions = machine.charged + 1;
+            machine.charged_work = turn * SAFEPOINT_STRIDE;
+            machine.instructions = machine.charged_work + 1;
+            machine.bulk_work = 0;
             assert_eq!(
                 machine.next_question(),
                 (turn + 1) * SAFEPOINT_STRIDE,
                 "with {} charged, the question is the next multiple",
-                machine.charged
+                machine.charged_work
             );
         }
 
-        // And when something charges more than one, the question is still a
-        // stride of *work* away rather than a multiple the charge may have
-        // stepped clean over. `2500` is past `2048` and is not a multiple of
-        // `1024`: the old rule would have answered false here and skipped the
+        // And when a copy charges for the words it moved, the question is
+        // still a stride of *work* away rather than a multiple the charge may
+        // have stepped clean over. `2500` is past `2048` and is not a multiple
+        // of `1024`: the old rule answered false here and skipped the
         // safepoint entirely.
-        machine.charged = 0;
-        machine.instructions = 2500;
-        assert_eq!(machine.next_question(), SAFEPOINT_STRIDE);
+        machine.charged_work = 0;
+        machine.instructions = 500;
+        machine.bulk_work = 2000;
+        assert_eq!(machine.work(), 2500);
+        // Already past a stride of work, so the question is due now.
+        assert_eq!(machine.next_question(), 0);
         assert!(
-            machine.instructions - machine.charged >= SAFEPOINT_STRIDE,
+            machine.work() - machine.charged_work >= SAFEPOINT_STRIDE,
             "2500 units of work since the last charge is a safepoint"
         );
         assert!(
-            !machine.instructions.is_multiple_of(SAFEPOINT_STRIDE),
+            !machine.work().is_multiple_of(SAFEPOINT_STRIDE),
             "and 2500 is not a multiple of the stride, which is the bug"
         );
     }
