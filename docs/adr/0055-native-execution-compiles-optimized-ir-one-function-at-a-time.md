@@ -16,6 +16,10 @@
   measured against a hand-written x86-64 template compiler and lost on compile
   latency, bundle size and lines to extend while winning execution by a few per
   cent. Nothing else here is disturbed
+- Superseded in part by [ADR 0057](0057-a-native-call-returns-into-the-destination-its-caller-named.md):
+  its return path, where the callee reported a slot and the runtime copied the
+  answer out through an owned vector. The callee is now given the destination
+  and writes it. Nothing else here is disturbed
 
 ## Context
 

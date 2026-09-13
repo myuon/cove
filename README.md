@@ -449,6 +449,21 @@ tiers pay the same frame machinery per call and covefmt is short functions
 calling short functions — so the next question is the call path, decomposed
 and measured, and not the code generator.
 
+[ADR 0057](docs/adr/0057-a-native-call-returns-into-the-destination-its-caller-named.md)
+gives a compiled function the place to put its answer. The bootstrap return
+path allocated an owned vector for every call's result and then copied it again
+into the destination the lowering had already settled on `Inst::Call`'s `dst` —
+so native execution was 2.44x the VM on code holding no call and **1.08x** on
+code that did. Removing the vector alone took the call-shaped row 26% down;
+handing the callee the destination took another 6%, and together they leave
+native **1.53x** the VM where it was 1.08x. The destination is a pair of word
+indices and never a pointer, for the same reason a frame base is: the Cove
+stack is a `Vec` that reallocates, and a test deliberately moves it. The
+callee writes into its caller's frame before its own is popped, which is a
+wider aliasing contract than "a callee touches only its own frame" and is
+written down as one; publication stays on the no-safepoint return path until a
+GC argument extends it.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles
