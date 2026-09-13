@@ -11,6 +11,11 @@
 - Extends: [ADR 0019](0019-executable-ir-and-vm.md), whose executable IR remains the input to execution, and [ADR 0022](0022-the-vm-is-the-default-backend.md), whose VM remains the portable execution path while native execution is introduced
 - Preserves: [ADR 0040](0040-a-bound-outlives-its-backend.md)'s bounded stop, fuel, cancellation and Host-effect contracts
 - Does not supersede: the tree-walking interpreter as the semantic oracle, or the VM as the default backend before this ADR's adoption gate passes
+- Superseded in part by [ADR 0056](0056-the-first-code-generator-is-the-one-that-was-cheaper-everywhere.md):
+  its sentence "The first code generator is Cranelift", which a spike then
+  measured against a hand-written x86-64 template compiler and lost on compile
+  latency, bundle size and lines to extend while winning execution by a few per
+  cent. Nothing else here is disturbed
 
 ## Context
 

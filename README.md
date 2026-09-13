@@ -433,6 +433,22 @@ slot ABI and must report the mixture — and the VM stays complete, for
 restricted runtimes, for debugging, and for every function the native lowering
 does not yet cover.
 
+[ADR 0056](docs/adr/0056-the-first-code-generator-is-the-one-that-was-cheaper-everywhere.md)
+replaces ADR 0055's choice of Cranelift with a hand-written x86-64 template
+compiler, because a spike built both against the same IR and the forecast that
+had chosen Cranelift did not survive contact with it. Extending to references,
+array reads, tags, switches and calls cost the hand-written arm **202
+non-comment lines against Cranelift's 239**, and it needed no register
+allocator. On execution the two are within a few per cent in both directions;
+on everything else the template arm is 69× on compile latency, 140× on the
+stripped bundle, and 38 crates lighter. What "earn complexity through use"
+says about paying 4.7 MB for an allocator no measurement has asked for decides
+the rest. The finding that outlived both arms is elsewhere: native is 2.44×
+the VM on code holding no call and **1.08×** on code that does, because both
+tiers pay the same frame machinery per call and covefmt is short functions
+calling short functions — so the next question is the call path, decomposed
+and measured, and not the code generator.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles
