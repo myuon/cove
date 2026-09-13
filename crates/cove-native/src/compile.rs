@@ -71,7 +71,6 @@ const CALL: &str = "cove_native_call";
 const OFF_WORDS: i32 = offset_of!(NativeCtx, words) as i32;
 const OFF_CHUNKS: i32 = offset_of!(NativeCtx, chunks) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
-const OFF_RETURN_SLOT: i32 = offset_of!(NativeCtx, return_slot) as i32;
 const OFF_RAISE_CODE: i32 = offset_of!(NativeCtx, raise_code) as i32;
 const OFF_RAISE_DETAIL: i32 = offset_of!(NativeCtx, raise_detail) as i32;
 const OFF_RAISE_PC: i32 = offset_of!(NativeCtx, raise_pc) as i32;
@@ -252,18 +251,21 @@ impl Jit {
     }
 }
 
-/// `extern "C" fn(ctx: *mut NativeCtx, base: u64) -> Outcome`, in Cranelift's
-/// terms.
+/// [`Entry`], in Cranelift's terms.
 ///
-/// The return is `I32` because [`Outcome`] is `#[repr(u32)]`, and the second
-/// parameter is `I64` because `base` is a word index rather than a pointer.
-/// See [`crate::abi`] for why the signature is this and not something else.
+/// The return is `I32` because [`Outcome`] is `#[repr(u32)]`; `base` and
+/// `return_base` are `I64` because both are word indices rather than pointers;
+/// and `return_slot` is `I32` because a slot is a `u32`, which is one zero
+/// extension in [`Lower::ret`] and is the shape ADR 0057 writes down. See
+/// [`crate::abi`] for why the signature is this and not something else.
 fn entry_signature(module: &JITModule) -> Signature {
     let mut signature = module.make_signature();
     signature
         .params
         .push(AbiParam::new(module.target_config().pointer_type()));
     signature.params.push(AbiParam::new(types::I64));
+    signature.params.push(AbiParam::new(types::I64));
+    signature.params.push(AbiParam::new(types::I32));
     signature.returns.push(AbiParam::new(types::I32));
     signature
 }
@@ -311,11 +313,16 @@ struct Lower<'a, 'f> {
     safepoint: FuncRef,
     call: FuncRef,
     pointer: Type,
-    /// The two entry parameters. Defined in the entry block, which dominates
+    /// The entry parameters. Defined in the entry block, which dominates
     /// every other, so they are readable from anywhere without a block
     /// parameter of their own.
     ctx: Value,
     base: Value,
+    /// The destination, as the two indices [`Entry`] is handed. Read only by
+    /// [`Lower::ret`], and held here rather than threaded because a `return` can
+    /// be the last instruction of any block.
+    return_base: Value,
+    return_slot: Value,
     /// The unpaid work accumulator: IR instructions executed since the last
     /// safepoint.
     ///
@@ -366,8 +373,8 @@ impl<'a, 'f> Lower<'a, 'f> {
             .collect();
         let work = b.declare_var(types::I64);
 
-        // The entry block and its two parameters are set up here rather than
-        // in `run` so that `ctx` and `base` are never a placeholder: they are
+        // The entry block and its parameters are set up here rather than in
+        // `run` so that `ctx` and `base` are never a placeholder: they are
         // read by nearly every method, and a `Value` that is valid only after
         // some other method has run is the sort of invariant that survives
         // exactly as long as nobody reorders anything.
@@ -376,6 +383,8 @@ impl<'a, 'f> Lower<'a, 'f> {
         b.append_block_params_for_function_params(entry);
         let ctx = b.block_params(entry)[0];
         let base = b.block_params(entry)[1];
+        let return_base = b.block_params(entry)[2];
+        let return_slot = b.block_params(entry)[3];
         let zero = b.ins().iconst(types::I64, 0);
         b.def_var(work, zero);
 
@@ -388,6 +397,8 @@ impl<'a, 'f> Lower<'a, 'f> {
             pointer,
             ctx,
             base,
+            return_base,
+            return_slot,
             work,
             frame: None,
             chunks: None,
@@ -954,19 +965,52 @@ impl<'a, 'f> Lower<'a, 'f> {
         self.forget();
     }
 
-    /// `encoded.rs`'s `RETURN` arm, minus the copy.
+    /// `encoded.rs`'s `RETURN` arm, whole: `Function::returns`' width of words
+    /// from `base + src` to the destination, and then leave.
     ///
-    /// The encoded arm copies `Function::returns`' width from `base + src` to
-    /// `caller_base + dst`, and it can, because it has the caller's frame in
-    /// front of it. A native callee does not: the caller's frame is the
-    /// caller's, and reaching into it would put the calling convention in two
-    /// places. So the slot is reported and the copy stays with the caller,
-    /// which is the tier-independent half of the same arm.
+    /// ADR 0057. The encoded arm copies into `caller_base + dst` because it has
+    /// the caller's frame in front of it; a native callee is *given* that
+    /// destination, as the two indices [`Entry`] carries, so it copies the same
+    /// words to the same place. What used to be here — report the slot and let
+    /// the caller copy — was an owned vector and a second copy on a path
+    /// measured at 1.08x the VM.
+    ///
+    /// Three things about the shape of it:
+    ///
+    /// - **the address is formed from `NativeCtx::words` re-read here**, not from
+    ///   the frame pointer this block may be holding. They are the same pointer,
+    ///   but the destination is not in this frame and deriving it from something
+    ///   named `frame` would read as though it were;
+    /// - **a zero-width return emits nothing at all**, not even the address. The
+    ///   lowering gives a width-0 destination the next free slot number, which
+    ///   may be one the caller's frame does not have;
+    /// - **loads and stores interleave.** The source is this frame and the
+    ///   destination is the caller's, which is below it, so the two runs cannot
+    ///   overlap — unlike [`Lower::copy`], where they can and where every word is
+    ///   therefore loaded before any is stored.
     fn ret(&mut self, src: Slot) {
         let work = self.b.use_var(self.work);
         self.store_ctx(OFF_PENDING_WORK, work);
-        let slot = self.b.ins().iconst(types::I32, i64::from(src));
-        self.store_ctx(OFF_RETURN_SLOT, slot);
+        let width = self.program.layout(self.function.returns).width();
+        if width > 0 {
+            let words =
+                self.b
+                    .ins()
+                    .load(self.pointer, MemFlagsData::trusted(), self.ctx, OFF_WORDS);
+            // `return_slot` is a `u32` and the upper half of the register it
+            // arrived in is not the caller's to promise, so it is extended
+            // rather than used as it lies.
+            let slot = self.b.ins().uextend(types::I64, self.return_slot);
+            let index = self.b.ins().iadd(self.return_base, slot);
+            let bytes = self.b.ins().ishl_imm_u(index, 3);
+            let into = self.b.ins().iadd(words, bytes);
+            for word in 0..width {
+                let value = self.load_slot(src + word);
+                self.b
+                    .ins()
+                    .store(MemFlagsData::trusted(), value, into, (word * 8) as i32);
+            }
+        }
         self.leave(Outcome::Returned);
     }
 

@@ -767,8 +767,11 @@ impl Arms {
     #[allow(unused_variables)]
     fn time(&self, arm: &str, id: cove_ir::FunctionId) -> Result<(u64, i64), String> {
         let base: u64 = 8;
+        // The frame, and one word past it for the destination: ADR 0057's entry
+        // writes its answer where its caller says, and here the caller is this
+        // function.
         #[allow(unused_mut)]
-        let mut words = vec![0u64; self.frame as usize + base as usize];
+        let mut words = vec![0u64; self.frame as usize + base as usize + 1];
         match arm {
             #[cfg(feature = "cranelift")]
             "cranelift" => {
@@ -803,21 +806,29 @@ fn hex(arm: &str, entry: cove_native::Entry, bytes: u32) {
     println!();
 }
 
-/// Enters compiled code over `words` and reads the answer out of the frame.
+/// Enters compiled code over `words` and reads the answer out of the destination.
+///
+/// The destination is the last word of `words`, which is one past the frame: the
+/// entry is handed it as `return_base + return_slot` — the two indices ADR 0057
+/// widened the ABI with — and has written the answer there by the time it
+/// returns. Nothing is copied out of a reported slot, because there is no longer
+/// one to report.
 #[cfg(any(feature = "cranelift", feature = "template"))]
 fn enter(entry: cove_native::Entry, words: &mut [u64], base: u64) -> (u64, i64) {
+    let into = (words.len() - 1) as u64;
     let mut ctx = cove_native::NativeCtx::new(std::ptr::null_mut(), words.as_mut_ptr());
     let started = Instant::now();
-    // Safety: `ctx.words` is `words`, `base` indexes into it, and the frame the
-    // lowering asked for fits inside what was allocated above.
-    let outcome = unsafe { entry(&mut ctx, base) };
+    // Safety: `ctx.words` is `words`, `base` indexes into it, the frame the
+    // lowering asked for fits inside what was allocated above, and `into` is one
+    // word of it that the frame does not reach.
+    let outcome = unsafe { entry(&mut ctx, base, into, 0) };
     let elapsed = started.elapsed();
     assert_eq!(
         outcome,
         cove_native::Outcome::Returned,
         "the raced unit returns; it raises nothing and its safepoint never stops"
     );
-    let answer = words[base as usize + ctx.return_slot as usize] as i64;
+    let answer = words[into as usize] as i64;
     (elapsed.as_nanos() as u64, answer)
 }
 

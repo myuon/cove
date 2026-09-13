@@ -39,7 +39,6 @@ use crate::Unavailable;
 const OFF_WORDS: i32 = offset_of!(NativeCtx, words) as i32;
 const OFF_CHUNKS: i32 = offset_of!(NativeCtx, chunks) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
-const OFF_RETURN_SLOT: i32 = offset_of!(NativeCtx, return_slot) as i32;
 const OFF_RAISE_CODE: i32 = offset_of!(NativeCtx, raise_code) as i32;
 const OFF_RAISE_DETAIL: i32 = offset_of!(NativeCtx, raise_detail) as i32;
 const OFF_RAISE_PC: i32 = offset_of!(NativeCtx, raise_pc) as i32;
@@ -51,6 +50,7 @@ const RAX: u8 = 0;
 const RCX: u8 = 1;
 const RDX: u8 = 2;
 const RBX: u8 = 3;
+const RBP: u8 = 5;
 const RSI: u8 = 6;
 const RDI: u8 = 7;
 const R8: u8 = 8;
@@ -60,7 +60,7 @@ const R13: u8 = 13;
 const R14: u8 = 14;
 const R15: u8 = 15;
 
-// What the four long-lived registers hold. All are callee-saved, so they
+// What the five long-lived registers hold. All are callee-saved, so they
 // survive the safepoint and call helpers; `RAX`, `RCX` and `RDX` are the scratch
 // the templates compute in, and `RDX` is also what `idiv` clobbers.
 const CTX: u8 = RBX;
@@ -68,16 +68,27 @@ const BASE_BYTES: u8 = R12;
 const WORK: u8 = R13;
 const FRAME: u8 = R14;
 
+// Where the answer goes, as a *byte* offset from word zero of the segment:
+// `(return_base + return_slot) * 8`, computed once in the prologue because
+// [`Emit::ret`] is the only reader and a `return` may be the end of any block.
+//
+// `RBP` because the other callee-saved registers are taken. Nothing here keeps a
+// frame pointer in it — this arm addresses the machine stack only through `push`
+// and `pop` — so what it costs is that a profiler unwinding by frame pointers
+// cannot walk through a compiled Cove frame, which is already true of the
+// Cranelift arm's frames and of neither arm's Cove semantics.
+const RETURN_BYTES: u8 = RBP;
+
 // The three registers a heap word's address is formed in, which is the one
 // template that needs more than the three scratch above: the chunk table, the
 // chunk, and the index inside it are three live values at once.
 //
 // `RSI` and `RDI` are caller-saved and hold nothing between instructions — they
 // are written at a `call` and nowhere else — so using them here costs nothing.
-// `R15` is pushed by the prologue and is the fifth push, which is what leaves
-// `rsp` 16-byte aligned at a `call` as the System V ABI requires; it used to
-// hold nothing at all, and holding a scratch value inside one template does not
-// change what it is for.
+// `R15` is pushed by the prologue and used to be the push that left `rsp`
+// 16-byte aligned at a `call`; see [`Emit::prologue`] for what keeps that true
+// now that there are six registers to save. Holding a scratch value inside one
+// template does not change what it is for.
 const HEAP_TABLE: u8 = RSI;
 const HEAP_INDEX: u8 = RDI;
 const HEAP_SPARE: u8 = R15;
@@ -365,18 +376,36 @@ impl<'a> Emit<'a> {
         self.code
     }
 
-    /// `extern "C" fn(ctx: *mut NativeCtx, base: u64) -> Outcome`, received.
+    /// [`Entry`] received: `ctx` in `rdi`, `base` in `rsi`, `return_base` in
+    /// `rdx` and `return_slot` in `ecx`.
     ///
     /// `base` is a word index, and the only thing this function ever wants from
     /// it is the byte offset, so the shift is paid once here rather than at
-    /// every block that re-derives the frame pointer.
+    /// every block that re-derives the frame pointer. The destination is the
+    /// same: two indices arrive and one byte offset is kept, because
+    /// [`Emit::ret`] wants the offset and nothing wants the pair.
+    ///
+    /// **Seven pushes for six registers.** Six would leave `rsp` 8 mod 16 at a
+    /// `call`, and the System V ABI asks for 0; one more push is the cheapest
+    /// way to say so. It is a second push of `RETURN_BYTES` *before* that
+    /// register is written, so both of [`Emit::leave_answered`]'s pops restore
+    /// the caller's value and neither has to be a pop into a register the
+    /// outcome is in.
     fn prologue(&mut self) {
-        for reg in [CTX, BASE_BYTES, WORK, FRAME, HEAP_SPARE] {
+        for reg in [CTX, BASE_BYTES, WORK, FRAME, HEAP_SPARE, RETURN_BYTES] {
             self.push(reg);
         }
+        self.push(RETURN_BYTES);
         self.mov_rr(CTX, RDI);
         self.mov_rr(BASE_BYTES, RSI);
         self.shl_imm8(BASE_BYTES, 3);
+        // `return_slot` is a `u32` in `ecx` and the upper half of `rcx` is not
+        // the caller's to promise, so it is zeroed rather than trusted: `mov
+        // ecx, ecx` is the extension in two bytes.
+        self.mov_rr32(RCX, RCX);
+        self.mov_rr(RETURN_BYTES, RDX);
+        self.add_rr(RETURN_BYTES, RCX);
+        self.shl_imm8(RETURN_BYTES, 3);
         self.xor_rr(WORK, WORK);
     }
 
@@ -894,11 +923,28 @@ impl<'a> Emit<'a> {
         self.frame_live = false;
     }
 
-    /// `encoded.rs`'s `RETURN` arm, minus the copy: the slot is reported and the
-    /// caller does the copying, because the caller's frame is the caller's.
+    /// `encoded.rs`'s `RETURN` arm, whole: the answer's words into the
+    /// destination, and then leave.
+    ///
+    /// ADR 0057, and see the Cranelift arm's `ret` for the three things this
+    /// shape is: the address comes from `NativeCtx::words` re-read here rather
+    /// than from [`FRAME`], because the destination is not this frame; a
+    /// zero-width return emits nothing, not even the address, because a width-0
+    /// destination may name a slot the caller's frame does not have; and the
+    /// loads and stores interleave, because the destination is the caller's frame
+    /// and so cannot overlap this one — which is the difference between this and
+    /// [`Emit::copy`].
     fn ret(&mut self, src: Slot) {
         self.store(CTX, OFF_PENDING_WORK, WORK);
-        self.store_imm32(CTX, OFF_RETURN_SLOT, src as i32);
+        let width = self.program.layout(self.function.returns).width();
+        if width > 0 {
+            self.load(RDX, CTX, OFF_WORDS);
+            self.add_rr(RDX, RETURN_BYTES);
+            for word in 0..width {
+                self.load_slot(RAX, src + word);
+                self.store(RDX, (word * 8) as i32, RAX);
+            }
+        }
         self.leave(Outcome::Returned);
     }
 
@@ -929,8 +975,8 @@ impl<'a> Emit<'a> {
 
     /// The epilogue, and the one place it is written.
     ///
-    /// `eax` carries the [`Outcome`], which is `#[repr(u32)]`. The five pops
-    /// undo the five pushes of the prologue; nothing else is ever left on the
+    /// `eax` carries the [`Outcome`], which is `#[repr(u32)]`. The seven pops
+    /// undo the seven pushes of the prologue; nothing else is ever left on the
     /// stack at an exit, because the only thing that pushes is
     /// [`Emit::copy`] and it pops what it pushed before the instruction ends.
     fn leave(&mut self, outcome: Outcome) {
@@ -941,10 +987,20 @@ impl<'a> Emit<'a> {
     /// The same epilogue, for an outcome that is already in `eax`.
     ///
     /// The one caller is [`Emit::callee`]: what it returns is the callee's
-    /// outcome rather than one this function chose. None of the five pops names
-    /// `RAX`, so the answer survives them.
+    /// outcome rather than one this function chose. None of the seven pops names
+    /// `RAX`, so the answer survives them — and the first two are the alignment
+    /// pair [`Emit::prologue`] pushed, both of which hold the caller's
+    /// `RETURN_BYTES`.
     fn leave_answered(&mut self) {
-        for reg in [HEAP_SPARE, FRAME, WORK, BASE_BYTES, CTX] {
+        for reg in [
+            RETURN_BYTES,
+            RETURN_BYTES,
+            HEAP_SPARE,
+            FRAME,
+            WORK,
+            BASE_BYTES,
+            CTX,
+        ] {
             self.pop(reg);
         }
         self.ret_near();

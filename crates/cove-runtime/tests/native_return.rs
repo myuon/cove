@@ -224,8 +224,13 @@ struct Seen {
 ///
 /// As [`cove_runtime::NativeEntry`]: `ctx` is valid and uniquely borrowed and
 /// `base` is this call's frame, with its parameters in place.
-unsafe extern "C" fn entry<const WHICH: usize>(ctx: *mut NativeCtx, base: u64) -> Outcome {
-    interpret(WHICH, ctx, base)
+unsafe extern "C" fn entry<const WHICH: usize>(
+    ctx: *mut NativeCtx,
+    base: u64,
+    return_base: u64,
+    return_slot: u32,
+) -> Outcome {
+    interpret(WHICH, ctx, base, return_base, return_slot)
 }
 
 /// The entry points, which is how many functions one case may install.
@@ -303,7 +308,13 @@ unsafe fn set(ctx: *mut NativeCtx, base: u64, slot: Slot, value: u64) {
 /// # Safety
 ///
 /// As [`entry`].
-unsafe fn interpret(which: usize, ctx: *mut NativeCtx, base: u64) -> Outcome {
+unsafe fn interpret(
+    which: usize,
+    ctx: *mut NativeCtx,
+    base: u64,
+    return_base: u64,
+    return_slot: u32,
+) -> Outcome {
     let program = PROGRAM
         .with(|held| held.borrow().clone())
         .expect("a case installed a program");
@@ -446,9 +457,17 @@ unsafe fn interpret(which: usize, ctx: *mut NativeCtx, base: u64) -> Outcome {
                 }
                 pc += 1;
             }
+            // ADR 0057: the answer goes into the run the caller named, before
+            // this frame is taken away, and a width of zero writes nothing at
+            // all — the destination of a zero-width return may be a slot the
+            // caller's frame does not have.
             Inst::Return { src } => {
                 (*ctx).pending_work = work;
-                (*ctx).return_slot = *src;
+                let width = program.layout(function.returns).width();
+                for at in 0..width {
+                    let held = word(ctx, base, *src + at);
+                    set(ctx, return_base, return_slot + at, held);
+                }
                 return Outcome::Returned;
             }
             other => panic!(

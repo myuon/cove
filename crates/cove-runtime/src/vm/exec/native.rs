@@ -199,13 +199,6 @@ struct Destination {
     slot: u32,
 }
 
-impl Destination {
-    /// The address the first word goes to.
-    fn addr(self) -> u64 {
-        self.base + u64::from(self.slot)
-    }
-}
-
 /// Re-publishes both pointers compiled code re-loads, after anything that could
 /// have moved either.
 ///
@@ -288,8 +281,11 @@ unsafe extern "C" fn safepoint(ctx: *mut NativeCtx, pc: u32, work: u64) -> bool 
 /// 4. the answer is published into the caller's `dst` at the callee's return
 ///    width, which is the half of `encoded.rs`'s `RETURN` arm that belongs to
 ///    the caller. [`Destination`] is that `dst`, handed *down* rather than
-///    applied afterwards: a native callee's answer goes from its slot to the
-///    caller's in one copy and no `Vec` is built for it.
+///    applied afterwards: a native callee is given the two indices and writes
+///    the words itself, before its frame is removed, and nothing is allocated to
+///    carry them. An encoded callee still hands its answer back as a `Vec`,
+///    because that is the convention of the tier that runs it, and the helper
+///    publishes that.
 ///
 /// # Safety
 ///
@@ -427,10 +423,12 @@ unsafe extern "C" fn call(
 /// one: ADR 0055's "No parameters are passed in registers."
 ///
 /// `into` is where the answer goes and it is the caller's to choose, which is
-/// ADR 0057: the words move once, out of the callee's return slot and into the
-/// destination the lowering settled, **before the callee's frame is removed**.
-/// Nothing is allocated to carry them, and nothing is published unless the
-/// outcome is [`Outcome::Returned`].
+/// ADR 0057: it is handed to the callee as two indices and **the callee writes
+/// it**, out of its own slot and into the destination the lowering settled,
+/// before its frame is removed. Nothing is allocated to carry the words, nothing
+/// copies them twice, and nothing is published unless the outcome is
+/// [`Outcome::Returned`] — the only path that writes the destination is the
+/// callee's return path, where no safepoint intervenes.
 ///
 /// # Safety
 ///
@@ -452,13 +450,19 @@ unsafe fn enter(
         // moves and the index does not. See `cove_native::abi`.
         machine.mem.stack_index(base) as u64
     };
-    let mut ctx = {
+    let (mut ctx, into_index) = {
         let machine = &mut *machine;
-        NativeCtx::new(host.cast::<c_void>(), machine.mem.words_ptr()).over_heap((*host).table())
+        let ctx = NativeCtx::new(host.cast::<c_void>(), machine.mem.words_ptr())
+            .over_heap((*host).table());
+        // The destination as the callee is given it: a word index, taken *after*
+        // the frame was pushed and stable whatever a later `push_frame` does to
+        // the `Vec`. This is the line ADR 0057's "never pointers" is about.
+        (ctx, machine.mem.stack_index(into.base) as u64)
     };
     // Safety: the context is this call's, the frame at `index` is the callee's,
-    // and the code was emitted for exactly `Entry`'s shape.
-    let outcome = entry(&mut ctx, index);
+    // the destination is `into`'s width of words outside that frame, and the code
+    // was emitted for exactly `Entry`'s shape.
+    let outcome = entry(&mut ctx, index, into_index, into.slot);
 
     let machine = &mut *machine;
     // Pending work is charged on every exit — a return, a raise and a stop
@@ -466,14 +470,9 @@ unsafe fn enter(
     machine.bulk_work += ctx.pending_work;
     ctx.pending_work = 0;
     match outcome {
+        // The answer is already where it belongs: the callee wrote it before it
+        // returned, so all that is left is to take its frame away.
         Outcome::Returned => {
-            let width = machine.width(machine.program.function(callee).returns);
-            // Before the frame is removed, because the words are still in it —
-            // and a zero-width return copies nothing, which `copy_words` is
-            // already the one place that decides.
-            machine
-                .mem
-                .copy_words(into.addr(), base + u64::from(ctx.return_slot), width);
             machine.frames.pop();
             machine.mem.pop_frame(base);
             Ok(())

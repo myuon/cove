@@ -241,6 +241,15 @@ pub const TAG: LayoutId = LayoutId(7);
 pub const REF: LayoutId = LayoutId(8);
 /// An `Int` and a `Repr::Host` word inline, which no arm lowers.
 pub const HOST_PAIR: LayoutId = LayoutId(9);
+/// A family of *no* words, which is what an empty struct lowers to.
+///
+/// It is the zero-width return ADR 0057 says writes nothing, and it is a real
+/// shape rather than an invented one: `Unit` is one word in this IR —
+/// `Layout::word("Unit", Repr::Unit)` above — and `struct Empty {}` is none. The
+/// lowering gives a width-0 destination the next free slot number, which may be
+/// one the frame does not have, so a return that formed the address anyway would
+/// be writing into whatever is above the frame.
+pub const EMPTY: LayoutId = LayoutId(10);
 
 pub fn span() -> Span {
     Span::new(FileId(0), 0, 0)
@@ -300,6 +309,14 @@ pub fn program(function: Function) -> Program {
                 },
                 vec![Repr::Int, Repr::Host],
             ),
+            Layout::inline(
+                "Empty",
+                cove_ir::Shape::Struct {
+                    fields: Vec::new(),
+                    opaque: false,
+                },
+                Vec::new(),
+            ),
         ],
         // `ArgsId(0)` is the empty argument list, which is what a call in these
         // tests hands over: the double records the hand-over and does not read
@@ -325,10 +342,32 @@ pub fn program_with_args(function: Function, args: Vec<Arg>) -> Program {
     held
 }
 
+/// How many words of destination an entry is given.
+///
+/// One more than the widest return in this file, so that every case can assert
+/// the answer *and* that the word past it was left alone — which is what says a
+/// return of `width` words wrote `width` words.
+pub const DESTINATION_WORDS: usize = 4;
+
+/// What an unwritten word of a destination holds.
+///
+/// A number no lowering in this crate produces and no fixture computes, so a
+/// destination word that still holds it is a word nothing wrote. Zero would not
+/// do: a `Bool` answer is zero and so is a frame nobody touched.
+pub const UNWRITTEN: u64 = 0x5555_aaaa_5555_aaaa;
+
 /// What one entry into compiled code answered.
 pub struct Answer {
     pub outcome: Outcome,
-    pub return_slot: u32,
+    /// The destination, as the entry left it: [`DESTINATION_WORDS`] words of
+    /// which the first `Function::returns`' width are the answer and the rest
+    /// are [`UNWRITTEN`].
+    ///
+    /// ADR 0057 — the callee writes its answer into the run its caller named, so
+    /// this is what a case reads instead of a reported slot. It is a stronger
+    /// thing to read: a slot number says where the answer would have been copied
+    /// from, and this is the copy.
+    pub returned: Vec<u64>,
     pub raise: Option<Raise>,
     pub raise_detail: u32,
     /// Which instruction raised, and the two numbers an out-of-range message
@@ -426,6 +465,15 @@ pub fn enter<A: Arm>(jit: &A, compiled: A::Handle, words: &mut [u64], base: u64)
     enter_over(jit, compiled, words, base, std::ptr::null())
 }
 
+/// Enters `compiled` over `words` and a destination of the suite's own.
+///
+/// The destination is [`DESTINATION_WORDS`] words *past* everything `words`
+/// holds, reached as `return_base + return_slot` with a slot of one — so that the
+/// two numbers are added rather than one of them being ignored, and so that the
+/// word before the run is a guard this function checks itself. The segment the
+/// entry is given is therefore a copy of `words` with that run appended, and the
+/// prefix is copied back before this returns: a case reads its frame out of
+/// `words` exactly as it did before the destination existed.
 pub fn enter_over<A: Arm>(
     jit: &A,
     compiled: A::Handle,
@@ -433,14 +481,25 @@ pub fn enter_over<A: Arm>(
     base: u64,
     chunks: *const *mut u64,
 ) -> Answer {
-    let mut ctx = NativeCtx::new(std::ptr::null_mut(), words.as_mut_ptr()).over_heap(chunks);
+    let mut held: Vec<u64> = words.to_vec();
+    let guard = held.len() as u64;
+    held.extend([UNWRITTEN; DESTINATION_WORDS + 1]);
+    let mut ctx = NativeCtx::new(std::ptr::null_mut(), held.as_mut_ptr()).over_heap(chunks);
     let entry = jit.entry(compiled);
-    // Safety: `ctx.words` is `words`, `base` indexes into it, and the
-    // functions below are all built with frames that fit inside it.
-    let outcome = unsafe { entry(&mut ctx, base) };
+    // Safety: `ctx.words` is `held`, `base` indexes into it, the functions below
+    // are all built with frames that fit inside the prefix, and the destination
+    // is `DESTINATION_WORDS` words that no frame overlaps.
+    let outcome = unsafe { entry(&mut ctx, base, guard, 1) };
+    assert_eq!(
+        held[guard as usize], UNWRITTEN,
+        "the word before the destination is not the destination's, and a return \
+         that wrote it formed the address without the slot"
+    );
+    let returned = held[guard as usize + 1..].to_vec();
+    words.copy_from_slice(&held[..words.len()]);
     Answer {
         outcome,
-        return_slot: ctx.return_slot,
+        returned,
         raise: ctx.raise(),
         raise_detail: ctx.raise_detail,
         raise_pc: ctx.raise_pc,
@@ -528,8 +587,12 @@ pub fn a_loop_answers_and_polls_once_per_backedge<A: Arm>() {
     let answer = run::<A>(&summing_loop(), &mut words, 4);
 
     assert_eq!(answer.outcome, Outcome::Returned);
-    assert_eq!(answer.return_slot, 1);
     assert_eq!(words[4 + 1], 55);
+    assert_eq!(
+        answer.returned,
+        [55, UNWRITTEN, UNWRITTEN, UNWRITTEN],
+        "one word of answer into the destination, and nothing past it"
+    );
     assert_eq!(words[4 + 2], 11, "the counter is left one past the bound");
 
     let polls = polls();
@@ -589,6 +652,71 @@ pub fn a_safepoint_can_stop_the_run<A: Arm>() {
     );
 }
 
+/// ADR 0057: a zero-width return writes nothing at all.
+///
+/// `struct Empty {}` is no words, and the lowering gives a width-0 destination
+/// the next free slot number — `call s2:m.Empty` in a two-slot frame is what
+/// `cove_ir` emits — so the destination may not be a word of anything. A return
+/// that formed the address and stored a word would be writing above the caller's
+/// frame, which is the callee's own frame while the callee is still running.
+///
+/// The `Return` here names `src: 1` for the same reason: a zero-width value's
+/// slot is one past everything the frame holds, and `crate::subset`'s `run`
+/// admits it because zero words at the end of a frame are inside it.
+pub fn a_zero_width_return_writes_nothing<A: Arm>() {
+    forget_polls();
+    let held = program(function(
+        vec![Repr::Int, Repr::Int],
+        EMPTY,
+        vec![Inst::Int { dst: 0, value: 7 }, Inst::Return { src: 2 }],
+    ));
+    assert!(compiles::<A>(&held));
+    // A word at the slot the zero-width return names, which is one past the
+    // frame. It is here so that a return which wrote one word anyway would copy
+    // *this* into the destination and be caught: with nothing there, the word
+    // such a return copies is whatever lies past the frame, and the suite's own
+    // guard word is exactly `UNWRITTEN` — so the assertion below would hold for
+    // the wrong reason. It was checked by making the arm write one word, which
+    // is how the coincidence was found.
+    let mut words = vec![0u64, 0, 0xdead_beef_dead_beef, 0];
+    let answer = run::<A>(&held, &mut words, 0);
+
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[0], 7, "the body ran");
+    assert_eq!(
+        answer.returned, [UNWRITTEN; DESTINATION_WORDS],
+        "a zero-width return wrote no word of the destination"
+    );
+}
+
+/// ADR 0057: a raise and a stop publish no result.
+///
+/// "Semantically" is the whole of it — a destination nothing may read is free to
+/// hold anything — but neither arm writes it at all, and that is the easiest
+/// version of the rule to keep true and the easiest to check. Both ways out are
+/// checked in one function because they are one claim about the two.
+pub fn leaving_publishes_no_destination<A: Arm>() {
+    // A raise: the addition overflows before the return is reached.
+    let (answer, _) = arith::<A>(ArithOp::Add, i64::MAX, 1);
+    assert_eq!(answer.outcome, Outcome::Raised);
+    assert_eq!(
+        answer.returned, [UNWRITTEN; DESTINATION_WORDS],
+        "a raise wrote no word of the destination"
+    );
+
+    // A stop: the safepoint helper answers `false` on the fourth poll.
+    forget_polls();
+    POLLS_ALLOWED.with(|allowed| allowed.set(3));
+    let mut words = vec![0u64; 8];
+    words[0] = 1_000_000;
+    let answer = run::<A>(&summing_loop(), &mut words, 0);
+    assert_eq!(answer.outcome, Outcome::Stopped);
+    assert_eq!(
+        answer.returned, [UNWRITTEN; DESTINATION_WORDS],
+        "a stop wrote no word of the destination"
+    );
+}
+
 // --- arithmetic --------------------------------------------------------------
 
 /// `s2 = s0 op s1; return s2`, over `Int` slots.
@@ -639,8 +767,11 @@ pub fn integer_arithmetic_answers_what_the_vm_answers<A: Arm>() {
     ] {
         let (answer, words) = arith::<A>(op, a, b);
         assert_eq!(answer.outcome, Outcome::Returned, "{op:?} {a} {b}");
-        assert_eq!(answer.return_slot, 2);
         assert_eq!(words[2] as i64, expected, "{op:?} {a} {b}");
+        assert_eq!(
+            answer.returned[0] as i64, expected,
+            "the destination holds what the slot holds: {op:?} {a} {b}"
+        );
     }
 }
 
@@ -966,8 +1097,17 @@ pub fn a_copy_moves_every_word_and_does_not_smear<A: Arm>() {
         let mut words = before.to_vec();
         let answer = run::<A>(&held, &mut words, 0);
         assert_eq!(answer.outcome, Outcome::Returned);
-        assert_eq!(answer.return_slot, dst);
         assert_eq!(words, after.to_vec(), "copy {src} -> {dst}");
+        assert_eq!(
+            answer.returned,
+            [
+                after[dst as usize],
+                after[dst as usize + 1],
+                UNWRITTEN,
+                UNWRITTEN
+            ],
+            "two words of answer into the destination, and nothing past them"
+        );
     }
 }
 
@@ -1262,8 +1402,12 @@ pub fn a_reference_slot_is_inside_the_slice<A: Arm>() {
     let mut words = vec![0u64, 0, 0xfeed_beef, 0];
     let answer = run::<A>(&held, &mut words, 2);
     assert_eq!(answer.outcome, Outcome::Returned);
-    assert_eq!(answer.return_slot, 1);
     assert_eq!(words[3], 0xfeed_beef, "the reference was copied as a word");
+    assert_eq!(
+        answer.returned,
+        [0xfeed_beef, UNWRITTEN, UNWRITTEN, UNWRITTEN],
+        "a reference return is one word — the address, not the object"
+    );
 }
 
 /// `encoded.rs`'s `FUNC_REF | CONST_TAG` arm (line 1071): a case index is
@@ -1392,8 +1536,12 @@ pub fn a_load_elem_strides_and_bounds_its_index<A: Arm>() {
         let mut words = vec![heap.addr(at), index as u64, 0, 0];
         let answer = run_over::<A>(&held, &mut words, 0, &heap);
         assert_eq!(answer.outcome, Outcome::Returned, "index {index}");
-        assert_eq!(answer.return_slot, 2);
         assert_eq!((words[2], words[3]), (first, second), "index {index}");
+        assert_eq!(
+            answer.returned,
+            [first, second, UNWRITTEN, UNWRITTEN],
+            "index {index}"
+        );
     }
 
     // `Machine::element`: "index {at} is outside a collection of {len}", for a
@@ -1543,10 +1691,14 @@ pub fn a_call_hands_over_and_an_outcome_travels_out<A: Arm>() {
     let mut words = vec![0u64; 7];
     let answer = run::<A>(&held, &mut words, 4);
     assert_eq!(answer.outcome, Outcome::Returned);
-    assert_eq!(answer.return_slot, 2);
     // The double writes `callee * 1000 + dst`, which for `FunctionId(0)` into
     // slot 2 is 2 — a number no other word of this frame holds.
     assert_eq!(words[6], 2, "the answer landed in `dst`");
+    assert_eq!(
+        answer.returned,
+        [2, UNWRITTEN, UNWRITTEN, UNWRITTEN],
+        "and then out of `dst` into this function's own destination"
+    );
     assert_eq!(
         calls(),
         vec![Called {

@@ -55,6 +55,16 @@ fn a_safepoint_can_stop_the_run() {
 }
 
 #[test]
+fn a_zero_width_return_writes_nothing() {
+    suite::a_zero_width_return_writes_nothing::<Template>();
+}
+
+#[test]
+fn leaving_publishes_no_destination() {
+    suite::leaving_publishes_no_destination::<Template>();
+}
+
+#[test]
 fn integer_arithmetic_answers_what_the_vm_answers() {
     suite::integer_arithmetic_answers_what_the_vm_answers::<Template>();
 }
