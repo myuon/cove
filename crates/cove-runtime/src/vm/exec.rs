@@ -2138,20 +2138,73 @@ impl<'a> Machine<'a> {
         src_at: usize,
         len: usize,
     ) {
+        // A range copy answers the source as it *was*, which is `memmove` and
+        // not `memcpy`. The two only differ when the ranges overlap, which
+        // they can: `Inst::CopyBytes` admits a `Shape::Bytes` source, so `src`
+        // and `dst` may be the same run — a builder shifting its own bytes
+        // along is the obvious use and there is no reason for it to be the one
+        // shape of copy that corrupts.
+        //
+        // Overlap only matters within one object, and only in one direction:
+        // writing *forward* into a range that begins later than the source
+        // overwrites bytes the copy has not read yet. Everything else — two
+        // different objects, or a destination at or before the source — is
+        // safe read-then-write in ascending order.
+        if dst == src && dst_at > src_at {
+            self.copy_bytes_descending(dst, dst_at, src, src_at, len);
+        } else {
+            self.copy_bytes_ascending(dst, dst_at, src, src_at, len);
+        }
+    }
+
+    /// Eight bytes a turn, from the front.
+    fn copy_bytes_ascending(
+        &mut self,
+        dst: u64,
+        dst_at: usize,
+        src: u64,
+        src_at: usize,
+        len: usize,
+    ) {
         let src_len = self.mem.object_len(src) as usize;
         let mut done = 0;
         while done < len {
             let take = (len - done).min(8);
             let bytes = self.bytes_word(src, src_at + done, src_len);
-            let at = dst_at + done;
-            let word = (at / 8) as u32;
-            let offset = at % 8;
-            let first = take.min(8 - offset);
-            self.blend(dst, word, offset, first, bytes);
-            if first < take {
-                self.blend(dst, word + 1, 0, take - first, bytes >> (first * 8));
-            }
+            self.put_bytes(dst, dst_at + done, take, bytes);
             done += take;
+        }
+    }
+
+    /// Eight bytes a turn, from the back, for a copy that shifts a run's bytes
+    /// to a higher offset in itself.
+    fn copy_bytes_descending(
+        &mut self,
+        dst: u64,
+        dst_at: usize,
+        src: u64,
+        src_at: usize,
+        len: usize,
+    ) {
+        let src_len = self.mem.object_len(src) as usize;
+        let mut done = len;
+        while done > 0 {
+            let take = done.min(8);
+            done -= take;
+            let bytes = self.bytes_word(src, src_at + done, src_len);
+            self.put_bytes(dst, dst_at + done, take, bytes);
+        }
+    }
+
+    /// Writes the low `take` bytes of `bytes` at byte `at` of the run at
+    /// `dst`, which may straddle two payload words.
+    fn put_bytes(&mut self, dst: u64, at: usize, take: usize, bytes: u64) {
+        let word = (at / 8) as u32;
+        let offset = at % 8;
+        let first = take.min(8 - offset);
+        self.blend(dst, word, offset, first, bytes);
+        if first < take {
+            self.blend(dst, word + 1, 0, take - first, bytes >> (first * 8));
         }
     }
 

@@ -565,14 +565,23 @@ fn copy_bytes(
             )),
         ));
     }
+    // The chunks run in the direction the whole copy runs in. Splitting a
+    // `memmove` into pieces does not preserve its meaning by itself: copying
+    // a run's bytes to a higher offset in *itself*, front first, makes each
+    // chunk overwrite the input of the next — and every chunk being correct
+    // in isolation does not save it. So an overlapping forward shift is
+    // chunked from the tail, which is the same reason
+    // `Machine::copy_string_bytes` walks it backwards inside one chunk.
+    let descending = dst == src && dst_at > src_at;
     let mut done: i64 = 0;
     while done < len {
         let take = (len - done).min(BULK_CHUNK_BYTES);
+        let offset = if descending { len - done - take } else { done };
         machine.copy_string_bytes(
             dst,
-            (dst_at + done) as usize,
+            (dst_at + offset) as usize,
             src,
-            (src_at + done) as usize,
+            (src_at + offset) as usize,
             take as usize,
         );
         machine.bulk_work += words_of_bytes(take);
@@ -2187,33 +2196,171 @@ mod tests {
         );
     }
 
-    /// **A collection with a half-filled run live keeps it, and keeps what has
-    /// been written into it.**
+    /// **A collection with a half-filled run live keeps it, and keeps every
+    /// byte already written into it.**
     ///
-    /// Chunking made this reachable. One `copy-bytes` used to be one dispatch
-    /// with no poll inside it, so no collection could see a partially written
-    /// destination; now one can. It is safe because the run's payload holds no
-    /// references, and it is *found* because the caller has `sync`ed and both
-    /// objects are named by frame slots — this collects in the middle of the
-    /// copy by the only honest route, a poll the copy itself reached, and then
-    /// checks every byte.
+    /// The heap is small and the run allocates garbage on purpose, so the
+    /// allocation between the two copies *must* collect — and the assertion on
+    /// `collections` is what makes this test mean anything. Without it the test
+    /// passes when no collection happens at all, which is what the first
+    /// version of it did.
+    ///
+    /// The collection lands between two `copy-bytes` rather than inside one,
+    /// and that is not a weaker test than it sounds: it is the only place a
+    /// single-task run can put one. `Memory::poll` collects when another task
+    /// has *requested* a stop-the-world, and a copy allocates nothing, so
+    /// nothing raises that request mid-copy here — the chunk poll is where
+    /// this task would join a collection another task asked for. What the
+    /// property needs either way is that a `Shape::Bytes` run half full of
+    /// bytes is traced as a live object and found through the frame slot
+    /// holding it, and that is what this walks.
     #[test]
-    fn a_collection_inside_a_copy_keeps_the_half_filled_run() {
-        // Large enough to take many chunks, so a poll certainly lands inside.
-        const BYTES: i64 = 256 * 1024;
-        let (program, entry) = one_big_copy(BYTES);
-        let mut machine = Machine::new(&program, 1 << 22);
-        let before = machine.collected();
+    fn a_collection_with_a_half_filled_run_live_keeps_every_byte_written() {
+        const BYTES: i64 = 1024;
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let str_layout = build.string_layout();
+        let run = build.bytes_layout();
+        // s1 is the run being filled; s2 is the source; s5 is garbage,
+        // reallocated on every turn of a loop so the heap has to collect.
+        let first = build.args(&[(1, run), (3, int), (2, run), (3, int), (4, int)]);
+        let second = build.args(&[(1, run), (4, int), (2, run), (4, int), (4, int)]);
+        let entry = build.function(
+            "half",
+            &[],
+            &[
+                Repr::Int,
+                Repr::Ref,
+                Repr::Ref,
+                Repr::Int,
+                Repr::Int,
+                Repr::Ref,
+            ],
+            str_layout,
+            vec![
+                Inst::Int {
+                    dst: 0,
+                    value: BYTES,
+                },
+                Inst::AllocBytes { dst: 1, len: 0 },
+                Inst::AllocBytes { dst: 2, len: 0 },
+                Inst::Int { dst: 3, value: 0 },
+                Inst::Int {
+                    dst: 4,
+                    value: BYTES / 2,
+                },
+                // The first half, so the run is half written from here on.
+                Inst::CopyBytes { args: first },
+                // Garbage, cleared between allocations so the previous one
+                // is unreachable when the next is asked for. The heap holds
+                // the two runs and one spare, so every allocation after the
+                // first has to reclaim before it fits.
+                Inst::AllocBytes { dst: 5, len: 0 },
+                Inst::Clear {
+                    slot: 5,
+                    layout: run,
+                },
+                Inst::AllocBytes { dst: 5, len: 0 },
+                Inst::Clear {
+                    slot: 5,
+                    layout: run,
+                },
+                Inst::AllocBytes { dst: 5, len: 0 },
+                Inst::Clear {
+                    slot: 5,
+                    layout: run,
+                },
+                // And the second half, into a run a collection has now walked.
+                Inst::CopyBytes { args: second },
+                Inst::FinishString { dst: 1, bytes: 1 },
+                Inst::Return { src: 1 },
+            ],
+        );
+        let program = build.done();
+        // Two runs of 129 words each and room for about one more, so the
+        // second piece of garbage cannot be handed out until the first is
+        // reclaimed — which is what makes the collection certain rather than
+        // merely possible.
+        let mut machine = Machine::new(&program, 400);
+        let before = machine.collected().collections;
         let answer = machine
-            .run(entry, &[BYTES as u64], &budget())
-            .expect("the copy answers");
-        // Both runs are zeroed, so every byte of the answer is zero — what
-        // matters is that the object is intact and its length is unchanged
-        // after the polls inside the copy.
-        let run = answer[0];
-        assert_eq!(machine.object_len(run) as i64, BYTES);
-        assert_eq!(machine.string_bytes(run), vec![0u8; BYTES as usize]);
-        let _ = before;
+            .run(entry, &[], &budget())
+            .expect("the run answers a string");
+        let after = machine.collected().collections;
+        assert!(
+            after > before,
+            "this fixture exists to collect with a half-filled run live, and \
+             it collected {} time(s)",
+            after - before
+        );
+        let text = answer[0];
+        assert_eq!(machine.object_len(text) as i64, BYTES);
+        assert_eq!(machine.string_bytes(text), vec![0u8; BYTES as usize]);
+    }
+
+    /// **An overlapping copy answers the source as it was, in both directions
+    /// and across chunk boundaries.**
+    ///
+    /// `Inst::CopyBytes` admits a `Shape::Bytes` source, so `src` and `dst` may
+    /// be one run and the ranges may overlap. A range copy means `memmove`: a
+    /// forward shift has to be walked from the tail, or each write lands on a
+    /// byte the copy has not read yet.
+    ///
+    /// Chunking is the reason the lengths here are what they are. Splitting a
+    /// `memmove` into chunks does not preserve its meaning by itself — chunk
+    /// each piece correctly, front first, and the pieces still overwrite one
+    /// another. So every case below is longer than `BULK_CHUNK_BYTES` and each
+    /// overlap straddles a chunk boundary, which is exactly what a
+    /// per-chunk-only fix passes and this does not.
+    #[test]
+    fn an_overlapping_copy_moves_bytes_as_memmove_does() {
+        const BYTES: i64 = 3 * BULK_CHUNK_BYTES;
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        build.string_layout();
+        let run = build.bytes_layout();
+        // shift(run, dst_at, src_at, len) over one object.
+        let args = build.args(&[(0, run), (1, int), (0, run), (2, int), (3, int)]);
+        let entry = build.function(
+            "shift",
+            &[run, int, int, int],
+            &[Repr::Ref, Repr::Int, Repr::Int, Repr::Int],
+            run,
+            vec![Inst::CopyBytes { args }, Inst::Return { src: 0 }],
+        );
+        let program = build.done();
+
+        let pattern: Vec<u8> = (0..BYTES).map(|n| (n % 251) as u8).collect();
+        // Forward and backward shifts, each crossing at least one chunk edge.
+        for (dst_at, src_at, len) in [
+            (BULK_CHUNK_BYTES + 3, 0i64, 2 * BULK_CHUNK_BYTES - 3),
+            (0, BULK_CHUNK_BYTES + 3, 2 * BULK_CHUNK_BYTES - 3),
+            (9, 1, 2 * BULK_CHUNK_BYTES),
+            (1, 9, 2 * BULK_CHUNK_BYTES),
+            (BULK_CHUNK_BYTES, BULK_CHUNK_BYTES - 1, BULK_CHUNK_BYTES + 1),
+        ] {
+            let mut machine = Machine::new(&program, 1 << 16);
+            let obj = machine
+                .allocate(program.bytes_layout, BYTES)
+                .expect("a run fits");
+            machine.write_bytes(obj, &pattern);
+            machine
+                .run(
+                    entry,
+                    &[obj, dst_at as u64, src_at as u64, len as u64],
+                    &budget(),
+                )
+                .expect("a copy within its bounds answers");
+
+            let mut want = pattern.clone();
+            want.copy_within(src_at as usize..(src_at + len) as usize, dst_at as usize);
+            assert_eq!(
+                machine.string_bytes(obj),
+                want,
+                "copy_within({src_at}..{}, {dst_at}) over {BYTES} bytes",
+                src_at + len
+            );
+        }
     }
 
     // --- ADR 0051: the two cases the sweep above cannot make ----------
