@@ -414,6 +414,25 @@ which ADR 0051 had already measured as a real risk, so the decision was
 written to be accepted only on wall time and not on the instruction count —
 593.1 M instructions to 486.2 M, and 3.94s to 3.75s.
 
+[ADR 0055](docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md)
+crosses the gate [ADR 0012](docs/adr/0012-performance-gate-and-native-backend.md)
+set, and adds a baseline native tier that compiles optimized IR one function at
+a time. The evidence is the VM's own: `examples/covefmt` is roughly 14x its
+Rust reference, dispatch has measured between 44% and 54% of profiled CPU, and
+a run of measured local improvements says what local improvements are worth —
+removing 11% of the allocations moved nothing, a much faster builtin bought
+3.1%, and fusing a comparison into its branch bought 4.8% for 18% of the
+instructions. Reaching twice the native reference needs about 31x, which no
+sequence of those adds up to. So the optimizer is split by *why* a
+transformation is valid rather than by what it looks like: inlining, folding,
+dead-code and the removal of real allocations, checks and copies are shared
+because they remove work; superinstructions and encoding peepholes go behind
+the VM branch because they only remove dispatch. Native is a tier of the VM
+and never of the oracle — a run may mix native and encoded functions over one
+slot ABI and must report the mixture — and the VM stays complete, for
+restricted runtimes, for debugging, and for every function the native lowering
+does not yet cover.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles

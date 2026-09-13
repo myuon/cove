@@ -1,8 +1,13 @@
-# ADR 0053: Native execution compiles optimized IR one function at a time
+# ADR 0055: Native execution compiles optimized IR one function at a time
 
 - Status: Accepted
 - Date: 2026-09-13
-- Amends: [ADR 0012](0012-performance-gate-and-native-backend.md), whose throughput gate is now crossed by a representative Cove program and its native reference
+- Supersedes nothing. [ADR 0012](0012-performance-gate-and-native-backend.md)
+  decided that compiling anything waits on a measured gate rather than an
+  argument, and that gate is now crossed by a representative Cove program
+  and its native reference. Satisfying a condition an ADR set is not
+  amending it: 0012's decision is the reason this one is allowed to exist,
+  and it stands exactly as written
 - Extends: [ADR 0019](0019-executable-ir-and-vm.md), whose executable IR remains the input to execution, and [ADR 0022](0022-the-vm-is-the-default-backend.md), whose VM remains the portable execution path while native execution is introduced
 - Preserves: [ADR 0040](0040-a-bound-outlives-its-backend.md)'s bounded stop, fuel, cancellation and Host-effect contracts
 - Does not supersede: the tree-walking interpreter as the semantic oracle, or the VM as the default backend before this ADR's adoption gate passes
@@ -15,11 +20,15 @@ ADR 0019 replaced the tree walk with an executable IR and a dedicated VM. That w
 
 The same evidence now says the next boundary has been reached.
 
-`examples/covefmt` is a representative Cove program over a real corpus, with a Rust implementation of the same formatter as its native reference. The recorded stage timing is 859 ms for Cove against about 60 ms for Rust, roughly 14x. The repeated end-to-end performance run used while optimizing its printer is about 3.9 s. The two measurements have different harness shapes and must not be divided into one invented ratio, but both say the same thing ADR 0012's throughput gate asks: execution is more than 10x from the native reference and the profiled CPU time is dominated by the execution mechanism rather than Host waits.
+`examples/covefmt` is a representative Cove program over a real corpus, with a Rust implementation of the same formatter as its native reference. The recorded stage timing is 859 ms for Cove against about 60 ms for Rust, roughly 14x. The repeated end-to-end performance run used while optimizing its printer is about 3.75 s. The two measurements have different harness shapes and must not be divided into one invented ratio, but both say the same thing ADR 0012's throughput gate asks: execution is more than 10x from the native reference and the profiled CPU time is dominated by the execution mechanism rather than Host waits.
 
-The VM dispatches roughly 590 million instructions in that repeated run. Dispatch alone has measured between 44% and 54% of CPU time. Removing intermediate strings and 11% of allocations moved wall time by approximately zero; making a builtin substantially faster bought only a few percent; carrying formatter state to avoid a scan performed more work and lost. These were useful experiments because they separate real local costs from the structural one. They do not add up to the order-of-magnitude change the target requires.
+The VM dispatched roughly 590 million instructions in that repeated run when
+this was written, and 486 million after
+[ADR 0054](0054-a-comparison-that-only-feeds-a-branch-is-the-branch.md) fused
+a comparison into the branch beside it — 18% of the instructions for 4.8% of
+the wall clock, which is this ADR's own argument arriving one commit early. Dispatch alone has measured between 44% and 54% of CPU time. Removing intermediate strings and 11% of allocations moved wall time by approximately zero; making a builtin substantially faster bought only a few percent; carrying formatter state to avoid a scan performed more work and lost. These were useful experiments because they separate real local costs from the structural one. They do not add up to the order-of-magnitude change the target requires.
 
-The performance target is approximately twice the native reference. Reaching 120 ms from a 3.9 s run would require about 32x from the current execution path. No plausible sequence of dispatch-loop constant-factor improvements promises that. Native execution is no longer a speculative alternative to an unmeasured VM. It is the next execution tier justified by the VM's own measurements.
+The performance target is approximately twice the native reference. Reaching 120 ms from a 3.75 s run would require about 31x from the current execution path. No plausible sequence of dispatch-loop constant-factor improvements promises that. Native execution is no longer a speculative alternative to an unmeasured VM. It is the next execution tier justified by the VM's own measurements.
 
 Two questions must be answered together:
 
