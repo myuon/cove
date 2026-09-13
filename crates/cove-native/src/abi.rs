@@ -1,8 +1,8 @@
 //! The boundary between compiled code and the runtime that called it.
 //!
-//! Everything in this module is compiled whether or not the `native` feature
-//! is on, and that is deliberate: the ABI is a contract between two crates,
-//! not a Cranelift artefact. A build with no code generator still has the
+//! Everything in this module is compiled whether or not a code generator's
+//! feature is on, and that is deliberate: the ABI is a contract between two
+//! crates, not a Cranelift artefact. A build with no code generator still has the
 //! declarations, so the runtime side can be written, read and type-checked
 //! against them without pulling in an executable-memory dependency.
 //!

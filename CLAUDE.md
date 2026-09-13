@@ -61,30 +61,45 @@ sets the variable and so does `pages.yml`. This has already been got wrong
 once, on a link to a private item from another module, and the failure mode is
 the worst kind: a gate that passes and a pull request that is red.
 
-### `cove-native` is behind a feature, so the five commands do not reach it
+### `cove-native` is behind two features, so the five commands do not reach it
 
-`crates/cove-native` — the native execution tier of ADR 0055 — has its whole
-Cranelift dependency edge behind a `native` feature that is **off by
-default**, because the ADR's adoption gate asks that "a build without the
-native feature has no executable-memory dependency" and that is a fact about
-the dependency graph rather than about which functions compile. So
-`--workspace` builds it as a crate of ABI declarations, `cargo t` runs two of
-its eighteen tests, and the lowering itself is compiled by none of the five
-commands.
+`crates/cove-native` — the native execution tier of ADR 0055 — has each of its
+code generators behind a feature that is **off by default**, because the ADR's
+adoption gate asks that "a build without the native feature has no
+executable-memory dependency" and that is a fact about the dependency graph
+rather than about which functions compile. So `--workspace` builds it as a
+crate of ABI declarations, `cargo t` runs two of its tests, and neither
+lowering is compiled by any of the five commands.
 
-Three more, then, after a change under `crates/cove-native/`:
+There are two arms, and they compile the same subset of the IR, so that a
+measurement of one against the other is a measurement of the code generator:
+
+- `cranelift` is the code generator ADR 0055 names. It was called `native`
+  while it was the only one.
+- `template` is a hand-written x86-64 template compiler whose only dependency
+  is `libc`. It is x86-64 only, and refuses every other host explicitly.
+
+So, after a change under `crates/cove-native/`:
 
 ```console
-$ cargo clippy -p cove-native --all-targets --features native --profile checked -- -D warnings
-$ RUSTDOCFLAGS="-D warnings" cargo doc -p cove-native --no-deps --features native --profile checked
-$ cargo test -p cove-native --features native --profile checked
+$ cargo clippy -p cove-native --all-targets --features cranelift --profile checked -- -D warnings
+$ RUSTDOCFLAGS="-D warnings" cargo doc -p cove-native --no-deps --features cranelift --profile checked
+$ cargo test -p cove-native --features cranelift --profile checked
+$ cargo clippy -p cove-native --all-targets --features template --profile checked -- -D warnings
+$ RUSTDOCFLAGS="-D warnings" cargo doc -p cove-native --no-deps --features template --profile checked
+$ cargo test -p cove-native --features template --profile checked
+$ cargo test -p cove-native --features cranelift,template --profile checked
 ```
 
-CI runs exactly those three, in one step, for the same reason it runs the
-other five: a run there and a run here are the same run. Cranelift is about
-twenty seconds of compilation the first time and nothing after, so this is
-cheap to run and cheap to forget — and forgetting it is a green gate over an
-untested code generator.
+The last one is not a repetition: the test that asserts the two arms answer
+identically on the same IR compiles only when both features are on, so a pass
+over each arm alone never runs it.
+
+CI runs exactly those, in one step, for the same reason it runs the other
+five: a run there and a run here are the same run. Cranelift is about twenty
+seconds of compilation the first time and nothing after, so this is cheap to
+run and cheap to forget — and forgetting it is a green gate over an untested
+code generator.
 
 ### The five commands are not the whole job
 

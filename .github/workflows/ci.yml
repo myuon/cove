@@ -138,28 +138,38 @@ jobs:
       - name: cargo test (the doc examples)
         run: cargo test --workspace --doc --profile checked
 
-      # The native tier, which every step above builds with its code
-      # generator absent.
+      # The native tier, which every step above builds with both of its code
+      # generators absent.
       #
-      # `cove-native`'s Cranelift dependency is an optional feature that is
-      # *off by default*, because ADR 0055's adoption gate asks that "a build
-      # without the native feature has no executable-memory dependency" and
-      # that is a fact about the dependency graph rather than about which
-      # functions compile. The consequence is that `--workspace` compiles a
-      # crate of ABI declarations and runs none of the lowering's tests, so
-      # they need a pass of their own — a test no gate runs is not a test.
+      # `cove-native`'s code generators are optional features that are *off by
+      # default*, because ADR 0055's adoption gate asks that "a build without
+      # the native feature has no executable-memory dependency" and that is a
+      # fact about the dependency graph rather than about which functions
+      # compile. The consequence is that `--workspace` compiles a crate of ABI
+      # declarations and runs none of either lowering's tests, so they need a
+      # pass of their own — a test no gate runs is not a test.
       #
-      # Three commands in one step because they are one dependency graph:
-      # Cranelift is about thirty seconds of compilation and this is the only
-      # step that pays it, so splitting them would pay it once and report it
-      # three times.
+      # Two arms and then both together. `cranelift` is ADR 0055's code
+      # generator; `template` is the hand-written x86-64 one it is being
+      # measured against; and the third pass is the one that runs the test
+      # asserting the two arms agree, which neither single-feature pass can
+      # compile.
+      #
+      # The commands are grouped into one step because they are one dependency
+      # graph: Cranelift is about thirty seconds of compilation and this is the
+      # only step that pays it, so splitting them would pay it once and report
+      # it several times.
       - name: cargo clippy, doc and test (the native tier)
         env:
           RUSTDOCFLAGS: -D warnings
         run: |
-          cargo clippy -p cove-native --all-targets --features native --profile checked -- -D warnings
-          cargo doc -p cove-native --no-deps --features native --profile checked
-          cargo test -p cove-native --features native --profile checked
+          cargo clippy -p cove-native --all-targets --features cranelift --profile checked -- -D warnings
+          cargo doc -p cove-native --no-deps --features cranelift --profile checked
+          cargo test -p cove-native --features cranelift --profile checked
+          cargo clippy -p cove-native --all-targets --features template --profile checked -- -D warnings
+          cargo doc -p cove-native --no-deps --features template --profile checked
+          cargo test -p cove-native --features template --profile checked
+          cargo test -p cove-native --features cranelift,template --profile checked
 
       # The `#[ignore]`d cases, which live in `crates/cove-cli/tests/` —
       # `vm_coverage.rs`, `bytecode_corpus.rs` and `build.rs`. The first is

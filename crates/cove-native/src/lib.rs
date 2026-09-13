@@ -38,15 +38,24 @@
 //! machinery into this crate so that the edge could run the other way — is
 //! not.
 //!
-//! # `native` is off by default
+//! # Two code generators, both off by default
 //!
 //! ADR 0055's adoption gate asks that "a build without the native feature has
 //! no executable-memory dependency". That is a claim about the dependency
-//! graph, so the *whole Cranelift edge* is optional and off by default; see
-//! this crate's manifest. Without the feature, what remains is
+//! graph, so every code generator's edge is optional and off by default; see
+//! this crate's manifest. Without them, what remains is
 //! [`mod@abi`] — the declarations the runtime side is written against — and
 //! `cargo tree` shows no `cranelift-jit`, which is the crate that maps an
 //! executable page.
+//!
+//! The `cranelift` feature is the code generator ADR 0055 names. The
+//! `template` feature is a second one, a hand-written x86-64 template
+//! compiler, and it exists to be *measured against* the first: which code
+//! generator Cove adopts is a question a comparison on identical optimized IR
+//! answers and an argument does not. Both arms compile exactly the same subset
+//! of the IR — a comparison over two different subsets would not be one — and
+//! both are entered through the same [`Entry`] over the same [`NativeCtx`].
+//! Neither is wired to the runtime.
 //!
 //! # What it compiles today, and what it refuses
 //!
@@ -78,8 +87,8 @@
 //! prejudges it.
 //!
 //! `Jit` and `Jit::compile` are named above without links on purpose: they
-//! exist only under the `native` feature, and an intra-doc link to an item a
-//! default build does not have is a broken link — which `RUSTDOCFLAGS="-D
+//! exist only under a code generator's feature, and an intra-doc link to an
+//! item a default build does not have is a broken link — which `RUSTDOCFLAGS="-D
 //! warnings"` turns into a failed `cargo doc`, as it did once while this was
 //! being written.
 //!
@@ -90,8 +99,36 @@ pub mod abi;
 
 pub use abi::{Entry, NativeCtx, NativeHelpers, Outcome, Raise, SafepointFn};
 
-#[cfg(feature = "native")]
+/// Native execution is not available here.
+///
+/// ADR 0055's "Executable memory is optional, not assumed": a target that
+/// prohibits or cannot provide executable memory, or that a code generator has
+/// not been written for, produces a capability diagnostic. It does not produce
+/// an attempted fallback to something else — the caller's fallback is the
+/// encoded VM, which is a complete execution path and not a fallback at all.
+///
+/// One type for both arms, and declared whether or not either is compiled: a
+/// refusal is a fact about the *host*, and the two arms refuse different hosts
+/// for the same reason.
+#[derive(Debug)]
+pub struct Unavailable(String);
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "native execution is unavailable: {}", self.0)
+    }
+}
+
+impl std::error::Error for Unavailable {}
+
+#[cfg(any(feature = "cranelift", feature = "template"))]
+mod subset;
+
+#[cfg(feature = "cranelift")]
 mod compile;
 
-#[cfg(feature = "native")]
-pub use compile::{Compiled, Jit, Unavailable};
+#[cfg(feature = "cranelift")]
+pub use compile::{Compiled, Jit};
+
+#[cfg(feature = "template")]
+pub mod template;

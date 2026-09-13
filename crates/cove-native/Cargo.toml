@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# The whole Cranelift dependency edge is optional and off by default.
+# Each code generator is an optional feature, and both are off by default.
 #
 # ADR 0055's adoption gate asks that "a build without the native feature has
 # no executable-memory dependency". That is a fact about the *dependency
@@ -15,19 +15,29 @@ license.workspace = true
 #
 # Default off, so the ordinary `cargo t` and the ordinary `cargo build` of
 # this workspace compile none of it. What that costs is that this crate's own
-# tests are behind the feature too, and the price is paid deliberately: the
+# tests are behind the features too, and the price is paid deliberately: the
 # ADR's requirement is about the *default* build, and a feature that is on by
 # default is not one anybody would remember to turn off. `.github/workflows/
-# ci.yml` runs the suite a second time with `--features cove-native/native`,
-# which is where the tests below are executed.
+# ci.yml` runs the suite again with each of them, which is where the tests
+# below are executed.
+#
+# `cranelift` was called `native` while it was the only code generator. It is
+# named for what it is now that there are two, and the comparison between them
+# is the reason for the rename: a feature called `native` could not say which
+# of two native arms a measurement came from.
+#
+# `template` is the hand-written x86-64 arm, and its only dependency is
+# `libc` — `mmap` and `mprotect`, which is the whole of what it needs to
+# honour the same W^X rule Cranelift's JIT honours for the arm above.
 [features]
 default = []
-native = [
+cranelift = [
   "dep:cranelift-codegen",
   "dep:cranelift-frontend",
   "dep:cranelift-jit",
   "dep:cranelift-module",
 ]
+template = ["dep:libc"]
 
 [dependencies]
 cove-ir = { workspace = true }
@@ -39,6 +49,8 @@ cranelift-codegen = { version = "0.135", optional = true }
 cranelift-frontend = { version = "0.135", optional = true }
 cranelift-jit = { version = "0.135", optional = true }
 cranelift-module = { version = "0.135", optional = true }
+
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 # `cove_ir::Function` carries a `Span` per instruction, so a hand-built
