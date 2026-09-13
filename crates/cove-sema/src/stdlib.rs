@@ -90,6 +90,18 @@ static SOURCES: &[StdSource] = &[
         path: "std/duration.cove",
         text: include_str!("../std/duration.cove"),
     },
+    // The one file here that is not a receiver's methods moved out of Rust: it
+    // declares a *type*. `StringBuilder` is the public name ADR 0052 leaves to
+    // the standard library — "the standard library chooses the public builder
+    // name; that name does not appear in IR or VM dispatch" — over the
+    // `ByteBuffer` intrinsic the VM does know. So it binds nothing in
+    // `cove_schema::builtins::STANDARD_LIBRARY`, and a program reaches it by
+    // importing the module like any other.
+    StdSource {
+        module: "std.stringbuilder",
+        path: "std/stringbuilder.cove",
+        text: include_str!("../std/stringbuilder.cove"),
+    },
 ];
 
 /// Every module name the standard library declares.

@@ -594,6 +594,38 @@ static EXERCISES: &[Exercise] = &[
         name: "hours",
         body: "  let wait = Duration.hours(7)\n  wait.hours()",
     },
+    // ADR 0052's byte buffer. Each exercise both drives the entry and answers
+    // something the call decided, so a method that dispatched and did nothing
+    // would fail here rather than pass: `allocate` is checked by the `length` of
+    // what it made, and each append by the length or the text it produced.
+    Exercise {
+        ty: "ByteBuffer",
+        name: "allocate",
+        body: "  var out = ByteBuffer.allocate(8)\n  out.length()",
+    },
+    Exercise {
+        ty: "ByteBuffer",
+        name: "length",
+        body: "  var out = ByteBuffer.allocate(8)\n  out.appendByte(65)\n  out.length()",
+    },
+    Exercise {
+        ty: "ByteBuffer",
+        name: "appendByte",
+        body: "  var out = ByteBuffer.allocate(0)\n  out.appendByte(65)\n  out.appendByte(66)\n  out.length()",
+    },
+    // A capacity of one against five bytes appended, so the exercise covers the
+    // growth as well as the append: a store that did not grow would either lose
+    // bytes or stop the run.
+    Exercise {
+        ty: "ByteBuffer",
+        name: "appendSlice",
+        body: "  var out = ByteBuffer.allocate(1)\n  out.appendSlice(\"the quick fox\", 4, 9)\n  out.length()",
+    },
+    Exercise {
+        ty: "ByteBuffer",
+        name: "finish",
+        body: "  var out = ByteBuffer.allocate(4)\n  out.appendSlice(\"hello\", 0, 5)\n  out.finish().length()",
+    },
     Exercise {
         ty: "Task",
         name: "await",

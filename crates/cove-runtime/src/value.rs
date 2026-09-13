@@ -118,6 +118,16 @@ pub(crate) enum Repr {
     /// Growable mutable sequence backed by stable shared storage. Copying the
     /// handle is O(1) and aliases observe the same elements and length.
     Vector(Rc<VectorStorage>),
+    /// ADR 0052's byte buffer: a stable owner over a growable packed run of
+    /// bytes.
+    ///
+    /// Held the way a `Vector` is held and for the ADR's own reason: the value
+    /// is the *owner*, copying it is O(1), and two holders append to the same
+    /// bytes. What the linear-memory backend splits into an owner object and a
+    /// replaceable store is one `Vec<u8>` here, because a `Vec` already is a
+    /// stable handle over a run it may reallocate — the growth discipline ADR
+    /// 0052 writes out for the VM is what `Vec` does.
+    ByteBuffer(Rc<ByteBufferStorage>),
     /// Immutable in the MVP. Iterates in ascending key order, since that is
     /// the natural order of its `BTreeMap` storage.
     Map(Rc<BTreeMap<MapKey, Value>>),
@@ -311,6 +321,52 @@ pub struct VectorStorage {
     pub elements: RefCell<Vec<Value>>,
     /// Set by `freeze()`, which consumes uniquely owned storage.
     pub frozen: RefCell<bool>,
+}
+
+/// The bytes of one `ByteBuffer`, and whether `finish()` has taken them.
+///
+/// The two fields are [`VectorStorage`]'s two, in a byte builder's vocabulary,
+/// because the ownership discipline is the same one: a growable run behind a
+/// stable handle, consumed once by an operation that relabels it into an
+/// immutable value. ADR 0052 says so in as many words — "the uniqueness proof
+/// and finish transition belong to Buffer".
+#[derive(Debug)]
+pub struct ByteBufferStorage {
+    /// The live bytes. `Vec`'s own doubling is ADR 0052's growth policy, and
+    /// its capacity is the ADR's "capacity is a performance hint": exceeding
+    /// the capacity a program asked for grows rather than changing an answer.
+    pub bytes: RefCell<Vec<u8>>,
+    /// Set by `finish()`, which consumes uniquely owned storage.
+    ///
+    /// A read after a finish is refused rather than answered as an empty
+    /// buffer, exactly as [`VectorStorage::frozen`] refuses a frozen vector:
+    /// `cove_sema::unique` is what proves nothing else was holding it, so
+    /// reaching this flag means the proof let one through and saying so is
+    /// better than reading a consumed buffer as empty.
+    pub finished: RefCell<bool>,
+}
+
+impl ByteBufferStorage {
+    /// A new, empty buffer with room for `capacity` bytes.
+    ///
+    /// A negative capacity is nonsense rather than a small number, so it is
+    /// the caller's to refuse; this takes a `usize`.
+    pub fn new(capacity: usize) -> Rc<ByteBufferStorage> {
+        Rc::new(ByteBufferStorage {
+            bytes: RefCell::new(Vec::with_capacity(capacity)),
+            finished: RefCell::new(false),
+        })
+    }
+
+    /// How many bytes are value.
+    pub fn len(&self) -> usize {
+        self.bytes.borrow().len()
+    }
+
+    /// Whether the buffer holds none.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl VectorStorage {
@@ -1331,6 +1387,7 @@ impl Value {
             Value(Repr::Str(_)) => "String".into(),
             Value(Repr::Array(_)) => "Array".into(),
             Value(Repr::Vector(_)) => "Vector".into(),
+            Value(Repr::ByteBuffer(_)) => "ByteBuffer".into(),
             Value(Repr::Map(_)) => "Map".into(),
             Value(Repr::Set(_)) => "Set".into(),
             Value(Repr::Struct(s)) => s.type_name.to_string(),
@@ -1789,6 +1846,9 @@ impl Value {
             Value(Repr::Str(text)) => ValueView::Str(text),
             Value(Repr::Array(items)) => ValueView::Array(items),
             Value(Repr::Vector(storage)) => ValueView::Vector(Elements(storage.elements.borrow())),
+            Value(Repr::ByteBuffer(_)) => {
+                ValueView::ByteBuffer(ByteBufferView(std::marker::PhantomData))
+            }
             Value(Repr::Map(entries)) => ValueView::Map(Entries(entries)),
             Value(Repr::Set(members)) => ValueView::Set(Members(members)),
             Value(Repr::Struct(value)) => ValueView::Struct(StructView(value)),
@@ -1882,6 +1942,8 @@ pub enum ValueView<'a> {
     Array(&'a [Value]),
     /// A growable sequence, borrowed for as long as the view is held.
     Vector(Elements<'a>),
+    /// A byte buffer under construction, which has nothing readable on it.
+    ByteBuffer(ByteBufferView<'a>),
     Map(Entries<'a>),
     Set(Members<'a>),
     Struct(StructView<'a>),
@@ -2171,6 +2233,17 @@ impl<'a> TaskScopeView<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct SharedView<'a>(std::marker::PhantomData<&'a SharedCell>);
 
+/// A `ByteBuffer`, which has nothing readable on it.
+///
+/// ADR 0052 keeps the raw packed run off every boundary — "`Shape::Bytes`
+/// remains an internal store and cannot be a call argument, return, capture or
+/// Host value" — and a host reading the owner's bytes would be reading that
+/// store through one more word. So the variant exists so that a host can *tell*
+/// a buffer from everything else, which is all there is to do with one: a
+/// program hands a host the `String` that `finish()` answered.
+#[derive(Clone, Copy, Debug)]
+pub struct ByteBufferView<'a>(std::marker::PhantomData<&'a ByteBufferStorage>);
+
 /// How a value appears inside string interpolation and `console.println`.
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -2264,6 +2337,13 @@ impl fmt::Display for Value {
             // representation, not something the program put there.
             Value(Repr::Dyn(d)) => write!(f, "{}", d.value),
             Value(Repr::Closure(_)) => f.write_str("<fn>"),
+            // A buffer prints as the handle it is and never as the bytes it
+            // holds. Those bytes are not text yet — only `finish()` has checked
+            // them — so rendering them would be the one place a program could
+            // observe a run that is not valid UTF-8 as if it were a `String`.
+            Value(Repr::ByteBuffer(buffer)) => {
+                write!(f, "<byte buffer of {} byte(s)>", buffer.len())
+            }
             Value(Repr::HostModule(m)) => write!(f, "<host module {m}>"),
             // A handle prints as what it names, identity included: two
             // connections are told apart by the number the host issued and
@@ -3092,6 +3172,7 @@ mod tests {
             Value(Repr::Task(task)),
             Value(Repr::TaskScope(scope)),
             Value(Repr::Shared(cell)),
+            Value(Repr::ByteBuffer(ByteBufferStorage::new(0))),
         ];
         let mut seen = 0;
         for value in &kinds {
@@ -3137,6 +3218,7 @@ mod tests {
                 ValueView::Task(task) => assert_eq!(task.scope(), "this call"),
                 ValueView::TaskScope(scope) => assert_eq!(scope.name(), "work"),
                 ValueView::Shared(_) => assert_eq!(seen, 21),
+                ValueView::ByteBuffer(_) => assert_eq!(seen, 22),
             }
         }
         assert_eq!(seen, kinds.len());

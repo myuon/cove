@@ -811,7 +811,14 @@ impl Transfer {
             // A vector is growable shared mutable storage, so it cannot cross
             // even through `let`: the `let` restricts this alias, not the
             // storage.
-            Value(Repr::Vector(_)) => Err(NotTaskSafe {
+            //
+            // A byte buffer is refused for the same sentence and not a new one.
+            // ADR 0052's owner is stable and shared, so two tasks appending
+            // through two copies of it are appending to one run — which is the
+            // race the vector rule exists to prevent, at a different storage
+            // unit. `cove_sema::typeck::not_task_safe` refuses it before a
+            // program runs; this is the same refusal where the value is.
+            Value(Repr::Vector(_)) | Value(Repr::ByteBuffer(_)) => Err(NotTaskSafe {
                 path: path.to_string(),
                 type_name: value.type_name(),
             }),

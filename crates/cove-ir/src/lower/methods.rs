@@ -128,6 +128,12 @@ impl Body<'_> {
                 self.vector_method(expr, base, &elem, name, args, want)
             }
             Ty::Set(_) => self.set_method(expr, base, name, args, want),
+            // A `ByteBuffer`'s four operations are the four instructions ADR
+            // 0052 added, emitted where the call is written:
+            // `cove_ir::lower::buffers` is where that is taken apart, and its
+            // module doc says why an appended byte may not become a builtin
+            // call.
+            Ty::ByteBuffer => self.buffer_method(expr, base, name, args, want),
             Ty::Map(..) => self.map_method(expr, base, name, args, want),
             // A scope and a task handle are the two values whose operations
             // are the scheduler's rather than the heap's, so they are
@@ -889,6 +895,7 @@ fn receiver_name(ty: &Ty) -> Option<&'static str> {
         Ty::Int => "Int",
         Ty::Float => "Float",
         Ty::Duration => "Duration",
+        Ty::ByteBuffer => "ByteBuffer",
         Ty::Error => "Error",
         Ty::Range => "Range",
         Ty::Array(_) => "Array",

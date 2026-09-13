@@ -892,9 +892,16 @@ struct ImportEnv {
 /// task scope, which belong to the task that holds them. Everything else is
 /// task-safe exactly when what it contains is — except a `Shared`, which
 /// crosses by sharing rather than by copying and so answers for itself.
+///
+/// A `ByteBuffer` is here for the `Vector`'s reason and not for a new one: it
+/// is a stable owner two holders can append through, so a builder reached from
+/// two tasks is the same race a vector reached from two tasks is. It is also
+/// the *field* of a `StringBuilder`, and a struct is task-safe exactly when its
+/// fields are — so naming it here is what keeps a builder from crossing inside
+/// a wrapper that says nothing about what it holds.
 fn not_task_safe(ty: &Ty) -> Option<&Ty> {
     match ty {
-        Ty::Vector(_) | Ty::Task(_) | Ty::Scope => Some(ty),
+        Ty::Vector(_) | Ty::ByteBuffer | Ty::Task(_) | Ty::Scope => Some(ty),
         Ty::Shared(_) => None,
         Ty::Array(inner) | Ty::Set(inner) | Ty::Option(inner) => not_task_safe(inner),
         Ty::Map(key, value) | Ty::MapEntry(key, value) | Ty::Result(key, value) => {
@@ -1059,6 +1066,13 @@ pub enum Ty {
     Float,
     Str,
     Duration,
+    /// `ByteBuffer`: the growable packed byte run ADR 0052 assembles a
+    /// `String` in, and the field an `opaque struct StringBuilder` wraps.
+    ///
+    /// Shared mutable storage exactly as a [`Ty::Vector`] is — a copy of the
+    /// value aliases the same owner, and an append through either is visible
+    /// through both — which is why `not_task_safe` names it beside one.
+    ByteBuffer,
     Error,
     Range,
     Array(Box<Ty>),
@@ -1592,6 +1606,7 @@ impl fmt::Display for Ty {
             Ty::Float => f.write_str("Float"),
             Ty::Str => f.write_str("String"),
             Ty::Duration => f.write_str("Duration"),
+            Ty::ByteBuffer => f.write_str("ByteBuffer"),
             Ty::Error => f.write_str("Error"),
             Ty::Range => f.write_str("Range"),
             Ty::Scope => f.write_str("Scope"),
@@ -3721,6 +3736,7 @@ impl<'a> Checker<'a> {
             "Float" => Ty::Float,
             "String" => Ty::Str,
             "Duration" => Ty::Duration,
+            "ByteBuffer" => Ty::ByteBuffer,
             "Error" => Ty::Error,
             "Range" => Ty::Range,
             "Array" => Ty::Array(Box::new(first)),
@@ -9332,6 +9348,7 @@ pub(crate) fn builtin_schema_of(receiver: &Ty) -> Option<&'static BuiltinSchema>
         Ty::Float => "Float",
         Ty::Str => "String",
         Ty::Duration => "Duration",
+        Ty::ByteBuffer => "ByteBuffer",
         Ty::Error => "Error",
         Ty::Range => "Range",
         Ty::Array(_) => "Array",
@@ -9389,6 +9406,7 @@ fn builtin_ty(declared: &BuiltinType, bound: &BTreeMap<&str, Ty>, receiver: Opti
         BuiltinType::String => Ty::Str,
         BuiltinType::Error => Ty::Error,
         BuiltinType::Duration => Ty::Duration,
+        BuiltinType::ByteBuffer => Ty::ByteBuffer,
         BuiltinType::Array(item) => Ty::Array(nested(item)),
         BuiltinType::Vector(item) => Ty::Vector(nested(item)),
         BuiltinType::Set(item) => Ty::Set(nested(item)),
@@ -11682,7 +11700,7 @@ fn run() -> Counter {
         assert_eq!(error.message, "`Array` has no associated function `of`");
         assert_eq!(
             error.rule.unwrap(),
-            "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, `String.fromCodePoint`, `Int.parse`, `Int.parseRadix`, `Float.parse`, `Duration.nanos`, `Duration.micros`, `Duration.millis`, `Duration.seconds`, `Duration.minutes`, and `Duration.hours`."
+            "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, `String.fromCodePoint`, `ByteBuffer.allocate`, `Int.parse`, `Int.parseRadix`, `Float.parse`, `Duration.nanos`, `Duration.micros`, `Duration.millis`, `Duration.seconds`, `Duration.minutes`, and `Duration.hours`."
         );
     }
 

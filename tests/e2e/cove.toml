@@ -323,3 +323,7 @@ allow = ["console"]
 [run.values_code_point]
 entry = "values_code_point.main"
 allow = ["console"]
+
+[run.values_string_builder]
+entry = "values_string_builder.main"
+allow = ["console"]

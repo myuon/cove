@@ -64,6 +64,7 @@
 //! more machinery than the word is worth.
 
 mod assertions;
+mod buffers;
 mod cells;
 mod closures;
 mod collections;

@@ -206,6 +206,16 @@ pub(super) const VECTOR_LEN: u32 = 0;
 /// object holding them.
 pub(super) const VECTOR_STORE: u32 = 1;
 
+/// Payload word 0 of a [`Shape::ByteBuffer`] owner: how many of the store's
+/// bytes are *value*.
+///
+/// The same word a [`Shape::Vector`] holds its logical length in, at the same
+/// offset, because the two are one ownership discipline in ADR 0052's words: a
+/// stable owner whose length is its own and whose payload is somewhere else.
+/// The store's header length is the *capacity*, which is why a program's
+/// `length()` reads this and never the object it points at.
+pub(super) const BUFFER_LEN: u32 = 0;
+
 /// The word a `Range` holds its first value in.
 pub(super) const RANGE_START: u32 = 0;
 
@@ -360,6 +370,10 @@ impl Shapes {
             Ty::Int => Some(INT),
             Ty::Float => Some(FLOAT),
             Ty::Duration => Some(DURATION),
+            // One program-wide layout, seeded rather than interned: an
+            // owner's two words are a length and a store reference whatever
+            // bytes it comes to hold.
+            Ty::ByteBuffer => Some(BYTE_BUFFER),
             Ty::Str => Some(STR),
             // One `Boxed` layout for the whole program, whatever trait was
             // written: what is inside is a question the box answers, from

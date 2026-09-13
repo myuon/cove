@@ -7,6 +7,6 @@ error[cove::unique::not_unique]: `freeze()` cannot prove that `building` holds t
   |
 6 |   var alias = building
   |               ^^^^^^^^ `building` is copied into another binding here
-  rule: `freeze()` consumes a vector whose storage the compiler can prove is uniquely owned here, and returns an immutable array in O(1).
+  rule: A consuming transition — `Vector.freeze()`, `ByteBuffer.finish()` — takes storage whose unique ownership the compiler can prove here, and answers an immutable value in O(1).
   help: call `toArray()` on the vector instead, which copies the elements in O(n) and asks nothing about who else is holding it
 1 error(s)

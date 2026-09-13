@@ -403,13 +403,48 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// #302, which is about what forwarding could remove, and it is the wrong one
 /// for asking whether a run got cheaper.
 ///
+/// **The seventh rise is the corpus again, and in the one place where one row
+/// is every row.** 2096 to 2231, and 132 of the 139 are one function:
+/// `std.stringbuilder`'s `withCapacity`, added with ADR 0052's byte builder.
+///
+/// A standard-library function is in *every* program's survey, because
+/// [`cove_ir::lower`] lowers a whole package and the standard library is
+/// attached to every package here. So the per-program table does not show this
+/// rise as a row — it shows it as a little over one copy added to each of 132
+/// rows, which is the shape to look for when a rise is not where the new source
+/// is. The remaining 7 are the one new row, `tests/e2e:values_string_builder`.
+///
+/// What that one function holds is a struct initializer written as a body's
+/// answer:
+///
+/// ```text
+/// alloc-buffer s2 s0
+/// copy s1:StringBuilder s2:ByteBuffer
+/// return s1
+/// ```
+///
+/// `Body::struct_literal` builds every initializer in a temporary of its own
+/// and copies the fields into it, because a destination that is also one of the
+/// field operands would be written before it was read. Deciding when it is not
+/// is exactly stage 3's work, and a one-field wrapper over a reference — which
+/// is what ADR 0052 says every collection wrapper will be — is the case where
+/// the copy is the whole of the function. So this 132 is not a copy the
+/// lowering started making; it is 132 sites of a candidate it has always had,
+/// in a function small enough that nothing else in it hides the shape.
+///
+/// The other five methods of the builder cost nothing here, and that was worth
+/// checking rather than assuming: an append answers `()`, and a `Unit` built in
+/// a temporary and copied into the answer would have been a fourth row per
+/// program. `Body::unit_answer` is why they are not — see
+/// `cove_ir::lower::buffers`.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2096;
+const FORWARDABLE_COPIES: usize = 2231;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

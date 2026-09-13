@@ -15,9 +15,9 @@ unless the run was granted the capability it names.
 
 | | |
 | --- | --- |
-| builtin types | 18 |
-| builtin methods | 102 |
-| builtin associated functions | 13 |
+| builtin types | 19 |
+| builtin methods | 106 |
+| builtin associated functions | 14 |
 | free builtins | 7 |
 | host modules | 8 |
 | host operations | 25 |
@@ -178,6 +178,25 @@ written as a namespace.
 | `codePointAtByte(offset: Int) -> Option<Int>` |  |  |  | `machine` |
 | `sliceBytes(from: Int, to: Int) -> Result<String, Error>` |  |  |  | `machine` |
 | `snapshot() -> Self` |  |  |  | `machine` |
+
+### `ByteBuffer`
+
+written as a namespace.
+
+**Associated functions.**
+
+| signature | variadic | binds | implemented by |
+| --- | --- | --- | --- |
+| `allocate(capacity: Int) -> ByteBuffer` |  |  | `machine` |
+
+**Methods.**
+
+| signature | `var self` | variadic | binds | implemented by |
+| --- | --- | --- | --- | --- |
+| `length() -> Int` |  |  |  | `machine` |
+| `appendByte(value: Int) -> Unit` | yes |  |  | `machine` |
+| `appendSlice(text: String, from: Int, to: Int) -> Unit` | yes |  |  | `machine` |
+| `finish() -> String` | yes |  |  | `machine` |
 
 ### `Range`
 

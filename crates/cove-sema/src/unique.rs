@@ -26,8 +26,9 @@
 //! four conditions are #240's own list:
 //!
 //! - it **originates at a locally known creation** — `Vector.of(...)`,
-//!   `array.toVector()`, `vector.snapshot()`, or a field initialised by one
-//!   in a struct literal this body wrote;
+//!   `array.toVector()`, `vector.snapshot()`, a field initialised by one in a
+//!   struct literal this body wrote, or a call to a declared function this
+//!   pass has *proved* answers freshly built storage (see `Freshness`, below);
 //! - it has **not been copied to another live place** — no `let`/`var` binds
 //!   it, no assignment writes it anywhere else;
 //! - it has **not escaped** — no closure captures it, no `return` carries it
@@ -112,11 +113,16 @@
 //! make each entry legible rather than mysterious. The ones that showed up
 //! while this was written:
 //!
-//! - **storage a call produced.** `var log = freshVector()` then
-//!   `log.freeze()` is refused: the initialiser is a call, and whether its
-//!   answer is fresh is a fact about another body. Proving it would be an
-//!   "answers unaliased storage" summary, which nothing in the corpus asks
-//!   for yet.
+//! - **storage a call produced, when the callee does not visibly build it.**
+//!   `var log = hand(mine)` then `log.freeze()` is refused whenever `hand`'s
+//!   answer is anything but a construction written where it is answered — a
+//!   parameter, a local, a literal over either. This entry used to say that
+//!   *every* call was refused, and `Freshness` is what changed it: a
+//!   declared function whose every answering expression builds its value on
+//!   the spot is proved to answer fresh storage, so `StringBuilder.withCapacity(16)`
+//!   is a creation where `freshVector()` used to be a dead end. What is still
+//!   refused is the interesting half, and the reason it is refused is written
+//!   there rather than here.
 //! - **storage an assignment brought in.** `log = lines` gives `log` whatever
 //!   the caller is holding, and this refuses `log.freeze()` afterwards —
 //!   correctly, in that case.
@@ -126,8 +132,12 @@
 //! - **a name a pattern or a `for` bound.** `match maybe { Some(v) => v.freeze() }`
 //!   has no creation to point at.
 //!
-//! Every one of them has the same correction, and the diagnostic gives it:
-//! `toArray()`, which copies in O(n) and asks nothing.
+//! A vector has one correction for all of them and the diagnostic gives it:
+//! `toArray()`, which copies in O(n) and asks nothing. A `ByteBuffer` has no
+//! copying conversion to offer, so its correction is to build the builder in
+//! the body that finishes it — which is the thing `Freshness` made possible
+//! to say, because `StringBuilder.withCapacity(n)` now counts as building one.
+//! See `Transition::correction`.
 //!
 //! # This is not a borrow checker
 //!
@@ -156,9 +166,14 @@ pub const NOT_UNIQUE: &str = "cove::unique::not_unique";
 pub const USED_AFTER_FREEZE: &str = "cove::unique::used_after_freeze";
 
 /// The one sentence this pass enforces, on every diagnostic it raises.
+///
+/// Written once for both transitions, because there is one rule: a consuming
+/// transition takes the storage, so the compiler has to be able to prove here
+/// that nothing else is holding it. [`Transition`] is what supplies the name and
+/// the correction, which are the two parts that differ.
 const RULE: &str =
-    "`freeze()` consumes a vector whose storage the compiler can prove is uniquely owned here, \
-     and returns an immutable array in O(1).";
+    "A consuming transition — `Vector.freeze()`, `ByteBuffer.finish()` — takes storage whose \
+     unique ownership the compiler can prove here, and answers an immutable value in O(1).";
 
 /// One declaration, as the demand table names it.
 type FnKey = (String, Option<String>, String);
@@ -237,8 +252,67 @@ struct Consume {
     /// Whether this site is the operand of a `return`, so that nothing
     /// written after it in the source runs after it.
     terminal: bool,
-    /// `None` for a `freeze()`; the callee, for a demanded receiver.
-    through: Option<String>,
+    /// Which transition this is, and what a reader should try instead.
+    transition: Transition,
+}
+
+/// What consumed the storage, as a diagnostic has to name it.
+///
+/// Three cases rather than two, because a demanded receiver is not a transition
+/// a reader wrote: `draft.finish()` consumes `draft.guests` because
+/// `BookingDraft.finish` freezes it, and pointing at `freeze()` would point into
+/// a body the reader is not looking at.
+#[derive(Clone, Debug)]
+enum Transition {
+    /// `Vector.freeze()`, written here.
+    Freeze,
+    /// `ByteBuffer.finish()`, written here.
+    Finish,
+    /// A call to a declared method that consumes through its own receiver,
+    /// named `Type.method`.
+    Through(String),
+}
+
+impl Transition {
+    /// How the diagnostic's first sentence names what took the storage.
+    fn named(&self) -> &str {
+        match self {
+            Transition::Freeze => "freeze()",
+            Transition::Finish => "finish()",
+            Transition::Through(callee) => callee,
+        }
+    }
+
+    /// What to do instead, which is the whole reason a refusal here is not a
+    /// dead end.
+    ///
+    /// A vector has a copying conversion and a buffer does not: ADR 0052 leaves
+    /// an explicit copying conversion for a non-unique builder to a later
+    /// decision, and until there is one the correction is to build the string
+    /// where it is finished. So the two say different things, and a shared
+    /// sentence recommending `toArray()` would be advice a `StringBuilder` has
+    /// no way to take.
+    fn correction(&self) -> &'static str {
+        match self {
+            Transition::Finish => {
+                "create the builder in the body that finishes it, and drop any other handle to it \
+                 before the call"
+            }
+            Transition::Freeze => {
+                "call `toArray()` on the vector instead, which copies the elements in O(n) and \
+                 asks nothing about who else is holding it"
+            }
+            // A demanded receiver may be carrying either kind of owner — the
+            // demand is a field path and this side does not know what type is
+            // at the end of it — so this says the part that is true of both and
+            // names the vector's copying conversion as the vector's own.
+            Transition::Through(_) => {
+                "create the value in the body that consumes it, and drop any other handle to it \
+                 before the call; for a `Vector`, `toArray()` copies the elements in O(n) and \
+                 asks nothing"
+            }
+        }
+    }
 }
 
 /// A call this body makes to a method written in an `impl` block.
@@ -261,6 +335,17 @@ struct Scan<'a> {
     writes: Vec<(Place, Span)>,
     freezes: Vec<Consume>,
     calls: Vec<MethodCall>,
+    /// Every expression this body can answer with: the tail of its own block,
+    /// and the operand of every `return` written anywhere inside it.
+    ///
+    /// This is what [`answers_fresh`] reads, and it is collected *over*
+    /// rather than *under*: a `return` inside a lambda or a local `fn`
+    /// returns from that closure and not from this body, and it is recorded
+    /// here anyway. Over-collecting only ever adds an expression that has to
+    /// be a construction, so the summary refuses more; missing one would let
+    /// a body answer something the summary never looked at, which is the
+    /// direction that is unsound.
+    answers: Vec<&'a Expr>,
 }
 
 /// One body to analyse.
@@ -278,13 +363,21 @@ struct Body<'a> {
     block: &'a Block,
 }
 
-/// The named types whose values can reach a `Vector`.
+/// The named types whose values can reach a linear owner.
 ///
-/// A struct or enum is one when a field or a payload names a `Vector`, or
-/// names another such type — so `World`, whose fields are `Array`s, is not,
-/// and `BookingDraft`, whose `guests` is a `Vector`, is. Keyed by the type's
-/// own name without its module, because two modules' types of one name are
-/// merged here and merging in this direction only ever refuses more.
+/// An *owner* is a value whose copy is an alias to shared growable storage and
+/// whose storage a consuming transition takes: a `Vector`, which
+/// `Vector.freeze()` consumes, and a `ByteBuffer`, which
+/// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
+/// `finish()` consumes. The two are one ownership discipline and this pass owes
+/// them one proof, so nothing here distinguishes them.
+///
+/// A struct or enum is here when a field or a payload names an owner, or names
+/// another such type — so `World`, whose fields are `Array`s, is not;
+/// `BookingDraft`, whose `guests` is a `Vector`, is; and `StringBuilder`, whose
+/// `buffer` is a `ByteBuffer`, is. Keyed by the type's own name without its
+/// module, because two modules' types of one name are merged here and merging
+/// in this direction only ever refuses more.
 type Bearing = BTreeSet<String>;
 
 /// Checks every `freeze()` in `program`.
@@ -292,12 +385,17 @@ type Bearing = BTreeSet<String>;
 /// The answer is one diagnostic per site that could not be proved, and one
 /// per read of a vector a proved site already consumed.
 pub fn check(program: &Program, facts: &Facts) -> Vec<Diagnostic> {
-    let bearing = vector_bearing(program);
+    let bearing = owner_bearing(program);
     let bodies = bodies(program);
     let scans: Vec<Scan<'_>> = bodies
         .iter()
         .map(|body| scan(body, facts, &bearing))
         .collect();
+
+    // What each declaration answers, before anything asks where a binding's
+    // storage came from: an initialiser that is a call to a function in this
+    // set is a creation, and `prove` below is what reads that.
+    let fresh = answers_fresh(program, &bodies, &scans, facts, &bearing);
 
     // Which methods demand a uniquely owned receiver, to a fixpoint: a
     // `finish` that freezes `self.routes` demands `routes`, and a method that
@@ -329,7 +427,15 @@ pub fn check(program: &Program, facts: &Facts) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     for (body, scanned) in bodies.iter().zip(&scans) {
         for consumed in consumptions(scanned, &demands) {
-            prove(body, scanned, facts, &demands, &consumed, &mut diagnostics);
+            prove(
+                body,
+                scanned,
+                facts,
+                &demands,
+                &fresh,
+                &consumed,
+                &mut diagnostics,
+            );
         }
     }
     diagnostics.sort_by_key(|diagnostic| {
@@ -360,7 +466,7 @@ fn consumptions(
                 span: call.span,
                 regions: call.regions.clone(),
                 terminal: call.terminal,
-                through: Some(format!(
+                transition: Transition::Through(format!(
                     "{}.{}",
                     call.target.1.clone().unwrap_or_default(),
                     call.target.2
@@ -379,18 +485,20 @@ fn prove(
     scanned: &Scan<'_>,
     facts: &Facts,
     demands: &BTreeMap<FnKey, BTreeSet<Vec<String>>>,
+    fresh: &Freshness<'_>,
     consumed: &Consume,
     out: &mut Vec<Diagnostic>,
 ) {
     let place = consumed.place.text();
-    let opening = match &consumed.through {
-        None => {
-            format!("`freeze()` cannot prove that `{place}` holds the only handle to its storage")
-        }
-        Some(callee) => format!(
+    let named = consumed.transition.named();
+    let opening = match &consumed.transition {
+        Transition::Through(callee) => format!(
             "`{callee}()` consumes `{place}`, and this call cannot prove that it holds the only \
              handle to its storage"
         ),
+        _ => {
+            format!("`{named}` cannot prove that `{place}` holds the only handle to its storage")
+        }
     };
     let refuse = |span: Span, message: String, out: &mut Vec<Diagnostic>| {
         out.push(
@@ -398,10 +506,7 @@ fn prove(
                 .at(consumed.span)
                 .label(span, message)
                 .rule(RULE)
-                .help(
-                    "call `toArray()` on the vector instead, which copies the elements in O(n) \
-                     and asks nothing about who else is holding it",
-                ),
+                .help(consumed.transition.correction()),
         );
     };
 
@@ -422,7 +527,7 @@ fn prove(
                 );
                 return;
             };
-            if !establishes(init, &consumed.place.fields, facts, body.file) {
+            if !establishes(init, &consumed.place.fields, facts, body.file, fresh) {
                 refuse(
                     init.span,
                     format!(
@@ -548,36 +653,260 @@ fn prove(
                 .at(read.span)
                 .label(
                     consumed.span,
-                    match &consumed.through {
-                        None => "`freeze()` took the storage here".to_string(),
-                        Some(callee) => format!("`{callee}()` took the storage here"),
-                    },
+                    format!(
+                        "`{}{}` took the storage here",
+                        consumed.transition.named(),
+                        match &consumed.transition {
+                            Transition::Through(_) => "()",
+                            _ => "",
+                        }
+                    ),
                 )
                 .rule(RULE)
-                .help(
-                    "read the `Array` the transition answered, or call `toArray()` instead, which \
-                     copies the elements in O(n) and leaves the vector usable",
-                ),
+                .help(match &consumed.transition {
+                    Transition::Finish => {
+                        "read the `String` the finish answered; a finished buffer holds nothing"
+                    }
+                    _ => {
+                        "read the `Array` the transition answered, or call `toArray()` instead, \
+                         which copies the elements in O(n) and leaves the vector usable"
+                    }
+                }),
             );
         }
     }
 }
 
+// --- what a declared function may be trusted to answer ---------------------
+
+/// The declarations this package's *bodies* prove answer fresh storage, and
+/// the tables a call site needs to name one.
+///
+/// # Derived, not declared, and the difference is the whole justification
+///
+/// [`creates`] says who may *claim* freshness: `cove-schema`, about a
+/// builtin, and nobody else. A declared `fn` is deliberately not on that
+/// list, because a claim is unchecked — nothing would verify that a Cove
+/// function annotated "answers fresh storage" really does, and a wrong claim
+/// is a consuming transition proved over storage another holder survived
+/// with. That boundary stays exactly where it is.
+///
+/// This is the other thing: the pass *proves* it from the body. No
+/// declaration says anything, no annotation exists to be written, and a
+/// function is in [`Freshness::answers`] only because this pass read its
+/// answering expressions and found every one of them to be a construction.
+/// A body that is edited to answer something else leaves the set on the next
+/// compile, with nothing to update — which is what a derived summary buys
+/// over a declared one.
+///
+/// # Why the rule is narrow on purpose
+///
+/// An answering expression counts only when it is *syntactically* a
+/// construction: a builtin fresh call, a call to a function already in this
+/// set, or a struct literal whose every argument is itself a construction or
+/// cannot reach an owner at all. `return x` naming a variable is not a
+/// construction, whatever `x` holds.
+///
+/// That restriction is what makes the summary sound without an escape
+/// analysis. An expression that builds its value on the spot cannot be
+/// aliased by anything else in the body, because there was no value to alias
+/// until the answer was built — so there is nothing to search the body for.
+/// The moment a name is admitted the question changes into "did anything else
+/// in this body get a handle on what that name holds", which is a whole
+/// analysis and not a syntactic test. Widening this is a soundness decision;
+/// see the negative tests, each of which would start proving if a bare
+/// `return x` were accepted.
+struct Freshness<'a> {
+    /// Declarations proved to answer freshly created storage.
+    answers: BTreeSet<FnKey>,
+    /// Every declared struct's bare name, so a `Call` through a plain `Ident`
+    /// can be told from a call to a function of the same shape.
+    ///
+    /// A name that is in both this set and `functions` is read as neither: see
+    /// [`constructs`], which refuses rather than guessing which declaration a
+    /// bare name reaches.
+    structs: BTreeSet<&'a str>,
+    /// Free functions by their bare name, and every declaration that name
+    /// could reach.
+    ///
+    /// A free call records no [`Facts::target`] — the checker names only
+    /// method and associated-function targets — so this side has to resolve
+    /// the name itself, and a name may be declared by more than one module.
+    /// The list is therefore every candidate, and a call resolves as fresh
+    /// only when *all* of them are in `answers`: an ambiguity that would have
+    /// to guess refuses instead.
+    functions: BTreeMap<&'a str, Vec<FnKey>>,
+    /// What a struct literal's argument is measured against.
+    bearing: &'a Bearing,
+}
+
+impl Freshness<'_> {
+    /// Whether a call to a declared function of this bare name answers fresh.
+    fn by_name(&self, name: &str) -> bool {
+        self.functions
+            .get(name)
+            .is_some_and(|keys| keys.iter().all(|key| self.answers.contains(key)))
+    }
+}
+
+/// Which of this package's declarations answer freshly created storage, to a
+/// monotone fixpoint.
+///
+/// The set starts empty and only ever grows, so it terminates; a function
+/// that answers a construction built out of its own recursive call is never
+/// added, because the first round has nothing to add it from and no later
+/// round can start it.
+///
+/// See [`Freshness`] for what a construction is and why nothing weaker
+/// counts.
+fn answers_fresh<'a>(
+    program: &'a Program,
+    bodies: &[Body<'a>],
+    scans: &[Scan<'a>],
+    facts: &Facts,
+    bearing: &'a Bearing,
+) -> Freshness<'a> {
+    let mut fresh = Freshness {
+        answers: BTreeSet::new(),
+        structs: BTreeSet::new(),
+        functions: BTreeMap::new(),
+        bearing,
+    };
+    for (module_name, module) in &program.modules {
+        for name in module.structs.keys() {
+            fresh.structs.insert(simple_name(name));
+        }
+        for name in module.functions.keys() {
+            fresh.functions.entry(name.as_str()).or_default().push((
+                module_name.clone(),
+                None,
+                name.clone(),
+            ));
+        }
+    }
+    loop {
+        let mut changed = false;
+        for (body, scanned) in bodies.iter().zip(scans) {
+            // A body the package cannot name — a trait's default, which is
+            // reached through a bound or through `dyn` — has no key for a
+            // call site to resolve to, so nothing could read its entry.
+            let Some(key) = &body.key else { continue };
+            if fresh.answers.contains(key) || scanned.answers.is_empty() {
+                continue;
+            }
+            let proved = scanned
+                .answers
+                .iter()
+                .all(|answer| constructs(answer, facts, body.file, &fresh));
+            if proved {
+                changed |= fresh.answers.insert(key.clone());
+            }
+        }
+        if !changed {
+            return fresh;
+        }
+    }
+}
+
+/// Whether this expression *builds* the value it answers, so that nothing
+/// else can be holding the storage underneath it.
+///
+/// Three shapes, and [`Freshness`] says why there are no more:
+///
+/// - a builtin call [`creates`] recognises, such as `ByteBuffer.allocate(n)`;
+/// - a call to a declared function already proved to answer fresh;
+/// - a struct literal whose every argument is itself a construction, or is of
+///   a type that cannot reach an owner — a scalar, a `String`, an `Array`.
+///   An argument that could carry an owner and is not itself built here is
+///   refused, so `Builder(buffer: given)` is not a construction however
+///   `given` was obtained.
+///
+/// A call carrying a trailing closure is not a construction either: the
+/// closure may have captured an owner, and the argument list this walks is
+/// not where it would be found.
+fn constructs(expr: &Expr, facts: &Facts, file: FileId, fresh: &Freshness<'_>) -> bool {
+    if creates(expr, facts, file) {
+        return true;
+    }
+    let ExprKind::Call {
+        callee,
+        args,
+        trailing,
+        ..
+    } = &expr.kind
+    else {
+        return false;
+    };
+    if trailing.is_some() {
+        return false;
+    }
+    // A method or an associated function: the checker resolved which
+    // declaration this reaches and recorded it, so there is nothing to guess.
+    if let Some(target) = facts.target(file, expr.id) {
+        return fresh.answers.contains(&(
+            target.module.clone(),
+            Some(target.type_name.clone()),
+            target.method.clone(),
+        ));
+    }
+    let ExprKind::Ident(head) = &callee.kind else {
+        return false;
+    };
+    // A callee the checker gave a type is a call *through a value* — a
+    // binding holding a closure — and names no declaration at all. See the
+    // `facts` module: that absence is the fact, not a gap in the table.
+    if facts.ty(file, callee.id).is_some() {
+        return false;
+    }
+    // A struct literal, unless the name is also some module's function — in
+    // which case this side cannot tell which of the two the call reaches, and
+    // reading a function call as a literal would check the wrong things about
+    // its arguments. Nothing in the corpus spells a struct and a function the
+    // same way, and the point of the guard is that nothing has to.
+    if fresh.structs.contains(head.as_str()) && !fresh.functions.contains_key(head.as_str()) {
+        return args.iter().all(|arg| {
+            let harmless = facts
+                .ty(file, arg.value.id)
+                .is_some_and(|ty| !holds_owned(fresh.bearing, ty));
+            harmless || constructs(&arg.value, facts, file, fresh)
+        });
+    }
+    fresh.by_name(head)
+}
+
 /// Whether `init` creates storage this body is the only holder of, reached
 /// through `fields`.
 ///
-/// With no fields, the initialiser has to be a call [`creates`] recognises.
-/// With fields, the initialiser has to be a literal this body wrote, so that
-/// the named field's own initialiser can be asked the same question.
-fn establishes(init: &Expr, fields: &[String], facts: &Facts, file: FileId) -> bool {
+/// Two ways, and the first is what lets a builder be built by a function.
+/// When the whole initialiser is a [`constructs`] — `StringBuilder.withCapacity(16)`,
+/// `ByteBuffer.allocate(64)`, `Builder(buffer: ByteBuffer.allocate(64))` —
+/// then *every* field path inside it is fresh, because the value was built
+/// here out of parts that were built here: there is no field of it that some
+/// other holder could have supplied. Nothing needs to be found in the
+/// argument list, which is what makes `withCapacity` work where looking for a
+/// labelled `buffer:` argument finds none.
+///
+/// Failing that, and only with a field path to follow, the initialiser has to
+/// be a literal this body wrote, so that the named field's own initialiser
+/// can be asked the same question.
+fn establishes(
+    init: &Expr,
+    fields: &[String],
+    facts: &Facts,
+    file: FileId,
+    fresh: &Freshness<'_>,
+) -> bool {
+    if constructs(init, facts, file, fresh) {
+        return true;
+    }
     let Some((first, rest)) = fields.split_first() else {
-        return creates(init, facts, file);
+        return false;
     };
     match &init.kind {
         ExprKind::Call { args, .. } => args
             .iter()
             .find(|arg| arg.label.as_ref().is_some_and(|label| label.node == *first))
-            .is_some_and(|arg| establishes(&arg.value, rest, facts, file)),
+            .is_some_and(|arg| establishes(&arg.value, rest, facts, file, fresh)),
         _ => false,
     }
 }
@@ -660,6 +989,19 @@ fn scan<'a>(body: &Body<'a>, facts: &Facts, bearing: &Bearing) -> Scan<'a> {
         scan: Scan::default(),
     };
     walk.block(body.block, None);
+    // The body's own tail is an answering expression, and it is the one the
+    // walk cannot recognise on its own: every nested block's tail reaches
+    // `Walk::block` the same way this one does.
+    //
+    // A tail that is itself a `return` answers nothing — the operand is the
+    // answer, and the walk has already recorded it — so counting the `return`
+    // as well would make a body written `{ return Builder.withCapacity(n) }`
+    // permanently unprovable for a reason that is about punctuation.
+    if let Some(tail) = &body.block.tail {
+        if !matches!(tail.kind, ExprKind::Return(_)) {
+            walk.scan.answers.push(tail);
+        }
+    }
     walk.scan
 }
 
@@ -868,6 +1210,7 @@ impl<'a> Walk<'a, '_> {
                 self.repeated(None, body);
             }
             ExprKind::Return(Some(value)) => {
+                self.scan.answers.push(value);
                 let outer = std::mem::replace(&mut self.terminal, true);
                 self.expr(value, Some("is returned"));
                 self.terminal = outer;
@@ -933,7 +1276,7 @@ impl<'a> Walk<'a, '_> {
         let result_holds = self
             .facts
             .ty(self.file, call.id)
-            .is_some_and(|ty| self.holds_vector(ty));
+            .is_some_and(|ty| self.holds_owned(ty));
         let receiver = match &callee.kind {
             ExprKind::Field { base, name } => {
                 self.method(call, base, &name.node, result_holds);
@@ -953,7 +1296,7 @@ impl<'a> Walk<'a, '_> {
             .map(|operand| {
                 self.facts
                     .ty(self.file, operand.id)
-                    .is_some_and(|ty| self.holds_vector(ty))
+                    .is_some_and(|ty| self.holds_owned(ty))
             })
             .collect();
         let elsewhere = |at: usize| {
@@ -985,16 +1328,33 @@ impl<'a> Walk<'a, '_> {
     }
 
     /// A method call's receiver, and whether this call is a consumption.
+    ///
+    /// Two calls consume, and they are the two transitions the language has:
+    /// `Vector.freeze()`, which relabels a vector's store into an immutable
+    /// `Array`, and `ByteBuffer.finish()`, which relabels a buffer's run into a
+    /// `String`. ADR 0052 asks for exactly this — "finishing requires the same
+    /// conservative local uniqueness proof as `Vector.freeze()`" — so a finish
+    /// is recorded here as a freeze is, and everything downstream of this
+    /// function treats the two identically.
+    ///
+    /// The receiver's *type* is asked and not the name alone, because a name is
+    /// not a transition: a program's own `finish()` on a declared type is an
+    /// ordinary method, and `examples/values`'s `BookingDraft.finish` is one.
     fn method(&mut self, call: &'a Expr, base: &'a Expr, name: &str, result_holds: bool) {
         let receiver = self.place_of(base);
-        if name == "freeze" && matches!(self.facts.ty(self.file, base.id), Some(Ty::Vector(_))) {
+        let consumes = match self.facts.ty(self.file, base.id) {
+            Some(Ty::Vector(_)) if name == "freeze" => Some(Transition::Freeze),
+            Some(Ty::ByteBuffer) if name == "finish" => Some(Transition::Finish),
+            _ => None,
+        };
+        if let Some(transition) = consumes {
             if let Some(place) = receiver.clone() {
                 self.scan.freezes.push(Consume {
                     place,
                     span: call.span,
                     regions: self.regions.clone(),
                     terminal: self.terminal,
-                    through: None,
+                    transition,
                 });
             }
         }
@@ -1024,28 +1384,46 @@ impl<'a> Walk<'a, '_> {
         );
     }
 
-    /// Whether a value of this type can reach a `Vector`.
-    fn holds_vector(&self, ty: &Ty) -> bool {
-        match ty {
-            Ty::Vector(_) => true,
-            Ty::Array(inner)
-            | Ty::Set(inner)
-            | Ty::Option(inner)
-            | Ty::Task(inner)
-            | Ty::Shared(inner) => self.holds_vector(inner),
-            Ty::Map(key, value) | Ty::MapEntry(key, value) | Ty::Result(key, value) => {
-                self.holds_vector(key) || self.holds_vector(value)
-            }
-            Ty::Struct(name, args) | Ty::Enum(name, args) => {
-                self.bearing.contains(simple_name(name))
-                    || args.iter().any(|ty| self.holds_vector(ty))
-            }
-            Ty::Fn(signature) => {
-                signature.params.iter().any(|ty| self.holds_vector(ty))
-                    || self.holds_vector(&signature.ret)
-            }
-            _ => false,
+    /// Whether a value of this type can reach a linear owner, against this
+    /// walk's [`Bearing`].
+    fn holds_owned(&self, ty: &Ty) -> bool {
+        holds_owned(self.bearing, ty)
+    }
+}
+
+/// Whether a value of this type can reach a linear owner: a `Vector` or a
+/// `ByteBuffer`.
+///
+/// See [`Bearing`] for what an owner is and why the two are one question.
+/// This is asked of every operand of every call, and what it decides is
+/// whether that operand is somewhere a callee could *keep* the handle it
+/// was given — so a type it answered `false` about wrongly would be a
+/// consumption proved over storage another holder survived with.
+///
+/// A free function rather than a [`Walk`] method because the freshness
+/// summary — [`answers_fresh`] — asks the same question outside any walk: a
+/// struct literal's argument is harmless exactly when it cannot reach an
+/// owner, and that has to be the *same* question the escape analysis asks or
+/// the two would disagree about what an argument can carry.
+fn holds_owned(bearing: &Bearing, ty: &Ty) -> bool {
+    match ty {
+        Ty::Vector(_) | Ty::ByteBuffer => true,
+        Ty::Array(inner)
+        | Ty::Set(inner)
+        | Ty::Option(inner)
+        | Ty::Task(inner)
+        | Ty::Shared(inner) => holds_owned(bearing, inner),
+        Ty::Map(key, value) | Ty::MapEntry(key, value) | Ty::Result(key, value) => {
+            holds_owned(bearing, key) || holds_owned(bearing, value)
         }
+        Ty::Struct(name, args) | Ty::Enum(name, args) => {
+            bearing.contains(simple_name(name)) || args.iter().any(|ty| holds_owned(bearing, ty))
+        }
+        Ty::Fn(signature) => {
+            signature.params.iter().any(|ty| holds_owned(bearing, ty))
+                || holds_owned(bearing, &signature.ret)
+        }
+        _ => false,
     }
 }
 
@@ -1054,13 +1432,13 @@ fn simple_name(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
-/// Every declared type whose values can reach a `Vector`, to a fixpoint.
+/// Every declared type whose values can reach a linear owner, to a fixpoint.
 ///
 /// Read off the written types rather than the checked ones, because what is
 /// wanted is one bit per declaration and the declarations are what the
 /// package holds. A name is compared without its module for the reason
 /// [`Bearing`] states.
-fn vector_bearing(program: &Program) -> Bearing {
+fn owner_bearing(program: &Program) -> Bearing {
     let mut members: BTreeMap<&str, Vec<&Type>> = BTreeMap::new();
     for module in program.modules.values() {
         for (name, entry) in &module.structs {
@@ -1083,7 +1461,7 @@ fn vector_bearing(program: &Program) -> Bearing {
             if bearing.contains(*name) {
                 continue;
             }
-            if types.iter().any(|ty| names_a_vector(ty, &bearing)) {
+            if types.iter().any(|ty| names_an_owner(ty, &bearing)) {
                 bearing.insert((*name).to_string());
                 changed = true;
             }
@@ -1094,9 +1472,17 @@ fn vector_bearing(program: &Program) -> Bearing {
     }
 }
 
-/// Whether a written type names `Vector`, or a type already known to bear
-/// one.
-fn names_a_vector(ty: &Type, bearing: &Bearing) -> bool {
+/// Whether a written type names an owner — `Vector` or `ByteBuffer` — or a type
+/// already known to bear one.
+///
+/// The *written* name and not a checked type, which is why the two owners are
+/// spelled out here as strings. Nothing generic or aliased is resolved: a type
+/// alias for a `ByteBuffer`, or a type parameter instantiated with one, is not
+/// recognised. That is the same conservatism the `Vector` half has always had,
+/// and it fails in the safe direction only for the fixpoint's own purpose —
+/// what a *call site* is holding comes from [`Walk::holds_owned`], which reads
+/// the checker's settled types.
+fn names_an_owner(ty: &Type, bearing: &Bearing) -> bool {
     match &ty.kind {
         TypeKind::Named { path, args } => {
             let name = path
@@ -1104,8 +1490,9 @@ fn names_a_vector(ty: &Type, bearing: &Bearing) -> bool {
                 .map(|segment| segment.node.as_str())
                 .unwrap_or_default();
             name == "Vector"
+                || name == "ByteBuffer"
                 || bearing.contains(name)
-                || args.iter().any(|arg| names_a_vector(arg, bearing))
+                || args.iter().any(|arg| names_an_owner(arg, bearing))
         }
         TypeKind::Fn {
             params,
@@ -1116,10 +1503,10 @@ fn names_a_vector(ty: &Type, bearing: &Bearing) -> bool {
                 param
                     .ty
                     .as_ref()
-                    .is_some_and(|ty| names_a_vector(ty, bearing))
+                    .is_some_and(|ty| names_an_owner(ty, bearing))
             }) || return_type
                 .as_ref()
-                .is_some_and(|ty| names_a_vector(ty, bearing))
+                .is_some_and(|ty| names_an_owner(ty, bearing))
         }
         TypeKind::Dyn(_) | TypeKind::Unit => false,
     }
@@ -1208,21 +1595,44 @@ mod tests {
 
     /// Everything `cove check` reports about one module.
     fn errors_of(source: &str) -> Vec<Diagnostic> {
+        errors_of_package(source, false)
+    }
+
+    /// The same, with the standard library attached.
+    ///
+    /// Only for a test that names something the standard library declares —
+    /// `std.stringbuilder.StringBuilder`. It is not the default because
+    /// attaching costs eleven more modules to parse and check per test, and
+    /// because a test that does not name one is asking a question about this
+    /// pass and not about the package around it.
+    fn errors_with_std(source: &str) -> Vec<Diagnostic> {
+        errors_of_package(source, true)
+    }
+
+    fn errors_of_package(source: &str, with_std: bool) -> Vec<Diagnostic> {
         let mut sources = SourceMap::new();
         let path = PathBuf::from("main.cove");
         let file = sources.add(path.clone(), source);
         let ast = cove_syntax::parse_file(&sources, file).expect("test source parses");
+        let mut modules = BTreeMap::from([(
+            "main".to_string(),
+            Module {
+                name: "main".to_string(),
+                dir: PathBuf::from("main"),
+                units: vec![Unit { file, path, ast }],
+            },
+        )]);
+        if with_std {
+            for (name, module) in
+                crate::stdlib::attach(&mut sources).expect("the standard library parses")
+            {
+                modules.insert(name, module);
+            }
+        }
         let package = Package {
             root: PathBuf::new(),
             config: crate::config::Config::default(),
-            modules: BTreeMap::from([(
-                "main".to_string(),
-                Module {
-                    name: "main".to_string(),
-                    dir: PathBuf::from("main"),
-                    units: vec![Unit { file, path, ast }],
-                },
-            )]),
+            modules,
         };
         let program = crate::resolve::resolve(&package).expect("test source resolves");
         check(&package, &program)
@@ -1233,7 +1643,17 @@ mod tests {
 
     #[track_caller]
     fn proves(source: &str) {
-        let errors = errors_of(source);
+        report(errors_of(source));
+    }
+
+    /// [`proves`], of a source that names the standard library.
+    #[track_caller]
+    fn proves_with_std(source: &str) {
+        report(errors_with_std(source));
+    }
+
+    #[track_caller]
+    fn report(errors: Vec<Diagnostic>) {
         assert!(
             errors.is_empty(),
             "expected the proof to succeed, found: {}",
@@ -1247,7 +1667,17 @@ mod tests {
 
     #[track_caller]
     fn refuses(source: &str) -> Diagnostic {
-        let mut errors = errors_of(source);
+        sole(errors_of(source))
+    }
+
+    /// [`refuses`], of a source that names the standard library.
+    #[track_caller]
+    fn refuses_with_std(source: &str) -> Diagnostic {
+        sole(errors_with_std(source))
+    }
+
+    #[track_caller]
+    fn sole(mut errors: Vec<Diagnostic>) -> Diagnostic {
         assert_eq!(
             errors.len(),
             1,
@@ -1532,16 +1962,23 @@ fn build(rounds: Int) -> Int {
     }
 
     /// Storage that came from somewhere this body cannot see the creation of.
+    ///
+    /// The call is to a function whose answer is its own *parameter*, which is
+    /// the one thing [`Freshness`] will not derive: `handed` answers storage
+    /// its caller supplied, so `items` may be the second handle to it. Written
+    /// with an explicit `return` because a tail expression and a `return`
+    /// operand are the same position to the summary and this pins the one that
+    /// is easier to get wrong.
     #[test]
     fn a_binding_this_body_did_not_create_is_refused() {
         let error = refuses(
             "\
-fn fresh() -> Vector<Int> {
-  Vector.of(1)
+fn handed(items: Vector<Int>) -> Vector<Int> {
+  return items
 }
 
-fn build() -> Array<Int> {
-  var items = fresh()
+fn build(given: Vector<Int>) -> Array<Int> {
+  var items = handed(given)
   items.freeze()
 }
 ",
@@ -1752,18 +2189,17 @@ fn build(holder: Holder) -> Array<Int> {
     /// above it in the very same body — nothing here has to know `make` is
     /// a "wrapper" for its own proof to go through.
     ///
-    /// What does not follow is that `make`'s *result* is fresh to whoever
-    /// calls it. `establishes()` only ever asks [`creates`] about a call's
-    /// own callee, and a call to `make` names a declared function, not a
-    /// builtin schema entry — the same refusal
-    /// [`a_binding_this_body_did_not_create_is_refused`] already pins for a
-    /// single-expression wrapper. This test is the multi-statement shape a
-    /// real one is written in, proved and refused in the same place so the
-    /// two facts read together: a wrapper's own `freeze()` inside it is
-    /// unaffected by this pass, and a wrapper's `return` still carries
-    /// nothing past its own body.
+    /// What *also* holds, and did not when this test was first written, is
+    /// that a wrapper whose answer is a construction is fresh to whoever calls
+    /// it. `make`'s single answering expression is `Vector.of(1, 2)`, which
+    /// builds the vector on the spot, so [`answers_fresh`] derives the
+    /// summary and `log.freeze()` in the caller is proved from it — still
+    /// without any declaration claiming anything. The two halves are here
+    /// together because they are the pair a reader needs: a wrapper's own
+    /// `freeze()` is proved locally, and its *result* is proved by a summary
+    /// of its body.
     #[test]
-    fn a_cove_wrappers_return_is_not_fresh_for_its_caller() {
+    fn a_cove_wrappers_return_is_fresh_when_its_body_builds_the_answer() {
         proves(
             "\
 fn make() -> Array<Int> {
@@ -1772,7 +2208,7 @@ fn make() -> Array<Int> {
 }
 ",
         );
-        let error = refuses(
+        proves(
             "\
 fn make() -> Vector<Int> {
   Vector.of(1, 2)
@@ -1784,35 +2220,30 @@ fn build() -> Array<Int> {
 }
 ",
         );
-        assert_eq!(error.code, NOT_UNIQUE);
-        assert_eq!(
-            error.message,
-            "`freeze()` cannot prove that `log` holds the only handle to its storage"
-        );
-        assert_eq!(
-            error.labels[0].message,
-            "`log` is initialised from a value this function did not create, so its storage \
-             may already have another handle"
-        );
     }
 
-    /// The same wrapper, renamed. `creates()` never reads a call's callee
-    /// name at all once the callee is not a builtin's own `Field` — it asks
-    /// whether the call *resolves* to a schema entry, and a declared
-    /// function does not, whatever it is spelled. Naming it `toVector` here
-    /// — a name `cove-schema` itself marks `fresh` on a different type —
-    /// is deliberate: if this pass still matched by name anywhere in this
-    /// path, this is the program that would prove when it must not.
+    /// The same wrapper, renamed, and answering a parameter instead of
+    /// building one. `creates()` never reads a call's callee name at all once
+    /// the callee is not a builtin's own `Field` — it asks whether the call
+    /// *resolves* to a schema entry, and a declared function does not,
+    /// whatever it is spelled. Naming it `toVector` here — a name
+    /// `cove-schema` itself marks `fresh` on a different type — is
+    /// deliberate: if this pass matched by name anywhere in this path, this is
+    /// the program that would prove when it must not.
+    ///
+    /// The body answers `seed` rather than a construction, so
+    /// [`answers_fresh`] declines it too, and the two reasons are independent:
+    /// the name buys nothing, and neither does the shape.
     #[test]
     fn renaming_the_wrapper_changes_nothing() {
         let error = refuses(
             "\
-fn toVector() -> Vector<Int> {
-  Vector.of(1, 2)
+fn toVector(seed: Vector<Int>) -> Vector<Int> {
+  seed
 }
 
-fn build() -> Array<Int> {
-  var log = toVector()
+fn build(given: Vector<Int>) -> Array<Int> {
+  var log = toVector(given)
   log.freeze()
 }
 ",
@@ -1822,6 +2253,477 @@ fn build() -> Array<Int> {
             error.labels[0].message,
             "`log` is initialised from a value this function did not create, so its storage \
              may already have another handle"
+        );
+    }
+    // ------------------------------------------------ ADR 0052's byte buffer
+    //
+    // `ByteBuffer.finish()` is the second consuming transition and it is proved
+    // by the same machinery, so these are the `Vector` tests above asked again
+    // of a buffer. What is worth pinning is that nothing had to be added per
+    // transition: the creation is trusted because `cove-schema` marks
+    // `allocate` fresh, and the struct that wraps a buffer is registered as
+    // bearing linear state because `names_an_owner` recognises the written type.
+
+    /// The shape `finish()` was written for: allocate, append, hand the string
+    /// over.
+    #[test]
+    fn a_buffer_built_here_and_finished_is_proved() {
+        proves(
+            "\
+fn build(upTo: Int) -> String {
+  var out = ByteBuffer.allocate(16)
+  for n in 1..upTo {
+    out.appendByte(65)
+  }
+  out.finish()
+}
+",
+        );
+    }
+
+    /// A buffer passed as a `var` argument through a recursion is still the
+    /// caller's to finish. This is the property ADR 0052 exists for — the owner
+    /// is stable, so the callee appends to the very buffer the caller will
+    /// finish — and the pass must not read the `var` argument as an escape.
+    #[test]
+    fn a_buffer_passed_as_a_var_argument_is_still_finishable() {
+        proves(
+            "\
+fn fill(var out: ByteBuffer, depth: Int) {
+  out.appendByte(65)
+  if depth > 0 {
+    fill(var out, depth - 1)
+  }
+}
+
+fn build() -> String {
+  var out = ByteBuffer.allocate(8)
+  fill(var out, 3)
+  out.finish()
+}
+",
+        );
+    }
+
+    /// A struct whose field is a `ByteBuffer` is owner-bearing, so its `var
+    /// self` method that finishes the field demands a unique receiver — and a
+    /// caller that wrote the literal discharges it.
+    ///
+    /// This is `StringBuilder` in miniature, and it is what `names_an_owner`
+    /// recognising `ByteBuffer` buys: before it did, the `Consume` recorded
+    /// inside `finish` was propagated to a receiver nothing had registered as
+    /// holding linear state, and the demand was recorded and then never checked.
+    #[test]
+    fn a_struct_wrapping_a_buffer_carries_the_demand_to_its_caller() {
+        proves(
+            "\
+struct Builder {
+  buffer: ByteBuffer
+}
+
+impl Builder {
+  fn add(var self, text: String) {
+    self.buffer.appendSlice(text, 0, text.byteLength())
+  }
+
+  fn finish(var self) -> String {
+    self.buffer.finish()
+  }
+}
+
+fn build() -> String {
+  var out = Builder(buffer: ByteBuffer.allocate(16))
+  out.add(\"hello\")
+  out.finish()
+}
+",
+        );
+    }
+
+    /// A second binding is a second handle, for a buffer as for a vector — and
+    /// the correction is not `toArray()`, because a buffer has no copying
+    /// conversion to offer.
+    #[test]
+    fn a_second_binding_defeats_a_finish_and_the_help_does_not_offer_to_array() {
+        let error = refuses(
+            "\
+fn build() -> String {
+  var out = ByteBuffer.allocate(8)
+  var alias = out
+  alias.appendByte(65)
+  out.finish()
+}
+",
+        );
+        assert_eq!(error.code, NOT_UNIQUE);
+        assert_eq!(
+            error.message,
+            "`finish()` cannot prove that `out` holds the only handle to its storage"
+        );
+        assert_eq!(
+            error.labels[0].message,
+            "`out` is copied into another binding here"
+        );
+        let help = error.help.expect("a refusal says what to do instead");
+        assert!(!help.contains("toArray"), "{help}");
+        assert!(help.contains("builder"), "{help}");
+    }
+
+    /// A call that could keep the buffer defeats the proof. `keep` answers a
+    /// `Builder`, which bears a buffer, so the handle it was given may be in
+    /// the answer.
+    #[test]
+    fn a_buffer_that_escapes_into_a_call_is_refused() {
+        let error = refuses(
+            "\
+struct Builder {
+  buffer: ByteBuffer
+}
+
+fn keep(out: ByteBuffer) -> Builder {
+  Builder(buffer: out)
+}
+
+fn build() -> String {
+  var out = ByteBuffer.allocate(8)
+  let held = keep(out)
+  out.finish()
+}
+",
+        );
+        assert_eq!(error.code, NOT_UNIQUE);
+        assert_eq!(
+            error.labels[0].message,
+            "`out` escapes into a call that may answer with it here"
+        );
+    }
+
+    /// A buffer read after it was finished is reported where the read is.
+    #[test]
+    fn a_read_after_the_finish_is_reported() {
+        let error = refuses(
+            "\
+fn build() -> Int {
+  var out = ByteBuffer.allocate(8)
+  let text = out.finish()
+  out.length()
+}
+",
+        );
+        assert_eq!(error.code, USED_AFTER_FREEZE);
+        assert_eq!(
+            error.message,
+            "`out` is read after its storage was consumed"
+        );
+        assert_eq!(error.labels[0].message, "`finish()` took the storage here");
+    }
+
+    // ------------------------------------- a derived freshness summary (#0052)
+    //
+    // `answers_fresh` proves from a body what no declaration may claim, and the
+    // negative tests below are the load-bearing half. Each one is written so
+    // that it would stop refusing — and therefore fail — if the rule were
+    // widened to accept a bare `return x`, which is the one widening that would
+    // turn this summary from a syntactic test into a wrong escape analysis.
+
+    /// The shape ADR 0052 wants a builder to be built in: an associated
+    /// function answers one, and the caller finishes it.
+    ///
+    /// Three clauses of [`constructs`] at once. `Builder.withCapacity`'s answer
+    /// is a struct literal; its `buffer:` argument is a builtin fresh call; its
+    /// `limit:` argument is an `Int`, which cannot reach an owner and so is
+    /// waved through without being a construction itself. `make` is then the
+    /// fixpoint's second round: a call to something the first round added.
+    #[test]
+    fn an_associated_function_that_builds_one_answers_fresh() {
+        proves(
+            "\
+struct Builder {
+  buffer: ByteBuffer
+  limit: Int
+}
+
+impl Builder {
+  fn withCapacity(capacity: Int) -> Builder {
+    Builder(buffer: ByteBuffer.allocate(capacity), limit: capacity)
+  }
+
+  fn finish(var self) -> String {
+    self.buffer.finish()
+  }
+}
+
+fn make() -> Builder {
+  Builder.withCapacity(16)
+}
+
+fn build() -> String {
+  var out = Builder.withCapacity(16)
+  out.finish()
+}
+
+fn again() -> String {
+  var out = make()
+  out.finish()
+}
+",
+        );
+    }
+
+    /// The standard library's own builder, finished by the caller that asked
+    /// for it — the program that was refused before this summary existed, and
+    /// the reason `StringBuilder` can be `opaque` at all.
+    #[test]
+    fn a_standard_builder_from_with_capacity_is_finishable() {
+        proves_with_std(
+            "\
+use std.stringbuilder.StringBuilder
+
+fn build() -> String {
+  var out = StringBuilder.withCapacity(16)
+  out.append(\"a\")
+  out.finish()
+}
+",
+        );
+    }
+
+    /// The same builder through a recursion that appends into it by `var`.
+    ///
+    /// This is ADR 0052's stable owner as a program observes it: every frame
+    /// names the one builder, the run under it is replaced on the way, and the
+    /// caller still holds the only handle when it finishes.
+    #[test]
+    fn a_standard_builder_survives_a_recursive_var_argument() {
+        proves_with_std(
+            "\
+use std.stringbuilder.StringBuilder
+
+fn emit(var out: StringBuilder, depth: Int) {
+  out.append(\"x\")
+  if depth > 0 {
+    emit(var out, depth - 1)
+  }
+}
+
+fn build() -> String {
+  var out = StringBuilder.withCapacity(4)
+  emit(var out, 3)
+  out.finish()
+}
+",
+        );
+    }
+
+    /// A function whose answer is its own parameter answers storage its caller
+    /// supplied, so finishing the result would finish something the caller may
+    /// still be holding.
+    ///
+    /// The body is exactly `return buffer`. If that counted as a construction
+    /// this would prove, and the proof would be wrong.
+    #[test]
+    fn a_function_that_answers_a_parameter_is_not_a_creation() {
+        let error = refuses(
+            "\
+fn handed(buffer: ByteBuffer) -> ByteBuffer {
+  return buffer
+}
+
+fn build(given: ByteBuffer) -> String {
+  var out = handed(given)
+  out.finish()
+}
+",
+        );
+        assert_eq!(error.code, NOT_UNIQUE);
+        assert_eq!(
+            error.message,
+            "`finish()` cannot prove that `out` holds the only handle to its storage"
+        );
+        assert_eq!(
+            error.labels[0].message,
+            "`out` is initialised from a value this function did not create, so its storage \
+             may already have another handle"
+        );
+    }
+
+    /// A struct literal is a construction only when its arguments are. `wrap`
+    /// answers a literal whose `buffer:` is a parameter, so the builder it
+    /// hands back is wrapped around storage the caller supplied — and the
+    /// wrapper being freshly allocated says nothing about the run inside it.
+    #[test]
+    fn a_struct_literal_over_a_parameter_is_not_a_construction() {
+        let error = refuses(
+            "\
+struct Builder {
+  buffer: ByteBuffer
+}
+
+impl Builder {
+  fn finish(var self) -> String {
+    self.buffer.finish()
+  }
+}
+
+fn wrap(buffer: ByteBuffer) -> Builder {
+  Builder(buffer: buffer)
+}
+
+fn build(given: ByteBuffer) -> String {
+  var out = wrap(given)
+  out.finish()
+}
+",
+        );
+        assert_eq!(error.code, NOT_UNIQUE);
+        assert_eq!(
+            error.message,
+            "`Builder.finish()` consumes `out.buffer`, and this call cannot prove that it holds \
+             the only handle to its storage"
+        );
+        assert_eq!(
+            error.labels[0].message,
+            "`out.buffer` is initialised from a value this function did not create, so its \
+             storage may already have another handle"
+        );
+    }
+
+    /// The case that makes the syntactic rule necessary rather than merely
+    /// convenient. `leaked` *does* create its buffer — and then gives a handle
+    /// to `stash`, which puts it in a `Holder` that outlives the call, and only
+    /// then answers the name.
+    ///
+    /// A rule that accepted the answer because the storage was created
+    /// somewhere in the body would prove this, and the proof would be wrong:
+    /// `kept` is holding the same run the caller is about to finish. A rule
+    /// that requires the answer to be *built where it is answered* has nothing
+    /// to search for, because nothing can have got hold of a value that did not
+    /// exist until the answer was built.
+    #[test]
+    fn a_construction_that_passed_through_a_call_before_being_answered_is_refused() {
+        let error = refuses(
+            "\
+struct Holder {
+  buffer: ByteBuffer
+}
+
+fn stash(buffer: ByteBuffer) -> Holder {
+  Holder(buffer: buffer)
+}
+
+fn leaked() -> ByteBuffer {
+  var out = ByteBuffer.allocate(8)
+  let kept = stash(out)
+  out
+}
+
+fn build() -> String {
+  var out = leaked()
+  out.finish()
+}
+",
+        );
+        assert_eq!(error.code, NOT_UNIQUE);
+        assert_eq!(
+            error.labels[0].message,
+            "`out` is initialised from a value this function did not create, so its storage \
+             may already have another handle"
+        );
+    }
+
+    /// A local `fn` shadows the module function of the same name, and the
+    /// summary refuses rather than resolving the wrong one.
+    ///
+    /// `make` at module level answers a construction and is in the set. The
+    /// `make` inside `build` is a different declaration with no key of its own —
+    /// `bodies` names only what a module declares — so resolving this call to
+    /// the module's entry would prove a `freeze()` over a vector `build`'s
+    /// caller is holding.
+    ///
+    /// What stops it is not a scope table in [`constructs`] but the one line
+    /// that asks whether the checker gave the *callee* a type. A local `fn` is
+    /// a binding holding a closure, so its callee has one, and a call through a
+    /// value names no declaration to look up — exactly the distinction the
+    /// `facts` module says that absence carries. This test is here because that
+    /// line reads like a formality and is not one: without it this program
+    /// proves.
+    #[test]
+    fn a_local_fn_shadowing_a_fresh_module_function_is_refused() {
+        let error = refuses(
+            "\
+fn make() -> Vector<Int> {
+  Vector.of(1, 2)
+}
+
+fn build(given: Vector<Int>) -> Array<Int> {
+  fn make(seed: Vector<Int>) -> Vector<Int> {
+    seed
+  }
+  var log = make(given)
+  log.freeze()
+}
+",
+        );
+        assert_eq!(error.code, NOT_UNIQUE);
+        assert_eq!(
+            error.labels[0].message,
+            "`log` is initialised from a value this function did not create, so its storage \
+             may already have another handle"
+        );
+    }
+
+    /// A builder the summary proved fresh is still only as unique as the body
+    /// holding it keeps it. The summary answers where the storage came from and
+    /// nothing else; a second binding is still a second handle.
+    #[test]
+    fn an_aliased_standard_builder_is_still_refused() {
+        let error = refuses_with_std(
+            "\
+use std.stringbuilder.StringBuilder
+
+fn build() -> String {
+  var a = StringBuilder.withCapacity(8)
+  var b = a
+  b.append(\"x\")
+  a.finish()
+}
+",
+        );
+        assert_eq!(error.code, NOT_UNIQUE);
+        assert_eq!(
+            error.message,
+            "`StringBuilder.finish()` consumes `a.buffer`, and this call cannot prove that it \
+             holds the only handle to its storage"
+        );
+        assert_eq!(
+            error.labels[0].message,
+            "`a` is copied into another binding here"
+        );
+    }
+
+    /// And a proved builder is consumed by the finish, so reading it afterwards
+    /// is the second diagnostic and not silence.
+    #[test]
+    fn a_standard_builder_read_after_finishing_is_refused() {
+        let error = refuses_with_std(
+            "\
+use std.stringbuilder.StringBuilder
+
+fn build() -> Int {
+  var out = StringBuilder.withCapacity(8)
+  let text = out.finish()
+  out.length()
+}
+",
+        );
+        assert_eq!(error.code, USED_AFTER_FREEZE);
+        assert_eq!(
+            error.message,
+            "`out` is read after its storage was consumed"
+        );
+        assert_eq!(
+            error.labels[0].message,
+            "`StringBuilder.finish()` took the storage here"
         );
     }
 }
