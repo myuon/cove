@@ -15,6 +15,7 @@ use cove_ir::{
     ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Function, Inst, LayoutId, Len, Num, Program, Repr,
     Shape, Slot, StrId,
 };
+use cove_schema::builtins::{NONE_CASE, SOME_CASE};
 
 use crate::abi::Raise;
 
@@ -218,6 +219,77 @@ pub(crate) enum Method {
         builtin: u32,
         args: u32,
     },
+    /// `Vector.set(index, value) -> Option<T>`, the path where the index is
+    /// in range.
+    ///
+    /// `vm::builtins::seq::vector_set` reads the receiver, reads the index,
+    /// answers `None` for one outside `[0, len)`, and otherwise reads the
+    /// element that was there — **before** overwriting it, because `set`
+    /// answers what `get` would have — and hands that back as `Some`. Every
+    /// one of those is a static fact of the call site or a comparison this
+    /// tier can already do, so unlike [`Method::Push`] there is no cold half
+    /// to a range that fits: an in-range `set` and an out-of-range one are
+    /// both emitted, and only the receiver's own preconditions go to
+    /// [`BuiltinFn`](crate::abi::BuiltinFn).
+    ///
+    /// Those preconditions are [`Method::Push`]'s two, for the same reasons:
+    ///
+    /// - **the receiver's object is the layout the call site names**, read out
+    ///   of the header the way `vector()` does, because the element's layout,
+    ///   its stride and therefore where it sits in the store are all derived
+    ///   from the declared one;
+    /// - **`freeze()` has not consumed it**, which `vector()` refuses with
+    ///   `operand::frozen` — a message this crate cannot build any more than
+    ///   `Push`'s could.
+    ///
+    /// The null receiver is emitted as [`Raise::NullObject`] for the same
+    /// reason `Push`'s is: it is the one refusal whose message names no
+    /// operand.
+    ///
+    /// # Building the `Option`
+    ///
+    /// The answer is not a builtin's ordinary one-word or `stride`-word run:
+    /// it is a case of an enum, which is a tag word and a payload region wide
+    /// enough for whichever case is written — [`crate::abi`] and
+    /// `vm::builtins::make`'s `case_words` agree that constructing a case
+    /// *zeroes* the payload words it does not fill, so a stale word from a
+    /// wider case never reads through a narrower one. `some_at` and `width`
+    /// are read out of the call site's declared `Option<T>` layout by
+    /// [`method_of`] rather than assumed to be zero and `1 + stride`: an enum
+    /// lays a case's parts into the lowest free run, and a reader that
+    /// guessed would be trusting a fact this crate can simply look up.
+    #[allow(clippy::too_many_arguments)]
+    Set {
+        /// Where the `Option<T>` answer goes: a tag word and the payload
+        /// region, `width` words wide in all.
+        dst: Slot,
+        /// The receiver's slot: one `Repr::Ref` word naming the `Vector` header.
+        recv: Slot,
+        /// The layout the call site declares the receiver to be, whose shape is
+        /// a [`Shape::Vector`] and which the object's own header is compared
+        /// against.
+        vector: LayoutId,
+        /// The index argument's slot: one `Repr::Int` word.
+        index: Slot,
+        /// The value argument's slot, `stride` words wide.
+        value: Slot,
+        /// The element layout's width, which is `Growable::stride`.
+        stride: u32,
+        /// The `Option<T>` layout's total width: the tag word plus its whole
+        /// payload region, which bounds every word this method writes.
+        width: u32,
+        /// The tag value a `Some` answer holds.
+        some_case: u32,
+        /// The word offset of `Some`'s one part within the payload region —
+        /// after the tag word, so its `stride` words sit at
+        /// `dst + 1 + some_at`.
+        some_at: u32,
+        /// The tag value a `None` answer holds.
+        none_case: u32,
+        /// The builtin and its argument list, for the cold path.
+        builtin: u32,
+        args: u32,
+    },
 }
 
 /// Which [`Method`] a `call-builtin` is, or `None` for one no arm lowers.
@@ -282,6 +354,57 @@ pub(crate) fn method_of(
                 vector,
                 value: list[1].slot,
                 stride: program.layout(elem).width(),
+                builtin: builtin.0,
+                args: args.0,
+            })
+        }
+        // `vm::builtins::seq::vector_set`. The receiver's declared layout and
+        // the element's own layout are read exactly as `Push`'s are, and for
+        // the same reason; what is new here is the *answer*'s layout, an
+        // `Option<T>` the call site also declares — and its `Some`/`None` tag
+        // values and `Some`'s payload offset are read out of it rather than
+        // assumed, because [`cove_ir::layout::enum_layout`] places a case's
+        // parts wherever they first fit rather than always at word zero.
+        ("Vector", "set") => {
+            // The receiver, the index and the value — `operand::method`'s
+            // split and the arity its refusal names.
+            if list.len() != 3 {
+                return None;
+            }
+            let recv = reference(0)?;
+            let vector = list[0].layout;
+            let Shape::Vector { elem } = program.layout(vector).shape else {
+                return None;
+            };
+            // `operand::int` requires the index to be one `Repr::Int` word.
+            if program.layout(list[1].layout).words.as_slice() != [Repr::Int] {
+                return None;
+            }
+            // `operand::run_of(machine, .., items.elem, args[1])` requires the
+            // value argument's layout to *be* the element's, so a call site
+            // where the two differ is one the VM refuses. Refusing to compile
+            // it leaves the refusal where its message is.
+            if list[2].layout != elem {
+                return None;
+            }
+            let option = program.layout(named.result);
+            let Shape::Enum { cases, .. } = &option.shape else {
+                return None;
+            };
+            let some_case = option.case(SOME_CASE.name)?;
+            let none_case = option.case(NONE_CASE.name)?;
+            let some_at = cases[some_case as usize].parts.first()?.at;
+            Some(Method::Set {
+                dst,
+                recv,
+                vector,
+                index: list[1].slot,
+                value: list[2].slot,
+                stride: program.layout(elem).width(),
+                width: option.width(),
+                some_case,
+                some_at,
+                none_case,
                 builtin: builtin.0,
                 args: args.0,
             })
@@ -378,15 +501,15 @@ pub fn supported(program: &Program, function: &Function) -> bool {
     refusal(program, function).is_none()
 }
 
-/// Why `function` is outside this slice, or `None` if it is inside it.
+/// The reason a function is refused whole, before any instruction is looked
+/// at, or `None` if none of those coarse reasons apply.
 ///
-/// The order the checks are made in is the order the reasons are reported in,
-/// and it is deliberate: a stub is refused before its slots are read and its
-/// slots before its instructions, so the reason a reader is given is the
-/// *coarsest* true one. A stub whose slots also hold a `Repr::Host` is reported
-/// as a stub, because writing the missing lowering is not what would make it
-/// compile.
-pub fn refusal(program: &Program, function: &Function) -> Option<Refusal> {
+/// [`refusal`] and [`blockers`] both start here, and have to: the order these
+/// three are checked in is the order [`refusal`]'s own documentation promises
+/// — stub, then slot representation, then terminator — and a function that
+/// fails one of them has no instruction census worth taking, because no
+/// single instruction is what would make it compile.
+fn whole_function_refusal(function: &Function) -> Option<Refusal> {
     let of = |reason: Reason| Some(Refusal { reason, at: None });
     // A stub is a stand-in for a body the lowering did not lower, so there is
     // nothing to compile: `lower::stub` leaves a `return` of a cleared slot.
@@ -407,12 +530,63 @@ pub fn refusal(program: &Program, function: &Function) -> Option<Refusal> {
     ) {
         return of(Reason::NoTerminator);
     }
+    None
+}
+
+/// Why `function` is outside this slice, or `None` if it is inside it.
+///
+/// The order the checks are made in is the order the reasons are reported in,
+/// and it is deliberate: a stub is refused before its slots are read and its
+/// slots before its instructions, so the reason a reader is given is the
+/// *coarsest* true one. A stub whose slots also hold a `Repr::Host` is reported
+/// as a stub, because writing the missing lowering is not what would make it
+/// compile.
+pub fn refusal(program: &Program, function: &Function) -> Option<Refusal> {
+    if let Some(whole) = whole_function_refusal(function) {
+        return Some(whole);
+    }
     function.code.iter().enumerate().find_map(|(pc, inst)| {
         inst_refused(program, function, inst).map(|reason| Refusal {
             reason,
             at: Some(pc as u32),
         })
     })
+}
+
+/// Every instruction-level refusal in `function`, in pc order.
+///
+/// [`refusal`] answers the question a reader asks first — is this function
+/// refused, and where — with the first blocker, because that is what marks a
+/// function refused at all and it is cheap to find. It does not answer the
+/// question a reader asks next: what would it take to *compile* this
+/// function. A function refused at its first `CallBuiltin` may be refused at
+/// nine more after it, and lowering the one family that stopped `refusal`
+/// would still leave it on the encoded tier — a lowering built from the first
+/// blocker alone is a lowering built for a function that still will not
+/// compile. `blockers` is what answers that question: one [`Refusal`] per
+/// refused instruction, so the caller can see the whole set a function is
+/// waiting on and group it.
+///
+/// For the whole-function reasons — [`Reason::Stub`], [`Reason::SlotRepr`],
+/// [`Reason::NoTerminator`] — there is no instruction census to take, because
+/// none of them are about one instruction: this answers the single
+/// [`Refusal`] [`refusal`] would have, and nothing more. A supported function
+/// answers an empty vector.
+pub fn blockers(program: &Program, function: &Function) -> Vec<Refusal> {
+    if let Some(whole) = whole_function_refusal(function) {
+        return vec![whole];
+    }
+    function
+        .code
+        .iter()
+        .enumerate()
+        .filter_map(|(pc, inst)| {
+            inst_refused(program, function, inst).map(|reason| Refusal {
+                reason,
+                at: Some(pc as u32),
+            })
+        })
+        .collect()
 }
 
 /// Why one instruction is outside the slice, or `None` if it is inside it.
@@ -711,6 +885,32 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                         && slot(recv)
                         && run(value, stride)
                 }
+                // The answer is a tag word and a `width - 1`-word payload
+                // region, so `dst` is bounded as a run of `width` words the
+                // way `Push`'s `value` is bounded as a run of `stride` — and
+                // `width` is checked directly rather than derived from
+                // `stride`, because the two agree for `Option<T>` but nothing
+                // here should assume it.
+                Some(Method::Set {
+                    dst,
+                    recv,
+                    vector,
+                    index,
+                    value,
+                    stride,
+                    width,
+                    ..
+                }) => {
+                    // See `Push`'s note on the same bound: the *template* arm
+                    // tests the header's high half with `cmp r64, imm32`.
+                    i32::try_from(vector.0).is_ok()
+                        && stride <= MAX_RUN_WORDS
+                        && width <= MAX_RUN_WORDS
+                        && run(dst, width)
+                        && slot(recv)
+                        && slot(index)
+                        && run(value, stride)
+                }
                 None => return Some(Reason::Instruction),
             }
         }
@@ -833,5 +1033,274 @@ pub(crate) fn by_zero_of(op: ArithOp) -> Raise {
     match op {
         ArithOp::Rem => Raise::RemainderByZero,
         _ => Raise::DividedByZero,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cove_ir::{enum_layout, Arg, Builtin, Layout, RefMap};
+    use std::sync::Arc;
+
+    fn span() -> cove_diag::Span {
+        cove_diag::Span::new(cove_diag::FileId(0), 0, 0)
+    }
+
+    fn function(reprs: Vec<Repr>, returns: LayoutId, code: Vec<Inst>) -> Function {
+        Function {
+            module: Arc::from("m"),
+            name: Arc::from("f"),
+            params: Vec::new(),
+            spans: vec![span(); code.len()],
+            refs: RefMap::of(&reprs),
+            reprs,
+            returns,
+            captures: Vec::new(),
+            code,
+            locals: Vec::new(),
+            inlined: Vec::new(),
+            span: span(),
+            is_async: false,
+            stub: false,
+        }
+    }
+
+    fn program(function: Function) -> Program {
+        Program {
+            functions: vec![function],
+            layouts: vec![
+                Layout::free(),
+                Layout::word("Unit", Repr::Unit),
+                Layout::word("Ref", Repr::Ref),
+            ],
+            ..Program::default()
+        }
+    }
+
+    /// **`blockers` answers every refused instruction; `refusal` answers only
+    /// the first.**
+    ///
+    /// `AddrOfField` and `StoreField` are both left outside the slice on
+    /// purpose — see this module's note on `Inst::AddrOfField` — so a body
+    /// that reaches one of each and then a second `AddrOfField` is refused at
+    /// three separate pcs. `refusal` is the first of them, because that is
+    /// what marks the function refused at all; `blockers` is all three,
+    /// because that is what says whether lowering one family would be enough.
+    #[test]
+    fn blockers_answers_every_refusal_and_refusal_answers_the_first() {
+        let reprs = vec![Repr::Ref, Repr::Unit];
+        let code = vec![
+            Inst::AddrOfField {
+                dst: 0,
+                obj: 0,
+                at: 0,
+            },
+            Inst::StoreField {
+                obj: 0,
+                at: 0,
+                src: 0,
+                layout: LayoutId(2),
+            },
+            Inst::AddrOfField {
+                dst: 0,
+                obj: 0,
+                at: 1,
+            },
+            Inst::Return { src: 1 },
+        ];
+        let function = function(reprs, LayoutId(1), code);
+        let program = program(function);
+        let function = program.function(cove_ir::FunctionId(0));
+
+        assert_eq!(
+            refusal(&program, function),
+            Some(Refusal {
+                reason: Reason::Instruction,
+                at: Some(0),
+            })
+        );
+        assert_eq!(
+            blockers(&program, function),
+            vec![
+                Refusal {
+                    reason: Reason::Instruction,
+                    at: Some(0),
+                },
+                Refusal {
+                    reason: Reason::Instruction,
+                    at: Some(1),
+                },
+                Refusal {
+                    reason: Reason::Instruction,
+                    at: Some(2),
+                },
+            ]
+        );
+    }
+
+    /// A stub refuses the whole function, so there is no instruction census
+    /// to take: both `refusal` and `blockers` answer the one reason, and
+    /// `blockers` does not walk a body that was never lowered.
+    #[test]
+    fn a_stub_gives_exactly_one_entry_from_both() {
+        let mut function = function(vec![], LayoutId(1), Vec::new());
+        function.stub = true;
+        let program = program(function);
+        let function = program.function(cove_ir::FunctionId(0));
+
+        let expected = Refusal {
+            reason: Reason::Stub,
+            at: None,
+        };
+        assert_eq!(refusal(&program, function), Some(expected));
+        assert_eq!(blockers(&program, function), vec![expected]);
+    }
+
+    // --- `method_of`'s `("Vector", "set")` arm ------------------------------
+
+    const SET_INT: LayoutId = LayoutId(1);
+    const SET_REF: LayoutId = LayoutId(2);
+    const SET_VECTOR: LayoutId = LayoutId(3);
+    const SET_OPTION: LayoutId = LayoutId(4);
+
+    /// A layout table wide enough for `Vector.set(Int, Int) -> Option<Int>`:
+    /// `Int`, `Ref`, `Vector<Int>` and `Option<Int>` — with one `Builtin` at
+    /// `BuiltinId(0)` naming `Vector.set` and `args` at `ArgsId(0)` and
+    /// `ArgsId(1)` for the empty list and the one this module's tests build.
+    ///
+    /// `Option<Int>`'s `Some`/`None` case order is not the checker's — this
+    /// table is built by hand and puts `Some` first — and that is deliberate:
+    /// it is what proves `method_of` reads the tag values and the payload
+    /// offset out of the layout rather than assuming `Some` is index 0 or
+    /// that its one part sits at word 0, the way `cove_ir::enum_layout`
+    /// itself does not promise either.
+    fn program_with_set(function: Function, args: Vec<Arg>) -> Program {
+        let mut layouts = vec![
+            Layout::free(),
+            Layout::word("Int", Repr::Int),
+            Layout::word("Ref", Repr::Ref),
+            Layout::object("Vector", Shape::Vector { elem: SET_INT }),
+        ];
+        let (cases, payload) = enum_layout(
+            &[
+                (Arc::from("Some"), vec![SET_INT]),
+                (Arc::from("None"), vec![]),
+            ],
+            &layouts,
+        );
+        let mut words = vec![Repr::Tag];
+        words.extend_from_slice(&payload);
+        layouts.push(Layout::inline(
+            "Option",
+            Shape::Enum { cases, payload },
+            words,
+        ));
+        Program {
+            functions: vec![function],
+            layouts,
+            args: vec![Vec::new(), args],
+            builtins: vec![Builtin {
+                receiver: Arc::from("Vector"),
+                operation: Arc::from("set"),
+                result: SET_OPTION,
+            }],
+            ..Program::default()
+        }
+    }
+
+    /// The receiver, the index and a value of the element's own layout —
+    /// `method_of`'s admitted shape — answers a [`Method::Set`] whose case
+    /// tags and payload offset are the ones [`program_with_set`] built,
+    /// rather than the `0`/`1 + 0` a reader might have assumed.
+    #[test]
+    fn vector_set_is_admitted_with_the_right_arity_and_layouts() {
+        let function = function(vec![Repr::Ref, Repr::Int, Repr::Int], SET_OPTION, vec![]);
+        let program = program_with_set(
+            function,
+            vec![
+                Arg {
+                    slot: 0,
+                    layout: SET_VECTOR,
+                },
+                Arg {
+                    slot: 1,
+                    layout: SET_INT,
+                },
+                Arg {
+                    slot: 2,
+                    layout: SET_INT,
+                },
+            ],
+        );
+        let method = method_of(&program, 3, BuiltinId(0), ArgsId(1));
+        assert_eq!(
+            method,
+            Some(Method::Set {
+                dst: 3,
+                recv: 0,
+                vector: SET_VECTOR,
+                index: 1,
+                value: 2,
+                stride: 1,
+                width: 2,
+                some_case: 0,
+                some_at: 0,
+                none_case: 1,
+                builtin: 0,
+                args: 1,
+            })
+        );
+    }
+
+    /// `operand::method`'s split asks for the receiver and exactly two
+    /// arguments; a call site with only one refuses, because `method_of`'s own
+    /// note is that a call site the VM would refuse for arity is one this
+    /// tier leaves refused rather than compiling into a read of a slot that
+    /// is not there.
+    #[test]
+    fn vector_set_refuses_the_wrong_arity() {
+        let function = function(vec![Repr::Ref, Repr::Int], SET_OPTION, vec![]);
+        let program = program_with_set(
+            function,
+            vec![
+                Arg {
+                    slot: 0,
+                    layout: SET_VECTOR,
+                },
+                Arg {
+                    slot: 1,
+                    layout: SET_INT,
+                },
+            ],
+        );
+        assert_eq!(method_of(&program, 2, BuiltinId(0), ArgsId(1)), None);
+    }
+
+    /// `operand::run_of(machine, .., items.elem, args[1])` requires the value
+    /// argument's layout to *be* the element's, so a call site where they
+    /// differ is one the VM refuses — `Vector<Int>.set(_, someRef)`, here.
+    /// Refusing to compile it leaves the refusal where its message is, rather
+    /// than emitting a write `operand::run_of` would never have allowed.
+    #[test]
+    fn vector_set_refuses_a_value_layout_that_is_not_the_element() {
+        let function = function(vec![Repr::Ref, Repr::Int, Repr::Ref], SET_OPTION, vec![]);
+        let program = program_with_set(
+            function,
+            vec![
+                Arg {
+                    slot: 0,
+                    layout: SET_VECTOR,
+                },
+                Arg {
+                    slot: 1,
+                    layout: SET_INT,
+                },
+                Arg {
+                    slot: 2,
+                    layout: SET_REF,
+                },
+            ],
+        );
+        assert_eq!(method_of(&program, 3, BuiltinId(0), ArgsId(1)), None);
     }
 }

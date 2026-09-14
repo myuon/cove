@@ -180,7 +180,7 @@ impl Unavailable {
 pub mod subset;
 
 #[cfg(any(feature = "cranelift", feature = "template"))]
-pub use subset::{refusal, supported, Reason, Refusal};
+pub use subset::{blockers, refusal, supported, Reason, Refusal};
 
 #[cfg(feature = "cranelift")]
 mod compile;

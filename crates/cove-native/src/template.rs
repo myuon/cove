@@ -684,6 +684,23 @@ impl<'a> Emit<'a> {
                         builtin,
                         args,
                     }) => self.vector_push(dst, recv, vector, value, stride, builtin, args),
+                    Some(Method::Set {
+                        dst,
+                        recv,
+                        vector,
+                        index,
+                        value,
+                        stride,
+                        width,
+                        some_case,
+                        some_at,
+                        none_case,
+                        builtin,
+                        args,
+                    }) => self.vector_set(
+                        dst, recv, vector, index, value, stride, width, some_case, some_at,
+                        none_case, builtin, args,
+                    ),
                     None => unreachable!("`supported` admitted a builtin no arm lowers"),
                 }
             }
@@ -1081,6 +1098,153 @@ impl<'a> Emit<'a> {
         // One predecessor of this join came through a helper, so the frame pointer
         // the other one derived is not to be trusted here.
         self.frame_live = false;
+    }
+
+    /// `vm::builtins::seq::vector_set`'s fast path: the element written at
+    /// `index`, answering what was there.
+    ///
+    /// See [`Method::Set`](crate::subset::Method::Set) for which of the
+    /// builtin's preconditions are emitted and which go to
+    /// [`BuiltinFn`](crate::abi::BuiltinFn), and why an out-of-range index is
+    /// **not** one of them: `vector_set` answers `None` for one, which this arm
+    /// builds as readily as it builds `Some`. The two tests in front of the
+    /// write are [`Emit::vector_push`]'s own two — the receiver's declared
+    /// layout against the object's own header, and the store word against
+    /// nought, which is `freeze()`'s mark.
+    ///
+    /// The index is bounded by **one** unsigned comparison,
+    /// [`Emit::raise_unless_below`]'s own — a negative `i64` read as unsigned
+    /// is larger than any `len`, which is a `u32` masked out of a header and so
+    /// below 2^32 — asked directly with `cmp`/`jcc` rather than through that
+    /// method, because what happens on the far side is a branch to `None`
+    /// rather than a raise.
+    ///
+    /// **The old element is read before the new one is written**, each word
+    /// pushed onto the machine stack and popped back off in the reverse order
+    /// — [`Emit::store_elem`]'s staging, used here for a read and then again
+    /// for the write, because `RAX`, `RCX` and `RDX` are the whole of this
+    /// arm's scratch and `RCX` holds the element's address across both loops.
+    /// `set` answers what `get` would have, so every word of the old element
+    /// has to be read while the store still holds it.
+    #[allow(clippy::too_many_arguments)]
+    fn vector_set(
+        &mut self,
+        dst: Slot,
+        recv: Slot,
+        vector: LayoutId,
+        index: Slot,
+        value: Slot,
+        stride: u32,
+        width: u32,
+        some_case: u32,
+        some_at: u32,
+        none_case: u32,
+        builtin: u32,
+        args: u32,
+    ) {
+        let cold = self.label();
+        let none_block = self.label();
+        let done = self.label();
+
+        self.load_slot(RAX, recv);
+        // `vector()`'s `if addr == 0 { null_value() }`, which is the one refusal
+        // of this builtin a program reaches and this crate can name.
+        self.refuse_null(RAX);
+
+        // `machine.object_layout(addr)`: the header's high half.
+        self.mov_rr(RDX, RAX);
+        self.heap_word(RDX);
+        self.shr_imm8(RDX, 32);
+        self.cmp_imm32(RDX, vector.0 as i32);
+        self.jcc(CC_NE, Target::Label(cold));
+
+        // `machine.payload(addr, 1)`: the store. `freeze()` leaves nought here.
+        self.mov_rr(RCX, RAX);
+        self.add_imm32(RCX, 2);
+        self.heap_word(RCX);
+        self.test_rr(RCX, RCX);
+        self.jcc(CC_E, Target::Label(cold));
+
+        // `machine.payload(addr, 0) as u32`: the length.
+        self.mov_rr(RDX, RAX);
+        self.add_imm32(RDX, 1);
+        self.heap_word(RDX);
+        self.mov_rr32(RDX, RDX);
+
+        // `index()`'s `at >= 0` and `set`'s `at >= items.len`, in one unsigned
+        // comparison: a negative `i64` read as unsigned is larger than any
+        // `len`. Unlike `Emit::raise_unless_below`, the far side of this one is
+        // `None` rather than a raise.
+        self.load_slot(RAX, index);
+        self.cmp_rr(RAX, RDX);
+        self.jcc(CC_AE, Target::Label(none_block));
+
+        // Where the element sits: `store + 1 + at * stride`, `Emit::vector_push`'s
+        // address arithmetic with `at` (still in `RAX`) in place of `len`.
+        self.mov_imm64(RDX, i64::from(stride));
+        self.imul_rr(RAX, RDX);
+        self.add_rr(RCX, RAX);
+        self.add_imm32(RCX, 1);
+
+        // The old element, one heap read per word, staged on the machine stack
+        // rather than written anywhere yet — `RCX` is the element's address for
+        // both this loop and the next, so nothing here may disturb it.
+        for word in 0..stride {
+            self.mov_rr(RDX, RCX);
+            self.add_imm32(RDX, word as i32);
+            self.heap_word(RDX);
+            self.push(RDX);
+        }
+        // The new element, staged the same way `Emit::store_elem` stages a
+        // write: every word loaded from the frame before any of them is
+        // written, so the loop below pops what it just pushed and nothing of
+        // the old element's, which is still waiting underneath.
+        for word in 0..stride {
+            self.load_slot(RAX, value + word);
+            self.push(RAX);
+        }
+        for word in (0..stride).rev() {
+            self.pop(RAX);
+            self.mov_rr(RDX, RCX);
+            self.add_imm32(RDX, word as i32);
+            self.heap_ptr(RDX);
+            self.store(HEAP_TABLE, 0, RAX);
+        }
+        self.write_option_case(dst, width, some_case);
+        for word in (0..stride).rev() {
+            self.pop(RDX);
+            self.store_slot(dst + 1 + some_at + word, RDX);
+        }
+        self.jmp(Target::Label(done));
+
+        self.bind(none_block);
+        self.write_option_case(dst, width, none_case);
+        self.jmp(Target::Label(done));
+
+        self.bind(cold);
+        self.builtin_call(dst, builtin, args);
+        self.bind(done);
+        // One predecessor of this join came through a helper, so the frame
+        // pointer the other one derived is not to be trusted here.
+        self.frame_live = false;
+    }
+
+    /// One case of an `Option<T>` answer into `dst`: `width` words, zeroed
+    /// first and then the tag written over word zero.
+    ///
+    /// `vm::builtins::make`'s `case_words` is the reason for the order —
+    /// "constructing a case zeroes the payload words it does not fill", so a
+    /// word belonging to a wider case never reads through a narrower one —
+    /// and this is the same order. A `Some` answer's caller writes its payload
+    /// words in on top afterwards, at `dst + 1 + at`; a `None` answer's has
+    /// none to write.
+    fn write_option_case(&mut self, dst: Slot, width: u32, case: u32) {
+        self.xor_rr(RAX, RAX);
+        for word in 0..width {
+            self.store_slot(dst + word, RAX);
+        }
+        self.mov_imm32(RAX, case as i32);
+        self.store_slot(dst, RAX);
     }
 
     /// One [`Inst::CallBuiltin`](cove_ir::Inst::CallBuiltin), handed to the runtime

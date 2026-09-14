@@ -42,6 +42,15 @@ template = ["dep:libc"]
 [dependencies]
 cove-ir = { workspace = true }
 
+# `Method::Set`'s `Some`/`None` case names come from here rather than being
+# written out again: `cove-schema`'s own note on `SOME_CASE`/`NONE_CASE` is
+# that the four case names are what issue #53 was about, named in one place
+# so `cove-sema` and `cove-runtime` cannot drift on them — and a third
+# spelling in this crate would be the same drift once more. `cove-schema` has
+# no dependencies of its own, so this costs the "no executable-memory
+# dependency" gate nothing.
+cove-schema = { workspace = true }
+
 # Pinned to one minor line rather than left open. Cranelift's IR builder and
 # its `Module` trait both change across minor releases, and this crate is a
 # lowering written against them.

@@ -79,6 +79,7 @@ version = "0.1.0"
 dependencies = [
  "cove-diag",
  "cove-ir",
+ "cove-schema",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-jit",
