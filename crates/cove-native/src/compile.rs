@@ -33,7 +33,9 @@
 
 use std::mem::offset_of;
 
-use cove_ir::{ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot};
+use cove_ir::{
+    ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot, StrId,
+};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
     types, AbiParam, Block, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData, Signature,
@@ -45,10 +47,12 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module, ModuleError};
 
 use crate::abi::{
-    Entry, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
+    BufferOp, Entry, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
     HEAP_ORIGIN_WORDS,
 };
-use crate::subset::{by_zero_of, leaders, method_of, overflow_of, slot_offset, supported, Method};
+use crate::subset::{
+    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported, Method,
+};
 use crate::Unavailable;
 
 /// The name the safepoint helper is imported under.
@@ -69,6 +73,10 @@ const ALLOC: &str = "cove_native_alloc";
 /// The name the builtin helper is imported under. [`SAFEPOINT`]'s note applies.
 const BUILTIN: &str = "cove_native_builtin";
 
+/// The name the growable-buffer helper is imported under. [`SAFEPOINT`]'s note
+/// applies.
+const BUFFER: &str = "cove_native_buffer";
+
 // The `NativeCtx` field offsets, read from the declaration rather than
 // written out. `offset_of!` is a const expression, so the numbers compiled
 // into the machine code and the numbers Rust uses to read the struct are the
@@ -76,6 +84,7 @@ const BUILTIN: &str = "cove_native_builtin";
 // them.
 const OFF_WORDS: i32 = offset_of!(NativeCtx, words) as i32;
 const OFF_CHUNKS: i32 = offset_of!(NativeCtx, chunks) as i32;
+const OFF_LITERALS: i32 = offset_of!(NativeCtx, literals) as i32;
 const OFF_STACK_ORIGIN: i32 = offset_of!(NativeCtx, stack_origin) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
 const OFF_RAISE_CODE: i32 = offset_of!(NativeCtx, raise_code) as i32;
@@ -127,6 +136,7 @@ pub struct Jit {
     call: FuncId,
     alloc: FuncId,
     builtin: FuncId,
+    buffer: FuncId,
     /// How many functions have been declared, which is how the symbol names
     /// are kept distinct. Compiling the same [`FunctionId`] twice is a
     /// caller's policy question, not an error here, so the name cannot be
@@ -150,6 +160,7 @@ impl Jit {
         builder.symbol(CALL, helpers.call as usize as *const u8);
         builder.symbol(ALLOC, helpers.alloc as usize as *const u8);
         builder.symbol(BUILTIN, helpers.builtin as usize as *const u8);
+        builder.symbol(BUFFER, helpers.buffer as usize as *const u8);
         let mut module = JITModule::new(builder);
 
         // Pointers are added to a `u64` word index scaled by eight, so a
@@ -171,6 +182,11 @@ impl Jit {
         let alloc = module.declare_function(ALLOC, Linkage::Import, &signature)?;
         let signature = builtin_signature(&module);
         let builtin = module.declare_function(BUILTIN, Linkage::Import, &signature)?;
+        // The same signature: `BufferFn` and `BuiltinFn` are one pointer, one
+        // `I64` and four `I32`s, and a second declaration that said so in its own
+        // words would be a second place for the shape to drift.
+        let signature = builtin_signature(&module);
+        let buffer = module.declare_function(BUFFER, Linkage::Import, &signature)?;
         Ok(Jit {
             ctx: module.make_context(),
             module,
@@ -179,6 +195,7 @@ impl Jit {
             call,
             alloc,
             builtin,
+            buffer,
             declared: 0,
             finalized: false,
         })
@@ -215,6 +232,7 @@ impl Jit {
             let call = self.module.declare_func_in_func(self.call, builder.func);
             let alloc = self.module.declare_func_in_func(self.alloc, builder.func);
             let builtin = self.module.declare_func_in_func(self.builtin, builder.func);
+            let buffer = self.module.declare_func_in_func(self.buffer, builder.func);
             Lower::new(
                 &mut builder,
                 program,
@@ -224,6 +242,7 @@ impl Jit {
                     call,
                     alloc,
                     builtin,
+                    buffer,
                 },
             )
             .run();
@@ -372,17 +391,18 @@ fn builtin_signature(module: &JITModule) -> Signature {
     signature
 }
 
-/// The four helpers this arm calls, as references inside one function.
+/// The helpers this arm calls, as references inside one function.
 ///
-/// A struct rather than four parameters of [`Lower::new`], because they arrive
-/// together, are never chosen between, and four `FuncRef`s in a signature is the
-/// shape a fifth would make unreadable.
+/// A struct rather than that many parameters of [`Lower::new`], because they
+/// arrive together and are never chosen between — which is the shape the fourth
+/// one already made necessary and the fifth confirms.
 #[derive(Clone, Copy)]
 struct Bound {
     safepoint: FuncRef,
     call: FuncRef,
     alloc: FuncRef,
     builtin: FuncRef,
+    buffer: FuncRef,
 }
 
 /// One function's lowering.
@@ -425,6 +445,16 @@ struct Lower<'a, 'f> {
     /// a block because a `load-elem` of a three-word element reads four heap
     /// words and would otherwise load the table four times.
     chunks: Option<Value>,
+    /// The literal-address table, as a pointer, if it has been loaded in the
+    /// block being emitted.
+    ///
+    /// Cached and forgotten exactly as [`Lower::chunks`] is, and that is
+    /// deliberately stricter than the field needs: the table is placed before the
+    /// run's first instruction and nothing republishes it, so a helper cannot
+    /// stale it. Forgetting all three in one place is worth more than the reload a
+    /// function with a literal after a call pays, because a cache with a rule of
+    /// its own is a rule somebody has to remember.
+    literals: Option<Value>,
     /// Which IR instruction is being emitted.
     ///
     /// Only a raise reads it — [`NativeCtx::raise_pc`] is how the runtime finds
@@ -479,6 +509,7 @@ impl<'a, 'f> Lower<'a, 'f> {
             work,
             frame: None,
             chunks: None,
+            literals: None,
             pc: 0,
             blocks,
         }
@@ -531,6 +562,12 @@ impl<'a, 'f> Lower<'a, 'f> {
         match &self.function.code[pc] {
             // `encoded.rs`'s `CONST_BOOL | CONST_INT | CONST_FLOAT` arm: one
             // store of a word the encoder already computed.
+            // `encoded.rs`'s `CONST_UNIT` arm: one store of a zero word.
+            Inst::Unit { dst } => {
+                let word = self.b.ins().iconst(types::I64, 0);
+                self.store_slot(*dst, word);
+                false
+            }
             Inst::Bool { dst, value } => {
                 let word = self.b.ins().iconst(types::I64, i64::from(*value));
                 self.store_slot(*dst, word);
@@ -547,6 +584,10 @@ impl<'a, 'f> Lower<'a, 'f> {
             Inst::Tag { dst, case, .. } => {
                 let word = self.b.ins().iconst(types::I64, i64::from(case.0));
                 self.store_slot(*dst, word);
+                false
+            }
+            Inst::Str { dst, text } => {
+                self.literal(*dst, *text);
                 false
             }
             Inst::Copy { dst, src, layout } => {
@@ -629,6 +670,26 @@ impl<'a, 'f> Lower<'a, 'f> {
             }
             Inst::Call { dst, callee, args } => {
                 self.callee(*dst, callee.0, args.0);
+                false
+            }
+            // ADR 0052's four, each handed to the runtime whole. See
+            // [`crate::abi::BufferFn`] for why none of them has an emitted fast
+            // path — one rooting discipline that is not the frame's, one chunked
+            // safepoint contract, and one UTF-8 walk.
+            Inst::AllocBuffer { dst, capacity } => {
+                self.buffer_op(BufferOp::Alloc, *dst, *capacity);
+                false
+            }
+            Inst::AppendByte { buffer, value } => {
+                self.buffer_op(BufferOp::AppendByte, *buffer, *value);
+                false
+            }
+            Inst::AppendBytes { args } => {
+                self.buffer_op(BufferOp::AppendBytes, args.0, 0);
+                false
+            }
+            Inst::FinishBuffer { dst, buffer } => {
+                self.buffer_op(BufferOp::Finish, *dst, *buffer);
                 false
             }
             Inst::Alloc { dst, layout, len } => {
@@ -805,6 +866,41 @@ impl<'a, 'f> Lower<'a, 'f> {
     fn forget(&mut self) {
         self.frame = None;
         self.chunks = None;
+        self.literals = None;
+    }
+
+    /// `encoded.rs`'s `STR` arm: `literal_addr(text)`, into a slot.
+    ///
+    /// Two loads and a store, and the address is not an immediate: see
+    /// [`crate::abi`]'s "A literal's address is a run-time load" for why it cannot
+    /// be one. The table pointer is cached exactly as [`Lower::heap_chunks`]'s is,
+    /// which is stricter than it has to be — the literal table is placed before
+    /// any frame exists and is never republished, so no helper can stale it — and
+    /// is written that way so the two tables are forgotten in one place rather
+    /// than in two with different rules.
+    fn literal(&mut self, dst: Slot, text: StrId) {
+        let at = literal_offset(text).expect("`supported` bounded every literal");
+        let table = self.literals();
+        let addr = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), table, at);
+        self.store_slot(dst, addr);
+    }
+
+    /// The literal-address table, as a pointer. See [`Lower::literal`].
+    fn literals(&mut self) -> Value {
+        if let Some(literals) = self.literals {
+            return literals;
+        }
+        let literals = self.b.ins().load(
+            self.pointer,
+            MemFlagsData::trusted(),
+            self.ctx,
+            OFF_LITERALS,
+        );
+        self.literals = Some(literals);
+        literals
     }
 
     /// The heap's chunk-base table, as a pointer.
@@ -1178,6 +1274,52 @@ impl<'a, 'f> Lower<'a, 'f> {
         let call = self.b.ins().call(
             self.bound.builtin,
             &[self.ctx, self.base, at, into, which, list],
+        );
+        let outcome = self.b.inst_results(call)[0];
+        self.forget();
+
+        let left = self.b.create_block();
+        let on = self.b.create_block();
+        let returned =
+            self.b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, outcome, i64::from(Outcome::Returned.abi()));
+        self.b.ins().brif(returned, on, &[], left, &[]);
+
+        self.b.switch_to_block(left);
+        // Not `leave`: what this returns is the helper's outcome and not one this
+        // function chose, and every field that outcome needs the helper has written.
+        self.b.ins().return_(&[outcome]);
+
+        self.b.switch_to_block(on);
+        self.forget();
+    }
+
+    /// One of [ADR 0052]'s four growable-buffer instructions, handed to the
+    /// runtime whole.
+    ///
+    /// [`Lower::builtin_call`]'s shape exactly, with the operand pair in place of
+    /// the destination and the builtin and one more argument saying which of the
+    /// four this is. See [`crate::abi::BufferFn`] for what each operand means and
+    /// why all of it is the helper rather than a fast path and a cold one.
+    ///
+    /// It is a safepoint: an `alloc-buffer` allocates twice, an `append` may grow
+    /// the store, and a `finish` walks the live prefix and charges what it moved.
+    ///
+    /// [ADR 0052]: ../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
+    fn buffer_op(&mut self, op: BufferOp, a: u32, b: u32) {
+        let work = self.b.use_var(self.work);
+        self.store_ctx(OFF_PENDING_WORK, work);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        self.b.def_var(self.work, zero);
+
+        let at = self.b.ins().iconst(types::I32, self.pc as i64);
+        let which = self.b.ins().iconst(types::I32, i64::from(op.abi()));
+        let first = self.b.ins().iconst(types::I32, i64::from(a));
+        let second = self.b.ins().iconst(types::I32, i64::from(b));
+        let call = self.b.ins().call(
+            self.bound.buffer,
+            &[self.ctx, self.base, at, which, first, second],
         );
         let outcome = self.b.inst_results(call)[0];
         self.forget();

@@ -36,7 +36,7 @@ use cove_ir::{
     Arg, ArgsId, ArithOp, BuiltinId, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout,
     LayoutId, Len, Num, Program, RefMap, Repr, Slot, StrId, Table, TableId,
 };
-use cove_native::{Entry, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
+use cove_native::{BufferOp, Entry, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
 use cove_native::{HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS};
 
 // --- the safepoint helper -----------------------------------------------------
@@ -387,6 +387,97 @@ pub fn mediated_answers(outcomes: &[Outcome]) {
         .with(|held| *held.borrow_mut() = outcomes.iter().map(|outcome| outcome.abi()).collect());
 }
 
+// --- the growable-buffer helper -----------------------------------------------
+
+/// One of ADR 0052's four instructions compiled code handed back through
+/// [`BufferFn`](cove_native::BufferFn).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Built {
+    pub base: u64,
+    pub pc: u32,
+    pub op: u32,
+    pub a: u32,
+    pub b: u32,
+    /// The unpaid work the caller published before handing over.
+    pub work: u64,
+}
+
+thread_local! {
+    /// Every buffer operation this thread's compiled code handed over, in order.
+    pub static BUILT: RefCell<Vec<Built>> = const { RefCell::new(Vec::new()) };
+    /// What the next one answers, taken from the front.
+    pub static BUILT_ANSWERS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The runtime's growable-buffer helper, as a test double.
+///
+/// A real one is `Machine::alloc_buffer`, `Machine::append_byte`,
+/// `encoded::append_bytes` or `Machine::finish_buffer`, whole. This one records
+/// the hand-over and writes one word — `op * 1000 + a`, a number no other part of
+/// a frame holds — into the destination *of the two operations that have one*.
+///
+/// That last clause is the part worth stating. `a` is `dst` for
+/// [`BufferOp::Alloc`] and [`BufferOp::Finish`]; it is the owner's slot for
+/// [`BufferOp::AppendByte`], which the real helper reads and never writes; and it
+/// is an `ArgsId` for [`BufferOp::AppendBytes`], which is not a slot at all. A
+/// double that wrote through it in every case would be asserting a store the
+/// runtime does not make.
+///
+/// # Safety
+///
+/// As [`alloc`]. `base` indexes into the words the entry point was given.
+unsafe extern "C" fn buffer(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    op: u32,
+    a: u32,
+    b: u32,
+) -> u32 {
+    BUILT.with(|held| {
+        held.borrow_mut().push(Built {
+            base,
+            pc,
+            op,
+            a,
+            b,
+            work: (*ctx).pending_work,
+        })
+    });
+    (*ctx).pending_work = 0;
+    let answer = BUILT_ANSWERS.with(|held| {
+        let mut held = held.borrow_mut();
+        (!held.is_empty()).then(|| held.remove(0))
+    });
+    match answer {
+        Some(outcome) if outcome != Outcome::Returned.abi() => outcome,
+        _ => {
+            if op == BufferOp::Alloc.abi() || op == BufferOp::Finish.abi() {
+                (*ctx)
+                    .words
+                    .add((base + u64::from(a)) as usize)
+                    .write(u64::from(op) * 1000 + u64::from(a));
+            }
+            Outcome::Returned.abi()
+        }
+    }
+}
+
+pub fn built() -> Vec<Built> {
+    BUILT.with(|held| held.borrow().clone())
+}
+
+pub fn forget_built() {
+    BUILT.with(|held| held.borrow_mut().clear());
+    BUILT_ANSWERS.with(|held| held.borrow_mut().clear());
+}
+
+/// Scripts what the next buffer operations answer.
+pub fn built_answers(outcomes: &[Outcome]) {
+    BUILT_ANSWERS
+        .with(|held| *held.borrow_mut() = outcomes.iter().map(|outcome| outcome.abi()).collect());
+}
+
 pub fn helpers() -> NativeHelpers {
     NativeHelpers {
         safepoint,
@@ -395,6 +486,7 @@ pub fn helpers() -> NativeHelpers {
         close,
         alloc,
         builtin,
+        buffer,
     }
 }
 
@@ -600,6 +692,21 @@ pub fn program(function: Function) -> Program {
     }
 }
 
+/// The same program, with a table of string literals.
+///
+/// `Inst::Str` names a `StrId`, and `supported` bounds that id against this very
+/// table — so a case that emits one has to declare the strings, exactly as a case
+/// that calls a builtin has to declare the builtin. The *text* is never read by
+/// either arm: what a literal lowers to is a load of
+/// `NativeCtx::literals[text]`, and what the table holds is the address the
+/// runtime placed. `run_with_literals` is where those addresses come from.
+pub fn program_with_strings(function: Function, strings: &[&str]) -> Program {
+    Program {
+        strings: strings.iter().map(|text| Arc::from(*text)).collect(),
+        ..program(function)
+    }
+}
+
 /// The same program, with switch tables.
 pub fn program_with_tables(function: Function, tables: Vec<Table>) -> Program {
     Program {
@@ -771,6 +878,28 @@ pub fn run_over<A: Arm>(program: &Program, words: &mut [u64], base: u64, heap: &
     enter_over(&jit, compiled, words, base, heap.table())
 }
 
+/// The same, over a heap **and** a table of literal addresses.
+///
+/// `literals` is `NativeCtx::literals`: one heap address per `StrId`, in order,
+/// which is what `Machine::place_literals` builds before a run's first
+/// instruction. A case gives the addresses of objects it put in `heap` itself, so
+/// that what an `Inst::Str` stores is a reference a later `len` or `byte-at` can
+/// actually follow.
+pub fn run_with_literals<A: Arm>(
+    program: &Program,
+    words: &mut [u64],
+    base: u64,
+    heap: &Heap,
+    literals: &[u64],
+) -> Answer {
+    let mut jit = A::new(helpers());
+    let compiled = jit
+        .compile(program, FunctionId(0))
+        .expect("the function is inside the slice");
+    jit.finalize();
+    enter_with_literals(&jit, compiled, words, base, heap.table(), literals)
+}
+
 pub fn enter<A: Arm>(jit: &A, compiled: A::Handle, words: &mut [u64], base: u64) -> Answer {
     enter_over(jit, compiled, words, base, std::ptr::null())
 }
@@ -791,11 +920,31 @@ pub fn enter_over<A: Arm>(
     base: u64,
     chunks: *const *mut u64,
 ) -> Answer {
+    enter_with_literals(jit, compiled, words, base, chunks, &[])
+}
+
+/// [`enter_over`], with a literal-address table published beside the heap.
+///
+/// An empty `literals` publishes a null table, which is what a caller whose
+/// compiled code holds no `Inst::Str` gets — and is loud rather than plausible if
+/// an arm ever reads it anyway.
+pub fn enter_with_literals<A: Arm>(
+    jit: &A,
+    compiled: A::Handle,
+    words: &mut [u64],
+    base: u64,
+    chunks: *const *mut u64,
+    literals: &[u64],
+) -> Answer {
     let mut held: Vec<u64> = words.to_vec();
     let guard = held.len() as u64;
     held.extend([UNWRITTEN; DESTINATION_WORDS + 1]);
-    let mut ctx =
-        NativeCtx::new(std::ptr::null_mut(), held.as_mut_ptr(), SEGMENT_ORIGIN).over_heap(chunks);
+    let mut ctx = NativeCtx::new(std::ptr::null_mut(), held.as_mut_ptr(), SEGMENT_ORIGIN)
+        .over_heap(chunks)
+        .over_literals(match literals.is_empty() {
+            true => std::ptr::null(),
+            false => literals.as_ptr(),
+        });
     let entry = jit.entry(compiled);
     // Safety: `ctx.words` is `held`, `base` indexes into it, the functions below
     // are all built with frames that fit inside the prefix, and the destination
@@ -1552,14 +1701,6 @@ pub fn a_trap_names_its_message_by_id<A: Arm>() {
 pub fn anything_outside_the_slice_refuses_the_whole_function<A: Arm>() {
     let refused: Vec<(&str, Program)> = vec![
         (
-            "a unit constant, which is not on the adoption gate's list",
-            program(function(
-                vec![Repr::Unit],
-                UNIT,
-                vec![Inst::Unit { dst: 0 }, Inst::Return { src: 0 }],
-            )),
-        ),
-        (
             "float negation, which `Num::Int` negation being lowered does not admit",
             program(function(
                 vec![Repr::Float],
@@ -1683,6 +1824,51 @@ pub fn anything_outside_the_slice_refuses_the_whole_function<A: Arm>() {
     for (what, held) in refused {
         assert!(!compiles::<A>(&held), "should have refused: {what}");
     }
+}
+
+/// A `Unit` constant is one word of nought, and a slot past the frame refuses.
+///
+/// `encoded.rs`'s `CONST_UNIT` arm is `set_word_at(base + dst, 0)`, so this is
+/// `Inst::Bool`'s emitter with the constant already chosen. It is asserted rather
+/// than assumed because a `Unit` word is *zero* and so is a fresh frame: a
+/// fixture that read an untouched slot would agree with an arm that emitted
+/// nothing at all. So the slot is written first and the instruction has to put it
+/// back.
+pub fn a_unit_constant_is_a_zero_word<A: Arm>() {
+    let held = program(function(
+        vec![Repr::Int, Repr::Unit],
+        UNIT,
+        vec![
+            // A number no `Unit` is, so a `const-unit` that stored nothing leaves
+            // it behind and the assertion below reads it.
+            Inst::Int {
+                dst: 1,
+                value: 0x5555_aaaa,
+            },
+            Inst::Unit { dst: 1 },
+            Inst::Return { src: 1 },
+        ],
+    ));
+    let mut words = vec![0u64, 0];
+    let answer = run::<A>(&held, &mut words, 0);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[1], 0, "the slot the constant was stored over");
+    assert_eq!(answer.returned[0], 0, "and the answer at the boundary");
+
+    // A frame that does not begin at word zero, and then a slot the frame does
+    // not have — which is `Reason::Operands` and a refusal.
+    let mut words = vec![9, 9, 0, 0];
+    let answer = run::<A>(&held, &mut words, 2);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[3], 0);
+    assert_eq!(&words[..2], &[9, 9]);
+
+    let past = program(function(
+        vec![Repr::Int, Repr::Unit],
+        UNIT,
+        vec![Inst::Unit { dst: 9 }, Inst::Return { src: 1 }],
+    ));
+    assert!(!compiles::<A>(&past), "a slot past the end of the frame");
 }
 
 /// A `Bool` equality *is* inside the slice, which is the other side of the
@@ -1962,6 +2148,439 @@ pub fn a_byte_length_builtin_reads_the_header_and_refuses_null<A: Arm>() {
     assert_eq!(answer.outcome, Outcome::Raised);
     assert_eq!(answer.raise, Some(Raise::NullObject));
     assert_eq!(answer.raise_pc, 1, "the builtin's pc, not the constant's");
+}
+
+/// `encoded.rs`'s `STR` arm: the address of a placed literal, into a slot.
+///
+/// The whole of what is emitted is `literals[text]`, so what this has to say is
+/// that the *right* entry is read — which is why the table holds three distinct
+/// addresses and the fixture asks for the middle one. A lowering that dropped the
+/// displacement, or scaled it by one instead of eight, answers a neighbour's
+/// address and passes every test whose table has one row.
+///
+/// **The answer is returned across the boundary and not only left in a slot.**
+/// `Answer::returned` is the destination the caller named, which is what a real
+/// VM-to-native crossing reads; a reference that was correct in the frame and
+/// wrong in the destination would be a string that vanished at a tier boundary.
+///
+/// The address is then *followed*, by a `len` of the object it names, because an
+/// `Inst::Str` that answered a plausible number rather than a reference would
+/// look right in a word comparison and wrong the moment anything read through it.
+pub fn a_literal_is_the_address_the_run_placed<A: Arm>() {
+    // The address, answered as a `Repr::Ref` and nothing more. It is a separate
+    // program from the one below on purpose: an arm that read the *wrong* entry
+    // answers a word that is not an address at all, and a fixture that followed it
+    // in the same breath would crash before it could say which word it got.
+    let address = program_with_strings(
+        function(
+            vec![Repr::Ref],
+            REF,
+            vec![
+                Inst::Str {
+                    dst: 0,
+                    text: StrId(1),
+                },
+                Inst::Return { src: 0 },
+            ],
+        ),
+        &["a", "bc", "def"],
+    );
+    // And the address *followed*: an `Inst::Str` that answered a plausible number
+    // rather than a reference would look right in a word comparison and wrong the
+    // moment anything read through it.
+    let followed = program_with_strings(
+        function(
+            vec![Repr::Ref, Repr::Int],
+            INT,
+            vec![
+                Inst::Str {
+                    dst: 0,
+                    text: StrId(1),
+                },
+                Inst::Len { dst: 1, obj: 0 },
+                Inst::Return { src: 1 },
+            ],
+        ),
+        &["a", "bc", "def"],
+    );
+
+    // Three objects, one per literal, in the *second* chunk so that the address
+    // is one the chunk arithmetic has to resolve rather than a small number. The
+    // table holds three distinct addresses and the fixtures ask for the middle
+    // one: a lowering that dropped the displacement, or scaled it by one instead
+    // of eight, answers a neighbour and passes every test whose table has one row.
+    let mut heap = Heap::new(2);
+    let first = heap.object(HEAP_CHUNK_WORDS + 4, INT, 1);
+    let second = heap.object(HEAP_CHUNK_WORDS + 8, INT, 2);
+    let third = heap.object(HEAP_CHUNK_WORDS + 12, INT, 3);
+    let literals = [first, second, third];
+
+    // `Answer::returned` is the destination the caller named, which is what a real
+    // VM-to-native crossing reads: a reference that was right in the frame and
+    // wrong in the destination would be a string that vanished at a tier boundary.
+    let mut words = vec![0u64];
+    let answer = run_with_literals::<A>(&address, &mut words, 0, &heap, &literals);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(
+        words[0], second,
+        "the second literal's address, not a neighbour's"
+    );
+    assert_eq!(
+        answer.returned[0], second,
+        "and the same address across the boundary"
+    );
+
+    let mut words = vec![0u64, 0];
+    let answer = run_with_literals::<A>(&followed, &mut words, 0, &heap, &literals);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[1], 2, "the length of the object that address names");
+
+    // The same code over a *different* table answers differently, which is what
+    // says the address is read at run time. It is the assertion an immediate — had
+    // one been possible — would have failed.
+    let moved = [third, first, second];
+    let mut words = vec![0u64];
+    let answer = run_with_literals::<A>(&address, &mut words, 0, &heap, &moved);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[0], first);
+
+    // A frame that does not begin at word zero, which is where a lowering that
+    // stored the address through the wrong base would show.
+    let mut words = vec![9, 9, 9, 9, 0, 0];
+    let answer = run_with_literals::<A>(&followed, &mut words, 4, &heap, &literals);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[4], second);
+    assert_eq!(words[5], 2);
+    assert_eq!(
+        &words[..4],
+        &[9, 9, 9, 9],
+        "and nothing below the frame moved"
+    );
+}
+
+/// A literal whose `StrId` the program has no string for refuses the function.
+///
+/// `cove_ir::verify` refuses one too, so this is unreachable for a lowered
+/// program — and it is bounded here anyway, because the alternative to refusing
+/// is reading past the end of `NativeCtx::literals` into whatever the allocator
+/// put there. A refusal is a function on the encoded tier; a read past the table
+/// is a wrong address that nothing would report.
+pub fn a_literal_past_the_table_refuses_the_function<A: Arm>() {
+    let inside = program_with_strings(
+        function(
+            vec![Repr::Ref],
+            REF,
+            vec![
+                Inst::Str {
+                    dst: 0,
+                    text: StrId(1),
+                },
+                Inst::Return { src: 0 },
+            ],
+        ),
+        &["a", "b"],
+    );
+    assert!(compiles::<A>(&inside));
+
+    let past = program_with_strings(
+        function(
+            vec![Repr::Ref],
+            REF,
+            vec![
+                Inst::Str {
+                    dst: 0,
+                    text: StrId(2),
+                },
+                Inst::Return { src: 0 },
+            ],
+        ),
+        &["a", "b"],
+    );
+    assert!(
+        !compiles::<A>(&past),
+        "a `StrId` this program has no string for"
+    );
+}
+
+/// ADR 0052's four, each handed to the runtime whole with its operands.
+///
+/// There is no fast path to check here and that is the design — see
+/// [`cove_native::BufferFn`] for why each of the four is the helper and not half
+/// of one. So what a case can say is the three things that *are* emitted code:
+/// the operation and its two operands reach the helper unchanged; the unpaid
+/// work is published and the accumulator cleared, because every one of them is a
+/// safepoint; and the answer the helper wrote is in the frame afterwards.
+///
+/// The four run in **one body**, in the order a builder is used, so the pcs are
+/// four different numbers and an emitter that dropped `self.pc` is a wrong pc
+/// rather than a coincidence. `alloc-buffer` and `finish-buffer` write a
+/// destination and the two appends do not, which is the double's own note.
+pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
+    forget_built();
+    // `s0` is the owner, `s1` the capacity and the byte, `s2` the answer.
+    let held = program_with_args(
+        function(
+            vec![Repr::Ref, Repr::Int, Repr::Ref],
+            REF,
+            vec![
+                Inst::AllocBuffer {
+                    dst: 0,
+                    capacity: 1,
+                },
+                Inst::AppendByte {
+                    buffer: 0,
+                    value: 1,
+                },
+                Inst::AppendBytes { args: ArgsId(1) },
+                Inst::FinishBuffer { dst: 2, buffer: 0 },
+                Inst::Return { src: 2 },
+            ],
+        ),
+        // `buffer`, `src`, `from`, `to` — the row `Inst::AppendBytes` is defined
+        // to hold, each one word.
+        vec![
+            Arg {
+                slot: 0,
+                layout: REF,
+            },
+            Arg {
+                slot: 2,
+                layout: REF,
+            },
+            Arg {
+                slot: 1,
+                layout: INT,
+            },
+            Arg {
+                slot: 1,
+                layout: INT,
+            },
+        ],
+    );
+
+    let heap = Heap::new(1);
+    let mut words = vec![0u64, 3, 0];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(
+        built(),
+        vec![
+            Built {
+                base: 0,
+                pc: 0,
+                op: BufferOp::Alloc.abi(),
+                a: 0,
+                b: 1,
+                // The block is five instructions and the charge is made at block
+                // entry, so the first hand-over carries the whole of it and every
+                // one after it carries nought.
+                work: 5,
+            },
+            Built {
+                base: 0,
+                pc: 1,
+                op: BufferOp::AppendByte.abi(),
+                a: 0,
+                b: 1,
+                work: 0,
+            },
+            Built {
+                base: 0,
+                pc: 2,
+                op: BufferOp::AppendBytes.abi(),
+                // The `ArgsId`, not a slot: the four operands are behind it and the
+                // helper resolves them out of the program.
+                a: 1,
+                b: 0,
+                work: 0,
+            },
+            Built {
+                base: 0,
+                pc: 3,
+                op: BufferOp::Finish.abi(),
+                a: 2,
+                b: 0,
+                work: 0,
+            },
+        ],
+        "the four operations, in order, with their operands"
+    );
+    // What the double wrote, in the two slots that have a destination.
+    assert_eq!(words[0], u64::from(BufferOp::Alloc.abi()) * 1000);
+    assert_eq!(words[2], u64::from(BufferOp::Finish.abi()) * 1000 + 2);
+    assert_eq!(words[1], 3, "and the operand slot was not written");
+    assert_eq!(answer.returned[0], words[2], "the answer at the boundary");
+    assert_eq!(
+        answer.pending_work, 0,
+        "every hand-over is a safepoint, so the accumulator was cleared at each"
+    );
+
+    // A frame that does not begin at word zero: `base` is a word index and the
+    // helper reads its operands through it.
+    forget_built();
+    let mut words = vec![9, 9, 9, 9, 0, 3, 0];
+    let answer = run_over::<A>(&held, &mut words, 4, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(
+        built().iter().map(|row| row.base).collect::<Vec<_>>(),
+        vec![4, 4, 4, 4],
+        "the frame the operands are read out of"
+    );
+    assert_eq!(words[4], u64::from(BufferOp::Alloc.abi()) * 1000);
+    assert_eq!(words[6], u64::from(BufferOp::Finish.abi()) * 1000 + 2);
+    assert_eq!(&words[..4], &[9, 9, 9, 9]);
+}
+
+/// A buffer operation the runtime refused leaves with *that* outcome.
+///
+/// The helper answers an [`Outcome`] and every field it needs — the raise code,
+/// the pc, the two numbers — is already written by the time it does, so emitted
+/// code tests the outcome once and returns it unchanged. It must not turn a
+/// `Stopped` into a `Raised` on the way out, which is what a lowering that
+/// answered a constant would do, so both are checked.
+pub fn a_buffer_op_the_runtime_refused_leaves_with_that_outcome<A: Arm>() {
+    for outcome in [Outcome::Raised, Outcome::Stopped] {
+        forget_built();
+        built_answers(&[outcome]);
+        let held = program(function(
+            vec![Repr::Ref, Repr::Int],
+            REF,
+            vec![
+                Inst::Int { dst: 1, value: 8 },
+                Inst::AllocBuffer {
+                    dst: 0,
+                    capacity: 1,
+                },
+                Inst::Return { src: 0 },
+            ],
+        ));
+        let heap = Heap::new(1);
+        let mut words = vec![0u64, 0];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, outcome);
+        assert_eq!(built().len(), 1, "and it left at the first refusal");
+        assert_eq!(
+            answer.returned[0], UNWRITTEN,
+            "nothing was published to the destination"
+        );
+    }
+}
+
+/// The four are admitted together, and an `append-bytes` whose row is not four
+/// one-word operands is not one.
+///
+/// `cove_ir::verify` holds the row to that shape too, so the second half of this
+/// is unreachable for a lowered program — and it is bounded here anyway, because
+/// what the helper does with a short row is index past the end of it.
+pub fn a_growable_buffer_is_admitted_as_a_family<A: Arm>() {
+    let one = |inst: Inst| {
+        program(function(
+            vec![Repr::Ref, Repr::Int],
+            REF,
+            vec![inst, Inst::Return { src: 0 }],
+        ))
+    };
+    for inst in [
+        Inst::AllocBuffer {
+            dst: 0,
+            capacity: 1,
+        },
+        Inst::AppendByte {
+            buffer: 0,
+            value: 1,
+        },
+        Inst::FinishBuffer { dst: 0, buffer: 0 },
+    ] {
+        assert!(compiles::<A>(&one(inst.clone())), "{inst:?}");
+        // The same instruction at a slot the frame does not have is `Operands`
+        // rather than `Instruction`, and is refused.
+        let past = match inst {
+            Inst::AllocBuffer { .. } => Inst::AllocBuffer {
+                dst: 9,
+                capacity: 1,
+            },
+            Inst::AppendByte { .. } => Inst::AppendByte {
+                buffer: 9,
+                value: 1,
+            },
+            _ => Inst::FinishBuffer { dst: 0, buffer: 9 },
+        };
+        assert!(
+            !compiles::<A>(&one(past)),
+            "a slot past the end of the frame"
+        );
+    }
+
+    let row = |args: Vec<Arg>| {
+        program_with_args(
+            function(
+                vec![Repr::Ref, Repr::Int],
+                REF,
+                vec![
+                    Inst::AppendBytes { args: ArgsId(1) },
+                    Inst::Return { src: 0 },
+                ],
+            ),
+            args,
+        )
+    };
+    let word = |slot: Slot| Arg { slot, layout: INT };
+    assert!(compiles::<A>(&row(vec![
+        Arg {
+            slot: 0,
+            layout: REF
+        },
+        Arg {
+            slot: 0,
+            layout: REF
+        },
+        word(1),
+        word(1),
+    ])));
+    assert!(
+        !compiles::<A>(&row(vec![
+            Arg {
+                slot: 0,
+                layout: REF
+            },
+            word(1),
+            word(1),
+        ])),
+        "three operands is not an `append-bytes` row"
+    );
+    assert!(
+        !compiles::<A>(&row(vec![
+            Arg {
+                slot: 0,
+                layout: REF
+            },
+            Arg {
+                slot: 0,
+                layout: REF
+            },
+            word(1),
+            word(9),
+        ])),
+        "an operand at a slot the frame does not have"
+    );
+    assert!(
+        !compiles::<A>(&row(vec![
+            Arg {
+                slot: 0,
+                layout: REF
+            },
+            Arg {
+                slot: 0,
+                layout: REF
+            },
+            word(1),
+            Arg {
+                slot: 0,
+                layout: PAIR
+            },
+        ])),
+        "an operand that is two words is not one of these four"
+    );
 }
 
 /// A `call-builtin` of a name no arm lowers refuses the whole function.

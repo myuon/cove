@@ -398,6 +398,7 @@ fn direct_helpers() -> NativeHelpers {
         // a table somebody has to keep honest.
         alloc: shared.alloc,
         builtin: shared.builtin,
+        buffer: shared.buffer,
     }
 }
 
@@ -617,4 +618,34 @@ impl Arm for TemplateDirect {
     fn entry(&self, handle: Compiled) -> Entry {
         self.0.entry(handle)
     }
+}
+
+#[test]
+fn a_literal_is_the_address_the_run_placed() {
+    suite::a_literal_is_the_address_the_run_placed::<Template>();
+}
+
+#[test]
+fn a_literal_past_the_table_refuses_the_function() {
+    suite::a_literal_past_the_table_refuses_the_function::<Template>();
+}
+
+#[test]
+fn a_growable_buffer_is_handed_to_the_runtime_whole() {
+    suite::a_growable_buffer_is_handed_to_the_runtime_whole::<Template>();
+}
+
+#[test]
+fn a_buffer_op_the_runtime_refused_leaves_with_that_outcome() {
+    suite::a_buffer_op_the_runtime_refused_leaves_with_that_outcome::<Template>();
+}
+
+#[test]
+fn a_growable_buffer_is_admitted_as_a_family() {
+    suite::a_growable_buffer_is_admitted_as_a_family::<Template>();
+}
+
+#[test]
+fn a_unit_constant_is_a_zero_word() {
+    suite::a_unit_constant_is_a_zero_word::<Template>();
 }

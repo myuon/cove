@@ -697,7 +697,7 @@ fn copy_bytes(
 /// above the logical length, where they are spare room rather than value.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn append_bytes(
+pub(super) fn append_bytes(
     machine: &mut Machine<'_>,
     program: &Program,
     budget: &Meter,

@@ -13,7 +13,7 @@
 
 use cove_ir::{
     ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Function, Inst, LayoutId, Len, Num, Program, Repr,
-    Shape, Slot,
+    Shape, Slot, StrId,
 };
 
 use crate::abi::Raise;
@@ -79,6 +79,22 @@ fn is_lowered(repr: Repr) -> bool {
 /// constant.
 pub(crate) fn slot_offset(slot: Slot) -> Option<i32> {
     i32::try_from(i64::from(slot) * 8).ok()
+}
+
+/// The byte offset of a literal's address from the first word of
+/// [`NativeCtx::literals`](crate::abi::NativeCtx::literals), if it fits the `i32`
+/// displacement both arms address the table with.
+///
+/// [`slot_offset`] one table over, and the `None` is unreachable for the same
+/// kind of reason: a program with 2^28 string literals is one no source file
+/// produced. It is checked rather than asserted because "unreachable in practice"
+/// is a claim about today's corpus, and an arm that was silently wrong above a
+/// threshold is worse than one that refuses at it.
+pub(crate) fn literal_offset(text: StrId) -> Option<i32> {
+    i64::try_from(text.index())
+        .ok()
+        .and_then(|at| at.checked_mul(8))
+        .and_then(|at| i32::try_from(at).ok())
 }
 
 /// Whether a comparison is one this slice lowers.
@@ -417,12 +433,43 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
     // `true` is "this instruction is inside the slice", so that each arm below
     // reads the way it read while it was a predicate.
     let inside = match inst {
+        // `encoded.rs`'s `CONST_UNIT` arm, which is `set_word_at(base + dst, 0)`
+        // and nothing else — one store of a zero word, the same shape
+        // `Inst::Bool` is with the constant already chosen.
+        //
+        // It was outside the slice until [ADR 0052]'s four came in, and it was
+        // outside for a defensible reason: the adoption gate's list does not name
+        // it and nothing the raced corpus ran reached one. Lowering the buffer
+        // family is what made it matter, and made it matter *a lot* — the first
+        // blocker of `std.stringbuilder.StringBuilder.append` and
+        // `appendSlice` became this, because both of them answer `Unit`, and
+        // that is 443,126 dynamic calls of the covefmt corpus behind a single
+        // word write. The philosophy's "earn complexity through use" is what
+        // admits it: a representative program showed the friction, twice.
+        //
+        // [ADR 0052]: ../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
+        Inst::Unit { dst } => slot(*dst),
         Inst::Bool { dst, .. } | Inst::Int { dst, .. } => slot(*dst),
         // A case index is one word and the word is a compile-time constant, so
         // this is `encoded.rs`'s `FUNC_REF | CONST_TAG` arm: the same store
         // `CONST_INT` makes, of a number the layout already fixed. The layout
         // and the case are bounded by `cove_ir::verify` before this is reached.
         Inst::Tag { dst, .. } => slot(*dst),
+        // `encoded.rs`'s `STR` arm: `set_slot(base, dst, literal_addr(text))`, a
+        // read of the table [ADR 0045] placed before the run's first instruction.
+        // There is no branch, no allocation and nothing that can fail — a
+        // placement failure is refused before a frame exists — so both arms emit
+        // the table read and the store and nothing else.
+        //
+        // The `StrId` is bounded against the program's own table as well as
+        // against the `i32` displacement, because `Refusal` is the honest answer
+        // for an id no program has: `cove_ir::verify` already refuses one, and an
+        // arm that read past the table would be reading whatever followed it.
+        //
+        // [ADR 0045]: ../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md
+        Inst::Str { dst, text } => {
+            text.index() < program.strings.len() && literal_offset(*text).is_some() && slot(*dst)
+        }
         Inst::Copy { dst, src, layout } => {
             let layout = program.layout(*layout);
             layout.width() <= MAX_RUN_WORDS
@@ -597,6 +644,40 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         }
         Inst::Return { src } => run(*src, program.layout(function.returns).width()),
         Inst::Trap { .. } => true,
+        // ---- [ADR 0052]'s growable buffer -----------------------------------
+        //
+        // All four, handed to [`BufferFn`](crate::abi::BufferFn) whole, and that
+        // helper's own documentation is where the decision for each of them is
+        // written down — including why none of them has an emitted fast path and
+        // why `AppendByte` is here although the census never named it.
+        //
+        // They are admitted together. Three of them without the fourth would be a
+        // subset that could allocate a builder and not finish it, and the first
+        // function that appended one byte would be refused with no work behind the
+        // refusal.
+        //
+        // What is bounded here is what the helper will *read out of this frame*,
+        // which is [`Inst::Call`]'s rule: the helper resolves its operands through
+        // `Memory::slot`, so a slot this frame does not have is a read past the
+        // end of it. Nothing about the capacity, the byte value or the range is
+        // bounded, because every one of those is a number a running program
+        // computed and each has a refusal of its own whose sentence the runtime
+        // builds — a second rejection here would be a second message for one rule.
+        //
+        // [ADR 0052]: ../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
+        Inst::AllocBuffer { dst, capacity } => slot(*dst) && slot(*capacity),
+        Inst::AppendByte { buffer, value } => slot(*buffer) && slot(*value),
+        // Four operands behind an `ArgsId` — `buffer`, `src`, `from`, `to` — which
+        // is the row `cove_ir::verify` already holds to that shape and width. Each
+        // is one word, so each is bounded as a slot rather than as a run.
+        Inst::AppendBytes { args } => {
+            let list = program.arg_list(*args);
+            list.len() == 4
+                && list
+                    .iter()
+                    .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))
+        }
+        Inst::FinishBuffer { dst, buffer } => slot(*dst) && slot(*buffer),
         // A builtin is decoded by [`method_of`] and by nothing here, so that the
         // name this tier lowers is written down once. `None` is a family nothing
         // emits and falls to `Reason::Instruction` with every other unlowered
