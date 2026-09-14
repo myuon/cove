@@ -13,7 +13,7 @@
 
 use cove_ir::{
     ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Function, Inst, LayoutId, Len, Num, Program, Repr,
-    Shape, Slot,
+    Shape, Slot, StrId,
 };
 
 use crate::abi::Raise;
@@ -79,6 +79,22 @@ fn is_lowered(repr: Repr) -> bool {
 /// constant.
 pub(crate) fn slot_offset(slot: Slot) -> Option<i32> {
     i32::try_from(i64::from(slot) * 8).ok()
+}
+
+/// The byte offset of a literal's address from the first word of
+/// [`NativeCtx::literals`](crate::abi::NativeCtx::literals), if it fits the `i32`
+/// displacement both arms address the table with.
+///
+/// [`slot_offset`] one table over, and the `None` is unreachable for the same
+/// kind of reason: a program with 2^28 string literals is one no source file
+/// produced. It is checked rather than asserted because "unreachable in practice"
+/// is a claim about today's corpus, and an arm that was silently wrong above a
+/// threshold is worse than one that refuses at it.
+pub(crate) fn literal_offset(text: StrId) -> Option<i32> {
+    i64::try_from(text.index())
+        .ok()
+        .and_then(|at| at.checked_mul(8))
+        .and_then(|at| i32::try_from(at).ok())
 }
 
 /// Whether a comparison is one this slice lowers.
@@ -423,6 +439,21 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // `CONST_INT` makes, of a number the layout already fixed. The layout
         // and the case are bounded by `cove_ir::verify` before this is reached.
         Inst::Tag { dst, .. } => slot(*dst),
+        // `encoded.rs`'s `STR` arm: `set_slot(base, dst, literal_addr(text))`, a
+        // read of the table [ADR 0045] placed before the run's first instruction.
+        // There is no branch, no allocation and nothing that can fail — a
+        // placement failure is refused before a frame exists — so both arms emit
+        // the table read and the store and nothing else.
+        //
+        // The `StrId` is bounded against the program's own table as well as
+        // against the `i32` displacement, because `Refusal` is the honest answer
+        // for an id no program has: `cove_ir::verify` already refuses one, and an
+        // arm that read past the table would be reading whatever followed it.
+        //
+        // [ADR 0045]: ../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md
+        Inst::Str { dst, text } => {
+            text.index() < program.strings.len() && literal_offset(*text).is_some() && slot(*dst)
+        }
         Inst::Copy { dst, src, layout } => {
             let layout = program.layout(*layout);
             layout.width() <= MAX_RUN_WORDS

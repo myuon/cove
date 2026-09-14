@@ -2132,6 +2132,29 @@ impl<'a> Machine<'a> {
     /// placement failure into a refusal before any frame existed — so by
     /// the time an instruction asks, the answer is always there, and this
     /// is a load rather than a question.
+    /// Every literal's address, as compiled code is handed it.
+    ///
+    /// [`NativeCtx::literals`](cove_native::NativeCtx::literals): the same
+    /// `Arc<[u64]>` [`Machine::literal_addr`] indexes, as a pointer to its first
+    /// word, so that a native `Inst::Str` is the load the encoded `STR` arm is.
+    ///
+    /// It `expect`s for [`Machine::literal_addr`]'s reason and under the same
+    /// invariant, which is if anything stronger here: a context is built to enter
+    /// a compiled *frame*, and [`Machine::run`] turned a placement failure into a
+    /// refusal before the first frame existed. A `null` instead would be a
+    /// segfault inside generated code where this is a panic with a sentence.
+    ///
+    /// The pointer is stable for the life of the run. The table is placed once,
+    /// never written again, and shared by every task — see [`Machine::for_task`] —
+    /// so unlike the words and the chunk table it is published once per context
+    /// and never re-published.
+    pub(crate) fn literals_ptr(&self) -> *const u64 {
+        self.literal_addrs
+            .as_ref()
+            .expect("a placement failure is refused before this machine's first frame")
+            .as_ptr()
+    }
+
     #[inline]
     fn literal_addr(&self, text: StrId) -> u64 {
         self.literal_addrs

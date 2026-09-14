@@ -26,20 +26,23 @@ use std::mem::offset_of;
 use std::ptr;
 
 use cove_ir::{
-    ArgsId, ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot,
+    ArgsId, ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot, StrId,
 };
 
 use crate::abi::{
     Entry, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
     HEAP_ORIGIN_WORDS,
 };
-use crate::subset::{by_zero_of, leaders, method_of, overflow_of, slot_offset, supported, Method};
+use crate::subset::{
+    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported, Method,
+};
 use crate::Unavailable;
 
 // The `NativeCtx` field offsets, read from the declaration rather than written
 // out, exactly as the Cranelift arm reads them.
 const OFF_WORDS: i32 = offset_of!(NativeCtx, words) as i32;
 const OFF_CHUNKS: i32 = offset_of!(NativeCtx, chunks) as i32;
+const OFF_LITERALS: i32 = offset_of!(NativeCtx, literals) as i32;
 const OFF_STACK_ORIGIN: i32 = offset_of!(NativeCtx, stack_origin) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
 const OFF_RAISE_CODE: i32 = offset_of!(NativeCtx, raise_code) as i32;
@@ -486,6 +489,7 @@ impl<'a> Emit<'a> {
                 self.mov_imm64(RAX, i64::from(case.0));
                 self.store_slot(*dst, RAX);
             }
+            Inst::Str { dst, text } => self.literal(*dst, *text),
             Inst::Copy { dst, src, layout } => {
                 self.copy(*dst, *src, self.program.layout(*layout).width());
             }
@@ -679,6 +683,25 @@ impl<'a> Emit<'a> {
         self.load(FRAME, CTX, OFF_WORDS);
         self.add_rr(FRAME, BASE_BYTES);
         self.frame_live = true;
+    }
+
+    /// `encoded.rs`'s `STR` arm: `literal_addr(text)`, into a slot.
+    ///
+    /// Three instructions, and a `mov r64, imm64` is not one of them: see
+    /// [`crate::abi`]'s "A literal's address is a run-time load" for why the
+    /// address cannot be an immediate. The table is loaded from the context every
+    /// time this arm runs, which is this arm being a template compiler — the
+    /// pointer is a loop invariant of the whole run and there is nothing here to
+    /// hoist it into.
+    ///
+    /// `RAX` survives [`Emit::store_slot`], whose only other write is [`FRAME`],
+    /// so the address is formed before the frame pointer is and no spill is
+    /// needed.
+    fn literal(&mut self, dst: Slot, text: StrId) {
+        let at = literal_offset(text).expect("`supported` bounded every literal");
+        self.load(RAX, CTX, OFF_LITERALS);
+        self.load(RAX, RAX, at);
+        self.store_slot(dst, RAX);
     }
 
     fn load_slot(&mut self, into: u8, slot: Slot) {

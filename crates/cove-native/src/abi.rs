@@ -184,7 +184,30 @@
 //! makes that true — which it cannot, because it neither allocates nor decides
 //! where a `Clear` goes.
 //!
+//! # A literal's address is a run-time load, and it could not have been anything
+//! else
+//!
+//! [ADR 0045] places every program literal in the heap before the run's first
+//! instruction, so `Inst::Str` is "a load of a precomputed address" and the
+//! encoded tier's arm is one table read. It is tempting to read that as *a
+//! constant*, and to fold the address into the generated code as an immediate.
+//!
+//! It is not one, and the order the runtime does things in is why. A
+//! `NativeProgram` is compiled and finalized **before the `Machine` exists** —
+//! `cove_runtime::native::compile` takes a `Program` and nothing else, and the
+//! literals are placed by `Machine::for_run`, which runs afterwards. At the
+//! moment a function is compiled there is no heap, so there is no address to
+//! fold. The table is per-*run*, not per-`Program`.
+//!
+//! So [`NativeCtx::literals`] is that table's base, published once per context
+//! beside [`NativeCtx::stack_origin`] and never re-published, and `Inst::Str` is
+//! two loads and a store: the table out of the context, the address out of the
+//! table, the address into the slot. Nothing about it can fail — placement
+//! failure is already a refusal before a frame exists — so there is no guard, no
+//! safepoint and no helper.
+//!
 //! [ADR 0034]: ../../../../docs/adr/0034-one-physical-word-stack.md
+//! [ADR 0045]: ../../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md
 //! [ADR 0057]: ../../../../docs/adr/0057-a-native-call-returns-into-the-destination-its-caller-named.md
 
 use std::ffi::c_void;
@@ -740,6 +763,31 @@ pub struct NativeCtx {
     /// step further out: a helper may have allocated, an allocation may have
     /// committed a chunk, and committing one may have moved the table.
     pub chunks: *const *mut u64,
+    /// Every program literal's heap address, in `StrId` order.
+    ///
+    /// `Machine::literal_addrs`, as a pointer to its first word — the `Arc<[u64]>`
+    /// [ADR 0045] places before the run's first instruction. `Inst::Str` reads
+    /// `literals[text]` out of it, which is the same load the encoded tier's `STR`
+    /// arm makes.
+    ///
+    /// Published **once**, as [`NativeCtx::stack_origin`] is, and for a stronger
+    /// reason than that one: the table is placed before any frame exists, is never
+    /// written again, and is shared by every task of the run. Nothing a helper does
+    /// can move it, so it is not re-derived after a call and generated code may
+    /// cache it for as long as it likes.
+    ///
+    /// It is a run-time load rather than a compile-time immediate because the
+    /// *compiler* runs first; see the module documentation's "A literal's address
+    /// is a run-time load".
+    ///
+    /// Null for a caller whose compiled code holds no literal, which is
+    /// [`NativeCtx::chunks`]' rule and is loud for the same reason: a table that
+    /// was never published is a null dereference where a dangling one would be a
+    /// wrong address. [`NativeCtx::over_literals`] is how a caller with literals
+    /// says so.
+    ///
+    /// [ADR 0045]: ../../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md
+    pub literals: *const u64,
     /// The linear address of word zero of the task's stack segment.
     ///
     /// What [`NativeCtx::words`] points *at*, as a number in the one address
@@ -814,6 +862,7 @@ impl NativeCtx {
             host,
             words,
             chunks: std::ptr::null(),
+            literals: std::ptr::null(),
             stack_origin,
             pending_work: 0,
             raise_code: 0,
@@ -831,6 +880,16 @@ impl NativeCtx {
     /// compiled code is running.
     pub fn over_heap(mut self, chunks: *const *mut u64) -> Self {
         self.chunks = chunks;
+        self
+    }
+
+    /// The same context, over the literal addresses `literals` begins.
+    ///
+    /// See [`NativeCtx::literals`]. Unlike [`NativeCtx::over_heap`]'s table this
+    /// one never has to be re-published, because nothing a run does changes it —
+    /// which is why it is a builder rather than a field a helper writes.
+    pub fn over_literals(mut self, literals: *const u64) -> Self {
+        self.literals = literals;
         self
     }
 
@@ -888,5 +947,24 @@ mod tests {
         assert_eq!(ctx.raise(), None);
         assert_eq!(ctx.pending_work, 0);
         assert_eq!(ctx.stack_origin, 0);
+    }
+
+    /// Both tables start null, and both builders publish only their own.
+    ///
+    /// A context whose compiled code holds no literal must not be given a
+    /// plausible-looking table, and publishing one must not disturb the other —
+    /// which is a thing to assert rather than to read, because the two fields are
+    /// adjacent and are written by two one-line builders.
+    #[test]
+    fn a_fresh_context_has_no_tables() {
+        let mut words = [0u64; 4];
+        let ctx = NativeCtx::new(std::ptr::null_mut(), words.as_mut_ptr(), 0);
+        assert!(ctx.chunks.is_null());
+        assert!(ctx.literals.is_null());
+
+        let addrs = [7u64, 9];
+        let ctx = ctx.over_literals(addrs.as_ptr());
+        assert!(ctx.chunks.is_null());
+        assert_eq!(unsafe { *ctx.literals.add(1) }, 9);
     }
 }

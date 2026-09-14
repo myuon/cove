@@ -18,7 +18,7 @@
 #![cfg(all(feature = "cranelift", feature = "template"))]
 
 use cove_ir::{ArithOp, CmpOp, FunctionId, Inst, Len, Num, Program, Repr, StrId};
-use cove_native::{Entry, NativeHelpers};
+use cove_native::{Entry, NativeHelpers, HEAP_CHUNK_WORDS};
 
 mod suite;
 
@@ -140,14 +140,36 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
 /// what the covefmt slice added and nothing that came before it has one: the
 /// callers above would all pass a heap with nothing in it.
 fn agree_over(what: &str, program: &Program, words: &[u64], base: u64, build: impl Fn() -> Heap) {
+    agree_with_literals(what, program, words, base, build, &[]);
+}
+
+/// [`agree_over`], with a literal-address table published to both arms.
+///
+/// The one thing `Inst::Str` can differ on is *which* entry of that table an arm
+/// reads, and an empty table cannot say so — so a case that lowers a literal
+/// hands the same three addresses to both arms and the frames are compared as
+/// they always are.
+fn agree_with_literals(
+    what: &str,
+    program: &Program,
+    words: &[u64],
+    base: u64,
+    build: impl Fn() -> Heap,
+    literals: &[u64],
+) {
     suite::forget_polls();
     suite::forget_calls();
     suite::forget_allocations();
     suite::forget_mediated();
     let cranelift_heap = build();
     let mut cranelift_words = words.to_vec();
-    let cranelift =
-        suite::run_over::<Cranelift>(program, &mut cranelift_words, base, &cranelift_heap);
+    let cranelift = suite::run_with_literals::<Cranelift>(
+        program,
+        &mut cranelift_words,
+        base,
+        &cranelift_heap,
+        literals,
+    );
     let cranelift_polls = suite::polls();
     let cranelift_allocs = suite::allocations();
     let cranelift_mediated = suite::mediated();
@@ -158,7 +180,13 @@ fn agree_over(what: &str, program: &Program, words: &[u64], base: u64, build: im
     suite::forget_mediated();
     let template_heap = build();
     let mut template_words = words.to_vec();
-    let template = suite::run_over::<Template>(program, &mut template_words, base, &template_heap);
+    let template = suite::run_with_literals::<Template>(
+        program,
+        &mut template_words,
+        base,
+        &template_heap,
+        literals,
+    );
     let template_polls = suite::polls();
     let template_allocs = suite::allocations();
     let template_mediated = suite::mediated();
@@ -291,6 +319,48 @@ fn both_arms_answer_the_same_thing() {
             },
         );
     }
+    // The literal table, which is the one thing in this slice that neither arm
+    // computes: both read `ctx.literals[text]`, and the whole of the difference
+    // between them is how the displacement is formed. The third read is followed
+    // to a byte, and the offset walks off the end of the object on purpose so the
+    // refusal is compared too.
+    let placed = |heap: &Heap| {
+        [
+            heap.addr(1),
+            heap.addr(HEAP_CHUNK_WORDS + 1),
+            heap.addr(HEAP_CHUNK_WORDS + 5),
+        ]
+    };
+    let literal_heap = || {
+        let mut heap = Heap::new(2);
+        heap.object(1, INT, 3);
+        heap.set(2, 0x0000_0000_0065_6e6f);
+        heap.object(HEAP_CHUNK_WORDS + 1, INT, 3);
+        heap.set(HEAP_CHUNK_WORDS + 2, 0x0000_0000_006f_7774);
+        heap.object(HEAP_CHUNK_WORDS + 5, INT, 5);
+        heap.set(HEAP_CHUNK_WORDS + 6, 0x0000_0065_6572_6874);
+        heap
+    };
+    let table = placed(&literal_heap());
+    for at in [0i64, 4, 5, -1] {
+        agree_with_literals(
+            &format!("three literals and a byte at {at}"),
+            &literals(),
+            &[0, 0, 0, at as u64, 0],
+            0,
+            literal_heap,
+            &table,
+        );
+        agree_with_literals(
+            &format!("three literals and a byte at {at}, off word zero"),
+            &literals(),
+            &[9, 9, 0, 0, 0, at as u64, 0],
+            2,
+            literal_heap,
+            &table,
+        );
+    }
+
     agree_over(
         "a load-elem of a null reference",
         &element(),
@@ -501,6 +571,43 @@ fn trap() -> Program {
             Inst::Trap { message: StrId(37) },
         ],
     ))
+}
+
+/// Three literals read in one body, and a byte taken out of the last of them.
+///
+/// One `Inst::Str` could not separate two arms that both read the table's first
+/// entry, so this reads three different entries and then *follows* one — the
+/// address the third store answered is the object a `byte-at` reads through, so
+/// an arm that scaled the displacement differently answers a different byte
+/// rather than a merely different number.
+fn literals() -> Program {
+    suite::program_with_strings(
+        suite::function(
+            vec![Repr::Ref, Repr::Ref, Repr::Ref, Repr::Int, Repr::Int],
+            INT,
+            vec![
+                Inst::Str {
+                    dst: 0,
+                    text: StrId(0),
+                },
+                Inst::Str {
+                    dst: 1,
+                    text: StrId(2),
+                },
+                Inst::Str {
+                    dst: 2,
+                    text: StrId(1),
+                },
+                Inst::ByteAt {
+                    dst: 4,
+                    obj: 2,
+                    at: 3,
+                },
+                Inst::Return { src: 4 },
+            ],
+        ),
+        &["one", "two", "three"],
+    )
 }
 
 /// `dst = obj[index]`, at a two-word stride.

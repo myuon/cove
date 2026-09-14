@@ -33,7 +33,9 @@
 
 use std::mem::offset_of;
 
-use cove_ir::{ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot};
+use cove_ir::{
+    ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot, StrId,
+};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
     types, AbiParam, Block, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData, Signature,
@@ -48,7 +50,9 @@ use crate::abi::{
     Entry, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
     HEAP_ORIGIN_WORDS,
 };
-use crate::subset::{by_zero_of, leaders, method_of, overflow_of, slot_offset, supported, Method};
+use crate::subset::{
+    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported, Method,
+};
 use crate::Unavailable;
 
 /// The name the safepoint helper is imported under.
@@ -76,6 +80,7 @@ const BUILTIN: &str = "cove_native_builtin";
 // them.
 const OFF_WORDS: i32 = offset_of!(NativeCtx, words) as i32;
 const OFF_CHUNKS: i32 = offset_of!(NativeCtx, chunks) as i32;
+const OFF_LITERALS: i32 = offset_of!(NativeCtx, literals) as i32;
 const OFF_STACK_ORIGIN: i32 = offset_of!(NativeCtx, stack_origin) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
 const OFF_RAISE_CODE: i32 = offset_of!(NativeCtx, raise_code) as i32;
@@ -425,6 +430,16 @@ struct Lower<'a, 'f> {
     /// a block because a `load-elem` of a three-word element reads four heap
     /// words and would otherwise load the table four times.
     chunks: Option<Value>,
+    /// The literal-address table, as a pointer, if it has been loaded in the
+    /// block being emitted.
+    ///
+    /// Cached and forgotten exactly as [`Lower::chunks`] is, and that is
+    /// deliberately stricter than the field needs: the table is placed before the
+    /// run's first instruction and nothing republishes it, so a helper cannot
+    /// stale it. Forgetting all three in one place is worth more than the reload a
+    /// function with a literal after a call pays, because a cache with a rule of
+    /// its own is a rule somebody has to remember.
+    literals: Option<Value>,
     /// Which IR instruction is being emitted.
     ///
     /// Only a raise reads it — [`NativeCtx::raise_pc`] is how the runtime finds
@@ -479,6 +494,7 @@ impl<'a, 'f> Lower<'a, 'f> {
             work,
             frame: None,
             chunks: None,
+            literals: None,
             pc: 0,
             blocks,
         }
@@ -547,6 +563,10 @@ impl<'a, 'f> Lower<'a, 'f> {
             Inst::Tag { dst, case, .. } => {
                 let word = self.b.ins().iconst(types::I64, i64::from(case.0));
                 self.store_slot(*dst, word);
+                false
+            }
+            Inst::Str { dst, text } => {
+                self.literal(*dst, *text);
                 false
             }
             Inst::Copy { dst, src, layout } => {
@@ -805,6 +825,41 @@ impl<'a, 'f> Lower<'a, 'f> {
     fn forget(&mut self) {
         self.frame = None;
         self.chunks = None;
+        self.literals = None;
+    }
+
+    /// `encoded.rs`'s `STR` arm: `literal_addr(text)`, into a slot.
+    ///
+    /// Two loads and a store, and the address is not an immediate: see
+    /// [`crate::abi`]'s "A literal's address is a run-time load" for why it cannot
+    /// be one. The table pointer is cached exactly as [`Lower::heap_chunks`]'s is,
+    /// which is stricter than it has to be — the literal table is placed before
+    /// any frame exists and is never republished, so no helper can stale it — and
+    /// is written that way so the two tables are forgotten in one place rather
+    /// than in two with different rules.
+    fn literal(&mut self, dst: Slot, text: StrId) {
+        let at = literal_offset(text).expect("`supported` bounded every literal");
+        let table = self.literals();
+        let addr = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), table, at);
+        self.store_slot(dst, addr);
+    }
+
+    /// The literal-address table, as a pointer. See [`Lower::literal`].
+    fn literals(&mut self) -> Value {
+        if let Some(literals) = self.literals {
+            return literals;
+        }
+        let literals = self.b.ins().load(
+            self.pointer,
+            MemFlagsData::trusted(),
+            self.ctx,
+            OFF_LITERALS,
+        );
+        self.literals = Some(literals);
+        literals
     }
 
     /// The heap's chunk-base table, as a pointer.

@@ -65,14 +65,22 @@ export fn adds(a: Int, b: Int) -> Int {
 
 /// A caller that is refused, so that its `call` is the VM-to-native hop.
 ///
-/// The string *literal* is what refuses it: `Inst::Str` is outside anything either
-/// code generator lowers, so this function runs on the encoded tier however the
-/// table is built — which is the point of it. `byteLength` beside it is no longer
-/// a refusal of its own and is not relied on to be one; see `measures` below,
-/// where it is the thing under test.
+/// `let nothing = ()` is what refuses it, and it is the marker every refused
+/// caller in this file uses: `Inst::Unit` is outside the adoption gate's list and
+/// is deliberately kept outside it — see `cove-native`'s
+/// `anything_outside_the_slice_refuses_the_whole_function`, whose first row is
+/// this very instruction — so this function runs on the encoded tier however the
+/// table is built, which is the point of it.
+///
+/// **It used to be a string literal, and it stopped being one when `Inst::Str`
+/// was lowered.** That is the hazard a marker like this has: the moment the
+/// instruction it relies on joins the subset, every case in this file compares the
+/// native tier with itself and passes whatever was emitted. What stands between
+/// this file and that is not the marker, it is the two assertions every case makes
+/// — `compiled < reachable`, and a tier counter that moved.
 export fn callsAdds(a: Int, b: Int) -> Int {
-  let note = \"x\"
-  adds(a, b) + note.byteLength() - 1
+  let nothing = ()
+  adds(a, b)
 }
 
 /// Negation, so that `Inst::Neg` runs as machine code and can raise there.
@@ -86,8 +94,8 @@ export fn negates(a: Int) -> Int {
 
 /// A refused caller, so the negation is reached across the boundary.
 export fn callsNegates(a: Int) -> Int {
-  let note = \"x\"
-  negates(a) + note.byteLength() - 1
+  let nothing = ()
+  negates(a)
 }
 
 /// Division, so that a raise crosses the boundary.
@@ -96,15 +104,15 @@ export fn divides(a: Int, b: Int) -> Int {
 }
 
 export fn callsDivides(a: Int, b: Int) -> Int {
-  let note = \"x\"
-  divides(a, b) + note.byteLength() - 1
+  let nothing = ()
+  divides(a, b)
 }
 
 /// A deep recursion whose outer destinations are pending while the stack's `Vec`
 /// reallocates.
 export fn callsCounts(n: Int) -> Int {
-  let note = \"x\"
-  counts(n) + note.byteLength() - 1
+  let nothing = ()
+  counts(n)
 }
 
 /// Two words inline, so that a place can name the second of them.
@@ -135,10 +143,10 @@ export fn bumps(var total: Int, by: Int) -> Int {
 /// slot, and `seen` says the callee also saw it, so an arm that wrote the right
 /// number to the wrong place cannot pass on the second alone.
 export fn callsBumps(a: Int) -> Int {
-  let note = \"x\"
+  let nothing = ()
   var total = a
   let seen = bumps(var total, 5)
-  total * 1000 + seen + note.byteLength() - 1
+  total * 1000 + seen
 }
 
 /// Writes *one word* of a two-word value location, which is `Inst::AddrOfPart`.
@@ -149,16 +157,16 @@ export fn movesY(var p: Point, to: Int) -> Int {
 
 /// A refused caller lending two words of its own frame, one of which is written.
 export fn callsMovesY(a: Int) -> Int {
-  let note = \"x\"
+  let nothing = ()
   var p = Point(x: a, y: 0)
   let seen = movesY(var p, 9)
-  p.x * 1000 + p.y * 10 + seen + note.byteLength() - 1
+  p.x * 1000 + p.y * 10 + seen
 }
 
-/// Refused — the string is why — and it writes through the `var` it was lent.
+/// Refused — the unit marker is why — and it writes through the `var` it was lent.
 export fn shows(var total: Int) -> Int {
-  let note = \"x\"
-  total = total + note.byteLength()
+  let nothing = ()
+  total = total + 1
   total
 }
 
@@ -176,8 +184,8 @@ export fn lendsToTheVm(a: Int) -> Int {
 /// the frame it opens itself: without a caller above it `lendsToTheVm` would run
 /// on the VM and the crossing under test would not happen.
 export fn callsLendsToTheVm(a: Int) -> Int {
-  let note = \"x\"
-  lendsToTheVm(a) + note.byteLength() - 1
+  let nothing = ()
+  lendsToTheVm(a)
 }
 
 /// A `var` threaded down a recursion that changes tier at every step.
@@ -194,8 +202,7 @@ export fn descends(n: Int, var total: Int) -> Int {
 /// through an alternating chain of encoded and compiled frames while the stack's
 /// `Vec` reallocates under all of them.
 export fn lowers(n: Int, var total: Int) -> Int {
-  let note = \"x\"
-  total = total + note.byteLength() - 1
+  let nothing = ()
   descends(n, var total)
 }
 
@@ -208,6 +215,7 @@ export fn threads(n: Int) -> Int {
 
 /// The allocation a collection is forced with. `sliceBytes` is outside anything
 /// the template compiler lowers, so this runs on the encoded tier in every case.
+/// It needs no marker of its own for that reason.
 export fn allocates(s: String, n: Int) -> Int {
   match s.sliceBytes(held(0), n) {
     Ok(cut) => cut.byteLength()
@@ -266,10 +274,45 @@ export fn measures(s: String) -> Int {
   s.byteLength() * 10 + counts(0)
 }
 
+/// A string **literal** in a frame that is compiled.
+///
+/// `Inst::Str` is a load of `NativeCtx::literals[text]`, and the table is
+/// published by the runtime rather than compiled in — see `cove_native::abi`'s
+/// note on why a literal's address is a run-time load — so what a case has to say is that
+/// the word this frame stores is the address `Machine::place_literals` handed out
+/// and not a number that happens to look like one.
+///
+/// Two literals and a branch, so that reading the wrong table entry answers the
+/// *other* string rather than nothing at all, and `counts(0)` for the reason it is
+/// in every fixture above.
+export fn picksALiteral(n: Int) -> String {
+  if n > counts(0) { \"alpha\" } else { \"beta gamma\" }
+}
+
+/// A refused caller that **follows** what compiled code handed it.
+///
+/// A literal that answered a plausible word rather than a reference passes a
+/// comparison and fails here, because a byte length is a read through the address.
+export fn callsPicksALiteral(n: Int) -> Int {
+  let nothing = ()
+  picksALiteral(n).byteLength()
+}
+
+/// The same literal, carried back across the boundary as the `String` itself.
+///
+/// This is the half a length cannot be: the object compiled code stored is what
+/// the *caller* renders, on the other tier, so a reference that was right in the
+/// callee's frame and wrong in the caller's destination is a string that vanished
+/// at a tier boundary.
+export fn saysALiteral(n: Int) -> String {
+  let nothing = ()
+  picksALiteral(n)
+}
+
 /// A refused caller, so the measurement is reached across the boundary.
 export fn callsMeasures(s: String) -> Int {
-  let note = \"x\"
-  measures(s) + note.byteLength() - 1
+  let nothing = ()
+  measures(s)
 }
 
 /// A compiled frame that **allocates**, with a reference live across it.
@@ -294,9 +337,9 @@ export fn allocatesAndKeeps(s: String, n: Int) -> Int {
 /// an **encoded** frame below a compiled one — which is the pair no single-tier
 /// case can be.
 export fn callsAllocatesAndKeeps(s: String, n: Int) -> Int {
-  let note = \"x\"
+  let nothing = ()
   let also = [n, n, n]
-  allocatesAndKeeps(s, n) + also.length() + note.byteLength() - 1
+  allocatesAndKeeps(s, n) + also.length()
 }
 
 /// `Vector.push` in a compiled frame: the fast path and the growth one.
@@ -336,7 +379,7 @@ export fn pushesOnto(given: Vector<Int>, n: Int) -> Int {
 /// the callee bumped, so the replaced store word is read by this frame and not by
 /// the one that replaced it.
 export fn callsPushesOnto(n: Int) -> Int {
-  let note = \"x\"
+  let nothing = ()
   var v = Vector.of(7)
   let answered = pushesOnto(v, n)
   var total = 0
@@ -348,7 +391,7 @@ export fn callsPushesOnto(n: Int) -> Int {
     }
     at = at + 1
   }
-  answered * 1000000 + v.length() * 1000 + total + note.byteLength() - 1
+  answered * 1000000 + v.length() * 1000 + total
 }
 
 /// Allocations from a compiled frame that are **kept**, so the heap runs out.
@@ -372,9 +415,9 @@ export fn fillsTheHeap(given: Vector<Array<Int>>, n: Int) -> Int {
 /// A refused caller, so the allocations that exhaust the heap are a compiled
 /// frame\'s.
 export fn callsFillsTheHeap(n: Int) -> Int {
-  let note = \"x\"
+  let nothing = ()
   var v: Vector<Array<Int>> = Vector.of([0])
-  fillsTheHeap(v, n) + note.byteLength() - 1
+  fillsTheHeap(v, n)
 }
 
 /// A refused caller, so the frame that clears a slot is a **compiled** one.
@@ -386,8 +429,8 @@ export fn callsFillsTheHeap(n: Int) -> Int {
 /// small heap at the same time — and this is the way the differential rows above
 /// already work.
 export fn callsKeepsWhatItStillNeeds(a: String, b: String, n: Int) -> Int {
-  let note = \"x\"
-  keepsWhatItStillNeeds(a, b, n) + note.byteLength() - 1
+  let nothing = ()
+  keepsWhatItStillNeeds(a, b, n)
 }
 ";
 
@@ -1143,6 +1186,76 @@ fn a_byte_length_is_a_header_read_in_compiled_code() {
             both.tiers
         );
     }
+}
+
+/// **A literal's address, loaded in machine code and followed on the other tier.**
+///
+/// The whole of `Inst::Str` is `ctx.literals[text]`, and `cove-native`'s own suite
+/// already holds each arm to a table it wrote itself. What only this file can say
+/// is that the table the *runtime* publishes is the one
+/// `Machine::place_literals` built — a compiled `Inst::Str` reading a pointer that
+/// was never published, or published from the wrong `Arc`, passes every test whose
+/// context is built by hand.
+///
+/// Three claims, and they are three because none of them implies the next:
+///
+/// - the byte length is the encoded tier's, which says the word is an address of
+///   the object the run placed rather than a number that looks like one;
+/// - the `String` itself is what the caller renders, which says the reference
+///   survived the crossing into the destination the caller named;
+/// - a *different* argument answers the *other* literal, which says the
+///   displacement picks an entry rather than always the table's first.
+#[test]
+fn a_literal_is_the_object_the_run_placed() {
+    on_each_tier(&["picksALiteral"], &["callsPicksALiteral", "saysALiteral"]);
+    for (n, text, bytes) in [(1i64, "alpha", 5i64), (0, "beta gamma", 10)] {
+        let measured = both("callsPicksALiteral", vec![Value::int(n)]);
+        assert_eq!(
+            measured.vm,
+            Ok(bytes.to_string()),
+            "`{text}` is {bytes} byte(s) to the encoded tier"
+        );
+        assert_eq!(
+            measured.native, measured.vm,
+            "and compiled code loaded the address of the same object"
+        );
+        assert!(
+            measured.tiers.vm_to_native >= 1,
+            "the literal was loaded in machine code: {:?}",
+            measured.tiers
+        );
+
+        let said = both("saysALiteral", vec![Value::int(n)]);
+        assert_eq!(said.vm, Ok(text.to_string()));
+        assert_eq!(
+            said.native, said.vm,
+            "and the same object came back across the boundary"
+        );
+    }
+}
+
+/// The same literal, on a **later stack segment**.
+///
+/// A literal's address is a heap address and the table is the run's rather than
+/// the task's, so nothing about either depends on where this task's words begin —
+/// and that is the claim rather than an assumption. `NativeCtx` holds
+/// `stack_origin` two fields from `literals`, and an arm that had confused the two
+/// would read a word out of the stack; the runtime's first task, whose origin is
+/// nought, hides exactly that.
+#[test]
+fn a_literal_resolves_on_a_later_stack_segment() {
+    let here = both("callsPicksALiteral", vec![Value::int(1)]);
+    let there = both_on(Segment::Later, "callsPicksALiteral", vec![Value::int(1)]);
+    assert!(there.origin > 0, "the run really is on a later segment");
+    assert_eq!(there.vm, here.vm, "the encoded tier answers the same there");
+    assert_eq!(
+        there.native, there.vm,
+        "and so does the native tier on a segment that does not begin at nought"
+    );
+
+    let said = both_on(Segment::Later, "saysALiteral", vec![Value::int(0)]);
+    assert_eq!(said.vm, Ok("beta gamma".to_string()));
+    assert_eq!(said.native, said.vm);
 }
 
 /// The same header read, on a **later stack segment**.

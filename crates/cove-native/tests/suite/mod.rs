@@ -600,6 +600,21 @@ pub fn program(function: Function) -> Program {
     }
 }
 
+/// The same program, with a table of string literals.
+///
+/// `Inst::Str` names a `StrId`, and `supported` bounds that id against this very
+/// table — so a case that emits one has to declare the strings, exactly as a case
+/// that calls a builtin has to declare the builtin. The *text* is never read by
+/// either arm: what a literal lowers to is a load of
+/// `NativeCtx::literals[text]`, and what the table holds is the address the
+/// runtime placed. `run_with_literals` is where those addresses come from.
+pub fn program_with_strings(function: Function, strings: &[&str]) -> Program {
+    Program {
+        strings: strings.iter().map(|text| Arc::from(*text)).collect(),
+        ..program(function)
+    }
+}
+
 /// The same program, with switch tables.
 pub fn program_with_tables(function: Function, tables: Vec<Table>) -> Program {
     Program {
@@ -771,6 +786,28 @@ pub fn run_over<A: Arm>(program: &Program, words: &mut [u64], base: u64, heap: &
     enter_over(&jit, compiled, words, base, heap.table())
 }
 
+/// The same, over a heap **and** a table of literal addresses.
+///
+/// `literals` is `NativeCtx::literals`: one heap address per `StrId`, in order,
+/// which is what `Machine::place_literals` builds before a run's first
+/// instruction. A case gives the addresses of objects it put in `heap` itself, so
+/// that what an `Inst::Str` stores is a reference a later `len` or `byte-at` can
+/// actually follow.
+pub fn run_with_literals<A: Arm>(
+    program: &Program,
+    words: &mut [u64],
+    base: u64,
+    heap: &Heap,
+    literals: &[u64],
+) -> Answer {
+    let mut jit = A::new(helpers());
+    let compiled = jit
+        .compile(program, FunctionId(0))
+        .expect("the function is inside the slice");
+    jit.finalize();
+    enter_with_literals(&jit, compiled, words, base, heap.table(), literals)
+}
+
 pub fn enter<A: Arm>(jit: &A, compiled: A::Handle, words: &mut [u64], base: u64) -> Answer {
     enter_over(jit, compiled, words, base, std::ptr::null())
 }
@@ -791,11 +828,31 @@ pub fn enter_over<A: Arm>(
     base: u64,
     chunks: *const *mut u64,
 ) -> Answer {
+    enter_with_literals(jit, compiled, words, base, chunks, &[])
+}
+
+/// [`enter_over`], with a literal-address table published beside the heap.
+///
+/// An empty `literals` publishes a null table, which is what a caller whose
+/// compiled code holds no `Inst::Str` gets — and is loud rather than plausible if
+/// an arm ever reads it anyway.
+pub fn enter_with_literals<A: Arm>(
+    jit: &A,
+    compiled: A::Handle,
+    words: &mut [u64],
+    base: u64,
+    chunks: *const *mut u64,
+    literals: &[u64],
+) -> Answer {
     let mut held: Vec<u64> = words.to_vec();
     let guard = held.len() as u64;
     held.extend([UNWRITTEN; DESTINATION_WORDS + 1]);
-    let mut ctx =
-        NativeCtx::new(std::ptr::null_mut(), held.as_mut_ptr(), SEGMENT_ORIGIN).over_heap(chunks);
+    let mut ctx = NativeCtx::new(std::ptr::null_mut(), held.as_mut_ptr(), SEGMENT_ORIGIN)
+        .over_heap(chunks)
+        .over_literals(match literals.is_empty() {
+            true => std::ptr::null(),
+            false => literals.as_ptr(),
+        });
     let entry = jit.entry(compiled);
     // Safety: `ctx.words` is `held`, `base` indexes into it, the functions below
     // are all built with frames that fit inside the prefix, and the destination
@@ -1962,6 +2019,158 @@ pub fn a_byte_length_builtin_reads_the_header_and_refuses_null<A: Arm>() {
     assert_eq!(answer.outcome, Outcome::Raised);
     assert_eq!(answer.raise, Some(Raise::NullObject));
     assert_eq!(answer.raise_pc, 1, "the builtin's pc, not the constant's");
+}
+
+/// `encoded.rs`'s `STR` arm: the address of a placed literal, into a slot.
+///
+/// The whole of what is emitted is `literals[text]`, so what this has to say is
+/// that the *right* entry is read — which is why the table holds three distinct
+/// addresses and the fixture asks for the middle one. A lowering that dropped the
+/// displacement, or scaled it by one instead of eight, answers a neighbour's
+/// address and passes every test whose table has one row.
+///
+/// **The answer is returned across the boundary and not only left in a slot.**
+/// `Answer::returned` is the destination the caller named, which is what a real
+/// VM-to-native crossing reads; a reference that was correct in the frame and
+/// wrong in the destination would be a string that vanished at a tier boundary.
+///
+/// The address is then *followed*, by a `len` of the object it names, because an
+/// `Inst::Str` that answered a plausible number rather than a reference would
+/// look right in a word comparison and wrong the moment anything read through it.
+pub fn a_literal_is_the_address_the_run_placed<A: Arm>() {
+    // The address, answered as a `Repr::Ref` and nothing more. It is a separate
+    // program from the one below on purpose: an arm that read the *wrong* entry
+    // answers a word that is not an address at all, and a fixture that followed it
+    // in the same breath would crash before it could say which word it got.
+    let address = program_with_strings(
+        function(
+            vec![Repr::Ref],
+            REF,
+            vec![
+                Inst::Str {
+                    dst: 0,
+                    text: StrId(1),
+                },
+                Inst::Return { src: 0 },
+            ],
+        ),
+        &["a", "bc", "def"],
+    );
+    // And the address *followed*: an `Inst::Str` that answered a plausible number
+    // rather than a reference would look right in a word comparison and wrong the
+    // moment anything read through it.
+    let followed = program_with_strings(
+        function(
+            vec![Repr::Ref, Repr::Int],
+            INT,
+            vec![
+                Inst::Str {
+                    dst: 0,
+                    text: StrId(1),
+                },
+                Inst::Len { dst: 1, obj: 0 },
+                Inst::Return { src: 1 },
+            ],
+        ),
+        &["a", "bc", "def"],
+    );
+
+    // Three objects, one per literal, in the *second* chunk so that the address
+    // is one the chunk arithmetic has to resolve rather than a small number. The
+    // table holds three distinct addresses and the fixtures ask for the middle
+    // one: a lowering that dropped the displacement, or scaled it by one instead
+    // of eight, answers a neighbour and passes every test whose table has one row.
+    let mut heap = Heap::new(2);
+    let first = heap.object(HEAP_CHUNK_WORDS + 4, INT, 1);
+    let second = heap.object(HEAP_CHUNK_WORDS + 8, INT, 2);
+    let third = heap.object(HEAP_CHUNK_WORDS + 12, INT, 3);
+    let literals = [first, second, third];
+
+    // `Answer::returned` is the destination the caller named, which is what a real
+    // VM-to-native crossing reads: a reference that was right in the frame and
+    // wrong in the destination would be a string that vanished at a tier boundary.
+    let mut words = vec![0u64];
+    let answer = run_with_literals::<A>(&address, &mut words, 0, &heap, &literals);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(
+        words[0], second,
+        "the second literal's address, not a neighbour's"
+    );
+    assert_eq!(
+        answer.returned[0], second,
+        "and the same address across the boundary"
+    );
+
+    let mut words = vec![0u64, 0];
+    let answer = run_with_literals::<A>(&followed, &mut words, 0, &heap, &literals);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[1], 2, "the length of the object that address names");
+
+    // The same code over a *different* table answers differently, which is what
+    // says the address is read at run time. It is the assertion an immediate — had
+    // one been possible — would have failed.
+    let moved = [third, first, second];
+    let mut words = vec![0u64];
+    let answer = run_with_literals::<A>(&address, &mut words, 0, &heap, &moved);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[0], first);
+
+    // A frame that does not begin at word zero, which is where a lowering that
+    // stored the address through the wrong base would show.
+    let mut words = vec![9, 9, 9, 9, 0, 0];
+    let answer = run_with_literals::<A>(&followed, &mut words, 4, &heap, &literals);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[4], second);
+    assert_eq!(words[5], 2);
+    assert_eq!(
+        &words[..4],
+        &[9, 9, 9, 9],
+        "and nothing below the frame moved"
+    );
+}
+
+/// A literal whose `StrId` the program has no string for refuses the function.
+///
+/// `cove_ir::verify` refuses one too, so this is unreachable for a lowered
+/// program — and it is bounded here anyway, because the alternative to refusing
+/// is reading past the end of `NativeCtx::literals` into whatever the allocator
+/// put there. A refusal is a function on the encoded tier; a read past the table
+/// is a wrong address that nothing would report.
+pub fn a_literal_past_the_table_refuses_the_function<A: Arm>() {
+    let inside = program_with_strings(
+        function(
+            vec![Repr::Ref],
+            REF,
+            vec![
+                Inst::Str {
+                    dst: 0,
+                    text: StrId(1),
+                },
+                Inst::Return { src: 0 },
+            ],
+        ),
+        &["a", "b"],
+    );
+    assert!(compiles::<A>(&inside));
+
+    let past = program_with_strings(
+        function(
+            vec![Repr::Ref],
+            REF,
+            vec![
+                Inst::Str {
+                    dst: 0,
+                    text: StrId(2),
+                },
+                Inst::Return { src: 0 },
+            ],
+        ),
+        &["a", "b"],
+    );
+    assert!(
+        !compiles::<A>(&past),
+        "a `StrId` this program has no string for"
+    );
 }
 
 /// A `call-builtin` of a name no arm lowers refuses the whole function.

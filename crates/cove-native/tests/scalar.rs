@@ -256,3 +256,13 @@ fn an_address_of_a_part_is_one_addition() {
 fn a_load_and_a_store_reach_either_region() {
     suite::a_load_and_a_store_reach_either_region::<Cranelift>();
 }
+
+#[test]
+fn a_literal_is_the_address_the_run_placed() {
+    suite::a_literal_is_the_address_the_run_placed::<Cranelift>();
+}
+
+#[test]
+fn a_literal_past_the_table_refuses_the_function() {
+    suite::a_literal_past_the_table_refuses_the_function::<Cranelift>();
+}

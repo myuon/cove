@@ -618,3 +618,13 @@ impl Arm for TemplateDirect {
         self.0.entry(handle)
     }
 }
+
+#[test]
+fn a_literal_is_the_address_the_run_placed() {
+    suite::a_literal_is_the_address_the_run_placed::<Template>();
+}
+
+#[test]
+fn a_literal_past_the_table_refuses_the_function() {
+    suite::a_literal_past_the_table_refuses_the_function::<Template>();
+}

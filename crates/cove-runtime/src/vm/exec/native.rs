@@ -981,7 +981,8 @@ unsafe fn enter<const MASK: u64>(
             machine.mem.words_ptr(),
             machine.mem.stack_origin(),
         )
-        .over_heap((*host).table());
+        .over_heap((*host).table())
+        .over_literals(machine.literals_ptr());
         // The destination as the callee is given it: a word index, taken *after*
         // the frame was pushed and stable whatever a later `push_frame` does to
         // the `Vec`. This is the line ADR 0057's "never pointers" is about.
@@ -1919,7 +1920,8 @@ unsafe fn again_ctx(
         machine.mem.words_ptr(),
         machine.mem.stack_origin(),
     )
-    .over_heap((*host).table());
+    .over_heap((*host).table())
+    .over_literals(machine.literals_ptr());
     std::hint::black_box(&ctx);
     std::hint::black_box(machine.mem.stack_index(base) as u64);
     std::hint::black_box(machine.mem.stack_index(into.base) as u64);
@@ -2046,7 +2048,8 @@ unsafe fn mediation_again(
             machine.mem.words_ptr(),
             machine.mem.stack_origin(),
         )
-        .over_heap((*host).table());
+        .over_heap((*host).table())
+        .over_literals(machine.literals_ptr());
         std::hint::black_box(&held);
         std::hint::black_box(machine.mem.stack_index(callee_base) as u64);
         std::hint::black_box(machine.mem.stack_index(caller_base) as u64);
