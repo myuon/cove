@@ -2040,10 +2040,11 @@ pub fn a_load_and_a_store_reach_either_region<A: Arm>() {
     assert_eq!((words[4], words[5]), (201, 202), "stored onto the stack");
     assert_eq!(words[3], 0, "and nothing beside them");
 
-    // A frame that does not begin at word zero, and an address into a word below
-    // it: the caller's frame is where a `var` parameter's target actually is.
+    // A frame that does not begin at word zero, and an address into word zero of
+    // the segment, below it: the caller's frame is where a `var` parameter's
+    // target actually is.
     forget_polls();
-    let mut words = vec![0, 0, SEGMENT_ORIGIN + 0, 301, 302, 0, 0];
+    let mut words = vec![0, 0, SEGMENT_ORIGIN, 301, 302, 0, 0];
     let answer = run::<A>(&stores, &mut words, 2);
     assert_eq!(answer.outcome, Outcome::Returned);
     assert_eq!((words[0], words[1]), (301, 302), "stored below the frame");

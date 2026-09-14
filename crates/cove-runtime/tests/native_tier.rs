@@ -198,6 +198,31 @@ export fn allocates(s: String, n: Int) -> Int {
   }
 }
 
+/// A `Shared` keeps its value in a **heap object**, and `lock` hands the closure
+/// the address of the field the value sits in — which is the one route a Cove
+/// program has to a `Repr::Addr` word naming the *heap* rather than a frame slot.
+///
+/// The closure is the compiled one: its `word = ...` is an `Inst::Store` through a
+/// heap address and its answer an `Inst::Load` through the same, so the `is_stack`
+/// decision generated code takes is taken on *both* of its arms by this fixture
+/// and the ones above it together. `counts(0)` is there for the reason it is
+/// everywhere else.
+///
+/// The second `lock` takes no `var`, so the VM loads the word itself and the
+/// closure is handed a copy: that is the encoded tier reading back what compiled
+/// code wrote into the heap.
+export fn heapsThrough(a: Int) -> Int {
+  let cell = Shared(a)
+  let seen = cell.lock(fn(var word) {
+    word = word + 5 + counts(0)
+    word
+  })
+  let after = cell.lock(fn(word) {
+    word + counts(0)
+  })
+  seen * 1000 + after
+}
+
 /// A reference given up and a reference kept, across an allocation that collects.
 ///
 /// `Inst::Clear` is emitted at `a`'s last use, so the compiled frame stops being
@@ -208,6 +233,19 @@ export fn keepsWhatItStillNeeds(a: String, b: String, n: Int) -> Int {
   let first = a.byteAt(held(0))
   let grew = allocates(b, n)
   first + b.byteAt(held(1)) + grew
+}
+
+/// A refused caller, so the frame that clears a slot is a **compiled** one.
+///
+/// `Vm::invoke` enters the encoded tier for the frame it opens itself, so
+/// `keepsWhatItStillNeeds` invoked directly runs the *VM's* `clear` arm and says
+/// nothing about the emitted one. `cove_runtime::NativeSession` is the other way
+/// to reach it — that is what the collection case below uses, because it needs a
+/// small heap at the same time — and this is the way the differential rows above
+/// already work.
+export fn callsKeepsWhatItStillNeeds(a: String, b: String, n: Int) -> Int {
+  let note = \"x\"
+  keepsWhatItStillNeeds(a, b, n) + note.byteLength() - 1
 }
 ";
 
@@ -258,6 +296,38 @@ struct Both {
     tiers: cove_runtime::Tiers,
     compiled: usize,
     reachable: usize,
+    /// The stack origin the native run's task had, which is `0` on the first
+    /// segment.
+    ///
+    /// Part of the answer rather than an assumption, for
+    /// [`Segment::Later`]'s reason: a case that asked for a later segment and
+    /// silently got the first one is the blind case again.
+    origin: u64,
+}
+
+/// Which stack segment the runs are on.
+///
+/// **A `Repr::Addr` word is a linear index and a frame slot's index is
+/// segment-relative, and on segment 0 those are the same number.** The entry task
+/// of every run is segment 0, so a case that drives an address through the real
+/// runtime cannot tell an arm that added `NativeCtx::stack_origin` from one that
+/// forgot to: `origin` is nought and both arms answer alike. Mutation testing
+/// found exactly that — the origin dropped in the template compiler's
+/// `frame_addr`, and dropped in its `word_ptr`, passes every other case in this
+/// file and every one of the runtime's own suites — and the only file that catches
+/// either is `cove-native`'s, which sets a `NativeCtx` origin by hand and so says
+/// nothing about the runtime the words come from.
+///
+/// [`Segment::Later`] closes that: the run is moved onto a further segment before
+/// it has executed anything, so the origin is a segment's worth of words and an
+/// index is *not* an address. Everything else about the run is what it was — the
+/// same `Space`, the same heap, the same literals at the same addresses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Segment {
+    /// The entry task's, where `stack_origin` is nought.
+    First,
+    /// A further one, where it is not.
+    Later,
 }
 
 /// Runs `module.name` once on the encoded VM and once on the native tier.
@@ -268,6 +338,17 @@ struct Both {
 /// ADR 0055's W^X rule forbids, and one table for a whole process is what the
 /// design is.
 fn both(name: &str, args: Vec<Value>) -> Both {
+    both_on(Segment::First, name, args)
+}
+
+/// [`both`], with the segment both runs execute on named.
+///
+/// The encoded run is moved too, and not only the native one. It is the reference
+/// either way — the case that uses this compares a later segment's answers against
+/// the *first* segment's encoded answer as well — and moving it says the thing a
+/// differential case on one tier could not: that the encoded arms resolve an
+/// address the same way wherever the task's words begin.
+fn both_on(segment: Segment, name: &str, args: Vec<Value>) -> Both {
     let (sources, program) = checked();
     let lowered = Arc::new(
         cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
@@ -285,11 +366,24 @@ fn both(name: &str, args: Vec<Value>) -> Both {
             .map(|value| value.to_string())
             .map_err(|error| error.message)
     };
+    // The segment is chosen before either run executes anything, which is what
+    // the seam requires: a frame that is already standing holds a base into the
+    // segment it was pushed in.
+    let moved = |vm: &mut Vm<'_>| match segment {
+        Segment::First => 0,
+        Segment::Later => {
+            let origin = vm.on_a_later_stack_segment();
+            assert!(origin > 0, "a later segment does not begin at word nought");
+            origin
+        }
+    };
     let vm = {
         let mut vm = Vm::new(&runtime, &hosts, &lowered);
+        moved(&mut vm);
         said(vm.invoke(MODULE, name, args.clone()))
     };
     let mut with = Vm::with_native(&runtime, &hosts, &lowered, &native);
+    let origin = moved(&mut with);
     let answered = said(with.invoke(MODULE, name, args));
     Both {
         vm,
@@ -297,6 +391,7 @@ fn both(name: &str, args: Vec<Value>) -> Both {
         tiers: with.tiers(),
         compiled: native.compiled(),
         reachable: native.reachable(),
+        origin,
     }
 }
 
@@ -614,4 +709,127 @@ fn a_cleared_slot_is_not_a_root_and_a_live_one_still_is() {
          so nothing was reused",
         vm.allocated_words()
     );
+}
+
+/// **Every address family, on a stack segment that does not begin at word
+/// nought.**
+///
+/// This is the case the ones above it could not be. All of them drive real
+/// addresses through real generated code, and every one of them runs on segment
+/// 0 — where [`Segment`]'s note applies: the origin is nought, so an
+/// `addr-of-slot` that added it and one that forgot it form the same word, and a
+/// `load` that resolved a stack address as a segment-relative index reads the
+/// right one. Two injected mutants — the origin dropped in the template
+/// compiler's `frame_addr`, and dropped in its `word_ptr` — survive this
+/// runtime's whole suite for that reason, and a *spawned* task, which is where a
+/// later segment occurs in a real program, is exactly where they would bite.
+///
+/// So the run is moved to a later segment first and every family is driven over
+/// it again:
+///
+/// - `callsBumps` — `addr-of-slot` in an encoded frame, `load` and `store`
+///   through it in a compiled one;
+/// - `callsMovesY` — `addr-of-part`, one word of two;
+/// - `callsLendsToTheVm` — the address formed *in machine code* and followed by
+///   the VM, which is the pair that has to agree about what the word means;
+/// - `threads` — one address carried down an alternating chain deep enough to
+///   reallocate the segment's `Vec` underneath it;
+/// - `heapsThrough` — a `load` and a `store` through an address into the **heap**,
+///   so the `is_stack` decision generated code takes is taken on both arms here;
+/// - `callsKeepsWhatItStillNeeds` — a `clear` in a compiled frame. It is the one
+///   member of the family that resolves a slot without forming an address at all
+///   — `store_slot` from the frame base, and no `stack_origin` anywhere near it —
+///   and it is here because the adoption gate lists it beside the others: a frame
+///   whose zeroes landed elsewhere on a later segment would be as wrong as an
+///   address that did.
+///
+/// Each row is asserted against the encoded VM on the same segment *and* against
+/// the encoded VM on the first one, so neither a wrong answer nor a pair of runs
+/// that are wrong together can pass, and against `vm_to_native`, so a row that
+/// stopped crossing is a failure rather than a comparison of the VM with itself.
+#[test]
+fn every_address_family_resolves_on_a_later_stack_segment() {
+    on_each_tier(
+        &[
+            "bumps",
+            "movesY",
+            "lendsToTheVm",
+            "descends",
+            "keepsWhatItStillNeeds",
+            // The `lock` closure, which is the one function of this fixture that
+            // is handed an address into the heap. `heapsThrough#1` is handed a
+            // copy of the word instead — the VM loads it, because that closure
+            // took no `var` — and is not what this row is for.
+            "heapsThrough#0",
+        ],
+        &[
+            "callsBumps",
+            "callsMovesY",
+            "callsLendsToTheVm",
+            "lowers",
+            "allocates",
+            "heapsThrough",
+            "callsKeepsWhatItStillNeeds",
+        ],
+    );
+    const DEEP: i64 = 300;
+    const AT: i64 = 64;
+    let text = "a string long enough that a byte can be read out of the middle of it without \
+                asking whether it is there.";
+    let rows: Vec<(&str, Vec<Value>, &str)> = vec![
+        (
+            "callsBumps",
+            vec![Value::int(20)],
+            "addr-of-slot, and a store through it into the caller's frame",
+        ),
+        (
+            "callsMovesY",
+            vec![Value::int(20)],
+            "addr-of-part: one word of a two-word value location",
+        ),
+        (
+            "callsLendsToTheVm",
+            vec![Value::int(20)],
+            "an address formed in machine code and followed by the VM",
+        ),
+        (
+            "threads",
+            vec![Value::int(DEEP)],
+            "one address down an alternating chain, across a reallocation",
+        ),
+        (
+            "heapsThrough",
+            vec![Value::int(20)],
+            "a load and a store through an address into the heap",
+        ),
+        (
+            "callsKeepsWhatItStillNeeds",
+            vec![Value::string(text), Value::string(text), Value::int(AT)],
+            "a clear in a compiled frame",
+        ),
+    ];
+    for (name, args, what) in rows {
+        let here = both(name, args.clone());
+        assert_eq!(here.origin, 0, "the entry task is the first segment");
+        let there = both_on(Segment::Later, name, args);
+        assert!(
+            there.origin > 0,
+            "`{name}` was meant to run on a later segment and ran on the first"
+        );
+        assert_eq!(
+            here.vm, there.vm,
+            "`{name}` ({what}): the encoded tier answers the same on either segment"
+        );
+        assert_eq!(
+            there.native, here.vm,
+            "`{name}` ({what}): compiled code on a segment at {} answers what the encoded tier \
+             answers",
+            there.origin
+        );
+        assert!(
+            there.tiers.vm_to_native >= 1,
+            "`{name}` crossed into machine code on the later segment: {:?}",
+            there.tiers
+        );
+    }
 }

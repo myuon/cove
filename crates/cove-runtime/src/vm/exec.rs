@@ -956,6 +956,61 @@ impl<'a> Machine<'a> {
         }
     }
 
+    /// Re-seats this machine's memory on a **later stack segment**, keeping the
+    /// heap it already has.
+    ///
+    /// A test seam, and the reason it exists is that the entry task is on segment
+    /// 0, where [`Memory::stack_origin`] is `0` and a word index and a linear
+    /// address are *the same number*. Every address a native test drives through
+    /// the runtime is therefore the index it would be if the origin had been
+    /// dropped, so a whole class of address bug — an `addr-of-slot` that forgot
+    /// the origin, a `load` that resolved a stack address as an index — is
+    /// invisible to it. `cove-native`'s own suite avoids that by setting a
+    /// `NativeCtx` origin of its own; nothing that went through a real
+    /// [`Machine`] could, because the only other way onto a later segment is a
+    /// spawned task, and a spawned task's machine has no tier installed.
+    ///
+    /// What it does is [`Memory::for_task`] and nothing else: a second segment of
+    /// the same [`crate::vm::mem::Space`], attached while the first is still
+    /// held so that it is a *later* one, and then the first given back. The heap
+    /// is the same heap, so every literal this machine placed keeps the address
+    /// it was placed at, and nothing that reads one has to be told.
+    ///
+    /// It is `#[cfg(feature = "template")]` because the one caller is
+    /// `cove-runtime`'s `tests/native_tier.rs`, which is itself compiled only
+    /// with a code generator: a default build's public surface is unchanged, and
+    /// no production path calls this.
+    ///
+    /// The new origin is **answered** rather than only set, so that the case that
+    /// asked for it can assert it is not nought. A test that silently stayed on
+    /// segment 0 would pass whatever the code generator emitted, which is the
+    /// blindness this method exists to end.
+    ///
+    /// # Panics
+    ///
+    /// If a frame is standing. The frames hold segment-relative bases and the
+    /// words behind them are the old segment's, so moving underneath one would
+    /// leave a machine reading another segment's stack.
+    #[cfg(feature = "template")]
+    pub(crate) fn on_a_later_stack_segment(&mut self) -> u64 {
+        assert!(
+            self.frames.is_empty(),
+            "a machine is moved between segments before it has run anything"
+        );
+        let later = self
+            .mem
+            .for_task()
+            .expect("this run's space has a second segment free");
+        assert!(
+            later.stack_origin() > self.mem.stack_origin(),
+            "a segment attached while the first is held is a later one"
+        );
+        // The assignment drops the old `Memory`, which gives segment 0 back. The
+        // heap outlives it: `for_task` cloned the `Arc` the space is behind.
+        self.mem = later;
+        self.mem.stack_origin()
+    }
+
     /// Installs [ADR 0055]'s entry table for the rest of this machine's life.
     ///
     /// One installer for a *run*; [`native::Session::call`] is the other and
