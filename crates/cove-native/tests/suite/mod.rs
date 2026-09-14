@@ -942,6 +942,99 @@ pub fn an_immediate_operand_fails_the_same_way<A: Arm>() {
     }
 }
 
+/// `s1 = -s0; return s1`, over `Int` slots of the given `Repr`.
+///
+/// `dst` is the second slot so that the source is still readable afterwards,
+/// which is what lets the negation case assert the operand was not clobbered.
+pub fn negation(dst: Repr) -> Program {
+    program(function(
+        vec![Repr::Int, dst],
+        match dst {
+            Repr::Duration => DURATION,
+            _ => INT,
+        },
+        vec![
+            Inst::Neg {
+                num: Num::Int,
+                dst: 1,
+                a: 0,
+            },
+            Inst::Return { src: 1 },
+        ],
+    ))
+}
+
+pub fn negate<A: Arm>(a: i64) -> (Answer, Vec<u64>) {
+    forget_polls();
+    let mut words = vec![a as u64, 0];
+    let answer = run::<A>(&negation(Repr::Int), &mut words, 0);
+    (answer, words)
+}
+
+/// `Inst::Neg` over `Num::Int` is `checked_neg`, and its answers are the VM's.
+///
+/// `encoded.rs`'s `NEG_INT` arm (line 1144) reads the word as `i64`, calls
+/// `checked_neg`, and stores the answer — so zero negates to zero rather than to
+/// a negative zero, and `i64::MAX` to `i64::MIN + 1`.
+pub fn negation_answers_what_the_vm_answers<A: Arm>() {
+    for (a, expected) in [
+        (0i64, 0i64),
+        (1, -1),
+        (-1, 1),
+        (42, -42),
+        (i64::MAX, i64::MIN + 1),
+        (i64::MIN + 1, i64::MAX),
+    ] {
+        let (answer, words) = negate::<A>(a);
+        assert_eq!(answer.outcome, Outcome::Returned, "-({a})");
+        assert_eq!(words[1] as i64, expected, "-({a})");
+        assert_eq!(
+            words[0] as i64, a,
+            "the operand is not the destination and was not written: -({a})"
+        );
+        assert_eq!(
+            answer.returned[0] as i64, expected,
+            "the destination holds what the slot holds: -({a})"
+        );
+    }
+}
+
+/// Negating `i64::MIN` raises, and it raises the VM's error.
+///
+/// The one input `checked_neg` answers `None` for. `encoded.rs`'s `NEG_INT` arm
+/// reports it as `overflowed("negation")` — **not** renamed by a `Duration`
+/// destination, because that arm calls `overflowed` directly instead of going
+/// through `int_arith`'s `named` closure, which is the asymmetry a
+/// reimplementation tidies up by accident. Both destinations are asserted here for
+/// that reason.
+///
+/// It is the case the whole lowering is worth having: a native `-` that wrapped
+/// where this raises would be a silent wrong answer, and the template arm's
+/// `jno` and the Cranelift arm's comparison against `i64::MIN` are two different
+/// ways to get it wrong.
+pub fn negating_the_least_int_raises<A: Arm>() {
+    for dst in [Repr::Int, Repr::Duration] {
+        forget_polls();
+        let mut words = vec![i64::MIN as u64, 0];
+        let answer = run::<A>(&negation(dst), &mut words, 0);
+        assert_eq!(answer.outcome, Outcome::Raised, "-(i64::MIN) into {dst:?}");
+        assert_eq!(
+            answer.raise,
+            Some(Raise::NegOverflowed),
+            "and `overflowed(\"negation\")` whatever the destination is: {dst:?}"
+        );
+        assert_eq!(
+            answer.returned, [UNWRITTEN; DESTINATION_WORDS],
+            "a raise wrote no word of the destination: {dst:?}"
+        );
+        assert_eq!(
+            answer.pending_work, 2,
+            "the whole block is charged at its entry — the negation and the return \
+             it never reached"
+        );
+    }
+}
+
 /// A `Duration` destination renames the overflow, and only for the three
 /// operations that consult the name.
 ///
@@ -1231,13 +1324,13 @@ pub fn anything_outside_the_slice_refuses_the_whole_function<A: Arm>() {
             )),
         ),
         (
-            "negation",
+            "float negation, which `Num::Int` negation being lowered does not admit",
             program(function(
-                vec![Repr::Int],
+                vec![Repr::Float],
                 INT,
                 vec![
                     Inst::Neg {
-                        num: Num::Int,
+                        num: Num::Float,
                         dst: 0,
                         a: 0,
                     },

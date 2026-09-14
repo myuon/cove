@@ -538,6 +538,21 @@ impl<'a> Emit<'a> {
             Inst::ByteAt { dst, obj, at } => self.byte_at(*dst, *obj, *at),
             Inst::Call { dst, callee, args } => self.callee(*dst, callee.0, args.0),
             Inst::Switch { on, table } => self.switch(*on, *table),
+            // `encoded.rs`'s `NEG_INT` arm: `checked_neg`, whose `None` is
+            // `overflowed("negation")`. `neg` sets the overflow flag for exactly
+            // the one operand `checked_neg` answers `None` for — `i64::MIN`, whose
+            // negation is not an `i64` — so the test is the flag and not a
+            // comparison against a constant.
+            Inst::Neg {
+                num: Num::Int,
+                dst,
+                a,
+            } => {
+                self.load_slot(RAX, *a);
+                self.neg_r(RAX);
+                self.raise_unless(CC_NO, Raise::NegOverflowed);
+                self.store_slot(*dst, RAX);
+            }
             Inst::Arith {
                 num: Num::Int,
                 op,
@@ -1612,6 +1627,13 @@ impl<'a> Emit<'a> {
     fn cqo(&mut self) {
         self.rex(true, 0, 0);
         self.byte(0x99);
+    }
+
+    /// `neg r64`, whose overflow flag is set only for `i64::MIN`.
+    fn neg_r(&mut self, dst: u8) {
+        self.rex(true, 0, dst);
+        self.byte(0xf7);
+        self.modrm_reg(3, dst);
     }
 
     /// `idiv r64`
