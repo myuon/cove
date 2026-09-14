@@ -11,7 +11,9 @@
 //!
 //! [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
 
-use cove_ir::{ArithOp, CmpOp, Compare, Function, Inst, Num, Program, Repr, Slot};
+use cove_ir::{
+    ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Function, Inst, Num, Program, Repr, Slot,
+};
 
 use crate::abi::Raise;
 
@@ -104,6 +106,83 @@ fn comparison_supported(on: Compare, op: CmpOp) -> bool {
         Compare::Int => true,
         Compare::Bool | Compare::Tag => matches!(op, CmpOp::Eq | CmpOp::Ne),
         Compare::Float | Compare::Str | Compare::Identity => false,
+    }
+}
+
+/// A [`Inst::CallBuiltin`] both arms emit code for, with its operands decoded.
+///
+/// A builtin is *named* rather than numbered — see [`cove_ir::Builtin`] — so the
+/// question "is this one the tier lowers" is a pair of string comparisons over
+/// the program's own table, and it is asked **once**, here, rather than in each
+/// arm. That is [`supported`]'s rule taken one level down: a family admitted by
+/// the subset and not emitted by an arm is a panic, and the only way to keep the
+/// two from drifting is for the decision and the operands to come out of the same
+/// function.
+///
+/// The operand checks that belong to the *shape* are here and the ones that
+/// belong to the *frame* are in [`inst_refused`], which is the same division
+/// every other instruction makes: a receiver that is not one `Repr::Ref` word is
+/// not this builtin at all, and a receiver at a slot the frame does not have is
+/// this builtin outside a bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Method {
+    /// `String.byteLength() -> Int`.
+    ///
+    /// `vm::builtins::text::byte_length` is `receiver_addr` and then
+    /// `machine.object_len(addr)`, which is what [`Inst::Len`] already is: a null
+    /// refusal and the header's low half. So this lowers to the *same emitter*
+    /// `Inst::Len` uses in both arms rather than to a family of its own — see
+    /// each arm's `len_of`.
+    ///
+    /// One check of `receiver_addr`'s three is **not** emitted, and it is worth
+    /// saying which. `receiver_addr` asks `super::is_string(machine, addr)` after
+    /// the null test and answers `no_method` for an object that is not a
+    /// `Shape::Str`. That question cannot have a different answer here: a
+    /// `call-builtin` of `String.byteLength` is emitted by
+    /// `cove_ir::lower::methods` only where the checker settled the receiver's
+    /// type as `Ty::Str`, so the receiver word is a reference to a `Shape::Str`
+    /// object or it is null. It is the same class of guard as the one
+    /// [`Inst::AddrOfField`] is refused for — a *lowering bug*, not something a
+    /// program can reach — and it is left out for the same reason: naming it
+    /// would be a [`Raise`] carrying the message `no_method` builds out of an
+    /// operand's rendered value, which is a whole `Value` this crate cannot see.
+    /// The null refusal is a program's to reach and is emitted.
+    ByteLength { dst: Slot, obj: Slot },
+}
+
+/// Which [`Method`] a `call-builtin` is, or `None` for one no arm lowers.
+///
+/// `None` is [`Reason::Instruction`] and not [`Reason::Operands`], which is this
+/// module's own division read through one more level: a builtin nothing lowers is
+/// a family to write, and the *name* is what says which family it is.
+pub(crate) fn method_of(
+    program: &Program,
+    dst: Slot,
+    builtin: BuiltinId,
+    args: ArgsId,
+) -> Option<Method> {
+    let named = program.builtin(builtin);
+    let list = program.arg_list(args);
+    // The receiver is operand zero, which is `vm::builtins::operand::method`'s
+    // own split. One `Repr::Ref` word, because that is what `operand::as_word`
+    // requires of it and what an object address is.
+    let reference = |at: usize| -> Option<Slot> {
+        let arg = list.get(at)?;
+        (program.layout(arg.layout).words.as_slice() == [Repr::Ref]).then_some(arg.slot)
+    };
+    match (&*named.receiver, &*named.operation) {
+        ("String", "byteLength") => {
+            // The answer is one `Int` word written at `dst`, which is what
+            // `Machine::call_builtin` copies out of the builtin's `out` buffer.
+            if list.len() != 1 || program.layout(named.result).width() != 1 {
+                return None;
+            }
+            Some(Method::ByteLength {
+                dst,
+                obj: reference(0)?,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -406,6 +485,16 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         }
         Inst::Return { src } => run(*src, program.layout(function.returns).width()),
         Inst::Trap { .. } => true,
+        // A builtin is decoded by [`method_of`] and by nothing here, so that the
+        // name this tier lowers is written down once. `None` is a family nothing
+        // emits and falls to `Reason::Instruction` with every other unlowered
+        // instruction; a family that *is* emitted is bounded like any other.
+        Inst::CallBuiltin { dst, builtin, args } => {
+            match method_of(program, *dst, *builtin, *args) {
+                Some(Method::ByteLength { dst, obj }) => slot(dst) && slot(obj),
+                None => return Some(Reason::Instruction),
+            }
+        }
         _ => return Some(Reason::Instruction),
     };
     (!inside).then_some(Reason::Operands)

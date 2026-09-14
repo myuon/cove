@@ -33,8 +33,8 @@ use std::sync::Arc;
 
 use cove_diag::{FileId, Span};
 use cove_ir::{
-    Arg, ArgsId, ArithOp, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout, LayoutId,
-    Num, Program, RefMap, Repr, Slot, StrId, Table, TableId,
+    Arg, ArgsId, ArithOp, BuiltinId, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout,
+    LayoutId, Num, Program, RefMap, Repr, Slot, StrId, Table, TableId,
 };
 use cove_native::{Entry, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
 use cove_native::{HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS};
@@ -399,6 +399,29 @@ pub fn program_with_tables(function: Function, tables: Vec<Table>) -> Program {
 pub fn program_with_args(function: Function, args: Vec<Arg>) -> Program {
     let mut held = program(function);
     held.args.push(args);
+    held
+}
+
+/// The same program, with one builtin at `BuiltinId(0)` and its operands at
+/// `ArgsId(1)`.
+///
+/// A builtin is named rather than numbered — see [`cove_ir::Builtin`] — so the
+/// two strings are what decide whether the tier lowers this call at all, and a
+/// case that passes the wrong pair should be refused rather than compiled. That
+/// is what `a_builtin_no_arm_lowers_refuses_the_function` checks with them.
+pub fn program_with_builtin(
+    function: Function,
+    receiver: &str,
+    operation: &str,
+    result: LayoutId,
+    args: Vec<Arg>,
+) -> Program {
+    let mut held = program_with_args(function, args);
+    held.builtins.push(cove_ir::Builtin {
+        receiver: Arc::from(receiver),
+        operation: Arc::from(operation),
+        result,
+    });
     held
 }
 
@@ -1663,6 +1686,111 @@ pub fn a_len_reads_the_header_and_refuses_null<A: Arm>() {
     assert_eq!(answer.outcome, Outcome::Raised);
     assert_eq!(answer.raise, Some(Raise::NullObject));
     assert_eq!(answer.raise_pc, 0);
+}
+
+/// `String.byteLength()`, which is the `LEN` arm reached through a
+/// `call-builtin`.
+///
+/// `vm::builtins::text::byte_length` is `receiver_addr` and then
+/// `machine.object_len(addr)`: the same null refusal and the same header read as
+/// `Inst::Len`, so the same three assertions hold — including that the raise names
+/// the *builtin's* pc and not the `Len`'s, because a `String.byteLength()` that
+/// reported the wrong instruction would print the wrong span.
+pub fn a_byte_length_builtin_reads_the_header_and_refuses_null<A: Arm>() {
+    let held = program_with_builtin(
+        function(
+            vec![Repr::Ref, Repr::Int],
+            INT,
+            vec![
+                // One instruction ahead of the builtin, so that `raise_pc` is a
+                // number a dropped `self.pc` could not have answered by accident.
+                Inst::Int { dst: 1, value: 7 },
+                Inst::CallBuiltin {
+                    dst: 1,
+                    builtin: BuiltinId(0),
+                    args: ArgsId(1),
+                },
+                Inst::Return { src: 1 },
+            ],
+        ),
+        "String",
+        "byteLength",
+        INT,
+        vec![Arg {
+            slot: 0,
+            layout: REF,
+        }],
+    );
+
+    // A multi-byte string: the length field is a *byte* count, so a two-byte
+    // character is two. `mem::header`'s low half is what both arms read.
+    let at = HEAP_CHUNK_WORDS + 9;
+    let mut heap = Heap::new(2);
+    let addr = heap.object(at, INT, 2);
+    let mut words = vec![addr, 0];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[1], 2, "the header's low half, as a byte count");
+    assert_eq!(answer.returned[0], 2);
+
+    // A byte count that needs more than the low half of a word would be a
+    // different object; what is asserted here is that the *high* half — the
+    // layout — is not read into the answer.
+    let addr = heap.object(at, PAIR, 0x1234_5678);
+    let mut words = vec![addr, 0];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[1], 0x1234_5678);
+
+    // `receiver_addr`'s `if addr == 0 { null_value() }`, which is the refusal
+    // `Raise::NullObject` names.
+    let mut words = vec![0u64, 0];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Raised);
+    assert_eq!(answer.raise, Some(Raise::NullObject));
+    assert_eq!(answer.raise_pc, 1, "the builtin's pc, not the constant's");
+}
+
+/// A `call-builtin` of a name no arm lowers refuses the whole function.
+///
+/// The name is the decision — see `subset::method_of` — so this is the one case
+/// that says the decision is really made on it: the same instruction, the same
+/// operands, the same widths, and a different pair of strings.
+pub fn a_builtin_no_arm_lowers_refuses_the_function<A: Arm>() {
+    let one = |receiver: &str, operation: &str| {
+        program_with_builtin(
+            function(
+                vec![Repr::Ref, Repr::Int],
+                INT,
+                vec![
+                    Inst::CallBuiltin {
+                        dst: 1,
+                        builtin: BuiltinId(0),
+                        args: ArgsId(1),
+                    },
+                    Inst::Return { src: 1 },
+                ],
+            ),
+            receiver,
+            operation,
+            INT,
+            vec![Arg {
+                slot: 0,
+                layout: REF,
+            }],
+        )
+    };
+    assert!(compiles::<A>(&one("String", "byteLength")));
+    for (receiver, operation) in [
+        ("String", "length"),
+        ("Array", "byteLength"),
+        ("Vector", "push"),
+    ] {
+        assert!(
+            !compiles::<A>(&one(receiver, operation)),
+            "`{receiver}.{operation}` is not lowered, so the function is refused"
+        );
+    }
 }
 
 /// `encoded.rs`'s `LOAD_ELEM` arm (line 1425), which is `Machine::element` and

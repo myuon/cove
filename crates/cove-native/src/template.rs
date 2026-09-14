@@ -31,7 +31,7 @@ use crate::abi::{
     Entry, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
     HEAP_ORIGIN_WORDS,
 };
-use crate::subset::{by_zero_of, leaders, overflow_of, slot_offset, supported};
+use crate::subset::{by_zero_of, leaders, method_of, overflow_of, slot_offset, supported, Method};
 use crate::Unavailable;
 
 // The `NativeCtx` field offsets, read from the declaration rather than written
@@ -521,12 +521,7 @@ impl<'a> Emit<'a> {
                 self.movzx_eax_al();
                 self.store_slot(*dst, RAX);
             }
-            Inst::Len { dst, obj } => {
-                self.load_slot(RAX, *obj);
-                self.refuse_null(RAX);
-                self.object_len(RAX);
-                self.store_slot(*dst, RAX);
-            }
+            Inst::Len { dst, obj } => self.len_of(*dst, *obj),
             Inst::LoadElem {
                 dst,
                 obj,
@@ -629,6 +624,15 @@ impl<'a> Emit<'a> {
             // The message is a program string, so the `StrId` is what crosses
             // the boundary and `cove-runtime` looks it up.
             Inst::Trap { message } => self.raise(Raise::Trapped, message.0),
+            // A builtin, decoded by the subset rather than here: see
+            // [`Method`](crate::subset::Method) for why the decision and the
+            // operands come out of one function that both arms ask.
+            Inst::CallBuiltin { dst, builtin, args } => {
+                match method_of(self.program, *dst, *builtin, *args) {
+                    Some(Method::ByteLength { dst, obj }) => self.len_of(dst, obj),
+                    None => unreachable!("`supported` admitted a builtin no arm lowers"),
+                }
+            }
             other => unreachable!("`supported` admitted {other:?}, which is not lowered"),
         }
     }
@@ -825,6 +829,22 @@ impl<'a> Emit<'a> {
     fn object_len(&mut self, reg: u8) {
         self.heap_word(reg);
         self.mov_rr32(reg, reg);
+    }
+
+    /// `encoded.rs`'s `LEN` arm, whole: the null refusal and the header's low
+    /// half.
+    ///
+    /// Two instructions reach it and that is the point of its being a method.
+    /// [`Inst::Len`](cove_ir::Inst::Len) is one, and
+    /// [`Method::ByteLength`](crate::subset::Method::ByteLength) is the other —
+    /// `String.byteLength()` is `object_len` of the receiver, so lowering it as a
+    /// second family would be two copies of the same three emitted instructions
+    /// and two places for the null refusal to be got wrong.
+    fn len_of(&mut self, dst: Slot, obj: Slot) {
+        self.load_slot(RAX, obj);
+        self.refuse_null(RAX);
+        self.object_len(RAX);
+        self.store_slot(dst, RAX);
     }
 
     /// Refuses a null reference, which every reader of an object does first.

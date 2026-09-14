@@ -65,9 +65,11 @@ export fn adds(a: Int, b: Int) -> Int {
 
 /// A caller that is refused, so that its `call` is the VM-to-native hop.
 ///
-/// `String.byteLength` is outside anything the template compiler lowers, so this
-/// function runs on the encoded tier however the table is built — which is the
-/// point of it.
+/// The string *literal* is what refuses it: `Inst::Str` is outside anything either
+/// code generator lowers, so this function runs on the encoded tier however the
+/// table is built — which is the point of it. `byteLength` beside it is no longer
+/// a refusal of its own and is not relied on to be one; see `measures` below,
+/// where it is the thing under test.
 export fn callsAdds(a: Int, b: Int) -> Int {
   let note = \"x\"
   adds(a, b) + note.byteLength() - 1
@@ -248,6 +250,26 @@ export fn keepsWhatItStillNeeds(a: String, b: String, n: Int) -> Int {
   let first = a.byteAt(held(0))
   let grew = allocates(b, n)
   first + b.byteAt(held(1)) + grew
+}
+
+/// `String.byteLength()` in a frame that is **compiled**.
+///
+/// `vm::builtins::text::byte_length` is a null refusal and one header read, which
+/// is what `Inst::Len` already was, so this is the same emitter reached through a
+/// `call-builtin` — see `cove_native`'s `Method::ByteLength`. `counts(0)` is here
+/// for the reason it is everywhere else, and it earns one thing more: it makes
+/// this function's own call a **native-to-native direct** one, which is what says
+/// the measurement happened on this tier rather than on the VM. A refused
+/// `measures` would have made that same call a VM-to-native one instead, and the
+/// two counters are how a case tells them apart.
+export fn measures(s: String) -> Int {
+  s.byteLength() * 10 + counts(0)
+}
+
+/// A refused caller, so the measurement is reached across the boundary.
+export fn callsMeasures(s: String) -> Int {
+  let note = \"x\"
+  measures(s) + note.byteLength() - 1
 }
 
 /// A refused caller, so the frame that clears a slot is a **compiled** one.
@@ -956,5 +978,82 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
             name: "Shared<Int>".to_string(),
             shape: "Shared".to_string(),
         })
+    );
+}
+
+/// **`String.byteLength()` in machine code, over a byte count and not a
+/// character count.**
+///
+/// `vm::builtins::text::byte_length` is `receiver_addr` and `machine.object_len`,
+/// which is what `Inst::Len` already is — so both arms lower it with the emitter
+/// `Inst::Len` uses and this is the differential that says the two agree. The
+/// multi-byte string is the half of it a character count would pass: `"héllo"` is
+/// five characters and six bytes, so an arm that answered `String.length`'s
+/// question would be off by exactly one here and by nothing on an ASCII string.
+///
+/// The empty string is the other end — a header whose low half is nought, which is
+/// also what a null reference's *word* is — and the two together are why the null
+/// refusal is tested where it is: a `String` slot that holds zero is not reachable
+/// from a checked Cove program, because every binding of one is initialised, so
+/// the refusal is driven directly in `cove-native`'s own suite over a frame built
+/// by hand. What this file can say is that every receiver a program *can* produce
+/// answers what the VM answers.
+#[test]
+fn a_byte_length_is_a_header_read_in_compiled_code() {
+    on_each_tier(&["measures"], &["callsMeasures"]);
+    let rows: [(&str, i64); 4] = [
+        // Five characters, six bytes: `é` is two.
+        ("héllo", 6),
+        ("hello", 5),
+        ("", 0),
+        // Four bytes in one character, so a length in code points would say one.
+        ("😀", 4),
+    ];
+    for (text, bytes) in rows {
+        let both = both("callsMeasures", vec![Value::string(text)]);
+        assert_eq!(
+            both.vm,
+            Ok((bytes * 10).to_string()),
+            "`{text}` is {bytes} byte(s) to the encoded tier"
+        );
+        assert_eq!(
+            both.native, both.vm,
+            "and compiled code reads the same header for `{text}`"
+        );
+        assert!(
+            both.tiers.native_to_native_direct >= 1,
+            "`measures` ran as machine code, so its own call was a direct one: {:?}",
+            both.tiers
+        );
+    }
+}
+
+/// The same header read, on a **later stack segment**.
+///
+/// The receiver is a `Repr::Ref` word naming the heap, so nothing about it depends
+/// on the segment — and that is the claim, not an assumption: `object_len` goes
+/// through `heap_ptr`, which subtracts `HEAP_ORIGIN_WORDS` rather than
+/// `stack_origin`, and an arm that had confused the two would read a stack word.
+/// The runtime's first task hides that, which is what `Segment::Later` is for.
+#[test]
+fn a_byte_length_reads_the_heap_on_a_later_segment() {
+    let here = both("callsMeasures", vec![Value::string("héllo")]);
+    let there = both_on(
+        Segment::Later,
+        "callsMeasures",
+        vec![Value::string("héllo")],
+    );
+    assert!(there.origin > 0, "the run was moved off the first segment");
+    assert_eq!(here.vm, Ok("60".to_string()));
+    assert_eq!(there.vm, here.vm, "the encoded tier is the same on either");
+    assert_eq!(
+        there.native, here.vm,
+        "and so is compiled code on a segment at {}",
+        there.origin
+    );
+    assert!(
+        there.tiers.native_to_native_direct >= 1,
+        "`measures` was the compiled frame that read it: {:?}",
+        there.tiers
     );
 }

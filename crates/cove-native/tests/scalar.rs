@@ -163,6 +163,16 @@ fn a_len_reads_the_header_and_refuses_null() {
 }
 
 #[test]
+fn a_byte_length_builtin_reads_the_header_and_refuses_null() {
+    suite::a_byte_length_builtin_reads_the_header_and_refuses_null::<Cranelift>();
+}
+
+#[test]
+fn a_builtin_no_arm_lowers_refuses_the_function() {
+    suite::a_builtin_no_arm_lowers_refuses_the_function::<Cranelift>();
+}
+
+#[test]
 fn a_load_elem_strides_and_bounds_its_index() {
     suite::a_load_elem_strides_and_bounds_its_index::<Cranelift>();
 }
