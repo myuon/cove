@@ -117,6 +117,31 @@ pub struct Refused {
     ///
     /// See [`Blocked`]. `None` for every opcode that names one operation.
     pub blocked: Option<Blocked>,
+    /// Every distinct thing that blocks this function, with how many instructions
+    /// each accounts for, most-frequent first.
+    pub blockers: Vec<(Blocker, u32)>,
+}
+
+/// One distinct thing that blocks a function, as [`Refused::blockers`] groups
+/// them.
+///
+/// The same pair [`Refused::instruction`] and [`Refused::blocked`] name for the
+/// *first* blocker, carried so the whole set can be grouped and counted: two
+/// instructions with the same opcode and the same subject are one blocker
+/// however many pcs they sit at, and two `CallBuiltin`s of different builtins
+/// are two.
+///
+/// A `String` inside for the reason [`Refused::reason`] is: this type has to
+/// exist in a build with no code generator, because the CLI must be able to
+/// name the report it cannot produce.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Blocker {
+    /// The opcode, by the name `cove_ir::bytecode::Op` gives it. Same spelling
+    /// as `Refused::instruction`.
+    pub instruction: Option<String>,
+    /// What that opcode was about, for the two aggregate opcodes. See
+    /// [`Blocked`].
+    pub blocked: Option<Blocked>,
 }
 
 /// What a blocking instruction operates on, when naming the opcode is not enough.
@@ -136,7 +161,7 @@ pub struct Refused {
 /// It is a `String` inside rather than a `cove_ir` or `cove_native` type, for the
 /// reason [`Refused::reason`] is: this type has to exist in a build with no code
 /// generator, because the CLI must be able to name the report it cannot produce.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Blocked {
     /// [`Inst::CallBuiltin`](cove_ir::Inst::CallBuiltin)'s builtin, as the
     /// receiver and the operation the IR's own `Builtin` names it by:
@@ -284,7 +309,8 @@ pub fn compile(program: &Program) -> Result<NativeProgram, Unavailable> {
     })
 }
 
-/// One refused function's row: the reason, the pc, and the opcode.
+/// One refused function's row: the reason, the pc, the opcode, and every
+/// distinct blocker behind it.
 #[cfg(feature = "template")]
 fn refused_row(program: &Program, id: FunctionId) -> Refused {
     let function = program.function(id);
@@ -299,7 +325,38 @@ fn refused_row(program: &Program, id: FunctionId) -> Refused {
         at: refusal.at,
         instruction,
         blocked,
+        blockers: grouped_blockers(program, function),
     }
+}
+
+/// Every distinct blocker of `function`, most-frequent first.
+///
+/// `cove_native::blockers` answers one `Refusal` per refused instruction —
+/// including repeats, when a body is refused at the same opcode more than once
+/// — and this is where they are grouped into the set [`Refused::blockers`]
+/// reports: the same `(instruction, blocked)` pair [`refused_row`]'s own first
+/// blocker is named by, counted.
+///
+/// Sorted descending by count and then ascending by the [`Blocker`] itself, so
+/// the table is the same table twice for one run — `Coverage::taken`'s sort has
+/// the same tie-break rationale, over a different key.
+#[cfg(feature = "template")]
+fn grouped_blockers(program: &Program, function: &cove_ir::Function) -> Vec<(Blocker, u32)> {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<Blocker, u32> = BTreeMap::new();
+    for refusal in cove_native::blockers(program, function) {
+        let instruction = refusal.at.and_then(|pc| opcode_at(function, pc));
+        let blocked = refusal.at.and_then(|pc| blocked_on(program, function, pc));
+        *counts
+            .entry(Blocker {
+                instruction,
+                blocked,
+            })
+            .or_insert(0) += 1;
+    }
+    let mut rows: Vec<(Blocker, u32)> = counts.into_iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows
 }
 
 /// What the instruction at `pc` operates on, for the two opcodes that aggregate.

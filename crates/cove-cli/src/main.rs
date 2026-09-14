@@ -1573,16 +1573,44 @@ impl Coverage {
         // hides the long tail, and the long tail is what the next family to lower
         // is read off.
         for (row, made) in &self.refused {
+            let first = cove_runtime::Blocker {
+                instruction: row.instruction.clone(),
+                blocked: row.blocked.clone(),
+            };
             eprintln!(
                 "  {:>13}  {:<44} {:<38} {}",
                 thousands(*made),
                 row.name,
                 row.reason,
-                match (&row.instruction, row.at) {
-                    (Some(op), Some(pc)) => format!("{op} at pc {pc}"),
-                    _ => "-".to_string(),
+                // Through `render_blocker` rather than the opcode alone, because
+                // `CallBuiltin` and the `Alloc` opcodes aggregate: a row reading
+                // "CallBuiltin at pc 44" names no work a reader can go and do,
+                // and the continuation line below names the *other* blockers, so
+                // a function with exactly one is the case where nothing at all
+                // said which builtin it was. That was the whole of what stood
+                // between a 159,421-call refusal and knowing what to write.
+                match row.at {
+                    Some(pc) => format!("{} at pc {pc}", render_blocker(&first)),
+                    None => "-".to_string(),
                 }
             );
+            // A table ranked by first blocker answers "which functions are
+            // refused" and cannot answer "what would lowering one family buy" —
+            // the first blocker is only the *first* instruction a refused
+            // function could not get past, and a function refused there may be
+            // refused nine more times behind it. A lowering picked from this
+            // table alone is a lowering built for a function that still will not
+            // compile, so every blocker behind the first is named here, skipping
+            // only the one the row above already names.
+            let rest: Vec<String> = row
+                .blockers
+                .iter()
+                .filter(|(blocker, _)| *blocker != first)
+                .map(|(blocker, count)| format!("{} x{count}", render_blocker(blocker)))
+                .collect();
+            if !rest.is_empty() {
+                eprintln!("                 also blocked by: {}", rest.join(", "));
+            }
         }
         self.print_census();
     }
@@ -1662,6 +1690,24 @@ impl Coverage {
                 );
             }
         }
+    }
+}
+
+/// One [`cove_runtime::Blocker`], rendered the way the refusal table's "also
+/// blocked by" line names one: the opcode, and its subject when it has one —
+/// the builtin's name, or an allocation's layout and shape together.
+fn render_blocker(blocker: &cove_runtime::Blocker) -> String {
+    use cove_runtime::Blocked;
+    let subject = match &blocker.blocked {
+        Some(Blocked::Builtin(name)) => Some(name.clone()),
+        Some(Blocked::Allocation { name, shape }) => Some(format!("{name} ({shape})")),
+        None => None,
+    };
+    match (&blocker.instruction, subject) {
+        (Some(op), Some(subject)) => format!("{op} {subject}"),
+        (Some(op), None) => op.clone(),
+        (None, Some(subject)) => subject,
+        (None, None) => "-".to_string(),
     }
 }
 
@@ -1937,10 +1983,18 @@ const OPCODE_FLOOR: u64 = 1_000;
 
 /// How many rows each half of a profile prints.
 ///
-/// Enough to see the shape and few enough to read without a pager. A caller
-/// who wants all of them wants a file rather than a terminal, and that is a
-/// flag this does not have yet.
-const PROFILE_ROWS: usize = 12;
+/// Twelve was too few for the use these tables are actually put to, which is
+/// **joining them against another table**. The native tier's refusal census
+/// ranks by dynamic calls, and calls are not time: `covefmt.tokens` is 18.2% of
+/// the covefmt benchmark's attributed time and sits fifteenth there, at 2,988
+/// calls. Reading one against the other is what says which refusal is worth
+/// lowering — and at twelve rows the profile side reached 62% of the run, so
+/// most of the census had no time to be joined to and the question could not be
+/// asked at all.
+///
+/// Forty reaches the long tail on both sides. A caller who wants every row wants
+/// a file rather than a terminal, and that is a flag this does not have yet.
+const PROFILE_ROWS: usize = 40;
 
 fn print_backend_stats(
     backend: Backend,

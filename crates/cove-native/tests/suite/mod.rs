@@ -599,6 +599,16 @@ pub const PAIR_VECTOR: LayoutId = LayoutId(13);
 /// told apart from `Elements`' other form.
 pub const STORE: LayoutId = LayoutId(14);
 
+/// `Option<Int>`, what `Vector<Int>.set` answers.
+///
+/// Built by [`program`] with `cove_ir::enum_layout`, so its `Some`/`None` tag
+/// values and `Some`'s one-part payload offset are whatever that function
+/// answered — not `0`/`1` assumed — which is what a case exercising
+/// `subset::method_of`'s `Method::Set` is checking.
+pub const OPTION_INT: LayoutId = LayoutId(15);
+/// `Option<Pair>`, the stride-two case of [`OPTION_INT`].
+pub const OPTION_PAIR: LayoutId = LayoutId(16);
+
 /// One [`Repr::Addr`] word, which is the whole of what a place is.
 ///
 /// `Inst::AddrOfSlot`'s destination and `Inst::Load`'s address: ADR 0034's "There
@@ -630,59 +640,80 @@ pub fn function(reprs: Vec<Repr>, returns: LayoutId, code: Vec<Inst>) -> Functio
 }
 
 pub fn program(function: Function) -> Program {
+    let mut layouts = vec![
+        Layout::free(),
+        Layout::word("Int", Repr::Int),
+        Layout::word("Bool", Repr::Bool),
+        Layout::word("Unit", Repr::Unit),
+        Layout::inline(
+            "Pair",
+            cove_ir::Shape::Struct {
+                fields: Vec::new(),
+                opaque: false,
+            },
+            vec![Repr::Int, Repr::Int],
+        ),
+        Layout::word("Duration", Repr::Duration),
+        Layout::inline(
+            "RefPair",
+            cove_ir::Shape::Struct {
+                fields: Vec::new(),
+                opaque: false,
+            },
+            vec![Repr::Int, Repr::Ref],
+        ),
+        Layout::word("Kind", Repr::Tag),
+        Layout::word("Ref", Repr::Ref),
+        Layout::inline(
+            "HostPair",
+            cove_ir::Shape::Struct {
+                fields: Vec::new(),
+                opaque: false,
+            },
+            vec![Repr::Int, Repr::Host],
+        ),
+        Layout::inline(
+            "Empty",
+            cove_ir::Shape::Struct {
+                fields: Vec::new(),
+                opaque: false,
+            },
+            Vec::new(),
+        ),
+        Layout::word("Addr", Repr::Addr),
+        Layout::object("Vector", cove_ir::Shape::Vector { elem: INT }),
+        Layout::object("Vector", cove_ir::Shape::Vector { elem: PAIR }),
+        Layout::object(
+            "Vector",
+            cove_ir::Shape::Elements {
+                elem: INT,
+                growable: true,
+            },
+        ),
+    ];
+    // `Option<Int>` and `Option<Pair>`, at `OPTION_INT` and `OPTION_PAIR`
+    // below — what `Vector.set` answers. Built with `cove_ir::enum_layout`,
+    // the same function the real lowering calls, rather than written out by
+    // hand: `method_of`'s `("Vector", "set")` arm reads the `Some`/`None` tag
+    // values and `Some`'s payload offset back out of whatever this answers,
+    // so a case that got them from anywhere else would not be testing what
+    // the lowering does.
+    for elem in [INT, PAIR] {
+        let (cases, payload) = cove_ir::enum_layout(
+            &[(Arc::from("Some"), vec![elem]), (Arc::from("None"), vec![])],
+            &layouts,
+        );
+        let mut words = vec![Repr::Tag];
+        words.extend_from_slice(&payload);
+        layouts.push(Layout::inline(
+            "Option",
+            cove_ir::Shape::Enum { cases, payload },
+            words,
+        ));
+    }
     Program {
         functions: vec![function],
-        layouts: vec![
-            Layout::free(),
-            Layout::word("Int", Repr::Int),
-            Layout::word("Bool", Repr::Bool),
-            Layout::word("Unit", Repr::Unit),
-            Layout::inline(
-                "Pair",
-                cove_ir::Shape::Struct {
-                    fields: Vec::new(),
-                    opaque: false,
-                },
-                vec![Repr::Int, Repr::Int],
-            ),
-            Layout::word("Duration", Repr::Duration),
-            Layout::inline(
-                "RefPair",
-                cove_ir::Shape::Struct {
-                    fields: Vec::new(),
-                    opaque: false,
-                },
-                vec![Repr::Int, Repr::Ref],
-            ),
-            Layout::word("Kind", Repr::Tag),
-            Layout::word("Ref", Repr::Ref),
-            Layout::inline(
-                "HostPair",
-                cove_ir::Shape::Struct {
-                    fields: Vec::new(),
-                    opaque: false,
-                },
-                vec![Repr::Int, Repr::Host],
-            ),
-            Layout::inline(
-                "Empty",
-                cove_ir::Shape::Struct {
-                    fields: Vec::new(),
-                    opaque: false,
-                },
-                Vec::new(),
-            ),
-            Layout::word("Addr", Repr::Addr),
-            Layout::object("Vector", cove_ir::Shape::Vector { elem: INT }),
-            Layout::object("Vector", cove_ir::Shape::Vector { elem: PAIR }),
-            Layout::object(
-                "Vector",
-                cove_ir::Shape::Elements {
-                    elem: INT,
-                    growable: true,
-                },
-            ),
-        ],
+        layouts,
         // `ArgsId(0)` is the empty argument list, which is what a call in these
         // tests hands over: the double records the hand-over and does not read
         // the list, and a table with nothing in it would panic the subset
@@ -2973,6 +3004,250 @@ pub fn a_push_refuses_a_null_receiver<A: Arm>() {
     let held = pushing(VECTOR, 1);
     let heap = Heap::new(2);
     let mut words = vec![0u64, 70, UNWRITTEN];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Raised);
+    assert_eq!(answer.raise, Some(Raise::NullObject));
+    assert_eq!(answer.raise_pc, 0);
+    assert!(
+        mediated().is_empty(),
+        "the null was refused here, not handed over"
+    );
+    forget_mediated();
+}
+
+// --- Vector.set ----------------------------------------------------------------
+
+/// One `Vector.set(index, value) -> Option<T>` of a `stride`-wide element,
+/// answering into `dst`.
+///
+/// Slot 0 is the receiver, slot 1 the index, slots 2..2+stride the element,
+/// and `dst` the `Option<T>` answer — one tag word and `stride` payload
+/// words, `OPTION_INT` or `OPTION_PAIR` depending on `stride`.
+pub fn setting(vector: LayoutId, stride: u32) -> Program {
+    let mut reprs = vec![Repr::Ref, Repr::Int];
+    reprs.extend(std::iter::repeat_n(Repr::Int, stride as usize));
+    let dst = 2 + stride;
+    reprs.push(Repr::Tag);
+    reprs.extend(std::iter::repeat_n(Repr::Int, stride as usize));
+    let elem = if stride == 2 { PAIR } else { INT };
+    let option = if stride == 2 { OPTION_PAIR } else { OPTION_INT };
+    program_with_builtin(
+        function(
+            reprs,
+            option,
+            vec![
+                Inst::CallBuiltin {
+                    dst,
+                    builtin: BuiltinId(0),
+                    args: ArgsId(1),
+                },
+                Inst::Return { src: dst },
+            ],
+        ),
+        "Vector",
+        "set",
+        option,
+        vec![
+            Arg {
+                slot: 0,
+                layout: vector,
+            },
+            Arg {
+                slot: 1,
+                layout: INT,
+            },
+            Arg {
+                slot: 2,
+                layout: elem,
+            },
+        ],
+    )
+}
+
+/// `vm::builtins::seq::vector_set`, in range: the element written and the one
+/// it displaced answered as `Some`.
+///
+/// Every position of a three-element vector, at both strides, so this is also
+/// the check that the offset is `at * stride` and not `at`: a lowering that
+/// forgot the multiply would pass at `at == 1`, where the two coincide, and
+/// fail everywhere else. A neighbouring element is read back too, which is
+/// what says the write did not smear past its own `stride` words.
+pub fn a_set_in_range_writes_the_element_and_answers_the_old_one<A: Arm>() {
+    for (vector, stride, option) in [(VECTOR, 1, OPTION_INT), (PAIR_VECTOR, 2, OPTION_PAIR)] {
+        for at in 0..3u32 {
+            forget_mediated();
+            let held = setting(vector, stride);
+            let some = held
+                .layout(option)
+                .case("Some")
+                .expect("`Option` has `Some`");
+            let addr = HEAP_CHUNK_WORDS + 33;
+            let mut heap = Heap::new(2);
+            let header = a_vector(&mut heap, addr, vector, 3, 4);
+            let store = addr + 8;
+            // Three elements, each word distinguishable by its position.
+            for idx in 0..3u32 {
+                for word in 0..stride {
+                    heap.set(
+                        store + 1 + u64::from(idx * stride + word),
+                        u64::from(100 + idx * 10 + word),
+                    );
+                }
+            }
+            let mut words = vec![header, u64::from(at)];
+            words.extend((0..stride).map(|word| 900 + u64::from(word)));
+            words.extend(vec![UNWRITTEN; 1 + stride as usize]);
+            let answer = run_over::<A>(&held, &mut words, 0, &heap);
+            assert_eq!(
+                answer.outcome,
+                Outcome::Returned,
+                "stride {stride}, at {at}"
+            );
+            assert!(
+                mediated().is_empty(),
+                "stride {stride}, at {at}: the fast path took it: {:?}",
+                mediated()
+            );
+
+            let dst = 2 + stride as usize;
+            assert_eq!(
+                words[dst],
+                u64::from(some),
+                "the tag is `Some`, stride {stride} at {at}"
+            );
+            for word in 0..stride {
+                assert_eq!(
+                    words[dst + 1 + word as usize],
+                    u64::from(100 + at * 10 + word),
+                    "the answer is the displaced element, stride {stride} at {at}, word {word}"
+                );
+                assert_eq!(
+                    heap.get(store + 1 + u64::from(at * stride + word)),
+                    900 + u64::from(word),
+                    "the new element was written, stride {stride} at {at}, word {word}"
+                );
+            }
+            // A neighbour was not touched, which is what says the write did not
+            // smear past its own `stride` words.
+            let neighbour = (at + 1) % 3;
+            for word in 0..stride {
+                assert_eq!(
+                    heap.get(store + 1 + u64::from(neighbour * stride + word)),
+                    u64::from(100 + neighbour * 10 + word),
+                    "a neighbour was untouched, stride {stride} at {at}"
+                );
+            }
+        }
+    }
+    forget_mediated();
+}
+
+/// `vm::builtins::seq::vector_set`, outside the vector: `None`, and nothing
+/// written.
+///
+/// One index at the length, one negative, and one on an empty vector —
+/// `index()`'s `at >= 0` and `set`'s `at >= items.len`, both answered by the
+/// one unsigned comparison the emitted fast path asks instead of raising.
+pub fn a_set_outside_the_vector_answers_none_and_writes_nothing<A: Arm>() {
+    let rows: [(&str, u32, i64); 3] = [
+        ("the index is at the length", 3, 3),
+        ("the index is negative", 3, -1),
+        ("the vector is empty", 0, 0),
+    ];
+    for (why, len, at) in rows {
+        forget_mediated();
+        let held = setting(VECTOR, 1);
+        let none = held
+            .layout(OPTION_INT)
+            .case("None")
+            .expect("`Option` has `None`");
+        let addr = HEAP_CHUNK_WORDS + 33;
+        let mut heap = Heap::new(2);
+        let header = a_vector(&mut heap, addr, VECTOR, len, 4);
+        let store = addr + 8;
+        for idx in 0..len {
+            heap.set(store + 1 + u64::from(idx), u64::from(100 + idx));
+        }
+        let mut words = vec![header, at as u64, 900, UNWRITTEN, UNWRITTEN];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "{why}");
+        assert!(
+            mediated().is_empty(),
+            "{why}: the fast path took it: {:?}",
+            mediated()
+        );
+        assert_eq!(words[3], u64::from(none), "{why}: the tag is `None`");
+        assert_eq!(
+            words[4], 0,
+            "{why}: a `None` answer's payload word is zeroed"
+        );
+        for idx in 0..len {
+            assert_eq!(
+                heap.get(store + 1 + u64::from(idx)),
+                100 + u64::from(idx),
+                "{why}: nothing was written"
+            );
+        }
+    }
+    forget_mediated();
+}
+
+/// The two cold paths of `Vector.set`, each handed to the runtime whole.
+///
+/// See [`Method::Push`](cove_native::Reason) for the shape of this table —
+/// `Vector.set` shares two of its three preconditions with `Vector.push` and
+/// not the third, because an index outside the vector is not a cold path
+/// here: it is `None`, answered on the fast path along with everything else.
+pub fn every_cold_path_of_a_set_goes_to_the_runtime<A: Arm>() {
+    let addr = HEAP_CHUNK_WORDS + 33;
+    let rows: [(&str, Build); 2] = [
+        ("`freeze()` consumed the store", |heap, at| {
+            let header = a_vector(heap, at, VECTOR, 1, 4);
+            heap.set(at + 2, 0);
+            header
+        }),
+        (
+            "the object is not the layout the call site declared",
+            |heap, at| a_vector(heap, at, PAIR_VECTOR, 1, 4),
+        ),
+    ];
+    for (why, build) in rows {
+        forget_mediated();
+        let held = setting(VECTOR, 1);
+        let mut heap = Heap::new(2);
+        let header = build(&mut heap, addr);
+        let mut words = vec![header, 0, 70, UNWRITTEN, UNWRITTEN];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "{why}");
+        assert_eq!(
+            mediated(),
+            vec![Mediated {
+                base: 0,
+                pc: 0,
+                dst: 3,
+                builtin: 0,
+                args: 1,
+                // A builtin is a safepoint, so the block's static work — two
+                // instructions — went over with the hand-over.
+                work: 2,
+            }],
+            "{why}: the runtime was handed the builtin, whole"
+        );
+        assert_eq!(words[3], 3, "{why}: the runtime's answer, in `dst`");
+    }
+    forget_mediated();
+}
+
+/// A `set` to a null receiver is refused where it is read.
+///
+/// `vector()`'s `if addr == 0 { null_value() }` — the one refusal of this
+/// builtin a program reaches and this crate can name, so it is emitted
+/// rather than mediated, and nothing goes to the runtime.
+pub fn a_set_refuses_a_null_receiver<A: Arm>() {
+    forget_mediated();
+    let held = setting(VECTOR, 1);
+    let heap = Heap::new(2);
+    let mut words = vec![0u64, 0, 70, UNWRITTEN, UNWRITTEN];
     let answer = run_over::<A>(&held, &mut words, 0, &heap);
     assert_eq!(answer.outcome, Outcome::Raised);
     assert_eq!(answer.raise, Some(Raise::NullObject));

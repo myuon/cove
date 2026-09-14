@@ -827,6 +827,23 @@ impl<'a, 'f> Lower<'a, 'f> {
                         builtin,
                         args,
                     }) => self.vector_push(dst, recv, vector, value, stride, builtin, args),
+                    Some(Method::Set {
+                        dst,
+                        recv,
+                        vector,
+                        index,
+                        value,
+                        stride,
+                        width,
+                        some_case,
+                        some_at,
+                        none_case,
+                        builtin,
+                        args,
+                    }) => self.vector_set(
+                        dst, recv, vector, index, value, stride, width, some_case, some_at,
+                        none_case, builtin, args,
+                    ),
                     None => unreachable!("`supported` admitted a builtin no arm lowers"),
                 }
                 false
@@ -1250,6 +1267,149 @@ impl<'a, 'f> Lower<'a, 'f> {
         // One predecessor of this join came through a helper, so neither pointer the
         // other one derived is to be trusted here.
         self.forget();
+    }
+
+    /// `vm::builtins::seq::vector_set`'s fast path: the element written at
+    /// `index`, answering what was there.
+    ///
+    /// See [`Method::Set`](crate::subset::Method::Set) for which of the
+    /// builtin's preconditions are emitted and which go to
+    /// [`BuiltinFn`](crate::abi::BuiltinFn), and why an out-of-range index is
+    /// **not** one of them: `vector_set` answers `None` for one, which this arm
+    /// builds as readily as it builds `Some`. The two tests in front of the
+    /// write are [`Lower::vector_push`]'s own two — the receiver's declared
+    /// layout against the object's own header, and the store word against
+    /// nought, which is `freeze()`'s mark — for the same reason: a header that
+    /// says something else, or a store `freeze()` has taken, is a receiver
+    /// this code cannot answer for.
+    ///
+    /// The index is bounded by **one** unsigned comparison, [`Lower::load_elem`]'s
+    /// trick: a negative `i64` read as unsigned is larger than any `len`, which
+    /// is a `u32` masked out of a header and so below 2^32. `load_elem` raises
+    /// there; here the same comparison picks `None` over `Some` instead,
+    /// because that is the difference between the two builtins and not a
+    /// difference in the arithmetic.
+    ///
+    /// **The old element is read before the new one is written**, into a run
+    /// of Cranelift values rather than back through a slot: `set` answers what
+    /// `get` would have, so every word of it has to be read while the store
+    /// still holds the old ones.
+    #[allow(clippy::too_many_arguments)]
+    fn vector_set(
+        &mut self,
+        dst: Slot,
+        recv: Slot,
+        vector: LayoutId,
+        index: Slot,
+        value: Slot,
+        stride: u32,
+        width: u32,
+        some_case: u32,
+        some_at: u32,
+        none_case: u32,
+        builtin: u32,
+        args: u32,
+    ) {
+        let cold = self.b.create_block();
+        let join = self.b.create_block();
+
+        let header = self.load_slot(recv);
+        // `vector()`'s `if addr == 0 { null_value() }`, which is the one
+        // refusal of this builtin a program reaches and this crate can name.
+        self.refuse_null(header);
+
+        // `machine.object_layout(addr)`: the header's high half. The call
+        // site's declared layout is what every static fact below was derived
+        // from, so a header that says something else is a receiver this code
+        // cannot answer for.
+        let word = self.heap_word(header);
+        let named = self.b.ins().ushr_imm_u(word, 32);
+        let wrong = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, named, i64::from(vector.0));
+        let known = self.b.create_block();
+        self.b.ins().brif(wrong, cold, &[], known, &[]);
+        self.b.switch_to_block(known);
+
+        // `machine.payload(addr, 1)`: the store. `freeze()` leaves nought here.
+        let one = self.b.ins().iconst(types::I64, 1);
+        let store = self.payload(header, one);
+        let frozen = self.b.ins().icmp_imm_s(IntCC::Equal, store, 0);
+        let live = self.b.create_block();
+        self.b.ins().brif(frozen, cold, &[], live, &[]);
+        self.b.switch_to_block(live);
+
+        // `machine.payload(addr, 0) as u32`: the length.
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let held = self.payload(header, zero);
+        let len = self.b.ins().band_imm_u(held, LEN_MASK);
+
+        // `index()`'s `at >= 0` and `set`'s `at >= items.len` answered by one
+        // compare, [`Lower::load_elem`]'s trick.
+        let at = self.load_slot(index);
+        let outside = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, at, len);
+        let none_block = self.b.create_block();
+        let some_block = self.b.create_block();
+        self.b.ins().brif(outside, none_block, &[], some_block, &[]);
+
+        self.b.switch_to_block(none_block);
+        self.write_option_case(dst, width, none_case, 0, &[]);
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(some_block);
+        // Where the element sits: `store + 1 + at * stride`, exactly
+        // [`Lower::vector_push`]'s address arithmetic with `at` in place of
+        // `len`.
+        let at_words = self.b.ins().imul_imm_s(at, i64::from(stride));
+        // The old element, read out of every one of its words before any of
+        // them is overwritten — `v.set(i, x)` answers what `v.get(i)` would
+        // have.
+        let mut was = Vec::with_capacity(stride as usize);
+        for word in 0..stride {
+            let at = self.b.ins().iadd_imm_s(at_words, i64::from(word));
+            was.push(self.payload(store, at));
+        }
+        for word in 0..stride {
+            let held = self.load_slot(value + word);
+            let at = self.b.ins().iadd_imm_s(at_words, i64::from(word));
+            self.set_payload(store, at, held);
+        }
+        self.write_option_case(dst, width, some_case, some_at, &was);
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(cold);
+        self.builtin_call(dst, builtin, args);
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(join);
+        // One predecessor of this join came through a helper, so neither
+        // pointer the other one derived is to be trusted here.
+        self.forget();
+    }
+
+    /// One case of an `Option<T>` answer into `dst`: `width` words, zeroed
+    /// first and then the tag and `words` written over it.
+    ///
+    /// `vm::builtins::make`'s `case_words` is the reason for the order —
+    /// "constructing a case zeroes the payload words it does not fill", so a
+    /// word belonging to a wider case never reads through a narrower one —
+    /// and this is the same order. `words` lands at `dst + 1 + at`, `at`
+    /// being the payload offset [`method_of`] read out of the `Option`'s own
+    /// layout rather than assumed.
+    fn write_option_case(&mut self, dst: Slot, width: u32, case: u32, at: u32, words: &[Value]) {
+        let zero = self.b.ins().iconst(types::I64, 0);
+        for word in 0..width {
+            self.store_slot(dst + word, zero);
+        }
+        let tag = self.b.ins().iconst(types::I64, i64::from(case));
+        self.store_slot(dst, tag);
+        for (offset, value) in words.iter().enumerate() {
+            self.store_slot(dst + 1 + at + offset as u32, *value);
+        }
     }
 
     /// One [`Inst::CallBuiltin`](cove_ir::Inst::CallBuiltin), handed to the runtime

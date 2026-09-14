@@ -403,6 +403,93 @@ export fn callsPushesOnto(n: Int) -> Int {
   answered * 1000000 + v.length() * 1000 + total
 }
 
+/// `Vector.set` in a compiled frame: the fast path, in range and out of it.
+///
+/// `held`'s reason not to inline is `pushesOnto`'s, unchanged: without
+/// `counts(0)` this callee is a leaf under sixteen instructions and the
+/// caller keeps the crossing for itself.
+export fn setsAt(given: Vector<Int>, index: Int, value: Int) -> Int {
+  var v = given
+  let was = v.set(index, value)
+  let answer = match was {
+    Some(x) => x
+    None => -1
+  }
+  answer + counts(0)
+}
+
+/// A refused caller that builds a vector of `size` elements — `0, 10, ..,
+/// (size - 1) * 10` — sets one, and reads back both the answer and the whole
+/// vector, so a wrong offset or a write that smeared past its own element is
+/// caught by the sum and not only by the answered element.
+export fn callsSetsAt(size: Int, index: Int, value: Int) -> Int {
+  let nothing = Vector.of(0)
+  var v = Vector.of(0)
+  var i = 1
+  while i < size {
+    v.push(i * 10)
+    i = i + 1
+  }
+  let answered = setsAt(v, index, value)
+  var total = 0
+  var at = 0
+  while at < v.length() {
+    match v.get(at) {
+      Some(x) => total = total + x
+      None => total = total - 1
+    }
+    at = at + 1
+  }
+  answered * 1000000 + v.length() * 1000 + total
+}
+
+/// The same, on a vector `pop()` has emptied — the shape a `set` on an empty
+/// vector needs: `Vector.of()` with no elements does not say what it is a
+/// vector of, and `Vector.of(0)` is already one.
+export fn callsSetsOnEmpty(index: Int, value: Int) -> Int {
+  let nothing = Vector.of(0)
+  var v = Vector.of(0)
+  let popped = v.pop()
+  let answered = setsAt(v, index, value)
+  answered * 1000 + v.length()
+}
+
+/// `Vector.set` of a two-word element in a compiled frame — the stride case,
+/// where an offset that forgot the multiply lands on the wrong element
+/// instead of merely a wrong one.
+export fn setsPointAt(given: Vector<Point>, index: Int, x: Int, y: Int) -> Int {
+  var v = given
+  let was = v.set(index, Point(x: x, y: y))
+  let answer = match was {
+    Some(p) => p.x * 1000 + p.y
+    None => -1
+  }
+  answer + counts(0)
+}
+
+/// A refused caller that builds a `Vector<Point>` of `size` elements, sets
+/// one, and reads every element back.
+export fn callsSetsPointAt(size: Int, index: Int, x: Int, y: Int) -> Int {
+  let nothing = Vector.of(0)
+  var v = Vector.of(Point(x: 0, y: 1))
+  var i = 1
+  while i < size {
+    v.push(Point(x: i * 10, y: i * 10 + 1))
+    i = i + 1
+  }
+  let answered = setsPointAt(v, index, x, y)
+  var total = 0
+  var at = 0
+  while at < v.length() {
+    match v.get(at) {
+      Some(p) => total = total + p.x + p.y
+      None => total = total - 1
+    }
+    at = at + 1
+  }
+  answered * 1000000 + v.length() * 1000 + total
+}
+
 /// Allocations from a compiled frame that are **kept**, so the heap runs out.
 ///
 /// Every array goes into the vector, so nothing a collection could reclaim is
@@ -1793,6 +1880,130 @@ fn a_push_from_compiled_code_writes_the_heap_on_a_later_segment() {
         there.origin
     );
     assert!(there.tiers.vm_to_native >= 1, "{:?}", there.tiers);
+}
+
+/// `Vector.set` from compiled code: in range, at the two ends, and outside the
+/// vector on both sides.
+///
+/// The vector is `0, 10, .., (size - 1) * 10`, so the displaced element at
+/// `index` is `index * 10` whenever `index` is in range, and the caller's own
+/// read-back sum is what says the write landed at `index * stride` and not
+/// merely somewhere: a lowering that forgot the multiply would agree with the
+/// VM at `index == 1`, where the two coincide, and disagree everywhere else —
+/// which is why `2` and `size - 1` are in the table and not only `0` and `1`.
+#[test]
+fn a_set_from_compiled_code_writes_in_range_and_answers_none_outside_it() {
+    on_each_tier(&["setsAt"], &["callsSetsAt"]);
+    const SIZE: i64 = 5;
+    let before: i64 = (0..SIZE).map(|i| i * 10).sum();
+    for index in [0i64, 2, SIZE - 1, SIZE, -1] {
+        let both = both(
+            "callsSetsAt",
+            vec![Value::int(SIZE), Value::int(index), Value::int(999)],
+        );
+        let (answered, total) = if (0..SIZE).contains(&index) {
+            (index * 10, before - index * 10 + 999)
+        } else {
+            (-1, before)
+        };
+        assert_eq!(
+            both.vm,
+            Ok(format!("{}", answered * 1_000_000 + SIZE * 1000 + total)),
+            "index {index}: the answer, the length and the sum of the elements"
+        );
+        assert_eq!(
+            both.native, both.vm,
+            "index {index}: compiled `set` agrees with the VM"
+        );
+        assert!(
+            both.tiers.vm_to_native >= 1,
+            "index {index}: the set was machine code: {:?}",
+            both.tiers
+        );
+    }
+}
+
+/// `Vector.set` on an empty vector answers `None`, the same as an
+/// out-of-range index on a non-empty one — one rule about indices, checked
+/// where a vector has none at all rather than merely too few.
+#[test]
+fn a_set_on_an_empty_vector_answers_none() {
+    on_each_tier(&["setsAt"], &["callsSetsOnEmpty"]);
+    for index in [0i64, -1] {
+        let both = both("callsSetsOnEmpty", vec![Value::int(index), Value::int(999)]);
+        assert_eq!(
+            both.vm,
+            Ok("-1000".to_string()),
+            "index {index}: `None`, and the vector is still empty"
+        );
+        assert_eq!(both.native, both.vm, "index {index}");
+        assert!(
+            both.tiers.vm_to_native >= 1,
+            "index {index}: {:?}",
+            both.tiers
+        );
+    }
+}
+
+// **`Vector.set`'s two cold paths are not reachable from here.**
+//
+// A frozen store is exercised, and the two code generators are checked
+// against each other on it, in `cove-native`'s own suite —
+// `every_cold_path_of_a_set_goes_to_the_runtime` in
+// `crates/cove-native/tests/suite/mod.rs`, run over hand-built IR. It cannot
+// be exercised from checked Cove source in this file: `crates/cove-sema`'s
+// `unique` pass proves every `freeze()` it accepts is the *only* handle to
+// its storage and refuses every later read of it (`used_after_freeze`), and
+// refuses the `freeze()` itself wherever that cannot be proved
+// (`not_unique`) — see that pass's own "This is not a borrow checker": a
+// program it accepts is never a program that reaches a store word of nought
+// through a second handle, because there is no second handle a checked
+// program can hold. `Vector.push`'s identical cold path is untested here for
+// the same reason.
+//
+// The other cold path — a receiver whose object is not the layout the call
+// site declared — is unreachable from checked Cove source the same way: it
+// would need an unsound cast the type checker does not offer, and it is
+// covered by the same `cove-native` suite instead.
+
+/// `Vector.set` of a two-word element — `Point` — from compiled code: the
+/// stride case, where the run this method copies is two words and not one.
+#[test]
+fn a_set_of_a_two_word_element_writes_the_whole_element() {
+    on_each_tier(&["setsPointAt"], &["callsSetsPointAt"]);
+    const SIZE: i64 = 4;
+    let before: i64 = (0..SIZE).map(|i| i * 10 + (i * 10 + 1)).sum();
+    for index in [1i64, SIZE - 1, SIZE] {
+        let both = both(
+            "callsSetsPointAt",
+            vec![
+                Value::int(SIZE),
+                Value::int(index),
+                Value::int(777),
+                Value::int(888),
+            ],
+        );
+        let (answered, total) = if (0..SIZE).contains(&index) {
+            let old = index * 10 * 1000 + (index * 10 + 1);
+            (old, before - (index * 20 + 1) + (777 + 888))
+        } else {
+            (-1, before)
+        };
+        assert_eq!(
+            both.vm,
+            Ok(format!("{}", answered * 1_000_000 + SIZE * 1000 + total)),
+            "index {index}: the displaced `Point`, the length and the sum of the elements"
+        );
+        assert_eq!(
+            both.native, both.vm,
+            "index {index}: compiled `set` agrees with the VM on a two-word element"
+        );
+        assert!(
+            both.tiers.vm_to_native >= 1,
+            "index {index}: {:?}",
+            both.tiers
+        );
+    }
 }
 
 /// **An allocation from compiled code that exhausts the heap raises the VM's own
