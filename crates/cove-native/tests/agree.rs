@@ -17,12 +17,12 @@
 
 #![cfg(all(feature = "cranelift", feature = "template"))]
 
-use cove_ir::{ArithOp, CmpOp, FunctionId, Inst, Num, Program, Repr, StrId};
+use cove_ir::{ArithOp, CmpOp, FunctionId, Inst, Len, Num, Program, Repr, StrId};
 use cove_native::{Entry, NativeHelpers};
 
 mod suite;
 
-use suite::{Arm, Heap, INT, UNIT};
+use suite::{Arm, Heap, INT, PAIR, UNIT};
 
 struct Cranelift(cove_native::Jit);
 
@@ -75,17 +75,25 @@ impl Arm for Template {
 fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
     suite::forget_polls();
     suite::forget_calls();
+    suite::forget_allocations();
+    suite::forget_mediated();
     let mut cranelift_words = words.to_vec();
     let cranelift = suite::run::<Cranelift>(program, &mut cranelift_words, base);
     let cranelift_polls = suite::polls();
     let cranelift_calls = suite::calls();
+    let cranelift_allocs = suite::allocations();
+    let cranelift_mediated = suite::mediated();
 
     suite::forget_polls();
     suite::forget_calls();
+    suite::forget_allocations();
+    suite::forget_mediated();
     let mut template_words = words.to_vec();
     let template = suite::run::<Template>(program, &mut template_words, base);
     let template_polls = suite::polls();
     let template_calls = suite::calls();
+    let template_allocs = suite::allocations();
+    let template_mediated = suite::mediated();
 
     assert_eq!(cranelift.outcome, template.outcome, "outcome: {what}");
     assert_eq!(
@@ -113,6 +121,17 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
         cranelift_calls, template_calls,
         "the calls, in order: {what}"
     );
+    // Two arms that agreed about the *answer* while one of them allocated and the
+    // other did not would be two arms doing different work, and one of them would
+    // not be the VM's.
+    assert_eq!(
+        cranelift_allocs, template_allocs,
+        "the allocations, in order: {what}"
+    );
+    assert_eq!(
+        cranelift_mediated, template_mediated,
+        "the builtins handed to the runtime, in order: {what}"
+    );
 }
 
 /// The same, over a heap both arms read the same words of.
@@ -123,18 +142,26 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
 fn agree_over(what: &str, program: &Program, words: &[u64], base: u64, build: impl Fn() -> Heap) {
     suite::forget_polls();
     suite::forget_calls();
+    suite::forget_allocations();
+    suite::forget_mediated();
     let cranelift_heap = build();
     let mut cranelift_words = words.to_vec();
     let cranelift =
         suite::run_over::<Cranelift>(program, &mut cranelift_words, base, &cranelift_heap);
     let cranelift_polls = suite::polls();
+    let cranelift_allocs = suite::allocations();
+    let cranelift_mediated = suite::mediated();
 
     suite::forget_polls();
     suite::forget_calls();
+    suite::forget_allocations();
+    suite::forget_mediated();
     let template_heap = build();
     let mut template_words = words.to_vec();
     let template = suite::run_over::<Template>(program, &mut template_words, base, &template_heap);
     let template_polls = suite::polls();
+    let template_allocs = suite::allocations();
+    let template_mediated = suite::mediated();
 
     assert_eq!(cranelift.outcome, template.outcome, "outcome: {what}");
     assert_eq!(
@@ -151,6 +178,14 @@ fn agree_over(what: &str, program: &Program, words: &[u64], base: u64, build: im
     );
     assert_eq!(cranelift_words, template_words, "the frame: {what}");
     assert_eq!(cranelift_polls, template_polls, "the safepoints: {what}");
+    assert_eq!(
+        cranelift_allocs, template_allocs,
+        "the allocations, in order: {what}"
+    );
+    assert_eq!(
+        cranelift_mediated, template_mediated,
+        "the builtins handed to the runtime, in order: {what}"
+    );
     // The two heaps started equal, so a difference here is one arm having read or
     // written a word the other did not. Until `Inst::Store` this was the weaker
     // claim that neither arm writes to the heap at all; a store *through an
@@ -312,6 +347,89 @@ fn both_arms_answer_the_same_thing() {
         0,
     );
 
+    // `Inst::Alloc`, in all three of `Len`'s forms and in the shape where the
+    // runtime refuses. Both arms hand the *same three numbers* to the same helper
+    // and store the same answer, which is what the recorded allocations say, and a
+    // refusal has to leave both of them the same way.
+    for (what, len, word) in [
+        ("fixed", Len::Fixed, 0i64),
+        ("a count", Len::Count(7), 0),
+        ("a slot", Len::Slot(0), 5),
+        // A count no `u32` holds, handed over as it lies: the narrowing is
+        // `Machine::allocate`'s and neither arm may do it first.
+        ("a slot holding more than a u32", Len::Slot(0), -1),
+    ] {
+        agree_over(
+            &format!("an allocation of {what}"),
+            &suite::allocating(len),
+            &[word as u64, 0],
+            0,
+            || Heap::new(2),
+        );
+    }
+    // And the refusal. `allocations_allowed` is set before *each* arm because both
+    // helpers forget it, which is what keeps the two runs identical.
+    for arm in [0usize, 1] {
+        suite::allocations_allowed(arm);
+        agree_over(
+            &format!("an allocation refused after {arm}"),
+            &suite::allocating(Len::Count(3)),
+            &[0, 0],
+            0,
+            || Heap::new(2),
+        );
+    }
+
+    // `Inst::StoreElem`: the stride, the bound, and a null receiver. The heap
+    // comparison is what makes this a test — the words go *into* the heap, so two
+    // arms that disagreed about the payload offset disagree here and nowhere else.
+    for index in [0i64, 1, 2, 3, -1, i64::MIN] {
+        agree_over(
+            &format!("a store-elem at {index}"),
+            &storing_an_element(),
+            &[object, index as u64, 0x1111, 0x2222],
+            0,
+            || {
+                let mut heap = Heap::new(2);
+                heap.object(1, INT, 3);
+                heap
+            },
+        );
+    }
+
+    // `Vector.push`: the emitted fast path and each of the three cold paths, which
+    // is where the two arms differ most — a compare chain and a `movabs` against a
+    // `brif` on an `icmp`, three times over.
+    for (what, layout, len, capacity, store) in [
+        ("into spare capacity", suite::VECTOR, 1u32, 4u32, true),
+        ("that would grow the store", suite::VECTOR, 4, 4, true),
+        ("of a frozen vector", suite::VECTOR, 0, 4, false),
+        (
+            "whose object is another layout",
+            suite::PAIR_VECTOR,
+            0,
+            4,
+            true,
+        ),
+    ] {
+        agree_over(
+            &format!("a push {what}"),
+            &suite::pushing(suite::VECTOR, 1),
+            &[cove_native::HEAP_ORIGIN_WORDS + 20, 70, 0],
+            0,
+            move || {
+                let mut heap = Heap::new(2);
+                // In chunk zero, and inside the run `agree_over` compares, so that
+                // every word either arm writes is compared.
+                suite::a_vector(&mut heap, 20, layout, len, capacity);
+                if !store {
+                    heap.set(22, 0);
+                }
+                heap
+            },
+        );
+    }
+
     for op in [
         CmpOp::Eq,
         CmpOp::Ne,
@@ -398,6 +516,23 @@ fn element() -> Program {
                 layout: suite::PAIR,
             },
             Inst::Return { src: 2 },
+        ],
+    ))
+}
+
+/// `obj[index] = s2..s3`, at a two-word stride.
+fn storing_an_element() -> Program {
+    suite::program(suite::function(
+        vec![Repr::Ref, Repr::Int, Repr::Int, Repr::Int],
+        INT,
+        vec![
+            Inst::StoreElem {
+                obj: 0,
+                index: 1,
+                src: 2,
+                layout: PAIR,
+            },
+            Inst::Return { src: 1 },
         ],
     ))
 }

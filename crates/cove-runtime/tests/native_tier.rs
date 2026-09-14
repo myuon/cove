@@ -272,6 +272,111 @@ export fn callsMeasures(s: String) -> Int {
   measures(s) + note.byteLength() - 1
 }
 
+/// A compiled frame that **allocates**, with a reference live across it.
+///
+/// The array literal is an `Inst::Alloc` and four `Inst::StoreElem`s, so this is
+/// the only shape a Cove program has for reaching the allocation helper from
+/// compiled code. `s` is read on both sides of it — `first` before and
+/// `byteLength` after — so a collection during the allocation has to have found
+/// the reference in the slot the frame's static map names, and has to have left it
+/// there.
+export fn allocatesAndKeeps(s: String, n: Int) -> Int {
+  let first = s.byteAt(held(0))
+  let made = [n, n + 1, n + 2, n + 3]
+  first + made.length() + s.byteLength()
+}
+
+/// A refused caller that holds a reference of its own across the callee's
+/// allocation.
+///
+/// `also` is an `Array` this frame builds and reads back *after* the call, so the
+/// collection the callee's allocation may cause happens with a live reference in
+/// an **encoded** frame below a compiled one — which is the pair no single-tier
+/// case can be.
+export fn callsAllocatesAndKeeps(s: String, n: Int) -> Int {
+  let note = \"x\"
+  let also = [n, n, n]
+  allocatesAndKeeps(s, n) + also.length() + note.byteLength() - 1
+}
+
+/// `Vector.push` in a compiled frame: the fast path and the growth one.
+///
+/// The vector is a **parameter** rather than a local, and that is not a style
+/// choice: `Vector.of` lowers to an `Inst::StoreField`, which nothing lowers, so a
+/// function that made its own vector would be refused and the pushes would run on
+/// the VM. Made by the caller, it is the caller that is refused — which is the
+/// shape every case in this file needs anyway.
+///
+/// It answers the *counter* and not `v.length()` for the same reason: a `Vector`'s
+/// length is payload word nought of its header, so `length()` is an
+/// `Inst::LoadField` rather than an `Inst::Len` and nothing lowers one yet. The
+/// caller reads the length instead, which is the stronger place to read it from.
+///
+/// `counts(0)` is here for the reason it is in every fixture above, and this is
+/// where it was learnt: without it the whole body is a leaf of under sixteen
+/// instructions, `cove_ir::lower::inline` expands it into its caller, and the
+/// pushes run on the caller's tier — which is the VM. The case then compares the
+/// VM with itself and passes whatever either code generator emitted.
+export fn pushesOnto(given: Vector<Int>, n: Int) -> Int {
+  var v = given
+  var at = 1
+  while at < n {
+    v.push(at)
+    at = at + 1
+  }
+  at + counts(0)
+}
+
+/// A refused caller that reads back everything the compiled pushes wrote.
+///
+/// The sum is what says the **live prefix survived growth**: a `push` that has to
+/// grow allocates a larger store, copies the elements it already had and replaces
+/// the header's store word, and a caller that could only see the *length* would
+/// pass whatever the copy did. `v.length()` here is read out of the same header
+/// the callee bumped, so the replaced store word is read by this frame and not by
+/// the one that replaced it.
+export fn callsPushesOnto(n: Int) -> Int {
+  let note = \"x\"
+  var v = Vector.of(7)
+  let answered = pushesOnto(v, n)
+  var total = 0
+  var at = 0
+  while at < v.length() {
+    match v.get(at) {
+      Some(x) => total = total + x
+      None => total = total - 1
+    }
+    at = at + 1
+  }
+  answered * 1000000 + v.length() * 1000 + total + note.byteLength() - 1
+}
+
+/// Allocations from a compiled frame that are **kept**, so the heap runs out.
+///
+/// Every array goes into the vector, so nothing a collection could reclaim is
+/// unreachable and the allocation helper eventually meets the refusal
+/// `Machine::allocate` raises when neither the bump nor the collection can satisfy
+/// it. The sentence is the runtime\'s — this crate names errors and never builds
+/// one — so what the differential says is that the *same* sentence arrives.
+export fn fillsTheHeap(given: Vector<Array<Int>>, n: Int) -> Int {
+  var v = given
+  var at = 0
+  while at < n {
+    let made = [at, at, at, at, at, at, at, at]
+    v.push(made)
+    at = at + 1
+  }
+  at + counts(0)
+}
+
+/// A refused caller, so the allocations that exhaust the heap are a compiled
+/// frame\'s.
+export fn callsFillsTheHeap(n: Int) -> Int {
+  let note = \"x\"
+  var v: Vector<Array<Int>> = Vector.of([0])
+  fillsTheHeap(v, n) + note.byteLength() - 1
+}
+
 /// A refused caller, so the frame that clears a slot is a **compiled** one.
 ///
 /// `Vm::invoke` enters the encoded tier for the frame it opens itself, so
@@ -917,6 +1022,18 @@ fn every_address_family_resolves_on_a_later_stack_segment() {
 /// second key, and what is asserted here is the join — that it is present for
 /// exactly those two opcodes, absent for every other, and names the thing the
 /// source actually wrote.
+///
+/// # The allocation table is expected to be *empty*, and that is the assertion
+///
+/// `Inst::Alloc` is lowered, so no function can be refused at one and the
+/// allocation half of the census has no rows. Asserting that rather than deleting
+/// the arm is deliberate in both directions: the arm has to stay, because
+/// `Refused::blocked` is a fact about a *program* and an operand bound could still
+/// refuse an allocation; and a row appearing again is news, because it would mean
+/// an allocation shape had become a blocker and the ranked table needs reading
+/// again. What tests the row's own formatting now is `native.rs`'s own
+/// `an_allocation_census_row_names_the_family_and_the_shape`, which builds the
+/// refusal by hand and so does not depend on what the subset happens to lower.
 #[test]
 fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
     use cove_runtime::Blocked;
@@ -952,12 +1069,15 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
             ),
         }
     }
-    assert!(builtins > 0 && allocations > 0, "both tables have rows");
+    assert!(builtins > 0, "the builtin table has rows");
+    assert_eq!(
+        allocations, 0,
+        "`Inst::Alloc` is lowered, so nothing is refused at one — see this case's \
+         own note before changing this number"
+    );
 
-    // And the two the fixture's own source writes, by name. `allocates` calls
-    // `s.sliceBytes(..)`, and `heapsThrough` constructs a `Shared(a)` — which is a
-    // heap object holding one `Int` inline, so the element is named beside the
-    // family for the reason `cove_runtime`'s `allocation_name` gives.
+    // And the one the fixture's own source writes, by name: `allocates` calls
+    // `s.sliceBytes(..)`, which nothing lowers.
     let named = |of: &str| {
         let full = format!("{MODULE}.{of}");
         native
@@ -972,13 +1092,10 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
         named("allocates"),
         Some(Blocked::Builtin("String.sliceBytes".to_string()))
     );
-    assert_eq!(
-        named("heapsThrough"),
-        Some(Blocked::Allocation {
-            name: "Shared<Int>".to_string(),
-            shape: "Shared".to_string(),
-        })
-    );
+    // `heapsThrough` constructs a `Shared(a)`, whose allocation now lowers — so it
+    // is refused for the `store-field` that fills the object in, and an opcode that
+    // names one operation already carries no second key.
+    assert_eq!(named("heapsThrough"), None);
 }
 
 /// **`String.byteLength()` in machine code, over a byte count and not a
@@ -1055,5 +1172,252 @@ fn a_byte_length_reads_the_heap_on_a_later_segment() {
         there.tiers.native_to_native_direct >= 1,
         "`measures` was the compiled frame that read it: {:?}",
         there.tiers
+    );
+}
+
+/// **An allocation made from compiled code, with a collection forced inside it.**
+///
+/// The case the allocation helper exists for, and the one genuinely new thing
+/// about it: before it, compiled code could not *cause* a collection. It reached
+/// the collector only at a safepoint, where nothing was half-built, or through a
+/// call, where the callee's frame was what was at risk. An allocation made from a
+/// compiled frame collects with **that frame's own references live in it**, so
+/// `cove_native::abi`'s "every live reference is already in the slot the frame's
+/// static map names" is what stands between the array being allocated and the
+/// string being swept.
+///
+/// Both frames hold one. `allocatesAndKeeps` reads `s` on either side of its
+/// allocation, and `callsAllocatesAndKeeps` — which is *encoded* — holds an
+/// `Array` of its own across the whole call and reads it back afterwards. So a
+/// walk that missed either tier's roots fails here, and it fails as a wrong answer
+/// rather than as a crash, because swept words are handed out again.
+///
+/// It is a [`cove_runtime::NativeSession`] over a **small heap** for
+/// `a_cleared_slot_is_not_a_root_and_a_live_one_still_is`' reason: a collection has
+/// to actually happen, and the loop runs until one has.
+#[test]
+fn an_allocation_from_compiled_code_collects_and_keeps_what_is_live() {
+    // One heap chunk, which is the smallest a heap is.
+    const SMALL_HEAP_WORDS: usize = 1 << 13;
+    const N: i64 = 11;
+    let text = "a string long enough that a byte can be read out of the middle of it.";
+    on_each_tier(&["allocatesAndKeeps"], &["callsAllocatesAndKeeps"]);
+
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+
+    let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, SMALL_HEAP_WORDS);
+    let (calls, crossings) = {
+        let mut session = vm
+            .native_session(
+                MODULE,
+                "callsAllocatesAndKeeps",
+                vec![Value::string(text), Value::int(N)],
+            )
+            .expect("the session opens");
+        let words = session.arguments().to_vec();
+        let expected = session
+            .call(&cove_runtime::NothingCompiled, &words)
+            .expect("the vm answers");
+        // `s.byteAt(0)` and the array's four and the string's byte length, then the
+        // caller's own array of three, its `"x"`, and the `- 1`.
+        let bytes = text.as_bytes();
+        assert_eq!(
+            expected,
+            vec![u64::from(bytes[0]) + 4 + text.len() as u64 + 3 + 1 - 1],
+            "the fixture answers a byte, two lengths and a byte length"
+        );
+
+        let before = session.collections();
+        let mut calls = 0;
+        while session.collections() == before && calls < 20_000 {
+            let answered = session
+                .call(&native, &words)
+                .expect("the native tier answers");
+            assert_eq!(answered, expected, "call {calls} answered wrongly");
+            calls += 1;
+        }
+        assert!(
+            session.collections() > before,
+            "no collection ran in {calls} call(s), so this case proved nothing"
+        );
+        (calls, session.tiers().vm_to_native)
+    };
+    assert!(
+        crossings >= calls,
+        "every call crossed into machine code: {crossings} of {calls}"
+    );
+    // The arrays were reclaimed rather than merely allocated: far more words were
+    // handed out than the heap ever held.
+    assert!(
+        vm.allocated_words() > SMALL_HEAP_WORDS as u64,
+        "{} word(s) handed out over {calls} call(s) of a {SMALL_HEAP_WORDS}-word heap",
+        vm.allocated_words()
+    );
+}
+
+/// **`Vector.push` from compiled code: the fast path, the growth path, and what
+/// the owner sees afterwards.**
+///
+/// `pushesOnto` is compiled and pushes `n - 1` times onto a vector its caller made
+/// with one element, so a run is mostly the emitted fast path and is punctuated by
+/// the growth path — which is the cold one, where the store is replaced. The caller
+/// then reads **every element back**, which is the assertion that matters: a growth
+/// that copied the live prefix wrongly, or that left the header pointing at the old
+/// store, answers a wrong sum while the length is still right.
+///
+/// The counter the compiled loop ended on goes out with the sum, so a push that
+/// silently did nothing cannot pass on the elements alone either.
+#[test]
+fn a_push_from_compiled_code_grows_and_the_owner_sees_it() {
+    on_each_tier(&["pushesOnto"], &["callsPushesOnto"]);
+    // One push, a handful, and enough to double the store several times.
+    for n in [1i64, 2, 5, 40] {
+        let both = both("callsPushesOnto", vec![Value::int(n)]);
+        // `Vector.of(7)` and then `1..n`, so the length is `max(n, 1)` and the sum
+        // is `7 + (n - 1) * n / 2`.
+        let length = n.max(1);
+        let total = 7 + (n - 1) * n / 2;
+        assert_eq!(
+            both.vm,
+            Ok(format!("{}", n * 1_000_000 + length * 1000 + total)),
+            "n = {n}: the counter, the length and the sum of the elements"
+        );
+        assert_eq!(
+            both.native, both.vm,
+            "n = {n}: every element the compiled pushes wrote is where the VM put it"
+        );
+        assert!(
+            both.tiers.vm_to_native >= 1,
+            "n = {n}: the pushes were machine code: {:?}",
+            both.tiers
+        );
+    }
+}
+
+/// The same pushes, on a **later stack segment**.
+///
+/// The vector and its store are heap objects, so nothing about a push depends on
+/// the segment — and that is the claim rather than an assumption. Every heap
+/// address the emitted push forms goes through `heap_ptr`, which subtracts
+/// `HEAP_ORIGIN_WORDS`; an arm that had reached for `stack_origin` anywhere in it
+/// would write into a frame, and on the first segment those two numbers are the
+/// same. See [`Segment`].
+#[test]
+fn a_push_from_compiled_code_writes_the_heap_on_a_later_segment() {
+    let here = both("callsPushesOnto", vec![Value::int(40)]);
+    let there = both_on(Segment::Later, "callsPushesOnto", vec![Value::int(40)]);
+    assert!(there.origin > 0, "the run was moved off the first segment");
+    assert_eq!(here.vm, Ok("40040787".to_string()));
+    assert_eq!(there.vm, here.vm, "the encoded tier is the same on either");
+    assert_eq!(
+        there.native, here.vm,
+        "and so is compiled code on a segment at {}",
+        there.origin
+    );
+    assert!(there.tiers.vm_to_native >= 1, "{:?}", there.tiers);
+}
+
+/// **An allocation from compiled code that exhausts the heap raises the VM's own
+/// sentence.**
+///
+/// `Machine::allocate`'s one refusal — the bump did not fit, a collection freed
+/// nothing, and the second attempt did not fit either. It reaches compiled code as
+/// a zero from the helper and leaves as [`Raise::Called`](cove_runtime::NativeRaise),
+/// which carries no message *because the runtime is already holding the whole
+/// error*: this crate names errors and never builds one. So what is compared is the
+/// sentence, and it has to be the same sentence.
+///
+/// Nothing the loop allocates is unreachable — every array goes into the vector —
+/// so the collection cannot help and the refusal is reached rather than deferred.
+///
+/// A session, because this needs a **small heap** and a **native tier** at once and
+/// no constructor offers both: `Vm::with_heap_words` installs no table and
+/// `Vm::with_native` takes the default heap. A session takes the table per call,
+/// which is exactly the pair.
+///
+/// # What this case cannot catch, and where that is caught instead
+///
+/// Emitted code that **did not test the helper's answer at all** passes here, and
+/// the reason is worth knowing: the helper stashed the error before it answered
+/// nought, and `native.rs`'s `raised` hands back a stashed error whatever
+/// [`Raise`](cove_runtime::NativeRaise) compiled code went on to name. So a zero
+/// stored into the destination, and the null refusal the next instruction makes of
+/// it, produce *this very sentence*. The missing test is caught by
+/// `cove-native`'s `an_allocation_the_runtime_refuses_leaves_as_called`, which
+/// reads the outcome and the destination directly — and it matters, because the
+/// next instruction is only guaranteed to refuse a null while every instruction
+/// that follows an allocation happens to do so.
+#[test]
+fn an_allocation_that_exhausts_the_heap_raises_the_vm_s_sentence() {
+    const SMALL_HEAP_WORDS: usize = 1 << 13;
+    // Enough nine-word arrays to overrun a one-chunk heap several times over.
+    const N: i64 = 4000;
+    on_each_tier(&["fillsTheHeap"], &["callsFillsTheHeap"]);
+
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+
+    let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, SMALL_HEAP_WORDS);
+    let mut session = vm
+        .native_session(MODULE, "callsFillsTheHeap", vec![Value::int(N)])
+        .expect("the session opens");
+    let words = session.arguments().to_vec();
+    // The **span** goes out with the message, and it is the half that says *which*
+    // allocation failed. Both tiers attach `Function::span_at(pc)`, so a native run
+    // that had failed at the `push` and a VM run that failed at the literal would
+    // agree about the sentence and disagree here.
+    let said = |answer: Result<Vec<u64>, cove_runtime::RuntimeError>| {
+        answer
+            .map(|words| format!("{words:?}"))
+            .map_err(|error| (error.message, error.span))
+    };
+    let expected = said(session.call(&cove_runtime::NothingCompiled, &words));
+    let (message, span) = expected.clone().expect_err("the VM runs out of memory");
+    assert_eq!(
+        message, "this run has no memory left",
+        "which is what makes this case a comparison"
+    );
+    // The array literal, and not the `push` beside it: it is the one allocation of
+    // this loop that compiled code makes itself, and the fixture puts it on a line
+    // of its own so that the two are told apart by more than a column.
+    let at = span.expect("a runtime error carries a span");
+    assert!(
+        SOURCE[at.start as usize..].starts_with('['),
+        "the allocation that failed is the array literal, and the source at the \
+         span is `{}`",
+        &SOURCE[at.start as usize..(at.end as usize).min(SOURCE.len())]
+    );
+
+    let answered = said(session.call(&native, &words));
+    assert_eq!(
+        answered, expected,
+        "compiled code left with the sentence the runtime built, at the instruction \
+         it was on, and not with one of its own"
+    );
+    assert!(
+        session.tiers().vm_to_native >= 1,
+        "and it was compiled code that asked: {:?}",
+        session.tiers()
     );
 }

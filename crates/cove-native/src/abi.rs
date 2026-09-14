@@ -103,12 +103,22 @@
 //!
 //! It is honoured by the rule above and by nothing else. **Neither code
 //! generator keeps a Cove value in a register across an instruction
-//! boundary**, so at the two places a collection can happen — the safepoint
-//! helper and the call helper, which are the only calls either arm emits —
-//! every live reference is already in the slot the frame's static
-//! `Function::refs` map names. The collector walks exactly what it walks for
-//! an encoded frame, and there is no spill sequence, because there is nothing
-//! anywhere else to spill.
+//! boundary**, so at every place a collection can happen — the safepoint
+//! helper, the call helper, and now [`AllocFn`] and [`BuiltinFn`], which are all
+//! the calls either arm emits — every live reference is already in the slot the
+//! frame's static `Function::refs` map names. The collector walks exactly what it
+//! walks for an encoded frame, and there is no spill sequence, because there is
+//! nothing anywhere else to spill.
+//!
+//! [`AllocFn`] is the one that made that argument load-bearing rather than
+//! merely true. Before it, compiled code could not *cause* a collection: it
+//! reached the collector only at a safepoint, where nothing had been half-built,
+//! or through a call, where the callee's own frame was the thing at risk. An
+//! allocation made from a compiled frame collects with that frame's own
+//! references live in it, so the walk this section describes is now the thing
+//! standing between an allocation and a swept object — and
+//! `native_tier.rs`'s forced-collection cases are how that is checked rather
+//! than argued.
 //!
 //! The intermediate an instruction computes *inside* one template — the object
 //! address a `load-elem` derives, the header word a `len` reads — is in a
@@ -329,13 +339,21 @@ pub enum Raise {
     /// because that is the number the encoded arm has in hand and subtracts
     /// from; doing the subtraction here would put the `- 1` in two places.
     ByteOffset = 12,
-    /// A callee raised, and the runtime already holds the error.
+    /// A helper refused, and the runtime already holds the error.
     ///
     /// The one variant that names no message, because there is none to name:
-    /// [`NativeHelpers::call`] ran a callee which failed, and what failed is a
-    /// whole `RuntimeError` — a span, a rule, a call chain — that the runtime
-    /// built and kept. Compiled code learns only that it must leave, and
-    /// leaves; the caller re-raises what it stashed.
+    /// a helper this compiled code called failed, and what failed is a whole
+    /// `RuntimeError` — a span, a rule, a call chain — that the runtime built
+    /// and kept. Compiled code learns only that it must leave, and leaves; the
+    /// caller re-raises what it stashed.
+    ///
+    /// Three helpers answer this way and the variant is deliberately one rather
+    /// than three, because *the code carries no message*: there is nothing for a
+    /// second number to distinguish. [`NativeHelpers::call`] ran a callee which
+    /// failed; [`NativeHelpers::alloc`] could not allocate, or its safepoint said
+    /// stop; [`NativeHelpers::builtin`] ran a builtin which refused. The name is
+    /// the oldest of the three and has stayed, because what it says is still what
+    /// happened: something this code *called* failed.
     ///
     /// This is the same division as every other variant here, taken to its
     /// end: this crate names errors and never builds one.
@@ -566,6 +584,101 @@ pub type OpenFn = unsafe extern "C" fn(
 /// function it was.
 pub type CloseFn = unsafe extern "C" fn(ctx: *mut NativeCtx, outcome: u32, callee: u32) -> u32;
 
+/// What an allocation helper is.
+///
+/// [`Inst::Alloc`](cove_ir::Inst::Alloc), handed to the runtime whole, and
+/// [ADR 0055]'s "Runtime operations whose correctness already lives in Rust …
+/// remain runtime helpers initially" with allocation as the archetype. What
+/// `Machine::allocate` already handles is the whole story and none of it is
+/// emitted: the `i64`-to-`u32` conversion, `Layout::try_payload_words`' overflow
+/// rejection, the bump allocation, the collect-and-retry when the first attempt
+/// does not fit, and the one refusal — "this run has no memory left" — that every
+/// way of failing converges on.
+///
+/// `layout` is a `LayoutId` and `len` the header's length field, as the plain
+/// numbers the IR carries. `len` is `i64` and not `u32` for the reason
+/// `Machine::allocate`'s own documentation gives: [`Len::Slot`](cove_ir::Len::Slot)
+/// is a count the running program computed, so a negative one and one past what a
+/// `u32` field can hold are both *that call's* to reject, and narrowing here would
+/// be a second rejection with a different message. `Len::Fixed` passes nought.
+///
+/// The answer is the new object's **linear word address**, or **zero**. Zero is
+/// not an address — the heap begins at [`HEAP_ORIGIN_WORDS`] and zero is what a
+/// null reference is — so it needs no second output to be unambiguous, and it
+/// means the runtime is holding a whole `RuntimeError` that compiled code must
+/// leave with as [`Raise::Called`]. Two things fail this way and the caller cannot
+/// tell them apart, which is deliberate: the allocation was refused, or the
+/// safepoint in front of it said stop. [`CallFn`] already maps a stop to
+/// [`Outcome::Raised`] with the error stashed, and both arrive at the same
+/// `Err(error)` in the runtime's `enter`.
+///
+/// # It is a safepoint, and that is ADR 0055 rather than a choice
+///
+/// "Safepoints occur at least: … around allocation or runtime calls which may
+/// collect." So this helper charges [`NativeCtx::pending_work`], synchronises the
+/// frame's program counter and takes [ADR 0040]'s three steps in that order
+/// *before* it allocates — which is more than `encoded.rs`'s `ALLOC` arm does,
+/// because that arm leans on the dispatch loop's own stride and compiled code has
+/// no loop to lean on.
+///
+/// # Safety
+///
+/// As [`SafepointFn`]. The helper collects, so every live reference must already
+/// be in the slot the frame's `Function::refs` names — which both code generators
+/// satisfy by never keeping a Cove value in a register across an instruction
+/// boundary. It may grow the stack and may commit a heap chunk, so it stores the
+/// current [`NativeCtx::words`] and [`NativeCtx::chunks`] before it returns and
+/// the generated code re-derives both afterwards.
+///
+/// [ADR 0040]: ../../../../docs/adr/0040-a-bound-outlives-its-backend.md
+/// [ADR 0055]: ../../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+pub type AllocFn = unsafe extern "C" fn(ctx: *mut NativeCtx, pc: u32, layout: u32, len: i64) -> u64;
+
+/// What a builtin helper is: one [`Inst::CallBuiltin`](cove_ir::Inst::CallBuiltin),
+/// handed to the runtime whole.
+///
+/// [`CallFn`]'s relationship to [`OpenFn`], for builtins. A builtin whose fast
+/// path is emitted still has cold paths whose *message* only the runtime can
+/// build — a `Vector` that `freeze()` consumed, a receiver whose object is not the
+/// shape the call site expected — and those messages name a rendered `Value`,
+/// which this crate cannot see and must never learn to. So emitted code tests the
+/// fast path's preconditions, and where one does not hold it calls this and the VM
+/// produces exactly the sentence it always produced. That is [`OpenFn`]'s "a mixed
+/// call keeps the path it had", one level down.
+///
+/// **It is not a way to lower a builtin.** A `call-builtin` whose only lowering
+/// was this helper would be the encoded tier's `CALL_BUILTIN` arm reached through
+/// one more indirection: it would present a run as more native than it is, and
+/// — because the two code generators would emit the identical call — it would make
+/// the comparison between them measure nothing. `subset::method_of` is what admits
+/// a builtin, and it admits one only where a fast path is emitted for it.
+///
+/// `base` is the **caller's** frame as a word index, and `dst`, `builtin` and
+/// `args` are the three operands of the instruction as the plain numbers the IR
+/// carries. `base` is [`CallFn`]'s `base` and is there for the same two reasons:
+/// six integer arguments are what the System V ABI passes in registers, and a
+/// helper that is handed the frame it was called from can *check* it against the
+/// frame stack rather than assume it. The helper uses the stack's own address —
+/// `Machine::call_builtin` reads slots, which needs a linear address and not an
+/// index — and asserts the two agree.
+///
+/// The answer is an [`Outcome`] as a `u32`, read exactly as [`CallFn`]'s is:
+/// [`Outcome::Returned`] means the answer's words are in `dst` already.
+///
+/// # Safety
+///
+/// As [`AllocFn`]: a builtin may allocate, so this is a safepoint and every live
+/// reference must be in its slot, and both republished pointers are re-derived by
+/// the generated code afterwards.
+pub type BuiltinFn = unsafe extern "C" fn(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    dst: u32,
+    builtin: u32,
+    args: u32,
+) -> u32;
+
 /// The runtime's side of the boundary, as function pointers.
 ///
 /// This table is the whole reason `cove-native` does not depend on
@@ -586,6 +699,10 @@ pub struct NativeHelpers {
     pub open: OpenFn,
     /// See [`CloseFn`].
     pub close: CloseFn,
+    /// See [`AllocFn`].
+    pub alloc: AllocFn,
+    /// See [`BuiltinFn`].
+    pub builtin: BuiltinFn,
 }
 
 /// The mutable state one native call reads and writes.

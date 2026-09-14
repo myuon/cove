@@ -608,6 +608,42 @@ unsafe extern "C" fn no_close(
     outcome
 }
 
+/// The allocation helper, for a scenario that allocates nothing. See [`no_call`].
+///
+/// arith's loop is `total += i` and holds no allocation, so this cannot be
+/// reached; nought is the ABI's "refused, and the runtime is holding the error",
+/// which the entry below asserts against the same way it asserts a call.
+///
+/// # Safety
+///
+/// Reads nothing through any of its arguments.
+#[cfg(any(feature = "cranelift", feature = "template"))]
+unsafe extern "C" fn no_alloc(
+    _ctx: *mut cove_native::NativeCtx,
+    _pc: u32,
+    _layout: u32,
+    _len: i64,
+) -> u64 {
+    0
+}
+
+/// The builtin helper, for a scenario that calls none. See [`no_call`].
+///
+/// # Safety
+///
+/// Reads nothing through any of its arguments.
+#[cfg(any(feature = "cranelift", feature = "template"))]
+unsafe extern "C" fn no_builtin(
+    _ctx: *mut cove_native::NativeCtx,
+    _base: u64,
+    _pc: u32,
+    _dst: u32,
+    _builtin: u32,
+    _args: u32,
+) -> u32 {
+    cove_native::Outcome::Raised.abi()
+}
+
 #[cfg(any(feature = "cranelift", feature = "template"))]
 fn helpers() -> cove_native::NativeHelpers {
     cove_native::NativeHelpers {
@@ -615,6 +651,8 @@ fn helpers() -> cove_native::NativeHelpers {
         call: no_call,
         open: no_open,
         close: no_close,
+        alloc: no_alloc,
+        builtin: no_builtin,
     }
 }
 

@@ -163,6 +163,41 @@ fn a_len_reads_the_header_and_refuses_null() {
 }
 
 #[test]
+fn an_allocation_hands_the_layout_and_the_length_over_whole() {
+    suite::an_allocation_hands_the_layout_and_the_length_over_whole::<Cranelift>();
+}
+
+#[test]
+fn an_allocation_the_runtime_refuses_leaves_as_called() {
+    suite::an_allocation_the_runtime_refuses_leaves_as_called::<Cranelift>();
+}
+
+#[test]
+fn a_reference_is_in_its_slot_across_an_allocation() {
+    suite::a_reference_is_in_its_slot_across_an_allocation::<Cranelift>();
+}
+
+#[test]
+fn a_push_into_spare_capacity_writes_the_element_and_the_length() {
+    suite::a_push_into_spare_capacity_writes_the_element_and_the_length::<Cranelift>();
+}
+
+#[test]
+fn every_cold_path_of_a_push_goes_to_the_runtime() {
+    suite::every_cold_path_of_a_push_goes_to_the_runtime::<Cranelift>();
+}
+
+#[test]
+fn a_cold_push_that_raised_leaves_with_that_outcome() {
+    suite::a_cold_push_that_raised_leaves_with_that_outcome::<Cranelift>();
+}
+
+#[test]
+fn a_push_refuses_a_null_receiver() {
+    suite::a_push_refuses_a_null_receiver::<Cranelift>();
+}
+
+#[test]
 fn a_byte_length_builtin_reads_the_header_and_refuses_null() {
     suite::a_byte_length_builtin_reads_the_header_and_refuses_null::<Cranelift>();
 }
@@ -175,6 +210,11 @@ fn a_builtin_no_arm_lowers_refuses_the_function() {
 #[test]
 fn a_load_elem_strides_and_bounds_its_index() {
     suite::a_load_elem_strides_and_bounds_its_index::<Cranelift>();
+}
+
+#[test]
+fn a_store_elem_strides_and_bounds_its_index() {
+    suite::a_store_elem_strides_and_bounds_its_index::<Cranelift>();
 }
 
 #[test]

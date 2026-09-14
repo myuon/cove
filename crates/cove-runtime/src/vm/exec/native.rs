@@ -30,7 +30,7 @@
 //!
 //! # What compiled code is allowed to do, and what it hands back
 //!
-//! Three things, and every one of them is a helper rather than emitted code,
+//! Five things, and every one of them is a helper rather than emitted code,
 //! because ADR 0055 says "Runtime operations whose correctness already lives in
 //! Rust … remain runtime helpers initially":
 //!
@@ -41,15 +41,25 @@
 //! - **a call** — [`call`] below, which opens the callee's frame with
 //!   `encoded::open_frame` and runs it on whichever tier it is on. Compiled code
 //!   does not open a frame, copy an argument or choose a tier;
+//! - **an allocation** — [`alloc`] below, which is `Machine::allocate` whole:
+//!   the length conversion, the payload-word overflow rejection, the
+//!   collect-and-retry and the one refusal an exhausted heap raises. It is the
+//!   archetype of the sentence above, and it is also the first thing compiled
+//!   code can do that *causes* a collection;
+//! - **a builtin the emitted fast path could not take** — [`builtin`] below,
+//!   which is `Machine::call_builtin` whole. It is the cold half of a builtin
+//!   whose fast path *is* emitted, and it exists because the refusals those cold
+//!   paths produce name a rendered `Value`, which `cove-native` cannot see;
 //! - **leaving** — a [`Raise`] the compiled code names and this builds, which is
 //!   how a `+` that overflowed in machine code produces the *same sentence* the
 //!   encoded tier's does.
 //!
 //! Everything else — an `Array` element, a `String` byte, an object's length, an
-//! enum's switch — is emitted code, and that is deliberate: an operation that is
-//! one identical helper call in both arms cannot tell the two code generators
-//! apart, so a comparison over a subset made entirely of helper calls would
-//! measure nothing.
+//! enum's switch, a `Vector.push` into spare capacity — is emitted code, and that
+//! is deliberate: an operation that is one identical helper call in both arms
+//! cannot tell the two code generators apart, so a comparison over a subset made
+//! entirely of helper calls would measure nothing. That is why [`builtin`] is
+//! reachable only from a cold path and never as a lowering of its own.
 //!
 //! # Why the aliasing discipline is written down
 //!
@@ -71,7 +81,7 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cove_ir::{ArgsId, FunctionId, Slot, StrId};
+use cove_ir::{ArgsId, BuiltinId, FunctionId, LayoutId, Slot, StrId};
 use cove_native::{Entry, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
 
 use super::{divided_by_zero, null_object, overflowed, Frame, Machine, Overflow};
@@ -532,6 +542,139 @@ unsafe extern "C" fn safepoint(ctx: *mut NativeCtx, pc: u32, work: u64) -> bool 
         Some(error) => {
             (*host).left = Some(error);
             false
+        }
+    }
+}
+
+/// The allocation helper: one `Inst::Alloc`, handed over whole.
+///
+/// See [`cove_native::AllocFn`] for the signature and for why the answer is an
+/// address or a zero. What happens here is `encoded.rs`'s
+/// `ALLOC_FIXED | ALLOC_IMM | ALLOC_SLOT` arm with one thing in front of it:
+///
+/// 1. the unpaid work is charged and [ADR 0040]'s three steps are taken, in that
+///    order, because ADR 0055 says a safepoint occurs "around allocation or
+///    runtime calls which may collect". The encoded arm does *not* do this — it
+///    leans on the dispatch loop's own `SAFEPOINT_STRIDE`, and compiled code has
+///    no dispatch loop to lean on;
+/// 2. `machine.sync(pc)` — the same line the encoded arm has, and for the same
+///    reason: `Machine::allocate` may collect, and a collection walks this
+///    frame;
+/// 3. `Machine::allocate`, whole. Not one part of it: the `u32` conversion, the
+///    `try_payload_words` overflow rejection, the collect-and-retry and the
+///    single "this run has no memory left" refusal are that function's and stay
+///    there, which is ADR 0055's "runtime operations remain runtime helpers
+///    initially" with allocation as the archetype.
+///
+/// # Safety
+///
+/// As [`safepoint`].
+///
+/// [ADR 0040]: ../../../../../docs/adr/0040-a-bound-outlives-its-backend.md
+unsafe extern "C" fn alloc(ctx: *mut NativeCtx, pc: u32, layout: u32, len: i64) -> u64 {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+    let budget = (*host).budget;
+
+    // An allocation is a safepoint. The work went into `pending_work` before the
+    // hand-over and is charged here, so nothing is counted twice and nothing is
+    // dropped if the safepoint stops the run.
+    let work = (*ctx).pending_work;
+    (*ctx).pending_work = 0;
+
+    // One borrow that ends before compiled code runs again; see the module's
+    // aliasing note.
+    let answered = {
+        let machine = &mut *machine;
+        machine.bulk_work += work;
+        machine.sync(pc as usize);
+        let id = machine
+            .frames
+            .last()
+            .expect("a native frame is executing")
+            .function;
+        machine
+            .safepoint(budget, id, pc as usize)
+            .and_then(|()| machine.allocate(LayoutId(layout), len))
+            // The span is the *allocating* instruction's, which is what the
+            // encoded arm's `fail!` attaches through its own `sync`. Compiled
+            // code knows the pc and the runtime knows the span, which is the
+            // division every raise here makes.
+            .map_err(|error| error.at(machine.span(id, pc as usize)))
+    };
+    // The allocation may have committed a heap chunk and the safepoint may have
+    // grown the stack, so both pointers compiled code cached are stale.
+    republish(ctx, host);
+    match answered {
+        Ok(addr) => addr,
+        Err(error) => {
+            (*host).left = Some(error);
+            // Zero is not an address — the heap begins at `HEAP_ORIGIN_WORDS` —
+            // so it needs no second output to mean "I am holding the error".
+            0
+        }
+    }
+}
+
+/// The builtin helper: one `Inst::CallBuiltin`, handed over whole.
+///
+/// See [`cove_native::BuiltinFn`] for what this is *for*, which is the half of it
+/// that matters: it is the cold path of a builtin whose fast path emitted code
+/// takes, and it exists because the messages those cold paths produce name a
+/// rendered `Value` that `cove-native` cannot see. It is `encoded.rs`'s
+/// `CALL_BUILTIN` arm and nothing else — the same `Machine::call_builtin`, the same
+/// operand buffer, the same dispatch by two strings — so the sentence a refusal
+/// produces is the one the VM has always produced, rather than a second copy of it
+/// in a code generator.
+///
+/// A builtin may allocate and an allocation may collect, so this is a safepoint for
+/// exactly [`alloc`]'s reason and takes the same three steps in the same order.
+///
+/// # Safety
+///
+/// As [`safepoint`].
+unsafe extern "C" fn builtin(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    dst: u32,
+    builtin: u32,
+    args: u32,
+) -> u32 {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+    let budget = (*host).budget;
+
+    let work = (*ctx).pending_work;
+    (*ctx).pending_work = 0;
+
+    let answered = {
+        let machine = &mut *machine;
+        machine.bulk_work += work;
+        machine.sync(pc as usize);
+        let frame = *machine.frames.last().expect("a native frame is executing");
+        debug_assert_eq!(
+            machine.mem.stack_index(frame.base) as u64,
+            base,
+            "compiled code and the frame stack disagree about which frame the builtin is in"
+        );
+        machine
+            .safepoint(budget, frame.function, pc as usize)
+            // The frame's *address* rather than its index, which is the one thing
+            // emitted code would have had to compute and the reason `base` is not
+            // an argument: the top frame is this call's, and the runtime is
+            // already holding it.
+            .and_then(|()| {
+                machine.call_builtin(frame.base, dst as Slot, BuiltinId(builtin), ArgsId(args))
+            })
+            .map_err(|error| error.at(machine.span(frame.function, pc as usize)))
+    };
+    republish(ctx, host);
+    match answered {
+        Ok(()) => Outcome::Returned.abi(),
+        Err(error) => {
+            (*host).left = Some(error);
+            Outcome::Raised.abi()
         }
     }
 }
@@ -1297,6 +1440,8 @@ pub fn helpers() -> NativeHelpers {
         call,
         open,
         close,
+        alloc,
+        builtin,
     }
 }
 
@@ -1386,6 +1531,8 @@ pub fn helpers_ablated<const MASK: u64>() -> NativeHelpers {
         call: call_ablated::<MASK>,
         open,
         close,
+        alloc,
+        builtin,
     }
 }
 

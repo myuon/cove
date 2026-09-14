@@ -33,7 +33,7 @@
 
 use std::mem::offset_of;
 
-use cove_ir::{ArithOp, CmpOp, Function, FunctionId, Inst, Num, Program, Slot};
+use cove_ir::{ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
     types, AbiParam, Block, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData, Signature,
@@ -62,6 +62,12 @@ const SAFEPOINT: &str = "cove_native_safepoint";
 
 /// The name the call helper is imported under. [`SAFEPOINT`]'s note applies.
 const CALL: &str = "cove_native_call";
+
+/// The name the allocation helper is imported under. [`SAFEPOINT`]'s note applies.
+const ALLOC: &str = "cove_native_alloc";
+
+/// The name the builtin helper is imported under. [`SAFEPOINT`]'s note applies.
+const BUILTIN: &str = "cove_native_builtin";
 
 // The `NativeCtx` field offsets, read from the declaration rather than
 // written out. `offset_of!` is a const expression, so the numbers compiled
@@ -119,6 +125,8 @@ pub struct Jit {
     builder: FunctionBuilderContext,
     safepoint: FuncId,
     call: FuncId,
+    alloc: FuncId,
+    builtin: FuncId,
     /// How many functions have been declared, which is how the symbol names
     /// are kept distinct. Compiling the same [`FunctionId`] twice is a
     /// caller's policy question, not an error here, so the name cannot be
@@ -140,6 +148,8 @@ impl Jit {
         // step; the integer in between is the same address either way.
         builder.symbol(SAFEPOINT, helpers.safepoint as usize as *const u8);
         builder.symbol(CALL, helpers.call as usize as *const u8);
+        builder.symbol(ALLOC, helpers.alloc as usize as *const u8);
+        builder.symbol(BUILTIN, helpers.builtin as usize as *const u8);
         let mut module = JITModule::new(builder);
 
         // Pointers are added to a `u64` word index scaled by eight, so a
@@ -157,12 +167,18 @@ impl Jit {
         let safepoint = module.declare_function(SAFEPOINT, Linkage::Import, &signature)?;
         let signature = call_signature(&module);
         let call = module.declare_function(CALL, Linkage::Import, &signature)?;
+        let signature = alloc_signature(&module);
+        let alloc = module.declare_function(ALLOC, Linkage::Import, &signature)?;
+        let signature = builtin_signature(&module);
+        let builtin = module.declare_function(BUILTIN, Linkage::Import, &signature)?;
         Ok(Jit {
             ctx: module.make_context(),
             module,
             builder: FunctionBuilderContext::new(),
             safepoint,
             call,
+            alloc,
+            builtin,
             declared: 0,
             finalized: false,
         })
@@ -197,7 +213,20 @@ impl Jit {
                 .module
                 .declare_func_in_func(self.safepoint, builder.func);
             let call = self.module.declare_func_in_func(self.call, builder.func);
-            Lower::new(&mut builder, program, function, safepoint, call).run();
+            let alloc = self.module.declare_func_in_func(self.alloc, builder.func);
+            let builtin = self.module.declare_func_in_func(self.builtin, builder.func);
+            Lower::new(
+                &mut builder,
+                program,
+                function,
+                Bound {
+                    safepoint,
+                    call,
+                    alloc,
+                    builtin,
+                },
+            )
+            .run();
             builder.seal_all_blocks();
             builder.finalize(self.module.target_config());
         }
@@ -306,13 +335,62 @@ fn call_signature(module: &JITModule) -> Signature {
     signature
 }
 
+/// [`crate::abi::AllocFn`], in Cranelift's terms.
+///
+/// `I64` for the answer because it is a linear word address, and `I64` for `len`
+/// because it is the `i64` `Machine::allocate` takes — see
+/// [`crate::abi::AllocFn`] for why the count is not narrowed on the way.
+fn alloc_signature(module: &JITModule) -> Signature {
+    let mut signature = module.make_signature();
+    signature
+        .params
+        .push(AbiParam::new(module.target_config().pointer_type()));
+    // `pc`, then `layout`.
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I32));
+    signature.params.push(AbiParam::new(types::I64));
+    signature.returns.push(AbiParam::new(types::I64));
+    signature
+}
+
+/// [`crate::abi::BuiltinFn`], in Cranelift's terms.
+///
+/// [`call_signature`]'s shape, for [`call_signature`]'s reason: the answer is an
+/// [`Outcome`] and is returned from the compiled function unchanged, so the two
+/// widths have to be the one width.
+fn builtin_signature(module: &JITModule) -> Signature {
+    let mut signature = module.make_signature();
+    signature
+        .params
+        .push(AbiParam::new(module.target_config().pointer_type()));
+    // `base`, then `pc`, `dst`, `builtin`, `args`.
+    signature.params.push(AbiParam::new(types::I64));
+    for _ in 0..4 {
+        signature.params.push(AbiParam::new(types::I32));
+    }
+    signature.returns.push(AbiParam::new(types::I32));
+    signature
+}
+
+/// The four helpers this arm calls, as references inside one function.
+///
+/// A struct rather than four parameters of [`Lower::new`], because they arrive
+/// together, are never chosen between, and four `FuncRef`s in a signature is the
+/// shape a fifth would make unreadable.
+#[derive(Clone, Copy)]
+struct Bound {
+    safepoint: FuncRef,
+    call: FuncRef,
+    alloc: FuncRef,
+    builtin: FuncRef,
+}
+
 /// One function's lowering.
 struct Lower<'a, 'f> {
     b: &'a mut FunctionBuilder<'f>,
     program: &'a Program,
     function: &'a Function,
-    safepoint: FuncRef,
-    call: FuncRef,
+    bound: Bound,
     pointer: Type,
     /// The entry parameters. Defined in the entry block, which dominates
     /// every other, so they are readable from anywhere without a block
@@ -364,8 +442,7 @@ impl<'a, 'f> Lower<'a, 'f> {
         b: &'a mut FunctionBuilder<'f>,
         program: &'a Program,
         function: &'a Function,
-        safepoint: FuncRef,
-        call: FuncRef,
+        bound: Bound,
     ) -> Self {
         let pointer = b.func.signature.params[0].value_type;
         let blocks: Vec<Option<(Block, u32)>> = leaders(program, function)
@@ -393,8 +470,7 @@ impl<'a, 'f> Lower<'a, 'f> {
             b,
             program,
             function,
-            safepoint,
-            call,
+            bound,
             pointer,
             ctx,
             base,
@@ -538,12 +614,25 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.load_elem(*dst, *obj, *index, self.program.layout(*layout).width());
                 false
             }
+            Inst::StoreElem {
+                obj,
+                index,
+                src,
+                layout,
+            } => {
+                self.store_elem(*obj, *index, *src, self.program.layout(*layout).width());
+                false
+            }
             Inst::ByteAt { dst, obj, at } => {
                 self.byte_at(*dst, *obj, *at);
                 false
             }
             Inst::Call { dst, callee, args } => {
                 self.callee(*dst, callee.0, args.0);
+                false
+            }
+            Inst::Alloc { dst, layout, len } => {
+                self.allocate(*dst, layout.0, *len);
                 false
             }
             Inst::Switch { on, table } => {
@@ -668,6 +757,15 @@ impl<'a, 'f> Lower<'a, 'f> {
             Inst::CallBuiltin { dst, builtin, args } => {
                 match method_of(self.program, *dst, *builtin, *args) {
                     Some(Method::ByteLength { dst, obj }) => self.len_of(dst, obj),
+                    Some(Method::Push {
+                        dst,
+                        recv,
+                        vector,
+                        value,
+                        stride,
+                        builtin,
+                        args,
+                    }) => self.vector_push(dst, recv, vector, value, stride, builtin, args),
                     None => unreachable!("`supported` admitted a builtin no arm lowers"),
                 }
                 false
@@ -913,6 +1011,204 @@ impl<'a, 'f> Lower<'a, 'f> {
         self.b.ins().band_imm_u(header, LEN_MASK)
     }
 
+    /// `encoded.rs`'s `ALLOC_FIXED | ALLOC_IMM | ALLOC_SLOT` arm: the runtime
+    /// allocates, and this stores the address it answered.
+    ///
+    /// See [`crate::abi::AllocFn`] for why none of `Machine::allocate` is emitted
+    /// and for what the zero answer means. What is emitted is the hand-over and
+    /// [`Lower::callee`]'s three things around it: the unpaid work published and the
+    /// accumulator cleared, because the helper is a safepoint and charges what it
+    /// finds; both cached pointers dropped, because a collection may have grown the
+    /// stack and an allocation may have committed a heap chunk; and a zero answer
+    /// left with as [`Raise::Called`], because the runtime is holding the whole
+    /// error.
+    fn allocate(&mut self, dst: Slot, layout: u32, len: Len) {
+        // The count is formed before the work is published, which is arbitrary here
+        // — Cranelift orders by data flow — and is written this way so the two arms
+        // read alike.
+        let count = match len {
+            // `Len::Fixed`'s count is nought, which is what the encoded arm hands
+            // `Machine::allocate` for it: the layout already fixes the size.
+            Len::Fixed => self.b.ins().iconst(types::I64, 0),
+            Len::Count(count) => self.b.ins().iconst(types::I64, i64::from(count)),
+            // Read as a whole word and handed over as one. A negative count, or one
+            // past what the header's length field holds, is the *helper's* to refuse
+            // — see `Machine::allocate` — so narrowing it here would be a second
+            // refusal with a different message.
+            Len::Slot(at) => self.load_slot(at),
+        };
+        let work = self.b.use_var(self.work);
+        self.store_ctx(OFF_PENDING_WORK, work);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        self.b.def_var(self.work, zero);
+
+        let at = self.b.ins().iconst(types::I32, self.pc as i64);
+        let which = self.b.ins().iconst(types::I32, i64::from(layout));
+        let call = self
+            .b
+            .ins()
+            .call(self.bound.alloc, &[self.ctx, at, which, count]);
+        let addr = self.b.inst_results(call)[0];
+        self.forget();
+
+        // Zero is not an address — the heap begins at `HEAP_ORIGIN_WORDS` — so the
+        // one test says both "it refused" and "the runtime has the sentence".
+        let refused = self.b.ins().icmp_imm_s(IntCC::Equal, addr, 0);
+        self.raise_if(refused, Raise::Called, 0);
+        self.store_slot(dst, addr);
+    }
+
+    /// `vm::builtins::seq::vector_push`'s fast path: the element into spare
+    /// capacity, and the length bumped.
+    ///
+    /// See [`Method::Push`](crate::subset::Method::Push) for which of the builtin's
+    /// preconditions are emitted and which go to
+    /// [`BuiltinFn`](crate::abi::BuiltinFn), and why. The three tests in front of
+    /// the write are the receiver's declared layout against the object's own
+    /// header, the store word against nought — which is what `freeze()` leaves —
+    /// and the length against the capacity. Each failure is a *cold* path and all
+    /// three share one, because what happens there is the same thing: the VM
+    /// performs the whole push.
+    ///
+    /// The comparison of length against capacity is unsigned and that is exact
+    /// rather than clever: the length is a payload word narrowed to `u32` and the
+    /// capacity is a header's low half, so both are below 2^32 and
+    /// `UnsignedGreaterThanOrEqual` is `items.len < items.capacity` read the other
+    /// way.
+    #[allow(clippy::too_many_arguments)]
+    fn vector_push(
+        &mut self,
+        dst: Slot,
+        recv: Slot,
+        vector: LayoutId,
+        value: Slot,
+        stride: u32,
+        builtin: u32,
+        args: u32,
+    ) {
+        let cold = self.b.create_block();
+        let join = self.b.create_block();
+
+        let header = self.load_slot(recv);
+        // `vector()`'s `if addr == 0 { null_value() }`, which is the one refusal of
+        // this builtin a program reaches and this crate can name.
+        self.refuse_null(header);
+
+        // `machine.object_layout(addr)`: the header's high half. The call site's
+        // declared layout is what every static fact below was derived from, so a
+        // header that says something else is a receiver this code cannot push to.
+        let word = self.heap_word(header);
+        let named = self.b.ins().ushr_imm_u(word, 32);
+        let wrong = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, named, i64::from(vector.0));
+        let known = self.b.create_block();
+        self.b.ins().brif(wrong, cold, &[], known, &[]);
+        self.b.switch_to_block(known);
+
+        // `machine.payload(addr, 1)`: the store. `freeze()` leaves nought here.
+        let one = self.b.ins().iconst(types::I64, 1);
+        let store = self.payload(header, one);
+        let frozen = self.b.ins().icmp_imm_s(IntCC::Equal, store, 0);
+        let live = self.b.create_block();
+        self.b.ins().brif(frozen, cold, &[], live, &[]);
+        self.b.switch_to_block(live);
+
+        // `machine.payload(addr, 0) as u32` against `machine.object_len(store)`.
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let held = self.payload(header, zero);
+        let len = self.b.ins().band_imm_u(held, LEN_MASK);
+        let capacity = self.object_len(store);
+        let full = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, len, capacity);
+        let room = self.b.create_block();
+        self.b.ins().brif(full, cold, &[], room, &[]);
+        self.b.switch_to_block(room);
+
+        // Where the element goes: `store + 1 + len * stride`. The stride is a
+        // compile-time constant and the product is formed in `u64`, which agrees
+        // with `set_payload_run`'s `u32` on every product the test above admits —
+        // the store's payload words are a `u32` and this is inside them.
+        let at = self.b.ins().imul_imm_s(len, i64::from(stride));
+        for word in 0..stride {
+            let held = self.load_slot(value + word);
+            let into = self.b.ins().iadd_imm_s(at, i64::from(word));
+            self.set_payload(store, into, held);
+        }
+        // `machine.set_payload(items.header, 0, items.len as u64 + 1)`.
+        let grown = self.b.ins().iadd_imm_s(len, 1);
+        self.set_payload(header, zero, grown);
+        // `Ok(0)`: one word of nought, which is the `Unit` the builtin answers.
+        let nothing = self.b.ins().iconst(types::I64, 0);
+        self.store_slot(dst, nothing);
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(cold);
+        self.builtin_call(dst, builtin, args);
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(join);
+        // One predecessor of this join came through a helper, so neither pointer the
+        // other one derived is to be trusted here.
+        self.forget();
+    }
+
+    /// One [`Inst::CallBuiltin`](cove_ir::Inst::CallBuiltin), handed to the runtime
+    /// whole.
+    ///
+    /// See [`crate::abi::BuiltinFn`] for what this is for and what it is not: it is
+    /// the cold path of a builtin whose fast path is emitted, and never a way to
+    /// lower one. The shape is [`Lower::callee`]'s, down to the outcome being
+    /// returned from this function unchanged.
+    fn builtin_call(&mut self, dst: Slot, builtin: u32, args: u32) {
+        // A builtin may allocate and an allocation may collect, so this is a
+        // safepoint and the unpaid work goes over with it.
+        let work = self.b.use_var(self.work);
+        self.store_ctx(OFF_PENDING_WORK, work);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        self.b.def_var(self.work, zero);
+
+        let at = self.b.ins().iconst(types::I32, self.pc as i64);
+        let into = self.b.ins().iconst(types::I32, i64::from(dst));
+        let which = self.b.ins().iconst(types::I32, i64::from(builtin));
+        let list = self.b.ins().iconst(types::I32, i64::from(args));
+        let call = self.b.ins().call(
+            self.bound.builtin,
+            &[self.ctx, self.base, at, into, which, list],
+        );
+        let outcome = self.b.inst_results(call)[0];
+        self.forget();
+
+        let left = self.b.create_block();
+        let on = self.b.create_block();
+        let returned =
+            self.b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, outcome, i64::from(Outcome::Returned.abi()));
+        self.b.ins().brif(returned, on, &[], left, &[]);
+
+        self.b.switch_to_block(left);
+        // Not `leave`: what this returns is the helper's outcome and not one this
+        // function chose, and every field that outcome needs the helper has written.
+        self.b.ins().return_(&[outcome]);
+
+        self.b.switch_to_block(on);
+        self.forget();
+    }
+
+    /// `Memory::set_payload`: payload word `at` of the object at `addr`, written.
+    ///
+    /// [`Lower::payload`] in the other direction, and the `+ 1` is the same one.
+    fn set_payload(&mut self, addr: Value, at: Value, word: Value) {
+        let one = self.b.ins().iadd_imm_s(at, 1);
+        let which = self.b.ins().iadd(addr, one);
+        let ptr = self.heap_ptr(which);
+        self.b.ins().store(MemFlagsData::trusted(), word, ptr, 0);
+    }
+
     /// `encoded.rs`'s `LEN` arm, whole: the null refusal and the header's low
     /// half.
     ///
@@ -965,6 +1261,31 @@ impl<'a, 'f> Lower<'a, 'f> {
             let at = self.b.ins().iadd_imm_s(at, i64::from(word));
             let value = self.payload(addr, at);
             self.store_slot(dst + word, value);
+        }
+    }
+
+    /// `encoded.rs`'s `STORE_ELEM` arm: `Machine::element`, and then a copy of
+    /// `width` words *into* the payload.
+    ///
+    /// [`Lower::load_elem`] backwards, with the same one unsigned comparison and
+    /// the same stride. Nothing is held back for overlap the way [`Lower::copy`]
+    /// holds words back: the source is a frame and the destination is the heap,
+    /// which are two regions.
+    fn store_elem(&mut self, obj: Slot, index: Slot, src: Slot, width: u32) {
+        let addr = self.load_slot(obj);
+        self.refuse_null(addr);
+        let index = self.load_slot(index);
+        let len = self.object_len(addr);
+        let outside = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, index, len);
+        self.raise_range(outside, Raise::IndexOutOfRange, index, len);
+        let at = self.b.ins().imul_imm_s(index, i64::from(width));
+        for word in 0..width {
+            let held = self.load_slot(src + word);
+            let into = self.b.ins().iadd_imm_s(at, i64::from(word));
+            self.set_payload(addr, into, held);
         }
     }
 
@@ -1137,11 +1458,13 @@ impl<'a, 'f> Lower<'a, 'f> {
     /// A safepoint: hand the runtime the unpaid work, and leave if it says to.
     ///
     /// Emitted on every backedge, which is the floor ADR 0055 sets
-    /// ("Safepoints occur at least: on loop backedges; …"). The other four
-    /// places the ADR names are not reachable in this slice — there are no
-    /// Host effects, no allocation and no runtime calls to put one around —
-    /// with one exception that is a real and stated gap: **this slice does not
-    /// split a long straight-line block.** A loop-free function of a hundred
+    /// ("Safepoints occur at least: on loop backedges; …"). It is no longer the
+    /// only one: [`Lower::allocate`] and [`Lower::builtin_call`] are the ADR's
+    /// "around allocation or runtime calls which may collect", and each of their
+    /// helpers takes the same three steps in the same order before it does
+    /// anything else. Host effects are still outside this slice. One of the
+    /// ADR's five remains a real and stated gap: **this slice does not split a
+    /// long straight-line block.** A loop-free function of a hundred
     /// thousand instructions therefore polls once, at its return, and the
     /// ADR's "at bounded intervals inside long straight-line code" is not yet
     /// honoured. That is the next slice's work and it is why this tier is not
@@ -1154,7 +1477,10 @@ impl<'a, 'f> Lower<'a, 'f> {
     fn safepoint(&mut self, pc: u32) {
         let work = self.b.use_var(self.work);
         let at = self.b.ins().iconst(types::I32, i64::from(pc));
-        let call = self.b.ins().call(self.safepoint, &[self.ctx, at, work]);
+        let call = self
+            .b
+            .ins()
+            .call(self.bound.safepoint, &[self.ctx, at, work]);
         let carry_on = self.b.inst_results(call)[0];
         // Charged, so no longer pending — on both sides of the branch below.
         let zero = self.b.ins().iconst(types::I64, 0);
@@ -1289,10 +1615,10 @@ impl<'a, 'f> Lower<'a, 'f> {
         let callee = self.b.ins().iconst(types::I32, i64::from(callee));
         let args = self.b.ins().iconst(types::I32, i64::from(args));
         let into = self.b.ins().iconst(types::I32, i64::from(dst));
-        let call = self
-            .b
-            .ins()
-            .call(self.call, &[self.ctx, self.base, at, callee, args, into]);
+        let call = self.b.ins().call(
+            self.bound.call,
+            &[self.ctx, self.base, at, callee, args, into],
+        );
         let outcome = self.b.inst_results(call)[0];
         self.forget();
 

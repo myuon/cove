@@ -165,6 +165,41 @@ fn a_len_reads_the_header_and_refuses_null() {
 }
 
 #[test]
+fn an_allocation_hands_the_layout_and_the_length_over_whole() {
+    suite::an_allocation_hands_the_layout_and_the_length_over_whole::<Template>();
+}
+
+#[test]
+fn an_allocation_the_runtime_refuses_leaves_as_called() {
+    suite::an_allocation_the_runtime_refuses_leaves_as_called::<Template>();
+}
+
+#[test]
+fn a_reference_is_in_its_slot_across_an_allocation() {
+    suite::a_reference_is_in_its_slot_across_an_allocation::<Template>();
+}
+
+#[test]
+fn a_push_into_spare_capacity_writes_the_element_and_the_length() {
+    suite::a_push_into_spare_capacity_writes_the_element_and_the_length::<Template>();
+}
+
+#[test]
+fn every_cold_path_of_a_push_goes_to_the_runtime() {
+    suite::every_cold_path_of_a_push_goes_to_the_runtime::<Template>();
+}
+
+#[test]
+fn a_cold_push_that_raised_leaves_with_that_outcome() {
+    suite::a_cold_push_that_raised_leaves_with_that_outcome::<Template>();
+}
+
+#[test]
+fn a_push_refuses_a_null_receiver() {
+    suite::a_push_refuses_a_null_receiver::<Template>();
+}
+
+#[test]
 fn a_byte_length_builtin_reads_the_header_and_refuses_null() {
     suite::a_byte_length_builtin_reads_the_header_and_refuses_null::<Template>();
 }
@@ -177,6 +212,11 @@ fn a_builtin_no_arm_lowers_refuses_the_function() {
 #[test]
 fn a_load_elem_strides_and_bounds_its_index() {
     suite::a_load_elem_strides_and_bounds_its_index::<Template>();
+}
+
+#[test]
+fn a_store_elem_strides_and_bounds_its_index() {
+    suite::a_store_elem_strides_and_bounds_its_index::<Template>();
 }
 
 #[test]
@@ -347,11 +387,17 @@ unsafe extern "C" fn close(ctx: *mut NativeCtx, outcome: u32, callee: u32) -> u3
 }
 
 fn direct_helpers() -> NativeHelpers {
+    let shared = suite::helpers();
     NativeHelpers {
         safepoint,
         call,
         open,
         close,
+        // The direct-call cases reach neither, so the suite's doubles are bound
+        // rather than two more panicking stubs: a table with a `todo!()` in it is
+        // a table somebody has to keep honest.
+        alloc: shared.alloc,
+        builtin: shared.builtin,
     }
 }
 
