@@ -176,3 +176,23 @@ fn a_call_hands_over_and_an_outcome_travels_out() {
 fn a_reference_is_in_its_slot_at_every_safepoint() {
     suite::a_reference_is_in_its_slot_at_every_safepoint::<Cranelift>();
 }
+
+#[test]
+fn a_clear_zeroes_the_words_its_layout_names() {
+    suite::a_clear_zeroes_the_words_its_layout_names::<Cranelift>();
+}
+
+#[test]
+fn an_address_of_a_slot_is_the_linear_address_of_it() {
+    suite::an_address_of_a_slot_is_the_linear_address_of_it::<Cranelift>();
+}
+
+#[test]
+fn an_address_of_a_part_is_one_addition() {
+    suite::an_address_of_a_part_is_one_addition::<Cranelift>();
+}
+
+#[test]
+fn a_load_and_a_store_reach_either_region() {
+    suite::a_load_and_a_store_reach_either_region::<Cranelift>();
+}

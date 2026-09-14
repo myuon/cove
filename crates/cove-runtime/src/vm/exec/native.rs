@@ -833,8 +833,12 @@ unsafe fn enter<const MASK: u64>(
     }
     let (mut ctx, into_index) = {
         let machine = &mut *machine;
-        let ctx = NativeCtx::new(host.cast::<c_void>(), machine.mem.words_ptr())
-            .over_heap((*host).table());
+        let ctx = NativeCtx::new(
+            host.cast::<c_void>(),
+            machine.mem.words_ptr(),
+            machine.mem.stack_origin(),
+        )
+        .over_heap((*host).table());
         // The destination as the callee is given it: a word index, taken *after*
         // the frame was pushed and stable whatever a later `push_frame` does to
         // the `Vec`. This is the line ADR 0057's "never pointers" is about.
@@ -1759,8 +1763,12 @@ unsafe fn again_ctx(
     base: u64,
     into: Destination,
 ) {
-    let ctx =
-        NativeCtx::new(host.cast::<c_void>(), machine.mem.words_ptr()).over_heap((*host).table());
+    let ctx = NativeCtx::new(
+        host.cast::<c_void>(),
+        machine.mem.words_ptr(),
+        machine.mem.stack_origin(),
+    )
+    .over_heap((*host).table());
     std::hint::black_box(&ctx);
     std::hint::black_box(machine.mem.stack_index(base) as u64);
     std::hint::black_box(machine.mem.stack_index(into.base) as u64);
@@ -1882,8 +1890,12 @@ unsafe fn mediation_again(
             pc: 0,
             dst: dst as Slot,
         });
-        let held = NativeCtx::new(host.cast::<c_void>(), machine.mem.words_ptr())
-            .over_heap((*host).table());
+        let held = NativeCtx::new(
+            host.cast::<c_void>(),
+            machine.mem.words_ptr(),
+            machine.mem.stack_origin(),
+        )
+        .over_heap((*host).table());
         std::hint::black_box(&held);
         std::hint::black_box(machine.mem.stack_index(callee_base) as u64);
         std::hint::black_box(machine.mem.stack_index(caller_base) as u64);

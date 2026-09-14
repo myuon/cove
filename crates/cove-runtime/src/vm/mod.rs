@@ -257,6 +257,35 @@ impl<'a> Vm<'a> {
         vm
     }
 
+    /// Moves this run onto a **later stack segment**, before it has run
+    /// anything, and answers that segment's stack origin.
+    ///
+    /// A seam for `cove-runtime`'s own `tests/native_tier.rs` and for nothing
+    /// else — `Machine::on_a_later_stack_segment`, which this forwards to, says
+    /// why a test needs one. The short of it: the entry task is segment 0, where
+    /// the stack origin is `0` and a frame's word index and a `Repr::Addr` word
+    /// are the same number, so an address family that dropped the origin answers
+    /// correctly there and only there.
+    ///
+    /// `#[doc(hidden)]` and behind the code generator's feature because it is not
+    /// API: an embedder has no reason to choose a segment, a default build does
+    /// not have this method at all, and no production path calls it. The
+    /// alternative was a test that could reach a later segment only through a
+    /// spawned task, which installs no tier and so would have compared the
+    /// encoded VM with itself.
+    ///
+    /// The origin is answered so that the case can assert it is not nought: a
+    /// test that quietly stayed on segment 0 would be the blind one again.
+    ///
+    /// # Panics
+    ///
+    /// If anything has already run on this `Vm`. See the machine's own method.
+    #[cfg(feature = "template")]
+    #[doc(hidden)]
+    pub fn on_a_later_stack_segment(&mut self) -> u64 {
+        self.machine.on_a_later_stack_segment()
+    }
+
     /// How this run's calls divided between the tiers, one counter per
     /// transition.
     ///

@@ -38,6 +38,7 @@ use crate::Unavailable;
 // out, exactly as the Cranelift arm reads them.
 const OFF_WORDS: i32 = offset_of!(NativeCtx, words) as i32;
 const OFF_CHUNKS: i32 = offset_of!(NativeCtx, chunks) as i32;
+const OFF_STACK_ORIGIN: i32 = offset_of!(NativeCtx, stack_origin) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
 const OFF_RAISE_CODE: i32 = offset_of!(NativeCtx, raise_code) as i32;
 const OFF_RAISE_DETAIL: i32 = offset_of!(NativeCtx, raise_detail) as i32;
@@ -477,6 +478,40 @@ impl<'a> Emit<'a> {
             Inst::Copy { dst, src, layout } => {
                 self.copy(*dst, *src, self.program.layout(*layout).width());
             }
+            // `encoded.rs`'s `CLEAR` arm: `clear_words(base + slot, width)`. A
+            // frame slot is a stack address by construction, so this is the
+            // `is_stack` branch's stack arm with nothing to decide — one store of
+            // a zero word per word of the layout.
+            Inst::Clear { slot, layout } => {
+                let width = self.program.layout(*layout).width();
+                if width > 0 {
+                    self.xor_rr(RAX, RAX);
+                    for word in 0..width {
+                        self.store_slot(slot + word, RAX);
+                    }
+                }
+            }
+            // `encoded.rs`'s `ADDR_OF_SLOT` arm: `base + slot`, where `base` is
+            // the frame's *linear* address and not the byte offset this arm keeps
+            // in `BASE_BYTES`. See [`Emit::frame_addr`].
+            Inst::AddrOfSlot { dst, slot } => {
+                self.frame_addr(RAX);
+                self.add_imm32(RAX, *slot as i32);
+                self.store_slot(*dst, RAX);
+            }
+            // `encoded.rs`'s `ADDR_OF_PART` arm, and the comment there is the
+            // whole of it: "Arithmetic and nothing else."
+            Inst::AddrOfPart { dst, addr, at } => {
+                self.load_slot(RAX, *addr);
+                self.add_imm32(RAX, *at as i32);
+                self.store_slot(*dst, RAX);
+            }
+            Inst::Load { dst, addr, layout } => {
+                self.load_through(*dst, *addr, self.program.layout(*layout).width());
+            }
+            Inst::Store { addr, src, layout } => {
+                self.store_through(*addr, *src, self.program.layout(*layout).width());
+            }
             // `encoded.rs`'s `NOT` arm tests the whole *word* against zero, not
             // the low byte, so that is what is tested here.
             Inst::Not { dst, a } => {
@@ -610,11 +645,11 @@ impl<'a> Emit<'a> {
         self.store(FRAME, at, from);
     }
 
-    /// The heap word at the linear address in `reg`, into `reg`.
+    /// The *address* of the heap word at the linear address in `reg`, into
+    /// [`HEAP_TABLE`].
     ///
     /// `Memory::read`'s heap half, which is `Space::load`: subtract the heap
-    /// origin, find the chunk, and index inside it. The `Relaxed` atomic load
-    /// that Rust half performs is a plain `mov` on x86-64.
+    /// origin, find the chunk, and index inside it.
     ///
     /// **Eleven instructions, and the table is re-loaded from the context every
     /// time.** That is this arm being a template compiler rather than an
@@ -626,7 +661,7 @@ impl<'a> Emit<'a> {
     ///
     /// `reg` must not be one of the three heap scratch registers, which every
     /// caller below satisfies by using `RAX`, `RCX` or `RDX`.
-    fn heap_word(&mut self, reg: u8) {
+    fn heap_ptr(&mut self, reg: u8) {
         debug_assert!(
             reg != HEAP_TABLE && reg != HEAP_INDEX && reg != HEAP_SPARE,
             "a heap address is formed in the scratch, so it cannot live in it"
@@ -650,7 +685,119 @@ impl<'a> Emit<'a> {
         self.and_imm32(HEAP_INDEX, (HEAP_CHUNK_WORDS - 1) as i32);
         self.shl_imm8(HEAP_INDEX, 3);
         self.add_rr(HEAP_TABLE, HEAP_INDEX);
+    }
+
+    /// The heap word at the linear address in `reg`, into `reg`.
+    ///
+    /// The `Relaxed` atomic load `Space::load` performs is a plain `mov` on
+    /// x86-64.
+    fn heap_word(&mut self, reg: u8) {
+        self.heap_ptr(reg);
         self.load(reg, HEAP_TABLE, 0);
+    }
+
+    /// The *address* of the word at the linear address in `reg`, whichever region
+    /// it names, into [`HEAP_TABLE`]. `reg` is clobbered.
+    ///
+    /// `Memory::read`'s and `Memory::write`'s shared first line —
+    /// `is_stack(addr)`, which is `addr < HEAP_ORIGIN_WORDS` — emitted rather than
+    /// called. See [`crate::abi`]'s "An address names either region" for why it is
+    /// emitted: the two arms are five instructions and eleven, and a helper call
+    /// would cost more than either *and* end the span in which a cached
+    /// [`NativeCtx::words`] may be trusted.
+    ///
+    /// `HEAP_ORIGIN_WORDS` does not fit an `imm32`, so the comparison is a
+    /// `movabs` and a `cmp` — the same pair [`Emit::heap_ptr`] opens with, and the
+    /// duplication is this arm having templates rather than a value graph.
+    fn word_ptr(&mut self, reg: u8) {
+        let on_stack = self.label();
+        let done = self.label();
+        self.mov_imm64(HEAP_SPARE, HEAP_ORIGIN_WORDS as i64);
+        self.cmp_rr(reg, HEAP_SPARE);
+        self.jcc(CC_B, Target::Label(on_stack));
+        self.heap_ptr(reg);
+        self.jmp(Target::Label(done));
+        self.bind(on_stack);
+        // `Stack::at`'s subtraction and nothing else: `words[addr - origin]`. The
+        // origin is re-read from the context rather than held in a register,
+        // because only the address family reads it and a sixth long-lived register
+        // would be a cost on every function that has no address in it.
+        self.load(HEAP_TABLE, CTX, OFF_WORDS);
+        self.load(HEAP_INDEX, CTX, OFF_STACK_ORIGIN);
+        self.sub_rr(reg, HEAP_INDEX);
+        self.shl_imm8(reg, 3);
+        self.add_rr(HEAP_TABLE, reg);
+        self.bind(done);
+    }
+
+    /// This frame's first word, as a **linear address**, into `reg`.
+    ///
+    /// What `encoded.rs` calls `base`, which is the number an `addr-of-slot` adds
+    /// its slot to. This arm keeps the frame as a *byte* offset from the segment's
+    /// first word, and the address is the segment's origin plus the word index, so
+    /// the shift the prologue paid once is undone here — the one place that
+    /// decision costs an instruction besides the two call sequences.
+    ///
+    /// It has to be the same number the VM would have formed, because the two
+    /// tiers pass these words to each other: an `addr-of-slot` in compiled code
+    /// becomes a `var` argument an encoded callee writes through.
+    fn frame_addr(&mut self, reg: u8) {
+        self.mov_rr(reg, BASE_BYTES);
+        self.shr_imm8(reg, 3);
+        self.load(HEAP_TABLE, CTX, OFF_STACK_ORIGIN);
+        self.add_rr(reg, HEAP_TABLE);
+    }
+
+    /// `encoded.rs`'s `LOAD` arm: `copy_words(base + dst, addr, width)`.
+    ///
+    /// `RCX` holds the address for the whole template and `RDX` is where each
+    /// word's own address is formed; the words wait on the machine stack, which is
+    /// what [`Emit::copy`] has instead of sixteen free registers.
+    ///
+    /// Every word is read before any is written, for [`Emit::copy`]'s reason and
+    /// with one more behind it: `copy_words` is a `memmove` where both runs are on
+    /// the stack, and an address formed by `addr-of-slot` from *this* frame makes
+    /// that case reachable — `load s3 <- &s1` with the runs overlapping is
+    /// something the lowering may emit and does not have to prove it does not.
+    fn load_through(&mut self, dst: Slot, addr: Slot, width: u32) {
+        if width == 0 {
+            return;
+        }
+        self.load_slot(RCX, addr);
+        for word in 0..width {
+            self.mov_rr(RDX, RCX);
+            self.add_imm32(RDX, word as i32);
+            self.word_ptr(RDX);
+            self.load(RAX, HEAP_TABLE, 0);
+            self.push(RAX);
+        }
+        for word in (0..width).rev() {
+            self.pop(RAX);
+            self.store_slot(dst + word, RAX);
+        }
+    }
+
+    /// `encoded.rs`'s `STORE` arm: `copy_words(addr, base + src, width)`.
+    ///
+    /// [`Emit::load_through`]'s order, in the other direction and for the same
+    /// reason. The address stays in `RCX` across the stores, which nothing in
+    /// [`Emit::word_ptr`] touches.
+    fn store_through(&mut self, addr: Slot, src: Slot, width: u32) {
+        if width == 0 {
+            return;
+        }
+        for word in 0..width {
+            self.load_slot(RAX, src + word);
+            self.push(RAX);
+        }
+        self.load_slot(RCX, addr);
+        for word in (0..width).rev() {
+            self.pop(RAX);
+            self.mov_rr(RDX, RCX);
+            self.add_imm32(RDX, word as i32);
+            self.word_ptr(RDX);
+            self.store(HEAP_TABLE, 0, RAX);
+        }
     }
 
     /// `Memory::object_len`: the header's low half, in `reg`, as a non-negative

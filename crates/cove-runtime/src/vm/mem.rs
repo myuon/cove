@@ -1866,6 +1866,23 @@ impl Memory {
         self.stack.at(base)
     }
 
+    /// The linear address of word zero of this task's segment.
+    ///
+    /// The other half of what compiled code is told about the stack, and the one
+    /// number [`Memory::words_ptr`] is not enough without: a `Repr::Addr` word
+    /// naming a frame slot is a *linear* address, and the index into the words
+    /// behind that pointer is `addr - origin`. It is the subtraction
+    /// [`Memory::read`] makes through `Stack::at`, handed to the other tier so it
+    /// can make the same one.
+    ///
+    /// Unlike the pointer it is **stable for the life of the task**: a segment is
+    /// a reserved range of the index space, chosen when the task attached, and
+    /// growing the `Vec` inside it does not move it. So it is published once, at
+    /// the context, and never re-published.
+    pub(crate) fn stack_origin(&self) -> u64 {
+        self.stack.origin
+    }
+
     /// The first word of this task's segment, as a pointer.
     ///
     /// The whole of what compiled code is told about the stack: a slot of a frame
