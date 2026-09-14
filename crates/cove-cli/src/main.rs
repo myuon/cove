@@ -1375,6 +1375,8 @@ pub(crate) fn execute_entry(
                 Memory::Words {
                     held: vm.heap_words(),
                     handed_out: vm.allocated_words(),
+                    allocations: vm.allocations(),
+                    collections: vm.collections(),
                 },
                 Some(vm.instructions()),
                 coverage,
@@ -1633,6 +1635,21 @@ enum Memory {
         held: u64,
         /// Words handed out over the whole run, reuse counted each time.
         handed_out: u64,
+        /// Objects handed out over the whole run, reuse counted each time.
+        ///
+        /// Beside the words rather than instead of them, because the two answer
+        /// different questions and a change can move one without the other: a
+        /// run that allocates the same bytes in half as many objects has halved
+        /// its allocator traffic and not its footprint.
+        ///
+        /// It is here, rather than only in a `--profile` run's header, because
+        /// [issue #369](https://github.com/myuon/cove/issues/369) asks for
+        /// "allocation count and allocated words" for the *native* tier, and ADR
+        /// 0055 refuses `--profile` beside `--backend native`. A figure only a
+        /// profiled run can report is a figure one of the three arms cannot have.
+        allocations: u64,
+        /// How many times the heap collected.
+        collections: u64,
     },
 }
 
@@ -2400,8 +2417,14 @@ fn print_stats(hosts: &HostRegistry, wait_total: &WaitTotal, memory: &Memory) {
             heap.peak_bytes,
             heap.pause,
         ),
-        Memory::Words { held, handed_out } => eprintln!(
-            "memory: heap_words={held} heap_bytes={} allocated_words={handed_out}",
+        Memory::Words {
+            held,
+            handed_out,
+            allocations,
+            collections,
+        } => eprintln!(
+            "memory: heap_words={held} heap_bytes={} allocated_words={handed_out} \
+             allocations={allocations} collections={collections}",
             held * 8
         ),
     }

@@ -460,6 +460,25 @@ impl<'a> Vm<'a> {
         self.machine.allocated_words()
     }
 
+    /// Objects handed out over the whole run, reuse counted each time.
+    ///
+    /// The count beside [`Vm::allocated_words`]'s total, and it is public for a
+    /// reason worth writing down: the same figure is in a `--profile` run's
+    /// header, and [issue #369](https://github.com/myuon/cove/issues/369)'s
+    /// measurement needs it for a run that **cannot be profiled**. ADR 0055
+    /// refuses `--profile` beside `--backend native`, because the profiler counts
+    /// dispatched opcodes and the native tier dispatches none — so a native run
+    /// asked for its allocation count through the profiler would be the VM
+    /// wearing the native tier's name. This accessor is a counter the allocator
+    /// keeps whichever tier asked it for the memory, so an encoded run and a
+    /// mixed one report it in the same words and neither has to be swapped for
+    /// the other to read it. The tree-walking interpreter's heap is a set of
+    /// objects rather than a run of words and reports its own figures through
+    /// `Runtime::heap_stats`; this is the linear memory's.
+    pub fn allocations(&self) -> u64 {
+        self.machine.allocations()
+    }
+
     /// How many collections this run's heap has done.
     ///
     /// [`Vm::live_words`] is `None` exactly when this is `0`: a heap that has

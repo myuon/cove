@@ -384,13 +384,13 @@ module covefmt
   ///
   /// The check is the repository itself. Every `.cove` file here passes
   /// `cove fmt --check`, so every one of them is already what the formatter
-  /// should produce. `print(parse(source)) == source` on all 246 is the
+  /// should produce. `print(parse(source)) == source` on all 248 is the
   /// weakest form of that and the one to distrust — a formatter's own output
   /// is a fixed point of anything that leaves it alone. `bench.cove` damages
   /// the corpus four ways that cannot change what a program means, and asks
   /// for the original back: the indentation stripped, the breaks inside
   /// brackets joined up, a body of one statement closed up, every run of space
-  /// doubled. All four reach 246 of 246, and it is those that say the rules
+  /// doubled. All four reach 248 of 248, and it is those that say the rules
   /// are rules rather than a copy.
   ///
   /// The output is built by pushing each piece and joining once. Appending with
