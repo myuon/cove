@@ -857,7 +857,7 @@ fn hex(arm: &str, entry: cove_native::Entry, bytes: u32) {
 #[cfg(any(feature = "cranelift", feature = "template"))]
 fn enter(entry: cove_native::Entry, words: &mut [u64], base: u64) -> (u64, i64) {
     let into = (words.len() - 1) as u64;
-    let mut ctx = cove_native::NativeCtx::new(std::ptr::null_mut(), words.as_mut_ptr());
+    let mut ctx = cove_native::NativeCtx::new(std::ptr::null_mut(), words.as_mut_ptr(), 0);
     let started = Instant::now();
     // Safety: `ctx.words` is `words`, `base` indexes into it, the frame the
     // lowering asked for fits inside what was allocated above, and `into` is one

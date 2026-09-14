@@ -70,6 +70,7 @@ const CALL: &str = "cove_native_call";
 // them.
 const OFF_WORDS: i32 = offset_of!(NativeCtx, words) as i32;
 const OFF_CHUNKS: i32 = offset_of!(NativeCtx, chunks) as i32;
+const OFF_STACK_ORIGIN: i32 = offset_of!(NativeCtx, stack_origin) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
 const OFF_RAISE_CODE: i32 = offset_of!(NativeCtx, raise_code) as i32;
 const OFF_RAISE_DETAIL: i32 = offset_of!(NativeCtx, raise_detail) as i32;
@@ -476,6 +477,46 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.copy(*dst, *src, self.program.layout(*layout).width());
                 false
             }
+            // `encoded.rs`'s `CLEAR` arm: `clear_words(base + slot, width)`. A
+            // frame slot is a stack address by construction, so this is the
+            // `is_stack` branch's stack arm with nothing to decide — one store of
+            // a zero word per word of the layout.
+            Inst::Clear { slot, layout } => {
+                let width = self.program.layout(*layout).width();
+                if width > 0 {
+                    let zero = self.b.ins().iconst(types::I64, 0);
+                    for word in 0..width {
+                        self.store_slot(slot + word, zero);
+                    }
+                }
+                false
+            }
+            // `encoded.rs`'s `ADDR_OF_SLOT` arm: `base + slot`, where `base` is
+            // the frame's *linear* address and not the index the entry point was
+            // handed. The two differ by the segment origin, which is why
+            // `NativeCtx::stack_origin` exists — see `crate::abi`.
+            Inst::AddrOfSlot { dst, slot } => {
+                let base = self.frame_addr();
+                let addr = self.b.ins().iadd_imm_s(base, i64::from(*slot));
+                self.store_slot(*dst, addr);
+                false
+            }
+            // `encoded.rs`'s `ADDR_OF_PART` arm, and the comment there is the
+            // whole of it: "Arithmetic and nothing else."
+            Inst::AddrOfPart { dst, addr, at } => {
+                let held = self.load_slot(*addr);
+                let moved = self.b.ins().iadd_imm_s(held, i64::from(*at));
+                self.store_slot(*dst, moved);
+                false
+            }
+            Inst::Load { dst, addr, layout } => {
+                self.load_through(*dst, *addr, self.program.layout(*layout).width());
+                false
+            }
+            Inst::Store { addr, src, layout } => {
+                self.store_through(*addr, *src, self.program.layout(*layout).width());
+                false
+            }
             // `encoded.rs`'s `NOT` arm tests the whole *word* against zero, not
             // the low byte, so that is what is tested here.
             Inst::Not { dst, a } => {
@@ -661,16 +702,11 @@ impl<'a, 'f> Lower<'a, 'f> {
         chunks
     }
 
-    /// The heap word at the linear address `addr`.
+    /// The address of the heap word at the linear address `addr`, as a pointer.
     ///
     /// `Memory::read`'s heap half, which is `Space::load`: subtract the heap
-    /// origin, find the chunk, and index inside it. The `Relaxed` atomic load
-    /// that Rust half performs is a plain load on every target either arm runs
-    /// on, and ADR 0034's argument for why `Relaxed` is enough — the ordering
-    /// that makes one task's writes visible to another is the release/acquire
-    /// pair on a cell's lock word — is unchanged by the load being emitted here
-    /// instead.
-    fn heap_word(&mut self, addr: Value) -> Value {
+    /// origin, find the chunk, and index inside it.
+    fn heap_ptr(&mut self, addr: Value) -> Value {
         let chunks = self.heap_chunks();
         let index = self.b.ins().iadd_imm_s(addr, -(HEAP_ORIGIN_WORDS as i64));
         let which = self.b.ins().ushr_imm_u(index, i64::from(HEAP_CHUNK_SHIFT));
@@ -685,10 +721,150 @@ impl<'a, 'f> Lower<'a, 'f> {
             .ins()
             .band_imm_u(index, (HEAP_CHUNK_WORDS - 1) as i64);
         let offset = self.b.ins().ishl_imm_u(inside, 3);
-        let word = self.b.ins().iadd(chunk, offset);
+        self.b.ins().iadd(chunk, offset)
+    }
+
+    /// The heap word at the linear address `addr`.
+    ///
+    /// The `Relaxed` atomic load `Space::load` performs is a plain load on every
+    /// target either arm runs on, and ADR 0034's argument for why `Relaxed` is
+    /// enough — the ordering that makes one task's writes visible to another is
+    /// the release/acquire pair on a cell's lock word — is unchanged by the load
+    /// being emitted here instead.
+    fn heap_word(&mut self, addr: Value) -> Value {
+        let word = self.heap_ptr(addr);
         self.b
             .ins()
             .load(types::I64, MemFlagsData::trusted(), word, 0)
+    }
+
+    /// The address of the stack word at the linear address `addr`, as a pointer.
+    ///
+    /// `Stack::at`'s subtraction and nothing else: `words[addr - origin]`. The
+    /// origin is re-read from the context rather than cached, because it is read
+    /// only by the address family and a register held across a block would cost
+    /// every function that has no address in it.
+    fn stack_ptr(&mut self, addr: Value) -> Value {
+        let words = self
+            .b
+            .ins()
+            .load(self.pointer, MemFlagsData::trusted(), self.ctx, OFF_WORDS);
+        let origin = self.b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            self.ctx,
+            OFF_STACK_ORIGIN,
+        );
+        let index = self.b.ins().isub(addr, origin);
+        let bytes = self.b.ins().ishl_imm_u(index, 3);
+        self.b.ins().iadd(words, bytes)
+    }
+
+    /// The address of the word at the linear address `addr`, whichever region it
+    /// names.
+    ///
+    /// `Memory::read`'s and `Memory::write`'s shared first line — `is_stack(addr)`,
+    /// which is `addr < HEAP_ORIGIN_WORDS` — emitted rather than called. See
+    /// [`crate::abi`]'s "An address names either region" for why it is emitted:
+    /// the two arms are four instructions and eleven, and a helper call would cost
+    /// more than either *and* end the span in which a cached
+    /// [`NativeCtx::words`] may be trusted.
+    ///
+    /// The branch cannot be hoisted out of a multi-word run and is not: each word
+    /// of a `Load` asks again. That is the same shape `Memory::copy_words` has for
+    /// `words == 1` — a read and a write, region-decoded each time — and it is
+    /// what makes a run that straddles a heap chunk boundary correct without a
+    /// second rule.
+    fn word_ptr(&mut self, addr: Value) -> Value {
+        // What is cached *here* is what the join block is dominated by, and it is
+        // restored below for exactly that reason: a pointer derived inside one of
+        // the two arms is defined in a block that does not dominate the other arm
+        // or the join, so reusing it there is a verifier error — and it is one this
+        // did have, as `uses value v23 from non-dominating inst20`, the second time
+        // a two-word load asked for the chunk table.
+        let outer = (self.frame, self.chunks);
+        let stack = self.b.create_block();
+        let heap = self.b.create_block();
+        let join = self.b.create_block();
+        self.b.append_block_param(join, self.pointer);
+
+        let origin = self.b.ins().iconst(types::I64, HEAP_ORIGIN_WORDS as i64);
+        let below = self.b.ins().icmp(IntCC::UnsignedLessThan, addr, origin);
+        self.b.ins().brif(below, stack, &[], heap, &[]);
+
+        self.b.switch_to_block(stack);
+        let held = self.stack_ptr(addr);
+        self.b.ins().jump(join, &[held.into()]);
+
+        self.b.switch_to_block(heap);
+        let held = self.heap_ptr(addr);
+        self.b.ins().jump(join, &[held.into()]);
+
+        // Neither is *forgotten* — nothing here can grow the stack or commit a
+        // chunk, so a pointer that was live before the branch is still live after
+        // it — but neither may have gained a definition inside an arm.
+        self.b.switch_to_block(join);
+        (self.frame, self.chunks) = outer;
+        self.b.block_params(join)[0]
+    }
+
+    /// This frame's first word, as a **linear address** rather than a pointer.
+    ///
+    /// What `encoded.rs` calls `base`, which is the number an `addr-of-slot` adds
+    /// its slot to. The entry point is handed the frame as a segment-relative
+    /// *index*, for the reallocation reason [`crate::abi`] gives, so the origin
+    /// has to be added back to get the address a `Repr::Addr` word carries — and
+    /// it has to be the same number the VM would have formed, because the two
+    /// tiers pass these words to each other.
+    fn frame_addr(&mut self) -> Value {
+        let origin = self.b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            self.ctx,
+            OFF_STACK_ORIGIN,
+        );
+        self.b.ins().iadd(origin, self.base)
+    }
+
+    /// `encoded.rs`'s `LOAD` arm: `copy_words(base + dst, addr, width)`.
+    ///
+    /// Every word is read before any is written, for [`Lower::copy`]'s reason and
+    /// with one more behind it: `copy_words` is a `memmove` where both runs are on
+    /// the stack, and an address formed by `addr-of-slot` from *this* frame makes
+    /// that case reachable — `load s3 <- &s1` with the runs overlapping is
+    /// something the lowering may emit and does not have to prove it does not.
+    fn load_through(&mut self, dst: Slot, addr: Slot, width: u32) {
+        let base = self.load_slot(addr);
+        let mut held = Vec::with_capacity(width as usize);
+        for word in 0..width {
+            let at = self.b.ins().iadd_imm_s(base, i64::from(word));
+            let ptr = self.word_ptr(at);
+            held.push(
+                self.b
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), ptr, 0),
+            );
+        }
+        for (word, value) in held.into_iter().enumerate() {
+            self.store_slot(dst + word as u32, value);
+        }
+    }
+
+    /// `encoded.rs`'s `STORE` arm: `copy_words(addr, base + src, width)`.
+    ///
+    /// [`Lower::load_through`]'s order, in the other direction and for the same
+    /// reason.
+    fn store_through(&mut self, addr: Slot, src: Slot, width: u32) {
+        let base = self.load_slot(addr);
+        let mut held = Vec::with_capacity(width as usize);
+        for word in 0..width {
+            held.push(self.load_slot(src + word));
+        }
+        for (word, value) in held.into_iter().enumerate() {
+            let at = self.b.ins().iadd_imm_s(base, word as i64);
+            let ptr = self.word_ptr(at);
+            self.b.ins().store(MemFlagsData::trusted(), value, ptr, 0);
+        }
     }
 
     /// `Memory::payload`: payload word `at` of the object whose header is at

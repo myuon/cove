@@ -34,7 +34,7 @@ use std::sync::Arc;
 use cove_diag::{FileId, Span};
 use cove_ir::{
     Arg, ArgsId, ArithOp, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout, LayoutId,
-    Num, Program, RefMap, Repr, StrId, Table, TableId,
+    Num, Program, RefMap, Repr, Slot, StrId, Table, TableId,
 };
 use cove_native::{Entry, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
 use cove_native::{HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS};
@@ -303,6 +303,12 @@ pub const HOST_PAIR: LayoutId = LayoutId(9);
 /// one the frame does not have, so a return that formed the address anyway would
 /// be writing into whatever is above the frame.
 pub const EMPTY: LayoutId = LayoutId(10);
+/// One [`Repr::Addr`] word, which is the whole of what a place is.
+///
+/// `Inst::AddrOfSlot`'s destination and `Inst::Load`'s address: ADR 0034's "There
+/// is no place object, no place stack and no table of places", so a `var`
+/// parameter is an ordinary slot holding a linear word index.
+pub const ADDR: LayoutId = LayoutId(11);
 
 pub fn span() -> Span {
     Span::new(FileId(0), 0, 0)
@@ -370,6 +376,7 @@ pub fn program(function: Function) -> Program {
                 },
                 Vec::new(),
             ),
+            Layout::word("Addr", Repr::Addr),
         ],
         // `ArgsId(0)` is the empty argument list, which is what a call in these
         // tests hands over: the double records the hand-over and does not read
@@ -394,6 +401,20 @@ pub fn program_with_args(function: Function, args: Vec<Arg>) -> Program {
     held.args.push(args);
     held
 }
+
+/// The linear address of word zero of the segment every case runs over.
+///
+/// **Not zero, and that is the whole point of it.** It is
+/// [`NativeCtx::stack_origin`], and an arm that resolved a stack address as
+/// though the segment began at address zero — which is what a lowering that
+/// confused the linear address with the word index would do — would read a word
+/// a million places away from the one the VM reads. Zero would have let that
+/// through, exactly as a `base` of zero would have let an address formed as if
+/// the frame began at word zero through, which is why no case here uses one.
+///
+/// `1 << 20` is a real segment origin: `cove_runtime::vm::mem`'s `SEGMENT_WORDS`
+/// is that, so this is the second task's segment.
+pub const SEGMENT_ORIGIN: u64 = 1 << 20;
 
 /// How many words of destination an entry is given.
 ///
@@ -537,7 +558,8 @@ pub fn enter_over<A: Arm>(
     let mut held: Vec<u64> = words.to_vec();
     let guard = held.len() as u64;
     held.extend([UNWRITTEN; DESTINATION_WORDS + 1]);
-    let mut ctx = NativeCtx::new(std::ptr::null_mut(), held.as_mut_ptr()).over_heap(chunks);
+    let mut ctx =
+        NativeCtx::new(std::ptr::null_mut(), held.as_mut_ptr(), SEGMENT_ORIGIN).over_heap(chunks);
     let entry = jit.entry(compiled);
     // Safety: `ctx.words` is `held`, `base` indexes into it, the functions below
     // are all built with frames that fit inside the prefix, and the destination
@@ -1845,5 +1867,246 @@ pub fn a_reference_is_in_its_slot_at_every_safepoint<A: Arm>() {
     assert!(
         saw.iter().all(|word| *word == sentinel),
         "the reference was in its slot at every safepoint, and what was seen was {saw:?}"
+    );
+}
+
+// --- the address family and `clear` ------------------------------------------
+
+/// `encoded.rs`'s `CLEAR` arm (line 1138): `clear_words(base + slot, width)`.
+///
+/// The instruction whose whole purpose is what it stops happening — a reference
+/// the frame no longer needs is not a root — so what is asserted is *zero*, at
+/// every word the layout names and at no word beside them. A clear that missed a
+/// word would leave a stale address for the collector to follow, and a clear that
+/// wrote one too many would zero a live slot.
+///
+/// Three widths, because the bug in each direction is a different bug: one word
+/// is a reference, two are a `struct { n: Int, s: String }` whose second word is
+/// the one that matters, and none is an empty struct — for which `clear_words`
+/// returns before it does anything and so must this.
+pub fn a_clear_zeroes_the_words_its_layout_names<A: Arm>() {
+    let held = |slot: Slot, layout: LayoutId| {
+        program(function(
+            vec![Repr::Int, Repr::Ref, Repr::Ref, Repr::Int],
+            INT,
+            vec![Inst::Clear { slot, layout }, Inst::Return { src: 3 }],
+        ))
+    };
+    let full = [0x1111u64, 0x2222, 0x3333, 7];
+
+    for (slot, layout, after) in [
+        (1u32, REF, [0x1111u64, 0, 0x3333, 7]),
+        (1, REF_PAIR, [0x1111, 0, 0, 7]),
+        (1, EMPTY, [0x1111, 0x2222, 0x3333, 7]),
+    ] {
+        forget_polls();
+        let mut words = full.to_vec();
+        let answer = run::<A>(&held(slot, layout), &mut words, 0);
+        assert_eq!(answer.outcome, Outcome::Returned, "clear at {slot}");
+        assert_eq!(words, after.to_vec(), "clear at {slot}");
+    }
+
+    // And at a frame that does not begin at word zero, because a clear whose
+    // address was formed as if it did would zero somebody else's words.
+    forget_polls();
+    let mut words = vec![0xfeedu64, 0x1111, 0x2222, 0x3333, 7];
+    let answer = run::<A>(&held(1, REF_PAIR), &mut words, 1);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words, vec![0xfeed, 0x1111, 0, 0, 7]);
+}
+
+/// `encoded.rs`'s `ADDR_OF_SLOT` arm (line 1699): `base + slot`, where `base` is
+/// the frame's **linear address**.
+///
+/// The thing this catches is the one mistake the ABI's shape makes easy. The entry
+/// point is handed the frame as a *segment-relative index*, because the stack's
+/// `Vec` moves and the index does not; a `Repr::Addr` word is a linear address,
+/// which is that index plus the segment's origin. An arm that wrote the index
+/// would produce a word that is wrong by a million and that the VM would follow
+/// into another task's segment — and it would be *right* on the first segment,
+/// which is why [`SEGMENT_ORIGIN`] is not zero.
+pub fn an_address_of_a_slot_is_the_linear_address_of_it<A: Arm>() {
+    for (base, slot) in [(0u64, 0u32), (0, 2), (3, 1)] {
+        forget_polls();
+        let held = program(function(
+            vec![Repr::Int, Repr::Addr, Repr::Int, Repr::Int],
+            ADDR,
+            vec![Inst::AddrOfSlot { dst: 1, slot }, Inst::Return { src: 1 }],
+        ));
+        let mut words = vec![0u64; base as usize + 4];
+        let answer = run::<A>(&held, &mut words, base);
+        assert_eq!(answer.outcome, Outcome::Returned);
+        assert_eq!(
+            words[base as usize + 1],
+            SEGMENT_ORIGIN + base + u64::from(slot),
+            "the address of slot {slot} of the frame at {base}"
+        );
+    }
+}
+
+/// `encoded.rs`'s `ADDR_OF_PART` arm (line 1729), whose own comment is the whole
+/// of it: "Arithmetic and nothing else."
+///
+/// A place is the address of the *first* word of a value location, so a part of
+/// one is at a static word offset from it — and that holds whichever region the
+/// address names, which is why one arm serves a field of a stack local and a field
+/// of a heap object alike.
+pub fn an_address_of_a_part_is_one_addition<A: Arm>() {
+    for (addr, at) in [
+        (SEGMENT_ORIGIN + 7, 0u32),
+        (SEGMENT_ORIGIN + 7, 3),
+        (HEAP_ORIGIN_WORDS + 9, 2),
+    ] {
+        forget_polls();
+        let held = program(function(
+            vec![Repr::Addr, Repr::Addr],
+            ADDR,
+            vec![
+                Inst::AddrOfPart {
+                    dst: 1,
+                    addr: 0,
+                    at,
+                },
+                Inst::Return { src: 1 },
+            ],
+        ));
+        let mut words = vec![addr, 0];
+        let answer = run::<A>(&held, &mut words, 0);
+        assert_eq!(answer.outcome, Outcome::Returned);
+        assert_eq!(words[1], addr + u64::from(at), "{addr} + {at}");
+    }
+}
+
+/// `encoded.rs`'s `LOAD` and `STORE` arms (lines 1735 and 1740), which are
+/// `Memory::copy_words` through an address — **and so are the `is_stack(addr)`
+/// branch in front of it**.
+///
+/// One address type names two regions, and that is the whole of what these two
+/// instructions are for: `bump(var total)` writes a local through the same
+/// instruction pair that `piece.count = 1` writes a field with. So each direction
+/// is asked twice, once at an address in this frame and once at an address in the
+/// heap, and an arm that decoded the region wrongly reads or writes a word a
+/// billion places from the right one.
+///
+/// The heap object straddles a chunk boundary for [`a_load_elem_strides_and_bounds_its_index`]'s
+/// reason: a two-word run whose words are in different chunks is the case a
+/// pointer formed once and reused would get wrong.
+pub fn a_load_and_a_store_reach_either_region<A: Arm>() {
+    // `s1 = *s0` at two words, and then the answer.
+    let loads = program(function(
+        vec![Repr::Addr, Repr::Int, Repr::Int],
+        PAIR,
+        vec![
+            Inst::Load {
+                dst: 1,
+                addr: 0,
+                layout: PAIR,
+            },
+            Inst::Return { src: 1 },
+        ],
+    ));
+    // `*s0 = s1`, and an answer that says nothing, so what is asserted is the
+    // words the store left behind.
+    let stores = program(function(
+        vec![Repr::Addr, Repr::Int, Repr::Int, Repr::Int],
+        INT,
+        vec![
+            Inst::Int { dst: 3, value: 0 },
+            Inst::Store {
+                addr: 0,
+                src: 1,
+                layout: PAIR,
+            },
+            Inst::Return { src: 3 },
+        ],
+    ));
+
+    // --- the stack ----------------------------------------------------------
+    //
+    // The address names word 4 of the segment, which is slot 4 of the frame at
+    // zero: a load through it is a load of the frame's own words, which is what a
+    // `var` parameter naming a caller's local is.
+    forget_polls();
+    let mut words = vec![SEGMENT_ORIGIN + 4, 0, 0, 0, 101, 102];
+    let answer = run::<A>(&loads, &mut words, 0);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!((words[1], words[2]), (101, 102), "loaded off the stack");
+    assert_eq!(answer.returned, [101, 102, UNWRITTEN, UNWRITTEN]);
+
+    forget_polls();
+    let mut words = vec![SEGMENT_ORIGIN + 4, 201, 202, 0, 0, 0];
+    let answer = run::<A>(&stores, &mut words, 0);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!((words[4], words[5]), (201, 202), "stored onto the stack");
+    assert_eq!(words[3], 0, "and nothing beside them");
+
+    // A frame that does not begin at word zero, and an address into a word below
+    // it: the caller's frame is where a `var` parameter's target actually is.
+    forget_polls();
+    let mut words = vec![0, 0, SEGMENT_ORIGIN + 0, 301, 302, 0, 0];
+    let answer = run::<A>(&stores, &mut words, 2);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!((words[0], words[1]), (301, 302), "stored below the frame");
+
+    // --- the heap -----------------------------------------------------------
+    let at = HEAP_CHUNK_WORDS - 1;
+    let build = || {
+        let mut heap = Heap::new(2);
+        heap.set(at, 401);
+        heap.set(at + 1, 402);
+        heap
+    };
+
+    forget_polls();
+    let heap = build();
+    let mut words = vec![heap.addr(at), 0, 0];
+    let answer = run_over::<A>(&loads, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(
+        (words[1], words[2]),
+        (401, 402),
+        "loaded across a chunk boundary"
+    );
+
+    forget_polls();
+    let mut heap = build();
+    let mut words = vec![heap.addr(at), 501, 502, 0];
+    let answer = run_over::<A>(&stores, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(
+        (heap.get(at), heap.get(at + 1)),
+        (501, 502),
+        "stored across a chunk boundary"
+    );
+    heap.set(at, 0);
+
+    // --- a run that overlaps itself -----------------------------------------
+    //
+    // `Memory::copy_words` is a `memmove`, and an address formed by
+    // `addr-of-slot` from *this* frame is what makes the overlapping case
+    // reachable: a forward run of load-store pairs would smear `[601, 602]` into
+    // `[601, 601]`.
+    forget_polls();
+    let overlapping = program(function(
+        vec![Repr::Addr, Repr::Int, Repr::Int, Repr::Int],
+        INT,
+        vec![
+            Inst::Int { dst: 3, value: 0 },
+            Inst::AddrOfSlot { dst: 0, slot: 2 },
+            Inst::Store {
+                addr: 0,
+                src: 1,
+                layout: PAIR,
+            },
+            Inst::Return { src: 3 },
+        ],
+    ));
+    let mut words = vec![0u64, 601, 602, 0];
+    let answer = run::<A>(&overlapping, &mut words, 0);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(
+        (words[2], words[3]),
+        (601, 602),
+        "the run moved rather than smearing"
     );
 }

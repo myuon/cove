@@ -151,8 +151,11 @@ fn agree_over(what: &str, program: &Program, words: &[u64], base: u64, build: im
     );
     assert_eq!(cranelift_words, template_words, "the frame: {what}");
     assert_eq!(cranelift_polls, template_polls, "the safepoints: {what}");
-    // Neither arm writes to the heap, so the two heaps are two reads of the
-    // same words — and asserting they are still equal is what says so.
+    // The two heaps started equal, so a difference here is one arm having read or
+    // written a word the other did not. Until `Inst::Store` this was the weaker
+    // claim that neither arm writes to the heap at all; a store *through an
+    // address* does, and comparing the words afterwards is how the two decoders
+    // are held to the same one.
     let touched: Vec<u64> = (0..64).map(|at| cranelift_heap.get(at)).collect();
     let also: Vec<u64> = (0..64).map(|at| template_heap.get(at)).collect();
     assert_eq!(touched, also, "the heap: {what}");
@@ -247,6 +250,54 @@ fn both_arms_answer_the_same_thing() {
         &[0, 0, 0, 0],
         0,
         || Heap::new(1),
+    );
+
+    // The address family, which is the one part of the slice where the two arms
+    // *decide* something at run time rather than computing it: `is_stack(addr)`
+    // is a branch, and the two arms take it with a `brif` on an `icmp` and with a
+    // `jb` on a `cmp` against a `movabs`. Two decoders that disagreed about the
+    // boundary would read words a billion places apart and only one of them would
+    // be the VM's, so they are compared on both sides of it — and on the *same*
+    // side twice, because the words a load answers are the whole of what is
+    // asserted.
+    let heap_words = || {
+        let mut heap = Heap::new(2);
+        heap.set(4, 710);
+        heap.set(5, 711);
+        heap
+    };
+    for (what, addr) in [
+        ("a stack address", suite::SEGMENT_ORIGIN + 4),
+        ("a heap address", cove_native::HEAP_ORIGIN_WORDS + 4),
+    ] {
+        agree_over(
+            &format!("a load through {what}"),
+            &loading(),
+            &[addr, 0, 0, 0, 700, 701],
+            0,
+            heap_words,
+        );
+        agree_over(
+            &format!("a store through {what}"),
+            &storing(),
+            &[addr, 800, 801, 0, 0, 0],
+            0,
+            heap_words,
+        );
+    }
+    // An address this frame formed, followed back into this frame: the one case
+    // where the two runs overlap and the `memmove` order matters.
+    agree(
+        "a store through an address of a part of a slot",
+        &through_a_slot(),
+        &[0, 900, 901, 0],
+        0,
+    );
+    agree(
+        "a clear of a reference and a pair",
+        &clearing(),
+        &[1, 2, 3, 4],
+        0,
     );
 
     for op in [
@@ -348,6 +399,82 @@ fn byte() -> Program {
                 at: 1,
             },
             Inst::Return { src: 2 },
+        ],
+    ))
+}
+
+/// `s1..s2 = *s0`, two words through an address.
+fn loading() -> Program {
+    suite::program(suite::function(
+        vec![Repr::Addr, Repr::Int, Repr::Int],
+        suite::PAIR,
+        vec![
+            Inst::Load {
+                dst: 1,
+                addr: 0,
+                layout: suite::PAIR,
+            },
+            Inst::Return { src: 1 },
+        ],
+    ))
+}
+
+/// `*s0 = s1..s2`, two words through an address.
+fn storing() -> Program {
+    suite::program(suite::function(
+        vec![Repr::Addr, Repr::Int, Repr::Int, Repr::Int],
+        INT,
+        vec![
+            Inst::Int { dst: 3, value: 0 },
+            Inst::Store {
+                addr: 0,
+                src: 1,
+                layout: suite::PAIR,
+            },
+            Inst::Return { src: 3 },
+        ],
+    ))
+}
+
+/// `*(&s1 + 1) = s1..s2`: an address of this frame, moved on by a word, stored
+/// through — so the two runs overlap and the `memmove` order matters.
+fn through_a_slot() -> Program {
+    suite::program(suite::function(
+        vec![Repr::Addr, Repr::Int, Repr::Int, Repr::Int],
+        INT,
+        vec![
+            Inst::Int { dst: 3, value: 0 },
+            Inst::AddrOfSlot { dst: 0, slot: 1 },
+            Inst::AddrOfPart {
+                dst: 0,
+                addr: 0,
+                at: 1,
+            },
+            Inst::Store {
+                addr: 0,
+                src: 1,
+                layout: suite::PAIR,
+            },
+            Inst::Return { src: 3 },
+        ],
+    ))
+}
+
+/// A clear of one reference word and of a two-word value location.
+fn clearing() -> Program {
+    suite::program(suite::function(
+        vec![Repr::Int, Repr::Ref, Repr::Ref, Repr::Int],
+        INT,
+        vec![
+            Inst::Clear {
+                slot: 1,
+                layout: suite::REF,
+            },
+            Inst::Clear {
+                slot: 1,
+                layout: suite::REF_PAIR,
+            },
+            Inst::Return { src: 3 },
         ],
     ))
 }

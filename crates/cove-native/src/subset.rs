@@ -17,13 +17,13 @@ use crate::abi::Raise;
 
 /// The widest run of words this slice moves in one instruction.
 ///
-/// An [`Inst::Copy`], an [`Inst::LoadElem`]'s element and an [`Inst::Call`]'s
-/// answer are each emitted as a run of loads and a run of stores — see each
-/// arm's `copy` for why a copy is in that order — so the code they produce is
-/// linear in the width and there is no memmove helper to fall back to yet. A
-/// bound is therefore worth having, and it is deliberately generous: sixteen
-/// words is a wider inline value than anything the corpus lowers, and a
-/// `covefmt.Token` is three.
+/// An [`Inst::Copy`], an [`Inst::LoadElem`]'s element, an [`Inst::Call`]'s
+/// answer, an [`Inst::Load`], an [`Inst::Store`] and an [`Inst::Clear`] are each
+/// emitted as a run of loads and a run of stores — see each arm's `copy` for why
+/// a copy is in that order — so the code they produce is linear in the width and
+/// there is no memmove helper to fall back to yet. A bound is therefore worth
+/// having, and it is deliberately generous: sixteen words is a wider inline value
+/// than anything the corpus lowers, and a `covefmt.Token` is three.
 const MAX_RUN_WORDS: u32 = 16;
 
 /// Whether a slot of this `Repr` is one this slice will touch.
@@ -35,11 +35,19 @@ const MAX_RUN_WORDS: u32 = 16;
 /// and because the covefmt slice takes a `String` and an `Array` as its
 /// parameters: refusing a reference would refuse the measurement.
 ///
-/// [`Repr::Addr`], [`Host`](Repr::Host), [`Task`](Repr::Task) and
-/// [`Scope`](Repr::Scope) are excluded, and for a reason that has nothing to do
-/// with the collector: they are not roots, but every operation that produces or
-/// consumes one is a runtime call this slice does not lower, so a frame holding
-/// one is a frame whose function will be refused anyway.
+/// [`Repr::Addr`] is admitted, and it is the one entry here that was once a
+/// refusal. A `var` parameter arrives as one word holding a linear word index,
+/// and the address family that forms and follows one — [`Inst::AddrOfSlot`],
+/// [`Inst::AddrOfPart`], [`Inst::Load`], [`Inst::Store`] — is emitted code
+/// rather than a runtime call. It is *not* a root, which is why admitting it
+/// costs the collector nothing: `Function::refs` names [`Repr::Ref`] and ADR
+/// 0034 says why, and see [`crate::abi`]'s "An address names either region".
+///
+/// [`Host`](Repr::Host), [`Task`](Repr::Task) and [`Scope`](Repr::Scope) stay
+/// excluded, and for a reason that has nothing to do with the collector: they
+/// are not roots either, but every operation that produces or consumes one is a
+/// runtime call this slice does not lower, so a frame holding one is a frame
+/// whose function will be refused anyway.
 ///
 /// [`Repr::Float`] is admitted although no float *operation* is lowered. A
 /// float slot that is only copied is a run of bits like any other, and
@@ -53,8 +61,9 @@ fn is_lowered(repr: Repr) -> bool {
         | Repr::Float
         | Repr::Duration
         | Repr::Tag
-        | Repr::Ref => true,
-        Repr::Addr | Repr::Host | Repr::Task | Repr::Scope => false,
+        | Repr::Ref
+        | Repr::Addr => true,
+        Repr::Host | Repr::Task | Repr::Scope => false,
     }
 }
 
@@ -124,8 +133,8 @@ pub enum Reason {
     Stub,
     /// A frame slot holds a representation this tier does not keep in a slot.
     ///
-    /// [`Repr::Addr`], [`Host`](Repr::Host), [`Task`](Repr::Task) and
-    /// [`Scope`](Repr::Scope); see this module's `is_lowered`.
+    /// [`Host`](Repr::Host), [`Task`](Repr::Task) and [`Scope`](Repr::Scope);
+    /// see this module's `is_lowered`.
     SlotRepr(Repr),
     /// The body does not end in a terminator, so its last block falls off the
     /// end.
@@ -254,7 +263,57 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                 && run(*dst, layout.width())
                 && run(*src, layout.width())
         }
+        // `encoded.rs`'s `CLEAR` arm, which is `clear_words(base + slot, width)`
+        // — a run of zero words over a value location that is always a frame
+        // slot, so there is no region to decide. It is bounded like a copy
+        // because it is one: `MAX_RUN_WORDS` is a bound on the code a single
+        // instruction expands to, and a clear expands to one store per word.
+        Inst::Clear { slot: at, layout } => {
+            let width = program.layout(*layout).width();
+            width <= MAX_RUN_WORDS && run(*at, width)
+        }
         Inst::Not { dst, a } => slot(*dst) && slot(*a),
+        // ---- places ---------------------------------------------------------
+        //
+        // Four of the six, and the two that are missing are missing on purpose.
+        //
+        // [`Inst::AddrOfField`] refuses through `Machine::checked`, whose message
+        // names the object's layout and its payload word count — "this reads word
+        // {at} of a `{name}`, which has {words}" — and that count is
+        // `Layout::payload_words` over the whole layout table. Naming it would be
+        // a new `Raise` carrying a `LayoutId`, and the guard it protects is a
+        // *lowering bug* rather than anything a program can reach.
+        //
+        // [`Inst::AddrOfElem`] would be cheap — its refusal is
+        // `Raise::IndexOutOfRange`, which `load_elem` already emits — and it is
+        // still left out, because neither it nor `AddrOfField` occurs once in the
+        // corpus this slice is widened by. See the philosophy's "Earn complexity
+        // through use": a form that is imaginable is not a form that has shown
+        // friction.
+        Inst::AddrOfSlot { dst, slot: at } => slot(*dst) && slot(*at),
+        // `at` has to fit an `i32`, and that is the *template* arm's bound rather
+        // than a bound on the language: it adds the offset with `add r64, imm32`.
+        // A word offset within one value location cannot approach it — a layout is
+        // bounded by the frame it fits in — so this refuses nothing real, and an
+        // arm that was silently wrong above a threshold is worse than one that
+        // refuses at it.
+        Inst::AddrOfPart { dst, addr, at } => {
+            i32::try_from(*at).is_ok() && slot(*dst) && slot(*addr)
+        }
+        Inst::Load { dst, addr, layout } => {
+            let layout = program.layout(*layout);
+            layout.width() <= MAX_RUN_WORDS
+                && layout.words.iter().copied().all(is_lowered)
+                && run(*dst, layout.width())
+                && slot(*addr)
+        }
+        Inst::Store { addr, src, layout } => {
+            let layout = program.layout(*layout);
+            layout.width() <= MAX_RUN_WORDS
+                && layout.words.iter().copied().all(is_lowered)
+                && run(*src, layout.width())
+                && slot(*addr)
+        }
         Inst::Arith {
             num: Num::Int,
             dst,

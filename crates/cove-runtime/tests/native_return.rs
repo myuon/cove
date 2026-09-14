@@ -170,6 +170,45 @@ export fn counts(n: Int) -> Int {
   }
 }
 
+/// Writes through a `var` parameter, which is the whole address family in two
+/// frames: `addr-of-slot` in whoever calls it, and `load` and `store` here.
+///
+/// It answers the word it wrote as well as writing it, so a case can tell the
+/// right number in the wrong place from the right number in the right place.
+export fn bumps(var total: Int, by: Int) -> Int {
+  total = total + held(by)
+  total
+}
+
+/// A caller that lends a slot of *its own* frame and then reads it back.
+export fn lends(a: Int) -> Int {
+  var total = a
+  let seen = bumps(var total, 5)
+  total * 1000 + seen
+}
+
+/// One address carried down a recursion deep enough that the stack's `Vec`
+/// reallocates under every frame holding it.
+///
+/// This is the reason an address is a *linear* address and not a pointer: the
+/// slot it names is in the bottom frame, and three hundred `push_frame`s happen
+/// between the address being formed and the last write through it.
+export fn lendsDeeply(n: Int, var total: Int) -> Int {
+  if n <= 0 {
+    total
+  } else {
+    total = total + 1
+    lendsDeeply(n - 1, var total)
+  }
+}
+
+/// The frame that owns the word every step of the chain wrote through.
+export fn threadsDeeply(n: Int) -> Int {
+  var total = 0
+  let seen = lendsDeeply(n, var total)
+  total * 1000 + seen
+}
+
 /// A caller no tier below ever compiles, so that the call it makes is a
 /// **VM-to-native** hop and not something else.
 ///
@@ -337,6 +376,73 @@ unsafe fn set(ctx: *mut NativeCtx, base: u64, slot: Slot, value: u64) {
         .write(value)
 }
 
+/// The **linear address** of `slot` of the frame at `base`.
+///
+/// `base` is a word index relative to the segment's origin, and a `Repr::Addr`
+/// word is not: the difference is [`NativeCtx::stack_origin`], and forgetting it
+/// is the one mistake the ABI's shape makes easy. On the first segment the two
+/// numbers are equal, which is why this test file cannot catch that mistake and
+/// `cove-native`'s own suite — whose segment deliberately does not begin at zero —
+/// can.
+///
+/// # Safety
+///
+/// As [`word`].
+unsafe fn address(ctx: *mut NativeCtx, base: u64, slot: Slot) -> u64 {
+    (*ctx).stack_origin + base + u64::from(slot)
+}
+
+/// The word at the linear address `addr`, in whichever region it names.
+///
+/// `Memory::read`'s `is_stack(addr)` and the two arms behind it, written a third
+/// time. The heap arm is the chunk spine: one table entry per committed chunk,
+/// and the word inside it.
+///
+/// # Safety
+///
+/// `ctx` is the entry's context and `addr` is an address of a value location it
+/// may reach.
+unsafe fn at_addr(ctx: *mut NativeCtx, addr: u64) -> u64 {
+    match region(ctx, addr) {
+        Region::Stack(at) => (*ctx).words.add(at).read(),
+        Region::Heap(chunk, at) => (*ctx).chunks.add(chunk).read().add(at).read(),
+    }
+}
+
+/// [`at_addr`] in the other direction.
+///
+/// # Safety
+///
+/// As [`at_addr`].
+unsafe fn set_at_addr(ctx: *mut NativeCtx, addr: u64, held: u64) {
+    match region(ctx, addr) {
+        Region::Stack(at) => (*ctx).words.add(at).write(held),
+        Region::Heap(chunk, at) => (*ctx).chunks.add(chunk).read().add(at).write(held),
+    }
+}
+
+/// Which region an address names, and where in it.
+enum Region {
+    /// An index into [`NativeCtx::words`].
+    Stack(usize),
+    /// A chunk of [`NativeCtx::chunks`], and a word inside it.
+    Heap(usize, usize),
+}
+
+/// # Safety
+///
+/// As [`at_addr`].
+unsafe fn region(ctx: *mut NativeCtx, addr: u64) -> Region {
+    if addr < cove_native::HEAP_ORIGIN_WORDS {
+        return Region::Stack((addr - (*ctx).stack_origin) as usize);
+    }
+    let index = addr - cove_native::HEAP_ORIGIN_WORDS;
+    Region::Heap(
+        (index >> cove_native::HEAP_CHUNK_SHIFT) as usize,
+        (index & (cove_native::HEAP_CHUNK_WORDS - 1)) as usize,
+    )
+}
+
 /// One function's IR, walked as a tier.
 ///
 /// Every slot read is a load and every slot write is a store, which is the
@@ -499,6 +605,46 @@ unsafe fn interpret(
                     // A raise or a stop is returned unchanged, so it leaves
                     // through one `return` per frame and nothing unwinds.
                     return outcome_of(outcome);
+                }
+                pc += 1;
+            }
+            // ---- places -------------------------------------------------
+            //
+            // A `Repr::Addr` slot holds a **linear word index**, so the three
+            // instructions below are the third independent implementation of
+            // `cove_native::abi`'s "An address names either region": this one, the
+            // Cranelift arm's and the template arm's. That is the point of them
+            // being here — a disagreement about what the word means is a wrong
+            // word written into whatever the number happened to name, and the
+            // encoded tier is the oracle for all three.
+            Inst::AddrOfSlot { dst, slot } => {
+                set(ctx, base, *dst, address(ctx, base, *slot));
+                pc += 1;
+            }
+            Inst::AddrOfPart { dst, addr, at } => {
+                let held = word(ctx, base, *addr);
+                set(ctx, base, *dst, held + u64::from(*at));
+                pc += 1;
+            }
+            Inst::Load { dst, addr, layout } => {
+                let at = word(ctx, base, *addr);
+                let width = program.layout(*layout).width();
+                // Read before written, because `Memory::copy_words` is a
+                // `memmove` and an address of this frame makes the runs overlap.
+                let held: Vec<u64> = (0..width)
+                    .map(|w| at_addr(ctx, at + u64::from(w)))
+                    .collect();
+                for (w, held) in held.into_iter().enumerate() {
+                    set(ctx, base, *dst + w as Slot, held);
+                }
+                pc += 1;
+            }
+            Inst::Store { addr, src, layout } => {
+                let at = word(ctx, base, *addr);
+                let width = program.layout(*layout).width();
+                let held: Vec<u64> = (0..width).map(|w| word(ctx, base, *src + w)).collect();
+                for (w, held) in held.into_iter().enumerate() {
+                    set_at_addr(ctx, at + w as u64, held);
                 }
                 pc += 1;
             }
@@ -2064,6 +2210,94 @@ fn one_table_serves_repeated_calls() {
             entries_into(lowered, "makesPair") as u64,
             CALLS,
             "the compiled entry ran once a call"
+        );
+    });
+}
+
+/// **A `var` parameter written through by the native tier, read back by its VM
+/// caller.**
+///
+/// The word the callee is handed is a linear address of a slot of the *caller's*
+/// frame, and the two tiers have to mean the same thing by it: the caller formed
+/// it with `encoded.rs`'s `ADDR_OF_SLOT` arm and the callee follows it with the
+/// address decode the ABI describes. Both halves of the fixture's answer are
+/// asserted — the caller's own slot and what the callee said — so a tier that
+/// wrote the right number somewhere else cannot pass on the second alone.
+#[test]
+fn a_var_parameter_is_written_through_by_the_native_tier() {
+    with_vm(ORDINARY_HEAP_WORDS, |vm, lowered| {
+        let mut session = vm
+            .native_session(MODULE, "lends", vec![Value::int(20)])
+            .expect("the session opens");
+        let words = session.arguments().to_vec();
+        let expected = session
+            .call(&NothingCompiled, &words)
+            .expect("the vm answers");
+        assert_eq!(
+            expected,
+            vec![25 * 1000 + 25],
+            "the caller's slot holds `a + 5` and so does what the callee answered"
+        );
+
+        // Only the callee, so the `addr-of-slot` is the encoded tier's and the
+        // `load` and `store` through it are this one's.
+        let tier = hand(lowered, &["bumps"]);
+        assert_eq!(
+            session.call(&tier, &words).expect("the hand tier answers"),
+            expected
+        );
+        assert_eq!(
+            entries_into(lowered, "bumps"),
+            1,
+            "and the callee really was the tier's"
+        );
+
+        // And with both frames on the tier, so the address is formed and followed
+        // by the same one.
+        let tier = hand(lowered, &["lends", "bumps"]);
+        assert_eq!(
+            session.call(&tier, &words).expect("the hand tier answers"),
+            expected
+        );
+    });
+}
+
+/// One address, carried down three hundred frames while the stack's `Vec`
+/// reallocates under every one of them.
+///
+/// [`segments`] is what says the reallocation happened: it counts the distinct
+/// `NativeCtx::words` the tier was handed, and more than one means the buffer
+/// moved *while native frames were live*. The slot the address names is in the
+/// bottom frame, so every write after the first is a write below a stack that has
+/// grown — which is the whole reason an address is an index into a segment whose
+/// origin is fixed, and not a pointer.
+#[test]
+fn an_address_survives_a_reallocation_under_a_deep_chain() {
+    const DEEP: u64 = 300;
+    with_vm(ORDINARY_HEAP_WORDS, |vm, lowered| {
+        let mut session = vm
+            .native_session(MODULE, "threadsDeeply", vec![Value::int(DEEP as i64)])
+            .expect("the session opens");
+        let words = session.arguments().to_vec();
+        // The hand tier goes *first*, which is `a_return_finds_a_destination_a_
+        // reallocation_moved`'s reason and the whole of what makes this case work:
+        // a `Vec` keeps its capacity across `Vec::clear`, so a 300-frame run on
+        // the VM would leave the stack large enough that the next run never
+        // reallocates — and the case would pass while testing nothing.
+        let tier = hand(lowered, &["threadsDeeply", "lendsDeeply"]);
+        let answered = session.call(&tier, &words).expect("the hand tier answers");
+        let expected = session
+            .call(&NothingCompiled, &words)
+            .expect("the vm answers");
+        assert_eq!(
+            expected,
+            vec![DEEP * 1000 + DEEP],
+            "every step added one to the same word"
+        );
+        assert_eq!(answered, expected);
+        assert!(
+            segments() > 1,
+            "the stack's `Vec` did not move, so this case proved nothing"
         );
     });
 }

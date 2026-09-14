@@ -138,6 +138,42 @@
 //! constants are declared here, beside the layout they describe, and the
 //! runtime asserts they are its own.
 //!
+//! # An address names either region, and compiled code decides which
+//!
+//! A `Repr::Addr` slot holds a **linear word index** in the one address space
+//! above: the address of the first word of a value location, which may be a slot
+//! of a frame or a payload word of a heap object. `Memory::read`,
+//! `Memory::write` and `Memory::copy_words` each begin with `is_stack(addr)` —
+//! `addr < STACK_WORDS`, which is [`HEAP_ORIGIN_WORDS`] — and pick the region
+//! from it. **Generated code makes the same comparison, inline**, and the reason
+//! it is emitted rather than delegated to a helper is that the two arms of it
+//! are four instructions and eleven: a call would cost more than either, and it
+//! would end the span in which a cached [`NativeCtx::words`] is live, because a
+//! helper is permitted to grow the stack and the generated code cannot tell that
+//! this one would not.
+//!
+//! Resolving a stack address needs one number the frame pointer does not carry.
+//! `base` is an index *relative to the task's segment origin*, and a linear
+//! address is not, so the two cannot be subtracted from one another:
+//!
+//! ```text
+//! stack word at addr = ctx.words[addr - ctx.stack_origin]
+//! ```
+//!
+//! [`NativeCtx::stack_origin`] is that origin. It is fixed for the life of the
+//! task — a segment is a reserved range of the index space, chosen when the task
+//! attaches — so unlike the two pointers beside it, it is published once and
+//! never re-published.
+//!
+//! An address is **not** a root. `Function::refs` names
+//! [`Repr::Ref`](cove_ir::Repr::Ref) slots and nothing else, and ADR 0034 is why:
+//! what an address points into is kept alive by the reference slot holding the
+//! base object, and the lowering keeps that slot live for exactly the address's
+//! live range. So admitting `Repr::Addr` into a compiled frame adds nothing to
+//! the collector's walk, and compiled code must not weaken the invariant that
+//! makes that true — which it cannot, because it neither allocates nor decides
+//! where a `Clear` goes.
+//!
 //! [ADR 0034]: ../../../../docs/adr/0034-one-physical-word-stack.md
 //! [ADR 0057]: ../../../../docs/adr/0057-a-native-call-returns-into-the-destination-its-caller-named.md
 
@@ -571,6 +607,19 @@ pub struct NativeCtx {
     /// step further out: a helper may have allocated, an allocation may have
     /// committed a chunk, and committing one may have moved the table.
     pub chunks: *const *mut u64,
+    /// The linear address of word zero of the task's stack segment.
+    ///
+    /// What [`NativeCtx::words`] points *at*, as a number in the one address
+    /// space — `cove_runtime::vm::mem`'s `segment_origin(at)`. It is what turns a
+    /// `Repr::Addr` word that names the stack into an index into `words`; see the
+    /// module documentation's "An address names either region".
+    ///
+    /// Unlike the two pointers above it is published **once** and never
+    /// re-published, because a task's segment is chosen when it attaches and does
+    /// not move: the `Vec` inside the segment reallocates, which is what makes
+    /// `words` unstable, and the segment's place in the index space is not that
+    /// `Vec`.
+    pub stack_origin: u64,
     /// IR instructions executed since the last safepoint and not yet charged.
     ///
     /// Written on every exit — a return, a raise and a stop alike — which is
@@ -621,11 +670,18 @@ impl NativeCtx {
     /// null that is dereferenced is a loud failure where a dangling table would
     /// be a quiet one. [`NativeCtx::over_heap`] is how a caller with a heap
     /// says so.
-    pub fn new(host: *mut c_void, words: *mut u64) -> Self {
+    ///
+    /// `stack_origin` is a parameter and not a builder for the reason the field
+    /// itself gives: a wrong one is not a crash but a *wrong address*, resolved
+    /// into the wrong task's segment, and there is no value it could default to
+    /// that would be right for every caller. Zero is right for the first segment
+    /// and for a test that owns its own words, and saying so is one argument.
+    pub fn new(host: *mut c_void, words: *mut u64, stack_origin: u64) -> Self {
         NativeCtx {
             host,
             words,
             chunks: std::ptr::null(),
+            stack_origin,
             pending_work: 0,
             raise_code: 0,
             raise_detail: 0,
@@ -694,8 +750,9 @@ mod tests {
     #[test]
     fn a_fresh_context_has_raised_nothing() {
         let mut words = [0u64; 4];
-        let ctx = NativeCtx::new(std::ptr::null_mut(), words.as_mut_ptr());
+        let ctx = NativeCtx::new(std::ptr::null_mut(), words.as_mut_ptr(), 0);
         assert_eq!(ctx.raise(), None);
         assert_eq!(ctx.pending_work, 0);
+        assert_eq!(ctx.stack_origin, 0);
     }
 }
