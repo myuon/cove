@@ -102,7 +102,7 @@ use crate::vm::cell;
 use crate::vm::mem::Overflow;
 
 use super::{
-    compare, float_arith, int_arith, null_object, overflowed, reentrant_lock, wrong_arity,
+    compare, float_arith, int_arith, native, null_object, overflowed, reentrant_lock, wrong_arity,
     ChildState, Frame, Live, Machine, Outcome, ScopeEntry, BUFFER_LEN, SAFEPOINT_STRIDE,
 };
 
@@ -1053,6 +1053,54 @@ pub(super) fn dispatch<'s, 'a>(
                 code = encoded.function(id);
             }};
         }
+        // The frame is open and its arguments are in it. Which tier runs it is
+        // [ADR 0055](../../../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md)'s
+        // function-entry table, and **this is where the encoded tier asks it** —
+        // the one thing that makes native coverage compositional, because until
+        // it did, a compiled function called from an encoded one stayed encoded.
+        //
+        // What a default run pays is [`Machine::tiered`]'s single `Option` test,
+        // at a `call` and nowhere else. Everything past it is out of line, for
+        // this loop's own stated reason: what sits inside `dispatch` is paid for
+        // by every instruction of every program whether or not it runs.
+        macro_rules! crossed {
+            ($callee:expr, $callee_base:expr, $dst:expr) => {{
+                match machine.tiered($callee) {
+                    None => entered!($callee, $callee_base, $dst),
+                    Some(entry) => {
+                        // The caller's pc is the `call` itself: that is the span a
+                        // failure below is reported at and the pc a collection
+                        // inside the callee walks this frame with. The dispatch
+                        // loop's own `pc` has already moved past it and is where
+                        // execution resumes, because the answer arrives in `dst`
+                        // rather than through a `return` this loop runs.
+                        machine.sync(pc - 1);
+                        match native::from_encoded(
+                            machine,
+                            budget,
+                            entry,
+                            $callee,
+                            $callee_base,
+                            base,
+                            $dst,
+                        ) {
+                            Ok(()) => {}
+                            // Not `fail!`, and the difference is a bug this had
+                            // first: `fail!` syncs the *top* frame, and on this
+                            // path the top frame is the failed callee's — its
+                            // frames are still standing, which is what the error's
+                            // call chain is read out of. Syncing here would
+                            // overwrite the innermost frame's pc with this call's
+                            // and report the wrong span for where it failed. The
+                            // caller's own pc was synced before the call, and
+                            // `.at` is `get_or_insert`, so the span below is used
+                            // only for a failure that carries none of its own.
+                            Err(error) => return Err(error.at(machine.span(id, pc - 1))),
+                        }
+                    }
+                }
+            }};
+        }
 
         match held.opcode() {
             // ---- constants and moves ---------------------------------
@@ -1273,7 +1321,7 @@ pub(super) fn dispatch<'s, 'a>(
                 let callee = FunctionId(held.lo());
                 let span = machine.span(id, pc - 1);
                 match open_frame(machine, budget, base, span, callee, ArgsId(held.hi()), None) {
-                    Ok(callee_base) => entered!(callee, callee_base, dst),
+                    Ok(callee_base) => crossed!(callee, callee_base, dst),
                     Err(error) => fail!(error),
                 }
             }
@@ -1298,7 +1346,13 @@ pub(super) fn dispatch<'s, 'a>(
                     ArgsId(held.lo()),
                     Some(object),
                 ) {
-                    Ok(callee_base) => entered!(callee, callee_base, dst),
+                    // A closure's body is a function like any other, and its
+                    // captures are already in the slots `Function::captures`
+                    // names — `open_frame` put them there. So the tier table is
+                    // asked here for the same reason it is asked at a `call`:
+                    // coverage that stopped at a closure would not be
+                    // compositional either.
+                    Ok(callee_base) => crossed!(callee, callee_base, dst),
                     Err(error) => fail!(error),
                 }
             }

@@ -195,6 +195,15 @@ fn parse_build_flags(args: &[String]) -> Result<BuildFlags, CliError> {
             }
             "--backend" => {
                 let value = flag_value(args, &mut i, "--backend")?;
+                // Refused here rather than at the plan, because a built binary
+                // bakes its backend in: the generated crate would have to carry
+                // the code generator's feature, and `cove build` embedding a JIT
+                // is a decision ADR 0055 leaves open ("Whether `cove build`
+                // embeds JIT code, links an object, or keeps the VM is not
+                // decided here").
+                if value == "native" {
+                    return Err(crate::native_is_not_here("build"));
+                }
                 flags.backend = Backend::parse(&value).ok_or_else(|| {
                     CliError::Message(format!(
                         "`--backend` must be {}, found `{value}`",
@@ -377,7 +386,7 @@ fn lower_what_the_binary_will_lower(
     program: &Program,
     sources: &SourceMap,
 ) -> Result<(), Vec<Diagnostic>> {
-    if plan.backend != Backend::Vm {
+    if !plan.backend.lowers() {
         return Ok(());
     }
     // `plan` was built from an entry `lookup_entry` already validated, so
@@ -602,6 +611,12 @@ fn main() -> std::process::ExitCode {{
         backend = match plan.backend {
             Backend::Ast => "Ast",
             Backend::Vm => "Vm",
+            // Refused where the flag is parsed, so this cannot be reached. It is
+            // an arm rather than a `_` so that a fourth backend is a compile
+            // error here instead of a binary built for the wrong one.
+            Backend::Native => {
+                unreachable!("`cove build --backend native` is refused when the flag is parsed")
+            }
         },
     )
 }

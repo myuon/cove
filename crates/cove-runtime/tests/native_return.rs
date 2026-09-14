@@ -169,6 +169,17 @@ export fn counts(n: Int) -> Int {
     counts(n - 1) + 1
   }
 }
+
+/// A caller no tier below ever compiles, so that the call it makes is a
+/// **VM-to-native** hop and not something else.
+///
+/// Every other wrapper in this file exists to be compiled; this one exists not to
+/// be. `counts` is recursive, so `cove_ir::lower::inline` cannot expand the call
+/// away — see `held` — and what is left is one encoded frame whose `call`
+/// instruction is the transition under test.
+export fn callsCounts(n: Int) -> Int {
+  counts(n)
+}
 ";
 
 // --- the hand-written tier ---------------------------------------------------
@@ -193,6 +204,14 @@ thread_local! {
     /// through the same `return` a wrong answer would, and the frame it wrote
     /// into is popped behind it.
     static WITNESS: RefCell<Vec<Seen>> = const { RefCell::new(Vec::new()) };
+    /// Which functions the hand tier was entered for, in order.
+    ///
+    /// The witness a *callee* leaves. [`WITNESS`] is what a caller saw of its
+    /// destination, so a compiled function nobody compiled a caller for appears
+    /// in neither — which is exactly the shape of a VM-to-native call, and a
+    /// counter moving with no code behind it is the one failure a transition test
+    /// must not pass through.
+    static ENTERED: RefCell<Vec<FunctionId>> = const { RefCell::new(Vec::new()) };
     /// Whether a call is made the *direct* way: `open`, the callee's entry, and
     /// `close`, rather than the one mediated `call` helper.
     ///
@@ -280,6 +299,7 @@ fn hand_with(program: &Arc<Lowered>, names: &[&str], helpers: NativeHelpers) -> 
     HELPERS.with(|held| held.set(Some(helpers)));
     SEGMENTS.with(|seen| seen.borrow_mut().clear());
     WITNESS.with(|seen| seen.borrow_mut().clear());
+    ENTERED.with(|seen| seen.borrow_mut().clear());
     let mut ids = Vec::new();
     let mut table = BTreeMap::new();
     for (at, name) in names.iter().enumerate() {
@@ -343,6 +363,7 @@ unsafe fn interpret(
         .with(Cell::get)
         .expect("a case installed the helpers");
     let function = program.function(id);
+    ENTERED.with(|seen| seen.borrow_mut().push(id));
     SEGMENTS.with(|seen| {
         let mut seen = seen.borrow_mut();
         let at = (*ctx).words as usize;
@@ -684,13 +705,28 @@ fn with_limited_vm(
     limits: Limits,
     body: impl FnOnce(&mut Vm<'_>, &Arc<Lowered>),
 ) {
+    with_bounded_vm(heap_words, limits, |vm, lowered, _| body(vm, lowered));
+}
+
+/// The same, with the run's [`Cancellation`] handed to the body.
+///
+/// The one thing `with_limited_vm` cannot do: a case that asks what a *cancelled*
+/// VM-to-native call does has to be able to cancel it, and the handle is the only
+/// way. It is the same handle the budget was built over, so flipping it is what a
+/// host or a signal would do.
+fn with_bounded_vm(
+    heap_words: usize,
+    limits: Limits,
+    body: impl FnOnce(&mut Vm<'_>, &Arc<Lowered>, &Cancellation),
+) {
     let (sources, checked) = checked();
     let lowered = Arc::new(
         cove_ir::lower(&checked, &sources, &cove_sema::HostSchemas::new())
             .expect("the fixture lowers"),
     );
+    let cancellation = Cancellation::new();
     let mut hosts = HostRegistry::new(Grants::new(Vec::<&str>::new()));
-    hosts.set_budget(Budget::with_cancellation(limits, Cancellation::new()));
+    hosts.set_budget(Budget::with_cancellation(limits, cancellation.clone()));
     let hosts = Arc::new(hosts);
     let runtime = Runtime::new(
         Arc::clone(&checked),
@@ -698,7 +734,7 @@ fn with_limited_vm(
         Arc::clone(&hosts),
     );
     let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, heap_words);
-    body(&mut vm, &lowered);
+    body(&mut vm, &lowered, &cancellation);
 }
 
 /// Runs `body` with every call in it made the direct way, and puts the switch
@@ -777,6 +813,14 @@ fn seen_into(lowered: &Arc<Lowered>, name: &str) -> Vec<Seen> {
         .collect()
 }
 
+/// How many times the hand tier was entered for `MODULE.name`. See [`ENTERED`].
+fn entries_into(lowered: &Arc<Lowered>, name: &str) -> usize {
+    let id = lowered
+        .function_named(MODULE, name)
+        .unwrap_or_else(|| panic!("`{MODULE}.{name}` is lowered"));
+    ENTERED.with(|seen| seen.borrow().iter().filter(|held| **held == id).count())
+}
+
 /// How many distinct segments the native frames ran over. See [`SEGMENTS`].
 fn segments() -> usize {
     SEGMENTS.with(|seen| seen.borrow().len())
@@ -832,7 +876,7 @@ fn a_multi_word_answer_reaches_the_destination() {
             "the frame holds the destination and no more"
         );
         assert!(
-            session.tiers().native >= 2,
+            session.tiers().native() >= 2,
             "the caller and the callee both ran natively"
         );
     });
@@ -854,14 +898,24 @@ fn a_vm_callee_answers_into_a_native_caller() {
         // and its answer reaches the destination through the other half of the
         // helper.
         let tier = hand(lowered, &["passesPair"]);
+        let before = session.tiers();
         let answered = session.call(&tier, &[7]).expect("the hand tier answers");
         assert_eq!(answered, expected);
         assert_eq!(answered, vec![7, 8]);
         let tiers = session.tiers();
         assert_eq!(
-            (tiers.native, tiers.encoded),
-            (1, 2),
-            "one native frame, and the vm ran the callee here and the whole of the oracle's call"
+            tiers.host_to_native - before.host_to_native,
+            1,
+            "one compiled outermost frame"
+        );
+        assert!(
+            tiers.native_to_vm - before.native_to_vm >= 1,
+            "`makesPair` has no compiled entry, so compiled code called the VM"
+        );
+        assert_eq!(
+            tiers.vm_to_native - before.vm_to_native,
+            0,
+            "nothing the VM called was compiled, so this hop was not taken"
         );
     });
 }
@@ -1065,7 +1119,7 @@ fn a_return_finds_a_destination_a_reallocation_moved() {
              is for"
         );
         assert_eq!(
-            session.tiers().native,
+            session.tiers().native(),
             DEEP as u64 + 1,
             "every frame of the recursion was native"
         );
@@ -1325,7 +1379,7 @@ fn a_direct_chain_returns_through_a_reallocation() {
              what it is for"
         );
         assert_eq!(
-            session.tiers().native,
+            session.tiers().native(),
             DEEP as u64 + 1,
             "every frame of the recursion was entered directly bar the outermost"
         );
@@ -1437,10 +1491,12 @@ fn a_collection_during_a_direct_chain_keeps_every_reference() {
 /// — so that call is the mediated helper and the encoded dispatch loop. Both
 /// callees answer into destinations in frames the direct path opened.
 ///
-/// The fourth hop the issue asks for, **encoded back into native**, does not
-/// exist in this slice and cannot be constructed: the encoded `CALL` arm consults
-/// no tier table, as `a_vm_caller_does_not_reach_the_tier_table` asserts. So the
-/// chain is three tiers deep and the tier counts below say which hop was which.
+/// The fourth hop — **encoded back into native** — is not in *this* chain, and
+/// that is a property of the tier the case installs rather than of the boundary:
+/// `allocates` calls nothing the table compiles. `all_four_transitions_are_taken_and_counted`
+/// is the case that takes all four, and `a_vm_caller_enters_a_compiled_callee`
+/// the one that isolates this one. So the counts below say which hop was which
+/// and no more than that.
 #[test]
 fn a_mixed_chain_crosses_the_tiers_and_answers() {
     with_vm(ORDINARY_HEAP_WORDS, |vm, lowered| {
@@ -1464,49 +1520,550 @@ fn a_mixed_chain_crosses_the_tiers_and_answers() {
         assert_eq!(answered, expected, "the chain answers what the VM answers");
         let tiers = session.tiers();
         assert!(
-            tiers.native - before.native >= 2,
+            tiers.native() - before.native() >= 2,
             "the caller and `echoes` were both entered natively"
         );
         assert!(
-            tiers.encoded - before.encoded >= 1,
+            tiers.encoded() - before.encoded() >= 1,
             "at least one callee was run by the encoded tier"
         );
     });
 }
 
-/// A VM caller does not enter native code, and that is why nothing above tests
-/// one.
+/// **A VM caller enters native code**, which is the transition issue #369 exists
+/// for.
 ///
-/// The tier table is consulted in exactly two places — the call helper, which is
-/// reached from compiled code, and [`NativeSession::call`](cove_runtime::NativeSession::call),
-/// which is the boundary a Rust caller comes in through. The encoded dispatch
-/// loop's `CALL` arm consults nothing: it opens a frame and keeps dispatching. So
-/// "VM to native" as a *Cove* call does not exist in this slice, and the closest
-/// thing to it is the session entering the outermost frame, which every case above
-/// does.
+/// The caller is refused and the callee is compiled — the shape that made
+/// coverage non-compositional before this. The encoded dispatch loop's `CALL` arm
+/// now asks the same tier table the call helper asks, so `makesPair` is entered as
+/// a compiled function from inside a function the VM is running.
 ///
-/// This asserts it rather than leaving it to be noticed, because a reader looking
-/// for the missing direction should find out why it is missing.
+/// It is asserted three ways, because two of them would each pass on their own for
+/// the wrong reason: the answer matches the VM's, the `vm_to_native` counter
+/// moved, and the hand-written entry was actually *entered* — a counter that
+/// incremented without the code running would be the worst of the three failures.
 #[test]
-fn a_vm_caller_does_not_reach_the_tier_table() {
+fn a_vm_caller_enters_a_compiled_callee() {
     with_vm(ORDINARY_HEAP_WORDS, |vm, lowered| {
         let mut session = vm
             .native_session(MODULE, "passesPair", vec![Value::int(3)])
             .expect("the session opens");
+        let expected = session
+            .call(&NothingCompiled, &[3])
+            .expect("the vm answers");
+        let before = session.tiers();
         // The callee is compiled and the caller is not, so the only way into the
-        // compiled code would be the dispatch loop choosing it.
+        // compiled code is the dispatch loop choosing it.
         let tier = hand(lowered, &["makesPair"]);
-        let answered = session.call(&tier, &[3]).expect("the vm answers");
+        let answered = session.call(&tier, &[3]).expect("the mixed call answers");
+        assert_eq!(answered, expected);
         assert_eq!(answered, vec![3, 4]);
         let tiers = session.tiers();
         assert_eq!(
-            (tiers.native, tiers.encoded),
-            (0, 1),
-            "the whole call ran on the encoded tier, compiled callee and all"
+            tiers.host_to_vm - before.host_to_vm,
+            1,
+            "the outermost frame was refused, so the VM ran it"
+        );
+        assert_eq!(
+            tiers.vm_to_native - before.vm_to_native,
+            1,
+            "the encoded `CALL` arm entered the one compiled callee"
+        );
+        assert_eq!(
+            entries_into(lowered, "makesPair"),
+            1,
+            "the compiled entry ran, rather than a counter moving on its own"
+        );
+        assert_eq!(
+            entries_into(lowered, "passesPair"),
+            0,
+            "and the caller it was called from was the VM's"
+        );
+    });
+}
+
+/// The four transitions, in one chain, each counted once.
+///
+/// Issue #369's table has four rows and this is the case that moves all four at
+/// once, which is a stronger statement than four cases moving one each: a chain
+/// that crosses back and forth is where a boundary that only works in one
+/// direction shows.
+///
+/// `refThroughCollection` calls `echoes`, `allocates` and `firstByte`. The tier
+/// below compiles `echoes` and `held` and leaves the other two to the VM —
+/// `allocates` reaches `String.sliceBytes`, which nothing native lowers, and
+/// `firstByte` is an `Inst::ByteAt` this file's tier does not walk. So each of the
+/// four hops is taken by a named call and the counters can be read one by one.
+#[test]
+fn all_four_transitions_are_taken_and_counted() {
+    with_vm(ORDINARY_HEAP_WORDS, |vm, lowered| {
+        let text = "a string with rather more than sixty-four bytes in it, so that a byte can \
+                    be read out of the middle without asking whether it is there at all.";
+        const AT: i64 = 16;
+        let mut session = vm
+            .native_session(
+                MODULE,
+                "refThroughCollection",
+                vec![Value::string(text), Value::int(AT)],
+            )
+            .expect("the session opens");
+        let words = session.arguments().to_vec();
+        let expected = session
+            .call(&NothingCompiled, &words)
+            .expect("the vm answers");
+        let before = session.tiers();
+        // `refThroughCollection` is *not* compiled, so the outermost frame is the
+        // VM's and every crossing below it is a Cove call rather than an entry
+        // from Rust. That is what makes `vm_to_native` the hop under test.
+        let tier = hand(lowered, &["echoes", "held"]);
+        let answered = directly(|| session.call(&tier, &words)).expect("the mixed chain");
+        assert_eq!(answered, expected, "the chain answers what the VM answers");
+        let took = |now: u64, then: u64| now - then;
+        let tiers = session.tiers();
+        assert_eq!(
+            took(tiers.host_to_vm, before.host_to_vm),
+            1,
+            "the outermost frame was refused"
         );
         assert!(
-            witness().is_empty(),
-            "no hand-written entry was entered, so no call was made through the helper"
+            took(tiers.vm_to_vm, before.vm_to_vm) >= 1,
+            "VM to VM: `allocates` has no compiled entry and the VM called it"
+        );
+        assert!(
+            took(tiers.vm_to_native, before.vm_to_native) >= 1,
+            "VM to native: the encoded caller entered the compiled `echoes`"
+        );
+        assert!(
+            took(tiers.native_to_vm, before.native_to_vm) >= 1,
+            "native to VM: `held` calls `counts`, which is not compiled"
+        );
+        assert!(
+            took(
+                tiers.native_to_native_direct,
+                before.native_to_native_direct
+            ) >= 1,
+            "native to native, direct: `echoes` calls the compiled `held`"
+        );
+    });
+}
+
+/// The same chain with the mediated call protocol, which is the fifth counter.
+///
+/// `direct` is off, so a compiled callee reached from compiled code goes through
+/// the one call helper. The counters have to say which protocol ran, because a
+/// reader who could not tell them apart would read a mediated run as if PR #368's
+/// direct calls were in it.
+#[test]
+fn a_mediated_native_to_native_call_is_counted_apart() {
+    with_vm(ORDINARY_HEAP_WORDS, |vm, lowered| {
+        let mut session = vm
+            .native_session(MODULE, "passesPair", vec![Value::int(11)])
+            .expect("the session opens");
+        let expected = session
+            .call(&NothingCompiled, &[11])
+            .expect("the vm answers");
+        let before = session.tiers();
+        let tier = hand(lowered, &["passesPair", "makesPair"]);
+        let answered = session.call(&tier, &[11]).expect("the hand tier answers");
+        assert_eq!(answered, expected);
+        let tiers = session.tiers();
+        assert_eq!(
+            took_all(before, tiers).native_to_native_direct,
+            0,
+            "nothing took the direct protocol"
+        );
+        assert_eq!(
+            took_all(before, tiers).native_to_native_mediated,
+            1,
+            "the compiled caller reached the compiled callee through the helper"
+        );
+    });
+}
+
+/// The difference between two readings, field by field.
+fn took_all(before: cove_runtime::Tiers, after: cove_runtime::Tiers) -> cove_runtime::Tiers {
+    cove_runtime::Tiers {
+        vm_to_vm: after.vm_to_vm - before.vm_to_vm,
+        vm_to_native: after.vm_to_native - before.vm_to_native,
+        native_to_vm: after.native_to_vm - before.native_to_vm,
+        native_to_native_direct: after.native_to_native_direct - before.native_to_native_direct,
+        native_to_native_mediated: after.native_to_native_mediated
+            - before.native_to_native_mediated,
+        host_to_native: after.host_to_native - before.host_to_native,
+        host_to_vm: after.host_to_vm - before.host_to_vm,
+    }
+}
+
+/// Every return shape, crossed by a **VM-to-native** call.
+///
+/// The cases above test each shape with a compiled caller, which is where ADR
+/// 0057's destination was written and measured. This is the same four shapes with
+/// the caller on the *encoded* tier, because the destination is then a frame the
+/// dispatch loop is standing in and the hand-over is the one issue #369 added:
+/// `open_frame` settled the arguments, `Inst::Call`'s `dst` settled the
+/// destination, and compiled code writes it before its frame comes off.
+///
+/// Each row names a wrapper that is deliberately **not** compiled and the callee
+/// that is, and every answer is compared against the encoded VM's for the same
+/// call. A destination one word short, one word wide or one slot over is a
+/// different answer.
+#[test]
+fn every_return_shape_crosses_a_vm_to_native_call() {
+    // (the encoded caller, the compiled callee, the argument, what it answers)
+    let rows: [(&str, &str, i64, Vec<u64>); 4] = [
+        // Two words, inline: the multi-word return.
+        ("passesPair", "makesPair", 41, vec![41, 42]),
+        // No words at all, and a caller that goes on to use a slot afterwards.
+        ("passesEmpty", "makesEmpty", 5, vec![105]),
+        // One word, and the word is a heap address rather than the object at it.
+        ("passesEcho", "echoes", 0, Vec::new()),
+        // One scalar word, through a recursion the callee makes itself.
+        ("callsCounts", "counts", 40, vec![40]),
+    ];
+    for (caller, callee, argument, answers) in rows {
+        with_vm(ORDINARY_HEAP_WORDS, |vm, lowered| {
+            let reference = caller == "passesEcho";
+            let arguments = if reference {
+                vec![Value::string("a string"), Value::int(argument)]
+            } else {
+                vec![Value::int(argument)]
+            };
+            let mut session = vm
+                .native_session(MODULE, caller, arguments)
+                .expect("the session opens");
+            let words = session.arguments().to_vec();
+            let expected = session
+                .call(&NothingCompiled, &words)
+                .expect("the vm answers");
+            if !answers.is_empty() {
+                assert_eq!(expected, answers, "`{caller}` answers what this case says");
+            }
+            let before = session.tiers();
+            let tier = hand(lowered, &[callee]);
+            let answered = session
+                .call(&tier, &words)
+                .unwrap_or_else(|error| panic!("`{caller}` -> `{callee}`: {}", error.message));
+            assert_eq!(
+                answered, expected,
+                "`{caller}` -> `{callee}` answered something other than the VM's answer"
+            );
+            let tiers = session.tiers();
+            assert!(
+                tiers.vm_to_native - before.vm_to_native >= 1,
+                "`{caller}` -> `{callee}` did not take the VM-to-native hop"
+            );
+            assert_eq!(
+                tiers.host_to_vm - before.host_to_vm,
+                1,
+                "`{caller}` was run by the VM, which is what makes the hop that one"
+            );
+            assert!(
+                entries_into(lowered, callee) >= 1,
+                "`{callee}`'s compiled entry ran"
+            );
+            assert_eq!(
+                entries_into(lowered, caller),
+                0,
+                "`{caller}`'s did not, because it has none"
+            );
+        });
+    }
+}
+
+/// A raise crosses a VM-to-native call with the sentence the VM would have
+/// produced, and publishes nothing.
+///
+/// Two halves, and the second is the one a boundary gets wrong. The message has to
+/// be the *encoded tier's* — `cove-native` names the operation and `cove-runtime`
+/// writes the sentence, so a native `/` by zero says what a dispatched one says —
+/// and the caller's destination has to be untouched, because the answer is
+/// published only on the return path.
+#[test]
+fn a_raise_crosses_a_vm_to_native_call() {
+    with_vm(ORDINARY_HEAP_WORDS, |vm, lowered| {
+        let mut session = vm
+            .native_session(MODULE, "passesRefusal", vec![Value::int(0)])
+            .expect("the session opens");
+        let refused = session
+            .call(&NothingCompiled, &[0])
+            .expect_err("the vm refuses a zero divisor");
+        // Only the callee is compiled, so the raise leaves compiled code and is
+        // built by the runtime for an encoded caller to carry.
+        let tier = hand(lowered, &["refuses"]);
+        let before = session.tiers();
+        let crossed = session
+            .call(&tier, &[0])
+            .expect_err("the compiled callee refuses it too");
+        assert_eq!(
+            crossed.message, refused.message,
+            "a native raise crossing into the VM is the same sentence"
+        );
+        assert_eq!(
+            crossed.span, refused.span,
+            "and it points at the same instruction"
+        );
+        // The chain is read out of the frames the failure left standing, and it is
+        // asserted because getting it wrong is invisible in the message: syncing
+        // the caller's pc on the way out would overwrite the *callee's* frame and
+        // report the call site as the place the division failed. It did, once.
+        assert_eq!(
+            crossed.chain(),
+            refused.chain(),
+            "and the call chain it left behind is the VM's"
+        );
+        assert_eq!(
+            session.tiers().vm_to_native - before.vm_to_native,
+            1,
+            "the encoded caller entered the compiled callee before it raised"
+        );
+        // The session is still usable, which is what says the failure put the
+        // stack back rather than leaving a frame standing on it.
+        let answered = session.call(&tier, &[4]).expect("a divisor that works");
+        assert_eq!(answered, vec![25]);
+    });
+}
+
+/// Exhausted fuel stops a run with a VM-to-native call in flight, and stops it
+/// where the VM stops it.
+///
+/// [ADR 0040] makes fuel backend-specific — a native run does not promise the same
+/// `fuel_spent` — and promises the same *stop outcome*. So this asserts the
+/// outcome and the sentence and deliberately not the number: the safepoint a
+/// native call takes is `Machine::safepoint`, the same three steps in the same
+/// order, and what differs is how much work had accumulated before it.
+///
+/// [ADR 0040]: ../../../docs/adr/0040-a-bound-outlives-its-backend.md
+#[test]
+fn fuel_runs_out_under_a_vm_to_native_call() {
+    const DEEP: i64 = 20_000;
+    let limits = Limits {
+        fuel: Some(2_000),
+        ..Limits::default()
+    };
+    with_limited_vm(ORDINARY_HEAP_WORDS, limits, |vm, lowered| {
+        let mut session = vm
+            .native_session(MODULE, "callsCounts", vec![Value::int(DEEP)])
+            .expect("the session opens");
+        let stopped = session
+            .call(&NothingCompiled, &[DEEP as u64])
+            .expect_err("the vm runs out of fuel");
+        let tier = hand(lowered, &["counts"]);
+        let crossed = session
+            .call(&tier, &[DEEP as u64])
+            .expect_err("and so does a run that crossed into compiled code");
+        assert_eq!(
+            crossed.outcome, stopped.outcome,
+            "the same terminal outcome, which is what ADR 0040 promises across tiers"
+        );
+        assert!(
+            crossed.message.contains("fuel"),
+            "and it says what stopped it: {}",
+            crossed.message
+        );
+        assert!(
+            session.tiers().vm_to_native >= 1,
+            "the encoded caller had entered compiled code before the stop"
+        );
+    });
+}
+
+/// Cancellation stops a run with a VM-to-native call in flight.
+///
+/// The first of ADR 0040's three safepoint steps, taken by the same
+/// `Machine::safepoint` an encoded run takes it with — cancellation is checked
+/// before fuel and before the collector rendezvous, in compiled code as in
+/// dispatched code, because neither of the three is emitted.
+#[test]
+fn cancellation_stops_a_vm_to_native_call() {
+    const DEEP: i64 = 200_000;
+    with_bounded_vm(
+        ORDINARY_HEAP_WORDS,
+        Limits::default(),
+        |vm, lowered, cancellation| {
+            let mut session = vm
+                .native_session(MODULE, "callsCounts", vec![Value::int(DEEP)])
+                .expect("the session opens");
+            cancellation.cancel();
+            let tier = hand(lowered, &["counts"]);
+            let stopped = session
+                .call(&tier, &[DEEP as u64])
+                .expect_err("a cancelled run stops");
+            assert!(
+                stopped.message.contains("cancel"),
+                "and says it was cancelled: {}",
+                stopped.message
+            );
+        },
+    );
+}
+
+/// A recursion past the configured call depth is refused on the VM-to-native path
+/// too, by the same two checks in the same order.
+///
+/// `admit_frame` against the embedder's `max_call_depth`, and then `push_frame`'s
+/// `Overflow` against the task's stack segment. Both are inside the *same*
+/// `open_frame` the dispatch loop calls, because a VM-to-native call opens its
+/// frame the way every other encoded call does and only then asks which tier runs
+/// it — which is the whole reason this hop needed no new admission code.
+#[test]
+fn a_vm_to_native_recursion_is_refused_at_the_configured_depth() {
+    const LIMIT: usize = 64;
+    let limits = Limits {
+        max_call_depth: Some(LIMIT),
+        ..Limits::default()
+    };
+    with_limited_vm(ORDINARY_HEAP_WORDS, limits, |vm, lowered| {
+        const RUNAWAY: i64 = 100_000;
+        let mut session = vm
+            .native_session(MODULE, "callsCounts", vec![Value::int(RUNAWAY)])
+            .expect("the session opens");
+        let refused = session
+            .call(&NothingCompiled, &[RUNAWAY as u64])
+            .expect_err("the vm refuses a recursion past the limit");
+        let tier = hand(lowered, &["counts"]);
+        let crossed = session
+            .call(&tier, &[RUNAWAY as u64])
+            .expect_err("a chain that crossed into compiled code is refused too");
+        assert!(
+            refused.message.contains(&LIMIT.to_string()),
+            "the VM's refusal names the limit: {}",
+            refused.message
+        );
+        assert_eq!(
+            crossed.message, refused.message,
+            "and the crossing is refused by the same check with the same sentence"
+        );
+        // Still usable, which is the other half of "refused rather than crashed".
+        let answered = session
+            .call(&tier, &[10])
+            .expect("a depth inside the limit");
+        assert_eq!(answered, vec![10]);
+    });
+}
+
+/// A destination pending across a reallocation of the stack, with the caller on
+/// the VM.
+///
+/// `a_return_finds_a_destination_a_reallocation_moved`'s case with the outermost
+/// frame encoded, which puts a *dispatch loop's* frame under three hundred native
+/// ones. The dispatch loop caches `base_at` — a word *index* — across the call for
+/// exactly this reason, and a native chain deep enough to `Vec::resize` the stack
+/// is what says the index survived what a pointer would not have.
+#[test]
+fn a_vm_destination_survives_a_reallocation_under_a_native_chain() {
+    with_vm(ORDINARY_HEAP_WORDS, |vm, lowered| {
+        const DEEP: i64 = 300;
+        let mut session = vm
+            .native_session(MODULE, "callsCounts", vec![Value::int(DEEP)])
+            .expect("the session opens");
+        // The compiled arm goes first, for the reason the direct case gives: a
+        // `Vec` keeps its capacity, so a VM run of three hundred frames would
+        // leave the stack large enough that nothing reallocates afterwards and
+        // this case would pass while testing nothing.
+        let tier = hand(lowered, &["counts"]);
+        let answered = session
+            .call(&tier, &[DEEP as u64])
+            .expect("the crossing answers");
+        let expected = session
+            .call(&NothingCompiled, &[DEEP as u64])
+            .expect("the vm answers");
+        assert_eq!(expected, vec![DEEP as u64]);
+        assert_eq!(answered, expected);
+        assert!(
+            segments() > 1,
+            "the stack did not reallocate under {DEEP} frames, so this case did not test what it \
+             is for"
+        );
+    });
+}
+
+/// A forced collection with references live in **both** the encoded caller and the
+/// compiled callee.
+///
+/// ADR 0055's "Collection uses the VM stack as the first root map", across the hop
+/// this issue added. The caller is a dispatch-loop frame holding a `String` in a
+/// `Repr::Ref` slot; the callee is compiled and holds the same reference in a slot
+/// of its own; and the allocation inside `allocates` — which runs on the VM,
+/// because `String.sliceBytes` is outside anything native lowers — is what
+/// collects while both are live. If either frame's reference were anywhere but the
+/// slot `Function::refs` names, the string would be swept and the byte read would
+/// answer something else.
+#[test]
+fn a_collection_keeps_references_live_in_both_an_encoded_caller_and_a_compiled_callee() {
+    const SMALL_HEAP_WORDS: usize = 1 << 13;
+    with_vm(SMALL_HEAP_WORDS, |vm, lowered| {
+        let text = "a string long enough that slicing it fills a heap chunk, and long enough \
+                    that a byte can be read out of the middle of it without asking whether it \
+                    is there: sixty-four bytes in is well inside this sentence.";
+        const AT: i64 = 64;
+        let mut session = vm
+            .native_session(
+                MODULE,
+                "refThroughCollection",
+                vec![Value::string(text), Value::int(AT)],
+            )
+            .expect("the session opens");
+        let words = session.arguments().to_vec();
+        let expected = session
+            .call(&NothingCompiled, &words)
+            .expect("the vm answers");
+        assert_eq!(expected, vec![u64::from(text.as_bytes()[AT as usize])]);
+
+        // `refThroughCollection` is *not* compiled, so it is the encoded caller
+        // and `echoes` is the compiled callee that holds the same reference.
+        let tier = hand(lowered, &["echoes"]);
+        let before = session.collections();
+        let mut calls = 0;
+        while session.collections() == before && calls < 20_000 {
+            let answered = session.call(&tier, &words).expect("the mixed chain");
+            assert_eq!(answered, expected, "crossing {calls} answered wrongly");
+            calls += 1;
+        }
+        assert!(
+            session.collections() > before,
+            "no collection happened in {calls} calls, so this case tested nothing"
+        );
+        assert!(
+            session.tiers().vm_to_native >= calls as u64,
+            "at least one VM-to-native crossing per call"
+        );
+    });
+}
+
+/// One finalized table, many calls, and the table is never rebuilt.
+///
+/// Issue #369: a VM-to-native call must "not recursively rebuild or refinalize the
+/// JIT". This file's tier emits nothing, so what it can say about *finalizing* is
+/// nothing — what it can say, and what the property reduces to for a caller, is
+/// that the table is consulted rather than constructed: the same `Tiered` is handed
+/// to a thousand calls, the answers are all the VM's, and the counters grow by one
+/// crossing a call and not by more.
+#[test]
+fn one_table_serves_repeated_calls() {
+    with_vm(ORDINARY_HEAP_WORDS, |vm, lowered| {
+        const CALLS: u64 = 1_000;
+        let mut session = vm
+            .native_session(MODULE, "passesPair", vec![Value::int(1)])
+            .expect("the session opens");
+        let tier = hand(lowered, &["makesPair"]);
+        let before = session.tiers();
+        for at in 0..CALLS {
+            let answered = session.call(&tier, &[at]).expect("every call answers");
+            assert_eq!(answered, vec![at, at + 1], "call {at}");
+        }
+        let took = took_all(before, session.tiers());
+        assert_eq!(
+            took.vm_to_native, CALLS,
+            "one crossing a call, through one table"
+        );
+        assert_eq!(
+            took.host_to_vm, CALLS,
+            "and one encoded outermost frame a call"
+        );
+        assert_eq!(
+            entries_into(lowered, "makesPair") as u64,
+            CALLS,
+            "the compiled entry ran once a call"
         );
     });
 }

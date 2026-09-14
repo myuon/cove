@@ -44,7 +44,13 @@ design is recorded in [ADR 0001](docs/adr/0001-mvp-language-design.md).
 An MVP compiler front end and two evaluators exist: the linear-memory backend
 of [ADR 0034](docs/adr/0034-one-physical-word-stack.md), which is what runs a
 program, and the tree-walking interpreter, which is the semantic oracle the
-backend is checked against and is still selectable with `--backend ast`.
+backend is checked against and is still selectable with `--backend ast`. A
+third tier is being built and measured behind
+[ADR 0055](docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md):
+`--backend native` compiles the functions it can to x86-64 machine code, runs
+the rest on the linear-memory backend, and reports which was which. It is
+explicit, off by default, needs a build with `--features template`, and says so
+rather than falling back when it cannot have one.
 `cove check`,
 `cove outline`, and `cove run` all cover every representative program; what a
 run does depends on which host implementations it was given, and one of them

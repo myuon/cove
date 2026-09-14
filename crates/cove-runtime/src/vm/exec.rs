@@ -755,6 +755,32 @@ pub(crate) struct Machine<'a> {
     /// layouts are fixed by then: there is no invalidation to get wrong and
     /// no entry that can be missing.
     widths: Arc<[u32]>,
+    /// [ADR 0055]'s function-entry table, while one is installed.
+    ///
+    /// `Program + FunctionId -> encoded entry | native entry`, and the reason it
+    /// is on the machine rather than passed down is that **the encoded `CALL` arm
+    /// has to ask it**. It is what makes native coverage compositional: without
+    /// it a compiled function called from an encoded one stays encoded, which is
+    /// the hole [issue #369](https://github.com/myuon/cove/issues/369) was opened
+    /// to close.
+    ///
+    /// `None` is the default and is every run that did not ask for the native
+    /// tier. What a run with no tier pays for the possibility is one `Option`
+    /// test in [`Machine::tiered`], made where a call is made and nowhere else —
+    /// ADR 0055's "It must not add a branch to every VM dispatch".
+    ///
+    /// A `Box`, and that is load-bearing rather than a layout choice: a helper
+    /// reaches the machine through one raw pointer and this through a second, and
+    /// the two have to name disjoint memory. See
+    /// [`Tiering`](native::Tiering)'s own note.
+    ///
+    /// A spawned task's machine is built with `None`, so a task runs on the
+    /// encoded tier whatever the entry task was given. That is a limitation and
+    /// not a decision: the table would have to be `Send + Sync` to cross the
+    /// thread, and nothing that needs it has spawned yet.
+    ///
+    /// [ADR 0055]: ../../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+    pub(crate) tier: Option<Box<native::Tiering>>,
 }
 
 /// Which of [`Machine::cases`] a wrapper memoises into.
@@ -851,6 +877,7 @@ impl<'a> Machine<'a> {
                 .iter()
                 .map(|layout| layout.width())
                 .collect(),
+            tier: None,
         };
         machine.literal_addrs = machine.place_literals();
         machine
@@ -923,7 +950,81 @@ impl<'a> Machine<'a> {
             // The parent's, for the reason `encoded` is: a table derived from
             // a program the whole run shares is the same table in every task.
             widths,
+            // Not the parent's: see the field. A spawned task runs on the
+            // encoded tier.
+            tier: None,
         }
+    }
+
+    /// Installs [ADR 0055]'s entry table for the rest of this machine's life.
+    ///
+    /// One installer for a *run*; [`native::Session::call`] is the other and
+    /// installs per call. See [`Machine::tier`] for why the table is here at all
+    /// and `native::Tiering` for why it is reached through a raw pointer.
+    ///
+    /// # Safety
+    ///
+    /// `entries` stays alive and unmoved for as long as this machine does. The
+    /// one caller is [`crate::Vm::with_native`], whose table outlives the `Vm`.
+    ///
+    /// [ADR 0055]: ../../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+    pub(crate) unsafe fn install_native(&mut self, entries: &dyn native::Tiered) {
+        let entries = native::erase(entries);
+        let functions = self.program.functions.len();
+        let capacity = self.mem.chunk_capacity();
+        self.tier = Some(Box::new(native::Tiering::new(entries, functions, capacity)));
+    }
+
+    /// Which transitions this machine's calls took. See [`native::Tiers`].
+    pub(crate) fn tiers(&self) -> native::Tiers {
+        self.tier
+            .as_deref()
+            .map_or_else(native::Tiers::default, native::Tiering::counts)
+    }
+
+    /// Dynamic calls to each function that stayed on the encoded tier, by
+    /// `FunctionId`. Empty when no tier is installed.
+    pub(crate) fn refused_calls(&self) -> &[u64] {
+        self.tier
+            .as_deref()
+            .map_or(&[][..], native::Tiering::refused_calls)
+    }
+
+    /// The compiled entry of `callee`, if a tier is installed and has one.
+    ///
+    /// **The whole of what the dispatch path pays for the native tier**, and it
+    /// is one `Option` test: a run that installed no table cannot reach the line
+    /// below it. ADR 0055 asks that an adaptive policy "must not add a branch to
+    /// every VM dispatch without a benchmark showing that branch pays for
+    /// itself", and the answer taken here is to put the question at a *call*
+    /// rather than at a dispatch — a `call` instruction already costs a frame, an
+    /// argument copy and a safepoint, so one more test is inside the noise, and a
+    /// call-free loop such as `benches/arith`'s pays nothing at all.
+    ///
+    /// The counting is out of line with the lookup for
+    /// [`encoded::dispatch`]'s stated reason: what a larger dispatch body costs is
+    /// paid by every instruction of every program, whether or not the added code
+    /// runs.
+    #[inline]
+    pub(crate) fn tiered(&mut self, callee: FunctionId) -> Option<cove_native::Entry> {
+        // A `match` on the discriminant, and the arm that does anything is a call
+        // to something out of line. `self.tier.as_deref_mut()?` would be shorter
+        // and is not the same thing: what has to stay small here is the code the
+        // dispatch loop *inlines*, and the `?` form puts the table lookup and its
+        // counters in it.
+        match self.tier {
+            None => None,
+            Some(_) => self.tier_of(callee),
+        }
+    }
+
+    /// [`Machine::tiered`] once a table is known to be installed.
+    #[inline(never)]
+    fn tier_of(&mut self, callee: FunctionId) -> Option<cove_native::Entry> {
+        let tier = self.tier.as_deref_mut()?;
+        // Safety: the installer keeps the table alive for as long as it is
+        // installed; see `Machine::install_native` and `native::Session::call`.
+        unsafe { tier.crossing(callee) }
     }
 
     /// The family of the value a callback answered during the host call in
@@ -1135,6 +1236,16 @@ impl<'a> Machine<'a> {
             pc: 0,
             dst: 0,
         });
+        // The outermost frame of a run is **always** the dispatch loop's, whatever
+        // the tier table says about it, and the counter says so rather than
+        // leaving a reader to work it out. Entering it natively would need a
+        // destination run below it — `native::Session` builds one, because a Rust
+        // caller has no `Inst::Call` whose `dst` was settled — and the frame is one
+        // frame: `main` is a `Host` caller in every program that has one, so it is
+        // refused anyway. The calls it makes consult the table like any others.
+        if let Some(tier) = self.tier.as_deref_mut() {
+            tier.entered_encoded();
+        }
         self.drive(&code, budget)
     }
 
@@ -1369,6 +1480,13 @@ impl<'a> Machine<'a> {
             pc: 0,
             dst: 0,
         });
+        // A host calling back into a closure is a Rust caller entering an
+        // outermost frame, exactly as a run is, and it is counted the same way and
+        // for the same reason: a total that left it out would not add up to the
+        // calls that were made. See `Machine::run`.
+        if let Some(tier) = self.tier.as_deref_mut() {
+            tier.entered_encoded();
+        }
         self.drive(&code, budget)
     }
 

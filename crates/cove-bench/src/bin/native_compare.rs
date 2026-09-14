@@ -1709,8 +1709,8 @@ fn race(
     // The VM's own iterations are `made` encoded calls of the raced function
     // itself, and they are taken off so the figures are about the *arms*: what a
     // native arm's call divided into.
-    let native_calls = tiers.native - before_tiers.native;
-    let encoded_calls = (tiers.encoded - before_tiers.encoded).saturating_sub(made);
+    let native_calls = tiers.native() - before_tiers.native();
+    let encoded_calls = (tiers.encoded() - before_tiers.encoded()).saturating_sub(made);
     println!(
         "  each arm's calls divided by tier: {:.1} native and {:.1} encoded per raced call \
          ({native_calls} and {encoded_calls} in total)",

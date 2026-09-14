@@ -171,6 +171,36 @@ jobs:
           cargo test -p cove-native --features template --profile checked
           cargo test -p cove-native --features cranelift,template --profile checked
 
+      # The *runtime's* half of the tier, and the CLI's, which are behind the
+      # same features for the same reason and were untested here until issue
+      # #369 wired `--backend native`.
+      #
+      # `crates/cove-runtime/tests/native_tier.rs` is the one that matters:
+      # every case above it in `native_return.rs` runs the boundary against a
+      # hand-written third tier, which is what lets them run in the ordinary
+      # `cargo t` with no executable page — and which is exactly why they can
+      # say nothing about machine code. This file compiles the real template
+      # compiler, enters it from the encoded `CALL` arm, and compares every
+      # answer with the VM's. A default build does not compile it, so without
+      # this step nothing would run it, and "a test no gate runs is not a
+      # test" is already written above.
+      #
+      # `cove-bench` is here for its `--features template` arm of
+      # `native_compare.rs`, which the default `--all-targets` clippy above
+      # compiles with neither arm and therefore does not lint.
+      - name: cargo clippy, doc and test (the native tier's runtime and CLI)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          for features in cranelift template cranelift,template; do
+            cargo clippy -p cove-runtime -p cove-cli -p cove-bench --all-targets \
+              --features "$features" --profile checked -- -D warnings
+            cargo doc -p cove-runtime -p cove-cli --no-deps \
+              --features "$features" --profile checked
+            cargo test -p cove-runtime -p cove-cli \
+              --features "$features" --profile checked
+          done
+
       # The `#[ignore]`d cases, which live in `crates/cove-cli/tests/` —
       # `vm_coverage.rs`, `bytecode_corpus.rs` and `build.rs`. The first is
       # the roadmap: it runs every program in the repository on the
@@ -279,6 +309,34 @@ jobs:
       # happens.
       - name: cove-bench (correctness only; no threshold gate)
         run: ./target/checked/cove-bench --iterations 1
+
+      # Last, and after everything above has used the *default* toolchain, which
+      # is the one a user gets: this step rebuilds `cove` with the code
+      # generator's feature, so it goes where nothing after it reads the binary.
+      #
+      # What it checks is the experimental tier on the corpus the toolchain
+      # already dogfoods: `examples/covefmt` over every `.cove` file in the
+      # repository, on the native tier, byte for byte against the encoded VM's
+      # answer.
+      #
+      # It is a check and not a measurement. Wall-clock numbers are meaningless
+      # on a shared runner — ADR 0029, and the reason `cove-bench` runs here for
+      # correctness only — so what this asserts is the thing a runner can
+      # assert: the two backends print the same bytes and both exit 0. The
+      # mixture itself is printed to the log, unconditionally, because ADR 0055
+      # requires a native run to report it.
+      - name: cove run covefmtBench on the native tier, against the VM
+        run: |
+          set -euo pipefail
+          cargo build --profile checked -p cove-cli --features template
+          cd examples
+          strip_timings() { grep -v '^lex\|^parse\|^print\|^whole'; }
+          ../target/checked/cove run covefmtBench --files-root .. --backend vm \
+            2>/dev/null | strip_timings > /tmp/covefmt-vm.out
+          ../target/checked/cove run covefmtBench --files-root .. --backend native \
+            | strip_timings > /tmp/covefmt-native.out
+          diff /tmp/covefmt-vm.out /tmp/covefmt-native.out
+          echo "the native tier printed what the encoded VM printed, byte for byte"
 
   # Issue #241 asks for the WebAssembly build to be in CI before the UI that
   # depends on it, so this is a job of its own rather than a step: it fails on
