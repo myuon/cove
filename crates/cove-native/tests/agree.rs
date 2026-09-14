@@ -17,8 +17,8 @@
 
 #![cfg(all(feature = "cranelift", feature = "template"))]
 
-use cove_ir::{ArithOp, CmpOp, FunctionId, Inst, Len, Num, Program, Repr, StrId};
-use cove_native::{Entry, NativeHelpers, HEAP_CHUNK_WORDS};
+use cove_ir::{Arg, ArgsId, ArithOp, CmpOp, FunctionId, Inst, Len, Num, Program, Repr, StrId};
+use cove_native::{Entry, NativeHelpers, Outcome, HEAP_CHUNK_WORDS};
 
 mod suite;
 
@@ -77,23 +77,27 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
     suite::forget_calls();
     suite::forget_allocations();
     suite::forget_mediated();
+    suite::forget_built();
     let mut cranelift_words = words.to_vec();
     let cranelift = suite::run::<Cranelift>(program, &mut cranelift_words, base);
     let cranelift_polls = suite::polls();
     let cranelift_calls = suite::calls();
     let cranelift_allocs = suite::allocations();
     let cranelift_mediated = suite::mediated();
+    let cranelift_built = suite::built();
 
     suite::forget_polls();
     suite::forget_calls();
     suite::forget_allocations();
     suite::forget_mediated();
+    suite::forget_built();
     let mut template_words = words.to_vec();
     let template = suite::run::<Template>(program, &mut template_words, base);
     let template_polls = suite::polls();
     let template_calls = suite::calls();
     let template_allocs = suite::allocations();
     let template_mediated = suite::mediated();
+    let template_built = suite::built();
 
     assert_eq!(cranelift.outcome, template.outcome, "outcome: {what}");
     assert_eq!(
@@ -132,6 +136,10 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
         cranelift_mediated, template_mediated,
         "the builtins handed to the runtime, in order: {what}"
     );
+    assert_eq!(
+        cranelift_built, template_built,
+        "the buffer operations handed to the runtime, in order: {what}"
+    );
 }
 
 /// The same, over a heap both arms read the same words of.
@@ -140,7 +148,25 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
 /// what the covefmt slice added and nothing that came before it has one: the
 /// callers above would all pass a heap with nothing in it.
 fn agree_over(what: &str, program: &Program, words: &[u64], base: u64, build: impl Fn() -> Heap) {
-    agree_with_literals(what, program, words, base, build, &[]);
+    agree_with_literals(what, program, words, base, build, &[], &[]);
+}
+
+/// [`agree_over`], with what the runtime's buffer helper answers scripted.
+///
+/// The script has to be *re-applied for each arm* rather than set once around the
+/// pair, which is the whole reason this is not four lines at a call site:
+/// `suite::forget_built` clears the queue along with the log, so a script set
+/// before the first arm would be gone by the second and the two would be compared
+/// on two different runs.
+fn agree_answering(
+    what: &str,
+    program: &Program,
+    words: &[u64],
+    base: u64,
+    build: impl Fn() -> Heap,
+    answers: &[Outcome],
+) {
+    agree_with_literals(what, program, words, base, build, &[], answers);
 }
 
 /// [`agree_over`], with a literal-address table published to both arms.
@@ -156,11 +182,14 @@ fn agree_with_literals(
     base: u64,
     build: impl Fn() -> Heap,
     literals: &[u64],
+    answers: &[Outcome],
 ) {
     suite::forget_polls();
     suite::forget_calls();
     suite::forget_allocations();
     suite::forget_mediated();
+    suite::forget_built();
+    suite::built_answers(answers);
     let cranelift_heap = build();
     let mut cranelift_words = words.to_vec();
     let cranelift = suite::run_with_literals::<Cranelift>(
@@ -173,11 +202,14 @@ fn agree_with_literals(
     let cranelift_polls = suite::polls();
     let cranelift_allocs = suite::allocations();
     let cranelift_mediated = suite::mediated();
+    let cranelift_built = suite::built();
 
     suite::forget_polls();
     suite::forget_calls();
     suite::forget_allocations();
     suite::forget_mediated();
+    suite::forget_built();
+    suite::built_answers(answers);
     let template_heap = build();
     let mut template_words = words.to_vec();
     let template = suite::run_with_literals::<Template>(
@@ -190,6 +222,7 @@ fn agree_with_literals(
     let template_polls = suite::polls();
     let template_allocs = suite::allocations();
     let template_mediated = suite::mediated();
+    let template_built = suite::built();
 
     assert_eq!(cranelift.outcome, template.outcome, "outcome: {what}");
     assert_eq!(
@@ -213,6 +246,10 @@ fn agree_with_literals(
     assert_eq!(
         cranelift_mediated, template_mediated,
         "the builtins handed to the runtime, in order: {what}"
+    );
+    assert_eq!(
+        cranelift_built, template_built,
+        "the buffer operations handed to the runtime, in order: {what}"
     );
     // The two heaps started equal, so a difference here is one arm having read or
     // written a word the other did not. Until `Inst::Store` this was the weaker
@@ -350,6 +387,7 @@ fn both_arms_answer_the_same_thing() {
             0,
             literal_heap,
             &table,
+            &[],
         );
         agree_with_literals(
             &format!("three literals and a byte at {at}, off word zero"),
@@ -358,6 +396,31 @@ fn both_arms_answer_the_same_thing() {
             2,
             literal_heap,
             &table,
+            &[],
+        );
+    }
+
+    // ADR 0052's four, each handed to the runtime whole: what the two arms have
+    // to agree on is the hand-over, its operands and its order, and on what the
+    // helper's outcome does to the frame when it is not `Returned`.
+    for words in [vec![0u64, 3, 0], vec![9, 9, 0, 3, 0]] {
+        let base = if words.len() > 3 { 2 } else { 0 };
+        agree_over(
+            "a builder allocated, appended to and finished",
+            &buffers(),
+            &words,
+            base,
+            || Heap::new(1),
+        );
+    }
+    for outcome in [Outcome::Raised, Outcome::Stopped] {
+        agree_answering(
+            &format!("a builder whose first operation answered {outcome:?}"),
+            &buffers(),
+            &[0, 3, 0],
+            0,
+            || Heap::new(1),
+            &[outcome],
         );
     }
 
@@ -607,6 +670,51 @@ fn literals() -> Program {
             ],
         ),
         &["one", "two", "three"],
+    )
+}
+
+/// ADR 0052's four in one body, in the order a builder is used.
+///
+/// Neither arm emits a fast path for any of them, so what has to agree is what
+/// each hands over and in what order — and `agree` already compares
+/// `suite::built()` between the two arms for exactly that.
+fn buffers() -> Program {
+    suite::program_with_args(
+        suite::function(
+            vec![Repr::Ref, Repr::Int, Repr::Ref],
+            suite::REF,
+            vec![
+                Inst::AllocBuffer {
+                    dst: 0,
+                    capacity: 1,
+                },
+                Inst::AppendByte {
+                    buffer: 0,
+                    value: 1,
+                },
+                Inst::AppendBytes { args: ArgsId(1) },
+                Inst::FinishBuffer { dst: 2, buffer: 0 },
+                Inst::Return { src: 2 },
+            ],
+        ),
+        vec![
+            Arg {
+                slot: 0,
+                layout: suite::REF,
+            },
+            Arg {
+                slot: 2,
+                layout: suite::REF,
+            },
+            Arg {
+                slot: 1,
+                layout: INT,
+            },
+            Arg {
+                slot: 1,
+                layout: INT,
+            },
+        ],
     )
 }
 

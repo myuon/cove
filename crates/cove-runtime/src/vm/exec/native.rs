@@ -82,7 +82,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cove_ir::{ArgsId, BuiltinId, FunctionId, LayoutId, Slot, StrId};
-use cove_native::{Entry, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
+use cove_native::{BufferOp, Entry, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
 
 use super::{divided_by_zero, null_object, overflowed, Frame, Machine, Overflow};
 use crate::budget::Meter;
@@ -666,6 +666,116 @@ unsafe extern "C" fn builtin(
             // already holding it.
             .and_then(|()| {
                 machine.call_builtin(frame.base, dst as Slot, BuiltinId(builtin), ArgsId(args))
+            })
+            .map_err(|error| error.at(machine.span(frame.function, pc as usize)))
+    };
+    republish(ctx, host);
+    match answered {
+        Ok(()) => Outcome::Returned.abi(),
+        Err(error) => {
+            (*host).left = Some(error);
+            Outcome::Raised.abi()
+        }
+    }
+}
+
+/// The growable-buffer helper: one of [ADR 0052]'s four, handed over whole.
+///
+/// See [`cove_native::BufferFn`] for why each of the four is the helper rather
+/// than a fast path and a cold one — the short of it is one rooting discipline
+/// that is not the frame's, one chunked safepoint contract, and one UTF-8 walk.
+/// What happens here is `encoded.rs`'s `ALLOC_BUFFER`, `APPEND_BYTE`,
+/// `APPEND_BYTES` and `FINISH_BUFFER` arms, and *is* those arms: each one reads
+/// its operands out of the frame and calls the same `Machine` method the
+/// dispatch loop calls, so there is no second copy of ADR 0052's capacity
+/// arithmetic, growth policy, chunking or relabel anywhere.
+///
+/// Every one of them may allocate and an allocation may collect, so this is a
+/// safepoint for exactly [`alloc`]'s reason and takes the same three steps in the
+/// same order.
+///
+/// # The span is attached the way `fail!` attaches it
+///
+/// `append_bytes` builds its own refusals with a span already on them, and the
+/// rest answer a bare `RuntimeError`. `RuntimeError::at` is `get_or_insert`, so
+/// one `map_err` here is what the encoded arms' `fail!` is: the instruction's
+/// span where the error has none, and the error's own where it has one.
+///
+/// # Safety
+///
+/// As [`safepoint`].
+///
+/// [ADR 0052]: ../../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
+unsafe extern "C" fn buffer(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    op: u32,
+    a: u32,
+    b: u32,
+) -> u32 {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+    let budget = (*host).budget;
+
+    let work = (*ctx).pending_work;
+    (*ctx).pending_work = 0;
+
+    let answered = {
+        let machine = &mut *machine;
+        machine.bulk_work += work;
+        machine.sync(pc as usize);
+        let frame = *machine.frames.last().expect("a native frame is executing");
+        debug_assert_eq!(
+            machine.mem.stack_index(frame.base) as u64,
+            base,
+            "compiled code and the frame stack disagree about which frame the buffer op is in"
+        );
+        let op = BufferOp::from_abi(op).expect("a code generator emitted a buffer op that is one");
+        machine
+            .safepoint(budget, frame.function, pc as usize)
+            .and_then(|()| {
+                // The frame's *address* rather than its index, for [`builtin`]'s
+                // reason: the runtime is already holding the top frame and a slot
+                // read needs a linear address.
+                let base = frame.base;
+                match op {
+                    BufferOp::Alloc => {
+                        let capacity = machine.mem.slot(base, b as Slot) as i64;
+                        let owner = machine.alloc_buffer(capacity)?;
+                        machine.mem.set_slot(base, a as Slot, owner);
+                        Ok(())
+                    }
+                    BufferOp::AppendByte => {
+                        let owner = machine.mem.slot(base, a as Slot);
+                        let value = machine.mem.slot(base, b as Slot) as i64;
+                        machine.append_byte(owner, value)
+                    }
+                    // The one that is not a `Machine` method, because its four
+                    // operands, its eight refusals and its chunk loop are a page of
+                    // code `encoded.rs` already keeps out of its dispatch loop.
+                    // Called rather than copied, for that whole page's worth of
+                    // reasons.
+                    BufferOp::AppendBytes => {
+                        let program = machine.program;
+                        let args = program.arg_list(ArgsId(a));
+                        super::encoded::append_bytes(
+                            machine,
+                            program,
+                            budget,
+                            base,
+                            args,
+                            frame.function,
+                            pc as usize,
+                        )
+                    }
+                    BufferOp::Finish => {
+                        let owner = machine.mem.slot(base, b as Slot);
+                        let text = machine.finish_buffer(owner)?;
+                        machine.mem.set_slot(base, a as Slot, text);
+                        Ok(())
+                    }
+                }
             })
             .map_err(|error| error.at(machine.span(frame.function, pc as usize)))
     };
@@ -1443,6 +1553,7 @@ pub fn helpers() -> NativeHelpers {
         close,
         alloc,
         builtin,
+        buffer,
     }
 }
 
@@ -1534,6 +1645,7 @@ pub fn helpers_ablated<const MASK: u64>() -> NativeHelpers {
         close,
         alloc,
         builtin,
+        buffer,
     }
 }
 

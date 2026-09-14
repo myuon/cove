@@ -104,9 +104,9 @@
 //! It is honoured by the rule above and by nothing else. **Neither code
 //! generator keeps a Cove value in a register across an instruction
 //! boundary**, so at every place a collection can happen — the safepoint
-//! helper, the call helper, and now [`AllocFn`] and [`BuiltinFn`], which are all
-//! the calls either arm emits — every live reference is already in the slot the
-//! frame's static `Function::refs` map names. The collector walks exactly what it
+//! helper, the call helper, and now [`AllocFn`], [`BuiltinFn`] and [`BufferFn`],
+//! which are all the calls either arm emits — every live reference is already in
+//! the slot the frame's static `Function::refs` map names. The collector walks exactly what it
 //! walks for an encoded frame, and there is no spill sequence, because there is
 //! nothing anywhere else to spill.
 //!
@@ -119,6 +119,15 @@
 //! standing between an allocation and a swept object — and
 //! `native_tier.rs`'s forced-collection cases are how that is checked rather
 //! than argued.
+//!
+//! [`BufferFn`] is where that argument had to be made a second time and could
+//! not be weakened. A growable buffer is a *stable owner over a replaceable
+//! store* — [ADR 0052] — so between allocating the store and allocating the
+//! owner there is a live object nothing in any frame names. The runtime holds it
+//! with `Machine::push_temp`, and that is exactly why the whole of
+//! `alloc-buffer` is one helper rather than two [`AllocFn`] calls with emitted
+//! code in between: the half-built state has a root discipline of its own, and it
+//! is not the frame's.
 //!
 //! The intermediate an instruction computes *inside* one template — the object
 //! address a `load-elem` derives, the header word a `len` reads — is in a
@@ -207,6 +216,7 @@
 //! safepoint and no helper.
 //!
 //! [ADR 0034]: ../../../../docs/adr/0034-one-physical-word-stack.md
+//! [ADR 0052]: ../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
 //! [ADR 0045]: ../../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md
 //! [ADR 0057]: ../../../../docs/adr/0057-a-native-call-returns-into-the-destination-its-caller-named.md
 
@@ -702,6 +712,132 @@ pub type BuiltinFn = unsafe extern "C" fn(
     args: u32,
 ) -> u32;
 
+/// Which of [ADR 0052]'s four growable-buffer instructions a [`BufferFn`] was
+/// handed.
+///
+/// `#[repr(u32)]` with the values written out, for [`Outcome`]'s reason: the
+/// generated code materialises them as integer constants and the runtime matches
+/// on them, and [`BufferOp::abi`] is the one place that conversion is spelled.
+///
+/// They are one helper and one enum rather than four helpers because every
+/// property the boundary cares about is the same for all four — each is a
+/// safepoint, each may collect, each may grow the stack and commit a chunk, each
+/// writes whatever it answers into the frame itself, and each answers an
+/// [`Outcome`]. Four typedefs differing in one pair of `u32`s would be four
+/// relocations, four emitters and four places for the safepoint discipline to
+/// drift. They are also ADR 0052's four: a build that had three of them would be
+/// a build that could allocate a builder it could not finish.
+///
+/// [ADR 0052]: ../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferOp {
+    /// [`Inst::AllocBuffer`](cove_ir::Inst::AllocBuffer). `a` is `dst` and `b` the
+    /// slot holding the capacity.
+    Alloc = 0,
+    /// [`Inst::AppendByte`](cove_ir::Inst::AppendByte). `a` is the owner's slot
+    /// and `b` the value's; there is no destination.
+    AppendByte = 1,
+    /// [`Inst::AppendBytes`](cove_ir::Inst::AppendBytes). `a` is the `ArgsId`
+    /// whose four entries are `buffer`, `src`, `from` and `to`; `b` is unused.
+    ///
+    /// The operands are behind an argument list rather than in `a` and `b`
+    /// because the instruction has four of them — see `Inst::AppendBytes`'s own
+    /// note — and the helper resolves the list out of the program, exactly as
+    /// `encoded.rs`'s arm does.
+    AppendBytes = 2,
+    /// [`Inst::FinishBuffer`](cove_ir::Inst::FinishBuffer). `a` is `dst` and `b`
+    /// the owner's slot.
+    Finish = 3,
+}
+
+impl BufferOp {
+    /// The integer the generated code passes for this operation.
+    pub const fn abi(self) -> u32 {
+        self as u32
+    }
+
+    /// Which operation `code` names, or `None` for a number no arm emits.
+    pub const fn from_abi(code: u32) -> Option<Self> {
+        match code {
+            0 => Some(BufferOp::Alloc),
+            1 => Some(BufferOp::AppendByte),
+            2 => Some(BufferOp::AppendBytes),
+            3 => Some(BufferOp::Finish),
+            _ => None,
+        }
+    }
+}
+
+/// What a growable-buffer helper is: one of [ADR 0052]'s four instructions,
+/// handed to the runtime whole.
+///
+/// [`AllocFn`]'s relationship to `Inst::Alloc`, for the builder. ADR 0055's
+/// "Runtime operations whose correctness already lives in Rust … remain runtime
+/// helpers initially" with allocation as the archetype — and this family is that
+/// sentence's next four cases, each for a reason of its own rather than by
+/// analogy. They were measured against emitting a fast path, and each one lost:
+///
+/// - **`AllocBuffer` allocates twice, and nothing in a frame can name what the
+///   first one answered.** `Machine::alloc_buffer` allocates the store, holds it
+///   with `Machine::push_temp` across the *owner's* allocation, and only then
+///   writes the store into the owner's payload. Emitted code could make both
+///   calls through [`AllocFn`] — but between them the store is reachable from
+///   nothing the collector walks, and the IR gives this instruction one
+///   destination, so there is no `Repr::Ref` slot to put it in. `crate::abi`'s
+///   "References are live here, and the frame is why that is safe" is the whole
+///   of this tier's collector discipline and it is exactly what splitting this
+///   would break. The temporary root exists because a Rust local is not a root;
+///   a register in a compiled frame is not one either;
+/// - **`AppendBytes` copies in bounded chunks with a safepoint between them**,
+///   which is ADR 0052's "bulk work remains proportionally charged" and ADR
+///   0040's stop bound. A generated fast path must not skip that. It could not
+///   honour it either without emitting `Machine::copy_string_bytes` — a
+///   byte-blending copy over the two-region address decode — around a poll, and
+///   in front of all of it the eight refusals whose sentences name offsets and
+///   lengths the runtime formats. So it is mediated, and the chunking stays where
+///   it already works;
+/// - **`FinishBuffer` validates and then relabels, and only the second half is
+///   small.** The relabel is a header write and a free block, which is emittable;
+///   the validation walks the live prefix through `std::str::from_utf8`, which is
+///   not. Emitting the tail of an operation whose head is a helper call buys
+///   nothing, because the call is already made;
+/// - **`AppendByte` is three lines and is here anyway.** It is not on the census
+///   — the corpus appends ranges, not bytes — but a subset that lowered the other
+///   three would refuse a function for the one scalar append in it, which is a
+///   refusal with no work behind it.
+///
+/// # It is a lowering, and [`BuiltinFn`] is not
+///
+/// [`BuiltinFn`]'s documentation says in as many words that it "is not a way to
+/// lower a builtin", and the distinction is worth keeping sharp rather than
+/// quietly crossing. That helper is the **cold path** of a builtin whose fast
+/// path is emitted; a `call-builtin` reached only through it would present a run
+/// as more native than it is *and* would make both code generators emit the
+/// identical call, so the comparison between them would measure nothing.
+///
+/// This is the other kind, the kind [`AllocFn`] is: the operation's correctness
+/// lives in Rust and stays there, and what the lowering buys is not a faster
+/// append — it is that **the function around it compiles**. `covefmt.spacing` and
+/// `covefmt.flattened` were refused whole for one `alloc-buffer` each; every
+/// other instruction in them ran on the encoded tier because of it.
+///
+/// `base` is the caller's frame as a word index, `pc` the instruction's index,
+/// and `a` and `b` the operands [`BufferOp`] names for each variant. Six integer
+/// arguments, which is what the System V ABI passes in registers and what the
+/// template arm's call sequence depends on. The answer is an [`Outcome`] as a
+/// `u32`, read exactly as [`BuiltinFn`]'s is.
+///
+/// # Safety
+///
+/// As [`AllocFn`]: this is a safepoint, so every live reference must already be
+/// in the slot the frame's `Function::refs` names, and both republished pointers
+/// are re-derived by the generated code afterwards.
+///
+/// [ADR 0052]: ../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
+pub type BufferFn =
+    unsafe extern "C" fn(ctx: *mut NativeCtx, base: u64, pc: u32, op: u32, a: u32, b: u32) -> u32;
+
 /// The runtime's side of the boundary, as function pointers.
 ///
 /// This table is the whole reason `cove-native` does not depend on
@@ -726,6 +862,8 @@ pub struct NativeHelpers {
     pub alloc: AllocFn,
     /// See [`BuiltinFn`].
     pub builtin: BuiltinFn,
+    /// See [`BufferFn`].
+    pub buffer: BufferFn,
 }
 
 /// The mutable state one native call reads and writes.
@@ -936,6 +1074,17 @@ mod tests {
         }
         assert_eq!(Raise::from_abi(0), None);
         assert_eq!(Raise::from_abi(15), None);
+
+        for (code, op) in [
+            (0, BufferOp::Alloc),
+            (1, BufferOp::AppendByte),
+            (2, BufferOp::AppendBytes),
+            (3, BufferOp::Finish),
+        ] {
+            assert_eq!(op.abi(), code);
+            assert_eq!(BufferOp::from_abi(code), Some(op));
+        }
+        assert_eq!(BufferOp::from_abi(4), None);
     }
 
     /// Zero is not a raise, which is what makes a fresh context's

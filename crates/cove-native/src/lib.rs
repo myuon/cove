@@ -109,10 +109,18 @@
 //! implementation does not split one function into native and interpreted
 //! regions."
 //!
-//! Allocation is deliberately not on that list. ADR 0055 keeps it a runtime
-//! helper, so it would be *one identical call in both arms* — which cannot
-//! separate two code generators, and a subset made of such calls would measure
-//! the runtime and report it as a code-generator difference.
+//! Allocation was deliberately not on that list while the two arms were being
+//! raced. ADR 0055 keeps it a runtime helper, so it is *one identical call in
+//! both arms* — which cannot separate two code generators, and a subset made of
+//! such calls would have measured the runtime and reported it as a
+//! code-generator difference.
+//!
+//! ADR 0056 settled the race, and that reason stopped applying with it. Since
+//! then the subset has taken [`Inst::Alloc`](cove_ir::Inst::Alloc) and [ADR
+//! 0052]'s four growable-buffer instructions — see [`AllocFn`] and [`BufferFn`]
+//! — and what they buy is not a faster allocation but a **compiled function
+//! around one**. A body refused for its single `alloc-buffer` ran every other
+//! instruction it had on the encoded tier.
 //!
 //! `Jit` and `Jit::compile` are named above without links on purpose: they
 //! exist only under a code generator's feature, and an intra-doc link to an
@@ -120,14 +128,16 @@
 //! warnings"` turns into a failed `cargo doc`, as it did once while this was
 //! being written.
 //!
+//! [ADR 0052]: ../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
 //! [ADR 0054]: ../../../docs/adr/0054-a-comparison-that-only-feeds-a-branch-is-the-branch.md
 //! [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
 
 pub mod abi;
 
 pub use abi::{
-    AllocFn, BuiltinFn, CallFn, CloseFn, Entry, NativeCtx, NativeHelpers, OpenFn, Opened, Outcome,
-    Raise, SafepointFn, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
+    AllocFn, BufferFn, BufferOp, BuiltinFn, CallFn, CloseFn, Entry, NativeCtx, NativeHelpers,
+    OpenFn, Opened, Outcome, Raise, SafepointFn, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
+    HEAP_ORIGIN_WORDS,
 };
 
 /// Native execution is not available here.

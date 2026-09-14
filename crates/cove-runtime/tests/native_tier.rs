@@ -45,6 +45,8 @@ const MODULE: &str = "m";
 /// crossing that no longer happens — and `counts` is recursive, so nothing that
 /// calls it can be expanded either.
 const SOURCE: &str = "\
+use std.stringbuilder.StringBuilder
+
 /// Recursive, so no caller of this can be inlined away. `counts(0)` is zero.
 export fn counts(n: Int) -> Int {
   if n <= 0 {
@@ -418,6 +420,101 @@ export fn callsFillsTheHeap(n: Int) -> Int {
   let nothing = ()
   var v: Vector<Array<Int>> = Vector.of([0])
   fillsTheHeap(v, n)
+}
+
+/// **A builder allocated, appended to and finished in one compiled frame.**
+///
+/// [ADR 0052]'s four, as a Cove program reaches them: `withCapacity` is an
+/// `alloc-buffer`, each `append` an `append-bytes`, and `finish` a
+/// `finish-buffer`. Every one of them is a call into the runtime — see
+/// `cove_native::abi`'s `BufferFn` for why all four are and none is half emitted
+/// — so what a differential case says is that the *frame around them* is compiled
+/// and the answer is still the VM's, byte for byte.
+///
+/// The capacity is deliberately small, so a caller that hands it more than four
+/// bytes makes the store grow: growth allocates a larger run, copies the live
+/// prefix and replaces the owner's store word, and a caller that could only see
+/// the length would pass whatever the copy did.
+export fn builds(a: String, b: String) -> String {
+  var out = StringBuilder.withCapacity(4 + counts(0))
+  out.append(a)
+  out.append(b)
+  out.finish()
+}
+
+/// A refused caller, so the whole build is reached across the boundary.
+export fn callsBuilds(a: String, b: String) -> String {
+  let nothing = ()
+  builds(a, b)
+}
+
+/// One byte appended and the run finished, in a compiled frame.
+///
+/// `appendByte` can put anything a byte can hold into the run, so `finish` is
+/// where a run that is not valid UTF-8 is caught — and a value that is not a byte
+/// at all is caught before that. Both sentences are the runtime's, and
+/// `cove-native` names errors rather than building them, so what this says is
+/// that the *same* sentence arrives from a compiled frame.
+export fn buildsAByte(n: Int) -> String {
+  var out = StringBuilder.withCapacity(4 + counts(0))
+  out.appendByte(n)
+  out.finish()
+}
+
+/// A refused caller, so the refusal crosses the boundary.
+export fn callsBuildsAByte(n: Int) -> String {
+  let nothing = ()
+  buildsAByte(n)
+}
+
+/// Refused, and it appends to a builder it was lent.
+export fn addsTo(var out: StringBuilder, text: String) {
+  let nothing = ()
+  out.append(text)
+}
+
+/// A builder whose `alloc-buffer` and `finish-buffer` are compiled and whose
+/// middle append is the VM's.
+///
+/// ADR 0052's whole point as a tier question: the owner is stable, so the growth
+/// that happens in an *encoded* frame is visible to the compiled one that made it
+/// — there is nothing to be visible of, they are naming one owner. A builder that
+/// reallocated itself, or a tier that copied the handle rather than the address,
+/// loses the bytes the other tier appended.
+export fn buildsAcross(a: String, b: String) -> String {
+  var out = StringBuilder.withCapacity(4 + counts(0))
+  out.append(a)
+  addsTo(var out, b)
+  out.finish()
+}
+
+/// A refused caller, so the outermost frame is not the one under test.
+export fn callsBuildsAcross(a: String, b: String) -> String {
+  let nothing = ()
+  buildsAcross(a, b)
+}
+
+/// A half-built run held live across an allocation that collects.
+///
+/// The bytes appended so far are reachable from the store, the store from the
+/// owner, and the owner from one `Repr::Ref` slot of **this** frame — so the walk
+/// `cove_native::abi` describes, where a live reference is in its slot at every
+/// instruction boundary, is what stands between the array being allocated and the
+/// half-built string being swept. The
+/// answer is the finished byte length, so a run that lost its prefix is a wrong
+/// number rather than a crash.
+export fn buildsWhileCollecting(s: String, n: Int) -> Int {
+  var out = StringBuilder.withCapacity(2 + counts(0))
+  out.append(s)
+  let made = [n, n + 1, n + 2, n + 3]
+  out.append(s)
+  out.finish().byteLength() + made.length()
+}
+
+/// A refused caller, so the frame the builder lives in is a compiled one.
+export fn callsBuildsWhileCollecting(s: String, n: Int) -> Int {
+  let nothing = ()
+  buildsWhileCollecting(s, n)
 }
 
 /// A refused caller, so the frame that clears a slot is a **compiled** one.
@@ -1288,6 +1385,166 @@ fn a_byte_length_reads_the_heap_on_a_later_segment() {
     );
 }
 
+/// **A builder allocated, appended to and finished in compiled code.**
+///
+/// [ADR 0052]'s four reached from a compiled frame, against the VM. What the
+/// native tier does with each of them is hand it to the runtime — see
+/// `cove_native::abi`'s `BufferFn` — so the claim is not that the append got
+/// faster; it is that the frame around it compiles and the string it builds is
+/// still character for character the VM's.
+///
+/// The rows are chosen so that the store is **not** grown, grown once, and grown
+/// repeatedly: the builder asks for four bytes, and growth allocates a larger
+/// run, copies the live prefix and replaces the owner's store word. A tier that
+/// lost the prefix answers a short string; one that kept a stale store word
+/// answers the prefix twice.
+#[test]
+fn a_builder_is_built_and_finished_in_compiled_code() {
+    on_each_tier(&["builds"], &["callsBuilds"]);
+    let rows: [(&str, &str); 5] = [
+        // Inside the initial capacity, so nothing grows.
+        ("ab", "cd"),
+        ("", ""),
+        // Over it, so the store is replaced once.
+        ("hello", " world"),
+        // Far over it, so it is replaced several times.
+        ("the quick brown fox jumps over the lazy dog, ", "and again"),
+        // Multi-byte, so a growth that split a character would be visible.
+        ("héllo 😀", " wörld"),
+    ];
+    for (a, b) in rows {
+        let both = both("callsBuilds", vec![Value::string(a), Value::string(b)]);
+        assert_eq!(
+            both.vm,
+            Ok(format!("{a}{b}")),
+            "the encoded tier joins `{a}` and `{b}`"
+        );
+        assert_eq!(
+            both.native, both.vm,
+            "and so does a compiled frame, for `{a}` and `{b}`"
+        );
+        assert!(
+            both.tiers.vm_to_native >= 1,
+            "the build happened in machine code: {:?}",
+            both.tiers
+        );
+    }
+}
+
+/// A finish of a run that is not valid UTF-8 raises the VM's own sentence.
+///
+/// `cove-native` names errors and never builds one, so this is the
+/// `BufferFn`-shaped version of the claim every raise in this file makes: the
+/// message, the rule and the span are the runtime's whichever tier the frame was
+/// on. Two failures and one success, because the two failures are raised by
+/// *different* instructions — `append-byte` refuses a value that is not a byte
+/// and `finish-buffer` refuses bytes that are not text — and a tier that reported
+/// one instruction's span for the other's error would still print a sentence.
+#[test]
+fn a_finish_of_invalid_utf8_is_the_vm_s_sentence() {
+    on_each_tier(&["buildsAByte"], &["callsBuildsAByte"]);
+    for n in [65i64, 0x7f, 0xff, 0x80, 256, -1] {
+        let both = both("callsBuildsAByte", vec![Value::int(n)]);
+        assert_eq!(
+            both.native, both.vm,
+            "the two tiers answer the same thing for byte {n}"
+        );
+    }
+    // Named rather than merely compared, so that a change of wording is a change
+    // this file has to agree to.
+    for (n, said) in [
+        (
+            0xffi64,
+            Err("this string's bytes are not valid UTF-8".to_string()),
+        ),
+        (
+            256,
+            Err("`appendByte`'s value is `256`, and a byte is 0 to 255".to_string()),
+        ),
+        (65, Ok("A".to_string())),
+    ] {
+        let named = both("callsBuildsAByte", vec![Value::int(n)]);
+        assert_eq!(named.vm, said, "the encoded tier's own words for {n}");
+        assert_eq!(named.native, named.vm);
+    }
+}
+
+/// **A builder that crosses a tier boundary between its `alloc` and its
+/// `finish`.**
+///
+/// ADR 0052's stable owner, as a tier question. The `alloc-buffer` and the
+/// `finish-buffer` are a compiled frame's and the append in between is an encoded
+/// one's, reached through a `var` — so the growth that happens on the VM has to be
+/// visible to the compiled frame that made the builder. It is, because there is
+/// nothing to be visible *of*: both frames name one owner, and only the store
+/// under it was replaced.
+///
+/// The second string is long enough to force that growth. Without it the case
+/// would pass for a tier that copied the handle, which is the mistake the ADR's
+/// "a builder that reallocated itself would leave every `var` address behind it
+/// stale" is about.
+#[test]
+fn a_builder_crosses_a_tier_boundary_between_alloc_and_finish() {
+    on_each_tier(&["buildsAcross"], &["callsBuildsAcross", "addsTo"]);
+    for (a, b) in [
+        ("ab", "cd"),
+        (
+            "",
+            "a string long enough to replace the store beneath the owner",
+        ),
+        ("héllo", " wörld 😀"),
+    ] {
+        let both = both(
+            "callsBuildsAcross",
+            vec![Value::string(a), Value::string(b)],
+        );
+        assert_eq!(both.vm, Ok(format!("{a}{b}")));
+        assert_eq!(
+            both.native, both.vm,
+            "the encoded append is visible to the compiled finish, for `{a}` + `{b}`"
+        );
+        assert!(
+            both.tiers.native_to_vm >= 1,
+            "the builder really did cross into the VM and back: {:?}",
+            both.tiers
+        );
+    }
+}
+
+/// The same four, on a **later stack segment**.
+///
+/// The helper is handed `base` as a word index and resolves its operands through
+/// the frame the runtime is already holding, so nothing about it should depend on
+/// where the task's words begin — and that is the claim rather than an
+/// assumption. The first task's origin is nought, which is what hides a helper
+/// that read a slot as though it were.
+#[test]
+fn a_builder_resolves_on_a_later_stack_segment() {
+    let args = || vec![Value::string("héllo"), Value::string(" wörld 😀")];
+    let here = both("callsBuilds", args());
+    let there = both_on(Segment::Later, "callsBuilds", args());
+    assert!(
+        there.origin > 0,
+        "a later segment does not begin at word nought"
+    );
+    assert_eq!(there.vm, here.vm, "the encoded tier answers the same there");
+    assert_eq!(
+        there.native, there.vm,
+        "and so does the native tier on a segment that does not begin at nought"
+    );
+
+    let across = both_on(Segment::Later, "callsBuildsAcross", args());
+    assert_eq!(across.vm, Ok("héllo wörld 😀".to_string()));
+    assert_eq!(across.native, across.vm);
+
+    let bad = both_on(Segment::Later, "callsBuildsAByte", vec![Value::int(0xff)]);
+    assert_eq!(
+        bad.vm,
+        Err("this string's bytes are not valid UTF-8".to_string())
+    );
+    assert_eq!(bad.native, bad.vm);
+}
+
 /// **An allocation made from compiled code, with a collection forced inside it.**
 ///
 /// The case the allocation helper exists for, and the one genuinely new thing
@@ -1342,12 +1599,12 @@ fn an_allocation_from_compiled_code_collects_and_keeps_what_is_live() {
         let expected = session
             .call(&cove_runtime::NothingCompiled, &words)
             .expect("the vm answers");
-        // `s.byteAt(0)` and the array's four and the string's byte length, then the
-        // caller's own array of three, its `"x"`, and the `- 1`.
+        // `s.byteAt(0)`, the array's four and the string's byte length, then the
+        // caller's own array of three.
         let bytes = text.as_bytes();
         assert_eq!(
             expected,
-            vec![u64::from(bytes[0]) + 4 + text.len() as u64 + 3 + 1 - 1],
+            vec![u64::from(bytes[0]) + 4 + text.len() as u64 + 3],
             "the fixture answers a byte, two lengths and a byte length"
         );
 
@@ -1371,6 +1628,96 @@ fn an_allocation_from_compiled_code_collects_and_keeps_what_is_live() {
         "every call crossed into machine code: {crossings} of {calls}"
     );
     // The arrays were reclaimed rather than merely allocated: far more words were
+    // handed out than the heap ever held.
+    assert!(
+        vm.allocated_words() > SMALL_HEAP_WORDS as u64,
+        "{} word(s) handed out over {calls} call(s) of a {SMALL_HEAP_WORDS}-word heap",
+        vm.allocated_words()
+    );
+}
+
+/// **A collection forced with a half-built run live in a compiled frame.**
+///
+/// The case the buffer helper's rooting argument is about, and the one thing
+/// about it that is genuinely new. `alloc-buffer` allocates *twice* and the store
+/// is unreachable from any frame between the two — the runtime holds it with
+/// `Machine::push_temp`, which is why the whole instruction is one helper and not
+/// two [`cove_native::AllocFn`] calls with emitted code in between. After it, the
+/// owner is in one `Repr::Ref` slot of a **compiled** frame and the bytes already
+/// appended hang off it, and then an array literal in the same body allocates
+/// again.
+///
+/// So a walk that missed the compiled frame's slot sweeps a run that has bytes in
+/// it, and the finish answers a shorter string or a different one. The answer is
+/// a length, so that is a wrong number rather than a crash — and swept words are
+/// handed out again, so it is a wrong number that stays wrong.
+///
+/// It is a [`cove_runtime::NativeSession`] over a **small heap** for
+/// `an_allocation_from_compiled_code_collects_and_keeps_what_is_live`' reason: a
+/// collection has to actually happen, and the loop runs until one has.
+#[test]
+fn a_half_built_run_survives_a_collection_from_compiled_code() {
+    // One heap chunk, which is the smallest a heap is.
+    const SMALL_HEAP_WORDS: usize = 1 << 13;
+    const N: i64 = 11;
+    // Longer than the builder's capacity, so the store is replaced before the
+    // array is allocated and the *replaced* run is what has to survive.
+    let text = "a string long enough that appending it twice replaces the store.";
+    on_each_tier(&["buildsWhileCollecting"], &["callsBuildsWhileCollecting"]);
+
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+
+    let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, SMALL_HEAP_WORDS);
+    let (calls, crossings) = {
+        let mut session = vm
+            .native_session(
+                MODULE,
+                "callsBuildsWhileCollecting",
+                vec![Value::string(text), Value::int(N)],
+            )
+            .expect("the session opens");
+        let words = session.arguments().to_vec();
+        let expected = session
+            .call(&cove_runtime::NothingCompiled, &words)
+            .expect("the vm answers");
+        // The text twice, and the array's four.
+        assert_eq!(
+            expected,
+            vec![2 * text.len() as u64 + 4],
+            "the fixture answers the finished length and the array's"
+        );
+
+        let before = session.collections();
+        let mut calls = 0;
+        while session.collections() == before && calls < 20_000 {
+            let answered = session
+                .call(&native, &words)
+                .expect("the native tier answers");
+            assert_eq!(answered, expected, "call {calls} answered wrongly");
+            calls += 1;
+        }
+        assert!(
+            session.collections() > before,
+            "no collection ran in {calls} call(s), so this case proved nothing"
+        );
+        (calls, session.tiers().vm_to_native)
+    };
+    assert!(
+        crossings >= calls,
+        "every call crossed into machine code: {crossings} of {calls}"
+    );
+    // The runs were reclaimed rather than merely allocated: far more words were
     // handed out than the heap ever held.
     assert!(
         vm.allocated_words() > SMALL_HEAP_WORDS as u64,

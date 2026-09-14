@@ -628,6 +628,40 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         }
         Inst::Return { src } => run(*src, program.layout(function.returns).width()),
         Inst::Trap { .. } => true,
+        // ---- [ADR 0052]'s growable buffer -----------------------------------
+        //
+        // All four, handed to [`BufferFn`](crate::abi::BufferFn) whole, and that
+        // helper's own documentation is where the decision for each of them is
+        // written down — including why none of them has an emitted fast path and
+        // why `AppendByte` is here although the census never named it.
+        //
+        // They are admitted together. Three of them without the fourth would be a
+        // subset that could allocate a builder and not finish it, and the first
+        // function that appended one byte would be refused with no work behind the
+        // refusal.
+        //
+        // What is bounded here is what the helper will *read out of this frame*,
+        // which is [`Inst::Call`]'s rule: the helper resolves its operands through
+        // `Memory::slot`, so a slot this frame does not have is a read past the
+        // end of it. Nothing about the capacity, the byte value or the range is
+        // bounded, because every one of those is a number a running program
+        // computed and each has a refusal of its own whose sentence the runtime
+        // builds — a second rejection here would be a second message for one rule.
+        //
+        // [ADR 0052]: ../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
+        Inst::AllocBuffer { dst, capacity } => slot(*dst) && slot(*capacity),
+        Inst::AppendByte { buffer, value } => slot(*buffer) && slot(*value),
+        // Four operands behind an `ArgsId` — `buffer`, `src`, `from`, `to` — which
+        // is the row `cove_ir::verify` already holds to that shape and width. Each
+        // is one word, so each is bounded as a slot rather than as a run.
+        Inst::AppendBytes { args } => {
+            let list = program.arg_list(*args);
+            list.len() == 4
+                && list
+                    .iter()
+                    .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))
+        }
+        Inst::FinishBuffer { dst, buffer } => slot(*dst) && slot(*buffer),
         // A builtin is decoded by [`method_of`] and by nothing here, so that the
         // name this tier lowers is written down once. `None` is a family nothing
         // emits and falls to `Reason::Instruction` with every other unlowered

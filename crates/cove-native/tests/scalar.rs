@@ -266,3 +266,18 @@ fn a_literal_is_the_address_the_run_placed() {
 fn a_literal_past_the_table_refuses_the_function() {
     suite::a_literal_past_the_table_refuses_the_function::<Cranelift>();
 }
+
+#[test]
+fn a_growable_buffer_is_handed_to_the_runtime_whole() {
+    suite::a_growable_buffer_is_handed_to_the_runtime_whole::<Cranelift>();
+}
+
+#[test]
+fn a_buffer_op_the_runtime_refused_leaves_with_that_outcome() {
+    suite::a_buffer_op_the_runtime_refused_leaves_with_that_outcome::<Cranelift>();
+}
+
+#[test]
+fn a_growable_buffer_is_admitted_as_a_family() {
+    suite::a_growable_buffer_is_admitted_as_a_family::<Cranelift>();
+}
