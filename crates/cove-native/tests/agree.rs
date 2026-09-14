@@ -205,6 +205,18 @@ fn both_arms_answer_the_same_thing() {
         );
     }
 
+    // Negation, including the one operand `checked_neg` refuses. The two arms
+    // reach the refusal differently — a flag the `neg` set against a comparison
+    // with `i64::MIN` — so agreeing on it is the whole point of the row.
+    for a in [0i64, 1, -1, i64::MAX, i64::MIN + 1, i64::MIN] {
+        agree(
+            &format!("-({a})"),
+            &suite::negation(Repr::Int),
+            &[a as u64, 0],
+            0,
+        );
+    }
+
     // The covefmt slice: a heap read, a bound, a byte, a tag and a switch. Both
     // arms over the same words of the same heap, and the heap asserted unchanged
     // afterwards — neither arm writes to it.
@@ -326,12 +338,15 @@ fn both_arms_answer_the_same_thing() {
 #[test]
 fn both_arms_refuse_the_same_programs() {
     let refused = [
+        // Float negation, and not `Num::Int` — which both arms now lower. The row
+        // is still a `Neg`, because what it asserts is that admitting one `Num`
+        // did not admit the other.
         suite::program(suite::function(
-            vec![Repr::Int],
+            vec![Repr::Float],
             INT,
             vec![
                 Inst::Neg {
-                    num: Num::Int,
+                    num: Num::Float,
                     dst: 0,
                     a: 0,
                 },

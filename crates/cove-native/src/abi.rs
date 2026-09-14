@@ -340,6 +340,21 @@ pub enum Raise {
     /// This is the same division as every other variant here, taken to its
     /// end: this crate names errors and never builds one.
     Called = 13,
+    /// `overflowed("negation")` — reached only by negating `i64::MIN`.
+    ///
+    /// Numbered after [`Raise::Called`] rather than beside the other overflows,
+    /// because these numbers are an **ABI**: generated code stores one and
+    /// [`Raise::from_abi`] reads it, so inserting a variant into the middle would
+    /// renumber every one below it and a stale page of machine code would name a
+    /// different error. The family a variant belongs to is a fact about its
+    /// documentation; its number is a fact about two builds agreeing.
+    ///
+    /// `encoded.rs`'s `NEG_INT` arm is `checked_neg` and names the operation
+    /// unconditionally, so there is no `Duration` variant beside this one the way
+    /// there is for addition: negating a `Duration` that overflows still says
+    /// "negation". `int_arith`'s `named` closure is what renames the other three,
+    /// and `NEG_INT` does not go through `int_arith` at all.
+    NegOverflowed = 14,
 }
 
 impl Raise {
@@ -365,6 +380,7 @@ impl Raise {
             11 => Some(Raise::IndexOutOfRange),
             12 => Some(Raise::ByteOffset),
             13 => Some(Raise::Called),
+            14 => Some(Raise::NegOverflowed),
             _ => None,
         }
     }
@@ -737,12 +753,13 @@ mod tests {
             (11, Raise::IndexOutOfRange),
             (12, Raise::ByteOffset),
             (13, Raise::Called),
+            (14, Raise::NegOverflowed),
         ] {
             assert_eq!(raise.abi(), code);
             assert_eq!(Raise::from_abi(code), Some(raise));
         }
         assert_eq!(Raise::from_abi(0), None);
-        assert_eq!(Raise::from_abi(14), None);
+        assert_eq!(Raise::from_abi(15), None);
     }
 
     /// Zero is not a raise, which is what makes a fresh context's

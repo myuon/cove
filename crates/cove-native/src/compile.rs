@@ -553,6 +553,22 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.switch(*on, *table);
                 true
             }
+            // `encoded.rs`'s `NEG_INT` arm: `checked_neg`, whose `None` is
+            // `overflowed("negation")`. Cranelift has no `sneg_overflow`, so the
+            // one operand `checked_neg` refuses is named directly — `i64::MIN`,
+            // whose negation is not an `i64` — and `ineg` runs on everything else.
+            Inst::Neg {
+                num: Num::Int,
+                dst,
+                a,
+            } => {
+                let x = self.load_slot(*a);
+                let least = self.b.ins().icmp_imm_s(IntCC::Equal, x, i64::MIN);
+                self.raise_if(least, Raise::NegOverflowed, 0);
+                let value = self.b.ins().ineg(x);
+                self.store_slot(*dst, value);
+                false
+            }
             Inst::Arith {
                 num: Num::Int,
                 op,

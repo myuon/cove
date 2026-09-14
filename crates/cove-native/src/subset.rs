@@ -314,6 +314,17 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                 && run(*src, layout.width())
                 && slot(*addr)
         }
+        // `encoded.rs`'s `NEG_INT` arm, which is `checked_neg` and nothing else.
+        //
+        // `Num::Float` is not here and falls to `Reason::Instruction`, the same
+        // division `Inst::Arith` above makes: no float *operation* is lowered, and
+        // `NEG_FLOAT` cannot raise at all, so the two arms are not one arm with a
+        // flag.
+        Inst::Neg {
+            num: Num::Int,
+            dst,
+            a,
+        } => slot(*dst) && slot(*a),
         Inst::Arith {
             num: Num::Int,
             dst,

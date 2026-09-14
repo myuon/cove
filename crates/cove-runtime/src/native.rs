@@ -113,6 +113,48 @@ pub struct Refused {
     /// The same spelling `encoded.rs`'s own refusal prints, so a reader meeting
     /// one here and one there is meeting one name.
     pub instruction: Option<String>,
+    /// What that instruction was *about*, when its opcode is an aggregate.
+    ///
+    /// See [`Blocked`]. `None` for every opcode that names one operation.
+    pub blocked: Option<Blocked>,
+}
+
+/// What a blocking instruction operates on, when naming the opcode is not enough.
+///
+/// An opcode is the unit [`Refused::instruction`] reports and it is the right one
+/// for deciding *whether* to lower a family. It is the wrong one for deciding
+/// *what to build*, because two of the opcodes at the top of a ranked table are
+/// aggregates: `CallBuiltin` is every builtin the language has, and the `Alloc`
+/// opcodes are every layout a program declares. "Lower `CallBuiltin`" is not a
+/// task; "lower `String.byteAt`" is.
+///
+/// So this is the second key a census groups by, and it exists for exactly the
+/// two aggregates. Everything else — `LoadField`, `Str`, `FinishBuffer` — names
+/// one operation already, and inventing a subject for it would add a column that
+/// repeats the opcode.
+///
+/// It is a `String` inside rather than a `cove_ir` or `cove_native` type, for the
+/// reason [`Refused::reason`] is: this type has to exist in a build with no code
+/// generator, because the CLI must be able to name the report it cannot produce.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Blocked {
+    /// [`Inst::CallBuiltin`](cove_ir::Inst::CallBuiltin)'s builtin, as the
+    /// receiver and the operation the IR's own `Builtin` names it by:
+    /// `String.byteAt`, `Vector.push`.
+    Builtin(String),
+    /// [`Inst::Alloc`](cove_ir::Inst::Alloc)'s layout: what is being allocated.
+    ///
+    /// Both halves are carried because neither is the other. The name is the
+    /// family — `covefmt.Token`, `Array<Int>` — and is what a reader recognises;
+    /// the shape is `cove_ir::Shape`'s variant, and is what says how much work
+    /// lowering it would be. A hundred distinct `Struct` names are one lowering;
+    /// one `Vector` is another.
+    Allocation {
+        /// `Layout::name`, which is qualified for a declared type.
+        name: String,
+        /// `Shape`'s variant name, with nothing of its contents.
+        shape: String,
+    },
 }
 
 impl Tiered for NativeProgram {
@@ -249,12 +291,103 @@ fn refused_row(program: &Program, id: FunctionId) -> Refused {
     let refusal = cove_native::refusal(program, function)
         .expect("a function with no compiled code was refused for a reason");
     let instruction = refusal.at.and_then(|pc| opcode_at(function, pc));
+    let blocked = refusal.at.and_then(|pc| blocked_on(program, function, pc));
     Refused {
         id,
         name: function.qualified(),
         reason: refusal.reason.to_string(),
         at: refusal.at,
         instruction,
+        blocked,
+    }
+}
+
+/// What the instruction at `pc` operates on, for the two opcodes that aggregate.
+///
+/// See [`Blocked`] for why only two. The `None` arm is the ordinary answer and
+/// not a failure: most opcodes are their own subject.
+#[cfg(feature = "template")]
+fn blocked_on(program: &Program, function: &cove_ir::Function, pc: u32) -> Option<Blocked> {
+    use cove_ir::Inst;
+    match function.code.get(pc as usize)? {
+        Inst::CallBuiltin { builtin, .. } => {
+            let held = program.builtin(*builtin);
+            Some(Blocked::Builtin(format!(
+                "{}.{}",
+                held.receiver, held.operation
+            )))
+        }
+        Inst::Alloc { layout, .. } => {
+            let held = program.layout(*layout);
+            Some(Blocked::Allocation {
+                name: allocation_name(program, *layout),
+                // The variant and none of its contents: a `Shape::Struct`'s
+                // fields are the layout's own description and the name already
+                // says which struct this is.
+                shape: shape_name(&held.shape).to_string(),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// What a layout is called in the census, with its element where it has one.
+///
+/// `Layout::name` alone is not enough for the collection shapes, and it is the one
+/// place this matters. `cove_ir::lower` names **every** `Array<T>` layout `Array`
+/// and every `Vector<T>`'s element store `Vector` — the element is in the shape,
+/// not in the name — so a census keyed on the name alone collapses `Array<Int>`
+/// and `Array<covefmt.Token>` into one row. Those are not one row for the purpose
+/// the table exists for: the element's width is most of what lowering an
+/// allocation of it costs.
+///
+/// So the element is appended, one level deep and no further. One level, because
+/// the element of an element is the *element's* business and a fully expanded
+/// `Vector<Array<Token>>` is a type signature rather than a table cell.
+#[cfg(feature = "template")]
+fn allocation_name(program: &Program, layout: cove_ir::LayoutId) -> String {
+    use cove_ir::Shape;
+    let held = program.layout(layout);
+    let named = |elem: cove_ir::LayoutId| format!("{}<{}>", held.name, program.layout(elem).name);
+    match &held.shape {
+        Shape::Elements { elem, .. } | Shape::Vector { elem } | Shape::Members { elem } => {
+            named(*elem)
+        }
+        Shape::Shared { value } => named(*value),
+        Shape::Entries { key, value } => format!(
+            "{}<{}, {}>",
+            held.name,
+            program.layout(*key).name,
+            program.layout(*value).name
+        ),
+        _ => held.name.to_string(),
+    }
+}
+
+/// `Shape`'s variant name, which `Debug` would print with its contents.
+///
+/// Written out rather than derived from `Debug`, because a `Shape::Struct`'s
+/// `Debug` is every field it has and a table cell is one word. A `match` also
+/// means a new shape is a compile error here rather than a silently different
+/// string.
+#[cfg(feature = "template")]
+fn shape_name(shape: &cove_ir::Shape) -> &'static str {
+    use cove_ir::Shape;
+    match shape {
+        Shape::Free => "Free",
+        Shape::Word(_) => "Word",
+        Shape::Struct { .. } => "Struct",
+        Shape::Enum { .. } => "Enum",
+        Shape::Str => "Str",
+        Shape::Bytes => "Bytes",
+        Shape::Elements { .. } => "Elements",
+        Shape::Vector { .. } => "Vector",
+        Shape::ByteBuffer => "ByteBuffer",
+        Shape::Members { .. } => "Members",
+        Shape::Entries { .. } => "Entries",
+        Shape::Closure { .. } => "Closure",
+        Shape::Shared { .. } => "Shared",
+        Shape::Boxed => "Boxed",
     }
 }
 

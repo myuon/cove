@@ -73,6 +73,21 @@ export fn callsAdds(a: Int, b: Int) -> Int {
   adds(a, b) + note.byteLength() - 1
 }
 
+/// Negation, so that `Inst::Neg` runs as machine code and can raise there.
+///
+/// `counts(0)` is zero and is here for the reason it is in every fixture above:
+/// it keeps `cove_ir::lower::inline` from expanding this body into its caller's,
+/// which would put the negation on the caller's tier instead of on this one's.
+export fn negates(a: Int) -> Int {
+  -a + counts(0)
+}
+
+/// A refused caller, so the negation is reached across the boundary.
+export fn callsNegates(a: Int) -> Int {
+  let note = \"x\"
+  negates(a) + note.byteLength() - 1
+}
+
 /// Division, so that a raise crosses the boundary.
 export fn divides(a: Int, b: Int) -> Int {
   held(a) / b
@@ -480,6 +495,44 @@ fn a_raise_in_machine_code_is_the_vm_s_sentence() {
     assert!(vm.contains("zero"), "and it says what happened: {vm}");
 }
 
+/// **Negation in machine code, and the one input it refuses.**
+///
+/// `Inst::Neg` over `Num::Int` is `checked_neg`, and the two arms of this crate
+/// reach its `None` differently — the template arm on the flag its `neg` set, the
+/// Cranelift arm on a comparison against `i64::MIN` — so what is asserted here is
+/// the *sentence*: `cove-native` names the operation and `cove-runtime` writes the
+/// error, and a negation that overflowed in compiled code has to say word for word
+/// what a dispatched one says.
+#[test]
+fn negation_and_its_overflow_are_the_vm_s() {
+    on_each_tier(&["negates"], &["callsNegates"]);
+
+    let ordinary = both("callsNegates", vec![Value::int(42)]);
+    assert_eq!(
+        ordinary.vm,
+        Ok("-42".to_string()),
+        "the fixture answers `-a`"
+    );
+    assert_eq!(
+        ordinary.native, ordinary.vm,
+        "and compiled code answers the same"
+    );
+    assert!(
+        ordinary.tiers.vm_to_native >= 1,
+        "the crossing into the compiled negation was taken: {:?}",
+        ordinary.tiers
+    );
+
+    let least = both("callsNegates", vec![Value::int(i64::MIN)]);
+    let vm = least.vm.expect_err("the vm refuses to negate `i64::MIN`");
+    let native = least.native.expect_err("and so does compiled code");
+    assert_eq!(native, vm, "the same sentence across the boundary");
+    assert!(
+        vm.contains("negation"),
+        "and it names the operation rather than renaming it: {vm}"
+    );
+}
+
 /// Which reachable functions the template compiler took, by name.
 ///
 /// Every case below asserts *which side of the boundary each fixture is on*, and
@@ -832,4 +885,76 @@ fn every_address_family_resolves_on_a_later_stack_segment() {
             there.tiers
         );
     }
+}
+
+/// **A refusal says which builtin, or which allocation, stopped it.**
+///
+/// `Refused::instruction` names an opcode, and for two opcodes that is not a task
+/// a reader can act on: `CallBuiltin` is every builtin the language has and the
+/// `Alloc` opcodes are every layout a program declares. `Refused::blocked` is the
+/// second key, and what is asserted here is the join — that it is present for
+/// exactly those two opcodes, absent for every other, and names the thing the
+/// source actually wrote.
+#[test]
+fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
+    use cove_runtime::Blocked;
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+
+    let mut builtins = 0;
+    let mut allocations = 0;
+    for row in native.refusals() {
+        match (row.instruction.as_deref(), &row.blocked) {
+            (Some("CallBuiltin"), Some(Blocked::Builtin(named))) => {
+                assert!(
+                    named.contains('.'),
+                    "a builtin is a receiver and an operation: `{named}` in `{}`",
+                    row.name
+                );
+                builtins += 1;
+            }
+            (Some("AllocImm" | "AllocFixed" | "AllocSlot"), Some(Blocked::Allocation { .. })) => {
+                allocations += 1
+            }
+            // Every other opcode names one operation already, so a subject for it
+            // would be a column repeating the opcode. See `cove_runtime::Blocked`.
+            (_, None) => {}
+            (opcode, blocked) => panic!(
+                "`{}` was refused at {opcode:?} and the census says {blocked:?}, \
+                 which is neither of the two aggregates nor nothing",
+                row.name
+            ),
+        }
+    }
+    assert!(builtins > 0 && allocations > 0, "both tables have rows");
+
+    // And the two the fixture's own source writes, by name. `allocates` calls
+    // `s.sliceBytes(..)`, and `heapsThrough` constructs a `Shared(a)` — which is a
+    // heap object holding one `Int` inline, so the element is named beside the
+    // family for the reason `cove_runtime`'s `allocation_name` gives.
+    let named = |of: &str| {
+        let full = format!("{MODULE}.{of}");
+        native
+            .refusals()
+            .iter()
+            .find(|row| row.name == full)
+            .unwrap_or_else(|| panic!("`{of}` is refused"))
+            .blocked
+            .clone()
+    };
+    assert_eq!(
+        named("allocates"),
+        Some(Blocked::Builtin("String.sliceBytes".to_string()))
+    );
+    assert_eq!(
+        named("heapsThrough"),
+        Some(Blocked::Allocation {
+            name: "Shared<Int>".to_string(),
+            shape: "Shared".to_string(),
+        })
+    );
 }

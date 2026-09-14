@@ -1584,6 +1584,84 @@ impl Coverage {
                 }
             );
         }
+        self.print_census();
+    }
+
+    /// The two aggregate opcodes, broken into the operations they are made of.
+    ///
+    /// The table above ranks by opcode, and for most opcodes that is the unit a
+    /// reader acts on: `LoadField` is one lowering. Two of them are not.
+    /// `CallBuiltin` is every builtin the language has and the `Alloc` opcodes are
+    /// every layout a program declares, so a row saying `CallBuiltin` names a
+    /// share and no task. These two tables say which builtin and which layout.
+    ///
+    /// **The accounting is the table above's, unchanged**, which is what makes the
+    /// three comparable: the number is *dynamic calls to the refused function*,
+    /// and what a VM-to-native crossing recovered is charged to nobody. A row's
+    /// calls are summed over every function whose first blocker is that builtin or
+    /// that allocation, and `functions` is how many those were.
+    ///
+    /// **Every figure here is a first-blocker figure and therefore an upper
+    /// bound.** A function is refused once, at the first instruction outside the
+    /// slice, so it appears in exactly one row of one table — the one it was
+    /// stopped at soonest. Lowering that row does not move its calls to the native
+    /// tier; it moves them to whatever the *second* blocker in the same body is.
+    /// The last three families lowered each showed this, so the honest reading of
+    /// a row is "at most this much is behind this one thing", never "this much
+    /// would become native".
+    fn print_census(&self) {
+        use cove_runtime::Blocked;
+        use std::collections::BTreeMap;
+        // `(dynamic calls, functions)` per subject. A `BTreeMap` rather than a
+        // `HashMap` so that the key order is fixed before the sort, which is what
+        // makes two runs of one program print the same table: the sort below is
+        // stable, so equal call counts keep the key order and an iteration order
+        // that varied would reorder them.
+        let mut builtins: BTreeMap<&str, (u64, usize)> = BTreeMap::new();
+        let mut allocations: BTreeMap<(&str, &str), (u64, usize)> = BTreeMap::new();
+        for (row, made) in &self.refused {
+            let held = match &row.blocked {
+                Some(Blocked::Builtin(named)) => builtins.entry(named).or_default(),
+                Some(Blocked::Allocation { name, shape }) => {
+                    allocations.entry((name, shape)).or_default()
+                }
+                None => continue,
+            };
+            held.0 += made;
+            held.1 += 1;
+        }
+
+        // Descending by the native work each subject prevented, which is the
+        // refusal table's own ordering and the reason these three are comparable.
+        if !builtins.is_empty() {
+            eprintln!(
+                "native: `CallBuiltin` refusals by builtin — a first blocker, so an upper bound on what lowering each would unlock"
+            );
+            eprintln!("  {:>13}  {:>9}  builtin", "dynamic calls", "functions");
+            let mut rows: Vec<_> = builtins.into_iter().collect();
+            rows.sort_by_key(|(_, (made, _))| std::cmp::Reverse(*made));
+            for (named, (made, functions)) in rows {
+                eprintln!("  {:>13}  {functions:>9}  {named}", thousands(made));
+            }
+        }
+
+        if !allocations.is_empty() {
+            eprintln!(
+                "native: `Alloc` refusals by what is allocated — a first blocker too, and read the same way"
+            );
+            eprintln!(
+                "  {:>13}  {:>9}  {:<12} allocation",
+                "dynamic calls", "functions", "shape"
+            );
+            let mut rows: Vec<_> = allocations.into_iter().collect();
+            rows.sort_by_key(|(_, (made, _))| std::cmp::Reverse(*made));
+            for ((name, shape), (made, functions)) in rows {
+                eprintln!(
+                    "  {:>13}  {functions:>9}  {shape:<12} {name}",
+                    thousands(made)
+                );
+            }
+        }
     }
 }
 

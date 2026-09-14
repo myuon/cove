@@ -978,6 +978,10 @@ fn raised(
         Some(Raise::MulOverflowed) => overflowed("multiplication"),
         Some(Raise::DivOverflowed) => overflowed("division"),
         Some(Raise::RemOverflowed) => overflowed("remainder"),
+        // Not renamed by a `Duration` destination, because `encoded.rs`'s
+        // `NEG_INT` arm is not renamed by one either: it calls `overflowed`
+        // directly rather than going through `int_arith`'s `named` closure.
+        Some(Raise::NegOverflowed) => overflowed("negation"),
         Some(Raise::DurationOverflowed) => overflowed("duration arithmetic"),
         Some(Raise::DividedByZero) => divided_by_zero("division"),
         Some(Raise::RemainderByZero) => divided_by_zero("remainder"),

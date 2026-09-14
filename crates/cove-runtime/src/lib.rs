@@ -74,7 +74,7 @@ pub use vm::debug::{Call, Debugger, Field, Line, Local, Object, Resume, Stop, Wo
 // the boundary can be written against it, and this is a caller of the boundary
 // doing exactly that.
 pub use cove_native::Entry as NativeEntry;
-pub use native::{compile as compile_native, NativeProgram, Refused};
+pub use native::{compile as compile_native, Blocked, NativeProgram, Refused};
 pub use vm::exec::native::{
     ablate as native_ablate, census_reset, census_taken, helpers as native_helpers,
     helpers_ablated as native_helpers_ablated, Census, NothingCompiled, Session as NativeSession,

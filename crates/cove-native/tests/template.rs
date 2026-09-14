@@ -75,6 +75,16 @@ fn every_arithmetic_failure_is_the_vms() {
 }
 
 #[test]
+fn negation_answers_what_the_vm_answers() {
+    suite::negation_answers_what_the_vm_answers::<Template>();
+}
+
+#[test]
+fn negating_the_least_int_raises() {
+    suite::negating_the_least_int_raises::<Template>();
+}
+
+#[test]
 fn an_immediate_operand_fails_the_same_way() {
     suite::an_immediate_operand_fails_the_same_way::<Template>();
 }
