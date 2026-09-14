@@ -433,6 +433,22 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
     // `true` is "this instruction is inside the slice", so that each arm below
     // reads the way it read while it was a predicate.
     let inside = match inst {
+        // `encoded.rs`'s `CONST_UNIT` arm, which is `set_word_at(base + dst, 0)`
+        // and nothing else — one store of a zero word, the same shape
+        // `Inst::Bool` is with the constant already chosen.
+        //
+        // It was outside the slice until [ADR 0052]'s four came in, and it was
+        // outside for a defensible reason: the adoption gate's list does not name
+        // it and nothing the raced corpus ran reached one. Lowering the buffer
+        // family is what made it matter, and made it matter *a lot* — the first
+        // blocker of `std.stringbuilder.StringBuilder.append` and
+        // `appendSlice` became this, because both of them answer `Unit`, and
+        // that is 443,126 dynamic calls of the covefmt corpus behind a single
+        // word write. The philosophy's "earn complexity through use" is what
+        // admits it: a representative program showed the friction, twice.
+        //
+        // [ADR 0052]: ../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
+        Inst::Unit { dst } => slot(*dst),
         Inst::Bool { dst, .. } | Inst::Int { dst, .. } => slot(*dst),
         // A case index is one word and the word is a compile-time constant, so
         // this is `encoded.rs`'s `FUNC_REF | CONST_TAG` arm: the same store

@@ -67,21 +67,28 @@ export fn adds(a: Int, b: Int) -> Int {
 
 /// A caller that is refused, so that its `call` is the VM-to-native hop.
 ///
-/// `let nothing = ()` is what refuses it, and it is the marker every refused
-/// caller in this file uses: `Inst::Unit` is outside the adoption gate's list and
-/// is deliberately kept outside it — see `cove-native`'s
-/// `anything_outside_the_slice_refuses_the_whole_function`, whose first row is
-/// this very instruction — so this function runs on the encoded tier however the
-/// table is built, which is the point of it.
+/// `let nothing = Vector.of(0)` is what refuses it, and it is the marker every
+/// refused caller in this file uses: `Vector.of` lowers to an `Inst::StoreField`,
+/// which nothing lowers, so this function runs on the encoded tier however the
+/// table is built — which is the point of it.
 ///
-/// **It used to be a string literal, and it stopped being one when `Inst::Str`
-/// was lowered.** That is the hazard a marker like this has: the moment the
-/// instruction it relies on joins the subset, every case in this file compares the
-/// native tier with itself and passes whatever was emitted. What stands between
-/// this file and that is not the marker, it is the two assertions every case makes
-/// — `compiled < reachable`, and a tier counter that moved.
+/// **It has already been two other things, and that is the hazard rather than an
+/// accident.** It was a string literal until `Inst::Str` was lowered, and
+/// `let nothing = ()` until `Inst::Unit` was; each time, the instruction the
+/// marker relied on joined the subset and a dozen cases in this file came within
+/// one commit of comparing the native tier with itself. So the marker is chosen
+/// for how *unlikely* it is to be lowered next rather than for how small it is:
+/// the field family refuses through `Machine::checked`, whose message names a
+/// layout by name and its payload word count, and `cove-native` cannot build that
+/// sentence — which is the same reason `subset.rs` gives for leaving
+/// `Inst::AddrOfField` out.
+///
+/// That is still a judgement and not a guarantee. What actually stands between
+/// this file and a self-comparison is not the marker: it is that **every case
+/// asserts the tiers it needs** — `on_each_tier`, `compiled < reachable`, and a
+/// tier counter that moved. Those fail loudly on the day this marker compiles.
 export fn callsAdds(a: Int, b: Int) -> Int {
-  let nothing = ()
+  let nothing = Vector.of(0)
   adds(a, b)
 }
 
@@ -96,7 +103,7 @@ export fn negates(a: Int) -> Int {
 
 /// A refused caller, so the negation is reached across the boundary.
 export fn callsNegates(a: Int) -> Int {
-  let nothing = ()
+  let nothing = Vector.of(0)
   negates(a)
 }
 
@@ -106,14 +113,14 @@ export fn divides(a: Int, b: Int) -> Int {
 }
 
 export fn callsDivides(a: Int, b: Int) -> Int {
-  let nothing = ()
+  let nothing = Vector.of(0)
   divides(a, b)
 }
 
 /// A deep recursion whose outer destinations are pending while the stack's `Vec`
 /// reallocates.
 export fn callsCounts(n: Int) -> Int {
-  let nothing = ()
+  let nothing = Vector.of(0)
   counts(n)
 }
 
@@ -145,7 +152,7 @@ export fn bumps(var total: Int, by: Int) -> Int {
 /// slot, and `seen` says the callee also saw it, so an arm that wrote the right
 /// number to the wrong place cannot pass on the second alone.
 export fn callsBumps(a: Int) -> Int {
-  let nothing = ()
+  let nothing = Vector.of(0)
   var total = a
   let seen = bumps(var total, 5)
   total * 1000 + seen
@@ -159,15 +166,15 @@ export fn movesY(var p: Point, to: Int) -> Int {
 
 /// A refused caller lending two words of its own frame, one of which is written.
 export fn callsMovesY(a: Int) -> Int {
-  let nothing = ()
+  let nothing = Vector.of(0)
   var p = Point(x: a, y: 0)
   let seen = movesY(var p, 9)
   p.x * 1000 + p.y * 10 + seen
 }
 
-/// Refused — the unit marker is why — and it writes through the `var` it was lent.
+/// Refused — the marker is why — and it writes through the `var` it was lent.
 export fn shows(var total: Int) -> Int {
-  let nothing = ()
+  let nothing = Vector.of(0)
   total = total + 1
   total
 }
@@ -186,7 +193,7 @@ export fn lendsToTheVm(a: Int) -> Int {
 /// the frame it opens itself: without a caller above it `lendsToTheVm` would run
 /// on the VM and the crossing under test would not happen.
 export fn callsLendsToTheVm(a: Int) -> Int {
-  let nothing = ()
+  let nothing = Vector.of(0)
   lendsToTheVm(a)
 }
 
@@ -204,7 +211,7 @@ export fn descends(n: Int, var total: Int) -> Int {
 /// through an alternating chain of encoded and compiled frames while the stack's
 /// `Vec` reallocates under all of them.
 export fn lowers(n: Int, var total: Int) -> Int {
-  let nothing = ()
+  let nothing = Vector.of(0)
   descends(n, var total)
 }
 
@@ -296,7 +303,7 @@ export fn picksALiteral(n: Int) -> String {
 /// A literal that answered a plausible word rather than a reference passes a
 /// comparison and fails here, because a byte length is a read through the address.
 export fn callsPicksALiteral(n: Int) -> Int {
-  let nothing = ()
+  let nothing = Vector.of(0)
   picksALiteral(n).byteLength()
 }
 
@@ -307,13 +314,13 @@ export fn callsPicksALiteral(n: Int) -> Int {
 /// callee's frame and wrong in the caller's destination is a string that vanished
 /// at a tier boundary.
 export fn saysALiteral(n: Int) -> String {
-  let nothing = ()
+  let nothing = Vector.of(0)
   picksALiteral(n)
 }
 
 /// A refused caller, so the measurement is reached across the boundary.
 export fn callsMeasures(s: String) -> Int {
-  let nothing = ()
+  let nothing = Vector.of(0)
   measures(s)
 }
 
@@ -339,7 +346,7 @@ export fn allocatesAndKeeps(s: String, n: Int) -> Int {
 /// an **encoded** frame below a compiled one — which is the pair no single-tier
 /// case can be.
 export fn callsAllocatesAndKeeps(s: String, n: Int) -> Int {
-  let nothing = ()
+  let nothing = Vector.of(0)
   let also = [n, n, n]
   allocatesAndKeeps(s, n) + also.length()
 }
@@ -381,7 +388,7 @@ export fn pushesOnto(given: Vector<Int>, n: Int) -> Int {
 /// the callee bumped, so the replaced store word is read by this frame and not by
 /// the one that replaced it.
 export fn callsPushesOnto(n: Int) -> Int {
-  let nothing = ()
+  let nothing = Vector.of(0)
   var v = Vector.of(7)
   let answered = pushesOnto(v, n)
   var total = 0
@@ -417,7 +424,7 @@ export fn fillsTheHeap(given: Vector<Array<Int>>, n: Int) -> Int {
 /// A refused caller, so the allocations that exhaust the heap are a compiled
 /// frame\'s.
 export fn callsFillsTheHeap(n: Int) -> Int {
-  let nothing = ()
+  let nothing = Vector.of(0)
   var v: Vector<Array<Int>> = Vector.of([0])
   fillsTheHeap(v, n)
 }
@@ -444,7 +451,7 @@ export fn builds(a: String, b: String) -> String {
 
 /// A refused caller, so the whole build is reached across the boundary.
 export fn callsBuilds(a: String, b: String) -> String {
-  let nothing = ()
+  let nothing = Vector.of(0)
   builds(a, b)
 }
 
@@ -463,13 +470,13 @@ export fn buildsAByte(n: Int) -> String {
 
 /// A refused caller, so the refusal crosses the boundary.
 export fn callsBuildsAByte(n: Int) -> String {
-  let nothing = ()
+  let nothing = Vector.of(0)
   buildsAByte(n)
 }
 
 /// Refused, and it appends to a builder it was lent.
 export fn addsTo(var out: StringBuilder, text: String) {
-  let nothing = ()
+  let nothing = Vector.of(0)
   out.append(text)
 }
 
@@ -490,7 +497,7 @@ export fn buildsAcross(a: String, b: String) -> String {
 
 /// A refused caller, so the outermost frame is not the one under test.
 export fn callsBuildsAcross(a: String, b: String) -> String {
-  let nothing = ()
+  let nothing = Vector.of(0)
   buildsAcross(a, b)
 }
 
@@ -513,7 +520,7 @@ export fn buildsWhileCollecting(s: String, n: Int) -> Int {
 
 /// A refused caller, so the frame the builder lives in is a compiled one.
 export fn callsBuildsWhileCollecting(s: String, n: Int) -> Int {
-  let nothing = ()
+  let nothing = Vector.of(0)
   buildsWhileCollecting(s, n)
 }
 
@@ -526,7 +533,7 @@ export fn callsBuildsWhileCollecting(s: String, n: Int) -> Int {
 /// small heap at the same time — and this is the way the differential rows above
 /// already work.
 export fn callsKeepsWhatItStillNeeds(a: String, b: String, n: Int) -> Int {
-  let nothing = ()
+  let nothing = Vector.of(0)
   keepsWhatItStillNeeds(a, b, n)
 }
 ";

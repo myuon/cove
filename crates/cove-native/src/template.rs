@@ -478,6 +478,13 @@ impl<'a> Emit<'a> {
     /// Emits one IR instruction's template.
     fn inst(&mut self, pc: usize) {
         match &self.function.code[pc] {
+            // `encoded.rs`'s `CONST_UNIT` arm: one store of a zero word. `xor`
+            // rather than a `mov` of nought, which is what every other zero in
+            // this file is.
+            Inst::Unit { dst } => {
+                self.xor_rr(RAX, RAX);
+                self.store_slot(*dst, RAX);
+            }
             Inst::Bool { dst, value } => {
                 self.mov_imm64(RAX, i64::from(*value));
                 self.store_slot(*dst, RAX);

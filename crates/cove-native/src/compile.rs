@@ -562,6 +562,12 @@ impl<'a, 'f> Lower<'a, 'f> {
         match &self.function.code[pc] {
             // `encoded.rs`'s `CONST_BOOL | CONST_INT | CONST_FLOAT` arm: one
             // store of a word the encoder already computed.
+            // `encoded.rs`'s `CONST_UNIT` arm: one store of a zero word.
+            Inst::Unit { dst } => {
+                let word = self.b.ins().iconst(types::I64, 0);
+                self.store_slot(*dst, word);
+                false
+            }
             Inst::Bool { dst, value } => {
                 let word = self.b.ins().iconst(types::I64, i64::from(*value));
                 self.store_slot(*dst, word);

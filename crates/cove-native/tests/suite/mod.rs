@@ -1701,14 +1701,6 @@ pub fn a_trap_names_its_message_by_id<A: Arm>() {
 pub fn anything_outside_the_slice_refuses_the_whole_function<A: Arm>() {
     let refused: Vec<(&str, Program)> = vec![
         (
-            "a unit constant, which is not on the adoption gate's list",
-            program(function(
-                vec![Repr::Unit],
-                UNIT,
-                vec![Inst::Unit { dst: 0 }, Inst::Return { src: 0 }],
-            )),
-        ),
-        (
             "float negation, which `Num::Int` negation being lowered does not admit",
             program(function(
                 vec![Repr::Float],
@@ -1832,6 +1824,51 @@ pub fn anything_outside_the_slice_refuses_the_whole_function<A: Arm>() {
     for (what, held) in refused {
         assert!(!compiles::<A>(&held), "should have refused: {what}");
     }
+}
+
+/// A `Unit` constant is one word of nought, and a slot past the frame refuses.
+///
+/// `encoded.rs`'s `CONST_UNIT` arm is `set_word_at(base + dst, 0)`, so this is
+/// `Inst::Bool`'s emitter with the constant already chosen. It is asserted rather
+/// than assumed because a `Unit` word is *zero* and so is a fresh frame: a
+/// fixture that read an untouched slot would agree with an arm that emitted
+/// nothing at all. So the slot is written first and the instruction has to put it
+/// back.
+pub fn a_unit_constant_is_a_zero_word<A: Arm>() {
+    let held = program(function(
+        vec![Repr::Int, Repr::Unit],
+        UNIT,
+        vec![
+            // A number no `Unit` is, so a `const-unit` that stored nothing leaves
+            // it behind and the assertion below reads it.
+            Inst::Int {
+                dst: 1,
+                value: 0x5555_aaaa,
+            },
+            Inst::Unit { dst: 1 },
+            Inst::Return { src: 1 },
+        ],
+    ));
+    let mut words = vec![0u64, 0];
+    let answer = run::<A>(&held, &mut words, 0);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[1], 0, "the slot the constant was stored over");
+    assert_eq!(answer.returned[0], 0, "and the answer at the boundary");
+
+    // A frame that does not begin at word zero, and then a slot the frame does
+    // not have — which is `Reason::Operands` and a refusal.
+    let mut words = vec![9, 9, 0, 0];
+    let answer = run::<A>(&held, &mut words, 2);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[3], 0);
+    assert_eq!(&words[..2], &[9, 9]);
+
+    let past = program(function(
+        vec![Repr::Int, Repr::Unit],
+        UNIT,
+        vec![Inst::Unit { dst: 9 }, Inst::Return { src: 1 }],
+    ));
+    assert!(!compiles::<A>(&past), "a slot past the end of the frame");
 }
 
 /// A `Bool` equality *is* inside the slice, which is the other side of the

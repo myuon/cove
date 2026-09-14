@@ -644,3 +644,8 @@ fn a_buffer_op_the_runtime_refused_leaves_with_that_outcome() {
 fn a_growable_buffer_is_admitted_as_a_family() {
     suite::a_growable_buffer_is_admitted_as_a_family::<Template>();
 }
+
+#[test]
+fn a_unit_constant_is_a_zero_word() {
+    suite::a_unit_constant_is_a_zero_word::<Template>();
+}
