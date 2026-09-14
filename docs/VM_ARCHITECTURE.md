@@ -603,6 +603,41 @@ performance change, and the next person to reach for "shrink the dispatch
 body" should read this section first.
 
 
+### What asking the native tier table at a `call` costs
+
+[Issue #369](https://github.com/myuon/cove/issues/369) made the encoded `CALL`
+arm consult [ADR 0055](adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md)'s
+function-entry table, so that a compiled function called from an encoded one is
+entered as machine code rather than dispatched. That puts a branch on a path
+every program takes, and the two sections above are the reason it had to be
+measured rather than argued: a change that alters nothing a program executes has
+moved `arith` by several per cent before now.
+
+The shape is what the measurement is about. `Machine::tiered` is an `Option`
+test, inlined, and everything past it — the table lookup, the four transition
+counters, the per-callee refusal count, the entry into compiled code — is behind
+`#[inline(never)]`. So a default run, which installs no table, pays one load and
+one branch at a `call` and nothing anywhere else; a call-free loop pays nothing
+at all.
+
+`cove run <bench> --backend vm --stats`, medians of `execute=`, fifteen rounds
+interleaved one sample at a time, repeated as two independent sessions. Both
+builds are the default feature set — the branch is there whether or not a code
+generator is — on `x86_64-apple-darwin`, i7-10700K, `--profile checked`:
+
+| row | base | with the lookup | delta | second session |
+| --- | ---: | ---: | ---: | ---: |
+| `arith` — no calls at all | 47.878 ms | 47.780 ms | **−0.21%** | −0.26% |
+| `field` | 48.815 ms | 48.069 ms | −1.53% | −1.95% |
+| `call` — a call per turn | 57.155 ms | 57.503 ms | **+0.61%** | +0.64% |
+
+**The call-free control does not regress**, twice, and `call` — the row whose
+whole body is calls — pays about 0.6%. That is the property the shape was chosen
+for, and it is the one to re-check if the lookup ever moves out of `CALL`. The
+`field` row moving the other way by 1.5% is inside the layout band the next two
+sections bound, and is not a claim that a branch made anything faster.
+
+
 ### The layout band is much wider than it was thought to be
 
 The section above bounds the band at "at least ±6%", from a build whose added

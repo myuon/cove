@@ -221,6 +221,63 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// A run that enters compiled code wherever `entries` has any.
+    ///
+    /// [ADR 0055]'s native tier, made **explicitly selectable**: the VM stays the
+    /// default and this is the one constructor that asks for anything else.
+    /// `entries` is the entry table — `Program + FunctionId -> encoded entry |
+    /// native entry` — and it is consulted at every Cove call, by the encoded
+    /// dispatch loop and by compiled code alike. A function it refuses runs on
+    /// the **encoded** tier, which is a complete execution path; nothing here can
+    /// reach the tree-walking interpreter, which ADR 0055 forbids as a
+    /// per-function fallback.
+    ///
+    /// A third constructor rather than a parameter on [`Vm::new`], for
+    /// [`Vm::debugged`]'s reason: no existing caller has a table to name, and a
+    /// parameter every caller passes `None` to is a question every caller is
+    /// asked and none of them answers. It is also what keeps the default
+    /// unchanged by construction rather than by a default value.
+    ///
+    /// The table has to outlive the `Vm`, which is what `'a` says: whoever
+    /// compiled the code owns the pages its entries point into, so the compiler
+    /// is built first and dropped last. Nothing here rebuilds or refinalizes it.
+    ///
+    /// [ADR 0055]: ../../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+    pub fn with_native(
+        runtime: &'a Runtime,
+        hosts: &'a HostRegistry,
+        program: &'a Program,
+        entries: &'a dyn native::Tiered,
+    ) -> Vm<'a> {
+        let mut vm = Vm::new(runtime, hosts, program);
+        // Safety: `entries` outlives the `Vm` and therefore the machine inside
+        // it, which is exactly what `install_native` asks and what the `'a` on
+        // the parameter promises.
+        unsafe { vm.machine.install_native(entries) };
+        vm
+    }
+
+    /// How this run's calls divided between the tiers, one counter per
+    /// transition.
+    ///
+    /// All nought for a run built any other way: the counters are the installed
+    /// table's, and a run with no table makes no transition to count. See
+    /// [`Tiers`](native::Tiers) for why the count is of edges rather than of
+    /// tiers.
+    pub fn tiers(&self) -> native::Tiers {
+        self.machine.tiers()
+    }
+
+    /// Dynamic calls to each function that stayed on the encoded tier, by
+    /// `FunctionId`.
+    ///
+    /// What a refusal cost, measured rather than guessed at: ADR 0055's report
+    /// asks for refusals ordered by the native work they prevented, and a
+    /// function count cannot say that. Empty for a run with no table.
+    pub fn refused_calls(&self) -> &[u64] {
+        self.machine.refused_calls()
+    }
+
     /// The same run, watched by `debugger`.
     ///
     /// A second constructor rather than a parameter on [`Vm::new`], for the
@@ -364,11 +421,14 @@ impl<'a> Vm<'a> {
     /// top of that one, entered on whichever tier
     /// [`Tiered`](crate::Tiered) names.
     ///
-    /// Nothing here makes the native tier selectable. The VM remains the
-    /// default, `cove run` does not reach this, and a build with no code
-    /// generator has only [`NothingCompiled`](crate::NothingCompiled) to hand it
-    /// — which answers that nothing is compiled, so every call runs on the
-    /// encoded tier and the session is a slower `invoke`.
+    /// This is not how a *run* selects the tier — [`Vm::with_native`] is, and it
+    /// is what `cove run --backend native` reaches. What a session adds is that
+    /// the table is chosen **per call**, which is the whole of what a differential
+    /// harness needs: the same function, the same arguments, once with
+    /// [`NothingCompiled`](crate::NothingCompiled) and once with a compiled table,
+    /// and the two answers compared. The table is installed on the machine for the
+    /// length of each call, so a caller the table refuses runs on the dispatch
+    /// loop and a compiled callee it calls is still entered as machine code.
     pub fn native_session(
         &mut self,
         module: &str,
@@ -398,6 +458,25 @@ impl<'a> Vm<'a> {
     /// Words handed out over the whole run, reuse counted each time.
     pub fn allocated_words(&self) -> u64 {
         self.machine.allocated_words()
+    }
+
+    /// Objects handed out over the whole run, reuse counted each time.
+    ///
+    /// The count beside [`Vm::allocated_words`]'s total, and it is public for a
+    /// reason worth writing down: the same figure is in a `--profile` run's
+    /// header, and [issue #369](https://github.com/myuon/cove/issues/369)'s
+    /// measurement needs it for a run that **cannot be profiled**. ADR 0055
+    /// refuses `--profile` beside `--backend native`, because the profiler counts
+    /// dispatched opcodes and the native tier dispatches none — so a native run
+    /// asked for its allocation count through the profiler would be the VM
+    /// wearing the native tier's name. This accessor is a counter the allocator
+    /// keeps whichever tier asked it for the memory, so an encoded run and a
+    /// mixed one report it in the same words and neither has to be swapped for
+    /// the other to read it. The tree-walking interpreter's heap is a set of
+    /// objects rather than a run of words and reports its own figures through
+    /// `Runtime::heap_stats`; this is the linear memory's.
+    pub fn allocations(&self) -> u64 {
+        self.machine.allocations()
     }
 
     /// How many collections this run's heap has done.

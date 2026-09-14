@@ -6,7 +6,7 @@
 //! whole point of having two is to measure one against the other. A
 //! measurement over two different subsets of the IR would not be that
 //! measurement, so the subset is not written twice: [`supported`] is the one
-//! predicate both arms ask, and [`leaders`] is the one block partition both
+//! predicate both arms ask, and `leaders` is the one block partition both
 //! arms charge work over.
 //!
 //! [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
@@ -98,22 +98,113 @@ fn comparison_supported(on: Compare, op: CmpOp) -> bool {
     }
 }
 
+/// Why a function has no machine code, as one stable reason.
+///
+/// [ADR 0055] asks a native run to report "one stable refusal reason per refused
+/// function", and *stable* is the load-bearing word: the reason is what a reader
+/// sorts a table by and decides what to build next from, so it names a **family**
+/// rather than an instruction. Two functions refused for `LoadField` and for
+/// `AllocFixed` share [`Reason::Instruction`] and are told apart by the
+/// instruction [`Refusal::at`] names; two refused because a slot holds a
+/// `Repr::Host` share [`Reason::SlotRepr`] and there is no instruction to name.
+///
+/// The division that matters is between the last two. [`Reason::Instruction`] is
+/// an operation nothing lowers — a family to write — and [`Reason::Operands`] is
+/// an operation that *is* lowered, refused because a bound it names was
+/// exceeded. Those point at different work, and a single "unsupported" would
+/// have hidden the difference.
+///
+/// [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reason {
+    /// `lower::stub` left a stand-in where a body would be.
+    ///
+    /// There is nothing to compile, and compiling it would present a run as
+    /// more native than it is.
+    Stub,
+    /// A frame slot holds a representation this tier does not keep in a slot.
+    ///
+    /// [`Repr::Addr`], [`Host`](Repr::Host), [`Task`](Repr::Task) and
+    /// [`Scope`](Repr::Scope); see this module's `is_lowered`.
+    SlotRepr(Repr),
+    /// The body does not end in a terminator, so its last block falls off the
+    /// end.
+    NoTerminator,
+    /// An instruction no arm emits code for.
+    Instruction,
+    /// An instruction both arms lower, whose operands are outside a bound one
+    /// of them needs.
+    ///
+    /// A value wider than this module's `MAX_RUN_WORDS`, a slot past the end of
+    /// the frame,
+    /// a slot offset an `i32` displacement cannot name, a comparison that is a
+    /// runtime error rather than an answer, or a jump table with more cases
+    /// than an `i32` immediate can hold.
+    Operands,
+}
+
+impl std::fmt::Display for Reason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Reason::Stub => write!(f, "the body is a stub"),
+            Reason::SlotRepr(repr) => write!(f, "a frame slot holds a `{repr:?}`"),
+            Reason::NoTerminator => write!(f, "the body does not end in a terminator"),
+            Reason::Instruction => write!(f, "an instruction is not lowered"),
+            Reason::Operands => write!(f, "an operand is outside a bound"),
+        }
+    }
+}
+
+/// One refused function's reason, and where the reason was found.
+///
+/// `at` is the **first** unsupported instruction, which is the other half of
+/// what ADR 0055's report asks for. First rather than every one, because a
+/// function is refused whole: the second refusal in a body is not work anybody
+/// can do next, and a list of them would sort a long function above a hot one.
+/// It is `None` when the refusal is not about an instruction at all — a stub, a
+/// slot's representation, a missing terminator — because there is no pc to name
+/// and a zero would read as one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    /// Which family of refusal this is.
+    pub reason: Reason,
+    /// The pc of the first instruction that could not be lowered.
+    pub at: Option<u32>,
+}
+
 /// Whether every part of `function` is inside this slice.
 ///
 /// Called before lowering begins, which is what makes lowering infallible.
 /// The instruction match here and each arm's `inst` are two halves of one
 /// decision and have to agree: a form admitted here and not lowered there is
 /// a panic, which is why that arm is `unreachable!` and says so.
-pub(crate) fn supported(program: &Program, function: &Function) -> bool {
-    if !function.reprs.iter().copied().all(is_lowered) {
-        return false;
-    }
+///
+/// It is [`refusal`] answering `None`, and it stays as the predicate both arms
+/// ask because a `bool` is what a code generator needs: *why* a function was
+/// refused is a question for the report and not for the emitter.
+pub fn supported(program: &Program, function: &Function) -> bool {
+    refusal(program, function).is_none()
+}
+
+/// Why `function` is outside this slice, or `None` if it is inside it.
+///
+/// The order the checks are made in is the order the reasons are reported in,
+/// and it is deliberate: a stub is refused before its slots are read and its
+/// slots before its instructions, so the reason a reader is given is the
+/// *coarsest* true one. A stub whose slots also hold a `Repr::Host` is reported
+/// as a stub, because writing the missing lowering is not what would make it
+/// compile.
+pub fn refusal(program: &Program, function: &Function) -> Option<Refusal> {
+    let of = |reason: Reason| Some(Refusal { reason, at: None });
     // A stub is a stand-in for a body the lowering did not lower, so there is
     // nothing to compile: `lower::stub` leaves a `return` of a cleared slot.
     // Compiling it would answer the same thing the encoded tier answers, and
     // it would also present a run as more native than it is.
     if function.stub {
-        return false;
+        return of(Reason::Stub);
+    }
+    if let Some(repr) = function.reprs.iter().copied().find(|r| !is_lowered(*r)) {
+        return of(Reason::SlotRepr(repr));
     }
     // The verifier requires it, and the lowering depends on it: a function
     // whose last instruction is not a terminator would fall off the end of
@@ -122,15 +213,23 @@ pub(crate) fn supported(program: &Program, function: &Function) -> bool {
         function.code.last(),
         Some(Inst::Return { .. } | Inst::Jump { .. } | Inst::Trap { .. } | Inst::Switch { .. })
     ) {
-        return false;
+        return of(Reason::NoTerminator);
     }
-    function
-        .code
-        .iter()
-        .all(|inst| inst_supported(program, function, inst))
+    function.code.iter().enumerate().find_map(|(pc, inst)| {
+        inst_refused(program, function, inst).map(|reason| Refusal {
+            reason,
+            at: Some(pc as u32),
+        })
+    })
 }
 
-fn inst_supported(program: &Program, function: &Function, inst: &Inst) -> bool {
+/// Why one instruction is outside the slice, or `None` if it is inside it.
+///
+/// Every arm answers [`Reason::Operands`] and the fallback answers
+/// [`Reason::Instruction`], which is the whole of the division: an arm exists
+/// because both code generators emit that form, so reaching one and failing it
+/// is a bound and never a missing family.
+fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<Reason> {
     let slots = function.reprs.len();
     let end = function.code.len() as u32;
     let slot = |at: Slot| (at as usize) < slots && slot_offset(at).is_some();
@@ -139,7 +238,9 @@ fn inst_supported(program: &Program, function: &Function, inst: &Inst) -> bool {
             .is_some_and(|last| (last as usize) <= slots)
             && slot_offset(at.saturating_add(width)).is_some()
     };
-    match inst {
+    // `true` is "this instruction is inside the slice", so that each arm below
+    // reads the way it read while it was a predicate.
+    let inside = match inst {
         Inst::Bool { dst, .. } | Inst::Int { dst, .. } => slot(*dst),
         // A case index is one word and the word is a compile-time constant, so
         // this is `encoded.rs`'s `FUNC_REF | CONST_TAG` arm: the same store
@@ -235,8 +336,9 @@ fn inst_supported(program: &Program, function: &Function, inst: &Inst) -> bool {
         }
         Inst::Return { src } => run(*src, program.layout(function.returns).width()),
         Inst::Trap { .. } => true,
-        _ => false,
-    }
+        _ => return Some(Reason::Instruction),
+    };
+    (!inside).then_some(Reason::Operands)
 }
 
 /// Where a basic block begins, and how many instructions it holds.

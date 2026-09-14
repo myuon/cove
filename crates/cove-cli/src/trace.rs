@@ -293,7 +293,7 @@ fn parse_header(line: &str) -> Result<Header, String> {
     }
     let backend = string_field(&json, "backend")?;
     let backend = RecordingBackend::parse(&backend)
-        .ok_or_else(|| format!("`backend` must be `ast` or `vm`, found `{backend}`"))?;
+        .ok_or_else(|| format!("`backend` must be `ast`, `vm` or `native`, found `{backend}`"))?;
     let values = string_field(&json, "values")?;
     let values = ValueCapture::parse(&values)
         .ok_or_else(|| format!("`values` must be `full` or `redacted`, found `{values}`"))?;
@@ -1436,7 +1436,7 @@ mod tests {
             r#"{"event":"trace_header","version":4,"backend":"jit","values":"full","entry":"a.b","args":[]}"#,
         ]);
         assert!(
-            message.contains("`backend` must be `ast` or `vm`, found `jit`"),
+            message.contains("`backend` must be `ast`, `vm` or `native`, found `jit`"),
             "{message}"
         );
     }

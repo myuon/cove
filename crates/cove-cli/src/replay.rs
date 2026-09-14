@@ -586,9 +586,18 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
     // because the lowering reports every gap in what the entry reaches rather
     // than the first; a replay that cannot be run is still a replay that
     // reads no tape.
+    // A recording made by a native run names `native` in its header, and ADR
+    // 0026 makes the default replay the backend that wrote the file — so this is
+    // the one place the refusal is reached without anybody typing it. It is still
+    // a refusal: replaying a native run on the VM without saying so would be the
+    // silent substitution ADR 0055 forbids, and the message names the flag that
+    // does say so.
+    if backend == Backend::Native {
+        return Err(crate::native_is_not_here("replay"));
+    }
     let lowered = match backend {
         Backend::Ast => None,
-        Backend::Vm => {
+        Backend::Vm | Backend::Native => {
             let ir = cove_ir::lower_entry(
                 &program,
                 &sources,

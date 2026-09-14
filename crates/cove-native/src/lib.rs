@@ -55,7 +55,11 @@
 //! answers and an argument does not. Both arms compile exactly the same subset
 //! of the IR — a comparison over two different subsets would not be one — and
 //! both are entered through the same [`Entry`] over the same [`NativeCtx`].
-//! Neither is wired to the runtime.
+//!
+//! ADR 0056 then decided between them on the measurements, and the template arm
+//! won: `cove_runtime::native` compiles with that one, and
+//! `cove run --backend native` runs what it emits. The Cranelift arm is kept for
+//! the comparison ADR 0056 keeps, and nothing selects it as a tier.
 //!
 //! # What it compiles today, and what it refuses
 //!
@@ -148,8 +152,25 @@ impl std::fmt::Display for Unavailable {
 
 impl std::error::Error for Unavailable {}
 
+impl Unavailable {
+    /// A refusal naming `reason`.
+    ///
+    /// Public because the *runtime* refuses hosts this crate cannot see. A
+    /// build with no code generator has nothing here that could refuse
+    /// anything, and "this build has no code generator" is exactly the
+    /// capability diagnostic ADR 0055 asks for — so the type has to be
+    /// constructible from outside, or a second type would say the same thing
+    /// in different words.
+    pub fn new(reason: impl Into<String>) -> Unavailable {
+        Unavailable(reason.into())
+    }
+}
+
 #[cfg(any(feature = "cranelift", feature = "template"))]
-mod subset;
+pub mod subset;
+
+#[cfg(any(feature = "cranelift", feature = "template"))]
+pub use subset::{refusal, supported, Reason, Refusal};
 
 #[cfg(feature = "cranelift")]
 mod compile;

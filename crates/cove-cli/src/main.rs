@@ -43,7 +43,7 @@ const USAGE: &str = "\
 cove — the Cove toolchain
 
 usage:
-  cove fmt [path] [--check]            format every `.cove` file in the package
+  cove fmt [path] [--check] [--backend <ast|vm|native>]  format every `.cove` file in the package
   cove check [path] [--deny-warnings]  parse, resolve, and type-check the package
   cove run <name> [flags] [args]       run the entry selected by `[run.<name>]` in cove.toml
   cove build <name> [--out <path>]     package that run as a native executable
@@ -64,7 +64,12 @@ usage:
 `cove fmt` rewrites files in place and prints how many changed. `--check`
 writes nothing, prints the path of every file that would change, and exits
 non-zero when there is one, which is the form to run in CI. A file that does
-not parse is reported and never rewritten.
+not parse is reported and never rewritten. It takes `--backend <ast|vm|native>`
+so that the flag means one thing on every command that accepts it, and says
+plainly what it does with it: `cove fmt` is Rust and runs no Cove program, so
+naming a backend changes nothing here. The Cove formatter is
+`examples/covefmt`, and the way to run *it* on a backend is
+`cove run covefmtBench --backend native`.
 
 `--deny-warnings` fails `cove check` when the package has any warnings, as
 does setting `deny_warnings = true` in `cove.toml`'s `[check]` table; either
@@ -140,7 +145,7 @@ generate: `cove generate` is the only command that runs project code besides
 an explicit `run`. `cove generate --check` regenerates every run that sets
 `generates` into memory, compares it against what is on disk, and exits
 non-zero on the first file that differs, which is the form to run in CI.
-`--backend <ast|vm>` chooses the backend a generator runs on, defaulting
+`--backend <ast|vm|native>` chooses the backend a generator runs on, defaulting
 to `vm`; it is the only `cove run` flag `cove generate` takes, because every
 other budget is `[run.<name>]`'s.
 
@@ -183,7 +188,7 @@ literal `--` is a program argument, even if it looks like a flag):
   --trace <path>        write a JSONL trace to <path>, or `-` for stderr
   --trace-values <mode> `full` (the default) records each host call's arguments and result, which is what `cove replay` needs; `redacted` records only their types
   --max-tasks <n>       stop the run when it would hold more than <n> tasks at once
-  --backend <ast|vm>    which backend runs the entry: `vm`, the linear-memory backend of ADR 0034 and the default, or `ast`, the tree-walking interpreter and the semantic oracle
+  --backend <ast|vm|native>  which backend runs the entry: `vm`, the linear-memory backend of ADR 0034 and the default, or `ast`, the tree-walking interpreter and the semantic oracle, or `native`, ADR 0055's experimental native tier — compiled machine code for the functions it can lower and the `vm` for the rest, reporting which was which. `native` needs a build with `--features template` and an x86-64 host, and says so rather than falling back when it does not have one
   --stats               print the backend's lowering and execution times and the instructions it executed, then fuel spent, host calls, irreversible writes, elapsed time, host-call wait, and the heap, to stderr
   --profile             count every instruction the run executes and report which functions and which instructions they were, to stderr. A profiler is a debugger that never stops, so a run without it is unchanged and a run with it is several times slower; the counts are of instructions and not of time
   --files-root <path>   the one directory the `files` host may reach; defaults to `files/` in the package
@@ -370,15 +375,47 @@ pub(crate) fn find_root(start: &Path) -> Option<PathBuf> {
 
 /// Formats every `.cove` file the user asked for, or reports the ones that
 /// are not formatted when `--check` is given.
+///
+/// # It takes `--backend` and says what it does with it
+///
+/// [Issue #369](https://github.com/myuon/cove/issues/369) names
+/// `cove fmt --backend native` beside `cove run --backend native`, on the
+/// reasonable assumption that the formatter this command runs is the Cove one.
+/// It is not: `cove fmt` is `cove_syntax::format`, written in Rust, and it runs
+/// no Cove program at all. The Cove formatter is `examples/covefmt`, and it is
+/// run the way any other Cove program is.
+///
+/// So the flag is **accepted and answered honestly**, which is the one of three
+/// options that is neither a lie nor a wart:
+///
+/// - accepting it and ignoring it would make `--backend native` a flag that
+///   silently did nothing on one command and something on another, which is the
+///   silent substitution ADR 0055 spends several paragraphs forbidding;
+/// - refusing it would make `--backend` a flag whose *set of commands* a reader
+///   has to learn, and issue #369 asked for it here;
+/// - accepting it, validating it with the same parser every other command uses,
+///   and printing one line saying where the Cove formatter is, costs a reader one
+///   sentence and tells them exactly what they wanted to know.
+///
+/// The note is printed only when a backend was named, so the ordinary
+/// `cove fmt --check` that CI runs is byte for byte what it was.
 fn cmd_fmt(args: &[String]) -> Result<(), CliError> {
+    let (named, args) = split_backend_if_named(args)?;
     let mut check = false;
     let mut path: Option<&Path> = None;
-    for arg in args {
+    for arg in &args {
         if arg == "--check" {
             check = true;
         } else {
             path = Some(Path::new(arg.as_str()));
         }
+    }
+    if let Some(backend) = named {
+        eprintln!(
+            "note: `cove fmt` is the Rust formatter and runs no Cove program, so \
+             `--backend {backend}` selects nothing here; the Cove formatter is \
+             `examples/covefmt`, run as `cove run covefmtBench --backend {backend}`"
+        );
     }
 
     let mut sources = SourceMap::new();
@@ -1173,9 +1210,25 @@ pub(crate) fn execute_entry(
     // checker's own call graph and closes the slice against what the lowering
     // names. The coverage harness lowers a case the same way, so the two
     // agree about what an entry's program is.
-    let lowered = match flags.backend {
-        Backend::Ast => None,
-        Backend::Vm => {
+    // ADR 0055: "Until a native profiler exists, requesting opcode profiling with
+    // native execution is refused or explicitly runs the VM." Refused, because the
+    // other option is a run that reports `backend: native` over a profile the VM
+    // produced — and the profiler is installed as a debugger, which selects the
+    // encoded tier for every instruction whether a tier table is installed or not.
+    if flags.backend == Backend::Native && flags.profile {
+        return Err(ExecuteError::Setup(
+            "`--profile` counts dispatched opcodes, which the native tier does not \
+             dispatch: a profiled native run would be the VM wearing the native \
+             tier's name. ADR 0055 refuses it until a native profiler exists. Run \
+             `--profile` on `--backend vm`, or `--backend native` without it — a \
+             native run still reports its tier mixture, its compilation time and \
+             its execution time."
+                .to_string(),
+        ));
+    }
+    let lowered = match flags.backend.lowers() {
+        false => None,
+        true => {
             let started = Instant::now();
             // The shipped schemas and no others, which is the set
             // `cove_sema::Compiler::new()` checked this package against —
@@ -1291,29 +1344,65 @@ pub(crate) fn execute_entry(
     // debugger is and the machine gains nothing for a run that asks for no
     // profile. See `cove_runtime::vm::profile`.
     let profiler = flags.profile.then(Profiler::new);
-    let (outcome, memory, instructions) = match lowered.as_ref().map(|l| &l.program) {
+    let (outcome, memory, instructions, coverage) = match lowered.as_ref().map(|l| &l.program) {
         Some(ir) => {
-            let mut vm = match profiler.as_ref() {
-                Some(profiler) => Vm::debugged(&runtime, runtime.hosts(), ir, profiler),
-                None => Vm::new(&runtime, runtime.hosts(), ir),
+            // The whole entry table, compiled and finalized **before the run**,
+            // and owned for the length of it: `native` outlives `vm` because it
+            // owns the pages `vm`'s entries point into. See
+            // `cove_runtime::native`.
+            //
+            // Its cost is taken here rather than inside `started`'s interval,
+            // which is issue #369's "Compile time and execution time are reported
+            // separately" — a figure covering both would hide which.
+            let native = match flags.backend {
+                Backend::Native => Some(
+                    cove_runtime::compile_native(ir)
+                        .map_err(|error| ExecuteError::Setup(error.to_string()))?,
+                ),
+                Backend::Ast | Backend::Vm => None,
+            };
+            let mut vm = match (profiler.as_ref(), native.as_ref()) {
+                (Some(profiler), _) => Vm::debugged(&runtime, runtime.hosts(), ir, profiler),
+                (None, Some(native)) => Vm::with_native(&runtime, runtime.hosts(), ir, native),
+                (None, None) => Vm::new(&runtime, runtime.hosts(), ir),
             };
             let outcome = vm.run_entry(module, entry, program_args);
+            // Read before `vm` and `native` go out of scope, because the report
+            // is printed after the timed region and neither lives that long.
+            let coverage = native.as_ref().map(|native| Coverage::taken(native, &vm));
             (
                 outcome,
                 Memory::Words {
                     held: vm.heap_words(),
                     handed_out: vm.allocated_words(),
+                    allocations: vm.allocations(),
+                    collections: vm.collections(),
                 },
                 Some(vm.instructions()),
+                coverage,
             )
         }
         None => {
             let mut interpreter = Interpreter::new(&runtime);
             let outcome = interpreter.run_entry(module, entry, program_args);
-            (outcome, Memory::Objects(interpreter.heap_stats()), None)
+            (
+                outcome,
+                Memory::Objects(interpreter.heap_stats()),
+                None,
+                None,
+            )
         }
     };
     let execution = started.elapsed();
+
+    // Unconditionally, and not under `--stats`: ADR 0055 requires that "the run
+    // reports how many calls and functions used each tier, so a benchmark cannot
+    // present a mixed run as fully native", and issue #369 that "a mixed run
+    // reports its mixture; it must not be presented as fully native". A report
+    // nobody asked for is what stops a silent claim.
+    if let Some(coverage) = &coverage {
+        coverage.print(execution);
+    }
 
     if let (Some(profiler), Some(held)) = (profiler.as_ref(), lowered.as_ref()) {
         print_profile(&held.program, profiler);
@@ -1324,6 +1413,192 @@ pub(crate) fn execute_entry(
     }
 
     outcome.map_err(ExecuteError::Runtime)
+}
+
+/// How much of a native run was native, and what the refusals cost it.
+///
+/// [ADR 0055]: "The run reports how many calls and functions used each tier, so a
+/// benchmark cannot present a mixed run as fully native."
+/// [Issue #369](https://github.com/myuon/cove/issues/369) fixes what that report
+/// contains, and this is it. Three things in the shape are deliberate:
+///
+/// - **compilation is not execution.** They are two fields and two lines, because
+///   a tier that is fast to run and slow to build is a different trade from one
+///   that is neither, and one wall-clock number covering both would hide which;
+/// - **the refusals are ranked by dynamic calls, not by function count.** A
+///   hundred refused functions nothing calls cost a run nothing; one refused
+///   function in the inner loop costs it everything. A table sorted by count
+///   would put the hundred first;
+/// - **what VM-to-native recovered is not charged to a refusal.** The count is per
+///   *callee*, so a compiled function reached from a refused caller is charged to
+///   nobody — which is the accounting issue #369 asks for in as many words.
+///
+/// [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+struct Coverage {
+    reachable: usize,
+    stubs: usize,
+    compiled: usize,
+    code_bytes: u64,
+    compile: Duration,
+    tiers: cove_runtime::Tiers,
+    /// Every refused function with the dynamic calls it kept in the VM, ranked by
+    /// that number.
+    refused: Vec<(cove_runtime::Refused, u64)>,
+}
+
+impl Coverage {
+    /// The report a finished run and the table it ran under make between them.
+    ///
+    /// The counts are the *run's* and the refusals the *program's*, and
+    /// `Refused::id` is the only thing that joins them: a table cannot know how
+    /// often a function was called and a run cannot know why it was refused.
+    fn taken(native: &cove_runtime::NativeProgram, vm: &Vm<'_>) -> Coverage {
+        let calls = vm.refused_calls();
+        let mut refused: Vec<(cove_runtime::Refused, u64)> = native
+            .refusals()
+            .iter()
+            .map(|row| {
+                let made = calls.get(row.id.index()).copied().unwrap_or(0);
+                (row.clone(), made)
+            })
+            .collect();
+        // Descending by the native work the refusal prevented, and by name after
+        // that so the table is the same table twice for one run.
+        refused.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
+        Coverage {
+            reachable: native.reachable(),
+            stubs: native.stubs(),
+            compiled: native.compiled(),
+            code_bytes: native.code_bytes(),
+            compile: native.compile_time(),
+            tiers: vm.tiers(),
+            refused,
+        }
+    }
+
+    /// Prints the report, on stderr, whether or not `--stats` was asked for.
+    ///
+    /// `execution` is the run's wall time with compilation already outside it —
+    /// see this type's own note on why the two are never one number.
+    fn print(&self, execution: Duration) {
+        let share = |part: usize, whole: usize| match whole {
+            0 => 0.0,
+            whole => 100.0 * part as f64 / whole as f64,
+        };
+        eprintln!(
+            "native: {} reachable function(s), {} compiled ({:.1}%), {} refused; \
+             {} byte(s) of machine code",
+            self.reachable,
+            self.compiled,
+            share(self.compiled, self.reachable),
+            self.refused.len(),
+            self.code_bytes
+        );
+        // Apart from the figures above, and named, because a reader has to know
+        // what the denominator excludes. See `NativeProgram::reachable`.
+        eprintln!(
+            "native: {} further declaration(s) are stubs no path in this slice \
+             reaches, and are neither reachable nor refused above",
+            self.stubs
+        );
+        eprintln!(
+            "native: compilation {:.1} ms, execution {:.1} ms — two measurements, never one",
+            self.compile.as_secs_f64() * 1000.0,
+            execution.as_secs_f64() * 1000.0
+        );
+        let tiers = self.tiers;
+        let calls = tiers.calls();
+        let native_share = match calls {
+            0 => 0.0,
+            calls => {
+                100.0
+                    * (tiers.vm_to_native
+                        + tiers.native_to_native_direct
+                        + tiers.native_to_native_mediated) as f64
+                    / calls as f64
+            }
+        };
+        eprintln!("native: calls, by the tier each crossed from and to");
+        eprintln!("  {:<26} {:>14}", "VM -> VM", thousands(tiers.vm_to_vm));
+        eprintln!(
+            "  {:<26} {:>14}",
+            "VM -> native",
+            thousands(tiers.vm_to_native)
+        );
+        eprintln!(
+            "  {:<26} {:>14}",
+            "native -> VM",
+            thousands(tiers.native_to_vm)
+        );
+        eprintln!(
+            "  {:<26} {:>14}",
+            "native -> native direct",
+            thousands(tiers.native_to_native_direct)
+        );
+        // Printed only when it happened. A zero here is the expected reading —
+        // the tier emits direct calls — and a row of zeroes invites a reader to
+        // stop noticing the row that is not.
+        if tiers.native_to_native_mediated != 0 {
+            eprintln!(
+                "  {:<26} {:>14}",
+                "native -> native mediated",
+                thousands(tiers.native_to_native_mediated)
+            );
+        }
+        eprintln!(
+            "  {:<26} {:>14}  ({:.1}% of Cove calls used native code)",
+            "total Cove calls",
+            thousands(calls),
+            native_share
+        );
+        eprintln!(
+            "  {:<26} {:>14}",
+            "the outermost frame",
+            match (tiers.host_to_native, tiers.host_to_vm) {
+                (0, _) => "encoded",
+                _ => "native",
+            }
+        );
+        if self.refused.is_empty() {
+            return;
+        }
+        eprintln!(
+            "native: refusals, ranked by the dynamic calls each kept in the VM (what VM->native recovered is charged to nobody)"
+        );
+        eprintln!(
+            "  {:>13}  {:<44} {:<38} first unsupported instruction",
+            "dynamic calls", "function", "refusal reason"
+        );
+        // The whole table for a run that was asked for a report. A truncated one
+        // hides the long tail, and the long tail is what the next family to lower
+        // is read off.
+        for (row, made) in &self.refused {
+            eprintln!(
+                "  {:>13}  {:<44} {:<38} {}",
+                thousands(*made),
+                row.name,
+                row.reason,
+                match (&row.instruction, row.at) {
+                    (Some(op), Some(pc)) => format!("{op} at pc {pc}"),
+                    _ => "-".to_string(),
+                }
+            );
+        }
+    }
+}
+
+/// `n` with a separator every three digits, because these numbers reach tens of
+/// millions and a reader counts digits otherwise.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (at, digit) in digits.chars().enumerate() {
+        if at > 0 && (digits.len() - at).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 /// What the lowering produced before the run, and what producing it cost.
@@ -1360,6 +1635,21 @@ enum Memory {
         held: u64,
         /// Words handed out over the whole run, reuse counted each time.
         handed_out: u64,
+        /// Objects handed out over the whole run, reuse counted each time.
+        ///
+        /// Beside the words rather than instead of them, because the two answer
+        /// different questions and a change can move one without the other: a
+        /// run that allocates the same bytes in half as many objects has halved
+        /// its allocator traffic and not its footprint.
+        ///
+        /// It is here, rather than only in a `--profile` run's header, because
+        /// [issue #369](https://github.com/myuon/cove/issues/369) asks for
+        /// "allocation count and allocated words" for the *native* tier, and ADR
+        /// 0055 refuses `--profile` beside `--backend native`. A figure only a
+        /// profiled run can report is a figure one of the three arms cannot have.
+        allocations: u64,
+        /// How many times the heap collected.
+        collections: u64,
     },
 }
 
@@ -1584,9 +1874,17 @@ fn print_backend_stats(
         Some(instructions) => instructions.to_string(),
         None => "none".to_string(),
     };
+    // A native run dispatches only what it did not compile, and ADR 0055 forbids
+    // labelling statically counted IR in native blocks as dispatched instructions.
+    // So the figure stays a count of dispatched opcodes and the line says which
+    // count it is, rather than a reader taking it for the run's whole work.
+    let dispatched = match backend {
+        Backend::Native => " (dispatched by the encoded tier only)",
+        Backend::Ast | Backend::Vm => "",
+    };
     match lowered {
         Some(lowered) => eprintln!(
-            "backend: {backend} lower={:?} validate=in-lower execute={:?} instructions={counted}",
+            "backend: {backend} lower={:?} validate=in-lower execute={:?} instructions={counted}{dispatched}",
             lowered.lower, execution
         ),
         None => {
@@ -1691,6 +1989,26 @@ pub(crate) enum Backend {
     /// spelling. `--backend lvm` is refused the way any other unknown value
     /// is.
     Vm,
+    /// The native tier of ADR 0055, over the same `cove-ir` [`Backend::Vm`]
+    /// runs.
+    ///
+    /// **Experimental, explicit and never the default.** ADR 0055 keeps the VM
+    /// the default until its adoption gate passes, and issue #369 says in as many
+    /// words that this is "an experimental backend gate, not permission to make
+    /// native execution the default". [`Backend::default_for_a_run`] is unchanged
+    /// and is the one place that decision lives.
+    ///
+    /// It is a third variant rather than a modifier on `Vm`, and the reason is
+    /// what a reader of a `--stats` line or a trace header needs: a native run
+    /// dispatches fewer instructions, reports a different `fuel_spent` — ADR 0040
+    /// makes fuel backend-specific — and is a *mixture* of two tiers. None of
+    /// those is `vm` with a flag set.
+    ///
+    /// What it is not is a third *semantics*. A function the code generator
+    /// refuses runs on the encoded tier, which is the same complete execution
+    /// path `Backend::Vm` is; nothing selects the tree-walking interpreter
+    /// per function, which ADR 0055 forbids.
+    Native,
 }
 
 impl Backend {
@@ -1711,6 +2029,7 @@ impl Backend {
         match value {
             "ast" => Some(Backend::Ast),
             "vm" => Some(Backend::Vm),
+            "native" => Some(Backend::Native),
             _ => None,
         }
     }
@@ -1722,7 +2041,20 @@ impl Backend {
     /// one fact, five commands refuse an unknown one, and a list written out
     /// five times is a list that can be extended in four places. It is also
     /// what made renaming the backend a single edit.
-    pub(crate) const NAMES: &'static str = "`ast` or `vm`";
+    pub(crate) const NAMES: &'static str = "`ast`, `vm` or `native`";
+
+    /// Whether this backend needs the lowering.
+    ///
+    /// One question rather than a `match` at each of the five commands that
+    /// lower, for [`Backend::NAMES`]'s reason: the set of backends that run
+    /// `cove-ir` is one fact, and a third variant added to four matches
+    /// independently is a variant that can be forgotten in three of them.
+    pub(crate) fn lowers(self) -> bool {
+        match self {
+            Backend::Ast => false,
+            Backend::Vm | Backend::Native => true,
+        }
+    }
 
     /// This backend as a trace header names it.
     ///
@@ -1735,6 +2067,7 @@ impl Backend {
         match self {
             Backend::Ast => RecordingBackend::Ast,
             Backend::Vm => RecordingBackend::Vm,
+            Backend::Native => RecordingBackend::Native,
         }
     }
 
@@ -1747,11 +2080,39 @@ impl Backend {
         match backend {
             RecordingBackend::Ast => Backend::Ast,
             RecordingBackend::Vm => Backend::Vm,
+            RecordingBackend::Native => Backend::Native,
         }
     }
 }
 
-/// Splits `--backend <ast|vm>` out of a command's arguments, leaving the
+/// Why a command refuses `--backend native`.
+///
+/// ADR 0055 makes the native tier explicit and default-off, and issue #369 makes
+/// it an experiment. So it is wired where a *program runs under one lowering and
+/// one report* — `cove run` and `cove generate` — and refused elsewhere, rather
+/// than accepted and quietly ignored.
+///
+/// A refusal and not a fallback, which is the whole of what this function is for.
+/// ADR 0055: "Selecting native execution on an unsupported target produces a
+/// capability diagnostic, not an attempted fallback." A command that took
+/// `--backend native` and ran the VM would be the silent mixture the ADR spends
+/// several paragraphs forbidding, and `--stats`, a trace header and a benchmark
+/// would all then say "native" about a run that was not.
+///
+/// One function rather than a sentence at each site, for [`Backend::NAMES`]'s
+/// reason: which commands run the native tier is one fact, and three copies of
+/// the answer can disagree.
+pub(crate) fn native_is_not_here(command: &str) -> CliError {
+    CliError::Message(format!(
+        "`cove {command}` does not run the native tier of ADR 0055. It is an explicit, \
+         default-off experiment (issue #369) and is wired to `cove run` and `cove \
+         generate`, which run one program under one lowering and report the mixture \
+         they ran as. Use `--backend vm`, which is the same lowering and the same \
+         semantics, or run this program through `cove run --backend native`."
+    ))
+}
+
+/// Splits `--backend <ast|vm|native>` out of a command's arguments, leaving the
 /// rest in the order they were written.
 ///
 /// It may appear anywhere, exactly as it may on `cove run`: one flag spelled
@@ -1807,6 +2168,7 @@ impl std::fmt::Display for Backend {
         f.write_str(match self {
             Backend::Ast => "ast",
             Backend::Vm => "vm",
+            Backend::Native => "native",
         })
     }
 }
@@ -2055,8 +2417,14 @@ fn print_stats(hosts: &HostRegistry, wait_total: &WaitTotal, memory: &Memory) {
             heap.peak_bytes,
             heap.pause,
         ),
-        Memory::Words { held, handed_out } => eprintln!(
-            "memory: heap_words={held} heap_bytes={} allocated_words={handed_out}",
+        Memory::Words {
+            held,
+            handed_out,
+            allocations,
+            collections,
+        } => eprintln!(
+            "memory: heap_words={held} heap_bytes={} allocated_words={handed_out} \
+             allocations={allocations} collections={collections}",
             held * 8
         ),
     }
@@ -2569,7 +2937,10 @@ module auth
             .expect("an unknown backend should be refused");
         match error {
             CliError::Message(message) => {
-                assert_eq!(message, "`--backend` must be `ast` or `vm`, found `jit`")
+                assert_eq!(
+                    message,
+                    "`--backend` must be `ast`, `vm` or `native`, found `jit`"
+                )
             }
             _ => panic!("expected a message"),
         }
@@ -2603,11 +2974,11 @@ module auth
         for (given, expected) in [
             (
                 vec!["--backend", "jit"],
-                "`--backend` must be `ast` or `vm`, found `jit`",
+                "`--backend` must be `ast`, `vm` or `native`, found `jit`",
             ),
             (
                 vec!["--backend"],
-                "`--backend` needs a value: `ast` or `vm`",
+                "`--backend` needs a value: `ast`, `vm` or `native`",
             ),
         ] {
             let Err(CliError::Message(message)) = split_backend(&args(&given)) else {
@@ -2645,7 +3016,10 @@ module auth
         else {
             panic!("an unknown backend should be refused with a message");
         };
-        assert_eq!(message, "`--backend` must be `ast` or `vm`, found `jit`");
+        assert_eq!(
+            message,
+            "`--backend` must be `ast`, `vm` or `native`, found `jit`"
+        );
     }
 
     /// A backend and the name a trace header writes it under are the same two

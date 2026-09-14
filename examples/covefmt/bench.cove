@@ -305,20 +305,29 @@ fn deindented(source: String) -> String {
 /// lay those lines out either — run on the same de-indented file it leaves
 /// the same two lines at column zero. The mutation was asking for what no
 /// formatter does, and [`deindented`] no longer asks it.
+///
+/// It sat at **0** for longer than that, and that was a mistake rather than a
+/// decision: the commit whose subject is "the last of the four mutations
+/// agrees, 246 of 246" lowered this from 246 to 0 and added the two below it at
+/// 0, which is the one thing a ratchet may never do. Three of the five gates
+/// asserted nothing at all from then until issue #369 came to read them.
 fn mustReIndent() -> Int {
-  0
+  248
 }
 
 /// How many of the corpus must survive being joined up and re-broken.
 ///
-/// A ratchet, and one that may rise and never fall. What the six that are
-/// left need is the one thing this printer cannot do at all: **write a body
-/// broken**. Every rule here rewrites a run of space that is already there,
-/// and a lambda or an `if` whose body was written on one line has none to
-/// rewrite — `breaks` says a control flow body and a lambda body always break,
-/// and saying that here means putting a newline where the source has none.
+/// A ratchet, and one that may rise and never fall. It is the whole corpus —
+/// the six that were left when the paragraph below was written are not left.
+///
+/// What they needed was the one thing this printer could not do at all:
+/// **write a body broken**. Every rule here rewrites a run of space that is
+/// already there, and a lambda or an `if` whose body was written on one line
+/// has none to rewrite — `breaks` says a control flow body and a lambda body
+/// always break, and saying that here means putting a newline where the source
+/// has none. It says it now, which is why this is 248.
 fn mustReBreak() -> Int {
-  0
+  248
 }
 
 /// `source` with the line breaks inside a `(` or a `[` taken out.
@@ -484,12 +493,12 @@ fn markBodies(held: Array<Token>, tree: Tree, var marked: Vector<Bool>) {
 /// How many of the corpus must survive having their one-statement bodies
 /// joined up and laid out again.
 ///
-/// A ratchet, and one that may rise and never fall. It starts low and that is
-/// the point of it: writing a body is a capability the other three mutations
-/// never ask for, and this is the first number that says how much of it is
-/// there.
+/// A ratchet, and one that may rise and never fall. It started low and that
+/// was the point of it: writing a body is a capability the other three
+/// mutations never ask for, and this was the first number that said how much of
+/// it was there. It is now the whole corpus.
 fn mustReOpen() -> Int {
-  0
+  248
 }
 
 /// `source` with the lines inside every one-statement body taken out.
@@ -558,9 +567,12 @@ fn insideALiteral(source: String) -> Vector<Bool> {
 /// How many of the corpus must survive having the space inside their lines
 /// doubled.
 ///
-/// A ratchet, and one that may rise and never fall.
+/// A ratchet, and one that may rise and never fall. It stood at 246 while the
+/// corpus was 248 files, which is a ratchet two files behind rather than a
+/// ratchet: a gate that is satisfied by the reading before last cannot report
+/// the reading before last going away.
 fn mustReSpace() -> Int {
-  246
+  248
 }
 
 /// `source` with every run of space inside a line doubled.

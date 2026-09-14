@@ -6,16 +6,27 @@
 //! documentation describes: the dependency edge runs one way, from here to
 //! there, and the calls run both.
 //!
-//! # It is the experiment's half, not the tier's
+//! # It is the tier's half now, and it was the experiment's first
 //!
-//! ADR 0055's native tier is not selectable yet and nothing here makes it so.
-//! `cove run` does not reach this module, [`Vm::invoke`](crate::Vm::invoke) does
-//! not consult it, and no default build compiles a code generator — which is why
-//! this file names [`Entry`] and never names a `Jit`. What it exists for is the
-//! comparison `crates/cove-bench/src/bin/native_compare.rs` runs: two code
-//! generators over identical optimized IR, on *real* data, with the VM beside
-//! them as the oracle. That needs the real heap and real calls, and those are
-//! here.
+//! This module was written for the comparison
+//! `crates/cove-bench/src/bin/native_compare.rs` runs — two code generators over
+//! identical optimized IR, on *real* data, with the VM beside them as the oracle
+//! — and it said so, because `cove run` did not reach it and the dispatch loop
+//! consulted no tier table.
+//!
+//! [Issue #369](https://github.com/myuon/cove/issues/369) changed that. The tier
+//! is selectable as `cove run --backend native`, `crate::native` owns the
+//! compiled table for one program, and **the encoded `CALL` arm asks that table**
+//! — [`from_encoded`] below is the hop it added, and it is the one thing that
+//! makes coverage compositional rather than whatever one entry point happens to
+//! reach without going back through the VM.
+//!
+//! Two things it did *not* change, and both are load-bearing. The VM is still the
+//! default: nothing here is reached by a run that did not ask for it, and what
+//! such a run pays is `Machine::tiered`'s single `Option` test at a `call`. And
+//! this file still names [`Entry`] and never names a `Jit`: which code generator
+//! emitted the machine code is not something the boundary knows, which is why it
+//! compiles in a build that has none.
 //!
 //! # What compiled code is allowed to do, and what it hands back
 //!
@@ -94,22 +105,236 @@ impl Tiered for NothingCompiled {
     }
 }
 
-/// How a run divided between the two tiers.
+/// How a run divided between the two tiers, one counter per transition.
 ///
 /// ADR 0055: "The run reports how many calls and functions used each tier, so a
 /// benchmark cannot present a mixed run as fully native." This is that report,
 /// for calls; how many *functions* were compiled is the compiler's own count and
 /// belongs beside it.
+///
+/// # Why a transition and not a tier
+///
+/// Two counters — native calls and encoded calls — cannot say the one thing the
+/// report exists to say. A run in which every compiled function is only ever
+/// reached *from* compiled code has full native coverage of its own subtree and
+/// none of the program; a run in which the encoded tier enters compiled code is
+/// compositional. Both answer the same pair of totals. So the counter is the
+/// **edge** rather than the node, and the four edges of
+/// [issue #369](https://github.com/myuon/cove/issues/369)'s table are four
+/// fields.
+///
+/// Native-to-native is two fields because there are two protocols and they cost
+/// differently: `direct` is the `open`/entry/`close` sequence generated code
+/// performs itself, and `mediated` is the one [`CallFn`](cove_native::CallFn)
+/// helper doing all of it. A code generator emitting no direct call leaves the
+/// first at nought, and a reader who could not tell the two apart would read a
+/// mediated run as if PR #368 were in it.
+///
+/// The two `host_to_*` fields are not Cove calls at all: they are the outermost
+/// frame, entered from Rust by [`Session::call`] or by a run. They are here
+/// because a total that left them out would not add up to the calls that were
+/// made, and they are named apart because "the VM called native code" is the
+/// claim this issue is about and the outermost entry is not evidence for it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Tiers {
-    /// Calls entered through a compiled entry point, the outermost included.
-    pub native: u64,
-    /// Calls run by the encoded dispatch loop.
-    pub encoded: u64,
+    /// An encoded caller called a function with no compiled entry.
+    pub vm_to_vm: u64,
+    /// An encoded caller entered a compiled callee.
+    ///
+    /// The transition this issue exists for. Before it, a compiled function
+    /// called from an encoded one stayed encoded and coverage was not
+    /// compositional.
+    pub vm_to_native: u64,
+    /// Compiled code called a function with no compiled entry, which the
+    /// dispatch loop then ran.
+    pub native_to_vm: u64,
+    /// Compiled code entered a compiled callee itself: `open`, the entry, and
+    /// `close`.
+    pub native_to_native_direct: u64,
+    /// Compiled code entered a compiled callee through the one mediated call
+    /// helper.
+    pub native_to_native_mediated: u64,
+    /// A Rust caller entered a compiled outermost frame.
+    pub host_to_native: u64,
+    /// A Rust caller entered an outermost frame the dispatch loop ran.
+    pub host_to_vm: u64,
 }
 
-/// What one native call chain shares: the runtime, the tier table, and the heap
-/// table compiled code reads.
+impl Tiers {
+    /// Calls entered through a compiled entry point, the outermost included.
+    pub fn native(self) -> u64 {
+        self.vm_to_native
+            + self.native_to_native_direct
+            + self.native_to_native_mediated
+            + self.host_to_native
+    }
+
+    /// Calls run by the encoded dispatch loop.
+    pub fn encoded(self) -> u64 {
+        self.vm_to_vm + self.native_to_vm + self.host_to_vm
+    }
+
+    /// Cove calls this run made, the outermost entry excluded.
+    pub fn calls(self) -> u64 {
+        self.vm_to_vm
+            + self.vm_to_native
+            + self.native_to_vm
+            + self.native_to_native_direct
+            + self.native_to_native_mediated
+    }
+}
+
+/// The tier table one run consults, and what consulting it counted.
+///
+/// ADR 0055's `Program + FunctionId -> encoded entry | native entry`, installed
+/// on the [`Machine`] for the length of a run so that **the encoded `CALL` arm
+/// asks the same table the call helper does**. Until it did, a compiled function
+/// called from an encoded one stayed encoded.
+///
+/// # It is boxed, and that is load-bearing
+///
+/// A helper reaches the machine through a raw pointer, for the reason this
+/// module's header gives, and it reaches this through a second one. Those two
+/// pointers must name **disjoint** memory: `republish` writes the chunk table
+/// while `Memory` is borrowed, and a nested call reaches the same table again
+/// while an outer one is still inside `enter`. Keeping this in a `Box` puts it
+/// outside the `Machine`'s own allocation, so neither of those is two borrows of
+/// one place. A field of `Machine` would have been.
+///
+/// It is also what lets the chunk table be reserved **once** and shared by every
+/// bridge of a nested chain — see [`Tiering::chunks`].
+pub(crate) struct Tiering {
+    /// The table itself, as a raw pointer.
+    ///
+    /// A raw pointer rather than a `&'a dyn Tiered` because the two installers
+    /// have two different lifetimes. A run installs a table that outlives its
+    /// `Vm`; [`Session::call`] installs one **per call**, chosen by its caller
+    /// after the session was opened, and a session's borrow of the machine
+    /// began before that table existed. One field cannot be both, and a second
+    /// lifetime parameter on `Machine` would be paid for by every signature in
+    /// the crate.
+    ///
+    /// # Safety
+    ///
+    /// Whoever installs it keeps the table alive until it is taken out again.
+    /// The two installers are [`crate::Vm::with_native`], where the table
+    /// outlives the machine, and [`Session::call`], which takes it back before
+    /// it returns.
+    entries: *const dyn Tiered,
+    /// Which transitions the calls of this run took.
+    counts: Tiers,
+    /// Dynamic calls to each function that did **not** go native, by
+    /// `FunctionId`.
+    ///
+    /// [Issue #369](https://github.com/myuon/cove/issues/369) asks for refusals
+    /// "ordered by dynamic calls prevented from going native, not only by
+    /// function count", and this is that number: one entry per function,
+    /// incremented wherever a call found no compiled entry — the encoded `CALL`
+    /// arm and the call helper alike.
+    ///
+    /// It is counted per **callee** on purpose, and that is what answers the
+    /// issue's "if a refused caller contains calls to compiled callees, count
+    /// the calls that VM-to-native recovers rather than attributing its whole
+    /// subtree to the refusal". A compiled callee reached from a refused caller
+    /// is a `vm_to_native` and is charged to nobody's refusal; only the call
+    /// that actually stayed in the VM is charged, and only to the function that
+    /// could not be compiled.
+    refused: Vec<u64>,
+    /// One pointer per committed heap chunk, which is
+    /// [`NativeCtx::chunks`].
+    ///
+    /// **Its capacity is reserved for the whole heap and it never reallocates**,
+    /// and that is load-bearing rather than an optimisation: every `NativeCtx` in
+    /// a native call chain holds `chunks.as_ptr()`, and a `Vec` that grew would
+    /// leave every one of them but the innermost pointing at a freed table.
+    /// Reserving the spine's length costs one allocation of eight bytes per
+    /// 64-KiB chunk the heap *could* hold, and makes the address a constant.
+    ///
+    /// It lives here rather than in a [`Bridge`] for a measured reason: building
+    /// it is an allocation and a walk, and a bridge is made once per *call*.
+    /// Built per call, the covefmt scenario measured the allocator rather than
+    /// the code — 4 KiB reserved and cleared for every one of twenty thousand
+    /// calls.
+    chunks: Vec<*mut u64>,
+}
+
+impl Tiering {
+    /// A tier over `entries`, for a program of `functions` functions.
+    ///
+    /// # Safety
+    ///
+    /// `entries` stays alive and unmoved until this is taken out of the machine
+    /// it is installed on.
+    pub(crate) unsafe fn new(
+        entries: *const (dyn Tiered + 'static),
+        functions: usize,
+        chunk_capacity: usize,
+    ) -> Tiering {
+        Tiering {
+            entries,
+            counts: Tiers::default(),
+            refused: vec![0; functions],
+            chunks: Vec::with_capacity(chunk_capacity),
+        }
+    }
+
+    /// Points this tier at `entries`, keeping the counts it has taken.
+    ///
+    /// What [`Session::call`] does between calls: a session is asked for the
+    /// encoded tier and then for a compiled one, over the same machine, and the
+    /// counts are the session's rather than one call's.
+    ///
+    /// # Safety
+    ///
+    /// As [`Tiering::new`].
+    pub(crate) unsafe fn aim(&mut self, entries: *const (dyn Tiered + 'static)) {
+        self.entries = entries;
+    }
+
+    /// Which transitions this run's calls took.
+    pub(crate) fn counts(&self) -> Tiers {
+        self.counts
+    }
+
+    /// Dynamic calls to each function that stayed on the encoded tier.
+    pub(crate) fn refused_calls(&self) -> &[u64] {
+        &self.refused
+    }
+
+    /// Charges the outermost frame of a run to the encoded tier.
+    ///
+    /// See `Machine::run`: a run always enters its entry through the dispatch
+    /// loop, and this is the line that makes a report say so instead of leaving the
+    /// entry out of the totals.
+    pub(crate) fn entered_encoded(&mut self) {
+        self.counts.host_to_vm += 1;
+    }
+
+    /// The compiled entry of `callee`, with the **encoded caller's** transition
+    /// charged.
+    ///
+    /// The other end of [`Bridge::entry_of`], and the two ask one table: that is
+    /// the whole of "the encoded `CALL` path must consult the same tier table as
+    /// the native path".
+    ///
+    /// # Safety
+    ///
+    /// The table this was aimed at is still alive.
+    pub(crate) unsafe fn crossing(&mut self, callee: FunctionId) -> Option<Entry> {
+        let entry = (*self.entries).entry(callee);
+        match entry {
+            Some(_) => self.counts.vm_to_native += 1,
+            None => {
+                self.counts.vm_to_vm += 1;
+                charge_refusal(self, callee);
+            }
+        }
+        entry
+    }
+}
+
+/// What one native call chain shares: the runtime and the tier it was entered
+/// under.
 ///
 /// Reached from a helper as `*mut Bridge` through [`NativeCtx::host`]. See the
 /// module's note on why that is a raw pointer and stays one.
@@ -122,24 +347,15 @@ struct Bridge<'m, 'a> {
     /// is taken where it is used and dropped before anything else runs.
     machine: *mut Machine<'a>,
     budget: &'m Meter,
-    entries: &'m dyn Tiered,
-    /// One pointer per committed heap chunk, which is
-    /// [`NativeCtx::chunks`]. Owned by the [`Session`] and borrowed here.
+    /// The installed [`Tiering`]: the entry table, the chunk table and the
+    /// counters, all three.
     ///
-    /// **Its capacity is reserved for the whole heap and it never reallocates**,
-    /// and that is load-bearing rather than an optimisation: every `NativeCtx` in
-    /// a native call chain holds `chunks.as_ptr()`, and a `Vec` that grew would
-    /// leave every one of them but the innermost pointing at a freed table.
-    /// Reserving the spine's length costs one allocation of eight bytes per
-    /// 64-KiB chunk the heap *could* hold, and makes the address a constant.
-    ///
-    /// It lives in the session rather than here for a measured reason: building
-    /// it is an allocation and a walk, and a bridge is made once per *call*.
-    /// Built per call, the covefmt scenario measured the allocator rather than
-    /// the code — 4 KiB reserved and cleared for every one of twenty thousand
-    /// calls. A raw pointer rather than a `&mut` for [`Bridge::machine`]'s
-    /// reason.
-    chunks: *mut Vec<*mut u64>,
+    /// A raw pointer for [`Bridge::machine`]'s reason and one more: a nested call
+    /// reaches the same tier while an outer one is still inside [`enter`], so a
+    /// `&mut` held across the entry would be two live borrows of one place. It
+    /// names a `Box`'s contents, which is why it does not alias the machine —
+    /// see [`Tiering`]'s own note.
+    tier: *mut Tiering,
     /// The error a helper is leaving with.
     ///
     /// A callee's failure is a whole `RuntimeError` — a span, a rule, a call
@@ -148,24 +364,22 @@ struct Bridge<'m, 'a> {
     /// [`Raise::Called`], and whoever entered the outermost compiled function
     /// takes it back out.
     left: Option<RuntimeError>,
-    tiers: Tiers,
 }
 
 impl<'m, 'a> Bridge<'m, 'a> {
-    fn new(
-        machine: &mut Machine<'a>,
-        budget: &'m Meter,
-        entries: &'m dyn Tiered,
-        chunks: &mut Vec<*mut u64>,
-    ) -> Self {
-        machine.mem.chunk_bases(chunks);
+    /// A bridge over `machine`, under the tier `tier` names.
+    ///
+    /// # Safety
+    ///
+    /// `machine` is a live, uniquely reachable machine and `tier` a live
+    /// [`Tiering`] outside its allocation; both outlive the bridge.
+    unsafe fn over(machine: *mut Machine<'a>, budget: &'m Meter, tier: *mut Tiering) -> Self {
+        (*machine).mem.chunk_bases(&mut (*tier).chunks);
         Bridge {
             machine,
             budget,
-            entries,
-            chunks,
+            tier,
             left: None,
-            tiers: Tiers::default(),
         }
     }
 
@@ -173,9 +387,64 @@ impl<'m, 'a> Bridge<'m, 'a> {
     ///
     /// # Safety
     ///
-    /// The session that owns the table outlives every bridge over it.
+    /// The tier that owns the table outlives every bridge over it.
     unsafe fn table(&self) -> *const *mut u64 {
-        (*self.chunks).as_ptr()
+        (*self.tier).chunks.as_ptr()
+    }
+
+    /// The compiled entry of `callee`, and the transition counted.
+    ///
+    /// The *same* question the encoded `CALL` arm asks, of the *same* table —
+    /// which is the whole of what makes coverage compositional. `crossed` is the
+    /// transition to charge when there is an entry and `stayed` the one when
+    /// there is not.
+    ///
+    /// # Safety
+    ///
+    /// As [`Bridge::over`].
+    unsafe fn entry_of(
+        &self,
+        callee: FunctionId,
+        crossed: fn(&mut Tiers),
+        stayed: fn(&mut Tiers),
+    ) -> Option<Entry> {
+        let tier = self.tier;
+        let entry = (*(*tier).entries).entry(callee);
+        match entry {
+            Some(_) => crossed(&mut (*tier).counts),
+            None => {
+                stayed(&mut (*tier).counts);
+                charge_refusal(&mut *tier, callee);
+            }
+        }
+        entry
+    }
+}
+
+/// `entries` as a raw pointer whose lifetime the type no longer carries.
+///
+/// [`Tiering::entries`] is a raw pointer for the reason that field gives — a run
+/// installs a table that outlives its machine and [`Session::call`] installs one
+/// per call — and a raw pointer to a trait object still has a lifetime in its
+/// *type*. One field cannot hold both, so the field holds the erased form and
+/// this is the one line that erases it.
+///
+/// A `transmute` of two raw pointers of the same shape, which is exactly what it
+/// is for: nothing about the value changes and the lifetime was never encoded in
+/// the bytes.
+///
+/// # Safety
+///
+/// The caller keeps `entries` alive and unmoved for as long as the pointer is
+/// installed. Both installers say how they do it.
+pub(crate) unsafe fn erase<'x>(entries: &'x dyn Tiered) -> *const (dyn Tiered + 'static) {
+    std::mem::transmute::<*const (dyn Tiered + 'x), *const (dyn Tiered + 'static)>(entries)
+}
+
+/// Charges one dynamic call to `callee`'s refusal. See [`Tiering::refused`].
+fn charge_refusal(tier: &mut Tiering, callee: FunctionId) {
+    if let Some(count) = tier.refused.get_mut(callee.index()) {
+        *count += 1;
     }
 }
 
@@ -213,14 +482,14 @@ struct Destination {
 /// `ctx` and `host` are the pointers the helper was reached with.
 unsafe fn republish(ctx: *mut NativeCtx, host: *mut Bridge<'_, '_>) {
     let machine = (*host).machine;
-    let chunks = (*host).chunks;
+    let tier = (*host).tier;
     // Extended rather than rebuilt, and that is a fact about the heap rather
     // than a shortcut: a committed chunk is never replaced and never moves, so
     // every entry already in the table is still right and the only thing that
     // can have changed is that there are more of them. See `Words::bases`.
-    (*machine).mem.chunk_bases(&mut *chunks);
+    (*machine).mem.chunk_bases(&mut (*tier).chunks);
     (*ctx).words = (*machine).mem.words_ptr();
-    (*ctx).chunks = (*chunks).as_ptr();
+    (*ctx).chunks = (*tier).chunks.as_ptr();
 }
 
 /// The safepoint helper: [ADR 0040]'s three steps, in that order, and none of
@@ -465,14 +734,16 @@ unsafe fn call_body<const MASK: u64>(
         base: caller_base,
         slot: dst,
     };
-    let entry = (*host).entries.entry(callee);
+    // The same table the encoded `CALL` arm asks, and the transition charged to
+    // whichever of the two it turned out to be.
+    let entry = (*host).entry_of(
+        callee,
+        |counts| counts.native_to_native_mediated += 1,
+        |counts| counts.native_to_vm += 1,
+    );
     let answered = match entry {
-        Some(entry) => {
-            (*host).tiers.native += 1;
-            enter::<MASK>(host, entry, callee, callee_base, into)
-        }
+        Some(entry) => enter::<MASK>(host, entry, callee, callee_base, into),
         None => {
-            (*host).tiers.encoded += 1;
             let machine = &mut *machine;
             let floor = machine.frames.len() - 1;
             let answered = match machine.code() {
@@ -597,6 +868,83 @@ unsafe fn enter<const MASK: u64>(
     }
 }
 
+/// **A VM-to-native call**: the encoded `CALL` arm's callee, entered as machine
+/// code.
+///
+/// This is the transition
+/// [issue #369](https://github.com/myuon/cove/issues/369) exists for. Before it,
+/// the dispatch loop consulted no tier table, so a compiled function called from
+/// an encoded one stayed encoded and native coverage was whatever one entry point
+/// happened to reach without ever going back through the VM. It is not
+/// compositional until this exists, and the issue says so.
+///
+/// # What it does not do
+///
+/// Almost everything. `encoded::dispatch`'s `CALL` arm has already called the
+/// *same* `open_frame` it always called, so the arguments are settled the same
+/// way, at the same widths, out of the same slots, with the same arity refusal
+/// and the same two depth checks. `dst` is the destination the same lowering
+/// settled. What is left is the three steps that differ:
+///
+/// 1. the callee's `Frame` joins the stack, which is what makes its reference
+///    slots walkable — the same push `entered!` makes;
+/// 2. [`enter`] runs the compiled code, handed the frame and
+///    [`Destination`]'s two indices;
+/// 3. on a return the frame comes off and the caller carries on dispatching at
+///    the instruction after the call, because the answer is already in `dst`.
+///
+/// Nothing is rebuilt and nothing is refinalized: the tier was installed before
+/// the run and the entry is a pointer into a page that was made executable once.
+///
+/// # Why it is out of line
+///
+/// `encoded::dispatch`'s own note: "nothing whose cost a program does not pay
+/// belongs inside `dispatch`". A run with no tier installed never reaches this,
+/// and what it pays for the possibility is the one `Option` test
+/// [`Machine::tiered`](Machine) makes.
+///
+/// A failure leaves its frames standing, because that is what the error's call
+/// chain is read out of, and the caller's `fail!` adds the call's span only if
+/// the error does not already carry one of its own.
+#[inline(never)]
+pub(super) fn from_encoded(
+    machine: &mut Machine<'_>,
+    budget: &Meter,
+    entry: Entry,
+    callee: FunctionId,
+    callee_base: u64,
+    caller_base: u64,
+    dst: Slot,
+) -> Result<(), RuntimeError> {
+    // The tier is a `Box`, so this address is outside the `Machine` and the two
+    // raw pointers below name disjoint memory. That is the reason it is boxed.
+    let tier: *mut Tiering = machine
+        .tier
+        .as_deref_mut()
+        .expect("a VM-to-native call is reached only with a tier installed");
+    machine.frames.push(Frame {
+        function: callee,
+        base: callee_base,
+        pc: 0,
+        dst,
+    });
+    let into = Destination {
+        base: caller_base,
+        slot: dst,
+    };
+    let held: *mut Machine = machine;
+    // Safety: `held` is the machine this borrow names and is not used through the
+    // reference again while the bridge is live; `tier` is the installed tiering,
+    // which the installer keeps alive for the run; the frame at `callee_base` is
+    // the callee's, with its arguments in place from `open_frame`; and `into` is
+    // the caller's own frame, which is below the callee's and cannot overlap it.
+    unsafe {
+        let mut bridge = Bridge::over(held, budget, tier);
+        let out: *mut Bridge = &mut bridge;
+        enter::<0>(out, entry, callee, callee_base, into)
+    }
+}
+
 /// The runtime error a compiled function named.
 ///
 /// This is the half of the boundary `cove_native`'s [`Raise`] exists for: that
@@ -696,9 +1044,14 @@ pub struct Session<'v, 'a> {
     result: u64,
     /// How wide an answer is, which is static: `Function::returns`.
     width: u32,
-    tiers: Tiers,
-    /// The heap's chunk table, reserved once. See [`Bridge::chunks`].
-    chunks: Vec<*mut u64>,
+    /// The tier this session installs on the machine for the length of one call.
+    ///
+    /// Held here between calls rather than built per call, because the counts are
+    /// the *session's*: a session is asked for the encoded tier and then for a
+    /// compiled one over the same machine, and the two answers are compared.
+    /// See [`Tiering`] for why installing it at all is what makes a VM-to-native
+    /// call reachable from inside a session.
+    tier: Option<Box<Tiering>>,
 }
 
 impl<'v, 'a> Session<'v, 'a> {
@@ -717,7 +1070,6 @@ impl<'v, 'a> Session<'v, 'a> {
         let span = function.span;
         let size = function.frame_size();
         let returns = function.returns;
-        let chunks = Vec::with_capacity(machine.mem.chunk_capacity());
         machine.literals().map_err(|error| error.at(span))?;
         machine.give_cells_back(0);
         machine.frames.clear();
@@ -752,8 +1104,7 @@ impl<'v, 'a> Session<'v, 'a> {
             holder,
             result,
             width,
-            tiers: Tiers::default(),
-            chunks,
+            tier: None,
         })
     }
 
@@ -773,6 +1124,16 @@ impl<'v, 'a> Session<'v, 'a> {
     /// A fresh frame goes on top of the holder every time, exactly as a real call
     /// would: `push_frame` zeroes it, so no word of a previous call is readable
     /// here and nothing a previous call left keeps an object alive.
+    ///
+    /// # The table is installed, not only asked
+    ///
+    /// `entries` is put on the machine for the length of the call, so that the
+    /// **encoded `CALL` arm inside this call asks the same table**. That is what
+    /// makes a VM-to-native call reachable from a session: a caller the table
+    /// refuses runs on the dispatch loop, and a compiled callee it calls is
+    /// entered as machine code rather than dispatched. It is taken back off
+    /// before this returns, because the table is the caller's and the next call
+    /// may name a different one.
     pub fn call(
         &mut self,
         entries: &dyn Tiered,
@@ -801,39 +1162,62 @@ impl<'v, 'a> Session<'v, 'a> {
             Some(self.holder),
             "the holder frame is still at the bottom, so the references are still rooted"
         );
-        let answer = match entries.entry(self.id) {
+        let functions = self.machine.program.functions.len();
+        let capacity = self.machine.mem.chunk_capacity();
+        // Safety: `entries` outlives this call — it is the caller's — and the
+        // tier is taken back off the machine before this returns, so the erased
+        // pointer is never installed for longer than the borrow it came from.
+        let table = unsafe { erase(entries) };
+        let mut tier = match self.tier.take() {
+            Some(mut held) => {
+                unsafe { held.aim(table) };
+                held
+            }
+            None => Box::new(unsafe { Tiering::new(table, functions, capacity) }),
+        };
+        let entry = entries.entry(self.id);
+        match entry {
+            Some(_) => tier.counts.host_to_native += 1,
+            None => {
+                tier.counts.host_to_vm += 1;
+                charge_refusal(&mut tier, self.id);
+            }
+        }
+        self.machine.tier = Some(tier);
+        let answer = match entry {
             Some(entry) => {
                 let into = Destination {
                     base: self.result,
                     slot: 0,
                 };
-                let published = {
-                    let mut bridge =
-                        Bridge::new(self.machine, self.budget, entries, &mut self.chunks);
-                    bridge.tiers.native += 1;
-                    let held: *mut Bridge = &mut bridge;
-                    // Safety: `held` is this stack frame's bridge and outlives
-                    // the call below; `entry` was compiled for `self.id`, whose
-                    // frame is the one just pushed; and `into` is the session's
-                    // own result run, which is below that frame and outlives it.
-                    let published = unsafe { enter::<0>(held, entry, self.id, base, into) };
-                    // Added rather than assigned: a bridge counts one call chain
-                    // and a session makes many, and `= bridge.tiers` reported the
-                    // last chain's count as the session's.
-                    self.tiers.native += bridge.tiers.native;
-                    self.tiers.encoded += bridge.tiers.encoded;
-                    published
+                let machine: *mut Machine = self.machine;
+                let held: *mut Tiering = self
+                    .machine
+                    .tier
+                    .as_deref_mut()
+                    .expect("the tier was just installed");
+                // Safety: the machine and the tier outlive the call below; `entry`
+                // was compiled for `self.id`, whose frame is the one just pushed;
+                // and `into` is the session's own result run, which is below that
+                // frame and outlives it.
+                let published = unsafe {
+                    let mut bridge = Bridge::over(machine, self.budget, held);
+                    let out: *mut Bridge = &mut bridge;
+                    enter::<0>(out, entry, self.id, base, into)
                 };
                 // The one `Vec` a session still builds, and it is the boundary's
                 // rather than the call's: a Rust caller asked for the words.
                 published.map(|()| self.machine.mem.read_words(self.result, self.width))
             }
             None => {
-                self.tiers.encoded += 1;
-                let code = self.machine.code()?;
-                self.machine.drive_from(&code, self.budget, floor)
+                let code = self.machine.code();
+                match code {
+                    Ok(code) => self.machine.drive_from(&code, self.budget, floor),
+                    Err(error) => Err(error),
+                }
             }
         };
+        self.tier = self.machine.tier.take();
         if answer.is_err() {
             // A failure leaves its frames standing, which is what an error's
             // call chain is read out of — but this session is going to be called
@@ -850,8 +1234,13 @@ impl<'v, 'a> Session<'v, 'a> {
     }
 
     /// How the calls made through this session divided between the two tiers.
+    ///
+    /// Every transition of every call, the sessions's own outermost entries
+    /// included — see [`Tiers`] for why an edge is counted rather than a tier.
     pub fn tiers(&self) -> Tiers {
-        self.tiers
+        self.tier
+            .as_deref()
+            .map_or_else(Tiers::default, Tiering::counts)
     }
 
     /// How many instructions the *encoded* tier has dispatched over this
@@ -1067,7 +1456,10 @@ unsafe extern "C" fn open(
     let budget = (*host).budget;
     let id = FunctionId(callee);
 
-    let Some(entry) = (*host).entries.entry(id) else {
+    // Asked without charging a transition: the mediated path below charges its
+    // own, and a direct call charges `native_to_native_direct` once the frame is
+    // open. Counting here as well would count a mixed call twice.
+    let Some(entry) = (*(*(*host).tier).entries).entry(id) else {
         // The mediated helper, whole. A mixed call is the path it always was.
         return Opened {
             entry: None,
@@ -1124,7 +1516,7 @@ unsafe extern "C" fn open(
             pc: 0,
             dst: dst as Slot,
         });
-        (*host).tiers.native += 1;
+        (*(*host).tier).counts.native_to_native_direct += 1;
         // Taken after the frame was pushed, and an index rather than a pointer,
         // which is ADR 0057's rule and is why a `push_frame` below this one is
         // harmless.

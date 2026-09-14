@@ -185,6 +185,21 @@ pub enum RecordingBackend {
     /// spelling: an alias would make a name that is scheduled to mean
     /// nothing readable forever.
     Vm,
+    /// The native tier of [ADR 0055], explicitly selected.
+    ///
+    /// A name of its own rather than `Vm` with a note, because a native run is
+    /// not the same run: it dispatches fewer instructions, reports a different
+    /// `fuel_spent` — ADR 0040 makes fuel backend-specific — and mixes two tiers.
+    /// ADR 0026's reason for the field at all is that a reader must not have to
+    /// infer which evaluator wrote a file, and inferring "native" from "vm" is
+    /// exactly that.
+    ///
+    /// **It does not say the run was fully native**, and nothing could: a mixed
+    /// run is what the native tier produces, and how it mixed is reported in the
+    /// run's own coverage figures rather than in one word here.
+    ///
+    /// [ADR 0055]: ../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+    Native,
 }
 
 impl RecordingBackend {
@@ -194,6 +209,7 @@ impl RecordingBackend {
         match self {
             RecordingBackend::Ast => "ast",
             RecordingBackend::Vm => "vm",
+            RecordingBackend::Native => "native",
         }
     }
 
@@ -202,6 +218,7 @@ impl RecordingBackend {
         match text {
             "ast" => Some(RecordingBackend::Ast),
             "vm" => Some(RecordingBackend::Vm),
+            "native" => Some(RecordingBackend::Native),
             _ => None,
         }
     }
@@ -1136,7 +1153,11 @@ mod tests {
     /// parses back to what wrote it.
     #[test]
     fn a_recording_backend_round_trips_through_its_name() {
-        for backend in [RecordingBackend::Ast, RecordingBackend::Vm] {
+        for backend in [
+            RecordingBackend::Ast,
+            RecordingBackend::Vm,
+            RecordingBackend::Native,
+        ] {
             assert_eq!(RecordingBackend::parse(backend.as_str()), Some(backend));
         }
         assert_eq!(RecordingBackend::parse("jit"), None);

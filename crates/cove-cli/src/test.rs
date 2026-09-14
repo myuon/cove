@@ -86,6 +86,15 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
                         Backend::NAMES
                     ))
                 })?;
+                // Refused rather than accepted and run on the VM, for the reason
+                // `native_is_not_here` gives: a suite that reported "native" for a
+                // run that was not is the silent mixture ADR 0055 forbids. What a
+                // suite needs and does not have yet is one aggregate report over
+                // every case's own tier table, and 165 per-case reports are not
+                // that.
+                if backend == Backend::Native {
+                    return Err(crate::native_is_not_here("test"));
+                }
                 i += 1;
             }
             other => path = Some(Path::new(other)),
@@ -220,7 +229,7 @@ fn run_test(
     // stopped at the first unlowerable test would report nothing about them.
     let lowered = match backend {
         Backend::Ast => None,
-        Backend::Vm => match cove_ir::lower_entry(
+        Backend::Vm | Backend::Native => match cove_ir::lower_entry(
             program,
             sources,
             &HostSchemas::new(),

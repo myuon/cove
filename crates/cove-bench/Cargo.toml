@@ -19,6 +19,14 @@ path = "src/main.rs"
 name = "cove-native-compare"
 path = "src/bin/native_compare.rs"
 
+# The Rust formatter's phase table, for issue #369's three-arm comparison. Also
+# a bin rather than a flag on `cove fmt`: it is a measurement with no baseline
+# and no gate, and it needs `cove-syntax`'s three phases apart, which
+# `cove_syntax::parse_file` composes into one call.
+[[bin]]
+name = "cove-fmt-phases"
+path = "src/bin/fmt_phases.rs"
+
 # One feature per arm, mirroring `cove-native`'s own, and both off by default
 # so that the ordinary `cargo build` of this workspace has no
 # executable-memory dependency.
