@@ -25,13 +25,15 @@
 use std::mem::offset_of;
 use std::ptr;
 
-use cove_ir::{ArgsId, ArithOp, CmpOp, Function, FunctionId, Inst, Num, Program, Slot};
+use cove_ir::{
+    ArgsId, ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot,
+};
 
 use crate::abi::{
     Entry, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
     HEAP_ORIGIN_WORDS,
 };
-use crate::subset::{by_zero_of, leaders, overflow_of, slot_offset, supported};
+use crate::subset::{by_zero_of, leaders, method_of, overflow_of, slot_offset, supported, Method};
 use crate::Unavailable;
 
 // The `NativeCtx` field offsets, read from the declaration rather than written
@@ -97,6 +99,7 @@ const HEAP_SPARE: u8 = R15;
 // Condition codes, as the low nibble of a `jcc`/`setcc` opcode.
 const CC_NO: u8 = 0x1;
 const CC_B: u8 = 0x2;
+const CC_AE: u8 = 0x3;
 const CC_E: u8 = 0x4;
 const CC_NE: u8 = 0x5;
 const CC_L: u8 = 0xc;
@@ -230,6 +233,8 @@ struct Helpers {
     call: usize,
     open: usize,
     close: usize,
+    alloc: usize,
+    builtin: usize,
 }
 
 impl Jit {
@@ -251,6 +256,8 @@ impl Jit {
                 call: helpers.call as usize,
                 open: helpers.open as usize,
                 close: helpers.close as usize,
+                alloc: helpers.alloc as usize,
+                builtin: helpers.builtin as usize,
             },
             code: Vec::new(),
             finalized: false,
@@ -351,6 +358,8 @@ struct Emit<'a> {
     call: usize,
     open: usize,
     close: usize,
+    alloc: usize,
+    builtin: usize,
     /// Whether a compiled callee is reached by emitted code. See [`Jit::direct`].
     direct: bool,
     /// Which IR instruction is being emitted.
@@ -386,6 +395,8 @@ impl<'a> Emit<'a> {
             call: helpers.call,
             open: helpers.open,
             close: helpers.close,
+            alloc: helpers.alloc,
+            builtin: helpers.builtin,
             direct,
             pc: 0,
             code: Vec::new(),
@@ -521,12 +532,7 @@ impl<'a> Emit<'a> {
                 self.movzx_eax_al();
                 self.store_slot(*dst, RAX);
             }
-            Inst::Len { dst, obj } => {
-                self.load_slot(RAX, *obj);
-                self.refuse_null(RAX);
-                self.object_len(RAX);
-                self.store_slot(*dst, RAX);
-            }
+            Inst::Len { dst, obj } => self.len_of(*dst, *obj),
             Inst::LoadElem {
                 dst,
                 obj,
@@ -535,8 +541,17 @@ impl<'a> Emit<'a> {
             } => {
                 self.load_elem(*dst, *obj, *index, self.program.layout(*layout).width());
             }
+            Inst::StoreElem {
+                obj,
+                index,
+                src,
+                layout,
+            } => {
+                self.store_elem(*obj, *index, *src, self.program.layout(*layout).width());
+            }
             Inst::ByteAt { dst, obj, at } => self.byte_at(*dst, *obj, *at),
             Inst::Call { dst, callee, args } => self.callee(*dst, callee.0, args.0),
+            Inst::Alloc { dst, layout, len } => self.allocate(*dst, layout.0, *len),
             Inst::Switch { on, table } => self.switch(*on, *table),
             // `encoded.rs`'s `NEG_INT` arm: `checked_neg`, whose `None` is
             // `overflowed("negation")`. `neg` sets the overflow flag for exactly
@@ -629,6 +644,24 @@ impl<'a> Emit<'a> {
             // The message is a program string, so the `StrId` is what crosses
             // the boundary and `cove-runtime` looks it up.
             Inst::Trap { message } => self.raise(Raise::Trapped, message.0),
+            // A builtin, decoded by the subset rather than here: see
+            // [`Method`](crate::subset::Method) for why the decision and the
+            // operands come out of one function that both arms ask.
+            Inst::CallBuiltin { dst, builtin, args } => {
+                match method_of(self.program, *dst, *builtin, *args) {
+                    Some(Method::ByteLength { dst, obj }) => self.len_of(dst, obj),
+                    Some(Method::Push {
+                        dst,
+                        recv,
+                        vector,
+                        value,
+                        stride,
+                        builtin,
+                        args,
+                    }) => self.vector_push(dst, recv, vector, value, stride, builtin, args),
+                    None => unreachable!("`supported` admitted a builtin no arm lowers"),
+                }
+            }
             other => unreachable!("`supported` admitted {other:?}, which is not lowered"),
         }
     }
@@ -827,6 +860,236 @@ impl<'a> Emit<'a> {
         self.mov_rr32(reg, reg);
     }
 
+    /// `encoded.rs`'s `ALLOC_FIXED | ALLOC_IMM | ALLOC_SLOT` arm: the runtime
+    /// allocates, and this stores the address it answered.
+    ///
+    /// See [`crate::abi::AllocFn`] for why none of `Machine::allocate` is emitted
+    /// and for what the zero answer means. What is emitted is the hand-over and the
+    /// three things around it, and they are [`Emit::callee_mediated`]'s three:
+    ///
+    /// - **the unpaid work is published and the accumulator cleared**, because the
+    ///   helper is a safepoint — ADR 0055 asks for one "around allocation or
+    ///   runtime calls which may collect" — and the helper charges what it finds;
+    /// - **the frame pointer is dropped**, because a collection may have grown the
+    ///   stack and an allocation may have committed a heap chunk;
+    /// - **a zero answer leaves**, as [`Raise::Called`]: the runtime is holding a
+    ///   whole `RuntimeError` and this crate names errors rather than building
+    ///   them.
+    ///
+    /// The length is formed into `RCX` **before** the three argument registers,
+    /// because [`Emit::load_slot`] touches the frame and nothing else: `RDI`, `RSI`
+    /// and `RDX` are written after it and nothing between them can disturb it.
+    fn allocate(&mut self, dst: Slot, layout: u32, len: Len) {
+        self.store(CTX, OFF_PENDING_WORK, WORK);
+        self.xor_rr(WORK, WORK);
+
+        match len {
+            // `Len::Fixed`'s count is nought, which is what the encoded arm hands
+            // `Machine::allocate` for it: the layout already fixes the size.
+            Len::Fixed => self.mov_imm32(RCX, 0),
+            Len::Count(count) => self.mov_imm64(RCX, i64::from(count)),
+            // Read as a whole word and handed over as one. A negative count, or
+            // one past what the header's length field holds, is the *helper's* to
+            // refuse — see `Machine::allocate` — so narrowing it here would be a
+            // second refusal with a different message.
+            Len::Slot(at) => self.load_slot(RCX, at),
+        }
+        self.mov_rr(RDI, CTX);
+        self.mov_imm32(RSI, self.pc as i32);
+        self.mov_imm32(RDX, layout as i32);
+        self.mov_imm64(RAX, self.alloc as i64);
+        self.call(RAX);
+        self.frame_live = false;
+
+        // Zero is not an address — the heap begins at `HEAP_ORIGIN_WORDS` — so the
+        // one test says both "it refused" and "the runtime has the sentence".
+        self.test_rr(RAX, RAX);
+        self.raise_unless(CC_NE, Raise::Called);
+        self.store_slot(dst, RAX);
+    }
+
+    /// `vm::builtins::seq::vector_push`'s fast path: the element into spare
+    /// capacity, and the length bumped.
+    ///
+    /// See [`Method::Push`](crate::subset::Method::Push) for which of the builtin's
+    /// preconditions are emitted and which go to
+    /// [`BuiltinFn`](crate::abi::BuiltinFn), and why. This is the shape:
+    ///
+    /// ```text
+    ///   rax = the receiver               -- a `Vector` header, refused if null
+    ///   the header's layout is `vector`, or cold
+    ///   rcx = payload(header, 1)         -- the store; nought is `freeze()`d, cold
+    ///   rdx = payload(header, 0) as u32  -- the length
+    ///   rax = len(store)                 -- the capacity
+    ///   rdx < rax, or cold               -- no room is growth, and growth is cold
+    ///   rcx = store + 1 + len * stride   -- where the element goes
+    ///   rdx = len + 1
+    ///   the element's words, out of this frame and into the store
+    ///   payload(header, 0) = rdx
+    ///   dst = 0                          -- `Ok(0)`, which is one `Unit` word
+    /// ```
+    ///
+    /// Three things in it are load-bearing.
+    ///
+    /// **The receiver is loaded twice.** Once at the top and once to bump the
+    /// length, because the register that held it is the one the capacity is
+    /// computed into — three scratch registers is what this arm has, and a frame
+    /// load is four bytes against a spill and a reload.
+    ///
+    /// **The comparison is unsigned and that is exact.** The length is a payload
+    /// word narrowed to `u32` and the capacity is a header's low half, so both are
+    /// below 2^32 and `jae` is `items.len < items.capacity` read the other way.
+    ///
+    /// **Every jump to the cold path is emitted before the first `push`.** The cold
+    /// path makes a C call, which wants `rsp` 16-byte aligned, and the element's
+    /// words wait on the machine stack the way [`Emit::copy`]'s do — so a cold jump
+    /// from inside that window would arrive misaligned. The order is the invariant
+    /// and it is checked by reading, which is why it is written down.
+    #[allow(clippy::too_many_arguments)]
+    fn vector_push(
+        &mut self,
+        dst: Slot,
+        recv: Slot,
+        vector: LayoutId,
+        value: Slot,
+        stride: u32,
+        builtin: u32,
+        args: u32,
+    ) {
+        let cold = self.label();
+        let done = self.label();
+
+        self.load_slot(RAX, recv);
+        // `vector()`'s `if addr == 0 { null_value() }`, which is the one refusal of
+        // this builtin a program reaches and this crate can name.
+        self.refuse_null(RAX);
+
+        // `machine.object_layout(addr)`: the header's high half. The call site's
+        // declared layout is what every static fact below was derived from, so a
+        // header that says something else is a receiver this code cannot push to.
+        self.mov_rr(RDX, RAX);
+        self.heap_word(RDX);
+        self.shr_imm8(RDX, 32);
+        self.cmp_imm32(RDX, vector.0 as i32);
+        self.jcc(CC_NE, Target::Label(cold));
+
+        // `machine.payload(addr, 1)`: the store. `freeze()` leaves nought here.
+        self.mov_rr(RCX, RAX);
+        self.add_imm32(RCX, 2);
+        self.heap_word(RCX);
+        self.test_rr(RCX, RCX);
+        self.jcc(CC_E, Target::Label(cold));
+
+        // `machine.payload(addr, 0) as u32`: the length.
+        self.mov_rr(RDX, RAX);
+        self.add_imm32(RDX, 1);
+        self.heap_word(RDX);
+        self.mov_rr32(RDX, RDX);
+
+        // `machine.object_len(store)`: the capacity, in elements.
+        self.mov_rr(RAX, RCX);
+        self.object_len(RAX);
+        self.cmp_rr(RDX, RAX);
+        self.jcc(CC_AE, Target::Label(cold));
+
+        // Where the element goes: `store + 1 + len * stride`, as a linear address.
+        // The stride is a compile-time constant and the product is formed in `u64`,
+        // which agrees with `set_payload_run`'s `u32` on every product the test
+        // above admits — the store's payload words are a `u32` and this is inside
+        // them.
+        self.mov_imm64(RAX, i64::from(stride));
+        self.imul_rr(RAX, RDX);
+        self.add_rr(RCX, RAX);
+        self.add_imm32(RCX, 1);
+        // The new length, kept across the element's words.
+        self.add_imm32(RDX, 1);
+
+        if stride > 0 {
+            self.push(RDX);
+            for word in 0..stride {
+                self.load_slot(RAX, value + word);
+                self.push(RAX);
+            }
+            for word in (0..stride).rev() {
+                self.pop(RAX);
+                self.mov_rr(RDX, RCX);
+                self.add_imm32(RDX, word as i32);
+                self.heap_ptr(RDX);
+                self.store(HEAP_TABLE, 0, RAX);
+            }
+            self.pop(RDX);
+        }
+
+        // `machine.set_payload(items.header, 0, items.len as u64 + 1)`.
+        self.load_slot(RAX, recv);
+        self.add_imm32(RAX, 1);
+        self.heap_ptr(RAX);
+        self.store(HEAP_TABLE, 0, RDX);
+
+        // `Ok(0)`: one word of nought, which is the `Unit` the builtin answers.
+        self.xor_rr(RAX, RAX);
+        self.store_slot(dst, RAX);
+        self.jmp(Target::Label(done));
+
+        self.bind(cold);
+        self.builtin_call(dst, builtin, args);
+        self.bind(done);
+        // One predecessor of this join came through a helper, so the frame pointer
+        // the other one derived is not to be trusted here.
+        self.frame_live = false;
+    }
+
+    /// One [`Inst::CallBuiltin`](cove_ir::Inst::CallBuiltin), handed to the runtime
+    /// whole.
+    ///
+    /// See [`crate::abi::BuiltinFn`] for what this is for and what it is not: it is
+    /// the cold path of a builtin whose fast path is emitted, and never a way to
+    /// lower one. Six arguments, which is what the System V ABI passes in
+    /// registers, and the same shape [`Emit::callee_mediated`] has — including the
+    /// shift that turns this arm's byte offset back into the word index the ABI is
+    /// written in.
+    fn builtin_call(&mut self, dst: Slot, builtin: u32, args: u32) {
+        // A builtin may allocate and an allocation may collect, so this is a
+        // safepoint and the unpaid work goes over with it.
+        self.store(CTX, OFF_PENDING_WORK, WORK);
+        self.xor_rr(WORK, WORK);
+
+        self.mov_rr(RDI, CTX);
+        self.mov_rr(RSI, BASE_BYTES);
+        self.shr_imm8(RSI, 3);
+        self.mov_imm32(RDX, self.pc as i32);
+        self.mov_imm32(RCX, dst as i32);
+        self.mov_imm32(R8, builtin as i32);
+        self.mov_imm32(R9, args as i32);
+        self.mov_imm64(RAX, self.builtin as i64);
+        self.call(RAX);
+
+        // Anything but `Returned` leaves, and leaves with that outcome: the helper
+        // has already written every field it needs.
+        let on = self.label();
+        self.test_rr32(RAX, RAX);
+        self.jcc(CC_E, Target::Label(on));
+        self.leave_answered();
+        self.bind(on);
+        self.frame_live = false;
+    }
+
+    /// `encoded.rs`'s `LEN` arm, whole: the null refusal and the header's low
+    /// half.
+    ///
+    /// Two instructions reach it and that is the point of its being a method.
+    /// [`Inst::Len`](cove_ir::Inst::Len) is one, and
+    /// [`Method::ByteLength`](crate::subset::Method::ByteLength) is the other —
+    /// `String.byteLength()` is `object_len` of the receiver, so lowering it as a
+    /// second family would be two copies of the same three emitted instructions
+    /// and two places for the null refusal to be got wrong.
+    fn len_of(&mut self, dst: Slot, obj: Slot) {
+        self.load_slot(RAX, obj);
+        self.refuse_null(RAX);
+        self.object_len(RAX);
+        self.store_slot(dst, RAX);
+    }
+
     /// Refuses a null reference, which every reader of an object does first.
     ///
     /// `Machine::element`, `encoded.rs`'s `LEN` and its `BYTE_AT` each begin
@@ -878,6 +1141,50 @@ impl<'a> Emit<'a> {
             self.add_imm32(RDX, 1 + word as i32);
             self.heap_word(RDX);
             self.store_slot(dst + word, RDX);
+        }
+    }
+
+    /// `encoded.rs`'s `STORE_ELEM` arm: `Machine::element`, and then a copy of
+    /// `width` words *into* the payload.
+    ///
+    /// [`Emit::load_elem`] backwards, and the bounds arithmetic is the same
+    /// arithmetic — one unsigned comparison, and a stride that is the element
+    /// layout's width. Two things differ.
+    ///
+    /// **The element's address is formed once and the object is then dead.** The
+    /// object's register is needed for the words on the way in, and a linear
+    /// address plus an offset is all the loop wants.
+    ///
+    /// **The words wait on the machine stack.** `RAX` is the word, `RCX` the
+    /// element's base address and `RDX` where each word's own address is formed —
+    /// three, and [`Emit::heap_ptr`] needs the other three — so a fourth live value
+    /// goes where [`Emit::copy`]'s go. Nothing is *held back* for overlap the way a
+    /// copy holds words back: the source is a frame and the destination is the
+    /// heap, which are two regions.
+    fn store_elem(&mut self, obj: Slot, index: Slot, src: Slot, width: u32) {
+        self.load_slot(RAX, obj);
+        self.refuse_null(RAX);
+        self.load_slot(RCX, index);
+        self.mov_rr(RDX, RAX);
+        self.object_len(RDX);
+        self.raise_unless_below(Raise::IndexOutOfRange, RCX, RDX);
+        // The stride. `Machine::element` multiplies in `u32`; this multiplies in
+        // `u64`, which agrees on every product the check above admits.
+        self.mov_imm64(RDX, i64::from(width));
+        self.imul_rr(RCX, RDX);
+        self.add_rr(RCX, RAX);
+        // The header is one word, so a payload word is one past it.
+        self.add_imm32(RCX, 1);
+        for word in 0..width {
+            self.load_slot(RAX, src + word);
+            self.push(RAX);
+        }
+        for word in (0..width).rev() {
+            self.pop(RAX);
+            self.mov_rr(RDX, RCX);
+            self.add_imm32(RDX, word as i32);
+            self.heap_ptr(RDX);
+            self.store(HEAP_TABLE, 0, RAX);
         }
     }
 

@@ -11,7 +11,10 @@
 //!
 //! [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
 
-use cove_ir::{ArithOp, CmpOp, Compare, Function, Inst, Num, Program, Repr, Slot};
+use cove_ir::{
+    ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Function, Inst, LayoutId, Len, Num, Program, Repr,
+    Shape, Slot,
+};
 
 use crate::abi::Raise;
 
@@ -104,6 +107,170 @@ fn comparison_supported(on: Compare, op: CmpOp) -> bool {
         Compare::Int => true,
         Compare::Bool | Compare::Tag => matches!(op, CmpOp::Eq | CmpOp::Ne),
         Compare::Float | Compare::Str | Compare::Identity => false,
+    }
+}
+
+/// A [`Inst::CallBuiltin`] both arms emit code for, with its operands decoded.
+///
+/// A builtin is *named* rather than numbered — see [`cove_ir::Builtin`] — so the
+/// question "is this one the tier lowers" is a pair of string comparisons over
+/// the program's own table, and it is asked **once**, here, rather than in each
+/// arm. That is [`supported`]'s rule taken one level down: a family admitted by
+/// the subset and not emitted by an arm is a panic, and the only way to keep the
+/// two from drifting is for the decision and the operands to come out of the same
+/// function.
+///
+/// The operand checks that belong to the *shape* are here and the ones that
+/// belong to the *frame* are in [`inst_refused`], which is the same division
+/// every other instruction makes: a receiver that is not one `Repr::Ref` word is
+/// not this builtin at all, and a receiver at a slot the frame does not have is
+/// this builtin outside a bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Method {
+    /// `String.byteLength() -> Int`.
+    ///
+    /// `vm::builtins::text::byte_length` is `receiver_addr` and then
+    /// `machine.object_len(addr)`, which is what [`Inst::Len`] already is: a null
+    /// refusal and the header's low half. So this lowers to the *same emitter*
+    /// `Inst::Len` uses in both arms rather than to a family of its own — see
+    /// each arm's `len_of`.
+    ///
+    /// One check of `receiver_addr`'s three is **not** emitted, and it is worth
+    /// saying which. `receiver_addr` asks `super::is_string(machine, addr)` after
+    /// the null test and answers `no_method` for an object that is not a
+    /// `Shape::Str`. That question cannot have a different answer here: a
+    /// `call-builtin` of `String.byteLength` is emitted by
+    /// `cove_ir::lower::methods` only where the checker settled the receiver's
+    /// type as `Ty::Str`, so the receiver word is a reference to a `Shape::Str`
+    /// object or it is null. It is the same class of guard as the one
+    /// [`Inst::AddrOfField`] is refused for — a *lowering bug*, not something a
+    /// program can reach — and it is left out for the same reason: naming it
+    /// would be a [`Raise`] carrying the message `no_method` builds out of an
+    /// operand's rendered value, which is a whole `Value` this crate cannot see.
+    /// The null refusal is a program's to reach and is emitted.
+    ByteLength { dst: Slot, obj: Slot },
+    /// `Vector.push(value)`, the path where the store has room.
+    ///
+    /// `vm::builtins::seq::vector_push` is four steps: read the receiver, copy the
+    /// element's words out, pick a store — the one it has, or a larger one — and
+    /// write the element and the new length. **Only the third of those has a cold
+    /// half, and that is the whole shape of this.** What is emitted is the push
+    /// into spare capacity; a push that has to grow calls
+    /// [`BuiltinFn`](crate::abi::BuiltinFn) and the VM does the whole push.
+    ///
+    /// Growth is where the *allocation* is, so it is not that it was hard — [ADR
+    /// 0055]'s allocation helper is right there, and `Inst::Alloc` goes through it.
+    /// It is that growth is also a payload *copy of unbounded length*, which is a
+    /// loop over `len * stride` heap words, and `capacity` doubles: the copy is
+    /// amortised over the pushes that filled the store, so emitting it would be
+    /// code proportional to the run in exchange for a share of the work that falls
+    /// as the vector grows. The fast path is what the census counted.
+    ///
+    /// Two other preconditions go the same way, and neither is a lowering bug a
+    /// reader may dismiss:
+    ///
+    /// - **the receiver's object is the layout the call site names.** `vector()`
+    ///   reads `Shape::Vector { elem }` out of the object's own header, and this
+    ///   compares that header against the layout the argument list declares —
+    ///   because everything else here is derived from the declared one: the
+    ///   element's layout, its stride, and therefore where the element goes. A
+    ///   mismatch is what `operand::no_method` reports, whose message renders the
+    ///   receiver as a `Value`;
+    /// - **`freeze()` has not consumed it.** `vector()` refuses a store word of
+    ///   nought with `operand::frozen`, which a *program* reaches by pushing to a
+    ///   frozen vector, and whose message names the method.
+    ///
+    /// Both messages are the runtime's to build and this crate can build neither,
+    /// so both are tested and both go to the helper. The null receiver is the one
+    /// refusal that is emitted, because [`Raise::NullObject`] already names it.
+    ///
+    /// [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+    Push {
+        /// Where the `Unit` answer goes: `vector_push` answers `Ok(0)`, so this is
+        /// one word of nought and not nothing.
+        dst: Slot,
+        /// The receiver's slot: one `Repr::Ref` word naming the `Vector` header.
+        recv: Slot,
+        /// The layout the call site declares the receiver to be, whose shape is a
+        /// [`Shape::Vector`] and which the object's own header is compared against.
+        vector: LayoutId,
+        /// The element's slot in this frame, `stride` words wide.
+        value: Slot,
+        /// The element layout's width, which is `Growable::stride`.
+        stride: u32,
+        /// The builtin and its argument list, for the cold path.
+        builtin: u32,
+        args: u32,
+    },
+}
+
+/// Which [`Method`] a `call-builtin` is, or `None` for one no arm lowers.
+///
+/// `None` is [`Reason::Instruction`] and not [`Reason::Operands`], which is this
+/// module's own division read through one more level: a builtin nothing lowers is
+/// a family to write, and the *name* is what says which family it is.
+pub(crate) fn method_of(
+    program: &Program,
+    dst: Slot,
+    builtin: BuiltinId,
+    args: ArgsId,
+) -> Option<Method> {
+    let named = program.builtin(builtin);
+    let list = program.arg_list(args);
+    // The receiver is operand zero, which is `vm::builtins::operand::method`'s
+    // own split. One `Repr::Ref` word, because that is what `operand::as_word`
+    // requires of it and what an object address is.
+    let reference = |at: usize| -> Option<Slot> {
+        let arg = list.get(at)?;
+        (program.layout(arg.layout).words.as_slice() == [Repr::Ref]).then_some(arg.slot)
+    };
+    match (&*named.receiver, &*named.operation) {
+        ("String", "byteLength") => {
+            // The answer is one `Int` word written at `dst`, which is what
+            // `Machine::call_builtin` copies out of the builtin's `out` buffer.
+            if list.len() != 1 || program.layout(named.result).width() != 1 {
+                return None;
+            }
+            Some(Method::ByteLength {
+                dst,
+                obj: reference(0)?,
+            })
+        }
+        // `vm::builtins::seq::vector_push`. Everything the fast path needs is a
+        // static fact of the call site, and each one is read here rather than in
+        // an arm: the receiver's declared layout, whose shape says what the
+        // elements are; the element's own layout, which has to be that same one
+        // or `operand::run_of` would refuse the call; and the stride, which is
+        // that layout's width.
+        ("Vector", "push") => {
+            // The receiver and one argument, which is `operand::method`'s split
+            // and the arity its refusal names.
+            if list.len() != 2 || program.layout(named.result).width() != 1 {
+                return None;
+            }
+            let recv = reference(0)?;
+            let vector = list[0].layout;
+            let Shape::Vector { elem } = program.layout(vector).shape else {
+                return None;
+            };
+            // `operand::run_of(machine, .., items.elem, args[0])` requires the
+            // argument's layout to *be* the element's, so a call site where the
+            // two differ is one the VM refuses. Refusing to compile it leaves the
+            // refusal where its message is.
+            if list[1].layout != elem {
+                return None;
+            }
+            Some(Method::Push {
+                dst,
+                recv,
+                vector,
+                value: list[1].slot,
+                stride: program.layout(elem).width(),
+                builtin: builtin.0,
+                args: args.0,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -387,6 +554,30 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                 && slot(*obj)
                 && slot(*index)
         }
+        // `encoded.rs`'s `STORE_ELEM` arm, which is [`Inst::LoadElem`] backwards:
+        // the same `Machine::element` — the same null refusal and the same
+        // `Raise::IndexOutOfRange` — and then a run of words the other way. It is
+        // bounded exactly as `LoadElem` is, because it expands to the same code.
+        //
+        // It is here because **it is what makes an allocation reachable**: an array
+        // literal is an `Inst::Alloc` followed by one of these per element, so a
+        // function that built one was refused for this however well the allocation
+        // itself lowered. `Inst::StoreField` is the same story for a struct and is
+        // *not* here — see this module's note on `Inst::AddrOfField`, whose
+        // `Machine::checked` refusal names a layout by name and payload width.
+        Inst::StoreElem {
+            obj,
+            index,
+            src,
+            layout,
+        } => {
+            let layout = program.layout(*layout);
+            layout.width() <= MAX_RUN_WORDS
+                && layout.words.iter().copied().all(is_lowered)
+                && run(*src, layout.width())
+                && slot(*obj)
+                && slot(*index)
+        }
         Inst::ByteAt { dst, obj, at } => slot(*dst) && slot(*obj) && slot(*at),
         // A call is admitted whatever the callee is: it is handed to
         // `NativeHelpers::call`, which opens the frame with the runtime's own
@@ -406,6 +597,53 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         }
         Inst::Return { src } => run(*src, program.layout(function.returns).width()),
         Inst::Trap { .. } => true,
+        // A builtin is decoded by [`method_of`] and by nothing here, so that the
+        // name this tier lowers is written down once. `None` is a family nothing
+        // emits and falls to `Reason::Instruction` with every other unlowered
+        // instruction; a family that *is* emitted is bounded like any other.
+        Inst::CallBuiltin { dst, builtin, args } => {
+            match method_of(program, *dst, *builtin, *args) {
+                Some(Method::ByteLength { dst, obj }) => slot(dst) && slot(obj),
+                // The element is a run of `stride` words of this frame, so it is
+                // bounded the way an `Inst::Copy`'s source is — and by
+                // `MAX_RUN_WORDS` too, because the emitted write is one store per
+                // word of it.
+                Some(Method::Push {
+                    dst,
+                    recv,
+                    vector,
+                    value,
+                    stride,
+                    ..
+                }) => {
+                    // The layout id has to fit an `i32`, and that is the
+                    // *template* arm's bound rather than a bound on the language:
+                    // it tests the header's high half with `cmp r64, imm32`, whose
+                    // immediate is sign-extended, so an id above `i32::MAX` would
+                    // be compared against a negative number. No program has two
+                    // billion layouts, so this refuses nothing real — but an arm
+                    // that was silently wrong above a threshold is worse than one
+                    // that refuses at it.
+                    i32::try_from(vector.0).is_ok()
+                        && stride <= MAX_RUN_WORDS
+                        && slot(dst)
+                        && slot(recv)
+                        && run(value, stride)
+                }
+                None => return Some(Reason::Instruction),
+            }
+        }
+        // `encoded.rs`'s `ALLOC_FIXED | ALLOC_IMM | ALLOC_SLOT` arm, which is
+        // `Machine::allocate` and a store of the address it answered. The helper
+        // is handed the layout and the length whole — see
+        // [`AllocFn`](crate::abi::AllocFn) — so there is nothing about the
+        // *layout* to bound here: a length no header could hold and a payload no
+        // `u32` could count are that function's to refuse, through the one
+        // "this run has no memory left" every other allocation fails with.
+        Inst::Alloc { dst, len, .. } => match len {
+            Len::Fixed | Len::Count(_) => slot(*dst),
+            Len::Slot(at) => slot(*dst) && slot(*at),
+        },
         _ => return Some(Reason::Instruction),
     };
     (!inside).then_some(Reason::Operands)

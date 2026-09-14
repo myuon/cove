@@ -33,11 +33,11 @@ use std::sync::Arc;
 
 use cove_diag::{FileId, Span};
 use cove_ir::{
-    Arg, ArgsId, ArithOp, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout, LayoutId,
-    Num, Program, RefMap, Repr, Slot, StrId, Table, TableId,
+    Arg, ArgsId, ArithOp, BuiltinId, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout,
+    LayoutId, Len, Num, Program, RefMap, Repr, Slot, StrId, Table, TableId,
 };
 use cove_native::{Entry, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
-use cove_native::{HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS};
+use cove_native::{HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS};
 
 // --- the safepoint helper -----------------------------------------------------
 
@@ -213,12 +213,188 @@ unsafe extern "C" fn close(_ctx: *mut NativeCtx, outcome: u32, callee: u32) -> u
     )
 }
 
+// --- the allocation helper ----------------------------------------------------
+
+/// How many words apart two test allocations are placed.
+///
+/// Generous, so that a case can write a payload without working out whether it
+/// has run into the next object: a header and sixty-three payload words is wider
+/// than anything here allocates.
+pub const ALLOC_STRIDE: u64 = 64;
+
+thread_local! {
+    /// Every allocation this thread's compiled code has asked for, as
+    /// `(pc, layout, len)`.
+    ///
+    /// The three numbers are the whole of what [`cove_native::AllocFn`] carries,
+    /// so a case reads them to say the arm handed over what the instruction said
+    /// — including that `Len::Fixed` is nought and `Len::Slot` is the *word* and
+    /// not a narrowed copy of it.
+    pub static ALLOCS: RefCell<Vec<(u32, u32, i64)>> = const { RefCell::new(Vec::new()) };
+    /// The heap word index the next test allocation is placed at.
+    pub static ALLOC_AT: Cell<u64> = const { Cell::new(1) };
+    /// How many allocations to answer before refusing.
+    ///
+    /// The refusal a real allocation makes when nothing this run holds can be
+    /// reclaimed — "this run has no memory left" — which the helper reports as a
+    /// zero and compiled code has to leave with as [`Raise::Called`].
+    pub static ALLOCS_ALLOWED: Cell<usize> = const { Cell::new(usize::MAX) };
+}
+
+/// The runtime's allocation helper, as a test double.
+///
+/// A real one is `Machine::allocate` behind [ADR 0040]'s three steps; this one
+/// bumps a pointer into the case's own [`Heap`] and writes the header
+/// `mem::header` would have written, which is exactly as much of it as compiled
+/// code can observe.
+///
+/// It **also reads [`WATCHED`]**, and that is the point of it rather than a
+/// convenience. An allocation is the first thing compiled code does that can
+/// cause a collection, so a collector walking this frame is the thing standing
+/// between a half-built object and a swept one — and what the walk can see is
+/// exactly what this can see. A case that watches a reference slot and allocates
+/// is asserting `cove_native::abi`'s "every live reference is already in the slot
+/// the frame's static map names", rather than believing it.
+///
+/// # Safety
+///
+/// `ctx` is the pointer the entry point was called with, and `ctx.chunks` is the
+/// table of a [`Heap`] with room at [`ALLOC_AT`].
+///
+/// [ADR 0040]: ../../../../docs/adr/0040-a-bound-outlives-its-backend.md
+unsafe extern "C" fn alloc(ctx: *mut NativeCtx, pc: u32, layout: u32, len: i64) -> u64 {
+    ALLOCS.with(|held| held.borrow_mut().push((pc, layout, len)));
+    if let Some(at) = WATCHED.with(Cell::get) {
+        // Safety: the caller set `at` to an index inside the `words` it handed
+        // the entry point.
+        let word = (*ctx).words.add(at).read();
+        WATCHED_SAW.with(|saw| saw.borrow_mut().push(word));
+    }
+    if ALLOCS.with(|held| held.borrow().len()) > ALLOCS_ALLOWED.with(Cell::get) {
+        // A real one stashes a whole `RuntimeError` and answers nought; there is
+        // no error to stash here, and nought is the whole of the ABI.
+        return 0;
+    }
+    let at = ALLOC_AT.with(Cell::get);
+    ALLOC_AT.with(|held| held.set(at + ALLOC_STRIDE));
+    // `mem::header`: the layout in the high half and the length field in the low
+    // one. The length is narrowed the way `Machine::allocate`'s `u32::try_from`
+    // narrows it, and a case that wants the refusal asks for it with
+    // [`ALLOCS_ALLOWED`] instead of an unrepresentable length.
+    let chunk = *(*ctx).chunks.add((at >> HEAP_CHUNK_SHIFT) as usize);
+    chunk
+        .add((at & (HEAP_CHUNK_WORDS - 1)) as usize)
+        .write((u64::from(layout) << 32) | (len as u64 & u64::from(u32::MAX)));
+    HEAP_ORIGIN_WORDS + at
+}
+
+pub fn allocations() -> Vec<(u32, u32, i64)> {
+    ALLOCS.with(|held| held.borrow().clone())
+}
+
+/// Forgets every allocation and puts the bump pointer back.
+pub fn forget_allocations() {
+    ALLOCS.with(|held| held.borrow_mut().clear());
+    ALLOC_AT.with(|held| held.set(1));
+    ALLOCS_ALLOWED.with(|held| held.set(usize::MAX));
+}
+
+/// Refuses every allocation after the first `allowed`. See [`ALLOCS_ALLOWED`].
+pub fn allocations_allowed(allowed: usize) {
+    ALLOCS_ALLOWED.with(|held| held.set(allowed));
+}
+
+// --- the builtin helper -------------------------------------------------------
+
+/// One builtin compiled code handed back through
+/// [`BuiltinFn`](cove_native::BuiltinFn).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mediated {
+    pub base: u64,
+    pub pc: u32,
+    pub dst: u32,
+    pub builtin: u32,
+    pub args: u32,
+    /// The unpaid work the caller published before handing over.
+    pub work: u64,
+}
+
+thread_local! {
+    /// Every builtin this thread's compiled code handed to the runtime, in order.
+    pub static MEDIATED: RefCell<Vec<Mediated>> = const { RefCell::new(Vec::new()) };
+    /// What the next mediated builtin answers, taken from the front.
+    pub static MEDIATED_ANSWERS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The runtime's builtin helper, as a test double.
+///
+/// A real one is `Machine::call_builtin`, whole. This one records the hand-over
+/// and writes one word into `dst` — `builtin * 1000 + dst`, a number no other
+/// part of a frame holds — so a case can say the cold path was taken *and* that
+/// the answer landed where the instruction said.
+///
+/// # Safety
+///
+/// As [`alloc`]. `base` indexes into the words the entry point was given and
+/// `dst` is a slot of the frame there.
+unsafe extern "C" fn builtin(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    dst: u32,
+    builtin: u32,
+    args: u32,
+) -> u32 {
+    MEDIATED.with(|held| {
+        held.borrow_mut().push(Mediated {
+            base,
+            pc,
+            dst,
+            builtin,
+            args,
+            work: (*ctx).pending_work,
+        })
+    });
+    (*ctx).pending_work = 0;
+    let answer = MEDIATED_ANSWERS.with(|held| {
+        let mut held = held.borrow_mut();
+        (!held.is_empty()).then(|| held.remove(0))
+    });
+    match answer {
+        Some(outcome) if outcome != Outcome::Returned.abi() => outcome,
+        _ => {
+            (*ctx)
+                .words
+                .add((base + u64::from(dst)) as usize)
+                .write(u64::from(builtin) * 1000 + u64::from(dst));
+            Outcome::Returned.abi()
+        }
+    }
+}
+
+pub fn mediated() -> Vec<Mediated> {
+    MEDIATED.with(|held| held.borrow().clone())
+}
+
+pub fn forget_mediated() {
+    MEDIATED.with(|held| held.borrow_mut().clear());
+    MEDIATED_ANSWERS.with(|held| held.borrow_mut().clear());
+}
+
+/// Scripts what the next mediated builtins answer.
+pub fn mediated_answers(outcomes: &[Outcome]) {
+    MEDIATED_ANSWERS
+        .with(|held| *held.borrow_mut() = outcomes.iter().map(|outcome| outcome.abi()).collect());
+}
+
 pub fn helpers() -> NativeHelpers {
     NativeHelpers {
         safepoint,
         call,
         open,
         close,
+        alloc,
+        builtin,
     }
 }
 
@@ -249,9 +425,17 @@ pub fn forget_polls() {
     WATCHED_SAW.with(|saw| saw.borrow_mut().clear());
 }
 
-/// Asks the safepoint helper to read word `at` of the frame's segment.
+/// Asks the safepoint and allocation helpers to read word `at` of the frame's
+/// segment.
 pub fn watch(at: usize) {
     WATCHED.with(|watched| watched.set(Some(at)));
+}
+
+/// Stops watching, so that a later case in this thread is not handed a reading it
+/// did not ask for.
+pub fn watch_nothing() {
+    WATCHED.with(|watched| watched.set(None));
+    WATCHED_SAW.with(|saw| saw.borrow_mut().clear());
 }
 
 pub fn watched() -> Vec<u64> {
@@ -303,6 +487,26 @@ pub const HOST_PAIR: LayoutId = LayoutId(9);
 /// one the frame does not have, so a return that formed the address anyway would
 /// be writing into whatever is above the frame.
 pub const EMPTY: LayoutId = LayoutId(10);
+/// A `Vector<Int>`, whose elements are one word each.
+///
+/// [`Shape::Vector`](cove_ir::Shape::Vector) is two payload words — the element
+/// count and the store — and the elements live in the store rather than here,
+/// which is what makes `is` defined for a `Vector` and why a `push` that grows
+/// replaces a word of this object instead of moving it.
+pub const VECTOR: LayoutId = LayoutId(12);
+/// A `Vector<Pair>`, whose elements are **two** words each.
+///
+/// The stride case: `set_payload_run` writes `stride` words at
+/// `len * stride`, so a one-word element cannot tell a lowering that multiplied
+/// from one that did not.
+pub const PAIR_VECTOR: LayoutId = LayoutId(13);
+/// The store of a `Vector<Int>`: a growable run of elements.
+///
+/// What the emitted push reads out of it is its header's length — the capacity —
+/// and nothing else, so this is here to be *named* by an object rather than to be
+/// told apart from `Elements`' other form.
+pub const STORE: LayoutId = LayoutId(14);
+
 /// One [`Repr::Addr`] word, which is the whole of what a place is.
 ///
 /// `Inst::AddrOfSlot`'s destination and `Inst::Load`'s address: ADR 0034's "There
@@ -377,6 +581,15 @@ pub fn program(function: Function) -> Program {
                 Vec::new(),
             ),
             Layout::word("Addr", Repr::Addr),
+            Layout::object("Vector", cove_ir::Shape::Vector { elem: INT }),
+            Layout::object("Vector", cove_ir::Shape::Vector { elem: PAIR }),
+            Layout::object(
+                "Vector",
+                cove_ir::Shape::Elements {
+                    elem: INT,
+                    growable: true,
+                },
+            ),
         ],
         // `ArgsId(0)` is the empty argument list, which is what a call in these
         // tests hands over: the double records the hand-over and does not read
@@ -399,6 +612,29 @@ pub fn program_with_tables(function: Function, tables: Vec<Table>) -> Program {
 pub fn program_with_args(function: Function, args: Vec<Arg>) -> Program {
     let mut held = program(function);
     held.args.push(args);
+    held
+}
+
+/// The same program, with one builtin at `BuiltinId(0)` and its operands at
+/// `ArgsId(1)`.
+///
+/// A builtin is named rather than numbered — see [`cove_ir::Builtin`] — so the
+/// two strings are what decide whether the tier lowers this call at all, and a
+/// case that passes the wrong pair should be refused rather than compiled. That
+/// is what `a_builtin_no_arm_lowers_refuses_the_function` checks with them.
+pub fn program_with_builtin(
+    function: Function,
+    receiver: &str,
+    operation: &str,
+    result: LayoutId,
+    args: Vec<Arg>,
+) -> Program {
+    let mut held = program_with_args(function, args);
+    held.builtins.push(cove_ir::Builtin {
+        receiver: Arc::from(receiver),
+        operation: Arc::from(operation),
+        result,
+    });
     held
 }
 
@@ -1665,6 +1901,470 @@ pub fn a_len_reads_the_header_and_refuses_null<A: Arm>() {
     assert_eq!(answer.raise_pc, 0);
 }
 
+/// `String.byteLength()`, which is the `LEN` arm reached through a
+/// `call-builtin`.
+///
+/// `vm::builtins::text::byte_length` is `receiver_addr` and then
+/// `machine.object_len(addr)`: the same null refusal and the same header read as
+/// `Inst::Len`, so the same three assertions hold — including that the raise names
+/// the *builtin's* pc and not the `Len`'s, because a `String.byteLength()` that
+/// reported the wrong instruction would print the wrong span.
+pub fn a_byte_length_builtin_reads_the_header_and_refuses_null<A: Arm>() {
+    let held = program_with_builtin(
+        function(
+            vec![Repr::Ref, Repr::Int],
+            INT,
+            vec![
+                // One instruction ahead of the builtin, so that `raise_pc` is a
+                // number a dropped `self.pc` could not have answered by accident.
+                Inst::Int { dst: 1, value: 7 },
+                Inst::CallBuiltin {
+                    dst: 1,
+                    builtin: BuiltinId(0),
+                    args: ArgsId(1),
+                },
+                Inst::Return { src: 1 },
+            ],
+        ),
+        "String",
+        "byteLength",
+        INT,
+        vec![Arg {
+            slot: 0,
+            layout: REF,
+        }],
+    );
+
+    // A multi-byte string: the length field is a *byte* count, so a two-byte
+    // character is two. `mem::header`'s low half is what both arms read.
+    let at = HEAP_CHUNK_WORDS + 9;
+    let mut heap = Heap::new(2);
+    let addr = heap.object(at, INT, 2);
+    let mut words = vec![addr, 0];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[1], 2, "the header's low half, as a byte count");
+    assert_eq!(answer.returned[0], 2);
+
+    // A byte count that needs more than the low half of a word would be a
+    // different object; what is asserted here is that the *high* half — the
+    // layout — is not read into the answer.
+    let addr = heap.object(at, PAIR, 0x1234_5678);
+    let mut words = vec![addr, 0];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[1], 0x1234_5678);
+
+    // `receiver_addr`'s `if addr == 0 { null_value() }`, which is the refusal
+    // `Raise::NullObject` names.
+    let mut words = vec![0u64, 0];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Raised);
+    assert_eq!(answer.raise, Some(Raise::NullObject));
+    assert_eq!(answer.raise_pc, 1, "the builtin's pc, not the constant's");
+}
+
+/// A `call-builtin` of a name no arm lowers refuses the whole function.
+///
+/// The name is the decision — see `subset::method_of` — so this is the one case
+/// that says the decision is really made on it: the same instruction, the same
+/// operands, the same widths, and a different pair of strings.
+pub fn a_builtin_no_arm_lowers_refuses_the_function<A: Arm>() {
+    let one = |receiver: &str, operation: &str| {
+        program_with_builtin(
+            function(
+                vec![Repr::Ref, Repr::Int],
+                INT,
+                vec![
+                    Inst::CallBuiltin {
+                        dst: 1,
+                        builtin: BuiltinId(0),
+                        args: ArgsId(1),
+                    },
+                    Inst::Return { src: 1 },
+                ],
+            ),
+            receiver,
+            operation,
+            INT,
+            vec![Arg {
+                slot: 0,
+                layout: REF,
+            }],
+        )
+    };
+    assert!(compiles::<A>(&one("String", "byteLength")));
+    for (receiver, operation) in [
+        ("String", "length"),
+        ("Array", "byteLength"),
+        ("Vector", "push"),
+    ] {
+        assert!(
+            !compiles::<A>(&one(receiver, operation)),
+            "`{receiver}.{operation}` is not lowered, so the function is refused"
+        );
+    }
+}
+
+// --- allocation ---------------------------------------------------------------
+
+/// One `Inst::Alloc` of each of `Len`'s three forms, answering into slot 1.
+pub fn allocating(len: Len) -> Program {
+    program(function(
+        vec![Repr::Int, Repr::Ref],
+        REF,
+        vec![
+            Inst::Alloc {
+                dst: 1,
+                layout: STORE,
+                len,
+            },
+            Inst::Return { src: 1 },
+        ],
+    ))
+}
+
+/// `encoded.rs`'s `ALLOC_FIXED | ALLOC_IMM | ALLOC_SLOT` arm: the runtime
+/// allocates and the address it answered lands in the destination.
+///
+/// The three `Len` forms are three opcodes in the encoded tier and one helper
+/// call here, so what this asserts is the *conversion*: `Len::Fixed` hands over
+/// nought, `Len::Count` hands over its immediate, and `Len::Slot` hands over the
+/// whole word the program computed — **not** a narrowed copy of it, which is why
+/// one of the rows is a count no `u32` holds. `Machine::allocate` is what refuses
+/// that one, through the same "this run has no memory left" an exhausted heap
+/// raises, and refusing it here instead would be a second refusal with a
+/// different message.
+pub fn an_allocation_hands_the_layout_and_the_length_over_whole<A: Arm>() {
+    let rows: [(Len, i64, i64); 4] = [
+        // `Len::Fixed`: the layout fixes the size, so the count is nought.
+        (Len::Fixed, 0, 0),
+        (Len::Count(7), 0, 7),
+        (Len::Slot(0), 5, 5),
+        // A word no `u32` holds, handed over as it lies.
+        (Len::Slot(0), -1, -1),
+    ];
+    for (len, word, expected) in rows {
+        forget_allocations();
+        let held = allocating(len);
+        let heap = Heap::new(2);
+        let mut words = vec![word as u64, 0];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "for {len:?}");
+        assert_eq!(
+            allocations(),
+            vec![(0, STORE.0, expected)],
+            "the pc, the layout and the length, for {len:?}"
+        );
+        // The double bumps from word one, so the first object of a case is there.
+        assert_eq!(words[1], HEAP_ORIGIN_WORDS + 1, "the address it answered");
+        assert_eq!(answer.returned[0], HEAP_ORIGIN_WORDS + 1);
+        // The helper is a safepoint, so the block's static work went over with it
+        // and the accumulator was cleared: what the return published is the work
+        // of the instructions *after* the allocation, which is the `return`.
+        assert_eq!(
+            answer.pending_work, 0,
+            "the work was published to the helper and the accumulator cleared"
+        );
+    }
+}
+
+/// An allocation the runtime refuses leaves as [`Raise::Called`].
+///
+/// Zero is not an address, so it is the whole of the ABI for "I could not, and I
+/// am holding the sentence" — see [`cove_native::AllocFn`]. What a case can check
+/// is that compiled code *left*, that it named the variant whose message the
+/// runtime owns, and that it named the instruction: the span a "this run has no
+/// memory left" carries is `Function::span_at(pc)`, and only compiled code knows
+/// which pc it was.
+pub fn an_allocation_the_runtime_refuses_leaves_as_called<A: Arm>() {
+    forget_allocations();
+    allocations_allowed(0);
+    let held = allocating(Len::Count(3));
+    let heap = Heap::new(2);
+    let mut words = vec![0u64, UNWRITTEN];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Raised);
+    assert_eq!(answer.raise, Some(Raise::Called));
+    assert_eq!(answer.raise_pc, 0, "the allocating instruction");
+    assert_eq!(
+        words[1], UNWRITTEN,
+        "and nothing was stored, because there was no address to store"
+    );
+    forget_allocations();
+}
+
+/// **A reference is in its slot when the allocation helper runs.**
+///
+/// `cove_native::abi`'s "References are live here, and the frame is why that is
+/// safe", checked rather than argued. An allocation is the first thing compiled
+/// code does that can *cause* a collection, and the collector's root walk sees
+/// exactly what the helper sees — so the helper reads the reference slot and this
+/// asserts what it found. An arm that had promoted the reference into a register
+/// would leave the slot holding whatever it held before.
+///
+/// The reference is read again *after* the allocation and returned, so a slot that
+/// was merely stale rather than wrong cannot pass either.
+pub fn a_reference_is_in_its_slot_across_an_allocation<A: Arm>() {
+    forget_allocations();
+    forget_polls();
+    let held = program(function(
+        vec![Repr::Ref, Repr::Ref, Repr::Ref],
+        REF,
+        vec![
+            // The reference arrives in slot 0 and is copied to slot 1, which is
+            // where the walk has to find it.
+            Inst::Copy {
+                dst: 1,
+                src: 0,
+                layout: REF,
+            },
+            Inst::Alloc {
+                dst: 2,
+                layout: STORE,
+                len: Len::Count(1),
+            },
+            Inst::Return { src: 1 },
+        ],
+    ));
+    let at = HEAP_CHUNK_WORDS + 21;
+    let mut heap = Heap::new(2);
+    let object = heap.object(at, INT, 4242);
+    // The frame is at word 3 of the segment, so the watched index is the frame's
+    // own offset plus the slot — which is what makes a case that watched slot 1 of
+    // word zero fail here.
+    let base = 3;
+    watch(base as usize + 1);
+    let mut words = vec![UNWRITTEN, UNWRITTEN, UNWRITTEN, object, 0, 0];
+    let answer = run_over::<A>(&held, &mut words, base, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(
+        watched(),
+        vec![object],
+        "the helper — and so a collector — found the reference in its slot"
+    );
+    assert_eq!(
+        answer.returned[0], object,
+        "and it was still there afterwards"
+    );
+    watch_nothing();
+    forget_allocations();
+}
+
+// --- Vector.push --------------------------------------------------------------
+
+/// One `Vector.push(value)` of a `stride`-wide element, answering `Unit` at
+/// `dst`.
+///
+/// Slot 0 is the receiver and slots 1.. are the element, so a case writes the
+/// header address and the element words into `words` and reads the `Unit` back.
+pub fn pushing(vector: LayoutId, stride: u32) -> Program {
+    let mut reprs = vec![Repr::Ref];
+    reprs.extend(std::iter::repeat_n(Repr::Int, stride as usize));
+    // The answer, one `Unit` word past the element.
+    let dst = 1 + stride;
+    reprs.push(Repr::Unit);
+    let elem = if stride == 2 { PAIR } else { INT };
+    program_with_builtin(
+        function(
+            reprs,
+            UNIT,
+            vec![
+                Inst::CallBuiltin {
+                    dst,
+                    builtin: BuiltinId(0),
+                    args: ArgsId(1),
+                },
+                Inst::Return { src: dst },
+            ],
+        ),
+        "Vector",
+        "push",
+        UNIT,
+        vec![
+            Arg {
+                slot: 0,
+                layout: vector,
+            },
+            Arg {
+                slot: 1,
+                layout: elem,
+            },
+        ],
+    )
+}
+
+/// A `Vector` header and its store, in the shape `vector()` reads them.
+///
+/// Two payload words: the element count and the store's address, which is
+/// `Shape::Vector`'s layout. The store is an ordinary object whose header length
+/// is the capacity *in elements*.
+pub fn a_vector(heap: &mut Heap, at: u64, layout: LayoutId, len: u32, capacity: u32) -> u64 {
+    let header = heap.object(at, layout, 0);
+    let store = heap.object(at + 8, STORE, capacity);
+    heap.set(at + 1, u64::from(len));
+    heap.set(at + 2, store);
+    header
+}
+
+/// `vm::builtins::seq::vector_push`, where the store has room.
+///
+/// The element's words into `store[len]` and the length bumped, and **nothing
+/// handed to the runtime** — which is the half a coverage number cannot say. The
+/// two-word element is the stride case: `set_payload_run` writes at `len * stride`,
+/// so a lowering that forgot the multiply lands the second push on top of the
+/// first.
+pub fn a_push_into_spare_capacity_writes_the_element_and_the_length<A: Arm>() {
+    for (vector, stride) in [(VECTOR, 1), (PAIR_VECTOR, 2)] {
+        forget_mediated();
+        let held = pushing(vector, stride);
+        let at = HEAP_CHUNK_WORDS + 33;
+        let mut heap = Heap::new(2);
+        // One element already there, room for four.
+        let header = a_vector(&mut heap, at, vector, 1, 4);
+        let mut words = vec![header];
+        words.extend((0..stride).map(|word| 70 + u64::from(word)));
+        words.push(UNWRITTEN);
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "stride {stride}");
+        assert!(
+            mediated().is_empty(),
+            "the fast path took it, so nothing went to the runtime: {:?}",
+            mediated()
+        );
+        // `store + 1 + len * stride`, which for `len == 1` is the second element.
+        for word in 0..stride {
+            assert_eq!(
+                heap.get(at + 8 + 1 + u64::from(stride) + u64::from(word)),
+                70 + u64::from(word),
+                "element word {word} at stride {stride}"
+            );
+        }
+        // And the first element was not touched, which is what says the offset was
+        // `len * stride` and not nought.
+        for word in 0..stride {
+            assert_eq!(heap.get(at + 8 + 1 + u64::from(word)), 0);
+        }
+        assert_eq!(heap.get(at + 1), 2, "the length was bumped, once");
+        assert_eq!(
+            words[1 + stride as usize],
+            0,
+            "`Ok(0)`: one `Unit` word of nought"
+        );
+    }
+}
+
+/// How a case builds the receiver a cold push is given: a [`Heap`] and where in it,
+/// answering the header's address.
+///
+/// A named type rather than the signature written in place, because the three rows
+/// below are an array of them and `clippy::type_complexity` is right that the
+/// written-out form is unreadable there.
+type Build = fn(&mut Heap, u64) -> u64;
+
+/// The three cold paths of `Vector.push`, each handed to the runtime whole.
+///
+/// See [`Method::Push`](cove_native::Reason) — no room, a store word of nought,
+/// and a receiver whose object is not the layout the call site declared. Each
+/// one's message names a rendered `Value` or the method, which this crate cannot
+/// build, so the assertion is that emitted code **did not try**: the builtin went
+/// over, at the right pc and the right destination, and what the runtime answered
+/// landed in `dst`.
+pub fn every_cold_path_of_a_push_goes_to_the_runtime<A: Arm>() {
+    let at = HEAP_CHUNK_WORDS + 33;
+    // The three, by what makes them cold.
+    let rows: [(&str, Build); 3] = [
+        (
+            "the store is full, so the push would grow it",
+            |heap, at| a_vector(heap, at, VECTOR, 4, 4),
+        ),
+        ("`freeze()` consumed the store", |heap, at| {
+            let header = a_vector(heap, at, VECTOR, 0, 4);
+            heap.set(at + 2, 0);
+            header
+        }),
+        (
+            "the object is not the layout the call site declared",
+            |heap, at| a_vector(heap, at, PAIR_VECTOR, 0, 4),
+        ),
+    ];
+    for (why, build) in rows {
+        forget_mediated();
+        let held = pushing(VECTOR, 1);
+        let mut heap = Heap::new(2);
+        let header = build(&mut heap, at);
+        let mut words = vec![header, 70, UNWRITTEN];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "{why}");
+        assert_eq!(
+            mediated(),
+            vec![Mediated {
+                base: 0,
+                pc: 0,
+                dst: 2,
+                builtin: 0,
+                args: 1,
+                // A builtin is a safepoint, so the block's static work — two
+                // instructions — went over with the hand-over.
+                work: 2,
+            }],
+            "{why}: the runtime was handed the builtin, whole"
+        );
+        // The double's own word, which says the answer landed where the
+        // instruction said rather than where emitted code would have put one.
+        assert_eq!(words[2], 2, "{why}: the runtime's answer, in `dst`");
+        assert_eq!(heap.get(at + 1), heap.get(at + 1), "{why}");
+    }
+    forget_mediated();
+}
+
+/// A cold path whose builtin *raised* leaves with that outcome.
+///
+/// The other half of the mediated shape, and it is [`Emit::callee_mediated`]'s:
+/// anything but `Returned` is returned from the compiled function unchanged, so a
+/// refusal eight frames down leaves through one `ret` per frame.
+pub fn a_cold_push_that_raised_leaves_with_that_outcome<A: Arm>() {
+    for outcome in [Outcome::Raised, Outcome::Stopped] {
+        forget_mediated();
+        mediated_answers(&[outcome]);
+        let held = pushing(VECTOR, 1);
+        let at = HEAP_CHUNK_WORDS + 33;
+        let mut heap = Heap::new(2);
+        // Full, so the push is cold.
+        let header = a_vector(&mut heap, at, VECTOR, 4, 4);
+        let mut words = vec![header, 70, UNWRITTEN];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, outcome);
+        assert_eq!(mediated().len(), 1);
+        assert_eq!(
+            words[2], UNWRITTEN,
+            "and no answer was published, because there was none"
+        );
+    }
+    forget_mediated();
+}
+
+/// A `push` to a null receiver is refused where it is read.
+///
+/// `vector()`'s `if addr == 0 { null_value() }` — the one refusal of this builtin
+/// a program reaches and this crate can name, so it is emitted rather than
+/// mediated, and nothing goes to the runtime.
+pub fn a_push_refuses_a_null_receiver<A: Arm>() {
+    forget_mediated();
+    let held = pushing(VECTOR, 1);
+    let heap = Heap::new(2);
+    let mut words = vec![0u64, 70, UNWRITTEN];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Raised);
+    assert_eq!(answer.raise, Some(Raise::NullObject));
+    assert_eq!(answer.raise_pc, 0);
+    assert!(
+        mediated().is_empty(),
+        "the null was refused here, not handed over"
+    );
+    forget_mediated();
+}
+
 /// `encoded.rs`'s `LOAD_ELEM` arm (line 1425), which is `Machine::element` and
 /// then a copy at the element layout's stride.
 ///
@@ -1727,6 +2427,75 @@ pub fn a_load_elem_strides_and_bounds_its_index<A: Arm>() {
     let heap = build();
     let mut words = vec![0u64, 0, 0, 0];
     let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.raise, Some(Raise::NullObject));
+}
+
+/// `encoded.rs`'s `STORE_ELEM` arm: `Machine::element`, and then a copy of the
+/// element's words *into* the payload.
+///
+/// The mirror of [`a_load_elem_strides_and_bounds_its_index`], and the same two
+/// things are asserted: the stride is the *element's* width — a two-word element
+/// at index two lands at payload words four and five, not two and three — and the
+/// index is bounded by one unsigned comparison, so a negative index is refused as
+/// a large one.
+///
+/// The element is read back out of the heap rather than out of a slot, which is
+/// what makes this a test of the store: a lowering that wrote the right words to
+/// the wrong payload offset passes every assertion a frame can make.
+pub fn a_store_elem_strides_and_bounds_its_index<A: Arm>() {
+    let held = program(function(
+        vec![Repr::Ref, Repr::Int, Repr::Int, Repr::Int],
+        INT,
+        vec![
+            Inst::StoreElem {
+                obj: 0,
+                index: 1,
+                src: 2,
+                layout: PAIR,
+            },
+            Inst::Return { src: 1 },
+        ],
+    ));
+
+    // An object in the second chunk, for the chunk arithmetic, with room for three
+    // two-word elements.
+    let at = HEAP_CHUNK_WORDS + 41;
+    let mut heap = Heap::new(2);
+    let addr = heap.object(at, PAIR, 3);
+    let mut words = vec![addr, 2, 0x1111, 0x2222];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(
+        (heap.get(at + 1 + 4), heap.get(at + 1 + 5)),
+        (0x1111, 0x2222),
+        "element two of a two-word run is payload words four and five"
+    );
+    for word in 0..4 {
+        assert_eq!(
+            heap.get(at + 1 + word),
+            0,
+            "payload word {word} belongs to elements nought and one"
+        );
+    }
+
+    // `Machine::element`'s `at < 0 || at >= len`, which is one unsigned comparison.
+    for index in [3i64, -1] {
+        let mut words = vec![addr, index as u64, 0x3333, 0x4444];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Raised, "index {index}");
+        assert_eq!(answer.raise, Some(Raise::IndexOutOfRange));
+        assert_eq!(
+            answer.raise_a, index,
+            "the offending index, as it was given"
+        );
+        assert_eq!(answer.raise_b, 3, "and the collection's length");
+    }
+
+    // And the null receiver, which every reader and writer of an object refuses
+    // first.
+    let mut words = vec![0u64, 0, 0x5555, 0x6666];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Raised);
     assert_eq!(answer.raise, Some(Raise::NullObject));
 }
 

@@ -420,3 +420,81 @@ pub fn compile(_program: &Program) -> Result<NativeProgram, Unavailable> {
         "this build has no native code generator; rebuild with `--features template`",
     ))
 }
+
+#[cfg(all(test, feature = "template"))]
+mod tests {
+    use super::*;
+    use cove_ir::{Function, Inst, Layout, LayoutId, Len, RefMap, Repr, Shape};
+    use std::sync::Arc;
+
+    /// **An allocation census row names the family and the shape.**
+    ///
+    /// It is here rather than in `tests/native_tier.rs` because of what happened
+    /// to the case that used to be there: `Inst::Alloc` became a lowered
+    /// instruction, so no function is refused at one any more and the row the
+    /// fixture used to produce stopped existing. The *report* is a fact about a
+    /// program and an operand bound could still refuse an allocation, so the arm
+    /// stays — and a test of it that depends on which instructions today's subset
+    /// happens to lower is a test that retires itself.
+    ///
+    /// Both halves are asserted because neither is the other, which is
+    /// [`Blocked::Allocation`]'s own note: `cove_ir::lower` names every
+    /// `Array<T>` layout `Array`, so a census keyed on the name alone collapses
+    /// `Array<Int>` and `Array<covefmt.Token>` into one row.
+    #[test]
+    fn an_allocation_census_row_names_the_family_and_the_shape() {
+        let span = cove_diag::Span::new(cove_diag::FileId(0), 0, 0);
+        let reprs = vec![Repr::Ref];
+        let code = vec![
+            Inst::Alloc {
+                dst: 0,
+                layout: LayoutId(2),
+                len: Len::Count(3),
+            },
+            Inst::Return { src: 0 },
+        ];
+        let function = Function {
+            module: Arc::from("m"),
+            name: Arc::from("f"),
+            params: Vec::new(),
+            spans: vec![span; code.len()],
+            refs: RefMap::of(&reprs),
+            reprs,
+            returns: LayoutId(2),
+            captures: Vec::new(),
+            code,
+            locals: Vec::new(),
+            inlined: Vec::new(),
+            span,
+            is_async: false,
+            stub: false,
+        };
+        let program = Program {
+            functions: vec![function],
+            layouts: vec![
+                Layout::free(),
+                Layout::word("Int", Repr::Int),
+                Layout::object(
+                    "Array",
+                    Shape::Elements {
+                        elem: LayoutId(1),
+                        growable: false,
+                    },
+                ),
+            ],
+            ..Program::default()
+        };
+        let function = program.function(FunctionId(0));
+        assert_eq!(
+            blocked_on(&program, function, 0),
+            Some(Blocked::Allocation {
+                // The element is beside the family, because `Array` alone would
+                // be every array the program has.
+                name: "Array<Int>".to_string(),
+                shape: "Elements".to_string(),
+            })
+        );
+        // And an instruction that is its own subject carries no second key.
+        assert_eq!(blocked_on(&program, function, 1), None);
+    }
+}
