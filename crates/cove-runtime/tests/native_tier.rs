@@ -67,28 +67,32 @@ export fn adds(a: Int, b: Int) -> Int {
 
 /// A caller that is refused, so that its `call` is the VM-to-native hop.
 ///
-/// `let nothing = Vector.of(0)` is what refuses it, and it is the marker every
-/// refused caller in this file uses: `Vector.of` lowers to an `Inst::StoreField`,
-/// which nothing lowers, so this function runs on the encoded tier however the
-/// table is built — which is the point of it.
+/// `let nothing = Shared(0).lock(fn(v) { v })` is what refuses it, and it is
+/// the marker every refused caller in this file uses: `Shared<T>.lock` emits
+/// `Inst::AddrOfField` unconditionally — see
+/// `cove_ir::lower::cells::Lower::shared_lock` — and nothing lowers that
+/// instruction, so this function runs on the encoded tier however the table
+/// is built — which is the point of it.
 ///
-/// **It has already been two other things, and that is the hazard rather than an
-/// accident.** It was a string literal until `Inst::Str` was lowered, and
-/// `let nothing = ()` until `Inst::Unit` was; each time, the instruction the
-/// marker relied on joined the subset and a dozen cases in this file came within
-/// one commit of comparing the native tier with itself. So the marker is chosen
-/// for how *unlikely* it is to be lowered next rather than for how small it is:
-/// the field family refuses through `Machine::checked`, whose message names a
-/// layout by name and its payload word count, and `cove-native` cannot build that
-/// sentence — which is the same reason `subset.rs` gives for leaving
-/// `Inst::AddrOfField` out.
+/// **It has already been three other things, and that is the hazard rather
+/// than an accident.** It was a string literal until `Inst::Str` was lowered,
+/// `let nothing = ()` until `Inst::Unit` was, and `Vector.of(0)` until
+/// `Inst::StoreField` was; each time, the instruction the marker relied on
+/// joined the subset and a dozen cases in this file came within one commit of
+/// comparing the native tier with itself. So the marker is chosen for how
+/// *unlikely* it is to be lowered next rather than for how small it is:
+/// `Inst::AddrOfField` refuses through `Machine::checked`, whose message names
+/// a layout by name and its payload word count, and `cove-native` cannot build
+/// that sentence — `subset.rs`'s own reason for leaving it out, unlike
+/// `Inst::LoadField` and `Inst::StoreField` beside it, which is what made this
+/// marker's two predecessors compile out from under it.
 ///
 /// That is still a judgement and not a guarantee. What actually stands between
 /// this file and a self-comparison is not the marker: it is that **every case
 /// asserts the tiers it needs** — `on_each_tier`, `compiled < reachable`, and a
 /// tier counter that moved. Those fail loudly on the day this marker compiles.
 export fn callsAdds(a: Int, b: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   adds(a, b)
 }
 
@@ -103,7 +107,7 @@ export fn negates(a: Int) -> Int {
 
 /// A refused caller, so the negation is reached across the boundary.
 export fn callsNegates(a: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   negates(a)
 }
 
@@ -113,14 +117,14 @@ export fn divides(a: Int, b: Int) -> Int {
 }
 
 export fn callsDivides(a: Int, b: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   divides(a, b)
 }
 
 /// A deep recursion whose outer destinations are pending while the stack's `Vec`
 /// reallocates.
 export fn callsCounts(n: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   counts(n)
 }
 
@@ -128,6 +132,27 @@ export fn callsCounts(n: Int) -> Int {
 export struct Point {
   x: Int
   y: Int
+}
+
+/// A `Point` a closure captures, read back inside the closure's own body.
+///
+/// A closure's captures live in the closure's own heap object — `Shape::Closure`,
+/// one of `Layout::fixed_payload_words`' `Some` shapes — and are copied in by
+/// `Inst::StoreField` where the closure is built and read back by
+/// `Inst::LoadField` where a captured name is used, both at the closure's own
+/// payload offset rather than the caller's frame. So `p.x` and `p.y` here are not
+/// `movesY`'s `Inst::AddrOfPart` — that is a place *inline* in a frame — this is
+/// the whole two-word value read out of an object on the heap, which is what
+/// makes it a case `Inst::LoadField`'s table lookup answers rather than one the
+/// `var`-address family already covered.
+///
+/// `counts(0)` is here for the reason it is everywhere above: without it the
+/// closure's own body is a leaf under sixteen instructions and
+/// `cove_ir::lower::inline` would expand it into whichever frame calls it.
+export fn capturesAPoint(x: Int, y: Int) -> Int {
+  let p = Point(x: x, y: y)
+  let f = fn() { p.x * 1000 + p.y + counts(0) }
+  f()
 }
 
 /// Writes through a `var` parameter, which is one word holding a linear address.
@@ -152,7 +177,7 @@ export fn bumps(var total: Int, by: Int) -> Int {
 /// slot, and `seen` says the callee also saw it, so an arm that wrote the right
 /// number to the wrong place cannot pass on the second alone.
 export fn callsBumps(a: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   var total = a
   let seen = bumps(var total, 5)
   total * 1000 + seen
@@ -166,7 +191,7 @@ export fn movesY(var p: Point, to: Int) -> Int {
 
 /// A refused caller lending two words of its own frame, one of which is written.
 export fn callsMovesY(a: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   var p = Point(x: a, y: 0)
   let seen = movesY(var p, 9)
   p.x * 1000 + p.y * 10 + seen
@@ -174,7 +199,7 @@ export fn callsMovesY(a: Int) -> Int {
 
 /// Refused — the marker is why — and it writes through the `var` it was lent.
 export fn shows(var total: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   total = total + 1
   total
 }
@@ -193,7 +218,7 @@ export fn lendsToTheVm(a: Int) -> Int {
 /// the frame it opens itself: without a caller above it `lendsToTheVm` would run
 /// on the VM and the crossing under test would not happen.
 export fn callsLendsToTheVm(a: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   lendsToTheVm(a)
 }
 
@@ -211,7 +236,7 @@ export fn descends(n: Int, var total: Int) -> Int {
 /// through an alternating chain of encoded and compiled frames while the stack's
 /// `Vec` reallocates under all of them.
 export fn lowers(n: Int, var total: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   descends(n, var total)
 }
 
@@ -303,7 +328,7 @@ export fn picksALiteral(n: Int) -> String {
 /// A literal that answered a plausible word rather than a reference passes a
 /// comparison and fails here, because a byte length is a read through the address.
 export fn callsPicksALiteral(n: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   picksALiteral(n).byteLength()
 }
 
@@ -314,13 +339,13 @@ export fn callsPicksALiteral(n: Int) -> Int {
 /// callee's frame and wrong in the caller's destination is a string that vanished
 /// at a tier boundary.
 export fn saysALiteral(n: Int) -> String {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   picksALiteral(n)
 }
 
 /// A refused caller, so the measurement is reached across the boundary.
 export fn callsMeasures(s: String) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   measures(s)
 }
 
@@ -346,23 +371,25 @@ export fn allocatesAndKeeps(s: String, n: Int) -> Int {
 /// an **encoded** frame below a compiled one — which is the pair no single-tier
 /// case can be.
 export fn callsAllocatesAndKeeps(s: String, n: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   let also = [n, n, n]
   allocatesAndKeeps(s, n) + also.length()
 }
 
 /// `Vector.push` in a compiled frame: the fast path and the growth one.
 ///
-/// The vector is a **parameter** rather than a local, and that is not a style
-/// choice: `Vector.of` lowers to an `Inst::StoreField`, which nothing lowers, so a
-/// function that made its own vector would be refused and the pushes would run on
-/// the VM. Made by the caller, it is the caller that is refused — which is the
-/// shape every case in this file needs anyway.
+/// The vector is a **parameter** rather than a local: it is the *caller* that
+/// carries this file's `Shared(0).lock(...)` marker and is refused for it, so a
+/// vector this function made itself would still be made in a compiled frame —
+/// `Vector.of` lowers fully now, `Inst::StoreField` included — and the shape below
+/// is kept anyway, because a callee that only receives what its caller already
+/// built is the stronger place to read a growth back from.
 ///
-/// It answers the *counter* and not `v.length()` for the same reason: a `Vector`'s
-/// length is payload word nought of its header, so `length()` is an
-/// `Inst::LoadField` rather than an `Inst::Len` and nothing lowers one yet. The
-/// caller reads the length instead, which is the stronger place to read it from.
+/// It answers the *counter* and not `v.length()`, and that is no longer forced —
+/// `length()` is an `Inst::LoadField` and this arm lowers one now — but the
+/// counter is kept: the caller reading the length back out of the same header
+/// this callee wrote is `callsPushesOnto`'s own assertion, and answering it here
+/// too would make that read redundant rather than load-bearing.
 ///
 /// `counts(0)` is here for the reason it is in every fixture above, and this is
 /// where it was learnt: without it the whole body is a leaf of under sixteen
@@ -388,7 +415,7 @@ export fn pushesOnto(given: Vector<Int>, n: Int) -> Int {
 /// the callee bumped, so the replaced store word is read by this frame and not by
 /// the one that replaced it.
 export fn callsPushesOnto(n: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   var v = Vector.of(7)
   let answered = pushesOnto(v, n)
   var total = 0
@@ -423,7 +450,7 @@ export fn setsAt(given: Vector<Int>, index: Int, value: Int) -> Int {
 /// vector, so a wrong offset or a write that smeared past its own element is
 /// caught by the sum and not only by the answered element.
 export fn callsSetsAt(size: Int, index: Int, value: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   var v = Vector.of(0)
   var i = 1
   while i < size {
@@ -447,7 +474,7 @@ export fn callsSetsAt(size: Int, index: Int, value: Int) -> Int {
 /// vector needs: `Vector.of()` with no elements does not say what it is a
 /// vector of, and `Vector.of(0)` is already one.
 export fn callsSetsOnEmpty(index: Int, value: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   var v = Vector.of(0)
   let popped = v.pop()
   let answered = setsAt(v, index, value)
@@ -470,7 +497,7 @@ export fn setsPointAt(given: Vector<Point>, index: Int, x: Int, y: Int) -> Int {
 /// A refused caller that builds a `Vector<Point>` of `size` elements, sets
 /// one, and reads every element back.
 export fn callsSetsPointAt(size: Int, index: Int, x: Int, y: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   var v = Vector.of(Point(x: 0, y: 1))
   var i = 1
   while i < size {
@@ -488,6 +515,45 @@ export fn callsSetsPointAt(size: Int, index: Int, x: Int, y: Int) -> Int {
     at = at + 1
   }
   answered * 1000000 + v.length() * 1000 + total
+}
+
+/// `Vector.freeze() -> Array<T>`: `Memory::relabel` turning the store into the
+/// array in place, read back through `Array.get` and `Array.length` rather than
+/// through the `Vector` it no longer is.
+///
+/// The vector is built **here** rather than handed in as a parameter: `freeze()`
+/// is a consuming transition, and the checker's uniqueness proof for one only
+/// reaches back across a `var self` receiver of a method in a plain `impl`
+/// block — `cove::unique::not_unique`'s own message — which a plain function
+/// parameter cannot carry. `size` sweeps past the vector's own growth, so the
+/// store `freeze()` relabels sometimes has spare capacity and sometimes none —
+/// `Vector.push`'s doubling means a `size` that is itself a power of two lands
+/// exactly full.
+export fn freezesInto(size: Int) -> Int {
+  var v = Vector.of(0)
+  var i = 1
+  while i < size {
+    v.push(i)
+    i = i + 1
+  }
+  let array = v.freeze()
+  var total = 0
+  var at = 0
+  while at < array.length() {
+    match array.get(at) {
+      Some(x) => total = total + x
+      None => total = total - 1
+    }
+    at = at + 1
+  }
+  total + counts(0)
+}
+
+/// A refused caller, so `freezesInto`'s build-push-freeze-read is reached
+/// across the boundary rather than run in the outermost, always-encoded frame.
+export fn callsFreezesInto(size: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  freezesInto(size)
 }
 
 /// Allocations from a compiled frame that are **kept**, so the heap runs out.
@@ -511,7 +577,7 @@ export fn fillsTheHeap(given: Vector<Array<Int>>, n: Int) -> Int {
 /// A refused caller, so the allocations that exhaust the heap are a compiled
 /// frame\'s.
 export fn callsFillsTheHeap(n: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   var v: Vector<Array<Int>> = Vector.of([0])
   fillsTheHeap(v, n)
 }
@@ -538,7 +604,7 @@ export fn builds(a: String, b: String) -> String {
 
 /// A refused caller, so the whole build is reached across the boundary.
 export fn callsBuilds(a: String, b: String) -> String {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   builds(a, b)
 }
 
@@ -557,13 +623,13 @@ export fn buildsAByte(n: Int) -> String {
 
 /// A refused caller, so the refusal crosses the boundary.
 export fn callsBuildsAByte(n: Int) -> String {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   buildsAByte(n)
 }
 
 /// Refused, and it appends to a builder it was lent.
 export fn addsTo(var out: StringBuilder, text: String) {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   out.append(text)
 }
 
@@ -584,7 +650,7 @@ export fn buildsAcross(a: String, b: String) -> String {
 
 /// A refused caller, so the outermost frame is not the one under test.
 export fn callsBuildsAcross(a: String, b: String) -> String {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   buildsAcross(a, b)
 }
 
@@ -607,7 +673,7 @@ export fn buildsWhileCollecting(s: String, n: Int) -> Int {
 
 /// A refused caller, so the frame the builder lives in is a compiled one.
 export fn callsBuildsWhileCollecting(s: String, n: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   buildsWhileCollecting(s, n)
 }
 
@@ -620,7 +686,7 @@ export fn callsBuildsWhileCollecting(s: String, n: Int) -> Int {
 /// small heap at the same time — and this is the way the differential rows above
 /// already work.
 export fn callsKeepsWhatItStillNeeds(a: String, b: String, n: Int) -> Int {
-  let nothing = Vector.of(0)
+  let nothing = Shared(0).lock(fn(v) { v })
   keepsWhatItStillNeeds(a, b, n)
 }
 ";
@@ -2001,6 +2067,61 @@ fn a_set_of_a_two_word_element_writes_the_whole_element() {
         assert!(
             both.tiers.vm_to_native >= 1,
             "index {index}: {:?}",
+            both.tiers
+        );
+    }
+}
+
+/// **A struct captured by a closure, read back inside the closure's own
+/// compiled body.**
+///
+/// `capturesAPoint` itself is refused — it contains a `FuncRef`, which nothing
+/// in this crate lowers, the same as every closure-forming function in this
+/// file — but the closure it builds is not, and `capturesAPoint` needs no
+/// marker of its own for that reason: it is already the outermost frame's
+/// refusal, `allocates`'s shape. What crosses at `f()` is a `Shape::Closure`
+/// object's own captured payload, read by an `Inst::LoadField` `cove-native`'s
+/// own suite never drives through a real, checked program.
+#[test]
+fn a_field_read_by_a_closures_own_body_agrees_with_the_vm() {
+    for (x, y) in [(3i64, 4i64), (0, 0), (-5, 12)] {
+        let both = both("capturesAPoint", vec![Value::int(x), Value::int(y)]);
+        assert_eq!(both.vm, Ok((x * 1000 + y).to_string()), "x={x} y={y}");
+        assert_eq!(
+            both.native, both.vm,
+            "x={x} y={y}: the closure's own compiled body reads its capture the \
+             same way the VM does"
+        );
+        assert!(
+            both.tiers.vm_to_native >= 1,
+            "x={x} y={y}: the closure body ran natively: {:?}",
+            both.tiers
+        );
+    }
+}
+
+/// **`Vector.freeze()` from compiled code: the store relabelled in place, and
+/// read back through the array it became.**
+///
+/// `size` sweeps past `Vector.push`'s own doubling — `MIN_CAPACITY`, then one
+/// past it, then a power of two — so the freeze this drives sometimes finds
+/// spare capacity in the store and sometimes finds none, and `array.get`/
+/// `array.length` read every element back through the layout `relabel` wrote
+/// rather than through the `Vector` header that named it before.
+#[test]
+fn a_freeze_from_compiled_code_answers_the_same_elements() {
+    on_each_tier(&["freezesInto"], &["callsFreezesInto"]);
+    for size in [1i64, 2, 3, 4, 5, 8, 9] {
+        let expected: i64 = (1..size).sum();
+        let both = both("callsFreezesInto", vec![Value::int(size)]);
+        assert_eq!(both.vm, Ok(expected.to_string()), "size {size}");
+        assert_eq!(
+            both.native, both.vm,
+            "size {size}: compiled `freeze` agrees with the VM"
+        );
+        assert!(
+            both.tiers.vm_to_native >= 1,
+            "size {size}: {:?}",
             both.tiers
         );
     }

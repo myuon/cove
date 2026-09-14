@@ -43,6 +43,7 @@ use crate::Unavailable;
 const OFF_WORDS: i32 = offset_of!(NativeCtx, words) as i32;
 const OFF_CHUNKS: i32 = offset_of!(NativeCtx, chunks) as i32;
 const OFF_LITERALS: i32 = offset_of!(NativeCtx, literals) as i32;
+const OFF_FIXED_PAYLOAD_WORDS: i32 = offset_of!(NativeCtx, fixed_payload_words) as i32;
 const OFF_STACK_ORIGIN: i32 = offset_of!(NativeCtx, stack_origin) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
 const OFF_RAISE_CODE: i32 = offset_of!(NativeCtx, raise_code) as i32;
@@ -239,6 +240,8 @@ struct Helpers {
     alloc: usize,
     builtin: usize,
     buffer: usize,
+    field_load: usize,
+    field_store: usize,
 }
 
 impl Jit {
@@ -263,6 +266,8 @@ impl Jit {
                 alloc: helpers.alloc as usize,
                 builtin: helpers.builtin as usize,
                 buffer: helpers.buffer as usize,
+                field_load: helpers.field_load as usize,
+                field_store: helpers.field_store as usize,
             },
             code: Vec::new(),
             finalized: false,
@@ -366,6 +371,8 @@ struct Emit<'a> {
     alloc: usize,
     builtin: usize,
     buffer: usize,
+    field_load: usize,
+    field_store: usize,
     /// Whether a compiled callee is reached by emitted code. See [`Jit::direct`].
     direct: bool,
     /// Which IR instruction is being emitted.
@@ -404,6 +411,8 @@ impl<'a> Emit<'a> {
             alloc: helpers.alloc,
             builtin: helpers.builtin,
             buffer: helpers.buffer,
+            field_load: helpers.field_load,
+            field_store: helpers.field_store,
             direct,
             pc: 0,
             code: Vec::new(),
@@ -537,6 +546,22 @@ impl<'a> Emit<'a> {
             }
             Inst::Store { addr, src, layout } => {
                 self.store_through(*addr, *src, self.program.layout(*layout).width());
+            }
+            Inst::LoadField {
+                dst,
+                obj,
+                at,
+                layout,
+            } => {
+                self.load_field(*dst, *obj, *at, self.program.layout(*layout).width());
+            }
+            Inst::StoreField {
+                obj,
+                at,
+                src,
+                layout,
+            } => {
+                self.store_field(*obj, *at, *src, self.program.layout(*layout).width());
             }
             // `encoded.rs`'s `NOT` arm tests the whole *word* against zero, not
             // the low byte, so that is what is tested here.
@@ -701,6 +726,15 @@ impl<'a> Emit<'a> {
                         dst, recv, vector, index, value, stride, width, some_case, some_at,
                         none_case, builtin, args,
                     ),
+                    Some(Method::Freeze {
+                        dst,
+                        recv,
+                        vector,
+                        stride,
+                        array,
+                        builtin,
+                        args,
+                    }) => self.vector_freeze(dst, recv, vector, stride, array, builtin, args),
                     None => unreachable!("`supported` admitted a builtin no arm lowers"),
                 }
             }
@@ -1229,6 +1263,141 @@ impl<'a> Emit<'a> {
         self.frame_live = false;
     }
 
+    /// `vm::builtins::seq::vector_freeze`: `Memory::relabel` turning the store
+    /// into the `Array<T>` it already holds, in place, and the two words of the
+    /// `Vector` header that mark it frozen.
+    ///
+    /// See [`Method::Freeze`](crate::subset::Method::Freeze) for which
+    /// preconditions are emitted and which go to
+    /// [`BuiltinFn`](crate::abi::BuiltinFn) — [`Emit::vector_push`]'s own two —
+    /// and for why there is no *third* cold half: `relabel` is O(1) whatever
+    /// `len` and `capacity` are, so once both preconditions hold, every
+    /// remaining step is unconditional.
+    ///
+    /// **`recv`'s address is reloaded from the frame wherever it is needed**
+    /// rather than kept live across the run, which is this arm having three
+    /// scratch registers and more than three addresses to have used —
+    /// `header`, `store`, and the two write targets `heap_ptr` forms from them.
+    /// Nothing between the two precondition checks and the end can raise or
+    /// call, so reloading costs a few bytes of code and never a wrong answer:
+    /// nothing in the heap moves underneath it.
+    ///
+    /// `spare` is computed as `capacity * stride - len * stride` rather than
+    /// as `(capacity - len) * stride`, which is the same number
+    /// `Machine::relabel`'s wrapper computes and one fewer register in the
+    /// middle of it.
+    #[allow(clippy::too_many_arguments)]
+    fn vector_freeze(
+        &mut self,
+        dst: Slot,
+        recv: Slot,
+        vector: LayoutId,
+        stride: u32,
+        array: LayoutId,
+        builtin: u32,
+        args: u32,
+    ) {
+        let cold = self.label();
+        let after_spare = self.label();
+        let done = self.label();
+
+        self.load_slot(RAX, recv);
+        // `vector()`'s `if addr == 0 { null_value() }`, which is the one
+        // refusal of this builtin a program reaches and this crate can name.
+        self.refuse_null(RAX);
+
+        // `machine.object_layout(addr)`: the header's high half.
+        self.mov_rr(RDX, RAX);
+        self.heap_word(RDX);
+        self.shr_imm8(RDX, 32);
+        self.cmp_imm32(RDX, vector.0 as i32);
+        self.jcc(CC_NE, Target::Label(cold));
+
+        // `machine.payload(addr, 1)`: the store. A second `freeze()` leaves
+        // nought here.
+        self.mov_rr(RCX, RAX);
+        self.add_imm32(RCX, 2);
+        self.heap_word(RCX);
+        self.test_rr(RCX, RCX);
+        self.jcc(CC_E, Target::Label(cold));
+
+        // `items.len` and `items.capacity`, `Emit::vector_push`'s own reads.
+        self.load_slot(RDX, recv);
+        self.add_imm32(RDX, 1);
+        self.heap_word(RDX);
+        self.mov_rr32(RDX, RDX); // RDX = len
+        self.load_slot(RCX, recv);
+        self.add_imm32(RCX, 2);
+        self.heap_word(RCX);
+        self.object_len(RCX); // RCX = capacity
+
+        // `payload = len * stride`, and `spare = capacity * stride - payload`
+        // — this method's own note on why it is not `(capacity - len) * stride`.
+        self.mov_imm64(RAX, i64::from(stride));
+        self.imul_rr(RDX, RAX); // RDX = payload
+        self.imul_rr(RCX, RAX); // RCX = capacity * stride
+        self.sub_rr(RCX, RDX); // RCX = spare (words)
+        self.push(RCX); // [spare]
+        self.push(RDX); // [spare, payload]
+
+        // `len`, once more, to build the new header word: `(array << 32) |
+        // len` — the array's bits and the length's do not overlap, so the OR
+        // `mem::header` performs is an add.
+        self.load_slot(RAX, recv);
+        self.add_imm32(RAX, 1);
+        self.heap_word(RAX);
+        self.mov_rr32(RAX, RAX); // RAX = len
+        self.mov_imm64(RCX, i64::from(array.0));
+        self.shl_imm8(RCX, 32);
+        self.add_rr(RCX, RAX); // RCX = new header word
+
+        // `self.write(addr, header(layout, len))`, and the answer — `dst =
+        // store` — read off the same address before it is spent on the write.
+        self.load_slot(RDX, recv);
+        self.add_imm32(RDX, 2);
+        self.heap_word(RDX); // RDX = store
+        self.store_slot(dst, RDX);
+        self.heap_ptr(RDX);
+        self.store(HEAP_TABLE, 0, RCX);
+
+        // `if spare > 0 { self.write(addr + 1 + payload, header(FREE, spare -
+        // 1)) }`. `RDX` is still `store`: `heap_ptr` and `store` above read it
+        // and neither writes it.
+        self.pop(RCX); // RCX = payload ; [spare]
+        self.add_rr(RDX, RCX);
+        self.add_imm32(RDX, 1); // RDX = store + 1 + payload
+        self.pop(RCX); // RCX = spare ; []
+        self.test_rr(RCX, RCX);
+        self.jcc(CC_E, Target::Label(after_spare));
+        // `LayoutId::FREE` is `0`, so that header word is `spare - 1` alone.
+        self.add_imm32(RCX, -1);
+        self.heap_ptr(RDX);
+        self.store(HEAP_TABLE, 0, RCX);
+        self.bind(after_spare);
+
+        // `machine.set_payload(items.header, 0, 0)` and `(items.header, 1,
+        // 0)`: the `Vector`'s own two words, cleared — `freeze()`'s mark, the
+        // same nought `vector()` refuses a later push or set against.
+        self.load_slot(RAX, recv);
+        self.xor_rr(RCX, RCX);
+        self.mov_rr(RDX, RAX);
+        self.add_imm32(RDX, 1);
+        self.heap_ptr(RDX);
+        self.store(HEAP_TABLE, 0, RCX);
+        self.mov_rr(RDX, RAX);
+        self.add_imm32(RDX, 2);
+        self.heap_ptr(RDX);
+        self.store(HEAP_TABLE, 0, RCX);
+        self.jmp(Target::Label(done));
+
+        self.bind(cold);
+        self.builtin_call(dst, builtin, args);
+        self.bind(done);
+        // One predecessor of this join came through a helper, so the frame
+        // pointer the other one derived is not to be trusted here.
+        self.frame_live = false;
+    }
+
     /// One case of an `Option<T>` answer into `dst`: `width` words, zeroed
     /// first and then the tag written over word zero.
     ///
@@ -1465,6 +1634,128 @@ impl<'a> Emit<'a> {
         self.shr_cl(RDX);
         self.and_imm32(RDX, 0xFF);
         self.store_slot(dst, RDX);
+    }
+
+    /// `NativeCtx::fixed_payload_words[layout]`, where `layout` is `reg`'s
+    /// header's high half on entry — `0` for a variable-payload shape.
+    ///
+    /// `reg` holds the object's linear address on entry and the table's answer
+    /// on exit; it must not be `RCX`, which this uses as scratch for the table
+    /// pointer — deliberately not `RAX`, so that a caller keeping the address
+    /// alive in `RAX` across this call still has it afterwards.
+    fn fixed_payload_words(&mut self, reg: u8) {
+        debug_assert!(
+            reg != RCX,
+            "`RCX` is this method's own scratch for the table pointer"
+        );
+        self.heap_word(reg);
+        self.shr_imm8(reg, 32);
+        // Four bytes per `u32` entry, not eight: this table is not `chunks` or
+        // `literals`.
+        self.shl_imm8(reg, 2);
+        // `RCX`, not `RAX`: every caller keeps the object's address in `RAX`
+        // across this call, for the fast-path copy or for `Emit::field_call`
+        // afterwards, and clobbering it here would lose it.
+        self.load(RCX, CTX, OFF_FIXED_PAYLOAD_WORDS);
+        self.add_rr(reg, RCX);
+        self.load32(reg, reg, 0);
+    }
+
+    /// `encoded.rs`'s `LOAD_FIELD` arm: `Machine::checked` and a copy of `width`
+    /// words out of the object's payload — with the bound answered in emitted
+    /// code wherever [`Emit::fixed_payload_words`] can answer it.
+    ///
+    /// `at` and `width` are compile-time constants, so this is one `cmp` against
+    /// an immediate — `Machine::checked`'s `at + width > words` turned around —
+    /// rather than a run-time addition. A `0` table entry is below any non-zero
+    /// `at + width`, which is what sends a variable-payload object to
+    /// [`Emit::field_call`]'s helper without this arm ever asking which shape it
+    /// is.
+    fn load_field(&mut self, dst: Slot, obj: Slot, at: u32, width: u32) {
+        let cold = self.label();
+        let done = self.label();
+
+        self.load_slot(RAX, obj);
+        self.refuse_null(RAX);
+
+        self.mov_rr(RDX, RAX);
+        self.fixed_payload_words(RDX);
+        self.cmp_imm32(RDX, (at + width) as i32);
+        self.jcc(CC_B, Target::Label(cold));
+
+        for word in 0..width {
+            self.mov_rr(RDX, RAX);
+            self.add_imm32(RDX, (1 + at + word) as i32);
+            self.heap_word(RDX);
+            self.store_slot(dst + word, RDX);
+        }
+        self.jmp(Target::Label(done));
+
+        self.bind(cold);
+        self.field_call(self.field_load, at, width, dst);
+        self.bind(done);
+        self.frame_live = false;
+    }
+
+    /// [`Emit::load_field`], the other direction: `encoded.rs`'s `STORE_FIELD`
+    /// arm.
+    fn store_field(&mut self, obj: Slot, at: u32, src: Slot, width: u32) {
+        let cold = self.label();
+        let done = self.label();
+
+        self.load_slot(RAX, obj);
+        self.refuse_null(RAX);
+
+        self.mov_rr(RDX, RAX);
+        self.fixed_payload_words(RDX);
+        self.cmp_imm32(RDX, (at + width) as i32);
+        self.jcc(CC_B, Target::Label(cold));
+
+        for word in 0..width {
+            self.load_slot(RDX, src + word);
+            self.mov_rr(RCX, RAX);
+            self.add_imm32(RCX, (1 + at + word) as i32);
+            self.heap_ptr(RCX);
+            self.store(HEAP_TABLE, 0, RDX);
+        }
+        self.jmp(Target::Label(done));
+
+        self.bind(cold);
+        self.field_call(self.field_store, at, width, src);
+        self.bind(done);
+        self.frame_live = false;
+    }
+
+    /// One [`crate::abi::FieldLoadFn`]/[`crate::abi::FieldStoreFn`] call, handed
+    /// to the runtime whole. [`Emit::builtin_call`]'s shape, with no safepoint
+    /// discipline around it — neither helper can allocate, so there is no unpaid
+    /// work to publish.
+    ///
+    /// `RAX` must hold the object's linear address on entry — every caller's
+    /// fast-path check leaves it there — and `slot` is the frame slot the words
+    /// are copied to or from. `Emit::frame_addr` forms that address into `R9`
+    /// **before** `RDI`/`RSI` are clobbered, because it is itself built out of
+    /// the heap scratch trio; and `RAX` moves into `RDX` before `RAX` is spent on
+    /// the callee's own address, because both name the same register.
+    fn field_call(&mut self, target: usize, at: u32, width: u32, slot: u32) {
+        self.frame_addr(R9);
+        self.add_imm32(R9, slot as i32);
+        self.mov_rr(RDX, RAX);
+        self.mov_rr(RDI, CTX);
+        self.mov_imm32(RSI, self.pc as i32);
+        self.mov_imm32(RCX, at as i32);
+        self.mov_imm32(R8, width as i32);
+        self.mov_imm64(RAX, target as i64);
+        self.call(RAX);
+
+        // Anything but `Returned` leaves, and leaves with that outcome: the helper
+        // has already written every field it needs.
+        let on = self.label();
+        self.test_rr32(RAX, RAX);
+        self.jcc(CC_E, Target::Label(on));
+        self.leave_answered();
+        self.bind(on);
+        self.frame_live = false;
     }
 
     /// ADR 0001's field-wise shallow copy, which `encoded.rs`'s `COPY` arm
@@ -2027,6 +2318,15 @@ impl<'a> Emit<'a> {
     /// `mov r64, [base + disp]`
     fn load(&mut self, dst: u8, base: u8, disp: i32) {
         self.rex(true, dst, base);
+        self.byte(0x8b);
+        self.modrm_mem(dst, base, disp);
+    }
+
+    /// `mov r32, [base + disp]`, which zeroes the upper half of `dst` — the
+    /// zero-extending load a table of `u32` entries needs, [`Emit::object_len`]'s
+    /// `mov_rr32` in memory-operand form.
+    fn load32(&mut self, dst: u8, base: u8, disp: i32) {
+        self.rex(false, dst, base);
         self.byte(0x8b);
         self.modrm_mem(dst, base, disp);
     }

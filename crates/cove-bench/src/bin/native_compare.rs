@@ -661,6 +661,41 @@ unsafe extern "C" fn no_buffer(
     cove_native::Outcome::Raised.abi()
 }
 
+/// The field-access helpers, for a scenario that loads and stores no field.
+/// See [`no_call`].
+///
+/// # Safety
+///
+/// Reads nothing through any of its arguments.
+#[cfg(any(feature = "cranelift", feature = "template"))]
+unsafe extern "C" fn no_field_load(
+    _ctx: *mut cove_native::NativeCtx,
+    _pc: u32,
+    _addr: u64,
+    _at: u32,
+    _width: u32,
+    _into: u64,
+) -> u32 {
+    cove_native::Outcome::Raised.abi()
+}
+
+/// [`no_field_load`], the other direction.
+///
+/// # Safety
+///
+/// Reads nothing through any of its arguments.
+#[cfg(any(feature = "cranelift", feature = "template"))]
+unsafe extern "C" fn no_field_store(
+    _ctx: *mut cove_native::NativeCtx,
+    _pc: u32,
+    _addr: u64,
+    _at: u32,
+    _width: u32,
+    _from: u64,
+) -> u32 {
+    cove_native::Outcome::Raised.abi()
+}
+
 #[cfg(any(feature = "cranelift", feature = "template"))]
 fn helpers() -> cove_native::NativeHelpers {
     cove_native::NativeHelpers {
@@ -671,6 +706,8 @@ fn helpers() -> cove_native::NativeHelpers {
         alloc: no_alloc,
         builtin: no_builtin,
         buffer: no_buffer,
+        field_load: no_field_load,
+        field_store: no_field_store,
     }
 }
 

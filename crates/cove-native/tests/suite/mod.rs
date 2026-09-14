@@ -478,6 +478,142 @@ pub fn built_answers(outcomes: &[Outcome]) {
         .with(|held| *held.borrow_mut() = outcomes.iter().map(|outcome| outcome.abi()).collect());
 }
 
+// --- the field-access cold path ------------------------------------------------
+
+/// One field access compiled code handed back through
+/// [`FieldLoadFn`](cove_native::FieldLoadFn)/[`FieldStoreFn`](cove_native::FieldStoreFn).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fielded {
+    pub pc: u32,
+    pub addr: u64,
+    pub at: u32,
+    pub width: u32,
+    /// `into` for a load, `from` for a store — both linear addresses.
+    pub other: u64,
+}
+
+thread_local! {
+    /// Every field access this thread's compiled code handed to the runtime, in
+    /// order.
+    pub static FIELDED: RefCell<Vec<Fielded>> = const { RefCell::new(Vec::new()) };
+    /// What the next one answers, taken from the front.
+    pub static FIELDED_ANSWERS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The heap word at linear address `addr`, as [`alloc`]'s own chunk arithmetic.
+///
+/// # Safety
+///
+/// `ctx.chunks` is the table of a [`Heap`] with a chunk committed at `addr`.
+unsafe fn heap_word_ptr(ctx: *mut NativeCtx, addr: u64) -> *mut u64 {
+    let index = addr - HEAP_ORIGIN_WORDS;
+    let chunk = *(*ctx).chunks.add((index >> HEAP_CHUNK_SHIFT) as usize);
+    chunk.add((index & (HEAP_CHUNK_WORDS - 1)) as usize)
+}
+
+/// The stack word at linear address `addr`: [`NativeCtx::words`] and
+/// [`NativeCtx::stack_origin`], the way every stack address in this suite
+/// resolves one.
+///
+/// # Safety
+///
+/// `addr` is inside the segment `ctx.words` was given.
+unsafe fn stack_word_ptr(ctx: *mut NativeCtx, addr: u64) -> *mut u64 {
+    (*ctx).words.add((addr - (*ctx).stack_origin) as usize)
+}
+
+/// The runtime's field-load helper, as a test double.
+///
+/// A real one is `Machine::checked` and a copy; this one records the hand-over
+/// and writes a recognizable word per word of the answer — `addr * 1000 + at *
+/// 10 + word`, a number no other part of a frame holds — into `into`, exactly
+/// as [`builtin`] writes one recognizable word into `dst`.
+///
+/// # Safety
+///
+/// `into` is `width` words of the segment `ctx.words` was given.
+unsafe extern "C" fn field_load(
+    ctx: *mut NativeCtx,
+    pc: u32,
+    addr: u64,
+    at: u32,
+    width: u32,
+    into: u64,
+) -> u32 {
+    FIELDED.with(|held| {
+        held.borrow_mut().push(Fielded {
+            pc,
+            addr,
+            at,
+            width,
+            other: into,
+        })
+    });
+    let answer = FIELDED_ANSWERS.with(|held| {
+        let mut held = held.borrow_mut();
+        (!held.is_empty()).then(|| held.remove(0))
+    });
+    match answer {
+        Some(outcome) if outcome != Outcome::Returned.abi() => outcome,
+        _ => {
+            for word in 0..u64::from(width) {
+                let value = addr * 1000 + u64::from(at) * 10 + word;
+                stack_word_ptr(ctx, into + word).write(value);
+            }
+            Outcome::Returned.abi()
+        }
+    }
+}
+
+/// [`field_load`], the other direction. A real store has no answer to leave —
+/// the runtime only reads what compiled code already wrote — so this records
+/// the hand-over and nothing more.
+///
+/// # Safety
+///
+/// As [`field_load`].
+unsafe extern "C" fn field_store(
+    _ctx: *mut NativeCtx,
+    pc: u32,
+    addr: u64,
+    at: u32,
+    width: u32,
+    from: u64,
+) -> u32 {
+    FIELDED.with(|held| {
+        held.borrow_mut().push(Fielded {
+            pc,
+            addr,
+            at,
+            width,
+            other: from,
+        })
+    });
+    let answer = FIELDED_ANSWERS.with(|held| {
+        let mut held = held.borrow_mut();
+        (!held.is_empty()).then(|| held.remove(0))
+    });
+    match answer {
+        Some(outcome) if outcome != Outcome::Returned.abi() => outcome,
+        _ => Outcome::Returned.abi(),
+    }
+}
+
+pub fn fielded() -> Vec<Fielded> {
+    FIELDED.with(|held| held.borrow().clone())
+}
+
+pub fn forget_fielded() {
+    FIELDED.with(|held| held.borrow_mut().clear());
+    FIELDED_ANSWERS.with(|held| held.borrow_mut().clear());
+}
+
+/// Scripts what the next field accesses answer.
+pub fn fielded_answers(outcomes: &[Outcome]) {
+    FIELDED_ANSWERS
+        .with(|held| *held.borrow_mut() = outcomes.iter().map(|outcome| outcome.abi()).collect());
+}
+
 pub fn helpers() -> NativeHelpers {
     NativeHelpers {
         safepoint,
@@ -487,6 +623,8 @@ pub fn helpers() -> NativeHelpers {
         alloc,
         builtin,
         buffer,
+        field_load,
+        field_store,
     }
 }
 
@@ -616,6 +754,22 @@ pub const OPTION_PAIR: LayoutId = LayoutId(16);
 /// parameter is an ordinary slot holding a linear word index.
 pub const ADDR: LayoutId = LayoutId(11);
 
+/// `Any`: one reference to a [`Shape::Boxed`](cove_ir::Shape::Boxed) object,
+/// whose payload width is `1 + len` — a run-time fact of the object's own
+/// header, so `Layout::fixed_payload_words` answers `None` for it and
+/// [`NativeCtx::fixed_payload_words`]'s table holds `0` at this index. It is
+/// the one variable-payload shape a field-access case needs, because it is the
+/// one the corpus this slice was widened by actually reaches.
+pub const BOXED: LayoutId = LayoutId(17);
+
+/// `Array<Int>`: a [`Shape::Elements`](cove_ir::Shape::Elements) that is not
+/// growable — what `Vector<Int>.freeze()` answers, and what
+/// `subset::method_of`'s `("Vector", "freeze")` arm has to find in the
+/// program's own layout table to admit the call at all.
+pub const ARRAY_INT: LayoutId = LayoutId(18);
+/// `Array<Pair>`, the stride-two case of [`ARRAY_INT`].
+pub const ARRAY_PAIR: LayoutId = LayoutId(19);
+
 pub fn span() -> Span {
     Span::new(FileId(0), 0, 0)
 }
@@ -711,6 +865,21 @@ pub fn program(function: Function) -> Program {
             words,
         ));
     }
+    layouts.push(Layout::object("Any", cove_ir::Shape::Boxed));
+    layouts.push(Layout::object(
+        "Array",
+        cove_ir::Shape::Elements {
+            elem: INT,
+            growable: false,
+        },
+    ));
+    layouts.push(Layout::object(
+        "Array",
+        cove_ir::Shape::Elements {
+            elem: PAIR,
+            growable: false,
+        },
+    ));
     Program {
         functions: vec![function],
         layouts,
@@ -931,6 +1100,37 @@ pub fn run_with_literals<A: Arm>(
     enter_with_literals(&jit, compiled, words, base, heap.table(), literals)
 }
 
+/// [`run_over`], with `NativeCtx::fixed_payload_words` published from
+/// `program`'s own layouts — `Layout::fixed_payload_words`, one per layout,
+/// computed the way `Machine::for_run` computes it, so a field-access case
+/// does not write the table out by hand.
+pub fn run_with_fields<A: Arm>(
+    program: &Program,
+    words: &mut [u64],
+    base: u64,
+    heap: &Heap,
+) -> Answer {
+    let mut jit = A::new(helpers());
+    let compiled = jit
+        .compile(program, FunctionId(0))
+        .expect("the function is inside the slice");
+    jit.finalize();
+    let payload_words: Vec<u32> = program
+        .layouts
+        .iter()
+        .map(|layout| layout.fixed_payload_words(&program.layouts).unwrap_or(0))
+        .collect();
+    enter_with_tables(
+        &jit,
+        compiled,
+        words,
+        base,
+        heap.table(),
+        &[],
+        &payload_words,
+    )
+}
+
 pub fn enter<A: Arm>(jit: &A, compiled: A::Handle, words: &mut [u64], base: u64) -> Answer {
     enter_over(jit, compiled, words, base, std::ptr::null())
 }
@@ -967,6 +1167,23 @@ pub fn enter_with_literals<A: Arm>(
     chunks: *const *mut u64,
     literals: &[u64],
 ) -> Answer {
+    enter_with_tables::<A>(jit, compiled, words, base, chunks, literals, &[])
+}
+
+/// [`enter_with_literals`], with `NativeCtx::fixed_payload_words` published too.
+///
+/// An empty `payload_words` publishes a null table — [`enter_with_literals`]'s
+/// rule for `literals`, and safe for the same reason: a program with no
+/// `Inst::LoadField`/`Inst::StoreField` never reads it.
+pub fn enter_with_tables<A: Arm>(
+    jit: &A,
+    compiled: A::Handle,
+    words: &mut [u64],
+    base: u64,
+    chunks: *const *mut u64,
+    literals: &[u64],
+    payload_words: &[u32],
+) -> Answer {
     let mut held: Vec<u64> = words.to_vec();
     let guard = held.len() as u64;
     held.extend([UNWRITTEN; DESTINATION_WORDS + 1]);
@@ -975,6 +1192,10 @@ pub fn enter_with_literals<A: Arm>(
         .over_literals(match literals.is_empty() {
             true => std::ptr::null(),
             false => literals.as_ptr(),
+        })
+        .over_payload_words(match payload_words.is_empty() {
+            true => std::ptr::null(),
+            false => payload_words.as_ptr(),
         });
     let entry = jit.entry(compiled);
     // Safety: `ctx.words` is `held`, `base` indexes into it, the functions below
@@ -3015,6 +3236,173 @@ pub fn a_push_refuses_a_null_receiver<A: Arm>() {
     forget_mediated();
 }
 
+// --- Vector.freeze ---------------------------------------------------------
+
+/// One `Vector.freeze() -> Array<T>`, answering into `dst`.
+pub fn freezing(vector: LayoutId) -> Program {
+    program_with_builtin(
+        function(
+            vec![Repr::Ref, Repr::Ref],
+            REF,
+            vec![
+                Inst::CallBuiltin {
+                    dst: 1,
+                    builtin: BuiltinId(0),
+                    args: ArgsId(1),
+                },
+                Inst::Return { src: 1 },
+            ],
+        ),
+        "Vector",
+        "freeze",
+        REF,
+        vec![Arg {
+            slot: 0,
+            layout: vector,
+        }],
+    )
+}
+
+/// `vm::builtins::seq::vector_freeze`: `Memory::relabel` turning the store
+/// into the `Array<T>` it already holds, in place — nothing handed to the
+/// runtime, the answer aliases the store, and the elements read back exactly
+/// as a `Vector.get` would have answered them.
+///
+/// Four shapes of vector, each named by what it says about the lowering:
+/// spare capacity, so the free block is written; exactly full, so `spare ==
+/// 0` and it is not; empty; and a two-word element, the stride case
+/// `Emit::vector_push`'s own note explains.
+pub fn a_freeze_relabels_the_store_in_place<A: Arm>() {
+    let cases: [(LayoutId, LayoutId, u32, u32, u32); 4] = [
+        (VECTOR, ARRAY_INT, 1, 2, 5),
+        (VECTOR, ARRAY_INT, 1, 4, 4),
+        (VECTOR, ARRAY_INT, 1, 0, 3),
+        (PAIR_VECTOR, ARRAY_PAIR, 2, 2, 3),
+    ];
+    for (vector, array, stride, len, capacity) in cases {
+        forget_mediated();
+        let held = freezing(vector);
+        let at = HEAP_CHUNK_WORDS + 33;
+        let mut heap = Heap::new(2);
+        let header = a_vector(&mut heap, at, vector, len, capacity);
+        let store = heap.addr(at + 8);
+        for word in 0..(len * stride) {
+            heap.set(at + 8 + 1 + u64::from(word), 900 + u64::from(word));
+        }
+        let mut words = vec![header, UNWRITTEN];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(
+            answer.outcome,
+            Outcome::Returned,
+            "{len}/{capacity} at stride {stride}"
+        );
+        assert!(
+            mediated().is_empty(),
+            "relabel is O(1) and has no cold half: {:?}",
+            mediated()
+        );
+
+        assert_eq!(
+            words[1], store,
+            "the answer aliases the store: `relabel` moves nothing"
+        );
+
+        let expect_header = (u64::from(array.0) << 32) | u64::from(len);
+        assert_eq!(
+            heap.get(at + 8),
+            expect_header,
+            "the store's own header now names the array and its length"
+        );
+
+        for word in 0..(len * stride) {
+            assert_eq!(
+                heap.get(at + 8 + 1 + u64::from(word)),
+                900 + u64::from(word),
+                "element word {word} reads back through the array exactly as \
+                 it did through the vector"
+            );
+        }
+
+        let spare = (capacity - len) * stride;
+        if spare > 0 {
+            assert_eq!(
+                heap.get(at + 8 + 1 + u64::from(len * stride)),
+                u64::from(spare - 1),
+                "a free block of `spare - 1` payload words, layout `FREE` (0)"
+            );
+        }
+
+        assert_eq!(heap.get(at + 1), 0, "the vector's own length word, cleared");
+        assert_eq!(heap.get(at + 2), 0, "the vector's own store word, cleared");
+    }
+    forget_mediated();
+}
+
+/// The two cold paths of `Vector.freeze`, each handed to the runtime whole.
+///
+/// A store word of nought — a second `freeze()` — and a receiver whose object
+/// is not the layout the call site declared: [`Method::Freeze`]'s own two,
+/// [`Method::Push`]'s reasons exactly. Each message names a rendered `Value`
+/// or the method, which this crate cannot build, so the assertion is that
+/// emitted code **did not try**.
+pub fn every_cold_path_of_a_freeze_goes_to_the_runtime<A: Arm>() {
+    let at = HEAP_CHUNK_WORDS + 33;
+    let rows: [(&str, Build); 2] = [
+        ("`freeze()` consumed the store already", |heap, at| {
+            let header = a_vector(heap, at, VECTOR, 0, 4);
+            heap.set(at + 2, 0);
+            header
+        }),
+        (
+            "the object is not the layout the call site declared",
+            |heap, at| a_vector(heap, at, PAIR_VECTOR, 0, 4),
+        ),
+    ];
+    for (why, build) in rows {
+        forget_mediated();
+        let held = freezing(VECTOR);
+        let mut heap = Heap::new(2);
+        let header = build(&mut heap, at);
+        let mut words = vec![header, UNWRITTEN];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "{why}");
+        assert_eq!(
+            mediated(),
+            vec![Mediated {
+                base: 0,
+                pc: 0,
+                dst: 1,
+                builtin: 0,
+                args: 1,
+                // A builtin is a safepoint, so the block's static work — two
+                // instructions — went over with the hand-over.
+                work: 2,
+            }],
+            "{why}: the runtime was handed the builtin, whole"
+        );
+        assert_eq!(words[1], 1, "{why}: the runtime's answer, in `dst`");
+    }
+    forget_mediated();
+}
+
+/// `Machine::checked`'s null refusal — no, `vector()`'s, [`Method::Push`]'s
+/// own note on which one refusal this builtin's family answers itself.
+pub fn a_freeze_refuses_a_null_receiver<A: Arm>() {
+    forget_mediated();
+    let held = freezing(VECTOR);
+    let heap = Heap::new(2);
+    let mut words = vec![0u64, UNWRITTEN];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Raised);
+    assert_eq!(answer.raise, Some(Raise::NullObject));
+    assert_eq!(answer.raise_pc, 0);
+    assert!(
+        mediated().is_empty(),
+        "the null was refused here, not handed over"
+    );
+    forget_mediated();
+}
+
 // --- Vector.set ----------------------------------------------------------------
 
 /// One `Vector.set(index, value) -> Option<T>` of a `stride`-wide element,
@@ -3443,6 +3831,197 @@ pub fn a_byte_at_reads_one_byte_and_bounds_it<A: Arm>() {
         assert_eq!(answer.raise_a, offset);
         assert_eq!(answer.raise_b, 10, "the length, not the last legal offset");
     }
+}
+
+/// `encoded.rs`'s `LOAD_FIELD` and `STORE_FIELD` arms (lines 1451/1464), for a
+/// *fixed*-payload object.
+///
+/// `Struct` is one of `NativeCtx::fixed_payload_words`'s `Some` shapes, so
+/// `PAIR`'s two words are answered from the table in one load and neither
+/// direction ever reaches [`fielded`] — which is the assertion that matters
+/// most here, because the whole point of the table is that a fixed shape never
+/// leaves compiled code. The third case reads and writes both of `PAIR`'s
+/// words in one field, which is [`Inst::Copy`]'s bound on a family that shares
+/// nothing else with it.
+pub fn a_field_access_reads_and_writes_a_fixed_object<A: Arm>() {
+    forget_fielded();
+    let held = program(function(
+        vec![Repr::Ref, Repr::Int, Repr::Int, Repr::Int, Repr::Int],
+        INT,
+        vec![
+            Inst::StoreField {
+                obj: 0,
+                at: 0,
+                src: 1,
+                layout: INT,
+            },
+            Inst::StoreField {
+                obj: 0,
+                at: 1,
+                src: 2,
+                layout: INT,
+            },
+            Inst::LoadField {
+                dst: 3,
+                obj: 0,
+                at: 0,
+                layout: INT,
+            },
+            Inst::LoadField {
+                dst: 4,
+                obj: 0,
+                at: 1,
+                layout: INT,
+            },
+            Inst::Return { src: 3 },
+        ],
+    ));
+    let mut heap = Heap::new(1);
+    let addr = heap.object(1, PAIR, 0);
+    let mut words = vec![addr, 111, 222, 0, 0];
+    let answer = run_with_fields::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[3], 111, "the first word read back");
+    assert_eq!(words[4], 222, "the second word read back");
+    assert_eq!(heap.get(2), 111, "the object's own payload word 0");
+    assert_eq!(heap.get(3), 222, "the object's own payload word 1");
+    assert!(
+        fielded().is_empty(),
+        "a `Struct` is a fixed shape, so the table answered it"
+    );
+
+    forget_fielded();
+    let held = program(function(
+        vec![Repr::Ref, Repr::Int, Repr::Int, Repr::Int, Repr::Int],
+        PAIR,
+        vec![
+            Inst::StoreField {
+                obj: 0,
+                at: 0,
+                src: 1,
+                layout: PAIR,
+            },
+            Inst::LoadField {
+                dst: 3,
+                obj: 0,
+                at: 0,
+                layout: PAIR,
+            },
+            Inst::Return { src: 3 },
+        ],
+    ));
+    let mut heap = Heap::new(1);
+    let addr = heap.object(1, PAIR, 0);
+    let mut words = vec![addr, 5, 6, 0, 0];
+    let answer = run_with_fields::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[3], 5);
+    assert_eq!(words[4], 6);
+    assert!(fielded().is_empty());
+}
+
+/// `Machine::checked`'s null refusal, which is the one precondition a field
+/// access answers itself — see this module's note on `Inst::AddrOfField` in
+/// `crate::subset` for why the rest of the bound is not named the same way.
+///
+/// The refusal happens before `NativeCtx::fixed_payload_words` is ever read, so
+/// this is the one field-access case that does not need
+/// [`run_with_fields`]: a null receiver never reaches the table.
+pub fn a_field_access_refuses_a_null_receiver<A: Arm>() {
+    let loads = program(function(
+        vec![Repr::Ref, Repr::Int],
+        INT,
+        vec![
+            Inst::LoadField {
+                dst: 1,
+                obj: 0,
+                at: 0,
+                layout: INT,
+            },
+            Inst::Return { src: 1 },
+        ],
+    ));
+    let heap = Heap::new(1);
+    let mut words = vec![0u64, 0];
+    let answer = run_over::<A>(&loads, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Raised);
+    assert_eq!(answer.raise, Some(Raise::NullObject));
+
+    let stores = program(function(
+        vec![Repr::Ref, Repr::Int, Repr::Unit],
+        UNIT,
+        vec![
+            Inst::StoreField {
+                obj: 0,
+                at: 0,
+                src: 1,
+                layout: INT,
+            },
+            Inst::Unit { dst: 2 },
+            Inst::Return { src: 2 },
+        ],
+    ));
+    let mut words = vec![0u64, 5, 0];
+    let answer = run_over::<A>(&stores, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Raised);
+    assert_eq!(answer.raise, Some(Raise::NullObject));
+}
+
+/// A [`Shape::Boxed`](cove_ir::Shape::Boxed) receiver — `Any`, in practice —
+/// which is the one *variable*-payload shape a program in this crate's corpus
+/// actually reaches.
+///
+/// `NativeCtx::fixed_payload_words` holds `0` at `BOXED`'s index, so both
+/// directions take the cold path unconditionally, however small `at + width`
+/// is — this is the case the sentinel exists for. [`fielded`] is the proof:
+/// both accesses reached [`crate::abi::FieldLoadFn`]/[`FieldStoreFn`] with the
+/// object's own linear address and the field's static `at`/`width`, and the
+/// load's synthetic answer — `addr * 1000 + at * 10 + word`, [`field_load`]'s
+/// own recognizable number — landed exactly where the instruction said.
+pub fn a_field_access_on_a_variable_payload_object_goes_to_the_runtime<A: Arm>() {
+    forget_fielded();
+    let held = program(function(
+        vec![Repr::Ref, Repr::Int, Repr::Int],
+        INT,
+        vec![
+            Inst::StoreField {
+                obj: 0,
+                at: 0,
+                src: 1,
+                layout: INT,
+            },
+            Inst::LoadField {
+                dst: 2,
+                obj: 0,
+                at: 0,
+                layout: INT,
+            },
+            Inst::Return { src: 2 },
+        ],
+    ));
+    let mut heap = Heap::new(1);
+    let addr = heap.object(1, BOXED, 3);
+    let mut words = vec![addr, 99, 0];
+    let answer = run_with_fields::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+
+    let calls = fielded();
+    assert_eq!(
+        calls.len(),
+        2,
+        "both the store and the load went to the runtime"
+    );
+    assert_eq!(calls[0].addr, addr);
+    assert_eq!(calls[0].at, 0);
+    assert_eq!(calls[0].width, 1);
+    assert_eq!(calls[1].addr, addr);
+    assert_eq!(calls[1].at, 0);
+    assert_eq!(calls[1].width, 1);
+    assert_eq!(
+        words[2],
+        addr * 1000,
+        "the double's synthetic answer landed in the dst slot"
+    );
 }
 
 /// `encoded.rs`'s `SWITCH` arm (line 1234):
