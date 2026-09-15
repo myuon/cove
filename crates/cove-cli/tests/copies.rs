@@ -541,13 +541,20 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// pin the builder's other two faults before ADR 0058 moves the builder onto
 /// core intrinsics (#378), so the lowering is the base's.
 ///
+/// **The seventeenth rise is one new row, and it is a benchmark.** 2303 to
+/// 2333, all thirty of them `benches:seqsearch` — 13 `prod` and 18 `ret`, one
+/// copy counted in both — the rows that time `contains` and `indexOf` at every
+/// sequence shape before ADR 0058 moves both searches into the standard
+/// library (#378). The lowering is the base's; the copies are the row
+/// functions' `Result`s and the searches' counts handed back through calls.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2303;
+const FORWARDABLE_COPIES: usize = 2333;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
