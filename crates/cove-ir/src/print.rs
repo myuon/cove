@@ -287,10 +287,9 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::CallBuiltin { dst, builtin, args } => {
             let builtin = program.builtin(*builtin);
             format!(
-                "call-builtin {} {}.{} ({})",
+                "call-builtin {} {} ({})",
                 v(*dst, builtin.result),
-                builtin.receiver,
-                builtin.operation,
+                builtin.intrinsic,
                 args_of(program, *args)
             )
         }

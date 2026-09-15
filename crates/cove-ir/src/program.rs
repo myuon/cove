@@ -12,6 +12,7 @@ use std::sync::Arc;
 use cove_diag::Span;
 
 use crate::inst::{Inst, Pc, Slot};
+use crate::intrinsic::Intrinsic;
 use crate::layout::{Layout, LayoutId};
 use crate::repr::{RefMap, Repr};
 
@@ -169,14 +170,17 @@ impl HostOp {
 
 /// One builtin a program calls: `Array.length`, `String.split`, `Int.abs`.
 ///
-/// A builtin is named rather than numbered because the set of them is the
-/// language reference's, not the IR's: adding one is a runtime change, and
-/// the IR should not have to be renumbered for it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
+/// identifies a builtin statically, as a closed [`Intrinsic`] rather than a
+/// pair of strings a machine matched at run time: "lowering resolves it to
+/// an intrinsic identifier with a fixed operand and result shape." A
+/// builtin's name — `Array.length`, for a disassembly or a diagnostic — is
+/// derived from the intrinsic it carries rather than stored beside it, so
+/// there is exactly one place that pairing is written down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Builtin {
-    /// The type the operation belongs to: `Array`, `String`, `Map`, `Int`.
-    pub receiver: Arc<str>,
-    pub operation: Arc<str>,
+    /// The operation this call performs.
+    pub intrinsic: Intrinsic,
     pub result: LayoutId,
 }
 

@@ -369,10 +369,7 @@ fn blocked_on(program: &Program, function: &cove_ir::Function, pc: u32) -> Optio
     match function.code.get(pc as usize)? {
         Inst::CallBuiltin { builtin, .. } => {
             let held = program.builtin(*builtin);
-            Some(Blocked::Builtin(format!(
-                "{}.{}",
-                held.receiver, held.operation
-            )))
+            Some(Blocked::Builtin(held.intrinsic.to_string()))
         }
         Inst::Alloc { layout, .. } => {
             let held = program.layout(*layout);

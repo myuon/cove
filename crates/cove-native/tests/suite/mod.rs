@@ -925,10 +925,11 @@ pub fn program_with_args(function: Function, args: Vec<Arg>) -> Program {
 /// The same program, with one builtin at `BuiltinId(0)` and its operands at
 /// `ArgsId(1)`.
 ///
-/// A builtin is named rather than numbered — see [`cove_ir::Builtin`] — so the
-/// two strings are what decide whether the tier lowers this call at all, and a
-/// case that passes the wrong pair should be refused rather than compiled. That
-/// is what `a_builtin_no_arm_lowers_refuses_the_function` checks with them.
+/// `receiver` and `operation` are resolved to the [`cove_ir::Intrinsic`]
+/// they name — see [`cove_ir::Builtin`] — so it is the *variant* that
+/// decides whether the tier lowers this call at all, and a case that passes
+/// one no native arm handles should be refused rather than compiled. That is
+/// what `a_builtin_no_arm_lowers_refuses_the_function` checks with them.
 pub fn program_with_builtin(
     function: Function,
     receiver: &str,
@@ -937,11 +938,9 @@ pub fn program_with_builtin(
     args: Vec<Arg>,
 ) -> Program {
     let mut held = program_with_args(function, args);
-    held.builtins.push(cove_ir::Builtin {
-        receiver: Arc::from(receiver),
-        operation: Arc::from(operation),
-        result,
-    });
+    let intrinsic = cove_ir::Intrinsic::from_names(receiver, operation)
+        .unwrap_or_else(|| panic!("`{receiver}.{operation}` has no `Intrinsic`"));
+    held.builtins.push(cove_ir::Builtin { intrinsic, result });
     held
 }
 
@@ -2867,7 +2866,7 @@ pub fn a_builtin_no_arm_lowers_refuses_the_function<A: Arm>() {
     assert!(compiles::<A>(&one("String", "byteLength")));
     for (receiver, operation) in [
         ("String", "length"),
-        ("Array", "byteLength"),
+        ("Array", "length"),
         ("Vector", "push"),
     ] {
         assert!(

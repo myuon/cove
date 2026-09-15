@@ -2077,9 +2077,40 @@ impl<'a> Machine<'a> {
             &spill
         };
 
+        // What the declared `Effects` of this call promise, checked against
+        // what it actually did — see [ADR
+        // 0058](../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)'s
+        // "Runtime calls are statically identified and typed". A native
+        // backend trusts these flags to decide whether generated code
+        // publishes roots, synchronizes the program counter or reloads a
+        // heap pointer, so a flag this backend's own VM arm does not live up
+        // to would be silently unsound there; `cargo t` runs under
+        // `--profile checked`, which keeps `debug_assertions` on, so the
+        // whole corpus exercises this rather than only a fuzzer that hits
+        // debug builds.
+        #[cfg(debug_assertions)]
+        let allocations_before = self.allocations();
+
         let mut out = std::mem::take(&mut self.builtin_answer);
         out.clear();
         let answered = builtins::call(self, program.builtin(builtin), operands, &mut out);
+
+        #[cfg(debug_assertions)]
+        {
+            let intrinsic = program.builtin(builtin).intrinsic;
+            let effects = intrinsic.effects();
+            debug_assert!(
+                answered.is_ok() || effects.contains(cove_ir::Effects::MAY_RAISE),
+                "`{intrinsic}` raised a `RuntimeError`, but its declared `Effects` do not \
+                 carry `MAY_RAISE`"
+            );
+            debug_assert!(
+                self.allocations() == allocations_before
+                    || effects.contains(cove_ir::Effects::MAY_ALLOCATE),
+                "`{intrinsic}` allocated, but its declared `Effects` do not carry \
+                 `MAY_ALLOCATE`"
+            );
+        }
 
         // Written into the frame here rather than by the dispatch loop,
         // because the buffer has to come back: handing the answer out as a

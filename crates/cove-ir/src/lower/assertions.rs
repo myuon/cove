@@ -55,6 +55,7 @@ use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Arg, Expr};
 
 use crate::inst::{CmpOp, Inst, Slot};
+use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
 use crate::program::Builtin;
 use crate::repr::Repr;
@@ -289,8 +290,7 @@ impl Body<'_> {
         ];
         let list = self.pool.args.intern(pieces);
         let builtin = self.pool.builtin(Builtin {
-            receiver: "String".into(),
-            operation: "interpolate".into(),
+            intrinsic: Intrinsic::StringInterpolate,
             result: shapes::STR,
         });
         let dst = self.temp(shapes::STR);

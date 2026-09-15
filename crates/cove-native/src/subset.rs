@@ -12,8 +12,8 @@
 //! [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
 
 use cove_ir::{
-    ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Function, Inst, LayoutId, Len, Num, Program, Repr,
-    Shape, Slot, StrId,
+    ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Function, Inst, Intrinsic, LayoutId, Len, Num,
+    Program, Repr, Shape, Slot, StrId,
 };
 use cove_schema::builtins::{NONE_CASE, SOME_CASE};
 
@@ -304,7 +304,7 @@ pub(crate) enum Method {
     /// `make::elements(program, elem, false)` only searches the program's own
     /// layout table for a [`Shape::Elements`] of `elem` that is not growable,
     /// and that search is exactly as available here as it is to the runtime —
-    /// see [`method_of`]'s `("Vector", "freeze")` arm. A program whose checker
+    /// see [`method_of`]'s `Intrinsic::VectorFreeze` arm. A program whose checker
     /// admitted `.freeze()` at all has that layout, so the search failing is
     /// the same class of impossibility [`Inst::AddrOfField`]'s bound is;
     /// refusing the call site rather than asserting keeps that claim untested
@@ -354,8 +354,8 @@ pub(crate) fn method_of(
         let arg = list.get(at)?;
         (program.layout(arg.layout).words.as_slice() == [Repr::Ref]).then_some(arg.slot)
     };
-    match (&*named.receiver, &*named.operation) {
-        ("String", "byteLength") => {
+    match named.intrinsic {
+        Intrinsic::StringByteLength => {
             // The answer is one `Int` word written at `dst`, which is what
             // `Machine::call_builtin` copies out of the builtin's `out` buffer.
             if list.len() != 1 || program.layout(named.result).width() != 1 {
@@ -372,7 +372,7 @@ pub(crate) fn method_of(
         // elements are; the element's own layout, which has to be that same one
         // or `operand::run_of` would refuse the call; and the stride, which is
         // that layout's width.
-        ("Vector", "push") => {
+        Intrinsic::VectorPush => {
             // The receiver and one argument, which is `operand::method`'s split
             // and the arity its refusal names.
             if list.len() != 2 || program.layout(named.result).width() != 1 {
@@ -407,7 +407,7 @@ pub(crate) fn method_of(
         // values and `Some`'s payload offset are read out of it rather than
         // assumed, because [`cove_ir::layout::enum_layout`] places a case's
         // parts wherever they first fit rather than always at word zero.
-        ("Vector", "set") => {
+        Intrinsic::VectorSet => {
             // The receiver, the index and the value — `operand::method`'s
             // split and the arity its refusal names.
             if list.len() != 3 {
@@ -457,7 +457,7 @@ pub(crate) fn method_of(
         // `Set`'s `Option<T>` is; it is `make::elements(program, elem, false)`'s
         // own search over the program's layout table, repeated here rather than
         // called, because this crate does not depend on `cove-runtime`.
-        ("Vector", "freeze") => {
+        Intrinsic::VectorFreeze => {
             // The receiver alone — `operand::method`'s split and the arity its
             // refusal names.
             if list.len() != 1 || program.layout(named.result).width() != 1 {
@@ -1307,7 +1307,7 @@ mod tests {
         assert_eq!(blockers(&program, function), vec![expected]);
     }
 
-    // --- `method_of`'s `("Vector", "set")` arm ------------------------------
+    // --- `method_of`'s `Intrinsic::VectorSet` arm ------------------------------
 
     const SET_INT: LayoutId = LayoutId(1);
     const SET_REF: LayoutId = LayoutId(2);
@@ -1351,8 +1351,7 @@ mod tests {
             layouts,
             args: vec![Vec::new(), args],
             builtins: vec![Builtin {
-                receiver: Arc::from("Vector"),
-                operation: Arc::from("set"),
+                intrinsic: Intrinsic::VectorSet,
                 result: SET_OPTION,
             }],
             ..Program::default()
@@ -1455,7 +1454,7 @@ mod tests {
         assert_eq!(method_of(&program, 3, BuiltinId(0), ArgsId(1)), None);
     }
 
-    // --- `method_of`'s `("Vector", "freeze")` arm ---------------------------
+    // --- `method_of`'s `Intrinsic::VectorFreeze` arm ---------------------------
 
     const FREEZE_INT: LayoutId = LayoutId(1);
     const FREEZE_REF: LayoutId = LayoutId(2);
@@ -1487,8 +1486,7 @@ mod tests {
             layouts,
             args: vec![Vec::new(), args],
             builtins: vec![Builtin {
-                receiver: Arc::from("Vector"),
-                operation: Arc::from("freeze"),
+                intrinsic: Intrinsic::VectorFreeze,
                 result: FREEZE_REF,
             }],
             ..Program::default()

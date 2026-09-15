@@ -913,11 +913,5 @@ mod tests {
             error.message,
             "`Any.equals` takes 2 operand(s), but 1 were given"
         );
-        // And nothing else on `Any` is an operation this backend has.
-        let error = run(&mut machine, "Any", "compare", &[]).unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Any.compare` is not an operation this backend has been taught"
-        );
     }
 }
