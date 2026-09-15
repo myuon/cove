@@ -36,18 +36,32 @@ pub const MAX_CALL_CHAIN: usize = 8;
 #[derive(Clone, Debug, Default)]
 struct Chain {
     /// Innermost first — not including this error's own
-    /// [`RuntimeError::span`], which is where it happened rather than who
-    /// called it.
+    /// [`RuntimeError::span`], which is where it is blamed rather than who
+    /// called that, nor [`Chain::library`], which is what the blame was moved
+    /// past.
     sites: Vec<Span>,
     /// How many call-site spans past [`MAX_CALL_CHAIN`] were dropped to keep
     /// [`Chain::sites`] bounded — the frames further from the fault, since
     /// the innermost ones are the ones kept.
     omitted: usize,
+    /// The library locations the blame was moved past, innermost first: where
+    /// the fault actually happened, then every library call site between it
+    /// and [`RuntimeError::span`]. Empty unless the fault was in a library
+    /// file and something outside one called it — see
+    /// [`RuntimeError::with_chain`].
+    library: Vec<Span>,
+    /// How many library locations past [`MAX_CALL_CHAIN`] were dropped to
+    /// keep [`Chain::library`] bounded — the ones nearest the caller, since
+    /// the innermost, where the fault was, is the one kept first.
+    library_omitted: usize,
 }
 
 #[derive(Clone, Debug)]
 pub struct RuntimeError {
     pub message: String,
+    /// Where this error is blamed: where it happened, unless that was inside
+    /// the standard library and a caller outside it can be named instead —
+    /// see [`RuntimeError::with_chain`].
     pub span: Option<Span>,
     /// `Box<str>` rather than `String`, here and for `help` and
     /// `denied_capability`, because none of the three is ever grown after it
@@ -59,7 +73,7 @@ pub struct RuntimeError {
     pub rule: Option<Box<str>>,
     pub help: Option<Box<str>>,
     /// `None` until [`RuntimeError::with_chain`] attaches one; see [`Chain`]
-    /// for why this is boxed rather than the two fields it holds.
+    /// for why this is boxed rather than the fields it holds.
     chain: Option<Box<Chain>>,
     /// Which of the three this error is, for the terminal trace event of a
     /// run that ends with it.
@@ -117,8 +131,58 @@ impl RuntimeError {
         self.chain.as_deref().map_or(0, |chain| chain.omitted)
     }
 
+    /// The library locations this error's blame was moved past, innermost
+    /// first — where the fault happened inside the standard library, and the
+    /// library call sites between it and [`RuntimeError::span`].
+    ///
+    /// Empty for an error that happened outside a library file, and for one
+    /// with no caller outside a library file to blame.
+    pub fn library_sites(&self) -> &[Span] {
+        self.chain.as_deref().map_or(&[], |chain| &chain.library)
+    }
+
+    /// How many library locations past [`MAX_CALL_CHAIN`] were dropped to keep
+    /// [`RuntimeError::library_sites`] bounded.
+    pub fn library_omitted(&self) -> usize {
+        self.chain
+            .as_deref()
+            .map_or(0, |chain| chain.library_omitted)
+    }
+
     /// Attaches `sites` as the call chain, innermost first, keeping the
-    /// innermost [`MAX_CALL_CHAIN`] and recording how many more were dropped.
+    /// innermost [`MAX_CALL_CHAIN`] and recording how many more were dropped —
+    /// and moves the blame out of the standard library, which is the one
+    /// definition of that rule every evaluator and every tier shares.
+    ///
+    /// # Who is blamed
+    ///
+    /// `library` says whether a span points into a file the toolchain
+    /// supplied rather than one the program's author wrote;
+    /// [`cove_diag::SourceMap::is_library`] is what both evaluators answer it
+    /// with. If this error's [`RuntimeError::span`] is such a location, the
+    /// blame moves outward along `sites` to the innermost one that is *not*:
+    /// that becomes the span, the library locations passed over become
+    /// [`RuntimeError::library_sites`], and the sites beyond it stay the
+    /// chain. `Int.abs` at the least `Int` fails on the `-value` in
+    /// `std/int.cove`, and it is the line that called `abs` a reader can do
+    /// something about — ADR 0058's "Fallibility preserves the source call
+    /// site's blame".
+    ///
+    /// Nothing here reads a frame or a program, and that is what makes it
+    /// hold on every backend. The interpreter pushes a frame for a library
+    /// call, the VM may have expanded the body into its caller, and compiled
+    /// code may be running either — but each of them hands this the same span
+    /// and the same sites, because [`cove_ir::program::Inlined`] puts back the
+    /// call site an expansion removed. So the rule is applied to what the
+    /// evaluators already agree on, rather than written once per evaluator.
+    ///
+    /// An error raised outside a library file is left exactly as it was, and
+    /// so is one whose every site is in a library file: there is no caller
+    /// outside one to blame, and naming a library line as the caller would
+    /// be no better than naming the fault.
+    ///
+    /// The blame is found before the chain is bounded, so a library body that
+    /// recursed deeper than [`MAX_CALL_CHAIN`] still names its caller.
     ///
     /// A no-op once a chain is attached. The VM and the interpreter each have
     /// exactly one place that calls this — where the error leaves the
@@ -129,17 +193,53 @@ impl RuntimeError {
     /// still see, and every frame further out finds one already there and
     /// leaves it alone, rather than overwriting it with the shorter chain
     /// its own, later vantage point would otherwise compute.
-    pub fn with_chain(mut self, sites: impl IntoIterator<Item = Span>) -> Self {
+    pub fn with_chain(
+        mut self,
+        sites: impl IntoIterator<Item = Span>,
+        library: impl Fn(Span) -> bool,
+    ) -> Self {
         if self.chain.is_some() {
             return self;
         }
         let mut sites = sites.into_iter();
-        let sites_kept = (&mut sites).take(MAX_CALL_CHAIN).collect();
-        let omitted = sites.count();
-        self.chain = Some(Box::new(Chain {
-            sites: sites_kept,
-            omitted,
-        }));
+        let mut chain = Chain::default();
+        if let Some(fault) = self.span.filter(|span| library(*span)) {
+            // Walk outward past every library location, holding them
+            // innermost first and bounded as they come: a library body that
+            // recursed has as many of these as it has frames.
+            let mut passed = vec![fault];
+            let mut passed_omitted = 0;
+            let blamed = sites.find(|site| {
+                if !library(*site) {
+                    return true;
+                }
+                // One more than the bound, so that the case below which keeps
+                // everything but the fault as the chain keeps a whole one.
+                if passed.len() <= MAX_CALL_CHAIN {
+                    passed.push(*site);
+                } else {
+                    passed_omitted += 1;
+                }
+                false
+            });
+            let Some(blamed) = blamed else {
+                // Every site was a library's, so there is nobody else to blame
+                // and the error stays as it was raised: the fault is the span
+                // and everything walked past it is the chain.
+                passed.remove(0);
+                chain.sites = passed;
+                chain.omitted = passed_omitted;
+                self.chain = Some(Box::new(chain));
+                return self;
+            };
+            self.span = Some(blamed);
+            chain.library_omitted = passed_omitted + passed.len().saturating_sub(MAX_CALL_CHAIN);
+            passed.truncate(MAX_CALL_CHAIN);
+            chain.library = passed;
+        }
+        chain.sites = (&mut sites).take(MAX_CALL_CHAIN).collect();
+        chain.omitted = sites.count();
+        self.chain = Some(Box::new(chain));
         self
     }
 
@@ -186,9 +286,30 @@ impl RuntimeError {
         if let Some(help) = &self.help {
             diagnostic = diagnostic.help(help.clone());
         }
+        // What the blame was moved past comes first: the primary span is the
+        // caller's line, and these are what it called that failed — the
+        // innermost is where it failed, the rest the library's own calls on
+        // the way there. The last one shown says when the bound cut them short.
+        let library = self.library_sites();
+        let library_omitted = self.library_omitted();
+        let library_last = library.len().saturating_sub(1);
+        for (i, span) in library.iter().enumerate() {
+            let mut message = if i == 0 {
+                "in the standard library".to_string()
+            } else {
+                "called from here, in the standard library".to_string()
+            };
+            if i == library_last && library_omitted > 0 {
+                message.push_str(&format!(
+                    " ({library_omitted} more call{} not shown)",
+                    if library_omitted == 1 { "" } else { "s" }
+                ));
+            }
+            diagnostic = diagnostic.label(*span, message);
+        }
         // Every call-site span becomes a secondary label, innermost first, so
-        // a fault raised inside a library call still shows the source line
-        // that called it and not only the library's own. The outermost one
+        // a fault raised inside a called body still shows the source line
+        // that called it and not only the body's own. The outermost one
         // shown also says when the bound cut the chain short, because that
         // is the label a reader who wants the rest would look at next.
         let chain = self.chain();
@@ -206,5 +327,100 @@ impl RuntimeError {
             diagnostic = diagnostic.label(*span, message);
         }
         diagnostic
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cove_diag::FileId;
+
+    use super::*;
+
+    /// File 0 is the program's and file 1 is the library's.
+    const USER: FileId = FileId(0);
+    const LIBRARY: FileId = FileId(1);
+
+    fn at(file: FileId, start: u32) -> Span {
+        Span::new(file, start, start + 1)
+    }
+
+    fn library(span: Span) -> bool {
+        span.file == LIBRARY
+    }
+
+    #[test]
+    fn a_fault_in_the_program_is_left_where_it_was_raised() {
+        let error = RuntimeError::new("boom")
+            .at(at(USER, 1))
+            .with_chain([at(LIBRARY, 2), at(USER, 3)], library);
+        assert_eq!(error.span, Some(at(USER, 1)));
+        assert_eq!(error.chain(), &[at(LIBRARY, 2), at(USER, 3)]);
+        assert!(error.library_sites().is_empty());
+    }
+
+    #[test]
+    fn a_fault_in_the_library_is_blamed_on_the_innermost_caller_outside_it() {
+        // The library called itself once on the way to the fault, and a
+        // program function called the library from inside another.
+        let error = RuntimeError::new("boom").at(at(LIBRARY, 1)).with_chain(
+            [at(LIBRARY, 2), at(USER, 3), at(LIBRARY, 4), at(USER, 5)],
+            library,
+        );
+        assert_eq!(error.span, Some(at(USER, 3)));
+        assert_eq!(error.library_sites(), &[at(LIBRARY, 1), at(LIBRARY, 2)]);
+        assert_eq!(error.chain(), &[at(LIBRARY, 4), at(USER, 5)]);
+
+        let diagnostic = error.to_diagnostic();
+        assert_eq!(diagnostic.primary, Some(at(USER, 3)));
+        let labels: Vec<(Span, &str)> = diagnostic
+            .labels
+            .iter()
+            .map(|label| (label.span, label.message.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                (at(LIBRARY, 1), "in the standard library"),
+                (at(LIBRARY, 2), "called from here, in the standard library"),
+                (at(LIBRARY, 4), "called from here"),
+                (at(USER, 5), "called from here"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fault_with_nobody_outside_the_library_to_blame_is_left_as_it_was() {
+        let sites: Vec<Span> = (2..20).map(|start| at(LIBRARY, start)).collect();
+        let blamed = RuntimeError::new("boom")
+            .at(at(LIBRARY, 1))
+            .with_chain(sites.iter().copied(), library);
+        let unblamed = RuntimeError::new("boom")
+            .at(at(LIBRARY, 1))
+            .with_chain(sites.iter().copied(), |_| false);
+        assert_eq!(blamed.span, unblamed.span);
+        assert_eq!(blamed.chain(), unblamed.chain());
+        assert_eq!(blamed.chain().len(), MAX_CALL_CHAIN);
+        assert_eq!(blamed.chain_omitted(), unblamed.chain_omitted());
+        assert!(blamed.library_sites().is_empty());
+    }
+
+    #[test]
+    fn a_library_deeper_than_the_bound_still_names_its_caller() {
+        let depth = MAX_CALL_CHAIN as u32 * 3;
+        let sites = (2..depth)
+            .map(|start| at(LIBRARY, start))
+            .chain([at(USER, 100), at(USER, 101)]);
+        let error = RuntimeError::new("boom")
+            .at(at(LIBRARY, 1))
+            .with_chain(sites, library);
+        assert_eq!(error.span, Some(at(USER, 100)));
+        assert_eq!(error.library_sites().len(), MAX_CALL_CHAIN);
+        assert_eq!(error.library_sites()[0], at(LIBRARY, 1));
+        assert_eq!(
+            error.library_sites().len() + error.library_omitted(),
+            depth as usize - 1,
+            "every library location is either kept or counted"
+        );
+        assert_eq!(error.chain(), &[at(USER, 101)]);
     }
 }

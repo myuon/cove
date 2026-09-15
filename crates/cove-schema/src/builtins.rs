@@ -659,7 +659,12 @@ pub struct StdBinding {
 /// trap raised from inside a standard-library body to name its caller
 /// instead of only the library's own line — without that, moving `abs`
 /// here would have moved its diagnostic out of the caller's source along
-/// with it.
+/// with it. [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
+/// finished the job: such a trap is now *blamed* on its caller, whose line
+/// is the diagnostic's primary location, with the library's line kept
+/// beside it as context — see `RuntimeError::with_chain` in `cove-runtime`.
+/// That is what retires ADR 0043's "It must be total" condition, so a
+/// fallible method is no longer kept out of this table for its diagnostic.
 ///
 /// Ten of the twenty-nine are `Duration`'s, and they are the first entries
 /// that come in pairs: `micros`, `millis`, `seconds`, `minutes`, and `hours`

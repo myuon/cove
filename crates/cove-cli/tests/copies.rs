@@ -438,13 +438,23 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// program. `Body::unit_answer` is why they are not — see
 /// `cove_ir::lower::buffers`.
 ///
+/// **The eighth rise is one new row, and it is at the floor.** 2231 to 2235,
+/// all four of them `tests/e2e:fail_stringbuilder_byte_range`, the end-to-end
+/// case for ADR 0058's blame through a library body the inliner will not
+/// expand. Its `prod` and `ret` columns are the ones `fail_divide_by_zero` and
+/// `fail_nested_divide_by_zero` already have, and those are as small as a
+/// failing case gets. So it adds no shape the corpus
+/// did not have; it adds one more program carrying the shapes every program
+/// here carries, the standard library's among them, which is what any new row
+/// costs.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2231;
+const FORWARDABLE_COPIES: usize = 2235;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

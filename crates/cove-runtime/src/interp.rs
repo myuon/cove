@@ -1693,8 +1693,16 @@ impl<'a> Interpreter<'a> {
     /// Everything above it is a real call site, read outermost-last so the
     /// chain comes out innermost-first, the order [`RuntimeError::with_chain`]
     /// bounds and [`RuntimeError::to_diagnostic`] renders in.
+    ///
+    /// The sources are what say which of those spans are the standard
+    /// library's, which is how the blame for a fault inside one moves to its
+    /// caller; [`RuntimeError::with_chain`] is where that rule is, and the
+    /// linear-memory backend answers it from the same map.
     fn attach_call_chain(&self, error: RuntimeError) -> RuntimeError {
-        error.with_chain(self.call_sites[1..].iter().rev().copied())
+        let sources = self.sources;
+        error.with_chain(self.call_sites[1..].iter().rev().copied(), |span| {
+            sources.is_library(span.file)
+        })
     }
 
     fn invoke_body(

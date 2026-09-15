@@ -172,7 +172,10 @@ pub fn attach(sources: &mut SourceMap) -> Result<Vec<(String, Module)>, Vec<Diag
     let mut diagnostics = Vec::new();
     for source in SOURCES {
         let path = PathBuf::from(source.path);
-        let file = sources.add(path.clone(), source.text);
+        // As a library file, which is what makes a runtime error raised in
+        // this body blame the caller's line rather than this one; see
+        // `SourceMap::add_library`.
+        let file = sources.add_library(path.clone(), source.text);
         match cove_syntax::parse_file(sources, file) {
             Ok(ast) => modules.push((
                 source.module.to_string(),

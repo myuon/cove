@@ -111,6 +111,19 @@ export fn callsNegates(a: Int) -> Int {
   negates(a)
 }
 
+/// `Int.abs`, which is the standard library's and a small leaf, so the inliner
+/// expands it here: a fault in it is raised by *this* function's compiled code,
+/// at a span inside `std/int.cove`.
+export fn absolutes(a: Int) -> Int {
+  a.abs() + counts(0)
+}
+
+/// A refused caller, so the expanded `abs` is reached across the boundary.
+export fn callsAbsolutes(a: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  absolutes(a)
+}
+
 /// Division, so that a raise crosses the boundary.
 export fn divides(a: Int, b: Int) -> Int {
   held(a) / b
@@ -958,6 +971,94 @@ fn negation_and_its_overflow_are_the_vm_s() {
         vm.contains("negation"),
         "and it names the operation rather than renaming it: {vm}"
     );
+}
+
+/// **A fault in a standard-library body, raised under compiled code, is blamed on
+/// its caller exactly as the VM blames it — whether the body was expanded or
+/// called.**
+///
+/// ADR 0058's "Fallibility preserves the source call site's blame".
+/// `RuntimeError::with_chain` moves the blame, from the span and the call sites it
+/// is handed, so what has to be the VM's is every one of those: the primary span,
+/// the library context and the chain.
+///
+/// Two fixtures, for the two ways a call site reaches the rule. `absolutes`
+/// expands `abs`, so its call site comes out of `Function::inlined` at the
+/// faulting instruction. `buildsAByte` *calls* `appendByte` — a `var self` is
+/// never expanded — so its call site is read from a compiled frame waiting on
+/// that call, whose program counter compiled code syncs to the call itself
+/// rather than to the instruction after it.
+#[test]
+fn a_fault_in_a_library_body_under_compiled_code_is_blamed_on_its_caller() {
+    on_each_tier(
+        &["absolutes", "buildsAByte"],
+        &["callsAbsolutes", "callsBuildsAByte"],
+    );
+
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+    let text = |span: cove_diag::Span| {
+        sources.get(span.file).text[span.start as usize..span.end as usize].to_string()
+    };
+    let blame = |answer: Result<Value, cove_runtime::RuntimeError>| {
+        let error = answer.expect_err("the fixture refuses its argument");
+        (
+            error.message.clone(),
+            error.span,
+            error.library_sites().to_vec(),
+            error.chain().to_vec(),
+        )
+    };
+    for (entry, arg, called, caller) in [
+        ("callsAbsolutes", i64::MIN, "a.abs()", "absolutes(a)"),
+        (
+            "callsBuildsAByte",
+            300,
+            "out.appendByte(n)",
+            "buildsAByte(n)",
+        ),
+    ] {
+        let args = vec![Value::int(arg)];
+        let vm = blame(Vm::new(&runtime, &hosts, &lowered).invoke(MODULE, entry, args.clone()));
+        let mut with = Vm::with_native(&runtime, &hosts, &lowered, &native);
+        let compiled = blame(with.invoke(MODULE, entry, args));
+        assert!(
+            with.tiers().vm_to_native >= 1,
+            "`{entry}`: the fault was raised under compiled code: {:?}",
+            with.tiers()
+        );
+        assert_eq!(
+            compiled, vm,
+            "`{entry}`: compiled code blames what the VM blames"
+        );
+
+        let (message, span, library, chain) = vm;
+        let span = span.expect("a fault carries a span");
+        assert!(
+            !sources.is_library(span.file),
+            "`{entry}` ({message}): the primary span is the caller's"
+        );
+        assert_eq!(text(span), called, "`{entry}`: and it is the call");
+        assert!(
+            !library.is_empty() && library.iter().all(|site| sources.is_library(site.file)),
+            "`{entry}`: the library's own line is kept as context: {library:?}"
+        );
+        assert_eq!(
+            chain.iter().map(|site| text(*site)).collect::<Vec<_>>(),
+            [caller],
+            "`{entry}`: and the refused caller is still named"
+        );
+    }
 }
 
 /// Which reachable functions the template compiler took, by name.

@@ -55,6 +55,9 @@ pub struct SourceFile {
     pub text: String,
     /// Byte offset of the start of each line.
     line_starts: Vec<u32>,
+    /// Whether the toolchain supplied this file rather than the program's
+    /// author: see [`SourceMap::add_library`].
+    library: bool,
 }
 
 impl SourceFile {
@@ -93,8 +96,28 @@ impl SourceMap {
     }
 
     pub fn add(&mut self, path: impl Into<PathBuf>, text: impl Into<String>) -> FileId {
+        self.push(path.into(), text.into(), false)
+    }
+
+    /// Adds a file the toolchain supplies rather than one the program's
+    /// author wrote — the standard library, which `cove_sema::stdlib::attach`
+    /// adds through this and nothing else does.
+    ///
+    /// The difference is who a runtime error blames. A fault raised inside a
+    /// library body is the caller's to act on, so `RuntimeError` reports the
+    /// innermost location that is *not* in a library file as the primary one
+    /// and keeps the library's own line as context — ADR 0058's
+    /// "Fallibility preserves the source call site's blame". Recorded here,
+    /// on the file, because a span is the one thing every evaluator and
+    /// every tier already agrees on: whichever backend raised an error, and
+    /// whether or not the body was expanded into its caller, the spans it
+    /// carries point into this map.
+    pub fn add_library(&mut self, path: impl Into<PathBuf>, text: impl Into<String>) -> FileId {
+        self.push(path.into(), text.into(), true)
+    }
+
+    fn push(&mut self, path: PathBuf, text: String, library: bool) -> FileId {
         let id = FileId(self.files.len() as u32);
-        let text = text.into();
         let mut line_starts = vec![0u32];
         for (i, b) in text.bytes().enumerate() {
             if b == b'\n' {
@@ -103,11 +126,17 @@ impl SourceMap {
         }
         self.files.push(SourceFile {
             id,
-            path: path.into(),
+            path,
             text,
             line_starts,
+            library,
         });
         id
+    }
+
+    /// Whether `id` was added by [`SourceMap::add_library`].
+    pub fn is_library(&self, id: FileId) -> bool {
+        self.files[id.0 as usize].library
     }
 
     pub fn get(&self, id: FileId) -> &SourceFile {

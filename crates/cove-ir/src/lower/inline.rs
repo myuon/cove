@@ -60,6 +60,16 @@
 //! *cannot* fail too, because a debugger's backtrace and a profile's
 //! attribution ask the same question an error chain asks.
 //!
+//! It is also what [ADR 0058]'s blame rests on. A fault inside a
+//! standard-library body is reported at the innermost call site *outside* the
+//! library, with the library's own line as context — `RuntimeError::with_chain`
+//! is the rule — and for an expanded body that call site is this record's. So
+//! expanding a library body does not move its diagnostic, which is ADR 0043's
+//! "the caller disappears" answered for both halves of it: the caller is named,
+//! and it is named first.
+//!
+//! [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+//!
 //! The record is a pair of program counters, so it moves when they do:
 //! [`super::dropping`] renumbers it beside a [`Local`](crate::Local)'s pair.
 //! Nothing reads it during a run, which is what makes forgetting that easy

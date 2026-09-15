@@ -1073,6 +1073,9 @@ unsafe fn call_body<const MASK: u64>(
     // already written the arguments into them.
     {
         let machine = &mut *machine;
+        // The caller now waits on this call, so its pc becomes the address it
+        // resumes at — see [`suspended_at_the_call`].
+        suspended_at_the_call(machine, pc);
         machine.frames.push(Frame {
             function: callee,
             base: callee_base,
@@ -1303,6 +1306,24 @@ pub(super) fn from_encoded(
         let out: *mut Bridge = &mut bridge;
         enter::<0>(out, entry, callee, callee_base, into)
     }
+}
+
+/// Marks the compiled frame on top of the stack as suspended at the call at `pc`,
+/// once the callee's frame is open and just before it is pushed.
+///
+/// **A frame waiting on a call holds the pc it resumes at, one past the call.**
+/// That is the encoded tier's convention — `entered!` syncs a `pc` that has
+/// already moved past the `call` — and it is what every reader of a suspended
+/// frame assumes: `Machine::call_chain` and the debugger's backtrace both read
+/// such a frame at `pc - 1`. Compiled code hands a helper the pc of the
+/// instruction it is on, and the helper syncs that for its safepoint and for a
+/// refusal raised before the callee's frame exists, where the caller is still the
+/// innermost frame and is read at its pc exactly. Left there once the callee runs,
+/// it read one instruction early: an error raised below a compiled call named the
+/// instruction *before* the call as its call site, which the blame for a fault in
+/// a standard-library body — ADR 0058 — then reported as the primary span.
+fn suspended_at_the_call(machine: &mut Machine<'_>, pc: u32) {
+    machine.sync(pc as usize + 1);
 }
 
 /// The runtime error a compiled function named.
@@ -1884,6 +1905,8 @@ unsafe extern "C" fn open(
     };
     let index = {
         let machine = &mut *machine;
+        // As in [`call_body`]: see [`suspended_at_the_call`].
+        suspended_at_the_call(machine, pc);
         machine.frames.push(Frame {
             function: id,
             base: callee_base,

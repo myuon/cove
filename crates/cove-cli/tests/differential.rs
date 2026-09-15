@@ -598,17 +598,27 @@ fn limits(run: &RunConfig) -> Limits {
 /// is the one the corpus supports: over the twelve cases that fail with a
 /// span, the two evaluators point at the same file and the same two byte
 /// offsets.
+///
+/// The span compared is the one the error is *blamed* on, after ADR 0058's
+/// rule moved a fault inside the standard library to its caller, and the
+/// library locations it moved past are compared beside it. That is the
+/// stronger comparison of the two available: the rule is one function of the
+/// span and the call sites, so evaluators that agreed before it agree after
+/// it, and comparing what it produced also catches an evaluator that handed it
+/// a different idea of which files are the library's.
 fn describe(answer: &Result<Value, RuntimeError>) -> String {
     match answer {
         Ok(value) => format!("value {value:?}"),
         Err(error) => format!(
-            "failed {:?}: {}\n    rule: {:?}\n    help: {:?}\n    denied: {:?}\n    at: {:?}\n    chain: {:?}\n    chain_omitted: {}",
+            "failed {:?}: {}\n    rule: {:?}\n    help: {:?}\n    denied: {:?}\n    at: {:?}\n    library: {:?}\n    library_omitted: {}\n    chain: {:?}\n    chain_omitted: {}",
             error.outcome,
             error.message,
             error.rule,
             error.help,
             error.denied_capability,
             error.span,
+            error.library_sites(),
+            error.library_omitted(),
             error.chain(),
             error.chain_omitted(),
         ),

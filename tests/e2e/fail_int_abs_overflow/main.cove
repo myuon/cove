@@ -2,8 +2,8 @@ use console.println
 
 /// Calls `Int.abs` at the least `Int`, which has no positive counterpart.
 /// `abs` is `std.int.abs`, a standard-library body rather than a Rust arm,
-/// so the diagnostic must name both: the line in `std/int.cove` where the
-/// negation overflows, and this line, which called `abs`. Issue #258.
+/// so the diagnostic blames this line, which called `abs`, and shows the line
+/// in `std/int.cove` where the negation overflows beside it. ADR 0058.
 export fn main() -> Result<Unit, Error> {
   let least = -9223372036854775807 - 1
   println("about to take the absolute value")?
