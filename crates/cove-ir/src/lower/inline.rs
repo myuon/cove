@@ -419,7 +419,7 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::CmpImmBranch { dst, .. }
             | Inst::Alloc { dst, .. }
             | Inst::Box { dst, .. }
-            | Inst::ByteAt { dst, .. }
+            | Inst::RunLoad { dst, .. }
             | Inst::AllocBuffer { dst, .. }
             | Inst::FinishBuffer { dst, .. }
             | Inst::Len { dst, .. }
@@ -432,8 +432,8 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             // word, so it marks nothing; the rest are what `reaches_nothing`
             // refuses. Written out rather than caught by a `_` for the reason
             // `slots_of`'s own tail gives at length: a `_` here is a promise
-            // that two lists are complements, and `Inst::ByteAt` is the
-            // instruction that broke it.
+            // that two lists are complements, and `Inst::RunLoad` (as
+            // `ByteAt`) is the instruction that broke it.
             Inst::StoreField { .. }
             | Inst::StoreElem { .. }
             | Inst::Store { .. }
@@ -1022,7 +1022,9 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         Inst::StoreElem {
             obj, index, src, ..
         } => vec![obj, index, src],
-        Inst::ByteAt { dst, obj, at } => vec![dst, obj, at],
+        Inst::RunLoad {
+            dst, run, index, ..
+        } => vec![dst, run, index],
         Inst::AllocBuffer { dst, capacity } => vec![dst, capacity],
         Inst::AppendByte { buffer, value } => vec![buffer, value],
         Inst::FinishBuffer { dst, buffer } => vec![dst, buffer],
@@ -1050,7 +1052,8 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         // Listed rather than caught by a `_`, and the difference is not
         // tidiness. A `_` here makes this function's correctness depend on a
         // *promise* made in `reaches_nothing` — that the two lists are each
-        // other's complement — and nothing checked it. `Inst::ByteAt` was
+        // other's complement — and nothing checked it. `Inst::ByteAt` (now
+        // `Inst::RunLoad`) was
         // added, `reaches_nothing` let it through because it reaches nothing,
         // and this returned no slots for it: an expansion that renumbered
         // every other instruction left that one pointing into the callee's

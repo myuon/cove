@@ -1400,7 +1400,7 @@ fn raised(
             ctx.raise_a, ctx.raise_b
         ))
         .with_rule("An index outside a collection is a broken invariant."),
-        // `encoded.rs`'s `BYTE_AT` refusal, which names the last legal offset and
+        // `encoded.rs`'s `RUN_LOAD_BYTES` refusal, which names the last legal offset and
         // so does the subtraction here rather than in emitted code.
         Some(Raise::ByteOffset) => RuntimeError::new(format!(
             "`byteAt` is `{}`, and a byte offset into this string is 0 to {}",

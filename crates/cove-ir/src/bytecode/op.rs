@@ -118,11 +118,13 @@ mod base {
     pub const STORE_FIELD: u8 = LOAD_FIELD + 1;
     pub const LOAD_ELEM: u8 = STORE_FIELD + 1;
     pub const STORE_ELEM: u8 = LOAD_ELEM + 1;
-    pub const BYTE_AT: u8 = STORE_ELEM + 1;
+    /// [`crate::Inst::RunLoad`] over [`crate::Storage::PackedBytes`], where
+    /// `byte-at` was and at its number.
+    pub const RUN_LOAD_BYTES: u8 = STORE_ELEM + 1;
     /// [`crate::Inst::RunCopy`], as the two opcodes
     /// [ADR 0058](../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
     /// lets an encoding split it into by storage.
-    pub const RUN_COPY_BYTES: u8 = BYTE_AT + 1;
+    pub const RUN_COPY_BYTES: u8 = RUN_LOAD_BYTES + 1;
     pub const RUN_COPY_WORDS: u8 = RUN_COPY_BYTES + 1;
     /// [ADR 0052](../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
     /// four byte-buffer instructions, in the order [`crate::Inst`] declares
@@ -200,7 +202,8 @@ pub enum Op {
     StoreField,
     LoadElem,
     StoreElem,
-    ByteAt,
+    /// [`crate::Inst::RunLoad`] over [`crate::Storage::PackedBytes`].
+    RunLoadBytes,
     /// [`crate::Inst::RunCopy`] over [`crate::Storage::PackedBytes`].
     RunCopyBytes,
     /// [`crate::Inst::RunCopy`] over [`crate::Storage::Words`], whose element
@@ -467,7 +470,7 @@ impl Op {
             Op::StoreField,
             Op::LoadElem,
             Op::StoreElem,
-            Op::ByteAt,
+            Op::RunLoadBytes,
             Op::RunCopyBytes,
             Op::RunCopyWords,
             Op::AllocBuffer,
@@ -553,7 +556,7 @@ impl Op {
             Op::StoreField => base::STORE_FIELD,
             Op::LoadElem => base::LOAD_ELEM,
             Op::StoreElem => base::STORE_ELEM,
-            Op::ByteAt => base::BYTE_AT,
+            Op::RunLoadBytes => base::RUN_LOAD_BYTES,
             Op::RunCopyBytes => base::RUN_COPY_BYTES,
             Op::RunCopyWords => base::RUN_COPY_WORDS,
             Op::AllocBuffer => base::ALLOC_BUFFER,
@@ -779,7 +782,7 @@ impl Op {
                 Operand::Value,
                 one(Half::Layout),
             ),
-            Op::ByteAt => fields(
+            Op::RunLoadBytes => fields(
                 Operand::Word(INT),
                 Operand::Word(REF),
                 Operand::Word(INT),
@@ -905,7 +908,8 @@ mod tests {
     /// argued from: a hundred and fifty-seven opcodes out of the 256 a byte
     /// names.
     ///
-    /// It was a hundred and two until `Op::ByteAt`, a hundred and three until
+    /// It was a hundred and two until `Op::ByteAt` (now `Op::RunLoadBytes`), a
+    /// hundred and three until
     /// `Compare::Tag` brought its six, a hundred and thirteen once ADR
     /// 0051's `AllocBytes`, `WriteByte`, `CopyBytes` and `FinishString`
     /// brought four more, a hundred and seventeen once ADR 0052's

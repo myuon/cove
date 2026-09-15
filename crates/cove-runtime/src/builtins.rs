@@ -996,7 +996,7 @@ pub fn call_method(
                 // Refused rather than answered, which is `sliceBytes`'s rule
                 // and not `codePointAtByte`'s: a byte offset out of range is
                 // one this type never handed out, and `byteLength()` is how a
-                // caller knows the range. The VM's `Inst::ByteAt` refuses in
+                // caller knows the range. The VM's `Inst::RunLoad` refuses in
                 // the same words.
                 match usize::try_from(*offset)
                     .ok()

@@ -265,7 +265,7 @@ const LOAD_FIELD: u8 = Op::LoadField.number();
 const STORE_FIELD: u8 = Op::StoreField.number();
 const LOAD_ELEM: u8 = Op::LoadElem.number();
 const STORE_ELEM: u8 = Op::StoreElem.number();
-const BYTE_AT: u8 = Op::ByteAt.number();
+const RUN_LOAD_BYTES: u8 = Op::RunLoadBytes.number();
 const RUN_COPY_BYTES: u8 = Op::RunCopyBytes.number();
 const RUN_COPY_WORDS: u8 = Op::RunCopyWords.number();
 const ALLOC_BUFFER: u8 = Op::AllocBuffer.number();
@@ -338,7 +338,7 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::AllocFixed
         | Op::AllocImm
         | Op::AllocSlot
-        | Op::ByteAt
+        | Op::RunLoadBytes
         | Op::RunCopyBytes
         | Op::RunCopyWords
         | Op::AllocBuffer
@@ -1714,8 +1714,8 @@ pub(super) fn dispatch<'s, 'a>(
             // payload is bytes, eight to a word, so this is a payload read, a
             // shift and a mask — and it is an instruction rather than a
             // builtin because as a builtin it measured 58 ns of which 48 was
-            // the calling and 10 was the reading. See `Inst::ByteAt`.
-            BYTE_AT => {
+            // the calling and 10 was the reading. See `Inst::RunLoad`.
+            RUN_LOAD_BYTES => {
                 let addr = machine.mem.word_at(base_at + (b!() as usize));
                 if addr == 0 {
                     fail!(null_object());

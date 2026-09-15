@@ -39,6 +39,15 @@ pub enum TooWide {
     /// checked in both cases so that a wider `Pc` is a refusal here rather
     /// than a wrong jump somewhere else.
     Displacement { from: Pc, to: Pc },
+    /// A run instruction over a storage no opcode encodes.
+    ///
+    /// [ADR 0058](../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
+    /// lets an encoding split a run family by storage, and the families that
+    /// have only a [`Storage::PackedBytes`] member so far have only that
+    /// opcode. `crate::verify` refuses the rest, so a program that reached the
+    /// encoder cannot hold one; this is the assertion that says so, for
+    /// [`TooWide::Slot`]'s reason.
+    Storage { storage: Storage },
 }
 
 impl std::fmt::Display for TooWide {
@@ -52,6 +61,9 @@ impl std::fmt::Display for TooWide {
             ),
             TooWide::Displacement { from, to } => {
                 write!(f, "a branch from {from} to {to} has no displacement")
+            }
+            TooWide::Storage { storage } => {
+                write!(f, "a run instruction over {storage:?} has no opcode")
             }
         }
     }
@@ -280,7 +292,17 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             slot(src)?,
             halves(layout.0, 0),
         ),
-        Inst::ByteAt { dst, obj, at } => build(Op::ByteAt, slot(dst)?, slot(obj)?, slot(at)?, 0),
+        Inst::RunLoad {
+            dst,
+            run,
+            index,
+            storage,
+        } => match storage {
+            Storage::PackedBytes => {
+                build(Op::RunLoadBytes, slot(dst)?, slot(run)?, slot(index)?, 0)
+            }
+            Storage::Words(_) => return Err(TooWide::Storage { storage }),
+        },
         Inst::RunCopy { args, storage } => match storage {
             Storage::PackedBytes => build(Op::RunCopyBytes, 0, 0, 0, halves(args.0, 0)),
             Storage::Words(elem) => build(Op::RunCopyWords, 0, 0, 0, halves(args.0, elem.0)),
@@ -758,10 +780,11 @@ mod tests {
             ),
             (
                 0,
-                Inst::ByteAt {
+                Inst::RunLoad {
                     dst: 1,
-                    obj: 2,
-                    at: 3,
+                    run: 2,
+                    index: 3,
+                    storage: Storage::PackedBytes,
                 },
             ),
             (
@@ -1173,6 +1196,26 @@ mod tests {
         for (pc, inst) in samples().into_iter().chain(boundaries()) {
             assert_eq!(encode(&inst, pc).expect("encodes").flags(), 0, "{inst:?}");
         }
+    }
+
+    /// A run instruction over a storage that has no opcode is refused rather
+    /// than encoded as the byte form. `crate::verify` refuses it first, so this
+    /// is the assertion behind that promise.
+    #[test]
+    fn a_run_instruction_over_a_storage_with_no_opcode_is_refused() {
+        let words = Storage::Words(LayoutId(0));
+        assert_eq!(
+            encode(
+                &Inst::RunLoad {
+                    dst: 0,
+                    run: 1,
+                    index: 2,
+                    storage: words,
+                },
+                0
+            ),
+            Err(TooWide::Storage { storage: words })
+        );
     }
 
     /// A slot a sixteen-bit operand cannot name is refused rather than

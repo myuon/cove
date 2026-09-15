@@ -358,14 +358,14 @@ pub enum Raise {
     Trapped = 9,
     /// `null_object()` — a reference read before it was given one.
     ///
-    /// What `encoded.rs`'s `LEN`, `BYTE_AT` and `Machine::element` each answer
+    /// What `encoded.rs`'s `LEN`, `RUN_LOAD_BYTES` and `Machine::element` each answer
     /// for a zero address, in that one word: the message is one sentence with
     /// no operand in it, so this variant carries nothing.
     NullObject = 10,
     /// `Machine::element`'s "index {a} is outside a collection of {b}", where
     /// the two numbers are [`NativeCtx::raise_a`] and [`NativeCtx::raise_b`].
     IndexOutOfRange = 11,
-    /// `encoded.rs`'s `BYTE_AT` refusal: "`byteAt` is `{a}`, and a byte offset
+    /// `encoded.rs`'s `RUN_LOAD_BYTES` refusal: "`byteAt` is `{a}`, and a byte offset
     /// into this string is 0 to `{b} - 1`".
     ///
     /// `raise_b` is the string's byte length rather than the last legal offset,

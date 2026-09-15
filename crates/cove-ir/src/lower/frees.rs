@@ -338,7 +338,7 @@ impl<'p> Flow<'p> {
             | Inst::CmpBranch { dst, .. }
             | Inst::CmpImmBranch { dst, .. }
             | Inst::Convert { dst, .. }
-            | Inst::ByteAt { dst, .. }
+            | Inst::RunLoad { dst, .. }
             | Inst::AllocBuffer { dst, .. }
             | Inst::FinishBuffer { dst, .. }
             | Inst::Len { dst, .. }
@@ -483,7 +483,7 @@ impl<'p> Flow<'p> {
                 }
             }
             Inst::LoadField { obj, .. }
-            | Inst::ByteAt { obj, .. }
+            | Inst::RunLoad { run: obj, .. }
             | Inst::Len { obj, .. }
             | Inst::LayoutOf { obj, .. }
             | Inst::AddrOfField { obj, .. } => f(obj, 1),

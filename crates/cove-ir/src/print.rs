@@ -331,9 +331,25 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             src,
             layout,
         } => format!("store-elem {} {} {}", s(*obj), s(*index), v(*src, *layout)),
-        Inst::ByteAt { dst, obj, at } => {
-            format!("byte-at {} {} {}", s(*dst), s(*obj), s(*at))
-        }
+        // Written the way `run-copy` is: the storage an encoding splits by, in
+        // the name.
+        Inst::RunLoad {
+            dst,
+            run,
+            index,
+            storage,
+        } => match storage {
+            Storage::PackedBytes => {
+                format!("run-load.bytes {} {} {}", s(*dst), s(*run), s(*index))
+            }
+            Storage::Words(elem) => format!(
+                "run-load.words {} {} {} {}",
+                l(*elem),
+                s(*dst),
+                s(*run),
+                s(*index)
+            ),
+        },
         // The storage is written the way an encoding splits it, because a
         // reader of a dump wants to see which copy runs without decoding a
         // payload: `run-copy.bytes` or `run-copy.words` and the element layout.

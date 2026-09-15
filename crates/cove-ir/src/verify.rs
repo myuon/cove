@@ -277,11 +277,11 @@ impl Check<'_> {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
-                Inst::ByteAt { dst, .. } | Inst::Len { dst, .. } | Inst::LayoutOf { dst, .. } => {
+                Inst::RunLoad { dst, .. } | Inst::Len { dst, .. } | Inst::LayoutOf { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
-                // ADR 0052's two poison `dst` exactly as `ByteAt` does rather
+                // ADR 0052's two poison `dst` exactly as `RunLoad` does rather
                 // than `identify`ing it the way `Inst::Alloc` and `Inst::Str`
                 // do: `AllocBuffer` always allocates `Program::buffer_layout`
                 // and `FinishBuffer` answers the store its owner was holding,
@@ -839,13 +839,15 @@ impl Check<'_> {
                     self.fits(at, src, layout, "what an element is written from");
                 }
             }
-            Inst::ByteAt {
+            Inst::RunLoad {
                 dst,
-                obj,
-                at: offset,
+                run,
+                index,
+                storage,
             } => {
-                self.expect(at, obj, &[Repr::Ref]);
-                self.expect(at, offset, &[Repr::Int]);
+                self.expect(at, run, &[Repr::Ref]);
+                self.expect(at, index, &[Repr::Int]);
+                self.admit_storage(at, "loads a unit of", storage);
                 self.expect(at, dst, &[Repr::Int]);
             }
             Inst::RunCopy { args, storage } => self.check_run_copy(at, args, storage),
@@ -1272,6 +1274,25 @@ impl Check<'_> {
                 arg.slot,
                 *layout,
                 &format!("argument {index} of `{name}`"),
+            );
+        }
+    }
+
+    /// Refuses a run instruction over a storage ADR 0058's Phase 2 does not
+    /// admit it for: every run family but [`Inst::RunCopy`] has only its
+    /// [`crate::Storage::PackedBytes`] member so far.
+    ///
+    /// The word members arrive with their first producer, and until then a
+    /// [`crate::Storage::Words`] here is a lowering mistake the machine has no
+    /// opcode for, not a unit it could load.
+    fn admit_storage(&mut self, at: Option<usize>, what: &str, storage: crate::Storage) {
+        if let crate::Storage::Words(layout) = storage {
+            let name = self.name_of(layout);
+            self.fault(
+                at,
+                format!(
+                    "{what} a run of `{name}` words, and this instruction admits only packed bytes"
+                ),
             );
         }
     }
@@ -2267,6 +2288,37 @@ mod tests {
         assert_eq!(
             faults(&program(vec![f])),
             vec!["what a clear zeroes is `Option`, whose word 0 is int, but slot 1 holds ref"]
+        );
+    }
+
+    /// A run load is admitted over packed bytes and nothing else, until the
+    /// word member has an opcode and a producer (ADR 0058, Phase 2): a
+    /// `Storage::Words` here is refused by name, and the byte form beside it
+    /// is well formed.
+    #[test]
+    fn a_run_load_over_words_is_a_fault() {
+        let load = |storage| {
+            function(
+                vec![Repr::Ref, Repr::Int, Repr::Int],
+                INT,
+                vec![
+                    Inst::RunLoad {
+                        dst: 2,
+                        run: 0,
+                        index: 1,
+                        storage,
+                    },
+                    Inst::Return { src: 2 },
+                ],
+            )
+        };
+        assert_eq!(
+            faults(&program(vec![load(crate::Storage::PackedBytes)])),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            faults(&program(vec![load(crate::Storage::Words(INT))])),
+            vec!["loads a unit of a run of `Int` words, and this instruction admits only packed bytes"]
         );
     }
 }

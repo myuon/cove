@@ -34,7 +34,7 @@
 use std::mem::offset_of;
 
 use cove_ir::{
-    ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot, StrId,
+    ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot, Storage, StrId,
 };
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
@@ -731,8 +731,13 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.store_elem(*obj, *index, *src, self.program.layout(*layout).width());
                 false
             }
-            Inst::ByteAt { dst, obj, at } => {
-                self.byte_at(*dst, *obj, *at);
+            Inst::RunLoad {
+                dst,
+                run,
+                index,
+                storage: Storage::PackedBytes,
+            } => {
+                self.byte_at(*dst, *run, *index);
                 false
             }
             Inst::Call { dst, callee, args } => {
@@ -1725,7 +1730,7 @@ impl<'a, 'f> Lower<'a, 'f> {
 
     /// Refuses a null reference, which every reader of an object does first.
     ///
-    /// `Machine::element`, `encoded.rs`'s `LEN` and its `BYTE_AT` each begin
+    /// `Machine::element`, `encoded.rs`'s `LEN` and its `RUN_LOAD_BYTES` each begin
     /// with `if addr == 0`, and each answers `null_object()`. One method,
     /// because one message.
     fn refuse_null(&mut self, addr: Value) {
@@ -1787,10 +1792,10 @@ impl<'a, 'f> Lower<'a, 'f> {
         }
     }
 
-    /// `encoded.rs`'s `BYTE_AT` arm: a payload read, a shift and a mask.
+    /// `encoded.rs`'s `RUN_LOAD_BYTES` arm: a payload read, a shift and a mask.
     ///
     /// The bound is the string's *byte* length and the refusal is not
-    /// `Array.get`'s — see [`Inst::ByteAt`](cove_ir::Inst::ByteAt) for why a
+    /// `Array.get`'s — see [`Inst::RunLoad`](cove_ir::Inst::RunLoad) for why a
     /// byte offset out of range stops the run rather than answering an
     /// `Option`. The one unsigned comparison is [`Lower::load_elem`]'s.
     fn byte_at(&mut self, dst: Slot, obj: Slot, at: Slot) {

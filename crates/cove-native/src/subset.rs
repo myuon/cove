@@ -13,7 +13,7 @@
 
 use cove_ir::{
     ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Function, Inst, Intrinsic, LayoutId, Len, Num,
-    Program, Repr, Shape, Slot, StrId,
+    Program, Repr, Shape, Slot, Storage, StrId,
 };
 use cove_schema::builtins::{NONE_CASE, SOME_CASE};
 
@@ -931,7 +931,14 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                 && slot(*obj)
                 && slot(*index)
         }
-        Inst::ByteAt { dst, obj, at } => slot(*dst) && slot(*obj) && slot(*at),
+        // A byte `run-load`, and only that: the word member has no opcode and
+        // no arm, and `cove_ir::verify` refuses it before it could get here.
+        Inst::RunLoad {
+            dst,
+            run,
+            index,
+            storage: Storage::PackedBytes,
+        } => slot(*dst) && slot(*run) && slot(*index),
         // A call is admitted whatever the callee is: it is handed to
         // `NativeHelpers::call`, which opens the frame with the runtime's own
         // `open_frame` and runs the callee on whichever tier it is on. So the

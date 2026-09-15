@@ -34,7 +34,7 @@ use std::sync::Arc;
 use cove_diag::{FileId, Span};
 use cove_ir::{
     Arg, ArgsId, ArithOp, BuiltinId, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout,
-    LayoutId, Len, Num, Program, RefMap, Repr, Slot, StrId, Table, TableId,
+    LayoutId, Len, Num, Program, RefMap, Repr, Slot, Storage, StrId, Table, TableId,
 };
 use cove_native::{BufferOp, Entry, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
 use cove_native::{HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS};
@@ -3780,17 +3780,18 @@ pub fn a_store_elem_strides_and_bounds_its_index<A: Arm>() {
     assert_eq!(answer.raise, Some(Raise::NullObject));
 }
 
-/// `encoded.rs`'s `BYTE_AT` arm (line 1456): a payload read, a shift and a mask,
+/// `encoded.rs`'s `RUN_LOAD_BYTES` arm (line 1456): a payload read, a shift and a mask,
 /// eight bytes to a word and least-significant byte first.
 pub fn a_byte_at_reads_one_byte_and_bounds_it<A: Arm>() {
     let held = program(function(
         vec![Repr::Ref, Repr::Int, Repr::Int],
         INT,
         vec![
-            Inst::ByteAt {
+            Inst::RunLoad {
                 dst: 2,
-                obj: 0,
-                at: 1,
+                run: 0,
+                index: 1,
+                storage: Storage::PackedBytes,
             },
             Inst::Return { src: 2 },
         ],

@@ -17,7 +17,9 @@
 
 #![cfg(all(feature = "cranelift", feature = "template"))]
 
-use cove_ir::{Arg, ArgsId, ArithOp, CmpOp, FunctionId, Inst, Len, Num, Program, Repr, StrId};
+use cove_ir::{
+    Arg, ArgsId, ArithOp, CmpOp, FunctionId, Inst, Len, Num, Program, Repr, Storage, StrId,
+};
 use cove_native::{Entry, NativeHelpers, Outcome, HEAP_CHUNK_WORDS};
 
 mod suite;
@@ -710,10 +712,11 @@ fn literals() -> Program {
                     dst: 2,
                     text: StrId(1),
                 },
-                Inst::ByteAt {
+                Inst::RunLoad {
                     dst: 4,
-                    obj: 2,
-                    at: 3,
+                    run: 2,
+                    index: 3,
+                    storage: Storage::PackedBytes,
                 },
                 Inst::Return { src: 4 },
             ],
@@ -807,10 +810,11 @@ fn byte() -> Program {
         vec![Repr::Ref, Repr::Int, Repr::Int],
         INT,
         vec![
-            Inst::ByteAt {
+            Inst::RunLoad {
                 dst: 2,
-                obj: 0,
-                at: 1,
+                run: 0,
+                index: 1,
+                storage: Storage::PackedBytes,
             },
             Inst::Return { src: 2 },
         ],

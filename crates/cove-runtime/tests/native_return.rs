@@ -1738,7 +1738,7 @@ fn a_vm_caller_enters_a_compiled_callee() {
 /// `refThroughCollection` calls `echoes`, `allocates` and `firstByte`. The tier
 /// below compiles `echoes` and `held` and leaves the other two to the VM —
 /// `allocates` reaches `String.sliceBytes`, which nothing native lowers, and
-/// `firstByte` is an `Inst::ByteAt` this file's tier does not walk. So each of the
+/// `firstByte` is an `Inst::RunLoad` this file's tier does not walk. So each of the
 /// four hops is taken by a named call and the counters can be read one by one.
 #[test]
 fn all_four_transitions_are_taken_and_counted() {

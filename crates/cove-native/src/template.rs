@@ -26,7 +26,8 @@ use std::mem::offset_of;
 use std::ptr;
 
 use cove_ir::{
-    ArgsId, ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot, StrId,
+    ArgsId, ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot, Storage,
+    StrId,
 };
 
 use crate::abi::{
@@ -589,7 +590,12 @@ impl<'a> Emit<'a> {
             } => {
                 self.store_elem(*obj, *index, *src, self.program.layout(*layout).width());
             }
-            Inst::ByteAt { dst, obj, at } => self.byte_at(*dst, *obj, *at),
+            Inst::RunLoad {
+                dst,
+                run,
+                index,
+                storage: Storage::PackedBytes,
+            } => self.byte_at(*dst, *run, *index),
             Inst::Call { dst, callee, args } => self.callee(*dst, callee.0, args.0),
             // ADR 0052's four, each handed to the runtime whole. See
             // [`crate::abi::BufferFn`] for why none of them has an emitted fast
@@ -1512,7 +1518,7 @@ impl<'a> Emit<'a> {
 
     /// Refuses a null reference, which every reader of an object does first.
     ///
-    /// `Machine::element`, `encoded.rs`'s `LEN` and its `BYTE_AT` each begin
+    /// `Machine::element`, `encoded.rs`'s `LEN` and its `RUN_LOAD_BYTES` each begin
     /// with `if addr == 0` and each answers `null_object()`.
     fn refuse_null(&mut self, reg: u8) {
         self.test_rr(reg, reg);
@@ -1608,10 +1614,10 @@ impl<'a> Emit<'a> {
         }
     }
 
-    /// `encoded.rs`'s `BYTE_AT` arm: a payload read, a shift and a mask.
+    /// `encoded.rs`'s `RUN_LOAD_BYTES` arm: a payload read, a shift and a mask.
     ///
     /// The bound is the string's *byte* length and the refusal is not
-    /// `Array.get`'s — see [`Inst::ByteAt`](cove_ir::Inst::ByteAt) for why a
+    /// `Array.get`'s — see [`Inst::RunLoad`](cove_ir::Inst::RunLoad) for why a
     /// byte offset out of range stops the run rather than answering an `Option`.
     fn byte_at(&mut self, dst: Slot, obj: Slot, at: Slot) {
         self.load_slot(RAX, obj);

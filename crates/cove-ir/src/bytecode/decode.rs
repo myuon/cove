@@ -252,10 +252,11 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             src: c,
             layout,
         },
-        Op::ByteAt => Inst::ByteAt {
+        Op::RunLoadBytes => Inst::RunLoad {
             dst: a,
-            obj: b,
-            at: c,
+            run: b,
+            index: c,
+            storage: Storage::PackedBytes,
         },
         Op::RunCopyBytes => Inst::RunCopy {
             args: ArgsId(lo),

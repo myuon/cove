@@ -563,7 +563,19 @@ pub enum Inst {
         src: Slot,
         layout: LayoutId,
     },
-    /// `dst = <byte `at` of the string `obj`>`, as an `Int` in `0..=255`.
+    /// `dst = run[index]`, one unit of a run in `storage`: ADR 0058's
+    /// `run-load dst, run, index, storage`.
+    ///
+    /// For [`Storage::PackedBytes`] the unit is a byte, and `dst` is an `Int`
+    /// in `0..=255`; `run` is a `String` and `index` a byte offset into it.
+    /// That is the only storage admitted today — `crate::verify` refuses
+    /// [`Storage::Words`], whose element reads are still [`Inst::LoadElem`] —
+    /// so what follows is the byte form's account.
+    ///
+    /// It began as `byte-at`, and is that instruction with the unit named
+    /// rather than assumed, for [`Inst::RunCopy`]'s reason: a byte read is
+    /// one member of a family of run operations, and the optimizer should see
+    /// the family rather than `String.byteAt`.
     ///
     /// The one instruction that reaches *inside* a word. Everything else here
     /// addresses a value location or a payload word, because a word is what a
@@ -577,14 +589,19 @@ pub enum Inst {
     /// the answer written back — for work that is one payload word, a shift
     /// and a mask. `benches/builtincall` is where those two numbers are.
     ///
-    /// `at` is bounds-checked against the receiver's byte length, and an
+    /// `index` is bounds-checked against the receiver's byte length, and an
     /// offset outside it stops the run. That is `String.sliceBytes`'s rule
     /// and not `Array.get`'s: a byte offset out of range is one this type
     /// never handed out, where an index out of range is arithmetic a caller
     /// did about a sequence it can count. Answering an `Option` here would
     /// also be answering it eight times per word of a lexer's inner loop,
     /// and the wrapper was measured at more than the read.
-    ByteAt { dst: Slot, obj: Slot, at: Slot },
+    RunLoad {
+        dst: Slot,
+        run: Slot,
+        index: Slot,
+        storage: Storage,
+    },
     /// A bulk range copy between two runs: `dst[dst_at .. dst_at+count] =
     /// src[src_at .. src_at+count]`, in units of `storage`.
     ///

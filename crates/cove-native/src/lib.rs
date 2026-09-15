@@ -96,7 +96,7 @@
 //! - [`Inst::Not`](cove_ir::Inst::Not);
 //! - [`Inst::Len`](cove_ir::Inst::Len),
 //!   [`Inst::LoadElem`](cove_ir::Inst::LoadElem) and
-//!   [`Inst::ByteAt`](cove_ir::Inst::ByteAt), which are the three heap reads —
+//!   a byte [`Inst::RunLoad`](cove_ir::Inst::RunLoad), which are the three heap reads —
 //!   each with the bounds check, the tag range and the null refusal
 //!   `cove_runtime::vm::exec::encoded` performs, because a native `load-elem`
 //!   that skips a check the VM makes is a wrong answer and not a fast one;
