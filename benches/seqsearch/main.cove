@@ -1,0 +1,240 @@
+use console.println
+use clock.now
+
+/// Two words inline, compared field by field: the element `==` cannot answer
+/// in one instruction.
+struct Pair {
+  key: Int
+  value: Int
+}
+
+/// `contains` and `indexOf` over every sequence shape a search is written
+/// against, found and not found, in a short sequence and a long one.
+///
+/// ADR 0058 (#378, Phase 3 Q10) moves both searches out of Rust and into a
+/// Cove loop over `==`. What that can cost is per element, and it is not the
+/// same per element for every `T`: an `Int` is one comparison, a `String` is
+/// one byte comparison, and a struct is a call into the machine's value
+/// equality per element where Rust made one call per search. So each row
+/// names its shape, and the pair of sizes is what tells a constant factor from
+/// a change of class — `n = 1024` over `n = 8` stays linear or it does not.
+///
+/// Every row spends about the same number of element comparisons — `budget`,
+/// half a million unless the first argument says otherwise — so the rows are
+/// comparable as nanoseconds per element as well as per call. A hit is the
+/// element in the middle, so it compares `n / 2 + 1` elements; a miss compares
+/// all `n`.
+export fn main(args: Array<String>) -> Result<Unit, Error> {
+  let budget = match args.get(0) {
+    Some(text) => Int.parse(text)?
+    None => 500000
+  }
+  for n in [8, 1024] {
+    let middle = n / 2
+    let intArray = ints(n)
+    arrayRow("Array<Int>", intArray, middle * 3, -1, n, budget)?
+    let intVector = intArray.toVector()
+    vectorRow("Vector<Int>", intVector, middle * 3, -1, n, budget)?
+    let stringArray = strings(n)
+    arrayRow(
+      "Array<String>",
+      stringArray,
+      "item-{middle * 3}",
+      "item-absent",
+      n,
+      budget,
+    )?
+    let pairArray = pairs(n)
+    arrayRow(
+      "Array<Pair>",
+      pairArray,
+      Pair(key: middle, value: middle * 7),
+      Pair(key: middle, value: -1),
+      n,
+      budget,
+    )?
+  }
+  Ok(())
+}
+
+/// `n` distinct `Int`s, `3 * i` at `i`.
+fn ints(n: Int) -> Array<Int> {
+  var out: Vector<Int> = Vector.of()
+  for i in 0..<n {
+    out.push(i * 3)
+  }
+  out.freeze()
+}
+
+/// `n` distinct strings, `"item-{3 * i}"` at `i`.
+fn strings(n: Int) -> Array<String> {
+  var out: Vector<String> = Vector.of()
+  for i in 0..<n {
+    out.push("item-{i * 3}")
+  }
+  out.freeze()
+}
+
+/// `n` distinct pairs whose keys are their positions.
+fn pairs(n: Int) -> Array<Pair> {
+  var out: Vector<Pair> = Vector.of()
+  for i in 0..<n {
+    out.push(Pair(key: i, value: i * 7))
+  }
+  out.freeze()
+}
+
+/// The four rows of one array: `contains` and `indexOf`, `hit` and `miss`.
+///
+/// The turns themselves are in [`arrayContains`] and [`arrayIndexOf`], which
+/// read no clock, print nothing, and are kept out of this function by
+/// [`reset`], so the native tier can compile the loop a row times rather than
+/// leaving it in the VM for the host call beside it.
+fn arrayRow<T>(
+  shape: String,
+  items: Array<T>,
+  hit: T,
+  miss: T,
+  n: Int,
+  budget: Int,
+) -> Result<Unit, Error> {
+  let middle = n / 2
+  let hitTurns = budget / (middle + 1)
+  let missTurns = budget / n
+
+  var from = now()
+  let hits = arrayContains(items, hit, hitTurns)
+  report(shape, "contains hit ", n, hitTurns, middle + 1, from)?
+  assertEqual(hits, hitTurns)?
+
+  from = now()
+  let misses = arrayContains(items, miss, missTurns)
+  report(shape, "contains miss", n, missTurns, n, from)?
+  assertEqual(misses, 0)?
+
+  from = now()
+  let found = arrayIndexOf(items, hit, hitTurns)
+  report(shape, "indexOf hit  ", n, hitTurns, middle + 1, from)?
+  assertEqual(found, hitTurns * middle)?
+
+  from = now()
+  let lost = arrayIndexOf(items, miss, missTurns)
+  report(shape, "indexOf miss ", n, missTurns, n, from)?
+  assertEqual(lost, -missTurns)?
+  Ok(())
+}
+
+/// [`arrayRow`], over a vector.
+fn vectorRow<T>(
+  shape: String,
+  items: Vector<T>,
+  hit: T,
+  miss: T,
+  n: Int,
+  budget: Int,
+) -> Result<Unit, Error> {
+  let middle = n / 2
+  let hitTurns = budget / (middle + 1)
+  let missTurns = budget / n
+
+  var from = now()
+  let hits = vectorContains(items, hit, hitTurns)
+  report(shape, "contains hit ", n, hitTurns, middle + 1, from)?
+  assertEqual(hits, hitTurns)?
+
+  from = now()
+  let misses = vectorContains(items, miss, missTurns)
+  report(shape, "contains miss", n, missTurns, n, from)?
+  assertEqual(misses, 0)?
+
+  from = now()
+  let found = vectorIndexOf(items, hit, hitTurns)
+  report(shape, "indexOf hit  ", n, hitTurns, middle + 1, from)?
+  assertEqual(found, hitTurns * middle)?
+
+  from = now()
+  let lost = vectorIndexOf(items, miss, missTurns)
+  report(shape, "indexOf miss ", n, missTurns, n, from)?
+  assertEqual(lost, -missTurns)?
+  Ok(())
+}
+
+/// Sets `count` to nothing.
+///
+/// Each loop below calls this once before it starts, and that call is what it
+/// is for: a program's own `var` function is never expanded, so a function
+/// that calls one is not a leaf, and the loop stays a function of its own — one
+/// the native tier can compile — rather than being expanded into the row above
+/// it, which reads the clock and so never compiles.
+fn reset(var count: Int) {
+  count = 0
+}
+
+/// How many of `turns` searches of `items` found `wanted`.
+fn arrayContains<T>(items: Array<T>, wanted: T, turns: Int) -> Int {
+  var found = 1
+  reset(var found)
+  var turn = 0
+  while turn < turns {
+    if items.contains(wanted) {
+      found += 1
+    }
+    turn += 1
+  }
+  found
+}
+
+/// The sum of the positions `turns` searches of `items` answered, `-1` for
+/// each that found nothing.
+fn arrayIndexOf<T>(items: Array<T>, wanted: T, turns: Int) -> Int {
+  var sum = 1
+  reset(var sum)
+  var turn = 0
+  while turn < turns {
+    sum += items.indexOf(wanted).unwrapOr(-1)
+    turn += 1
+  }
+  sum
+}
+
+/// [`arrayContains`], over a vector.
+fn vectorContains<T>(items: Vector<T>, wanted: T, turns: Int) -> Int {
+  var found = 1
+  reset(var found)
+  var turn = 0
+  while turn < turns {
+    if items.contains(wanted) {
+      found += 1
+    }
+    turn += 1
+  }
+  found
+}
+
+/// [`arrayIndexOf`], over a vector.
+fn vectorIndexOf<T>(items: Vector<T>, wanted: T, turns: Int) -> Int {
+  var sum = 1
+  reset(var sum)
+  var turn = 0
+  while turn < turns {
+    sum += items.indexOf(wanted).unwrapOr(-1)
+    turn += 1
+  }
+  sum
+}
+
+/// One row: the shape, the search, `n`, and what the turns since `from` cost
+/// per call, and per element compared in picoseconds.
+fn report(
+  shape: String,
+  search: String,
+  n: Int,
+  turns: Int,
+  compared: Int,
+  from: Duration,
+) -> Result<Unit, Error> {
+  let micros = (now() - from).micros()
+  let perCall = micros * 1000 / turns
+  let perElement = micros * 1000000 / (turns * compared)
+  println("{shape} {search} n={n}  {perCall} ns/call  {perElement} ps/element")
+}
