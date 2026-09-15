@@ -175,11 +175,11 @@ fn wrote(program: &Program, inst: &Inst) -> Option<(Slot, u32)> {
                 .get(op.index())
                 .map_or(1, |op| width(op.result)),
         )),
-        Inst::CallBuiltin { dst, builtin, .. } => Some((
+        Inst::IntrinsicCall { dst, site, .. } => Some((
             dst,
             program
-                .builtins
-                .get(builtin.index())
+                .intrinsic_sites
+                .get(site.index())
                 .map_or(1, |held| width(held.result)),
         )),
         // One word, whatever it holds.

@@ -233,7 +233,7 @@ export fn main() -> Result<Unit, Error> {
     // One unit per instruction, and one per word a bulk copy moved: `map`
     // walks a snapshot of the vector, and since ADR 0058 that snapshot is a
     // `run-copy` of 64 two-word `Point`s, charged the 128 words it moves
-    // rather than the one `call-builtin` it used to hide them behind.
+    // rather than the one `intrinsic-call` it used to hide them behind.
     assert_eq!(ran.fuel_spent, ran.instructions + 64 * 2);
 }
 

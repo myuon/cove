@@ -104,7 +104,7 @@
 //! It is honoured by the rule above and by nothing else. **Neither code
 //! generator keeps a Cove value in a register across an instruction
 //! boundary**, so at every place a collection can happen — the safepoint
-//! helper, the call helper, and now [`AllocFn`], [`BuiltinFn`], [`GrowableFn`] and
+//! helper, the call helper, and now [`AllocFn`], [`IntrinsicFn`], [`GrowableFn`] and
 //! [`RunCopyFn`], which are all the calls either arm emits that can reach one
 //! ([`OrderStrFn`] is a leaf and cannot) — every live reference is already in
 //! the slot the frame's static `Function::refs` map names. The collector walks exactly what it
@@ -385,7 +385,7 @@ pub enum Raise {
     /// than three, because *the code carries no message*: there is nothing for a
     /// second number to distinguish. [`NativeHelpers::call`] ran a callee which
     /// failed; [`NativeHelpers::alloc`] could not allocate, or its safepoint said
-    /// stop; [`NativeHelpers::builtin`] ran a builtin which refused. The name is
+    /// stop; [`NativeHelpers::intrinsic`] ran an intrinsic which refused. The name is
     /// the oldest of the three and has stayed, because what it says is still what
     /// happened: something this code *called* failed.
     ///
@@ -668,50 +668,132 @@ pub type CloseFn = unsafe extern "C" fn(ctx: *mut NativeCtx, outcome: u32, calle
 /// [ADR 0055]: ../../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
 pub type AllocFn = unsafe extern "C" fn(ctx: *mut NativeCtx, pc: u32, layout: u32, len: i64) -> u64;
 
-/// What a builtin helper is: one [`Inst::CallBuiltin`](cove_ir::Inst::CallBuiltin),
+/// What the intrinsic helper is: one [`Inst::IntrinsicCall`](cove_ir::Inst::IntrinsicCall),
 /// handed to the runtime whole.
 ///
-/// [`CallFn`]'s relationship to [`OpenFn`], for builtins. A builtin whose fast
-/// path is emitted still has cold paths whose *message* only the runtime can
-/// build — a `Vector` that `freeze()` consumed, a receiver whose object is not the
-/// shape the call site expected — and those messages name a rendered `Value`,
-/// which this crate cannot see and must never learn to. So emitted code tests the
-/// fast path's preconditions, and where one does not hold it calls this and the VM
-/// produces exactly the sentence it always produced. That is [`OpenFn`]'s "a mixed
-/// call keeps the path it had", one level down.
+/// [ADR 0058]: a core operation that stays in Rust is reached through "one typed
+/// boundary without name dispatch or temporary value reconstruction", and "native
+/// code binds a direct helper address or a compact helper table entry". This is
+/// that boundary for compiled code. There is **one** helper for every intrinsic
+/// rather than a typed function per intrinsic (#378, Q5.4): the operation is the
+/// `site` operand, and `Machine::call_intrinsic` — the function the encoded tier's
+/// `INTRINSIC_CALL` arm calls — dispatches on the static [`cove_ir::Intrinsic`] it
+/// names, reads the operands straight out of the caller's frame and writes the
+/// answer straight into `dst`. So the sentence a refusal produces is the VM's own
+/// and not a second copy of it here.
 ///
-/// **It is not a way to lower a builtin.** A `call-builtin` whose only lowering
-/// was this helper would be the encoded tier's `CALL_BUILTIN` arm reached through
-/// one more indirection: it would present a run as more native than it is, and
-/// — because the two code generators would emit the identical call — it would make
-/// the comparison between them measure nothing. `subset::method_of` is what admits
-/// a builtin, and it admits one only where a fast path is emitted for it.
+/// **What the call costs around it is decided by the intrinsic's effects**, and
+/// [`IntrinsicProtocol`] is that decision, written once for both code generators
+/// and for the helper itself. A call that may collect is a safepoint for exactly
+/// [`AllocFn`]'s reason: the unpaid work is published before it, the helper
+/// synchronises the program counter and takes [ADR 0040]'s three steps, and the
+/// generated code re-derives both republished pointers after it. A call that
+/// cannot collect is none of that — the work stays in the accumulator and the
+/// cached frame pointer stays live — and a call that can neither collect nor raise
+/// has no outcome to test either.
 ///
-/// `base` is the **caller's** frame as a word index, and `dst`, `builtin` and
+/// **Admission is not coverage.** A function compiled around an intrinsic call is
+/// worth compiling only if the function is faster for it, and every call here is a
+/// native-to-runtime crossing. Which intrinsics are admitted is `crate::subset`'s
+/// rule, measured on the representative workloads (#378, Q5.5), and not every
+/// intrinsic this helper can run.
+///
+/// `base` is the **caller's** frame as a word index, and `dst`, `site` and
 /// `args` are the three operands of the instruction as the plain numbers the IR
 /// carries. `base` is [`CallFn`]'s `base` and is there for the same two reasons:
 /// six integer arguments are what the System V ABI passes in registers, and a
 /// helper that is handed the frame it was called from can *check* it against the
 /// frame stack rather than assume it. The helper uses the stack's own address —
-/// `Machine::call_builtin` reads slots, which needs a linear address and not an
+/// `Machine::call_intrinsic` reads slots, which needs a linear address and not an
 /// index — and asserts the two agree.
 ///
 /// The answer is an [`Outcome`] as a `u32`, read exactly as [`CallFn`]'s is:
-/// [`Outcome::Returned`] means the answer's words are in `dst` already.
+/// [`Outcome::Returned`] means the answer's words are in `dst` already. Generated
+/// code reads it only where [`IntrinsicProtocol::tests_outcome`] says so; where it
+/// does not, the answer is always `Returned`: an intrinsic whose effects lack
+/// `MAY_RAISE` answering an error is a broken invariant, and the runtime ends the
+/// run at one rather than handing back an outcome nobody reads.
 ///
 /// # Safety
 ///
-/// As [`AllocFn`]: a builtin may allocate, so this is a safepoint and every live
+/// Where [`IntrinsicProtocol::safepoint`] holds, as [`AllocFn`]: every live
 /// reference must be in its slot, and both republished pointers are re-derived by
-/// the generated code afterwards.
-pub type BuiltinFn = unsafe extern "C" fn(
+/// the generated code afterwards. Where it does not, as [`FieldLoadFn`]: nothing is
+/// charged, and nothing a cached pointer points into can move.
+///
+/// [ADR 0040]: ../../../../docs/adr/0040-a-bound-outlives-its-backend.md
+/// [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+pub type IntrinsicFn = unsafe extern "C" fn(
     ctx: *mut NativeCtx,
     base: u64,
     pc: u32,
     dst: u32,
-    builtin: u32,
+    site: u32,
     args: u32,
 ) -> u32;
+
+/// What generated code does around one [`IntrinsicFn`] call, read off the
+/// intrinsic's declared [`Effects`](cove_ir::Effects).
+///
+/// [ADR 0058] asks for effects because they "decide whether generated code must
+/// publish roots, synchronize the program counter, take a safepoint and reload
+/// stack or heap pointers. A non-allocating field bound check does not pay the
+/// allocation protocol. A grow operation does." This is that sentence as two
+/// facts, computed in one place so that the Cranelift arm, the template arm and
+/// the runtime's helper cannot come to disagree about a call:
+///
+/// - [`IntrinsicProtocol::safepoint`]: the intrinsic may allocate, collect or
+///   block. The call publishes the unpaid work, the helper synchronises the
+///   program counter and takes a safepoint before it runs the intrinsic, and the
+///   generated code forgets every pointer it cached, because the stack may have
+///   grown and a heap chunk may have been committed.
+/// - [`IntrinsicProtocol::raises`]: the intrinsic may answer a language-level
+///   refusal. The helper synchronises the program counter so that the error names
+///   the instruction's span, and the generated code tests the outcome.
+///
+/// An intrinsic with neither — `String.contains`, `Float.sqrt` — is a plain call:
+/// no publish, no program counter, no test, and the frame pointer stays live.
+///
+/// `MAY_ALLOCATE` without `MAY_COLLECT` is read as a safepoint too, although
+/// [`cove_ir::Intrinsic::effects`] sets the two together: an allocation that did
+/// not collect may still commit a heap chunk. `BULK_WORK` changes nothing here,
+/// because the encoded arm does not poll inside an intrinsic either.
+///
+/// [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntrinsicProtocol {
+    /// The call is a safepoint: publish the work before it, forget cached pointers
+    /// after it.
+    pub safepoint: bool,
+    /// The call may raise: synchronise the program counter and test the outcome.
+    pub raises: bool,
+}
+
+impl IntrinsicProtocol {
+    /// The protocol `intrinsic`'s declared effects ask for.
+    pub const fn of(intrinsic: cove_ir::Intrinsic) -> Self {
+        use cove_ir::Effects;
+        let effects = intrinsic.effects();
+        IntrinsicProtocol {
+            safepoint: effects.contains(Effects::MAY_ALLOCATE)
+                || effects.contains(Effects::MAY_COLLECT)
+                || effects.contains(Effects::MAY_BLOCK),
+            raises: effects.contains(Effects::MAY_RAISE),
+        }
+    }
+
+    /// Whether generated code reads the helper's [`Outcome`]: a raise leaves, and so
+    /// does a stop the safepoint in front of the intrinsic answered.
+    pub const fn tests_outcome(self) -> bool {
+        self.safepoint || self.raises
+    }
+
+    /// Whether the helper writes the program counter into the frame: a safepoint
+    /// walks the frame, and a raise names the instruction's span.
+    pub const fn syncs_pc(self) -> bool {
+        self.safepoint || self.raises
+    }
+}
 
 /// What the field-access cold path is: [`Inst::LoadField`](cove_ir::Inst::LoadField),
 /// whose bound [`NativeCtx::fixed_payload_words`] could not answer, handed to the
@@ -726,7 +808,7 @@ pub type BuiltinFn = unsafe extern "C" fn(
 /// `Machine::checked` — the same bound, dynamic and exact — and then the copy
 /// `encoded.rs`'s `LOAD_FIELD` arm makes.
 ///
-/// Unlike [`AllocFn`] and [`BuiltinFn`] this is **not a safepoint**: neither the
+/// Unlike [`AllocFn`] and [`IntrinsicFn`] this is **not a safepoint**: neither the
 /// bound check nor the copy it guards can allocate, so there is nothing to
 /// charge and no cached pointer a call here could stale.
 ///
@@ -739,7 +821,7 @@ pub type BuiltinFn = unsafe extern "C" fn(
 /// both addresses are already resolved, so there is nothing left to resolve one
 /// against.
 ///
-/// The answer is an [`Outcome`] as a `u32`, read exactly as [`BuiltinFn`]'s is.
+/// The answer is an [`Outcome`] as a `u32`, read exactly as [`IntrinsicFn`]'s is.
 ///
 /// # Safety
 ///
@@ -894,16 +976,9 @@ impl GrowableOp {
 ///   three would refuse a function for the one scalar append in it, which is a
 ///   refusal with no work behind it.
 ///
-/// # It is a lowering, and [`BuiltinFn`] is not
+/// # It is a lowering, and what it buys is the function around it
 ///
-/// [`BuiltinFn`]'s documentation says in as many words that it "is not a way to
-/// lower a builtin", and the distinction is worth keeping sharp rather than
-/// quietly crossing. That helper is the **cold path** of a builtin whose fast
-/// path is emitted; a `call-builtin` reached only through it would present a run
-/// as more native than it is *and* would make both code generators emit the
-/// identical call, so the comparison between them would measure nothing.
-///
-/// This is the other kind, the kind [`AllocFn`] is: the operation's correctness
+/// This is the kind of helper [`AllocFn`] is: the operation's correctness
 /// lives in Rust and stays there, and what the lowering buys is not a faster
 /// append — it is that **the function around it compiles**. `covefmt.spacing` and
 /// `covefmt.flattened` were refused whole for one `growable-alloc` each; every
@@ -913,7 +988,7 @@ impl GrowableOp {
 /// and `a` and `b` the operands [`GrowableOp`] names for each variant. Six integer
 /// arguments, which is what the System V ABI passes in registers and what the
 /// template arm's call sequence depends on. The answer is an [`Outcome`] as a
-/// `u32`, read exactly as [`BuiltinFn`]'s is.
+/// `u32`, read exactly as [`IntrinsicFn`]'s is.
 ///
 /// # Safety
 ///
@@ -1098,8 +1173,8 @@ pub struct NativeHelpers {
     pub close: CloseFn,
     /// See [`AllocFn`].
     pub alloc: AllocFn,
-    /// See [`BuiltinFn`].
-    pub builtin: BuiltinFn,
+    /// See [`IntrinsicFn`].
+    pub intrinsic: IntrinsicFn,
     /// See [`GrowableFn`].
     pub growable: GrowableFn,
     /// See [`RunCopyFn`].

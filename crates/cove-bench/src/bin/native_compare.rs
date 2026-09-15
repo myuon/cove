@@ -627,18 +627,18 @@ unsafe extern "C" fn no_alloc(
     0
 }
 
-/// The builtin helper, for a scenario that calls none. See [`no_call`].
+/// The intrinsic helper, for a scenario that calls none. See [`no_call`].
 ///
 /// # Safety
 ///
 /// Reads nothing through any of its arguments.
 #[cfg(any(feature = "cranelift", feature = "template"))]
-unsafe extern "C" fn no_builtin(
+unsafe extern "C" fn no_intrinsic(
     _ctx: *mut cove_native::NativeCtx,
     _base: u64,
     _pc: u32,
     _dst: u32,
-    _builtin: u32,
+    _site: u32,
     _args: u32,
 ) -> u32 {
     cove_native::Outcome::Raised.abi()
@@ -732,7 +732,7 @@ fn helpers() -> cove_native::NativeHelpers {
         open: no_open,
         close: no_close,
         alloc: no_alloc,
-        builtin: no_builtin,
+        intrinsic: no_intrinsic,
         growable: no_growable,
         run_copy: no_run_copy,
         field_load: no_field_load,

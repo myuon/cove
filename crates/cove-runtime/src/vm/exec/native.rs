@@ -46,10 +46,10 @@
 //!   collect-and-retry and the one refusal an exhausted heap raises. It is the
 //!   archetype of the sentence above, and it is also the first thing compiled
 //!   code can do that *causes* a collection;
-//! - **a builtin the emitted fast path could not take** — [`builtin`] below,
-//!   which is `Machine::call_builtin` whole. It is the cold half of a builtin
-//!   whose fast path *is* emitted, and it exists because the refusals those cold
-//!   paths produce name a rendered `Value`, which `cove-native` cannot see;
+//! - **an intrinsic** — [`intrinsic`] below, which is `Machine::call_intrinsic`
+//!   whole: ADR 0058's one typed boundary for a core operation that stays in
+//!   Rust, with a safepoint in front of it only where the intrinsic's declared
+//!   effects say it may collect;
 //! - **leaving** — a [`Raise`] the compiled code names and this builds, which is
 //!   how a `+` that overflowed in machine code produces the *same sentence* the
 //!   encoded tier's does.
@@ -58,8 +58,10 @@
 //! enum's switch, a `Vector.push` into spare capacity — is emitted code, and that
 //! is deliberate: an operation that is one identical helper call in both arms
 //! cannot tell the two code generators apart, so a comparison over a subset made
-//! entirely of helper calls would measure nothing. That is why [`builtin`] is
-//! reachable only from a cold path and never as a lowering of its own.
+//! entirely of helper calls would measure nothing. An intrinsic call is admitted
+//! for what it buys the function around it — its Unicode walk or its parse is the
+//! runtime's either way — and only where that function measured faster for it
+//! (#378, Q5.5).
 //!
 //! # Why the aliasing discipline is written down
 //!
@@ -81,8 +83,10 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cove_ir::{ArgsId, BuiltinId, FunctionId, Inst, LayoutId, Slot, Storage, StrId};
-use cove_native::{Entry, GrowableOp, NativeCtx, NativeHelpers, Opened, Outcome, Raise, RunOp};
+use cove_ir::{ArgsId, FunctionId, Inst, LayoutId, SiteId, Slot, Storage, StrId};
+use cove_native::{
+    Entry, GrowableOp, IntrinsicProtocol, NativeCtx, NativeHelpers, Opened, Outcome, Raise, RunOp,
+};
 
 use super::{divided_by_zero, null_object, overflowed, Frame, Machine, Overflow};
 use crate::budget::Meter;
@@ -649,7 +653,7 @@ unsafe extern "C" fn alloc(ctx: *mut NativeCtx, pc: u32, layout: u32, len: i64) 
 /// `into` arrive as linear addresses emitted code already formed, so there is
 /// no slot to resolve against a frame here.
 ///
-/// Unlike [`alloc`] and [`builtin`] this is **not a safepoint**. Neither the
+/// Unlike [`alloc`] and [`intrinsic`] this is **not a safepoint**. Neither the
 /// bound check nor the copy it guards can allocate, so there is no unpaid work
 /// to publish and no cached pointer for [`republish`] to fix.
 ///
@@ -761,30 +765,114 @@ unsafe extern "C" fn field_store(
     }
 }
 
-/// The builtin helper: one `Inst::CallBuiltin`, handed over whole.
+/// The intrinsic helper: one `Inst::IntrinsicCall`, handed over whole.
 ///
-/// See [`cove_native::BuiltinFn`] for what this is *for*, which is the half of it
-/// that matters: it is the cold path of a builtin whose fast path emitted code
-/// takes, and it exists because the messages those cold paths produce name a
-/// rendered `Value` that `cove-native` cannot see. It is `encoded.rs`'s
-/// `CALL_BUILTIN` arm and nothing else — the same `Machine::call_builtin`, reading
-/// its operands out of the same frame and writing its answer into the same
-/// destination, with no buffer between (#378, P5-4) — so the sentence a refusal
-/// produces is the one the VM has always produced, rather than a second copy of it
+/// See [`cove_native::IntrinsicFn`] for what this is for. It is `encoded.rs`'s
+/// `INTRINSIC_CALL` arm and nothing else — the same `Machine::call_intrinsic`,
+/// reading its operands out of the same frame and writing its answer into the
+/// same destination, with no buffer between (#378, P5-4) — so the sentence a
+/// refusal produces is the one the VM produces, rather than a second copy of it
 /// in a code generator.
 ///
-/// A builtin may allocate and an allocation may collect, so this is a safepoint for
-/// exactly [`alloc`]'s reason and takes the same three steps in the same order.
+/// What happens around it is [`IntrinsicProtocol`], read off the intrinsic's
+/// declared effects — the one decision both code generators emitted the call
+/// from, asked again here so the two halves of the protocol cannot disagree:
+///
+/// - **a safepoint**, for an intrinsic that may allocate or collect: the unpaid
+///   work compiled code published is charged, the program counter synchronised and
+///   [ADR 0040]'s three steps taken, in that order and for exactly [`alloc`]'s
+///   reason, and both cached pointers are republished afterwards;
+/// - **otherwise nothing is charged and nothing republished.** The work stays
+///   where compiled code keeps it, and the pointers it cached are still right —
+///   which is a promise about the intrinsic, so under `debug_assertions` it is
+///   checked: the stack did not move and the heap did not collect. The program
+///   counter is synchronised only for an intrinsic that may raise, so the error
+///   names this instruction's span.
+///
+/// An intrinsic that may not raise is not tested for an outcome by compiled code,
+/// so answering anything but `Returned` for one would be answering into a
+/// register nobody reads — and stashing an error the *next* raise would report.
+/// `Machine::call_intrinsic` makes that impossible rather than unlikely: an `Err`
+/// from an intrinsic whose effects lack `MAY_RAISE` is a broken invariant and ends
+/// the run there, in every profile (`vm::exec`'s `unraisable`). So the `Raised`
+/// arm below is reachable only for an intrinsic that declares it.
 ///
 /// # Safety
 ///
 /// As [`safepoint`].
-unsafe extern "C" fn builtin(
+///
+/// [ADR 0040]: ../../../../../docs/adr/0040-a-bound-outlives-its-backend.md
+unsafe extern "C" fn intrinsic(
     ctx: *mut NativeCtx,
     base: u64,
     pc: u32,
     dst: u32,
-    builtin: u32,
+    site: u32,
+    args: u32,
+) -> u32 {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+    let site = SiteId(site);
+    let protocol = IntrinsicProtocol::of((*machine).program.intrinsic_site(site).intrinsic);
+    if protocol.safepoint {
+        return intrinsic_at_safepoint(ctx, base, pc, dst, site, args);
+    }
+
+    // One borrow that ends before compiled code runs again; see the module's
+    // aliasing note.
+    let answered = {
+        let machine = &mut *machine;
+        if protocol.raises {
+            machine.sync(pc as usize);
+        }
+        let frame = *machine.frames.last().expect("a native frame is executing");
+        debug_assert_eq!(
+            machine.mem.stack_index(frame.base) as u64,
+            base,
+            "compiled code and the frame stack disagree about which frame the intrinsic is in"
+        );
+        #[cfg(debug_assertions)]
+        let before = (machine.mem.words_ptr(), machine.collected().collections);
+        if let Some(counting) = machine.counting.as_deref_mut() {
+            counting.native_intrinsic(site);
+        }
+        let answered = machine.call_intrinsic(frame.base, dst as Slot, site, ArgsId(args));
+        #[cfg(debug_assertions)]
+        {
+            let intrinsic = machine.program.intrinsic_site(site).intrinsic;
+            debug_assert!(
+                before == (machine.mem.words_ptr(), machine.collected().collections),
+                "`{intrinsic}` moved the stack or collected, but its declared `Effects` ask \
+                 compiled code for no safepoint, so the pointers it cached are stale"
+            );
+        }
+        answered.map_err(|error| error.at(machine.span(frame.function, pc as usize)))
+    };
+    match answered {
+        Ok(()) => Outcome::Returned.abi(),
+        Err(error) => {
+            (*host).left = Some(error);
+            Outcome::Raised.abi()
+        }
+    }
+}
+
+/// [`intrinsic`] for an intrinsic whose protocol is a safepoint: [`alloc`]'s
+/// three steps in front of `Machine::call_intrinsic`, and both pointers
+/// republished after it.
+///
+/// Out of line so that the plain call above is the short path.
+///
+/// # Safety
+///
+/// As [`safepoint`].
+#[inline(never)]
+unsafe fn intrinsic_at_safepoint(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    dst: u32,
+    site: SiteId,
     args: u32,
 ) -> u32 {
     let host = (*ctx).host.cast::<Bridge>();
@@ -802,7 +890,7 @@ unsafe extern "C" fn builtin(
         debug_assert_eq!(
             machine.mem.stack_index(frame.base) as u64,
             base,
-            "compiled code and the frame stack disagree about which frame the builtin is in"
+            "compiled code and the frame stack disagree about which frame the intrinsic is in"
         );
         machine
             .safepoint(budget, frame.function, pc as usize)
@@ -812,12 +900,11 @@ unsafe extern "C" fn builtin(
             // already holding it.
             .and_then(|()| {
                 // After the safepoint, so that a stop it raised is not a call. One
-                // `Option` test on what is only ever a fast path's cold half; see
-                // `crate::vm::report`.
+                // `Option` test; see `crate::vm::report`.
                 if let Some(counting) = machine.counting.as_deref_mut() {
-                    counting.native_builtin(BuiltinId(builtin));
+                    counting.native_intrinsic(site);
                 }
-                machine.call_builtin(frame.base, dst as Slot, BuiltinId(builtin), ArgsId(args))
+                machine.call_intrinsic(frame.base, dst as Slot, site, ArgsId(args))
             })
             .map_err(|error| error.at(machine.span(frame.function, pc as usize)))
     };
@@ -888,7 +975,7 @@ unsafe extern "C" fn growable(
         machine
             .safepoint(budget, frame.function, pc as usize)
             .and_then(|()| {
-                // The frame's *address* rather than its index, for [`builtin`]'s
+                // The frame's *address* rather than its index, for [`intrinsic`]'s
                 // reason: the runtime is already holding the top frame and a slot
                 // read needs a linear address.
                 let base = frame.base;
@@ -1060,7 +1147,7 @@ unsafe extern "C" fn run_copy(
             .and_then(|()| {
                 let program = machine.program;
                 let args = program.arg_list(ArgsId(args));
-                // The frame's *address* rather than its index, for [`builtin`]'s
+                // The frame's *address* rather than its index, for [`intrinsic`]'s
                 // reason. Both cores attach the instruction's span to their own
                 // refusals.
                 match RunOp::from_abi(kind).expect("a code generator emitted a run op that is one")
@@ -1926,7 +2013,7 @@ pub fn helpers() -> NativeHelpers {
         open,
         close,
         alloc,
-        builtin,
+        intrinsic,
         growable,
         run_copy,
         field_load,
@@ -1958,7 +2045,7 @@ pub fn helpers_counting() -> NativeHelpers {
         open: counted_open,
         close: counted_close,
         alloc: counted_alloc,
-        builtin: counted_builtin,
+        intrinsic: counted_intrinsic,
         growable: counted_growable,
         run_copy: counted_run_copy,
         field_load: counted_field_load,
@@ -2061,9 +2148,9 @@ counted!(
     counted_alloc => alloc.alloc(pc: u32, layout: u32, len: i64) -> u64
 );
 counted!(
-    /// [`builtin`], counted. Which intrinsic it was is counted by [`builtin`]
+    /// [`intrinsic`], counted. Which intrinsic it was is counted by [`intrinsic`]
     /// itself, whichever table was bound; see `crate::vm::report`.
-    counted_builtin => builtin.builtin(base: u64, pc: u32, dst: u32, id: u32, args: u32) -> u32
+    counted_intrinsic => intrinsic.intrinsic(base: u64, pc: u32, dst: u32, id: u32, args: u32) -> u32
 );
 counted!(
     /// [`growable`], counted.
@@ -2175,7 +2262,7 @@ pub fn helpers_ablated<const MASK: u64>() -> NativeHelpers {
         open,
         close,
         alloc,
-        builtin,
+        intrinsic,
         growable,
         run_copy,
         field_load,

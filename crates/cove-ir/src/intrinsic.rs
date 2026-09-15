@@ -8,8 +8,8 @@
 //! use Rust dispatch on the numeric identifier. Native code binds a direct
 //! helper address or a compact helper table entry." [`Intrinsic`] is that
 //! identifier: a closed, numbered enum with one variant per operation
-//! `crate::vm::builtins::call` (in `cove-runtime`) has been taught, rather
-//! than the `(receiver, operation)` pair of strings [`crate::Builtin`] used
+//! `crate::vm::intrinsics::call` (in `cove-runtime`) has been taught, rather
+//! than the `(receiver, operation)` pair of strings [`crate::IntrinsicSite`] used
 //! to carry.
 //!
 //! # Effects are read off the implementation, not guessed
@@ -25,7 +25,7 @@
 
 use std::fmt;
 
-/// One core operation a `CallBuiltin` may name.
+/// One core operation an `IntrinsicCall` may name.
 ///
 /// A variant is named `ReceiverOperation` in upper camel case — `String`'s
 /// `fromCodePoint` is [`Intrinsic::StringFromCodePoint`] — because that pair is
@@ -195,7 +195,7 @@ impl Intrinsic {
     /// A linear search of [`ALL`], which is the whole set this backend has
     /// been taught and small enough that a search of it costs nothing next
     /// to lowering the call it names. Nothing after lowering calls this:
-    /// [`crate::Builtin`] carries the variant itself once one is found, for
+    /// [`crate::IntrinsicSite`] carries the variant itself once one is found, for
     /// the reason this ADR exists — dispatch is never again a string
     /// comparison.
     pub fn from_names(receiver: &str, operation: &str) -> Option<Intrinsic> {
@@ -250,7 +250,7 @@ impl Intrinsic {
     }
 
     /// The operands the intrinsic takes and the answer it writes, as the
-    /// verifier checks every `CallBuiltin` against them.
+    /// verifier checks every `IntrinsicCall` against them.
     ///
     /// ADR 0058: "Lowering resolves it to an intrinsic identifier with a fixed
     /// operand and result shape." This is that shape, written down once, so
@@ -310,7 +310,7 @@ impl Intrinsic {
     ///
     /// See [`Effects`]'s fields for what each one asks of generated code.
     /// Assigned by reading the VM arm each intrinsic dispatches to in
-    /// `cove-runtime`'s `vm::builtins`, not by a rule applied to every
+    /// `cove-runtime`'s `vm::intrinsics`, not by a rule applied to every
     /// member of a family — two operations of the same receiver may answer
     /// differently, the way [`Intrinsic::StringContains`] allocates nothing
     /// and [`Intrinsic::StringSlice`] does.
@@ -428,7 +428,7 @@ impl Intrinsic {
 /// What an [`Intrinsic`] is about.
 ///
 /// Three, and not one of them a collection: ADR 0058's Phase 5 makes "a new
-/// collection `CallBuiltin` a verification failure", and this is the half of
+/// collection `IntrinsicCall` a verification failure", and this is the half of
 /// that rule a verifier can read. A `Text` or `Scalar` intrinsic whose operand
 /// is a collection is refused by `crate::verify` — the one exception is the
 /// `Array<String>` [`Class::Strings`] names, which `String.join` reads as the
@@ -563,7 +563,7 @@ impl Effects {
     ///
     /// No [`Intrinsic`] carries this today — a core intrinsic is Rust that
     /// stays off the scheduler and the Host boundary by construction, which
-    /// is the boundary [`crate::Builtin`]'s own doc comment draws. The flag
+    /// is the boundary [`crate::IntrinsicSite`]'s own doc comment draws. The flag
     /// exists because the ADR's effect list names it as one of the seven a
     /// future intrinsic could need, and generated code that saw it would
     /// have to take a safepoint before the call so the scheduler can move

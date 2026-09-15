@@ -101,8 +101,8 @@ use cove_syntax::ast::{Expr, FnDecl};
 use crate::inst::{Inst, Pc, Slot};
 use crate::layout::LayoutId;
 use crate::program::{
-    Arg, ArgsId, Builtin, BuiltinId, Function, FunctionId, HostOp, HostOpId, Program, StrId, Table,
-    TableId,
+    Arg, ArgsId, Function, FunctionId, HostOp, HostOpId, IntrinsicSite, Program, SiteId, StrId,
+    Table, TableId,
 };
 use crate::repr::{RefMap, Repr};
 
@@ -340,7 +340,7 @@ fn emit<'a>(
         args: pool.args.lists,
         tables: pool.tables,
         host_ops: pool.host_ops,
-        builtins: pool.builtins,
+        intrinsic_sites: pool.intrinsic_sites,
         // Only what this pass lowered is nameable. A stub answers `()`, so
         // an entry point that resolved to one would run and say nothing
         // rather than saying it was not there — and `run_entry` already has
@@ -1117,7 +1117,7 @@ struct Pool {
     strings: Vec<Arc<str>>,
     tables: Vec<Table>,
     host_ops: Vec<HostOp>,
-    builtins: Vec<Builtin>,
+    intrinsic_sites: Vec<IntrinsicSite>,
     shapes: Shapes,
     /// The functions numbered after every declaration: the body a lambda
     /// lowered to, and the body one instantiation of a generic declaration
@@ -1179,7 +1179,7 @@ impl Pool {
             strings: Vec::new(),
             tables: Vec::new(),
             host_ops: Vec::new(),
-            builtins: Vec::new(),
+            intrinsic_sites: Vec::new(),
             shapes: Shapes::new(schemas),
             appended: Vec::new(),
             instances: HashMap::new(),
@@ -1216,12 +1216,12 @@ impl Pool {
         }
     }
 
-    fn builtin(&mut self, builtin: Builtin) -> BuiltinId {
-        match self.builtins.iter().position(|held| *held == builtin) {
-            Some(at) => BuiltinId(at as u32),
+    fn intrinsic_site(&mut self, site: IntrinsicSite) -> SiteId {
+        match self.intrinsic_sites.iter().position(|held| *held == site) {
+            Some(at) => SiteId(at as u32),
             None => {
-                self.builtins.push(builtin);
-                BuiltinId((self.builtins.len() - 1) as u32)
+                self.intrinsic_sites.push(site);
+                SiteId((self.intrinsic_sites.len() - 1) as u32)
             }
         }
     }

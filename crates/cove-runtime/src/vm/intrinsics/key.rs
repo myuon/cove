@@ -24,7 +24,7 @@
 //! member is*. Everything below therefore compares a [`Key`], which is either
 //! the run of words a known layout describes or one operand word.
 //!
-//! The two halves exist because a [`cove_ir::Builtin`] carries no layout for
+//! The two halves exist because a [`cove_ir::IntrinsicSite`] carries no layout for
 //! its operands and an argument list is base slots that need not be adjacent,
 //! so the machine cannot know how wide an operand is and an operand stays one
 //! word. A set's member and a map's key are not so restricted — the receiver's
@@ -87,11 +87,11 @@ use cove_ir::{Field, LayoutId, Part, Program, Repr, Shape};
 
 use crate::error::RuntimeError;
 use crate::vm::boundary::is_range;
-#[cfg(test)]
-use crate::vm::builtins::operand::Operand;
-use crate::vm::builtins::operand::{self, Dest, Frame};
-use crate::vm::builtins::{equal, render_value};
 use crate::vm::exec::Machine;
+#[cfg(test)]
+use crate::vm::intrinsics::operand::Operand;
+use crate::vm::intrinsics::operand::{self, Dest, Frame};
+use crate::vm::intrinsics::{equal, render_value};
 
 /// What a `Map`'s key argument is called in a refusal.
 #[cfg(test)]
@@ -1023,11 +1023,11 @@ fn not_a_key() -> RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::builtins::make;
-    use crate::vm::builtins::tests::{
+    use crate::vm::exec::tests::Build;
+    use crate::vm::intrinsics::make;
+    use crate::vm::intrinsics::tests::{
         at, elements as array_layout, named, scalar, two_case, world,
     };
-    use crate::vm::exec::tests::Build;
 
     fn machine(program: &cove_ir::Program) -> Machine<'_> {
         Machine::new(program, 1 << 14)

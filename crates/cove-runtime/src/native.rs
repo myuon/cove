@@ -131,7 +131,7 @@ pub struct Refused {
 /// The same pair [`Refused::instruction`] and [`Refused::blocked`] name for the
 /// *first* blocker, carried so the whole set can be grouped and counted: two
 /// instructions with the same opcode and the same subject are one blocker
-/// however many pcs they sit at, and two `CallBuiltin`s of different builtins
+/// however many pcs they sit at, and two `IntrinsicCall`s of different builtins
 /// are two.
 ///
 /// A `String` inside for the reason [`Refused::reason`] is: this type has to
@@ -152,8 +152,8 @@ pub struct Blocker {
 /// An opcode is the unit [`Refused::instruction`] reports and it is the right one
 /// for deciding *whether* to lower a family. It is the wrong one for deciding
 /// *what to build*, because two of the opcodes at the top of a ranked table are
-/// aggregates: `CallBuiltin` is every builtin the language has, and the `Alloc`
-/// opcodes are every layout a program declares. "Lower `CallBuiltin`" is not a
+/// aggregates: `IntrinsicCall` is every builtin the language has, and the `Alloc`
+/// opcodes are every layout a program declares. "Lower `IntrinsicCall`" is not a
 /// task; "lower `String.byteAt`" is.
 ///
 /// So this is the second key a census groups by, and it exists for exactly the
@@ -166,10 +166,10 @@ pub struct Blocker {
 /// generator, because the CLI must be able to name the report it cannot produce.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Blocked {
-    /// [`Inst::CallBuiltin`](cove_ir::Inst::CallBuiltin)'s builtin, as the
+    /// [`Inst::IntrinsicCall`](cove_ir::Inst::IntrinsicCall)'s builtin, as the
     /// receiver and the operation the IR's own `Builtin` names it by:
     /// `String.byteAt`, `Vector.push`.
-    Builtin(String),
+    Intrinsic(String),
     /// [`Inst::Alloc`](cove_ir::Inst::Alloc)'s layout: what is being allocated.
     ///
     /// Both halves are carried because neither is the other. The name is the
@@ -397,9 +397,9 @@ fn grouped_blockers(program: &Program, function: &cove_ir::Function) -> Vec<(Blo
 fn blocked_on(program: &Program, function: &cove_ir::Function, pc: u32) -> Option<Blocked> {
     use cove_ir::Inst;
     match function.code.get(pc as usize)? {
-        Inst::CallBuiltin { builtin, .. } => {
-            let held = program.builtin(*builtin);
-            Some(Blocked::Builtin(held.intrinsic.to_string()))
+        Inst::IntrinsicCall { site, .. } => {
+            let held = program.intrinsic_site(*site);
+            Some(Blocked::Intrinsic(held.intrinsic.to_string()))
         }
         Inst::Alloc { layout, .. } => {
             let held = program.layout(*layout);

@@ -2,7 +2,7 @@
 //!
 //! A builtin is a method of a type the language ships — `String`, `Array`,
 //! `Int` — that is too large or too specific to be an [`Inst`](cove_ir::Inst)
-//! and too fixed to be a Host call. [`cove_ir::Builtin`] names one by a
+//! and too fixed to be a Host call. [`cove_ir::IntrinsicSite`] names one by a
 //! closed [`cove_ir::Intrinsic`] rather than by a pair of strings matched at
 //! run time — see [ADR
 //! 0058](../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
@@ -43,7 +43,7 @@ use cove_ir::{Intrinsic, LayoutId, Repr, Shape};
 use cove_schema::builtins::{ERROR, MESSAGE_FIELD};
 
 use crate::vm::boundary::{is_range, short};
-use crate::vm::builtins::operand::{Dest, Frame};
+use crate::vm::intrinsics::operand::{Dest, Frame};
 
 use crate::error::RuntimeError;
 use crate::vm::exec::Machine;
@@ -621,9 +621,9 @@ fn duration(ns: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::builtins::operand::Operand;
     use crate::vm::exec::tests::{budget, Build};
-    use cove_ir::{Builtin, BuiltinId, Inst, LayoutId, Program, Repr, Shape};
+    use crate::vm::intrinsics::operand::Operand;
+    use cove_ir::{Inst, IntrinsicSite, LayoutId, Program, Repr, Shape, SiteId};
 
     /// The program every builtin test is run against.
     ///
@@ -762,7 +762,7 @@ mod tests {
     /// location, so a `Point` argument is the layout and both of its words.
     /// The same, declaring the layout the answer is supposed to have.
     ///
-    /// What `Inst::CallBuiltin` carries, and the only thing that tells two
+    /// What `Inst::IntrinsicCall` carries, and the only thing that tells two
     /// instantiations of one family apart.
     pub(super) fn answering(
         machine: &mut Machine,
@@ -842,7 +842,7 @@ mod tests {
         answering(machine, receiver, operation, result, operands)
     }
 
-    /// The layout the lowering would have put in `Inst::CallBuiltin`.
+    /// The layout the lowering would have put in `Inst::IntrinsicCall`.
     ///
     /// A fixture standing in for the lowering, and it is here rather than in
     /// `make` on purpose: the machine is *given* the layout of the answer,
@@ -1083,10 +1083,10 @@ mod tests {
         let operand = build.args(&[(0, held)]);
         let dst = reprs.len() as u32;
         reprs.push(Repr::Ref);
-        let builtin = builtin(&mut build.program, "String", "interpolate", str_layout);
-        code.push(Inst::CallBuiltin {
+        let site = site(&mut build.program, "String", "interpolate", str_layout);
+        code.push(Inst::IntrinsicCall {
             dst,
-            builtin,
+            site,
             args: operand,
         });
         code.push(Inst::Return { src: dst });
@@ -1097,16 +1097,13 @@ mod tests {
         String::from_utf8(machine.string_bytes(word[0])).unwrap()
     }
 
-    fn builtin(
-        program: &mut Program,
-        receiver: &str,
-        operation: &str,
-        result: LayoutId,
-    ) -> BuiltinId {
+    fn site(program: &mut Program, receiver: &str, operation: &str, result: LayoutId) -> SiteId {
         let intrinsic = Intrinsic::from_names(receiver, operation)
             .unwrap_or_else(|| panic!("`{receiver}.{operation}` has no `Intrinsic`"));
-        program.builtins.push(Builtin { intrinsic, result });
-        BuiltinId(program.builtins.len() as u32 - 1)
+        program
+            .intrinsic_sites
+            .push(IntrinsicSite { intrinsic, result });
+        SiteId(program.intrinsic_sites.len() as u32 - 1)
     }
 
     #[test]
@@ -1159,7 +1156,7 @@ mod tests {
         let str_layout = build.layout("String", Shape::Str);
         build.program.str_layout = str_layout;
         let operand = build.args(&[(0, str_layout)]);
-        let builtin = builtin(&mut build.program, "String", "interpolate", str_layout);
+        let site = site(&mut build.program, "String", "interpolate", str_layout);
         let f = build.function(
             "f",
             &[],
@@ -1170,9 +1167,9 @@ mod tests {
                     dst: 0,
                     text: cove_ir::StrId(0),
                 },
-                Inst::CallBuiltin {
+                Inst::IntrinsicCall {
                     dst: 1,
-                    builtin,
+                    site,
                     args: operand,
                 },
                 Inst::Return { src: 1 },
@@ -1232,7 +1229,7 @@ mod tests {
         build.program.str_layout = str_layout;
         let ints = build.scalar(Repr::Int);
         let parts = build.args(&[(0, str_layout), (1, ints), (2, str_layout)]);
-        let builtin = builtin(&mut build.program, "String", "interpolate", str_layout);
+        let site = site(&mut build.program, "String", "interpolate", str_layout);
         let f = build.function(
             "f",
             &[],
@@ -1248,9 +1245,9 @@ mod tests {
                     dst: 2,
                     text: cove_ir::StrId(1),
                 },
-                Inst::CallBuiltin {
+                Inst::IntrinsicCall {
                     dst: 3,
-                    builtin,
+                    site,
                     args: parts,
                 },
                 Inst::Return { src: 3 },
@@ -1283,8 +1280,8 @@ mod tests {
             pieces.push((2, str_layout));
         }
         let pieces = build.args(&pieces);
-        let trim = builtin(&mut build.program, "String", "trim", str_layout);
-        let interpolate = builtin(&mut build.program, "String", "interpolate", str_layout);
+        let trim = site(&mut build.program, "String", "trim", str_layout);
+        let interpolate = site(&mut build.program, "String", "interpolate", str_layout);
         let f = build.function(
             "f",
             &[],
@@ -1295,9 +1292,9 @@ mod tests {
                     dst: 0,
                     text: cove_ir::StrId(0),
                 },
-                Inst::CallBuiltin {
+                Inst::IntrinsicCall {
                     dst: 0,
-                    builtin: trim,
+                    site: trim,
                     args: trimmed,
                 },
                 Inst::Int { dst: 1, value: 7 },
@@ -1305,9 +1302,9 @@ mod tests {
                     dst: 2,
                     text: cove_ir::StrId(1),
                 },
-                Inst::CallBuiltin {
+                Inst::IntrinsicCall {
                     dst: 0,
-                    builtin: interpolate,
+                    site: interpolate,
                     args: pieces,
                 },
                 Inst::Return { src: 0 },

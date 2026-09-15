@@ -12,10 +12,10 @@
 //! # Five quantities, because no two of them are one
 //!
 //! - **emitted IR** is static: the instructions the lowering left in the
-//!   program after optimization, and how many of them are `CallBuiltin` sites.
+//!   program after optimization, and how many of them are `IntrinsicCall` sites.
 //!   It is a fact about the program and answers the same whatever runs it;
-//! - **mediated intrinsics** are dynamic: each `CallBuiltin` that reached
-//!   `Machine::call_builtin`, by [`Intrinsic`], split by the tier that made the
+//! - **mediated intrinsics** are dynamic: each `IntrinsicCall` that reached
+//!   `Machine::call_intrinsic`, by [`Intrinsic`], split by the tier that made the
 //!   call. A native fast path that answered in emitted code never reaches the
 //!   runtime and is *not* counted — which is the point: a mediated call is the
 //!   one that crossed;
@@ -28,11 +28,11 @@
 //!
 //! Nothing here is on the dispatch loop. What a run that did not ask pays is:
 //!
-//! - one `Option` test at the top of `Machine::call_builtin`, which is already a
-//!   Rust call that copies every operand word into a buffer and dispatches on the
-//!   intrinsic — the same shape `Machine::tiered` puts at a `call`;
-//! - one `Option` test in the native `builtin` helper, which is only ever the
-//!   *cold* half of a fast path;
+//! - one `Option` test at the top of `Machine::call_intrinsic`, which is already a
+//!   Rust call that dispatches on the intrinsic — the same shape `Machine::tiered`
+//!   puts at a `call`;
+//! - one `Option` test in the native `intrinsic` helper, which is already a call
+//!   out of compiled code into that same function;
 //! - and nothing at all in the other eight helpers: those are counted by a
 //!   **second helper table**, [`helpers_counting`], which a run that wants the
 //!   counts compiles against and a run that does not never binds. That is
@@ -46,7 +46,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use cove_ir::{BuiltinId, FunctionId, Inst, Intrinsic, Program};
+use cove_ir::{FunctionId, Inst, Intrinsic, Program, SiteId};
 
 use crate::vm::exec::native::Tiers;
 
@@ -69,9 +69,8 @@ pub struct HelperCalls {
     pub close: u64,
     /// [`AllocFn`](cove_native::AllocFn): one `Inst::Alloc`.
     pub alloc: u64,
-    /// [`BuiltinFn`](cove_native::BuiltinFn): the cold half of a builtin fast
-    /// path.
-    pub builtin: u64,
+    /// [`IntrinsicFn`](cove_native::IntrinsicFn): one intrinsic call.
+    pub intrinsic: u64,
     /// [`GrowableFn`](cove_native::GrowableFn): one growable-run operation.
     pub growable: u64,
     /// [`RunCopyFn`](cove_native::RunCopyFn): one run copy, whole.
@@ -100,7 +99,7 @@ impl HelperCalls {
             ("open", self.open),
             ("close", self.close),
             ("alloc", self.alloc),
-            ("builtin", self.builtin),
+            ("intrinsic", self.intrinsic),
             ("growable", self.growable),
             ("run_copy", self.run_copy),
             ("field_load", self.field_load),
@@ -116,12 +115,11 @@ impl HelperCalls {
 pub struct IntrinsicCalls {
     /// The operation.
     pub intrinsic: Intrinsic,
-    /// `CallBuiltin` instructions naming it, over every function with a body.
+    /// `IntrinsicCall` instructions naming it, over every function with a body.
     pub sites: u64,
     /// Calls the encoded dispatch loop made.
     pub encoded: u64,
-    /// Calls compiled code made through the `builtin` helper — the cold path of
-    /// an emitted fast path. The fast path itself is not here.
+    /// Calls compiled code made through the `intrinsic` helper.
     pub native: u64,
 }
 
@@ -140,8 +138,8 @@ pub struct Emitted {
     pub functions: usize,
     /// IR instructions in those functions, after optimization.
     pub instructions: u64,
-    /// How many of them are `CallBuiltin`.
-    pub builtin_sites: u64,
+    /// How many of them are `IntrinsicCall`.
+    pub intrinsic_sites: u64,
     /// How many of them are an `Inst::Call` to a standard-library function:
     /// the library calls the lowering left calls rather than expanding.
     ///
@@ -171,19 +169,19 @@ pub struct LibraryCalls {
 }
 
 impl Emitted {
-    /// Counts `program`, and the `CallBuiltin` sites of each builtin by
-    /// `BuiltinId`.
+    /// Counts `program`, and the `IntrinsicCall` sites of each builtin by
+    /// `SiteId`.
     fn of(program: &Program) -> (Emitted, Vec<u64>) {
         let mut emitted = Emitted::default();
-        let mut sites = vec![0u64; program.builtins.len()];
+        let mut sites = vec![0u64; program.intrinsic_sites.len()];
         for function in program.functions.iter().filter(|f| !f.is_stub()) {
             emitted.functions += 1;
             emitted.instructions += function.code.len() as u64;
             for inst in &function.code {
                 match inst {
-                    Inst::CallBuiltin { builtin, .. } => {
-                        emitted.builtin_sites += 1;
-                        if let Some(count) = sites.get_mut(builtin.index()) {
+                    Inst::IntrinsicCall { site, .. } => {
+                        emitted.intrinsic_sites += 1;
+                        if let Some(count) = sites.get_mut(site.index()) {
                             *count += 1;
                         }
                     }
@@ -211,9 +209,9 @@ impl Emitted {
 /// # Free when it is off
 ///
 /// Nothing is on the dispatch loop. A run that did not ask pays one `Option` test
-/// at the top of `Machine::call_builtin` — already a Rust call that copies every
-/// operand into a buffer — and one in the native `builtin` helper, which is only
-/// ever a fast path's cold half. The per-helper counts cost such a run nothing at
+/// at the top of `Machine::call_intrinsic` — already a Rust call that dispatches on
+/// the intrinsic — and one in the native `intrinsic` helper, which is already a call
+/// out of compiled code into that function. The per-helper counts cost such a run nothing at
 /// all, because they are a second helper table,
 /// [`native_helpers_counting`](crate::native_helpers_counting), which only
 /// [`compile_native_counting`](crate::compile_native_counting) binds:
@@ -265,10 +263,10 @@ impl BoundaryReport {
 /// a helper reaches the machine through one raw pointer, and this is written from
 /// inside helpers.
 pub(crate) struct Counting {
-    /// `CallBuiltin`s that reached `Machine::call_builtin`, by `BuiltinId`, from
+    /// `IntrinsicCall`s that reached `Machine::call_intrinsic`, by `SiteId`, from
     /// either tier.
-    builtins: Vec<u64>,
-    /// The ones among them the native `builtin` helper made.
+    sites: Vec<u64>,
+    /// The ones among them the native `intrinsic` helper made.
     from_native: Vec<u64>,
     /// Whether each function, by `FunctionId`, is the standard library's.
     library: Vec<bool>,
@@ -290,8 +288,8 @@ pub(crate) struct Counting {
 impl Counting {
     pub(crate) fn new(program: &Program, instructions: u64, tiers: Tiers) -> Counting {
         Counting {
-            builtins: vec![0; program.builtins.len()],
-            from_native: vec![0; program.builtins.len()],
+            sites: vec![0; program.intrinsic_sites.len()],
+            from_native: vec![0; program.intrinsic_sites.len()],
             library: program
                 .functions
                 .iter()
@@ -305,9 +303,9 @@ impl Counting {
         }
     }
 
-    /// One `CallBuiltin` of `builtin`, whichever tier made it.
-    pub(crate) fn builtin(&mut self, builtin: BuiltinId) {
-        if let Some(count) = self.builtins.get_mut(builtin.index()) {
+    /// One `IntrinsicCall` of `builtin`, whichever tier made it.
+    pub(crate) fn intrinsic(&mut self, site: SiteId) {
+        if let Some(count) = self.sites.get_mut(site.index()) {
             *count += 1;
         }
     }
@@ -327,9 +325,9 @@ impl Counting {
         }
     }
 
-    /// One of those, made by the native `builtin` helper.
-    pub(crate) fn native_builtin(&mut self, builtin: BuiltinId) {
-        if let Some(count) = self.from_native.get_mut(builtin.index()) {
+    /// One of those, made by the native `intrinsic` helper.
+    pub(crate) fn native_intrinsic(&mut self, site: SiteId) {
+        if let Some(count) = self.from_native.get_mut(site.index()) {
             *count += 1;
         }
     }
@@ -346,12 +344,12 @@ impl Counting {
         helpers_counted: bool,
     ) -> BoundaryReport {
         let (emitted, sites) = Emitted::of(program);
-        // Several `BuiltinId`s may name one intrinsic — one per result layout —
+        // Several `SiteId`s may name one intrinsic — one per result layout —
         // and a reader asks about the operation, so they are summed.
         let mut rows: HashMap<Intrinsic, IntrinsicCalls> = HashMap::new();
-        for (at, builtin) in program.builtins.iter().enumerate() {
+        for (at, builtin) in program.intrinsic_sites.iter().enumerate() {
             let native = self.from_native.get(at).copied().unwrap_or(0);
-            let all = self.builtins.get(at).copied().unwrap_or(0);
+            let all = self.sites.get(at).copied().unwrap_or(0);
             let row = rows
                 .entry(builtin.intrinsic)
                 .or_insert_with(|| IntrinsicCalls {
@@ -416,10 +414,10 @@ impl fmt::Display for BoundaryReport {
         let emitted = self.emitted;
         writeln!(
             f,
-            "boundary: emitted IR, {} instruction(s) in {} function(s), {} of them `CallBuiltin` site(s)",
+            "boundary: emitted IR, {} instruction(s) in {} function(s), {} of them `IntrinsicCall` site(s)",
             thousands(emitted.instructions),
             emitted.functions,
-            thousands(emitted.builtin_sites)
+            thousands(emitted.intrinsic_sites)
         )?;
         writeln!(
             f,
@@ -519,7 +517,7 @@ mod tests {
             emitted: Emitted {
                 functions: 3,
                 instructions: 12_345,
-                builtin_sites: 4,
+                intrinsic_sites: 4,
                 library_call_sites: 2,
             },
             intrinsics: vec![
@@ -546,7 +544,7 @@ mod tests {
                 ..Tiers::default()
             }),
             helpers: Some(HelperCalls {
-                builtin: 7,
+                intrinsic: 7,
                 ..HelperCalls::default()
             }),
         };

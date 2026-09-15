@@ -20,7 +20,7 @@
 //! # The operands are not re-checked
 //!
 //! `cove-sema` settled every receiver's type, every argument's type and every
-//! call's arity, and `cove_ir::verify` holds every `CallBuiltin` to its
+//! call's arity, and `cove_ir::verify` holds every `IntrinsicCall` to its
 //! intrinsic's [`cove_ir::Signature`] — the count, each operand's layout and
 //! the answer's — before anything runs (#378, P5-3). So nothing here refuses
 //! an operand for its count or its type any more: the readers below
@@ -47,7 +47,7 @@ use crate::vm::exec::Machine;
 /// run while one is held.
 ///
 /// It used to be a `Repr` and one word, and that was the shape of a call
-/// rather than a choice this file made: a `CallBuiltin`'s argument list was
+/// rather than a choice this file made: an `IntrinsicCall`'s argument list was
 /// base slots, so nothing said how wide an operand was. A scalar described
 /// itself from its slot and a reference from its object's header, and an
 /// inline struct or enum described itself from neither — so `"{p}"` rendered

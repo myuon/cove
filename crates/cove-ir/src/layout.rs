@@ -195,7 +195,7 @@ pub enum Shape {
     /// construction is not a `String`", and giving it a different shape is how
     /// that is enforced without a runtime tag check on every ordinary
     /// reference operation: `is_string` at
-    /// `crates/cove-runtime/src/vm/builtins.rs:564` matches on `Shape::Str`
+    /// `crates/cove-runtime/src/vm/intrinsics.rs` matches on `Shape::Str`
     /// alone, so a `Bytes` run fails it and every place that asks "is this
     /// really a string" — the Host boundary, a call argument, a captured
     /// value — refuses it for the ordinary reason a `Str`-only match already

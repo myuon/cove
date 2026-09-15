@@ -45,8 +45,8 @@
 use cove_ir::{LayoutId, Program, Repr, Shape};
 
 use crate::error::RuntimeError;
-use crate::vm::builtins::operand::{self, Dest, Frame, Operand, Word};
 use crate::vm::exec::Machine;
+use crate::vm::intrinsics::operand::{self, Dest, Frame, Operand, Word};
 
 /// A value: the layout that describes it, and the words it occupies.
 ///
@@ -574,8 +574,8 @@ pub(super) fn too_deep() -> RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::builtins::make;
-    use crate::vm::builtins::tests::{elements, named, run, scalar, two_case, vector, world};
+    use crate::vm::intrinsics::make;
+    use crate::vm::intrinsics::tests::{elements, named, run, scalar, two_case, vector, world};
 
     fn equal(machine: &mut Machine, a: (Repr, u64), b: (Repr, u64)) -> bool {
         let answer = run(machine, "Any", "equals", &[a, b]).unwrap();

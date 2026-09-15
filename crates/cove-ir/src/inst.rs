@@ -42,7 +42,7 @@
 //! of it throws away.
 
 use crate::layout::LayoutId;
-use crate::{ArgsId, BuiltinId, CaseId, FunctionId, HostOpId, StrId, TableId};
+use crate::{ArgsId, CaseId, FunctionId, HostOpId, SiteId, StrId, TableId};
 
 /// A slot in the current frame: `memory[frame_base + slot]`.
 pub type Slot = u32;
@@ -507,7 +507,7 @@ pub enum Inst {
     ///
     /// It is carried rather than looked up because there is nowhere to look:
     /// every other call names a callee the program declares — a
-    /// [`FunctionId`], a [`crate::HostOpId`], a [`crate::BuiltinId`] — and
+    /// [`FunctionId`], a [`crate::HostOpId`], a [`crate::SiteId`] — and
     /// the answer's layout is read from that declaration. A closure call
     /// names a word in a slot. Without this field the destination's width
     /// was known to the checker, thrown away by the lowering, and then
@@ -563,9 +563,9 @@ pub enum Inst {
     ///
     /// A builtin operates on words and heap objects directly. It is not a
     /// boundary and it does not materialise anything.
-    CallBuiltin {
+    IntrinsicCall {
         dst: Slot,
-        builtin: BuiltinId,
+        site: SiteId,
         args: ArgsId,
     },
 
@@ -637,7 +637,7 @@ pub enum Inst {
     /// bytes, eight to a word, and the only shape that reads one is this.
     ///
     /// It is an instruction and not a builtin, and the difference is the
-    /// whole reason it exists. `String.byteAt` as a `call-builtin` measured
+    /// whole reason it exists. `String.byteAt` as an `intrinsic-call` measured
     /// 58 ns of which 48 ns was *being a builtin call* — the operands copied
     /// into a buffer, the operand array built, the dispatch by two strings,
     /// the answer written back — for work that is one payload word, a shift

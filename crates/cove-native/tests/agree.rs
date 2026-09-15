@@ -141,7 +141,7 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
     );
     assert_eq!(
         cranelift_mediated, template_mediated,
-        "the builtins handed to the runtime, in order: {what}"
+        "the intrinsic calls handed to the runtime, in order: {what}"
     );
     assert_eq!(
         cranelift_built, template_built,
@@ -199,6 +199,7 @@ fn agree_with_literals(
     suite::forget_calls();
     suite::forget_allocations();
     suite::forget_mediated();
+    suite::mediated_answers(answers);
     suite::forget_built();
     suite::built_answers(answers);
     // The same script for a run copy, which no program here mixes with a builder:
@@ -224,6 +225,7 @@ fn agree_with_literals(
     suite::forget_calls();
     suite::forget_allocations();
     suite::forget_mediated();
+    suite::mediated_answers(answers);
     suite::forget_built();
     suite::built_answers(answers);
     // The same script for a run copy, which no program here mixes with a builder:
@@ -266,7 +268,7 @@ fn agree_with_literals(
     );
     assert_eq!(
         cranelift_mediated, template_mediated,
-        "the builtins handed to the runtime, in order: {what}"
+        "the intrinsic calls handed to the runtime, in order: {what}"
     );
     assert_eq!(
         cranelift_built, template_built,
@@ -639,6 +641,24 @@ fn both_arms_answer_the_same_thing() {
                 heap
             },
         );
+    }
+
+    // An intrinsic call of each effect class, answering `Returned` and then
+    // `Raised`: the two arms publish the same work, test the same outcomes and
+    // leave the same frame, which is the protocol written twice from one
+    // `IntrinsicProtocol`.
+    for (receiver, operation) in suite::INTRINSIC_CLASSES {
+        let intrinsic = cove_ir::Intrinsic::from_names(receiver, operation).expect("an intrinsic");
+        for scripted in [Outcome::Returned, Outcome::Raised] {
+            agree_answering(
+                &format!("`{intrinsic}` answering {scripted:?}"),
+                &suite::intrinsic_calling(receiver, operation),
+                &[0, 0, 0, 0, 0xfeed, 0, 0, 0],
+                3,
+                || Heap::new(1),
+                &[scripted],
+            );
+        }
     }
 
     // `Vector.push`: the emitted fast path and each of the three cold paths, which

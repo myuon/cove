@@ -29,9 +29,9 @@
 use cove_ir::{LayoutId, Shape};
 
 use crate::error::RuntimeError;
-use crate::vm::builtins::operand::{Dest, Frame};
-use crate::vm::builtins::{make, operand};
 use crate::vm::exec::Machine;
+use crate::vm::intrinsics::operand::{Dest, Frame};
+use crate::vm::intrinsics::{make, operand};
 
 /// `String.length() -> Int`, in characters.
 pub(super) fn length(
@@ -344,7 +344,7 @@ pub(super) fn from_code_point(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::builtins::tests::{
+    use crate::vm::intrinsics::tests::{
         elements, message_of, option_of, read, result_of, run, scalar, word, words_of, world,
     };
     use cove_ir::Repr;

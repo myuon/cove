@@ -1326,7 +1326,7 @@ pub fn call_method(
                 Ok(Value(Repr::Str(text.to_lowercase().into())))
             }
             // The byte-counted operations. Their diagnostics are written out
-            // again in `crates/cove-runtime/src/vm/builtins/text.rs` rather
+            // again in `crates/cove-runtime/src/vm/intrinsics/text.rs` rather
             // than shared, as every other builtin's are; what holds the two
             // readings together is `tests/e2e/values_string`, which runs on
             // both backends against one `expected.out`. `byteLength` is not

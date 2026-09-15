@@ -132,7 +132,7 @@ allow = []
 entry = "stringlib.parseCoveRow"
 allow = []
 
-# What one `Inst::CallBuiltin` costs, decomposed. Three loops over the same
+# What one `Inst::IntrinsicCall` costs, decomposed. Three loops over the same
 # 2,000,000 turns as `arith`, each with exactly one builtin in it, and a
 # fourth with none: the difference between the bare loop and one of the others
 # is that builtin's whole cost — the operand copy, the dispatch, the work, and

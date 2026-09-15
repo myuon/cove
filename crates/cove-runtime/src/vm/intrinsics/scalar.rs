@@ -16,9 +16,9 @@
 //! work.
 
 use crate::error::RuntimeError;
-use crate::vm::builtins::operand::{Dest, Frame};
-use crate::vm::builtins::{make, operand};
 use crate::vm::exec::Machine;
+use crate::vm::intrinsics::operand::{Dest, Frame};
+use crate::vm::intrinsics::{make, operand};
 
 // --- Int -------------------------------------------------------------------
 
@@ -169,7 +169,7 @@ pub(super) fn float_parse(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::builtins::tests::{message_of, read, result_of, run, scalar, word, world};
+    use crate::vm::intrinsics::tests::{message_of, read, result_of, run, scalar, word, world};
     use cove_ir::Repr;
 
     fn float_of(machine: &mut Machine, operation: &str, operands: &[(Repr, u64)]) -> f64 {

@@ -2,7 +2,7 @@
 //! builtins.
 //!
 //! A `Range` is three inline words, so none of these reads an object and none
-//! of them reaches `cove_runtime::vm::builtins` — the machine's table has no
+//! of them reaches `cove_runtime::vm::intrinsics` — the machine's table has no
 //! `Range` arm and does not want one, for the reason `Option` and `Result`
 //! have none. What each listing pins is the same thing: that the `+ 1` the
 //! oracle's `RangeBounds::of` makes to normalise an inclusive end is *not*

@@ -45,7 +45,7 @@ fn a_scope_spawns_a_task_and_waits_for_it_where_it_is_left() {
 /// `await` and `cancel` are one instruction each, and neither is a builtin.
 ///
 /// A task's operations are the scheduler's rather than the heap's, so they
-/// are not entries of `cove_runtime::vm::builtins`: what they do is start,
+/// are not entries of `cove_runtime::vm::intrinsics`: what they do is start,
 /// join and flag a thread, none of which is a walk over words.
 ///
 /// `cancel` asks and answers `()`. Whether the task stopped or had already

@@ -395,7 +395,7 @@ fn @m.f() -> Int
      7  copy s0:Int s8:Int
      8  jump 14
      9  copy s9:Error s7:Error
-    10  call-builtin s0:Int String.length (s9:String)
+    10  intrinsic-call s0:Int String.length (s9:String)
     11  clear s9:Error
     12  jump 14
     13  trap \"no `match` arm covers this value\"
@@ -403,7 +403,7 @@ fn @m.f() -> Int
     15  clear s4:Any
     16  jump 22
     17  copy s4:Error s3:Error
-    18  call-builtin s0:Int String.length (s4:String)
+    18  intrinsic-call s0:Int String.length (s4:String)
     19  clear s4:Error
     20  jump 22
     21  trap \"no `match` arm covers this value\"
