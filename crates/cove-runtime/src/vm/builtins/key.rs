@@ -206,6 +206,61 @@ pub(super) fn cmp_held(
     )
 }
 
+// --- the intrinsics a standard-library search reaches -----------------------
+
+/// `core.order(a, b)`: `-1`, `0` or `1` as the `Int` word `a` sorts before,
+/// equal to or after `b` — ADR 0059's `value-order`, for a key the lowering
+/// could not order with one comparison instruction.
+///
+/// Both operands carry their layout, and both are the key layout the search
+/// is over: the standard library hands it a key it read out of a sorted run
+/// and the key it was asked about. Nothing is admitted here; the body asked
+/// [`admit_key`] first, as every refusal of a key is asked before anything
+/// is compared.
+pub(super) fn value_order(
+    machine: &Machine,
+    operands: &[Operand<'_>],
+) -> Result<u64, RuntimeError> {
+    let [a, b] = operands else {
+        return Err(operand::operands("Value.order", 2, operands.len()));
+    };
+    let ordered = order(
+        machine,
+        Key::Held(a.layout, a.words),
+        Key::Held(b.layout, b.words),
+        0,
+    )?;
+    Ok(match ordered {
+        Ordering::Less => -1i64 as u64,
+        Ordering::Equal => 0,
+        Ordering::Greater => 1,
+    })
+}
+
+/// `core.admitKey(key, method, role)`: nothing, or the refusal [`check`]
+/// makes of a key the language does not admit, in `method`'s words and
+/// naming the key by `role`.
+///
+/// The two names are `String` objects the standard library wrote as
+/// literals, and they are read only when the key is refused: the walk is
+/// asked once with nothing to name, and asked again with the names only when
+/// it failed. It is the same walk over the same words both times, so the
+/// second answers the refusal the first found.
+pub(super) fn admit_key(machine: &Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
+    let [key, method, role] = operands else {
+        return Err(operand::operands("Value.admitKey", 3, operands.len()));
+    };
+    let held = Key::Held(key.layout, key.words);
+    if admits(machine, "", "", None, held, 0).is_ok() {
+        return Ok(0);
+    }
+    let text = |operand: &Operand<'_>| {
+        String::from_utf8_lossy(&machine.string_bytes(operand.word())).into_owned()
+    };
+    let (method, role) = (text(method), text(role));
+    admits(machine, &method, &role, None, held, 0).map(|()| 0)
+}
+
 // --- looking through a description -----------------------------------------
 
 /// The value `key` names, one description in, or `None` when it is already a

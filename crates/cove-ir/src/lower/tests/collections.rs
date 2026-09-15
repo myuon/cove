@@ -533,8 +533,10 @@ fn @m.f(Set) -> Set
 /// `get` answers an `Option`, which is a fixed-size enum and therefore
 /// **inline**: two words at `s4`, a discriminant and the value.
 ///
-/// So the builtin answers a run of words the caller copies into its
-/// destination the way a `Copy` writes one, rather than an address.
+/// So the call answers a run of words straight into the caller's destination
+/// the way a `Copy` writes one, rather than an address. It is a call of
+/// `std.map.get` now — a binary search in Cove since ADR 0059 — where it was a
+/// builtin, and the destination it is handed is the same two words.
 #[test]
 fn a_map_lookup_answers_the_option_s_words_rather_than_an_object() {
     assert_eq!(
@@ -547,7 +549,7 @@ fn @m.f(Map) -> Option
   frame 4: s0!:ref s1:tag s2:int s3:ref
   local m -> s0:Map [0, 3)
      0  str s3:ref \"a\"
-     1  call-builtin s1..s2:Option Map.get (s0:Map s3:String)
+     1  call s1..s2:Option std.map.get<String, Int> (s0:Map s3:String)
      2  return s1..s2:Option
 "
     );

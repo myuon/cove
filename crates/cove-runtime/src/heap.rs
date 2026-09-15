@@ -700,12 +700,10 @@ impl Scan {
                 }
             }
             Value(Repr::Map(entries)) => {
-                if self.sight(
-                    Rc::as_ptr(entries) as usize,
-                    Rc::strong_count(entries),
-                    || value.clone(),
-                ) {
-                    for entry in entries.values() {
+                if self.sight(map_addr(entries), Rc::strong_count(entries), || {
+                    value.clone()
+                }) {
+                    for (_, entry) in entries.iter() {
                         self.count(entry);
                     }
                 }
@@ -877,7 +875,7 @@ impl Marker<'_> {
                 }
             }
             Value(Repr::Map(entries)) => {
-                if self.walked.insert(Rc::as_ptr(entries) as usize) {
+                if self.walked.insert(map_addr(entries)) {
                     for (key, entry) in entries.iter() {
                         self.bytes += key_bytes(key) + size_of::<Value>() as u64;
                         self.visit(entry);
@@ -885,7 +883,7 @@ impl Marker<'_> {
                 }
             }
             Value(Repr::Set(items)) => {
-                if self.walked.insert(Rc::as_ptr(items) as usize) {
+                if self.walked.insert(set_addr(items)) {
                     for item in items.iter() {
                         self.bytes += key_bytes(item);
                     }
@@ -980,6 +978,18 @@ impl Marker<'_> {
 /// first element, which identifies the allocation just as well.
 fn array_addr(items: &Rc<[Value]>) -> usize {
     Rc::as_ptr(items) as *const Value as usize
+}
+
+/// The address of a map's shared storage, narrowed the same way `array_addr`
+/// narrows an array's: `Rc<[(MapKey, Value)]>` is a fat pointer too, to the
+/// address of its first entry, which identifies the allocation just as well.
+fn map_addr(entries: &Rc<[(MapKey, Value)]>) -> usize {
+    Rc::as_ptr(entries) as *const (MapKey, Value) as usize
+}
+
+/// The address of a set's shared storage, narrowed the same way.
+fn set_addr(items: &Rc<[MapKey]>) -> usize {
+    Rc::as_ptr(items) as *const MapKey as usize
 }
 
 /// The storage one object holds for itself: its header and its element slots.

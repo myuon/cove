@@ -27,7 +27,7 @@ use cove_schema::builtins::{FreeBuiltinKind, FreeBuiltinSchema, MAP_ENTRY};
 use crate::error::RuntimeError;
 use crate::shared::SharedCell;
 use crate::value::{
-    ByteBufferStorage, InvalidKey, MapKey, RangeBounds, Repr, Value, VectorStorage,
+    ByteBufferStorage, InvalidKey, MapKey, RangeBounds, Repr, StructValue, Value, VectorStorage,
 };
 
 /// Type names a program may write as a namespace, such as `Vector.of`.
@@ -665,12 +665,89 @@ pub fn call_core(
             check_consumed(storage, span)?;
             Ok(Value(Repr::Int(storage.len() as i64)))
         }
+        // ADR 0059's value order, beneath a keyed search in the standard
+        // library: `MapKey`'s own `Ord`, which is the order the oracle keeps a
+        // `Map`'s keys and a `Set`'s members in. The body admitted the key
+        // first, so the conversion refusing is a key no checked program hands
+        // this.
+        "order" => {
+            let a = MapKey::from_value(&args[0])
+                .map_err(|invalid| invalid_key_error(&shown, "key", &invalid, span))?;
+            let b = MapKey::from_value(&args[1])
+                .map_err(|invalid| invalid_key_error(&shown, "key", &invalid, span))?;
+            Ok(Value(Repr::Int(match a.cmp(&b) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            })))
+        }
+        // The admission a keyed method asks of its argument before anything
+        // is compared, in the method's words and naming the key by its role —
+        // the refusal every `Map` and `Set` arm made before the search moved.
+        "admitKey" => match MapKey::from_value(&args[0]) {
+            Ok(_) => Ok(Value(Repr::Unit)),
+            Err(invalid) => {
+                let (method, role) = core_names(&shown, &args[1], &args[2], span)?;
+                Err(invalid_key_error(&method, &role, &invalid, span))
+            }
+        },
+        // A literal's duplicate, found in Cove as an order of `0`: always the
+        // refusal, over the key as it renders.
+        "refuseDuplicate" => {
+            let (method, role) = core_names(&shown, &args[1], &args[2], span)?;
+            match MapKey::from_value(&args[0]) {
+                Ok(key) => Err(duplicate_key_error(&method, &role, &key, span)),
+                Err(invalid) => Err(invalid_key_error(&method, &role, &invalid, span)),
+            }
+        }
+        // The element reads of a sorted run: the member or the entry at a
+        // position the body has already held below the length. A slice indexes
+        // in one step, which is why the oracle keeps one.
+        "memberAt" => {
+            let Value(Repr::Set(items)) = &args[0] else {
+                return Err(type_error(&shown, "members", "Set", &args[0], span));
+            };
+            let at = core_index(&shown, &args[1], items.len(), span)?;
+            Ok(items[at].to_value())
+        }
+        "entryAt" => {
+            let Value(Repr::Map(entries)) = &args[0] else {
+                return Err(type_error(&shown, "entries", "Map", &args[0], span));
+            };
+            let at = core_index(&shown, &args[1], entries.len(), span)?;
+            let (key, value) = &entries[at];
+            Ok(Value(Repr::Struct(Rc::new(StructValue {
+                type_name: MAP_ENTRY.name.into(),
+                fields: vec![
+                    (MAP_ENTRY.fields[0].name.into(), key.to_value()),
+                    (MAP_ENTRY.fields[1].name.into(), value.clone()),
+                ],
+                opaque: false,
+            }))))
+        }
         // A name the table declares and nothing here executes. No program can
         // reach one of these from its own modules, so the check that every
         // entry has a body here is `vm::differential`'s, which calls each
         // from a standard-library module on both evaluators.
         _ => Err(RuntimeError::new(format!("unknown core intrinsic `{shown}`")).at(span)),
     }
+}
+
+/// The method and the role a keyed refusal is written in, as the standard
+/// library passed them to `core.admitKey` or `core.refuseDuplicate`.
+fn core_names(
+    shown: &str,
+    method: &Value,
+    role: &Value,
+    span: Span,
+) -> Result<(String, String), RuntimeError> {
+    let Value(Repr::Str(method)) = method else {
+        return Err(type_error(shown, "method", "String", method, span));
+    };
+    let Value(Repr::Str(role)) = role else {
+        return Err(type_error(shown, "role", "String", role, span));
+    };
+    Ok((method.to_string(), role.to_string()))
 }
 
 /// What a core intrinsic answers for a vector a finish already consumed.
@@ -780,7 +857,10 @@ pub fn call_associated(
                     .clone();
                 map.insert(key, value);
             }
-            Ok(Value(Repr::Map(Rc::new(map))))
+            // Ascending by construction: `BTreeMap::into_iter` already
+            // answers in `MapKey`'s `Ord`, which is exactly the order the
+            // sorted run `Repr::Map` stores needs.
+            Ok(Value(Repr::Map(map.into_iter().collect())))
         }
         // `Set.of` rejects a duplicate element for the same reason `Map.of`
         // rejects a duplicate key.
@@ -792,7 +872,7 @@ pub fn call_associated(
                     return Err(duplicate_key_error("Set.of", "element", &key, span));
                 }
             }
-            Ok(Value(Repr::Set(Rc::new(set))))
+            Ok(Value(Repr::Set(set.into_iter().collect())))
         }
         // `Duration.nanos(count)`: the one primitive builder left.
         // `micros` through `hours` are `std.duration.ofMicros` and its four
@@ -982,20 +1062,9 @@ pub fn call_method(
             }
         }
         Value(Repr::Map(entries)) => match name {
-            "get" => {
-                let args = expect_args("Map.get", args, 1, span)?;
-                let key = to_map_key("Map.get", "map key", &args[0], span)?;
-                Ok(entries
-                    .get(&key)
-                    .cloned()
-                    .map(Value::some)
-                    .unwrap_or_else(Value::none))
-            }
-            "contains" => {
-                let args = expect_args("Map.contains", args, 1, span)?;
-                let key = to_map_key("Map.contains", "map key", &args[0], span)?;
-                Ok(Value(Repr::Bool(entries.contains_key(&key))))
-            }
+            // `get` and `contains` do not reach this arm: both are `std.map`
+            // binary searches over `core.order` and `core.entryAt` (ADR 0059),
+            // which `call_core` executes over this sorted run.
             "length" => {
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Int(entries.len() as i64)))
@@ -1005,44 +1074,76 @@ pub fn call_method(
             // resolves it to a call into `std.map.isEmpty` before this
             // function is ever asked about it — see
             // `cove_schema::builtins::standard_binding`.
-            // Ascending key order, matching the `BTreeMap` storage and the
-            // order `for` iterates.
+            // Ascending key order, matching the sorted run's own order and
+            // the order `for` iterates.
             "keys" => {
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Array(
-                    entries.keys().map(MapKey::to_value).collect(),
+                    entries.iter().map(|(k, _)| MapKey::to_value(k)).collect(),
                 )))
             }
             "values" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Array(entries.values().cloned().collect())))
+                Ok(Value(Repr::Array(
+                    entries.iter().map(|(_, v)| v.clone()).collect(),
+                )))
             }
             // `Map` is immutable, so `inserted`/`removed` return a new map
             // rather than write through `entries`; the past-participle names
-            // say so, unlike `Vector`'s mutating `push`.
+            // say so, unlike `Vector`'s mutating `push`. Each searches once
+            // and then copies around the insertion or removal point, the
+            // same shape the linear-memory backend's own `Map.inserted` and
+            // `Map.removed` build their new run with.
             "inserted" => {
                 let args = expect_args("Map.inserted", args, 2, span)?;
                 let value = args.remove(1);
                 let key = to_map_key("Map.inserted", "map key", &args[0], span)?;
-                let mut next = (**entries).clone();
-                next.insert(key, value);
-                Ok(Value(Repr::Map(Rc::new(next))))
+                let next: Rc<[(MapKey, Value)]> =
+                    match entries.binary_search_by(|(k, _)| k.cmp(&key)) {
+                        // A key already there keeps the key the map was
+                        // holding and takes the new value — the two keys
+                        // compare equal, so which one the answer carries is
+                        // not something a program can tell apart.
+                        Ok(at) => {
+                            let mut next = Vec::with_capacity(entries.len());
+                            next.extend_from_slice(&entries[..at]);
+                            next.push((entries[at].0.clone(), value));
+                            next.extend_from_slice(&entries[at + 1..]);
+                            next.into()
+                        }
+                        Err(at) => {
+                            let mut next = Vec::with_capacity(entries.len() + 1);
+                            next.extend_from_slice(&entries[..at]);
+                            next.push((key, value));
+                            next.extend_from_slice(&entries[at..]);
+                            next.into()
+                        }
+                    };
+                Ok(Value(Repr::Map(next)))
             }
             "removed" => {
                 let args = expect_args("Map.removed", args, 1, span)?;
                 let key = to_map_key("Map.removed", "map key", &args[0], span)?;
-                let mut next = (**entries).clone();
-                next.remove(&key);
-                Ok(Value(Repr::Map(Rc::new(next))))
+                let next: Rc<[(MapKey, Value)]> =
+                    match entries.binary_search_by(|(k, _)| k.cmp(&key)) {
+                        Ok(at) => {
+                            let mut next = Vec::with_capacity(entries.len() - 1);
+                            next.extend_from_slice(&entries[..at]);
+                            next.extend_from_slice(&entries[at + 1..]);
+                            next.into()
+                        }
+                        // A key that was never there answers a copy of the same
+                        // handle — sharing the run costs nothing and is what a
+                        // copy with the same contents means for an `Rc`.
+                        Err(_) => Rc::clone(entries),
+                    };
+                Ok(Value(Repr::Map(next)))
             }
             _ => Err(no_method("Map", name, span)),
         },
         Value(Repr::Set(items)) => match name {
-            "contains" => {
-                let args = expect_args("Set.contains", args, 1, span)?;
-                let key = to_map_key("Set.contains", "set element", &args[0], span)?;
-                Ok(Value(Repr::Bool(items.contains(&key))))
-            }
+            // `contains` does not reach this arm: it is `std.set`'s binary
+            // search over `core.order` and `core.memberAt` (ADR 0059).
             "length" => {
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Int(items.len() as i64)))
@@ -1061,16 +1162,34 @@ pub fn call_method(
             "inserted" => {
                 let args = expect_args("Set.inserted", args, 1, span)?;
                 let key = to_map_key("Set.inserted", "set element", &args[0], span)?;
-                let mut next = (**items).clone();
-                next.insert(key);
-                Ok(Value(Repr::Set(Rc::new(next))))
+                let next: Rc<[MapKey]> = match items.binary_search(&key) {
+                    // An element already there answers a copy and keeps the
+                    // member the set was holding, exactly as `Map.inserted`
+                    // keeps the stored key.
+                    Ok(_) => Rc::clone(items),
+                    Err(at) => {
+                        let mut next = Vec::with_capacity(items.len() + 1);
+                        next.extend_from_slice(&items[..at]);
+                        next.push(key);
+                        next.extend_from_slice(&items[at..]);
+                        next.into()
+                    }
+                };
+                Ok(Value(Repr::Set(next)))
             }
             "removed" => {
                 let args = expect_args("Set.removed", args, 1, span)?;
                 let key = to_map_key("Set.removed", "set element", &args[0], span)?;
-                let mut next = (**items).clone();
-                next.remove(&key);
-                Ok(Value(Repr::Set(Rc::new(next))))
+                let next: Rc<[MapKey]> = match items.binary_search(&key) {
+                    Ok(at) => {
+                        let mut next = Vec::with_capacity(items.len() - 1);
+                        next.extend_from_slice(&items[..at]);
+                        next.extend_from_slice(&items[at + 1..]);
+                        next.into()
+                    }
+                    Err(_) => Rc::clone(items),
+                };
+                Ok(Value(Repr::Set(next)))
             }
             _ => Err(no_method("Set", name, span)),
         },

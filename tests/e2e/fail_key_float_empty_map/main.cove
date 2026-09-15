@@ -1,0 +1,11 @@
+use console.println
+
+/// Looks a `Float` up in an empty map: the key is refused before anything is
+/// searched, so an empty map refuses it as loudly as a full one.
+export fn main() -> Result<Unit, Error> {
+  let weights: Map<Float, String> = Map.of()
+  println("about to look a Float up in an empty map")?
+  let found = weights.get(1.5)
+  println("never printed {found}")?
+  Ok(())
+}

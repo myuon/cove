@@ -59,7 +59,7 @@
 //! what condition three above refuses, so no target lands on a counter that
 //! means something different afterwards.
 
-use crate::inst::{Inst, Pc};
+use crate::inst::{CmpOp, Inst, Pc};
 use crate::program::{Function, Program, Table};
 
 use super::dropping;
@@ -107,14 +107,18 @@ fn fusion(code: &[Inst], pc: usize, targeted: &[bool]) -> Option<Inst> {
         return None;
     }
     match code[pc] {
-        Inst::Cmp { on, op, dst, a, b } if dst == cond => Some(Inst::CmpBranch {
-            on,
-            op,
-            dst,
-            a,
-            b,
-            target: to,
-        }),
+        // A three-way order answers an `Int`, which no `branch-false` reads;
+        // the guard says so rather than leaving it to the verifier.
+        Inst::Cmp { on, op, dst, a, b } if dst == cond && op != CmpOp::Order => {
+            Some(Inst::CmpBranch {
+                on,
+                op,
+                dst,
+                a,
+                b,
+                target: to,
+            })
+        }
         // The immediate narrows to the thirty-two bits the fused encoding
         // gives it, or the pair stays as it is. A comparison against a wider
         // constant is a missed fusion; one that silently lost the high bits

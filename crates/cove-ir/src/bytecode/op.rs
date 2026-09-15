@@ -1,4 +1,4 @@
-//! The hundred and sixty-two opcodes, and what each one makes of the four
+//! The hundred and sixty-eight opcodes, and what each one makes of the four
 //! fields.
 //!
 //! # One opcode per concrete operation
@@ -12,7 +12,9 @@
 //! - [`Inst::Arith`](crate::Inst::Arith) becomes ten, `Num` × `ArithOp`;
 //! - [`Inst::Cmp`](crate::Inst::Cmp) becomes thirty-six, `Compare` × `CmpOp`,
 //!   and [`Inst::CmpBranch`](crate::Inst::CmpBranch) thirty-six more beside
-//!   it;
+//!   it — the six operators that answer a `Bool`, that is; the three-way
+//!   [`CmpOp::Order`] is a family of six of its own, `Compare` alone, because
+//!   nothing branches on or takes an immediate for an answer that is an `Int`;
 //! - [`Inst::ArithImm`](crate::Inst::ArithImm) five,
 //!   [`Inst::CmpImm`](crate::Inst::CmpImm) six and
 //!   [`Inst::CmpImmBranch`](crate::Inst::CmpImmBranch) six, the operator
@@ -52,7 +54,11 @@ const ARITH_OPS: [ArithOp; 5] = [
     ArithOp::Div,
     ArithOp::Rem,
 ];
-/// Every [`CmpOp`], in opcode order.
+/// Every [`CmpOp`] that answers a `Bool`, in opcode order.
+///
+/// [`CmpOp::Order`] is not here. It answers an `Int`, so it has no member in
+/// the branch-fused and immediate families this table generates, and its six
+/// opcodes are `base::CMP_ORDER`'s instead.
 const CMP_OPS: [CmpOp; 6] = [
     CmpOp::Eq,
     CmpOp::Ne,
@@ -172,8 +178,13 @@ mod base {
     pub const SHARED_UNLOCK: u8 = SHARED_LOCK + 1;
     pub const TRAP: u8 = SHARED_UNLOCK + 1;
     pub const ASSERT_FAILED: u8 = TRAP + 1;
+    /// [`crate::Inst::Cmp`] with [`crate::CmpOp::Order`], one per `Compare`:
+    /// ADR 0059's three-way order, which a keyed collection's binary search in
+    /// the standard library asks once per step. Last rather than beside `CMP`,
+    /// so that adding it renumbered nothing that was already there.
+    pub const CMP_ORDER: u8 = ASSERT_FAILED + 1;
     /// One past the last, which is how many opcodes there are.
-    pub const END: u8 = ASSERT_FAILED + 1;
+    pub const END: u8 = CMP_ORDER + COMPARES.len() as u8;
 }
 
 /// How many opcodes are defined, out of the 256 an opcode byte can name.
@@ -545,6 +556,7 @@ impl Op {
             Op::Trap,
             Op::AssertFailed,
         ]);
+        all.extend(COMPARES.map(|on| Op::Cmp(on, CmpOp::Order)));
         all
     }
 
@@ -573,6 +585,7 @@ impl Op {
                     + index_of!(NUMS, num) * ARITH_OPS.len() as u8
                     + index_of!(ARITH_OPS, op)
             }
+            Op::Cmp(on, CmpOp::Order) => base::CMP_ORDER + index_of!(COMPARES, on),
             Op::Cmp(on, op) => {
                 base::CMP + index_of!(COMPARES, on) * CMP_OPS.len() as u8 + index_of!(CMP_OPS, op)
             }
@@ -695,6 +708,16 @@ impl Op {
                 let want = numeric(num);
                 fields(
                     Operand::Word(want),
+                    Operand::Word(want),
+                    Operand::Word(want),
+                    Payload::Empty,
+                )
+            }
+            // The three-way order answers an `Int` word: `-1`, `0` or `1`.
+            Op::Cmp(on, CmpOp::Order) => {
+                let want = compared(on);
+                fields(
+                    Operand::Word(INT),
                     Operand::Word(want),
                     Operand::Word(want),
                     Payload::Empty,
@@ -998,7 +1021,7 @@ mod tests {
     use super::*;
 
     /// ADR 0041's count, which is the one number the format's headroom is
-    /// argued from: a hundred and sixty-two opcodes out of the 256 a byte
+    /// argued from: a hundred and sixty-eight opcodes out of the 256 a byte
     /// names.
     ///
     /// It was a hundred and two until `Op::ByteAt` (now `Op::RunLoadBytes`), a
@@ -1022,15 +1045,17 @@ mod tests {
     /// for `Vector.freeze`, a hundred and sixty once the run slice arrived
     /// with `Array.slice`, a hundred and sixty-one once the growable
     /// truncate arrived with `Vector.pop`, and a hundred and sixty-two once the
-    /// run slice gained its byte member for `String.sliceBytes`. What the number is for is that a reader can see the
+    /// run slice gained its byte member for `String.sliceBytes`, and a hundred
+    /// and sixty-eight once ADR 0059's three-way order arrived for a keyed
+    /// search, one per `Compare`. What the number is for is that a reader can see the
     /// headroom
     /// rather than be told about it: more than a third of the byte is still
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_sixty_two_opcodes() {
-        assert_eq!(Op::all().len(), 162);
-        assert_eq!(OPCODES, 162);
+    fn there_are_a_hundred_and_sixty_eight_opcodes() {
+        assert_eq!(Op::all().len(), 168);
+        assert_eq!(OPCODES, 168);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic
@@ -1078,7 +1103,12 @@ mod tests {
         let all = Op::all();
         let count = |f: fn(&Op) -> bool| all.iter().filter(|op| f(op)).count();
         assert_eq!(count(|op| matches!(op, Op::Arith(_, _))), 10);
-        assert_eq!(count(|op| matches!(op, Op::Cmp(_, _))), 36);
+        assert_eq!(
+            count(|op| matches!(op, Op::Cmp(_, op) if *op != CmpOp::Order)),
+            36
+        );
+        // ADR 0059's three-way order is a family of its own, `Compare` alone.
+        assert_eq!(count(|op| matches!(op, Op::Cmp(_, CmpOp::Order))), 6);
         assert_eq!(count(|op| matches!(op, Op::ArithImm(_))), 5);
         assert_eq!(count(|op| matches!(op, Op::CmpImm(_))), 6);
         // ADR 0054's two mirror those two rather than covering the subset one

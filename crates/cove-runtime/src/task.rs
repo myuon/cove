@@ -833,8 +833,9 @@ impl Transfer {
             }
             // A `Set` element is a `MapKey`: always `Bool`, `Int`, `Str`, or a
             // payload-free enum case, all of which are unconditionally
-            // task-safe.
-            Value(Repr::Set(items)) => Ok(Transfer::Set((**items).clone())),
+            // task-safe. The set's sorted run is already in `BTreeSet`'s
+            // canonical order, so collecting it changes nothing it holds.
+            Value(Repr::Set(items)) => Ok(Transfer::Set(items.iter().cloned().collect())),
             Value(Repr::Map(entries)) => {
                 let mut converted = BTreeMap::new();
                 for (key, item) in entries.iter() {
@@ -948,13 +949,16 @@ impl Transfer {
             Transfer::Array(items) => Value(Repr::Array(
                 items.into_iter().map(Transfer::into_value).collect(),
             )),
-            Transfer::Map(entries) => Value(Repr::Map(Rc::new(
+            // `BTreeMap::into_iter` and `BTreeSet::into_iter` both answer
+            // ascending by `MapKey`'s `Ord`, so collecting either straight
+            // into the sorted run keeps the invariant without a second sort.
+            Transfer::Map(entries) => Value(Repr::Map(
                 entries
                     .into_iter()
                     .map(|(key, value)| (key, value.into_value()))
                     .collect(),
-            ))),
-            Transfer::Set(items) => Value(Repr::Set(Rc::new(items))),
+            )),
+            Transfer::Set(items) => Value(Repr::Set(items.into_iter().collect())),
             Transfer::Struct {
                 type_name,
                 fields,
@@ -1247,10 +1251,14 @@ mod tests {
 
     #[test]
     fn a_map_of_task_safe_values_crosses_and_round_trips() {
-        let value = Value(Repr::Map(Rc::new(BTreeMap::from([
-            (MapKey::Str("a".to_string()), Value(Repr::Int(1))),
-            (MapKey::Str("b".to_string()), Value(Repr::Int(2))),
-        ]))));
+        let value = Value(Repr::Map(
+            BTreeMap::from([
+                (MapKey::Str("a".to_string()), Value(Repr::Int(1))),
+                (MapKey::Str("b".to_string()), Value(Repr::Int(2))),
+            ])
+            .into_iter()
+            .collect(),
+        ));
         let crossed = Transfer::of(&value)
             .expect("a map of Ints is task-safe")
             .into_value();
@@ -1259,10 +1267,14 @@ mod tests {
 
     #[test]
     fn a_map_value_holding_a_vector_is_refused_naming_the_key() {
-        let value = Value(Repr::Map(Rc::new(BTreeMap::from([(
-            MapKey::Str("widgets".to_string()),
-            Value(Repr::Vector(VectorStorage::new(Vec::new()))),
-        )]))));
+        let value = Value(Repr::Map(
+            BTreeMap::from([(
+                MapKey::Str("widgets".to_string()),
+                Value(Repr::Vector(VectorStorage::new(Vec::new()))),
+            )])
+            .into_iter()
+            .collect(),
+        ));
         let found = Transfer::of(&value).expect_err("a vector held by a map entry may not cross");
         assert_eq!(found.path, "[widgets]");
         assert_eq!(found.type_name, "Vector");

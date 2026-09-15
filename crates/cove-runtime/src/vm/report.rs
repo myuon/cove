@@ -520,7 +520,7 @@ mod tests {
             },
             intrinsics: vec![
                 IntrinsicCalls {
-                    intrinsic: Intrinsic::SetContains,
+                    intrinsic: Intrinsic::SetInserted,
                     sites: 1,
                     encoded: 1_000,
                     native: 7,
@@ -556,7 +556,7 @@ mod tests {
         ));
         assert!(text.contains("VM->native 2,"));
         assert!(text.contains("helper calls, 7 in all"));
-        assert!(text.contains("           1,000              7       1  Set.contains"));
+        assert!(text.contains("           1,000              7       1  Set.inserted"));
         assert!(text.contains("               0              0       3  String.fromCodePoint"));
     }
 }

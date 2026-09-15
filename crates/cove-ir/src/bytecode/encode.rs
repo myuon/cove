@@ -16,7 +16,7 @@
 //! its program counter, every field an opcode does not use is written zero,
 //! and two encodings of one program are byte-identical.
 
-use crate::inst::{Inst, Len, Pc, Slot, Storage, Validation};
+use crate::inst::{CmpOp, Inst, Len, Pc, Slot, Storage, Validation};
 use crate::program::{Function, Program};
 
 use super::op::Op;
@@ -55,6 +55,12 @@ pub enum TooWide {
     /// make: a byte finish is always a UTF-8 finish, for the same reason and
     /// under the same verifier refusal as [`TooWide::Storage`].
     Validation { validation: Validation },
+    /// A three-way [`CmpOp::Order`] in a form that has
+    /// no member for it: fused into a branch, or against an immediate. Its
+    /// answer is an `Int`, so neither form means anything, and the lowering
+    /// never builds one; `crate::verify` refuses one, for
+    /// [`TooWide::Storage`]'s reason.
+    Order,
 }
 
 impl std::fmt::Display for TooWide {
@@ -78,6 +84,10 @@ impl std::fmt::Display for TooWide {
                     "a run finish with validation {validation:?} has no opcode"
                 )
             }
+            TooWide::Order => write!(
+                f,
+                "a three-way order has no opcode fused into a branch or taking an immediate"
+            ),
         }
     }
 }
@@ -163,6 +173,15 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
         Inst::ArithImm { op, dst, a, value } => {
             build(Op::ArithImm(op), slot(dst)?, slot(a)?, 0, value as u64)
         }
+        Inst::CmpImm {
+            op: CmpOp::Order, ..
+        }
+        | Inst::CmpBranch {
+            op: CmpOp::Order, ..
+        }
+        | Inst::CmpImmBranch {
+            op: CmpOp::Order, ..
+        } => return Err(TooWide::Order),
         Inst::CmpImm { op, dst, a, value } => {
             build(Op::CmpImm(op), slot(dst)?, slot(a)?, 0, value as u64)
         }
@@ -619,6 +638,7 @@ mod tests {
                 CmpOp::Le,
                 CmpOp::Gt,
                 CmpOp::Ge,
+                CmpOp::Order,
             ] {
                 held.push((
                     0,

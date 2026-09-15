@@ -7,9 +7,10 @@
 //! spells `core.<name>(...)` — `cove_schema::builtins::CORE_INTRINSICS` is the
 //! table. The checker admits such a call only inside a standard-library module,
 //! and this is the lowering's half: each entry becomes run instructions in the
-//! frame the call is written in, and **never** an [`Inst::CallBuiltin`]. A core
-//! intrinsic is not a name for the machine to dispatch on; it is the operation
-//! the name stands for.
+//! frame the call is written in, and never an [`Inst::CallBuiltin`] that names
+//! a method — the keyed walks below are the one exception, and they name a
+//! static intrinsic identity. A core intrinsic is not a name for the machine to
+//! dispatch on; it is the operation the name stands for.
 //!
 //! The string builder is the one core type here with no public method of its
 //! own. `std.stringbuilder`'s `StringBuilder` wraps a `ByteBuffer` — ADR 0052's
@@ -21,6 +22,20 @@
 //! it, and every append writes *through* it — which is why a growth that
 //! replaces the store beneath the owner is visible to every frame naming the
 //! builder.
+//!
+//! A keyed collection's search is the one family here with runtime calls
+//! beneath it (ADR 0059, #378 Phase 4). Its element reads are run instructions
+//! like every other — `core.memberAt` and `core.entryAt` are a `load-elem` of
+//! the sorted run itself — but the order a search steps by and the admission
+//! of a key are layout-directed walks no instruction performs for a struct, an
+//! array or a set. So `core.order` is one `cmp` of `CmpOp::Order` where the
+//! key is a scalar, a `String` or a case index in name order, and a
+//! [`Inst::CallBuiltin`] of `Intrinsic::ValueOrder` otherwise;
+//! `core.admitKey` is nothing at all where the key's layout cannot hold a
+//! refused part, and `Intrinsic::ValueAdmitKey` where it can; and
+//! `core.refuseDuplicate` is always `Intrinsic::ValueRefuseDuplicate`. Those
+//! three are the only calls this file emits, and each is a static identity
+//! rather than a name.
 //!
 //! So nothing downstream of this file learns that a public method moved. The
 //! verifier, both encoders and the native code generators see run instructions
@@ -37,9 +52,19 @@ use cove_syntax::ast::{Arg, Expr};
 use super::frame::Val;
 use super::shapes::{self, BUFFER_LEN, VECTOR_LEN, VECTOR_STORE};
 use super::{Body, Dest};
-use crate::inst::{Inst, Len, Slot, Storage, Validation};
-use crate::layout::LayoutId;
-use crate::program::Arg as Operand;
+use crate::inst::{CmpOp, Compare, Inst, Len, Slot, Storage, Validation};
+use crate::intrinsic::Intrinsic;
+use crate::layout::{LayoutId, Shape};
+use crate::program::{Arg as Operand, Builtin};
+use crate::repr::Repr;
+
+/// How deep a key's layout may nest for `Body::always_admitted` to remove
+/// the admission of it.
+///
+/// Well inside the runtime's bound on how deep a key is walked (128 steps,
+/// of which a level of nesting takes at most two), so a layout this shallow
+/// has no value the admission would stop for its depth.
+const ADMITTED_DEPTH: usize = 48;
 
 impl Body<'_> {
     /// `core.name(args)`, written in a standard-library module.
@@ -101,6 +126,17 @@ impl Body<'_> {
             ("bytesLength", [buffer]) => self.core_bytes_length(expr, &buffer.value, want),
             ("arrayLength", [items]) => self.core_array_length(expr, &items.value, want),
             ("vectorLength", [items]) => self.core_vector_length(expr, &items.value, want),
+            ("order", [a, b]) => self.core_order(expr, &a.value, &b.value, want),
+            ("admitKey", [key, method, role]) => {
+                self.core_admit_key(expr, &key.value, [&method.value, &role.value], want)
+            }
+            ("refuseDuplicate", [key, method, role]) => {
+                self.core_refuse_duplicate(expr, &key.value, [&method.value, &role.value], want)
+            }
+            ("memberAt", [members, at]) => {
+                self.core_member_at(expr, &members.value, &at.value, want)
+            }
+            ("entryAt", [entries, at]) => self.core_entry_at(expr, &entries.value, &at.value, want),
             _ => self.gap(&format!("`core.{name}`"), expr),
         }
     }
@@ -825,6 +861,292 @@ impl Body<'_> {
             },
             expr.span,
         );
+        self.release(obj, expr.span);
+        dst
+    }
+
+    /// `core.order(a, b)`: `-1`, `0` or `1` as `a` sorts before, equal to or
+    /// after `b` in the order a key is kept in.
+    ///
+    /// One [`Inst::Cmp`] of [`CmpOp::Order`] where the key's layout is one a
+    /// comparison instruction orders exactly as `key::order` does — see
+    /// [`Body::ordered_by`] — and otherwise one [`Inst::CallBuiltin`] of
+    /// [`Intrinsic::ValueOrder`], the layout-directed walk.
+    fn core_order(&mut self, expr: &Expr, a: &Expr, b: &Expr, want: Option<Dest>) -> Val {
+        let Some(ty) = self.settled_ty(a) else {
+            return self.dead(expr);
+        };
+        let Some(layout) = self.layout(&ty, a.span) else {
+            return self.dead(expr);
+        };
+        let left = self.expr(a);
+        let right = self.expr(b);
+        let dst = self.answer_at(want, shapes::INT);
+        match self.ordered_by(layout) {
+            Some(on) => {
+                self.emit(
+                    Inst::Cmp {
+                        on,
+                        op: CmpOp::Order,
+                        dst: dst.slot,
+                        a: left.slot,
+                        b: right.slot,
+                    },
+                    expr.span,
+                );
+            }
+            None => self.intrinsic_call(
+                Intrinsic::ValueOrder,
+                shapes::INT,
+                dst.slot,
+                &[&left, &right],
+                expr.span,
+            ),
+        }
+        self.release(right, expr.span);
+        self.release(left, expr.span);
+        dst
+    }
+
+    /// The comparison that orders a value of `layout` exactly as a key is
+    /// ordered, where one instruction can.
+    ///
+    /// `key::order` ranks an `Int` and a `Duration` by their signed words, a
+    /// `Bool` `false` first, and a `String` by its bytes — which are
+    /// [`Compare::Int`], [`Compare::Bool`] and [`Compare::Str`]. It ranks an
+    /// enum's cases by their *names*, and a payload-free enum's word is its
+    /// case *index*, so [`Compare::Tag`] is the order only where the cases were
+    /// declared in ascending name order; any other enum is a walk. A `Unit`
+    /// has one value and no comparison instruction admits it, so it is a walk
+    /// too, and so is everything wider than a word.
+    fn ordered_by(&self, layout: LayoutId) -> Option<Compare> {
+        match &self.pool.shapes.layout(layout).shape {
+            Shape::Word(Repr::Int | Repr::Duration) => Some(Compare::Int),
+            Shape::Word(Repr::Bool) => Some(Compare::Bool),
+            Shape::Str => Some(Compare::Str),
+            Shape::Enum { cases, payload } if payload.is_empty() => cases
+                .windows(2)
+                .all(|pair| pair[0].name < pair[1].name)
+                .then_some(Compare::Tag),
+            _ => None,
+        }
+    }
+
+    /// `core.admitKey(key, method, role)`: the refusal of a key the language
+    /// does not admit, in `method`'s words.
+    ///
+    /// Nothing at all where `key`'s layout cannot hold a part the admission
+    /// refuses — [`Body::always_admitted`] — and there the call answers a `()`
+    /// only if something reads one. Otherwise one [`Inst::CallBuiltin`] of
+    /// [`Intrinsic::ValueAdmitKey`] over the key and the two names.
+    fn core_admit_key(
+        &mut self,
+        expr: &Expr,
+        key: &Expr,
+        [method, role]: [&Expr; 2],
+        want: Option<Dest>,
+    ) -> Val {
+        let Some(ty) = self.settled_ty(key) else {
+            return self.dead(expr);
+        };
+        let Some(layout) = self.layout(&ty, key.span) else {
+            return self.dead(expr);
+        };
+        if self.always_admitted(layout) {
+            let held = self.expr(key);
+            self.release(held, expr.span);
+            return match want {
+                Some(_) => self.unit_answer(expr, want),
+                None => self.temp(shapes::UNIT),
+            };
+        }
+        self.keyed_refusal(Intrinsic::ValueAdmitKey, expr, key, [method, role], want)
+    }
+
+    /// `core.refuseDuplicate(key, method, role)`: one [`Inst::CallBuiltin`]
+    /// of [`Intrinsic::ValueRefuseDuplicate`], which always raises.
+    fn core_refuse_duplicate(
+        &mut self,
+        expr: &Expr,
+        key: &Expr,
+        names: [&Expr; 2],
+        want: Option<Dest>,
+    ) -> Val {
+        self.keyed_refusal(Intrinsic::ValueRefuseDuplicate, expr, key, names, want)
+    }
+
+    /// One [`Inst::CallBuiltin`] of a keyed refusal over a key and the two
+    /// names its message is written with, answering `()`.
+    fn keyed_refusal(
+        &mut self,
+        intrinsic: Intrinsic,
+        expr: &Expr,
+        key: &Expr,
+        [method, role]: [&Expr; 2],
+        want: Option<Dest>,
+    ) -> Val {
+        let held = self.expr(key);
+        let method = self.expr(method);
+        let role = self.expr(role);
+        let dst = self.answer_at(want, shapes::UNIT);
+        self.intrinsic_call(
+            intrinsic,
+            shapes::UNIT,
+            dst.slot,
+            &[&held, &method, &role],
+            expr.span,
+        );
+        self.release(role, expr.span);
+        self.release(method, expr.span);
+        self.release(held, expr.span);
+        dst
+    }
+
+    /// One [`Inst::CallBuiltin`] of `intrinsic` over `args`, answering a
+    /// value of `result` into `dst`.
+    fn intrinsic_call(
+        &mut self,
+        intrinsic: Intrinsic,
+        result: LayoutId,
+        dst: Slot,
+        args: &[&Val],
+        span: Span,
+    ) {
+        let builtin = self.pool.builtin(Builtin { intrinsic, result });
+        let args = self
+            .pool
+            .args
+            .intern(args.iter().map(|arg| arg.arg()).collect());
+        self.emit(Inst::CallBuiltin { dst, builtin, args }, span);
+    }
+
+    /// Whether every value of `layout` is one the key admission admits, so
+    /// that asking it could never refuse.
+    ///
+    /// The admission refuses a `Float`, a `Vector`, a closure, a task, a
+    /// shared cell and anything that holds one, and looks inside a box at
+    /// whatever it was given — so a word of those, a box, and every shape
+    /// that is not a key's are `false`. An `Int`, a `Bool`, a `Duration`, a
+    /// `Unit` and a `String` are `true`; an array, a struct and an enum are
+    /// what their parts are; a set's members and a map's keys are keys by
+    /// construction, so a set is `true` and a map is what its values are.
+    ///
+    /// The walk also refuses a layout that holds itself, and one nested deeper
+    /// than [`ADMITTED_DEPTH`]: the admission stops a value nested past the
+    /// machine's depth bound with a refusal of its own, and only a layout of
+    /// bounded depth is one no value of can reach it.
+    fn always_admitted(&self, layout: LayoutId) -> bool {
+        fn walk(body: &Body<'_>, layout: LayoutId, path: &mut Vec<LayoutId>) -> bool {
+            if path.contains(&layout) || path.len() >= ADMITTED_DEPTH {
+                return false;
+            }
+            path.push(layout);
+            let admitted = match &body.pool.shapes.layout(layout).shape {
+                Shape::Word(repr) => {
+                    matches!(repr, Repr::Unit | Repr::Bool | Repr::Int | Repr::Duration)
+                }
+                Shape::Str | Shape::Members { .. } => true,
+                Shape::Elements {
+                    elem,
+                    growable: false,
+                } => walk(body, *elem, path),
+                Shape::Entries { value, .. } => walk(body, *value, path),
+                Shape::Struct { fields, .. } => {
+                    fields.iter().all(|field| walk(body, field.layout, path))
+                }
+                Shape::Enum { cases, .. } => cases
+                    .iter()
+                    .all(|case| case.parts.iter().all(|part| walk(body, part.layout, path))),
+                _ => false,
+            };
+            path.pop();
+            admitted
+        }
+        walk(self, layout, &mut Vec::new())
+    }
+
+    /// `core.memberAt(members, at)`: the member at `at` of a set's sorted run.
+    ///
+    /// One [`Inst::LoadElem`] of the set object itself at the member's layout:
+    /// a `Set` is a run of members laid end to end, so the machine's element
+    /// bound — the header's length — is the set's own length.
+    fn core_member_at(
+        &mut self,
+        expr: &Expr,
+        members: &Expr,
+        at: &Expr,
+        want: Option<Dest>,
+    ) -> Val {
+        let Some(ty) = self.settled_ty(members) else {
+            return self.dead(expr);
+        };
+        let Ty::Set(elem) = &ty else {
+            self.errors.push(super::gap::gap(
+                "`core.memberAt` over something that is not a `Set`",
+                members.span,
+            ));
+            return self.dead(expr);
+        };
+        let elem = (**elem).clone();
+        if self.layout(&ty, members.span).is_none() {
+            return self.dead(expr);
+        }
+        let Some(layout) = self.layout(&elem, members.span) else {
+            return self.dead(expr);
+        };
+        self.load_keyed_element(expr, members, at, layout, want)
+    }
+
+    /// `core.entryAt(entries, at)`: the entry at `at` of a map's sorted run, as
+    /// a `MapEntry`.
+    ///
+    /// One [`Inst::LoadElem`] of the map object itself at the `MapEntry<K, V>`
+    /// layout, whose two fields are the key's words and then the value's —
+    /// which is exactly how a map lays an entry out.
+    fn core_entry_at(&mut self, expr: &Expr, entries: &Expr, at: &Expr, want: Option<Dest>) -> Val {
+        let Some(ty) = self.settled_ty(entries) else {
+            return self.dead(expr);
+        };
+        let Ty::Map(key, value) = &ty else {
+            self.errors.push(super::gap::gap(
+                "`core.entryAt` over something that is not a `Map`",
+                entries.span,
+            ));
+            return self.dead(expr);
+        };
+        let entry = Ty::MapEntry(key.clone(), value.clone());
+        if self.layout(&ty, entries.span).is_none() {
+            return self.dead(expr);
+        }
+        let Some(layout) = self.layout(&entry, entries.span) else {
+            return self.dead(expr);
+        };
+        self.load_keyed_element(expr, entries, at, layout, want)
+    }
+
+    /// One [`Inst::LoadElem`] of element `at` of the sorted run `run` is, at
+    /// `layout`.
+    fn load_keyed_element(
+        &mut self,
+        expr: &Expr,
+        run: &Expr,
+        at: &Expr,
+        layout: LayoutId,
+        want: Option<Dest>,
+    ) -> Val {
+        let obj = self.expr(run);
+        let index = self.expr(at);
+        let dst = self.answer_at(want, layout);
+        self.emit(
+            Inst::LoadElem {
+                dst: dst.slot,
+                obj: obj.slot,
+                index: index.slot,
+                layout,
+            },
+            expr.span,
+        );
+        self.release(index, expr.span);
         self.release(obj, expr.span);
         dst
     }

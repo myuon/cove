@@ -4672,12 +4672,13 @@ pub(crate) fn items_of(value: Value, span: Span) -> Result<Vec<Value>, RuntimeEr
             end,
             inclusive_end,
         }) => Ok(RangeBounds::of(start, end, inclusive_end).items()),
-        // A `Set` is `BTreeSet<MapKey>`-backed, so it iterates its
-        // elements in ascending order, the same order `Display` shows.
+        // A `Set` is backed by a sorted, distinct run of `MapKey`s, so it
+        // iterates its elements in ascending order, the same order `Display`
+        // shows.
         Value(Repr::Set(items)) => Ok(items.iter().map(|key| key.to_value()).collect()),
-        // A `Map` iterates in ascending key order, matching its
-        // `BTreeMap` storage. Each binding is a `MapEntry` carrying that
-        // iteration's `key` and `value`, the same shape `Map.of` accepts.
+        // A `Map` iterates in ascending key order, matching its sorted run's
+        // own order. Each binding is a `MapEntry` carrying that iteration's
+        // `key` and `value`, the same shape `Map.of` accepts.
         Value(Repr::Map(entries)) => Ok(entries
             .iter()
             .map(|(key, value)| {

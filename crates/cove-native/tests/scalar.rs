@@ -108,6 +108,11 @@ fn a_comparison_writes_one_or_zero() {
 }
 
 #[test]
+fn a_three_way_order_writes_minus_one_zero_or_one() {
+    suite::a_three_way_order_writes_minus_one_zero_or_one::<Cranelift>();
+}
+
+#[test]
 fn a_copy_moves_every_word_and_does_not_smear() {
     suite::a_copy_moves_every_word_and_does_not_smear::<Cranelift>();
 }

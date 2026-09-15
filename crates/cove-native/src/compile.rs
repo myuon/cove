@@ -887,6 +887,26 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.arith(*op, *dst, x, y);
                 false
             }
+            // `encoded.rs`'s `ORDER_INT | ORDER_BOOL | ORDER_TAG`: `(x > y) -
+            // (x < y)` over the words read as `i64`, which `crate::subset`
+            // admits for those three and no other.
+            Inst::Cmp {
+                on: _,
+                op: CmpOp::Order,
+                dst,
+                a,
+                b,
+            } => {
+                let x = self.load_slot(*a);
+                let y = self.load_slot(*b);
+                let above = self.b.ins().icmp(IntCC::SignedGreaterThan, x, y);
+                let below = self.b.ins().icmp(IntCC::SignedLessThan, x, y);
+                let above = self.b.ins().uextend(types::I64, above);
+                let below = self.b.ins().uextend(types::I64, below);
+                let answer = self.b.ins().isub(above, below);
+                self.store_slot(*dst, answer);
+                false
+            }
             Inst::Cmp {
                 on: _,
                 op,
@@ -1985,6 +2005,7 @@ impl<'a, 'f> Lower<'a, 'f> {
             CmpOp::Le => IntCC::SignedLessThanOrEqual,
             CmpOp::Gt => IntCC::SignedGreaterThan,
             CmpOp::Ge => IntCC::SignedGreaterThanOrEqual,
+            CmpOp::Order => unreachable!("a three-way order is lowered by its own `Inst::Cmp` arm"),
         };
         self.b.ins().icmp(cc, x, y)
     }

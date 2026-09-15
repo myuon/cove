@@ -35,7 +35,7 @@
 //! that such a bug is a loud failure at lowering time instead of a quiet one
 //! at collection time.
 
-use crate::inst::{Compare, Inst, Len, Num, Slot};
+use crate::inst::{CmpOp, Compare, Inst, Len, Num, Slot};
 use crate::layout::{LayoutId, Shape};
 use crate::program::{Function, FunctionId, Program};
 use crate::repr::{RefMap, Repr};
@@ -629,9 +629,30 @@ impl Check<'_> {
                 self.expect(at, dst, want);
                 self.expect(at, a, want);
             }
-            Inst::CmpImm { dst, a, .. } => {
+            Inst::CmpImm { op, dst, a, .. } => {
+                self.unordered(at, op);
                 self.expect(at, dst, &[Repr::Bool]);
                 self.expect(at, a, &[Repr::Int, Repr::Duration]);
+            }
+            // ADR 0059's three-way order answers an `Int`, and only over the
+            // comparisons a key's order is one of: see `CmpOp::Order`.
+            Inst::Cmp {
+                on,
+                op: CmpOp::Order,
+                dst,
+                a,
+                b,
+            } => {
+                if matches!(on, Compare::Float | Compare::Identity) {
+                    self.fault(
+                        at,
+                        format!("a three-way order over {on:?} is not an order a key has"),
+                    );
+                }
+                self.expect(at, dst, &[Repr::Int]);
+                let want = Self::compared(on);
+                self.expect(at, a, want);
+                self.expect(at, b, want);
             }
             Inst::Cmp { on, dst, a, b, .. } => {
                 self.expect(at, dst, &[Repr::Bool]);
@@ -663,19 +684,23 @@ impl Check<'_> {
             // required to be a `Bool` as the destination.
             Inst::CmpBranch {
                 on,
+                op,
                 dst,
                 a,
                 b,
                 target,
-                ..
             } => {
+                self.unordered(at, op);
                 self.expect(at, dst, &[Repr::Bool]);
                 let want = Self::compared(on);
                 self.expect(at, a, want);
                 self.expect(at, b, want);
                 self.target(at, target);
             }
-            Inst::CmpImmBranch { dst, a, target, .. } => {
+            Inst::CmpImmBranch {
+                op, dst, a, target, ..
+            } => {
+                self.unordered(at, op);
                 self.expect(at, dst, &[Repr::Bool]);
                 self.expect(at, a, &[Repr::Int, Repr::Duration]);
                 self.target(at, target);
@@ -1175,6 +1200,20 @@ impl Check<'_> {
                 self.fault(at, format!("names slot {slot}, outside a frame of {size}"));
                 None
             }
+        }
+    }
+
+    /// Refuses [`CmpOp::Order`] in a comparison that answers a `Bool`.
+    ///
+    /// The three-way order's answer is an `Int`, so a branch fused on it or an
+    /// immediate form of it has no meaning, and the bytecode has no opcode for
+    /// either: `crate::bytecode`'s encoder would refuse what this lets through.
+    fn unordered(&mut self, at: Option<usize>, op: CmpOp) {
+        if op == CmpOp::Order {
+            self.fault(
+                at,
+                "a three-way order answers an `Int`, and only `cmp` carries one".to_string(),
+            );
         }
     }
 

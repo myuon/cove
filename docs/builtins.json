@@ -27,7 +27,12 @@
     {"name": "bytesFinish", "signature": "core.bytesFinish(buffer: ByteBuffer) -> String", "generics": [], "params": [{"name": "buffer", "type": "ByteBuffer"}], "result": "String", "libraryOnly": true},
     {"name": "bytesLength", "signature": "core.bytesLength(buffer: ByteBuffer) -> Int", "generics": [], "params": [{"name": "buffer", "type": "ByteBuffer"}], "result": "Int", "libraryOnly": true},
     {"name": "arrayLength", "signature": "core.arrayLength(items: Array<T>) -> Int", "generics": ["T"], "params": [{"name": "items", "type": "Array<T>"}], "result": "Int", "libraryOnly": true},
-    {"name": "vectorLength", "signature": "core.vectorLength(items: Vector<T>) -> Int", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}], "result": "Int", "libraryOnly": true}
+    {"name": "vectorLength", "signature": "core.vectorLength(items: Vector<T>) -> Int", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}], "result": "Int", "libraryOnly": true},
+    {"name": "order", "signature": "core.order(a: T, b: T) -> Int", "generics": ["T"], "params": [{"name": "a", "type": "T"}, {"name": "b", "type": "T"}], "result": "Int", "libraryOnly": true},
+    {"name": "admitKey", "signature": "core.admitKey(key: T, method: String, role: String) -> Unit", "generics": ["T"], "params": [{"name": "key", "type": "T"}, {"name": "method", "type": "String"}, {"name": "role", "type": "String"}], "result": "Unit", "libraryOnly": true},
+    {"name": "refuseDuplicate", "signature": "core.refuseDuplicate(key: T, method: String, role: String) -> Unit", "generics": ["T"], "params": [{"name": "key", "type": "T"}, {"name": "method", "type": "String"}, {"name": "role", "type": "String"}], "result": "Unit", "libraryOnly": true},
+    {"name": "memberAt", "signature": "core.memberAt(members: Set<T>, at: Int) -> T", "generics": ["T"], "params": [{"name": "members", "type": "Set<T>"}, {"name": "at", "type": "Int"}], "result": "T", "libraryOnly": true},
+    {"name": "entryAt", "signature": "core.entryAt(entries: Map<K, V>, at: Int) -> MapEntry<K, V>", "generics": ["K", "V"], "params": [{"name": "entries", "type": "Map<K, V>"}, {"name": "at", "type": "Int"}], "result": "MapEntry<K, V>", "libraryOnly": true}
   ],
   "types": [
     {
@@ -92,10 +97,10 @@
         {"name": "of", "signature": "of(entries: MapEntry<K, V>...) -> Map<K, V>", "generics": ["K", "V"], "params": [{"name": "entries", "type": "MapEntry<K, V>"}], "variadic": true, "result": "Map<K, V>", "implementedBy": "machine", "host": false}
       ],
       "methods": [
-        {"name": "get", "signature": "get(key: K) -> Option<V>", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Option<V>", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "get", "signature": "get(key: K) -> Option<V>", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Option<V>", "mutating": false, "implementedBy": "std.map.get", "host": false},
         {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.map.isEmpty", "host": false},
-        {"name": "contains", "signature": "contains(key: K) -> Bool", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "contains", "signature": "contains(key: K) -> Bool", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.map.contains", "host": false},
         {"name": "keys", "signature": "keys() -> Array<K>", "generics": [], "params": [], "variadic": false, "result": "Array<K>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "values", "signature": "values() -> Array<V>", "generics": [], "params": [], "variadic": false, "result": "Array<V>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "inserted", "signature": "inserted(key: K, value: V) -> Map<K, V>", "generics": [], "params": [{"name": "key", "type": "K"}, {"name": "value", "type": "V"}], "variadic": false, "result": "Map<K, V>", "mutating": false, "implementedBy": "machine", "host": false},
@@ -127,7 +132,7 @@
         {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.set.isEmpty", "host": false},
         {"name": "toArray", "signature": "toArray() -> Array<T>", "generics": [], "params": [], "variadic": false, "result": "Array<T>", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "contains", "signature": "contains(element: T) -> Bool", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "contains", "signature": "contains(element: T) -> Bool", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.set.contains", "host": false},
         {"name": "inserted", "signature": "inserted(element: T) -> Set<T>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Set<T>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "removed", "signature": "removed(element: T) -> Set<T>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Set<T>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "implementedBy": "machine", "host": false}

@@ -1,0 +1,32 @@
+use console.println
+
+/// A reading whose weight is a `Float`, one struct further in.
+struct Reading {
+  weight: Float
+}
+
+/// A sample named by a label, holding a reading.
+struct Sample {
+  label: String
+  reading: Reading
+}
+
+/// Asks an empty `Set<Array<Sample>>` whether it holds an array whose second
+/// sample nests a `Float`: the refusal names the path to the part that cannot
+/// be a key.
+///
+/// The path is rooted at an array rather than at the struct itself, because a
+/// struct at the root names itself by its type, and the two evaluators name a
+/// type differently there — the VM by its qualified layout name, the oracle by
+/// its short one.
+export fn main() -> Result<Unit, Error> {
+  let samples: Set<Array<Sample>> = Set.of()
+  println("about to search an empty set for samples holding a Float")?
+  let wanted = [
+    Sample(label: "a", reading: Reading(weight: 1.0)),
+    Sample(label: "b", reading: Reading(weight: 1.5)),
+  ]
+  let found = samples.contains(wanted)
+  println("never printed {found}")?
+  Ok(())
+}

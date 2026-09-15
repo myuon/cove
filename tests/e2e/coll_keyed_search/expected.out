@@ -1,0 +1,41 @@
+ints {-9223372036854775808: least, -3: minus three, 0: zero, 7: seven, 9223372036854775807: greatest}
+  get Some(least) Some(minus three) Some(zero) Some(seven) Some(greatest)
+  miss None None None None None
+  contains true true false true
+  empty None false
+  one None Some(five) None true
+  set {-1, 0, 2, 4, 9} true true false false false
+  empty set false
+strings {: 0, Z: 26, ab: 2, abc: 3, b: 5, é: 9}
+  get Some(0) Some(2) Some(3) Some(5) Some(9) Some(26)
+  miss None None None None None
+  contains true true false
+  set {, apple, fig, pear} true true false false
+colors {Blue, Green, Red} true
+  partial false true true
+  map {Green: 2, Red: 1} Some(1) None true
+shapes {Circle(1), Circle(3), Dot, Label(a), Label(b), Square(2)}
+  contains true false true true false false
+  options {None: none, Some(-1): minus one, Some(2): two} Some(none) Some(two) None
+points {Point(x: 0, y: 9): b, Point(x: 1, y: -2): c, Point(x: 1, y: 2): a}
+  get Some(a) Some(b) Some(c)
+  miss None None None
+  set {Point(x: -3, y: 3), Point(x: 3, y: 3)} true false
+arrays {[], [1], [1, 2], [1, 2, 0], [2]}
+  contains true true false false true
+sets {{1}, {1, 2}, {2, 3}} true false
+maps {{a: 2}: a2, {b: 1}: b1} Some(a2) None
+  deep Some(2) None
+bools {false, true} true
+  only true false true
+durations Some(two) Some(minus) None
+units true
+ranges {0..<3, 0..3, 1..<2} true false
+replaced {c: 20, m: 1, x: 3} Some(20) 3
+  grown {a: 0, c: 2, m: 1, x: 3} {c: 2, m: 1, x: 3, z: 9} {c: 2, m: 1, n: 5, x: 3}
+  removed absent {c: 2, m: 1, x: 3} true 3
+  removed present {c: 2, x: 3} None
+  emptied {} true None
+  base {c: 2, m: 1, x: 3}
+  set {1, 3} {1, 2, 3} {1, 3} {3} {1, 3}
+  wide {Point(x: 5, y: 5)} {Point(x: 5, y: 4), Point(x: 5, y: 5)} {Point(x: 5, y: 5)}

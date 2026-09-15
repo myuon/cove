@@ -65,6 +65,11 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `bytesLength` | `core.bytesLength(buffer: ByteBuffer) -> Int` |
 | `arrayLength` | `core.arrayLength(items: Array<T>) -> Int` |
 | `vectorLength` | `core.vectorLength(items: Vector<T>) -> Int` |
+| `order` | `core.order(a: T, b: T) -> Int` |
+| `admitKey` | `core.admitKey(key: T, method: String, role: String) -> Unit` |
+| `refuseDuplicate` | `core.refuseDuplicate(key: T, method: String, role: String) -> Unit` |
+| `memberAt` | `core.memberAt(members: Set<T>, at: Int) -> T` |
+| `entryAt` | `core.entryAt(entries: Map<K, V>, at: Int) -> MapEntry<K, V>` |
 
 ## Builtin types
 
@@ -135,10 +140,10 @@ written as a namespace; binds `K`, `V`.
 
 | signature | `var self` | variadic | binds | implemented by |
 | --- | --- | --- | --- | --- |
-| `get(key: K) -> Option<V>` |  |  |  | `machine` |
+| `get(key: K) -> Option<V>` |  |  |  | `std.map.get` |
 | `length() -> Int` |  |  |  | `machine` |
 | `isEmpty() -> Bool` |  |  |  | `std.map.isEmpty` |
-| `contains(key: K) -> Bool` |  |  |  | `machine` |
+| `contains(key: K) -> Bool` |  |  |  | `std.map.contains` |
 | `keys() -> Array<K>` |  |  |  | `machine` |
 | `values() -> Array<V>` |  |  |  | `machine` |
 | `inserted(key: K, value: V) -> Map<K, V>` |  |  |  | `machine` |
@@ -168,7 +173,7 @@ written as a namespace; binds `T`.
 | `length() -> Int` |  |  |  | `machine` |
 | `isEmpty() -> Bool` |  |  |  | `std.set.isEmpty` |
 | `toArray() -> Array<T>` |  |  |  | `machine` |
-| `contains(element: T) -> Bool` |  |  |  | `machine` |
+| `contains(element: T) -> Bool` |  |  |  | `std.set.contains` |
 | `inserted(element: T) -> Set<T>` |  |  |  | `machine` |
 | `removed(element: T) -> Set<T>` |  |  |  | `machine` |
 | `snapshot() -> Self` |  |  |  | `machine` |

@@ -1,0 +1,8 @@
+error[cove::runtime]: `Map.of` was given the key `a` more than once
+ --> <e2e>/fail_key_duplicate_map/main.cove:8:13
+  |
+8 |   let bad = Map.of(
+  |             ^^^^^^^
+  rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
+  help: remove the duplicate, or give it a different key
+1 error(s)

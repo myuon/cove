@@ -114,6 +114,13 @@ pub(crate) fn literal_offset(text: StrId) -> Option<i32> {
 /// loop it has — see [`cove_ir::Compare::Tag`]'s own note on what walking it
 /// instead cost.
 ///
+/// ADR 0059's three-way [`CmpOp::Order`] is in the slice over the same three,
+/// because `encoded.rs`'s `ORDER_INT | ORDER_BOOL | ORDER_TAG` arm is one
+/// signed comparison of the two words for all of them. A `String`'s order is
+/// not: `ORDER_STR` walks two objects' bytes, which is a helper this slice does
+/// not have, so a standard-library search over `String` keys stays encoded
+/// (#378, Q4.14).
+///
 /// Everything else — [`Compare::Float`], [`Str`](Compare::Str),
 /// [`Identity`](Compare::Identity) — is outside the slice. `Identity` would be
 /// one integer comparison and is left out because nothing the raced slice does
@@ -121,7 +128,7 @@ pub(crate) fn literal_offset(text: StrId) -> Option<i32> {
 fn comparison_supported(on: Compare, op: CmpOp) -> bool {
     match on {
         Compare::Int => true,
-        Compare::Bool | Compare::Tag => matches!(op, CmpOp::Eq | CmpOp::Ne),
+        Compare::Bool | Compare::Tag => matches!(op, CmpOp::Eq | CmpOp::Ne | CmpOp::Order),
         Compare::Float | Compare::Str | Compare::Identity => false,
     }
 }
@@ -677,7 +684,14 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             a,
             b,
             target,
-        } => comparison_supported(*on, *op) && slot(*dst) && slot(*a) && slot(*b) && *target < end,
+        } => {
+            *op != CmpOp::Order
+                && comparison_supported(*on, *op)
+                && slot(*dst)
+                && slot(*a)
+                && slot(*b)
+                && *target < end
+        }
         Inst::CmpImmBranch { dst, a, target, .. } => slot(*dst) && slot(*a) && *target < end,
         Inst::Jump { to } => *to < end,
         Inst::BranchFalse { cond, to } => slot(*cond) && *to < end,

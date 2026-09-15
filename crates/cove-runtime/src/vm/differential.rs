@@ -2263,3 +2263,253 @@ export fn bumpBefore(var x: Int, by: Int) -> Int {
         assert_eq!(machine, oracle, "`{name}` answers alike");
     }
 }
+
+/// ADR 0059's keyed core intrinsics answer alike on both evaluators, across
+/// every family a key may be — and on the machine each is the instruction or
+/// the static intrinsic the lowering chose for the key's layout.
+///
+/// `core.order` over the scalars, `String`s that differ in their ninth byte,
+/// payload-free enums declared in and out of case-name order, an `Option`, a
+/// struct, arrays, sets, maps and ranges; `core.admitKey` of a key it removes
+/// and of two it refuses, one nested; `core.refuseDuplicate`; and
+/// `core.memberAt` and `core.entryAt` over one-word members and a map of
+/// two-word values. Each answer is also the one the language's order gives,
+/// written out, so an agreement on a wrong order would not pass either.
+#[test]
+fn the_keyed_core_intrinsics_agree_across_families() {
+    let probe = "\
+/// A two-word key.
+struct ProbePoint {
+  x: Int
+  y: Int
+}
+
+/// Declared out of case-name order.
+enum ProbeColor {
+  Red
+  Green
+  Blue
+}
+
+/// Declared in case-name order.
+enum ProbeFruit {
+  Apple
+  Banana
+  Cherry
+}
+
+/// A key that nests a `Float`.
+struct ProbeReading {
+  weight: Float
+}
+
+/// `core.order` across families, one family a line.
+export fn probeOrders() -> String {
+  let least = -9223372036854775807 - 1
+  let ints = \"{core.order(1, 2)} {core.order(2, 2)} {core.order(3, 2)} {core.order(least, 9223372036854775807)}\"
+  let durations = \"{core.order(Duration.millis(-5), Duration.seconds(1))} {core.order(Duration.seconds(1), Duration.millis(1000))}\"
+  let bools = \"{core.order(false, true)} {core.order(true, true)} {core.order(true, false)}\"
+  let strings = \"{core.order(\"\", \"\")} {core.order(\"ab\", \"abc\")} {core.order(\"b\", \"abc\")} {core.order(\"Z\", \"a\")} {core.order(\"h\u{e9}llo\", \"hello\")} {core.order(\"abcdefghi\", \"abcdefghj\")} {core.order(\"abcdefghj\", \"abcdefghi\")} {core.order(\"abcdefgh\", \"abcdefgh\")}\"
+  let units = \"{core.order((), ())}\"
+  let colors = \"{core.order(ProbeColor.Red, ProbeColor.Blue)} {core.order(ProbeColor.Green, ProbeColor.Red)} {core.order(ProbeColor.Blue, ProbeColor.Blue)}\"
+  let fruits = \"{core.order(ProbeFruit.Apple, ProbeFruit.Cherry)} {core.order(ProbeFruit.Cherry, ProbeFruit.Banana)} {core.order(ProbeFruit.Banana, ProbeFruit.Banana)}\"
+  let nothing: Option<Int> = None
+  let options = \"{core.order(Some(1), nothing)} {core.order(Some(1), Some(2))}\"
+  let points = \"{core.order(ProbePoint(x: 1, y: 2), ProbePoint(x: 1, y: 3))} {core.order(ProbePoint(x: 2, y: 0), ProbePoint(x: 1, y: 9))} {core.order(ProbePoint(x: 1, y: 2), ProbePoint(x: 1, y: 2))}\"
+  let empty: Array<Int> = []
+  let arrays = \"{core.order([1, 2], [1])} {core.order(empty, [0])} {core.order([1, 2], [1, 2])}\"
+  let sets = \"{core.order(Set.of(1, 2), Set.of(1, 3))} {core.order(Set.of(2), Set.of(1, 3))}\"
+  let maps = \"{core.order(Map.of(MapEntry(key: \"a\", value: 1)), Map.of(MapEntry(key: \"a\", value: 2)))}\"
+  let ranges = \"{core.order(0..<3, 0..3)} {core.order(1..<2, 0..3)}\"
+  \"{ints} | {durations} | {bools} | {strings} | {units} | {colors} | {fruits} | {options} | {points} | {arrays} | {sets} | {maps} | {ranges}\"
+}
+
+/// A key the admission removes: nothing it can hold is refused.
+export fn probeAdmitted(key: Int) -> Int {
+  core.admitKey(key, \"Map.get\", \"map key\")
+  core.admitKey(Set.of([key], [2]), \"Set.contains\", \"set element\")
+  key
+}
+
+/// A `Float` key, refused.
+export fn probeFloat() -> Int {
+  core.admitKey(1.5, \"Map.get\", \"map key\")
+  1
+}
+
+/// A key nesting a `Float`, refused with its path.
+export fn probeNested() -> Int {
+  core.admitKey([ProbeReading(weight: 1.5)], \"Set.contains\", \"set element\")
+  1
+}
+
+/// A literal's duplicate, refused.
+export fn probeDuplicate() -> Int {
+  core.refuseDuplicate(ProbePoint(x: 1, y: 2), \"Set.of\", \"element\")
+  1
+}
+
+/// The members and entries of sorted runs, read by position.
+export fn probeElements() -> String {
+  let small = Set.of(3, 1, 2)
+  let wide = Set.of(ProbePoint(x: 2, y: 0), ProbePoint(x: 1, y: 9))
+  let byName = Map.of(
+    MapEntry(key: \"b\", value: ProbePoint(x: 5, y: 6)),
+    MapEntry(key: \"a\", value: ProbePoint(x: 7, y: 8)),
+  )
+  let first = core.entryAt(byName, 0)
+  let last = core.entryAt(byName, 1)
+  \"{core.memberAt(small, 0)} {core.memberAt(small, 2)} {core.memberAt(wide, 0)} {first.key} {first.value} {last.key} {last.value}\"
+}
+";
+    let source = "\
+use std.set
+
+export fn main() -> Int {
+  set.probeAdmitted(1)
+}
+";
+    let (sources, checked) = checked_with_probe(source, "std.set", probe);
+    let program = lowered(&sources, &checked);
+    let function = |name: &str| {
+        program
+            .functions
+            .iter()
+            .find(|f| &*f.module == "std.set" && &*f.name == name)
+            .unwrap_or_else(|| panic!("`{name}` is lowered"))
+    };
+    let intrinsics = |name: &str| -> Vec<cove_ir::Intrinsic> {
+        function(name)
+            .code
+            .iter()
+            .filter_map(|inst| match inst {
+                cove_ir::Inst::CallBuiltin { builtin, .. } => {
+                    Some(program.builtin(*builtin).intrinsic)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let orders = |name: &str| -> Vec<cove_ir::Compare> {
+        function(name)
+            .code
+            .iter()
+            .filter_map(|inst| match inst {
+                cove_ir::Inst::Cmp {
+                    on,
+                    op: cove_ir::CmpOp::Order,
+                    ..
+                } => Some(*on),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // One instruction wherever one orders the key as a key is ordered: the
+    // four `Int`s and two `Duration`s, three `Bool`s, eight `String`s and the
+    // three fruits, whose index order is their name order. Everything else is
+    // the walk — the colors, whose is not, and the unit, the option, the
+    // points, the arrays, the sets, the map and the ranges.
+    let compares = orders("probeOrders");
+    let count = |on: cove_ir::Compare| compares.iter().filter(|c| **c == on).count();
+    assert_eq!(count(cove_ir::Compare::Int), 6, "{compares:?}");
+    assert_eq!(count(cove_ir::Compare::Bool), 3, "{compares:?}");
+    assert_eq!(count(cove_ir::Compare::Str), 8, "{compares:?}");
+    assert_eq!(count(cove_ir::Compare::Tag), 3, "{compares:?}");
+    let walks = intrinsics("probeOrders")
+        .into_iter()
+        .filter(|intrinsic| *intrinsic == cove_ir::Intrinsic::ValueOrder)
+        .count();
+    assert_eq!(walks, 1 + 3 + 2 + 3 + 3 + 2 + 1 + 2);
+    assert_eq!(
+        intrinsics("probeAdmitted")
+            .iter()
+            .filter(|intrinsic| **intrinsic != cove_ir::Intrinsic::SetOf)
+            .count(),
+        0,
+        "an admission that cannot refuse is removed"
+    );
+    assert_eq!(
+        intrinsics("probeFloat"),
+        vec![cove_ir::Intrinsic::ValueAdmitKey]
+    );
+    assert!(intrinsics("probeNested").contains(&cove_ir::Intrinsic::ValueAdmitKey));
+    assert_eq!(
+        intrinsics("probeDuplicate"),
+        vec![cove_ir::Intrinsic::ValueRefuseDuplicate]
+    );
+    assert!(function("probeElements")
+        .code
+        .iter()
+        .any(|inst| matches!(inst, cove_ir::Inst::LoadElem { .. })));
+
+    let wanted = [
+        (
+            "probeOrders",
+            Answer::Value(
+                "-1 0 1 -1 | -1 0 | -1 0 1 | 0 -1 1 -1 1 -1 1 0 | 0 | 1 -1 0 | -1 1 0 | 1 -1 | \
+                 -1 1 0 | 1 -1 0 | -1 1 | -1 | -1 1"
+                    .to_string(),
+            ),
+        ),
+        ("probeAdmitted", Answer::Value("1".to_string())),
+        (
+            "probeFloat",
+            Answer::Failed("`Map.get` cannot use a `Float` as a map key".to_string()),
+        ),
+        (
+            "probeNested",
+            Answer::Failed(
+                "`Set.contains` cannot use a `Float` inside `[0].weight` as a set element"
+                    .to_string(),
+            ),
+        ),
+        (
+            "probeDuplicate",
+            Answer::Failed(
+                "`Set.of` was given the element `ProbePoint(x: 1, y: 2)` more than once"
+                    .to_string(),
+            ),
+        ),
+        (
+            "probeElements",
+            Answer::Value(
+                "1 3 ProbePoint(x: 1, y: 9) a ProbePoint(x: 7, y: 8) b ProbePoint(x: 5, y: 6)"
+                    .to_string(),
+            ),
+        ),
+    ];
+    for (name, want) in wanted {
+        let args = if name == "probeAdmitted" {
+            vec![1]
+        } else {
+            vec![]
+        };
+        let oracle = {
+            let args = args.clone();
+            on_a_deep_stack(move || {
+                let (sources, program) = checked_with_probe(source, "std.set", probe);
+                let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+                let runtime = Runtime::new(program, sources, hosts);
+                said(Interpreter::new(&runtime).invoke(
+                    "std.set",
+                    name,
+                    args.into_iter().map(Value::int).collect(),
+                ))
+            })
+        };
+        let machine = on_a_deep_stack(move || {
+            let (sources, program) = checked_with_probe(source, "std.set", probe);
+            let ir = lowered(&sources, &program);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts.clone());
+            said(Vm::new(&runtime, &hosts, &ir).invoke(
+                "std.set",
+                name,
+                args.into_iter().map(Value::int).collect(),
+            ))
+        });
+        assert_eq!(oracle, want, "`{name}` on the oracle");
+        assert_eq!(machine, oracle, "`{name}` answers alike");
+    }
+}

@@ -160,3 +160,14 @@ allow = ["console", "clock"]
 [run.seqsearch]
 entry = "seqsearch.main"
 allow = ["console", "clock"]
+
+# `Map` and `Set` lookups, updates and literals, one keyed mechanism a row —
+# #378's Phase 4 (ADR 0059). Lookups and updates move from a Rust binary
+# search into a Cove one over a layout-directed value order, and these rows
+# are what says whether that is a constant factor on the mechanism. The first
+# argument is how many turns a lookup row takes; `keyed/args` makes it a
+# test's size for the corpus surveys.
+
+[run.keyed]
+entry = "keyed.main"
+allow = ["console", "clock"]

@@ -128,14 +128,20 @@ pub(crate) enum Repr {
     /// stable handle over a run it may reallocate — the growth discipline ADR
     /// 0052 writes out for the VM is what `Vec` does.
     ByteBuffer(Rc<ByteBufferStorage>),
-    /// Immutable in the MVP. Iterates in ascending key order, since that is
-    /// the natural order of its `BTreeMap` storage.
-    Map(Rc<BTreeMap<MapKey, Value>>),
-    /// Immutable in the MVP. Backed by the same key-ordered storage as `Map`,
-    /// so membership is O(log n) and iteration order is defined the same
-    /// way: ascending order. An element must satisfy the [`MapKey`]
-    /// restriction, exactly like a map key.
-    Set(Rc<BTreeSet<MapKey>>),
+    /// Immutable in the MVP. A packed run of entries, ascending and distinct
+    /// by [`MapKey`]'s `Ord` — the oracle's storage matches the linear-memory
+    /// backend's `Shape::Entries` so that a lookup by position is O(1) and a
+    /// lookup by key is a binary search, the same two operations the VM's
+    /// `entryAt`/`seek` answer over its own sorted packed run. Iteration
+    /// reads the run in order, which is the natural order of the invariant
+    /// rather than an incidental one.
+    Map(Rc<[(MapKey, Value)]>),
+    /// Immutable in the MVP. Backed the same way as `Map`: a packed run of
+    /// members, ascending and distinct by [`MapKey`]'s `Ord`, matching
+    /// `Shape::Members`. Membership is a binary search and iteration order is
+    /// the run's order — ascending, exactly as `Map` promises. An element
+    /// must satisfy the [`MapKey`] restriction, exactly like a map key.
+    Set(Rc<[MapKey]>),
     /// A struct value.
     ///
     /// The storage is shared and copied on write. Cloning a struct value is
@@ -865,8 +871,10 @@ impl MapKey {
                 Ok(MapKey::Array(converted))
             }
             // A `Set`'s elements are already `MapKey`s by construction, so
-            // this never fails.
-            Value(Repr::Set(items)) => Ok(MapKey::Set((**items).clone())),
+            // this never fails. The set's own sorted run is already in
+            // `MapKey::Set`'s canonical order, so collecting it into a
+            // `BTreeSet` changes nothing about what it holds.
+            Value(Repr::Set(items)) => Ok(MapKey::Set(items.iter().cloned().collect())),
             Value(Repr::Map(entries)) => {
                 let base = anchor.unwrap_or_default();
                 let mut converted = BTreeMap::new();
@@ -923,13 +931,16 @@ impl MapKey {
             MapKey::Array(items) => {
                 Value(Repr::Array(items.iter().map(MapKey::to_value).collect()))
             }
-            MapKey::Set(items) => Value(Repr::Set(Rc::new(items.clone()))),
-            MapKey::Map(entries) => Value(Repr::Map(Rc::new(
+            // `BTreeSet::iter` and `BTreeMap::iter` already answer ascending
+            // by `MapKey`'s `Ord`, so collecting either straight into the
+            // run keeps the invariant without a separate sort.
+            MapKey::Set(items) => Value(Repr::Set(items.iter().cloned().collect())),
+            MapKey::Map(entries) => Value(Repr::Map(
                 entries
                     .iter()
                     .map(|(key, value)| (key.clone(), value.to_value()))
                     .collect(),
-            ))),
+            )),
             MapKey::Range {
                 start,
                 end,
@@ -1140,8 +1151,19 @@ impl Value {
     /// Duplicates collapse, exactly as they do for a `Set` a Cove program
     /// builds, and the order the set iterates in is ascending key order
     /// whatever order they arrived in.
+    ///
+    /// Collecting into a `BTreeSet` first, and only then into the sorted run
+    /// the storage holds, is what establishes the invariant a host does not
+    /// have to reason about: the run this hands back is always ascending and
+    /// distinct, however `items` arrived.
     pub fn set(items: impl IntoIterator<Item = MapKey>) -> Value {
-        Value(Repr::Set(Rc::new(items.into_iter().collect())))
+        Value(Repr::Set(
+            items
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        ))
     }
 
     /// A `Map` holding `entries`.
@@ -1149,9 +1171,17 @@ impl Value {
     /// The companion of [`Value::set`], with the same reason for taking a
     /// [`MapKey`]: only the key carries the restriction, so the value half is
     /// an ordinary [`Value`]. A later entry under a key an earlier one used
-    /// replaces it.
+    /// replaces it — collecting into a `BTreeMap` first is what gives that
+    /// last-write-wins rule, before the result is handed to the sorted run
+    /// the storage holds.
     pub fn map(entries: impl IntoIterator<Item = (MapKey, Value)>) -> Value {
-        Value(Repr::Map(Rc::new(entries.into_iter().collect())))
+        Value(Repr::Map(
+            entries
+                .into_iter()
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
+                .collect(),
+        ))
     }
 
     /// `()`, the value a statement and a function with no result answer.
@@ -1434,16 +1464,18 @@ impl Value {
             (Value(Repr::Array(a)), Value(Repr::Array(b))) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.eq_value(y))
             }
-            // Both sides are `BTreeMap`s keyed the same way, so two maps with
-            // the same keys line up entry-for-entry once both are in their
-            // one true ascending order.
+            // Both sides are sorted runs ordered the same way, so two maps
+            // with the same keys line up entry-for-entry once both are in
+            // their one true ascending order.
             (Value(Repr::Map(a)), Value(Repr::Map(b))) => {
                 a.len() == b.len()
                     && a.iter()
                         .zip(b.iter())
                         .all(|((ka, va), (kb, vb))| ka == kb && va.eq_value(vb))
             }
-            // `BTreeSet<MapKey>` already compares as a set of keys.
+            // Two sorted, distinct runs of the same keys are equal exactly
+            // when they are the same slice element for element — `Rc<[T]>`'s
+            // `PartialEq` already compares that way.
             (Value(Repr::Set(a)), Value(Repr::Set(b))) => a == b,
             (Value(Repr::Struct(a)), Value(Repr::Struct(b))) => {
                 a.type_name == b.type_name
@@ -1716,7 +1748,7 @@ impl Value {
     /// [`Value`].
     pub fn entries(&self) -> Option<impl Iterator<Item = (&MapKey, &Value)> + '_> {
         match self.erased() {
-            Value(Repr::Map(entries)) => Some(entries.iter()),
+            Value(Repr::Map(entries)) => Some(entries.iter().map(|(k, v)| (k, v))),
             _ => None,
         }
     }
@@ -2024,11 +2056,11 @@ impl<'a, 'b> IntoIterator for &'b Elements<'a> {
 
 /// A `Map`'s entries, in ascending key order.
 ///
-/// Opaque so that the key-ordered storage behind it stays the runtime's
+/// Opaque so that the sorted-run storage behind it stays the runtime's
 /// business; what it promises is the order, which is the order a Cove program
 /// iterating the same map sees.
 #[derive(Clone, Copy, Debug)]
-pub struct Entries<'a>(&'a BTreeMap<MapKey, Value>);
+pub struct Entries<'a>(&'a [(MapKey, Value)]);
 
 impl<'a> Entries<'a> {
     /// How many entries the map holds.
@@ -2041,24 +2073,39 @@ impl<'a> Entries<'a> {
         self.0.is_empty()
     }
 
-    /// What `key` maps to, if anything.
+    /// What `key` maps to, if anything. A binary search over the ascending
+    /// run, the same search the linear-memory backend's `seek` performs over
+    /// its own sorted run for the same method.
     pub fn get(self, key: &MapKey) -> Option<&'a Value> {
-        self.0.get(key)
+        self.0
+            .binary_search_by(|(k, _)| k.cmp(key))
+            .ok()
+            .map(|at| &self.0[at].1)
     }
 
     /// The entries, in ascending key order.
     pub fn iter(self) -> impl Iterator<Item = (&'a MapKey, &'a Value)> {
-        self.0.iter()
+        self.0.iter().map(entry_parts)
     }
 }
 
 impl<'a> IntoIterator for Entries<'a> {
     type Item = (&'a MapKey, &'a Value);
-    type IntoIter = std::collections::btree_map::Iter<'a, MapKey, Value>;
+    type IntoIter = std::iter::Map<
+        std::slice::Iter<'a, (MapKey, Value)>,
+        fn(&'a (MapKey, Value)) -> (&'a MapKey, &'a Value),
+    >;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+        self.0.iter().map(entry_parts)
     }
+}
+
+/// Splits a stored entry into the pair of references every reader of
+/// [`Entries`] wants, so the transform has one name instead of being
+/// written out at each call site.
+fn entry_parts(entry: &(MapKey, Value)) -> (&MapKey, &Value) {
+    (&entry.0, &entry.1)
 }
 
 /// A `Set`'s elements, in ascending key order.
@@ -2067,7 +2114,7 @@ impl<'a> IntoIterator for Entries<'a> {
 /// way in: the restriction is real, and showing it is better than pretending
 /// a set holds anything.
 #[derive(Clone, Copy, Debug)]
-pub struct Members<'a>(&'a BTreeSet<MapKey>);
+pub struct Members<'a>(&'a [MapKey]);
 
 impl<'a> Members<'a> {
     /// How many elements the set holds.
@@ -2080,9 +2127,10 @@ impl<'a> Members<'a> {
         self.0.is_empty()
     }
 
-    /// Whether `member` is one of them.
+    /// Whether `member` is one of them. A binary search over the ascending
+    /// run, matching [`Entries::get`] and the VM's own `seek`.
     pub fn contains(self, member: &MapKey) -> bool {
-        self.0.contains(member)
+        self.0.binary_search(member).is_ok()
     }
 
     /// The elements, in ascending key order.
@@ -2093,7 +2141,7 @@ impl<'a> Members<'a> {
 
 impl<'a> IntoIterator for Members<'a> {
     type Item = &'a MapKey;
-    type IntoIter = std::collections::btree_set::Iter<'a, MapKey>;
+    type IntoIter = std::slice::Iter<'a, MapKey>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
@@ -2788,10 +2836,11 @@ mod tests {
 
     #[test]
     fn a_set_is_a_valid_key_because_its_elements_are_already_map_keys() {
-        let inner = Value(Repr::Set(Rc::new(BTreeSet::from([
-            MapKey::Int(1),
-            MapKey::Int(2),
-        ]))));
+        let inner = Value(Repr::Set(
+            BTreeSet::from([MapKey::Int(1), MapKey::Int(2)])
+                .into_iter()
+                .collect(),
+        ));
         assert_eq!(
             MapKey::from_value(&inner),
             Ok(MapKey::Set(BTreeSet::from([
@@ -2803,10 +2852,11 @@ mod tests {
 
     #[test]
     fn a_map_is_a_valid_key_when_every_value_is_admissible() {
-        let inner = Value(Repr::Map(Rc::new(BTreeMap::from([(
-            MapKey::Str("a".to_string()),
-            Value(Repr::Int(1)),
-        )]))));
+        let inner = Value(Repr::Map(
+            BTreeMap::from([(MapKey::Str("a".to_string()), Value(Repr::Int(1)))])
+                .into_iter()
+                .collect(),
+        ));
         assert_eq!(
             MapKey::from_value(&inner),
             Ok(MapKey::Map(BTreeMap::from([(
@@ -2818,21 +2868,36 @@ mod tests {
 
     #[test]
     fn a_map_containing_an_inadmissible_value_is_rejected_naming_the_entry() {
-        let inner = Value(Repr::Map(Rc::new(BTreeMap::from([(
-            MapKey::Str("a".to_string()),
-            Value(Repr::Vector(VectorStorage::new(Vec::new()))),
-        )]))));
+        let inner = Value(Repr::Map(
+            BTreeMap::from([(
+                MapKey::Str("a".to_string()),
+                Value(Repr::Vector(VectorStorage::new(Vec::new()))),
+            )])
+            .into_iter()
+            .collect(),
+        ));
         let invalid = MapKey::from_value(&inner).unwrap_err();
         assert_eq!(invalid.type_name, "Vector");
         assert_eq!(invalid.path, "[a]");
     }
 
     fn map_of(pairs: Vec<(MapKey, Value)>) -> Value {
-        Value(Repr::Map(Rc::new(pairs.into_iter().collect())))
+        Value(Repr::Map(
+            pairs
+                .into_iter()
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
+                .collect(),
+        ))
     }
 
     fn set_of(keys: Vec<MapKey>) -> Value {
-        Value(Repr::Set(Rc::new(keys.into_iter().collect())))
+        Value(Repr::Set(
+            keys.into_iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        ))
     }
 
     #[test]

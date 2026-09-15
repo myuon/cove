@@ -1270,22 +1270,20 @@ impl Body<'_> {
 /// `std.array`/`std.vector`, resolved before this table is ever consulted —
 /// see `Body::array_method` and `Body::vector_method`.
 ///
-/// A `Set` and a `Map` are here for the whole of their tables but `length`
-/// and `isEmpty`: both are sorted runs, so every one of these is a binary
-/// search over the order `cove_runtime::vm::builtins::key` defines or a run
-/// built sorted in one pass.
+/// A `Set` and a `Map` are here for what is left of their tables: both are
+/// sorted runs, and every one of these builds a run sorted in one pass. Their
+/// `contains` and a map's `get` are not — each is `std.set` or `std.map`, a
+/// binary search in Cove over the order `cove_runtime::vm::builtins::key`
+/// defines (ADR 0059, #378) — and nor are `length` and `isEmpty`.
 ///
 /// It is a list rather than a fall-through, because what this lowering emits
 /// is a contract the machine is written against: a name that reached the
 /// machine by accident would be a runtime refusal where a gap should have
 /// named the work.
 const HANDED_OVER: &[(&str, &str)] = &[
-    ("Set", "contains"),
     ("Set", "inserted"),
     ("Set", "removed"),
     ("Set", "toArray"),
-    ("Map", "get"),
-    ("Map", "contains"),
     ("Map", "keys"),
     ("Map", "values"),
     ("Map", "inserted"),
