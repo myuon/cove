@@ -334,10 +334,6 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::ByteAt { dst, obj, at } => {
             format!("byte-at {} {} {}", s(*dst), s(*obj), s(*at))
         }
-        Inst::AllocBytes { dst, len } => format!("alloc-bytes {} {}", s(*dst), s(*len)),
-        Inst::WriteByte { bytes, at, value } => {
-            format!("write-byte {} {} {}", s(*bytes), s(*at), s(*value))
-        }
         // The storage is written the way an encoding splits it, because a
         // reader of a dump wants to see which copy runs without decoding a
         // payload: `run-copy.bytes` or `run-copy.words` and the element layout.
@@ -347,9 +343,6 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
                 format!("run-copy.words {} ({})", l(*elem), args_of(program, *args))
             }
         },
-        Inst::FinishString { dst, bytes } => {
-            format!("finish-string {} {}", s(*dst), s(*bytes))
-        }
         Inst::AllocBuffer { dst, capacity } => {
             format!("alloc-buffer {} {}", s(*dst), s(*capacity))
         }

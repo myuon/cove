@@ -266,11 +266,8 @@ const STORE_FIELD: u8 = Op::StoreField.number();
 const LOAD_ELEM: u8 = Op::LoadElem.number();
 const STORE_ELEM: u8 = Op::StoreElem.number();
 const BYTE_AT: u8 = Op::ByteAt.number();
-const ALLOC_BYTES: u8 = Op::AllocBytes.number();
-const WRITE_BYTE: u8 = Op::WriteByte.number();
 const RUN_COPY_BYTES: u8 = Op::RunCopyBytes.number();
 const RUN_COPY_WORDS: u8 = Op::RunCopyWords.number();
-const FINISH_STRING: u8 = Op::FinishString.number();
 const ALLOC_BUFFER: u8 = Op::AllocBuffer.number();
 const APPEND_BYTE: u8 = Op::AppendByte.number();
 const APPEND_BYTES: u8 = Op::AppendBytes.number();
@@ -342,11 +339,8 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::AllocImm
         | Op::AllocSlot
         | Op::ByteAt
-        | Op::AllocBytes
-        | Op::WriteByte
         | Op::RunCopyBytes
         | Op::RunCopyWords
-        | Op::FinishString
         | Op::AllocBuffer
         | Op::AppendByte
         | Op::AppendBytes
@@ -1740,57 +1734,6 @@ pub(super) fn dispatch<'s, 'a>(
                 let byte = (word >> ((at % 8) * 8)) & 0xFF;
                 machine.mem.set_word_at(base_at + (a!()) as usize, byte);
             }
-            // ADR 0051's allocation. `Program::bytes_layout` is a
-            // program-wide constant exactly as `Program::str_layout` is —
-            // see `Op::AllocBytes`'s fields — so unlike `ALLOC_SLOT` there is
-            // no `Half::Layout` to read out of the payload, only the length.
-            // `Machine::allocate` is what rejects a negative or oversized
-            // `len` through the "no memory left" refusal every other
-            // allocation shares.
-            ALLOC_BYTES => {
-                let len = machine.mem.word_at(base_at + (b!() as usize)) as i64;
-                machine.sync(pc - 1);
-                match machine.allocate(program.bytes_layout, len) {
-                    Ok(addr) => machine.mem.set_word_at(base_at + (a!()) as usize, addr),
-                    Err(error) => fail!(error),
-                }
-            }
-            // One checked byte of a run under construction. Bounds and range
-            // are both checked ahead of the write, the same way `BYTE_AT`
-            // checks `at` ahead of its read: an out-of-range offset or an
-            // out-of-range value would otherwise write past the object or
-            // write a word another `Inst::FinishString` would trust as a
-            // byte.
-            WRITE_BYTE => {
-                let bytes = machine.mem.word_at(base_at + (a!() as usize));
-                if bytes == 0 {
-                    fail!(null_object());
-                }
-                let at = machine.mem.word_at(base_at + (b!() as usize)) as i64;
-                let len = machine.mem.object_len(bytes) as i64;
-                if at < 0 || at >= len {
-                    machine.sync(pc - 1);
-                    fail!(RuntimeError::new(format!(
-                        "`writeByte`'s `at` is `{at}`, and a byte offset into this run is 0 to {}",
-                        len - 1
-                    )));
-                }
-                let value = machine.mem.word_at(base_at + (c!() as usize)) as i64;
-                if !(0..=255).contains(&value) {
-                    machine.sync(pc - 1);
-                    fail!(RuntimeError::new(format!(
-                        "`writeByte`'s value is `{value}`, and a byte is 0 to 255"
-                    )));
-                }
-                let at = at as u32;
-                let word_at = at / 8;
-                let shift = (at % 8) * 8;
-                let word = machine.mem.payload(bytes, word_at);
-                let mask = 0xFFu64 << shift;
-                machine
-                    .mem
-                    .set_payload(bytes, word_at, (word & !mask) | ((value as u64) << shift));
-            }
             // ADR 0058's run copy, one arm per storage. All five operands —
             // `dst`, `dst_at`, `src`, `src_at`, `count` — live behind the
             // `ArgsId` in the payload's low half rather than in `a`, `b` and
@@ -1818,35 +1761,6 @@ pub(super) fn dispatch<'s, 'a>(
                 let elem = LayoutId(held.hi());
                 run_copy_words(machine, program, budget, base, args, elem, id, pc - 1)?;
             }
-            // ADR 0051's finish: validated once, and turned into the answer
-            // without copying its payload. A `Shape::Bytes` run and a
-            // `Shape::Str` of the same byte length occupy the same number of
-            // words — both are `len.div_ceil(8)` payload words — so this is a
-            // header re-label with `spare` zero rather than an allocation and
-            // a copy. Not copying the payload is the whole performance
-            // argument the ADR makes.
-            FINISH_STRING => {
-                let bytes = machine.mem.word_at(base_at + (b!() as usize));
-                if bytes == 0 {
-                    fail!(null_object());
-                }
-                machine.sync(pc - 1);
-                if !matches!(
-                    program.layout(machine.mem.object_layout(bytes)).shape,
-                    Shape::Bytes
-                ) {
-                    fail!(RuntimeError::new(
-                        "`finishString` needs a byte run under construction, and this is not one"
-                    ));
-                }
-                let text = machine.string_bytes(bytes);
-                if std::str::from_utf8(&text).is_err() {
-                    fail!(RuntimeError::new("this string's bytes are not valid UTF-8"));
-                }
-                let len = machine.mem.object_len(bytes);
-                machine.relabel(bytes, program.str_layout, len, 0);
-                machine.mem.set_word_at(base_at + (a!()) as usize, bytes);
-            }
             // ADR 0052's four. Each arm is a read of its operands and one call,
             // for `RUN_COPY_BYTES`' reason: the checks, the capacity arithmetic and
             // the growth are far more code than a dispatch arm should put in the
@@ -1863,8 +1777,8 @@ pub(super) fn dispatch<'s, 'a>(
             }
             // One checked byte at the logical length, which then becomes one
             // more. There is no `at` to bounds-check — that is the difference
-            // between a buffer and `WRITE_BYTE`'s fixed run — and no capacity to
-            // check either, because a full store grows.
+            // between a buffer and a fixed run — and no capacity to check
+            // either, because a full store grows.
             APPEND_BYTE => {
                 let owner = machine.mem.word_at(base_at + (a!() as usize));
                 let value = machine.mem.word_at(base_at + (b!() as usize)) as i64;
@@ -2432,24 +2346,21 @@ mod tests {
         );
     }
 
-    // ---- ADR 0051: the byte-run instructions --------------------------
+    // ---- ADR 0058: a run copy of packed bytes ----------------------------
 
-    /// A program with every function [ADR 0051](../../../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
-    /// tests share, so each test builds a fixture and none builds a
-    /// compiler.
+    /// A program with the one function the byte `run-copy` tests share, so
+    /// each test builds a fixture and none builds a compiler.
     ///
-    /// - `alloc_bytes_case(len) -> Ref` allocates and answers a byte run.
-    /// - `write_byte_case(bytes, at, value) -> Ref` writes one byte and
-    ///   answers the same run, so a caller can inspect it afterward.
-    /// - `finish_string_case(bytes) -> Ref` finishes a run into a `String`.
     /// - `copy_into(dst, dst_at, src, src_at, len) -> Ref` copies and
     ///   answers `dst`, so both the successful matrix and every refusal path
     ///   run through one function.
+    ///
+    /// A destination is a `Shape::Bytes` run the test allocates directly with
+    /// `Machine::allocate`, at exactly the length the case needs: no
+    /// instruction allocates a bare fixed run, and a buffer's store would be
+    /// raised to the growable floor.
     struct Fixture {
         program: Program,
-        alloc_bytes_case: FunctionId,
-        write_byte_case: FunctionId,
-        finish_string_case: FunctionId,
         copy_into: FunctionId,
     }
 
@@ -2459,37 +2370,6 @@ mod tests {
         build.string_layout();
         let bytes = build.bytes_layout();
 
-        let alloc_bytes_case = build.function(
-            "alloc_bytes_case",
-            &[int],
-            &[Repr::Int, Repr::Ref],
-            bytes,
-            vec![Inst::AllocBytes { dst: 1, len: 0 }, Inst::Return { src: 1 }],
-        );
-        let write_byte_case = build.function(
-            "write_byte_case",
-            &[bytes, int, int],
-            &[Repr::Ref, Repr::Int, Repr::Int],
-            bytes,
-            vec![
-                Inst::WriteByte {
-                    bytes: 0,
-                    at: 1,
-                    value: 2,
-                },
-                Inst::Return { src: 0 },
-            ],
-        );
-        let finish_string_case = build.function(
-            "finish_string_case",
-            &[bytes],
-            &[Repr::Ref],
-            bytes,
-            vec![
-                Inst::FinishString { dst: 0, bytes: 0 },
-                Inst::Return { src: 0 },
-            ],
-        );
         let args = build.args(&[(0, bytes), (1, int), (2, bytes), (3, int), (4, int)]);
         let copy_into = build.function(
             "copy_into",
@@ -2505,216 +2385,12 @@ mod tests {
             ],
         );
         let program = build.done();
-        Fixture {
-            program,
-            alloc_bytes_case,
-            write_byte_case,
-            finish_string_case,
-            copy_into,
-        }
-    }
-
-    /// `AllocBytes`, a sequence of `WriteByte`s and `FinishString`, chained
-    /// by hand in one function, answer the expected string — and the result
-    /// is `eq.str`-equal to the same text written directly, padding of the
-    /// last partial word included. That last part is the one a `relabel`
-    /// leaving the tail of the old `Bytes` allocation dirty would fail: the
-    /// text is thirteen bytes, so the last of its two payload words is only
-    /// five bytes full.
-    #[test]
-    fn alloc_write_finish_answers_the_expected_string() {
-        let mut build = Build::default();
-        build.string_layout();
-        let bytes = build.bytes_layout();
-        let text = "Hello, World!";
-        assert_eq!(text.len(), 13, "a length whose last word is partial");
-        let mut code = vec![Inst::Int {
-            dst: 1,
-            value: text.len() as i64,
-        }];
-        code.push(Inst::AllocBytes { dst: 0, len: 1 });
-        for (at, byte) in text.bytes().enumerate() {
-            code.push(Inst::Int {
-                dst: 2,
-                value: at as i64,
-            });
-            code.push(Inst::Int {
-                dst: 3,
-                value: byte as i64,
-            });
-            code.push(Inst::WriteByte {
-                bytes: 0,
-                at: 2,
-                value: 3,
-            });
-        }
-        code.push(Inst::FinishString { dst: 0, bytes: 0 });
-        code.push(Inst::Return { src: 0 });
-        let entry = build.function(
-            "round_trip",
-            &[],
-            &[Repr::Ref, Repr::Int, Repr::Int, Repr::Int],
-            bytes,
-            code,
-        );
-        let program = build.done();
-
-        let mut machine = Machine::new(&program, 1 << 16);
-        let finished = machine.run(entry, &[], &budget()).unwrap()[0];
-        assert_eq!(
-            machine.object_layout(finished),
-            program.str_layout,
-            "finishing relabels the run to `String` in place"
-        );
-        assert_eq!(
-            String::from_utf8(machine.string_bytes(finished)).unwrap(),
-            text
-        );
-
-        let direct = machine.new_string(text).unwrap();
-        assert_eq!(machine.object_len(finished), machine.object_len(direct));
-        for at in 0..machine.object_len(direct).div_ceil(8) {
-            assert_eq!(
-                machine.payload(finished, at),
-                machine.payload(direct, at),
-                "word {at}: a finished run and a written string must be the same words, \
-                 padding included"
-            );
-        }
-    }
-
-    #[test]
-    fn alloc_bytes_of_zero_length_works_without_error() {
-        let Fixture {
-            program,
-            alloc_bytes_case,
-            ..
-        } = fixture();
-        let mut machine = Machine::new(&program, 1 << 16);
-        let addr = machine.run(alloc_bytes_case, &[0], &budget()).unwrap()[0];
-        assert_ne!(addr, 0);
-        assert_eq!(machine.object_layout(addr), program.bytes_layout);
-        assert_eq!(machine.object_len(addr), 0);
-    }
-
-    #[test]
-    fn alloc_bytes_of_a_negative_length_is_the_shared_no_memory_refusal() {
-        let Fixture {
-            program,
-            alloc_bytes_case,
-            ..
-        } = fixture();
-        let error = run_words(&program, alloc_bytes_case, &[(-1i64) as u64]).unwrap_err();
-        assert_eq!(error.message, "this run has no memory left");
-    }
-
-    #[test]
-    fn write_byte_refuses_a_null_run() {
-        let Fixture {
-            program,
-            write_byte_case,
-            ..
-        } = fixture();
-        let error = run_words(&program, write_byte_case, &[0, 0, 0]).unwrap_err();
-        assert_eq!(error.message, null_object().message);
-    }
-
-    #[test]
-    fn write_byte_refuses_an_out_of_range_at() {
-        let Fixture {
-            program,
-            alloc_bytes_case,
-            write_byte_case,
-            ..
-        } = fixture();
-        let mut machine = Machine::new(&program, 1 << 16);
-        let addr = machine.run(alloc_bytes_case, &[3], &budget()).unwrap()[0];
-        for at in [3u64, (-1i64) as u64] {
-            let error = machine
-                .run(write_byte_case, &[addr, at, 65], &budget())
-                .unwrap_err();
-            assert!(
-                error.message.contains("writeByte") && error.message.contains("byte offset"),
-                "{at}: {}",
-                error.message
-            );
-        }
-    }
-
-    #[test]
-    fn write_byte_refuses_a_value_above_255() {
-        let Fixture {
-            program,
-            alloc_bytes_case,
-            write_byte_case,
-            ..
-        } = fixture();
-        let mut machine = Machine::new(&program, 1 << 16);
-        let addr = machine.run(alloc_bytes_case, &[3], &budget()).unwrap()[0];
-        for value in [256u64, (-1i64) as u64] {
-            let error = machine
-                .run(write_byte_case, &[addr, 0, value], &budget())
-                .unwrap_err();
-            assert!(
-                error.message.contains("writeByte") && error.message.contains("0 to 255"),
-                "{value}: {}",
-                error.message
-            );
-        }
-    }
-
-    #[test]
-    fn finish_string_refuses_a_null_run() {
-        let Fixture {
-            program,
-            finish_string_case,
-            ..
-        } = fixture();
-        let error = run_words(&program, finish_string_case, &[0]).unwrap_err();
-        assert_eq!(error.message, null_object().message);
-    }
-
-    #[test]
-    fn finish_string_refuses_a_value_that_is_not_a_byte_run() {
-        let Fixture {
-            program,
-            finish_string_case,
-            ..
-        } = fixture();
-        let mut machine = Machine::new(&program, 1 << 16);
-        let string = machine.new_string("already a string").unwrap();
-        let error = machine
-            .run(finish_string_case, &[string], &budget())
-            .unwrap_err();
-        assert!(error.message.contains("byte run"), "{}", error.message);
-    }
-
-    #[test]
-    fn finish_string_refuses_invalid_utf8() {
-        let Fixture {
-            program,
-            alloc_bytes_case,
-            write_byte_case,
-            finish_string_case,
-            ..
-        } = fixture();
-        let mut machine = Machine::new(&program, 1 << 16);
-        let addr = machine.run(alloc_bytes_case, &[1], &budget()).unwrap()[0];
-        // 0xFF is not a valid UTF-8 lead byte on its own.
-        machine
-            .run(write_byte_case, &[addr, 0, 0xFF], &budget())
-            .unwrap();
-        let error = machine
-            .run(finish_string_case, &[addr], &budget())
-            .unwrap_err();
-        assert_eq!(error.message, "this string's bytes are not valid UTF-8");
+        Fixture { program, copy_into }
     }
 
     #[test]
     fn run_copy_bytes_refuses_a_null_destination() {
-        let Fixture {
-            program, copy_into, ..
-        } = fixture();
+        let Fixture { program, copy_into } = fixture();
         let mut machine = Machine::new(&program, 1 << 16);
         let src = machine.new_string("source").unwrap();
         let error = machine
@@ -2725,14 +2401,9 @@ mod tests {
 
     #[test]
     fn run_copy_bytes_refuses_a_null_source() {
-        let Fixture {
-            program,
-            alloc_bytes_case,
-            copy_into,
-            ..
-        } = fixture();
+        let Fixture { program, copy_into } = fixture();
         let mut machine = Machine::new(&program, 1 << 16);
-        let dst = machine.run(alloc_bytes_case, &[3], &budget()).unwrap()[0];
+        let dst = machine.allocate(program.bytes_layout, 3).unwrap();
         let error = machine
             .run(copy_into, &[dst, 0, 0, 0, 3], &budget())
             .unwrap_err();
@@ -2741,14 +2412,9 @@ mod tests {
 
     #[test]
     fn run_copy_bytes_refuses_a_negative_length() {
-        let Fixture {
-            program,
-            alloc_bytes_case,
-            copy_into,
-            ..
-        } = fixture();
+        let Fixture { program, copy_into } = fixture();
         let mut machine = Machine::new(&program, 1 << 16);
-        let dst = machine.run(alloc_bytes_case, &[3], &budget()).unwrap()[0];
+        let dst = machine.allocate(program.bytes_layout, 3).unwrap();
         let src = machine.new_string("abc").unwrap();
         let error = machine
             .run(copy_into, &[dst, 0, src, 0, (-1i64) as u64], &budget())
@@ -2762,9 +2428,7 @@ mod tests {
 
     #[test]
     fn run_copy_bytes_refuses_a_string_destination() {
-        let Fixture {
-            program, copy_into, ..
-        } = fixture();
+        let Fixture { program, copy_into } = fixture();
         let mut machine = Machine::new(&program, 1 << 16);
         let dst = machine.new_string("already a string").unwrap();
         let src = machine.new_string("abc").unwrap();
@@ -2776,14 +2440,9 @@ mod tests {
 
     #[test]
     fn run_copy_bytes_refuses_an_out_of_range_source() {
-        let Fixture {
-            program,
-            alloc_bytes_case,
-            copy_into,
-            ..
-        } = fixture();
+        let Fixture { program, copy_into } = fixture();
         let mut machine = Machine::new(&program, 1 << 16);
-        let dst = machine.run(alloc_bytes_case, &[10], &budget()).unwrap()[0];
+        let dst = machine.allocate(program.bytes_layout, 10).unwrap();
         let src = machine.new_string("abc").unwrap();
         let error = machine
             .run(copy_into, &[dst, 0, src, 2, 5], &budget())
@@ -2797,14 +2456,9 @@ mod tests {
 
     #[test]
     fn run_copy_bytes_refuses_an_out_of_range_destination() {
-        let Fixture {
-            program,
-            alloc_bytes_case,
-            copy_into,
-            ..
-        } = fixture();
+        let Fixture { program, copy_into } = fixture();
         let mut machine = Machine::new(&program, 1 << 16);
-        let dst = machine.run(alloc_bytes_case, &[3], &budget()).unwrap()[0];
+        let dst = machine.allocate(program.bytes_layout, 3).unwrap();
         let src = machine.new_string("abcdef").unwrap();
         let error = machine
             .run(copy_into, &[dst, 2, src, 0, 5], &budget())
@@ -2822,12 +2476,7 @@ mod tests {
     /// which is the one case that touches no byte at all.
     #[test]
     fn run_copy_bytes_agrees_with_rust_at_every_alignment() {
-        let Fixture {
-            program,
-            alloc_bytes_case,
-            copy_into,
-            ..
-        } = fixture();
+        let Fixture { program, copy_into } = fixture();
         let mut machine = Machine::new(&program, 1 << 16);
         let text = "abcdefghijklmnopqrstuvwxyz";
         let as_string = machine.new_string(text).unwrap();
@@ -2849,8 +2498,8 @@ mod tests {
         for &source in &[as_string, as_bytes_run] {
             for &(dst_at, src_at, len) in cases {
                 let dst = machine
-                    .run(alloc_bytes_case, &[DST_LEN as u64], &budget())
-                    .unwrap()[0];
+                    .allocate(program.bytes_layout, DST_LEN as i64)
+                    .unwrap();
                 let result = machine
                     .run(
                         copy_into,
@@ -2872,6 +2521,25 @@ mod tests {
 
     // --- ADR 0052: bulk work is bounded work -------------------------------
 
+    /// A byte run of `capacity` bytes in `dst`: a buffer allocated there and
+    /// replaced by its own store.
+    ///
+    /// The store is a `Shape::Bytes` run whose header length is the capacity
+    /// (above the growable floor), which is all a copy needs of either end;
+    /// the owner is garbage from the instruction after it is allocated, and
+    /// nothing reads its length.
+    fn byte_run(dst: Slot, capacity: Slot, run: LayoutId) -> [Inst; 2] {
+        [
+            Inst::AllocBuffer { dst, capacity },
+            Inst::LoadField {
+                dst,
+                obj: dst,
+                at: 1,
+                layout: run,
+            },
+        ]
+    }
+
     /// A run that copies `bytes` bytes in one byte `run-copy`, with a fixture
     /// whose only other instructions are the two allocations and a return.
     fn one_big_copy(bytes: i64) -> (cove_ir::Program, cove_ir::FunctionId) {
@@ -2879,22 +2547,24 @@ mod tests {
         let int = build.scalar(Repr::Int);
         build.string_layout();
         let run = build.bytes_layout();
+        build.buffer_layout();
         let copy = build.args(&[(1, run), (3, int), (2, run), (3, int), (0, int)]);
+        let mut code = byte_run(1, 0, run).to_vec();
+        code.extend(byte_run(2, 0, run));
+        code.extend([
+            Inst::Int { dst: 3, value: 0 },
+            Inst::RunCopy {
+                args: copy,
+                storage: Storage::PackedBytes,
+            },
+            Inst::Return { src: 1 },
+        ]);
         let entry = build.function(
             "copier",
             &[int],
             &[Repr::Int, Repr::Ref, Repr::Ref, Repr::Int],
             run,
-            vec![
-                Inst::AllocBytes { dst: 1, len: 0 },
-                Inst::AllocBytes { dst: 2, len: 0 },
-                Inst::Int { dst: 3, value: 0 },
-                Inst::RunCopy {
-                    args: copy,
-                    storage: Storage::PackedBytes,
-                },
-                Inst::Return { src: 1 },
-            ],
+            code,
         );
         let _ = bytes;
         (build.done(), entry)
@@ -2992,8 +2662,9 @@ mod tests {
         const BYTES: i64 = 1024;
         let mut build = Build::default();
         let int = build.scalar(Repr::Int);
-        let str_layout = build.string_layout();
+        build.string_layout();
         let run = build.bytes_layout();
+        let owner = build.buffer_layout();
         // s1 is the run being filled; s2 is the source; s5 is garbage,
         // reallocated on every turn of a loop so the heap has to collect.
         let first = build.args(&[(1, run), (3, int), (2, run), (3, int), (4, int)]);
@@ -3009,51 +2680,62 @@ mod tests {
                 Repr::Int,
                 Repr::Ref,
             ],
-            str_layout,
-            vec![
-                Inst::Int {
+            run,
+            [
+                vec![Inst::Int {
                     dst: 0,
                     value: BYTES,
-                },
-                Inst::AllocBytes { dst: 1, len: 0 },
-                Inst::AllocBytes { dst: 2, len: 0 },
-                Inst::Int { dst: 3, value: 0 },
-                Inst::Int {
-                    dst: 4,
-                    value: BYTES / 2,
-                },
-                // The first half, so the run is half written from here on.
-                Inst::RunCopy {
-                    args: first,
-                    storage: Storage::PackedBytes,
-                },
-                // Garbage, cleared between allocations so the previous one
-                // is unreachable when the next is asked for. The heap holds
-                // the two runs and one spare, so every allocation after the
-                // first has to reclaim before it fits.
-                Inst::AllocBytes { dst: 5, len: 0 },
-                Inst::Clear {
-                    slot: 5,
-                    layout: run,
-                },
-                Inst::AllocBytes { dst: 5, len: 0 },
-                Inst::Clear {
-                    slot: 5,
-                    layout: run,
-                },
-                Inst::AllocBytes { dst: 5, len: 0 },
-                Inst::Clear {
-                    slot: 5,
-                    layout: run,
-                },
-                // And the second half, into a run a collection has now walked.
-                Inst::RunCopy {
-                    args: second,
-                    storage: Storage::PackedBytes,
-                },
-                Inst::FinishString { dst: 1, bytes: 1 },
-                Inst::Return { src: 1 },
-            ],
+                }],
+                byte_run(1, 0, run).to_vec(),
+                byte_run(2, 0, run).to_vec(),
+                vec![
+                    Inst::Int { dst: 3, value: 0 },
+                    Inst::Int {
+                        dst: 4,
+                        value: BYTES / 2,
+                    },
+                    // The first half, so the run is half written from here on.
+                    Inst::RunCopy {
+                        args: first,
+                        storage: Storage::PackedBytes,
+                    },
+                    // Garbage, cleared between allocations so the previous one
+                    // is unreachable when the next is asked for. The heap holds
+                    // the two runs and one spare, so every allocation after the
+                    // first has to reclaim before it fits.
+                    Inst::AllocBuffer {
+                        dst: 5,
+                        capacity: 0,
+                    },
+                    Inst::Clear {
+                        slot: 5,
+                        layout: owner,
+                    },
+                    Inst::AllocBuffer {
+                        dst: 5,
+                        capacity: 0,
+                    },
+                    Inst::Clear {
+                        slot: 5,
+                        layout: owner,
+                    },
+                    Inst::AllocBuffer {
+                        dst: 5,
+                        capacity: 0,
+                    },
+                    Inst::Clear {
+                        slot: 5,
+                        layout: owner,
+                    },
+                    // And the second half, into a run a collection has now walked.
+                    Inst::RunCopy {
+                        args: second,
+                        storage: Storage::PackedBytes,
+                    },
+                    Inst::Return { src: 1 },
+                ],
+            ]
+            .concat(),
         );
         let program = build.done();
         // Two runs of 129 words each and room for about one more, so the
@@ -3064,7 +2746,7 @@ mod tests {
         let before = machine.collected().collections;
         let answer = machine
             .run(entry, &[], &budget())
-            .expect("the run answers a string");
+            .expect("the run answers its run");
         let after = machine.collected().collections;
         assert!(
             after > before,
@@ -3592,94 +3274,6 @@ mod tests {
                 "element {at} kept its text"
             );
         }
-    }
-
-    // --- ADR 0051: the two cases the sweep above cannot make ----------
-
-    /// `Inst::WriteByte`s that write `text` into the run at `bytes`, one
-    /// byte at a time, using `at` and `value` as scratch slots.
-    fn write_text(bytes: Slot, at: Slot, value: Slot, text: &[u8]) -> Vec<Inst> {
-        let mut code = Vec::new();
-        for (index, byte) in text.iter().enumerate() {
-            code.push(Inst::Int {
-                dst: at,
-                value: index as i64,
-            });
-            code.push(Inst::Int {
-                dst: value,
-                value: i64::from(*byte),
-            });
-            code.push(Inst::WriteByte { bytes, at, value });
-        }
-        code
-    }
-
-    /// The catch for a `relabel` that left the tail of the last word dirty:
-    /// seven bytes is short of a whole word, so the top byte of that word is
-    /// padding, and this compares payload words rather than only the text.
-    #[test]
-    fn a_finished_string_matches_the_same_text_written_directly_padding_included() {
-        let text: &[u8] = b"hello!!";
-        let mut build = Build::default();
-        let str_layout = build.string_layout();
-        build.bytes_layout();
-        let mut code = vec![
-            Inst::Int {
-                dst: 0,
-                value: text.len() as i64,
-            },
-            Inst::AllocBytes { dst: 1, len: 0 },
-        ];
-        code.extend(write_text(1, 2, 3, text));
-        code.push(Inst::FinishString { dst: 1, bytes: 1 });
-        code.push(Inst::Return { src: 1 });
-        let f = build.function(
-            "build",
-            &[],
-            &[Repr::Int, Repr::Ref, Repr::Int, Repr::Int],
-            str_layout,
-            code,
-        );
-        let program = build.done();
-        let mut machine = Machine::new(&program, 1 << 12);
-        let words = machine.run(f, &[], &budget()).unwrap();
-        let from_bytes = words[0];
-        let direct = machine
-            .new_string(std::str::from_utf8(text).unwrap())
-            .unwrap();
-        let len = machine.object_len(from_bytes);
-        assert_eq!(len, machine.object_len(direct));
-        for word in 0..len.div_ceil(8) {
-            assert_eq!(
-                machine.payload(from_bytes, word),
-                machine.payload(direct, word),
-                "payload word {word} should match, padding included"
-            );
-        }
-    }
-
-    #[test]
-    fn a_zero_length_run_finishes_to_the_empty_string() {
-        let mut build = Build::default();
-        let str_layout = build.string_layout();
-        build.bytes_layout();
-        let f = build.function(
-            "empty",
-            &[],
-            &[Repr::Int, Repr::Ref],
-            str_layout,
-            vec![
-                Inst::Int { dst: 0, value: 0 },
-                Inst::AllocBytes { dst: 1, len: 0 },
-                Inst::FinishString { dst: 1, bytes: 1 },
-                Inst::Return { src: 1 },
-            ],
-        );
-        let program = build.done();
-        let mut machine = Machine::new(&program, 1 << 12);
-        let words = machine.run(f, &[], &budget()).unwrap();
-        assert_eq!(machine.string_bytes(words[0]), Vec::<u8>::new());
-        assert_eq!(machine.object_len(words[0]), 0);
     }
 
     // --- ADR 0052: the byte-buffer instructions ----------------------------
@@ -4258,7 +3852,7 @@ mod tests {
         let mut build = Build::default();
         let int = build.scalar(Repr::Int);
         let str_layout = build.string_layout();
-        let run = build.bytes_layout();
+        build.bytes_layout();
         let owner = build.buffer_layout();
         // s0: the capacity and then the garbage length; s1: the owner;
         // s2: the byte appended; s3: garbage, cleared between allocations so
@@ -4285,10 +3879,13 @@ mod tests {
             });
             // Garbage between every append, so no growth has a quiet heap.
             if at % 8 == 0 {
-                code.push(Inst::AllocBytes { dst: 3, len: 0 });
+                code.push(Inst::AllocBuffer {
+                    dst: 3,
+                    capacity: 0,
+                });
                 code.push(Inst::Clear {
                     slot: 3,
-                    layout: run,
+                    layout: owner,
                 });
             }
         }
@@ -4347,7 +3944,16 @@ mod tests {
                     dst: 3,
                     value: BYTES,
                 },
-                Inst::AllocBytes { dst: 2, len: 3 },
+                Inst::AllocBuffer {
+                    dst: 2,
+                    capacity: 3,
+                },
+                Inst::LoadField {
+                    dst: 2,
+                    obj: 2,
+                    at: 1,
+                    layout: run,
+                },
                 Inst::Int { dst: 0, value: 0 },
                 Inst::AllocBuffer {
                     dst: 1,

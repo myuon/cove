@@ -1,4 +1,4 @@
-//! The hundred and sixty opcodes, and what each one makes of the four
+//! The hundred and fifty-seven opcodes, and what each one makes of the four
 //! fields.
 //!
 //! # One opcode per concrete operation
@@ -119,20 +119,15 @@ mod base {
     pub const LOAD_ELEM: u8 = STORE_FIELD + 1;
     pub const STORE_ELEM: u8 = LOAD_ELEM + 1;
     pub const BYTE_AT: u8 = STORE_ELEM + 1;
-    /// [ADR 0051](../../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
-    /// byte-run instructions, in the order [`crate::Inst`] declares them —
-    /// with [`crate::Inst::RunCopy`] where its `copy-bytes` was, as the two
-    /// opcodes [ADR 0058](../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
+    /// [`crate::Inst::RunCopy`], as the two opcodes
+    /// [ADR 0058](../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
     /// lets an encoding split it into by storage.
-    pub const ALLOC_BYTES: u8 = BYTE_AT + 1;
-    pub const WRITE_BYTE: u8 = ALLOC_BYTES + 1;
-    pub const RUN_COPY_BYTES: u8 = WRITE_BYTE + 1;
+    pub const RUN_COPY_BYTES: u8 = BYTE_AT + 1;
     pub const RUN_COPY_WORDS: u8 = RUN_COPY_BYTES + 1;
-    pub const FINISH_STRING: u8 = RUN_COPY_WORDS + 1;
     /// [ADR 0052](../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
     /// four byte-buffer instructions, in the order [`crate::Inst`] declares
-    /// them and directly after the four fixed-run ones they grow.
-    pub const ALLOC_BUFFER: u8 = FINISH_STRING + 1;
+    /// them and directly after the run copy they fill with.
+    pub const ALLOC_BUFFER: u8 = RUN_COPY_WORDS + 1;
     pub const APPEND_BYTE: u8 = ALLOC_BUFFER + 1;
     pub const APPEND_BYTES: u8 = APPEND_BYTE + 1;
     pub const FINISH_BUFFER: u8 = APPEND_BYTES + 1;
@@ -206,14 +201,11 @@ pub enum Op {
     LoadElem,
     StoreElem,
     ByteAt,
-    AllocBytes,
-    WriteByte,
     /// [`crate::Inst::RunCopy`] over [`crate::Storage::PackedBytes`].
     RunCopyBytes,
     /// [`crate::Inst::RunCopy`] over [`crate::Storage::Words`], whose element
     /// layout is the payload's high half.
     RunCopyWords,
-    FinishString,
     AllocBuffer,
     AppendByte,
     AppendBytes,
@@ -476,11 +468,8 @@ impl Op {
             Op::LoadElem,
             Op::StoreElem,
             Op::ByteAt,
-            Op::AllocBytes,
-            Op::WriteByte,
             Op::RunCopyBytes,
             Op::RunCopyWords,
-            Op::FinishString,
             Op::AllocBuffer,
             Op::AppendByte,
             Op::AppendBytes,
@@ -565,11 +554,8 @@ impl Op {
             Op::LoadElem => base::LOAD_ELEM,
             Op::StoreElem => base::STORE_ELEM,
             Op::ByteAt => base::BYTE_AT,
-            Op::AllocBytes => base::ALLOC_BYTES,
-            Op::WriteByte => base::WRITE_BYTE,
             Op::RunCopyBytes => base::RUN_COPY_BYTES,
             Op::RunCopyWords => base::RUN_COPY_WORDS,
-            Op::FinishString => base::FINISH_STRING,
             Op::AllocBuffer => base::ALLOC_BUFFER,
             Op::AppendByte => base::APPEND_BYTE,
             Op::AppendBytes => base::APPEND_BYTES,
@@ -799,16 +785,6 @@ impl Op {
                 Operand::Word(INT),
                 Payload::Empty,
             ),
-            // No `Half::Layout` here, for `Op::Str`'s reason: the layout is
-            // always `Program::bytes_layout`, a program-wide constant rather
-            // than a fact this opcode has to carry.
-            Op::AllocBytes => fields(Operand::Word(REF), Operand::Word(INT), NONE, Payload::Empty),
-            Op::WriteByte => fields(
-                Operand::Word(REF),
-                Operand::Word(INT),
-                Operand::Word(INT),
-                Payload::Empty,
-            ),
             // All five operands — `dst`, `dst_at`, `src`, `src_at`, `count`
             // — live behind the `ArgsId`, because a sixteen-byte instruction
             // has room for three slot operands and this needs five. See
@@ -822,13 +798,11 @@ impl Op {
             // which is where `Op::CallClosure` keeps its answer's layout too.
             Op::RunCopyBytes => fields(NONE, NONE, NONE, one(Half::Args)),
             Op::RunCopyWords => fields(NONE, NONE, NONE, ids(Half::Args, Half::Layout)),
-            Op::FinishString => {
-                fields(Operand::Word(REF), Operand::Word(REF), NONE, Payload::Empty)
-            }
             // No `Half::Layout` on either of the two allocating buffer
-            // opcodes, for `Op::AllocBytes`' reason twice over: an owner is
-            // always `Program::buffer_layout` and its store is always
-            // `Program::bytes_layout`.
+            // opcodes, for the reason `Op::Str` carries none, twice over: an
+            // owner is always `Program::buffer_layout` and its store is always
+            // `Program::bytes_layout`, program-wide constants rather than
+            // facts an opcode has to carry.
             Op::AllocBuffer => fields(Operand::Word(REF), Operand::Word(INT), NONE, Payload::Empty),
             Op::AppendByte => fields(Operand::Word(REF), Operand::Word(INT), NONE, Payload::Empty),
             // All four operands — `buffer`, `src`, `from`, `to` — live behind
@@ -928,7 +902,7 @@ mod tests {
     use super::*;
 
     /// ADR 0041's count, which is the one number the format's headroom is
-    /// argued from: a hundred and sixty opcodes out of the 256 a byte
+    /// argued from: a hundred and fifty-seven opcodes out of the 256 a byte
     /// names.
     ///
     /// It was a hundred and two until `Op::ByteAt`, a hundred and three until
@@ -941,14 +915,17 @@ mod tests {
     /// member for member — thirty-six and six, the largest single growth this
     /// table has had and the one the ADR makes a measurement the condition
     /// of — and a hundred and sixty once ADR 0058's `run-copy` replaced
-    /// `CopyBytes` with one opcode per storage. What the number is for is that a reader can see the headroom
+    /// `CopyBytes` with one opcode per storage, and a hundred and fifty-seven
+    /// once ADR 0058 deleted `AllocBytes`, `WriteByte` and `FinishString`,
+    /// which no lowering had ever emitted. What the number is for is that a
+    /// reader can see the headroom
     /// rather than be told about it: more than a third of the byte is still
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_sixty_opcodes() {
-        assert_eq!(Op::all().len(), 160);
-        assert_eq!(OPCODES, 160);
+    fn there_are_a_hundred_and_fifty_seven_opcodes() {
+        assert_eq!(Op::all().len(), 157);
+        assert_eq!(OPCODES, 157);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

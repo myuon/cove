@@ -500,8 +500,8 @@ pub struct Program {
     /// The layout every byte run under construction shares.
     ///
     /// A program-wide constant for the reason [`Program::str_layout`] is one:
-    /// [`Inst::AllocBytes`] should not have to be told this layout per call
-    /// site, and [ADR 0051](../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)
+    /// [`Inst::AllocBuffer`] should not have to be told its store's layout per
+    /// call site, and [ADR 0051](../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)
     /// gives every run the same [`crate::layout::Shape::Bytes`] shape whatever
     /// string it will become.
     pub bytes_layout: LayoutId,

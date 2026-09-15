@@ -329,12 +329,11 @@ fn is_expandable(f: &Function, limit: usize) -> bool {
 /// This is a `matches!` exclusion list rather than an exhaustive match, so
 /// nothing here forces a new [`Inst`] variant to be considered — unlike
 /// [`written`] and [`slots_of`] below, a variant left out compiles silently.
-/// [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
-/// `AllocBytes`, `WriteByte`, `RunCopy` and `FinishString` make no call and
-/// touch no scope or cell, so they belong in the list of things this refuses
-/// nothing for — correctly left out of the `matches!` above — but that is a
-/// fact worth writing down here precisely because the compiler cannot check
-/// it. The same is true of
+/// [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)'s
+/// `RunCopy` makes no call and touches no scope or cell, so it belongs in the
+/// list of things this refuses nothing for — correctly left out of the
+/// `matches!` above — but that is a fact worth writing down here precisely
+/// because the compiler cannot check it. The same is true of
 /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
 /// `AllocBuffer`, `AppendByte`, `AppendBytes` and `FinishBuffer`: they
 /// allocate and they copy, and an allocation is not a call.
@@ -421,8 +420,6 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::Alloc { dst, .. }
             | Inst::Box { dst, .. }
             | Inst::ByteAt { dst, .. }
-            | Inst::AllocBytes { dst, .. }
-            | Inst::FinishString { dst, .. }
             | Inst::AllocBuffer { dst, .. }
             | Inst::FinishBuffer { dst, .. }
             | Inst::Len { dst, .. }
@@ -440,7 +437,6 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             Inst::StoreField { .. }
             | Inst::StoreElem { .. }
             | Inst::Store { .. }
-            | Inst::WriteByte { .. }
             | Inst::RunCopy { .. }
             | Inst::AppendByte { .. }
             | Inst::AppendBytes { .. }
@@ -1027,9 +1023,6 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
             obj, index, src, ..
         } => vec![obj, index, src],
         Inst::ByteAt { dst, obj, at } => vec![dst, obj, at],
-        Inst::AllocBytes { dst, len } => vec![dst, len],
-        Inst::WriteByte { bytes, at, value } => vec![bytes, at, value],
-        Inst::FinishString { dst, bytes } => vec![dst, bytes],
         Inst::AllocBuffer { dst, capacity } => vec![dst, capacity],
         Inst::AppendByte { buffer, value } => vec![buffer, value],
         Inst::FinishBuffer { dst, buffer } => vec![dst, buffer],

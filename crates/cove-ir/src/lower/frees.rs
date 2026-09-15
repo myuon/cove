@@ -339,8 +339,6 @@ impl<'p> Flow<'p> {
             | Inst::CmpImmBranch { dst, .. }
             | Inst::Convert { dst, .. }
             | Inst::ByteAt { dst, .. }
-            | Inst::AllocBytes { dst, .. }
-            | Inst::FinishString { dst, .. }
             | Inst::AllocBuffer { dst, .. }
             | Inst::FinishBuffer { dst, .. }
             | Inst::Len { dst, .. }
@@ -404,7 +402,6 @@ impl<'p> Flow<'p> {
             Inst::Store { .. }
             | Inst::StoreField { .. }
             | Inst::StoreElem { .. }
-            | Inst::WriteByte { .. }
             | Inst::RunCopy { .. }
             | Inst::AppendByte { .. }
             | Inst::AppendBytes { .. }
@@ -490,16 +487,9 @@ impl<'p> Flow<'p> {
             | Inst::Len { obj, .. }
             | Inst::LayoutOf { obj, .. }
             | Inst::AddrOfField { obj, .. } => f(obj, 1),
-            Inst::AllocBytes { len, .. } => f(len, 1),
-            Inst::WriteByte { bytes, at, value } => {
-                f(bytes, 1);
-                f(at, 1);
-                f(value, 1);
-            }
             // The five operands live in the args row, exactly as a call's
             // do, so they are read the same way.
             Inst::RunCopy { args: list, .. } => args(list, f),
-            Inst::FinishString { bytes, .. } => f(bytes, 1),
             Inst::AllocBuffer { capacity, .. } => f(capacity, 1),
             Inst::AppendByte { buffer, value } => {
                 f(buffer, 1);

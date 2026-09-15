@@ -281,30 +281,19 @@ impl Check<'_> {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
-                // `AllocBytes` always allocates `Program::bytes_layout`, but
-                // this poisons `dst` exactly as `ByteAt` does rather than
-                // `identify`ing it the way `Inst::Alloc` and `Inst::Str` do:
-                // a byte run under construction is not a value this pass
-                // needs to reason about by layout, only by `Repr`, and
-                // `FinishString` immediately relabels the same slot to a
-                // `Str` object anyway.
-                Inst::AllocBytes { dst, .. } | Inst::FinishString { dst, .. } => {
-                    poison(&mut objects, dst, 1);
-                    poison(&mut funcs, dst, 1);
-                }
-                // ADR 0052's two, and the same answer for the same reason:
-                // `AllocBuffer` always allocates `Program::buffer_layout` and
-                // `FinishBuffer` answers the store its owner was holding,
+                // ADR 0052's two poison `dst` exactly as `ByteAt` does rather
+                // than `identify`ing it the way `Inst::Alloc` and `Inst::Str`
+                // do: `AllocBuffer` always allocates `Program::buffer_layout`
+                // and `FinishBuffer` answers the store its owner was holding,
                 // relabelled to a `Str` object. Neither is a layout this pass
                 // reasons about, only a `Repr`.
                 Inst::AllocBuffer { dst, .. } | Inst::FinishBuffer { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
-                // Neither writes a frame slot: `WriteByte` writes a byte of
-                // the object `bytes` already names, and `RunCopy` writes
-                // into the object its `args` table's `dst` already names.
-                Inst::WriteByte { .. } | Inst::RunCopy { .. } => {}
+                // Writes no frame slot: `RunCopy` writes into the object its
+                // `args` table's `dst` already names.
+                Inst::RunCopy { .. } => {}
                 // Nor do the growable appends: what each changes is the store
                 // the owner in `buffer` names, and the owner's own length word.
                 Inst::AppendByte { .. } | Inst::AppendBytes { .. } => {}
@@ -859,24 +848,7 @@ impl Check<'_> {
                 self.expect(at, offset, &[Repr::Int]);
                 self.expect(at, dst, &[Repr::Int]);
             }
-            Inst::AllocBytes { dst, len } => {
-                self.expect(at, dst, &[Repr::Ref]);
-                self.expect(at, len, &[Repr::Int]);
-            }
-            Inst::WriteByte {
-                bytes,
-                at: offset,
-                value,
-            } => {
-                self.expect(at, bytes, &[Repr::Ref]);
-                self.expect(at, offset, &[Repr::Int]);
-                self.expect(at, value, &[Repr::Int]);
-            }
             Inst::RunCopy { args, storage } => self.check_run_copy(at, args, storage),
-            Inst::FinishString { dst, bytes } => {
-                self.expect(at, dst, &[Repr::Ref]);
-                self.expect(at, bytes, &[Repr::Ref]);
-            }
             Inst::AllocBuffer { dst, capacity } => {
                 self.expect(at, dst, &[Repr::Ref]);
                 self.expect(at, capacity, &[Repr::Int]);

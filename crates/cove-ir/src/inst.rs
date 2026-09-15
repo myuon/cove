@@ -585,47 +585,6 @@ pub enum Inst {
     /// also be answering it eight times per word of a lexer's inner loop,
     /// and the wrapper was measured at more than the read.
     ByteAt { dst: Slot, obj: Slot, at: Slot },
-    /// `dst = <a new, zeroed byte run of `len` bytes>`.
-    ///
-    /// [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
-    /// allocation. It always allocates [`crate::Program::bytes_layout`] —
-    /// the one shape every run under construction shares — so unlike
-    /// [`Inst::Alloc`] it carries no [`LayoutId`] of its own, for
-    /// [`Inst::Str`]'s reason: a program-wide constant should not have to be
-    /// named at every call site that always means the same one.
-    ///
-    /// The payload is zeroed exactly as [`Inst::Alloc`]'s is, so a run that
-    /// is collected before it is filled walks safely — not because a
-    /// half-written byte is meaningful, but because [`crate::Shape::Bytes`] holds no
-    /// references for the collector to chase either way.
-    ///
-    /// `len` is a byte count and a run-time value, because the whole point
-    /// of ADR 0051's construction is a length computed by summing the pieces
-    /// a `join` was given — a fixed length would have made this
-    /// [`Inst::Alloc`] with a [`Len::Count`] instead. A negative or oversized
-    /// `len` fails through the same "this run has no memory left" refusal
-    /// every other allocation does.
-    AllocBytes { dst: Slot, len: Slot },
-    /// `bytes[at] = value`, one checked byte of a run under construction.
-    ///
-    /// The scalar half of [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
-    /// two write primitives, and deliberately the smaller one: it exists for
-    /// a delimiter or an encoded scalar a lowering writes one at a time, not
-    /// as how a `join` is expected to move text. Copying more than a
-    /// handful of bytes through this would replace one native copy with as
-    /// many dispatches as there are bytes, which is exactly the shape
-    /// [`Inst::RunCopy`] exists to avoid.
-    ///
-    /// `bytes` must name a live [`crate::Shape::Bytes`] object — writing into a
-    /// `String` is refused, because a `String`'s bytes are the invariant
-    /// [`Inst::FinishString`] exists to establish and never to reopen.
-    /// `at` is bounds-checked against the run's declared length the same way
-    /// [`Inst::ByteAt`]'s is, and `value` must be a byte, `0..=255`: neither
-    /// bound is optional here the way it would be reading back a value this
-    /// run already produced, because this is the instruction that puts an
-    /// arbitrary integer into memory another instruction will one day read
-    /// back and trust.
-    WriteByte { bytes: Slot, at: Slot, value: Slot },
     /// A bulk range copy between two runs: `dst[dst_at .. dst_at+count] =
     /// src[src_at .. src_at+count]`, in units of `storage`.
     ///
@@ -637,7 +596,7 @@ pub enum Inst {
     /// `copy-bytes`, and is that instruction with the unit named rather than
     /// assumed: for [`Storage::PackedBytes`] a unit is a byte, and for
     /// [`Storage::Words`] a unit is a whole element of the layout, `stride`
-    /// words wide. It is not a Cove loop over [`Inst::WriteByte`] or
+    /// words wide. It is not a Cove loop over [`Inst::AppendByte`] or
     /// [`Inst::StoreElem`], because that would turn one bulk operation into a
     /// dispatch and a safepoint per unit — which ADR 0051's "why a byte loop in
     /// IR is not enough" and ADR 0058 both reject.
@@ -656,8 +615,9 @@ pub enum Inst {
     /// **One family on both sides.** For [`Storage::PackedBytes`], `src` may be
     /// a `String` **or** a [`crate::Shape::Bytes`] run — a fused slice copies
     /// straight out of the run that produced it — and `dst` must be a
-    /// [`crate::Shape::Bytes`] run: writing into a `String` is refused for
-    /// [`Inst::WriteByte`]'s reason. For [`Storage::Words`], both must be
+    /// [`crate::Shape::Bytes`] run: writing into a `String` is refused,
+    /// because a `String`'s bytes are an invariant a finish establishes and
+    /// nothing reopens. For [`Storage::Words`], both must be
     /// [`crate::Shape::Elements`] of exactly that element layout, fixed or
     /// growable, because the collector traces each by its own layout's
     /// reference map and a unit of another family would be traced wrongly.
@@ -698,7 +658,7 @@ pub enum Inst {
     /// zeroed by allocation, and every word already copied is a whole word of
     /// a unit whose layout the destination's reference map agrees with.
     ///
-    /// [`Inst::AllocBytes`] and [`Inst::FinishString`] are **not** charged
+    /// [`Inst::AllocBuffer`] and [`Inst::FinishBuffer`] are **not** charged
     /// this way and not chunked. Their bulk work is inside the allocator's
     /// zeroing and inside one `from_utf8` over a copy of the run, neither of
     /// which this could interrupt, and charging an operation that cannot be
@@ -721,35 +681,13 @@ pub enum Inst {
     /// the row: it is the instruction's own, and the encoding carries a
     /// [`Storage::Words`] layout in the payload half the row leaves free.
     RunCopy { args: ArgsId, storage: Storage },
-    /// `dst = <the run at `bytes`, validated and turned into an immutable
-    /// String, in place>`.
-    ///
-    /// The instruction [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)
-    /// closes construction with. `bytes` must name a live [`crate::Shape::Bytes`]
-    /// run; its packed payload is read and checked as UTF-8 exactly once,
-    /// because a run assembled from [`Inst::WriteByte`] and [`Inst::RunCopy`]
-    /// may hold anything a byte can hold, and ADR 0051 refuses to skip that
-    /// check for an arbitrary run. Invalid UTF-8 fails with the same error a
-    /// source-level string operation already raises for it.
-    ///
-    /// On success the run becomes the answer **without copying its
-    /// payload**: a [`crate::Shape::Bytes`] object and a [`crate::Shape::Str`] object of
-    /// the same byte length occupy the same number of words, so finishing is
-    /// a re-label of the object's header — its layout changes from
-    /// [`crate::Program::bytes_layout`] to [`crate::Program::str_layout`] and
-    /// its `len` does not change at all — rather than an allocation and a
-    /// copy. Not copying the payload is the whole performance argument this
-    /// ADR makes: every byte a `join` moves is moved once, by
-    /// [`Inst::RunCopy`], and finishing moves none of them again.
-    FinishString { dst: Slot, bytes: Slot },
     /// `dst = <a new, empty byte buffer whose store has room for `capacity`
     /// bytes>`.
     ///
     /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
-    /// allocation, and the first of the four instructions that replace
-    /// [`Inst::AllocBytes`] wherever the final length is not known before the
-    /// writes. ADR 0051's fixed run is enough when it *is* known; it is not
-    /// enough for `examples/covefmt`, whose three hot joins are filled by
+    /// allocation, and the first of the four instructions that build a byte run
+    /// wherever the final length is not known before the writes. ADR 0051's
+    /// fixed run would be enough when it *is* known; it is not enough for `examples/covefmt`, whose three hot joins are filled by
     /// data-dependent loops and whose largest is a `var out` parameter passed
     /// through recursive calls.
     ///
@@ -758,7 +696,7 @@ pub enum Inst {
     /// logical length and a reference; the store is
     /// [`crate::Program::bytes_layout`], the same packed run ADR 0051 already
     /// has, whose *header* length is the capacity. Neither layout is named
-    /// here, for [`Inst::AllocBytes`]'s reason: both are program-wide
+    /// here, for [`Inst::Str`]'s reason: both are program-wide
     /// constants, and a call site that always means the same one should not
     /// have to say so.
     ///
@@ -771,9 +709,8 @@ pub enum Inst {
     AllocBuffer { dst: Slot, capacity: Slot },
     /// `buffer.append(value)`, one checked byte onto the end of a buffer.
     ///
-    /// The scalar half of ADR 0052's append pair, and [`Inst::WriteByte`]'s
-    /// counterpart for a growable run — with the one difference that makes a
-    /// buffer a buffer: there is no offset. A write goes at the logical length
+    /// The scalar half of ADR 0052's append pair — with the one difference
+    /// that makes a buffer a buffer: there is no offset. A write goes at the logical length
     /// and the logical length becomes one more, so a caller never names a
     /// position and can never leave a hole below one.
     ///
@@ -783,7 +720,7 @@ pub enum Inst {
     /// what [`Inst::AppendBytes`] is for.
     ///
     /// `buffer` must name a live owner and `value` must be a byte, `0..=255`,
-    /// for [`Inst::WriteByte`]'s reason — this is an instruction that puts an
+    /// because this is an instruction that puts an
     /// arbitrary integer into memory that [`Inst::FinishBuffer`] will later
     /// read back and validate. Nothing is bounds-checked against the capacity,
     /// because there is no bound to check: a full store grows.
@@ -836,8 +773,7 @@ pub enum Inst {
     /// `dst = <the buffer at `buffer`, consumed, its store validated and
     /// relabelled into an immutable String>`.
     ///
-    /// ADR 0052's finish, and [`Inst::FinishString`]'s counterpart for a
-    /// growable run. The bytes are read and checked as UTF-8 exactly once,
+    /// ADR 0052's finish for a growable run. The bytes are read and checked as UTF-8 exactly once,
     /// because a run assembled from [`Inst::AppendByte`] may hold anything a
     /// byte can hold, and invalid UTF-8 fails with the same error a
     /// source-level string operation already raises for it.

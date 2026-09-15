@@ -281,17 +281,10 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             halves(layout.0, 0),
         ),
         Inst::ByteAt { dst, obj, at } => build(Op::ByteAt, slot(dst)?, slot(obj)?, slot(at)?, 0),
-        Inst::AllocBytes { dst, len } => build(Op::AllocBytes, slot(dst)?, slot(len)?, 0, 0),
-        Inst::WriteByte { bytes, at, value } => {
-            build(Op::WriteByte, slot(bytes)?, slot(at)?, slot(value)?, 0)
-        }
         Inst::RunCopy { args, storage } => match storage {
             Storage::PackedBytes => build(Op::RunCopyBytes, 0, 0, 0, halves(args.0, 0)),
             Storage::Words(elem) => build(Op::RunCopyWords, 0, 0, 0, halves(args.0, elem.0)),
         },
-        Inst::FinishString { dst, bytes } => {
-            build(Op::FinishString, slot(dst)?, slot(bytes)?, 0, 0)
-        }
         Inst::AllocBuffer { dst, capacity } => {
             build(Op::AllocBuffer, slot(dst)?, slot(capacity)?, 0, 0)
         }
@@ -771,15 +764,6 @@ mod tests {
                     at: 3,
                 },
             ),
-            (0, Inst::AllocBytes { dst: 1, len: 2 }),
-            (
-                0,
-                Inst::WriteByte {
-                    bytes: 1,
-                    at: 2,
-                    value: 3,
-                },
-            ),
             (
                 0,
                 Inst::RunCopy {
@@ -794,7 +778,6 @@ mod tests {
                     storage: Storage::Words(L),
                 },
             ),
-            (0, Inst::FinishString { dst: 1, bytes: 2 }),
             (
                 0,
                 Inst::AllocBuffer {

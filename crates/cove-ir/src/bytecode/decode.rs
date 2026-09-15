@@ -257,12 +257,6 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             obj: b,
             at: c,
         },
-        Op::AllocBytes => Inst::AllocBytes { dst: a, len: b },
-        Op::WriteByte => Inst::WriteByte {
-            bytes: a,
-            at: b,
-            value: c,
-        },
         Op::RunCopyBytes => Inst::RunCopy {
             args: ArgsId(lo),
             storage: Storage::PackedBytes,
@@ -271,7 +265,6 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             args: ArgsId(lo),
             storage: Storage::Words(LayoutId(hi)),
         },
-        Op::FinishString => Inst::FinishString { dst: a, bytes: b },
         Op::AllocBuffer => Inst::AllocBuffer {
             dst: a,
             capacity: b,
