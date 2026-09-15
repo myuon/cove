@@ -81,6 +81,7 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
     suite::forget_allocations();
     suite::forget_mediated();
     suite::forget_built();
+    suite::forget_copied();
     let mut cranelift_words = words.to_vec();
     let cranelift = suite::run::<Cranelift>(program, &mut cranelift_words, base);
     let cranelift_polls = suite::polls();
@@ -88,12 +89,14 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
     let cranelift_allocs = suite::allocations();
     let cranelift_mediated = suite::mediated();
     let cranelift_built = suite::built();
+    let cranelift_copied = suite::copied();
 
     suite::forget_polls();
     suite::forget_calls();
     suite::forget_allocations();
     suite::forget_mediated();
     suite::forget_built();
+    suite::forget_copied();
     let mut template_words = words.to_vec();
     let template = suite::run::<Template>(program, &mut template_words, base);
     let template_polls = suite::polls();
@@ -101,6 +104,7 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
     let template_allocs = suite::allocations();
     let template_mediated = suite::mediated();
     let template_built = suite::built();
+    let template_copied = suite::copied();
 
     assert_eq!(cranelift.outcome, template.outcome, "outcome: {what}");
     assert_eq!(
@@ -142,6 +146,10 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
     assert_eq!(
         cranelift_built, template_built,
         "the growable operations handed to the runtime, in order: {what}"
+    );
+    assert_eq!(
+        cranelift_copied, template_copied,
+        "the run copies handed to the runtime, in order: {what}"
     );
 }
 
@@ -193,6 +201,10 @@ fn agree_with_literals(
     suite::forget_mediated();
     suite::forget_built();
     suite::built_answers(answers);
+    // The same script for a run copy, which no program here mixes with a builder:
+    // each queue is read only by its own helper.
+    suite::forget_copied();
+    suite::copied_answers(answers);
     let cranelift_heap = build();
     let mut cranelift_words = words.to_vec();
     let cranelift = suite::run_with_literals::<Cranelift>(
@@ -206,6 +218,7 @@ fn agree_with_literals(
     let cranelift_allocs = suite::allocations();
     let cranelift_mediated = suite::mediated();
     let cranelift_built = suite::built();
+    let cranelift_copied = suite::copied();
 
     suite::forget_polls();
     suite::forget_calls();
@@ -213,6 +226,10 @@ fn agree_with_literals(
     suite::forget_mediated();
     suite::forget_built();
     suite::built_answers(answers);
+    // The same script for a run copy, which no program here mixes with a builder:
+    // each queue is read only by its own helper.
+    suite::forget_copied();
+    suite::copied_answers(answers);
     let template_heap = build();
     let mut template_words = words.to_vec();
     let template = suite::run_with_literals::<Template>(
@@ -226,6 +243,7 @@ fn agree_with_literals(
     let template_allocs = suite::allocations();
     let template_mediated = suite::mediated();
     let template_built = suite::built();
+    let template_copied = suite::copied();
 
     assert_eq!(cranelift.outcome, template.outcome, "outcome: {what}");
     assert_eq!(
@@ -253,6 +271,10 @@ fn agree_with_literals(
     assert_eq!(
         cranelift_built, template_built,
         "the growable operations handed to the runtime, in order: {what}"
+    );
+    assert_eq!(
+        cranelift_copied, template_copied,
+        "the run copies handed to the runtime, in order: {what}"
     );
     // The two heaps started equal, so a difference here is one arm having read or
     // written a word the other did not. Until `Inst::Store` this was the weaker
@@ -421,6 +443,28 @@ fn both_arms_answer_the_same_thing() {
             &format!("a builder whose first operation answered {outcome:?}"),
             &buffers(),
             &[0, 3, 0],
+            0,
+            || Heap::new(1),
+            &[outcome],
+        );
+    }
+
+    // ADR 0058's run copy, over both storages, handed to the runtime whole — and
+    // what a refusal or a stop from inside it does to the frame.
+    for (words, base) in [(vec![7u64, 1, 9, 2, 3], 0), (vec![5, 5, 7, 1, 9, 2, 3], 2)] {
+        agree_over(
+            "a byte copy and a word copy",
+            &suite::run_copies(),
+            &words,
+            base,
+            || Heap::new(1),
+        );
+    }
+    for outcome in [Outcome::Raised, Outcome::Stopped] {
+        agree_answering(
+            &format!("a run copy that answered {outcome:?}"),
+            &suite::run_copies(),
+            &[7, 1, 9, 2, 3],
             0,
             || Heap::new(1),
             &[outcome],

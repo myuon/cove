@@ -77,6 +77,9 @@ const BUILTIN: &str = "cove_native_builtin";
 /// applies.
 const GROWABLE: &str = "cove_native_growable";
 
+/// The name the run-copy helper is imported under. [`SAFEPOINT`]'s note applies.
+const RUN_COPY: &str = "cove_native_run_copy";
+
 /// The name the field-load helper is imported under. [`SAFEPOINT`]'s note
 /// applies.
 const FIELD_LOAD: &str = "cove_native_field_load";
@@ -146,6 +149,7 @@ pub struct Jit {
     alloc: FuncId,
     builtin: FuncId,
     growable: FuncId,
+    run_copy: FuncId,
     field_load: FuncId,
     field_store: FuncId,
     /// How many functions have been declared, which is how the symbol names
@@ -172,6 +176,7 @@ impl Jit {
         builder.symbol(ALLOC, helpers.alloc as usize as *const u8);
         builder.symbol(BUILTIN, helpers.builtin as usize as *const u8);
         builder.symbol(GROWABLE, helpers.growable as usize as *const u8);
+        builder.symbol(RUN_COPY, helpers.run_copy as usize as *const u8);
         builder.symbol(FIELD_LOAD, helpers.field_load as usize as *const u8);
         builder.symbol(FIELD_STORE, helpers.field_store as usize as *const u8);
         let mut module = JITModule::new(builder);
@@ -200,6 +205,9 @@ impl Jit {
         // words would be a second place for the shape to drift.
         let signature = builtin_signature(&module);
         let growable = module.declare_function(GROWABLE, Linkage::Import, &signature)?;
+        // And again: `RunCopyFn` is the same six.
+        let signature = builtin_signature(&module);
+        let run_copy = module.declare_function(RUN_COPY, Linkage::Import, &signature)?;
         let signature = field_signature(&module);
         let field_load = module.declare_function(FIELD_LOAD, Linkage::Import, &signature)?;
         let field_store = module.declare_function(FIELD_STORE, Linkage::Import, &signature)?;
@@ -212,6 +220,7 @@ impl Jit {
             alloc,
             builtin,
             growable,
+            run_copy,
             field_load,
             field_store,
             declared: 0,
@@ -253,6 +262,9 @@ impl Jit {
             let growable = self
                 .module
                 .declare_func_in_func(self.growable, builder.func);
+            let run_copy = self
+                .module
+                .declare_func_in_func(self.run_copy, builder.func);
             let field_load = self
                 .module
                 .declare_func_in_func(self.field_load, builder.func);
@@ -269,6 +281,7 @@ impl Jit {
                     alloc,
                     builtin,
                     growable,
+                    run_copy,
                     field_load,
                     field_store,
                 },
@@ -452,6 +465,7 @@ struct Bound {
     alloc: FuncRef,
     builtin: FuncRef,
     growable: FuncRef,
+    run_copy: FuncRef,
     field_load: FuncRef,
     field_store: FuncRef,
 }
@@ -780,6 +794,14 @@ impl<'a, 'f> Lower<'a, 'f> {
                 ..
             } => {
                 self.growable_op(GrowableOp::Finish, *dst, *owner);
+                false
+            }
+            // ADR 0058's `run-copy`, handed to the runtime whole. See
+            // [`crate::abi::RunCopyFn`] for why it has no emitted loop — memmove in
+            // bounded chunks with a poll between them, and refusals whose
+            // sentences only the runtime can build.
+            Inst::RunCopy { args, storage } => {
+                self.run_copy(args.0, *storage);
                 false
             }
             Inst::Alloc { dst, layout, len } => {
@@ -1699,6 +1721,55 @@ impl<'a, 'f> Lower<'a, 'f> {
         let call = self.b.ins().call(
             self.bound.growable,
             &[self.ctx, self.base, at, which, first, second],
+        );
+        let outcome = self.b.inst_results(call)[0];
+        self.forget();
+
+        let left = self.b.create_block();
+        let on = self.b.create_block();
+        let returned =
+            self.b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, outcome, i64::from(Outcome::Returned.abi()));
+        self.b.ins().brif(returned, on, &[], left, &[]);
+
+        self.b.switch_to_block(left);
+        // Not `leave`: what this returns is the helper's outcome and not one this
+        // function chose, and every field that outcome needs the helper has written.
+        self.b.ins().return_(&[outcome]);
+
+        self.b.switch_to_block(on);
+        self.forget();
+    }
+
+    /// One [ADR 0058] `run-copy`, handed to the runtime whole.
+    ///
+    /// [`Lower::growable_op`]'s shape exactly, with the argument list and the
+    /// storage in place of the operation and its pair. See
+    /// [`crate::abi::RunCopyFn`] for what the operands mean and why the copy is the
+    /// helper's.
+    ///
+    /// It is a safepoint: the helper takes one before the copy, and a long copy
+    /// polls between chunks, either of which may collect.
+    ///
+    /// [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+    fn run_copy(&mut self, args: u32, storage: Storage) {
+        let work = self.b.use_var(self.work);
+        self.store_ctx(OFF_PENDING_WORK, work);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        self.b.def_var(self.work, zero);
+
+        let (words, elem) = match storage {
+            Storage::PackedBytes => (0i64, 0u32),
+            Storage::Words(elem) => (1i64, elem.0),
+        };
+        let at = self.b.ins().iconst(types::I32, self.pc as i64);
+        let list = self.b.ins().iconst(types::I32, i64::from(args));
+        let words = self.b.ins().iconst(types::I32, words);
+        let elem = self.b.ins().iconst(types::I32, i64::from(elem));
+        let call = self.b.ins().call(
+            self.bound.run_copy,
+            &[self.ctx, self.base, at, list, words, elem],
         );
         let outcome = self.b.inst_results(call)[0];
         self.forget();

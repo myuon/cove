@@ -1104,16 +1104,36 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             Len::Fixed | Len::Count(_) => slot(*dst),
             Len::Slot(at) => slot(*dst) && slot(*at),
         },
-        // [ADR 0058]'s run copy is not lowered by either arm yet, and is named
-        // here rather than left to the `_` below because it is the instruction
-        // `Vector.toArray` now lowers to: a function refused for it was refused
-        // before for the `call-builtin` it replaced, which `method_of` never
-        // decoded either, so naming it records that the refusal is the same one
-        // and not a regression. Lowering it is a helper call with a chunk poll —
-        // [`GrowableFn`](crate::abi::GrowableFn)'s shape — and is later work.
+        // [ADR 0058]'s run copy, over either storage, handed to
+        // [`RunCopyFn`](crate::abi::RunCopyFn) whole — whose documentation is
+        // where the decision is written down: memmove in bounded chunks with a poll
+        // between them, and refusals whose sentences the runtime formats. It is
+        // the instruction `Vector.toArray` lowers to, and the census named it as
+        // the only blocker of several parser functions.
+        //
+        // What is bounded is [`Inst::GrowableExtend`]'s: what the helper will read
+        // out of this frame. Five operands behind an `ArgsId` — `dst`, `dst_at`,
+        // `src`, `src_at`, `count` — each one word, each bounded as a slot. A word
+        // copy's element layout is bounded against the program's table, because
+        // the helper reads its width, and against an `i32`, for [`Method::Push`]'s
+        // reason: the template arm materialises it as a 32-bit immediate. Neither
+        // is reachable for a verified program, and each is a read past a table
+        // rather than a wrong answer if it were.
         //
         // [ADR 0058]: ../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
-        Inst::RunCopy { .. } => return Some(Reason::Instruction),
+        Inst::RunCopy { args, storage } => {
+            let list = program.arg_list(*args);
+            let elem = match storage {
+                Storage::PackedBytes => true,
+                Storage::Words(elem) => {
+                    elem.index() < program.layouts.len() && i32::try_from(elem.0).is_ok()
+                }
+            };
+            elem && list.len() == 5
+                && list
+                    .iter()
+                    .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))
+        }
         _ => return Some(Reason::Instruction),
     };
     (!inside).then_some(Reason::Operands)

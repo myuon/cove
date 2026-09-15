@@ -717,6 +717,83 @@ export fn measuresAndPushes(s: String, given: Vector<Int>, n: Int) -> Int {
   at + counts(0)
 }
 
+/// `Vector.toArray` in a compiled frame: an allocation and one word `run-copy` of
+/// the whole live prefix, which `cove_native::RunCopyFn` hands to the runtime.
+///
+/// The push after the snapshot is what makes it a snapshot rather than a view: an
+/// array that shared the store would read the pushed element or a store the push
+/// replaced. `counts(0)` for `pushesOnto`'s reason.
+export fn snapshots(given: Vector<Point>, n: Int) -> Int {
+  var v = given
+  var at = 1
+  while at < n {
+    v.push(Point(x: at, y: at * 10))
+    at = at + 1
+  }
+  let held = v.toArray()
+  v.push(Point(x: 1000000, y: 1000000))
+  var total = 0
+  var i = 0
+  while i < held.length() {
+    match held.get(i) {
+      Some(p) => total = total + p.x + p.y
+      None => total = total - 1
+    }
+    i = i + 1
+  }
+  total * 1000 + held.length() + counts(0)
+}
+
+/// A refused caller, so the snapshot is taken across the boundary.
+export fn callsSnapshots(n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  var v = Vector.of(Point(x: 0, y: 1))
+  snapshots(v, n)
+}
+
+/// A snapshot of **references** that is the only thing holding them, across
+/// allocations that collect, in a compiled frame.
+///
+/// The vector is built here and then replaced, so once `held` is taken the arrays
+/// it names are reachable from `held` and from nothing else — and `held` is one
+/// `Repr::Ref` slot of this compiled frame. The garbage loop allocates far more
+/// than the pushes did, so a collection lands in it far more often than not, and
+/// the sum over every element's second word is what a swept array would change.
+export fn snapshotsWhileCollecting(n: Int) -> Int {
+  var v = Vector.of([counts(0), 1])
+  var at = 1
+  while at < n {
+    v.push([at, at + 1])
+    at = at + 1
+  }
+  let held = v.toArray()
+  v = Vector.of([0, 0])
+  var garbage = 0
+  while garbage < 64 {
+    let made = [garbage, garbage, garbage, garbage, garbage, garbage, garbage, garbage]
+    garbage = garbage + made.length() - 7
+  }
+  var total = 0
+  var i = 0
+  while i < held.length() {
+    match held.get(i) {
+      Some(pair) => match pair.get(1) {
+        Some(x) => total = total + x
+        None => total = total - 1
+      }
+      None => total = total - 1
+    }
+    i = i + 1
+  }
+  total + v.length()
+}
+
+/// A refused caller, so the frame holding the snapshot is a compiled one.
+export fn callsSnapshotsWhileCollecting(n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  snapshotsWhileCollecting(n)
+}
+
 /// A refused caller making `n` calls to `String.sliceBytes`, which nothing lowers,
 /// before handing the same `n` to the compiled loop above.
 export fn countsTheBoundary(s: String, n: Int) -> Int {
@@ -2350,6 +2427,91 @@ fn an_allocation_that_exhausts_the_heap_raises_the_vm_s_sentence() {
         session.tiers().vm_to_native >= 1,
         "and it was compiled code that asked: {:?}",
         session.tiers()
+    );
+}
+
+/// **`Vector.toArray` from compiled code answers the elements the vector had.**
+///
+/// ADR 0058's word `run-copy`, as a Cove program reaches it. The sizes sweep
+/// across the vector's growth so the store copied from sometimes has spare
+/// capacity and sometimes none, and the element after the snapshot is pushed onto
+/// the vector and must not appear in the array.
+#[test]
+fn a_snapshot_from_compiled_code_answers_the_same_elements() {
+    on_each_tier(&["snapshots"], &["callsSnapshots"]);
+    for n in [1i64, 2, 4, 5, 40] {
+        let expected: i64 = (1..n).map(|at| at * 11).sum::<i64>() + 1;
+        let both = both("callsSnapshots", vec![Value::int(n)]);
+        assert_eq!(both.vm, Ok((expected * 1000 + n).to_string()), "n = {n}");
+        assert_eq!(both.native, both.vm, "n = {n}: compiled `toArray` agrees");
+        assert!(both.tiers.vm_to_native >= 1, "n = {n}: {:?}", both.tiers);
+    }
+}
+
+/// **A snapshot of references held only by a compiled frame survives the
+/// collections that frame's own allocations make.**
+///
+/// A [`cove_runtime::NativeSession`] over a small heap, for
+/// `a_half_built_run_survives_a_collection_from_compiled_code`' reason, and it
+/// keeps calling until several collections have run: the first one may land among
+/// the pushes, before there is a snapshot to lose.
+#[test]
+fn a_snapshot_of_references_survives_a_collection_from_compiled_code() {
+    const SMALL_HEAP_WORDS: usize = 1 << 13;
+    const N: i64 = 11;
+    on_each_tier(
+        &["snapshotsWhileCollecting"],
+        &["callsSnapshotsWhileCollecting"],
+    );
+
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+
+    let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, SMALL_HEAP_WORDS);
+    let (calls, crossings) = {
+        let mut session = vm
+            .native_session(MODULE, "callsSnapshotsWhileCollecting", vec![Value::int(N)])
+            .expect("the session opens");
+        let words = session.arguments().to_vec();
+        let expected = session
+            .call(&cove_runtime::NothingCompiled, &words)
+            .expect("the vm answers");
+        // `1 + 2 + .. + N`, and the replacement vector's one element.
+        assert_eq!(
+            expected,
+            vec![(N * (N + 1) / 2 + 1) as u64],
+            "the fixture answers the second words and a length"
+        );
+
+        let before = session.collections();
+        let mut calls = 0;
+        while session.collections() < before + 8 && calls < 20_000 {
+            let answered = session
+                .call(&native, &words)
+                .expect("the native tier answers");
+            assert_eq!(answered, expected, "call {calls} answered wrongly");
+            calls += 1;
+        }
+        assert!(
+            session.collections() >= before + 8,
+            "only {} collection(s) ran in {calls} call(s), so this case proved little",
+            session.collections() - before
+        );
+        (calls, session.tiers().vm_to_native)
+    };
+    assert!(
+        crossings >= calls,
+        "every call crossed into machine code: {crossings} of {calls}"
     );
 }
 

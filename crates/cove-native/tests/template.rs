@@ -454,6 +454,7 @@ fn direct_helpers() -> NativeHelpers {
         alloc: shared.alloc,
         builtin: shared.builtin,
         growable: shared.growable,
+        run_copy: shared.run_copy,
         field_load: shared.field_load,
         field_store: shared.field_store,
     }
@@ -700,6 +701,21 @@ fn a_buffer_op_the_runtime_refused_leaves_with_that_outcome() {
 #[test]
 fn a_growable_buffer_is_admitted_as_a_family() {
     suite::a_growable_buffer_is_admitted_as_a_family::<Template>();
+}
+
+#[test]
+fn a_run_copy_is_handed_to_the_runtime_whole() {
+    suite::a_run_copy_is_handed_to_the_runtime_whole::<Template>();
+}
+
+#[test]
+fn a_run_copy_the_runtime_refused_leaves_with_that_outcome() {
+    suite::a_run_copy_the_runtime_refused_leaves_with_that_outcome::<Template>();
+}
+
+#[test]
+fn a_run_copy_is_admitted_with_five_one_word_operands() {
+    suite::a_run_copy_is_admitted_with_five_one_word_operands::<Template>();
 }
 
 #[test]

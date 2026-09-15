@@ -661,6 +661,23 @@ unsafe extern "C" fn no_growable(
     cove_native::Outcome::Raised.abi()
 }
 
+/// The run-copy helper, for a scenario that copies no run. See [`no_call`].
+///
+/// # Safety
+///
+/// Reads nothing through any of its arguments.
+#[cfg(any(feature = "cranelift", feature = "template"))]
+unsafe extern "C" fn no_run_copy(
+    _ctx: *mut cove_native::NativeCtx,
+    _base: u64,
+    _pc: u32,
+    _args: u32,
+    _words: u32,
+    _elem: u32,
+) -> u32 {
+    cove_native::Outcome::Raised.abi()
+}
+
 /// The field-access helpers, for a scenario that loads and stores no field.
 /// See [`no_call`].
 ///
@@ -706,6 +723,7 @@ fn helpers() -> cove_native::NativeHelpers {
         alloc: no_alloc,
         builtin: no_builtin,
         growable: no_growable,
+        run_copy: no_run_copy,
         field_load: no_field_load,
         field_store: no_field_store,
     }
