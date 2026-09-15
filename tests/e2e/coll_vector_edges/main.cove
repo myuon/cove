@@ -1,0 +1,109 @@
+use console.println
+
+/// Two words inline: a `Vector<Span>` store is a run of two-word elements, so
+/// an element written or read at the wrong stride answers the wrong numbers.
+struct Span {
+  from: Int
+  to: Int
+}
+
+/// Builds a vector nobody else observes, grows it past every capacity it
+/// started with, and freezes it.
+fn grown(count: Int) -> Array<String> {
+  var building: Vector<String> = Vector.of()
+  var i = 0
+  while i < count {
+    building.push("item {i}")
+    i += 1
+  }
+  building.freeze()
+}
+
+/// The same, for an element two words wide.
+fn spans(count: Int) -> Array<Span> {
+  var building: Vector<Span> = Vector.of()
+  var i = 0
+  while i < count {
+    building.push(Span(from: i, to: i * 10))
+    i += 1
+  }
+  building.freeze()
+}
+
+/// Pins every edge of a `Vector`'s index rule, aliasing across growth, and
+/// `freeze` after growth, at a one-word and a two-word element.
+///
+/// These are the answers the runtime's own `Vector` methods give today, and
+/// they are what the standard library's Cove bodies have to keep giving when
+/// `push`, `set` and `freeze` move there (ADR 0058, #378).
+export fn main() -> Result<Unit, Error> {
+  // One rule about indices: negative, at the length, past it, and on an
+  // empty vector are all `None`, and none of them writes.
+  var numbers = Vector.of(10, 20, 30)
+  println("get {numbers.get(-1)} {numbers.get(0)} {numbers.get(2)} {numbers.get(3)} {numbers.get(99)}")?
+  println("set {numbers.set(-1, 0)} {numbers.set(3, 0)} {numbers.set(99, 0)} {numbers}")?
+  println("set in range {numbers.set(2, 33)} {numbers.set(0, 11)} {numbers}")?
+  println("remove {numbers.remove(-1)} {numbers.remove(3)} {numbers}")?
+  println("remove last {numbers.remove(2)} {numbers}")?
+  println("pop {numbers.pop()} {numbers.pop()} {numbers.pop()} {numbers}")?
+  println("empty get {numbers.get(0)} {numbers.get(-1)}")?
+  println("empty set {numbers.set(0, 1)} {numbers.set(-1, 1)} {numbers}")?
+  println("empty remove {numbers.remove(0)} {numbers.remove(-1)}")?
+  numbers.push(7)
+  println("push after emptying {numbers} {numbers.get(0)} {numbers.length()}")?
+
+  // An alias holds the same owner, so every growth — including the ones
+  // that replace the store — is visible through it.
+  var growing: Vector<Int> = Vector.of()
+  var alias = growing
+  var i = 0
+  while i < 20 {
+    growing.push(i)
+    i += 1
+  }
+  println("an alias observes twenty pushes {alias.length()} {alias.get(19)} {alias.get(20)}")?
+  alias.push(99)
+  println(
+    "and the original observes the alias {growing.length()} {growing.get(20)}",
+  )?
+  println("set through the alias {alias.set(0, -5)} {growing.get(0)}")?
+
+  // A `Vector<String>`: one reference word per element.
+  var words: Vector<String> = Vector.of()
+  words.push("alpha")
+  words.push("beta")
+  words.push("gamma")
+  println("strings {words} {words.get(1)} {words.get(3)} {words.get(-1)}")?
+  println("string set {words.set(1, "BETA")} {words.set(3, "none")} {words}")?
+  println("string pop {words.pop()} remove {words.remove(0)} {words}")?
+
+  // A two-word struct element.
+  var pairs: Vector<Span> = Vector.of(Span(from: 1, to: 2))
+  pairs.push(Span(from: 3, to: 4))
+  pairs.push(Span(from: 5, to: 6))
+  let pairsAlias = pairs
+  pairs.push(Span(from: 7, to: 8))
+  pairs.push(Span(from: 9, to: 10))
+  println(
+    "spans {pairs.length()} {pairsAlias.get(4)} {pairs.get(5)} {pairs.get(-1)}",
+  )?
+  println("span set {pairs.set(2, Span(from: 50, to: 60))} {pairsAlias.get(2)} {pairs.set(5, Span(from: 0, to: 0))}")?
+  println("span remove {pairs.remove(0)} pop {pairs.pop()} {pairs.length()} {pairs.get(0)}")?
+
+  // `freeze` after growth answers exactly the live prefix, whatever capacity
+  // the store had grown to.
+  let frozen = grown(13)
+  println("frozen strings {frozen.length()} {frozen.get(0)} {frozen.get(12)} {frozen.get(13)}")?
+  println("frozen {frozen}")?
+  let frozenSpans = spans(9)
+  println("frozen spans {frozenSpans.length()} {frozenSpans.get(8)} {frozenSpans.get(9)}")?
+  var sum = 0
+  for span in frozenSpans {
+    sum += span.from + span.to
+  }
+  println("frozen spans sum {sum}")?
+  var nothing: Vector<Int> = Vector.of()
+  let none = nothing.freeze()
+  println("an empty freeze {none} {none.length()}")?
+  Ok(())
+}

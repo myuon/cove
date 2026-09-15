@@ -1,0 +1,24 @@
+get None Some(10) Some(30) None None
+set None None None [10, 20, 30]
+set in range Some(30) Some(10) [11, 20, 33]
+remove None None [11, 20, 33]
+remove last Some(33) [11, 20]
+pop Some(20) Some(11) None []
+empty get None None
+empty set None None []
+empty remove None None
+push after emptying [7] Some(7) 1
+an alias observes twenty pushes 20 Some(19) None
+and the original observes the alias 21 Some(99)
+set through the alias Some(0) Some(-5)
+strings [alpha, beta, gamma] Some(beta) None None
+string set Some(beta) None [alpha, BETA, gamma]
+string pop Some(gamma) remove Some(alpha) [BETA]
+spans 5 Some(Span(from: 9, to: 10)) None None
+span set Some(Span(from: 5, to: 6)) Some(Span(from: 50, to: 60)) None
+span remove Some(Span(from: 1, to: 2)) pop Some(Span(from: 9, to: 10)) 3 Some(Span(from: 3, to: 4))
+frozen strings 13 Some(item 0) Some(item 12) None
+frozen [item 0, item 1, item 2, item 3, item 4, item 5, item 6, item 7, item 8, item 9, item 10, item 11, item 12]
+frozen spans 9 Some(Span(from: 8, to: 80)) None
+frozen spans sum 396
+an empty freeze [] 0

@@ -461,13 +461,21 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// that makes a small standard-library wrapper a mandatory expansion adds
 /// nothing here.
 ///
+/// **The tenth rise is two new rows, and neither is the lowering.** 2236 to
+/// 2251: `tests/e2e:coll_vector_edges` holds 5 and `tests/e2e:gc_vector_grow`
+/// holds 10, measured one without the other. They are the fixtures that pin a
+/// `Vector`'s index edges, its aliasing across growth and its `freeze` through
+/// collections before ADR 0058 moves `push`, `set` and `freeze` into the
+/// standard library (#378), so they land a commit ahead of the move and the
+/// lowering is the base's.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2236;
+const FORWARDABLE_COPIES: usize = 2251;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {
