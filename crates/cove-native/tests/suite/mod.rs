@@ -4024,6 +4024,81 @@ pub fn a_field_access_on_a_variable_payload_object_goes_to_the_runtime<A: Arm>()
     );
 }
 
+/// A field helper that refuses publishes the frame's unpaid work before leaving.
+///
+/// `native::call` charges `NativeCtx::pending_work` "on every exit — a return, a
+/// raise and a stop alike", which is [ADR 0040]'s `S + T` bound: work that is
+/// never published is never charged, and the bound is then computed from a number
+/// that is short by a whole block.
+///
+/// This exit is the one that had to be written by hand. Every other hand-over —
+/// `builtin_call`, `buffer_op`, `callee_direct` — publishes *before* the call and
+/// clears the accumulator, because each of them is a safepoint. A field helper is
+/// deliberately not one, since neither `FieldLoadFn` nor `FieldStoreFn` can
+/// allocate, so it cannot publish early without putting a charge where there is
+/// no safepoint. It publishes on the leaving path instead.
+///
+/// **Nothing else in this file observes it.** The cold-path cases above assert
+/// the hand-over and the answer, both of which are right whether or not the work
+/// survives, so the loss was invisible to every correctness test — which is why
+/// this one asserts the number rather than the outcome.
+///
+/// The nine instructions before the access are what make the number non-zero:
+/// each arm accumulates its block's static instruction count and hands it over at
+/// a safepoint, so a refusal reached with nothing accumulated would pass with the
+/// store removed.
+///
+/// [ADR 0040]: ../../../../docs/adr/0040-a-bound-outlives-its-backend.md
+pub fn a_refused_field_access_publishes_its_unpaid_work<A: Arm>() {
+    let mut code = Vec::new();
+    // Nine instructions of accumulated work, none of which is a safepoint: no
+    // backedge, no call, nothing that can allocate. So all of it is still in the
+    // accumulator when the field access hands over.
+    for step in 0..9 {
+        code.push(Inst::Int {
+            dst: 1,
+            value: step,
+        });
+    }
+    code.push(Inst::LoadField {
+        dst: 2,
+        obj: 0,
+        at: 0,
+        layout: INT,
+    });
+    code.push(Inst::Return { src: 2 });
+    // The whole block, because both arms add a block's static instruction count
+    // to the accumulator *at its head* rather than one instruction at a time —
+    // so the `return` this access never reaches is counted too, and the number
+    // an exit must publish is the block's, not the prefix that ran.
+    let block = code.len() as u64;
+    let held = program(function(vec![Repr::Ref, Repr::Int, Repr::Int], INT, code));
+
+    let mut heap = Heap::new(1);
+    // `BOXED` has a nought entry in the table, so this takes the cold path
+    // whatever `at` is — and the double is scripted to refuse it.
+    let addr = heap.object(1, BOXED, 3);
+
+    forget_fielded();
+    fielded_answers(&[Outcome::Raised]);
+    let mut words = vec![addr, 0, 0];
+    let answer = run_with_fields::<A>(&held, &mut words, 0, &heap);
+
+    assert_eq!(answer.outcome, Outcome::Raised, "the double refused it");
+    assert_eq!(
+        fielded().len(),
+        1,
+        "the access reached the helper rather than being emitted"
+    );
+    // An exit that did not publish answers nought here, which is the defect this
+    // case exists for.
+    assert_eq!(
+        answer.pending_work, block,
+        "a refusing field helper left {block} of unpaid work unpublished, so \
+         `native::call` would charge none of it"
+    );
+}
+
 /// `encoded.rs`'s `SWITCH` arm (line 1234):
 /// `targets.get(index).unwrap_or(&default)`.
 ///

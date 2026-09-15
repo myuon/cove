@@ -1951,6 +1951,23 @@ impl<'a, 'f> Lower<'a, 'f> {
         self.b.ins().brif(returned, on, &[], left, &[]);
 
         self.b.switch_to_block(left);
+        // This frame's unpaid work, published before leaving. `native::call`
+        // charges `pending_work` "on every exit — a return, a raise and a stop
+        // alike", so an exit that does not publish does not under-charge by a
+        // little: the whole block's work is never charged at all, and ADR 0040's
+        // `S + T` bound is then computed from a number that is short.
+        //
+        // [`Lower::builtin_call`] and [`Lower::buffer_op`] publish *before* the
+        // call instead, and clear the accumulator, because each of them is a
+        // safepoint and the helper may charge. This one cannot do that: a field
+        // helper is deliberately **not** a safepoint — neither
+        // [`crate::abi::FieldLoadFn`] nor [`crate::abi::FieldStoreFn`] can
+        // allocate — so publishing early would put a charge where there is no
+        // safepoint. It publishes here instead, on the one path that leaves, and
+        // does not clear: there is nothing after this for a cleared accumulator
+        // to be right for.
+        let work = self.b.use_var(self.work);
+        self.store_ctx(OFF_PENDING_WORK, work);
         // Not `leave`: what this returns is the helper's outcome and not one this
         // function chose, and every field that outcome needs the helper has written.
         self.b.ins().return_(&[outcome]);

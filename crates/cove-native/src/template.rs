@@ -1753,6 +1753,22 @@ impl<'a> Emit<'a> {
         let on = self.label();
         self.test_rr32(RAX, RAX);
         self.jcc(CC_E, Target::Label(on));
+        // This frame's unpaid work, published before leaving. `native::call`
+        // charges `pending_work` "on every exit — a return, a raise and a stop
+        // alike", and [`Emit::leave_answered`] does **not** publish it: it pops
+        // the caller's [`WORK`] back, which is a different thing entirely. Its
+        // other caller [`Emit::callee`] needs no store here because
+        // [`Emit::callee_direct`] published and cleared before the call;
+        // [`Emit::builtin_call`] and [`Emit::buffer_op`] do the same. This one
+        // cannot, because a field helper is deliberately **not** a safepoint —
+        // neither [`crate::abi::FieldLoadFn`] nor [`crate::abi::FieldStoreFn`]
+        // can allocate — so publishing early would put a charge where there is no
+        // safepoint. Without this store the whole block's work is never charged
+        // at all, and ADR 0040's `S + T` bound is computed from a short number.
+        //
+        // `RAX` holds the outcome that [`Emit::leave_answered`] returns, so this
+        // may not touch it: one store of [`WORK`] and nothing else.
+        self.store(CTX, OFF_PENDING_WORK, WORK);
         self.leave_answered();
         self.bind(on);
         self.frame_live = false;

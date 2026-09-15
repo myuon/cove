@@ -275,6 +275,11 @@ fn a_field_access_on_a_variable_payload_object_goes_to_the_runtime() {
 }
 
 #[test]
+fn a_refused_field_access_publishes_its_unpaid_work() {
+    suite::a_refused_field_access_publishes_its_unpaid_work::<Template>();
+}
+
+#[test]
 fn a_switch_takes_its_case_or_the_default() {
     suite::a_switch_takes_its_case_or_the_default::<Template>();
 }
