@@ -432,6 +432,50 @@ pub enum Inst {
         value: i32,
         target: Pc,
     },
+    /// [`Inst::RunLoad`] over [`Storage::PackedBytes`] and then
+    /// [`Inst::CmpImmBranch`] on the byte it read, as one instruction: #378's
+    /// P3-8.
+    ///
+    /// `dst = run[index]`, one byte, refused outside the run exactly as the
+    /// load is; then `cond = dst op value`, a `Bool`; then continue at `target`
+    /// when that `Bool` is false. It is **exactly the two instructions it
+    /// replaces, in that order** — both words are written, the byte to `dst` and
+    /// the `Bool` to `cond`, so anything that reads either afterwards reads what
+    /// the unfused pair would have left there. That is [`Inst::CmpBranch`]'s
+    /// argument, taken one instruction further, and it asks no liveness question
+    /// for the same reason.
+    ///
+    /// # Why it exists
+    ///
+    /// A byte read is almost always read to be compared: `line.byteAt(at) ==
+    /// '\n'` is the idiom the language reference names, a lexer's inner loop is
+    /// that idiom, and `std.string.sliceBytes` asks it of the byte at each end
+    /// of every range since ADR 0058 moved that method into Cove. What the
+    /// fusion saves is the dispatch between the two, and nothing else.
+    ///
+    /// # Why the immediate is sixteen bits
+    ///
+    /// The sixteen-byte instruction has three slot fields and this needs four:
+    /// `dst`, `run` and `index` take the three, and `cond` goes in the payload
+    /// beside the immediate, sixteen bits each in the low half, with the
+    /// displacement in the high half. A byte is `0..=255`, so every comparison
+    /// a program writes against one fits; a wider immediate is left as the
+    /// unfused pair, and the narrowing is checked rather than assumed.
+    ///
+    /// Nothing lowers to this. [`mod@crate::lower`]'s branch peephole
+    /// recognises a byte load followed by an immediate comparison-and-branch on
+    /// the byte it wrote, with nothing jumping to the second, in finished code
+    /// after it has fused the comparisons — so a form it cannot see is a missed
+    /// fusion rather than a wrong one.
+    RunLoadBranch {
+        op: CmpOp,
+        dst: Slot,
+        run: Slot,
+        index: Slot,
+        cond: Slot,
+        value: i16,
+        target: Pc,
+    },
     /// Continue at the entry of `table` selected by the `Int` in `on`.
     ///
     /// This is how a `match` over an enum's cases dispatches: `on` is the

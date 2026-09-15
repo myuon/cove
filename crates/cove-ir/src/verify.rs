@@ -273,6 +273,14 @@ impl Check<'_> {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
+                // A fused byte comparison writes both of its unfused pair's
+                // words: the byte and the `Bool`.
+                Inst::RunLoadBranch { dst, cond, .. } => {
+                    poison(&mut objects, dst, 1);
+                    poison(&mut funcs, dst, 1);
+                    poison(&mut objects, cond, 1);
+                    poison(&mut funcs, cond, 1);
+                }
                 Inst::Convert { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
@@ -678,6 +686,20 @@ impl Check<'_> {
             Inst::CmpImmBranch { dst, a, target, .. } => {
                 self.expect(at, dst, &[Repr::Bool]);
                 self.expect(at, a, &[Repr::Int, Repr::Duration]);
+                self.target(at, target);
+            }
+            Inst::RunLoadBranch {
+                dst,
+                run,
+                index,
+                cond,
+                target,
+                ..
+            } => {
+                self.expect(at, run, &[Repr::Ref]);
+                self.expect(at, index, &[Repr::Int]);
+                self.expect(at, dst, &[Repr::Int]);
+                self.expect(at, cond, &[Repr::Bool]);
                 self.target(at, target);
             }
             Inst::Switch { on, table } => {

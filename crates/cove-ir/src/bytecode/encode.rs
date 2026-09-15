@@ -211,6 +211,27 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             0,
             halves(value as u32, narrow(pc, target)? as u32),
         ),
+        // The byte load's three slots in the fields, and the payload's low
+        // half shared by the immediate and the `Bool`'s slot. See
+        // `Inst::RunLoadBranch`.
+        Inst::RunLoadBranch {
+            op,
+            dst,
+            run,
+            index,
+            cond,
+            value,
+            target,
+        } => build(
+            Op::RunLoadImmBranch(op),
+            slot(dst)?,
+            slot(run)?,
+            slot(index)?,
+            halves(
+                u32::from(value as u16) | (u32::from(slot(cond)?) << 16),
+                narrow(pc, target)? as u32,
+            ),
+        ),
         Inst::Switch { on, table } => build(Op::Switch, slot(on)?, 0, 0, halves(table.0, 0)),
         Inst::Return { src } => build(Op::Return, slot(src)?, 0, 0, 0),
 
@@ -739,6 +760,18 @@ mod tests {
                     target: 5,
                 },
             ));
+            held.push((
+                5,
+                Inst::RunLoadBranch {
+                    op,
+                    dst: 1,
+                    run: 2,
+                    index: 3,
+                    cond: 4,
+                    value: 128,
+                    target: 9,
+                },
+            ));
         }
         held.push((0, Inst::Not { dst: 1, a: 2 }));
         for to in [Convert::IntToFloat, Convert::FloatToInt] {
@@ -1224,6 +1257,44 @@ mod tests {
                     a: top,
                     b: top,
                     target: Pc::MAX,
+                },
+            ),            // The fused byte comparison's payload at its extremes: the widest
+            // slot and both ends of the sixteen-bit immediate, which share a
+            // half and must not bleed into each other.
+            (
+                0,
+                Inst::RunLoadBranch {
+                    op: CmpOp::Ne,
+                    dst: top,
+                    run: top,
+                    index: top,
+                    cond: top,
+                    value: i16::MIN,
+                    target: 1,
+                },
+            ),
+            (
+                3,
+                Inst::RunLoadBranch {
+                    op: CmpOp::Le,
+                    dst: 0,
+                    run: 0,
+                    index: 0,
+                    cond: 0,
+                    value: -1,
+                    target: 0,
+                },
+            ),
+            (
+                0,
+                Inst::RunLoadBranch {
+                    op: CmpOp::Gt,
+                    dst: 0,
+                    run: 0,
+                    index: 0,
+                    cond: top,
+                    value: i16::MAX,
+                    target: i32::MAX as Pc,
                 },
             ),
         ]

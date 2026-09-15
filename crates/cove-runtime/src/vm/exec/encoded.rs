@@ -248,6 +248,18 @@ const LT_INT_IMM_BRANCH: u8 = Op::CmpImmBranch(CmpOp::Lt).number();
 const LE_INT_IMM_BRANCH: u8 = Op::CmpImmBranch(CmpOp::Le).number();
 const GT_INT_IMM_BRANCH: u8 = Op::CmpImmBranch(CmpOp::Gt).number();
 const GE_INT_IMM_BRANCH: u8 = Op::CmpImmBranch(CmpOp::Ge).number();
+const EQ_BYTE_IMM_BRANCH: u8 = Op::RunLoadImmBranch(CmpOp::Eq).number();
+const GE_BYTE_IMM_BRANCH: u8 = Op::RunLoadImmBranch(CmpOp::Ge).number();
+/// The operators of the six fused byte comparisons, in the order their opcodes
+/// are numbered: `EQ_BYTE_IMM_BRANCH + i` is `BYTE_BRANCH_OPS[i]`.
+const BYTE_BRANCH_OPS: [CmpOp; 6] = [
+    CmpOp::Eq,
+    CmpOp::Ne,
+    CmpOp::Lt,
+    CmpOp::Le,
+    CmpOp::Gt,
+    CmpOp::Ge,
+];
 
 const SWITCH: u8 = Op::Switch.number();
 const RETURN: u8 = Op::Return.number();
@@ -332,6 +344,7 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::BranchFalse
         | Op::CmpBranch(_, _)
         | Op::CmpImmBranch(_)
+        | Op::RunLoadImmBranch(_)
         | Op::Switch
         | Op::Return
         | Op::Call
@@ -986,6 +999,23 @@ pub(super) fn run_slice_words(
     Ok(())
 }
 
+/// What a fused byte comparison refuses: a null run, or an offset outside it,
+/// in `RUN_LOAD_BYTES`' words.
+///
+/// Out of line so that the one dispatch arm the six operators share carries no
+/// formatting of its own; see that arm.
+#[cold]
+#[inline(never)]
+fn byte_offset_refused(addr: u64, at: i64, len: i64) -> RuntimeError {
+    if addr == 0 {
+        return null_object();
+    }
+    RuntimeError::new(format!(
+        "`byteAt` is `{at}`, and a byte offset into this string is 0 to {}",
+        len - 1
+    ))
+}
+
 /// A byte [`Inst::GrowableExtend`], checked, grown once and copied in bounded chunks.
 ///
 /// Out of line and out of the dispatch loop's body for [`run_copy_bytes`]'
@@ -1607,6 +1637,45 @@ pub(super) fn dispatch<'s, 'a>(
             LE_INT_IMM_BRANCH => cmp_imm_branch!(CmpOp::Le),
             GT_INT_IMM_BRANCH => cmp_imm_branch!(CmpOp::Gt),
             GE_INT_IMM_BRANCH => cmp_imm_branch!(CmpOp::Ge),
+
+            // #378's P3-8: `RUN_LOAD_BYTES` and then `cmp_imm_branch!` on the
+            // byte it wrote, in that order and with no condition, as ADR 0054's
+            // fusion is. The load's three operands are `a`, `b` and `c`; the
+            // immediate is the low half's low sixteen bits, the `Bool`'s slot
+            // its high sixteen, and the displacement the high half.
+            //
+            // **One arm for all six operators, with the refusal out of line.**
+            // Six copies of a byte load — each with its own formatted refusal —
+            // were measured costing the loop around every *other* arm: 4% on
+            // the `benches/arith` control, which dispatches none of them. The
+            // operator is the opcode's offset in its family, which is how
+            // `Op::number` assigned it.
+            EQ_BYTE_IMM_BRANCH..=GE_BYTE_IMM_BRANCH => {
+                let addr = machine.mem.word_at(base_at + (b!() as usize));
+                let at = machine.mem.word_at(base_at + (c!() as usize));
+                let len = if addr == 0 {
+                    0
+                } else {
+                    machine.mem.object_len(addr) as u64
+                };
+                if at >= len {
+                    fail!(byte_offset_refused(addr, at as i64, len as i64));
+                }
+                let at = at as u32;
+                let word = machine.mem.payload(addr, at / 8);
+                let byte = (word >> ((at % 8) * 8)) & 0xFF;
+                machine.mem.set_word_at(base_at + (a!()) as usize, byte);
+                let lo = held.lo();
+                let value = i64::from(lo as u16 as i16);
+                let op = BYTE_BRANCH_OPS[usize::from(held.opcode() - EQ_BYTE_IMM_BRANCH)];
+                let answer = compare(op, (byte as i64).cmp(&value));
+                machine
+                    .mem
+                    .set_word_at(base_at + (lo >> 16) as usize, answer as u64);
+                if !answer {
+                    pc = pc.wrapping_add_signed(held.hi() as i32 as isize);
+                }
+            }
 
             // A switch table stays immutable program metadata with absolute
             // targets — ADR 0041's one exception to relative control flow,
@@ -2506,6 +2575,110 @@ mod tests {
             run_words(&program, negative, &[0]).expect("the fixture runs"),
             vec![2]
         );
+    }
+
+    /// **#378's P3-8: a fused byte comparison is the byte load and then the
+    /// comparison-and-branch, with every word of both written and the load's
+    /// refusal in the load's words.**
+    ///
+    /// One dispatch arm serves all six operators by the opcode's offset in its
+    /// family, so every operator is run on both sides of its immediate — an
+    /// offset read wrongly answers the wrong operator here rather than nowhere.
+    #[test]
+    fn a_fused_byte_comparison_is_the_load_and_the_branch() {
+        let ops = [
+            CmpOp::Eq,
+            CmpOp::Ne,
+            CmpOp::Lt,
+            CmpOp::Le,
+            CmpOp::Gt,
+            CmpOp::Ge,
+        ];
+        let text = "a\u{e9}z";
+        for op in ops {
+            for value in [-1i16, 97, 98, 195, 300] {
+                let mut build = Build::default();
+                let str_layout = build.string_layout();
+                let int = build.scalar(Repr::Int);
+                let entry = build.function(
+                    "fused",
+                    &[str_layout, int],
+                    &[Repr::Ref, Repr::Int, Repr::Int, Repr::Bool, Repr::Int],
+                    int,
+                    vec![
+                        Inst::RunLoadBranch {
+                            op,
+                            dst: 2,
+                            run: 0,
+                            index: 1,
+                            cond: 3,
+                            value,
+                            target: 5,
+                        },
+                        // Held: the byte, the `Bool` and a marker, as one number.
+                        Inst::ArithImm {
+                            op: ArithOp::Mul,
+                            dst: 4,
+                            a: 2,
+                            value: 10,
+                        },
+                        Inst::Arith {
+                            num: Num::Int,
+                            op: ArithOp::Add,
+                            dst: 4,
+                            a: 4,
+                            b: 3,
+                        },
+                        Inst::ArithImm {
+                            op: ArithOp::Add,
+                            dst: 4,
+                            a: 4,
+                            value: 100_000,
+                        },
+                        Inst::Return { src: 4 },
+                        // Not held: the same number without the marker.
+                        Inst::ArithImm {
+                            op: ArithOp::Mul,
+                            dst: 4,
+                            a: 2,
+                            value: 10,
+                        },
+                        Inst::Arith {
+                            num: Num::Int,
+                            op: ArithOp::Add,
+                            dst: 4,
+                            a: 4,
+                            b: 3,
+                        },
+                        Inst::Return { src: 4 },
+                    ],
+                );
+                let program = build.done();
+                for (at, byte) in text.bytes().enumerate() {
+                    let mut machine = Machine::new(&program, 1 << 14);
+                    let word = machine.new_string(text).unwrap();
+                    let answer = machine
+                        .run(entry, &[word, at as u64], &budget())
+                        .expect("a byte inside the string answers")[0];
+                    let held = compare(op, i64::from(byte).cmp(&i64::from(value)));
+                    let want = u64::from(byte) * 10 + held as u64 + if held { 100_000 } else { 0 };
+                    assert_eq!(answer, want, "{op:?} {value} at {at}");
+                }
+                let mut machine = Machine::new(&program, 1 << 14);
+                let word = machine.new_string(text).unwrap();
+                let error = machine
+                    .run(entry, &[word, 4], &budget())
+                    .expect_err("one past the end");
+                assert_eq!(
+                    error.message,
+                    "`byteAt` is `4`, and a byte offset into this string is 0 to 3"
+                );
+                let error = machine
+                    .run(entry, &[0, 0], &budget())
+                    .expect_err("a null run");
+                assert_eq!(error.message, null_object().message);
+            }
+        }
     }
 
     #[test]

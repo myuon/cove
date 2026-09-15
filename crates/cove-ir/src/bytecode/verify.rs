@@ -265,6 +265,22 @@ impl Check<'_> {
             Inst::CmpBranch { target, .. } | Inst::CmpImmBranch { target, .. } => {
                 self.target(at, target)
             }
+            // A fused byte comparison is a branch too, and its `Bool` is the one
+            // slot operand of this format that lives in the payload rather than
+            // in `a`, `b` or `c` — so the uniform slot pass never saw it, and it
+            // is checked here by the same two questions: inside the frame, and a
+            // `Bool`.
+            Inst::RunLoadBranch { cond, target, .. } => {
+                self.target(at, target);
+                match self.function.repr(cond) {
+                    None => self.outside(at, "payload", cond),
+                    Some(Repr::Bool) => {}
+                    Some(found) => self.fault(
+                        at,
+                        format!("slot {cond} holds {found}, and this opcode wants bool"),
+                    ),
+                }
+            }
             Inst::Switch { table, .. } => {
                 // The table stays immutable program metadata with absolute
                 // targets, and this is where absolute breaks loudly if a
@@ -558,7 +574,7 @@ mod tests {
     use super::*;
     use crate::bytecode::encode::{encode, encode_function, encode_program};
     use crate::bytecode::{instructions, EncodedInst};
-    use crate::inst::{ArithOp, Num};
+    use crate::inst::{ArithOp, CmpOp, Num};
     use crate::layout::{Case, Layout, Shape};
     use crate::program::{Arg, Table};
     use crate::repr::RefMap;
@@ -746,6 +762,40 @@ mod tests {
         assert_eq!(
             faults(&held, &code),
             ["writes a case of `Point`, which is not an enum"]
+        );
+    }
+
+    /// A fused byte comparison's `Bool` is the one slot this format keeps in a
+    /// payload rather than in `a`, `b` or `c`, so the uniform slot pass never
+    /// reads it — and it is held to the same two rules here: inside the frame,
+    /// and a `Bool`.
+    #[test]
+    fn a_fused_byte_comparisons_payload_slot_is_checked_as_a_slot() {
+        let held = program(vec![
+            Inst::RunLoadBranch {
+                op: CmpOp::Ge,
+                dst: 0,
+                run: 2,
+                index: 1,
+                cond: 3,
+                value: 128,
+                target: 1,
+            },
+            Inst::Return { src: 0 },
+        ]);
+        let code = encode_function(&held.functions[0]).expect("it encodes");
+        assert_eq!(faults(&held, &code), Vec::<String>::new());
+        // The low half is the immediate's two bytes and then the slot's, so
+        // byte 10 is the slot's low byte.
+        let outside = [with(code[0], 10, 9), code[1]];
+        assert_eq!(
+            faults(&held, &outside),
+            ["payload names slot 9, outside a frame of 4"]
+        );
+        let an_int = [with(code[0], 10, 0), code[1]];
+        assert_eq!(
+            faults(&held, &an_int),
+            ["slot 0 holds int, and this opcode wants bool"]
         );
     }
 

@@ -181,6 +181,18 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             value: lo as i32,
             target: target(pc, i64::from(hi as i32))?,
         },
+        // The immediate is the low half's low sixteen bits read back as the
+        // `i16` it was written as, and the `Bool`'s slot is its high sixteen.
+        // See `Inst::RunLoadBranch`.
+        Op::RunLoadImmBranch(op) => Inst::RunLoadBranch {
+            op,
+            dst: a,
+            run: b,
+            index: c,
+            cond: Slot::from((lo >> 16) as u16),
+            value: lo as u16 as i16,
+            target: target(pc, i64::from(hi as i32))?,
+        },
         Op::Switch => Inst::Switch {
             on: a,
             table: TableId(lo),
@@ -413,7 +425,11 @@ fn canonical(code: EncodedInst, op: Op) -> Result<(), Malformed> {
         }
         // A `Bool` payload's own range is checked where it is read, so that
         // the fault names the constant rather than the field.
-        Payload::Bool | Payload::Imm | Payload::Displacement | Payload::ImmAndDisplacement => {}
+        Payload::Bool
+        | Payload::Imm
+        | Payload::Displacement
+        | Payload::ImmAndDisplacement
+        | Payload::ImmSlotAndDisplacement => {}
         Payload::Halves(lo, hi) => {
             for (half, (name, held)) in [lo, hi]
                 .into_iter()

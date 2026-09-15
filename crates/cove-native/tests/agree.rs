@@ -642,6 +642,19 @@ fn both_arms_answer_the_same_thing() {
                 0,
             );
         }
+        // And #378's fused byte comparison, over a string on the heap — the
+        // last offset is one past it, which both arms refuse.
+        const BYTES: [u8; 10] = [7, 8, 9, 10, 200, 0, 255, 1, 42, 43];
+        let addr = suite::a_byte_string(&BYTES).1;
+        for (offset, value) in [(4u64, 128i16), (0, 128), (9, 43), (5, -1), (10, 0)] {
+            agree_over(
+                &format!("fused byte {op:?} {offset} {value}"),
+                &suite::fused_byte(op, value),
+                &[addr, offset, 0xdead, 0xdead, 0],
+                0,
+                || suite::a_byte_string(&BYTES).0,
+            );
+        }
     }
 }
 

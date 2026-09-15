@@ -64,9 +64,9 @@ pub(super) fn rewrite(function: &mut Function, tables: &mut [Table], dropped: &[
         let mut inst = inst.clone();
         match &mut inst {
             Inst::Jump { to } | Inst::BranchFalse { to, .. } => *to = moved[*to as usize],
-            Inst::CmpBranch { target, .. } | Inst::CmpImmBranch { target, .. } => {
-                *target = moved[*target as usize]
-            }
+            Inst::CmpBranch { target, .. }
+            | Inst::CmpImmBranch { target, .. }
+            | Inst::RunLoadBranch { target, .. } => *target = moved[*target as usize],
             Inst::Switch { table, .. } => {
                 let table = &mut tables[table.index()];
                 for target in &mut table.targets {

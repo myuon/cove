@@ -742,6 +742,23 @@ impl<'a> Emit<'a> {
                 self.compare(*op, *dst);
                 self.branch_when_false(pc, *target);
             }
+            // #378's P3-8: the byte load and then the comparison-and-branch on
+            // the byte it wrote, emitted as the two they were fused from.
+            Inst::RunLoadBranch {
+                op,
+                dst,
+                run,
+                index,
+                cond,
+                value,
+                target,
+            } => {
+                self.byte_at(*dst, *run, *index);
+                self.load_slot(RAX, *dst);
+                self.mov_imm64(RCX, i64::from(*value));
+                self.compare(*op, *cond);
+                self.branch_when_false(pc, *target);
+            }
             // `encoded.rs`'s `BRANCH_FALSE` arm tests the whole *word* against
             // zero, so that is what is tested here and not the low byte.
             Inst::BranchFalse { cond, to } => {

@@ -224,6 +224,22 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             s(*dst),
             s(*a)
         ),
+        Inst::RunLoadBranch {
+            op,
+            dst,
+            run,
+            index,
+            cond,
+            value,
+            target,
+        } => format!(
+            "run-load.bytes.{}.imm.branch {} {} {} {} {value} {target}",
+            cmp_name(*op),
+            s(*dst),
+            s(*run),
+            s(*index),
+            s(*cond)
+        ),
         Inst::Switch { on, table } => {
             let table = program.table(*table);
             let targets: Vec<String> = table.targets.iter().map(|to| to.to_string()).collect();

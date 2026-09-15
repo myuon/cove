@@ -4079,6 +4079,84 @@ pub fn a_byte_at_reads_one_byte_and_bounds_it<A: Arm>() {
     }
 }
 
+/// One fused byte comparison of `op` against `value`: `s2 = byte of s0 at s1`,
+/// `s3 = s2 op value`, answering `10` in `s4` when it held and `20` when not.
+pub fn fused_byte(op: CmpOp, value: i16) -> Program {
+    program(function(
+        vec![Repr::Ref, Repr::Int, Repr::Int, Repr::Bool, Repr::Int],
+        INT,
+        vec![
+            Inst::RunLoadBranch {
+                op,
+                dst: 2,
+                run: 0,
+                index: 1,
+                cond: 3,
+                value,
+                target: 3,
+            },
+            Inst::Int { dst: 4, value: 10 },
+            Inst::Return { src: 4 },
+            Inst::Int { dst: 4, value: 20 },
+            Inst::Return { src: 4 },
+        ],
+    ))
+}
+
+/// A heap holding one ten-byte string, the second of its payload words in the
+/// next chunk, and the address of it.
+pub fn a_byte_string(bytes: &[u8; 10]) -> (Heap, u64) {
+    let at = HEAP_CHUNK_WORDS - 2;
+    let mut heap = Heap::new(2);
+    heap.object(at, INT, bytes.len() as u32);
+    for (word, run) in bytes.chunks(8).enumerate() {
+        let mut packed = 0u64;
+        for (byte, value) in run.iter().enumerate() {
+            packed |= u64::from(*value) << (byte * 8);
+        }
+        heap.set(at + 1 + word as u64, packed);
+    }
+    let addr = heap.addr(at);
+    (heap, addr)
+}
+
+/// #378's P3-8 fused byte comparison, split back into the byte load and the
+/// comparison-and-branch it was made of: both words written on both paths, the
+/// branch taken on the `Bool`, and the load's refusal the load's.
+///
+/// `encoded.rs`'s shared `EQ_BYTE_IMM_BRANCH..=GE_BYTE_IMM_BRANCH` arm. The
+/// negative immediate is the row that catches a zero-extended sixteen bits.
+pub fn a_fused_byte_comparison_branches_and_writes_both_words<A: Arm>() {
+    let bytes: [u8; 10] = [7, 8, 9, 10, 200, 0, 255, 1, 42, 43];
+    for (op, offset, value, answered, flag) in [
+        (CmpOp::Ge, 4usize, 128i16, 10i64, 1u64),
+        (CmpOp::Ge, 0, 128, 20, 0),
+        (CmpOp::Lt, 6, 192, 20, 0),
+        (CmpOp::Eq, 9, 43, 10, 1),
+        (CmpOp::Ne, 8, 42, 20, 0),
+        (CmpOp::Gt, 5, -1, 10, 1),
+        (CmpOp::Le, 3, 9, 20, 0),
+    ] {
+        let (heap, addr) = a_byte_string(&bytes);
+        let mut words = vec![addr, offset as u64, 0xdead, 0xdead, 0];
+        let answer = run_over::<A>(&fused_byte(op, value), &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "{op:?} {offset} {value}");
+        assert_eq!(words[4] as i64, answered, "{op:?} {offset} {value}");
+        assert_eq!(words[2], u64::from(bytes[offset]), "the byte is written");
+        assert_eq!(words[3], flag, "and so is the `Bool`: {op:?} {offset}");
+    }
+
+    for offset in [10i64, -1] {
+        let (heap, addr) = a_byte_string(&bytes);
+        let mut words = vec![addr, offset as u64, 0, 0, 0];
+        let answer = run_over::<A>(&fused_byte(CmpOp::Eq, 0), &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Raised, "byte {offset}");
+        assert_eq!(answer.raise, Some(Raise::ByteOffset));
+        assert_eq!(answer.raise_a, offset);
+        assert_eq!(answer.raise_b, 10);
+    }
+}
+
 /// `encoded.rs`'s `LOAD_FIELD` and `STORE_FIELD` arms (lines 1451/1464), for a
 /// *fixed*-payload object.
 ///

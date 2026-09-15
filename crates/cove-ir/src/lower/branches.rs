@@ -59,7 +59,7 @@
 //! what condition three above refuses, so no target lands on a counter that
 //! means something different afterwards.
 
-use crate::inst::{Inst, Pc};
+use crate::inst::{Inst, Pc, Storage};
 use crate::program::{Function, Program, Table};
 
 use super::dropping;
@@ -71,7 +71,66 @@ pub(super) fn fuse_comparisons_into_branches(program: &mut Program) {
     } = program;
     for function in functions.iter_mut() {
         fuse(function, tables);
+        fuse_byte_loads(function, tables);
     }
+}
+
+/// Rewrites one function with each byte load fused into the immediate
+/// comparison-and-branch beside it — #378's P3-8, [`Inst::RunLoadBranch`].
+///
+/// The same peephole as [`fuse`], one instruction further, and run after it
+/// because the pair it looks for is one that pass makes: a `run-load.bytes`
+/// followed by a fused `CmpImmBranch` that compares the byte it wrote. The
+/// conditions are ADR 0054's, restated for this pair: the comparison reads the
+/// load's destination, nothing jumps to the comparison — control that arrived
+/// there without the load would compare whatever the slot held — and the
+/// immediate fits the sixteen bits the fused encoding gives it.
+///
+/// A load whose destination is also where the comparison writes its `Bool` is
+/// left alone. The pair is still sound in order, but the two words would then
+/// be one slot claiming two `Repr`s, and no lowering writes that.
+fn fuse_byte_loads(function: &mut Function, tables: &mut [Table]) {
+    let targeted = targeted(function, tables);
+    let mut dropped = vec![false; function.code.len()];
+    let mut pc = 0;
+    while pc + 1 < function.code.len() {
+        let fused = match (&function.code[pc], &function.code[pc + 1]) {
+            (
+                Inst::RunLoad {
+                    dst,
+                    run,
+                    index,
+                    storage: Storage::PackedBytes,
+                },
+                Inst::CmpImmBranch {
+                    op,
+                    dst: cond,
+                    a,
+                    value,
+                    target,
+                },
+            ) if a == dst && cond != dst && !targeted[pc + 1] => {
+                i16::try_from(*value).ok().map(|value| Inst::RunLoadBranch {
+                    op: *op,
+                    dst: *dst,
+                    run: *run,
+                    index: *index,
+                    cond: *cond,
+                    value,
+                    target: *target,
+                })
+            }
+            _ => None,
+        };
+        let Some(fused) = fused else {
+            pc += 1;
+            continue;
+        };
+        function.code[pc] = fused;
+        dropped[pc + 1] = true;
+        pc += 2;
+    }
+    dropping::rewrite(function, tables, &dropped);
 }
 
 /// Rewrites one function with the pairs it holds fused.
@@ -148,7 +207,9 @@ fn targeted(function: &Function, tables: &[Table]) -> Vec<bool> {
     for inst in &function.code {
         match *inst {
             Inst::Jump { to } | Inst::BranchFalse { to, .. } => mark(to),
-            Inst::CmpBranch { target, .. } | Inst::CmpImmBranch { target, .. } => mark(target),
+            Inst::CmpBranch { target, .. }
+            | Inst::CmpImmBranch { target, .. }
+            | Inst::RunLoadBranch { target, .. } => mark(target),
             Inst::Switch { table, .. } => {
                 if let Some(table) = tables.get(table.index()) {
                     for target in &table.targets {
@@ -490,5 +551,97 @@ mod tests {
         assert!(matches!(code(&ran)[0], Inst::CmpBranch { target: 3, .. }));
         assert!(matches!(code(&ran)[1], Inst::CmpBranch { target: 3, .. }));
         assert_eq!(code(&ran).len(), 4);
+    }
+
+    // --- #378's P3-8: a byte load and the comparison-and-branch on it --------
+
+    /// `s3 = byte of s1 at s2`, `s0 = s3 op value`, branch past the `int`.
+    fn byte_branch(op: CmpOp, a: u32, value: i64) -> Vec<Inst> {
+        vec![
+            Inst::RunLoad {
+                dst: 3,
+                run: 1,
+                index: 2,
+                storage: crate::Storage::PackedBytes,
+            },
+            Inst::CmpImm {
+                op,
+                dst: 0,
+                a,
+                value,
+            },
+            Inst::BranchFalse { cond: 0, to: 4 },
+            Inst::Int { dst: 2, value: 7 },
+            Inst::Return { src: 2 },
+        ]
+    }
+
+    fn byte_reprs() -> Vec<Repr> {
+        vec![Repr::Bool, Repr::Ref, Repr::Int, Repr::Int]
+    }
+
+    /// The pair the second pass is for: the load, then the fused comparison
+    /// the first pass made of the two instructions after it, become one — and
+    /// that one still writes both words.
+    #[test]
+    fn a_byte_load_and_the_branch_on_it_become_one_instruction() {
+        let ran = ran(byte_reprs(), byte_branch(CmpOp::Ge, 3, 128));
+        assert_eq!(
+            code(&ran),
+            [
+                Inst::RunLoadBranch {
+                    op: CmpOp::Ge,
+                    dst: 3,
+                    run: 1,
+                    index: 2,
+                    cond: 0,
+                    value: 128,
+                    // Two counters back: two instructions went.
+                    target: 2,
+                },
+                Inst::Int { dst: 2, value: 7 },
+                Inst::Return { src: 2 },
+            ]
+        );
+    }
+
+    /// A comparison of some other slot is two instructions that happen to be
+    /// adjacent, and it still fuses with its own branch.
+    #[test]
+    fn a_branch_on_another_word_is_not_a_byte_pair() {
+        let ran = ran(byte_reprs(), byte_branch(CmpOp::Eq, 2, 10));
+        assert!(matches!(code(&ran)[0], Inst::RunLoad { .. }));
+        assert!(matches!(code(&ran)[1], Inst::CmpImmBranch { a: 2, .. }));
+    }
+
+    /// An immediate outside sixteen bits leaves the load on its own, and the
+    /// widest one inside still fuses.
+    #[test]
+    fn a_byte_comparison_wider_than_sixteen_bits_is_left_unfused() {
+        let ran = ran(byte_reprs(), byte_branch(CmpOp::Lt, 3, 32_768));
+        assert!(matches!(code(&ran)[0], Inst::RunLoad { .. }));
+        assert!(matches!(
+            code(&ran)[1],
+            Inst::CmpImmBranch { value: 32_768, .. }
+        ));
+        let ran = ran(byte_reprs(), byte_branch(CmpOp::Lt, 3, -32_768));
+        assert!(matches!(
+            code(&ran)[0],
+            Inst::RunLoadBranch {
+                value: -32_768,
+                ..
+            }
+        ));
+    }
+
+    /// Control that arrives at the comparison without the load keeps the
+    /// comparison its own instruction, as ADR 0054's branch does.
+    #[test]
+    fn a_comparison_something_jumps_to_keeps_its_byte_load_apart() {
+        let mut held = byte_branch(CmpOp::Eq, 3, 10);
+        held.insert(4, Inst::Jump { to: 1 });
+        let ran = ran(byte_reprs(), held);
+        assert!(matches!(code(&ran)[0], Inst::RunLoad { .. }));
+        assert!(matches!(code(&ran)[1], Inst::CmpImmBranch { .. }));
     }
 }

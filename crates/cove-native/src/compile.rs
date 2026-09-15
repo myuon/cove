@@ -935,6 +935,25 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.branch_when_false(pc, answer, *target);
                 true
             }
+            // #378's P3-8: the byte load and then the comparison-and-branch on
+            // the byte it wrote, emitted as the two they were fused from.
+            Inst::RunLoadBranch {
+                op,
+                dst,
+                run,
+                index,
+                cond,
+                value,
+                target,
+            } => {
+                self.byte_at(*dst, *run, *index);
+                let x = self.load_slot(*dst);
+                let y = self.b.ins().iconst(types::I64, i64::from(*value));
+                let answer = self.compare(*op, x, y);
+                self.store_flag(*cond, answer);
+                self.branch_when_false(pc, answer, *target);
+                true
+            }
             // `encoded.rs`'s `BRANCH_FALSE` arm tests the *word* against
             // zero, so the word is what `brif` is given: `brif` takes its
             // then-branch when its argument is non-zero, which is the same

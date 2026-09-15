@@ -74,7 +74,9 @@
 //! - comparisons ([`Inst::Cmp`](cove_ir::Inst::Cmp),
 //!   [`Inst::CmpImm`](cove_ir::Inst::CmpImm)) and [ADR 0054]'s fused
 //!   [`Inst::CmpBranch`](cove_ir::Inst::CmpBranch) and
-//!   [`Inst::CmpImmBranch`](cove_ir::Inst::CmpImmBranch);
+//!   [`Inst::CmpImmBranch`](cove_ir::Inst::CmpImmBranch), and #378's fused
+//!   byte comparison [`Inst::RunLoadBranch`](cove_ir::Inst::RunLoadBranch),
+//!   split back into the two it was made of;
 //! - slot copies ([`Inst::Copy`](cove_ir::Inst::Copy));
 //! - [`Inst::Jump`](cove_ir::Inst::Jump) and
 //!   [`Inst::BranchFalse`](cove_ir::Inst::BranchFalse);

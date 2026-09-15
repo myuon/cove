@@ -679,6 +679,16 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             target,
         } => comparison_supported(*on, *op) && slot(*dst) && slot(*a) && slot(*b) && *target < end,
         Inst::CmpImmBranch { dst, a, target, .. } => slot(*dst) && slot(*a) && *target < end,
+        // #378's P3-8 fused byte comparison, which both arms split back into
+        // the byte load and the comparison-and-branch it was made of.
+        Inst::RunLoadBranch {
+            dst,
+            run,
+            index,
+            cond,
+            target,
+            ..
+        } => slot(*dst) && slot(*run) && slot(*index) && slot(*cond) && *target < end,
         Inst::Jump { to } => *to < end,
         Inst::BranchFalse { cond, to } => slot(*cond) && *to < end,
         // Every target and the default, because the machine does not take the
@@ -986,7 +996,9 @@ pub(crate) fn leaders(program: &Program, function: &Function) -> Vec<Option<u32>
                 mark(&mut leader, *to as usize);
                 mark(&mut leader, pc + 1);
             }
-            Inst::CmpBranch { target, .. } | Inst::CmpImmBranch { target, .. } => {
+            Inst::CmpBranch { target, .. }
+            | Inst::CmpImmBranch { target, .. }
+            | Inst::RunLoadBranch { target, .. } => {
                 mark(&mut leader, *target as usize);
                 mark(&mut leader, pc + 1);
             }

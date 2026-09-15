@@ -382,9 +382,9 @@ fn inside_a_loop(f: &Function) -> Vec<bool> {
         let back = match inst {
             Inst::Jump { to } => Some(*to as usize),
             Inst::BranchFalse { to, .. } => Some(*to as usize),
-            Inst::CmpBranch { target, .. } | Inst::CmpImmBranch { target, .. } => {
-                Some(*target as usize)
-            }
+            Inst::CmpBranch { target, .. }
+            | Inst::CmpImmBranch { target, .. }
+            | Inst::RunLoadBranch { target, .. } => Some(*target as usize),
             _ => None,
         };
         if let Some(to) = back {
@@ -528,6 +528,10 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::AddrOfField { dst, .. }
             | Inst::AddrOfElem { dst, .. }
             | Inst::AddrOfPart { dst, .. } => mark(dst, 1),
+            Inst::RunLoadBranch { dst, cond, .. } => {
+                mark(dst, 1);
+                mark(cond, 1);
+            }
             // A store writes an object or an address rather than a frame
             // word, so it marks nothing; the rest are what `reaches_nothing`
             // refuses. Written out rather than caught by a `_` for the reason
@@ -1011,9 +1015,9 @@ fn relocated(
         // walk above is exhaustive, this is not. An expansion that left a
         // fused branch pointing into the leaf's own numbering would branch
         // into the middle of the caller.
-        Inst::CmpBranch { target, .. } | Inst::CmpImmBranch { target, .. } => {
-            *target = place[*target as usize] as Pc
-        }
+        Inst::CmpBranch { target, .. }
+        | Inst::CmpImmBranch { target, .. }
+        | Inst::RunLoadBranch { target, .. } => *target = place[*target as usize] as Pc,
         // An argument list is `Program::args` and not part of the
         // instruction, so shifting the slots the instruction names does not
         // reach it. A builtin is the one call a leaf may hold, and
@@ -1086,9 +1090,12 @@ fn renumber(
             // edit of the copy already at `to` rather than as a rebuild,
             // because the two variants have five fields between them that are
             // not the target and none of them changes.
-            Inst::CmpBranch { target, .. } | Inst::CmpImmBranch { target, .. } => {
+            Inst::CmpBranch { target, .. }
+            | Inst::CmpImmBranch { target, .. }
+            | Inst::RunLoadBranch { target, .. } => {
                 if let Inst::CmpBranch { target: held, .. }
-                | Inst::CmpImmBranch { target: held, .. } = &mut code[to]
+                | Inst::CmpImmBranch { target: held, .. }
+                | Inst::RunLoadBranch { target: held, .. } = &mut code[to]
                 {
                     *held = moved[*target as usize];
                 }
@@ -1127,6 +1134,13 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         Inst::ArithImm { dst, a, .. } | Inst::CmpImm { dst, a, .. } => vec![dst, a],
         Inst::Arith { dst, a, b, .. } | Inst::Cmp { dst, a, b, .. } => vec![dst, a, b],
         Inst::CmpImmBranch { dst, a, .. } => vec![dst, a],
+        Inst::RunLoadBranch {
+            dst,
+            run,
+            index,
+            cond,
+            ..
+        } => vec![dst, run, index, cond],
         Inst::CmpBranch { dst, a, b, .. } => vec![dst, a, b],
         Inst::BranchFalse { cond, .. } => vec![cond],
         Inst::Switch { on, .. } => vec![on],

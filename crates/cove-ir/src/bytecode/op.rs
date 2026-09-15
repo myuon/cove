@@ -1,4 +1,4 @@
-//! The hundred and sixty-one opcodes, and what each one makes of the four
+//! The hundred and sixty-seven opcodes, and what each one makes of the four
 //! fields.
 //!
 //! # One opcode per concrete operation
@@ -15,7 +15,8 @@
 //!   it;
 //! - [`Inst::ArithImm`](crate::Inst::ArithImm) five,
 //!   [`Inst::CmpImm`](crate::Inst::CmpImm) six and
-//!   [`Inst::CmpImmBranch`](crate::Inst::CmpImmBranch) six, the operator
+//!   [`Inst::CmpImmBranch`](crate::Inst::CmpImmBranch) six and
+//!   [`Inst::RunLoadBranch`](crate::Inst::RunLoadBranch) six, the operator
 //!   alone;
 //! - [`Inst::Neg`](crate::Inst::Neg) two, [`Convert`] two;
 //! - [`Inst::Alloc`](crate::Inst::Alloc) three, one per [`Len`](crate::Len)
@@ -104,7 +105,10 @@ mod base {
     /// member: thirty-six and six.
     pub const CMP_BRANCH: u8 = BRANCH_FALSE + 1;
     pub const CMP_IMM_BRANCH: u8 = CMP_BRANCH + (COMPARES.len() * CMP_OPS.len()) as u8;
-    pub const SWITCH: u8 = CMP_IMM_BRANCH + CMP_OPS.len() as u8;
+    /// #378's P3-8: a byte `run-load` fused with the immediate
+    /// comparison-and-branch on what it read, one per operator.
+    pub const RUN_LOAD_IMM_BRANCH: u8 = CMP_IMM_BRANCH + CMP_OPS.len() as u8;
+    pub const SWITCH: u8 = RUN_LOAD_IMM_BRANCH + CMP_OPS.len() as u8;
     pub const RETURN: u8 = SWITCH + 1;
     pub const CALL: u8 = RETURN + 1;
     pub const CALL_CLOSURE: u8 = CALL + 1;
@@ -203,6 +207,7 @@ pub enum Op {
     BranchFalse,
     CmpBranch(Compare, CmpOp),
     CmpImmBranch(CmpOp),
+    RunLoadImmBranch(CmpOp),
     Switch,
     Return,
     Call,
@@ -350,6 +355,16 @@ pub enum Payload {
     /// pays for the fusion, and it is why a wider immediate stays the unfused
     /// pair.
     ImmAndDisplacement,
+    /// The low half is an `i16` immediate in its low sixteen bits and a frame
+    /// slot in its high sixteen; the high half is a thirty-two-bit
+    /// `Displacement`.
+    ///
+    /// [`Op::RunLoadImmBranch`] alone, whose fourth slot — the `Bool` it
+    /// writes — has no field of its own: the three slot fields hold the byte
+    /// load's operands. A slot is sixteen bits wherever it is written (ADR
+    /// 0041), so it loses nothing here; the immediate narrows to sixteen, which
+    /// every byte comparison fits.
+    ImmSlotAndDisplacement,
 }
 
 /// What one 32-bit half of a payload holds.
@@ -490,6 +505,7 @@ impl Op {
             }
         }
         all.extend(CMP_OPS.map(Op::CmpImmBranch));
+        all.extend(CMP_OPS.map(Op::RunLoadImmBranch));
         all.extend([
             Op::Switch,
             Op::Return,
@@ -581,6 +597,7 @@ impl Op {
                     + index_of!(CMP_OPS, op)
             }
             Op::CmpImmBranch(op) => base::CMP_IMM_BRANCH + index_of!(CMP_OPS, op),
+            Op::RunLoadImmBranch(op) => base::RUN_LOAD_IMM_BRANCH + index_of!(CMP_OPS, op),
             Op::Switch => base::SWITCH,
             Op::Return => base::RETURN,
             Op::Call => base::CALL,
@@ -743,6 +760,17 @@ impl Op {
                 Operand::Word(INT),
                 NONE,
                 Payload::ImmAndDisplacement,
+            ),
+            // `Op::RunLoadBytes`' three slots, and the payload split three
+            // ways: the immediate and the `Bool`'s slot in the low half, the
+            // target in the high. The payload slot is checked by
+            // `crate::bytecode::verify`'s `meaning`, which is where a decoded
+            // instruction's own facts are.
+            Op::RunLoadImmBranch(_) => fields(
+                Operand::Word(INT),
+                Operand::Word(REF),
+                Operand::Word(INT),
+                Payload::ImmSlotAndDisplacement,
             ),
             // The discriminant of an enum location is its first word and is
             // an `Int`; so is the layout id a `dyn` dispatch switches on.
@@ -988,7 +1016,7 @@ mod tests {
     use super::*;
 
     /// ADR 0041's count, which is the one number the format's headroom is
-    /// argued from: a hundred and sixty-one opcodes out of the 256 a byte
+    /// argued from: a hundred and sixty-seven opcodes out of the 256 a byte
     /// names.
     ///
     /// It was a hundred and two until `Op::ByteAt` (now `Op::RunLoadBytes`), a
@@ -1011,15 +1039,17 @@ mod tests {
     /// `Vector.push`, and a hundred and fifty-nine once the finish gained one
     /// for `Vector.freeze`, a hundred and sixty once the run slice arrived
     /// with `Array.slice`, and a hundred and sixty-one once the growable
-    /// truncate arrived with `Vector.pop`. What the number is for is that a reader can see the
+    /// truncate arrived with `Vector.pop`, and a hundred and sixty-seven once
+    /// #378's P3-8 fused a byte load with the comparison-and-branch on it, six
+    /// operators. What the number is for is that a reader can see the
     /// headroom
     /// rather than be told about it: more than a third of the byte is still
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_sixty_one_opcodes() {
-        assert_eq!(Op::all().len(), 161);
-        assert_eq!(OPCODES, 161);
+    fn there_are_a_hundred_and_sixty_seven_opcodes() {
+        assert_eq!(Op::all().len(), 167);
+        assert_eq!(OPCODES, 167);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

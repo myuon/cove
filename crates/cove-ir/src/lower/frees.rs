@@ -293,7 +293,8 @@ impl<'p> Flow<'p> {
             // said the word was already null.
             Inst::BranchFalse { to, .. }
             | Inst::CmpBranch { target: to, .. }
-            | Inst::CmpImmBranch { target: to, .. } => {
+            | Inst::CmpImmBranch { target: to, .. }
+            | Inst::RunLoadBranch { target: to, .. } => {
                 f(to as usize);
                 if pc < last {
                     f(pc + 1);
@@ -352,6 +353,11 @@ impl<'p> Flow<'p> {
             | Inst::ScopeEnter { dst, .. }
             | Inst::Spawn { dst, .. } => f(dst, 1),
             Inst::Clear { slot, layout } => f(slot, width(layout)),
+            // Both of the words its unfused pair wrote.
+            Inst::RunLoadBranch { dst, cond, .. } => {
+                f(dst, 1);
+                f(cond, 1);
+            }
             Inst::Copy { dst, layout, .. }
             | Inst::Load { dst, layout, .. }
             | Inst::LoadField { dst, layout, .. }
@@ -489,6 +495,12 @@ impl<'p> Flow<'p> {
                 if let Len::Slot(slot) = len {
                     f(slot, 1);
                 }
+            }
+            // The byte it compares is the one it has just written, so what it
+            // reads from before is the run and the offset.
+            Inst::RunLoadBranch { run, index, .. } => {
+                f(run, 1);
+                f(index, 1);
             }
             Inst::LoadField { obj, .. }
             | Inst::RunLoad { run: obj, .. }

@@ -235,6 +235,11 @@ fn a_byte_at_reads_one_byte_and_bounds_it() {
 }
 
 #[test]
+fn a_fused_byte_comparison_branches_and_writes_both_words() {
+    suite::a_fused_byte_comparison_branches_and_writes_both_words::<Template>();
+}
+
+#[test]
 fn a_field_access_reads_and_writes_a_fixed_object() {
     suite::a_field_access_reads_and_writes_a_fixed_object::<Template>();
 }
