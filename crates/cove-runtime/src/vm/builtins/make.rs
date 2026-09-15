@@ -282,7 +282,7 @@ pub(super) fn strings<S: AsRef<str>>(
 /// A `Vector` of `elem` holding `words`, which the caller holds rooted.
 ///
 /// The store is allocated to exactly the elements it was given. See
-/// [`super::seq::grow`] for why it starts there and what happens when it
+/// [`crate::vm::exec::runs::growable_ensure`] for what happens when it
 /// fills.
 pub(super) fn vector_of(
     machine: &mut Machine,

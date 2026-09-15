@@ -70,7 +70,9 @@
 //! allocates one of **twice the capacity, from a floor of four**, copies the
 //! elements across, and writes the new store into word 1 — the header does
 //! not move, so no reference to it anywhere goes stale. Appending is
-//! therefore amortised O(1).
+//! therefore amortised O(1). That growth, and `freeze()`'s relabel, are
+//! [`crate::vm::exec::runs`]' — the one growable-run core a byte buffer grows
+//! through too.
 //!
 //! A store never shrinks. `pop` and `remove` leave the room they vacate, so
 //! that a program that fills and empties one does not reallocate on every
@@ -81,15 +83,13 @@
 
 #[cfg(test)]
 use cove_ir::Program;
-use cove_ir::{LayoutId, Repr, Shape};
+use cove_ir::{LayoutId, Repr, Shape, Storage};
 
 use crate::error::RuntimeError;
 use crate::vm::builtins::operand::Operand;
 use crate::vm::builtins::{equal, make, operand};
+use crate::vm::exec::runs::{self, Growable, Validation, GROWABLE_LEN, GROWABLE_STORE};
 use crate::vm::exec::Machine;
-
-/// The smallest store a `push` onto a full one asks for.
-const MIN_CAPACITY: u32 = 4;
 
 /// A value's words, off the operand and out of the way of a `&mut Machine`.
 ///
@@ -174,18 +174,16 @@ fn array(machine: &Machine, method: &str, receiver: Operand<'_>) -> Result<Fixed
     }
 }
 
-/// A live `Vector`: its header, its store, and how much of the store is
-/// value rather than spare room.
+/// A live `Vector`: the growable run under its header, and the element that
+/// run is a run of.
 ///
-/// `len` and `capacity` are both element counts, as the header and the
-/// store's own header state them; `stride` is what turns either into words.
-struct Growable {
-    header: u64,
+/// `run.len` and `run.capacity` are both element counts, as the header and
+/// the store's own header state them; `stride` is what turns either into
+/// words.
+struct Items {
+    run: Growable,
     elem: LayoutId,
     stride: u32,
-    len: u32,
-    capacity: u32,
-    store: u64,
 }
 
 /// Reads the receiver of a `Vector` method, refusing one `freeze()` consumed.
@@ -194,11 +192,7 @@ struct Growable {
 /// oracle asks it once, at the top of its `Vector` arm, before it looks at
 /// the method name at all — so a consumed vector answers the same thing to
 /// `length()` as to `push()`, and the message names whichever was called.
-fn vector(
-    machine: &Machine,
-    method: &str,
-    receiver: Operand<'_>,
-) -> Result<Growable, RuntimeError> {
+fn vector(machine: &Machine, method: &str, receiver: Operand<'_>) -> Result<Items, RuntimeError> {
     let Some((Repr::Ref, addr)) = operand::as_word(machine, receiver) else {
         return Err(operand::no_method(machine, receiver, method));
     };
@@ -208,17 +202,20 @@ fn vector(
     let Shape::Vector { elem } = machine.program().layout(machine.object_layout(addr)).shape else {
         return Err(operand::no_method(machine, receiver, method));
     };
-    let store = machine.payload(addr, 1);
+    let store = machine.payload(addr, GROWABLE_STORE);
     if store == 0 {
         return Err(operand::frozen(method));
     }
-    Ok(Growable {
-        header: addr,
+    Ok(Items {
+        run: Growable {
+            owner: addr,
+            store,
+            len: machine.payload(addr, GROWABLE_LEN) as u32,
+            capacity: machine.object_len(store),
+            storage: Storage::Words(elem),
+        },
         elem,
         stride: machine.words_of(elem),
-        len: machine.payload(addr, 0) as u32,
-        capacity: machine.object_len(store),
-        store,
     })
 }
 
@@ -457,7 +454,7 @@ pub(super) fn vector_push(
     operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, args) = operand::method("push", operands, 1)?;
-    let items = vector(machine, "push", receiver)?;
+    let mut items = vector(machine, "push", receiver)?;
     let mut held = Held::new();
     let element = held.take(operand::run_of(
         machine,
@@ -465,39 +462,10 @@ pub(super) fn vector_push(
         items.elem,
         args[0],
     )?);
-    let store = if items.len < items.capacity {
-        items.store
-    } else {
-        grow(machine, &items)?
-    };
-    machine.set_payload_run(store, items.len * items.stride, element);
-    machine.set_payload(items.header, 0, items.len as u64 + 1);
+    runs::growable_ensure(machine, &mut items.run, 1)?;
+    machine.set_payload_run(items.run.store, items.run.len * items.stride, element);
+    runs::growable_commit(machine, &mut items.run, 1);
     Ok(0)
-}
-
-/// A larger store for a vector whose own is full, written into word 1.
-///
-/// The header does not move. That is the whole reason a `Vector` has a store
-/// at all: `is` is defined for it, and mutation through one copy is visible
-/// through every other, so the object a program is holding has to stay where
-/// it is while what is under it is replaced.
-///
-/// The capacity is elements and so is the store's header length; the copy is
-/// the whole payload, which is `len` elements at the element layout's width.
-///
-/// The old store is reachable from the header, which is an operand and
-/// therefore a slot of the frame that called this builtin, so the allocation
-/// below cannot free it. The new one is unrooted for exactly the copy, which
-/// allocates nothing — and the elements are read *after* the allocation, so
-/// nothing is held in a Rust `Vec` across a collection.
-fn grow(machine: &mut Machine, items: &Growable) -> Result<u64, RuntimeError> {
-    let layout = make::elements(machine.program(), items.elem, true)?;
-    let capacity = items.capacity.saturating_mul(2).max(MIN_CAPACITY);
-    let store = machine.new_object(layout, capacity)?;
-    let words = machine.payload_run(items.store, 0, items.len * items.stride);
-    machine.set_payload_run(store, 0, &words);
-    machine.set_payload(items.header, 1, store);
-    Ok(store)
 }
 
 /// `Vector.set(index, value) -> Option<T>`.
@@ -521,14 +489,14 @@ pub(super) fn vector_set(
     let Some(at) = index(machine, "Vector.set", args[0])? else {
         return make::none(machine, result, out);
     };
-    if at >= items.len as usize {
+    if at >= items.run.len as usize {
         return make::none(machine, result, out);
     }
     let at = at as u32 * items.stride;
     // What the index held before, read out before it is overwritten:
     // `v.set(i, x)` answers what `v.get(i)` would have.
-    let was = machine.payload_run(items.store, at, items.stride);
-    machine.set_payload_run(items.store, at, element);
+    let was = machine.payload_run(items.run.store, at, items.stride);
+    machine.set_payload_run(items.run.store, at, element);
     make::some(machine, result, &was, out)
 }
 
@@ -546,17 +514,17 @@ pub(super) fn vector_pop(
 ) -> Result<(), RuntimeError> {
     let (receiver, _) = operand::method("Vector.pop", operands, 0)?;
     let items = vector(machine, "pop", receiver)?;
-    if items.len == 0 {
+    if items.run.len == 0 {
         return make::none(machine, result, out);
     }
-    let at = items.len - 1;
-    let was = machine.payload_run(items.store, at * items.stride, items.stride);
+    let at = items.run.len - 1;
+    let was = machine.payload_run(items.run.store, at * items.stride, items.stride);
     machine.set_payload_run(
-        items.store,
+        items.run.store,
         at * items.stride,
         &vec![0; items.stride as usize],
     );
-    machine.set_payload(items.header, 0, at as u64);
+    machine.set_payload(items.run.owner, 0, at as u64);
     make::some(machine, result, &was, out)
 }
 
@@ -576,24 +544,24 @@ pub(super) fn vector_remove(
     let Some(at) = index(machine, "Vector.remove", args[0])? else {
         return make::none(machine, result, out);
     };
-    if at >= items.len as usize {
+    if at >= items.run.len as usize {
         return make::none(machine, result, out);
     }
     let at = at as u32;
     let stride = items.stride;
-    let was = machine.payload_run(items.store, at * stride, stride);
+    let was = machine.payload_run(items.run.store, at * stride, stride);
     let tail = machine.payload_run(
-        items.store,
+        items.run.store,
         (at + 1) * stride,
-        (items.len - at - 1) * stride,
+        (items.run.len - at - 1) * stride,
     );
-    machine.set_payload_run(items.store, at * stride, &tail);
+    machine.set_payload_run(items.run.store, at * stride, &tail);
     machine.set_payload_run(
-        items.store,
-        (items.len - 1) * stride,
+        items.run.store,
+        (items.run.len - 1) * stride,
         &vec![0; stride as usize],
     );
-    machine.set_payload(items.header, 0, items.len as u64 - 1);
+    machine.set_payload(items.run.owner, 0, items.run.len as u64 - 1);
     make::some(machine, result, &was, out)
 }
 
@@ -607,8 +575,9 @@ pub(super) fn vector_get(
     let (receiver, args) = operand::method("Vector.get", operands, 1)?;
     let items = vector(machine, "get", receiver)?;
     match index(machine, "Vector.get", args[0])? {
-        Some(at) if at < items.len as usize => {
-            let words = machine.payload_run(items.store, at as u32 * items.stride, items.stride);
+        Some(at) if at < items.run.len as usize => {
+            let words =
+                machine.payload_run(items.run.store, at as u32 * items.stride, items.stride);
             make::some(machine, result, &words, out)
         }
         _ => make::none(machine, result, out),
@@ -626,8 +595,8 @@ pub(super) fn vector_contains(
         machine,
         items.elem,
         items.stride,
-        items.store,
-        items.len,
+        items.run.store,
+        items.run.len,
         args[0],
     )?;
     Ok(at.is_some() as u64)
@@ -646,8 +615,8 @@ pub(super) fn vector_index_of(
         machine,
         items.elem,
         items.stride,
-        items.store,
-        items.len,
+        items.run.store,
+        items.run.len,
         args[0],
     )? {
         Some(at) => make::some(machine, result, &[at as u64], out),
@@ -669,9 +638,9 @@ pub(super) fn vector_slice(
     let words = sliced(
         machine,
         "Vector.slice",
-        items.store,
+        items.run.store,
         items.stride,
-        items.len,
+        items.run.len,
         args,
     )?;
     make::array_of(machine, items.elem, &words)
@@ -683,7 +652,7 @@ pub(super) fn vector_length(
     operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("length", operands, 0)?;
-    Ok(vector(machine, "length", receiver)?.len as u64)
+    Ok(vector(machine, "length", receiver)?.run.len as u64)
 }
 
 /// `Vector.toArray() -> Array<T>`, copying the elements.
@@ -693,7 +662,7 @@ pub(super) fn vector_to_array(
 ) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("toArray", operands, 0)?;
     let items = vector(machine, "toArray", receiver)?;
-    let words = machine.payload_run(items.store, 0, items.len * items.stride);
+    let words = machine.payload_run(items.run.store, 0, items.run.len * items.stride);
     make::array_of(machine, items.elem, &words)
 }
 
@@ -744,13 +713,8 @@ pub(super) fn vector_freeze(
     let items = vector(machine, "freeze", receiver)?;
     let array = make::elements(machine.program(), items.elem, false)?;
     // The store is allocated to its capacity and holds its length, so what it
-    // gives up is the room in between — in words, because that is what a free
-    // block is measured in.
-    let spare = (items.capacity - items.len) * items.stride;
-    machine.relabel(items.store, array, items.len, spare);
-    machine.set_payload(items.header, 0, 0);
-    machine.set_payload(items.header, 1, 0);
-    Ok(items.store)
+    // gives up is the room in between, and `growable_finish` says how much.
+    runs::growable_finish(machine, &items.run, array, Validation::None)
 }
 
 #[cfg(test)]
@@ -1163,7 +1127,10 @@ mod tests {
             &[(Repr::Ref, items), (Repr::Int, 7)],
         )
         .unwrap();
-        assert_eq!(machine.object_len(machine.payload(items, 1)), MIN_CAPACITY);
+        assert_eq!(
+            u64::from(machine.object_len(machine.payload(items, 1))),
+            runs::MIN_GROWABLE_ELEMENTS
+        );
         assert_eq!(machine.payload(items, 0), 1);
     }
 
@@ -1394,7 +1361,10 @@ mod tests {
         )
         .unwrap();
         let store = machine.payload(items, 1);
-        assert_eq!(machine.object_len(store), MIN_CAPACITY);
+        assert_eq!(
+            u64::from(machine.object_len(store)),
+            runs::MIN_GROWABLE_ELEMENTS
+        );
 
         let frozen = word(&mut machine, "Vector", "freeze", &[(Repr::Ref, items)]).unwrap();
         assert_eq!(frozen, store);
@@ -1525,7 +1495,7 @@ mod tests {
         );
     }
 
-    /// The one window a builtin has to get rooting wrong: `grow` allocates a
+    /// The one window a builtin has to get rooting wrong: a growth allocates a
     /// larger store while the elements it is about to copy are reachable only
     /// through the header.
     ///

@@ -102,8 +102,8 @@ use crate::vm::cell;
 use crate::vm::mem::Overflow;
 
 use super::{
-    compare, float_arith, int_arith, native, null_object, overflowed, reentrant_lock, wrong_arity,
-    ChildState, Frame, Live, Machine, Outcome, ScopeEntry, BUFFER_LEN, SAFEPOINT_STRIDE,
+    compare, float_arith, int_arith, native, null_object, overflowed, reentrant_lock, runs,
+    wrong_arity, ChildState, Frame, Live, Machine, Outcome, ScopeEntry, SAFEPOINT_STRIDE,
 };
 
 // The opcodes this path runs, by the name ADR 0041 gives them rather than by
@@ -924,7 +924,7 @@ pub(super) fn append_bytes(
     if owner == 0 || src == 0 {
         return Err(refuse(machine, null_object()));
     }
-    let buffer = machine.buffer("appendBytes", owner).map_err(|error| {
+    let mut buffer = machine.buffer("appendBytes", owner).map_err(|error| {
         // `Machine::buffer` reports without a span, because two of its three
         // callers are dispatch arms that have one to add.
         refuse(machine, error)
@@ -973,21 +973,15 @@ pub(super) fn append_bytes(
             }
         }
     }
-    // `checked_add` rather than a plain `+`, even though both operands came out
-    // of `u32`-wide header lengths: a sum that wrapped would under-reserve and
-    // then be written to by a loop sized from the original, which is the one
-    // arithmetic mistake in here that would be a write past an object rather
-    // than a wrong answer.
+    // The ensure's sum is checked rather than a plain `+`, even though both
+    // operands came out of `u32`-wide header lengths: a sum that wrapped would
+    // under-reserve and then be written to by a loop sized from the original,
+    // which is the one arithmetic mistake in here that would be a write past an
+    // object rather than a wrong answer.
     let take = to - from;
-    let Some(needed) = u64::from(buffer.len).checked_add(take as u64) else {
-        return Err(refuse(
-            machine,
-            RuntimeError::new("this run has no memory left"),
-        ));
-    };
-    let store = machine
-        .reserve_bytes(&buffer, needed)
+    runs::growable_ensure(machine, &mut buffer, take as u64)
         .map_err(|error| refuse(machine, error))?;
+    let store = buffer.store;
     // `RunCopy`'s chunk loop, ascending: the source is a `String` or a run
     // under construction and never this buffer's own store, so the two ranges
     // cannot overlap.
@@ -1011,7 +1005,7 @@ pub(super) fn append_bytes(
             words_of_bytes(chunk as i64)
         },
     )?;
-    machine.set_payload(buffer.owner, BUFFER_LEN, needed);
+    runs::growable_commit(machine, &mut buffer, take as u64);
     Ok(())
 }
 
@@ -2179,8 +2173,8 @@ pub(super) fn dispatch<'s, 'a>(
 mod tests {
     use cove_ir::{Convert as ConvertTo, Inst, Len, Shape, Storage};
 
+    use super::super::runs::MIN_GROWABLE_BYTES;
     use super::super::tests::{budget, run_words, Build};
-    use super::super::MIN_BUFFER_BYTES;
     use super::*;
 
     /// Every opcode ADR 0041 defines has an implementation.
@@ -3822,7 +3816,7 @@ mod tests {
         let store = machine.payload(owner, 1);
         assert_ne!(store, 0);
         assert_eq!(machine.object_layout(store), f.program.bytes_layout);
-        assert_eq!(u64::from(machine.object_len(store)), MIN_BUFFER_BYTES);
+        assert_eq!(u64::from(machine.object_len(store)), MIN_GROWABLE_BYTES);
         assert_eq!(machine.payload(owner, 0), 0, "and it holds nothing yet");
 
         let text = machine.run(f.finish, &[owner], &budget()).unwrap()[0];
@@ -3848,7 +3842,7 @@ mod tests {
             error.message
         );
         // And the heap is still a walkable sequence of objects afterwards. A
-        // finish of an empty buffer relabels a store of `MIN_BUFFER_BYTES` down
+        // finish of an empty buffer relabels a store of `MIN_GROWABLE_BYTES` down
         // to nothing, which is the largest `spare` a finish can release relative
         // to what it keeps — so a free block written one word wrong would leave
         // the sweep walking into the middle of an object, and this is where that
@@ -3869,7 +3863,7 @@ mod tests {
     /// object itself moves when it grows, every alias and `var` address to it
     /// goes stale" — so it is asserted directly rather than inferred from the
     /// answer being right. A capacity of zero gives a store of
-    /// `MIN_BUFFER_BYTES`, and 200 appends double it five times, so the store
+    /// `MIN_GROWABLE_BYTES`, and 200 appends double it five times, so the store
     /// address is asserted to have actually moved as well: a test that watched
     /// an owner not move while nothing grew would pass for the wrong reason.
     #[test]
@@ -3896,7 +3890,7 @@ mod tests {
         }
         assert!(
             stores.len() >= 5,
-            "200 appends from a floor of {MIN_BUFFER_BYTES} should have grown \
+            "200 appends from a floor of {MIN_GROWABLE_BYTES} should have grown \
              several times, and grew {} time(s)",
             stores.len() - 1
         );

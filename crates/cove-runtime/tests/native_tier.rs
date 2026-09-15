@@ -2235,8 +2235,8 @@ fn a_field_read_by_a_closures_own_body_agrees_with_the_vm() {
 /// **`Vector.freeze()` from compiled code: the store relabelled in place, and
 /// read back through the array it became.**
 ///
-/// `size` sweeps past `Vector.push`'s own doubling — `MIN_CAPACITY`, then one
-/// past it, then a power of two — so the freeze this drives sometimes finds
+/// `size` sweeps past `Vector.push`'s own doubling — the element floor, then
+/// one past it, then a power of two — so the freeze this drives sometimes finds
 /// spare capacity in the store and sometimes finds none, and `array.get`/
 /// `array.length` read every element back through the layout `relabel` wrote
 /// rather than through the `Vector` header that named it before.
