@@ -31,8 +31,8 @@ use cove_ir::{
 };
 
 use crate::abi::{
-    Entry, GrowableOp, NativeCtx, NativeHelpers, Outcome, Raise, RunOp, HEAP_CHUNK_SHIFT,
-    HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
+    Entry, GrowableOp, IntrinsicProtocol, NativeCtx, NativeHelpers, Outcome, Raise, RunOp,
+    HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
     by_zero_of, leaders, literal_offset, overflow_of, slot_offset, supported, word_finish,
@@ -240,6 +240,7 @@ struct Helpers {
     open: usize,
     close: usize,
     alloc: usize,
+    intrinsic: usize,
     growable: usize,
     run_copy: usize,
     field_load: usize,
@@ -267,6 +268,7 @@ impl Jit {
                 open: helpers.open as usize,
                 close: helpers.close as usize,
                 alloc: helpers.alloc as usize,
+                intrinsic: helpers.intrinsic as usize,
                 growable: helpers.growable as usize,
                 run_copy: helpers.run_copy as usize,
                 field_load: helpers.field_load as usize,
@@ -373,6 +375,7 @@ struct Emit<'a> {
     open: usize,
     close: usize,
     alloc: usize,
+    intrinsic: usize,
     growable: usize,
     run_copy: usize,
     field_load: usize,
@@ -414,6 +417,7 @@ impl<'a> Emit<'a> {
             open: helpers.open,
             close: helpers.close,
             alloc: helpers.alloc,
+            intrinsic: helpers.intrinsic,
             growable: helpers.growable,
             run_copy: helpers.run_copy,
             field_load: helpers.field_load,
@@ -808,6 +812,9 @@ impl<'a> Emit<'a> {
             // The message is a program string, so the `StrId` is what crosses
             // the boundary and `cove-runtime` looks it up.
             Inst::Trap { message } => self.raise(Raise::Trapped, message.0),
+            // `encoded.rs`'s `INTRINSIC_CALL` arm, through the one helper. See
+            // [`Emit::intrinsic_call`].
+            Inst::IntrinsicCall { dst, site, args } => self.intrinsic_call(*dst, *site, *args),
             other => unreachable!("`supported` admitted {other:?}, which is not lowered"),
         }
     }
@@ -1409,6 +1416,57 @@ impl<'a> Emit<'a> {
         self.leave_answered();
         self.bind(on);
         self.frame_live = false;
+    }
+
+    /// One `intrinsic-call`, handed to [`IntrinsicFn`](crate::abi::IntrinsicFn)
+    /// with the protocol its effects ask for.
+    ///
+    /// [`Emit::growable_op`]'s six registers, with the destination, the site and
+    /// the argument list in place of the operation and its pair — and everything
+    /// around the call read off one [`IntrinsicProtocol`], which is the whole of
+    /// this arm's decision:
+    ///
+    /// - a **safepoint** publishes and clears [`WORK`] before the call and drops the
+    ///   frame pointer after it, exactly as [`Emit::growable_op`] does;
+    /// - an intrinsic that **cannot collect** does neither: the helper charges
+    ///   nothing, so the work stays in [`WORK`], and it can neither grow the stack
+    ///   nor commit a chunk, so [`FRAME`] — callee-saved — is still the frame;
+    /// - the outcome is tested only where [`IntrinsicProtocol::tests_outcome`] says
+    ///   an answer other than `Returned` can come back, and an exit that did not
+    ///   publish before the call publishes on the way out, for
+    ///   [`Emit::field_call`]'s reason.
+    fn intrinsic_call(&mut self, dst: Slot, site: cove_ir::SiteId, args: ArgsId) {
+        let protocol = IntrinsicProtocol::of(self.program.intrinsic_site(site).intrinsic);
+        if protocol.safepoint {
+            self.store(CTX, OFF_PENDING_WORK, WORK);
+            self.xor_rr(WORK, WORK);
+        }
+
+        self.mov_rr(RDI, CTX);
+        self.mov_rr(RSI, BASE_BYTES);
+        self.shr_imm8(RSI, 3);
+        self.mov_imm32(RDX, self.pc as i32);
+        self.mov_imm32(RCX, dst as i32);
+        self.mov_imm32(R8, site.0 as i32);
+        self.mov_imm32(R9, args.0 as i32);
+        self.mov_imm64(RAX, self.intrinsic as i64);
+        self.call(RAX);
+
+        if protocol.tests_outcome() {
+            let on = self.label();
+            self.test_rr32(RAX, RAX);
+            self.jcc(CC_E, Target::Label(on));
+            if !protocol.safepoint {
+                // `RAX` holds the outcome `leave_answered` returns: one store of
+                // `WORK` and nothing else.
+                self.store(CTX, OFF_PENDING_WORK, WORK);
+            }
+            self.leave_answered();
+            self.bind(on);
+        }
+        if protocol.safepoint {
+            self.frame_live = false;
+        }
     }
 
     /// `encoded.rs`'s `LEN` arm, whole: the null refusal and the header's low

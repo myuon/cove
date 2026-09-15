@@ -36,7 +36,9 @@ use cove_ir::{
     Arg, ArgsId, ArithOp, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout, LayoutId,
     Len, Num, Program, RefMap, Repr, SiteId, Slot, Storage, StrId, Table, TableId, Validation,
 };
-use cove_native::{Entry, GrowableOp, NativeCtx, NativeHelpers, Opened, Outcome, Raise, RunOp};
+use cove_native::{
+    Entry, GrowableOp, IntrinsicProtocol, NativeCtx, NativeHelpers, Opened, Outcome, Raise, RunOp,
+};
 use cove_native::{HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS};
 
 // --- the safepoint helper -----------------------------------------------------
@@ -1086,7 +1088,7 @@ pub fn program_with_args(function: Function, args: Vec<Arg>) -> Program {
 /// they name — see [`cove_ir::IntrinsicSite`] — so it is the *variant* that
 /// decides whether the tier lowers this call at all, and a case that passes
 /// one no native arm handles should be refused rather than compiled. That is
-/// what `an_intrinsic_call_refuses_the_function` checks with them.
+/// what `an_intrinsic_call_is_handed_over_by_its_effects` checks with them.
 pub fn program_with_intrinsic(
     function: Function,
     receiver: &str,
@@ -3653,53 +3655,138 @@ pub fn a_run_slice_is_admitted_with_four_one_word_operands<A: Arm>() {
     );
 }
 
-/// An `intrinsic-call` of a name no arm lowers refuses the whole function.
-///
-/// The name is the decision — see `subset::method_of` — so this is the one case
-/// that says the decision is really made on it: the same instruction, the same
-/// operands, the same widths, and a different pair of strings.
-pub fn an_intrinsic_call_refuses_the_function<A: Arm>() {
-    let one = |receiver: &str, operation: &str| {
-        program_with_intrinsic(
-            function(
-                vec![Repr::Ref, Repr::Int],
-                INT,
-                vec![
-                    Inst::IntrinsicCall {
-                        dst: 1,
-                        site: SiteId(0),
-                        args: ArgsId(1),
-                    },
-                    Inst::Return { src: 1 },
-                ],
-            ),
-            receiver,
-            operation,
+/// One `intrinsic-call` of `receiver.operation` over two references, answering
+/// into slot 1, and returned.
+pub fn intrinsic_calling(receiver: &str, operation: &str) -> Program {
+    program_with_intrinsic(
+        function(
+            vec![Repr::Ref, Repr::Int, Repr::Ref],
             INT,
-            vec![Arg {
+            vec![
+                Inst::IntrinsicCall {
+                    dst: 1,
+                    site: SiteId(0),
+                    args: ArgsId(1),
+                },
+                Inst::Return { src: 1 },
+            ],
+        ),
+        receiver,
+        operation,
+        INT,
+        vec![
+            Arg {
                 slot: 0,
                 layout: REF,
-            }],
-        )
-    };
-    // The same frame, the same operands and the same answer, with the header
-    // read written as the instruction it is: this is the function the tier
-    // compiles, so what refuses each call below is the name.
-    assert!(compiles::<A>(&program(function(
-        vec![Repr::Ref, Repr::Int],
-        INT,
-        vec![Inst::Len { dst: 1, obj: 0 }, Inst::Return { src: 1 }],
-    ))));
-    for (receiver, operation) in [
-        ("String", "length"),
-        ("String", "trim"),
-        ("String", "toUpper"),
-    ] {
-        assert!(
-            !compiles::<A>(&one(receiver, operation)),
-            "`{receiver}.{operation}` is not lowered, so the function is refused"
-        );
+            },
+            Arg {
+                slot: 2,
+                layout: REF,
+            },
+        ],
+    )
+}
+
+/// One intrinsic of each effect class, as the pair of names that resolves to it:
+/// a plain call (`String.contains`: neither collects nor raises), a raise
+/// (`Any.equals`: a walk too deep to finish) and a safepoint (`String.trim`:
+/// allocates the string it answers).
+pub const INTRINSIC_CLASSES: [(&str, &str); 3] = [
+    ("String", "contains"),
+    ("Any", "equals"),
+    ("String", "trim"),
+];
+
+/// **An `intrinsic-call` is handed over with the protocol its effects ask for.**
+///
+/// One call of each class in [`INTRINSIC_CLASSES`], with the helper double
+/// scripted to answer `Returned` and then `Raised`, and what the arm did around
+/// the call read back from what the double saw and what the entry left:
+///
+/// - the hand-over is the instruction's own numbers — the frame, the pc, the
+///   destination, the site and the argument list;
+/// - the unpaid work is **published before the call only for a safepoint**, and
+///   is charged exactly once either way: on the call for a safepoint, on the exit
+///   for anything else;
+/// - a `Raised` answer **leaves only where the protocol tests the outcome**. A
+///   plain call does not read it, so the function returns — which is the whole
+///   saving, and which the runtime's helper makes unobservable by never answering
+///   anything but `Returned` for such an intrinsic.
+///
+pub fn an_intrinsic_call_is_handed_over_by_its_effects<A: Arm>() {
+    let base = 3u64;
+    for (receiver, operation) in INTRINSIC_CLASSES {
+        let intrinsic = cove_ir::Intrinsic::from_names(receiver, operation)
+            .unwrap_or_else(|| panic!("`{receiver}.{operation}` is an intrinsic"));
+        let program = intrinsic_calling(receiver, operation);
+        let protocol = IntrinsicProtocol::of(intrinsic);
+        for scripted in [Outcome::Returned, Outcome::Raised] {
+            forget_mediated();
+            mediated_answers(&[scripted]);
+            let mut words = vec![0u64; 8];
+            words[base as usize + 1] = 0xfeed;
+            let answer = run::<A>(&program, &mut words, base);
+            let what = format!("`{intrinsic}` answering {scripted:?}");
+
+            let handed = mediated();
+            assert_eq!(handed.len(), 1, "{what}: one hand-over");
+            let handed = handed[0];
+            assert_eq!(
+                (handed.base, handed.pc, handed.dst, handed.site, handed.args),
+                (base, 0, 1, 0, 1),
+                "{what}: the instruction's own operands"
+            );
+            // The block is the call and the return: two instructions.
+            let charge = 2;
+            assert_eq!(
+                handed.work,
+                if protocol.safepoint { charge } else { 0 },
+                "{what}: the work is published before a safepoint and only then"
+            );
+            assert_eq!(
+                answer.pending_work,
+                if protocol.safepoint { 0 } else { charge },
+                "{what}: and charged once, on the exit, where it was not"
+            );
+
+            let leaves = scripted == Outcome::Raised && protocol.tests_outcome();
+            assert_eq!(
+                answer.outcome,
+                if leaves {
+                    Outcome::Raised
+                } else {
+                    Outcome::Returned
+                },
+                "{what}: the outcome is read where the protocol says it can differ"
+            );
+            if !leaves {
+                // The double writes `site * 1000 + dst` when it answers
+                // `Returned`, and writes nothing when it does not.
+                let expected = if scripted == Outcome::Returned {
+                    1
+                } else {
+                    0xfeed
+                };
+                assert_eq!(answer.returned[0], expected, "{what}: the answer");
+            }
+        }
     }
+}
+
+/// An `intrinsic-call` with a site the program does not have is refused, and so
+/// is one whose argument list is not there: bounded like any other operand.
+pub fn an_intrinsic_call_out_of_bounds_refuses_the_function<A: Arm>() {
+    let (receiver, operation) = INTRINSIC_CLASSES[0];
+    assert!(compiles::<A>(&intrinsic_calling(receiver, operation)));
+    let mut no_site = intrinsic_calling(receiver, operation);
+    no_site.intrinsic_sites.clear();
+    assert!(!compiles::<A>(&no_site), "a site the program does not have");
+    let mut no_args = intrinsic_calling(receiver, operation);
+    no_args.args.truncate(1);
+    assert!(
+        !compiles::<A>(&no_args),
+        "an argument list the program does not have"
+    );
 }
 
 // --- allocation ---------------------------------------------------------------

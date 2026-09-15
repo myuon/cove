@@ -29,10 +29,10 @@
 //! Nothing here is on the dispatch loop. What a run that did not ask pays is:
 //!
 //! - one `Option` test at the top of `Machine::call_intrinsic`, which is already a
-//!   Rust call that copies every operand word into a buffer and dispatches on the
-//!   intrinsic — the same shape `Machine::tiered` puts at a `call`;
-//! - one `Option` test in the native `intrinsic` helper, which is only ever the
-//!   *cold* half of a fast path;
+//!   Rust call that dispatches on the intrinsic — the same shape `Machine::tiered`
+//!   puts at a `call`;
+//! - one `Option` test in the native `intrinsic` helper, which is already a call
+//!   out of compiled code into that same function;
 //! - and nothing at all in the other eight helpers: those are counted by a
 //!   **second helper table**, [`helpers_counting`], which a run that wants the
 //!   counts compiles against and a run that does not never binds. That is
@@ -119,8 +119,7 @@ pub struct IntrinsicCalls {
     pub sites: u64,
     /// Calls the encoded dispatch loop made.
     pub encoded: u64,
-    /// Calls compiled code made through the `intrinsic` helper — the cold path of
-    /// an emitted fast path. The fast path itself is not here.
+    /// Calls compiled code made through the `intrinsic` helper.
     pub native: u64,
 }
 
@@ -210,9 +209,9 @@ impl Emitted {
 /// # Free when it is off
 ///
 /// Nothing is on the dispatch loop. A run that did not ask pays one `Option` test
-/// at the top of `Machine::call_intrinsic` — already a Rust call that copies every
-/// operand into a buffer — and one in the native `intrinsic` helper, which is only
-/// ever a fast path's cold half. The per-helper counts cost such a run nothing at
+/// at the top of `Machine::call_intrinsic` — already a Rust call that dispatches on
+/// the intrinsic — and one in the native `intrinsic` helper, which is already a call
+/// out of compiled code into that function. The per-helper counts cost such a run nothing at
 /// all, because they are a second helper table,
 /// [`native_helpers_counting`](crate::native_helpers_counting), which only
 /// [`compile_native_counting`](crate::compile_native_counting) binds:

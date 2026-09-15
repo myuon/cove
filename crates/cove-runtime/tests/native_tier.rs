@@ -261,15 +261,18 @@ export fn threads(n: Int) -> Int {
   total * 1000 + seen
 }
 
-/// The allocation a collection is forced with. `String.slice` is outside anything
-/// the template compiler lowers, so this runs on the encoded tier in every case.
-/// It needs no marker of its own for that reason.
+/// The allocation a collection is forced with, on the encoded tier in every case.
+///
+/// It needed no marker while `String.slice` was outside anything the template
+/// compiler lowers. Compiled code calls intrinsics now (#378, P5-6), so it carries
+/// the marker every refused fixture in this file carries.
 ///
 /// It was `sliceBytes` until ADR 0058 moved that into the standard library over
 /// a byte run slice, which both code generators lower. `slice` counts characters
 /// rather than bytes, and every character of the text it is handed is ASCII, so
 /// the answer is the same number.
 export fn allocates(s: String, n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
   s.slice(held(0), n).byteLength()
 }
 
@@ -873,6 +876,61 @@ export fn countsTheBoundary(s: String, n: Int) -> Int {
   }
   var v = Vector.of(7)
   measuresAndPushes(s, v, n) * 1000 + cut
+}
+
+/// `String.contains` in a compiled loop: an intrinsic whose declared effects
+/// neither allocate nor raise, so the call is a plain one — no work published,
+/// no program counter, no outcome tested, and the frame pointer kept across it.
+/// `counts(0)` for the reason it is in every fixture above.
+export fn containsIn(s: String, n: Int) -> Int {
+  var found = counts(0)
+  var at = 0
+  while at < n {
+    if s.contains(\"needle\") {
+      found = found + 1
+    }
+    at = at + 1
+  }
+  found * 1000 + s.byteLength()
+}
+
+/// A refused caller, so the loop is reached across the boundary.
+export fn callsContainsIn(s: String, n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  containsIn(s, n)
+}
+
+/// `String.split` over a separator the caller chose: an intrinsic that may raise,
+/// because an empty separator is the language's own refusal.
+export fn splitsOn(s: String, on: String) -> Int {
+  s.split(on).length() * 1000 + counts(0) + s.byteLength()
+}
+
+/// A refused caller, so the refusal is raised under compiled code.
+export fn callsSplitsOn(s: String, on: String) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  splitsOn(s, on)
+}
+
+/// `String.trim` in a compiled loop, with an `Array` and the receiver live in the
+/// compiled frame across every call: an intrinsic that allocates, so the call is
+/// a safepoint and may collect.
+export fn trimsAndKeeps(s: String, n: Int) -> Int {
+  let kept = [n, n + 1, n + 2]
+  var total = counts(0)
+  var at = 0
+  while at < n {
+    total = total + s.trim().byteLength()
+    at = at + 1
+  }
+  total * 1000 + kept.length() + s.byteLength()
+}
+
+/// A refused caller holding a reference of its own across the calls.
+export fn callsTrimsAndKeeps(s: String, n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  let also = [n, n]
+  trimsAndKeeps(s, n) + also.length()
 }
 ";
 
@@ -1653,10 +1711,12 @@ fn every_address_family_resolves_on_a_later_stack_segment() {
 /// exactly those two opcodes, absent for every other, and names the thing the
 /// source actually wrote.
 ///
-/// # The allocation table is expected to be *empty*, and that is the assertion
+/// # Both tables are expected to be *empty*, and that is the assertion
 ///
-/// `Inst::Alloc` is lowered, so no function can be refused at one and the
-/// allocation half of the census has no rows. Asserting that rather than deleting
+/// `Inst::Alloc` is lowered, and so is `Inst::IntrinsicCall` for every intrinsic
+/// (#378, P5-6), so no function can be refused at either
+/// and both halves of the census have no rows. What follows is the allocation
+/// half's argument, and the intrinsic half's is the same. Asserting that rather than deleting
 /// the arm is deliberate in both directions: the arm has to stay, because
 /// `Refused::blocked` is a fact about a *program* and an operand bound could still
 /// refuse an allocation; and a row appearing again is news, because it would mean
@@ -1699,7 +1759,11 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
             ),
         }
     }
-    assert!(builtins > 0, "the builtin table has rows");
+    assert_eq!(
+        builtins, 0,
+        "`Inst::IntrinsicCall` is lowered for every intrinsic, so nothing is refused at \
+         one — see this case's own note before changing this number"
+    );
     assert_eq!(
         allocations, 0,
         "`Inst::Alloc` is lowered, so nothing is refused at one — see this case's \
@@ -1707,7 +1771,7 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
     );
 
     // And the one the fixture's own source writes, by name: `allocates` calls
-    // `s.slice(..)`, which nothing lowers.
+    // `s.slice(..)`, which compiled code calls now, so it is refused for its marker.
     let named = |of: &str| {
         let full = format!("{MODULE}.{of}");
         native
@@ -1718,14 +1782,162 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
             .blocked
             .clone()
     };
-    assert_eq!(
-        named("allocates"),
-        Some(Blocked::Intrinsic("String.slice".to_string()))
-    );
+    assert_eq!(named("allocates"), None);
     // `heapsThrough` constructs a `Shared(a)`, whose allocation now lowers — so it
     // is refused for the `store-field` that fills the object in, and an opcode that
     // names one operation already carries no second key.
     assert_eq!(named("heapsThrough"), None);
+}
+
+/// **An intrinsic that neither allocates nor raises is a plain call from compiled
+/// code, and answers what the VM answers.**
+///
+/// `String.contains` carries neither `MAY_ALLOCATE`/`MAY_COLLECT` nor
+/// `MAY_RAISE`, so both code generators emit the call with nothing around it —
+/// see `cove_native::IntrinsicProtocol`. Under `debug_assertions`, which this
+/// suite runs with, the runtime's helper also asserts the promise that makes that
+/// sound: the stack did not move and the heap did not collect.
+#[test]
+fn a_plain_intrinsic_call_from_compiled_code_agrees_with_the_vm() {
+    on_each_tier(&["containsIn"], &["callsContainsIn"]);
+    for text in ["hay needle hay", "haystack", ""] {
+        let both = both("callsContainsIn", vec![Value::string(text), Value::int(7)]);
+        assert!(both.vm.is_ok(), "`{text}`: {:?}", both.vm);
+        assert_eq!(both.native, both.vm, "`{text}`: compiled code agrees");
+        assert!(both.tiers.vm_to_native >= 1, "`{text}`: {:?}", both.tiers);
+    }
+}
+
+/// **An intrinsic that raises from compiled code reports the VM's message, span
+/// and outcome.**
+///
+/// `String.split` refuses an empty separator. The call carries `MAY_RAISE`, so
+/// the helper synchronises the program counter and compiled code tests the
+/// outcome and leaves with it, publishing the unpaid work on the way out. What is
+/// compared is the whole error as a caller sees it — the sentence, the primary
+/// span, the library sites and the chain — and a separator that is not empty
+/// answers alike too.
+#[test]
+fn a_raising_intrinsic_call_from_compiled_code_is_the_vm_s_refusal() {
+    on_each_tier(&["splitsOn"], &["callsSplitsOn"]);
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+    let said = |answer: Result<Value, cove_runtime::RuntimeError>| match answer {
+        Ok(value) => Ok(value.to_string()),
+        Err(error) => Err((
+            error.message.clone(),
+            error.span,
+            error.library_sites().to_vec(),
+            error.chain().to_vec(),
+        )),
+    };
+    for on in ["", ","] {
+        let args = vec![Value::string("a,b,,c"), Value::string(on)];
+        let vm =
+            said(Vm::new(&runtime, &hosts, &lowered).invoke(MODULE, "callsSplitsOn", args.clone()));
+        let mut with = Vm::with_native(&runtime, &hosts, &lowered, &native);
+        let compiled = said(with.invoke(MODULE, "callsSplitsOn", args));
+        assert!(
+            with.tiers().vm_to_native >= 1,
+            "separator `{on}`: the call was made under compiled code: {:?}",
+            with.tiers()
+        );
+        assert_eq!(
+            compiled, vm,
+            "separator `{on}`: compiled code answers what the VM does"
+        );
+        if on.is_empty() {
+            let (message, span, _, _) = vm.expect_err("an empty separator is refused");
+            let span = span.expect("the refusal carries a span");
+            let text = &sources.get(span.file).text[span.start as usize..span.end as usize];
+            assert_eq!(text, "s.split(on)", "`{message}` names the call");
+        }
+    }
+}
+
+/// **An intrinsic that allocates from compiled code collects, and keeps what the
+/// compiled frame still holds.**
+///
+/// `String.trim` allocates the string it answers, so the call is a safepoint: the
+/// work is published before it, the helper takes ADR 0040's three steps and the
+/// allocation may collect with `trimsAndKeeps`' `kept` array and receiver live in
+/// the compiled frame — and `callsTrimsAndKeeps`' own array live in the encoded
+/// one below it. Both are read back after the loop, so a walk that missed either
+/// sweeps an object that is then handed out again, and the answer is a wrong
+/// number rather than a crash.
+///
+/// A session over a **small heap**, for
+/// `an_allocation_from_compiled_code_collects_and_keeps_what_is_live`' reason: a
+/// collection has to actually happen, and the loop runs until one has.
+#[test]
+fn a_collecting_intrinsic_call_from_compiled_code_keeps_what_is_live() {
+    const SMALL_HEAP_WORDS: usize = 1 << 13;
+    const N: i64 = 9;
+    let text = "   a string with room around it, long enough to be several words   ";
+    on_each_tier(&["trimsAndKeeps"], &["callsTrimsAndKeeps"]);
+
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+
+    let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, SMALL_HEAP_WORDS);
+    let (calls, crossings) = {
+        let mut session = vm
+            .native_session(
+                MODULE,
+                "callsTrimsAndKeeps",
+                vec![Value::string(text), Value::int(N)],
+            )
+            .expect("the session opens");
+        let words = session.arguments().to_vec();
+        let expected = session
+            .call(&cove_runtime::NothingCompiled, &words)
+            .expect("the vm answers");
+        let trimmed = text.trim().len() as u64;
+        assert_eq!(
+            expected,
+            vec![trimmed * N as u64 * 1000 + 3 + text.len() as u64 + 2],
+            "the fixture answers the trimmed lengths, two array lengths and a byte length"
+        );
+
+        let before = session.collections();
+        let mut calls = 0;
+        while session.collections() == before && calls < 20_000 {
+            let answered = session
+                .call(&native, &words)
+                .expect("the native tier answers");
+            assert_eq!(answered, expected, "call {calls} answered wrongly");
+            calls += 1;
+        }
+        assert!(
+            session.collections() > before,
+            "no collection ran in {calls} call(s), so this case proved nothing"
+        );
+        (calls, session.tiers().vm_to_native)
+    };
+    assert!(
+        crossings >= calls,
+        "every call crossed into machine code: {crossings} of {calls}"
+    );
 }
 
 /// **`String.byteLength()` in machine code, over a byte count and not a

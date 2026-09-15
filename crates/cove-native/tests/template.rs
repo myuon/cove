@@ -235,8 +235,13 @@ fn a_freeze_refuses_a_null_receiver() {
 }
 
 #[test]
-fn an_intrinsic_call_refuses_the_function() {
-    suite::an_intrinsic_call_refuses_the_function::<Template>();
+fn an_intrinsic_call_is_handed_over_by_its_effects() {
+    suite::an_intrinsic_call_is_handed_over_by_its_effects::<Template>();
+}
+
+#[test]
+fn an_intrinsic_call_out_of_bounds_refuses_the_function() {
+    suite::an_intrinsic_call_out_of_bounds_refuses_the_function::<Template>();
 }
 
 #[test]

@@ -886,9 +886,30 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             len,
             storage: Storage::Words(elem),
         } => elem.index() < program.layouts.len() && slot(*owner) && slot(*len),
-        // An intrinsic call is lowered by neither arm: it falls to
-        // `Reason::Instruction` with every other unlowered instruction.
-        Inst::IntrinsicCall { .. } => return Some(Reason::Instruction),
+        // `encoded.rs`'s `INTRINSIC_CALL` arm, which is `Machine::call_intrinsic`
+        // whole, handed over through the one helper with the protocol its
+        // effects ask for — see [`IntrinsicFn`](crate::abi::IntrinsicFn). Bounded
+        // like any other operand: a site and an argument list the program has,
+        // and a destination slot.
+        //
+        // **Every intrinsic is admitted, and that is a measurement rather than a
+        // default** (#378, Q5.5): a helper call is a native-to-runtime crossing, so
+        // admission was to be kept only where the function around the call is
+        // faster for it. Admitting none against admitting all, one binary, twelve
+        // interleaved rounds: covefmt `whole` -7.3%, cq revenue-summary -10.9%,
+        // `benches/keyed` -14.3% (`keyed_of5` -56%), `benches/seqsearch` -6.4%
+        // (the wide `Any.equals` rows -8% to -22%), and no row of those or of
+        // `benches/builtincall` and `benches/bytescan` slower beyond the spread.
+        // Native-to-VM crossings fell on every workload that had them (covefmt
+        // 302,791 -> 144,736, cq 3,100,001 -> 1,300,000, keyed 100,016 -> 0), so no
+        // narrower rule — only intrinsics that cannot collect, or a list — had a
+        // loss to remove. A future intrinsic that measures slower compiled is
+        // refused here, by name.
+        Inst::IntrinsicCall { dst, site, args } => {
+            site.index() < program.intrinsic_sites.len()
+                && args.index() < program.args.len()
+                && slot(*dst)
+        }
         // `encoded.rs`'s `ALLOC_FIXED | ALLOC_IMM | ALLOC_SLOT` arm, which is
         // `Machine::allocate` and a store of the address it answered. The helper
         // is handed the layout and the length whole — see

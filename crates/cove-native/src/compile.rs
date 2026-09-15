@@ -48,8 +48,8 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module, ModuleError};
 
 use crate::abi::{
-    Entry, GrowableOp, NativeCtx, NativeHelpers, Outcome, Raise, RunOp, HEAP_CHUNK_SHIFT,
-    HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
+    Entry, GrowableOp, IntrinsicProtocol, NativeCtx, NativeHelpers, Outcome, Raise, RunOp,
+    HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
     by_zero_of, leaders, literal_offset, overflow_of, slot_offset, supported, word_finish,
@@ -90,6 +90,10 @@ const FIELD_STORE: &str = "cove_native_field_store";
 /// The name the string-order helper is imported under. [`SAFEPOINT`]'s note
 /// applies.
 const ORDER_STR: &str = "cove_native_order_str";
+
+/// The name the intrinsic helper is imported under. [`SAFEPOINT`]'s note
+/// applies.
+const INTRINSIC: &str = "cove_native_intrinsic";
 
 // The `NativeCtx` field offsets, read from the declaration rather than
 // written out. `offset_of!` is a const expression, so the numbers compiled
@@ -150,6 +154,7 @@ pub struct Jit {
     safepoint: FuncId,
     call: FuncId,
     alloc: FuncId,
+    intrinsic: FuncId,
     growable: FuncId,
     run_copy: FuncId,
     field_load: FuncId,
@@ -177,6 +182,7 @@ impl Jit {
         builder.symbol(SAFEPOINT, helpers.safepoint as usize as *const u8);
         builder.symbol(CALL, helpers.call as usize as *const u8);
         builder.symbol(ALLOC, helpers.alloc as usize as *const u8);
+        builder.symbol(INTRINSIC, helpers.intrinsic as usize as *const u8);
         builder.symbol(GROWABLE, helpers.growable as usize as *const u8);
         builder.symbol(RUN_COPY, helpers.run_copy as usize as *const u8);
         builder.symbol(FIELD_LOAD, helpers.field_load as usize as *const u8);
@@ -201,9 +207,10 @@ impl Jit {
         let call = module.declare_function(CALL, Linkage::Import, &signature)?;
         let signature = alloc_signature(&module);
         let alloc = module.declare_function(ALLOC, Linkage::Import, &signature)?;
+        let signature = intrinsic_signature(&module);
+        let intrinsic = module.declare_function(INTRINSIC, Linkage::Import, &signature)?;
         // `GrowableFn` is one pointer, one `I64` and four `I32`s — `IntrinsicFn`'s
-        // shape, which no lowering calls any more since ADR 0058 moved the last
-        // builtin this arm lowered into the standard library.
+        // shape.
         let signature = intrinsic_signature(&module);
         let growable = module.declare_function(GROWABLE, Linkage::Import, &signature)?;
         // And again: `RunCopyFn` is the same six.
@@ -221,6 +228,7 @@ impl Jit {
             safepoint,
             call,
             alloc,
+            intrinsic,
             growable,
             run_copy,
             field_load,
@@ -261,6 +269,9 @@ impl Jit {
                 .declare_func_in_func(self.safepoint, builder.func);
             let call = self.module.declare_func_in_func(self.call, builder.func);
             let alloc = self.module.declare_func_in_func(self.alloc, builder.func);
+            let intrinsic = self
+                .module
+                .declare_func_in_func(self.intrinsic, builder.func);
             let growable = self
                 .module
                 .declare_func_in_func(self.growable, builder.func);
@@ -284,6 +295,7 @@ impl Jit {
                     safepoint,
                     call,
                     alloc,
+                    intrinsic,
                     growable,
                     run_copy,
                     field_load,
@@ -482,6 +494,7 @@ struct Bound {
     safepoint: FuncRef,
     call: FuncRef,
     alloc: FuncRef,
+    intrinsic: FuncRef,
     growable: FuncRef,
     run_copy: FuncRef,
     field_load: FuncRef,
@@ -1054,6 +1067,12 @@ impl<'a, 'f> Lower<'a, 'f> {
             Inst::Trap { message } => {
                 self.raise(Raise::Trapped, message.0);
                 true
+            }
+            // `encoded.rs`'s `INTRINSIC_CALL` arm, through the one helper. See
+            // [`Lower::intrinsic_call`].
+            Inst::IntrinsicCall { dst, site, args } => {
+                self.intrinsic_call(*dst, *site, *args);
+                false
             }
             other => unreachable!("`supported` admitted {other:?}, which is not lowered"),
         }
@@ -1675,6 +1694,75 @@ impl<'a, 'f> Lower<'a, 'f> {
 
         self.b.switch_to_block(on);
         self.forget();
+    }
+
+    /// One `intrinsic-call`, handed to [`crate::abi::IntrinsicFn`] with the
+    /// protocol its effects ask for.
+    ///
+    /// [`Lower::growable_op`]'s shape, with the destination, the site and the
+    /// argument list in place of the operation and its pair — and everything
+    /// around the call read off one [`IntrinsicProtocol`], which is the whole of
+    /// this arm's decision and the template arm's `Emit::intrinsic_call` reads the
+    /// same one:
+    ///
+    /// - a **safepoint** publishes and clears the work before the call and forgets
+    ///   every cached pointer after it, exactly as [`Lower::growable_op`] does;
+    /// - an intrinsic that **cannot collect** does neither: the helper charges
+    ///   nothing, so the work stays in its variable, and it can neither grow the
+    ///   stack nor commit a chunk, so the frame pointer derived before the call is
+    ///   still the frame's;
+    /// - the outcome is tested only where [`IntrinsicProtocol::tests_outcome`] says
+    ///   an answer other than `Returned` can come back, and an exit that did not
+    ///   publish before the call publishes on the way out, for
+    ///   [`Lower::field_call`]'s reason.
+    fn intrinsic_call(&mut self, dst: Slot, site: cove_ir::SiteId, args: cove_ir::ArgsId) {
+        let protocol = IntrinsicProtocol::of(self.program.intrinsic_site(site).intrinsic);
+        if protocol.safepoint {
+            let work = self.b.use_var(self.work);
+            self.store_ctx(OFF_PENDING_WORK, work);
+            let zero = self.b.ins().iconst(types::I64, 0);
+            self.b.def_var(self.work, zero);
+        }
+
+        let at = self.b.ins().iconst(types::I32, self.pc as i64);
+        let into = self.b.ins().iconst(types::I32, i64::from(dst));
+        let which = self.b.ins().iconst(types::I32, i64::from(site.0));
+        let list = self.b.ins().iconst(types::I32, i64::from(args.0));
+        let call = self.b.ins().call(
+            self.bound.intrinsic,
+            &[self.ctx, self.base, at, into, which, list],
+        );
+        let outcome = self.b.inst_results(call)[0];
+        if protocol.safepoint {
+            self.forget();
+        }
+
+        if protocol.tests_outcome() {
+            let left = self.b.create_block();
+            let on = self.b.create_block();
+            let returned =
+                self.b
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, outcome, i64::from(Outcome::Returned.abi()));
+            self.b.ins().brif(returned, on, &[], left, &[]);
+
+            self.b.switch_to_block(left);
+            if !protocol.safepoint {
+                let work = self.b.use_var(self.work);
+                self.store_ctx(OFF_PENDING_WORK, work);
+            }
+            // Not `leave`: what this returns is the helper's outcome and not one
+            // this function chose, and every field that outcome needs the helper
+            // has written.
+            self.b.ins().return_(&[outcome]);
+
+            self.b.switch_to_block(on);
+            // The only predecessor is the call's block, so a pointer cached
+            // before a call that cannot collect still dominates this one.
+            if protocol.safepoint {
+                self.forget();
+            }
+        }
     }
 
     /// `Memory::set_payload`: payload word `at` of the object at `addr`, written.
