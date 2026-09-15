@@ -56,10 +56,8 @@ type Held<'w> = (LayoutId, &'w [u64]);
 
 /// `a == b`, as the `Bool` word `0` or `1`.
 pub(super) fn equals(machine: &Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let [a, b] = operands else {
-        return Err(operand::operands("Any.equals", 2, operands.len()));
-    };
-    Ok(same(machine, *a, *b)? as u64)
+    debug_assert_eq!(operands.len(), 2, "`Any.equals` was verified to take two");
+    Ok(same(machine, operands[0], operands[1])? as u64)
 }
 
 /// Whether two values of `layout` are equal, given their words.
@@ -902,16 +900,5 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.message, "this value nests too deeply to compare");
-    }
-
-    #[test]
-    fn equals_takes_two_operands() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let error = run(&mut machine, "Any", "equals", &[(Repr::Int, 1)]).unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Any.equals` takes 2 operand(s), but 1 were given"
-        );
     }
 }

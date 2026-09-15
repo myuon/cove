@@ -17,12 +17,15 @@
 //! reference, an object the collector already reclaimed, a family the program
 //! does not declare — and the doc comment says so.
 //!
-//! Almost none of them is reachable from a checked program. `cove-sema` has
-//! already settled every receiver's type, every argument's type and every
-//! call's arity, so an arity or type refusal here is a lowering bug rather
-//! than a program's mistake. They are written out anyway, in the oracle's
-//! words, because "should never" is not "cannot" and a silent wrong answer
-//! costs more than the `match` arm that reports one.
+//! # The operands are not re-checked
+//!
+//! `cove-sema` settled every receiver's type, every argument's type and every
+//! call's arity, and `cove_ir::verify` holds every `CallBuiltin` to its
+//! intrinsic's [`cove_ir::Signature`] — the count, each operand's layout and
+//! the answer's — before anything runs (#378, P5-3). So nothing here refuses
+//! an operand for its count or its type any more: the readers below
+//! `debug_assert!` what the verifier established, which the `checked` profile
+//! every test and every measurement runs under keeps on, and read the word.
 
 use cove_ir::{LayoutId, Repr, Shape};
 
@@ -88,22 +91,19 @@ pub(super) fn as_word(machine: &Machine, operand: Operand<'_>) -> Option<Word> {
 
 /// The receiver and the arguments of a method call.
 ///
-/// A method's operands are its receiver followed by its arguments, so the
-/// count this holds them to is the *argument* count — which is the count the
-/// schema declares and the count the oracle's message names.
+/// A method's operands are its receiver followed by its arguments. The count
+/// is the verifier's to hold, and `shown` is only what the assertion names.
 pub(super) fn method<'w, 'o>(
     shown: &str,
     operands: &'o [Operand<'w>],
     arguments: usize,
-) -> Result<(Operand<'w>, &'o [Operand<'w>]), RuntimeError> {
-    match operands.split_first() {
-        Some((receiver, rest)) if rest.len() == arguments => Ok((*receiver, rest)),
-        Some((_, rest)) => Err(arity(shown, arguments, rest.len())),
-        // A method call with no receiver at all is a lowering that built the
-        // argument list wrongly, and there is nothing to report but that no
-        // argument arrived.
-        None => Err(arity(shown, arguments, 0)),
-    }
+) -> (Operand<'w>, &'o [Operand<'w>]) {
+    debug_assert_eq!(
+        operands.len(),
+        arguments + 1,
+        "`{shown}` was verified to take a receiver and {arguments} argument(s)"
+    );
+    (operands[0], &operands[1..])
 }
 
 /// The arguments of an associated function, which is called on a name rather
@@ -112,105 +112,49 @@ pub(super) fn free<'w, 'o>(
     shown: &str,
     operands: &'o [Operand<'w>],
     arguments: usize,
-) -> Result<&'o [Operand<'w>], RuntimeError> {
-    if operands.len() != arguments {
-        return Err(arity(shown, arguments, operands.len()));
-    }
-    Ok(operands)
+) -> &'o [Operand<'w>] {
+    debug_assert_eq!(
+        operands.len(),
+        arguments,
+        "`{shown}` was verified to take {arguments} argument(s)"
+    );
+    operands
 }
 
 /// The `Int` in `operand`.
-pub(super) fn int(
-    machine: &Machine,
-    method: &str,
-    parameter: &str,
-    operand: Operand<'_>,
-) -> Result<i64, RuntimeError> {
-    match as_word(machine, operand) {
-        Some((Repr::Int, word)) => Ok(word as i64),
-        _ => Err(type_error(machine, method, parameter, "Int", operand)),
-    }
+pub(super) fn int(machine: &Machine, operand: Operand<'_>) -> i64 {
+    debug_assert!(
+        matches!(as_word(machine, operand), Some((Repr::Int, _))),
+        "an operand verified to be an `Int`"
+    );
+    operand.word() as i64
 }
 
 /// The `Float` in `operand`.
-pub(super) fn float(
-    machine: &Machine,
-    method: &str,
-    parameter: &str,
-    operand: Operand<'_>,
-) -> Result<f64, RuntimeError> {
-    match as_word(machine, operand) {
-        Some((Repr::Float, word)) => Ok(f64::from_bits(word)),
-        _ => Err(type_error(machine, method, parameter, "Float", operand)),
-    }
+pub(super) fn float(machine: &Machine, operand: Operand<'_>) -> f64 {
+    debug_assert!(
+        matches!(as_word(machine, operand), Some((Repr::Float, _))),
+        "an operand verified to be a `Float`"
+    );
+    f64::from_bits(operand.word())
+}
+
+/// The address of the `String` in `operand`.
+pub(super) fn string(machine: &Machine, operand: Operand<'_>) -> u64 {
+    let addr = operand.word();
+    debug_assert!(
+        super::is_string(machine, addr),
+        "an operand verified to be a `String`"
+    );
+    addr
 }
 
 /// The text of the `String` in `operand`.
-pub(super) fn text(
-    machine: &Machine,
-    method: &str,
-    parameter: &str,
-    operand: Operand<'_>,
-) -> Result<String, RuntimeError> {
-    match as_word(machine, operand) {
-        Some((Repr::Ref, addr)) if super::is_string(machine, addr) => {
-            super::string_of(machine, addr)
-        }
-        _ => Err(type_error(machine, method, parameter, "String", operand)),
-    }
-}
-
-/// `` `{method}` takes {expected} argument(s), but {found} were given ``.
-pub(super) fn arity(method: &str, expected: usize, found: usize) -> RuntimeError {
-    RuntimeError::new(format!(
-        "`{method}` takes {expected} argument(s), but {found} were given"
-    ))
-}
-
-/// The same, for the three builtins that have no receiver and no schema —
-/// `String.text`, `concat` and `interpolate` are the machine's own, and what
-/// they take is operands.
-pub(super) fn operands(shown: &str, wanted: usize, given: usize) -> RuntimeError {
-    RuntimeError::new(format!(
-        "`{shown}` takes {wanted} operand(s), but {given} were given"
-    ))
-}
-
-/// `` `{method}` expects `{expected}` for `{parameter}`, but found `{found}` ``.
-pub(super) fn type_error(
-    machine: &Machine,
-    method: &str,
-    parameter: &str,
-    expected: &str,
-    found: Operand<'_>,
-) -> RuntimeError {
-    RuntimeError::new(format!(
-        "`{method}` expects `{expected}` for `{parameter}`, but found `{}`",
-        name(machine, found)
-    ))
-}
-
-/// `` `{type}` has no method `{method}` ``.
 ///
-/// What a receiver of the wrong family is answered with. The oracle reaches
-/// this by falling off the end of its `match` on the receiver's
-/// representation; this reaches it by finding a shape the operation is not
-/// for, which is the same question asked of a header instead of an `enum`.
-pub(super) fn no_method(machine: &Machine, receiver: Operand<'_>, method: &str) -> RuntimeError {
-    RuntimeError::new(format!(
-        "`{}` has no method `{method}`",
-        name(machine, receiver)
-    ))
-}
-
-/// What the language calls the value in `operand`.
-///
-/// Asked of the layout rather than of a `Repr`, which is what the operand
-/// carries now and what makes the answer right for an inline value: a
-/// `Point` that a refusal used to call an `Int` — its first word — is called
-/// a `Point`.
-pub(super) fn name(machine: &Machine, operand: Operand<'_>) -> String {
-    layout_name(machine, operand.layout, operand.word(), 0)
+/// The `Err` is a string object whose bytes are not UTF-8, which nothing that
+/// builds one can make.
+pub(super) fn text(machine: &Machine, operand: Operand<'_>) -> Result<String, RuntimeError> {
+    super::string_of(machine, string(machine, operand))
 }
 
 /// What the language calls the value in `word`, read as `repr`.

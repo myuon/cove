@@ -204,6 +204,107 @@ impl Intrinsic {
         })
     }
 
+    /// What the intrinsic is about, which is what the verifier holds its
+    /// operands to.
+    ///
+    /// See [`Category`]. There is no collection category, and that is the
+    /// point: ADR 0058 moved every collection operation into run instructions
+    /// and the standard library, and a new one written as an intrinsic has no
+    /// category to be.
+    pub const fn category(self) -> Category {
+        match self {
+            Intrinsic::StringLength
+            | Intrinsic::StringWords
+            | Intrinsic::StringChars
+            | Intrinsic::StringSplit
+            | Intrinsic::StringJoin
+            | Intrinsic::StringSlice
+            | Intrinsic::StringTrim
+            | Intrinsic::StringContains
+            | Intrinsic::StringStartsWith
+            | Intrinsic::StringEndsWith
+            | Intrinsic::StringIndexOf
+            | Intrinsic::StringReplace
+            | Intrinsic::StringToUpper
+            | Intrinsic::StringToLower
+            | Intrinsic::StringFromCodePoint => Category::Text,
+            Intrinsic::IntParse
+            | Intrinsic::IntParseRadix
+            | Intrinsic::FloatToInt
+            | Intrinsic::FloatRound
+            | Intrinsic::FloatAbs
+            | Intrinsic::FloatSqrt
+            | Intrinsic::FloatMin
+            | Intrinsic::FloatMax
+            | Intrinsic::FloatFormat
+            | Intrinsic::FloatParse => Category::Scalar,
+            // Rendering is a walk directed by whatever layout each piece has,
+            // which is what makes it a value rule rather than a text one: a
+            // `"{items}"` renders an `Array` through it.
+            Intrinsic::StringInterpolate
+            | Intrinsic::AnyEquals
+            | Intrinsic::ValueOrder
+            | Intrinsic::ValueAdmitKey
+            | Intrinsic::ValueRefuseDuplicate => Category::Value,
+        }
+    }
+
+    /// The operands the intrinsic takes and the answer it writes, as the
+    /// verifier checks every `CallBuiltin` against them.
+    ///
+    /// ADR 0058: "Lowering resolves it to an intrinsic identifier with a fixed
+    /// operand and result shape." This is that shape, written down once, so
+    /// that `crate::verify` refuses a call whose argument count, argument
+    /// layouts or answer layout disagree with it — and so that the machine's
+    /// arms no longer re-check any of the three on every call (#378, P5-3).
+    pub const fn signature(self) -> Signature {
+        use Carried as K;
+        use Class as C;
+        const fn fixed(operands: &'static [Class], result: Class) -> Signature {
+            Signature {
+                operands,
+                rest: None,
+                result,
+            }
+        }
+        match self {
+            Intrinsic::StringInterpolate => Signature {
+                operands: &[],
+                rest: Some(C::Value),
+                result: C::Str,
+            },
+            Intrinsic::StringLength => fixed(&[C::Str], C::Int),
+            Intrinsic::StringWords | Intrinsic::StringChars => fixed(&[C::Str], C::Strings),
+            Intrinsic::StringSplit => fixed(&[C::Str, C::Str], C::Strings),
+            Intrinsic::StringJoin => fixed(&[C::Str, C::Strings], C::Str),
+            Intrinsic::StringSlice => fixed(&[C::Str, C::Int, C::Int], C::Str),
+            Intrinsic::StringTrim | Intrinsic::StringToUpper | Intrinsic::StringToLower => {
+                fixed(&[C::Str], C::Str)
+            }
+            Intrinsic::StringContains | Intrinsic::StringStartsWith | Intrinsic::StringEndsWith => {
+                fixed(&[C::Str, C::Str], C::Bool)
+            }
+            Intrinsic::StringIndexOf => fixed(&[C::Str, C::Str], C::OptionOf(K::Int)),
+            Intrinsic::StringReplace => fixed(&[C::Str, C::Str, C::Str], C::Str),
+            Intrinsic::StringFromCodePoint => fixed(&[C::Int], C::ResultOf(K::Str)),
+            Intrinsic::IntParse => fixed(&[C::Str], C::ResultOf(K::Int)),
+            Intrinsic::IntParseRadix => fixed(&[C::Str, C::Int], C::ResultOf(K::Int)),
+            Intrinsic::FloatToInt => fixed(&[C::Float], C::ResultOf(K::Int)),
+            Intrinsic::FloatRound | Intrinsic::FloatAbs | Intrinsic::FloatSqrt => {
+                fixed(&[C::Float], C::Float)
+            }
+            Intrinsic::FloatMin | Intrinsic::FloatMax => fixed(&[C::Float, C::Float], C::Float),
+            Intrinsic::FloatFormat => fixed(&[C::Float, C::Int], C::Str),
+            Intrinsic::FloatParse => fixed(&[C::Str], C::ResultOf(K::Float)),
+            Intrinsic::AnyEquals => fixed(&[C::Value, C::Value], C::Bool),
+            Intrinsic::ValueOrder => fixed(&[C::Value, C::Value], C::Int),
+            // The key, then the method and the role a refusal is worded with.
+            Intrinsic::ValueAdmitKey | Intrinsic::ValueRefuseDuplicate => {
+                fixed(&[C::Value, C::Str, C::Str], C::Unit)
+            }
+        }
+    }
+
     /// The effects generated code has to be ready for when it calls this
     /// intrinsic.
     ///
@@ -215,32 +316,35 @@ impl Intrinsic {
     /// and [`Intrinsic::StringSlice`] does.
     pub const fn effects(self) -> Effects {
         use Effects as E;
-        // Every arm below validates its own operand count and shape before
-        // it does anything else — `vm::builtins::operand::method` and
-        // `operand::free` both answer `Err` for a call whose arity or
-        // operand types are wrong — so every intrinsic carries
-        // `MAY_RAISE`, even the ones a checked program can never make fail:
-        // the lowering that lets one through would be a compiler bug this
-        // machine reports rather than reads past. `MAY_BLOCK` is on none of
-        // them: nothing below reaches the scheduler or a Host boundary,
-        // which is a fact about the whole family and not one this match
-        // has to repeat per arm.
+        // `MAY_RAISE` is language-level failure only (#378, Q5.3). An arm no
+        // longer re-checks its operand count or types — the verifier refused
+        // any call that disagrees with [`Intrinsic::signature`] — so the
+        // `Err` those checks answered is not a path any verified program has,
+        // and the flag says what a program can actually be stopped by: a
+        // refusal the language defines (an empty separator, a radix outside
+        // `2..=36`, a key it does not admit), a value nested past what a walk
+        // of it may reach, and an exhausted heap — which is why every
+        // intrinsic that allocates carries it.
+        //
+        // `MAY_BLOCK` is on none of them: nothing below reaches the scheduler
+        // or a Host boundary, which is a fact about the whole family and not
+        // one this match has to repeat per arm.
         let raise = E::MAY_RAISE;
+        let allocate = E::MAY_ALLOCATE.union(E::MAY_COLLECT).union(raise);
         match self {
             // Rendering walks whatever value it was handed, which may be a
-            // collection nested arbitrarily deep, and answers a freshly
+            // collection nested arbitrarily deep — past the depth a rendering
+            // may reach, which stops the run — and answers a freshly
             // allocated `String`.
-            Intrinsic::StringInterpolate => raise
-                .union(E::MAY_ALLOCATE)
-                .union(E::MAY_COLLECT)
-                .union(E::READS_MEMORY)
-                .union(E::BULK_WORK),
+            Intrinsic::StringInterpolate => allocate.union(E::READS_MEMORY).union(E::BULK_WORK),
 
-            // `length()` decodes every byte to count characters; the other
-            // readers below it do the same one decode and then walk, split
-            // or map the result, so every one of them is proportional to
-            // the receiver and allocates the array or string it answers.
-            Intrinsic::StringLength => raise.union(E::READS_MEMORY).union(E::BULK_WORK),
+            // `length()` decodes every byte to count characters, and nothing
+            // about a valid `String` can make that fail.
+            Intrinsic::StringLength => E::READS_MEMORY.union(E::BULK_WORK),
+            // The other readers do the same one decode and then walk, split
+            // or map the result, so every one of them is proportional to the
+            // receiver and allocates the array or string it answers. `split`
+            // and `replace` also refuse an empty needle.
             Intrinsic::StringWords
             | Intrinsic::StringChars
             | Intrinsic::StringSplit
@@ -249,24 +353,22 @@ impl Intrinsic {
             | Intrinsic::StringTrim
             | Intrinsic::StringReplace
             | Intrinsic::StringToUpper
-            | Intrinsic::StringToLower => raise
-                .union(E::MAY_ALLOCATE)
-                .union(E::MAY_COLLECT)
-                .union(E::READS_MEMORY)
-                .union(E::BULK_WORK),
-            // The three predicates and `indexOf` search the receiver
-            // without allocating anything.
+            | Intrinsic::StringToLower => allocate.union(E::READS_MEMORY).union(E::BULK_WORK),
+            // The three predicates and `indexOf` search the receiver without
+            // allocating anything, and a search cannot fail: `indexOf`'s
+            // `Option` is words written into the destination, of a layout the
+            // verifier has already found.
             Intrinsic::StringContains
             | Intrinsic::StringStartsWith
             | Intrinsic::StringEndsWith
-            | Intrinsic::StringIndexOf => raise.union(E::READS_MEMORY).union(E::BULK_WORK),
+            | Intrinsic::StringIndexOf => E::READS_MEMORY.union(E::BULK_WORK),
             // `codePointAtByte` is not here: it is `std.string`, a decode in
             // Cove over one run load a byte.
             // `fromCodePoint` reads no receiver — its one argument is an
             // `Int` word — and allocates the one-character `String` it
             // answers, or the message an out-of-range code point fails
             // with.
-            Intrinsic::StringFromCodePoint => raise.union(E::MAY_ALLOCATE).union(E::MAY_COLLECT),
+            Intrinsic::StringFromCodePoint => allocate,
 
             // No `Array` or `Vector` operation is here. `contains` and
             // `indexOf` are `std.array` and `std.vector` loops over `==`;
@@ -279,30 +381,33 @@ impl Intrinsic {
             // intrinsics at the end, run copies and slices, and a keyed finish
             // (ADR 0059).
 
-            // A scalar reader or writer of its own word, with nothing on
-            // the heap to read.
+            // `Int.toFloat` and `Duration.nanos` are not here: each is an
+            // `Inst::Convert` (#378, P5-2).
+
+            // A scalar function of its own words, with nothing on the heap to
+            // read and nothing that can fail: IEEE 754 answers every one of
+            // them for every input.
             Intrinsic::FloatRound
             | Intrinsic::FloatAbs
             | Intrinsic::FloatSqrt
             | Intrinsic::FloatMin
-            | Intrinsic::FloatMax => raise,
+            | Intrinsic::FloatMax => E::NONE,
             // The three parsers read a `String` receiver's bytes and
-            // allocate the message an `Err` carries; `format` allocates the
-            // `String` it always answers. None of the four is proportional
-            // to anything past the one receiver or the one answer, which is
-            // short enough that this backend does not charge it as bulk
-            // work.
-            Intrinsic::IntParse | Intrinsic::IntParseRadix | Intrinsic::FloatParse => raise
-                .union(E::READS_MEMORY)
-                .union(E::MAY_ALLOCATE)
-                .union(E::MAY_COLLECT),
-            Intrinsic::FloatToInt | Intrinsic::FloatFormat => {
-                raise.union(E::MAY_ALLOCATE).union(E::MAY_COLLECT)
+            // allocate the message an `Err` carries, and `parseRadix` refuses
+            // a radix outside `2..=36`; `format` allocates the `String` it
+            // always answers and refuses a digit count past 17. None of the
+            // four is proportional to anything past the one receiver or the
+            // one answer, which is short enough that this backend does not
+            // charge it as bulk work.
+            Intrinsic::IntParse | Intrinsic::IntParseRadix | Intrinsic::FloatParse => {
+                allocate.union(E::READS_MEMORY)
             }
+            Intrinsic::FloatToInt | Intrinsic::FloatFormat => allocate,
 
             // `==` on anything wider than a word walks both operands
-            // together, as deep as they nest, and allocates nothing: the
-            // answer is one `Bool` word.
+            // together, as deep as they nest — past the depth a walk may
+            // reach, which stops the run — and allocates nothing: the answer
+            // is one `Bool` word.
             Intrinsic::AnyEquals => raise.union(E::READS_MEMORY).union(E::BULK_WORK),
 
             // ADR 0059's keyed intrinsics. The order and the admission each
@@ -316,6 +421,91 @@ impl Intrinsic {
                 raise.union(E::READS_MEMORY).union(E::BULK_WORK)
             }
             Intrinsic::ValueRefuseDuplicate => raise.union(E::READS_MEMORY),
+        }
+    }
+}
+
+/// What an [`Intrinsic`] is about.
+///
+/// Three, and not one of them a collection: ADR 0058's Phase 5 makes "a new
+/// collection `CallBuiltin` a verification failure", and this is the half of
+/// that rule a verifier can read. A `Text` or `Scalar` intrinsic whose operand
+/// is a collection is refused by `crate::verify` — the one exception is the
+/// `Array<String>` [`Class::Strings`] names, which `String.join` reads as the
+/// input of a bulk text operation (#378, Q18) rather than as a collection it
+/// manages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Category {
+    /// Reads or builds text: Unicode, searching, splitting, case mapping.
+    Text,
+    /// An `Int` or a `Float`, and the text one is parsed from or formatted to.
+    Scalar,
+    /// A rule over any value, directed by its layout: equality, key order and
+    /// admission, and rendering.
+    Value,
+}
+
+/// What an [`Intrinsic`] takes and answers, as [`Intrinsic::signature`]
+/// writes it down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Signature {
+    /// The operands every call passes, in order: a method's receiver first.
+    pub operands: &'static [Class],
+    /// What every operand past [`Signature::operands`] is, for a variadic
+    /// intrinsic, which may then be passed any number of them; `None` for one
+    /// that takes exactly [`Signature::operands`].
+    pub rest: Option<Class>,
+    /// What the answer written into the destination is.
+    pub result: Class,
+}
+
+/// The layout an operand or an answer of an [`Intrinsic`] has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Class {
+    /// `()`, the one word a refusal that returns answers.
+    Unit,
+    Bool,
+    Int,
+    Float,
+    /// A `String`: one reference to a string object.
+    Str,
+    /// An `Array<String>`: what `words`, `chars` and `split` answer and what
+    /// `join` reads.
+    Strings,
+    /// The `Option` whose `Some` carries one of these.
+    OptionOf(Carried),
+    /// The `Result` whose `Ok` carries one of these, and whose `Err` carries
+    /// the `Error` the machine builds.
+    ResultOf(Carried),
+    /// A value of any layout, read as the layout says.
+    Value,
+}
+
+/// What an [`Class::OptionOf`] or a [`Class::ResultOf`] carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Carried {
+    Int,
+    Float,
+    Str,
+}
+
+impl fmt::Display for Class {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let carried = |carried: &Carried| match carried {
+            Carried::Int => "Int",
+            Carried::Float => "Float",
+            Carried::Str => "String",
+        };
+        match self {
+            Class::Unit => write!(f, "Unit"),
+            Class::Bool => write!(f, "Bool"),
+            Class::Int => write!(f, "Int"),
+            Class::Float => write!(f, "Float"),
+            Class::Str => write!(f, "String"),
+            Class::Strings => write!(f, "Array<String>"),
+            Class::OptionOf(inner) => write!(f, "Option<{}>", carried(inner)),
+            Class::ResultOf(inner) => write!(f, "Result<{}, Error>", carried(inner)),
+            Class::Value => write!(f, "a value"),
         }
     }
 }
@@ -529,17 +719,95 @@ mod tests {
         }
     }
 
-    /// Every intrinsic validates its own operand shape before it does
-    /// anything else, so every one of them may raise — see
-    /// [`Intrinsic::effects`]'s doc comment for why that is not a flag this
-    /// backend can narrow per arm.
+    /// An intrinsic that allocates may raise, because an allocation can find
+    /// the heap exhausted.
     #[test]
-    fn every_intrinsic_may_raise() {
+    fn allocating_implies_raising() {
+        for intrinsic in ALL {
+            let effects = intrinsic.effects();
+            if effects.contains(Effects::MAY_ALLOCATE) {
+                assert!(
+                    effects.contains(Effects::MAY_RAISE),
+                    "`{intrinsic}` may allocate without a flag saying it may raise"
+                );
+            }
+        }
+    }
+
+    /// `MAY_RAISE` is language-level failure only (#378, Q5.3), so the
+    /// intrinsics no program can be stopped by say so: a character count, a
+    /// search, and the `Float` functions IEEE 754 answers for every input.
+    #[test]
+    fn raising_is_language_level() {
+        let never: Vec<Intrinsic> = ALL
+            .iter()
+            .copied()
+            .filter(|intrinsic| !intrinsic.effects().contains(Effects::MAY_RAISE))
+            .collect();
+        assert_eq!(
+            never,
+            vec![
+                Intrinsic::StringLength,
+                Intrinsic::StringContains,
+                Intrinsic::StringStartsWith,
+                Intrinsic::StringEndsWith,
+                Intrinsic::StringIndexOf,
+                Intrinsic::FloatRound,
+                Intrinsic::FloatAbs,
+                Intrinsic::FloatSqrt,
+                Intrinsic::FloatMin,
+                Intrinsic::FloatMax,
+            ]
+        );
+    }
+
+    /// No intrinsic is a collection operation: ADR 0058 moved every one into
+    /// run instructions and the standard library, and Phase 5 makes a new one
+    /// a verification failure. No receiver is a collection, no category is
+    /// one — [`Category`] has none to be — and the one collection an operand
+    /// may be is `String.join`'s `Array<String>`, which is text work's input.
+    #[test]
+    fn no_intrinsic_is_a_collection_operation() {
+        const COLLECTIONS: &[&str] = &[
+            "Array",
+            "Vector",
+            "Set",
+            "Map",
+            "ByteBuffer",
+            "StringBuilder",
+        ];
         for intrinsic in ALL {
             assert!(
-                intrinsic.effects().contains(Effects::MAY_RAISE),
-                "`{intrinsic}` does not carry `MAY_RAISE`"
+                !COLLECTIONS.contains(&intrinsic.receiver()),
+                "`{intrinsic}` is an operation of a collection"
             );
+            let signature = intrinsic.signature();
+            for class in signature.operands.iter().chain(signature.rest.iter()) {
+                assert!(
+                    *class != Class::Strings || *intrinsic == Intrinsic::StringJoin,
+                    "`{intrinsic}` takes an `Array<String>`, which only `String.join` may"
+                );
+                assert!(
+                    *class != Class::Value || intrinsic.category() == Category::Value,
+                    "`{intrinsic}` is a {:?} intrinsic taking any value, which a collection is",
+                    intrinsic.category()
+                );
+            }
+        }
+    }
+
+    /// A variadic intrinsic is a `Value` one, and every fixed intrinsic's
+    /// operand list is short enough to be read without collecting it.
+    #[test]
+    fn only_interpolation_is_variadic() {
+        for intrinsic in ALL {
+            let signature = intrinsic.signature();
+            assert_eq!(
+                signature.rest.is_some(),
+                *intrinsic == Intrinsic::StringInterpolate,
+                "`{intrinsic}`"
+            );
+            assert!(signature.operands.len() <= 3, "`{intrinsic}`");
         }
     }
 

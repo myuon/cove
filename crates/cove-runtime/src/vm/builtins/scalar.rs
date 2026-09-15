@@ -15,7 +15,7 @@
 //! P5-2), because a conversion of one word is not a runtime call's worth of
 //! work.
 
-use cove_ir::{LayoutId, Repr};
+use cove_ir::LayoutId;
 
 use crate::error::RuntimeError;
 use crate::vm::builtins::operand::Operand;
@@ -23,15 +23,8 @@ use crate::vm::builtins::{make, operand};
 use crate::vm::exec::Machine;
 
 /// The `Float` a method was called on.
-fn float_receiver(
-    machine: &Machine,
-    method: &str,
-    receiver: Operand<'_>,
-) -> Result<f64, RuntimeError> {
-    match operand::as_word(machine, receiver) {
-        Some((Repr::Float, word)) => Ok(f64::from_bits(word)),
-        _ => Err(operand::no_method(machine, receiver, method)),
-    }
+fn float_receiver(machine: &Machine, receiver: Operand<'_>) -> f64 {
+    operand::float(machine, receiver)
 }
 
 // --- Int -------------------------------------------------------------------
@@ -47,8 +40,8 @@ pub(super) fn int_parse(
     operands: &[Operand<'_>],
     out: &mut Vec<u64>,
 ) -> Result<(), RuntimeError> {
-    let args = operand::free("Int.parse", operands, 1)?;
-    let text = operand::text(machine, "Int.parse", "text", args[0])?;
+    let args = operand::free("Int.parse", operands, 1);
+    let text = operand::text(machine, args[0])?;
     match text.parse::<i64>() {
         Ok(value) => make::ok(machine, result, &[value as u64], out),
         Err(_) => make::failed(machine, result, &format!("`{text}` is not an Int"), out),
@@ -66,9 +59,9 @@ pub(super) fn int_parse_radix(
     operands: &[Operand<'_>],
     out: &mut Vec<u64>,
 ) -> Result<(), RuntimeError> {
-    let args = operand::free("Int.parseRadix", operands, 2)?;
-    let text = operand::text(machine, "Int.parseRadix", "text", args[0])?;
-    let radix = operand::int(machine, "Int.parseRadix", "radix", args[1])?;
+    let args = operand::free("Int.parseRadix", operands, 2);
+    let text = operand::text(machine, args[0])?;
+    let radix = operand::int(machine, args[1]);
     let Some(base) = (2..=36).contains(&radix).then_some(radix as u32) else {
         return Err(operand::radix(radix));
     };
@@ -90,8 +83,8 @@ pub(super) fn float_to_int(
     operands: &[Operand<'_>],
     out: &mut Vec<u64>,
 ) -> Result<(), RuntimeError> {
-    let (self_, _) = operand::method("toInt", operands, 0)?;
-    let x = float_receiver(machine, "toInt", self_)?;
+    let (self_, _) = operand::method("toInt", operands, 0);
+    let x = float_receiver(machine, self_);
     if x.is_nan() {
         return make::failed(
             machine,
@@ -117,8 +110,8 @@ pub(super) fn float_round(
     machine: &mut Machine,
     operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("round", operands, 0)?;
-    Ok(float_receiver(machine, "round", self_)?.round().to_bits())
+    let (self_, _) = operand::method("round", operands, 0);
+    Ok(float_receiver(machine, self_).round().to_bits())
 }
 
 /// `Float.abs() -> Float`.
@@ -126,8 +119,8 @@ pub(super) fn float_abs(
     machine: &mut Machine,
     operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("abs", operands, 0)?;
-    Ok(float_receiver(machine, "abs", self_)?.abs().to_bits())
+    let (self_, _) = operand::method("abs", operands, 0);
+    Ok(float_receiver(machine, self_).abs().to_bits())
 }
 
 /// `Float.sqrt() -> Float`.
@@ -144,8 +137,8 @@ pub(super) fn float_sqrt(
     machine: &mut Machine,
     operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("sqrt", operands, 0)?;
-    Ok(float_receiver(machine, "sqrt", self_)?.sqrt().to_bits())
+    let (self_, _) = operand::method("sqrt", operands, 0);
+    Ok(float_receiver(machine, self_).sqrt().to_bits())
 }
 
 /// `Float.min(other) -> Float`.
@@ -153,9 +146,9 @@ pub(super) fn float_min(
     machine: &mut Machine,
     operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("Float.min", operands, 1)?;
-    let x = float_receiver(machine, "min", self_)?;
-    let other = operand::float(machine, "Float.min", "other", args[0])?;
+    let (self_, args) = operand::method("Float.min", operands, 1);
+    let x = float_receiver(machine, self_);
+    let other = operand::float(machine, args[0]);
     Ok(x.min(other).to_bits())
 }
 
@@ -164,9 +157,9 @@ pub(super) fn float_max(
     machine: &mut Machine,
     operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("Float.max", operands, 1)?;
-    let x = float_receiver(machine, "max", self_)?;
-    let other = operand::float(machine, "Float.max", "other", args[0])?;
+    let (self_, args) = operand::method("Float.max", operands, 1);
+    let x = float_receiver(machine, self_);
+    let other = operand::float(machine, args[0]);
     Ok(x.max(other).to_bits())
 }
 
@@ -175,9 +168,9 @@ pub(super) fn float_format(
     machine: &mut Machine,
     operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("Float.format", operands, 1)?;
-    let x = float_receiver(machine, "format", self_)?;
-    let digits = operand::int(machine, "Float.format", "digits", args[0])?;
+    let (self_, args) = operand::method("Float.format", operands, 1);
+    let x = float_receiver(machine, self_);
+    let digits = operand::int(machine, args[0]);
     if !(0..=17).contains(&digits) {
         return Err(operand::format_digits(digits));
     }
@@ -196,8 +189,8 @@ pub(super) fn float_parse(
     operands: &[Operand<'_>],
     out: &mut Vec<u64>,
 ) -> Result<(), RuntimeError> {
-    let args = operand::free("Float.parse", operands, 1)?;
-    let text = operand::text(machine, "Float.parse", "text", args[0])?;
+    let args = operand::free("Float.parse", operands, 1);
+    let text = operand::text(machine, args[0])?;
     match text.parse::<f64>() {
         Ok(value) => make::ok(machine, result, &[value.to_bits()], out),
         Err(_) => make::failed(machine, result, &format!("`{text}` is not a Float"), out),
@@ -208,6 +201,7 @@ pub(super) fn float_parse(
 mod tests {
     use super::*;
     use crate::vm::builtins::tests::{message_of, read, result_of, run, scalar, word, world};
+    use cove_ir::Repr;
 
     fn float_of(machine: &mut Machine, operation: &str, operands: &[(Repr, u64)]) -> f64 {
         f64::from_bits(word(machine, "Float", operation, operands).unwrap())
@@ -387,24 +381,5 @@ mod tests {
         let text = machine.new_string("x").unwrap();
         let words = run(&mut machine, "Float", "parse", &[(Repr::Ref, text)]).unwrap();
         assert_eq!(message_of(&machine, float, &words), "`x` is not a Float");
-    }
-
-    #[test]
-    fn a_receiver_of_the_wrong_kind_says_so() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let error = run(&mut machine, "Float", "round", &[(Repr::Int, 0)]).unwrap_err();
-        assert_eq!(error.message, "`Int` has no method `round`");
-        let error = run(
-            &mut machine,
-            "Float",
-            "min",
-            &[(Repr::Float, 0), (Repr::Int, 1)],
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Float.min` expects `Float` for `other`, but found `Int`"
-        );
     }
 }

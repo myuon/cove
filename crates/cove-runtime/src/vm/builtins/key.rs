@@ -230,9 +230,8 @@ pub(super) fn value_order(
     machine: &Machine,
     operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
-    let [a, b] = operands else {
-        return Err(operand::operands("Value.order", 2, operands.len()));
-    };
+    debug_assert_eq!(operands.len(), 2, "`Value.order` was verified to take two");
+    let (a, b) = (operands[0], operands[1]);
     let ordered = order(
         machine,
         Key::Held(a.layout, a.words),
@@ -256,9 +255,12 @@ pub(super) fn value_order(
 /// it failed. It is the same walk over the same words both times, so the
 /// second answers the refusal the first found.
 pub(super) fn admit_key(machine: &Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let [key, method, role] = operands else {
-        return Err(operand::operands("Value.admitKey", 3, operands.len()));
-    };
+    debug_assert_eq!(
+        operands.len(),
+        3,
+        "`Value.admitKey` was verified to take three"
+    );
+    let [key, method, role] = [&operands[0], &operands[1], &operands[2]];
     let held = Key::Held(key.layout, key.words);
     if admits(machine, "", "", None, held, 0).is_ok() {
         return Ok(0);
@@ -334,13 +336,12 @@ pub(super) fn refuse_duplicate(
     machine: &Machine,
     operands: &[Operand<'_>],
 ) -> Result<(), RuntimeError> {
-    let [key, method, role] = operands else {
-        return Err(operand::operands(
-            "Value.refuseDuplicate",
-            3,
-            operands.len(),
-        ));
-    };
+    debug_assert_eq!(
+        operands.len(),
+        3,
+        "`Value.refuseDuplicate` was verified to take three"
+    );
+    let [key, method, role] = [&operands[0], &operands[1], &operands[2]];
     let text = |operand: &Operand<'_>| {
         String::from_utf8_lossy(&machine.string_bytes(operand.word())).into_owned()
     };

@@ -36,9 +36,27 @@
 //! at collection time.
 
 use crate::inst::{CmpOp, Compare, Inst, Len, Num, Slot};
+use crate::intrinsic::{Carried, Category, Class};
 use crate::layout::{LayoutId, Shape};
 use crate::program::{Function, FunctionId, Program};
 use crate::repr::{RefMap, Repr};
+
+/// Whether a value of `shape` is a collection: a run of elements, a vector,
+/// a set, a map, or a byte buffer or run.
+///
+/// A `StringBuilder` is not named: it is a standard-library struct over a
+/// byte buffer, and no signature class matches a struct.
+fn is_collection(shape: &Shape) -> bool {
+    matches!(
+        shape,
+        Shape::Elements { .. }
+            | Shape::Vector { .. }
+            | Shape::Members { .. }
+            | Shape::Entries { .. }
+            | Shape::ByteBuffer
+            | Shape::Bytes
+    )
+}
 
 /// A way in which a lowered program is not well formed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -799,9 +817,10 @@ impl Check<'_> {
             }
             Inst::CallBuiltin { dst, builtin, args } => {
                 if self.in_range(at, builtin.index(), self.program.builtins.len(), "builtin") {
-                    let result = self.program.builtin(builtin).result;
-                    if self.layout_exists(at, result) {
-                        self.fits(at, dst, result, "the answer of a builtin");
+                    let called = *self.program.builtin(builtin);
+                    if self.layout_exists(at, called.result) {
+                        self.fits(at, dst, called.result, "the answer of a builtin");
+                        self.check_signature(at, called, args);
                     }
                 }
                 self.each_arg(at, args);
@@ -1348,6 +1367,148 @@ impl Check<'_> {
     /// of what an argument was — so a call passing the last slot of a frame
     /// as a two-word `Point` was checked by nothing, and the machine read the
     /// frame above it.
+    /// Whether a `CallBuiltin` passes what its intrinsic takes and names the
+    /// answer it writes: the argument count, each argument's layout and the
+    /// answer's layout, against [`crate::Intrinsic::signature`].
+    ///
+    /// ADR 0058 gives an intrinsic "a fixed operand and result shape", and
+    /// this is where the shape is held to — once, before anything runs — so
+    /// that the machine's arms read their operands without re-checking any of
+    /// it on every call (#378, P5-3). An argument's *location* is
+    /// [`Check::each_arg`]'s; this is about its family.
+    ///
+    /// It is also where ADR 0058's Phase 5 makes "a new collection
+    /// `CallBuiltin` a verification failure": a `Text` or `Scalar` intrinsic
+    /// handed a collection is refused as that, by name, whatever its
+    /// signature says — `String.join`'s `Array<String>` is the one collection
+    /// a signature names, and it names it exactly.
+    fn check_signature(&mut self, at: Option<usize>, called: crate::Builtin, args: crate::ArgsId) {
+        let intrinsic = called.intrinsic;
+        let signature = intrinsic.signature();
+        if let Some(fault) = self.class_fault(signature.result, called.result) {
+            self.fault(at, format!("the answer of `{intrinsic}` is {fault}"));
+        }
+        let Some(list) = self.program.args.get(args.index()) else {
+            // `each_arg` reports a list that is not there.
+            return;
+        };
+        let fixed = signature.operands.len();
+        let counted = match signature.rest {
+            None => list.len() == fixed,
+            Some(_) => list.len() >= fixed,
+        };
+        if !counted {
+            let wanted = match signature.rest {
+                None => format!("{fixed}"),
+                Some(_) => format!("at least {fixed}"),
+            };
+            self.fault(
+                at,
+                format!(
+                    "`{intrinsic}` takes {wanted} operand(s), and this call passes {}",
+                    list.len()
+                ),
+            );
+            return;
+        }
+        for (index, arg) in list.clone().into_iter().enumerate() {
+            let Some(class) = signature.operands.get(index).copied().or(signature.rest) else {
+                continue;
+            };
+            if arg.layout.index() >= self.program.layouts.len() {
+                // `each_arg` reports a layout that is not there.
+                continue;
+            }
+            let described = self.program.layout(arg.layout);
+            if intrinsic.category() != Category::Value
+                && class != Class::Strings
+                && is_collection(&described.shape)
+            {
+                let name = described.name.clone();
+                self.fault(
+                    at,
+                    format!(
+                        "operand {index} of `{intrinsic}` is the collection `{name}`, and a \
+                         {:?} intrinsic takes none: a collection operation is a run instruction \
+                         or the standard library's, not an intrinsic (ADR 0058)",
+                        intrinsic.category()
+                    ),
+                );
+            } else if let Some(fault) = self.class_fault(class, arg.layout) {
+                self.fault(at, format!("operand {index} of `{intrinsic}` is {fault}"));
+            }
+        }
+    }
+
+    /// Why a value of `layout` is not a `class`, or `None` when it is one.
+    fn class_fault(&self, class: Class, layout: LayoutId) -> Option<String> {
+        let described = self.program.layout(layout);
+        let word = |repr: Repr| described.shape == Shape::Word(repr);
+        let fits = match class {
+            Class::Value => true,
+            Class::Unit => word(Repr::Unit),
+            Class::Bool => word(Repr::Bool),
+            Class::Int => word(Repr::Int),
+            Class::Float => word(Repr::Float),
+            Class::Str => described.shape == Shape::Str,
+            Class::Strings => self.is_strings(layout),
+            Class::OptionOf(carried) => self.is_case_pair(
+                layout,
+                (cove_schema::builtins::SOME_CASE.name, Some(carried)),
+                (cove_schema::builtins::NONE_CASE.name, None),
+            ),
+            Class::ResultOf(carried) => self.is_case_pair(
+                layout,
+                (cove_schema::builtins::OK_CASE.name, Some(carried)),
+                (cove_schema::builtins::ERR_CASE.name, None),
+            ),
+        };
+        (!fits).then(|| format!("`{}`, where its signature has {class}", described.name))
+    }
+
+    /// Whether `layout` is an `Array<String>`.
+    fn is_strings(&self, layout: LayoutId) -> bool {
+        match self.program.layout(layout).shape {
+            Shape::Elements {
+                elem,
+                growable: false,
+            } => {
+                elem.index() < self.program.layouts.len()
+                    && self.program.layout(elem).shape == Shape::Str
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `layout` is an enum with a case `carrier` holding exactly one
+    /// value of the carried class, and a case `other`.
+    ///
+    /// `other` is named and not described: `None` carries nothing and `Err`
+    /// carries the machine's `Error`, and neither is a question a signature
+    /// asks.
+    fn is_case_pair(
+        &self,
+        layout: LayoutId,
+        (carrier, carried): (&str, Option<Carried>),
+        (other, _): (&str, Option<Carried>),
+    ) -> bool {
+        let Shape::Enum { cases, .. } = &self.program.layout(layout).shape else {
+            return false;
+        };
+        let carries = |part: LayoutId| {
+            part.index() < self.program.layouts.len()
+                && matches!(
+                    (carried, &self.program.layout(part).shape),
+                    (Some(Carried::Int), Shape::Word(Repr::Int))
+                        | (Some(Carried::Float), Shape::Word(Repr::Float))
+                        | (Some(Carried::Str), Shape::Str)
+                )
+        };
+        cases.iter().any(|case| {
+            &*case.name == carrier && case.parts.len() == 1 && carries(case.parts[0].layout)
+        }) && cases.iter().any(|case| &*case.name == other)
+    }
+
     fn each_arg(&mut self, at: Option<usize>, args: crate::ArgsId) {
         if !self.in_range(at, args.index(), self.program.args.len(), "argument list") {
             return;
@@ -2294,17 +2455,170 @@ mod tests {
         );
         let mut held = program(vec![f]);
         held.builtins = vec![crate::Builtin {
-            intrinsic: crate::Intrinsic::AnyEquals,
+            intrinsic: crate::Intrinsic::ValueOrder,
             result: INT,
         }];
-        held.args = vec![vec![Arg {
-            slot: 2,
-            layout: POINT,
-        }]];
+        held.args = vec![vec![
+            Arg {
+                slot: 2,
+                layout: POINT,
+            },
+            Arg {
+                slot: 0,
+                layout: INT,
+            },
+        ]];
         assert_eq!(
             faults(&held),
             vec!["argument 0 is `Point`, 2 words at slot 2, and the frame has 3"]
         );
+    }
+
+    /// A program with one function calling `intrinsic` over `args`, answering
+    /// `result` into slot 0 of a frame of `reprs`.
+    fn calling(
+        intrinsic: crate::Intrinsic,
+        result: LayoutId,
+        reprs: Vec<Repr>,
+        args: Vec<Arg>,
+    ) -> Program {
+        let f = function(
+            reprs,
+            result,
+            vec![
+                Inst::CallBuiltin {
+                    dst: 0,
+                    builtin: crate::BuiltinId(0),
+                    args: crate::ArgsId(0),
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let mut held = program(vec![f]);
+        held.builtins = vec![crate::Builtin { intrinsic, result }];
+        held.args = vec![args];
+        held
+    }
+
+    /// An intrinsic's signature is held to at every call: how many operands,
+    /// what each one is, and what the answer is (#378, P5-3). The machine's
+    /// arms re-check none of the three.
+    #[test]
+    fn a_builtin_call_is_held_to_its_intrinsics_signature() {
+        let string = |slot| Arg { slot, layout: STR };
+        let int = |slot| Arg { slot, layout: INT };
+        let reprs = || vec![Repr::Int, Repr::Ref, Repr::Ref, Repr::Int];
+
+        // `String.length` over one `String`, answering an `Int`: nothing.
+        let held = calling(
+            crate::Intrinsic::StringLength,
+            INT,
+            reprs(),
+            vec![string(1)],
+        );
+        assert_eq!(faults(&held), Vec::<String>::new());
+
+        // One operand too many.
+        let held = calling(
+            crate::Intrinsic::StringLength,
+            INT,
+            reprs(),
+            vec![string(1), string(2)],
+        );
+        assert_eq!(
+            faults(&held),
+            vec!["`String.length` takes 1 operand(s), and this call passes 2"]
+        );
+
+        // An `Int` where a `String` goes.
+        let held = calling(crate::Intrinsic::StringLength, INT, reprs(), vec![int(3)]);
+        assert_eq!(
+            faults(&held),
+            vec!["operand 0 of `String.length` is `Int`, where its signature has String"]
+        );
+
+        // The answer a `String.indexOf` writes is an `Option<Int>`, and the
+        // fixture's only `Option` carries a reference.
+        let held = calling(
+            crate::Intrinsic::StringIndexOf,
+            ANSWER,
+            vec![Repr::Int, Repr::Ref, Repr::Ref, Repr::Ref],
+            vec![string(2), string(3)],
+        );
+        assert_eq!(
+            faults(&held),
+            vec!["the answer of `String.indexOf` is `Option`, where its signature has Option<Int>"]
+        );
+
+        // Interpolation takes any number of pieces of any layout.
+        let held = calling(
+            crate::Intrinsic::StringInterpolate,
+            STR,
+            vec![Repr::Ref, Repr::Int, Repr::Ref],
+            vec![
+                int(1),
+                string(2),
+                Arg {
+                    slot: 1,
+                    layout: INT,
+                },
+            ],
+        );
+        assert_eq!(faults(&held), Vec::<String>::new());
+    }
+
+    /// A text or scalar intrinsic handed a collection is refused as that,
+    /// which is what makes a new collection builtin a verification failure
+    /// rather than a runtime arm (ADR 0058, Phase 5). A value intrinsic may
+    /// be handed one: `==` on two arrays is a walk of both.
+    #[test]
+    fn a_collection_is_refused_by_a_text_or_scalar_intrinsic() {
+        let array = |slot| Arg {
+            slot,
+            layout: ARRAY_INT,
+        };
+        let held = calling(
+            crate::Intrinsic::StringTrim,
+            STR,
+            vec![Repr::Ref, Repr::Ref],
+            vec![array(1)],
+        );
+        assert_eq!(
+            faults(&held),
+            vec![
+                "operand 0 of `String.trim` is the collection `Array<Int>`, and a Text intrinsic \
+                 takes none: a collection operation is a run instruction or the standard \
+                 library's, not an intrinsic (ADR 0058)"
+            ]
+        );
+
+        // `Array<Int>` is not the `Array<String>` `join` names.
+        let held = calling(
+            crate::Intrinsic::StringJoin,
+            STR,
+            vec![Repr::Ref, Repr::Ref, Repr::Ref],
+            vec![
+                Arg {
+                    slot: 1,
+                    layout: STR,
+                },
+                array(2),
+            ],
+        );
+        assert_eq!(
+            faults(&held),
+            vec![
+                "operand 1 of `String.join` is `Array<Int>`, where its signature has Array<String>"
+            ]
+        );
+
+        let held = calling(
+            crate::Intrinsic::ValueOrder,
+            INT,
+            vec![Repr::Int, Repr::Ref, Repr::Ref],
+            vec![array(1), array(2)],
+        );
+        assert_eq!(faults(&held), Vec::<String>::new());
     }
 
     /// A closure call's destination is checked like every other call's.
