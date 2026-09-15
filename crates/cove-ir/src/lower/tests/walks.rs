@@ -82,15 +82,13 @@ fn filter_is_an_ordinary_call_into_the_standard_library() {
         ),
         "\
 fn @m.f(Array) -> Array
-  frame 5: s0!:ref s1:ref s2:ref s3:int s4:ref
-  local xs -> s0:Array [0, 7)
+  frame 4: s0!:ref s1:ref s2:ref s3:int
+  local xs -> s0:Array [0, 5)
      0  alloc s2:ref closure m.f#0<closure>
      1  func-ref s3:int @m.f#0
      2  store-field s2:ref +0 s3:Int
-     3  call s4:Array std.array.filter<String> (s0:Array s2:fn)
-     4  clear s2:fn
-     5  copy s1:Array s4:Array
-     6  return s1:Array
+     3  call s1:Array std.array.filter<String> (s0:Array s2:fn)
+     4  return s1:Array
 "
     );
 }
@@ -111,15 +109,13 @@ fn fold_is_an_ordinary_call_into_the_standard_library() {
         "\
 fn @m.f(Array) -> Int
   frame 5: s0!:ref s1:int s2:int s3:ref s4:int
-  local xs -> s0:Array [0, 8)
+  local xs -> s0:Array [0, 6)
      0  int s2:int 0
      1  alloc s3:ref closure m.f#0<closure>
      2  func-ref s4:int @m.f#0
      3  store-field s3:ref +0 s4:Int
-     4  call s4:Int std.array.fold<String, Int> (s0:Array s2:Int s3:fn)
-     5  clear s3:fn
-     6  copy s1:Int s4:Int
-     7  return s1:Int
+     4  call s1:Int std.array.fold<String, Int> (s0:Array s2:Int s3:fn)
+     5  return s1:Int
 "
     );
 }

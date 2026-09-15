@@ -371,6 +371,8 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             s(*dst),
             s(*capacity)
         ),
+        // A word push's source is a run of the element's width, so it is written
+        // as a value location the way `store-elem`'s is.
         Inst::GrowablePush {
             owner,
             src,
@@ -379,7 +381,10 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             "growable-push{} {} {}",
             unit(program, *storage),
             s(*owner),
-            s(*src)
+            match storage {
+                Storage::PackedBytes => s(*src),
+                Storage::Words(elem) => v(*src, *elem),
+            }
         ),
         Inst::GrowableExtend { args, storage } => format!(
             "growable-extend{} ({})",

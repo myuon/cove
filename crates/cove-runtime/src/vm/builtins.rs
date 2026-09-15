@@ -145,8 +145,11 @@ pub(crate) fn call(
 
         // ---- Vector ------------------------------------------------------
         Intrinsic::VectorOf => seq::vector_of(machine, operands).map(|word| out.push(word)),
-        Intrinsic::VectorPush => seq::vector_push(machine, operands).map(|word| out.push(word)),
-        Intrinsic::VectorSet => seq::vector_set(machine, builtin.result, operands, out),
+        // `Vector.push` is not here: it is `std.vector.push` over the core
+        // intrinsic that is a word `Inst::GrowablePush` — see
+        // `Machine::push_words`.
+        // `Vector.set` is not here: it is `std.vector.set`, a range check and
+        // an `Option` in Cove over an element `LoadElem` and `StoreElem`.
         Intrinsic::VectorPop => seq::vector_pop(machine, builtin.result, operands, out),
         Intrinsic::VectorRemove => seq::vector_remove(machine, builtin.result, operands, out),
         Intrinsic::VectorGet => seq::vector_get(machine, builtin.result, operands, out),
@@ -161,7 +164,9 @@ pub(crate) fn call(
         Intrinsic::VectorToArray => {
             seq::vector_to_array(machine, operands).map(|word| out.push(word))
         }
-        Intrinsic::VectorFreeze => seq::vector_freeze(machine, operands).map(|word| out.push(word)),
+        // `Vector.freeze` is not here: it is `std.vector.freeze` over the core
+        // intrinsic that is a word `Inst::RunFinish` — see
+        // `Machine::finish_words`.
 
         // ---- Set ---------------------------------------------------------
         //

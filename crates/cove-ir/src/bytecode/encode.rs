@@ -320,8 +320,9 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             Storage::PackedBytes => build(Op::RunCopyBytes, 0, 0, 0, halves(args.0, 0)),
             Storage::Words(elem) => build(Op::RunCopyWords, 0, 0, 0, halves(args.0, elem.0)),
         },
-        // The growable family has only its byte members so far, so a word
-        // storage is refused here the way `crate::verify` refuses it first.
+        // The growable family's word members arrive one at a time with the
+        // method that needs each, so a word storage with no opcode is refused
+        // here the way `crate::verify` refuses it first.
         Inst::GrowableAlloc {
             dst,
             capacity,
@@ -338,15 +339,22 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             storage,
         } => match storage {
             Storage::PackedBytes => build(Op::GrowablePushByte, slot(owner)?, slot(src)?, 0, 0),
-            Storage::Words(_) => return Err(TooWide::Storage { storage }),
+            Storage::Words(elem) => build(
+                Op::GrowablePushWords,
+                slot(owner)?,
+                slot(src)?,
+                0,
+                halves(elem.0, 0),
+            ),
         },
         Inst::GrowableExtend { args, storage } => match storage {
             Storage::PackedBytes => build(Op::GrowableExtendBytes, 0, 0, 0, halves(args.0, 0)),
             Storage::Words(_) => return Err(TooWide::Storage { storage }),
         },
         // The opcode *is* the storage and the validation: a byte finish
-        // validates UTF-8, so `Validation::None` over bytes has no opcode. The
-        // target is the payload's low half, as `Op::LoadElem`'s layout is.
+        // validates UTF-8 and a word finish validates nothing, so the other
+        // pairing of each has no opcode. The target is the payload's low half,
+        // as `Op::LoadElem`'s layout is, and a word finish's element the high.
         Inst::RunFinish {
             dst,
             owner,
@@ -361,10 +369,16 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
                 0,
                 halves(target.0, 0),
             ),
-            (Storage::PackedBytes, Validation::None) => {
+            (Storage::Words(elem), Validation::None) => build(
+                Op::RunFinishWords,
+                slot(dst)?,
+                slot(owner)?,
+                0,
+                halves(target.0, elem.0),
+            ),
+            (Storage::PackedBytes, Validation::None) | (Storage::Words(_), Validation::Utf8) => {
                 return Err(TooWide::Validation { validation })
             }
-            (Storage::Words(_), _) => return Err(TooWide::Storage { storage }),
         },
         Inst::Len { dst, obj } => build(Op::Len, slot(dst)?, slot(obj)?, 0, 0),
         Inst::LayoutOf { dst, obj } => build(Op::LayoutOf, slot(dst)?, slot(obj)?, 0, 0),
@@ -868,6 +882,14 @@ mod tests {
             ),
             (
                 0,
+                Inst::GrowablePush {
+                    owner: 1,
+                    src: 2,
+                    storage: Storage::Words(L),
+                },
+            ),
+            (
+                0,
                 Inst::GrowableExtend {
                     args: ArgsId(1),
                     storage: Storage::PackedBytes,
@@ -881,6 +903,16 @@ mod tests {
                     target: L,
                     validation: Validation::Utf8,
                     storage: Storage::PackedBytes,
+                },
+            ),
+            (
+                0,
+                Inst::RunFinish {
+                    dst: 1,
+                    owner: 2,
+                    target: L,
+                    validation: Validation::None,
+                    storage: Storage::Words(L),
                 },
             ),
             (0, Inst::Len { dst: 1, obj: 2 }),
@@ -1277,20 +1309,8 @@ mod tests {
                 capacity: 1,
                 storage: words,
             },
-            Inst::GrowablePush {
-                owner: 0,
-                src: 1,
-                storage: words,
-            },
             Inst::GrowableExtend {
                 args: ArgsId(0),
-                storage: words,
-            },
-            Inst::RunFinish {
-                dst: 0,
-                owner: 1,
-                target: LayoutId(0),
-                validation: Validation::None,
                 storage: words,
             },
         ] {
@@ -1313,6 +1333,21 @@ mod tests {
             ),
             Err(TooWide::Validation {
                 validation: Validation::None
+            })
+        );
+        assert_eq!(
+            encode(
+                &Inst::RunFinish {
+                    dst: 0,
+                    owner: 1,
+                    target: LayoutId(0),
+                    validation: Validation::Utf8,
+                    storage: words,
+                },
+                0
+            ),
+            Err(TooWide::Validation {
+                validation: Validation::Utf8
             })
         );
         assert_eq!(

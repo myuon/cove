@@ -48,6 +48,10 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | name | signature |
 | --- | --- |
 | `byteLength` | `core.byteLength(text: String) -> Int` |
+| `vectorPush` | `core.vectorPush(items: Vector<T>, value: T) -> Unit` |
+| `vectorLoad` | `core.vectorLoad(items: Vector<T>, index: Int) -> T` |
+| `vectorStore` | `core.vectorStore(items: Vector<T>, index: Int, value: T) -> Unit` |
+| `vectorFinish` | `core.vectorFinish(items: Vector<T>) -> Array<T>` |
 
 ## Builtin types
 
@@ -96,11 +100,11 @@ written as a namespace; binds `T`.
 | `filter(keep: fn(T) -> Bool) -> Array<T>` |  |  |  | `std.vector.filter` |
 | `fold(initial: R, step: fn(R, T) -> R) -> R` |  |  | `R` | `std.vector.fold` |
 | `sorted(by: fn(T, T) -> Bool) -> Array<T>` |  |  |  | `machine` |
-| `push(value: T) -> Unit` | yes |  |  | `machine` |
-| `set(index: Int, value: T) -> Option<T>` | yes |  |  | `machine` |
+| `push(value: T) -> Unit` | yes |  |  | `std.vector.push` |
+| `set(index: Int, value: T) -> Option<T>` | yes |  |  | `std.vector.set` |
 | `pop() -> Option<T>` | yes |  |  | `machine` |
 | `remove(index: Int) -> Option<T>` | yes |  |  | `machine` |
-| `freeze() -> Array<T>` | yes |  |  | `machine` |
+| `freeze() -> Array<T>` | yes |  |  | `std.vector.freeze` |
 | `toArray() -> Array<T>` |  |  |  | `machine` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 

@@ -1,0 +1,4 @@
+pushed 3000 strings and abandoned 24000
+read back 3000 strings, 3000 in place, 25890 bytes
+first Some(kept 0) middle Some(kept 1500) last Some(kept 2999) past None
+after 16000 more, 3000 still in place

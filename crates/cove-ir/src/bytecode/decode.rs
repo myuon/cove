@@ -276,6 +276,11 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             src: b,
             storage: Storage::PackedBytes,
         },
+        Op::GrowablePushWords => Inst::GrowablePush {
+            owner: a,
+            src: b,
+            storage: Storage::Words(LayoutId(lo)),
+        },
         Op::GrowableExtendBytes => Inst::GrowableExtend {
             args: ArgsId(lo),
             storage: Storage::PackedBytes,
@@ -286,6 +291,13 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             target: LayoutId(lo),
             validation: Validation::Utf8,
             storage: Storage::PackedBytes,
+        },
+        Op::RunFinishWords => Inst::RunFinish {
+            dst: a,
+            owner: b,
+            target: LayoutId(lo),
+            validation: Validation::None,
+            storage: Storage::Words(LayoutId(hi)),
         },
         Op::Len => Inst::Len { dst: a, obj: b },
         Op::LayoutOf => Inst::LayoutOf { dst: a, obj: b },

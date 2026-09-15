@@ -83,12 +83,11 @@ fn a_duration_reader_is_a_call_the_standard_library_implements() {
         listing("fn ms(d: Duration) -> Int { d.millis() }", "ms"),
         "\
 fn @m.ms(Duration) -> Int
-  frame 5: s0!:duration s1:int s2:int s3:int s4:int
-  local d -> s0:Duration [0, 4)
-     0  call-builtin s4:Int Duration.nanos (s0:Duration)
-     1  div.int.imm s2:int s4:int 1000000
-     2  copy s1:Int s2:Int
-     3  return s1:Int
+  frame 4: s0!:duration s1:int s2:int s3:int
+  local d -> s0:Duration [0, 3)
+     0  call-builtin s3:Int Duration.nanos (s0:Duration)
+     1  div.int.imm s1:int s3:int 1000000
+     2  return s1:Int
 "
     );
 }
@@ -110,16 +109,15 @@ fn is_some_is_a_call_the_standard_library_implements() {
         listing("fn has(o: Option<Int>) -> Bool { o.isSome() }", "has"),
         "\
 fn @m.has(Option) -> Bool
-  frame 5: s0!:tag s1!:int s2:bool s3:bool s4:bool
-  local o -> s0..s1:Option [0, 8)
+  frame 4: s0!:tag s1!:int s2:bool s3:bool
+  local o -> s0..s1:Option [0, 7)
      0  switch s0:tag [3 1] else 5
-     1  bool s3:bool true
+     1  bool s2:bool true
      2  jump 6
-     3  bool s3:bool false
+     3  bool s2:bool false
      4  jump 6
      5  trap \"no `match` arm covers this value\"
-     6  copy s2:Bool s3:Bool
-     7  return s2:Bool
+     6  return s2:Bool
 "
     );
 }
@@ -139,18 +137,17 @@ fn unwrap_or_is_an_ordinary_call_into_the_standard_library() {
         ),
         "\
 fn @m.value(Option Int) -> Int
-  frame 7: s0!:tag s1!:int s2!:int s3:int s4:int s5:int s6:int
-  local o -> s0..s1:Option [0, 9)
-  local other -> s2:Int [0, 9)
+  frame 6: s0!:tag s1!:int s2!:int s3:int s4:int s5:int
+  local o -> s0..s1:Option [0, 8)
+  local other -> s2:Int [0, 8)
      0  switch s0:tag [4 1] else 6
-     1  copy s6:Int s1:Int
-     2  copy s4:Int s6:Int
+     1  copy s5:Int s1:Int
+     2  copy s3:Int s5:Int
      3  jump 7
-     4  copy s4:Int s2:Int
+     4  copy s3:Int s2:Int
      5  jump 7
      6  trap \"no `match` arm covers this value\"
-     7  copy s3:Int s4:Int
-     8  return s3:Int
+     7  return s3:Int
 "
     );
 }
@@ -167,20 +164,18 @@ fn a_parser_answers_a_result_and_interns_the_error_it_may_carry() {
         ),
         "\
 fn @m.parse(String) -> Int
-  frame 9: s0!:ref s1:int s2:tag s3:int s4:ref s5:int s6:int s7:int s8:int
-  local s -> s0:String [0, 12)
+  frame 8: s0!:ref s1:int s2:tag s3:int s4:ref s5:int s6:int s7:int
+  local s -> s0:String [0, 10)
      0  call-builtin s2..s4:Result Int.parse (s0:String)
      1  int s5:int 0
      2  switch s2:tag [3 6] else 8
-     3  copy s8:Int s3:Int
-     4  copy s6:Int s8:Int
+     3  copy s7:Int s3:Int
+     4  copy s1:Int s7:Int
      5  jump 9
-     6  copy s6:Int s5:Int
+     6  copy s1:Int s5:Int
      7  jump 9
      8  trap \"no `match` arm covers this value\"
-     9  clear s2..s4:Result
-    10  copy s1:Int s6:Int
-    11  return s1:Int
+     9  return s1:Int
 "
     );
 }
@@ -225,12 +220,11 @@ fn a_method_the_standard_library_implements_is_an_ordinary_call() {
         listing("fn f(xs: Array<Int>) -> Bool { xs.isEmpty() }", "f"),
         "\
 fn @m.f(Array) -> Bool
-  frame 5: s0!:ref s1:bool s2:bool s3:bool s4:int
-  local xs -> s0:Array [0, 4)
-     0  len s4:int s0:ref
-     1  eq.int.imm s2:bool s4:int 0
-     2  copy s1:Bool s2:Bool
-     3  return s1:Bool
+  frame 4: s0!:ref s1:bool s2:bool s3:int
+  local xs -> s0:Array [0, 3)
+     0  len s3:int s0:ref
+     1  eq.int.imm s1:bool s3:int 0
+     2  return s1:Bool
 "
     );
 }
@@ -260,6 +254,98 @@ fn @m.Point.bump(<addr>) -> Unit
      7  unit s5:unit
      8  copy s1:Unit s5:Unit
      9  return s1:Unit
+"
+    );
+}
+
+/// `Vector.push` is `std.vector.push`, whose body is ADR 0058's
+/// `core.vectorPush`: a word `growable-push` of the element's layout and the
+/// `()` the call answers. The wrapper is thin, so it is expanded wherever it is
+/// called, and neither a `call` nor a `call-builtin` is left — at a one-word
+/// element and at a two-word one, whose source is the whole run.
+#[test]
+fn a_push_is_a_word_growable_push_where_it_is_written() {
+    assert_eq!(
+        listing(
+            "struct Point { x: Int, y: Int }\n\
+             fn f(xs: Vector<Int>, ps: Vector<Point>, p: Point) -> Int {\n  \
+               var ints = xs\n  var points = ps\n  ints.push(7)\n  points.push(p)\n  0\n}",
+            "f"
+        ),
+        "\
+fn @m.f(Vector Vector m.Point) -> Int
+  frame 11: s0!:ref s1!:ref s2!:int s3!:int s4:int s5:ref s6:ref s7:int s8:unit s9:unit s10:unit
+  local xs -> s0:Vector [0, 9)
+  local ps -> s1:Vector [0, 9)
+  local p -> s2..s3:m.Point [0, 9)
+  local ints -> s5:Vector [1, 8)
+  local points -> s6:Vector [2, 8)
+     0  copy s5:Vector s0:Vector
+     1  copy s6:Vector s1:Vector
+     2  int s7:int 7
+     3  growable-push.words Int s5:ref s7:Int
+     4  unit s8:unit
+     5  growable-push.words m.Point s6:ref s2..s3:m.Point
+     6  unit s8:unit
+     7  int s4:int 0
+     8  return s4:Int
+"
+    );
+}
+
+/// `Vector.set` is `std.vector.set`: the range decision and the `Option` in
+/// Cove, over ADR 0058's `core.vectorLoad` and `core.vectorStore`, which are a
+/// `load-field` of the store and a `load-elem` or `store-elem` of it. What is
+/// left at the call site is an ordinary call — the body is eighteen
+/// instructions, past the leaf limit outside a loop — and no `call-builtin`.
+#[test]
+fn a_set_is_a_range_check_over_an_element_load_and_store() {
+    assert_eq!(
+        listing(
+            "fn f(xs: Vector<Int>, i: Int) -> Option<Int> {\n  var ints = xs\n  ints.set(i, 7)\n}",
+            "f"
+        ),
+        "\
+fn @m.f(Vector Int) -> Option
+  frame 6: s0!:ref s1!:int s2:tag s3:int s4:ref s5:int
+  local xs -> s0:Vector [0, 4)
+  local i -> s1:Int [0, 4)
+  local ints -> s4:Vector [1, 3)
+     0  copy s4:Vector s0:Vector
+     1  int s5:int 7
+     2  call s2..s3:Option std.vector.set<Int> (s4:Vector s1:Int s5:Int)
+     3  return s2..s3:Option
+"
+    );
+}
+
+/// `Vector.freeze` is `std.vector.freeze`, whose body is ADR 0058's
+/// `core.vectorFinish`: one word `run-finish` into the `Array` of the element,
+/// with nothing to validate, expanded where it is called — and written straight
+/// into the function's answer, because a standard-library binding hands its call
+/// the destination the surrounding form asked for, as the builtin did.
+#[test]
+fn a_freeze_is_a_word_run_finish_where_it_is_written() {
+    assert_eq!(
+        listing(
+            "fn f(n: Int) -> Array<Int> {\n  var building: Vector<Int> = Vector.of()\n  building.push(n)\n  building.freeze()\n}",
+            "f"
+        ),
+        "\
+fn @m.f(Int) -> Array
+  frame 8: s0!:int s1:ref s2:ref s3:int s4:ref s5:unit s6:unit s7:ref
+  local n -> s0:Int [0, 10)
+  local building -> s4:Vector [6, 9)
+     0  alloc s2:ref Vector<store> x0
+     1  alloc s4:ref Vector<vector>
+     2  int s3:int 0
+     3  store-field s4:ref +0 s3:Int
+     4  store-field s4:ref +1 s2:<ref>
+     5  clear s2:<ref>
+     6  growable-push.words Int s4:ref s0:Int
+     7  unit s5:unit
+     8  run-finish.words Int s1:ref s4:ref Array unchecked
+     9  return s1:Array
 "
     );
 }
@@ -306,18 +392,15 @@ fn map_error_is_an_ordinary_call_into_the_standard_library() {
         ),
         "\
 fn @m.f(String) -> Result
-  frame 14: s0!:ref s1:tag s2:int s3:tag s4:ref s5:tag s6:int s7:ref s8:ref s9:int s10:tag s11:int s12:tag s13:ref
-  local t -> s0:String [0, 10)
+  frame 10: s0!:ref s1:tag s2:int s3:tag s4:ref s5:tag s6:int s7:ref s8:ref s9:int
+  local t -> s0:String [0, 7)
      0  call-builtin s5..s7:Result Int.parse (s0:String)
      1  alloc s8:ref closure m.f#0<closure>
      2  func-ref s9:int @m.f#0
      3  store-field s8:ref +0 s9:Int
      4  store-field s8:ref +1 s0:String
-     5  call s10..s13:Result std.result.mapError<Int, Error, m.E> (s5..s7:Result s8:fn)
-     6  clear s8:fn
-     7  clear s5..s7:Result
-     8  copy s1..s4:Result s10..s13:Result
-     9  return s1..s4:Result
+     5  call s1..s4:Result std.result.mapError<Int, Error, m.E> (s5..s7:Result s8:fn)
+     6  return s1..s4:Result
 "
     );
 }

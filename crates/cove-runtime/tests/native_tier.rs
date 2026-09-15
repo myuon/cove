@@ -705,7 +705,8 @@ export fn callsKeepsWhatItStillNeeds(a: String, b: String, n: Int) -> Int {
 
 /// A compiled loop over one operation that never reaches the runtime and one that
 /// sometimes does: `String.byteLength()` is an expanded `Inst::Len`, and
-/// `Vector.push` is an emitted fast path whose growth is the `builtin` helper.
+/// `Vector.push` is an expanded word `growable-push`, an emitted fast path whose
+/// growth is the `growable` helper.
 /// `counts(0)` for `pushesOnto`'s reason.
 export fn measuresAndPushes(s: String, given: Vector<Int>, n: Int) -> Int {
   var v = given
@@ -2563,10 +2564,13 @@ fn counted_run(
 ///   ADR 0058's `core.byteLength`, a thin wrapper the lowering expands into
 ///   `measuresAndPushes` as an `Inst::Len` — so no site, no mediated call, and
 ///   no library call left for either tier to make;
-/// - `Vector.push`: only its growths reach the runtime from native code. The
-///   vector starts as `Vector.of(7)`, one element in a store of exactly one, and
-///   `vm::builtins::seq::grow` doubles from a minimum of four, so forty pushes
-///   grow the store at lengths 1, 4, 8, 16 and 32 — five mediated calls.
+/// - `Vector.push`: not an intrinsic either. It is `std.vector` over
+///   `core.vectorPush`, expanded into `measuresAndPushes` as a word
+///   `growable-push`, so it has no site and no mediated call on either tier —
+///   and from native code only its growths reach the runtime, through the
+///   `growable` helper. The vector starts as `Vector.of(7)`, one element in a
+///   store of exactly one, and a growth doubles from a minimum of four, so forty
+///   pushes grow the store at lengths 1, 4, 8, 16 and 32 — five helper calls.
 ///
 /// The program is lowered from the one entry, as `cove run` lowers it, so the
 /// static counts are this slice's own.
@@ -2623,9 +2627,7 @@ fn the_boundary_report_counts_each_quantity_apart() {
             .intrinsic(intrinsic)
             .unwrap_or_else(|| panic!("the program names {intrinsic}"))
     };
-    for intrinsic in [Intrinsic::StringSliceBytes, Intrinsic::VectorPush] {
-        assert_eq!(row(&on_vm, intrinsic).sites, 1, "{intrinsic}");
-    }
+    assert_eq!(row(&on_vm, Intrinsic::StringSliceBytes).sites, 1);
     assert_eq!(
         on_vm.emitted.builtin_sites,
         on_vm.intrinsics.iter().map(|row| row.sites).sum::<u64>(),
@@ -2639,14 +2641,8 @@ fn the_boundary_report_counts_each_quantity_apart() {
         (held.encoded, held.native)
     };
     assert_eq!(calls(&on_vm, Intrinsic::StringSliceBytes), (n, 0));
-    assert_eq!(calls(&on_vm, Intrinsic::VectorPush), (n, 0));
     for report in [&on_native, &uncounted] {
         assert_eq!(calls(report, Intrinsic::StringSliceBytes), (n, 0));
-        assert_eq!(
-            calls(report, Intrinsic::VectorPush),
-            (0, 5),
-            "only the five growths reached the runtime"
-        );
         // Sorted by dynamic calls, most first.
         assert!(report
             .intrinsics
@@ -2693,9 +2689,10 @@ fn the_boundary_report_counts_each_quantity_apart() {
     assert_eq!(uncounted.helpers, None);
     let helpers = on_native.helpers.expect("the counting helpers were bound");
     assert_eq!(
-        helpers.builtin, 5,
-        "one `builtin` helper call per mediated growth: {helpers:?}"
+        helpers.growable, 5,
+        "one `growable` helper call per growth, and none for a push with room: {helpers:?}"
     );
+    assert_eq!(helpers.builtin, 0, "no builtin was mediated: {helpers:?}");
     // Every call compiled code made went out through `open` or `call` — an `open`
     // whose callee has no machine code runs the mediated call itself, and is
     // still one `open` — and only a direct one comes back through `close`.

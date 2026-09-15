@@ -67,8 +67,6 @@ pub enum Intrinsic {
     ArraySlice,
     ArrayToVector,
     VectorOf,
-    VectorPush,
-    VectorSet,
     VectorPop,
     VectorRemove,
     VectorGet,
@@ -77,7 +75,6 @@ pub enum Intrinsic {
     VectorSlice,
     VectorLength,
     VectorToArray,
-    VectorFreeze,
     SetOf,
     SetLength,
     SetContains,
@@ -140,8 +137,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::ArraySlice,
     Intrinsic::ArrayToVector,
     Intrinsic::VectorOf,
-    Intrinsic::VectorPush,
-    Intrinsic::VectorSet,
     Intrinsic::VectorPop,
     Intrinsic::VectorRemove,
     Intrinsic::VectorGet,
@@ -150,7 +145,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::VectorSlice,
     Intrinsic::VectorLength,
     Intrinsic::VectorToArray,
-    Intrinsic::VectorFreeze,
     Intrinsic::SetOf,
     Intrinsic::SetLength,
     Intrinsic::SetContains,
@@ -215,8 +209,6 @@ impl Intrinsic {
             Intrinsic::ArraySlice => "Array",
             Intrinsic::ArrayToVector => "Array",
             Intrinsic::VectorOf => "Vector",
-            Intrinsic::VectorPush => "Vector",
-            Intrinsic::VectorSet => "Vector",
             Intrinsic::VectorPop => "Vector",
             Intrinsic::VectorRemove => "Vector",
             Intrinsic::VectorGet => "Vector",
@@ -225,7 +217,6 @@ impl Intrinsic {
             Intrinsic::VectorSlice => "Vector",
             Intrinsic::VectorLength => "Vector",
             Intrinsic::VectorToArray => "Vector",
-            Intrinsic::VectorFreeze => "Vector",
             Intrinsic::SetOf => "Set",
             Intrinsic::SetLength => "Set",
             Intrinsic::SetContains => "Set",
@@ -286,8 +277,6 @@ impl Intrinsic {
             Intrinsic::ArraySlice => "slice",
             Intrinsic::ArrayToVector => "toVector",
             Intrinsic::VectorOf => "of",
-            Intrinsic::VectorPush => "push",
-            Intrinsic::VectorSet => "set",
             Intrinsic::VectorPop => "pop",
             Intrinsic::VectorRemove => "remove",
             Intrinsic::VectorGet => "get",
@@ -296,7 +285,6 @@ impl Intrinsic {
             Intrinsic::VectorSlice => "slice",
             Intrinsic::VectorLength => "length",
             Intrinsic::VectorToArray => "toArray",
-            Intrinsic::VectorFreeze => "freeze",
             Intrinsic::SetOf => "of",
             Intrinsic::SetLength => "length",
             Intrinsic::SetContains => "contains",
@@ -349,7 +337,7 @@ impl Intrinsic {
     /// `cove-runtime`'s `vm::builtins`, not by a rule applied to every
     /// member of a family — two operations of the same receiver may answer
     /// differently, the way [`Intrinsic::VectorGet`] does not write memory
-    /// and [`Intrinsic::VectorSet`] does.
+    /// and [`Intrinsic::VectorPop`] does.
     pub const fn effects(self) -> Effects {
         use Effects as E;
         // Every arm below validates its own operand count and shape before
@@ -436,23 +424,14 @@ impl Intrinsic {
                 .union(E::MAY_ALLOCATE)
                 .union(E::MAY_COLLECT)
                 .union(E::BULK_WORK),
-            // `push` mutates the header in place and, past capacity,
-            // allocates a larger store and copies the live prefix into it —
-            // amortised O(1), but the copy is real work on the turn it
-            // happens, so it carries the same flags a `grow` would.
-            Intrinsic::VectorPush => raise
-                .union(E::READS_MEMORY)
-                .union(E::WRITES_MEMORY)
-                .union(E::MAY_ALLOCATE)
-                .union(E::MAY_COLLECT)
-                .union(E::BULK_WORK),
-            // `set`, `pop` and `get` touch exactly one element's words and
-            // never allocate; `remove` additionally shifts every element
-            // past the one it takes out, which is what makes it the one of
-            // the three that is proportional to the vector.
-            Intrinsic::VectorSet | Intrinsic::VectorPop => {
-                raise.union(E::READS_MEMORY).union(E::WRITES_MEMORY)
-            }
+            // `push` is not here: it is `std.vector.push` over the core
+            // intrinsic that is a word `Inst::GrowablePush`.
+            // `pop` and `get` touch exactly one element's words and never
+            // allocate; `remove` additionally shifts every element past the
+            // one it takes out, which is what makes it the one of the three
+            // that is proportional to the vector. `set` was the fourth, and is
+            // `std.vector.set` over an element load and store now.
+            Intrinsic::VectorPop => raise.union(E::READS_MEMORY).union(E::WRITES_MEMORY),
             Intrinsic::VectorRemove => raise
                 .union(E::READS_MEMORY)
                 .union(E::WRITES_MEMORY)
@@ -466,10 +445,8 @@ impl Intrinsic {
                 .union(E::BULK_WORK)
                 .union(E::MAY_ALLOCATE)
                 .union(E::MAY_COLLECT),
-            // `freeze()` relabels the store the vector already owns down
-            // from capacity to length and empties the header — O(1), and
-            // nothing new is allocated.
-            Intrinsic::VectorFreeze => raise.union(E::READS_MEMORY).union(E::WRITES_MEMORY),
+            // `push`, `set` and `freeze` are not here: each is `std.vector`
+            // over run instructions now.
 
             // A `Set` or a `Map` is immutable, so every update below
             // allocates a new run rather than writing through the receiver
@@ -671,8 +648,6 @@ mod tests {
                 | Intrinsic::ArraySlice
                 | Intrinsic::ArrayToVector
                 | Intrinsic::VectorOf
-                | Intrinsic::VectorPush
-                | Intrinsic::VectorSet
                 | Intrinsic::VectorPop
                 | Intrinsic::VectorRemove
                 | Intrinsic::VectorGet
@@ -681,7 +656,6 @@ mod tests {
                 | Intrinsic::VectorSlice
                 | Intrinsic::VectorLength
                 | Intrinsic::VectorToArray
-                | Intrinsic::VectorFreeze
                 | Intrinsic::SetOf
                 | Intrinsic::SetLength
                 | Intrinsic::SetContains
@@ -741,7 +715,7 @@ mod tests {
 
     #[test]
     fn display_prints_receiver_dot_operation() {
-        assert_eq!(Intrinsic::VectorPush.to_string(), "Vector.push");
+        assert_eq!(Intrinsic::VectorPop.to_string(), "Vector.pop");
         assert_eq!(Intrinsic::AnyEquals.to_string(), "Any.equals");
     }
 

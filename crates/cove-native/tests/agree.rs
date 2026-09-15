@@ -594,7 +594,7 @@ fn both_arms_answer_the_same_thing() {
     ] {
         agree_over(
             &format!("a push {what}"),
-            &suite::pushing(suite::VECTOR, 1),
+            &suite::pushing(1),
             &[cove_native::HEAP_ORIGIN_WORDS + 20, 70, 0],
             0,
             move || {
@@ -602,55 +602,6 @@ fn both_arms_answer_the_same_thing() {
                 // In chunk zero, and inside the run `agree_over` compares, so that
                 // every word either arm writes is compared.
                 suite::a_vector(&mut heap, 20, layout, len, capacity);
-                if !store {
-                    heap.set(22, 0);
-                }
-                heap
-            },
-        );
-    }
-
-    // `Vector.set`: the emitted fast path, in range and out of it, and its two
-    // cold paths — one fewer than `push`'s three, because an index outside the
-    // vector is not cold here: it is `None`, on the fast path with everything
-    // else.
-    for (what, len, at) in [
-        ("in range", 3u32, 1i64),
-        ("at the first element", 3, 0),
-        ("at the last element", 3, 2),
-        ("at the length", 3, 3),
-        ("negative", 3, -1),
-        ("on an empty vector", 0, 0),
-    ] {
-        agree_over(
-            &format!("a set {what}"),
-            &suite::setting(suite::VECTOR, 1),
-            &[cove_native::HEAP_ORIGIN_WORDS + 20, at as u64, 70, 0, 0],
-            0,
-            move || {
-                let mut heap = Heap::new(2);
-                suite::a_vector(&mut heap, 20, suite::VECTOR, len, 4);
-                // Distinguishable words, so a wrong offset disagrees with itself
-                // rather than coincidentally reading zero on both arms.
-                for idx in 0..len {
-                    heap.set(29 + u64::from(idx), 100 + u64::from(idx));
-                }
-                heap
-            },
-        );
-    }
-    for (what, layout, store) in [
-        ("of a frozen vector", suite::VECTOR, false),
-        ("whose object is another layout", suite::PAIR_VECTOR, true),
-    ] {
-        agree_over(
-            &format!("a set {what}"),
-            &suite::setting(suite::VECTOR, 1),
-            &[cove_native::HEAP_ORIGIN_WORDS + 20, 0, 70, 0, 0],
-            0,
-            move || {
-                let mut heap = Heap::new(2);
-                suite::a_vector(&mut heap, 20, layout, 1, 4);
                 if !store {
                     heap.set(22, 0);
                 }

@@ -2569,6 +2569,99 @@ impl<'a> Machine<'a> {
         Ok(())
     }
 
+    /// A live `Vector` at `owner` whose elements are `elem`: its store, its
+    /// logical length and its capacity.
+    ///
+    /// [`Machine::buffer`]'s three checks for an element run, for its reasons:
+    /// nothing static says which family the object behind a `Ref` slot is, so
+    /// reading an arbitrary object's payload word 1 as a store is how a wrong
+    /// program becomes a write into the middle of the heap. The shape is
+    /// compared with the instruction's element layout as well as with
+    /// `Shape::Vector`, because the stride every write below is measured in is
+    /// that layout's.
+    ///
+    /// A null store is a vector a finish already consumed. A checked program
+    /// cannot reach one — `cove_sema::unique` proves it at the `.freeze()` the
+    /// program wrote (#240) — so it is refused as the internal invariant it is,
+    /// in [`consumed_vector`]'s one sentence, which names no method: the
+    /// instruction is below every method that lowers to it.
+    fn vector_run(&self, owner: u64, elem: LayoutId) -> Result<Growable, RuntimeError> {
+        if owner == 0 {
+            return Err(null_object());
+        }
+        match self.program.layout(self.mem.object_layout(owner)).shape {
+            Shape::Vector { elem: held } if held == elem => {}
+            _ => {
+                return Err(RuntimeError::new(format!(
+                    "a growable run of `{}` was expected here, and this object is not one",
+                    self.program.layout(elem).name
+                )))
+            }
+        }
+        let store = self.mem.payload(owner, GROWABLE_STORE);
+        if store == 0 {
+            return Err(consumed_vector());
+        }
+        Ok(Growable {
+            owner,
+            store,
+            len: self.mem.payload(owner, GROWABLE_LEN) as u32,
+            capacity: self.mem.object_len(store),
+            storage: cove_ir::Storage::Words(elem),
+        })
+    }
+
+    /// A word [`Inst::GrowablePush`]: the element whose words begin at the
+    /// linear address `src` onto the end of the vector at `owner`.
+    ///
+    /// `vm::builtins::seq::vector_push` without the operand array: the ensure
+    /// first, because it may allocate, and then the element's words straight
+    /// out of the frame into the store at `len * stride`, and then the commit.
+    /// Nothing is lost to a collection in the ensure — the frame does not
+    /// move, a collection moves nothing, and the element is still in the slots
+    /// the frame's reference map names.
+    pub(crate) fn push_words(
+        &mut self,
+        owner: u64,
+        elem: LayoutId,
+        src: u64,
+    ) -> Result<(), RuntimeError> {
+        let mut run = self.vector_run(owner, elem)?;
+        runs::growable_ensure(self, &mut run, 1)?;
+        let width = self.width(elem);
+        let into = self.mem.payload_addr(run.store, run.len * width);
+        self.mem.copy_words(into, src, width);
+        runs::growable_commit(self, &mut run, 1);
+        Ok(())
+    }
+
+    /// A word [`Inst::RunFinish`]: the vector's store relabelled to `target` at
+    /// its live length, and the vector emptied.
+    ///
+    /// `vm::builtins::seq::vector_freeze` without the search for the `Array`
+    /// layout — the instruction names it — and without a question it never
+    /// asked: whether the vector had a second holder is `cove_sema::unique`'s
+    /// to have proved.
+    ///
+    /// # Never inlined into the dispatch loop
+    ///
+    /// The `RUN_FINISH_WORDS` arm is one call, as every run arm is, and this is
+    /// what keeps it one: left to the optimiser, this function and
+    /// `growable_finish`'s relabel were inlined into `encoded::dispatch`, and
+    /// `benches/arith` — which finishes nothing — ran 47.0 ms against 55.3 on
+    /// the same tree, the loop around every arm paying for an arm it never
+    /// took. A finish is once per vector, so the call costs nothing that shows.
+    #[inline(never)]
+    pub(crate) fn finish_words(
+        &mut self,
+        owner: u64,
+        target: LayoutId,
+        elem: LayoutId,
+    ) -> Result<u64, RuntimeError> {
+        let run = self.vector_run(owner, elem)?;
+        runs::growable_finish(self, &run, target, Validation::None)
+    }
+
     /// A byte [`Inst::RunFinish`]: the buffer's live prefix, validated and
     /// relabelled to `target`, and the owner emptied.
     ///
@@ -4048,6 +4141,18 @@ fn wrong_arity(callee: String, declared: usize, given: usize) -> RuntimeError {
 /// reaching the machine, reported rather than read through.
 fn null_object() -> RuntimeError {
     RuntimeError::new("this value was read before it was given one")
+}
+
+/// A vector's storage was used after a finish consumed it.
+///
+/// One sentence for every run instruction over a vector, and one the oracle's
+/// core intrinsics use too, because it is an internal invariant rather than a
+/// program's mistake: `cove_sema::unique` refuses a read of a vector after its
+/// `freeze()` and a `freeze()` of one another place still holds (#240), so a
+/// checked program never gets here. It names no method, since the instruction
+/// that finds it is below whichever method lowered to it (#378, Q9).
+pub(crate) fn consumed_vector() -> RuntimeError {
+    RuntimeError::new(crate::builtins::CONSUMED_VECTOR)
 }
 
 /// A `lock` taken by a task that already holds the same cell.

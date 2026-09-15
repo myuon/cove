@@ -106,7 +106,7 @@ impl Body<'_> {
         // to.
         if let Some(receiver) = receiver_name(&ty) {
             if let Some(binding) = cove_schema::builtins::standard_binding(receiver, name) {
-                return self.call_std_binding(expr, binding, base, args);
+                return self.call_std_binding(expr, binding, base, args, want);
             }
         }
         match &ty {
@@ -222,12 +222,20 @@ impl Body<'_> {
     /// function it becomes does not: `base` is pushed on as the first
     /// argument and whatever the call site wrote follows it, unevaluated
     /// until `call_target` walks the list in order.
+    ///
+    /// The destination the surrounding form asked for goes with it, as it
+    /// goes with every other call `call_target` makes (issue #302). It did
+    /// not while the bound methods were answers nobody forwarded anyway; since
+    /// ADR 0058 moved `Vector.freeze`, whose builtin wrote its `Array` straight
+    /// into that destination, a binding that dropped it would be a copy per
+    /// `freeze()` in a function's answer that the builtin never made.
     fn call_std_binding(
         &mut self,
         expr: &Expr,
         binding: &cove_schema::builtins::StdBinding,
         base: &Expr,
         args: &[Arg],
+        want: Option<Dest>,
     ) -> Val {
         let Some(id) = self
             .plan
@@ -258,7 +266,7 @@ impl Body<'_> {
             span: base.span,
         });
         written.extend_from_slice(args);
-        self.call_target(expr, id, None, &written, None)
+        self.call_target(expr, id, None, &written, want)
     }
 
     /// A call to an associated builtin function the standard library

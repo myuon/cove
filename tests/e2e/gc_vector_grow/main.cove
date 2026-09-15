@@ -1,0 +1,79 @@
+use console.println
+
+/// A string of 4096 bytes, so that one piece of garbage is five hundred words
+/// and the machine's default heap fills after a few thousand of them.
+fn padding() -> String {
+  var pad = "0123456789abcdef"
+  var i = 0
+  while i < 8 {
+    pad = "{pad}{pad}"
+    i += 1
+  }
+  pad
+}
+
+/// Allocates and abandons `count` large strings and a vector of them, so that
+/// the heap fills with garbage between two pushes and collections have to run
+/// while the vector that is kept is growing.
+fn churn(pad: String, count: Int) -> Int {
+  var scratch: Vector<String> = Vector.of()
+  var i = 0
+  while i < count {
+    scratch.push("{pad}{i}")
+    i += 1
+  }
+  scratch.length()
+}
+
+/// How many elements of `frozen` are still the string pushed at their index.
+fn inPlace(frozen: Array<String>) -> Int {
+  var matched = 0
+  var at = 0
+  for text in frozen {
+    if text == "kept {at}" {
+      matched += 1
+    }
+    at += 1
+  }
+  matched
+}
+
+/// A `Vector<String>` grown one fresh string at a time across collections,
+/// then frozen and read back whole.
+///
+/// Every element is a string allocated just before its push, so it is
+/// reachable only through the vector's store — which is replaced every time
+/// the vector grows. A growth that lost the old store, a push that wrote the
+/// element where the collector did not look, or a freeze that released live
+/// words would each show up here as a wrong or missing element.
+export fn main() -> Result<Unit, Error> {
+  let pad = padding()
+  var kept: Vector<String> = Vector.of()
+  var discarded = 0
+  var i = 0
+  while i < 3000 {
+    kept.push("kept {i}")
+    discarded += churn(pad, 8)
+    i += 1
+  }
+  println("pushed {kept.length()} strings and abandoned {discarded}")?
+
+  let frozen = kept.freeze()
+  var bytes = 0
+  for text in frozen {
+    bytes += text.byteLength()
+  }
+  println("read back {frozen.length()} strings, {inPlace(frozen)} in place, {bytes} bytes")?
+  println("first {frozen.get(0)} middle {frozen.get(1500)} last {frozen.get(2999)} past {frozen.get(3000)}")?
+
+  // More garbage after the freeze: the array the store became is the only
+  // thing still holding those strings.
+  var more = 0
+  var j = 0
+  while j < 1000 {
+    more += churn(pad, 16)
+    j += 1
+  }
+  println("after {more} more, {inPlace(frozen)} still in place")?
+  Ok(())
+}

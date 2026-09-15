@@ -340,11 +340,102 @@ pub fn call_core(name: &str, args: &mut Vec<Value>, span: Span) -> Result<Value,
             };
             Ok(Value(Repr::Int(text.len() as i64)))
         }
+        // `std.vector.push`'s whole body. The write goes through the storage
+        // handle, so every alias observes it, exactly as the `Vector` arm of
+        // `call_method` wrote it before `push` moved; the liveness check is that
+        // arm's too, in the same words.
+        "vectorPush" => {
+            let value = args.remove(1);
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Vector", &args[0], span));
+            };
+            check_consumed(storage, span)?;
+            storage.elements.borrow_mut().push(value);
+            Ok(Value(Repr::Unit))
+        }
+        // The element read and write beneath `std.vector.set`. The body holds the
+        // index below `items.length()` before either is asked, so the refusal
+        // here is the machine's `LoadElem`/`StoreElem` bound and not a sentence a
+        // checked program reaches.
+        "vectorLoad" => {
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Vector", &args[0], span));
+            };
+            check_consumed(storage, span)?;
+            let elements = storage.elements.borrow();
+            let at = core_index(&shown, &args[1], elements.len(), span)?;
+            Ok(elements[at].clone())
+        }
+        "vectorStore" => {
+            let value = args.remove(2);
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Vector", &args[0], span));
+            };
+            check_consumed(storage, span)?;
+            let mut elements = storage.elements.borrow_mut();
+            let at = core_index(&shown, &args[1], elements.len(), span)?;
+            elements[at] = value;
+            Ok(Value(Repr::Unit))
+        }
+        // `std.vector.freeze`'s whole body: the elements taken out of the
+        // storage as the array, and the storage marked consumed.
+        //
+        // No handle is counted. The tree-walking oracle once refused a freeze
+        // whose `Rc` another alias shared, which answered ADR 0001's question at
+        // run time and in this evaluator only; `cove_sema::unique` answers it
+        // before either evaluator runs (#240), and it is authoritative (#378,
+        // Q9). A standard-library body is handed the vector by value — a second
+        // handle by construction — so counting here would refuse every call.
+        "vectorFinish" => {
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Vector", &args[0], span));
+            };
+            check_consumed(storage, span)?;
+            let elements = storage.elements.take();
+            *storage.frozen.borrow_mut() = true;
+            Ok(Value(Repr::Array(elements.into())))
+        }
         // A name the table declares and nothing here executes. No program can
         // reach one of these from its own modules, so the check that every
         // entry has a body here is `vm::differential`'s, which calls each
         // from a standard-library module on both evaluators.
         _ => Err(RuntimeError::new(format!("unknown core intrinsic `{shown}`")).at(span)),
+    }
+}
+
+/// What a core intrinsic answers for a vector a finish already consumed.
+///
+/// An internal invariant and not a program's mistake — `cove_sema::unique`
+/// refuses a read after a `freeze()` and a `freeze()` of a vector another place
+/// still holds — so it is one sentence that names no method, and the machine's
+/// run instructions refuse in the same words (`vm::exec::consumed_vector`).
+pub const CONSUMED_VECTOR: &str =
+    "a vector was used after it was consumed, which the uniqueness check rules out";
+
+/// Refuses a vector a finish consumed, in [`CONSUMED_VECTOR`]'s words.
+fn check_consumed(storage: &Rc<VectorStorage>, span: Span) -> Result<(), RuntimeError> {
+    if *storage.frozen.borrow() {
+        return Err(RuntimeError::new(CONSUMED_VECTOR).at(span));
+    }
+    Ok(())
+}
+
+/// A core intrinsic's element index, inside a run of `len`.
+///
+/// `Machine::element`'s refusal, in its words: an index outside the run a core
+/// intrinsic reads is a broken invariant of the standard-library body that
+/// called it, not a program's mistake.
+fn core_index(shown: &str, index: &Value, len: usize, span: Span) -> Result<usize, RuntimeError> {
+    let Value(Repr::Int(at)) = index else {
+        return Err(type_error(shown, "index", "Int", index, span));
+    };
+    match usize::try_from(*at) {
+        Ok(at) if at < len => Ok(at),
+        _ => Err(
+            RuntimeError::new(format!("index {at} is outside a collection of {len}"))
+                .at(span)
+                .with_rule("An index outside a collection is a broken invariant."),
+        ),
     }
 }
 
@@ -585,31 +676,11 @@ pub fn call_method(
         Value(Repr::Vector(storage)) => {
             check_live(storage, name, span)?;
             match name {
-                "push" => {
-                    let args = expect_args("push", args, 1, span)?;
-                    storage.elements.borrow_mut().push(args.remove(0));
-                    Ok(Value(Repr::Unit))
-                }
-                // Replaces the element at `index` and answers what was
-                // there, or answers `None` and writes nothing when `index`
-                // is not already in the vector — which is `get`'s answer to
-                // the same bad index, so a program has one rule about
-                // indices rather than two. The write goes through the
-                // storage handle, exactly as `push`'s does, so an alias
-                // observes it and there is nothing to write back to the
-                // receiver's own slot.
-                "set" => {
-                    let args = expect_args("Vector.set", args, 2, span)?;
-                    let value = args.remove(1);
-                    let Some(index) = index_of("Vector.set", args, span)? else {
-                        return Ok(Value::none());
-                    };
-                    let mut elements = storage.elements.borrow_mut();
-                    let Some(slot) = elements.get_mut(index) else {
-                        return Ok(Value::none());
-                    };
-                    Ok(Value::some(std::mem::replace(slot, value)))
-                }
+                // `push` is not here: it is `std.vector.push`, over
+                // `call_core`'s `vectorPush`.
+                // `set` is not here either: it is `std.vector.set`, whose
+                // range decision and `Option` are Cove over `call_core`'s
+                // `vectorLoad` and `vectorStore`.
                 // Takes the last element out and answers it, or answers
                 // `None` and writes nothing when there is no last element.
                 //
@@ -664,10 +735,8 @@ pub fn call_method(
                 // `Interpreter::eval_method_call` resolves it to a call into
                 // `std.vector.isEmpty` before this function is ever asked
                 // about it — see `cove_schema::builtins::standard_binding`.
-                "freeze" => {
-                    expect_args("freeze", args, 0, span)?;
-                    freeze(storage, span)
-                }
+                // `freeze` is `std.vector.freeze` the same way, over
+                // `call_core`'s `vectorFinish`.
                 "toArray" => {
                     expect_args("toArray", args, 0, span)?;
                     Ok(Value(Repr::Array(
@@ -758,13 +827,12 @@ pub fn call_method(
                 // it is refused rather than answered as an empty buffer.
                 //
                 // **There is no uniqueness check here, and that is deliberate.**
-                // `Vector.freeze` counts `Rc` handles because it can — the
-                // evaluator hands it the storage where it lives. A buffer
-                // arrives as a value read out of a place, which is already a
-                // second handle, so counting here would refuse every call.
-                // Uniqueness is `cove_sema::unique`'s proof for both backends;
-                // `Machine::finish_buffer` does not count handles either, and
-                // what both keep is the liveness check below.
+                // A buffer arrives as a value read out of a place, which is
+                // already a second handle, so counting here would refuse every
+                // call — and `Vector.freeze`, which once counted `Rc` handles,
+                // no longer does either. Uniqueness is `cove_sema::unique`'s
+                // proof for both backends; `Machine::finish_buffer` does not
+                // count handles, and what both keep is the liveness check.
                 "finish" => {
                     expect_args("finish", args, 0, span)?;
                     let bytes = storage.bytes.take();
@@ -1410,30 +1478,6 @@ fn callback_bool(
         ))
         .at(span)),
     }
-}
-
-/// Consumes uniquely owned vector storage and returns its elements as an
-/// `Array` in O(1).
-///
-/// Uniqueness is the runtime form of the Language Card's local uniqueness
-/// check: the caller must hold the only handle to this storage.
-pub fn freeze(storage: &Rc<VectorStorage>, span: Span) -> Result<Value, RuntimeError> {
-    check_live(storage, "freeze", span)?;
-    if Rc::strong_count(storage) != 1 {
-        return Err(RuntimeError::new(
-            "`freeze()` needs uniquely owned vector storage, but another alias observes this vector",
-        )
-        .at(span)
-        .with_rule(
-            "`freeze()` consumes a locally unique vector and returns an immutable array in O(1).",
-        )
-        .with_help(
-            "call `toArray()` instead, which copies the elements in O(n), or drop the other alias before calling `freeze()`",
-        ));
-    }
-    let elements = storage.elements.take();
-    *storage.frozen.borrow_mut() = true;
-    Ok(Value(Repr::Array(elements.into())))
 }
 
 /// A vector consumed by `freeze()` is no longer usable.

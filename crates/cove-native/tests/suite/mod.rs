@@ -417,11 +417,12 @@ thread_local! {
 /// a frame holds — into the destination *of the two operations that have one*.
 ///
 /// That last clause is the part worth stating. `a` is `dst` for
-/// [`GrowableOp::Alloc`] and [`GrowableOp::Finish`]; it is the owner's slot for
-/// [`GrowableOp::Push`], which the real helper reads and never writes; and it
-/// is an `ArgsId` for [`GrowableOp::Extend`], which is not a slot at all. A
-/// double that wrote through it in every case would be asserting a store the
-/// runtime does not make.
+/// [`GrowableOp::Alloc`], [`GrowableOp::Finish`] and [`GrowableOp::FinishWords`];
+/// it is the owner's slot for
+/// [`GrowableOp::Push`] and [`GrowableOp::PushWords`], which the real helper
+/// reads and never writes; and it is an `ArgsId` for [`GrowableOp::Extend`],
+/// which is not a slot at all. A double that wrote through it in every case
+/// would be asserting a store the runtime does not make.
 ///
 /// # Safety
 ///
@@ -452,7 +453,10 @@ unsafe extern "C" fn growable(
     match answer {
         Some(outcome) if outcome != Outcome::Returned.abi() => outcome,
         _ => {
-            if op == GrowableOp::Alloc.abi() || op == GrowableOp::Finish.abi() {
+            if op == GrowableOp::Alloc.abi()
+                || op == GrowableOp::Finish.abi()
+                || op == GrowableOp::FinishWords.abi()
+            {
                 (*ctx)
                     .words
                     .add((base + u64::from(a)) as usize)
@@ -811,12 +815,13 @@ pub const PAIR_VECTOR: LayoutId = LayoutId(13);
 /// told apart from `Elements`' other form.
 pub const STORE: LayoutId = LayoutId(14);
 
-/// `Option<Int>`, what `Vector<Int>.set` answers.
+/// `Option<Int>`, what `Vector<Int>.set` answered while it was a builtin this
+/// crate lowered by name.
 ///
 /// Built by [`program`] with `cove_ir::enum_layout`, so its `Some`/`None` tag
 /// values and `Some`'s one-part payload offset are whatever that function
-/// answered — not `0`/`1` assumed — which is what a case exercising
-/// `subset::method_of`'s `Method::Set` is checking.
+/// answered — not `0`/`1` assumed. `Vector.set` is `std.vector.set` since ADR
+/// 0058, and the layout stays so that every id after it stays where it is.
 pub const OPTION_INT: LayoutId = LayoutId(15);
 /// `Option<Pair>`, the stride-two case of [`OPTION_INT`].
 pub const OPTION_PAIR: LayoutId = LayoutId(16);
@@ -920,12 +925,9 @@ pub fn program(function: Function) -> Program {
         ),
     ];
     // `Option<Int>` and `Option<Pair>`, at `OPTION_INT` and `OPTION_PAIR`
-    // below — what `Vector.set` answers. Built with `cove_ir::enum_layout`,
-    // the same function the real lowering calls, rather than written out by
-    // hand: `method_of`'s `("Vector", "set")` arm reads the `Some`/`None` tag
-    // values and `Some`'s payload offset back out of whatever this answers,
-    // so a case that got them from anywhere else would not be testing what
-    // the lowering does.
+    // below. Built with `cove_ir::enum_layout`, the same function the real
+    // lowering calls, rather than written out by hand, so that a case reading
+    // a tag value or a payload offset reads the lowering's own.
     for elem in [INT, PAIR] {
         let (cases, payload) = cove_ir::enum_layout(
             &[(Arc::from("Some"), vec![elem]), (Arc::from("None"), vec![])],
@@ -2811,18 +2813,17 @@ pub fn a_growable_buffer_is_admitted_as_a_family<A: Arm>() {
         );
     }
 
-    // A word member of any of the four is not the byte buffer's helper, and is
-    // refused rather than handed to it.
+    // A word allocation is not the byte buffer's helper, and is refused rather
+    // than handed to it. A word push and a word finish are admitted, but as
+    // emitted fast paths of their own — `every_cold_path_of_a_push_goes_to_the_runtime`
+    // and `every_cold_path_of_a_freeze_goes_to_the_runtime` are where that is
+    // asserted — and a word finish into anything but the fixed run of its
+    // element is refused.
     let words = Storage::Words(INT);
     for inst in [
         Inst::GrowableAlloc {
             dst: 0,
             capacity: 1,
-            storage: words,
-        },
-        Inst::GrowablePush {
-            owner: 0,
-            src: 1,
             storage: words,
         },
         Inst::RunFinish {
@@ -3164,11 +3165,7 @@ pub fn a_builtin_no_arm_lowers_refuses_the_function<A: Arm>() {
         INT,
         vec![Inst::Len { dst: 1, obj: 0 }, Inst::Return { src: 1 }],
     ))));
-    for (receiver, operation) in [
-        ("String", "length"),
-        ("Array", "length"),
-        ("Vector", "push"),
-    ] {
+    for (receiver, operation) in [("String", "length"), ("Array", "length"), ("Vector", "pop")] {
         assert!(
             !compiles::<A>(&one(receiver, operation)),
             "`{receiver}.{operation}` is not lowered, so the function is refused"
@@ -3324,44 +3321,31 @@ pub fn a_reference_is_in_its_slot_across_an_allocation<A: Arm>() {
 // --- Vector.push --------------------------------------------------------------
 
 /// One `Vector.push(value)` of a `stride`-wide element, answering `Unit` at
-/// `dst`.
+/// `dst`: what `std.vector.push` is once the lowering has expanded it — a word
+/// `growable-push` of the element's layout, and the `()` it answers.
 ///
-/// Slot 0 is the receiver and slots 1.. are the element, so a case writes the
+/// Slot 0 is the owner and slots 1.. are the element, so a case writes the
 /// header address and the element words into `words` and reads the `Unit` back.
-pub fn pushing(vector: LayoutId, stride: u32) -> Program {
+pub fn pushing(stride: u32) -> Program {
     let mut reprs = vec![Repr::Ref];
     reprs.extend(std::iter::repeat_n(Repr::Int, stride as usize));
     // The answer, one `Unit` word past the element.
     let dst = 1 + stride;
     reprs.push(Repr::Unit);
     let elem = if stride == 2 { PAIR } else { INT };
-    program_with_builtin(
-        function(
-            reprs,
-            UNIT,
-            vec![
-                Inst::CallBuiltin {
-                    dst,
-                    builtin: BuiltinId(0),
-                    args: ArgsId(1),
-                },
-                Inst::Return { src: dst },
-            ],
-        ),
-        "Vector",
-        "push",
+    program(function(
+        reprs,
         UNIT,
         vec![
-            Arg {
-                slot: 0,
-                layout: vector,
+            Inst::GrowablePush {
+                owner: 0,
+                src: 1,
+                storage: Storage::Words(elem),
             },
-            Arg {
-                slot: 1,
-                layout: elem,
-            },
+            Inst::Unit { dst },
+            Inst::Return { src: dst },
         ],
-    )
+    ))
 }
 
 /// A `Vector` header and its store, in the shape `vector()` reads them.
@@ -3377,7 +3361,7 @@ pub fn a_vector(heap: &mut Heap, at: u64, layout: LayoutId, len: u32, capacity: 
     header
 }
 
-/// `vm::builtins::seq::vector_push`, where the store has room.
+/// `Machine::push_words`, where the store has room.
 ///
 /// The element's words into `store[len]` and the length bumped, and **nothing
 /// handed to the runtime** — which is the half a coverage number cannot say. The
@@ -3386,8 +3370,8 @@ pub fn a_vector(heap: &mut Heap, at: u64, layout: LayoutId, len: u32, capacity: 
 /// first.
 pub fn a_push_into_spare_capacity_writes_the_element_and_the_length<A: Arm>() {
     for (vector, stride) in [(VECTOR, 1), (PAIR_VECTOR, 2)] {
-        forget_mediated();
-        let held = pushing(vector, stride);
+        forget_built();
+        let held = pushing(stride);
         let at = HEAP_CHUNK_WORDS + 33;
         let mut heap = Heap::new(2);
         // One element already there, room for four.
@@ -3398,9 +3382,9 @@ pub fn a_push_into_spare_capacity_writes_the_element_and_the_length<A: Arm>() {
         let answer = run_over::<A>(&held, &mut words, 0, &heap);
         assert_eq!(answer.outcome, Outcome::Returned, "stride {stride}");
         assert!(
-            mediated().is_empty(),
+            built().is_empty(),
             "the fast path took it, so nothing went to the runtime: {:?}",
-            mediated()
+            built()
         );
         // `store + 1 + len * stride`, which for `len == 1` is the second element.
         for word in 0..stride {
@@ -3419,7 +3403,7 @@ pub fn a_push_into_spare_capacity_writes_the_element_and_the_length<A: Arm>() {
         assert_eq!(
             words[1 + stride as usize],
             0,
-            "`Ok(0)`: one `Unit` word of nought"
+            "the `unit` after it: one word of nought"
         );
     }
 }
@@ -3434,12 +3418,12 @@ type Build = fn(&mut Heap, u64) -> u64;
 
 /// The three cold paths of `Vector.push`, each handed to the runtime whole.
 ///
-/// See [`Method::Push`](cove_native::Reason) — no room, a store word of nought,
-/// and a receiver whose object is not the layout the call site declared. Each
-/// one's message names a rendered `Value` or the method, which this crate cannot
-/// build, so the assertion is that emitted code **did not try**: the builtin went
-/// over, at the right pc and the right destination, and what the runtime answered
-/// landed in `dst`.
+/// No room, a store word of nought, and an owner whose object is not the vector
+/// the element layout implies — `cove_native`'s `WordPush`. Each one's sentence is
+/// the runtime's, which this crate cannot build, so the assertion is that emitted
+/// code **did not try**: the push went over as
+/// [`GrowableOp::PushWords`], at the right pc with the owner and the element's
+/// slots, and the instruction after it ran once the runtime answered.
 pub fn every_cold_path_of_a_push_goes_to_the_runtime<A: Arm>() {
     let at = HEAP_CHUNK_WORDS + 33;
     // The three, by what makes them cold.
@@ -3459,45 +3443,44 @@ pub fn every_cold_path_of_a_push_goes_to_the_runtime<A: Arm>() {
         ),
     ];
     for (why, build) in rows {
-        forget_mediated();
-        let held = pushing(VECTOR, 1);
+        forget_built();
+        let held = pushing(1);
         let mut heap = Heap::new(2);
         let header = build(&mut heap, at);
         let mut words = vec![header, 70, UNWRITTEN];
         let answer = run_over::<A>(&held, &mut words, 0, &heap);
         assert_eq!(answer.outcome, Outcome::Returned, "{why}");
         assert_eq!(
-            mediated(),
-            vec![Mediated {
+            built(),
+            vec![Built {
                 base: 0,
                 pc: 0,
-                dst: 2,
-                builtin: 0,
-                args: 1,
-                // A builtin is a safepoint, so the block's static work — two
+                op: GrowableOp::PushWords.abi(),
+                a: 0,
+                b: 1,
+                // The helper is a safepoint, so the block's static work — three
                 // instructions — went over with the hand-over.
-                work: 2,
+                work: 3,
             }],
-            "{why}: the runtime was handed the builtin, whole"
+            "{why}: the runtime was handed the push, whole"
         );
-        // The double's own word, which says the answer landed where the
-        // instruction said rather than where emitted code would have put one.
-        assert_eq!(words[2], 2, "{why}: the runtime's answer, in `dst`");
-        assert_eq!(heap.get(at + 1), heap.get(at + 1), "{why}");
+        // The `unit` after the push, which says compiled code carried on from
+        // the cold path rather than leaving the function there.
+        assert_eq!(words[2], 0, "{why}: the instruction after the push ran");
     }
-    forget_mediated();
+    forget_built();
 }
 
-/// A cold path whose builtin *raised* leaves with that outcome.
+/// A cold push whose helper *raised* leaves with that outcome.
 ///
 /// The other half of the mediated shape, and it is [`Emit::callee_mediated`]'s:
 /// anything but `Returned` is returned from the compiled function unchanged, so a
 /// refusal eight frames down leaves through one `ret` per frame.
 pub fn a_cold_push_that_raised_leaves_with_that_outcome<A: Arm>() {
     for outcome in [Outcome::Raised, Outcome::Stopped] {
-        forget_mediated();
-        mediated_answers(&[outcome]);
-        let held = pushing(VECTOR, 1);
+        forget_built();
+        built_answers(&[outcome]);
+        let held = pushing(1);
         let at = HEAP_CHUNK_WORDS + 33;
         let mut heap = Heap::new(2);
         // Full, so the push is cold.
@@ -3505,23 +3488,23 @@ pub fn a_cold_push_that_raised_leaves_with_that_outcome<A: Arm>() {
         let mut words = vec![header, 70, UNWRITTEN];
         let answer = run_over::<A>(&held, &mut words, 0, &heap);
         assert_eq!(answer.outcome, outcome);
-        assert_eq!(mediated().len(), 1);
+        assert_eq!(built().len(), 1);
         assert_eq!(
             words[2], UNWRITTEN,
-            "and no answer was published, because there was none"
+            "and nothing after the push ran, because the function left"
         );
     }
-    forget_mediated();
+    forget_built();
 }
 
-/// A `push` to a null receiver is refused where it is read.
+/// A `push` to a null owner is refused where it is read.
 ///
-/// `vector()`'s `if addr == 0 { null_value() }` — the one refusal of this builtin
-/// a program reaches and this crate can name, so it is emitted rather than
-/// mediated, and nothing goes to the runtime.
+/// `Machine::vector_run`'s `if owner == 0 { null_object() }` — the one refusal of
+/// a push this crate can name, so it is emitted rather than mediated, and nothing
+/// goes to the runtime.
 pub fn a_push_refuses_a_null_receiver<A: Arm>() {
-    forget_mediated();
-    let held = pushing(VECTOR, 1);
+    forget_built();
+    let held = pushing(1);
     let heap = Heap::new(2);
     let mut words = vec![0u64, 70, UNWRITTEN];
     let answer = run_over::<A>(&held, &mut words, 0, &heap);
@@ -3529,40 +3512,40 @@ pub fn a_push_refuses_a_null_receiver<A: Arm>() {
     assert_eq!(answer.raise, Some(Raise::NullObject));
     assert_eq!(answer.raise_pc, 0);
     assert!(
-        mediated().is_empty(),
+        built().is_empty(),
         "the null was refused here, not handed over"
     );
-    forget_mediated();
+    forget_built();
 }
 
 // --- Vector.freeze ---------------------------------------------------------
 
-/// One `Vector.freeze() -> Array<T>`, answering into `dst`.
-pub fn freezing(vector: LayoutId) -> Program {
-    program_with_builtin(
-        function(
-            vec![Repr::Ref, Repr::Ref],
-            REF,
-            vec![
-                Inst::CallBuiltin {
-                    dst: 1,
-                    builtin: BuiltinId(0),
-                    args: ArgsId(1),
-                },
-                Inst::Return { src: 1 },
-            ],
-        ),
-        "Vector",
-        "freeze",
+/// One `Vector.freeze() -> Array<T>`, answering into `dst`: what
+/// `std.vector.freeze` is once the lowering has expanded it — a word
+/// `run-finish` of `stride`-wide elements into the `Array` of them.
+pub fn freezing(stride: u32) -> Program {
+    let (elem, target) = if stride == 2 {
+        (PAIR, ARRAY_PAIR)
+    } else {
+        (INT, ARRAY_INT)
+    };
+    program(function(
+        vec![Repr::Ref, Repr::Ref],
         REF,
-        vec![Arg {
-            slot: 0,
-            layout: vector,
-        }],
-    )
+        vec![
+            Inst::RunFinish {
+                dst: 1,
+                owner: 0,
+                target,
+                validation: Validation::None,
+                storage: Storage::Words(elem),
+            },
+            Inst::Return { src: 1 },
+        ],
+    ))
 }
 
-/// `vm::builtins::seq::vector_freeze`: `Memory::relabel` turning the store
+/// `Machine::finish_words`: `Memory::relabel` turning the store
 /// into the `Array<T>` it already holds, in place — nothing handed to the
 /// runtime, the answer aliases the store, and the elements read back exactly
 /// as a `Vector.get` would have answered them.
@@ -3579,8 +3562,8 @@ pub fn a_freeze_relabels_the_store_in_place<A: Arm>() {
         (PAIR_VECTOR, ARRAY_PAIR, 2, 2, 3),
     ];
     for (vector, array, stride, len, capacity) in cases {
-        forget_mediated();
-        let held = freezing(vector);
+        forget_built();
+        let held = freezing(stride);
         let at = HEAP_CHUNK_WORDS + 33;
         let mut heap = Heap::new(2);
         let header = a_vector(&mut heap, at, vector, len, capacity);
@@ -3596,9 +3579,9 @@ pub fn a_freeze_relabels_the_store_in_place<A: Arm>() {
             "{len}/{capacity} at stride {stride}"
         );
         assert!(
-            mediated().is_empty(),
-            "relabel is O(1) and has no cold half: {:?}",
-            mediated()
+            built().is_empty(),
+            "relabel is O(1) and emitted whole: {:?}",
+            built()
         );
 
         assert_eq!(
@@ -3634,16 +3617,17 @@ pub fn a_freeze_relabels_the_store_in_place<A: Arm>() {
         assert_eq!(heap.get(at + 1), 0, "the vector's own length word, cleared");
         assert_eq!(heap.get(at + 2), 0, "the vector's own store word, cleared");
     }
-    forget_mediated();
+    forget_built();
 }
 
 /// The two cold paths of `Vector.freeze`, each handed to the runtime whole.
 ///
-/// A store word of nought — a second `freeze()` — and a receiver whose object
-/// is not the layout the call site declared: [`Method::Freeze`]'s own two,
-/// [`Method::Push`]'s reasons exactly. Each message names a rendered `Value`
-/// or the method, which this crate cannot build, so the assertion is that
-/// emitted code **did not try**.
+/// A store word of nought — a second finish — and an owner whose object is not
+/// the vector the element layout implies: `cove_native`'s `WordFinish`, for a
+/// push's reasons exactly. Each sentence is the runtime's, which this crate
+/// cannot build, so the assertion is that emitted code **did not try**: the
+/// finish went over as [`GrowableOp::FinishWords`] and what the runtime
+/// answered landed in `dst`.
 pub fn every_cold_path_of_a_freeze_goes_to_the_runtime<A: Arm>() {
     let at = HEAP_CHUNK_WORDS + 33;
     let rows: [(&str, Build); 2] = [
@@ -3658,37 +3642,41 @@ pub fn every_cold_path_of_a_freeze_goes_to_the_runtime<A: Arm>() {
         ),
     ];
     for (why, build) in rows {
-        forget_mediated();
-        let held = freezing(VECTOR);
+        forget_built();
+        let held = freezing(1);
         let mut heap = Heap::new(2);
         let header = build(&mut heap, at);
         let mut words = vec![header, UNWRITTEN];
         let answer = run_over::<A>(&held, &mut words, 0, &heap);
         assert_eq!(answer.outcome, Outcome::Returned, "{why}");
         assert_eq!(
-            mediated(),
-            vec![Mediated {
+            built(),
+            vec![Built {
                 base: 0,
                 pc: 0,
-                dst: 1,
-                builtin: 0,
-                args: 1,
-                // A builtin is a safepoint, so the block's static work — two
+                op: GrowableOp::FinishWords.abi(),
+                a: 1,
+                b: 0,
+                // The helper is a safepoint, so the block's static work — two
                 // instructions — went over with the hand-over.
                 work: 2,
             }],
-            "{why}: the runtime was handed the builtin, whole"
+            "{why}: the runtime was handed the finish, whole"
         );
-        assert_eq!(words[1], 1, "{why}: the runtime's answer, in `dst`");
+        assert_eq!(
+            words[1],
+            u64::from(GrowableOp::FinishWords.abi()) * 1000 + 1,
+            "{why}: the runtime's answer, in `dst`"
+        );
     }
-    forget_mediated();
+    forget_built();
 }
 
-/// `Machine::checked`'s null refusal — no, `vector()`'s, [`Method::Push`]'s
-/// own note on which one refusal this builtin's family answers itself.
+/// `Machine::vector_run`'s null refusal — the one refusal of a finish this
+/// crate can name, so it is emitted rather than handed over.
 pub fn a_freeze_refuses_a_null_receiver<A: Arm>() {
-    forget_mediated();
-    let held = freezing(VECTOR);
+    forget_built();
+    let held = freezing(1);
     let heap = Heap::new(2);
     let mut words = vec![0u64, UNWRITTEN];
     let answer = run_over::<A>(&held, &mut words, 0, &heap);
@@ -3696,254 +3684,10 @@ pub fn a_freeze_refuses_a_null_receiver<A: Arm>() {
     assert_eq!(answer.raise, Some(Raise::NullObject));
     assert_eq!(answer.raise_pc, 0);
     assert!(
-        mediated().is_empty(),
+        built().is_empty(),
         "the null was refused here, not handed over"
     );
-    forget_mediated();
-}
-
-// --- Vector.set ----------------------------------------------------------------
-
-/// One `Vector.set(index, value) -> Option<T>` of a `stride`-wide element,
-/// answering into `dst`.
-///
-/// Slot 0 is the receiver, slot 1 the index, slots 2..2+stride the element,
-/// and `dst` the `Option<T>` answer — one tag word and `stride` payload
-/// words, `OPTION_INT` or `OPTION_PAIR` depending on `stride`.
-pub fn setting(vector: LayoutId, stride: u32) -> Program {
-    let mut reprs = vec![Repr::Ref, Repr::Int];
-    reprs.extend(std::iter::repeat_n(Repr::Int, stride as usize));
-    let dst = 2 + stride;
-    reprs.push(Repr::Tag);
-    reprs.extend(std::iter::repeat_n(Repr::Int, stride as usize));
-    let elem = if stride == 2 { PAIR } else { INT };
-    let option = if stride == 2 { OPTION_PAIR } else { OPTION_INT };
-    program_with_builtin(
-        function(
-            reprs,
-            option,
-            vec![
-                Inst::CallBuiltin {
-                    dst,
-                    builtin: BuiltinId(0),
-                    args: ArgsId(1),
-                },
-                Inst::Return { src: dst },
-            ],
-        ),
-        "Vector",
-        "set",
-        option,
-        vec![
-            Arg {
-                slot: 0,
-                layout: vector,
-            },
-            Arg {
-                slot: 1,
-                layout: INT,
-            },
-            Arg {
-                slot: 2,
-                layout: elem,
-            },
-        ],
-    )
-}
-
-/// `vm::builtins::seq::vector_set`, in range: the element written and the one
-/// it displaced answered as `Some`.
-///
-/// Every position of a three-element vector, at both strides, so this is also
-/// the check that the offset is `at * stride` and not `at`: a lowering that
-/// forgot the multiply would pass at `at == 1`, where the two coincide, and
-/// fail everywhere else. A neighbouring element is read back too, which is
-/// what says the write did not smear past its own `stride` words.
-pub fn a_set_in_range_writes_the_element_and_answers_the_old_one<A: Arm>() {
-    for (vector, stride, option) in [(VECTOR, 1, OPTION_INT), (PAIR_VECTOR, 2, OPTION_PAIR)] {
-        for at in 0..3u32 {
-            forget_mediated();
-            let held = setting(vector, stride);
-            let some = held
-                .layout(option)
-                .case("Some")
-                .expect("`Option` has `Some`");
-            let addr = HEAP_CHUNK_WORDS + 33;
-            let mut heap = Heap::new(2);
-            let header = a_vector(&mut heap, addr, vector, 3, 4);
-            let store = addr + 8;
-            // Three elements, each word distinguishable by its position.
-            for idx in 0..3u32 {
-                for word in 0..stride {
-                    heap.set(
-                        store + 1 + u64::from(idx * stride + word),
-                        u64::from(100 + idx * 10 + word),
-                    );
-                }
-            }
-            let mut words = vec![header, u64::from(at)];
-            words.extend((0..stride).map(|word| 900 + u64::from(word)));
-            words.extend(vec![UNWRITTEN; 1 + stride as usize]);
-            let answer = run_over::<A>(&held, &mut words, 0, &heap);
-            assert_eq!(
-                answer.outcome,
-                Outcome::Returned,
-                "stride {stride}, at {at}"
-            );
-            assert!(
-                mediated().is_empty(),
-                "stride {stride}, at {at}: the fast path took it: {:?}",
-                mediated()
-            );
-
-            let dst = 2 + stride as usize;
-            assert_eq!(
-                words[dst],
-                u64::from(some),
-                "the tag is `Some`, stride {stride} at {at}"
-            );
-            for word in 0..stride {
-                assert_eq!(
-                    words[dst + 1 + word as usize],
-                    u64::from(100 + at * 10 + word),
-                    "the answer is the displaced element, stride {stride} at {at}, word {word}"
-                );
-                assert_eq!(
-                    heap.get(store + 1 + u64::from(at * stride + word)),
-                    900 + u64::from(word),
-                    "the new element was written, stride {stride} at {at}, word {word}"
-                );
-            }
-            // A neighbour was not touched, which is what says the write did not
-            // smear past its own `stride` words.
-            let neighbour = (at + 1) % 3;
-            for word in 0..stride {
-                assert_eq!(
-                    heap.get(store + 1 + u64::from(neighbour * stride + word)),
-                    u64::from(100 + neighbour * 10 + word),
-                    "a neighbour was untouched, stride {stride} at {at}"
-                );
-            }
-        }
-    }
-    forget_mediated();
-}
-
-/// `vm::builtins::seq::vector_set`, outside the vector: `None`, and nothing
-/// written.
-///
-/// One index at the length, one negative, and one on an empty vector —
-/// `index()`'s `at >= 0` and `set`'s `at >= items.len`, both answered by the
-/// one unsigned comparison the emitted fast path asks instead of raising.
-pub fn a_set_outside_the_vector_answers_none_and_writes_nothing<A: Arm>() {
-    let rows: [(&str, u32, i64); 3] = [
-        ("the index is at the length", 3, 3),
-        ("the index is negative", 3, -1),
-        ("the vector is empty", 0, 0),
-    ];
-    for (why, len, at) in rows {
-        forget_mediated();
-        let held = setting(VECTOR, 1);
-        let none = held
-            .layout(OPTION_INT)
-            .case("None")
-            .expect("`Option` has `None`");
-        let addr = HEAP_CHUNK_WORDS + 33;
-        let mut heap = Heap::new(2);
-        let header = a_vector(&mut heap, addr, VECTOR, len, 4);
-        let store = addr + 8;
-        for idx in 0..len {
-            heap.set(store + 1 + u64::from(idx), u64::from(100 + idx));
-        }
-        let mut words = vec![header, at as u64, 900, UNWRITTEN, UNWRITTEN];
-        let answer = run_over::<A>(&held, &mut words, 0, &heap);
-        assert_eq!(answer.outcome, Outcome::Returned, "{why}");
-        assert!(
-            mediated().is_empty(),
-            "{why}: the fast path took it: {:?}",
-            mediated()
-        );
-        assert_eq!(words[3], u64::from(none), "{why}: the tag is `None`");
-        assert_eq!(
-            words[4], 0,
-            "{why}: a `None` answer's payload word is zeroed"
-        );
-        for idx in 0..len {
-            assert_eq!(
-                heap.get(store + 1 + u64::from(idx)),
-                100 + u64::from(idx),
-                "{why}: nothing was written"
-            );
-        }
-    }
-    forget_mediated();
-}
-
-/// The two cold paths of `Vector.set`, each handed to the runtime whole.
-///
-/// See [`Method::Push`](cove_native::Reason) for the shape of this table —
-/// `Vector.set` shares two of its three preconditions with `Vector.push` and
-/// not the third, because an index outside the vector is not a cold path
-/// here: it is `None`, answered on the fast path along with everything else.
-pub fn every_cold_path_of_a_set_goes_to_the_runtime<A: Arm>() {
-    let addr = HEAP_CHUNK_WORDS + 33;
-    let rows: [(&str, Build); 2] = [
-        ("`freeze()` consumed the store", |heap, at| {
-            let header = a_vector(heap, at, VECTOR, 1, 4);
-            heap.set(at + 2, 0);
-            header
-        }),
-        (
-            "the object is not the layout the call site declared",
-            |heap, at| a_vector(heap, at, PAIR_VECTOR, 1, 4),
-        ),
-    ];
-    for (why, build) in rows {
-        forget_mediated();
-        let held = setting(VECTOR, 1);
-        let mut heap = Heap::new(2);
-        let header = build(&mut heap, addr);
-        let mut words = vec![header, 0, 70, UNWRITTEN, UNWRITTEN];
-        let answer = run_over::<A>(&held, &mut words, 0, &heap);
-        assert_eq!(answer.outcome, Outcome::Returned, "{why}");
-        assert_eq!(
-            mediated(),
-            vec![Mediated {
-                base: 0,
-                pc: 0,
-                dst: 3,
-                builtin: 0,
-                args: 1,
-                // A builtin is a safepoint, so the block's static work — two
-                // instructions — went over with the hand-over.
-                work: 2,
-            }],
-            "{why}: the runtime was handed the builtin, whole"
-        );
-        assert_eq!(words[3], 3, "{why}: the runtime's answer, in `dst`");
-    }
-    forget_mediated();
-}
-
-/// A `set` to a null receiver is refused where it is read.
-///
-/// `vector()`'s `if addr == 0 { null_value() }` — the one refusal of this
-/// builtin a program reaches and this crate can name, so it is emitted
-/// rather than mediated, and nothing goes to the runtime.
-pub fn a_set_refuses_a_null_receiver<A: Arm>() {
-    forget_mediated();
-    let held = setting(VECTOR, 1);
-    let heap = Heap::new(2);
-    let mut words = vec![0u64, 0, 70, UNWRITTEN, UNWRITTEN];
-    let answer = run_over::<A>(&held, &mut words, 0, &heap);
-    assert_eq!(answer.outcome, Outcome::Raised);
-    assert_eq!(answer.raise, Some(Raise::NullObject));
-    assert_eq!(answer.raise_pc, 0);
-    assert!(
-        mediated().is_empty(),
-        "the null was refused here, not handed over"
-    );
-    forget_mediated();
+    forget_built();
 }
 
 /// `encoded.rs`'s `LOAD_ELEM` arm (line 1425), which is `Machine::element` and

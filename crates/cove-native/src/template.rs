@@ -26,8 +26,7 @@ use std::mem::offset_of;
 use std::ptr;
 
 use cove_ir::{
-    ArgsId, ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot, Storage,
-    StrId,
+    ArgsId, ArithOp, CmpOp, Function, FunctionId, Inst, Len, Num, Program, Slot, Storage, StrId,
 };
 
 use crate::abi::{
@@ -35,7 +34,8 @@ use crate::abi::{
     HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
-    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported, Method,
+    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported,
+    word_finish, word_push, WordFinish, WordPush,
 };
 use crate::Unavailable;
 
@@ -239,7 +239,6 @@ struct Helpers {
     open: usize,
     close: usize,
     alloc: usize,
-    builtin: usize,
     growable: usize,
     run_copy: usize,
     field_load: usize,
@@ -266,7 +265,6 @@ impl Jit {
                 open: helpers.open as usize,
                 close: helpers.close as usize,
                 alloc: helpers.alloc as usize,
-                builtin: helpers.builtin as usize,
                 growable: helpers.growable as usize,
                 run_copy: helpers.run_copy as usize,
                 field_load: helpers.field_load as usize,
@@ -372,7 +370,6 @@ struct Emit<'a> {
     open: usize,
     close: usize,
     alloc: usize,
-    builtin: usize,
     growable: usize,
     run_copy: usize,
     field_load: usize,
@@ -413,7 +410,6 @@ impl<'a> Emit<'a> {
             open: helpers.open,
             close: helpers.close,
             alloc: helpers.alloc,
-            builtin: helpers.builtin,
             growable: helpers.growable,
             run_copy: helpers.run_copy,
             field_load: helpers.field_load,
@@ -615,6 +611,18 @@ impl<'a> Emit<'a> {
                 src,
                 storage: Storage::PackedBytes,
             } => self.growable_op(GrowableOp::Push, *owner, *src),
+            // `Vector.push`: a fast path into spare capacity and the whole push as
+            // its cold half. See [`WordPush`](crate::subset::WordPush), decoded
+            // by the subset so that the two arms read one set of facts.
+            Inst::GrowablePush {
+                owner,
+                src,
+                storage: Storage::Words(elem),
+            } => {
+                let push = word_push(self.program, *owner, *src, *elem)
+                    .expect("`supported` admitted a word push it could decode");
+                self.vector_push(push)
+            }
             Inst::GrowableExtend {
                 args,
                 storage: Storage::PackedBytes,
@@ -625,6 +633,19 @@ impl<'a> Emit<'a> {
                 storage: Storage::PackedBytes,
                 ..
             } => self.growable_op(GrowableOp::Finish, *dst, *owner),
+            // `Vector.freeze()`: the relabel emitted, and the whole finish as its
+            // cold half. See [`WordFinish`](crate::subset::WordFinish).
+            Inst::RunFinish {
+                dst,
+                owner,
+                target,
+                storage: Storage::Words(elem),
+                ..
+            } => {
+                let finish = word_finish(self.program, *dst, *owner, *target, *elem)
+                    .expect("`supported` admitted a word finish it could decode");
+                self.vector_freeze(finish)
+            }
             // ADR 0058's `run-copy`, handed to the runtime whole. See
             // [`crate::abi::RunCopyFn`] for why it has no emitted loop — memmove in
             // bounded chunks with a poll between them, and refusals whose
@@ -728,41 +749,7 @@ impl<'a> Emit<'a> {
             // operands come out of one function that both arms ask.
             Inst::CallBuiltin { dst, builtin, args } => {
                 match method_of(self.program, *dst, *builtin, *args) {
-                    Some(Method::Push {
-                        dst,
-                        recv,
-                        vector,
-                        value,
-                        stride,
-                        builtin,
-                        args,
-                    }) => self.vector_push(dst, recv, vector, value, stride, builtin, args),
-                    Some(Method::Set {
-                        dst,
-                        recv,
-                        vector,
-                        index,
-                        value,
-                        stride,
-                        width,
-                        some_case,
-                        some_at,
-                        none_case,
-                        builtin,
-                        args,
-                    }) => self.vector_set(
-                        dst, recv, vector, index, value, stride, width, some_case, some_at,
-                        none_case, builtin, args,
-                    ),
-                    Some(Method::Freeze {
-                        dst,
-                        recv,
-                        vector,
-                        stride,
-                        array,
-                        builtin,
-                        args,
-                    }) => self.vector_freeze(dst, recv, vector, stride, array, builtin, args),
+                    Some(method) => match method {},
                     None => unreachable!("`supported` admitted a builtin no arm lowers"),
                 }
             }
@@ -1031,15 +1018,15 @@ impl<'a> Emit<'a> {
         self.store_slot(dst, RAX);
     }
 
-    /// `vm::builtins::seq::vector_push`'s fast path: the element into spare
-    /// capacity, and the length bumped.
+    /// A word `growable-push`'s fast path — `Vector.push` — the element into
+    /// spare capacity, and the length bumped.
     ///
-    /// See [`Method::Push`](crate::subset::Method::Push) for which of the builtin's
-    /// preconditions are emitted and which go to
-    /// [`BuiltinFn`](crate::abi::BuiltinFn), and why. This is the shape:
+    /// See [`WordPush`](crate::subset::WordPush) for which of
+    /// `Machine::push_words`' preconditions are emitted and which go to
+    /// [`GrowableFn`](crate::abi::GrowableFn), and why. This is the shape:
     ///
     /// ```text
-    ///   rax = the receiver               -- a `Vector` header, refused if null
+    ///   rax = the owner                  -- a `Vector` header, refused if null
     ///   the header's layout is `vector`, or cold
     ///   rcx = payload(header, 1)         -- the store; nought is `freeze()`d, cold
     ///   rdx = payload(header, 0) as u32  -- the length
@@ -1049,12 +1036,14 @@ impl<'a> Emit<'a> {
     ///   rdx = len + 1
     ///   the element's words, out of this frame and into the store
     ///   payload(header, 0) = rdx
-    ///   dst = 0                          -- `Ok(0)`, which is one `Unit` word
     /// ```
+    ///
+    /// There is no answer to write: the `()` a push answers is the `Inst::Unit`
+    /// the lowering emits after it.
     ///
     /// Three things in it are load-bearing.
     ///
-    /// **The receiver is loaded twice.** Once at the top and once to bump the
+    /// **The owner is loaded twice.** Once at the top and once to bump the
     /// length, because the register that held it is the one the capacity is
     /// computed into — three scratch registers is what this arm has, and a frame
     /// load is four bytes against a spill and a reload.
@@ -1068,28 +1057,24 @@ impl<'a> Emit<'a> {
     /// words wait on the machine stack the way [`Emit::copy`]'s do — so a cold jump
     /// from inside that window would arrive misaligned. The order is the invariant
     /// and it is checked by reading, which is why it is written down.
-    #[allow(clippy::too_many_arguments)]
-    fn vector_push(
-        &mut self,
-        dst: Slot,
-        recv: Slot,
-        vector: LayoutId,
-        value: Slot,
-        stride: u32,
-        builtin: u32,
-        args: u32,
-    ) {
+    fn vector_push(&mut self, push: WordPush) {
+        let WordPush {
+            owner,
+            vector,
+            src,
+            stride,
+        } = push;
         let cold = self.label();
         let done = self.label();
 
-        self.load_slot(RAX, recv);
-        // `vector()`'s `if addr == 0 { null_value() }`, which is the one refusal of
-        // this builtin a program reaches and this crate can name.
+        self.load_slot(RAX, owner);
+        // `Machine::vector_run`'s `if owner == 0 { null_object() }`, which is the
+        // one refusal of a push this crate can name.
         self.refuse_null(RAX);
 
-        // `machine.object_layout(addr)`: the header's high half. The call site's
-        // declared layout is what every static fact below was derived from, so a
-        // header that says something else is a receiver this code cannot push to.
+        // `machine.object_layout(addr)`: the header's high half. The element
+        // layout is what every static fact below was derived from, so a header
+        // that is not the vector of it is an owner this code cannot push to.
         self.mov_rr(RDX, RAX);
         self.heap_word(RDX);
         self.shr_imm8(RDX, 32);
@@ -1130,7 +1115,7 @@ impl<'a> Emit<'a> {
         if stride > 0 {
             self.push(RDX);
             for word in 0..stride {
-                self.load_slot(RAX, value + word);
+                self.load_slot(RAX, src + word);
                 self.push(RAX);
             }
             for word in (0..stride).rev() {
@@ -1143,166 +1128,33 @@ impl<'a> Emit<'a> {
             self.pop(RDX);
         }
 
-        // `machine.set_payload(items.header, 0, items.len as u64 + 1)`.
-        self.load_slot(RAX, recv);
+        // `growable_commit`: `machine.set_payload(owner, 0, len + 1)`.
+        self.load_slot(RAX, owner);
         self.add_imm32(RAX, 1);
         self.heap_ptr(RAX);
         self.store(HEAP_TABLE, 0, RDX);
-
-        // `Ok(0)`: one word of nought, which is the `Unit` the builtin answers.
-        self.xor_rr(RAX, RAX);
-        self.store_slot(dst, RAX);
         self.jmp(Target::Label(done));
 
         self.bind(cold);
-        self.builtin_call(dst, builtin, args);
+        self.growable_op(GrowableOp::PushWords, owner, src);
         self.bind(done);
         // One predecessor of this join came through a helper, so the frame pointer
         // the other one derived is not to be trusted here.
         self.frame_live = false;
     }
 
-    /// `vm::builtins::seq::vector_set`'s fast path: the element written at
-    /// `index`, answering what was there.
+    /// A word `run-finish` — `Vector.freeze()` — as `Memory::relabel` turning
+    /// the store into the `Array<T>` it already holds, in place, and the two
+    /// words of the `Vector` header that mark it consumed.
     ///
-    /// See [`Method::Set`](crate::subset::Method::Set) for which of the
-    /// builtin's preconditions are emitted and which go to
-    /// [`BuiltinFn`](crate::abi::BuiltinFn), and why an out-of-range index is
-    /// **not** one of them: `vector_set` answers `None` for one, which this arm
-    /// builds as readily as it builds `Some`. The two tests in front of the
-    /// write are [`Emit::vector_push`]'s own two — the receiver's declared
-    /// layout against the object's own header, and the store word against
-    /// nought, which is `freeze()`'s mark.
-    ///
-    /// The index is bounded by **one** unsigned comparison,
-    /// [`Emit::raise_unless_below`]'s own — a negative `i64` read as unsigned
-    /// is larger than any `len`, which is a `u32` masked out of a header and so
-    /// below 2^32 — asked directly with `cmp`/`jcc` rather than through that
-    /// method, because what happens on the far side is a branch to `None`
-    /// rather than a raise.
-    ///
-    /// **The old element is read before the new one is written**, each word
-    /// pushed onto the machine stack and popped back off in the reverse order
-    /// — [`Emit::store_elem`]'s staging, used here for a read and then again
-    /// for the write, because `RAX`, `RCX` and `RDX` are the whole of this
-    /// arm's scratch and `RCX` holds the element's address across both loops.
-    /// `set` answers what `get` would have, so every word of the old element
-    /// has to be read while the store still holds it.
-    #[allow(clippy::too_many_arguments)]
-    fn vector_set(
-        &mut self,
-        dst: Slot,
-        recv: Slot,
-        vector: LayoutId,
-        index: Slot,
-        value: Slot,
-        stride: u32,
-        width: u32,
-        some_case: u32,
-        some_at: u32,
-        none_case: u32,
-        builtin: u32,
-        args: u32,
-    ) {
-        let cold = self.label();
-        let none_block = self.label();
-        let done = self.label();
-
-        self.load_slot(RAX, recv);
-        // `vector()`'s `if addr == 0 { null_value() }`, which is the one refusal
-        // of this builtin a program reaches and this crate can name.
-        self.refuse_null(RAX);
-
-        // `machine.object_layout(addr)`: the header's high half.
-        self.mov_rr(RDX, RAX);
-        self.heap_word(RDX);
-        self.shr_imm8(RDX, 32);
-        self.cmp_imm32(RDX, vector.0 as i32);
-        self.jcc(CC_NE, Target::Label(cold));
-
-        // `machine.payload(addr, 1)`: the store. `freeze()` leaves nought here.
-        self.mov_rr(RCX, RAX);
-        self.add_imm32(RCX, 2);
-        self.heap_word(RCX);
-        self.test_rr(RCX, RCX);
-        self.jcc(CC_E, Target::Label(cold));
-
-        // `machine.payload(addr, 0) as u32`: the length.
-        self.mov_rr(RDX, RAX);
-        self.add_imm32(RDX, 1);
-        self.heap_word(RDX);
-        self.mov_rr32(RDX, RDX);
-
-        // `index()`'s `at >= 0` and `set`'s `at >= items.len`, in one unsigned
-        // comparison: a negative `i64` read as unsigned is larger than any
-        // `len`. Unlike `Emit::raise_unless_below`, the far side of this one is
-        // `None` rather than a raise.
-        self.load_slot(RAX, index);
-        self.cmp_rr(RAX, RDX);
-        self.jcc(CC_AE, Target::Label(none_block));
-
-        // Where the element sits: `store + 1 + at * stride`, `Emit::vector_push`'s
-        // address arithmetic with `at` (still in `RAX`) in place of `len`.
-        self.mov_imm64(RDX, i64::from(stride));
-        self.imul_rr(RAX, RDX);
-        self.add_rr(RCX, RAX);
-        self.add_imm32(RCX, 1);
-
-        // The old element, one heap read per word, staged on the machine stack
-        // rather than written anywhere yet — `RCX` is the element's address for
-        // both this loop and the next, so nothing here may disturb it.
-        for word in 0..stride {
-            self.mov_rr(RDX, RCX);
-            self.add_imm32(RDX, word as i32);
-            self.heap_word(RDX);
-            self.push(RDX);
-        }
-        // The new element, staged the same way `Emit::store_elem` stages a
-        // write: every word loaded from the frame before any of them is
-        // written, so the loop below pops what it just pushed and nothing of
-        // the old element's, which is still waiting underneath.
-        for word in 0..stride {
-            self.load_slot(RAX, value + word);
-            self.push(RAX);
-        }
-        for word in (0..stride).rev() {
-            self.pop(RAX);
-            self.mov_rr(RDX, RCX);
-            self.add_imm32(RDX, word as i32);
-            self.heap_ptr(RDX);
-            self.store(HEAP_TABLE, 0, RAX);
-        }
-        self.write_option_case(dst, width, some_case);
-        for word in (0..stride).rev() {
-            self.pop(RDX);
-            self.store_slot(dst + 1 + some_at + word, RDX);
-        }
-        self.jmp(Target::Label(done));
-
-        self.bind(none_block);
-        self.write_option_case(dst, width, none_case);
-        self.jmp(Target::Label(done));
-
-        self.bind(cold);
-        self.builtin_call(dst, builtin, args);
-        self.bind(done);
-        // One predecessor of this join came through a helper, so the frame
-        // pointer the other one derived is not to be trusted here.
-        self.frame_live = false;
-    }
-
-    /// `vm::builtins::seq::vector_freeze`: `Memory::relabel` turning the store
-    /// into the `Array<T>` it already holds, in place, and the two words of the
-    /// `Vector` header that mark it frozen.
-    ///
-    /// See [`Method::Freeze`](crate::subset::Method::Freeze) for which
-    /// preconditions are emitted and which go to
-    /// [`BuiltinFn`](crate::abi::BuiltinFn) — [`Emit::vector_push`]'s own two —
+    /// See [`WordFinish`](crate::subset::WordFinish) for which preconditions are
+    /// emitted and which go to [`GrowableFn`](crate::abi::GrowableFn) —
+    /// [`Emit::vector_push`]'s own two —
     /// and for why there is no *third* cold half: `relabel` is O(1) whatever
     /// `len` and `capacity` are, so once both preconditions hold, every
     /// remaining step is unconditional.
     ///
-    /// **`recv`'s address is reloaded from the frame wherever it is needed**
+    /// **The owner's address is reloaded from the frame wherever it is needed**
     /// rather than kept live across the run, which is this arm having three
     /// scratch registers and more than three addresses to have used —
     /// `header`, `store`, and the two write targets `heap_ptr` forms from them.
@@ -1314,17 +1166,14 @@ impl<'a> Emit<'a> {
     /// as `(capacity - len) * stride`, which is the same number
     /// `Machine::relabel`'s wrapper computes and one fewer register in the
     /// middle of it.
-    #[allow(clippy::too_many_arguments)]
-    fn vector_freeze(
-        &mut self,
-        dst: Slot,
-        recv: Slot,
-        vector: LayoutId,
-        stride: u32,
-        array: LayoutId,
-        builtin: u32,
-        args: u32,
-    ) {
+    fn vector_freeze(&mut self, finish: WordFinish) {
+        let WordFinish {
+            dst,
+            owner: recv,
+            vector,
+            stride,
+            array,
+        } = finish;
         let cold = self.label();
         let after_spare = self.label();
         let done = self.label();
@@ -1419,73 +1268,19 @@ impl<'a> Emit<'a> {
         self.jmp(Target::Label(done));
 
         self.bind(cold);
-        self.builtin_call(dst, builtin, args);
+        self.growable_op(GrowableOp::FinishWords, dst, recv);
         self.bind(done);
         // One predecessor of this join came through a helper, so the frame
         // pointer the other one derived is not to be trusted here.
         self.frame_live = false;
     }
 
-    /// One case of an `Option<T>` answer into `dst`: `width` words, zeroed
-    /// first and then the tag written over word zero.
-    ///
-    /// `vm::builtins::make`'s `case_words` is the reason for the order —
-    /// "constructing a case zeroes the payload words it does not fill", so a
-    /// word belonging to a wider case never reads through a narrower one —
-    /// and this is the same order. A `Some` answer's caller writes its payload
-    /// words in on top afterwards, at `dst + 1 + at`; a `None` answer's has
-    /// none to write.
-    fn write_option_case(&mut self, dst: Slot, width: u32, case: u32) {
-        self.xor_rr(RAX, RAX);
-        for word in 0..width {
-            self.store_slot(dst + word, RAX);
-        }
-        self.mov_imm32(RAX, case as i32);
-        self.store_slot(dst, RAX);
-    }
-
-    /// One [`Inst::CallBuiltin`](cove_ir::Inst::CallBuiltin), handed to the runtime
-    /// whole.
-    ///
-    /// See [`crate::abi::BuiltinFn`] for what this is for and what it is not: it is
-    /// the cold path of a builtin whose fast path is emitted, and never a way to
-    /// lower one. Six arguments, which is what the System V ABI passes in
-    /// registers, and the same shape [`Emit::callee_mediated`] has — including the
-    /// shift that turns this arm's byte offset back into the word index the ABI is
-    /// written in.
-    fn builtin_call(&mut self, dst: Slot, builtin: u32, args: u32) {
-        // A builtin may allocate and an allocation may collect, so this is a
-        // safepoint and the unpaid work goes over with it.
-        self.store(CTX, OFF_PENDING_WORK, WORK);
-        self.xor_rr(WORK, WORK);
-
-        self.mov_rr(RDI, CTX);
-        self.mov_rr(RSI, BASE_BYTES);
-        self.shr_imm8(RSI, 3);
-        self.mov_imm32(RDX, self.pc as i32);
-        self.mov_imm32(RCX, dst as i32);
-        self.mov_imm32(R8, builtin as i32);
-        self.mov_imm32(R9, args as i32);
-        self.mov_imm64(RAX, self.builtin as i64);
-        self.call(RAX);
-
-        // Anything but `Returned` leaves, and leaves with that outcome: the helper
-        // has already written every field it needs.
-        let on = self.label();
-        self.test_rr32(RAX, RAX);
-        self.jcc(CC_E, Target::Label(on));
-        self.leave_answered();
-        self.bind(on);
-        self.frame_live = false;
-    }
-
     /// One of [ADR 0052]'s four growable-buffer instructions, handed to the
     /// runtime whole.
     ///
-    /// [`Emit::builtin_call`]'s shape exactly — the same six registers, the same
-    /// shift back to a word index, the same test of the outcome — with the
-    /// operand pair in place of the destination and the builtin, and one more
-    /// register spent on saying which of the four this is. See
+    /// [`Emit::callee_mediated`]'s shape — six registers, the same shift back to
+    /// a word index, the same test of the outcome — with the operand pair and
+    /// the operation in place of the callee and its argument list. See
     /// [`crate::abi::GrowableFn`] for what each operand means and, more to the
     /// point, why *all* of it is the helper rather than a fast path and a cold
     /// one.
@@ -1795,7 +1590,7 @@ impl<'a> Emit<'a> {
     }
 
     /// One [`crate::abi::FieldLoadFn`]/[`crate::abi::FieldStoreFn`] call, handed
-    /// to the runtime whole. [`Emit::builtin_call`]'s shape, with no safepoint
+    /// to the runtime whole. [`Emit::growable_op`]'s shape, with no safepoint
     /// discipline around it — neither helper can allocate, so there is no unpaid
     /// work to publish.
     ///
@@ -1827,7 +1622,7 @@ impl<'a> Emit<'a> {
         // the caller's [`WORK`] back, which is a different thing entirely. Its
         // other caller [`Emit::callee`] needs no store here because
         // [`Emit::callee_direct`] published and cleared before the call;
-        // [`Emit::builtin_call`] and [`Emit::growable_op`] do the same. This one
+        // [`Emit::allocate`] and [`Emit::growable_op`] do the same. This one
         // cannot, because a field helper is deliberately **not** a safepoint —
         // neither [`crate::abi::FieldLoadFn`] nor [`crate::abi::FieldStoreFn`]
         // can allocate — so publishing early would put a charge where there is no

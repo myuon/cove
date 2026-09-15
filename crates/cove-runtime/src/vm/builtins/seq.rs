@@ -59,8 +59,9 @@
 //! in place and in O(1). That is only sound where the caller holds the only
 //! handle, and uniqueness is not a question this backend can answer — a
 //! handle is a word and words are not counted. It does not have to: the
-//! checker proves it before the program runs. [`vector_freeze`] says which
-//! pass, and why trusting it is the right shape rather than a shortcut.
+//! checker proves it before the program runs. Since ADR 0058 it is not this
+//! module's either: `freeze()` is `std.vector.freeze` over a word
+//! `Inst::RunFinish`, which is `Machine::finish_words`.
 //!
 //! # Growth
 //!
@@ -83,61 +84,13 @@
 
 #[cfg(test)]
 use cove_ir::Program;
-use cove_ir::{LayoutId, Repr, Shape, Storage, Validation};
+use cove_ir::{LayoutId, Repr, Shape, Storage};
 
 use crate::error::RuntimeError;
 use crate::vm::builtins::operand::Operand;
 use crate::vm::builtins::{equal, make, operand};
-use crate::vm::exec::runs::{self, Growable, GROWABLE_LEN, GROWABLE_STORE};
+use crate::vm::exec::runs::{Growable, GROWABLE_LEN, GROWABLE_STORE};
 use crate::vm::exec::Machine;
-
-/// A value's words, off the operand and out of the way of a `&mut Machine`.
-///
-/// An operand's words point into the machine's own memory, so a write that
-/// needs `&mut Machine` cannot hold them. Copying them out is the whole of
-/// the answer and `to_vec()` was how, which is a `malloc` and a `free` for
-/// **every `push`** — `examples/covefmt` makes five million of them, and the
-/// profile priced one at 287 ns against a floor of 53.
-///
-/// A value is a run of words its layout describes, and the layouts a
-/// collection holds are small: a `String` handle is one word, a `Point` is
-/// two, `examples/covefmt`'s `Token` is three. So the run goes on the stack,
-/// and a value wider than [`INLINE`] — which nothing in the corpus is —
-/// falls back to the heap rather than being refused.
-struct Held {
-    inline: [u64; INLINE],
-    spilled: Vec<u64>,
-    len: usize,
-}
-
-/// How many words of a value are copied without touching the heap.
-///
-/// Eight, which is two more than the widest element layout in the corpus and
-/// sixty-four bytes of stack in a function that is called five million times.
-const INLINE: usize = 8;
-
-impl Held {
-    fn new() -> Held {
-        Held {
-            inline: [0; INLINE],
-            spilled: Vec::new(),
-            len: 0,
-        }
-    }
-
-    /// `words`, copied out, and a borrow of the copy.
-    fn take(&mut self, words: &[u64]) -> &[u64] {
-        self.len = words.len();
-        if self.len <= INLINE {
-            self.inline[..self.len].copy_from_slice(words);
-            &self.inline[..self.len]
-        } else {
-            self.spilled.clear();
-            self.spilled.extend_from_slice(words);
-            &self.spilled
-        }
-    }
-}
 
 // --- reading a receiver ----------------------------------------------------
 
@@ -448,58 +401,6 @@ pub(super) fn vector_of(
     make::vector_of(machine, elem, &words)
 }
 
-/// `Vector.push(value)`.
-pub(super) fn vector_push(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, args) = operand::method("push", operands, 1)?;
-    let mut items = vector(machine, "push", receiver)?;
-    let mut held = Held::new();
-    let element = held.take(operand::run_of(
-        machine,
-        "Vector.push",
-        items.elem,
-        args[0],
-    )?);
-    runs::growable_ensure(machine, &mut items.run, 1)?;
-    machine.set_payload_run(items.run.store, items.run.len * items.stride, element);
-    runs::growable_commit(machine, &mut items.run, 1);
-    Ok(0)
-}
-
-/// `Vector.set(index, value) -> Option<T>`.
-///
-/// Answers what the index held before, which is what `get` would have
-/// answered — so a caller that wants the displaced element does not have to
-/// read it first and a caller that does not can ignore one word instead of
-/// making two calls. An index outside the vector answers `None` and writes
-/// nothing: a vector grows by `push`, and a `set` that sometimes grew would
-/// make the length depend on the index.
-pub(super) fn vector_set(
-    machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
-) -> Result<(), RuntimeError> {
-    let (receiver, args) = operand::method("Vector.set", operands, 2)?;
-    let items = vector(machine, "set", receiver)?;
-    let mut held = Held::new();
-    let element = held.take(operand::run_of(machine, "Vector.set", items.elem, args[1])?);
-    let Some(at) = index(machine, "Vector.set", args[0])? else {
-        return make::none(machine, result, out);
-    };
-    if at >= items.run.len as usize {
-        return make::none(machine, result, out);
-    }
-    let at = at as u32 * items.stride;
-    // What the index held before, read out before it is overwritten:
-    // `v.set(i, x)` answers what `v.get(i)` would have.
-    let was = machine.payload_run(items.run.store, at, items.stride);
-    machine.set_payload_run(items.run.store, at, element);
-    make::some(machine, result, &was, out)
-}
-
 /// `Vector.pop() -> Option<T>`.
 ///
 /// The empty case is `remove(length() - 1)` on an empty vector, where that
@@ -666,57 +567,6 @@ pub(super) fn vector_to_array(
     make::array_of(machine, items.elem, &words)
 }
 
-/// `Vector.freeze() -> Array<T>`, consuming the store in place.
-///
-/// The one O(1) sequence conversion the language has, and O(1) here: the
-/// store is *already* the run of elements an `Array` is, so nothing is
-/// copied. [`Memory::relabel`](crate::vm::mem::Memory::relabel) rewrites its
-/// header from the growable family to the fixed one and shortens it from the
-/// capacity to the length, and the spare room the vector had grown into
-/// becomes a free block the next sweep folds back in. The address does not
-/// move, so the array this answers is the store the vector was holding.
-///
-/// Then the vector is emptied — length zero, store null — because `freeze()`
-/// *consumes*. There is no second handle to see that happen: which is the
-/// whole point, and it is a fact this machine is told rather than one it
-/// works out.
-///
-/// # Who proved it
-///
-/// [ADR 0001](../../../../docs/adr/0001-mvp-language-design.md) always
-/// said the compiler does: *"the compiler only performs conservative, local
-/// uniqueness checking for this explicit transition"*. The tree-walking
-/// oracle answered it a different way, by counting `Rc` handles at run time,
-/// and this machine cannot answer it at all — a handle here is a word and
-/// words are not counted. So [issue #240](https://github.com/myuon/cove/issues/240)
-/// put the proof where the ADR always had it, in
-/// [`cove_sema::unique`](../../../../crates/cove-sema/src/unique.rs), and
-/// this arm trusts it.
-///
-/// Trusting is the right shape rather than a shortcut. The alternatives are
-/// a sharing bit, a reference count or a uniqueness table, and #240 rules out
-/// all three; what is left is a check the machine cannot perform and a proof
-/// the checker can. A user-facing runtime error for something the compiler
-/// guarantees would report a compiler bug in the vocabulary of a program bug.
-///
-/// What stays is [`vector`]'s own liveness check, which every `Vector` method
-/// shares: a header whose store word is null answers [`operand::frozen`].
-/// For a checked program that state is unreachable — a read after a
-/// `freeze()` is `cove::unique::used_after_freeze` — so reaching it means the
-/// proof let one through, and an internal invariant that reports is better
-/// than one that reads a null store as a sequence.
-pub(super) fn vector_freeze(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, _) = operand::method("freeze", operands, 0)?;
-    let items = vector(machine, "freeze", receiver)?;
-    let array = make::elements(machine.program(), items.elem, false)?;
-    // The store is allocated to its capacity and holds its length, so what it
-    // gives up is the room in between, and `growable_finish` says how much.
-    runs::growable_finish(machine, &items.run, array, Validation::None)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,6 +592,29 @@ mod tests {
         let int = scalar(machine.program(), Repr::Int);
         let words: Vec<u64> = values.iter().map(|value| *value as u64).collect();
         make::vector_of(machine, int, &words).expect("the fixture declares every family")
+    }
+
+    /// `Vector.push(value)`, which is `Machine::push_words` since ADR 0058 moved
+    /// `push` into the standard library over a word `growable-push`.
+    ///
+    /// The instruction reads the element straight out of the frame by address;
+    /// there is no frame here, so the words are placed in an object of their
+    /// own, rooted for the call, and handed over by the address of its payload.
+    fn push(
+        machine: &mut Machine,
+        items: u64,
+        elem: LayoutId,
+        words: &[u64],
+    ) -> Result<(), RuntimeError> {
+        let holder = machine
+            .new_object(elements(machine.program(), elem, false), 1)
+            .expect("the fixture's heap is large enough");
+        let mark = machine.temps();
+        machine.push_temp(holder);
+        machine.set_payload_run(holder, 0, words);
+        let answer = machine.push_words(items, elem, holder + 1);
+        machine.release_temps(mark);
+        answer
     }
 
     /// What the `Option<Int>` in `words` holds.
@@ -998,34 +871,13 @@ mod tests {
             ("Some".to_string(), vec![1])
         );
 
-        // A `push` writes both words at the element's own stride, and a `set`
-        // answers the two words the position held before it.
-        values(
-            &mut machine,
-            "Vector",
-            "push",
-            &[(vectors, &[grown]), (point, &[5, 6])],
-        )
-        .unwrap();
+        // A `push` writes both words at the element's own stride.
+        push(&mut machine, grown, point, &[5, 6]).unwrap();
         // The store grew, so its spare room is zeroed room past the length —
         // the three elements are the first six words of it.
         let store = machine.payload(grown, 1);
         assert_eq!(machine.payload_run(store, 0, 6), vec![1u64, 2, 3, 4, 5, 6]);
-        let was = values(
-            &mut machine,
-            "Vector",
-            "set",
-            &[(vectors, &[grown]), (int, &[0]), (point, &[7, 8])],
-        )
-        .unwrap();
-        assert_eq!(
-            option_of(&program, point, &was),
-            ("Some".to_string(), vec![1, 2])
-        );
-        assert_eq!(
-            machine.payload_run(machine.payload(grown, 1), 0, 6),
-            vec![7u64, 8, 3, 4, 5, 6]
-        );
+        assert_eq!(machine.object_layout(grown), vectors);
     }
 
     /// A store is traced by its element layout's reference map and searched
@@ -1042,17 +894,26 @@ mod tests {
         let store = machine.new_object(layout, 1).unwrap();
         let grown = machine.new_object(vector(&program, point), 0).unwrap();
         machine.set_payload(grown, 1, store);
-        let vectors = machine.object_layout(grown);
+        // `Vector.of` takes its family from the first element and holds every
+        // other one to it.
         let error = values(
             &mut machine,
             "Vector",
-            "push",
-            &[(vectors, &[grown]), (int, &[1])],
+            "of",
+            &[(point, &[1, 2]), (int, &[1])],
         )
         .unwrap_err();
         assert_eq!(
             error.message,
-            "`Vector.push` expects `Point` here, but found `Int`"
+            "`Vector.of` expects `Point` here, but found `Int`"
+        );
+        // A word `growable-push` is given its element layout by the lowering
+        // rather than by an operand, so what it holds to the store's family is
+        // the owner: a vector of another element is refused before a word moves.
+        let error = push(&mut machine, grown, int, &[1]).unwrap_err();
+        assert_eq!(
+            error.message,
+            "a growable run of `Int` was expected here, and this object is not one"
         );
     }
 
@@ -1087,13 +948,8 @@ mod tests {
         let store = machine.payload(items, 1);
         assert_eq!(machine.object_len(store), 2);
 
-        word(
-            &mut machine,
-            "Vector",
-            "push",
-            &[(Repr::Ref, items), (Repr::Int, 3)],
-        )
-        .unwrap();
+        let int = scalar(&program, Repr::Int);
+        push(&mut machine, items, int, &[3]).unwrap();
         let grown = machine.payload(items, 1);
         assert_ne!(grown, store, "a full store is replaced");
         // Twice the capacity, from a floor of four.
@@ -1102,13 +958,7 @@ mod tests {
         assert_eq!(words_of(&machine, grown), vec![1, 2, 3, 0]);
 
         // And the next push fits without replacing anything.
-        word(
-            &mut machine,
-            "Vector",
-            "push",
-            &[(Repr::Ref, items), (Repr::Int, 4)],
-        )
-        .unwrap();
+        push(&mut machine, items, int, &[4]).unwrap();
         assert_eq!(machine.payload(items, 1), grown);
         assert_eq!(machine.payload(items, 0), 4);
     }
@@ -1120,16 +970,10 @@ mod tests {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
         let items = growable(&mut machine, &[]);
-        word(
-            &mut machine,
-            "Vector",
-            "push",
-            &[(Repr::Ref, items), (Repr::Int, 7)],
-        )
-        .unwrap();
+        push(&mut machine, items, scalar(&program, Repr::Int), &[7]).unwrap();
         assert_eq!(
             u64::from(machine.object_len(machine.payload(items, 1))),
-            runs::MIN_GROWABLE_ELEMENTS
+            crate::vm::exec::runs::MIN_GROWABLE_ELEMENTS
         );
         assert_eq!(machine.payload(items, 0), 1);
     }
@@ -1143,13 +987,7 @@ mod tests {
         let items = growable(&mut machine, &[1, 2]);
         let alias = items;
 
-        word(
-            &mut machine,
-            "Vector",
-            "push",
-            &[(Repr::Ref, items), (Repr::Int, 3)],
-        )
-        .unwrap();
+        push(&mut machine, items, scalar(&program, Repr::Int), &[3]).unwrap();
         assert_eq!(
             word(&mut machine, "Vector", "length", &[(Repr::Ref, alias)]).unwrap(),
             3
@@ -1162,49 +1000,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(option_int(&program, &words), ("Some".to_string(), vec![3]));
-    }
-
-    #[test]
-    fn set_writes_where_the_index_is_already_there_and_nowhere_else() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let items = growable(&mut machine, &[1, 2, 3]);
-        let ints = scalar(&program, Repr::Int);
-
-        // The answer is what the index held before, which is what `get`
-        // would have answered.
-        let answer = run(
-            &mut machine,
-            "Vector",
-            "set",
-            &[(Repr::Ref, items), (Repr::Int, 1), (Repr::Int, 20)],
-        )
-        .unwrap();
-        assert_eq!(
-            option_of(&program, ints, &answer),
-            ("Some".to_string(), vec![2])
-        );
-        assert_eq!(
-            words_of(&machine, machine.payload(items, 1)),
-            vec![1, 20, 3]
-        );
-
-        // An index that is not already there writes nothing, which is `get`'s
-        // answer to the same bad index said as a store that did not happen.
-        for at in [-1i64, 3] {
-            let answer = run(
-                &mut machine,
-                "Vector",
-                "set",
-                &[(Repr::Ref, items), (Repr::Int, at as u64), (Repr::Int, 99)],
-            )
-            .unwrap();
-            assert_eq!(option_of(&program, ints, &answer).0, "None");
-        }
-        assert_eq!(
-            words_of(&machine, machine.payload(items, 1)),
-            vec![1, 20, 3]
-        );
     }
 
     /// The store keeps its room and loses its dead element: the words a `pop`
@@ -1319,8 +1114,11 @@ mod tests {
         let mut machine = Machine::new(&program, 1 << 14);
         let items = growable(&mut machine, &[1, 2]);
         let store = machine.payload(items, 1);
+        let int = scalar(&program, Repr::Int);
 
-        let frozen = word(&mut machine, "Vector", "freeze", &[(Repr::Ref, items)]).unwrap();
+        let frozen = machine
+            .finish_words(items, elements(&program, int, false), int)
+            .unwrap();
         assert_eq!(frozen, store);
         assert_eq!(words_of(&machine, frozen), vec![1, 2]);
         assert!(matches!(
@@ -1353,20 +1151,17 @@ mod tests {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
         let items = growable(&mut machine, &[1]);
-        word(
-            &mut machine,
-            "Vector",
-            "push",
-            &[(Repr::Ref, items), (Repr::Int, 2)],
-        )
-        .unwrap();
+        push(&mut machine, items, scalar(&program, Repr::Int), &[2]).unwrap();
         let store = machine.payload(items, 1);
         assert_eq!(
             u64::from(machine.object_len(store)),
-            runs::MIN_GROWABLE_ELEMENTS
+            crate::vm::exec::runs::MIN_GROWABLE_ELEMENTS
         );
 
-        let frozen = word(&mut machine, "Vector", "freeze", &[(Repr::Ref, items)]).unwrap();
+        let int = scalar(&program, Repr::Int);
+        let frozen = machine
+            .finish_words(items, elements(&program, int, false), int)
+            .unwrap();
         assert_eq!(frozen, store);
         assert_eq!(words_of(&machine, frozen), vec![1, 2]);
 
@@ -1382,13 +1177,14 @@ mod tests {
     }
 
     /// A header whose store word is null is still a state the machine can be
-    /// handed, and every method answers the same thing for it — whichever one
-    /// was called.
+    /// handed, and every operation refuses it.
     ///
-    /// Nothing in this backend produces one any more, now that `freeze()`
-    /// refuses. It is built by hand here because the reading of it is what is
-    /// under test: the check is at the top of the receiver, before the method
-    /// name is looked at, which is where the oracle asks it.
+    /// A checked program never produces one — `cove_sema::unique` proves a
+    /// vector is not read after its `freeze()` — so it is built by hand here,
+    /// because the reading of it is what is under test. A method still
+    /// dispatched here names itself, as the oracle's does; a run instruction
+    /// over the vector — `push` and `freeze` since ADR 0058 — is below every
+    /// method, and answers the one internal-invariant sentence.
     #[test]
     fn a_vector_with_no_storage_refuses_every_method() {
         let program = world();
@@ -1396,20 +1192,23 @@ mod tests {
         let int = scalar(&program, Repr::Int);
         let header = machine.new_object(vector(&program, int), 0).unwrap();
 
-        for (operation, operands) in [
-            ("length", vec![(Repr::Ref, header)]),
-            ("push", vec![(Repr::Ref, header), (Repr::Int, 1)]),
-            ("freeze", vec![(Repr::Ref, header)]),
-        ] {
-            let error = run(&mut machine, "Vector", operation, &operands).unwrap_err();
-            assert_eq!(
-                error.message,
-                format!("`{operation}` was called on a vector that `freeze()` already consumed")
-            );
-            assert_eq!(
-                error.rule.as_deref(),
-                Some("`freeze()` consumes its vector; the source vector is no longer usable.")
-            );
+        let error = run(&mut machine, "Vector", "length", &[(Repr::Ref, header)]).unwrap_err();
+        assert_eq!(
+            error.message,
+            "`length` was called on a vector that `freeze()` already consumed"
+        );
+        assert_eq!(
+            error.rule.as_deref(),
+            Some("`freeze()` consumes its vector; the source vector is no longer usable.")
+        );
+
+        let pushed = push(&mut machine, header, int, &[1]).unwrap_err();
+        let finished = machine
+            .finish_words(header, elements(&program, int, false), int)
+            .unwrap_err();
+        for error in [pushed, finished] {
+            assert_eq!(error.message, crate::builtins::CONSUMED_VECTOR);
+            assert_eq!(error.rule, None);
         }
     }
 
@@ -1522,6 +1321,13 @@ mod tests {
         machine.set_payload(store, 0, kept);
         machine.set_payload(items, 0, 1);
         machine.set_payload(items, 1, store);
+        // The element a push reads by address, placed and rooted before the heap
+        // is filled: a frame's slot, in a fixture that has no frame.
+        let holder = machine
+            .new_object(elements(&program, text, false), 1)
+            .unwrap();
+        machine.push_temp(holder);
+        machine.set_payload(holder, 0, kept);
 
         // Dead strings, two words each, until the heap is exactly full — so
         // that the larger store below cannot fit and has to collect.
@@ -1530,13 +1336,7 @@ mod tests {
         }
         let before = machine.collected().collections;
 
-        word(
-            &mut machine,
-            "Vector",
-            "push",
-            &[(Repr::Ref, items), (Repr::Ref, kept)],
-        )
-        .unwrap();
+        machine.push_words(items, text, holder + 1).unwrap();
         assert!(
             machine.collected().collections > before,
             "the fixture did not force a collection"

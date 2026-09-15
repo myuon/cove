@@ -30,6 +30,10 @@ allow = ["console"]
 entry = "coll_vector.main"
 allow = ["console"]
 
+[run.coll_vector_edges]
+entry = "coll_vector_edges.main"
+allow = ["console"]
+
 [run.fail_database_connect_denied]
 entry = "fail_database_connect_denied.main"
 allow = ["database", "console"]
@@ -174,6 +178,10 @@ allow = ["console"]
 
 [run.gc_tasks]
 entry = "gc_tasks.main"
+allow = ["console"]
+
+[run.gc_vector_grow]
+entry = "gc_vector_grow.main"
 allow = ["console"]
 
 [run.fail_http_no_capability]

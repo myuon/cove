@@ -215,26 +215,6 @@ fn a_freeze_refuses_a_null_receiver() {
 }
 
 #[test]
-fn a_set_in_range_writes_the_element_and_answers_the_old_one() {
-    suite::a_set_in_range_writes_the_element_and_answers_the_old_one::<Template>();
-}
-
-#[test]
-fn a_set_outside_the_vector_answers_none_and_writes_nothing() {
-    suite::a_set_outside_the_vector_answers_none_and_writes_nothing::<Template>();
-}
-
-#[test]
-fn every_cold_path_of_a_set_goes_to_the_runtime() {
-    suite::every_cold_path_of_a_set_goes_to_the_runtime::<Template>();
-}
-
-#[test]
-fn a_set_refuses_a_null_receiver() {
-    suite::a_set_refuses_a_null_receiver::<Template>();
-}
-
-#[test]
 fn a_builtin_no_arm_lowers_refuses_the_function() {
     suite::a_builtin_no_arm_lowers_refuses_the_function::<Template>();
 }

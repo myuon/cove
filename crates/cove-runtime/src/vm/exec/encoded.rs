@@ -270,8 +270,10 @@ const RUN_COPY_BYTES: u8 = Op::RunCopyBytes.number();
 const RUN_COPY_WORDS: u8 = Op::RunCopyWords.number();
 const GROWABLE_ALLOC_BYTES: u8 = Op::GrowableAllocBytes.number();
 const GROWABLE_PUSH_BYTE: u8 = Op::GrowablePushByte.number();
+const GROWABLE_PUSH_WORDS: u8 = Op::GrowablePushWords.number();
 const GROWABLE_EXTEND_BYTES: u8 = Op::GrowableExtendBytes.number();
 const RUN_FINISH_BYTES: u8 = Op::RunFinishBytes.number();
+const RUN_FINISH_WORDS: u8 = Op::RunFinishWords.number();
 const LEN: u8 = Op::Len.number();
 const LAYOUT_OF: u8 = Op::LayoutOf.number();
 
@@ -343,8 +345,10 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::RunCopyWords
         | Op::GrowableAllocBytes
         | Op::GrowablePushByte
+        | Op::GrowablePushWords
         | Op::GrowableExtendBytes
         | Op::RunFinishBytes
+        | Op::RunFinishWords
         | Op::LoadField
         | Op::StoreField
         | Op::LoadElem
@@ -1788,6 +1792,19 @@ pub(super) fn dispatch<'s, 'a>(
                     fail!(error);
                 }
             }
+            // One element at the logical length: `Vector.push`, since ADR 0058
+            // moved it into the standard library. The element is a run of the
+            // payload layout's width in this frame, copied into the store after
+            // the ensure, which may allocate and so comes first — the frame does
+            // not move and a collection does not either.
+            GROWABLE_PUSH_WORDS => {
+                let owner = machine.mem.word_at(base_at + (a!() as usize));
+                let elem = LayoutId(held.lo());
+                machine.sync(pc - 1);
+                if let Err(error) = machine.push_words(owner, elem, base + held.b() as u64) {
+                    fail!(error);
+                }
+            }
             // The bulk append. All four operands — `owner`, `src`, `from`,
             // `to` — live behind the `ArgsId` in the payload's low half rather
             // than in `a`, `b` and `c`; see `Inst::GrowableExtend`'s doc for why.
@@ -1807,6 +1824,20 @@ pub(super) fn dispatch<'s, 'a>(
                 machine.sync(pc - 1);
                 match machine.finish_buffer(owner, target, Validation::Utf8) {
                     Ok(text) => machine.mem.set_word_at(base_at + (a!()) as usize, text),
+                    Err(error) => fail!(error),
+                }
+            }
+            // A word finish: `Vector.freeze()`, since ADR 0058 moved it into the
+            // standard library. The store is relabelled to the `Array` the
+            // payload's low half names and the element layout is its high half;
+            // there is nothing to validate in a run of whole elements.
+            RUN_FINISH_WORDS => {
+                let owner = machine.mem.word_at(base_at + (b!() as usize));
+                let target = LayoutId(held.lo());
+                let elem = LayoutId(held.hi());
+                machine.sync(pc - 1);
+                match machine.finish_words(owner, target, elem) {
+                    Ok(array) => machine.mem.set_word_at(base_at + (a!()) as usize, array),
                     Err(error) => fail!(error),
                 }
             }

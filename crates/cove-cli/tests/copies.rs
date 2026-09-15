@@ -461,13 +461,56 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// that makes a small standard-library wrapper a mandatory expansion adds
 /// nothing here.
 ///
+/// **The tenth rise is two new rows, and neither is the lowering.** 2236 to
+/// 2251: `tests/e2e:coll_vector_edges` holds 5 and `tests/e2e:gc_vector_grow`
+/// holds 10, measured one without the other. They are the fixtures that pin a
+/// `Vector`'s index edges, its aliasing across growth and its `freeze` through
+/// collections before ADR 0058 moves `push`, `set` and `freeze` into the
+/// standard library (#378), so they land a commit ahead of the move and the
+/// lowering is the base's.
+///
+/// **The eleventh rise is `Vector.push` moving into the standard library.**
+/// 2251 to 2256, all five in the `ret` column: `examples:callbacks` 2,
+/// `examples:covefmtBench`, `examples:values` and `tests/e2e:values_unit` 1
+/// each. Each is a function whose last expression is a `push` —
+/// `Router.get`, `BookingDraft.addGuest`, `record` — and so answers the push's
+/// `()`. The builtin wrote that unit straight into the answer; the push is now
+/// `std.vector.push` expanded where it is called, whose `unit` is written in
+/// the expansion's own slot and copied out by its `return`, because the
+/// expansion's answer forwarding declines a destination the arguments are
+/// read around. It is one static copy of a `Unit` per such function, and not
+/// per push: a push in statement position writes its unit and nothing else
+/// (`lower::tests::methods`'s listing of one).
+///
+/// **The twelfth rise is `Vector.set` following it.** 2256 to 2264. The
+/// builtin answered its `Option` straight into the call's destination;
+/// `std.vector.set<T>` is a Cove body that builds `Some(was)` or `None` in a
+/// temporary and copies it into its answer, the shape `Body::struct_literal`'s
+/// seventh-rise note describes for an initializer. One `ret` copy per
+/// instantiation — `examples:life` and `tests/e2e:coll_vector` 1 each,
+/// `tests/e2e:coll_vector_edges` 3 (`Int`, `String`, a two-word struct) — and in
+/// `examples:covefmtBench` 1 `ret` and 2 `prod`, where the body is also expanded
+/// into a caller that holds the same shape.
+///
+/// **Then it falls, and by more than `Vector.freeze` added.** 2264 to 2241.
+/// Moved alone, `freeze` was 2264 to 2285: twenty-one `ret` copies across
+/// ten programs, one per function whose answer is a `freeze()` — `life` 7,
+/// `coll_transform` 3, `cq`, `cqSample` and `coll_vector_edges` 2 each, and one
+/// in each of five more. The builtin had written its `Array` into the call's
+/// destination; `call_std_binding` handed a standard-library call none, so the
+/// expanded finish wrote a temporary and a copy carried it out. Handing the
+/// binding the destination its call site was given, as `call_target` already
+/// does for every other call, removes those twenty-one and twenty-three more
+/// that every earlier binding — `isEmpty`, `unwrapOr`, `filter`, `fold` in an
+/// answer position — had been paying since it moved.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2236;
+const FORWARDABLE_COPIES: usize = 2241;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

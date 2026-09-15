@@ -7,6 +7,58 @@ export fn isEmpty<T>(items: Vector<T>) -> Bool {
   items.length() == 0
 }
 
+/// Appends `value` at the end, growing the storage when it is full.
+///
+/// The write goes through the vector's shared storage, so every alias sees
+/// the new element and the new length; a growth replaces the storage beneath
+/// the vector without moving the vector itself, so no alias is left behind.
+/// Amortised O(1).
+///
+/// A push has no index to check and nothing to answer, so there is no policy
+/// here to write in Cove: the body is one core intrinsic, ADR 0058's growable
+/// push over the element's words, and the lowering expands it wherever it is
+/// called.
+export fn push<T>(items: Vector<T>, value: T) {
+  core.vectorPush(items, value)
+}
+
+/// Replaces the element at `index` with `value`, answering what was there.
+///
+/// An index that is not already in the vector — negative, at or past
+/// `length()`, or any index of an empty vector — answers `None` and writes
+/// nothing, which is `get`'s answer to the same index. It replaces and never
+/// appends: a vector grows by `push`, and a `set` that sometimes grew would
+/// make the length depend on the index. The write goes through the shared
+/// storage, so every alias sees it.
+///
+/// The range decision and the `Option` are this body's; the element read and
+/// write beneath them are core intrinsics, bounded by the storage rather than
+/// by the length, which is why the range is decided first.
+export fn set<T>(items: Vector<T>, index: Int, value: T) -> Option<T> {
+  if index >= 0 && index < items.length() {
+    let was = core.vectorLoad(items, index)
+    core.vectorStore(items, index, value)
+    Some(was)
+  } else {
+    None
+  }
+}
+
+/// The elements of this vector as an `Array`, in O(1), consuming the vector.
+///
+/// The storage the vector was holding *is* the array: it is relabelled in
+/// place to the elements it holds, and whatever room the vector had grown
+/// into is given back. Nothing is copied, which is why the vector is no
+/// longer usable afterwards, and why the compiler has to be able to prove
+/// that nothing else is holding it — that proof is made at the call written
+/// in the program, and where it cannot be, `toArray()` copies instead.
+///
+/// The body is one core intrinsic, ADR 0058's run finish over the element's
+/// words, and the lowering expands it wherever it is called.
+export fn freeze<T>(items: Vector<T>) -> Array<T> {
+  core.vectorFinish(items)
+}
+
 /// The elements `keep` answers `true` for, in the order they were in.
 ///
 /// **Through a copy taken before the first call.** A vector shares its
