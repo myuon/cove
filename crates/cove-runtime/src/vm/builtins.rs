@@ -145,15 +145,12 @@ pub(crate) fn call(
         Intrinsic::SetOf => keyed::set_of(machine, operands).map(|word| out.push(word)),
         // `Set.isEmpty` is not here: it is `std.set.isEmpty` — see
         // `cove_schema::builtins::standard_binding`.
-        Intrinsic::SetContains => keyed::set_contains(machine, operands).map(|word| out.push(word)),
         Intrinsic::SetToArray => keyed::set_to_array(machine, operands).map(|word| out.push(word)),
         Intrinsic::SetInserted => keyed::set_inserted(machine, operands).map(|word| out.push(word)),
         Intrinsic::SetRemoved => keyed::set_removed(machine, operands).map(|word| out.push(word)),
 
         // ---- Map ---------------------------------------------------------
         Intrinsic::MapOf => keyed::map_of(machine, operands).map(|word| out.push(word)),
-        Intrinsic::MapGet => keyed::map_get(machine, builtin.result, operands, out),
-        Intrinsic::MapContains => keyed::map_contains(machine, operands).map(|word| out.push(word)),
         // `Map.isEmpty` is not here: it is `std.map.isEmpty` — see
         // `cove_schema::builtins::standard_binding`.
         Intrinsic::MapKeys => keyed::map_keys(machine, operands).map(|word| out.push(word)),
@@ -832,7 +829,6 @@ mod tests {
         };
         let payload = match (receiver, operation) {
             ("Array" | "Vector", "get" | "set" | "pop" | "remove") => inside(),
-            ("Map", "get") => inside(),
             ("String", "indexOf") => ints(),
             ("Int", "parse" | "parseRadix") | ("Float", "toInt") => ints(),
             ("Float", "parse") => word_layout(program, Repr::Float),

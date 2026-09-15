@@ -140,10 +140,10 @@ written as a namespace; binds `K`, `V`.
 
 | signature | `var self` | variadic | binds | implemented by |
 | --- | --- | --- | --- | --- |
-| `get(key: K) -> Option<V>` |  |  |  | `machine` |
+| `get(key: K) -> Option<V>` |  |  |  | `std.map.get` |
 | `length() -> Int` |  |  |  | `machine` |
 | `isEmpty() -> Bool` |  |  |  | `std.map.isEmpty` |
-| `contains(key: K) -> Bool` |  |  |  | `machine` |
+| `contains(key: K) -> Bool` |  |  |  | `std.map.contains` |
 | `keys() -> Array<K>` |  |  |  | `machine` |
 | `values() -> Array<V>` |  |  |  | `machine` |
 | `inserted(key: K, value: V) -> Map<K, V>` |  |  |  | `machine` |
@@ -173,7 +173,7 @@ written as a namespace; binds `T`.
 | `length() -> Int` |  |  |  | `machine` |
 | `isEmpty() -> Bool` |  |  |  | `std.set.isEmpty` |
 | `toArray() -> Array<T>` |  |  |  | `machine` |
-| `contains(element: T) -> Bool` |  |  |  | `machine` |
+| `contains(element: T) -> Bool` |  |  |  | `std.set.contains` |
 | `inserted(element: T) -> Set<T>` |  |  |  | `machine` |
 | `removed(element: T) -> Set<T>` |  |  |  | `machine` |
 | `snapshot() -> Self` |  |  |  | `machine` |

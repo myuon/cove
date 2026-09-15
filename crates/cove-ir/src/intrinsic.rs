@@ -57,13 +57,10 @@ pub enum Intrinsic {
     StringToLower,
     StringFromCodePoint,
     SetOf,
-    SetContains,
     SetToArray,
     SetInserted,
     SetRemoved,
     MapOf,
-    MapGet,
-    MapContains,
     MapKeys,
     MapValues,
     MapInserted,
@@ -109,13 +106,10 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringToLower,
     Intrinsic::StringFromCodePoint,
     Intrinsic::SetOf,
-    Intrinsic::SetContains,
     Intrinsic::SetToArray,
     Intrinsic::SetInserted,
     Intrinsic::SetRemoved,
     Intrinsic::MapOf,
-    Intrinsic::MapGet,
-    Intrinsic::MapContains,
     Intrinsic::MapKeys,
     Intrinsic::MapValues,
     Intrinsic::MapInserted,
@@ -166,13 +160,10 @@ impl Intrinsic {
             Intrinsic::StringToLower => "String",
             Intrinsic::StringFromCodePoint => "String",
             Intrinsic::SetOf => "Set",
-            Intrinsic::SetContains => "Set",
             Intrinsic::SetToArray => "Set",
             Intrinsic::SetInserted => "Set",
             Intrinsic::SetRemoved => "Set",
             Intrinsic::MapOf => "Map",
-            Intrinsic::MapGet => "Map",
-            Intrinsic::MapContains => "Map",
             Intrinsic::MapKeys => "Map",
             Intrinsic::MapValues => "Map",
             Intrinsic::MapInserted => "Map",
@@ -216,13 +207,10 @@ impl Intrinsic {
             Intrinsic::StringToLower => "toLower",
             Intrinsic::StringFromCodePoint => "fromCodePoint",
             Intrinsic::SetOf => "of",
-            Intrinsic::SetContains => "contains",
             Intrinsic::SetToArray => "toArray",
             Intrinsic::SetInserted => "inserted",
             Intrinsic::SetRemoved => "removed",
             Intrinsic::MapOf => "of",
-            Intrinsic::MapGet => "get",
-            Intrinsic::MapContains => "contains",
             Intrinsic::MapKeys => "keys",
             Intrinsic::MapValues => "values",
             Intrinsic::MapInserted => "inserted",
@@ -331,13 +319,10 @@ impl Intrinsic {
 
             // A `Set` or a `Map` is immutable, so every update below
             // allocates a new run rather than writing through the receiver
-            // — none of this family ever carries `WRITES_MEMORY`. The
-            // membership tests and `get` are a binary search, not
-            // proportional to the collection; everything else opens or
-            // copies a run proportional to it.
-            Intrinsic::SetContains | Intrinsic::MapContains | Intrinsic::MapGet => {
-                raise.union(E::READS_MEMORY)
-            }
+            // — none of this family ever carries `WRITES_MEMORY` — and opens
+            // or copies a run proportional to it. The membership tests and
+            // `get` are not here: they are `std.set` and `std.map` binary
+            // searches over the three `Value` intrinsics at the end (ADR 0059).
             Intrinsic::SetOf
             | Intrinsic::SetToArray
             | Intrinsic::SetInserted
@@ -530,13 +515,10 @@ mod tests {
                 | Intrinsic::StringToLower
                 | Intrinsic::StringFromCodePoint
                 | Intrinsic::SetOf
-                | Intrinsic::SetContains
                 | Intrinsic::SetToArray
                 | Intrinsic::SetInserted
                 | Intrinsic::SetRemoved
                 | Intrinsic::MapOf
-                | Intrinsic::MapGet
-                | Intrinsic::MapContains
                 | Intrinsic::MapKeys
                 | Intrinsic::MapValues
                 | Intrinsic::MapInserted
@@ -589,7 +571,7 @@ mod tests {
 
     #[test]
     fn display_prints_receiver_dot_operation() {
-        assert_eq!(Intrinsic::SetContains.to_string(), "Set.contains");
+        assert_eq!(Intrinsic::SetInserted.to_string(), "Set.inserted");
         assert_eq!(Intrinsic::AnyEquals.to_string(), "Any.equals");
     }
 

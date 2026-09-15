@@ -6,6 +6,12 @@
 //! a set iterates and renders in ascending order — so it is kept rather than
 //! recovered, and every lookup is a binary search over it.
 //!
+//! Not every lookup is here. `Set.contains`, `Map.contains` and `Map.get` are
+//! `std.set` and `std.map` — the search written in Cove, stepping by
+//! [`super::key`]'s order through `core.order` (ADR 0059, #378) — and what
+//! this file keeps for them is [`refuse_duplicate`] and the two runtime halves
+//! in `key`, `value_order` and `admit_key`. What is left below builds runs.
+//!
 //! # A member is as wide as its layout says
 //!
 //! One value may occupy several consecutive words, so a member is a *run* at
@@ -278,25 +284,6 @@ pub(super) fn set_of(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<
     Ok(addr)
 }
 
-/// `Set.contains(element) -> Bool`.
-pub(super) fn set_contains(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, args) = operand::method("Set.contains", operands, 1)?;
-    let items = set(machine, "contains", receiver)?;
-    key::check(machine, "Set.contains", key::SET_ELEMENT, args[0])?;
-    let found = seek(
-        machine,
-        items.addr,
-        items.width,
-        items.width,
-        items.len,
-        |held| key::cmp_held(machine, items.elem, held, args[0]),
-    )?;
-    Ok(found.is_ok() as u64)
-}
-
 /// `Set.toArray() -> Array<T>`, in ascending order.
 ///
 /// Which is the order the members are already in, so this copies rather than
@@ -526,56 +513,6 @@ fn mixed(machine: &Machine, entry: &Entry) -> RuntimeError {
     .with_rule("A map literal has one key type and one value type.")
 }
 
-/// `Map.get(key) -> Option<V>`.
-///
-/// The answer is the `Option`'s words rather than an address: a fixed-size
-/// enum is inline, so `Some(Point(1, 2))` is a run the caller writes into its
-/// destination location the way a copy writes one.
-pub(super) fn map_get(
-    machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
-) -> Result<(), RuntimeError> {
-    let (receiver, args) = operand::method("Map.get", operands, 1)?;
-    let entries = map(machine, "get", receiver)?;
-    key::check(machine, "Map.get", key::MAP_KEY, args[0])?;
-    let found = seek(
-        machine,
-        entries.addr,
-        entries.stride(),
-        entries.keys,
-        entries.len,
-        |held| key::cmp_held(machine, entries.key, held, args[0]),
-    )?;
-    match found {
-        Ok(at) => {
-            let words = entries.value_words(machine, at);
-            make::some(machine, result, &words, out)
-        }
-        Err(_) => make::none(machine, result, out),
-    }
-}
-
-/// `Map.contains(key) -> Bool`.
-pub(super) fn map_contains(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, args) = operand::method("Map.contains", operands, 1)?;
-    let entries = map(machine, "contains", receiver)?;
-    key::check(machine, "Map.contains", key::MAP_KEY, args[0])?;
-    let found = seek(
-        machine,
-        entries.addr,
-        entries.stride(),
-        entries.keys,
-        entries.len,
-        |held| key::cmp_held(machine, entries.key, held, args[0]),
-    )?;
-    Ok(found.is_ok() as u64)
-}
-
 /// `Map.keys() -> Array<K>`, in ascending order.
 pub(super) fn map_keys(
     machine: &mut Machine,
@@ -750,9 +687,7 @@ fn duplicate(method: &str, role: &str, shown: Result<String, RuntimeError>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::builtins::tests::{
-        named, option_of, read, run, scalar, values, word, words_of, world,
-    };
+    use crate::vm::builtins::tests::{named, read, run, scalar, values, word, words_of, world};
     use crate::vm::exec::tests::Build;
     use cove_ir::Program;
 
@@ -919,29 +854,6 @@ mod tests {
         assert_eq!(words_of(&machine, array), vec![1, 2, 3]);
     }
 
-    /// Membership is the binary search the sorted run is for, and it answers
-    /// the same thing at both ends and in the middle.
-    #[test]
-    fn a_set_answers_membership_by_searching() {
-        let program = world();
-        let mut machine = machine(&program);
-        let int = scalar(&program, Repr::Int);
-        let items = members(&mut machine, int, &[1, 3, 5, 7]);
-        for (element, expected) in [(1, 1), (3, 1), (5, 1), (7, 1), (0, 0), (4, 0), (9, 0)] {
-            assert_eq!(
-                word(
-                    &mut machine,
-                    "Set",
-                    "contains",
-                    &[(Repr::Ref, items), (Repr::Int, element)]
-                )
-                .unwrap(),
-                expected,
-                "contains({element})"
-            );
-        }
-    }
-
     /// A new set every time, sorted, and the receiver untouched — which is
     /// what an immutable value has to be.
     #[test]
@@ -1062,67 +974,16 @@ mod tests {
 
         assert_eq!(machine.object_len(held_map), 2);
 
-        // `isEmpty` is not a machine builtin for `Map` either: it is
-        // `std.map.isEmpty`, and it is `cove-sema`'s and `cove-ir`'s tests
-        // that check it rather than a word read off the machine here.
-        assert_eq!(
-            word(
-                &mut machine,
-                "Map",
-                "contains",
-                &[(Repr::Ref, held_map), (Repr::Int, 2)]
-            )
-            .unwrap(),
-            1
-        );
-        assert_eq!(
-            word(
-                &mut machine,
-                "Map",
-                "contains",
-                &[(Repr::Ref, held_map), (Repr::Int, 3)]
-            )
-            .unwrap(),
-            0
-        );
+        // `isEmpty`, `contains` and `get` are not machine builtins for `Map`
+        // either: they are `std.map` — `get` and `contains` a binary search in
+        // Cove over `core.order` (ADR 0059) — and `vm::differential` and the
+        // end-to-end fixtures check them rather than a word read off the
+        // machine here.
 
         let keys = word(&mut machine, "Map", "keys", &[(Repr::Ref, held_map)]).unwrap();
         assert_eq!(words_of(&machine, keys), vec![1, 2]);
         let values = word(&mut machine, "Map", "values", &[(Repr::Ref, held_map)]).unwrap();
         assert_eq!(words_of(&machine, values), vec![10, 20]);
-    }
-
-    /// `get` answers an `Option` of the value family, which is where a
-    /// missing key and a present one are one answer rather than two — and it
-    /// is a run of words now rather than an object.
-    #[test]
-    fn a_map_get_answers_an_option() {
-        let program = world();
-        let mut machine = machine(&program);
-        let int = scalar(&program, Repr::Int);
-        let held_map = entries(&mut machine, int, int, &[(1, 10), (2, 20)]);
-        let found = run(
-            &mut machine,
-            "Map",
-            "get",
-            &[(Repr::Ref, held_map), (Repr::Int, 2)],
-        )
-        .unwrap();
-        assert_eq!(
-            option_of(&program, int, &found),
-            ("Some".to_string(), vec![20])
-        );
-        let missing = run(
-            &mut machine,
-            "Map",
-            "get",
-            &[(Repr::Ref, held_map), (Repr::Int, 3)],
-        )
-        .unwrap();
-        assert_eq!(
-            option_of(&program, int, &missing),
-            ("None".to_string(), vec![])
-        );
     }
 
     #[test]
@@ -1196,17 +1057,15 @@ mod tests {
         assert_eq!(machine.object_len(values), 2);
         assert_eq!(machine.payload_run(values, 0, 4), vec![10, 20, 30, 40]);
 
-        let found = run(
+        // And an update copies whole entries at that stride.
+        let without = word(
             &mut machine,
             "Map",
-            "get",
-            &[(Repr::Ref, held_map), (Repr::Int, 2)],
+            "removed",
+            &[(Repr::Ref, held_map), (Repr::Int, 1)],
         )
         .unwrap();
-        assert_eq!(
-            option_of(&program, point, &found),
-            ("Some".to_string(), vec![30, 40])
-        );
+        assert_eq!(held(&machine, without, 3), vec![2, 30, 40]);
     }
 
     /// A two-word member goes into a set as both of its words, because an
@@ -1272,23 +1131,26 @@ mod tests {
         let error = run(
             &mut machine,
             "Map",
-            "get",
+            "removed",
             &[(Repr::Ref, empty), (Repr::Float, 1.5f64.to_bits())],
         )
         .unwrap_err();
-        assert_eq!(error.message, "`Map.get` cannot use a `Float` as a map key");
+        assert_eq!(
+            error.message,
+            "`Map.removed` cannot use a `Float` as a map key"
+        );
 
         let items = members(&mut machine, int, &[]);
         let error = run(
             &mut machine,
             "Set",
-            "contains",
+            "removed",
             &[(Repr::Ref, items), (Repr::Float, 1.5f64.to_bits())],
         )
         .unwrap_err();
         assert_eq!(
             error.message,
-            "`Set.contains` cannot use a `Float` as a set element"
+            "`Set.removed` cannot use a `Float` as a set element"
         );
     }
 
@@ -1316,10 +1178,10 @@ mod tests {
         let mut machine = machine(&program);
         let int = scalar(&program, Repr::Int);
         let items = members(&mut machine, int, &[1]);
-        let error = run(&mut machine, "Set", "contains", &[(Repr::Ref, items)]).unwrap_err();
+        let error = run(&mut machine, "Set", "removed", &[(Repr::Ref, items)]).unwrap_err();
         assert_eq!(
             error.message,
-            "`Set.contains` takes 1 argument(s), but 0 were given"
+            "`Set.removed` takes 1 argument(s), but 0 were given"
         );
 
         let held_map = entries(&mut machine, int, int, &[(1, 10)]);
@@ -1336,7 +1198,7 @@ mod tests {
         );
     }
 
-    /// A key that is a reference is searched by value, so a lookup finds an
+    /// A key that is a reference is searched by value, so an update finds an
     /// entry a different object with the same bytes put there.
     #[test]
     fn a_reference_key_is_found_by_what_it_is_and_not_by_where_it_is() {
@@ -1349,17 +1211,14 @@ mod tests {
         let held_map = entries(&mut machine, text, int, &[(a, 1), (b, 2)]);
         let wanted = machine.new_string("b").unwrap();
         assert_ne!(wanted, b);
-        let found = run(
+        let without = word(
             &mut machine,
             "Map",
-            "get",
+            "removed",
             &[(Repr::Ref, held_map), (Repr::Ref, wanted)],
         )
         .unwrap();
-        assert_eq!(
-            option_of(&program, int, &found),
-            ("Some".to_string(), vec![2])
-        );
+        assert_eq!(held(&machine, without, 2), vec![a, 1]);
 
         // And the key the map keeps is the one it already held.
         let over = word(

@@ -574,13 +574,25 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `fail_key_float_empty_map` 6 each, which is the floor every program's
 /// standard library sets. The lowering is the base's.
 ///
+/// **The twentieth rise is `Map.get` and `contains` moving into the standard
+/// library.** 2339 to 2354. ADR 0059's P4-4 (#378) made them binary searches
+/// in Cove over `core.entryAt` and `core.memberAt`, and a search step reads a
+/// whole entry out of the map with a `load-elem` and then copies the key field
+/// out of it — a copy after a producer — as `get` does for the value it wraps
+/// in `Some`, and a call answering a `Bool` or an `Option` where the builtin
+/// wrote its word straight into the caller's destination. Only the programs
+/// that search a map or a set move: `benches:keyed` +8, `examples:reviewPolicy`
+/// +5 and `examples:covecheck` +2. A core intrinsic that loaded a key alone
+/// would remove the field copies; it is not added for a count, and
+/// `benches/keyed`'s lookup rows are faster than the builtin with them in.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2339;
+const FORWARDABLE_COPIES: usize = 2354;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

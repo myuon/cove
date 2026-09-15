@@ -879,6 +879,30 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.set",
         function: "isEmpty",
     },
+    // A keyed lookup is a binary search in Cove over the sorted run (#378,
+    // ADR 0059, P4-4): `core.admitKey` of the argument, then a private seek
+    // stepping by `core.order` over `core.memberAt` / `core.entryAt`.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Set",
+        method: "contains",
+        module: "std.set",
+        function: "contains",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Map",
+        method: "contains",
+        module: "std.map",
+        function: "contains",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Map",
+        method: "get",
+        module: "std.map",
+        function: "get",
+    },
     StdBinding {
         kind: StdBindingKind::Method,
         receiver: "String",

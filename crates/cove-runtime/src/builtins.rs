@@ -1062,23 +1062,9 @@ pub fn call_method(
             }
         }
         Value(Repr::Map(entries)) => match name {
-            "get" => {
-                let args = expect_args("Map.get", args, 1, span)?;
-                let key = to_map_key("Map.get", "map key", &args[0], span)?;
-                Ok(entries
-                    .binary_search_by(|(k, _)| k.cmp(&key))
-                    .ok()
-                    .map(|at| entries[at].1.clone())
-                    .map(Value::some)
-                    .unwrap_or_else(Value::none))
-            }
-            "contains" => {
-                let args = expect_args("Map.contains", args, 1, span)?;
-                let key = to_map_key("Map.contains", "map key", &args[0], span)?;
-                Ok(Value(Repr::Bool(
-                    entries.binary_search_by(|(k, _)| k.cmp(&key)).is_ok(),
-                )))
-            }
+            // `get` and `contains` do not reach this arm: both are `std.map`
+            // binary searches over `core.order` and `core.entryAt` (ADR 0059),
+            // which `call_core` executes over this sorted run.
             "length" => {
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Int(entries.len() as i64)))
@@ -1156,11 +1142,8 @@ pub fn call_method(
             _ => Err(no_method("Map", name, span)),
         },
         Value(Repr::Set(items)) => match name {
-            "contains" => {
-                let args = expect_args("Set.contains", args, 1, span)?;
-                let key = to_map_key("Set.contains", "set element", &args[0], span)?;
-                Ok(Value(Repr::Bool(items.binary_search(&key).is_ok())))
-            }
+            // `contains` does not reach this arm: it is `std.set`'s binary
+            // search over `core.order` and `core.memberAt` (ADR 0059).
             "length" => {
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Int(items.len() as i64)))

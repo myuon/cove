@@ -3,6 +3,10 @@ error[cove::runtime]: `Map.get` cannot use a `Float` as a map key
   |
 8 |   let found = weights.get(1.5)
   |               ^^^^^^^^^^^^^^^^
+  --> std/map.cove:17:3
+   |
+17 |   core.admitKey(key, "Map.get", "map key")
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
   rule: A `Float` cannot be a map key or set element: `NaN` is not equal to itself, which breaks the total order every key needs.
   help: convert it to a stable key first, such as rounding to an `Int` or formatting it as a `String`
 1 error(s)
