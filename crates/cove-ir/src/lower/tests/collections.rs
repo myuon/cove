@@ -511,12 +511,14 @@ fn @m.f(Set) -> Int
     );
 }
 
-/// An immutable update is a new object, and the machine builds it: the search
-/// that finds where the element goes also answers whether it was already
-/// there, so the run is allocated to its final length and filled sorted in
-/// one pass.
+/// An immutable update is a new object, and the standard library builds it:
+/// `std.set.inserted` searches, answers the receiver when the element is
+/// already there, and otherwise copies the run's two ranges around it into a
+/// vector of exact room and finishes that into the new set (ADR 0059, #378
+/// P4-6). At the call site it is a call answering straight into the
+/// destination, where it was a builtin.
 #[test]
-fn an_immutable_update_is_the_machine_s_and_answers_a_new_set() {
+fn an_immutable_update_is_the_standard_library_s_and_answers_a_new_set() {
     assert_eq!(
         listing("fn f(s: Set<Int>) -> Set<Int> { s.inserted(4) }", "f"),
         "\
@@ -524,7 +526,7 @@ fn @m.f(Set) -> Set
   frame 3: s0!:ref s1:ref s2:int
   local s -> s0:Set [0, 3)
      0  int s2:int 4
-     1  call-builtin s1:Set Set.inserted (s0:Set s2:Int)
+     1  call s1:Set std.set.inserted<Int> (s0:Set s2:Int)
      2  return s1:Set
 "
     );

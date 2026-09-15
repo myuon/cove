@@ -1447,7 +1447,7 @@ impl Check<'_> {
     /// and a finish into another family would have the collector follow the
     /// wrong words. That a keyed run is ascending and distinct is not a static
     /// fact: the standard-library body that built it established it, and the
-    /// machine asserts it under `debug_assertions` (#378, Q4.10).
+    /// oracle asserts it under `debug_assertions` (#378, Q4.10).
     fn check_word_finish(
         &mut self,
         at: Option<usize>,

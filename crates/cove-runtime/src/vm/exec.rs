@@ -2742,8 +2742,9 @@ impl<'a> Machine<'a> {
     /// `cove_ir::verify` admits (#378, P4-5): `std.set` and `std.map` build an
     /// updated sorted run in a growable vector and finish it here. The relabel is
     /// the same three writes. The run's being ascending and distinct is the
-    /// body's to have established, and under `debug_assertions` it is asserted
-    /// before the relabel (Q4.10) — [`Machine::assert_keyed_order`].
+    /// body's to have established; this crate's tests assert it before the
+    /// relabel (Q4.10), and a `checked` binary does not, for the cost
+    /// `key::is_ascending_and_distinct` records.
     #[inline(never)]
     pub(crate) fn finish_words(
         &mut self,
@@ -2752,17 +2753,17 @@ impl<'a> Machine<'a> {
         elem: LayoutId,
     ) -> Result<u64, RuntimeError> {
         let run = self.vector_run(owner, elem)?;
-        #[cfg(debug_assertions)]
+        #[cfg(test)]
         self.assert_keyed_order(&run, target, elem);
         runs::growable_finish(self, &run, target, Validation::None)
     }
 
-    /// Under `debug_assertions`, panics if a keyed finish's run is not
+    /// In this crate's tests, panics if a keyed finish's run is not
     /// ascending and distinct by key; a finish into an `Array` asks nothing.
     ///
     /// A `Set`'s unit is its key. A `Map`'s unit is a `MapEntry`, whose key is
     /// its first field and so the first words of the unit.
-    #[cfg(debug_assertions)]
+    #[cfg(test)]
     fn assert_keyed_order(&self, run: &Growable, target: LayoutId, elem: LayoutId) {
         let key = match self.program.layout(target).shape {
             Shape::Members { elem } => elem,

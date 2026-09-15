@@ -151,8 +151,8 @@ written as a namespace; binds `K`, `V`.
 | `contains(key: K) -> Bool` |  |  |  | `std.map.contains` |
 | `keys() -> Array<K>` |  |  |  | `machine` |
 | `values() -> Array<V>` |  |  |  | `machine` |
-| `inserted(key: K, value: V) -> Map<K, V>` |  |  |  | `machine` |
-| `removed(key: K) -> Map<K, V>` |  |  |  | `machine` |
+| `inserted(key: K, value: V) -> Map<K, V>` |  |  |  | `std.map.inserted` |
+| `removed(key: K) -> Map<K, V>` |  |  |  | `std.map.removed` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `MapEntry<K, V>`
@@ -179,8 +179,8 @@ written as a namespace; binds `T`.
 | `isEmpty() -> Bool` |  |  |  | `std.set.isEmpty` |
 | `toArray() -> Array<T>` |  |  |  | `machine` |
 | `contains(element: T) -> Bool` |  |  |  | `std.set.contains` |
-| `inserted(element: T) -> Set<T>` |  |  |  | `machine` |
-| `removed(element: T) -> Set<T>` |  |  |  | `machine` |
+| `inserted(element: T) -> Set<T>` |  |  |  | `std.set.inserted` |
+| `removed(element: T) -> Set<T>` |  |  |  | `std.set.removed` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `String`

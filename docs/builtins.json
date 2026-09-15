@@ -108,8 +108,8 @@
         {"name": "contains", "signature": "contains(key: K) -> Bool", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.map.contains", "host": false},
         {"name": "keys", "signature": "keys() -> Array<K>", "generics": [], "params": [], "variadic": false, "result": "Array<K>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "values", "signature": "values() -> Array<V>", "generics": [], "params": [], "variadic": false, "result": "Array<V>", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "inserted", "signature": "inserted(key: K, value: V) -> Map<K, V>", "generics": [], "params": [{"name": "key", "type": "K"}, {"name": "value", "type": "V"}], "variadic": false, "result": "Map<K, V>", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "removed", "signature": "removed(key: K) -> Map<K, V>", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Map<K, V>", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "inserted", "signature": "inserted(key: K, value: V) -> Map<K, V>", "generics": [], "params": [{"name": "key", "type": "K"}, {"name": "value", "type": "V"}], "variadic": false, "result": "Map<K, V>", "mutating": false, "implementedBy": "std.map.inserted", "host": false},
+        {"name": "removed", "signature": "removed(key: K) -> Map<K, V>", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Map<K, V>", "mutating": false, "implementedBy": "std.map.removed", "host": false},
         {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "implementedBy": "machine", "host": false}
       ]
     },
@@ -138,8 +138,8 @@
         {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.set.isEmpty", "host": false},
         {"name": "toArray", "signature": "toArray() -> Array<T>", "generics": [], "params": [], "variadic": false, "result": "Array<T>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "contains", "signature": "contains(element: T) -> Bool", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.set.contains", "host": false},
-        {"name": "inserted", "signature": "inserted(element: T) -> Set<T>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Set<T>", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "removed", "signature": "removed(element: T) -> Set<T>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Set<T>", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "inserted", "signature": "inserted(element: T) -> Set<T>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Set<T>", "mutating": false, "implementedBy": "std.set.inserted", "host": false},
+        {"name": "removed", "signature": "removed(element: T) -> Set<T>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Set<T>", "mutating": false, "implementedBy": "std.set.removed", "host": false},
         {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "implementedBy": "machine", "host": false}
       ]
     },

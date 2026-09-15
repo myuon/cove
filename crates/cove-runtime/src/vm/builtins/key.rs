@@ -192,7 +192,11 @@ pub(super) fn cmp_value(
 /// wherever the two disagree — a boxed `Int` looked for in a `Set<Int>` is
 /// one address and one integer, and comparing them as integers would compare
 /// a heap address with a number.
-pub(super) fn cmp_held(
+///
+/// Only this module's tests ask it now: the searches that did moved into
+/// `std.set` and `std.map` (#378, P4-4 and P4-6).
+#[cfg(test)]
+fn cmp_held(
     machine: &Machine,
     layout: LayoutId,
     held: &[u64],
@@ -266,13 +270,26 @@ pub(super) fn admit_key(machine: &Machine, operands: &[Operand<'_>]) -> Result<u
 /// `width` are a value of `key`.
 ///
 /// A keyed finish's invariant, which the relabel cannot establish and the
-/// standard-library body that built the run did (#378, Q4.10). It is asked
-/// only under `debug_assertions`, by `Machine::finish_words`, because it is a
-/// check of the library's algorithm rather than of a program: one order per
-/// adjacent pair, where the finish itself is constant work. A pair the order
-/// cannot compare — a key nested past the depth bound — answers `false`, for
-/// the run holds a key no search over it could have placed.
-#[cfg(debug_assertions)]
+/// standard-library body that built the run did (#378, Q4.10). It is asked by
+/// `Machine::finish_words` in this crate's own tests, because it is a check of
+/// the library's algorithm rather than of a program: one order per adjacent
+/// pair, where the finish itself is constant work. A pair the order cannot
+/// compare — a key nested past the depth bound — answers `false`, for the run
+/// holds a key no search over it could have placed.
+///
+/// **Not under `debug_assertions`**, which is where Q4.10 put it first: the
+/// `checked` profile keeps them on and every measurement is taken with it, and
+/// the check made `benches/keyed`'s nine `String`-keyed `inserted`s 2.6x the
+/// builtin through [`order`] (which copies both strings out) and still 1.31x
+/// with the fast paths below, against 1.17x without it (#378, P4-6). The same
+/// Cove body runs on the oracle, whose keyed finish `debug_assert`s the order
+/// on every `checked` run, so the algorithm is still checked wherever a program
+/// runs on both evaluators.
+///
+/// The key families a comparison instruction orders are compared as that
+/// instruction compares them — a signed word, a `Bool`, a `String`'s bytes in
+/// place — and every other key through [`order`].
+#[cfg(test)]
 pub(crate) fn is_ascending_and_distinct(
     machine: &Machine,
     key: LayoutId,
@@ -281,14 +298,22 @@ pub(crate) fn is_ascending_and_distinct(
     width: u32,
     len: u32,
 ) -> bool {
-    (1..len).all(|at| {
-        let before = machine.payload_run(addr, (at - 1) * stride, width);
-        let after = machine.payload_run(addr, at * stride, width);
-        matches!(
-            order(machine, Key::Held(key, &before), Key::Held(key, &after), 0),
-            Ok(Ordering::Less)
-        )
-    })
+    let word = |at: u32| machine.payload(addr, at * stride);
+    match machine.program().layout(key).shape {
+        Shape::Word(Repr::Int | Repr::Duration) => {
+            (1..len).all(|at| (word(at - 1) as i64) < (word(at) as i64))
+        }
+        Shape::Word(Repr::Bool) => (1..len).all(|at| word(at - 1) < word(at)),
+        Shape::Str => (1..len).all(|at| machine.order_strings(word(at - 1), word(at)) < 0),
+        _ => (1..len).all(|at| {
+            let before = machine.payload_run(addr, (at - 1) * stride, width);
+            let after = machine.payload_run(addr, at * stride, width);
+            matches!(
+                order(machine, Key::Held(key, &before), Key::Held(key, &after), 0),
+                Ok(Ordering::Less)
+            )
+        }),
+    }
 }
 
 // --- looking through a description -----------------------------------------

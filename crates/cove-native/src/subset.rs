@@ -271,8 +271,8 @@ pub(crate) fn word_finish(
     // of it or the `Map` whose entry it is. The emitted relabel is the same
     // header write and free block for all three: each is `len` units of
     // `stride` words under the same reference map. The sorted-and-distinct
-    // assertion `Machine::finish_words` makes under `debug_assertions` is not
-    // emitted; the cold half still makes it.
+    // assertion `Machine::finish_words` makes in the runtime's own tests is not
+    // emitted.
     let fixed = program.layouts.get(target.index()).is_some_and(|layout| {
         matches!(layout.shape, Shape::Elements { elem: e, growable: false } if e == elem)
             || cove_ir::finishes_as_keyed_run_of(&program.layouts, &layout.shape, elem)

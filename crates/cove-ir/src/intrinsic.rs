@@ -58,13 +58,9 @@ pub enum Intrinsic {
     StringFromCodePoint,
     SetOf,
     SetToArray,
-    SetInserted,
-    SetRemoved,
     MapOf,
     MapKeys,
     MapValues,
-    MapInserted,
-    MapRemoved,
     IntToFloat,
     IntParse,
     IntParseRadix,
@@ -107,13 +103,9 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringFromCodePoint,
     Intrinsic::SetOf,
     Intrinsic::SetToArray,
-    Intrinsic::SetInserted,
-    Intrinsic::SetRemoved,
     Intrinsic::MapOf,
     Intrinsic::MapKeys,
     Intrinsic::MapValues,
-    Intrinsic::MapInserted,
-    Intrinsic::MapRemoved,
     Intrinsic::IntToFloat,
     Intrinsic::IntParse,
     Intrinsic::IntParseRadix,
@@ -161,13 +153,9 @@ impl Intrinsic {
             Intrinsic::StringFromCodePoint => "String",
             Intrinsic::SetOf => "Set",
             Intrinsic::SetToArray => "Set",
-            Intrinsic::SetInserted => "Set",
-            Intrinsic::SetRemoved => "Set",
             Intrinsic::MapOf => "Map",
             Intrinsic::MapKeys => "Map",
             Intrinsic::MapValues => "Map",
-            Intrinsic::MapInserted => "Map",
-            Intrinsic::MapRemoved => "Map",
             Intrinsic::IntToFloat => "Int",
             Intrinsic::IntParse => "Int",
             Intrinsic::IntParseRadix => "Int",
@@ -208,13 +196,9 @@ impl Intrinsic {
             Intrinsic::StringFromCodePoint => "fromCodePoint",
             Intrinsic::SetOf => "of",
             Intrinsic::SetToArray => "toArray",
-            Intrinsic::SetInserted => "inserted",
-            Intrinsic::SetRemoved => "removed",
             Intrinsic::MapOf => "of",
             Intrinsic::MapKeys => "keys",
             Intrinsic::MapValues => "values",
-            Intrinsic::MapInserted => "inserted",
-            Intrinsic::MapRemoved => "removed",
             Intrinsic::IntToFloat => "toFloat",
             Intrinsic::IntParse => "parse",
             Intrinsic::IntParseRadix => "parseRadix",
@@ -317,21 +301,18 @@ impl Intrinsic {
             // `slice`, `toVector`, `push`, `set`, `pop`, `remove`, `freeze` and
             // `toArray` are each Cove over run instructions.
 
-            // A `Set` or a `Map` is immutable, so every update below
-            // allocates a new run rather than writing through the receiver
-            // — none of this family ever carries `WRITES_MEMORY` — and opens
-            // or copies a run proportional to it. The membership tests and
-            // `get` are not here: they are `std.set` and `std.map` binary
-            // searches over the three `Value` intrinsics at the end (ADR 0059).
+            // A `Set` or a `Map` is immutable, so every one below allocates
+            // a new run rather than writing through the receiver — none of
+            // this family ever carries `WRITES_MEMORY` — and opens or copies a
+            // run proportional to it. The membership tests, `get`, `inserted`
+            // and `removed` are not here: they are `std.set` and `std.map`
+            // binary searches over the three `Value` intrinsics at the end, and
+            // run copies and a keyed finish (ADR 0059).
             Intrinsic::SetOf
             | Intrinsic::SetToArray
-            | Intrinsic::SetInserted
-            | Intrinsic::SetRemoved
             | Intrinsic::MapOf
             | Intrinsic::MapKeys
-            | Intrinsic::MapValues
-            | Intrinsic::MapInserted
-            | Intrinsic::MapRemoved => raise
+            | Intrinsic::MapValues => raise
                 .union(E::READS_MEMORY)
                 .union(E::MAY_ALLOCATE)
                 .union(E::MAY_COLLECT)
@@ -516,13 +497,9 @@ mod tests {
                 | Intrinsic::StringFromCodePoint
                 | Intrinsic::SetOf
                 | Intrinsic::SetToArray
-                | Intrinsic::SetInserted
-                | Intrinsic::SetRemoved
                 | Intrinsic::MapOf
                 | Intrinsic::MapKeys
                 | Intrinsic::MapValues
-                | Intrinsic::MapInserted
-                | Intrinsic::MapRemoved
                 | Intrinsic::IntToFloat
                 | Intrinsic::IntParse
                 | Intrinsic::IntParseRadix
@@ -571,7 +548,7 @@ mod tests {
 
     #[test]
     fn display_prints_receiver_dot_operation() {
-        assert_eq!(Intrinsic::SetInserted.to_string(), "Set.inserted");
+        assert_eq!(Intrinsic::StringJoin.to_string(), "String.join");
         assert_eq!(Intrinsic::AnyEquals.to_string(), "Any.equals");
     }
 

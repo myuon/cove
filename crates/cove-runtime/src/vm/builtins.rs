@@ -50,7 +50,7 @@ use crate::vm::exec::Machine;
 
 mod equal;
 mod key;
-#[cfg(debug_assertions)]
+#[cfg(test)]
 pub(crate) use key::is_ascending_and_distinct;
 mod keyed;
 mod make;
@@ -148,8 +148,6 @@ pub(crate) fn call(
         // `Set.isEmpty` is not here: it is `std.set.isEmpty` — see
         // `cove_schema::builtins::standard_binding`.
         Intrinsic::SetToArray => keyed::set_to_array(machine, operands).map(|word| out.push(word)),
-        Intrinsic::SetInserted => keyed::set_inserted(machine, operands).map(|word| out.push(word)),
-        Intrinsic::SetRemoved => keyed::set_removed(machine, operands).map(|word| out.push(word)),
 
         // ---- Map ---------------------------------------------------------
         Intrinsic::MapOf => keyed::map_of(machine, operands).map(|word| out.push(word)),
@@ -157,8 +155,6 @@ pub(crate) fn call(
         // `cove_schema::builtins::standard_binding`.
         Intrinsic::MapKeys => keyed::map_keys(machine, operands).map(|word| out.push(word)),
         Intrinsic::MapValues => keyed::map_values(machine, operands).map(|word| out.push(word)),
-        Intrinsic::MapInserted => keyed::map_inserted(machine, operands).map(|word| out.push(word)),
-        Intrinsic::MapRemoved => keyed::map_removed(machine, operands).map(|word| out.push(word)),
 
         // ---- String ------------------------------------------------------
         Intrinsic::StringLength => text::length(machine, operands).map(|word| out.push(word)),

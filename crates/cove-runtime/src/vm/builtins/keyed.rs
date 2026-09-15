@@ -6,11 +6,14 @@
 //! a set iterates and renders in ascending order — so it is kept rather than
 //! recovered, and every lookup is a binary search over it.
 //!
-//! Not every lookup is here. `Set.contains`, `Map.contains` and `Map.get` are
-//! `std.set` and `std.map` — the search written in Cove, stepping by
-//! [`super::key`]'s order through `core.order` (ADR 0059, #378) — and what
-//! this file keeps for them is [`refuse_duplicate`] and the two runtime halves
-//! in `key`, `value_order` and `admit_key`. What is left below builds runs.
+//! Not every operation is here. `Set.contains`, `Map.contains` and `Map.get`
+//! are `std.set` and `std.map` — the search written in Cove, stepping by
+//! [`super::key`]'s order through `core.order` (ADR 0059, #378) — and so are
+//! both families' `inserted` and `removed`, which copy the old run's ranges
+//! into a growable vector around the new unit and finish it into the new run
+//! (P4-6). What this file keeps for them is [`refuse_duplicate`] and the two
+//! runtime halves in `key`, `value_order` and `admit_key`. What is left below
+//! builds a literal and reads a run out.
 //!
 //! # A member is as wide as its layout says
 //!
@@ -22,29 +25,11 @@
 //! times a stride while every length stays a count. Getting those two the same
 //! way round is the whole of what changed when a value stopped being one word.
 //!
-//! # An argument is a member, at whatever width one is
-//!
-//! An argument names a value location and carries its layout, so a whole
-//! member arrives as a whole member and `Set.inserted` on a `Set<Point>` is
-//! handed both words. Reading one was never in doubt — the receiver's own
-//! layout says how wide one is — and *putting one in* used to be: an operand
-//! was one word, so those were refused rather than truncated.
-//!
-//! What is left is [`operand::run_of`], which holds an incoming member or
-//! value to the receiver's own layout. A sorted run is traced by that
-//! layout's reference map and searched at its width, so a value of another
-//! family written into one would be both a collection following the wrong
-//! words and a search comparing the wrong ones.
-//!
-//! # Both are immutable, so an update is a new object
-//!
-//! `inserted` and `removed` are past participles for a reason: neither writes
-//! through the receiver. Each allocates the run the answer needs and fills it
-//! in one pass, so the result is sorted because it was built sorted and never
-//! because something sorted it. That is also why the object is allocated to
-//! its final length first: the length is known before the first word is
-//! written — the search that found where the element goes also answered
-//! whether it was already there.
+//! An argument names a value location and carries its layout, so a literal's
+//! member arrives whole, and [`operand::run_of`] holds it to the element
+//! layout: a sorted run is traced by that layout's reference map and searched
+//! at its width, so a value of another family written into one would be both a
+//! collection following the wrong words and a search comparing the wrong ones.
 //!
 //! # Nothing here needs a temporary root
 //!
@@ -217,18 +202,6 @@ fn open(machine: &mut Machine, addr: u64, stride: u32, at: u32, len: u32) {
     }
 }
 
-/// Copies `count` words from `from[at..]` to `into[to..]`.
-///
-/// Words rather than elements: every caller has a stride in hand and
-/// multiplying at the call site is what keeps this from having to know which
-/// of the two shapes it is copying.
-fn copy(machine: &mut Machine, from: u64, at: u32, into: u64, to: u32, count: u32) {
-    for word in 0..count {
-        let held = machine.payload(from, at + word);
-        machine.set_payload(into, to + word, held);
-    }
-}
-
 // --- Set -------------------------------------------------------------------
 
 /// `Set.of(items...) -> Set<T>`.
@@ -299,98 +272,6 @@ pub(super) fn set_to_array(
     let items = set(machine, "toArray", receiver)?;
     let words = machine.payload_run(items.addr, 0, items.len * items.width);
     make::array_of(machine, items.elem, &words)
-}
-
-/// `Set.inserted(element) -> Set<T>`.
-///
-/// A new set. An element already there answers a copy and keeps the member
-/// the set was holding rather than the one it was handed, which is what
-/// `BTreeSet::insert` does with a member it finds — the two are equal, and
-/// which object the set holds afterwards is not something a program can ask.
-pub(super) fn set_inserted(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, args) = operand::method("Set.inserted", operands, 1)?;
-    let items = set(machine, "inserted", receiver)?;
-    key::check(machine, "Set.inserted", key::SET_ELEMENT, args[0])?;
-    let element = operand::run_of(machine, "Set.inserted", items.elem, args[0])?.to_vec();
-    let found = seek(
-        machine,
-        items.addr,
-        items.width,
-        items.width,
-        items.len,
-        |held| key::cmp_held(machine, items.elem, held, args[0]),
-    )?;
-    let layout = machine.object_layout(items.addr);
-    let len = match found {
-        Ok(_) => items.len,
-        Err(_) => items.len + 1,
-    };
-    let addr = machine.new_object(layout, len)?;
-    let stride = items.width;
-    match found {
-        Ok(_) => copy(machine, items.addr, 0, addr, 0, items.len * stride),
-        Err(at) => {
-            copy(machine, items.addr, 0, addr, 0, at * stride);
-            machine.set_payload_run(addr, at * stride, &element);
-            copy(
-                machine,
-                items.addr,
-                at * stride,
-                addr,
-                (at + 1) * stride,
-                (items.len - at) * stride,
-            );
-        }
-    }
-    Ok(addr)
-}
-
-/// `Set.removed(element) -> Set<T>`.
-///
-/// A new set either way: an element that was not there answers a copy, as
-/// `BTreeSet::remove` leaves a map it did not find anything in. Nothing is
-/// put in, so a member wider than an operand is only searched for and the
-/// search answers what it can.
-pub(super) fn set_removed(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, args) = operand::method("Set.removed", operands, 1)?;
-    let items = set(machine, "removed", receiver)?;
-    key::check(machine, "Set.removed", key::SET_ELEMENT, args[0])?;
-    let found = seek(
-        machine,
-        items.addr,
-        items.width,
-        items.width,
-        items.len,
-        |held| key::cmp_held(machine, items.elem, held, args[0]),
-    )?;
-    let layout = machine.object_layout(items.addr);
-    let len = match found {
-        Ok(_) => items.len - 1,
-        Err(_) => items.len,
-    };
-    let addr = machine.new_object(layout, len)?;
-    let stride = items.width;
-    match found {
-        Ok(at) => {
-            copy(machine, items.addr, 0, addr, 0, at * stride);
-            copy(
-                machine,
-                items.addr,
-                (at + 1) * stride,
-                addr,
-                at * stride,
-                (items.len - at - 1) * stride,
-            );
-        }
-        Err(_) => copy(machine, items.addr, 0, addr, 0, items.len * stride),
-    }
-    Ok(addr)
 }
 
 // --- Map -------------------------------------------------------------------
@@ -539,97 +420,6 @@ pub(super) fn map_values(
         words.extend_from_slice(&entries.value_words(machine, at));
     }
     make::array_of(machine, entries.value, &words)
-}
-
-/// `Map.inserted(key, value) -> Map<K, V>`.
-///
-/// A key already there keeps the key the map was holding and takes the new
-/// value, which is what `BTreeMap::insert` does: the two keys are equal, and
-/// the entry a program reads back is the same entry either way.
-pub(super) fn map_inserted(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, args) = operand::method("Map.inserted", operands, 2)?;
-    let entries = map(machine, "inserted", receiver)?;
-    key::check(machine, "Map.inserted", key::MAP_KEY, args[0])?;
-    let key = operand::run_of(machine, "Map.inserted", entries.key, args[0])?.to_vec();
-    let value = operand::run_of(machine, "Map.inserted", entries.value, args[1])?.to_vec();
-    let found = seek(
-        machine,
-        entries.addr,
-        entries.stride(),
-        entries.keys,
-        entries.len,
-        |held| key::cmp_held(machine, entries.key, held, args[0]),
-    )?;
-    let layout = machine.object_layout(entries.addr);
-    let len = match found {
-        Ok(_) => entries.len,
-        Err(_) => entries.len + 1,
-    };
-    let addr = machine.new_object(layout, len)?;
-    let stride = entries.stride();
-    match found {
-        Ok(at) => {
-            copy(machine, entries.addr, 0, addr, 0, entries.len * stride);
-            machine.set_payload_run(addr, at * stride + entries.keys, &value);
-        }
-        Err(at) => {
-            copy(machine, entries.addr, 0, addr, 0, at * stride);
-            machine.set_payload_run(addr, at * stride, &key);
-            machine.set_payload_run(addr, at * stride + entries.keys, &value);
-            copy(
-                machine,
-                entries.addr,
-                at * stride,
-                addr,
-                (at + 1) * stride,
-                (entries.len - at) * stride,
-            );
-        }
-    }
-    Ok(addr)
-}
-
-/// `Map.removed(key) -> Map<K, V>`.
-pub(super) fn map_removed(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, args) = operand::method("Map.removed", operands, 1)?;
-    let entries = map(machine, "removed", receiver)?;
-    key::check(machine, "Map.removed", key::MAP_KEY, args[0])?;
-    let found = seek(
-        machine,
-        entries.addr,
-        entries.stride(),
-        entries.keys,
-        entries.len,
-        |held| key::cmp_held(machine, entries.key, held, args[0]),
-    )?;
-    let layout = machine.object_layout(entries.addr);
-    let len = match found {
-        Ok(_) => entries.len - 1,
-        Err(_) => entries.len,
-    };
-    let addr = machine.new_object(layout, len)?;
-    let stride = entries.stride();
-    match found {
-        Ok(at) => {
-            copy(machine, entries.addr, 0, addr, 0, at * stride);
-            copy(
-                machine,
-                entries.addr,
-                (at + 1) * stride,
-                addr,
-                at * stride,
-                (entries.len - at - 1) * stride,
-            );
-        }
-        Err(_) => copy(machine, entries.addr, 0, addr, 0, entries.len * stride),
-    }
-    Ok(addr)
 }
 
 // --- refusals --------------------------------------------------------------
@@ -854,77 +644,6 @@ mod tests {
         assert_eq!(words_of(&machine, array), vec![1, 2, 3]);
     }
 
-    /// A new set every time, sorted, and the receiver untouched — which is
-    /// what an immutable value has to be.
-    #[test]
-    fn inserting_and_removing_answer_new_sets() {
-        let program = world();
-        let mut machine = machine(&program);
-        let int = scalar(&program, Repr::Int);
-        let items = members(&mut machine, int, &[1, 3]);
-
-        let with = word(
-            &mut machine,
-            "Set",
-            "inserted",
-            &[(Repr::Ref, items), (Repr::Int, 2)],
-        )
-        .unwrap();
-        assert_ne!(with, items);
-        assert_eq!(held(&machine, with, 1), vec![1, 2, 3]);
-        assert_eq!(
-            held(&machine, items, 1),
-            vec![1, 3],
-            "the receiver is not written"
-        );
-
-        // At either end, and an element already there answers a copy of the
-        // same length.
-        let low = word(
-            &mut machine,
-            "Set",
-            "inserted",
-            &[(Repr::Ref, items), (Repr::Int, 0)],
-        )
-        .unwrap();
-        assert_eq!(held(&machine, low, 1), vec![0, 1, 3]);
-        let high = word(
-            &mut machine,
-            "Set",
-            "inserted",
-            &[(Repr::Ref, items), (Repr::Int, 9)],
-        )
-        .unwrap();
-        assert_eq!(held(&machine, high, 1), vec![1, 3, 9]);
-        let again = word(
-            &mut machine,
-            "Set",
-            "inserted",
-            &[(Repr::Ref, items), (Repr::Int, 3)],
-        )
-        .unwrap();
-        assert_eq!(held(&machine, again, 1), vec![1, 3]);
-
-        let without = word(
-            &mut machine,
-            "Set",
-            "removed",
-            &[(Repr::Ref, items), (Repr::Int, 1)],
-        )
-        .unwrap();
-        assert_eq!(held(&machine, without, 1), vec![3]);
-        // An element that was not there answers a copy.
-        let same = word(
-            &mut machine,
-            "Set",
-            "removed",
-            &[(Repr::Ref, items), (Repr::Int, 2)],
-        )
-        .unwrap();
-        assert_ne!(same, items);
-        assert_eq!(held(&machine, same, 1), vec![1, 3]);
-    }
-
     #[test]
     fn a_map_is_built_sorted_from_its_entries() {
         let program = world();
@@ -986,51 +705,6 @@ mod tests {
         assert_eq!(words_of(&machine, values), vec![10, 20]);
     }
 
-    #[test]
-    fn inserting_and_removing_answer_new_maps() {
-        let program = world();
-        let mut machine = machine(&program);
-        let int = scalar(&program, Repr::Int);
-        let held_map = entries(&mut machine, int, int, &[(1, 10), (3, 30)]);
-
-        let with = word(
-            &mut machine,
-            "Map",
-            "inserted",
-            &[(Repr::Ref, held_map), (Repr::Int, 2), (Repr::Int, 20)],
-        )
-        .unwrap();
-        assert_eq!(held(&machine, with, 2), vec![1, 10, 2, 20, 3, 30]);
-        assert_eq!(held(&machine, held_map, 2), vec![1, 10, 3, 30]);
-
-        // A key already there keeps its place and takes the new value.
-        let over = word(
-            &mut machine,
-            "Map",
-            "inserted",
-            &[(Repr::Ref, held_map), (Repr::Int, 3), (Repr::Int, 99)],
-        )
-        .unwrap();
-        assert_eq!(held(&machine, over, 2), vec![1, 10, 3, 99]);
-
-        let without = word(
-            &mut machine,
-            "Map",
-            "removed",
-            &[(Repr::Ref, held_map), (Repr::Int, 1)],
-        )
-        .unwrap();
-        assert_eq!(held(&machine, without, 2), vec![3, 30]);
-        let same = word(
-            &mut machine,
-            "Map",
-            "removed",
-            &[(Repr::Ref, held_map), (Repr::Int, 2)],
-        )
-        .unwrap();
-        assert_eq!(held(&machine, same, 2), vec![1, 10, 3, 30]);
-    }
-
     /// A member is a run at the element layout's width, so every offset is an
     /// index times a stride and every length stays a count of members.
     #[test]
@@ -1056,102 +730,6 @@ mod tests {
         let values = word(&mut machine, "Map", "values", &[(Repr::Ref, held_map)]).unwrap();
         assert_eq!(machine.object_len(values), 2);
         assert_eq!(machine.payload_run(values, 0, 4), vec![10, 20, 30, 40]);
-
-        // And an update copies whole entries at that stride.
-        let without = word(
-            &mut machine,
-            "Map",
-            "removed",
-            &[(Repr::Ref, held_map), (Repr::Int, 1)],
-        )
-        .unwrap();
-        assert_eq!(held(&machine, without, 3), vec![2, 30, 40]);
-    }
-
-    /// A two-word member goes into a set as both of its words, because an
-    /// operand is a value location. This refused until an argument carried
-    /// its layout: a call said where the `Point` began and never that it was
-    /// two words, and writing the one word that arrived into a run whose
-    /// stride is two would have been a silently wrong set.
-    #[test]
-    fn a_member_wider_than_a_word_is_inserted_whole() {
-        let program = wide();
-        let mut machine = machine(&program);
-        let point = named(&program, "Point");
-        let items = members(&mut machine, point, &[3, 4]);
-        let sets = machine.object_layout(items);
-        let grown = values(
-            &mut machine,
-            "Set",
-            "inserted",
-            &[(sets, &[items]), (point, &[1, 2])],
-        )
-        .unwrap();
-        // Sorted because it was built sorted: the new member is smaller, so
-        // it goes in front of the one the set already held.
-        assert_eq!(words_of(&machine, grown[0]), vec![1u64, 2, 3, 4]);
-        assert_eq!(machine.object_len(grown[0]), 2);
-        // And the set that was handed over is untouched: `inserted` is a past
-        // participle, and neither of them writes through the receiver.
-        assert_eq!(machine.object_len(items), 1);
-    }
-
-    /// A sorted run is traced by its element layout's map and searched at its
-    /// width, so a member of another family is refused rather than written.
-    #[test]
-    fn a_member_of_another_family_is_refused_rather_than_stored() {
-        let program = wide();
-        let mut machine = machine(&program);
-        let point = named(&program, "Point");
-        let int = scalar(&program, Repr::Int);
-        let items = members(&mut machine, point, &[1, 2]);
-        let sets = machine.object_layout(items);
-        let error = values(
-            &mut machine,
-            "Set",
-            "inserted",
-            &[(sets, &[items]), (int, &[5])],
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Set.inserted` expects `Point` here, but found `Int`"
-        );
-    }
-
-    /// A key the language does not admit stops the operation before anything
-    /// is searched, in the words the oracle refuses it in — an empty map as
-    /// loudly as a full one.
-    #[test]
-    fn an_argument_that_cannot_be_a_key_is_refused_before_the_search() {
-        let program = world();
-        let mut machine = machine(&program);
-        let int = scalar(&program, Repr::Int);
-        let empty = entries(&mut machine, int, int, &[]);
-        let error = run(
-            &mut machine,
-            "Map",
-            "removed",
-            &[(Repr::Ref, empty), (Repr::Float, 1.5f64.to_bits())],
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Map.removed` cannot use a `Float` as a map key"
-        );
-
-        let items = members(&mut machine, int, &[]);
-        let error = run(
-            &mut machine,
-            "Set",
-            "removed",
-            &[(Repr::Ref, items), (Repr::Float, 1.5f64.to_bits())],
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Set.removed` cannot use a `Float` as a set element"
-        );
     }
 
     /// A receiver of the wrong family is told it has no such method, which is
@@ -1168,69 +746,6 @@ mod tests {
         let text = machine.new_string("x").unwrap();
         let error = run(&mut machine, "Set", "toArray", &[(Repr::Ref, text)]).unwrap_err();
         assert_eq!(error.message, "`String` has no method `toArray`");
-    }
-
-    /// The arity a method takes is the schema's, and the message is the
-    /// oracle's — counted in arguments, which is operands less the receiver.
-    #[test]
-    fn an_operation_holds_its_arguments_to_the_count_it_takes() {
-        let program = world();
-        let mut machine = machine(&program);
-        let int = scalar(&program, Repr::Int);
-        let items = members(&mut machine, int, &[1]);
-        let error = run(&mut machine, "Set", "removed", &[(Repr::Ref, items)]).unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Set.removed` takes 1 argument(s), but 0 were given"
-        );
-
-        let held_map = entries(&mut machine, int, int, &[(1, 10)]);
-        let error = run(
-            &mut machine,
-            "Map",
-            "inserted",
-            &[(Repr::Ref, held_map), (Repr::Int, 1)],
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Map.inserted` takes 2 argument(s), but 1 were given"
-        );
-    }
-
-    /// A key that is a reference is searched by value, so an update finds an
-    /// entry a different object with the same bytes put there.
-    #[test]
-    fn a_reference_key_is_found_by_what_it_is_and_not_by_where_it_is() {
-        let program = world();
-        let mut machine = machine(&program);
-        let int = scalar(&program, Repr::Int);
-        let text = program.str_layout;
-        let a = machine.new_string("a").unwrap();
-        let b = machine.new_string("b").unwrap();
-        let held_map = entries(&mut machine, text, int, &[(a, 1), (b, 2)]);
-        let wanted = machine.new_string("b").unwrap();
-        assert_ne!(wanted, b);
-        let without = word(
-            &mut machine,
-            "Map",
-            "removed",
-            &[(Repr::Ref, held_map), (Repr::Ref, wanted)],
-        )
-        .unwrap();
-        assert_eq!(held(&machine, without, 2), vec![a, 1]);
-
-        // And the key the map keeps is the one it already held.
-        let over = word(
-            &mut machine,
-            "Map",
-            "inserted",
-            &[(Repr::Ref, held_map), (Repr::Ref, wanted), (Repr::Int, 9)],
-        )
-        .unwrap();
-        assert_eq!(machine.payload(over, 2), b);
-        assert_eq!(machine.payload(over, 3), 9);
-        assert_eq!(read(&machine, machine.payload(over, 2)), "b");
     }
 
     /// A set of references is a set of what they point at, so it sorts by the

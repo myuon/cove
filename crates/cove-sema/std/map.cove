@@ -31,6 +31,60 @@ export fn contains<K, V>(entries: Map<K, V>, key: K) -> Bool {
   return seekMap(entries, key) >= 0
 }
 
+/// This map with `key` mapped to `value`, as a new map.
+///
+/// A key already there keeps its place and takes `value`: the entry is
+/// replaced whole, and the key the answer holds is the one passed in, which
+/// is equal in the order the map keeps to the one it replaces. Otherwise the
+/// entry goes where `key` sorts. Either way the answer is built once, at
+/// exactly its length — the entries below, the new entry, the entries above
+/// — and the refusal [`get`] makes of a key that cannot be one comes first.
+///
+/// Cove over a growable run of `MapEntry`s (ADR 0059, P4-6), which is word for
+/// word a map's run of entries: the two ranges are word copies out of the old
+/// run, and the finish relabels the vector's store into the new map.
+export fn inserted<K, V>(entries: Map<K, V>, key: K, value: V) -> Map<K, V> {
+  core.admitKey(key, "Map.inserted", "map key")
+  let at = seekMap(entries, key)
+  let length = entries.length()
+  let gap = if at >= 0 {
+    at
+  } else {
+    -at - 1
+  }
+  let above = if at >= 0 {
+    gap + 1
+  } else {
+    gap
+  }
+  let out: Vector<MapEntry<K, V>> = core.vectorWithCapacity(
+    gap + 1 + length - above,
+  )
+  core.extendFromMap(out, entries, 0, gap)
+  core.vectorPush(out, MapEntry(key: key, value: value))
+  core.extendFromMap(out, entries, above, length - above)
+  return core.mapFinish(out)
+}
+
+/// This map without an entry for `key`, as a new map.
+///
+/// A key that is not there answers **this map**, unchanged: nothing about it
+/// would differ, and a map is immutable, so which object answers is not
+/// something a program can ask (#378, Q4.9). Otherwise the answer is the
+/// entries below and above it, copied into a run of exactly one fewer.
+export fn removed<K, V>(entries: Map<K, V>, key: K) -> Map<K, V> {
+  core.admitKey(key, "Map.removed", "map key")
+  let at = seekMap(entries, key)
+  if at < 0 {
+    return entries
+  }
+  let length = entries.length()
+  let out: Vector<MapEntry<K, V>> = core.vectorWithCapacity(length - 1)
+  core.extendFromMap(out, entries, 0, at)
+  core.extendFromMap(out, entries, at + 1, length - at - 1)
+  return core.mapFinish(out)
+}
+
 /// Where `key` is among `entries`' ascending keys: its entry's position when
 /// it is there, and `-(where it would go) - 1` when it is not.
 ///

@@ -903,6 +903,38 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.map",
         function: "get",
     },
+    // A keyed update is Cove over a growable run (#378, P4-6): the same seek,
+    // the receiver itself when nothing changes, and otherwise the old run's
+    // ranges copied around the new unit into a vector of exact room and a
+    // keyed finish into the new set or map.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Set",
+        method: "inserted",
+        module: "std.set",
+        function: "inserted",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Set",
+        method: "removed",
+        module: "std.set",
+        function: "removed",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Map",
+        method: "inserted",
+        module: "std.map",
+        function: "inserted",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Map",
+        method: "removed",
+        module: "std.map",
+        function: "removed",
+    },
     StdBinding {
         kind: StdBindingKind::Method,
         receiver: "String",
@@ -2119,8 +2151,8 @@ pub const CORE_EXTEND_FROM_MAP: CoreIntrinsicSchema = CoreIntrinsicSchema {
 /// ADR 0058's word `Inst::RunFinish` with a keyed target (#378, P4-5): the same
 /// relabel `core.vectorFinish` makes into an `Array`. **The run must already be
 /// ascending and distinct** — a finish does not sort (ADR 0059) — which the
-/// standard-library body that built it established, and which the machine
-/// asserts under `debug_assertions` (Q4.10). Like `core.vectorFinish`, it
+/// standard-library body that built it established, and which the
+/// oracle asserts under `debug_assertions` (Q4.10). Like `core.vectorFinish`, it
 /// records no consumption: the vector is the body's own.
 pub const CORE_SET_FINISH: CoreIntrinsicSchema = CoreIntrinsicSchema {
     name: "setFinish",

@@ -20,6 +20,52 @@ export fn contains<T>(items: Set<T>, element: T) -> Bool {
   return seekSet(items, element) >= 0
 }
 
+/// This set with `element` in it, as a new set.
+///
+/// An element already there answers **this set**, unchanged: nothing about
+/// it would differ, and a set is immutable, so which object answers is not
+/// something a program can ask (#378, Q4.9). Otherwise the answer is built
+/// once, at exactly its length — the members below where `element` goes,
+/// `element`, and the members above — ascending because it was built in
+/// order and never because anything sorted it. The same refusal
+/// [`contains`] makes of an element that cannot be a member comes first.
+///
+/// Cove over a growable run of the member's words (ADR 0059, P4-6): the two
+/// ranges are word copies out of the old run, and the finish relabels the
+/// vector's store into the new set without copying it again.
+export fn inserted<T>(items: Set<T>, element: T) -> Set<T> {
+  core.admitKey(element, "Set.inserted", "set element")
+  let at = seekSet(items, element)
+  if at >= 0 {
+    return items
+  }
+  let gap = -at - 1
+  let length = items.length()
+  let out: Vector<T> = core.vectorWithCapacity(length + 1)
+  core.extendFromSet(out, items, 0, gap)
+  core.vectorPush(out, element)
+  core.extendFromSet(out, items, gap, length - gap)
+  return core.setFinish(out)
+}
+
+/// This set without `element`, as a new set.
+///
+/// An element that is not there answers **this set**, unchanged, for
+/// [`inserted`]'s reason. Otherwise the answer is the members below it and
+/// the members above it, copied into a run of exactly one fewer.
+export fn removed<T>(items: Set<T>, element: T) -> Set<T> {
+  core.admitKey(element, "Set.removed", "set element")
+  let at = seekSet(items, element)
+  if at < 0 {
+    return items
+  }
+  let length = items.length()
+  let out: Vector<T> = core.vectorWithCapacity(length - 1)
+  core.extendFromSet(out, items, 0, at)
+  core.extendFromSet(out, items, at + 1, length - at - 1)
+  return core.setFinish(out)
+}
+
 /// Where `element` is among `items`' ascending members: its position when it
 /// is there, and `-(where it would go) - 1` when it is not.
 ///

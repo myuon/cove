@@ -3995,11 +3995,10 @@ mod tests {
         }
     }
 
-    /// **Under `debug_assertions` a keyed finish of a run that is not ascending
+    /// **In this crate's tests a keyed finish of a run that is not ascending
     /// and distinct is a broken invariant of the body that built it** (#378,
     /// Q4.10): a finish does not sort, and a set that renders out of order is
     /// worse than a stopped run.
-    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "not ascending and distinct")]
     fn a_keyed_finish_of_an_unsorted_run_is_a_broken_invariant() {

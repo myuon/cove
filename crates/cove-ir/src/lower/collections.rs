@@ -1271,24 +1271,18 @@ impl Body<'_> {
 /// see `Body::array_method` and `Body::vector_method`.
 ///
 /// A `Set` and a `Map` are here for what is left of their tables: both are
-/// sorted runs, and every one of these builds a run sorted in one pass. Their
-/// `contains` and a map's `get` are not — each is `std.set` or `std.map`, a
-/// binary search in Cove over the order `cove_runtime::vm::builtins::key`
-/// defines (ADR 0059, #378) — and nor are `length` and `isEmpty`.
+/// sorted runs, and every one of these reads a run out in one pass. Their
+/// `contains`, a map's `get`, and both families' `inserted` and `removed` are
+/// not — each is `std.set` or `std.map`, a binary search in Cove over the
+/// order `cove_runtime::vm::builtins::key` defines and, for an update, a
+/// growable run finished into the new set or map (ADR 0059, #378) — and nor
+/// are `length` and `isEmpty`.
 ///
 /// It is a list rather than a fall-through, because what this lowering emits
 /// is a contract the machine is written against: a name that reached the
 /// machine by accident would be a runtime refusal where a gap should have
 /// named the work.
-const HANDED_OVER: &[(&str, &str)] = &[
-    ("Set", "inserted"),
-    ("Set", "removed"),
-    ("Set", "toArray"),
-    ("Map", "keys"),
-    ("Map", "values"),
-    ("Map", "inserted"),
-    ("Map", "removed"),
-];
+const HANDED_OVER: &[(&str, &str)] = &[("Set", "toArray"), ("Map", "keys"), ("Map", "values")];
 
 /// Whether the checker knows `head` as a builtin type that is written as a
 /// namespace, and `ty` as what its `of` answers: `Vector.of(1, 2)`,

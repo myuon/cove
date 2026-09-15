@@ -785,7 +785,8 @@ pub fn call_core(
         // The keyed finish: the vector's elements taken out as the sorted run of
         // a `Set` or a `Map`, and the vector consumed, as `vectorFinish` takes
         // them as an `Array`. The body built the run ascending and distinct;
-        // under `debug_assertions` that is asserted, as the machine asserts it
+        // under `debug_assertions` that is asserted here — the machine asserts it
+        // only in its own tests, where the cost does not reach a measurement
         // (#378, Q4.10).
         "setFinish" | "mapFinish" => {
             let Value(Repr::Vector(storage)) = &args[0] else {
@@ -1201,57 +1202,9 @@ pub fn call_method(
                     entries.iter().map(|(_, v)| v.clone()).collect(),
                 )))
             }
-            // `Map` is immutable, so `inserted`/`removed` return a new map
-            // rather than write through `entries`; the past-participle names
-            // say so, unlike `Vector`'s mutating `push`. Each searches once
-            // and then copies around the insertion or removal point, the
-            // same shape the linear-memory backend's own `Map.inserted` and
-            // `Map.removed` build their new run with.
-            "inserted" => {
-                let args = expect_args("Map.inserted", args, 2, span)?;
-                let value = args.remove(1);
-                let key = to_map_key("Map.inserted", "map key", &args[0], span)?;
-                let next: Rc<[(MapKey, Value)]> =
-                    match entries.binary_search_by(|(k, _)| k.cmp(&key)) {
-                        // A key already there keeps the key the map was
-                        // holding and takes the new value — the two keys
-                        // compare equal, so which one the answer carries is
-                        // not something a program can tell apart.
-                        Ok(at) => {
-                            let mut next = Vec::with_capacity(entries.len());
-                            next.extend_from_slice(&entries[..at]);
-                            next.push((entries[at].0.clone(), value));
-                            next.extend_from_slice(&entries[at + 1..]);
-                            next.into()
-                        }
-                        Err(at) => {
-                            let mut next = Vec::with_capacity(entries.len() + 1);
-                            next.extend_from_slice(&entries[..at]);
-                            next.push((key, value));
-                            next.extend_from_slice(&entries[at..]);
-                            next.into()
-                        }
-                    };
-                Ok(Value(Repr::Map(next)))
-            }
-            "removed" => {
-                let args = expect_args("Map.removed", args, 1, span)?;
-                let key = to_map_key("Map.removed", "map key", &args[0], span)?;
-                let next: Rc<[(MapKey, Value)]> =
-                    match entries.binary_search_by(|(k, _)| k.cmp(&key)) {
-                        Ok(at) => {
-                            let mut next = Vec::with_capacity(entries.len() - 1);
-                            next.extend_from_slice(&entries[..at]);
-                            next.extend_from_slice(&entries[at + 1..]);
-                            next.into()
-                        }
-                        // A key that was never there answers a copy of the same
-                        // handle — sharing the run costs nothing and is what a
-                        // copy with the same contents means for an `Rc`.
-                        Err(_) => Rc::clone(entries),
-                    };
-                Ok(Value(Repr::Map(next)))
-            }
+            // `inserted` and `removed` do not reach this arm either: each is
+            // `std.map`'s seek and a growable run finished into the new map
+            // (#378, P4-6), which `call_core` executes over this sorted run.
             _ => Err(no_method("Map", name, span)),
         },
         Value(Repr::Set(items)) => match name {
@@ -1272,38 +1225,7 @@ pub fn call_method(
                     items.iter().map(MapKey::to_value).collect(),
                 )))
             }
-            "inserted" => {
-                let args = expect_args("Set.inserted", args, 1, span)?;
-                let key = to_map_key("Set.inserted", "set element", &args[0], span)?;
-                let next: Rc<[MapKey]> = match items.binary_search(&key) {
-                    // An element already there answers a copy and keeps the
-                    // member the set was holding, exactly as `Map.inserted`
-                    // keeps the stored key.
-                    Ok(_) => Rc::clone(items),
-                    Err(at) => {
-                        let mut next = Vec::with_capacity(items.len() + 1);
-                        next.extend_from_slice(&items[..at]);
-                        next.push(key);
-                        next.extend_from_slice(&items[at..]);
-                        next.into()
-                    }
-                };
-                Ok(Value(Repr::Set(next)))
-            }
-            "removed" => {
-                let args = expect_args("Set.removed", args, 1, span)?;
-                let key = to_map_key("Set.removed", "set element", &args[0], span)?;
-                let next: Rc<[MapKey]> = match items.binary_search(&key) {
-                    Ok(at) => {
-                        let mut next = Vec::with_capacity(items.len() - 1);
-                        next.extend_from_slice(&items[..at]);
-                        next.extend_from_slice(&items[at + 1..]);
-                        next.into()
-                    }
-                    Err(_) => Rc::clone(items),
-                };
-                Ok(Value(Repr::Set(next)))
-            }
+            // `inserted` and `removed` are `std.set`'s, as `Map`'s are.
             _ => Err(no_method("Set", name, span)),
         },
         Value(Repr::Str(text)) => match name {

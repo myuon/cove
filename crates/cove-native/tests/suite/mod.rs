@@ -3490,8 +3490,8 @@ pub fn a_builtin_no_arm_lowers_refuses_the_function<A: Arm>() {
     ))));
     for (receiver, operation) in [
         ("String", "length"),
-        ("Set", "inserted"),
-        ("Map", "inserted"),
+        ("String", "trim"),
+        ("String", "toUpper"),
     ] {
         assert!(
             !compiles::<A>(&one(receiver, operation)),
