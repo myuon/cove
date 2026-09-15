@@ -1777,3 +1777,120 @@ export fn f(n: Int) -> Int {
         "an exhausted heap should point at the allocation that could not be served"
     );
 }
+
+/// **A fault inside the standard library is blamed on its caller, on both
+/// evaluators, whether the machine expanded the library body or called it.**
+///
+/// ADR 0058's "Fallibility preserves the source call site's blame".
+/// `RuntimeError::with_chain` is the one place the rule is, and it reads only
+/// spans; what this pins is that the spans each evaluator hands it make the
+/// rule come out the same. The two fixtures are chosen for the one difference
+/// that could break that on the machine: `abs` is a small leaf, so
+/// `cove_ir::lower::inline` expands it into `viaAbs` and the call site is
+/// recovered from [`cove_ir::program::Inlined`]; `appendByte` takes its
+/// builder as a `var` parameter, which the inliner refuses, so its call site
+/// is a real frame's. Both assertions about which is which are made first, so
+/// a change to the inliner that moved either fixture fails here by name rather
+/// than quietly testing one path twice.
+#[test]
+fn a_fault_in_the_standard_library_is_blamed_on_its_caller() {
+    let source = "
+use std.stringbuilder.StringBuilder
+
+export fn viaAbs(n: Int) -> Int {
+  n.abs()
+}
+
+export fn viaAppendByte(value: Int) -> Int {
+  var out = StringBuilder.withCapacity(4)
+  out.appendByte(value)
+  out.length()
+}
+";
+    let (sources, checked) = checked(source);
+    let program = lowered(&sources, &checked);
+    let callee = |module: &str, name: &str| {
+        program
+            .function_named(module, name)
+            .or_else(|| {
+                program
+                    .functions
+                    .iter()
+                    .position(|f| &*f.module == module && &*f.name == name)
+                    .map(|at| cove_ir::FunctionId(at as u32))
+            })
+            .unwrap_or_else(|| panic!("`{module}.{name}` is lowered"))
+    };
+    let caller = |name: &str| program.function(callee("m", name));
+
+    let abs = callee("std.int", "abs");
+    assert!(
+        caller("viaAbs")
+            .inlined
+            .iter()
+            .any(|held| held.callee == abs),
+        "`abs` is expanded into its caller, which is what makes this the inlined case"
+    );
+    let append = program
+        .functions
+        .iter()
+        .position(|f| &*f.module == "std.stringbuilder" && f.name.ends_with("appendByte"))
+        .map(|at| cove_ir::FunctionId(at as u32))
+        .expect("`StringBuilder.appendByte` is lowered");
+    let via_append = caller("viaAppendByte");
+    assert!(
+        via_append.inlined.iter().all(|held| held.callee != append)
+            && via_append.code.iter().any(|inst| matches!(
+                inst,
+                cove_ir::Inst::Call { callee, .. } if *callee == append
+            )),
+        "`appendByte` is called through a frame, which is what makes this the framed case"
+    );
+
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(checked.clone(), Arc::clone(&sources), hosts.clone());
+    let blame = |error: crate::error::RuntimeError| {
+        (
+            error.message.clone(),
+            error.span,
+            error.library_sites().to_vec(),
+            error.chain().to_vec(),
+        )
+    };
+    for (name, arg, called) in [
+        ("viaAbs", i64::MIN, "n.abs()"),
+        ("viaAppendByte", 300, "out.appendByte(value)"),
+    ] {
+        let oracle = blame(
+            Interpreter::new(&runtime)
+                .invoke("m", name, vec![Value::int(arg)])
+                .expect_err("the oracle refuses"),
+        );
+        let machine = blame(
+            Vm::new(&runtime, &hosts, &program)
+                .invoke("m", name, vec![Value::int(arg)])
+                .expect_err("the machine refuses"),
+        );
+        assert_eq!(machine, oracle, "`{name}`: the two evaluators blame alike");
+
+        let (message, span, library, chain) = oracle;
+        let span = span.expect("a fault carries a span");
+        assert!(
+            !sources.is_library(span.file),
+            "`{name}` ({message}): the primary span is the caller's, not the library's"
+        );
+        assert_eq!(
+            &sources.get(span.file).text[span.start as usize..span.end as usize],
+            called,
+            "`{name}`: and it is the call that reached the library"
+        );
+        assert!(
+            !library.is_empty() && library.iter().all(|site| sources.is_library(site.file)),
+            "`{name}`: the library's own line is kept as context: {library:?}"
+        );
+        assert!(
+            chain.is_empty(),
+            "`{name}` is the entry, so nothing called it: {chain:?}"
+        );
+    }
+}

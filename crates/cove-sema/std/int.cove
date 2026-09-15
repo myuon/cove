@@ -20,10 +20,10 @@ export fn max(value: Int, other: Int) -> Int {
 ///
 /// Unlike `min` and `max` beside it, this one can fail: the least `Int` has
 /// no positive counterpart, and it traps there exactly as the builtin did.
-/// It is the first fallible function in the standard library, which was
-/// possible to write here at all only once a trap raised from inside a
-/// standard-library body named its caller rather than only this file's own
-/// line — [issue #258](https://github.com/myuon/cove/issues/258).
+/// It is the first fallible function in the standard library. A trap raised
+/// here names its caller ([issue #258](https://github.com/myuon/cove/issues/258))
+/// and, since ADR 0058, is blamed on it: the caller's line is the diagnostic's
+/// primary location and this file's line is the context shown beside it.
 export fn abs(value: Int) -> Int {
   if value < 0 {
     -value

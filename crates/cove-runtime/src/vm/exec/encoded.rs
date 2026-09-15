@@ -1068,13 +1068,17 @@ pub(super) fn dispatch<'s, 'a>(
                 match machine.tiered($callee) {
                     None => entered!($callee, $callee_base, $dst),
                     Some(entry) => {
-                        // The caller's pc is the `call` itself: that is the span a
-                        // failure below is reported at and the pc a collection
-                        // inside the callee walks this frame with. The dispatch
-                        // loop's own `pc` has already moved past it and is where
-                        // execution resumes, because the answer arrives in `dst`
-                        // rather than through a `return` this loop runs.
-                        machine.sync(pc - 1);
+                        // The caller's pc is where it resumes, one past the `call`,
+                        // exactly as `entered!` leaves it: a frame waiting on a
+                        // call is read at `pc - 1` by `Machine::call_chain` and by
+                        // the debugger, and this one synced the `call` itself
+                        // until an error raised in compiled code named the
+                        // instruction before the call as its call site. The span
+                        // a failure below is reported at is still the `call`'s,
+                        // read at `pc - 1` explicitly. Execution resumes at the
+                        // dispatch loop's own `pc`, because the answer arrives in
+                        // `dst` rather than through a `return` this loop runs.
+                        machine.sync(pc);
                         match native::from_encoded(
                             machine,
                             budget,

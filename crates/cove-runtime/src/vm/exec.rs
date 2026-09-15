@@ -1369,7 +1369,7 @@ impl<'a> Machine<'a> {
         std::thread::scope(|threads| {
             let mut running: Vec<Option<ScopedJoinHandle<'_, Outcome>>> = Vec::new();
             let answer = encoded::dispatch(self, code, budget, threads, &mut running, floor);
-            let answer = answer.map_err(|error| error.with_chain(self.call_chain()));
+            let answer = answer.map_err(|error| self.attach_call_chain(error));
             self.stop_all(&mut running);
             answer
         })
@@ -1391,7 +1391,7 @@ impl<'a> Machine<'a> {
             // whichever instruction or safepoint raised it, so a chain
             // attached at every `.at()` site instead would be the same work
             // repeated at every one of them for no error that reaches two.
-            let answer = answer.map_err(|error| error.with_chain(self.call_chain()));
+            let answer = answer.map_err(|error| self.attach_call_chain(error));
             debug_assert!(
                 answer.is_err() || !self.anything_running(),
                 "a body that answered left every scope it opened, so nothing is still running"
@@ -2785,6 +2785,22 @@ impl<'a> Machine<'a> {
             .rev()
             .map(|frame| (frame.function, frame.base, frame.pc))
             .collect()
+    }
+
+    /// Attaches [`Machine::call_chain`] to `error`, with the run's sources
+    /// saying which spans are the standard library's.
+    ///
+    /// The one place this machine calls [`RuntimeError::with_chain`], which
+    /// is where a fault inside a library body is blamed on its caller. The
+    /// sources are the [`Runtime`]'s, the same map the interpreter answers the
+    /// same question from. A machine with no run around it — this module's
+    /// own tests — has no sources, and so no library: its errors are left
+    /// where they were raised.
+    fn attach_call_chain(&self, error: RuntimeError) -> RuntimeError {
+        let sources = self.runtime.map(Runtime::sources);
+        error.with_chain(self.call_chain(), |span| {
+            sources.is_some_and(|sources| sources.is_library(span.file))
+        })
     }
 
     /// The call-site spans [`RuntimeError::with_chain`] wants, innermost

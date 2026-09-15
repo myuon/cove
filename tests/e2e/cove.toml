@@ -92,6 +92,10 @@ allow = ["console"]
 entry = "fail_sort_callback.main"
 allow = ["console"]
 
+[run.fail_stringbuilder_byte_range]
+entry = "fail_stringbuilder_byte_range.main"
+allow = ["console"]
+
 [run.flow_bindings]
 entry = "flow_bindings.main"
 allow = ["console"]

@@ -272,7 +272,8 @@ pub struct Local {
 /// walks the live frames and reads each one's call site; an expansion has no
 /// frame, so its call site was not there to read, and an error raised inside
 /// one named where it happened and not where it was called from. One span per
-/// expansion is what puts that back.
+/// expansion is what puts that back — and, for a standard-library body, it is
+/// the span the error is blamed on (ADR 0058; `RuntimeError::with_chain`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Inlined {
     pub from: Pc,
