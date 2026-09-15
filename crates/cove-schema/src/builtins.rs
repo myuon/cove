@@ -1381,6 +1381,12 @@ impl CoreIntrinsicSchema {
 /// which are ADR 0052's growable byte run with no method of its own left.
 /// `length` of both sequences is [`CORE_ARRAY_LENGTH`] or
 /// [`CORE_VECTOR_LENGTH`].
+///
+/// A keyed collection's search is Cove over the five ADR 0059 names (#378,
+/// Phase 4): [`CORE_ORDER`], the value order a binary search steps by;
+/// [`CORE_ADMIT_KEY`], the refusal of a key the language does not admit;
+/// [`CORE_REFUSE_DUPLICATE`], the refusal of a literal with a key twice; and
+/// [`CORE_MEMBER_AT`] and [`CORE_ENTRY_AT`], the element reads of a sorted run.
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_PUSH,
@@ -1400,6 +1406,11 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTES_LENGTH,
     CORE_ARRAY_LENGTH,
     CORE_VECTOR_LENGTH,
+    CORE_ORDER,
+    CORE_ADMIT_KEY,
+    CORE_REFUSE_DUPLICATE,
+    CORE_MEMBER_AT,
+    CORE_ENTRY_AT,
 ];
 
 /// Every core intrinsic.
@@ -1845,6 +1856,136 @@ pub const CORE_VECTOR_LENGTH: CoreIntrinsicSchema = CoreIntrinsicSchema {
         ty: BuiltinType::Vector(&BuiltinType::Param("T")),
     }],
     result: BuiltinType::Int,
+    fresh: false,
+};
+
+/// `core.order<T>(a: T, b: T) -> Int`: `-1`, `0` or `1` as `a` sorts before,
+/// equal to or after `b` in the order a `Map` keeps its keys and a `Set` its
+/// members.
+///
+/// [ADR 0059](../../../docs/adr/0059-a-keyed-collection-is-searched-by-order-not-hashed.md)'s
+/// `value-order`. The lowering answers it with one `Inst::Cmp` of
+/// `CmpOp::Order` where `T` is a scalar, a `String` or an enum whose case
+/// index order is its case-name order, and with the layout-directed runtime
+/// order otherwise. It admits nothing: a body asks [`CORE_ADMIT_KEY`] first.
+pub const CORE_ORDER: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "order",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "a",
+            ty: BuiltinType::Param("T"),
+        },
+        ParamSchema {
+            name: "b",
+            ty: BuiltinType::Param("T"),
+        },
+    ],
+    result: BuiltinType::Int,
+    fresh: false,
+};
+
+/// `core.admitKey<T>(key: T, method: String, role: String) -> Unit`: nothing,
+/// or the refusal of a key the language does not admit — a `Float`, a
+/// `Vector`, or anything holding one — as `` `{method}` cannot use a … as a
+/// {role} ``.
+///
+/// ADR 0059's key admission, asked of the argument before anything is
+/// compared, so an empty collection refuses a key as loudly as a full one.
+/// The lowering removes the call where `T`'s layout cannot hold a refused
+/// part, which is every key a checked program usually has.
+pub const CORE_ADMIT_KEY: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "admitKey",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "key",
+            ty: BuiltinType::Param("T"),
+        },
+        ParamSchema {
+            name: "method",
+            ty: BuiltinType::String,
+        },
+        ParamSchema {
+            name: "role",
+            ty: BuiltinType::String,
+        },
+    ],
+    result: BuiltinType::Unit,
+    fresh: false,
+};
+
+/// `core.refuseDuplicate<T>(key: T, method: String, role: String) -> Unit`:
+/// always the refusal of a literal that holds `key` twice, as `` `{method}`
+/// was given the {role} `{key}` more than once ``.
+///
+/// ADR 0059 has a keyed literal *find* its duplicate in Cove, as an order of
+/// `0`, and raise it through this; it never answers.
+pub const CORE_REFUSE_DUPLICATE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "refuseDuplicate",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "key",
+            ty: BuiltinType::Param("T"),
+        },
+        ParamSchema {
+            name: "method",
+            ty: BuiltinType::String,
+        },
+        ParamSchema {
+            name: "role",
+            ty: BuiltinType::String,
+        },
+    ],
+    result: BuiltinType::Unit,
+    fresh: false,
+};
+
+/// `core.memberAt<T>(members: Set<T>, at: Int) -> T`: the member at `at` of a
+/// set's ascending run, which the caller has already held below
+/// `members.length()`.
+///
+/// `Inst::LoadElem` of the set itself at the member's width: a `Set` is a
+/// sorted packed run, so the `at`-th member is the `at`-th element.
+pub const CORE_MEMBER_AT: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "memberAt",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "members",
+            ty: BuiltinType::Set(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "at",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Param("T"),
+    fresh: false,
+};
+
+/// `core.entryAt<K, V>(entries: Map<K, V>, at: Int) -> MapEntry<K, V>`: the
+/// entry at `at` of a map's run, ascending by key, which the caller has
+/// already held below `entries.length()`.
+///
+/// `Inst::LoadElem` of the map itself at a `MapEntry`'s width: an entry is its
+/// key's words and then its value's, which is the struct `MapEntry(key:,
+/// value:)` laid out inline.
+pub const CORE_ENTRY_AT: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "entryAt",
+    generics: &["K", "V"],
+    params: &[
+        ParamSchema {
+            name: "entries",
+            ty: BuiltinType::Map(&BuiltinType::Param("K"), &BuiltinType::Param("V")),
+        },
+        ParamSchema {
+            name: "at",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::MapEntry(&BuiltinType::Param("K"), &BuiltinType::Param("V")),
     fresh: false,
 };
 

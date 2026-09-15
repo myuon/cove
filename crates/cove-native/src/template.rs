@@ -699,6 +699,19 @@ impl<'a> Emit<'a> {
                 self.mov_imm64(RCX, *value);
                 self.arith(*op, *dst);
             }
+            // `encoded.rs`'s `ORDER_INT | ORDER_BOOL | ORDER_TAG`, which
+            // `crate::subset` admits for those three and no other.
+            Inst::Cmp {
+                on: _,
+                op: CmpOp::Order,
+                dst,
+                a,
+                b,
+            } => {
+                self.load_slot(RAX, *a);
+                self.load_slot(RCX, *b);
+                self.order(*dst);
+            }
             Inst::Cmp {
                 on: _,
                 op,
@@ -1739,6 +1752,7 @@ impl<'a> Emit<'a> {
             CmpOp::Le => CC_LE,
             CmpOp::Gt => CC_G,
             CmpOp::Ge => CC_GE,
+            CmpOp::Order => unreachable!("a three-way order is lowered by `Emit::order`"),
         };
         self.cmp_rr(RAX, RCX);
         self.setcc(cc);
@@ -1747,6 +1761,22 @@ impl<'a> Emit<'a> {
         // What the fused form branches on, and what `BranchFalse` would have
         // set for itself: the stored word against zero.
         self.test_rr(RAX, RAX);
+    }
+
+    /// `encoded.rs`'s `ORDER_INT`: `(x > y) - (x < y)` over the two words as
+    /// `i64`, stored as the `Int` `-1`, `0` or `1`.
+    ///
+    /// Both `setcc`s read the flags one `cmp` left, the two bytes are widened
+    /// into whole registers, and the subtraction is over sixty-four bits, so a
+    /// `0 - 1` is all ones rather than `255`.
+    fn order(&mut self, dst: Slot) {
+        self.cmp_rr(RAX, RCX);
+        self.setcc(CC_G);
+        self.setcc_cl(CC_L);
+        self.movzx_eax_al();
+        self.movzx_ecx_cl();
+        self.sub_rr(RAX, RCX);
+        self.store_slot(dst, RAX);
     }
 
     // --- control flow ------------------------------------------------------
@@ -2371,6 +2401,20 @@ impl<'a> Emit<'a> {
         self.byte(0x0f);
         self.byte(0xb6);
         self.byte(0xc0);
+    }
+
+    /// `setcc cl`
+    fn setcc_cl(&mut self, cc: u8) {
+        self.byte(0x0f);
+        self.byte(0x90 | cc);
+        self.byte(0xc1);
+    }
+
+    /// `movzx ecx, cl`, which leaves a zero or a one in the whole of `rcx`.
+    fn movzx_ecx_cl(&mut self) {
+        self.byte(0x0f);
+        self.byte(0xb6);
+        self.byte(0xc9);
     }
 
     /// `cqo`

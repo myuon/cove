@@ -27,7 +27,12 @@
     {"name": "bytesFinish", "signature": "core.bytesFinish(buffer: ByteBuffer) -> String", "generics": [], "params": [{"name": "buffer", "type": "ByteBuffer"}], "result": "String", "libraryOnly": true},
     {"name": "bytesLength", "signature": "core.bytesLength(buffer: ByteBuffer) -> Int", "generics": [], "params": [{"name": "buffer", "type": "ByteBuffer"}], "result": "Int", "libraryOnly": true},
     {"name": "arrayLength", "signature": "core.arrayLength(items: Array<T>) -> Int", "generics": ["T"], "params": [{"name": "items", "type": "Array<T>"}], "result": "Int", "libraryOnly": true},
-    {"name": "vectorLength", "signature": "core.vectorLength(items: Vector<T>) -> Int", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}], "result": "Int", "libraryOnly": true}
+    {"name": "vectorLength", "signature": "core.vectorLength(items: Vector<T>) -> Int", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}], "result": "Int", "libraryOnly": true},
+    {"name": "order", "signature": "core.order(a: T, b: T) -> Int", "generics": ["T"], "params": [{"name": "a", "type": "T"}, {"name": "b", "type": "T"}], "result": "Int", "libraryOnly": true},
+    {"name": "admitKey", "signature": "core.admitKey(key: T, method: String, role: String) -> Unit", "generics": ["T"], "params": [{"name": "key", "type": "T"}, {"name": "method", "type": "String"}, {"name": "role", "type": "String"}], "result": "Unit", "libraryOnly": true},
+    {"name": "refuseDuplicate", "signature": "core.refuseDuplicate(key: T, method: String, role: String) -> Unit", "generics": ["T"], "params": [{"name": "key", "type": "T"}, {"name": "method", "type": "String"}, {"name": "role", "type": "String"}], "result": "Unit", "libraryOnly": true},
+    {"name": "memberAt", "signature": "core.memberAt(members: Set<T>, at: Int) -> T", "generics": ["T"], "params": [{"name": "members", "type": "Set<T>"}, {"name": "at", "type": "Int"}], "result": "T", "libraryOnly": true},
+    {"name": "entryAt", "signature": "core.entryAt(entries: Map<K, V>, at: Int) -> MapEntry<K, V>", "generics": ["K", "V"], "params": [{"name": "entries", "type": "Map<K, V>"}, {"name": "at", "type": "Int"}], "result": "MapEntry<K, V>", "libraryOnly": true}
   ],
   "types": [
     {

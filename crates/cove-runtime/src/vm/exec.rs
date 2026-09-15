@@ -2367,6 +2367,61 @@ impl<'a> Machine<'a> {
         self.string_bytes(a).cmp(&self.string_bytes(b))
     }
 
+    /// `-1`, `0` or `1` as two string objects order by their bytes — the
+    /// three-way order `ORDER_STR` answers, which is `String`'s own `Ord` and
+    /// `key::order`'s for a `Str`.
+    ///
+    /// The bytes are compared where they are, a payload word at a time,
+    /// rather than copied out as [`Machine::compare_strings`] copies them: a
+    /// binary search over `String` keys asks this once per step, and nothing
+    /// it answers needs the bytes anywhere else. A word holds eight bytes least
+    /// significant first, so the first byte two words differ in is the lowest
+    /// set byte of their exclusive or, masked to the bytes both strings have.
+    /// A null address reads as the empty string, as it does there.
+    ///
+    /// `#[inline(never)]`: it is reached from the encoded dispatch loop, and a
+    /// loop body a helper was inlined into is a different loop body (#378).
+    #[inline(never)]
+    pub(crate) fn order_strings(&self, a: u64, b: u64) -> i64 {
+        use std::cmp::Ordering;
+        if a == b {
+            return 0;
+        }
+        let len = |addr: u64| {
+            if addr == 0 {
+                0
+            } else {
+                self.mem.object_len(addr) as usize
+            }
+        };
+        let (left, right) = (len(a), len(b));
+        let common = left.min(right);
+        let mut at = 0;
+        let mut word = 0;
+        while at < common {
+            let (x, y) = (self.mem.payload(a, word), self.mem.payload(b, word));
+            let take = (common - at).min(8);
+            let mask = if take == 8 {
+                u64::MAX
+            } else {
+                (1u64 << (take * 8)) - 1
+            };
+            let differ = (x ^ y) & mask;
+            if differ != 0 {
+                let shift = differ.trailing_zeros() / 8 * 8;
+                let ordered = ((x >> shift) as u8).cmp(&((y >> shift) as u8));
+                return if ordered == Ordering::Less { -1 } else { 1 };
+            }
+            at += take;
+            word += 1;
+        }
+        match left.cmp(&right) {
+            Ordering::Less => -1,
+            Ordering::Equal => 0,
+            Ordering::Greater => 1,
+        }
+    }
+
     /// The bytes of the string object at `addr`.
     ///
     /// A null address answers the empty string rather than failing: the one
@@ -4089,6 +4144,9 @@ fn compare(op: CmpOp, ordering: std::cmp::Ordering) -> bool {
         CmpOp::Le => ordering != Greater,
         CmpOp::Gt => ordering == Greater,
         CmpOp::Ge => ordering != Less,
+        // Three answers do not fit a `bool`, and no encoded arm asks this for
+        // one: `ORDER_*` computes its `Int` itself.
+        CmpOp::Order => unreachable!("a three-way order answers an `Int`, not a `bool`"),
     }
 }
 

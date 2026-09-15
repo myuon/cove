@@ -27,7 +27,7 @@ use cove_schema::builtins::{FreeBuiltinKind, FreeBuiltinSchema, MAP_ENTRY};
 use crate::error::RuntimeError;
 use crate::shared::SharedCell;
 use crate::value::{
-    ByteBufferStorage, InvalidKey, MapKey, RangeBounds, Repr, Value, VectorStorage,
+    ByteBufferStorage, InvalidKey, MapKey, RangeBounds, Repr, StructValue, Value, VectorStorage,
 };
 
 /// Type names a program may write as a namespace, such as `Vector.of`.
@@ -665,12 +665,89 @@ pub fn call_core(
             check_consumed(storage, span)?;
             Ok(Value(Repr::Int(storage.len() as i64)))
         }
+        // ADR 0059's value order, beneath a keyed search in the standard
+        // library: `MapKey`'s own `Ord`, which is the order the oracle keeps a
+        // `Map`'s keys and a `Set`'s members in. The body admitted the key
+        // first, so the conversion refusing is a key no checked program hands
+        // this.
+        "order" => {
+            let a = MapKey::from_value(&args[0])
+                .map_err(|invalid| invalid_key_error(&shown, "key", &invalid, span))?;
+            let b = MapKey::from_value(&args[1])
+                .map_err(|invalid| invalid_key_error(&shown, "key", &invalid, span))?;
+            Ok(Value(Repr::Int(match a.cmp(&b) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            })))
+        }
+        // The admission a keyed method asks of its argument before anything
+        // is compared, in the method's words and naming the key by its role —
+        // the refusal every `Map` and `Set` arm made before the search moved.
+        "admitKey" => match MapKey::from_value(&args[0]) {
+            Ok(_) => Ok(Value(Repr::Unit)),
+            Err(invalid) => {
+                let (method, role) = core_names(&shown, &args[1], &args[2], span)?;
+                Err(invalid_key_error(&method, &role, &invalid, span))
+            }
+        },
+        // A literal's duplicate, found in Cove as an order of `0`: always the
+        // refusal, over the key as it renders.
+        "refuseDuplicate" => {
+            let (method, role) = core_names(&shown, &args[1], &args[2], span)?;
+            match MapKey::from_value(&args[0]) {
+                Ok(key) => Err(duplicate_key_error(&method, &role, &key, span)),
+                Err(invalid) => Err(invalid_key_error(&method, &role, &invalid, span)),
+            }
+        }
+        // The element reads of a sorted run: the member or the entry at a
+        // position the body has already held below the length. A slice indexes
+        // in one step, which is why the oracle keeps one.
+        "memberAt" => {
+            let Value(Repr::Set(items)) = &args[0] else {
+                return Err(type_error(&shown, "members", "Set", &args[0], span));
+            };
+            let at = core_index(&shown, &args[1], items.len(), span)?;
+            Ok(items[at].to_value())
+        }
+        "entryAt" => {
+            let Value(Repr::Map(entries)) = &args[0] else {
+                return Err(type_error(&shown, "entries", "Map", &args[0], span));
+            };
+            let at = core_index(&shown, &args[1], entries.len(), span)?;
+            let (key, value) = &entries[at];
+            Ok(Value(Repr::Struct(Rc::new(StructValue {
+                type_name: MAP_ENTRY.name.into(),
+                fields: vec![
+                    (MAP_ENTRY.fields[0].name.into(), key.to_value()),
+                    (MAP_ENTRY.fields[1].name.into(), value.clone()),
+                ],
+                opaque: false,
+            }))))
+        }
         // A name the table declares and nothing here executes. No program can
         // reach one of these from its own modules, so the check that every
         // entry has a body here is `vm::differential`'s, which calls each
         // from a standard-library module on both evaluators.
         _ => Err(RuntimeError::new(format!("unknown core intrinsic `{shown}`")).at(span)),
     }
+}
+
+/// The method and the role a keyed refusal is written in, as the standard
+/// library passed them to `core.admitKey` or `core.refuseDuplicate`.
+fn core_names(
+    shown: &str,
+    method: &Value,
+    role: &Value,
+    span: Span,
+) -> Result<(String, String), RuntimeError> {
+    let Value(Repr::Str(method)) = method else {
+        return Err(type_error(shown, "method", "String", method, span));
+    };
+    let Value(Repr::Str(role)) = role else {
+        return Err(type_error(shown, "role", "String", role, span));
+    };
+    Ok((method.to_string(), role.to_string()))
 }
 
 /// What a core intrinsic answers for a vector a finish already consumed.

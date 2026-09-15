@@ -697,6 +697,34 @@ pub(super) fn map_removed(
 
 // --- refusals --------------------------------------------------------------
 
+/// `core.refuseDuplicate(key, method, role)`: always the refusal a literal
+/// with `key` twice is given, in `method`'s words and naming the key by
+/// `role`.
+///
+/// ADR 0059 has a standard-library literal *find* a duplicate, as a value
+/// order of equal, and raise it through this — so the sentence is still the
+/// one [`duplicate`] writes, over the key as it renders.
+pub(super) fn refuse_duplicate(
+    machine: &Machine,
+    operands: &[Operand<'_>],
+) -> Result<(), RuntimeError> {
+    let [key, method, role] = operands else {
+        return Err(operand::operands(
+            "Value.refuseDuplicate",
+            3,
+            operands.len(),
+        ));
+    };
+    let text = |operand: &Operand<'_>| {
+        String::from_utf8_lossy(&machine.string_bytes(operand.word())).into_owned()
+    };
+    Err(duplicate(
+        &text(method),
+        &text(role),
+        render_value(machine, key.layout, key.words, 0),
+    ))
+}
+
 /// `` `{method}` was given the {role} `{key}` more than once ``.
 ///
 /// [`crate::builtins`]' `duplicate_key_error`, over the key as it renders —

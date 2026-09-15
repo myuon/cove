@@ -617,6 +617,7 @@ fn cmp_name(op: CmpOp) -> &'static str {
         CmpOp::Le => "le",
         CmpOp::Gt => "gt",
         CmpOp::Ge => "ge",
+        CmpOp::Order => "order",
     }
 }
 

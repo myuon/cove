@@ -2199,6 +2199,48 @@ pub fn a_unit_constant_is_a_zero_word<A: Arm>() {
     assert!(!compiles::<A>(&past), "a slot past the end of the frame");
 }
 
+/// ADR 0059's three-way order writes the `Int` `-1`, `0` or `1`, over an
+/// `Int`, a `Bool` and a case index alike.
+///
+/// `encoded.rs`'s `ORDER_INT | ORDER_BOOL | ORDER_TAG` arm is one signed
+/// comparison of the two words and a subtraction of its two flags, stored as
+/// a whole word — so `-1` is all ones, and a lowering that widened a flag
+/// byte with a sign, or subtracted in eight bits, would write `255` or a mask.
+/// The `String` order is outside the slice and refuses the function.
+pub fn a_three_way_order_writes_minus_one_zero_or_one<A: Arm>() {
+    for (on, repr, a, b, answer) in [
+        (Compare::Int, Repr::Int, 1i64, 2i64, -1i64),
+        (Compare::Int, Repr::Int, 2, 2, 0),
+        (Compare::Int, Repr::Int, 3, 2, 1),
+        (Compare::Int, Repr::Int, i64::MIN, i64::MAX, -1),
+        (Compare::Int, Repr::Int, i64::MAX, i64::MIN, 1),
+        (Compare::Int, Repr::Int, -1, 1, -1),
+        (Compare::Bool, Repr::Bool, 0, 1, -1),
+        (Compare::Bool, Repr::Bool, 1, 1, 0),
+        (Compare::Tag, Repr::Tag, 2, 0, 1),
+    ] {
+        forget_polls();
+        let held = program(function(
+            vec![repr, repr, Repr::Int],
+            INT,
+            vec![
+                Inst::Cmp {
+                    on,
+                    op: CmpOp::Order,
+                    dst: 2,
+                    a: 0,
+                    b: 1,
+                },
+                Inst::Return { src: 2 },
+            ],
+        ));
+        let mut words = vec![a as u64, b as u64, 0xdead];
+        let outcome = run::<A>(&held, &mut words, 0);
+        assert_eq!(outcome.outcome, Outcome::Returned, "{on:?} {a} {b}");
+        assert_eq!(words[2] as i64, answer, "{on:?} {a} {b}");
+    }
+}
+
 /// A `Bool` equality *is* inside the slice, which is the other side of the
 /// refusal above.
 ///

@@ -175,6 +175,13 @@ const LT_TAG: u8 = Op::Cmp(Compare::Tag, CmpOp::Lt).number();
 const LE_TAG: u8 = Op::Cmp(Compare::Tag, CmpOp::Le).number();
 const GT_TAG: u8 = Op::Cmp(Compare::Tag, CmpOp::Gt).number();
 const GE_TAG: u8 = Op::Cmp(Compare::Tag, CmpOp::Ge).number();
+// ADR 0059's three-way order, a family of its own at the end of the table.
+const ORDER_INT: u8 = Op::Cmp(Compare::Int, CmpOp::Order).number();
+const ORDER_FLOAT: u8 = Op::Cmp(Compare::Float, CmpOp::Order).number();
+const ORDER_BOOL: u8 = Op::Cmp(Compare::Bool, CmpOp::Order).number();
+const ORDER_STR: u8 = Op::Cmp(Compare::Str, CmpOp::Order).number();
+const ORDER_REF: u8 = Op::Cmp(Compare::Identity, CmpOp::Order).number();
+const ORDER_TAG: u8 = Op::Cmp(Compare::Tag, CmpOp::Order).number();
 
 const ADD_INT_IMM: u8 = Op::ArithImm(ArithOp::Add).number();
 const SUB_INT_IMM: u8 = Op::ArithImm(ArithOp::Sub).number();
@@ -1636,6 +1643,34 @@ pub(super) fn dispatch<'s, 'a>(
             LE_STR => cmp_str!(CmpOp::Le),
             GT_STR => cmp_str!(CmpOp::Gt),
             GE_STR => cmp_str!(CmpOp::Ge),
+
+            // ADR 0059's three-way order: `-1`, `0` or `1` as an `Int` word.
+            // A `Bool` is `0` or `1` and a case index is small and never
+            // negative, so the signed reading an `Int` takes orders all three —
+            // `false` first, and cases by index, which the lowering asks for
+            // only where that is the case-name order a key sorts by.
+            ORDER_INT | ORDER_BOOL | ORDER_TAG => {
+                let x = machine.mem.word_at(base_at + (b!() as usize)) as i64;
+                let y = machine.mem.word_at(base_at + (c!() as usize)) as i64;
+                let answer = i64::from(x > y) - i64::from(x < y);
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, answer as u64);
+            }
+            // Out of line, and reading the bytes where they are: a search step
+            // over `String` keys is one of these, and `cmp_str!`'s copy of
+            // both strings into two vectors is not a cost it should pay.
+            ORDER_STR => {
+                let x = machine.mem.word_at(base_at + (b!() as usize));
+                let y = machine.mem.word_at(base_at + (c!() as usize));
+                let answer = machine.order_strings(x, y);
+                machine
+                    .mem
+                    .set_word_at(base_at + (a!()) as usize, answer as u64);
+            }
+            // A `Float` has no total order and an identity none a program may
+            // see; `cove_ir::verify` refuses both before this could run.
+            ORDER_FLOAT | ORDER_REF => not_ordered!(),
 
             ADD_INT_IMM => arith_imm!(ArithOp::Add),
             SUB_INT_IMM => arith_imm!(ArithOp::Sub),

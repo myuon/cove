@@ -111,6 +111,27 @@ pub enum CmpOp {
     Le,
     Gt,
     Ge,
+    /// The three-way comparison: an `Int`, `-1` when `a` sorts before `b`,
+    /// `0` when they are equal and `1` when it sorts after.
+    ///
+    /// [ADR 0059](../../../docs/adr/0059-a-keyed-collection-is-searched-by-order-not-hashed.md)
+    /// moves a `Map`'s and a `Set`'s binary search into the standard library
+    /// over a value order, and a search step asks one question with three
+    /// answers. Two ordered comparisons would ask it twice — two dispatches
+    /// and, for a `String`, two walks of the same bytes — where this asks it
+    /// once (#378, Q4.4).
+    ///
+    /// It is only an [`Inst::Cmp`]. The answer is not a `Bool`, so nothing
+    /// branches on it directly: [`Inst::CmpBranch`], [`Inst::CmpImm`] and
+    /// [`Inst::CmpImmBranch`] refuse it, and the bytecode gives it a family
+    /// of its own rather than a member of the cross products those mirror.
+    /// And it is only an order the language keeps for a key: over
+    /// [`Compare::Int`] (which a `Duration` reads as), [`Compare::Bool`]
+    /// (`false` first), [`Compare::Str`] (by bytes) and [`Compare::Tag`] (by
+    /// case index, which a lowering asks for only where the index order is
+    /// the case-name order a key sorts by). A `Float` has no total order and
+    /// an identity has none a program may see, so the verifier refuses both.
+    Order,
 }
 
 /// A conversion between two scalar representations.
@@ -315,7 +336,8 @@ pub enum Inst {
         a: Slot,
         b: Slot,
     },
-    /// `dst = a op b`, answering a `Bool`.
+    /// `dst = a op b`, answering a `Bool` — or, for [`CmpOp::Order`], the
+    /// `Int` `-1`, `0` or `1`.
     Cmp {
         on: Compare,
         op: CmpOp,

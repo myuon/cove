@@ -233,6 +233,17 @@ pub(crate) fn call(
         // `crates/cove-runtime/src/builtins.rs` has no entry for it, and
         // `crate::interp` reaches it as an operator.
         Intrinsic::AnyEquals => equal::equals(machine, operands).map(|word| out.push(word)),
+
+        // ---- keys --------------------------------------------------------
+        //
+        // ADR 0059's three: the order a keyed search in the standard library
+        // asks when one comparison instruction cannot answer it, the
+        // admission it asks of a key before anything is compared, and the
+        // refusal a literal with a key twice is given. Each answers a word or
+        // nothing; the admission's `()` is the zero word.
+        Intrinsic::ValueOrder => key::value_order(machine, operands).map(|word| out.push(word)),
+        Intrinsic::ValueAdmitKey => key::admit_key(machine, operands).map(|word| out.push(word)),
+        Intrinsic::ValueRefuseDuplicate => keyed::refuse_duplicate(machine, operands),
     }
 }
 

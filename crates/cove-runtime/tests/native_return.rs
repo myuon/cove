@@ -782,6 +782,8 @@ fn compare(op: CmpOp, x: i64, y: i64) -> bool {
         CmpOp::Le => x <= y,
         CmpOp::Gt => x > y,
         CmpOp::Ge => x >= y,
+        // No fixture here writes a three-way order, whose answer is an `Int`.
+        CmpOp::Order => unreachable!("a three-way order answers an `Int`, not a `bool`"),
     }
 }
 

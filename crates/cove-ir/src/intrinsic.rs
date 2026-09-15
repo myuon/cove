@@ -81,6 +81,9 @@ pub enum Intrinsic {
     FloatParse,
     DurationNanos,
     AnyEquals,
+    ValueOrder,
+    ValueAdmitKey,
+    ValueRefuseDuplicate,
 }
 
 /// Every [`Intrinsic`], in declaration order.
@@ -130,6 +133,9 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::FloatParse,
     Intrinsic::DurationNanos,
     Intrinsic::AnyEquals,
+    Intrinsic::ValueOrder,
+    Intrinsic::ValueAdmitKey,
+    Intrinsic::ValueRefuseDuplicate,
 ];
 
 impl Intrinsic {
@@ -137,7 +143,10 @@ impl Intrinsic {
     ///
     /// `Any` for [`Intrinsic::AnyEquals`], which is `==` on anything wider
     /// than a word rather than a method a type declares — see the doc
-    /// comment where `cove-runtime` dispatches it.
+    /// comment where `cove-runtime` dispatches it. `Value` for the three a
+    /// keyed collection's standard-library body reaches through `core.order`,
+    /// `core.admitKey` and `core.refuseDuplicate`, which are rules over any
+    /// key's layout rather than methods of a type either.
     pub const fn receiver(self) -> &'static str {
         match self {
             Intrinsic::StringInterpolate => "String",
@@ -181,6 +190,9 @@ impl Intrinsic {
             Intrinsic::FloatParse => "Float",
             Intrinsic::DurationNanos => "Duration",
             Intrinsic::AnyEquals => "Any",
+            Intrinsic::ValueOrder => "Value",
+            Intrinsic::ValueAdmitKey => "Value",
+            Intrinsic::ValueRefuseDuplicate => "Value",
         }
     }
 
@@ -228,6 +240,9 @@ impl Intrinsic {
             Intrinsic::FloatParse => "parse",
             Intrinsic::DurationNanos => "nanos",
             Intrinsic::AnyEquals => "equals",
+            Intrinsic::ValueOrder => "order",
+            Intrinsic::ValueAdmitKey => "admitKey",
+            Intrinsic::ValueRefuseDuplicate => "refuseDuplicate",
         }
     }
 
@@ -364,6 +379,18 @@ impl Intrinsic {
             // together, as deep as they nest, and allocates nothing: the
             // answer is one `Bool` word.
             Intrinsic::AnyEquals => raise.union(E::READS_MEMORY).union(E::BULK_WORK),
+
+            // ADR 0059's keyed intrinsics. The order and the admission each
+            // walk a key as deep as it nests and allocate nothing: the order
+            // answers one `Int` word, the admission nothing at all, and both
+            // raise — a key too deep to walk, and for the admission a key the
+            // language refuses, in the method's words. The duplicate refusal
+            // always raises; it renders the key it names, which reads it, and
+            // the message is the machine's rather than an object on the heap.
+            Intrinsic::ValueOrder | Intrinsic::ValueAdmitKey => {
+                raise.union(E::READS_MEMORY).union(E::BULK_WORK)
+            }
+            Intrinsic::ValueRefuseDuplicate => raise.union(E::READS_MEMORY),
         }
     }
 }
@@ -526,7 +553,10 @@ mod tests {
                 | Intrinsic::FloatFormat
                 | Intrinsic::FloatParse
                 | Intrinsic::DurationNanos
-                | Intrinsic::AnyEquals => 1,
+                | Intrinsic::AnyEquals
+                | Intrinsic::ValueOrder
+                | Intrinsic::ValueAdmitKey
+                | Intrinsic::ValueRefuseDuplicate => 1,
             }
         }
         let variants: usize = ALL.iter().map(|intrinsic| count(*intrinsic)).sum();
