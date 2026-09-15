@@ -702,7 +702,7 @@ fn run_bounds(machine: &Machine<'_>, range: &RunRange, unit: &str) -> Result<(),
 /// rooted by the slots this read them out of.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn run_copy_bytes(
+pub(super) fn run_copy_bytes(
     machine: &mut Machine<'_>,
     program: &Program,
     budget: &Meter,
@@ -793,7 +793,7 @@ fn run_copy_bytes(
 /// ever half its old words and half its new ones.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn run_copy_words(
+pub(super) fn run_copy_words(
     machine: &mut Machine<'_>,
     program: &Program,
     budget: &Meter,
@@ -4047,6 +4047,624 @@ mod tests {
                 spent < words,
                 "and it must not have appended the whole {words} words first"
             );
+        }
+    }
+
+    /// [`cove_native::RunCopyFn`], differentially: each fixture above with a caller
+    /// in front of it, run once on the dispatch loop alone and once with the
+    /// template compiler's table installed.
+    ///
+    /// Here rather than in `tests/native_tier.rs` because no Cove source reaches a
+    /// byte copy, an overlapping copy or a refusal — `Vector.toArray` copies a
+    /// whole live prefix into a fresh array, and that file has it — so the
+    /// programs are written in the IR, as every other `RunCopy` fixture in this
+    /// module is.
+    ///
+    /// The caller is what makes it a tier question: the outermost frame of a run
+    /// is always the dispatch loop's, so the copy has to be reached through a
+    /// `call`, and the `call` is what consults the table. Every case asserts that
+    /// the callee was compiled and that the call crossed into it, because a case
+    /// that did not would compare the VM with itself.
+    #[cfg(feature = "template")]
+    mod compiled {
+        use super::*;
+        use crate::native::NativeProgram;
+        use crate::vm::exec::native::{Tiered, Tiers};
+
+        /// `outer(params) = inner(params)`, whose one `call` is the crossing.
+        ///
+        /// Every parameter here is one word, which is what lets the frame be the
+        /// parameters' own `Repr`s and one slot more for the answer.
+        fn through_a_call(build: &mut Build, inner: FunctionId, answer: Repr) -> FunctionId {
+            let held = build.program.function(inner);
+            let params = held.params.clone();
+            let mut frame = held.reprs[..params.len()].to_vec();
+            let returns = held.returns;
+            let row: Vec<(Slot, LayoutId)> = params
+                .iter()
+                .enumerate()
+                .map(|(at, layout)| (at as Slot, *layout))
+                .collect();
+            let args = build.args(&row);
+            let dst = frame.len() as Slot;
+            frame.push(answer);
+            build.function(
+                "outer",
+                &params,
+                &frame,
+                returns,
+                vec![
+                    Inst::Call {
+                        dst,
+                        callee: inner,
+                        args,
+                    },
+                    Inst::Return { src: dst },
+                ],
+            )
+        }
+
+        /// What a run said: its words, or its error's sentence, span and outcome.
+        type Said = Result<Vec<u64>, (String, Option<Span>, crate::trace::RunOutcome)>;
+
+        /// What a case places before a run, and what it reads back after one.
+        type Prepare<'p> = &'p dyn Fn(&mut Machine<'_>) -> Vec<u64>;
+        type Inspect<'i, T> = &'i dyn Fn(&Machine<'_>, &[u64]) -> T;
+
+        /// One run of `entry` on a fresh machine of `heap` words, on the dispatch
+        /// loop alone or with `native` installed: `prepare` places the arguments,
+        /// and `inspect` reads back whatever the case needs after the run.
+        fn on<T>(
+            program: &Program,
+            native: Option<&NativeProgram>,
+            heap: usize,
+            budget: &Meter,
+            entry: FunctionId,
+            prepare: Prepare<'_>,
+            inspect: Inspect<'_, T>,
+        ) -> (Said, T, Tiers, u64) {
+            let mut machine = Machine::new(program, heap);
+            if let Some(native) = native {
+                // Safety: `native` is borrowed for longer than this machine lives.
+                unsafe { machine.install_native(native) };
+            }
+            let args = prepare(&mut machine);
+            let said = machine
+                .run(entry, &args, budget)
+                .map_err(|error| (error.message, error.span, error.outcome));
+            let seen = inspect(&machine, &args);
+            let tiers = machine.tiers();
+            (said, seen, tiers, machine.work())
+        }
+
+        /// [`on`] on both tiers, asserting they said and left the same thing and
+        /// that the native run really crossed.
+        fn agree<T: PartialEq + std::fmt::Debug>(
+            what: &str,
+            program: &Program,
+            native: &NativeProgram,
+            entry: FunctionId,
+            prepare: Prepare<'_>,
+            inspect: Inspect<'_, T>,
+        ) -> (Said, T) {
+            let (vm, vm_seen, _, _) =
+                on(program, None, 1 << 16, &budget(), entry, prepare, inspect);
+            let (native_said, seen, tiers, _) =
+                on(program, Some(native), 1 << 16, &budget(), entry, prepare, inspect);
+            assert_eq!(native_said, vm, "what the run said: {what}");
+            assert_eq!(seen, vm_seen, "what it left: {what}");
+            assert!(
+                tiers.vm_to_native >= 1,
+                "the copy ran in compiled code: {what}: {tiers:?}"
+            );
+            (vm, vm_seen)
+        }
+
+        /// Compiles `program` and asserts `inner` is one of what compiled.
+        fn compiled(program: &Program, inner: FunctionId) -> NativeProgram {
+            let native = crate::native::compile(program).expect("this host compiles");
+            assert!(
+                native.entry(inner).is_some(),
+                "the copying function is compiled: {:?}",
+                native.refusals()
+            );
+            native
+        }
+
+        /// `fixture()`'s byte copier, with a caller in front of it.
+        fn byte_copier() -> (Program, FunctionId, FunctionId) {
+            let Fixture { program, copy_into } = fixture();
+            let mut build = Build { program };
+            let entry = through_a_call(&mut build, copy_into, Repr::Ref);
+            (build.done(), copy_into, entry)
+        }
+
+        /// **A byte copy from compiled code agrees with the VM at every alignment,
+        /// from a `String` and from a byte run, and as memmove over one run in both
+        /// directions across chunk edges.**
+        #[test]
+        fn a_compiled_byte_copy_agrees_with_the_vm() {
+            let (program, copy_into, entry) = byte_copier();
+            let native = compiled(&program, copy_into);
+            let text = "abcdefghijklmnopqrstuvwxyz";
+            for from_string in [true, false] {
+                for (dst_at, src_at, len) in [
+                    (0u64, 0u64, 5u64),
+                    (3, 0, 5),
+                    (0, 7, 9),
+                    (8, 10, 6),
+                    (1, 1, 10),
+                    (0, 0, 0),
+                    (5, 5, 0),
+                ] {
+                    let prepare = |machine: &mut Machine<'_>| {
+                        let src = if from_string {
+                            machine.new_string(text).unwrap()
+                        } else {
+                            let run = machine
+                                .allocate(machine.program.bytes_layout, text.len() as i64)
+                                .unwrap();
+                            machine.write_bytes(run, text.as_bytes());
+                            run
+                        };
+                        let dst = machine.allocate(machine.program.bytes_layout, 16).unwrap();
+                        vec![dst, dst_at, src, src_at, len]
+                    };
+                    let inspect =
+                        |machine: &Machine<'_>, args: &[u64]| machine.string_bytes(args[0]);
+                    let (said, bytes) = agree(
+                        &format!("from a string: {from_string}, {dst_at} {src_at} {len}"),
+                        &program,
+                        &native,
+                        entry,
+                        &prepare,
+                        &inspect,
+                    );
+                    assert!(said.is_ok());
+                    let mut want = vec![0u8; 16];
+                    want[dst_at as usize..(dst_at + len) as usize].copy_from_slice(
+                        &text.as_bytes()[src_at as usize..(src_at + len) as usize],
+                    );
+                    assert_eq!(bytes, want);
+                }
+            }
+
+            // memmove over one run, each overlap straddling a chunk edge.
+            const BYTES: i64 = 3 * BULK_CHUNK_BYTES;
+            let mut build = Build::default();
+            let int = build.scalar(Repr::Int);
+            build.string_layout();
+            let run = build.bytes_layout();
+            let args = build.args(&[(0, run), (1, int), (0, run), (2, int), (3, int)]);
+            let shift = build.function(
+                "shift",
+                &[run, int, int, int],
+                &[Repr::Ref, Repr::Int, Repr::Int, Repr::Int],
+                run,
+                vec![
+                    Inst::RunCopy {
+                        args,
+                        storage: Storage::PackedBytes,
+                    },
+                    Inst::Return { src: 0 },
+                ],
+            );
+            let entry = through_a_call(&mut build, shift, Repr::Ref);
+            let program = build.done();
+            let native = compiled(&program, shift);
+            let pattern: Vec<u8> = (0..BYTES).map(|n| (n % 251) as u8).collect();
+            for (dst_at, src_at, len) in [
+                (BULK_CHUNK_BYTES + 3, 0i64, 2 * BULK_CHUNK_BYTES - 3),
+                (0, BULK_CHUNK_BYTES + 3, 2 * BULK_CHUNK_BYTES - 3),
+                (9, 1, 2 * BULK_CHUNK_BYTES),
+                (1, 9, 2 * BULK_CHUNK_BYTES),
+            ] {
+                let prepare = |machine: &mut Machine<'_>| {
+                    let obj = machine
+                        .allocate(machine.program.bytes_layout, BYTES)
+                        .unwrap();
+                    machine.write_bytes(obj, &pattern);
+                    vec![obj, dst_at as u64, src_at as u64, len as u64]
+                };
+                let inspect = |machine: &Machine<'_>, args: &[u64]| machine.string_bytes(args[0]);
+                let (_, bytes) = agree(
+                    &format!("copy_within({src_at}..+{len}, {dst_at})"),
+                    &program,
+                    &native,
+                    entry,
+                    &prepare,
+                    &inspect,
+                );
+                let mut want = pattern.clone();
+                want.copy_within(src_at as usize..(src_at + len) as usize, dst_at as usize);
+                assert_eq!(bytes, want, "and it is memmove's answer");
+            }
+        }
+
+        /// **A word copy from compiled code moves whole elements at the stride,
+        /// between two stores and as memmove within one, across chunk edges.**
+        #[test]
+        fn a_compiled_word_copy_agrees_with_the_vm() {
+            let mut build = Build::default();
+            let int = build.scalar(Repr::Int);
+            let triple = build.structure("Triple", &[("a", int), ("b", int), ("c", int)]);
+            let store = build.layout(
+                "Store<Triple>",
+                Shape::Elements {
+                    elem: triple,
+                    growable: true,
+                },
+            );
+            let copier = word_copier(&mut build, store, triple);
+            let entry = through_a_call(&mut build, copier, Repr::Ref);
+            let program = build.done();
+            let native = compiled(&program, copier);
+
+            let chunk = BULK_CHUNK_WORDS / 3;
+            let elements = 3 * chunk + 5;
+            let pattern: Vec<u64> = (0..elements * 3).collect();
+            for same in [false, true] {
+                for (dst_at, src_at, count) in [
+                    (chunk + 1, 0u64, 2 * chunk),
+                    (0, chunk + 1, 2 * chunk),
+                    (1, 0, elements - 1),
+                    (0, 1, elements - 1),
+                    (7, 9, 1),
+                    (0, 0, 0),
+                ] {
+                    let prepare = |machine: &mut Machine<'_>| {
+                        let src = machine.allocate(store, elements as i64).unwrap();
+                        machine.set_payload_run(src, 0, &pattern);
+                        let dst = match same {
+                            true => src,
+                            false => machine.allocate(store, elements as i64).unwrap(),
+                        };
+                        vec![dst, dst_at, src, src_at, count]
+                    };
+                    let inspect = |machine: &Machine<'_>, args: &[u64]| {
+                        machine.payload_run(args[0], 0, elements as u32 * 3)
+                    };
+                    let (said, words) = agree(
+                        &format!("one store: {same}, {dst_at} {src_at} {count}"),
+                        &program,
+                        &native,
+                        entry,
+                        &prepare,
+                        &inspect,
+                    );
+                    assert!(said.is_ok());
+                    let mut want = match same {
+                        true => pattern.clone(),
+                        false => vec![0; pattern.len()],
+                    };
+                    let from = &pattern[(src_at * 3) as usize..((src_at + count) * 3) as usize];
+                    want.splice(
+                        (dst_at * 3) as usize..((dst_at + count) * 3) as usize,
+                        from.iter().copied(),
+                    );
+                    assert_eq!(words, want);
+                }
+            }
+        }
+
+        /// **Every refusal a copy makes from compiled code is the VM's sentence, at
+        /// the VM's span, with the VM's outcome — and leaves the destination as it
+        /// was.**
+        #[test]
+        fn every_refusal_of_a_compiled_copy_is_the_vm_s() {
+            let (program, copy_into, entry) = byte_copier();
+            let native = compiled(&program, copy_into);
+            // What each end is, their lengths, and `dst_at`, `src_at`, `count`.
+            #[derive(Clone, Copy)]
+            enum End {
+                Null,
+                Text,
+                Run,
+            }
+            let rows = [
+                ("a null destination", End::Null, End::Text, 6i64, 3i64, [0i64, 0, 3]),
+                ("a null source", End::Run, End::Null, 6, 3, [0, 0, 3]),
+                ("a negative count", End::Run, End::Text, 6, 3, [0, 0, -1]),
+                ("a string destination", End::Text, End::Text, 6, 3, [0, 0, 3]),
+                ("past the source", End::Run, End::Text, 3, 10, [0, 2, 5]),
+                ("a negative source offset", End::Run, End::Text, 3, 10, [0, -1, 1]),
+                ("past the destination", End::Run, End::Text, 6, 3, [2, 0, 5]),
+                ("a negative destination offset", End::Run, End::Text, 6, 3, [-1, 0, 1]),
+            ];
+            for (what, dst_end, src_end, src_len, dst_len, [dst_at, src_at, count]) in rows {
+                let prepare = |machine: &mut Machine<'_>| {
+                    let mut place = |end: End, len: i64| match end {
+                        End::Null => 0,
+                        End::Text => machine.new_string(&"s".repeat(len as usize)).unwrap(),
+                        End::Run => machine
+                            .allocate(machine.program.bytes_layout, len)
+                            .unwrap(),
+                    };
+                    let src = place(src_end, src_len);
+                    let dst = place(dst_end, dst_len);
+                    vec![dst, dst_at as u64, src, src_at as u64, count as u64]
+                };
+                let inspect = |machine: &Machine<'_>, args: &[u64]| match args[0] {
+                    0 => Vec::new(),
+                    dst => machine.string_bytes(dst),
+                };
+                let (said, left) = agree(what, &program, &native, entry, &prepare, &inspect);
+                let (message, ..) = said.expect_err(what);
+                assert!(
+                    message.contains("runCopy") || message == null_object().message,
+                    "{what}: {message}"
+                );
+                assert!(
+                    left.iter().all(|byte| *byte == 0 || *byte == b's'),
+                    "{what}: nothing was written"
+                );
+            }
+
+            // The word copy's own refusals: another element family at either end,
+            // one element past a source that is in range by words, and a negative
+            // count.
+            let mut build = Build::default();
+            let int = build.scalar(Repr::Int);
+            build.string_layout();
+            let point = build.structure("Point", &[("x", int), ("y", int)]);
+            let points = build.layout(
+                "Array<Point>",
+                Shape::Elements {
+                    elem: point,
+                    growable: false,
+                },
+            );
+            let ints = build.layout(
+                "Array<Int>",
+                Shape::Elements {
+                    elem: int,
+                    growable: false,
+                },
+            );
+            let copier = word_copier(&mut build, points, point);
+            let entry = through_a_call(&mut build, copier, Repr::Ref);
+            let program = build.done();
+            let native = compiled(&program, copier);
+            for (what, dst_family, src_family, src_len, [dst_at, src_at, count]) in [
+                ("another family at the destination", ints, points, 4i64, [0i64, 0, 1]),
+                ("another family at the source", points, ints, 8, [0, 0, 1]),
+                ("one element past the source", points, points, 4, [0, 1, 4]),
+                ("a negative count of elements", points, points, 4, [0, 0, -1]),
+            ] {
+                let prepare = |machine: &mut Machine<'_>| {
+                    let src = machine.allocate(src_family, src_len).unwrap();
+                    let dst = machine.allocate(dst_family, 8).unwrap();
+                    vec![dst, dst_at as u64, src, src_at as u64, count as u64]
+                };
+                let inspect = |machine: &Machine<'_>, args: &[u64]| {
+                    machine.payload_run(args[0], 0, machine.object_len(args[0]))
+                };
+                let (said, untouched) = agree(what, &program, &native, entry, &prepare, &inspect);
+                said.expect_err(what);
+                assert!(
+                    untouched.iter().all(|word| *word == 0),
+                    "{what}: nothing was written"
+                );
+            }
+        }
+
+        /// **A copy longer than a chunk, in compiled code, is stopped by fuel within
+        /// ADR 0040's bound and by cancellation before it has done a chunk's work.**
+        ///
+        /// The objects are the test's own, so the callee is the copy and nothing
+        /// else: the first safepoint a native run reaches is the helper's. A
+        /// cancellation is answered there, before a byte is copied; fuel is gathered
+        /// there and then spent chunk by chunk, so the overspend is the chunk loop's
+        /// — one chunk plus one stride, as on the dispatch loop, and emphatically
+        /// not the length of the copy.
+        #[test]
+        fn a_compiled_copy_longer_than_a_chunk_stops_within_its_bound() {
+            const BYTES: i64 = 1 << 20;
+            let (program, copy_into, entry) = byte_copier();
+            let native = compiled(&program, copy_into);
+            let words = (BYTES as u64).div_ceil(8);
+            let prepare = |machine: &mut Machine<'_>| {
+                let src = machine
+                    .allocate(machine.program.bytes_layout, BYTES)
+                    .unwrap();
+                let dst = machine
+                    .allocate(machine.program.bytes_layout, BYTES)
+                    .unwrap();
+                vec![dst, 0, src, 0, BYTES as u64]
+            };
+            let nothing = |_: &Machine<'_>, _: &[u64]| ();
+
+            for limit in [1_024u64, 8_192, 40_000] {
+                let bound = limit + words_of_bytes(BULK_CHUNK_BYTES) + SAFEPOINT_STRIDE;
+                for tier in [None, Some(&native)] {
+                    let budget = crate::budget::Budget::new(crate::budget::Limits {
+                        fuel: Some(limit),
+                        ..crate::budget::Limits::default()
+                    });
+                    let (said, (), tiers, _) = on(
+                        &program,
+                        tier,
+                        1 << 22,
+                        &budget.meter(),
+                        entry,
+                        &prepare,
+                        &nothing,
+                    );
+                    let (.., outcome) = said.expect_err("a copy past its fuel is stopped");
+                    assert_eq!(outcome, crate::trace::RunOutcome::Fuel);
+                    if tier.is_some() {
+                        assert!(tiers.vm_to_native >= 1, "{tiers:?}");
+                    }
+                    let spent = budget.fuel_spent();
+                    assert!(
+                        spent <= bound && spent < words,
+                        "a {BYTES}-byte copy under a fuel limit of {limit} spent {spent} \
+                         (native: {}), past the bound of {bound}; the whole copy would have \
+                         been {words}",
+                        tier.is_some()
+                    );
+                }
+            }
+
+            for tier in [None, Some(&native)] {
+                let budget = crate::budget::Budget::new(crate::budget::Limits::default());
+                budget.cancellation().cancel();
+                let (said, (), tiers, work) = on(
+                    &program,
+                    tier,
+                    1 << 22,
+                    &budget.meter(),
+                    entry,
+                    &prepare,
+                    &nothing,
+                );
+                let (.., outcome) = said.expect_err("a cancelled run does not answer");
+                assert_eq!(outcome, crate::trace::RunOutcome::Cancelled);
+                if tier.is_some() {
+                    assert!(tiers.vm_to_native >= 1, "{tiers:?}");
+                }
+                let bound = words_of_bytes(BULK_CHUNK_BYTES) + SAFEPOINT_STRIDE;
+                assert!(
+                    work <= bound,
+                    "a cancelled {BYTES}-byte copy did {work} work (native: {}), past {bound}",
+                    tier.is_some()
+                );
+            }
+        }
+
+        /// **References copied by compiled code survive collections made from that
+        /// compiled frame, half way through the copy and after the source is
+        /// dropped.**
+        ///
+        /// `references_copied_into_a_run_survive_a_collection`'s fixture as the
+        /// callee, so its garbage allocations are compiled `Inst::Alloc`s and every
+        /// collection walks a compiled frame holding a half-copied run of `String`s.
+        /// A collection *at a chunk's poll* is not something a single-task run can
+        /// force — `Memory::poll` joins a collection another task asked for, and a
+        /// copy allocates nothing — so, as on the dispatch loop, the collections
+        /// are forced beside the copy rather than inside it.
+        #[test]
+        fn references_copied_by_compiled_code_survive_a_collection() {
+            const COUNT: i64 = 10;
+            const GARBAGE: u32 = 200;
+            let mut build = Build::default();
+            let int = build.scalar(Repr::Int);
+            let text = build.string_layout();
+            let strings = build.layout(
+                "Array<String>",
+                Shape::Elements {
+                    elem: text,
+                    growable: false,
+                },
+            );
+            let ints = build.layout(
+                "Array<Int>",
+                Shape::Elements {
+                    elem: int,
+                    growable: false,
+                },
+            );
+            let first = build.args(&[(1, strings), (3, int), (0, strings), (3, int), (2, int)]);
+            let second = build.args(&[(1, strings), (2, int), (0, strings), (2, int), (2, int)]);
+            let garbage = |code: &mut Vec<Inst>| {
+                for _ in 0..3 {
+                    code.push(Inst::Alloc {
+                        dst: 5,
+                        layout: ints,
+                        len: Len::Count(GARBAGE),
+                    });
+                    code.push(Inst::Clear {
+                        slot: 5,
+                        layout: ints,
+                    });
+                }
+            };
+            let mut code = vec![
+                Inst::Int {
+                    dst: 4,
+                    value: COUNT,
+                },
+                Inst::Alloc {
+                    dst: 1,
+                    layout: strings,
+                    len: Len::Slot(4),
+                },
+                Inst::Int {
+                    dst: 2,
+                    value: COUNT / 2,
+                },
+                Inst::Int { dst: 3, value: 0 },
+                Inst::RunCopy {
+                    args: first,
+                    storage: Storage::Words(text),
+                },
+            ];
+            garbage(&mut code);
+            code.push(Inst::RunCopy {
+                args: second,
+                storage: Storage::Words(text),
+            });
+            code.push(Inst::Clear {
+                slot: 0,
+                layout: strings,
+            });
+            garbage(&mut code);
+            code.push(Inst::Return { src: 1 });
+            let inner = build.function(
+                "copy_strings",
+                &[strings],
+                &[
+                    Repr::Ref,
+                    Repr::Ref,
+                    Repr::Int,
+                    Repr::Int,
+                    Repr::Int,
+                    Repr::Ref,
+                ],
+                strings,
+                code,
+            );
+            let entry = through_a_call(&mut build, inner, Repr::Ref);
+            let program = build.done();
+            let native = compiled(&program, inner);
+
+            let answered = |tier: Option<&NativeProgram>| {
+                // One word more than the dispatch loop's fixture, for the caller's
+                // frame: the heap is what has to be tight, and it is the same heap.
+                let mut machine = Machine::new(&program, 600);
+                if let Some(native) = tier {
+                    // Safety: `native` outlives this machine.
+                    unsafe { machine.install_native(native) };
+                }
+                let src = machine.allocate(strings, COUNT).unwrap();
+                for at in 0..COUNT {
+                    let word = machine.new_string(&format!("string {at}")).unwrap();
+                    machine.set_payload(src, at as u32, word);
+                }
+                let before = machine.collected().collections;
+                let dst = machine
+                    .run(entry, &[src], &budget())
+                    .expect("the run answers the destination")[0];
+                let collections = machine.collected().collections - before;
+                let texts: Vec<Vec<u8>> = (0..COUNT)
+                    .map(|at| machine.string_bytes(machine.payload(dst, at as u32)))
+                    .collect();
+                (collections, texts, machine.tiers())
+            };
+            let (vm_collections, vm_texts, _) = answered(None);
+            let (collections, texts, tiers) = answered(Some(&native));
+            assert!(tiers.vm_to_native >= 1, "{tiers:?}");
+            for (tier, collected) in [("vm", vm_collections), ("native", collections)] {
+                assert!(
+                    collected >= 1,
+                    "{tier}: the fixture exists to collect with a half-copied run live, and \
+                     it collected {collected} time(s)"
+                );
+            }
+            assert_eq!(texts, vm_texts);
+            for (at, text) in texts.iter().enumerate() {
+                assert_eq!(text, format!("string {at}").as_bytes());
+            }
         }
     }
 }

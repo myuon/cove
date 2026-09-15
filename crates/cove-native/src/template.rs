@@ -241,6 +241,7 @@ struct Helpers {
     alloc: usize,
     builtin: usize,
     growable: usize,
+    run_copy: usize,
     field_load: usize,
     field_store: usize,
 }
@@ -267,6 +268,7 @@ impl Jit {
                 alloc: helpers.alloc as usize,
                 builtin: helpers.builtin as usize,
                 growable: helpers.growable as usize,
+                run_copy: helpers.run_copy as usize,
                 field_load: helpers.field_load as usize,
                 field_store: helpers.field_store as usize,
             },
@@ -372,6 +374,7 @@ struct Emit<'a> {
     alloc: usize,
     builtin: usize,
     growable: usize,
+    run_copy: usize,
     field_load: usize,
     field_store: usize,
     /// Whether a compiled callee is reached by emitted code. See [`Jit::direct`].
@@ -412,6 +415,7 @@ impl<'a> Emit<'a> {
             alloc: helpers.alloc,
             builtin: helpers.builtin,
             growable: helpers.growable,
+            run_copy: helpers.run_copy,
             field_load: helpers.field_load,
             field_store: helpers.field_store,
             direct,
@@ -621,6 +625,11 @@ impl<'a> Emit<'a> {
                 storage: Storage::PackedBytes,
                 ..
             } => self.growable_op(GrowableOp::Finish, *dst, *owner),
+            // ADR 0058's `run-copy`, handed to the runtime whole. See
+            // [`crate::abi::RunCopyFn`] for why it has no emitted loop — memmove in
+            // bounded chunks with a poll between them, and refusals whose
+            // sentences only the runtime can build.
+            Inst::RunCopy { args, storage } => self.run_copy(args.0, *storage),
             Inst::Alloc { dst, layout, len } => self.allocate(*dst, layout.0, *len),
             Inst::Switch { on, table } => self.switch(*on, *table),
             // `encoded.rs`'s `NEG_INT` arm: `checked_neg`, whose `None` is
@@ -1502,6 +1511,47 @@ impl<'a> Emit<'a> {
         self.mov_imm32(R8, a as i32);
         self.mov_imm32(R9, b as i32);
         self.mov_imm64(RAX, self.growable as i64);
+        self.call(RAX);
+
+        // Anything but `Returned` leaves, and leaves with that outcome: the helper
+        // has already written every field it needs.
+        let on = self.label();
+        self.test_rr32(RAX, RAX);
+        self.jcc(CC_E, Target::Label(on));
+        self.leave_answered();
+        self.bind(on);
+        self.frame_live = false;
+    }
+
+    /// One [ADR 0058] `run-copy`, handed to the runtime whole.
+    ///
+    /// [`Emit::growable_op`]'s shape exactly — the same six registers, the same
+    /// shift back to a word index, the same test of the outcome — with the
+    /// argument list and the storage in place of the operation and its pair. See
+    /// [`crate::abi::RunCopyFn`] for what the operands mean and why the copy is the
+    /// helper's.
+    ///
+    /// It is a safepoint: the helper takes one before the copy, and a long copy
+    /// polls between chunks, either of which may collect. So the unpaid work is
+    /// published before the call and the frame pointer dropped after it.
+    ///
+    /// [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+    fn run_copy(&mut self, args: u32, storage: Storage) {
+        let (words, elem) = match storage {
+            Storage::PackedBytes => (0, 0),
+            Storage::Words(elem) => (1, elem.0),
+        };
+        self.store(CTX, OFF_PENDING_WORK, WORK);
+        self.xor_rr(WORK, WORK);
+
+        self.mov_rr(RDI, CTX);
+        self.mov_rr(RSI, BASE_BYTES);
+        self.shr_imm8(RSI, 3);
+        self.mov_imm32(RDX, self.pc as i32);
+        self.mov_imm32(RCX, args as i32);
+        self.mov_imm32(R8, words);
+        self.mov_imm32(R9, elem as i32);
+        self.mov_imm64(RAX, self.run_copy as i64);
         self.call(RAX);
 
         // Anything but `Returned` leaves, and leaves with that outcome: the helper

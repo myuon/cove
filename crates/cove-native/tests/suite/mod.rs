@@ -478,6 +478,79 @@ pub fn built_answers(outcomes: &[Outcome]) {
         .with(|held| *held.borrow_mut() = outcomes.iter().map(|outcome| outcome.abi()).collect());
 }
 
+// --- the run-copy helper ------------------------------------------------------
+
+/// One run copy compiled code handed back through
+/// [`RunCopyFn`](cove_native::RunCopyFn).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Copied {
+    pub base: u64,
+    pub pc: u32,
+    pub args: u32,
+    pub words: u32,
+    pub elem: u32,
+    /// The unpaid work the caller published before handing over.
+    pub work: u64,
+}
+
+thread_local! {
+    /// Every run copy this thread's compiled code handed over, in order.
+    pub static COPIED: RefCell<Vec<Copied>> = const { RefCell::new(Vec::new()) };
+    /// What the next one answers, taken from the front.
+    pub static COPIED_ANSWERS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The runtime's run-copy helper, as a test double.
+///
+/// A real one is `encoded::run_copy_bytes` or `encoded::run_copy_words`, whole.
+/// This one records the hand-over and writes nothing: the instruction has no
+/// destination slot — it writes into the object `dst` names — so a double that
+/// wrote into the frame would be asserting a store the runtime does not make.
+///
+/// # Safety
+///
+/// As [`alloc`].
+unsafe extern "C" fn run_copy(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    args: u32,
+    words: u32,
+    elem: u32,
+) -> u32 {
+    COPIED.with(|held| {
+        held.borrow_mut().push(Copied {
+            base,
+            pc,
+            args,
+            words,
+            elem,
+            work: (*ctx).pending_work,
+        })
+    });
+    (*ctx).pending_work = 0;
+    let answer = COPIED_ANSWERS.with(|held| {
+        let mut held = held.borrow_mut();
+        (!held.is_empty()).then(|| held.remove(0))
+    });
+    answer.unwrap_or(Outcome::Returned.abi())
+}
+
+pub fn copied() -> Vec<Copied> {
+    COPIED.with(|held| held.borrow().clone())
+}
+
+pub fn forget_copied() {
+    COPIED.with(|held| held.borrow_mut().clear());
+    COPIED_ANSWERS.with(|held| held.borrow_mut().clear());
+}
+
+/// Scripts what the next run copies answer.
+pub fn copied_answers(outcomes: &[Outcome]) {
+    COPIED_ANSWERS
+        .with(|held| *held.borrow_mut() = outcomes.iter().map(|outcome| outcome.abi()).collect());
+}
+
 // --- the field-access cold path ------------------------------------------------
 
 /// One field access compiled code handed back through
@@ -623,6 +696,7 @@ pub fn helpers() -> NativeHelpers {
         alloc,
         builtin,
         growable,
+        run_copy,
         field_load,
         field_store,
     }
@@ -2921,6 +2995,184 @@ pub fn a_growable_buffer_is_admitted_as_a_family<A: Arm>() {
             },
         ])),
         "an operand that is two words is not one of these four"
+    );
+}
+
+/// A run copy's five operands, as `ArgsId(1)`: `dst` in slot 0, `dst_at` in 1,
+/// `src` in 2, `src_at` in 3 and `count` in 4.
+pub fn run_copy_row() -> Vec<Arg> {
+    vec![
+        Arg {
+            slot: 0,
+            layout: REF,
+        },
+        Arg {
+            slot: 1,
+            layout: INT,
+        },
+        Arg {
+            slot: 2,
+            layout: REF,
+        },
+        Arg {
+            slot: 3,
+            layout: INT,
+        },
+        Arg {
+            slot: 4,
+            layout: INT,
+        },
+    ]
+}
+
+/// Two run copies — one of each storage — and a return, over [`run_copy_row`].
+pub fn run_copies() -> Program {
+    program_with_args(
+        function(
+            vec![Repr::Ref, Repr::Int, Repr::Ref, Repr::Int, Repr::Int],
+            INT,
+            vec![
+                Inst::RunCopy {
+                    args: ArgsId(1),
+                    storage: Storage::PackedBytes,
+                },
+                Inst::RunCopy {
+                    args: ArgsId(1),
+                    storage: Storage::Words(PAIR),
+                },
+                Inst::Return { src: 4 },
+            ],
+        ),
+        run_copy_row(),
+    )
+}
+
+/// ADR 0058's `run-copy`, over both storages, handed to the runtime whole.
+///
+/// [`cove_native::RunCopyFn`] is the reason there is no fast path to check. What
+/// a case can say is what *is* emitted code: the argument list and the storage
+/// reach the helper unchanged — a byte copy as `words = 0` with nought for the
+/// element, a word copy as `words = 1` with its element's `LayoutId` — the pc is
+/// each instruction's own, the unpaid work is published and cleared because the
+/// hand-over is a safepoint, and nothing is written into the frame, because the
+/// instruction writes into the object `dst` names and not into a slot.
+pub fn a_run_copy_is_handed_to_the_runtime_whole<A: Arm>() {
+    forget_copied();
+    let held = run_copies();
+    let heap = Heap::new(1);
+    let frame = [7u64, 1, 9, 2, 3];
+    let mut words = frame.to_vec();
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(
+        copied(),
+        vec![
+            Copied {
+                base: 0,
+                pc: 0,
+                args: 1,
+                words: 0,
+                elem: 0,
+                // The block is three instructions, charged at its entry, so the
+                // first hand-over carries all of it.
+                work: 3,
+            },
+            Copied {
+                base: 0,
+                pc: 1,
+                args: 1,
+                words: 1,
+                elem: PAIR.0,
+                work: 0,
+            },
+        ],
+        "both copies, in order, with their storage"
+    );
+    assert_eq!(words, frame, "and not a word of the frame was written");
+    assert_eq!(answer.returned[0], 3, "the count, returned after both");
+    assert_eq!(answer.pending_work, 0);
+
+    // A frame that does not begin at word zero: `base` is a word index.
+    forget_copied();
+    let mut words = vec![5, 5, 7, 1, 9, 2, 3];
+    let answer = run_over::<A>(&held, &mut words, 2, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(
+        copied().iter().map(|row| row.base).collect::<Vec<_>>(),
+        vec![2, 2]
+    );
+    assert_eq!(&words[..2], &[5, 5]);
+}
+
+/// A run copy the runtime refused — or whose poll said stop — leaves with *that*
+/// outcome, and runs nothing after it.
+pub fn a_run_copy_the_runtime_refused_leaves_with_that_outcome<A: Arm>() {
+    for outcome in [Outcome::Raised, Outcome::Stopped] {
+        forget_copied();
+        copied_answers(&[outcome]);
+        let heap = Heap::new(1);
+        let mut words = vec![7u64, 1, 9, 2, 3];
+        let answer = run_over::<A>(&run_copies(), &mut words, 0, &heap);
+        assert_eq!(answer.outcome, outcome);
+        assert_eq!(copied().len(), 1, "and it left at the first refusal");
+        assert_eq!(
+            answer.returned[0], UNWRITTEN,
+            "nothing was published to the destination"
+        );
+    }
+}
+
+/// A run copy is admitted over both storages with five one-word operands the
+/// frame has, and refused otherwise.
+///
+/// `cove_ir::verify` holds the row to that shape, so the refusals are unreachable
+/// for a lowered program — and they are bounded here anyway, because what the
+/// helper does with a short row is index past the end of it, and what it does with
+/// an element layout the table does not have is read past the table.
+pub fn a_run_copy_is_admitted_with_five_one_word_operands<A: Arm>() {
+    let one = |storage: Storage, row: Vec<Arg>| {
+        program_with_args(
+            function(
+                vec![Repr::Ref, Repr::Int, Repr::Ref, Repr::Int, Repr::Int],
+                INT,
+                vec![
+                    Inst::RunCopy {
+                        args: ArgsId(1),
+                        storage,
+                    },
+                    Inst::Return { src: 4 },
+                ],
+            ),
+            row,
+        )
+    };
+    for storage in [Storage::PackedBytes, Storage::Words(INT), Storage::Words(PAIR)] {
+        assert!(
+            compiles::<A>(&one(storage, run_copy_row())),
+            "{storage:?} is admitted"
+        );
+        let mut short = run_copy_row();
+        short.pop();
+        assert!(
+            !compiles::<A>(&one(storage, short)),
+            "{storage:?}: four operands is not a `run-copy` row"
+        );
+        let mut past = run_copy_row();
+        past[4].slot = 9;
+        assert!(
+            !compiles::<A>(&one(storage, past)),
+            "{storage:?}: an operand at a slot the frame does not have"
+        );
+        let mut wide = run_copy_row();
+        wide[1].layout = PAIR;
+        assert!(
+            !compiles::<A>(&one(storage, wide)),
+            "{storage:?}: an operand that is two words"
+        );
+    }
+    assert!(
+        !compiles::<A>(&one(Storage::Words(LayoutId(9_999)), run_copy_row())),
+        "an element layout the program does not have"
     );
 }
 
