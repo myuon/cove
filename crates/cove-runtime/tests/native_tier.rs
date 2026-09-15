@@ -598,9 +598,9 @@ export fn callsFillsTheHeap(n: Int) -> Int {
 /// **A builder allocated, appended to and finished in one compiled frame.**
 ///
 /// [ADR 0052]'s four, as a Cove program reaches them: `withCapacity` is an
-/// `alloc-buffer`, each `append` an `append-bytes`, and `finish` a
-/// `finish-buffer`. Every one of them is a call into the runtime — see
-/// `cove_native::abi`'s `BufferFn` for why all four are and none is half emitted
+/// `growable-alloc`, each `append` an `growable-extend`, and `finish` a
+/// `run-finish`. Every one of them is a call into the runtime — see
+/// `cove_native::abi`'s `GrowableFn` for why all four are and none is half emitted
 /// — so what a differential case says is that the *frame around them* is compiled
 /// and the answer is still the VM's, byte for byte.
 ///
@@ -646,7 +646,7 @@ export fn addsTo(var out: StringBuilder, text: String) {
   out.append(text)
 }
 
-/// A builder whose `alloc-buffer` and `finish-buffer` are compiled and whose
+/// A builder whose `growable-alloc` and `run-finish` are compiled and whose
 /// middle append is the VM's.
 ///
 /// ADR 0052's whole point as a tier question: the owner is stable, so the growth
@@ -1681,7 +1681,7 @@ fn a_byte_length_reads_the_heap_on_a_later_segment() {
 ///
 /// [ADR 0052]'s four reached from a compiled frame, against the VM. What the
 /// native tier does with each of them is hand it to the runtime — see
-/// `cove_native::abi`'s `BufferFn` — so the claim is not that the append got
+/// `cove_native::abi`'s `GrowableFn` — so the claim is not that the append got
 /// faster; it is that the frame around it compiles and the string it builds is
 /// still character for character the VM's.
 ///
@@ -1726,11 +1726,11 @@ fn a_builder_is_built_and_finished_in_compiled_code() {
 /// A finish of a run that is not valid UTF-8 raises the VM's own sentence.
 ///
 /// `cove-native` names errors and never builds one, so this is the
-/// `BufferFn`-shaped version of the claim every raise in this file makes: the
+/// `GrowableFn`-shaped version of the claim every raise in this file makes: the
 /// message, the rule and the span are the runtime's whichever tier the frame was
 /// on. Two failures and one success, because the two failures are raised by
-/// *different* instructions — `append-byte` refuses a value that is not a byte
-/// and `finish-buffer` refuses bytes that are not text — and a tier that reported
+/// *different* instructions — `growable-push` refuses a value that is not a byte
+/// and `run-finish` refuses bytes that are not text — and a tier that reported
 /// one instruction's span for the other's error would still print a sentence.
 #[test]
 fn a_finish_of_invalid_utf8_is_the_vm_s_sentence() {
@@ -1764,8 +1764,8 @@ fn a_finish_of_invalid_utf8_is_the_vm_s_sentence() {
 /// **A builder that crosses a tier boundary between its `alloc` and its
 /// `finish`.**
 ///
-/// ADR 0052's stable owner, as a tier question. The `alloc-buffer` and the
-/// `finish-buffer` are a compiled frame's and the append in between is an encoded
+/// ADR 0052's stable owner, as a tier question. The `growable-alloc` and the
+/// `run-finish` are a compiled frame's and the append in between is an encoded
 /// one's, reached through a `var` — so the growth that happens on the VM has to be
 /// visible to the compiled frame that made the builder. It is, because there is
 /// nothing to be visible *of*: both frames name one owner, and only the store
@@ -1931,7 +1931,7 @@ fn an_allocation_from_compiled_code_collects_and_keeps_what_is_live() {
 /// **A collection forced with a half-built run live in a compiled frame.**
 ///
 /// The case the buffer helper's rooting argument is about, and the one thing
-/// about it that is genuinely new. `alloc-buffer` allocates *twice* and the store
+/// about it that is genuinely new. `growable-alloc` allocates *twice* and the store
 /// is unreachable from any frame between the two — the runtime holds it with
 /// `Machine::push_temp`, which is why the whole instruction is one helper and not
 /// two [`cove_native::AllocFn`] calls with emitted code in between. After it, the

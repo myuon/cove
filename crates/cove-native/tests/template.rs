@@ -453,7 +453,7 @@ fn direct_helpers() -> NativeHelpers {
         // a table somebody has to keep honest.
         alloc: shared.alloc,
         builtin: shared.builtin,
-        buffer: shared.buffer,
+        growable: shared.growable,
         field_load: shared.field_load,
         field_store: shared.field_store,
     }

@@ -126,14 +126,16 @@ mod base {
     /// lets an encoding split it into by storage.
     pub const RUN_COPY_BYTES: u8 = RUN_LOAD_BYTES + 1;
     pub const RUN_COPY_WORDS: u8 = RUN_COPY_BYTES + 1;
+    /// The byte members of ADR 0058's growable family and its finish —
     /// [ADR 0052](../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
-    /// four byte-buffer instructions, in the order [`crate::Inst`] declares
-    /// them and directly after the run copy they fill with.
-    pub const ALLOC_BUFFER: u8 = RUN_COPY_WORDS + 1;
-    pub const APPEND_BYTE: u8 = ALLOC_BUFFER + 1;
-    pub const APPEND_BYTES: u8 = APPEND_BYTE + 1;
-    pub const FINISH_BUFFER: u8 = APPEND_BYTES + 1;
-    pub const LEN: u8 = FINISH_BUFFER + 1;
+    /// four byte-buffer instructions, renamed in place — in the order
+    /// [`crate::Inst`] declares them and directly after the run copy they fill
+    /// with.
+    pub const GROWABLE_ALLOC_BYTES: u8 = RUN_COPY_WORDS + 1;
+    pub const GROWABLE_PUSH_BYTE: u8 = GROWABLE_ALLOC_BYTES + 1;
+    pub const GROWABLE_EXTEND_BYTES: u8 = GROWABLE_PUSH_BYTE + 1;
+    pub const RUN_FINISH_BYTES: u8 = GROWABLE_EXTEND_BYTES + 1;
+    pub const LEN: u8 = RUN_FINISH_BYTES + 1;
     pub const LAYOUT_OF: u8 = LEN + 1;
     pub const ADDR_OF_SLOT: u8 = LAYOUT_OF + 1;
     pub const ADDR_OF_FIELD: u8 = ADDR_OF_SLOT + 1;
@@ -209,10 +211,16 @@ pub enum Op {
     /// [`crate::Inst::RunCopy`] over [`crate::Storage::Words`], whose element
     /// layout is the payload's high half.
     RunCopyWords,
-    AllocBuffer,
-    AppendByte,
-    AppendBytes,
-    FinishBuffer,
+    /// [`crate::Inst::GrowableAlloc`] over [`crate::Storage::PackedBytes`].
+    GrowableAllocBytes,
+    /// [`crate::Inst::GrowablePush`] over [`crate::Storage::PackedBytes`].
+    GrowablePushByte,
+    /// [`crate::Inst::GrowableExtend`] over [`crate::Storage::PackedBytes`].
+    GrowableExtendBytes,
+    /// [`crate::Inst::RunFinish`] over [`crate::Storage::PackedBytes`], which
+    /// is always [`crate::Validation::Utf8`]; the target layout is the
+    /// payload's low half.
+    RunFinishBytes,
     Len,
     LayoutOf,
     AddrOfSlot,
@@ -473,10 +481,10 @@ impl Op {
             Op::RunLoadBytes,
             Op::RunCopyBytes,
             Op::RunCopyWords,
-            Op::AllocBuffer,
-            Op::AppendByte,
-            Op::AppendBytes,
-            Op::FinishBuffer,
+            Op::GrowableAllocBytes,
+            Op::GrowablePushByte,
+            Op::GrowableExtendBytes,
+            Op::RunFinishBytes,
             Op::Len,
             Op::LayoutOf,
             Op::AddrOfSlot,
@@ -559,10 +567,10 @@ impl Op {
             Op::RunLoadBytes => base::RUN_LOAD_BYTES,
             Op::RunCopyBytes => base::RUN_COPY_BYTES,
             Op::RunCopyWords => base::RUN_COPY_WORDS,
-            Op::AllocBuffer => base::ALLOC_BUFFER,
-            Op::AppendByte => base::APPEND_BYTE,
-            Op::AppendBytes => base::APPEND_BYTES,
-            Op::FinishBuffer => base::FINISH_BUFFER,
+            Op::GrowableAllocBytes => base::GROWABLE_ALLOC_BYTES,
+            Op::GrowablePushByte => base::GROWABLE_PUSH_BYTE,
+            Op::GrowableExtendBytes => base::GROWABLE_EXTEND_BYTES,
+            Op::RunFinishBytes => base::RUN_FINISH_BYTES,
             Op::Len => base::LEN,
             Op::LayoutOf => base::LAYOUT_OF,
             Op::AddrOfSlot => base::ADDR_OF_SLOT,
@@ -806,17 +814,27 @@ impl Op {
             // owner is always `Program::buffer_layout` and its store is always
             // `Program::bytes_layout`, program-wide constants rather than
             // facts an opcode has to carry.
-            Op::AllocBuffer => fields(Operand::Word(REF), Operand::Word(INT), NONE, Payload::Empty),
-            Op::AppendByte => fields(Operand::Word(REF), Operand::Word(INT), NONE, Payload::Empty),
-            // All four operands — `buffer`, `src`, `from`, `to` — live behind
+            Op::GrowableAllocBytes => {
+                fields(Operand::Word(REF), Operand::Word(INT), NONE, Payload::Empty)
+            }
+            Op::GrowablePushByte => {
+                fields(Operand::Word(REF), Operand::Word(INT), NONE, Payload::Empty)
+            }
+            // All four operands — `owner`, `src`, `from`, `to` — live behind
             // the `ArgsId`, because a sixteen-byte instruction has room for
             // three slot operands and this needs four. See
-            // `Inst::AppendBytes`'s doc, and `Op::RunCopyBytes` above for the same
+            // `Inst::GrowableExtend`'s doc, and `Op::RunCopyBytes` above for the same
             // arrangement at five.
-            Op::AppendBytes => fields(NONE, NONE, NONE, one(Half::Args)),
-            Op::FinishBuffer => {
-                fields(Operand::Word(REF), Operand::Word(REF), NONE, Payload::Empty)
-            }
+            Op::GrowableExtendBytes => fields(NONE, NONE, NONE, one(Half::Args)),
+            // The target layout rides in the payload because the IR carries it;
+            // for bytes it is always `Program::str_layout`, which
+            // `crate::verify` checks, and a word finish will name an `Array`.
+            Op::RunFinishBytes => fields(
+                Operand::Word(REF),
+                Operand::Word(REF),
+                NONE,
+                one(Half::Layout),
+            ),
             Op::Len => fields(Operand::Word(INT), Operand::Word(REF), NONE, Payload::Empty),
             Op::LayoutOf => fields(Operand::Word(INT), Operand::Word(REF), NONE, Payload::Empty),
             Op::AddrOfSlot => fields(
@@ -913,7 +931,9 @@ mod tests {
     /// `Compare::Tag` brought its six, a hundred and thirteen once ADR
     /// 0051's `AllocBytes`, `WriteByte`, `CopyBytes` and `FinishString`
     /// brought four more, a hundred and seventeen once ADR 0052's
-    /// `AllocBuffer`, `AppendByte`, `AppendBytes` and `FinishBuffer` brought
+    /// `AllocBuffer`, `AppendByte`, `AppendBytes` and `FinishBuffer` (now
+    /// ADR 0058's `GrowableAllocBytes`, `GrowablePushByte`,
+    /// `GrowableExtendBytes` and `RunFinishBytes`) brought
     /// the growable four beside them, and a hundred and fifty-nine once ADR
     /// 0054's `CmpBranch` and `CmpImmBranch` mirrored `Cmp` and `CmpImm`
     /// member for member — thirty-six and six, the largest single growth this

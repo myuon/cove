@@ -47,8 +47,8 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module, ModuleError};
 
 use crate::abi::{
-    BufferOp, Entry, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
-    HEAP_ORIGIN_WORDS,
+    Entry, GrowableOp, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT,
+    HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
     by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported, Method,
@@ -73,9 +73,9 @@ const ALLOC: &str = "cove_native_alloc";
 /// The name the builtin helper is imported under. [`SAFEPOINT`]'s note applies.
 const BUILTIN: &str = "cove_native_builtin";
 
-/// The name the growable-buffer helper is imported under. [`SAFEPOINT`]'s note
+/// The name the growable-run helper is imported under. [`SAFEPOINT`]'s note
 /// applies.
-const BUFFER: &str = "cove_native_buffer";
+const GROWABLE: &str = "cove_native_growable";
 
 /// The name the field-load helper is imported under. [`SAFEPOINT`]'s note
 /// applies.
@@ -145,7 +145,7 @@ pub struct Jit {
     call: FuncId,
     alloc: FuncId,
     builtin: FuncId,
-    buffer: FuncId,
+    growable: FuncId,
     field_load: FuncId,
     field_store: FuncId,
     /// How many functions have been declared, which is how the symbol names
@@ -171,7 +171,7 @@ impl Jit {
         builder.symbol(CALL, helpers.call as usize as *const u8);
         builder.symbol(ALLOC, helpers.alloc as usize as *const u8);
         builder.symbol(BUILTIN, helpers.builtin as usize as *const u8);
-        builder.symbol(BUFFER, helpers.buffer as usize as *const u8);
+        builder.symbol(GROWABLE, helpers.growable as usize as *const u8);
         builder.symbol(FIELD_LOAD, helpers.field_load as usize as *const u8);
         builder.symbol(FIELD_STORE, helpers.field_store as usize as *const u8);
         let mut module = JITModule::new(builder);
@@ -195,11 +195,11 @@ impl Jit {
         let alloc = module.declare_function(ALLOC, Linkage::Import, &signature)?;
         let signature = builtin_signature(&module);
         let builtin = module.declare_function(BUILTIN, Linkage::Import, &signature)?;
-        // The same signature: `BufferFn` and `BuiltinFn` are one pointer, one
+        // The same signature: `GrowableFn` and `BuiltinFn` are one pointer, one
         // `I64` and four `I32`s, and a second declaration that said so in its own
         // words would be a second place for the shape to drift.
         let signature = builtin_signature(&module);
-        let buffer = module.declare_function(BUFFER, Linkage::Import, &signature)?;
+        let growable = module.declare_function(GROWABLE, Linkage::Import, &signature)?;
         let signature = field_signature(&module);
         let field_load = module.declare_function(FIELD_LOAD, Linkage::Import, &signature)?;
         let field_store = module.declare_function(FIELD_STORE, Linkage::Import, &signature)?;
@@ -211,7 +211,7 @@ impl Jit {
             call,
             alloc,
             builtin,
-            buffer,
+            growable,
             field_load,
             field_store,
             declared: 0,
@@ -250,7 +250,9 @@ impl Jit {
             let call = self.module.declare_func_in_func(self.call, builder.func);
             let alloc = self.module.declare_func_in_func(self.alloc, builder.func);
             let builtin = self.module.declare_func_in_func(self.builtin, builder.func);
-            let buffer = self.module.declare_func_in_func(self.buffer, builder.func);
+            let growable = self
+                .module
+                .declare_func_in_func(self.growable, builder.func);
             let field_load = self
                 .module
                 .declare_func_in_func(self.field_load, builder.func);
@@ -266,7 +268,7 @@ impl Jit {
                     call,
                     alloc,
                     builtin,
-                    buffer,
+                    growable,
                     field_load,
                     field_store,
                 },
@@ -449,7 +451,7 @@ struct Bound {
     call: FuncRef,
     alloc: FuncRef,
     builtin: FuncRef,
-    buffer: FuncRef,
+    growable: FuncRef,
     field_load: FuncRef,
     field_store: FuncRef,
 }
@@ -745,23 +747,39 @@ impl<'a, 'f> Lower<'a, 'f> {
                 false
             }
             // ADR 0052's four, each handed to the runtime whole. See
-            // [`crate::abi::BufferFn`] for why none of them has an emitted fast
+            // [`crate::abi::GrowableFn`] for why none of them has an emitted fast
             // path — one rooting discipline that is not the frame's, one chunked
             // safepoint contract, and one UTF-8 walk.
-            Inst::AllocBuffer { dst, capacity } => {
-                self.buffer_op(BufferOp::Alloc, *dst, *capacity);
+            Inst::GrowableAlloc {
+                dst,
+                capacity,
+                storage: Storage::PackedBytes,
+            } => {
+                self.growable_op(GrowableOp::Alloc, *dst, *capacity);
                 false
             }
-            Inst::AppendByte { buffer, value } => {
-                self.buffer_op(BufferOp::AppendByte, *buffer, *value);
+            Inst::GrowablePush {
+                owner,
+                src,
+                storage: Storage::PackedBytes,
+            } => {
+                self.growable_op(GrowableOp::Push, *owner, *src);
                 false
             }
-            Inst::AppendBytes { args } => {
-                self.buffer_op(BufferOp::AppendBytes, args.0, 0);
+            Inst::GrowableExtend {
+                args,
+                storage: Storage::PackedBytes,
+            } => {
+                self.growable_op(GrowableOp::Extend, args.0, 0);
                 false
             }
-            Inst::FinishBuffer { dst, buffer } => {
-                self.buffer_op(BufferOp::Finish, *dst, *buffer);
+            Inst::RunFinish {
+                dst,
+                owner,
+                storage: Storage::PackedBytes,
+                ..
+            } => {
+                self.growable_op(GrowableOp::Finish, *dst, *owner);
                 false
             }
             Inst::Alloc { dst, layout, len } => {
@@ -1661,14 +1679,14 @@ impl<'a, 'f> Lower<'a, 'f> {
     ///
     /// [`Lower::builtin_call`]'s shape exactly, with the operand pair in place of
     /// the destination and the builtin and one more argument saying which of the
-    /// four this is. See [`crate::abi::BufferFn`] for what each operand means and
+    /// four this is. See [`crate::abi::GrowableFn`] for what each operand means and
     /// why all of it is the helper rather than a fast path and a cold one.
     ///
-    /// It is a safepoint: an `alloc-buffer` allocates twice, an `append` may grow
+    /// It is a safepoint: a `growable-alloc` allocates twice, an `append` may grow
     /// the store, and a `finish` walks the live prefix and charges what it moved.
     ///
     /// [ADR 0052]: ../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
-    fn buffer_op(&mut self, op: BufferOp, a: u32, b: u32) {
+    fn growable_op(&mut self, op: GrowableOp, a: u32, b: u32) {
         let work = self.b.use_var(self.work);
         self.store_ctx(OFF_PENDING_WORK, work);
         let zero = self.b.ins().iconst(types::I64, 0);
@@ -1679,7 +1697,7 @@ impl<'a, 'f> Lower<'a, 'f> {
         let first = self.b.ins().iconst(types::I32, i64::from(a));
         let second = self.b.ins().iconst(types::I32, i64::from(b));
         let call = self.b.ins().call(
-            self.bound.buffer,
+            self.bound.growable,
             &[self.ctx, self.base, at, which, first, second],
         );
         let outcome = self.b.inst_results(call)[0];
@@ -1962,7 +1980,7 @@ impl<'a, 'f> Lower<'a, 'f> {
         // little: the whole block's work is never charged at all, and ADR 0040's
         // `S + T` bound is then computed from a number that is short.
         //
-        // [`Lower::builtin_call`] and [`Lower::buffer_op`] publish *before* the
+        // [`Lower::builtin_call`] and [`Lower::growable_op`] publish *before* the
         // call instead, and clear the accumulator, because each of them is a
         // safepoint and the helper may charge. This one cannot do that: a field
         // helper is deliberately **not** a safepoint — neither

@@ -36,7 +36,7 @@
 //! observes, and that is a decision of its own (issue #378, Q13) rather than a
 //! side effect of moving the code.
 
-use cove_ir::{LayoutId, Storage};
+use cove_ir::{LayoutId, Storage, Validation};
 
 use super::Machine;
 use crate::error::RuntimeError;
@@ -98,18 +98,6 @@ impl Growable {
             Storage::Words(_) => MIN_GROWABLE_ELEMENTS,
         }
     }
-}
-
-/// What a finish checks about the live prefix before it hands it over.
-///
-/// `Vector.freeze()` is [`Validation::None`]: an element store is already the
-/// array it becomes. A byte builder is [`Validation::Utf8`], because the fixed
-/// run it becomes is a `String` and its bytes were never checked on the way
-/// in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Validation {
-    None,
-    Utf8,
 }
 
 /// Room for `additional` more units in `run`, growing its store if they would

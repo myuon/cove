@@ -335,7 +335,7 @@ fn is_expandable(f: &Function, limit: usize) -> bool {
 /// `matches!` above — but that is a fact worth writing down here precisely
 /// because the compiler cannot check it. The same is true of
 /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
-/// `AllocBuffer`, `AppendByte`, `AppendBytes` and `FinishBuffer`: they
+/// `GrowableAlloc`, `GrowablePush`, `GrowableExtend` and `RunFinish`: they
 /// allocate and they copy, and an allocation is not a call.
 fn reaches_nothing(inst: &Inst) -> bool {
     !matches!(
@@ -420,8 +420,8 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::Alloc { dst, .. }
             | Inst::Box { dst, .. }
             | Inst::RunLoad { dst, .. }
-            | Inst::AllocBuffer { dst, .. }
-            | Inst::FinishBuffer { dst, .. }
+            | Inst::GrowableAlloc { dst, .. }
+            | Inst::RunFinish { dst, .. }
             | Inst::Len { dst, .. }
             | Inst::LayoutOf { dst, .. }
             | Inst::AddrOfSlot { dst, .. }
@@ -438,8 +438,8 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::StoreElem { .. }
             | Inst::Store { .. }
             | Inst::RunCopy { .. }
-            | Inst::AppendByte { .. }
-            | Inst::AppendBytes { .. }
+            | Inst::GrowablePush { .. }
+            | Inst::GrowableExtend { .. }
             | Inst::Jump { .. }
             | Inst::BranchFalse { .. }
             | Inst::Switch { .. }
@@ -812,7 +812,7 @@ fn expand(program: &mut Program, id: FunctionId, small: &[bool], wide: &[bool], 
             }
             Inst::CallBuiltin { args, .. }
             | Inst::RunCopy { args, .. }
-            | Inst::AppendBytes { args }
+            | Inst::GrowableExtend { args, .. }
                 if args.0 >= PLACED =>
             {
                 *args = crate::ArgsId(listed + (args.0 - PLACED));
@@ -897,12 +897,12 @@ fn relocated(
         // An argument list is `Program::args` and not part of the
         // instruction, so shifting the slots the instruction names does not
         // reach it. A builtin is the one call a leaf may hold, and
-        // `Inst::RunCopy` and `Inst::AppendBytes` are the non-call
+        // `Inst::RunCopy` and `Inst::GrowableExtend` are the non-call
         // instructions that also name one — each is the list relocated into a
         // list of its own.
         Inst::CallBuiltin { args, .. }
         | Inst::RunCopy { args, .. }
-        | Inst::AppendBytes { args } => {
+        | Inst::GrowableExtend { args, .. } => {
             lists.push(
                 program
                     .arg_list(*args)
@@ -1025,14 +1025,14 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         Inst::RunLoad {
             dst, run, index, ..
         } => vec![dst, run, index],
-        Inst::AllocBuffer { dst, capacity } => vec![dst, capacity],
-        Inst::AppendByte { buffer, value } => vec![buffer, value],
-        Inst::FinishBuffer { dst, buffer } => vec![dst, buffer],
+        Inst::GrowableAlloc { dst, capacity, .. } => vec![dst, capacity],
+        Inst::GrowablePush { owner, src, .. } => vec![owner, src],
+        Inst::RunFinish { dst, owner, .. } => vec![dst, owner],
         // The five operands live in the args row rather than on the
         // instruction, exactly as a call's do — `relocated` moves that row
         // and repoints `args` at the copy, the same way it does for
         // `Inst::CallBuiltin`.
-        Inst::RunCopy { .. } | Inst::AppendBytes { .. } => Vec::new(),
+        Inst::RunCopy { .. } | Inst::GrowableExtend { .. } => Vec::new(),
         Inst::Len { dst, obj } | Inst::LayoutOf { dst, obj } => vec![dst, obj],
         Inst::AddrOfSlot { dst, slot } => vec![dst, slot],
         Inst::AddrOfField { dst, obj, .. } => vec![dst, obj],

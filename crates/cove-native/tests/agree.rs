@@ -19,6 +19,7 @@
 
 use cove_ir::{
     Arg, ArgsId, ArithOp, CmpOp, FunctionId, Inst, Len, Num, Program, Repr, Storage, StrId,
+    Validation,
 };
 use cove_native::{Entry, NativeHelpers, Outcome, HEAP_CHUNK_WORDS};
 
@@ -140,7 +141,7 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
     );
     assert_eq!(
         cranelift_built, template_built,
-        "the buffer operations handed to the runtime, in order: {what}"
+        "the growable operations handed to the runtime, in order: {what}"
     );
 }
 
@@ -251,7 +252,7 @@ fn agree_with_literals(
     );
     assert_eq!(
         cranelift_built, template_built,
-        "the buffer operations handed to the runtime, in order: {what}"
+        "the growable operations handed to the runtime, in order: {what}"
     );
     // The two heaps started equal, so a difference here is one arm having read or
     // written a word the other did not. Until `Inst::Store` this was the weaker
@@ -736,16 +737,27 @@ fn buffers() -> Program {
             vec![Repr::Ref, Repr::Int, Repr::Ref],
             suite::REF,
             vec![
-                Inst::AllocBuffer {
+                Inst::GrowableAlloc {
                     dst: 0,
                     capacity: 1,
+                    storage: Storage::PackedBytes,
                 },
-                Inst::AppendByte {
-                    buffer: 0,
-                    value: 1,
+                Inst::GrowablePush {
+                    owner: 0,
+                    src: 1,
+                    storage: Storage::PackedBytes,
                 },
-                Inst::AppendBytes { args: ArgsId(1) },
-                Inst::FinishBuffer { dst: 2, buffer: 0 },
+                Inst::GrowableExtend {
+                    args: ArgsId(1),
+                    storage: Storage::PackedBytes,
+                },
+                Inst::RunFinish {
+                    dst: 2,
+                    owner: 0,
+                    target: suite::REF,
+                    validation: Validation::Utf8,
+                    storage: Storage::PackedBytes,
+                },
                 Inst::Return { src: 2 },
             ],
         ),

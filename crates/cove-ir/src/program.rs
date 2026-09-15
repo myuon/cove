@@ -500,7 +500,7 @@ pub struct Program {
     /// The layout every byte run under construction shares.
     ///
     /// A program-wide constant for the reason [`Program::str_layout`] is one:
-    /// [`Inst::AllocBuffer`] should not have to be told its store's layout per
+    /// [`Inst::GrowableAlloc`] should not have to be told its store's layout per
     /// call site, and [ADR 0051](../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)
     /// gives every run the same [`crate::layout::Shape::Bytes`] shape whatever
     /// string it will become.
@@ -509,7 +509,7 @@ pub struct Program {
     ///
     /// A program-wide constant for [`Program::bytes_layout`]'s reason, and the
     /// other half of the pair: an owner and its store are allocated together
-    /// by [`Inst::AllocBuffer`], so neither layout is named at a call site.
+    /// by [`Inst::GrowableAlloc`], so neither layout is named at a call site.
     /// [ADR 0052](../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)
     /// gives every buffer the same [`crate::layout::Shape::ByteBuffer`] shape
     /// whatever bytes it will hold, because an owner's two words are a length

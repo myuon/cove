@@ -644,13 +644,13 @@ unsafe extern "C" fn no_builtin(
     cove_native::Outcome::Raised.abi()
 }
 
-/// The growable-buffer helper, for a scenario that builds none. See [`no_call`].
+/// The growable-run helper, for a scenario that builds none. See [`no_call`].
 ///
 /// # Safety
 ///
 /// Reads nothing through any of its arguments.
 #[cfg(any(feature = "cranelift", feature = "template"))]
-unsafe extern "C" fn no_buffer(
+unsafe extern "C" fn no_growable(
     _ctx: *mut cove_native::NativeCtx,
     _base: u64,
     _pc: u32,
@@ -705,7 +705,7 @@ fn helpers() -> cove_native::NativeHelpers {
         close: no_close,
         alloc: no_alloc,
         builtin: no_builtin,
-        buffer: no_buffer,
+        growable: no_growable,
         field_load: no_field_load,
         field_store: no_field_store,
     }

@@ -157,7 +157,7 @@ pub struct Blocker {
 /// task; "lower `String.byteAt`" is.
 ///
 /// So this is the second key a census groups by, and it exists for exactly the
-/// two aggregates. Everything else — `LoadField`, `Str`, `FinishBuffer` — names
+/// two aggregates. Everything else — `LoadField`, `Str`, `RunFinish` — names
 /// one operation already, and inventing a subject for it would add a column that
 /// repeats the opcode.
 ///

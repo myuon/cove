@@ -81,8 +81,8 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cove_ir::{ArgsId, BuiltinId, FunctionId, LayoutId, Slot, StrId};
-use cove_native::{BufferOp, Entry, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
+use cove_ir::{ArgsId, BuiltinId, FunctionId, Inst, LayoutId, Slot, StrId};
+use cove_native::{Entry, GrowableOp, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
 
 use super::{divided_by_zero, null_object, overflowed, Frame, Machine, Overflow};
 use crate::budget::Meter;
@@ -808,13 +808,13 @@ unsafe extern "C" fn builtin(
     }
 }
 
-/// The growable-buffer helper: one of [ADR 0052]'s four, handed over whole.
+/// The growable-run helper: one of [ADR 0052]'s four, handed over whole.
 ///
-/// See [`cove_native::BufferFn`] for why each of the four is the helper rather
+/// See [`cove_native::GrowableFn`] for why each of the four is the helper rather
 /// than a fast path and a cold one — the short of it is one rooting discipline
 /// that is not the frame's, one chunked safepoint contract, and one UTF-8 walk.
-/// What happens here is `encoded.rs`'s `ALLOC_BUFFER`, `APPEND_BYTE`,
-/// `APPEND_BYTES` and `FINISH_BUFFER` arms, and *is* those arms: each one reads
+/// What happens here is `encoded.rs`'s `GROWABLE_ALLOC_BYTES`, `GROWABLE_PUSH_BYTE`,
+/// `GROWABLE_EXTEND_BYTES` and `RUN_FINISH_BYTES` arms, and *is* those arms: each one reads
 /// its operands out of the frame and calls the same `Machine` method the
 /// dispatch loop calls, so there is no second copy of ADR 0052's capacity
 /// arithmetic, growth policy, chunking or relabel anywhere.
@@ -835,7 +835,7 @@ unsafe extern "C" fn builtin(
 /// As [`safepoint`].
 ///
 /// [ADR 0052]: ../../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
-unsafe extern "C" fn buffer(
+unsafe extern "C" fn growable(
     ctx: *mut NativeCtx,
     base: u64,
     pc: u32,
@@ -858,9 +858,10 @@ unsafe extern "C" fn buffer(
         debug_assert_eq!(
             machine.mem.stack_index(frame.base) as u64,
             base,
-            "compiled code and the frame stack disagree about which frame the buffer op is in"
+            "compiled code and the frame stack disagree about which frame the growable op is in"
         );
-        let op = BufferOp::from_abi(op).expect("a code generator emitted a buffer op that is one");
+        let op =
+            GrowableOp::from_abi(op).expect("a code generator emitted a growable op that is one");
         machine
             .safepoint(budget, frame.function, pc as usize)
             .and_then(|()| {
@@ -869,13 +870,13 @@ unsafe extern "C" fn buffer(
                 // read needs a linear address.
                 let base = frame.base;
                 match op {
-                    BufferOp::Alloc => {
+                    GrowableOp::Alloc => {
                         let capacity = machine.mem.slot(base, b as Slot) as i64;
                         let owner = machine.alloc_buffer(capacity)?;
                         machine.mem.set_slot(base, a as Slot, owner);
                         Ok(())
                     }
-                    BufferOp::AppendByte => {
+                    GrowableOp::Push => {
                         let owner = machine.mem.slot(base, a as Slot);
                         let value = machine.mem.slot(base, b as Slot) as i64;
                         machine.append_byte(owner, value)
@@ -885,7 +886,7 @@ unsafe extern "C" fn buffer(
                     // code `encoded.rs` already keeps out of its dispatch loop.
                     // Called rather than copied, for that whole page's worth of
                     // reasons.
-                    BufferOp::AppendBytes => {
+                    GrowableOp::Extend => {
                         let program = machine.program;
                         let args = program.arg_list(ArgsId(a));
                         super::encoded::append_bytes(
@@ -898,9 +899,22 @@ unsafe extern "C" fn buffer(
                             pc as usize,
                         )
                     }
-                    BufferOp::Finish => {
+                    // The target and the validation are the instruction's, read
+                    // out of the IR at `pc` as the encoded arm reads them out of
+                    // its opcode and payload: the ABI carries two operands, and
+                    // neither generator's emitted code changed to carry more.
+                    GrowableOp::Finish => {
                         let owner = machine.mem.slot(base, b as Slot);
-                        let text = machine.finish_buffer(owner)?;
+                        let code = &machine.program.function(frame.function).code;
+                        let Inst::RunFinish {
+                            target, validation, ..
+                        } = code[pc as usize]
+                        else {
+                            unreachable!(
+                                "a growable finish was handed over for a pc that is not one"
+                            )
+                        };
+                        let text = machine.finish_buffer(owner, target, validation)?;
                         machine.mem.set_slot(base, a as Slot, text);
                         Ok(())
                     }
@@ -1726,7 +1740,7 @@ pub fn helpers() -> NativeHelpers {
         close,
         alloc,
         builtin,
-        buffer,
+        growable,
         field_load,
         field_store,
     }
@@ -1756,7 +1770,7 @@ pub fn helpers_counting() -> NativeHelpers {
         close: counted_close,
         alloc: counted_alloc,
         builtin: counted_builtin,
-        buffer: counted_buffer,
+        growable: counted_growable,
         field_load: counted_field_load,
         field_store: counted_field_store,
     }
@@ -1820,8 +1834,8 @@ counted!(
     counted_builtin => builtin.builtin(base: u64, pc: u32, dst: u32, id: u32, args: u32) -> u32
 );
 counted!(
-    /// [`buffer`], counted.
-    counted_buffer => buffer.buffer(base: u64, pc: u32, op: u32, a: u32, b: u32) -> u32
+    /// [`growable`], counted.
+    counted_growable => growable.growable(base: u64, pc: u32, op: u32, a: u32, b: u32) -> u32
 );
 counted!(
     /// [`field_load`], counted.
@@ -1920,7 +1934,7 @@ pub fn helpers_ablated<const MASK: u64>() -> NativeHelpers {
         close,
         alloc,
         builtin,
-        buffer,
+        growable,
         field_load,
         field_store,
     }

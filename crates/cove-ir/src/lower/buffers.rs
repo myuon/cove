@@ -1,8 +1,10 @@
 //! `ByteBuffer`: ADR 0052's growable packed byte run, lowered inline.
 //!
 //! [ADR 0052](../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)
-//! gives the IR four instructions for a byte builder — `alloc-builder`,
-//! `append-byte`, `append-bytes`, `finish-builder` — and one sentence about how
+//! gives the IR four instructions for a byte builder — which
+//! [ADR 0058](../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
+//! names by run family as `growable-alloc`, `growable-push`, `growable-extend`
+//! and `run-finish`, each over packed bytes — and one sentence about how
 //! they may be reached: *"It must not turn one appended byte or one element into
 //! a `call-builtin` merely to reuse the source API."* This module is that
 //! sentence. Every operation `cove_schema::builtins::BYTE_BUFFER` declares
@@ -46,7 +48,7 @@ use cove_syntax::ast::{Arg, Expr};
 use super::frame::Val;
 use super::shapes::{self, BUFFER_LEN};
 use super::{Body, Dest};
-use crate::inst::Inst;
+use crate::inst::{Inst, Storage, Validation};
 
 impl Body<'_> {
     /// A method call on a `ByteBuffer`.
@@ -72,7 +74,7 @@ impl Body<'_> {
         }
     }
 
-    /// `ByteBuffer.allocate(capacity)`, as [`Inst::AllocBuffer`].
+    /// `ByteBuffer.allocate(capacity)`, as a byte [`Inst::GrowableAlloc`].
     ///
     /// It is an instruction rather than a builtin call for `Vector.of`'s
     /// reason: both of the layouts it allocates — the owner and its store —
@@ -81,7 +83,7 @@ impl Body<'_> {
     ///
     /// `capacity` is a hint. A store too small for what is appended grows, and
     /// one larger than the final length gives the tail back at
-    /// [`Inst::FinishBuffer`], so no value here can change what a program
+    /// [`Inst::RunFinish`], so no value here can change what a program
     /// answers.
     pub(super) fn buffer_allocate(&mut self, expr: &Expr, args: &[Arg], want: Option<Dest>) -> Val {
         if args.len() != 1 {
@@ -93,9 +95,10 @@ impl Body<'_> {
         let capacity = self.expr(&args[0].value);
         let dst = self.answer_at(want, shapes::BYTE_BUFFER);
         self.emit(
-            Inst::AllocBuffer {
+            Inst::GrowableAlloc {
                 dst: dst.slot,
                 capacity: capacity.slot,
+                storage: Storage::PackedBytes,
             },
             expr.span,
         );
@@ -123,7 +126,7 @@ impl Body<'_> {
         dst
     }
 
-    /// `buffer.appendByte(value)`, as [`Inst::AppendByte`].
+    /// `buffer.appendByte(value)`, as a byte [`Inst::GrowablePush`].
     ///
     /// The answer is `()` and the instruction writes no destination, so the
     /// unit is written separately — into the location the surrounding form asked
@@ -140,9 +143,10 @@ impl Body<'_> {
         let buffer = self.expr(base);
         let value = self.expr(value);
         self.emit(
-            Inst::AppendByte {
-                buffer: buffer.slot,
-                value: value.slot,
+            Inst::GrowablePush {
+                owner: buffer.slot,
+                src: value.slot,
+                storage: Storage::PackedBytes,
             },
             expr.span,
         );
@@ -151,13 +155,13 @@ impl Body<'_> {
         self.unit_answer(expr, want)
     }
 
-    /// `buffer.appendSlice(text, from, to)`, as [`Inst::AppendBytes`].
+    /// `buffer.appendSlice(text, from, to)`, as a byte [`Inst::GrowableExtend`].
     ///
     /// Four operands and an encoded instruction with room for three, so the row
-    /// goes in the argument pool the way a call's does — `[buffer, src, from,
+    /// goes in the argument pool the way a call's does — `[owner, src, from,
     /// to]`, in that order, each carrying its own layout so the bytecode
     /// verifier checks them by the rule it checks a call's arguments by. See
-    /// [`Inst::AppendBytes`] for why this is not two instructions.
+    /// [`Inst::GrowableExtend`] for why this is not three instructions.
     ///
     /// The range is checked by the machine, in `String.sliceBytes`'s words, and
     /// a range that fails those checks stops the run. Nothing is checked here:
@@ -179,7 +183,13 @@ impl Body<'_> {
             .pool
             .args
             .intern(vec![buffer.arg(), text.arg(), from.arg(), to.arg()]);
-        self.emit(Inst::AppendBytes { args: row }, expr.span);
+        self.emit(
+            Inst::GrowableExtend {
+                args: row,
+                storage: Storage::PackedBytes,
+            },
+            expr.span,
+        );
         self.release(to, expr.span);
         self.release(from, expr.span);
         self.release(text, expr.span);
@@ -200,7 +210,7 @@ impl Body<'_> {
         dst
     }
 
-    /// `buffer.finish()`, as [`Inst::FinishBuffer`].
+    /// `buffer.finish()`, as a byte [`Inst::RunFinish`] into `String`.
     ///
     /// The live prefix is validated once and its store is relabelled down from
     /// the capacity to the logical length, so the `String` this answers *is*
@@ -213,9 +223,12 @@ impl Body<'_> {
         let buffer = self.expr(base);
         let dst = self.answer_at(want, shapes::STR);
         self.emit(
-            Inst::FinishBuffer {
+            Inst::RunFinish {
                 dst: dst.slot,
-                buffer: buffer.slot,
+                owner: buffer.slot,
+                target: shapes::STR,
+                validation: Validation::Utf8,
+                storage: Storage::PackedBytes,
             },
             expr.span,
         );

@@ -7,13 +7,16 @@
 //! limit already refuses at the declaration, and a branch displacement that
 //! overflows, which no pair of `u32` program counters can produce. Both are
 //! checked anyway, because *"the encoder rejects overflow"* should be a line
-//! of code rather than an argument.
+//! of code rather than an argument. So is the one refusal that is not about
+//! width: a run instruction over a storage, or a finish over a validation,
+//! that its family has no opcode for yet — which `crate::verify` refuses
+//! first.
 //!
 //! It is **deterministic**: encoding is a pure function of the instruction and
 //! its program counter, every field an opcode does not use is written zero,
 //! and two encodings of one program are byte-identical.
 
-use crate::inst::{Inst, Len, Pc, Slot, Storage};
+use crate::inst::{Inst, Len, Pc, Slot, Storage, Validation};
 use crate::program::{Function, Program};
 
 use super::op::Op;
@@ -48,6 +51,10 @@ pub enum TooWide {
     /// encoder cannot hold one; this is the assertion that says so, for
     /// [`TooWide::Slot`]'s reason.
     Storage { storage: Storage },
+    /// A [`Inst::RunFinish`] whose validation its storage's opcode does not
+    /// make: a byte finish is always a UTF-8 finish, for the same reason and
+    /// under the same verifier refusal as [`TooWide::Storage`].
+    Validation { validation: Validation },
 }
 
 impl std::fmt::Display for TooWide {
@@ -64,6 +71,12 @@ impl std::fmt::Display for TooWide {
             }
             TooWide::Storage { storage } => {
                 write!(f, "a run instruction over {storage:?} has no opcode")
+            }
+            TooWide::Validation { validation } => {
+                write!(
+                    f,
+                    "a run finish with validation {validation:?} has no opcode"
+                )
             }
         }
     }
@@ -307,16 +320,52 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             Storage::PackedBytes => build(Op::RunCopyBytes, 0, 0, 0, halves(args.0, 0)),
             Storage::Words(elem) => build(Op::RunCopyWords, 0, 0, 0, halves(args.0, elem.0)),
         },
-        Inst::AllocBuffer { dst, capacity } => {
-            build(Op::AllocBuffer, slot(dst)?, slot(capacity)?, 0, 0)
-        }
-        Inst::AppendByte { buffer, value } => {
-            build(Op::AppendByte, slot(buffer)?, slot(value)?, 0, 0)
-        }
-        Inst::AppendBytes { args } => build(Op::AppendBytes, 0, 0, 0, halves(args.0, 0)),
-        Inst::FinishBuffer { dst, buffer } => {
-            build(Op::FinishBuffer, slot(dst)?, slot(buffer)?, 0, 0)
-        }
+        // The growable family has only its byte members so far, so a word
+        // storage is refused here the way `crate::verify` refuses it first.
+        Inst::GrowableAlloc {
+            dst,
+            capacity,
+            storage,
+        } => match storage {
+            Storage::PackedBytes => {
+                build(Op::GrowableAllocBytes, slot(dst)?, slot(capacity)?, 0, 0)
+            }
+            Storage::Words(_) => return Err(TooWide::Storage { storage }),
+        },
+        Inst::GrowablePush {
+            owner,
+            src,
+            storage,
+        } => match storage {
+            Storage::PackedBytes => build(Op::GrowablePushByte, slot(owner)?, slot(src)?, 0, 0),
+            Storage::Words(_) => return Err(TooWide::Storage { storage }),
+        },
+        Inst::GrowableExtend { args, storage } => match storage {
+            Storage::PackedBytes => build(Op::GrowableExtendBytes, 0, 0, 0, halves(args.0, 0)),
+            Storage::Words(_) => return Err(TooWide::Storage { storage }),
+        },
+        // The opcode *is* the storage and the validation: a byte finish
+        // validates UTF-8, so `Validation::None` over bytes has no opcode. The
+        // target is the payload's low half, as `Op::LoadElem`'s layout is.
+        Inst::RunFinish {
+            dst,
+            owner,
+            target,
+            validation,
+            storage,
+        } => match (storage, validation) {
+            (Storage::PackedBytes, Validation::Utf8) => build(
+                Op::RunFinishBytes,
+                slot(dst)?,
+                slot(owner)?,
+                0,
+                halves(target.0, 0),
+            ),
+            (Storage::PackedBytes, Validation::None) => {
+                return Err(TooWide::Validation { validation })
+            }
+            (Storage::Words(_), _) => return Err(TooWide::Storage { storage }),
+        },
         Inst::Len { dst, obj } => build(Op::Len, slot(dst)?, slot(obj)?, 0, 0),
         Inst::LayoutOf { dst, obj } => build(Op::LayoutOf, slot(dst)?, slot(obj)?, 0, 0),
 
@@ -803,20 +852,37 @@ mod tests {
             ),
             (
                 0,
-                Inst::AllocBuffer {
+                Inst::GrowableAlloc {
                     dst: 1,
                     capacity: 2,
+                    storage: Storage::PackedBytes,
                 },
             ),
             (
                 0,
-                Inst::AppendByte {
-                    buffer: 1,
-                    value: 2,
+                Inst::GrowablePush {
+                    owner: 1,
+                    src: 2,
+                    storage: Storage::PackedBytes,
                 },
             ),
-            (0, Inst::AppendBytes { args: ArgsId(1) }),
-            (0, Inst::FinishBuffer { dst: 1, buffer: 2 }),
+            (
+                0,
+                Inst::GrowableExtend {
+                    args: ArgsId(1),
+                    storage: Storage::PackedBytes,
+                },
+            ),
+            (
+                0,
+                Inst::RunFinish {
+                    dst: 1,
+                    owner: 2,
+                    target: L,
+                    validation: Validation::Utf8,
+                    storage: Storage::PackedBytes,
+                },
+            ),
             (0, Inst::Len { dst: 1, obj: 2 }),
             (0, Inst::LayoutOf { dst: 1, obj: 2 }),
             (0, Inst::AddrOfSlot { dst: 1, slot: 2 }),
@@ -1204,6 +1270,51 @@ mod tests {
     #[test]
     fn a_run_instruction_over_a_storage_with_no_opcode_is_refused() {
         let words = Storage::Words(LayoutId(0));
+        let bytes = Storage::PackedBytes;
+        for inst in [
+            Inst::GrowableAlloc {
+                dst: 0,
+                capacity: 1,
+                storage: words,
+            },
+            Inst::GrowablePush {
+                owner: 0,
+                src: 1,
+                storage: words,
+            },
+            Inst::GrowableExtend {
+                args: ArgsId(0),
+                storage: words,
+            },
+            Inst::RunFinish {
+                dst: 0,
+                owner: 1,
+                target: LayoutId(0),
+                validation: Validation::None,
+                storage: words,
+            },
+        ] {
+            assert_eq!(
+                encode(&inst, 0),
+                Err(TooWide::Storage { storage: words }),
+                "{inst:?}"
+            );
+        }
+        assert_eq!(
+            encode(
+                &Inst::RunFinish {
+                    dst: 0,
+                    owner: 1,
+                    target: LayoutId(0),
+                    validation: Validation::None,
+                    storage: bytes,
+                },
+                0
+            ),
+            Err(TooWide::Validation {
+                validation: Validation::None
+            })
+        );
         assert_eq!(
             encode(
                 &Inst::RunLoad {

@@ -418,7 +418,7 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// answer:
 ///
 /// ```text
-/// alloc-buffer s2 s0
+/// growable-alloc.bytes s2 s0
 /// copy s1:StringBuilder s2:ByteBuffer
 /// return s1
 /// ```

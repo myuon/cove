@@ -93,7 +93,7 @@ use cove_diag::Span;
 use cove_ir::bytecode::{disasm, encode_program, verify, Encoded, EncodedInst, Op};
 use cove_ir::{
     ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Convert, FunctionId, HostOpId, LayoutId, Num,
-    Program, Repr, Shape, Slot, StrId, TableId,
+    Program, Repr, Shape, Slot, StrId, TableId, Validation,
 };
 
 use crate::budget::Meter;
@@ -268,10 +268,10 @@ const STORE_ELEM: u8 = Op::StoreElem.number();
 const RUN_LOAD_BYTES: u8 = Op::RunLoadBytes.number();
 const RUN_COPY_BYTES: u8 = Op::RunCopyBytes.number();
 const RUN_COPY_WORDS: u8 = Op::RunCopyWords.number();
-const ALLOC_BUFFER: u8 = Op::AllocBuffer.number();
-const APPEND_BYTE: u8 = Op::AppendByte.number();
-const APPEND_BYTES: u8 = Op::AppendBytes.number();
-const FINISH_BUFFER: u8 = Op::FinishBuffer.number();
+const GROWABLE_ALLOC_BYTES: u8 = Op::GrowableAllocBytes.number();
+const GROWABLE_PUSH_BYTE: u8 = Op::GrowablePushByte.number();
+const GROWABLE_EXTEND_BYTES: u8 = Op::GrowableExtendBytes.number();
+const RUN_FINISH_BYTES: u8 = Op::RunFinishBytes.number();
 const LEN: u8 = Op::Len.number();
 const LAYOUT_OF: u8 = Op::LayoutOf.number();
 
@@ -341,10 +341,10 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::RunLoadBytes
         | Op::RunCopyBytes
         | Op::RunCopyWords
-        | Op::AllocBuffer
-        | Op::AppendByte
-        | Op::AppendBytes
-        | Op::FinishBuffer
+        | Op::GrowableAllocBytes
+        | Op::GrowablePushByte
+        | Op::GrowableExtendBytes
+        | Op::RunFinishBytes
         | Op::LoadField
         | Op::StoreField
         | Op::LoadElem
@@ -862,7 +862,7 @@ fn run_copy_words(
     )
 }
 
-/// [`Inst::AppendBytes`], checked, grown once and copied in bounded chunks.
+/// A byte [`Inst::GrowableExtend`], checked, grown once and copied in bounded chunks.
 ///
 /// Out of line and out of the dispatch loop's body for [`run_copy_bytes`]'
 /// reason, which is the only reason that matters here: this loop is sensitive
@@ -880,7 +880,7 @@ fn run_copy_words(
 /// The boundary check applies to a `String` source and not to a
 /// [`Shape::Bytes`] one, because a run under construction is not claiming to be
 /// text: the bytes it holds are checked once, at
-/// [`Inst::FinishBuffer`](cove_ir::Inst::FinishBuffer).
+/// [`Inst::RunFinish`](cove_ir::Inst::RunFinish).
 ///
 /// # Why the growth happens once, before the first chunk
 ///
@@ -1761,13 +1761,14 @@ pub(super) fn dispatch<'s, 'a>(
                 let elem = LayoutId(held.hi());
                 run_copy_words(machine, program, budget, base, args, elem, id, pc - 1)?;
             }
-            // ADR 0052's four. Each arm is a read of its operands and one call,
+            // ADR 0058's growable family over bytes, and its finish — ADR 0052's
+            // four. Each arm is a read of its operands and one call,
             // for `RUN_COPY_BYTES`' reason: the checks, the capacity arithmetic and
             // the growth are far more code than a dispatch arm should put in the
             // way of the arms around it. `Machine::alloc_buffer` documents which
             // of its two allocations happens first and why nothing is lost
             // between them.
-            ALLOC_BUFFER => {
+            GROWABLE_ALLOC_BYTES => {
                 let capacity = machine.mem.word_at(base_at + (b!() as usize)) as i64;
                 machine.sync(pc - 1);
                 match machine.alloc_buffer(capacity) {
@@ -1779,7 +1780,7 @@ pub(super) fn dispatch<'s, 'a>(
             // more. There is no `at` to bounds-check — that is the difference
             // between a buffer and a fixed run — and no capacity to check
             // either, because a full store grows.
-            APPEND_BYTE => {
+            GROWABLE_PUSH_BYTE => {
                 let owner = machine.mem.word_at(base_at + (a!() as usize));
                 let value = machine.mem.word_at(base_at + (b!() as usize)) as i64;
                 machine.sync(pc - 1);
@@ -1787,21 +1788,24 @@ pub(super) fn dispatch<'s, 'a>(
                     fail!(error);
                 }
             }
-            // The bulk append. All four operands — `buffer`, `src`, `from`,
+            // The bulk append. All four operands — `owner`, `src`, `from`,
             // `to` — live behind the `ArgsId` in the payload's low half rather
-            // than in `a`, `b` and `c`; see `Inst::AppendBytes`'s doc for why.
-            APPEND_BYTES => {
+            // than in `a`, `b` and `c`; see `Inst::GrowableExtend`'s doc for why.
+            GROWABLE_EXTEND_BYTES => {
                 machine.sync(pc - 1);
                 let args = program.arg_list(ArgsId(held.lo()));
                 append_bytes(machine, program, budget, base, args, id, pc - 1)?;
             }
             // ADR 0052's finish: the *live prefix* validated once, and the store
             // relabelled down from its capacity to that length without copying a
-            // byte. The owner is then emptied, because finishing consumes.
-            FINISH_BUFFER => {
+            // byte. The owner is then emptied, because finishing consumes. The
+            // opcode is the validation — a byte finish is a UTF-8 finish — and
+            // the target layout is the payload's low half.
+            RUN_FINISH_BYTES => {
                 let owner = machine.mem.word_at(base_at + (b!() as usize));
+                let target = LayoutId(held.lo());
                 machine.sync(pc - 1);
-                match machine.finish_buffer(owner) {
+                match machine.finish_buffer(owner, target, Validation::Utf8) {
                     Ok(text) => machine.mem.set_word_at(base_at + (a!()) as usize, text),
                     Err(error) => fail!(error),
                 }
@@ -2085,7 +2089,7 @@ pub(super) fn dispatch<'s, 'a>(
 
 #[cfg(test)]
 mod tests {
-    use cove_ir::{Convert as ConvertTo, Inst, Len, Shape, Storage};
+    use cove_ir::{Convert as ConvertTo, Inst, Len, Shape, Storage, Validation};
 
     use super::super::runs::MIN_GROWABLE_BYTES;
     use super::super::tests::{budget, run_words, Build};
@@ -2530,7 +2534,11 @@ mod tests {
     /// nothing reads its length.
     fn byte_run(dst: Slot, capacity: Slot, run: LayoutId) -> [Inst; 2] {
         [
-            Inst::AllocBuffer { dst, capacity },
+            Inst::GrowableAlloc {
+                dst,
+                capacity,
+                storage: Storage::PackedBytes,
+            },
             Inst::LoadField {
                 dst,
                 obj: dst,
@@ -2703,25 +2711,28 @@ mod tests {
                     // is unreachable when the next is asked for. The heap holds
                     // the two runs and one spare, so every allocation after the
                     // first has to reclaim before it fits.
-                    Inst::AllocBuffer {
+                    Inst::GrowableAlloc {
                         dst: 5,
                         capacity: 0,
+                        storage: Storage::PackedBytes,
                     },
                     Inst::Clear {
                         slot: 5,
                         layout: owner,
                     },
-                    Inst::AllocBuffer {
+                    Inst::GrowableAlloc {
                         dst: 5,
                         capacity: 0,
+                        storage: Storage::PackedBytes,
                     },
                     Inst::Clear {
                         slot: 5,
                         layout: owner,
                     },
-                    Inst::AllocBuffer {
+                    Inst::GrowableAlloc {
                         dst: 5,
                         capacity: 0,
+                        storage: Storage::PackedBytes,
                     },
                     Inst::Clear {
                         slot: 5,
@@ -3282,11 +3293,11 @@ mod tests {
     /// builds a fixture and none builds a compiler.
     ///
     /// - `alloc(capacity) -> Ref` answers a new owner.
-    /// - `append_byte(buffer, value) -> Ref` answers the same owner, so a
+    /// - `append_byte(owner, value) -> Ref` answers the same owner, so a
     ///   caller can keep appending to what it got back and watch the address
     ///   not move.
-    /// - `append_bytes(buffer, src, from, to) -> Ref` likewise.
-    /// - `finish(buffer) -> Ref` answers the `String`.
+    /// - `append_bytes(owner, src, from, to) -> Ref` likewise.
+    /// - `finish(owner) -> Ref` answers the `String`.
     struct Buffers {
         program: Program,
         alloc: FunctionId,
@@ -3308,9 +3319,10 @@ mod tests {
             &[Repr::Int, Repr::Ref],
             owner,
             vec![
-                Inst::AllocBuffer {
+                Inst::GrowableAlloc {
                     dst: 1,
                     capacity: 0,
+                    storage: Storage::PackedBytes,
                 },
                 Inst::Return { src: 1 },
             ],
@@ -3321,9 +3333,10 @@ mod tests {
             &[Repr::Ref, Repr::Int],
             owner,
             vec![
-                Inst::AppendByte {
-                    buffer: 0,
-                    value: 1,
+                Inst::GrowablePush {
+                    owner: 0,
+                    src: 1,
+                    storage: Storage::PackedBytes,
                 },
                 Inst::Return { src: 0 },
             ],
@@ -3334,7 +3347,13 @@ mod tests {
             &[owner, bytes, int, int],
             &[Repr::Ref, Repr::Ref, Repr::Int, Repr::Int],
             owner,
-            vec![Inst::AppendBytes { args }, Inst::Return { src: 0 }],
+            vec![
+                Inst::GrowableExtend {
+                    args,
+                    storage: Storage::PackedBytes,
+                },
+                Inst::Return { src: 0 },
+            ],
         );
         let finish = build.function(
             "finish",
@@ -3342,7 +3361,13 @@ mod tests {
             &[Repr::Ref],
             str_layout,
             vec![
-                Inst::FinishBuffer { dst: 0, buffer: 0 },
+                Inst::RunFinish {
+                    dst: 0,
+                    owner: 0,
+                    target: str_layout,
+                    validation: Validation::Utf8,
+                    storage: Storage::PackedBytes,
+                },
                 Inst::Return { src: 0 },
             ],
         );
@@ -3358,7 +3383,7 @@ mod tests {
 
     /// **The words a finish gives back are handed out again.**
     ///
-    /// `spare` is the whole reason `finish-buffer` passes anything to
+    /// `spare` is the whole reason `run-finish` passes anything to
     /// `relabel` beyond the new length: a buffer that reserved 4 KB and kept
     /// eight bytes of it is holding 510 words the run has no further use for.
     /// The heap here is a little over one such store, so the second buffer
@@ -3606,7 +3631,7 @@ mod tests {
         assert_eq!(machine.object_len(text), 5);
     }
 
-    /// **`append-bytes` agrees with Rust's own slicing, from a `String` and
+    /// **`growable-extend` agrees with Rust's own slicing, from a `String` and
     /// from another buffer's store, at every alignment.**
     ///
     /// The destination offset is the buffer's own logical length, so the
@@ -3859,9 +3884,10 @@ mod tests {
         // the previous one is unreachable when the next is asked for.
         let mut code = vec![
             Inst::Int { dst: 0, value: 0 },
-            Inst::AllocBuffer {
+            Inst::GrowableAlloc {
                 dst: 1,
                 capacity: 0,
+                storage: Storage::PackedBytes,
             },
             Inst::Int {
                 dst: 2,
@@ -3873,15 +3899,17 @@ mod tests {
             },
         ];
         for at in 0..BYTES {
-            code.push(Inst::AppendByte {
-                buffer: 1,
-                value: 2,
+            code.push(Inst::GrowablePush {
+                owner: 1,
+                src: 2,
+                storage: Storage::PackedBytes,
             });
             // Garbage between every append, so no growth has a quiet heap.
             if at % 8 == 0 {
-                code.push(Inst::AllocBuffer {
+                code.push(Inst::GrowableAlloc {
                     dst: 3,
                     capacity: 0,
+                    storage: Storage::PackedBytes,
                 });
                 code.push(Inst::Clear {
                     slot: 3,
@@ -3889,7 +3917,13 @@ mod tests {
                 });
             }
         }
-        code.push(Inst::FinishBuffer { dst: 1, buffer: 1 });
+        code.push(Inst::RunFinish {
+            dst: 1,
+            owner: 1,
+            target: str_layout,
+            validation: Validation::Utf8,
+            storage: Storage::PackedBytes,
+        });
         code.push(Inst::Return { src: 1 });
         let entry = build.function(
             "grow_under_pressure",
@@ -3924,8 +3958,12 @@ mod tests {
         );
     }
 
-    /// A run that appends `BYTES` bytes in one `append-bytes`, with a fixture
-    /// whose only other instructions are the two allocations and a return.
+    /// A run that appends `BYTES` bytes in one `growable-extend` onto the owner
+    /// it is handed, with a fixture whose only other instructions are the
+    /// source's allocation and a return.
+    ///
+    /// The owner is a parameter rather than an allocation of the run's own so
+    /// that a test can read it after the run has been stopped.
     fn one_big_append() -> (Program, FunctionId) {
         const BYTES: i64 = 1 << 20;
         let mut build = Build::default();
@@ -3933,36 +3971,27 @@ mod tests {
         build.string_layout();
         let run = build.bytes_layout();
         let owner = build.buffer_layout();
-        let args = build.args(&[(1, owner), (2, run), (4, int), (3, int)]);
+        // s0: the owner; s1: the source run; s2: its length; s3: zero.
+        let args = build.args(&[(0, owner), (1, run), (3, int), (2, int)]);
+        let mut code = vec![Inst::Int {
+            dst: 2,
+            value: BYTES,
+        }];
+        code.extend(byte_run(1, 2, run));
+        code.extend([
+            Inst::Int { dst: 3, value: 0 },
+            Inst::GrowableExtend {
+                args,
+                storage: Storage::PackedBytes,
+            },
+            Inst::Return { src: 0 },
+        ]);
         let entry = build.function(
             "appender",
-            &[],
-            &[Repr::Int, Repr::Ref, Repr::Ref, Repr::Int, Repr::Int],
+            &[owner],
+            &[Repr::Ref, Repr::Ref, Repr::Int, Repr::Int],
             owner,
-            vec![
-                Inst::Int {
-                    dst: 3,
-                    value: BYTES,
-                },
-                Inst::AllocBuffer {
-                    dst: 2,
-                    capacity: 3,
-                },
-                Inst::LoadField {
-                    dst: 2,
-                    obj: 2,
-                    at: 1,
-                    layout: run,
-                },
-                Inst::Int { dst: 0, value: 0 },
-                Inst::AllocBuffer {
-                    dst: 1,
-                    capacity: 0,
-                },
-                Inst::Int { dst: 4, value: 0 },
-                Inst::AppendBytes { args },
-                Inst::Return { src: 1 },
-            ],
+            code,
         );
         (build.done(), entry)
     }
@@ -3986,10 +4015,26 @@ mod tests {
                 ..crate::budget::Limits::default()
             });
             let mut machine = Machine::new(&program, 1 << 22);
+            let owner = machine.alloc_buffer(0).expect("an empty buffer fits");
             let error = machine
-                .run(entry, &[], &budget.meter())
+                .run(entry, &[owner], &budget.meter())
                 .expect_err("an append past its fuel is stopped");
             assert_eq!(error.outcome, crate::trace::RunOutcome::Fuel);
+
+            // The ensure happened and the commit did not: the store was grown
+            // for the whole range up front, and the length word still says
+            // nothing was appended, so the bytes a stopped copy did move are
+            // spare room rather than value.
+            assert_eq!(
+                machine.payload(owner, runs::GROWABLE_LEN),
+                0,
+                "a {BYTES}-byte append stopped at a fuel limit of {limit} committed nothing"
+            );
+            let store = machine.payload(owner, runs::GROWABLE_STORE);
+            assert!(
+                u64::from(machine.object_len(store)) >= BYTES,
+                "and its store was grown for the whole range before the first chunk"
+            );
 
             let bound = limit + words_of_bytes(BULK_CHUNK_BYTES) + SAFEPOINT_STRIDE;
             let spent = budget.fuel_spent();

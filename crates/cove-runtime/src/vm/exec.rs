@@ -87,7 +87,8 @@ pub(crate) mod native;
 /// `encoded`'s reason: growth allocates, and allocation is the machine's.
 pub(crate) mod runs;
 
-use runs::{Growable, Validation, GROWABLE_LEN, GROWABLE_STORE, MIN_GROWABLE_BYTES};
+use cove_ir::Validation;
+use runs::{Growable, GROWABLE_LEN, GROWABLE_STORE, MIN_GROWABLE_BYTES};
 
 /// How many instructions run between two budget checks.
 ///
@@ -2436,7 +2437,7 @@ impl<'a> Machine<'a> {
 
     // ---- ADR 0052's byte buffer -------------------------------------------
 
-    /// [`Inst::AllocBuffer`]: a new, empty byte buffer whose store has room for
+    /// A byte [`Inst::GrowableAlloc`]: a new, empty byte buffer whose store has room for
     /// `capacity` bytes.
     ///
     /// Two objects, because [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
@@ -2504,7 +2505,7 @@ impl<'a> Machine<'a> {
     /// write into the middle of the heap. `Inst::RunCopy` checks its
     /// destination's shape for the same reason.
     ///
-    /// A null store is a buffer [`Inst::FinishBuffer`] already consumed. For a
+    /// A null store is a buffer [`Inst::RunFinish`] already consumed. For a
     /// checked program that is unreachable — the uniqueness proof is
     /// `cove_sema`'s — so reaching it means the proof let one through, and an
     /// internal invariant that reports is better than one that reads a null
@@ -2546,7 +2547,7 @@ impl<'a> Machine<'a> {
         })
     }
 
-    /// [`Inst::AppendByte`]: one checked byte onto the end of a buffer.
+    /// A byte [`Inst::GrowablePush`]: one checked byte onto the end of a buffer.
     pub(crate) fn append_byte(&mut self, owner: u64, value: i64) -> Result<(), RuntimeError> {
         let mut buffer = self.buffer("appendByte", owner)?;
         if !(0..=255).contains(&value) {
@@ -2560,15 +2561,23 @@ impl<'a> Machine<'a> {
         Ok(())
     }
 
-    /// [`Inst::FinishBuffer`]: the buffer's live prefix, validated and
-    /// relabelled into a `String`, and the owner emptied.
+    /// A byte [`Inst::RunFinish`]: the buffer's live prefix, validated and
+    /// relabelled to `target`, and the owner emptied.
     ///
-    /// [`runs::growable_finish`] with UTF-8 validation, which is where the
-    /// argument lives for why only the live prefix is validated, why the store
-    /// is the answer and why the answer's tail is zero.
-    pub(crate) fn finish_buffer(&mut self, owner: u64) -> Result<u64, RuntimeError> {
+    /// [`runs::growable_finish`], which is where the argument lives for why
+    /// only the live prefix is validated, why the store is the answer and why
+    /// the answer's tail is zero. `target` and `validation` are the
+    /// instruction's own: `cove_ir::verify` holds a byte finish to
+    /// `Program::str_layout` and [`Validation::Utf8`], and this does what the
+    /// instruction says rather than what the verifier allowed.
+    pub(crate) fn finish_buffer(
+        &mut self,
+        owner: u64,
+        target: LayoutId,
+        validation: Validation,
+    ) -> Result<u64, RuntimeError> {
         let buffer = self.buffer("finishBuffer", owner)?;
-        runs::growable_finish(self, &buffer, self.program.str_layout, Validation::Utf8)
+        runs::growable_finish(self, &buffer, target, validation)
     }
 
     /// The eight bytes of the string object at `addr` beginning at byte `at`,
@@ -4300,7 +4309,7 @@ pub(crate) mod tests {
 
         /// `String`'s layout, declared and recorded as `Program::str_layout`
         /// the way `cove_ir::lower` records it — `Inst::Str` and
-        /// `Inst::FinishBuffer` read the field rather than being told the
+        /// `Inst::RunFinish`'s verifier read the field rather than being told the
         /// layout at each call site, so a fixture that only declared the
         /// shape without recording it here would allocate strings the
         /// dispatch loop could not finish into.
@@ -4312,7 +4321,7 @@ pub(crate) mod tests {
 
         /// [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
         /// byte-run layout, declared and recorded as `Program::bytes_layout`
-        /// for `string_layout`'s reason: `Inst::AllocBuffer` always allocates
+        /// for `string_layout`'s reason: `Inst::GrowableAlloc` always allocates
         /// its store as this field's layout rather than one named in the
         /// instruction.
         pub(crate) fn bytes_layout(&mut self) -> LayoutId {
@@ -4324,7 +4333,7 @@ pub(crate) mod tests {
         /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
         /// byte-buffer owner layout, declared and recorded as
         /// `Program::buffer_layout` for `bytes_layout`'s reason:
-        /// `Inst::AllocBuffer` allocates both of the field's layouts rather
+        /// `Inst::GrowableAlloc` allocates both of the field's layouts rather
         /// than any named in the instruction, so a fixture that declared only
         /// the shape would allocate owners the dispatch loop could not read.
         pub(crate) fn buffer_layout(&mut self) -> LayoutId {

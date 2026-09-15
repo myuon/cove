@@ -2354,13 +2354,13 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
 /// `appendSlice` checks its range the way `String.sliceBytes` checks one —
 /// bounds and character boundaries both — and a range that fails those checks
 /// **stops the run**. That is not a narrowing of ADR 0052; it is what
-/// `Inst::AppendBytes` does, and a `Result` declared here would be a `Result`
+/// `Inst::GrowableExtend` does, and a `Result` declared here would be a `Result`
 /// no instruction can produce. A caller that wants to *ask* whether a range is
 /// appendable asks `String` about it before appending.
 ///
 /// `finish` answers a `String` rather than a `Result<String, Error>` for the
 /// same reason read off the other instruction: invalid UTF-8 in the live prefix
-/// is a broken invariant `Inst::FinishBuffer` refuses, in the words every other
+/// is a broken invariant `Inst::RunFinish` refuses, in the words every other
 /// string operation refuses it in. Only `appendByte` can put a byte there that
 /// no `String` would have, so the fallibility ADR 0052 anticipated belongs to
 /// whoever calls that — and until a program does something with it, declaring a
