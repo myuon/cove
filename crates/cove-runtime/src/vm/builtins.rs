@@ -82,29 +82,6 @@ pub(crate) fn call(
     // through on, because `Intrinsic` is the closed set this backend has
     // been taught.
     match builtin.intrinsic {
-        Intrinsic::StringText => {
-            let [operand] = operands else {
-                return Err(operand::operands("String.text", 1, operands.len()));
-            };
-            let text = render_value(machine, operand.layout, operand.words, 0)?;
-            machine.new_string(&text).map(|word| out.push(word))
-        }
-        Intrinsic::StringConcat => {
-            let mut text = String::new();
-            for operand in operands {
-                match operand::as_word(machine, *operand) {
-                    Some((Repr::Ref, word)) if is_string(machine, word) => {
-                        text.push_str(&string_of(machine, word)?)
-                    }
-                    _ => {
-                        return Err(RuntimeError::new(
-                            "`String.concat` joins strings, and this operand is not one",
-                        ))
-                    }
-                }
-            }
-            machine.new_string(&text).map(|word| out.push(word))
-        }
         // What `"{p}"` puts in the string. An operand is a value location, so
         // an inline struct or enum renders as the value it is rather than as
         // its first word — which is what `"{Point(x: 1)}"` answering `1` was.
@@ -128,8 +105,10 @@ pub(crate) fn call(
         // ns of an 86 ns call; see `Machine::builtin_answer`. What each one means
         // is in the module it delegates to, beside the reading of the oracle
         // it follows.
-        Intrinsic::ArrayGet => seq::array_get(machine, builtin.result, operands, out),
-        Intrinsic::ArrayLength => seq::array_length(machine, operands).map(|word| out.push(word)),
+        //
+        // `get` and `length` are not here, for `Array` or `Vector`: the
+        // lowering has always answered both with instructions, and neither
+        // had a caller.
         // `Array.isEmpty` is not here: it is `std.array.isEmpty`, the first
         // builtin method whose body is Cove rather than a machine builtin —
         // see `cove_schema::builtins::standard_binding` and
@@ -144,7 +123,8 @@ pub(crate) fn call(
         }
 
         // ---- Vector ------------------------------------------------------
-        Intrinsic::VectorOf => seq::vector_of(machine, operands).map(|word| out.push(word)),
+        // `Vector.of` is not here: the lowering allocates it — see
+        // `cove_ir::lower::collections`' `vector_of`.
         // `Vector.push` is not here: it is `std.vector.push` over the core
         // intrinsic that is a word `Inst::GrowablePush` — see
         // `Machine::push_words`.
@@ -152,18 +132,13 @@ pub(crate) fn call(
         // an `Option` in Cove over an element `LoadElem` and `StoreElem`.
         Intrinsic::VectorPop => seq::vector_pop(machine, builtin.result, operands, out),
         Intrinsic::VectorRemove => seq::vector_remove(machine, builtin.result, operands, out),
-        Intrinsic::VectorGet => seq::vector_get(machine, builtin.result, operands, out),
         Intrinsic::VectorContains => {
             seq::vector_contains(machine, operands).map(|word| out.push(word))
         }
         Intrinsic::VectorIndexOf => seq::vector_index_of(machine, builtin.result, operands, out),
         Intrinsic::VectorSlice => seq::vector_slice(machine, operands).map(|word| out.push(word)),
-        Intrinsic::VectorLength => seq::vector_length(machine, operands).map(|word| out.push(word)),
         // `Vector.isEmpty` is not here: it is `std.vector.isEmpty` — see
         // `cove_schema::builtins::standard_binding`.
-        Intrinsic::VectorToArray => {
-            seq::vector_to_array(machine, operands).map(|word| out.push(word))
-        }
         // `Vector.freeze` is not here: it is `std.vector.freeze` over the core
         // intrinsic that is a word `Inst::RunFinish` — see
         // `Machine::finish_words`.
@@ -173,7 +148,6 @@ pub(crate) fn call(
         // A `Set` and a `Map` are sorted runs, so every one of these is a
         // binary search over `key`'s order or a walk of a run already in it.
         Intrinsic::SetOf => keyed::set_of(machine, operands).map(|word| out.push(word)),
-        Intrinsic::SetLength => keyed::set_length(machine, operands).map(|word| out.push(word)),
         // `Set.isEmpty` is not here: it is `std.set.isEmpty` — see
         // `cove_schema::builtins::standard_binding`.
         Intrinsic::SetContains => keyed::set_contains(machine, operands).map(|word| out.push(word)),
@@ -185,7 +159,6 @@ pub(crate) fn call(
         Intrinsic::MapOf => keyed::map_of(machine, operands).map(|word| out.push(word)),
         Intrinsic::MapGet => keyed::map_get(machine, builtin.result, operands, out),
         Intrinsic::MapContains => keyed::map_contains(machine, operands).map(|word| out.push(word)),
-        Intrinsic::MapLength => keyed::map_length(machine, operands).map(|word| out.push(word)),
         // `Map.isEmpty` is not here: it is `std.map.isEmpty` — see
         // `cove_schema::builtins::standard_binding`.
         Intrinsic::MapKeys => keyed::map_keys(machine, operands).map(|word| out.push(word)),
@@ -1068,7 +1041,7 @@ mod tests {
         let operand = build.args(&[(0, held)]);
         let dst = reprs.len() as u32;
         reprs.push(Repr::Ref);
-        let builtin = builtin(&mut build.program, "String", "text", str_layout);
+        let builtin = builtin(&mut build.program, "String", "interpolate", str_layout);
         code.push(Inst::CallBuiltin {
             dst,
             builtin,
@@ -1144,7 +1117,7 @@ mod tests {
         let str_layout = build.layout("String", Shape::Str);
         build.program.str_layout = str_layout;
         let operand = build.args(&[(0, str_layout)]);
-        let builtin = builtin(&mut build.program, "String", "text", str_layout);
+        let builtin = builtin(&mut build.program, "String", "interpolate", str_layout);
         let f = build.function(
             "f",
             &[],
@@ -1250,76 +1223,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn concat_joins_strings_and_refuses_anything_else() {
-        let mut build = Build::default().strings(&["ab", "cd"]);
-        let str_layout = build.layout("String", Shape::Str);
-        build.program.str_layout = str_layout;
-        let both = build.args(&[(0, str_layout), (1, str_layout)]);
-        let joined = builtin(&mut build.program, "String", "concat", str_layout);
-        let f = build.function(
-            "f",
-            &[],
-            &[Repr::Ref, Repr::Ref, Repr::Ref],
-            str_layout,
-            vec![
-                Inst::Str {
-                    dst: 0,
-                    text: cove_ir::StrId(0),
-                },
-                Inst::Str {
-                    dst: 1,
-                    text: cove_ir::StrId(1),
-                },
-                Inst::CallBuiltin {
-                    dst: 2,
-                    builtin: joined,
-                    args: both,
-                },
-                Inst::Return { src: 2 },
-            ],
-        );
-        let program = build.done();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let word = machine.run(f, &[], &budget()).unwrap();
-        assert_eq!(
-            String::from_utf8(machine.string_bytes(word[0])).unwrap(),
-            "abcd"
-        );
-
-        // The one thing `concat` is stricter about than `interpolate`: it
-        // joins strings, and there are no implicit conversions.
-        let mut build = Build::default();
-        let str_layout = build.layout("String", Shape::Str);
-        build.program.str_layout = str_layout;
-        let ints = build.scalar(Repr::Int);
-        let both = build.args(&[(0, ints)]);
-        let joined = builtin(&mut build.program, "String", "concat", str_layout);
-        let f = build.function(
-            "f",
-            &[],
-            &[Repr::Int, Repr::Ref],
-            str_layout,
-            vec![
-                Inst::Int { dst: 0, value: 1 },
-                Inst::CallBuiltin {
-                    dst: 1,
-                    builtin: joined,
-                    args: both,
-                },
-                Inst::Return { src: 1 },
-            ],
-        );
-        let program = build.done();
-        let error = Machine::new(&program, 1 << 14)
-            .run(f, &[], &budget())
-            .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`String.concat` joins strings, and this operand is not one"
-        );
-    }
-
     /// A rendering that allocates once, whatever it renders.
     ///
     /// `Inst::Alloc` is not reached from here: the text is built in Rust and
@@ -1338,7 +1241,7 @@ mod tests {
             machine.set_payload(items, at, at as u64 + 1);
         }
         let before = machine.allocated_words();
-        let word = word(&mut machine, "String", "text", &[(Repr::Ref, items)]).unwrap();
+        let word = word(&mut machine, "String", "interpolate", &[(Repr::Ref, items)]).unwrap();
         assert_eq!(
             String::from_utf8(machine.string_bytes(word)).unwrap(),
             "[1, 2, 3]"

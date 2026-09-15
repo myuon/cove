@@ -278,15 +278,6 @@ pub(super) fn set_of(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<
     Ok(addr)
 }
 
-/// `Set.length() -> Int`.
-pub(super) fn set_length(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, _) = operand::method("length", operands, 0)?;
-    Ok(set(machine, "length", receiver)?.len as u64)
-}
-
 /// `Set.contains(element) -> Bool`.
 pub(super) fn set_contains(
     machine: &mut Machine,
@@ -583,15 +574,6 @@ pub(super) fn map_contains(
         |held| key::cmp_held(machine, entries.key, held, args[0]),
     )?;
     Ok(found.is_ok() as u64)
-}
-
-/// `Map.length() -> Int`.
-pub(super) fn map_length(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, _) = operand::method("length", operands, 0)?;
-    Ok(map(machine, "length", receiver)?.len as u64)
 }
 
 /// `Map.keys() -> Array<K>`, in ascending order.
@@ -899,10 +881,7 @@ mod tests {
         let mut machine = machine(&program);
         let int = scalar(&program, Repr::Int);
         let items = members(&mut machine, int, &[1, 2, 3]);
-        assert_eq!(
-            word(&mut machine, "Set", "length", &[(Repr::Ref, items)]).unwrap(),
-            3
-        );
+        assert_eq!(machine.object_len(items), 3);
 
         // `isEmpty` is not a machine builtin for `Set` either: it is
         // `std.set.isEmpty`, and it is `cove-sema`'s and `cove-ir`'s tests
@@ -1053,10 +1032,7 @@ mod tests {
         let int = scalar(&program, Repr::Int);
         let held_map = entries(&mut machine, int, int, &[(1, 10), (2, 20)]);
 
-        assert_eq!(
-            word(&mut machine, "Map", "length", &[(Repr::Ref, held_map)]).unwrap(),
-            2
-        );
+        assert_eq!(machine.object_len(held_map), 2);
 
         // `isEmpty` is not a machine builtin for `Map` either: it is
         // `std.map.isEmpty`, and it is `cove-sema`'s and `cove-ir`'s tests
@@ -1177,10 +1153,6 @@ mod tests {
 
         let items = members(&mut machine, point, &[1, 2, 3, 4]);
         assert_eq!(machine.object_len(items), 2, "two members, four words");
-        assert_eq!(
-            word(&mut machine, "Set", "length", &[(Repr::Ref, items)]).unwrap(),
-            2
-        );
         let array = word(&mut machine, "Set", "toArray", &[(Repr::Ref, items)]).unwrap();
         assert_eq!(machine.object_len(array), 2);
         assert_eq!(machine.payload_run(array, 0, 4), vec![1, 2, 3, 4]);
@@ -1234,10 +1206,7 @@ mod tests {
         assert_eq!(machine.object_len(grown[0]), 2);
         // And the set that was handed over is untouched: `inserted` is a past
         // participle, and neither of them writes through the receiver.
-        assert_eq!(
-            word(&mut machine, "Set", "length", &[(Repr::Ref, items)]).unwrap(),
-            1
-        );
+        assert_eq!(machine.object_len(items), 1);
     }
 
     /// A sorted run is traced by its element layout's map and searched at its
@@ -1303,8 +1272,8 @@ mod tests {
         let mut machine = machine(&program);
         let int = scalar(&program, Repr::Int);
         let items = members(&mut machine, int, &[1]);
-        let error = run(&mut machine, "Map", "length", &[(Repr::Ref, items)]).unwrap_err();
-        assert_eq!(error.message, "`Set` has no method `length`");
+        let error = run(&mut machine, "Map", "keys", &[(Repr::Ref, items)]).unwrap_err();
+        assert_eq!(error.message, "`Set` has no method `keys`");
 
         let text = machine.new_string("x").unwrap();
         let error = run(&mut machine, "Set", "toArray", &[(Repr::Ref, text)]).unwrap_err();

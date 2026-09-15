@@ -3165,7 +3165,11 @@ pub fn a_builtin_no_arm_lowers_refuses_the_function<A: Arm>() {
         INT,
         vec![Inst::Len { dst: 1, obj: 0 }, Inst::Return { src: 1 }],
     ))));
-    for (receiver, operation) in [("String", "length"), ("Array", "length"), ("Vector", "pop")] {
+    for (receiver, operation) in [
+        ("String", "length"),
+        ("Array", "contains"),
+        ("Vector", "pop"),
+    ] {
         assert!(
             !compiles::<A>(&one(receiver, operation)),
             "`{receiver}.{operation}` is not lowered, so the function is refused"
