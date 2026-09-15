@@ -491,6 +491,18 @@ declared effects rather than by name, and a fallible intrinsic carries its
 source call site's blame — which retires ADR 0043's totality condition at its
 reason. `CallBuiltin` is deprecated by architecture before it leaves the tree.
 
+[ADR 0059](docs/adr/0059-a-keyed-collection-is-searched-by-order-not-hashed.md)
+corrects ADR 0058's Phase 4, which told `Map` and `Set` to keep a
+`value-hash` intrinsic. They were never hash tables: both are sorted packed
+runs — members ascending and distinct, entries ascending by key — searched by
+binary search over a total order, and ascending iteration and rendering are
+language semantics. So what the runtime keeps is `value-order`, a three-way
+comparison, beside `value-equal` and key admission; binary search and building
+the new run for `inserted` and `removed` move to Cove. Hash tables are rejected
+because they would lose the order every `for` and rendering relies on, and the
+quadratic cost of building a map by repeated `inserted` is recorded as known
+rather than fixed here.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles
