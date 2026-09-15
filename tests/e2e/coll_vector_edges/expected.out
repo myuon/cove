@@ -28,3 +28,13 @@ array slice [a, b, c, d, e] [] [] [a] []
 copies [a, b, c, d, e] [a, b, c, d, e, f] [A, b, c, d, e] 6 5
 empty conversions [] [Span(from: 1, to: 1)] [Span(from: 1, to: 1)]
 span slices [Span(from: 50, to: 60), Span(from: 7, to: 8)] [Span(from: 7, to: 8)]
+remove middle Some(3) [1, 2, 4, 5, 6] 5
+remove first Some(1) last Some(6) [2, 4, 5]
+remove outside None None None [2, 4, 5]
+pop to empty Some(5) Some(4) Some(2) None []
+push after popping [8] Some(8) None
+span remove middle Some(Span(from: 3, to: 4)) [Span(from: 1, to: 2), Span(from: 5, to: 6)]
+span pop Some(Span(from: 5, to: 6)) [Span(from: 1, to: 2)]
+span push after [Span(from: 1, to: 2), Span(from: 7, to: 8)] Some(Span(from: 7, to: 8)) None
+strings after churn 35 [text 0, text 18, text 19, text 20, text 21] None
+strings pushed after churn 6 Some(again)

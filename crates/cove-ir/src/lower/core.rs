@@ -14,7 +14,8 @@
 //! So nothing downstream of this file learns that a public method moved. The
 //! verifier, both encoders and the native code generators see run instructions
 //! — a `len`, a word `growable-push`, a `load-elem` or `store-elem` of a store, a
-//! word `run-finish`, a word `run-slice` — and never the name of the method above
+//! word `run-finish`, a word `run-slice`, a word `growable-truncate` — and never the
+//! name of the method above
 //! them; a function the standard library wraps around a single one of them is
 //! small enough that `super::inline` expands it where it is called.
 
@@ -63,6 +64,15 @@ impl Body<'_> {
                 self.core_vector_slice(expr, &items.value, &from.value, &count.value, want)
             }
             ("arrayToVector", [items]) => self.core_array_to_vector(expr, &items.value, want),
+            ("vectorTruncate", [items, len]) => {
+                self.core_vector_truncate(expr, &items.value, &len.value, want)
+            }
+            ("vectorMove", [items, to, from, count]) => self.core_vector_move(
+                expr,
+                &items.value,
+                [&to.value, &from.value, &count.value],
+                want,
+            ),
             _ => self.gap(&format!("`core.{name}`"), expr),
         }
     }
@@ -253,6 +263,83 @@ impl Body<'_> {
         );
         self.release(owner, expr.span);
         dst
+    }
+
+    /// `core.vectorTruncate(items, len)`: the vector's length lowered to `len`,
+    /// and the elements above it cleared.
+    ///
+    /// One [`Inst::GrowableTruncate`] over [`Storage::Words`] of the element,
+    /// then the `()` the call answers, written where the surrounding form asked
+    /// for it as [`Body::core_vector_push`]'s is. `len` is the body's to have
+    /// computed from the length it read; a `len` above it is refused.
+    fn core_vector_truncate(
+        &mut self,
+        expr: &Expr,
+        items: &Expr,
+        len: &Expr,
+        want: Option<Dest>,
+    ) -> Val {
+        let Some(elem) = self.vector_element(items) else {
+            return self.dead(expr);
+        };
+        let owner = self.expr(items);
+        let to = self.expr(len);
+        self.emit(
+            Inst::GrowableTruncate {
+                owner: owner.slot,
+                len: to.slot,
+                storage: Storage::Words(elem),
+            },
+            expr.span,
+        );
+        self.release(to, expr.span);
+        self.release(owner, expr.span);
+        self.unit_answer(expr, want)
+    }
+
+    /// `core.vectorMove(items, to, from, count)`: `count` elements of the
+    /// vector's store moved from `from` to `to`, as memmove.
+    ///
+    /// [`Inst::LoadField`] of the store and one word [`Inst::RunCopy`] of the
+    /// store into itself, then the `()`. The bounds the copy checks are the
+    /// store's capacity, so this is a vector write only where the body has held
+    /// both ranges inside `items.length()` first — `std.vector.remove` moves
+    /// the tail above the index it takes out.
+    fn core_vector_move(
+        &mut self,
+        expr: &Expr,
+        items: &Expr,
+        [to, from, count]: [&Expr; 3],
+        want: Option<Dest>,
+    ) -> Val {
+        let Some(elem) = self.vector_element(items) else {
+            return self.dead(expr);
+        };
+        let owner = self.expr(items);
+        let at = self.expr(to);
+        let source = self.expr(from);
+        let many = self.expr(count);
+        let store = self.vector_store(owner.slot, expr.span);
+        let row = self.pool.args.intern(vec![
+            store.arg(),
+            at.arg(),
+            store.arg(),
+            source.arg(),
+            many.arg(),
+        ]);
+        self.emit(
+            Inst::RunCopy {
+                args: row,
+                storage: Storage::Words(elem),
+            },
+            expr.span,
+        );
+        self.release(store, expr.span);
+        self.release(many, expr.span);
+        self.release(source, expr.span);
+        self.release(at, expr.span);
+        self.release(owner, expr.span);
+        self.unit_answer(expr, want)
     }
 
     /// One word [`Inst::RunSlice`]: `dst` becomes a fresh `target` run holding

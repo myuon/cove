@@ -937,6 +937,49 @@ pub enum Inst {
     /// call's arguments do, so the verifier checks them by the same rule. The
     /// storage is the instruction's own, as [`Inst::RunCopy`]'s is.
     GrowableExtend { args: ArgsId, storage: Storage },
+    /// `owner.truncate(len)`: the logical length lowered to `len`, and the
+    /// units it vacates cleared.
+    ///
+    /// # In ADR 0058's families
+    ///
+    /// Not one of the six: #378's Q5. It is `growable-commit`'s inverse — a
+    /// commit raises the length over units the caller has written, and this
+    /// lowers it over units the caller has read — and it is what `Vector.pop`
+    /// and `Vector.remove` need beneath their Cove bodies, which read the
+    /// element with a load, move the tail down with a [`Inst::RunCopy`] of the
+    /// store into itself, and then give the last unit back.
+    ///
+    /// # What it means
+    ///
+    /// **The vacated units are zeroed before the length is written.** A store's
+    /// shape says its whole capacity is elements, and the collector traces it
+    /// that way, so a unit above the length that still held a reference would
+    /// keep what it names alive — a vector used as a work queue would retain
+    /// everything it had ever held. The store is not replaced and not shrunk:
+    /// the room stays for the next push.
+    ///
+    /// **It only lowers.** A `len` above the current length, or below zero, is
+    /// refused as a broken invariant: nothing between the length and the
+    /// capacity is a written unit, so raising the length here would expose
+    /// zeroes as elements, which is what [`Inst::GrowablePush`] and a commit
+    /// exist to rule out. Every producer computes `len` from the length it has
+    /// just read.
+    ///
+    /// **What it is charged.** One unit, as [`Inst::GrowableAlloc`] and
+    /// [`Inst::RunFinish`] are: the zeroing is one clear of the vacated words,
+    /// which nothing could interrupt, and its only producers vacate one
+    /// element.
+    ///
+    /// # For [`Storage::Words`]
+    ///
+    /// `owner` names a `Vector<T>` whose element layout is the storage's, and
+    /// `len` an `Int`. It writes no frame slot. Only [`Storage::Words`] is
+    /// admitted: a byte builder has no operation that takes bytes back out.
+    GrowableTruncate {
+        owner: Slot,
+        len: Slot,
+        storage: Storage,
+    },
     /// `dst = <owner's live prefix, validated and relabelled to `target`>`,
     /// consuming the owner.
     ///

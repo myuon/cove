@@ -44,6 +44,48 @@ export fn set<T>(items: Vector<T>, index: Int, value: T) -> Option<T> {
   }
 }
 
+/// Takes the last element out and answers it, or answers `None` and writes
+/// nothing when there is no last element.
+///
+/// The empty case is `remove(length() - 1)` on an empty vector, whose index is
+/// `-1` and so `None`: one rule about indices rather than a second one about
+/// emptiness. The storage keeps its room and forgets the element — the core
+/// truncate beneath this clears the words it vacates, so nothing the vector no
+/// longer holds is kept alive by it.
+export fn pop<T>(items: Vector<T>) -> Option<T> {
+  let length = items.length()
+  if length == 0 {
+    None
+  } else {
+    let last = core.vectorLoad(items, length - 1)
+    core.vectorTruncate(items, length - 1)
+    Some(last)
+  }
+}
+
+/// Takes the element at `index` out, moves everything after it down one, and
+/// answers what was there.
+///
+/// An index that is not already in the vector — negative, at or past
+/// `length()`, or any index of an empty vector — answers `None` and removes
+/// nothing, which is `get`'s answer and `set`'s. The write goes through the
+/// shared storage, so every alias observes the shrink.
+///
+/// The decision and the `Option` are this body's; beneath them are an element
+/// load, one bulk move of the tail over the hole, and the truncate `pop` ends
+/// with.
+export fn remove<T>(items: Vector<T>, index: Int) -> Option<T> {
+  let length = items.length()
+  if index >= 0 && index < length {
+    let was = core.vectorLoad(items, index)
+    core.vectorMove(items, index, index + 1, length - index - 1)
+    core.vectorTruncate(items, length - 1)
+    Some(was)
+  } else {
+    None
+  }
+}
+
 /// The elements of this vector as an `Array`, in O(1), consuming the vector.
 ///
 /// The storage the vector was holding *is* the array: it is relabelled in

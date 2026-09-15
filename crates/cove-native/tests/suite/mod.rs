@@ -3129,6 +3129,61 @@ pub fn a_run_copy_is_admitted_with_five_one_word_operands<A: Arm>() {
     );
 }
 
+/// A word truncate — `Vector.pop` and `Vector.remove`'s last step — handed to
+/// the growable helper whole as [`GrowableOp::TruncateWords`], with the owner's
+/// slot and the length's, at its own pc; admitted over words with both slots in
+/// the frame, and refused at a slot the frame does not have or over bytes.
+pub fn a_word_truncate_is_handed_to_the_runtime_whole<A: Arm>() {
+    let one = |owner: u32, storage: Storage| {
+        program(function(
+            vec![Repr::Ref, Repr::Int],
+            INT,
+            vec![
+                Inst::GrowableTruncate {
+                    owner,
+                    len: 1,
+                    storage,
+                },
+                Inst::Return { src: 1 },
+            ],
+        ))
+    };
+    forget_built();
+    let heap = Heap::new(1);
+    let mut words = vec![7u64, 2];
+    let answer = run_over::<A>(&one(0, Storage::Words(PAIR)), &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(
+        built(),
+        vec![Built {
+            base: 0,
+            pc: 0,
+            op: GrowableOp::TruncateWords.abi(),
+            a: 0,
+            b: 1,
+            work: 2,
+        }]
+    );
+    assert_eq!(answer.returned[0], 2);
+    for outcome in [Outcome::Raised, Outcome::Stopped] {
+        forget_built();
+        built_answers(&[outcome]);
+        let mut words = vec![7u64, 2];
+        let answer = run_over::<A>(&one(0, Storage::Words(PAIR)), &mut words, 0, &heap);
+        assert_eq!(answer.outcome, outcome);
+        assert_eq!(answer.returned[0], UNWRITTEN);
+    }
+    assert!(compiles::<A>(&one(0, Storage::Words(INT))));
+    assert!(
+        !compiles::<A>(&one(9, Storage::Words(INT))),
+        "a slot the frame does not have"
+    );
+    assert!(
+        !compiles::<A>(&one(0, Storage::PackedBytes)),
+        "no byte member"
+    );
+}
+
 /// A run slice's four operands, as `ArgsId(1)`: `dst` in slot 3, `src` in 0,
 /// `from` in 1 and `count` in 2 — the destination last in the frame and first in
 /// the row, so an arm that confused the row's order with the frame's is caught.
@@ -3311,7 +3366,7 @@ pub fn a_builtin_no_arm_lowers_refuses_the_function<A: Arm>() {
     for (receiver, operation) in [
         ("String", "length"),
         ("Array", "contains"),
-        ("Vector", "pop"),
+        ("Vector", "contains"),
     ] {
         assert!(
             !compiles::<A>(&one(receiver, operation)),

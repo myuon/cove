@@ -425,6 +425,88 @@ fn @std.array.slice<Int>(Array Int Int) -> Array
     );
 }
 
+/// `Vector.pop` and `Vector.remove` are `std.vector` bodies: the index decided
+/// and the `Option` built in Cove, over an element load, a word `run-copy` of
+/// the store into itself for `remove`'s tail, and a word `growable-truncate`
+/// that lowers the length and clears what it vacates.
+#[test]
+fn pop_and_remove_are_cove_over_a_growable_truncate() {
+    let source = "fn f(v: Vector<Int>) -> Option<Int> {\n  var w = v\n  w.remove(1)\n  w.pop()\n}";
+    let (sources, checked) = super::checked(source);
+    let program = super::lower(&checked, &sources, &cove_schema::HostSchemas::new())
+        .expect("the program lowers");
+    let body = |name: &str| {
+        let id = program
+            .functions
+            .iter()
+            .position(|f| &*f.module == "std.vector" && f.name.starts_with(name))
+            .map(|at| crate::FunctionId(at as u32))
+            .unwrap_or_else(|| panic!("`{name}` was lowered"));
+        crate::print::function(&program, id)
+    };
+    assert_eq!(
+        body("pop<"),
+        "\
+fn @std.vector.pop<Int>(Vector) -> Option
+  frame 11: s0!:ref s1:tag s2:int s3:int s4:bool s5:tag s6:int s7:int s8:ref s9:int s10:unit
+  local items -> s0:Vector [0, 16)
+  local length -> s3:Int [1, 15)
+  local last -> s9:Int [9, 15)
+     0  load-field s3:Int s0:ref +0
+     1  eq.int.imm.branch s4:bool s3:int 0 5
+     2  tag s5:tag Option.None
+     3  copy s1..s2:Option s5..s6:Option
+     4  jump 15
+     5  sub.int.imm s7:int s3:int 1
+     6  load-field s8:<ref> s0:ref +1
+     7  load-elem s9:Int s8:ref s7:int
+     8  clear s8:<ref>
+     9  sub.int.imm s7:int s3:int 1
+    10  growable-truncate.words Int s0:ref s7:int
+    11  unit s10:unit
+    12  tag s5:tag Option.Some
+    13  copy s6:Int s9:Int
+    14  copy s1..s2:Option s5..s6:Option
+    15  return s1..s2:Option
+"
+    );
+    assert_eq!(
+        body("remove<"),
+        "\
+fn @std.vector.remove<Int>(Vector Int) -> Option
+  frame 14: s0!:ref s1!:int s2:tag s3:int s4:int s5:bool s6:ref s7:int s8:int s9:int s10:int s11:unit s12:tag s13:int
+  local items -> s0:Vector [0, 24)
+  local index -> s1:Int [0, 24)
+  local length -> s4:Int [1, 23)
+  local was -> s7:Int [7, 20)
+     0  load-field s4:Int s0:ref +0
+     1  ge.int.imm.branch s5:bool s1:int 0 3
+     2  lt.int s5:bool s1:int s4:int
+     3  branch-false s5:bool 21
+     4  load-field s6:<ref> s0:ref +1
+     5  load-elem s7:Int s6:ref s1:int
+     6  clear s6:<ref>
+     7  add.int.imm s8:int s1:int 1
+     8  sub.int s9:int s4:int s1:int
+     9  sub.int.imm s10:int s9:int 1
+    10  load-field s6:<ref> s0:ref +1
+    11  run-copy.words Int (s6:<ref> s1:Int s6:<ref> s8:Int s10:Int)
+    12  clear s6:<ref>
+    13  unit s11:unit
+    14  sub.int.imm s8:int s4:int 1
+    15  growable-truncate.words Int s0:ref s8:int
+    16  unit s11:unit
+    17  tag s12:tag Option.Some
+    18  copy s13:Int s7:Int
+    19  copy s2..s3:Option s12..s13:Option
+    20  jump 23
+    21  tag s12:tag Option.None
+    22  copy s2..s3:Option s12..s13:Option
+    23  return s2..s3:Option
+"
+    );
+}
+
 /// `mapError` moved out of the lowering the same way `isSome` and
 /// `unwrapOr` did above: `cove_schema::builtins::STANDARD_LIBRARY` names it
 /// too, so `Int.parse(t).mapError(fn(error) { ... })` is an ordinary

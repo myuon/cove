@@ -359,6 +359,16 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
                 format!("run-copy.words {} ({})", l(*elem), args_of(program, *args))
             }
         },
+        Inst::GrowableTruncate {
+            owner,
+            len,
+            storage,
+        } => format!(
+            "growable-truncate{} {} {}",
+            unit(program, *storage),
+            s(*owner),
+            s(*len)
+        ),
         Inst::RunSlice { args, storage } => match storage {
             Storage::PackedBytes => format!("run-slice.bytes ({})", args_of(program, *args)),
             Storage::Words(elem) => {

@@ -868,6 +868,16 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                 && slot(finish.dst)
                 && slot(finish.owner)
         }),
+        // `Vector.pop` and `Vector.remove`'s truncate, handed to the growable
+        // helper whole: two slots it reads, and an element layout it reads off
+        // the instruction, bounded against the table. There is no emitted fast
+        // path — a truncate clears a stride of words and writes the length, and
+        // the helper is one call per pop.
+        Inst::GrowableTruncate {
+            owner,
+            len,
+            storage: Storage::Words(elem),
+        } => elem.index() < program.layouts.len() && slot(*owner) && slot(*len),
         // A builtin is decoded by [`method_of`] and by nothing here, so that the
         // name this tier lowers is written down once. `None` is a family nothing
         // emits and falls to `Reason::Instruction` with every other unlowered

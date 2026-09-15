@@ -289,6 +289,11 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             args: ArgsId(lo),
             storage: Storage::PackedBytes,
         },
+        Op::GrowableTruncateWords => Inst::GrowableTruncate {
+            owner: a,
+            len: b,
+            storage: Storage::Words(LayoutId(lo)),
+        },
         Op::RunFinishBytes => Inst::RunFinish {
             dst: a,
             owner: b,

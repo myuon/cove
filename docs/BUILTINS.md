@@ -55,6 +55,8 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `arraySlice` | `core.arraySlice(items: Array<T>, from: Int, count: Int) -> Array<T>` |
 | `vectorSlice` | `core.vectorSlice(items: Vector<T>, from: Int, count: Int) -> Array<T>` |
 | `arrayToVector` | `core.arrayToVector(items: Array<T>) -> Vector<T>` |
+| `vectorTruncate` | `core.vectorTruncate(items: Vector<T>, len: Int) -> Unit` |
+| `vectorMove` | `core.vectorMove(items: Vector<T>, to: Int, from: Int, count: Int) -> Unit` |
 
 ## Builtin types
 
@@ -105,8 +107,8 @@ written as a namespace; binds `T`.
 | `sorted(by: fn(T, T) -> Bool) -> Array<T>` |  |  |  | `machine` |
 | `push(value: T) -> Unit` | yes |  |  | `std.vector.push` |
 | `set(index: Int, value: T) -> Option<T>` | yes |  |  | `std.vector.set` |
-| `pop() -> Option<T>` | yes |  |  | `machine` |
-| `remove(index: Int) -> Option<T>` | yes |  |  | `machine` |
+| `pop() -> Option<T>` | yes |  |  | `std.vector.pop` |
+| `remove(index: Int) -> Option<T>` | yes |  |  | `std.vector.remove` |
 | `freeze() -> Array<T>` | yes |  |  | `std.vector.freeze` |
 | `toArray() -> Array<T>` |  |  |  | `std.vector.toArray` |
 | `snapshot() -> Self` |  |  |  | `machine` |

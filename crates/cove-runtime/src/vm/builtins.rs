@@ -128,8 +128,9 @@ pub(crate) fn call(
         // `Machine::push_words`.
         // `Vector.set` is not here: it is `std.vector.set`, a range check and
         // an `Option` in Cove over an element `LoadElem` and `StoreElem`.
-        Intrinsic::VectorPop => seq::vector_pop(machine, builtin.result, operands, out),
-        Intrinsic::VectorRemove => seq::vector_remove(machine, builtin.result, operands, out),
+        // `Vector.pop` and `Vector.remove` are not here: they are `std.vector`
+        // over an element load, a word `Inst::RunCopy` of the tail and a word
+        // `Inst::GrowableTruncate` — see `Machine::truncate_words`.
         Intrinsic::VectorContains => {
             seq::vector_contains(machine, operands).map(|word| out.push(word))
         }

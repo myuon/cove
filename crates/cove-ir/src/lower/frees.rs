@@ -412,6 +412,7 @@ impl<'p> Flow<'p> {
             | Inst::RunCopy { .. }
             | Inst::GrowablePush { .. }
             | Inst::GrowableExtend { .. }
+            | Inst::GrowableTruncate { .. }
             | Inst::ScopeCancel { .. }
             | Inst::Cancel { .. }
             | Inst::SharedLock { .. }
@@ -507,6 +508,10 @@ impl<'p> Flow<'p> {
             Inst::GrowablePush { owner, src, .. } => {
                 f(owner, 1);
                 f(src, 1);
+            }
+            Inst::GrowableTruncate { owner, len, .. } => {
+                f(owner, 1);
+                f(len, 1);
             }
             // All four operands live in the args row, exactly as
             // `Inst::RunCopy`'s five do.

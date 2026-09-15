@@ -1287,8 +1287,6 @@ impl Body<'_> {
 const HANDED_OVER: &[(&str, &str)] = &[
     ("Array", "contains"),
     ("Array", "indexOf"),
-    ("Vector", "pop"),
-    ("Vector", "remove"),
     ("Vector", "contains"),
     ("Vector", "indexOf"),
     ("Set", "contains"),

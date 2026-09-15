@@ -644,7 +644,7 @@ pub struct StdBinding {
 /// Every builtin method whose body has moved out of Rust and into the
 /// standard library.
 ///
-/// Thirty-seven entries, and what is *not* here is as informative as what is.
+/// Thirty-nine entries, and what is *not* here is as informative as what is.
 ///
 /// `Result.mapError` is here, and it is the only one that needed a language
 /// change to arrive. While a callback's arity was adapted rather than
@@ -666,7 +666,7 @@ pub struct StdBinding {
 /// That is what retires ADR 0043's "It must be total" condition, so a
 /// fallible method is no longer kept out of this table for its diagnostic.
 ///
-/// Ten of the thirty-seven are `Duration`'s, and they are the first entries
+/// Ten of the thirty-nine are `Duration`'s, and they are the first entries
 /// that come in pairs: `micros`, `millis`, `seconds`, `minutes`, and `hours`
 /// each name a method (`d.millis()`, the reader) and, separately, an
 /// associated function (`Duration.millis(n)`, the builder) — see
@@ -812,6 +812,22 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "toArray",
         module: "std.vector",
         function: "toArray",
+    },
+    // `pop` and `remove` decide their index and build their `Option` in Cove,
+    // over an element load, a move of the tail and a truncate.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Vector",
+        method: "pop",
+        module: "std.vector",
+        function: "pop",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Vector",
+        method: "remove",
+        module: "std.vector",
+        function: "remove",
     },
     StdBinding {
         kind: StdBindingKind::Method,
@@ -1290,7 +1306,9 @@ impl CoreIntrinsicSchema {
 /// write beneath them. `Vector.freeze` is [`CORE_VECTOR_FINISH`], the word run
 /// finish. The slices of both sequences are [`CORE_ARRAY_SLICE`] and
 /// [`CORE_VECTOR_SLICE`], an exact construction beneath a range policy written
-/// in Cove, and `Array.toVector` is [`CORE_ARRAY_TO_VECTOR`].
+/// in Cove, and `Array.toVector` is [`CORE_ARRAY_TO_VECTOR`]. `Vector.pop` and
+/// `Vector.remove` are an element load, [`CORE_VECTOR_MOVE`] of the tail and
+/// [`CORE_VECTOR_TRUNCATE`], which gives the last element back.
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_PUSH,
@@ -1300,6 +1318,8 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_ARRAY_SLICE,
     CORE_VECTOR_SLICE,
     CORE_ARRAY_TO_VECTOR,
+    CORE_VECTOR_TRUNCATE,
+    CORE_VECTOR_MOVE,
 ];
 
 /// Every core intrinsic.
@@ -1489,6 +1509,59 @@ pub const CORE_ARRAY_TO_VECTOR: CoreIntrinsicSchema = CoreIntrinsicSchema {
         ty: BuiltinType::Array(&BuiltinType::Param("T")),
     }],
     result: BuiltinType::Vector(&BuiltinType::Param("T")),
+};
+
+/// `core.vectorTruncate<T>(items: Vector<T>, len: Int) -> Unit`: the vector's
+/// length lowered to `len`, which the caller computed from the length it read,
+/// and the elements above it cleared.
+///
+/// `Inst::GrowableTruncate` over `Storage::Words` of the element, #378's Q5 —
+/// `growable-commit`'s inverse. The cleared elements are what keep the collector
+/// from following a reference the vector no longer holds.
+pub const CORE_VECTOR_TRUNCATE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "vectorTruncate",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "items",
+            ty: BuiltinType::Vector(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "len",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Unit,
+};
+
+/// `core.vectorMove<T>(items: Vector<T>, to: Int, from: Int, count: Int) ->
+/// Unit`: `count` elements of the vector moved from `from` to `to`, with
+/// memmove semantics, both ranges already inside `items.length()`.
+///
+/// `Inst::LoadField` of the store and one word `Inst::RunCopy` of it into
+/// itself, bounded, as [`CORE_VECTOR_LOAD`] is, by the capacity.
+pub const CORE_VECTOR_MOVE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "vectorMove",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "items",
+            ty: BuiltinType::Vector(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "to",
+            ty: BuiltinType::Int,
+        },
+        ParamSchema {
+            name: "from",
+            ty: BuiltinType::Int,
+        },
+        ParamSchema {
+            name: "count",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Unit,
 };
 
 // ----------------------------------------------------- the shared signatures

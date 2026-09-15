@@ -312,6 +312,9 @@ impl Check<'_> {
                 // Nor do the growable appends: what each changes is the store
                 // the owner in `owner` names, and the owner's own length word.
                 Inst::GrowablePush { .. } | Inst::GrowableExtend { .. } => {}
+                // Nor does a truncate: it lowers the owner's length word and
+                // clears units of its store.
+                Inst::GrowableTruncate { .. } => {}
                 // Forming the address of a slot is also a write to it, as
                 // far as this is concerned: a `var` argument is that address
                 // handed to a callee, and what the callee stores through it
@@ -902,6 +905,26 @@ impl Check<'_> {
             Inst::GrowableExtend { args, storage } => {
                 self.admit_storage(at, "extends", storage);
                 self.check_growable_extend_args(at, args);
+            }
+            // The one growable member admitted over words alone: a byte builder
+            // has no operation that takes a byte back out.
+            Inst::GrowableTruncate {
+                owner,
+                len,
+                storage,
+            } => {
+                match storage {
+                    crate::Storage::PackedBytes => self.fault(
+                        at,
+                        "truncates a run of packed bytes, and this instruction admits only words"
+                            .to_string(),
+                    ),
+                    crate::Storage::Words(elem) => {
+                        self.layout_exists(at, elem);
+                    }
+                }
+                self.expect(at, owner, &[Repr::Ref]);
+                self.expect(at, len, &[Repr::Int]);
             }
             Inst::RunFinish {
                 dst,
@@ -2560,6 +2583,11 @@ mod tests {
             src: 1,
             storage,
         };
+        let truncate = |storage| Inst::GrowableTruncate {
+            owner: 0,
+            len: 1,
+            storage,
+        };
         let extend = |storage| Inst::GrowableExtend {
             args: ArgsId(0),
             storage,
@@ -2594,6 +2622,12 @@ mod tests {
             "{wide:?}"
         );
         assert_eq!(one(extend(words)), refused("extends"));
+        // A truncate is the other way round: words and not bytes.
+        assert_eq!(one(truncate(words)), none);
+        assert_eq!(
+            one(truncate(bytes)),
+            vec!["truncates a run of packed bytes, and this instruction admits only words"]
+        );
         // A word finish is admitted into the fixed run of its element, with
         // nothing to validate, and refused into anything else.
         assert_eq!(one(finish(ARRAY_INT, Validation::None, words)), none);

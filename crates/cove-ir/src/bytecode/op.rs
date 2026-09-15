@@ -1,4 +1,4 @@
-//! The hundred and sixty opcodes, and what each one makes of the four
+//! The hundred and sixty-one opcodes, and what each one makes of the four
 //! fields.
 //!
 //! # One opcode per concrete operation
@@ -141,7 +141,10 @@ mod base {
     /// `Vector.push` since ADR 0058 moved it into the standard library.
     pub const GROWABLE_PUSH_WORDS: u8 = GROWABLE_PUSH_BYTE + 1;
     pub const GROWABLE_EXTEND_BYTES: u8 = GROWABLE_PUSH_WORDS + 1;
-    pub const RUN_FINISH_BYTES: u8 = GROWABLE_EXTEND_BYTES + 1;
+    /// A growable member with no byte twin: `Vector.pop` and `Vector.remove`
+    /// since ADR 0058 moved them into the standard library.
+    pub const GROWABLE_TRUNCATE_WORDS: u8 = GROWABLE_EXTEND_BYTES + 1;
+    pub const RUN_FINISH_BYTES: u8 = GROWABLE_TRUNCATE_WORDS + 1;
     /// A word finish, beside its byte twin: `Vector.freeze()` since ADR 0058
     /// moved it into the standard library.
     pub const RUN_FINISH_WORDS: u8 = RUN_FINISH_BYTES + 1;
@@ -234,6 +237,9 @@ pub enum Op {
     GrowablePushWords,
     /// [`crate::Inst::GrowableExtend`] over [`crate::Storage::PackedBytes`].
     GrowableExtendBytes,
+    /// [`crate::Inst::GrowableTruncate`] over [`crate::Storage::Words`], whose
+    /// element layout is the payload's low half.
+    GrowableTruncateWords,
     /// [`crate::Inst::RunFinish`] over [`crate::Storage::PackedBytes`], which
     /// is always [`crate::Validation::Utf8`]; the target layout is the
     /// payload's low half.
@@ -507,6 +513,7 @@ impl Op {
             Op::GrowablePushByte,
             Op::GrowablePushWords,
             Op::GrowableExtendBytes,
+            Op::GrowableTruncateWords,
             Op::RunFinishBytes,
             Op::RunFinishWords,
             Op::Len,
@@ -596,6 +603,7 @@ impl Op {
             Op::GrowablePushByte => base::GROWABLE_PUSH_BYTE,
             Op::GrowablePushWords => base::GROWABLE_PUSH_WORDS,
             Op::GrowableExtendBytes => base::GROWABLE_EXTEND_BYTES,
+            Op::GrowableTruncateWords => base::GROWABLE_TRUNCATE_WORDS,
             Op::RunFinishBytes => base::RUN_FINISH_BYTES,
             Op::RunFinishWords => base::RUN_FINISH_WORDS,
             Op::Len => base::LEN,
@@ -866,6 +874,14 @@ impl Op {
             // `Inst::GrowableExtend`'s doc, and `Op::RunCopyBytes` above for the same
             // arrangement at five.
             Op::GrowableExtendBytes => fields(NONE, NONE, NONE, one(Half::Args)),
+            // The owner and the new length, and the element layout the vacated
+            // units are cleared at the stride of.
+            Op::GrowableTruncateWords => fields(
+                Operand::Word(REF),
+                Operand::Word(INT),
+                NONE,
+                one(Half::Layout),
+            ),
             // The target layout rides in the payload because the IR carries it;
             // for bytes it is always `Program::str_layout`, which
             // `crate::verify` checks, and a word finish will name an `Array`.
@@ -972,7 +988,7 @@ mod tests {
     use super::*;
 
     /// ADR 0041's count, which is the one number the format's headroom is
-    /// argued from: a hundred and sixty opcodes out of the 256 a byte
+    /// argued from: a hundred and sixty-one opcodes out of the 256 a byte
     /// names.
     ///
     /// It was a hundred and two until `Op::ByteAt` (now `Op::RunLoadBytes`), a
@@ -993,16 +1009,17 @@ mod tests {
     /// which no lowering had ever emitted, and a hundred and fifty-eight once
     /// ADR 0058's Phase 3 gave the growable push a word member for
     /// `Vector.push`, and a hundred and fifty-nine once the finish gained one
-    /// for `Vector.freeze`, and a hundred and sixty once the run slice arrived
-    /// with `Array.slice`. What the number is for is that a reader can see the
+    /// for `Vector.freeze`, a hundred and sixty once the run slice arrived
+    /// with `Array.slice`, and a hundred and sixty-one once the growable
+    /// truncate arrived with `Vector.pop`. What the number is for is that a reader can see the
     /// headroom
     /// rather than be told about it: more than a third of the byte is still
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_sixty_opcodes() {
-        assert_eq!(Op::all().len(), 160);
-        assert_eq!(OPCODES, 160);
+    fn there_are_a_hundred_and_sixty_one_opcodes() {
+        assert_eq!(Op::all().len(), 161);
+        assert_eq!(OPCODES, 161);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

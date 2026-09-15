@@ -273,6 +273,7 @@ const GROWABLE_ALLOC_BYTES: u8 = Op::GrowableAllocBytes.number();
 const GROWABLE_PUSH_BYTE: u8 = Op::GrowablePushByte.number();
 const GROWABLE_PUSH_WORDS: u8 = Op::GrowablePushWords.number();
 const GROWABLE_EXTEND_BYTES: u8 = Op::GrowableExtendBytes.number();
+const GROWABLE_TRUNCATE_WORDS: u8 = Op::GrowableTruncateWords.number();
 const RUN_FINISH_BYTES: u8 = Op::RunFinishBytes.number();
 const RUN_FINISH_WORDS: u8 = Op::RunFinishWords.number();
 const LEN: u8 = Op::Len.number();
@@ -349,6 +350,7 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::GrowablePushByte
         | Op::GrowablePushWords
         | Op::GrowableExtendBytes
+        | Op::GrowableTruncateWords
         | Op::RunFinishBytes
         | Op::RunFinishWords
         | Op::LoadField
@@ -1930,6 +1932,17 @@ pub(super) fn dispatch<'s, 'a>(
                 let elem = LayoutId(held.lo());
                 machine.sync(pc - 1);
                 if let Err(error) = machine.push_words(owner, elem, base + held.b() as u64) {
+                    fail!(error);
+                }
+            }
+            // `Vector.pop` and `Vector.remove`'s last step since ADR 0058: the
+            // length lowered and the vacated element cleared, as one call.
+            GROWABLE_TRUNCATE_WORDS => {
+                let owner = machine.mem.word_at(base_at + (a!() as usize));
+                let len = machine.mem.word_at(base_at + (b!() as usize)) as i64;
+                let elem = LayoutId(held.lo());
+                machine.sync(pc - 1);
+                if let Err(error) = machine.truncate_words(owner, elem, len) {
                     fail!(error);
                 }
             }

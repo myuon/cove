@@ -60,8 +60,6 @@ pub enum Intrinsic {
     StringSliceBytes,
     ArrayContains,
     ArrayIndexOf,
-    VectorPop,
-    VectorRemove,
     VectorContains,
     VectorIndexOf,
     SetOf,
@@ -117,8 +115,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringSliceBytes,
     Intrinsic::ArrayContains,
     Intrinsic::ArrayIndexOf,
-    Intrinsic::VectorPop,
-    Intrinsic::VectorRemove,
     Intrinsic::VectorContains,
     Intrinsic::VectorIndexOf,
     Intrinsic::SetOf,
@@ -176,8 +172,6 @@ impl Intrinsic {
             Intrinsic::StringSliceBytes => "String",
             Intrinsic::ArrayContains => "Array",
             Intrinsic::ArrayIndexOf => "Array",
-            Intrinsic::VectorPop => "Vector",
-            Intrinsic::VectorRemove => "Vector",
             Intrinsic::VectorContains => "Vector",
             Intrinsic::VectorIndexOf => "Vector",
             Intrinsic::SetOf => "Set",
@@ -231,8 +225,6 @@ impl Intrinsic {
             Intrinsic::StringSliceBytes => "sliceBytes",
             Intrinsic::ArrayContains => "contains",
             Intrinsic::ArrayIndexOf => "indexOf",
-            Intrinsic::VectorPop => "pop",
-            Intrinsic::VectorRemove => "remove",
             Intrinsic::VectorContains => "contains",
             Intrinsic::VectorIndexOf => "indexOf",
             Intrinsic::SetOf => "of",
@@ -284,8 +276,8 @@ impl Intrinsic {
     /// Assigned by reading the VM arm each intrinsic dispatches to in
     /// `cove-runtime`'s `vm::builtins`, not by a rule applied to every
     /// member of a family — two operations of the same receiver may answer
-    /// differently, the way [`Intrinsic::VectorContains`] does not write
-    /// memory and [`Intrinsic::VectorPop`] does.
+    /// differently, the way [`Intrinsic::StringContains`] allocates nothing
+    /// and [`Intrinsic::StringSlice`] does.
     pub const fn effects(self) -> Effects {
         use Effects as E;
         // Every arm below validates its own operand count and shape before
@@ -356,23 +348,11 @@ impl Intrinsic {
             }
             // `slice` and `toVector` are not here: each is `std.array` over a
             // run slice or a run copy now.
-
-            // `push` is not here: it is `std.vector.push` over the core
-            // intrinsic that is a word `Inst::GrowablePush`.
-            // `pop` touches exactly one element's words and never allocates;
-            // `remove` additionally shifts every element past the one it
-            // takes out, which is what makes it proportional to the vector. `set` was the fourth, and is
-            // `std.vector.set` over an element load and store now.
-            Intrinsic::VectorPop => raise.union(E::READS_MEMORY).union(E::WRITES_MEMORY),
-            Intrinsic::VectorRemove => raise
-                .union(E::READS_MEMORY)
-                .union(E::WRITES_MEMORY)
-                .union(E::BULK_WORK),
             Intrinsic::VectorContains | Intrinsic::VectorIndexOf => {
                 raise.union(E::READS_MEMORY).union(E::BULK_WORK)
             }
-            // `push`, `set`, `freeze`, `slice` and `toArray` are not here: each
-            // is `std.vector` over run instructions now.
+            // `push`, `set`, `pop`, `remove`, `freeze`, `slice` and `toArray` are
+            // not here: each is `std.vector` over run instructions now.
 
             // A `Set` or a `Map` is immutable, so every update below
             // allocates a new run rather than writing through the receiver
@@ -566,8 +546,6 @@ mod tests {
                 | Intrinsic::StringSliceBytes
                 | Intrinsic::ArrayContains
                 | Intrinsic::ArrayIndexOf
-                | Intrinsic::VectorPop
-                | Intrinsic::VectorRemove
                 | Intrinsic::VectorContains
                 | Intrinsic::VectorIndexOf
                 | Intrinsic::SetOf
@@ -627,7 +605,7 @@ mod tests {
 
     #[test]
     fn display_prints_receiver_dot_operation() {
-        assert_eq!(Intrinsic::VectorPop.to_string(), "Vector.pop");
+        assert_eq!(Intrinsic::VectorContains.to_string(), "Vector.contains");
         assert_eq!(Intrinsic::AnyEquals.to_string(), "Any.equals");
     }
 

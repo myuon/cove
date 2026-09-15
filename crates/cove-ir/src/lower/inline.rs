@@ -540,6 +540,7 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::RunCopy { .. }
             | Inst::GrowablePush { .. }
             | Inst::GrowableExtend { .. }
+            | Inst::GrowableTruncate { .. }
             | Inst::Jump { .. }
             | Inst::BranchFalse { .. }
             | Inst::Switch { .. }
@@ -1147,6 +1148,7 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         } => vec![dst, run, index],
         Inst::GrowableAlloc { dst, capacity, .. } => vec![dst, capacity],
         Inst::GrowablePush { owner, src, .. } => vec![owner, src],
+        Inst::GrowableTruncate { owner, len, .. } => vec![owner, len],
         Inst::RunFinish { dst, owner, .. } => vec![dst, owner],
         // The five operands live in the args row rather than on the
         // instruction, exactly as a call's do — `relocated` moves that row

@@ -123,5 +123,54 @@ export fn main() -> Result<Unit, Error> {
   grownFromNothing.push(Span(from: 1, to: 1))
   println("empty conversions {noSpans.slice(0, 1)} {grownFromNothing} {grownFromNothing.toArray()}")?
   println("span slices {pairs.slice(1, 3)} {pairs.toArray().slice(2, 99).toVector().slice(-1, 1)}")?
+
+  // Taking elements back out: the first, the last and one from the middle,
+  // an index outside the vector, and a pop from empty — at a one-word and a
+  // two-word element, with an alias watching.
+  var queue = Vector.of(1, 2, 3, 4, 5, 6)
+  let watching = queue
+  println("remove middle {queue.remove(2)} {queue} {watching.length()}")?
+  println("remove first {queue.remove(0)} last {queue.remove(queue.length() - 1)} {watching}")?
+  println("remove outside {queue.remove(3)} {queue.remove(-1)} {queue.remove(99)} {queue}")?
+  println("pop to empty {queue.pop()} {queue.pop()} {queue.pop()} {queue.pop()} {watching}")?
+  queue.push(8)
+  println("push after popping {queue} {queue.get(0)} {queue.get(1)}")?
+  var spansOut = Vector.of(
+    Span(from: 1, to: 2),
+    Span(from: 3, to: 4),
+    Span(from: 5, to: 6),
+  )
+  println("span remove middle {spansOut.remove(1)} {spansOut}")?
+  println("span pop {spansOut.pop()} {spansOut}")?
+  spansOut.push(Span(from: 7, to: 8))
+  println("span push after {spansOut} {spansOut.get(1)} {spansOut.get(2)}")?
+
+  // A `Vector<String>` popped and removed from while the heap turns over:
+  // what is left must still be the strings it was, and what was taken must
+  // not come back.
+  var texts: Vector<String> = Vector.of()
+  var n = 0
+  while n < 40 {
+    texts.push("text {n}")
+    n += 1
+  }
+  var taken = 0
+  while texts.length() > 5 {
+    let out = if texts.length() % 2 == 0 {
+      texts.pop()
+    } else {
+      texts.remove(1)
+    }
+    if out.isSome() {
+      taken += 1
+    }
+    let churn = grown(30)
+    if churn.length() != 30 {
+      taken = -1000
+    }
+  }
+  println("strings after churn {taken} {texts} {texts.get(5)}")?
+  texts.push("again")
+  println("strings pushed after churn {texts.length()} {texts.get(5)}")?
   Ok(())
 }

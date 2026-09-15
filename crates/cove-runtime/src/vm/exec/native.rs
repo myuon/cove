@@ -905,6 +905,22 @@ unsafe extern "C" fn growable(
                         machine.mem.set_slot(base, a as Slot, array);
                         Ok(())
                     }
+                    // A word truncate, through the same `Machine::truncate_words`
+                    // the `GROWABLE_TRUNCATE_WORDS` arm calls; the element layout
+                    // is the instruction's.
+                    GrowableOp::TruncateWords => {
+                        let owner = machine.mem.slot(base, a as Slot);
+                        let len = machine.mem.slot(base, b as Slot) as i64;
+                        let code = &machine.program.function(frame.function).code;
+                        let Inst::GrowableTruncate {
+                            storage: Storage::Words(elem),
+                            ..
+                        } = code[pc as usize]
+                        else {
+                            unreachable!("a word truncate was handed over for a pc that is not one")
+                        };
+                        machine.truncate_words(owner, elem, len)
+                    }
                     GrowableOp::PushWords => {
                         let owner = machine.mem.slot(base, a as Slot);
                         let code = &machine.program.function(frame.function).code;

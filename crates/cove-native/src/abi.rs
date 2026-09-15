@@ -825,6 +825,12 @@ pub enum GrowableOp {
     /// element layout are read off the instruction at the pc, as for
     /// [`GrowableOp::Finish`].
     FinishWords = 5,
+    /// [`Inst::GrowableTruncate`](cove_ir::Inst::GrowableTruncate) over
+    /// [`Storage::Words`](cove_ir::Storage::Words) — `Vector.pop` and
+    /// `Vector.remove` — handed over whole. `a` is the owner's slot and `b` the
+    /// new length's; the element layout is read off the instruction at the pc,
+    /// as for [`GrowableOp::PushWords`].
+    TruncateWords = 6,
 }
 
 impl GrowableOp {
@@ -842,6 +848,7 @@ impl GrowableOp {
             3 => Some(GrowableOp::Finish),
             4 => Some(GrowableOp::PushWords),
             5 => Some(GrowableOp::FinishWords),
+            6 => Some(GrowableOp::TruncateWords),
             _ => None,
         }
     }
@@ -1309,11 +1316,22 @@ mod tests {
             (3, GrowableOp::Finish),
             (4, GrowableOp::PushWords),
             (5, GrowableOp::FinishWords),
+            (6, GrowableOp::TruncateWords),
         ] {
             assert_eq!(op.abi(), code);
             assert_eq!(GrowableOp::from_abi(code), Some(op));
         }
-        assert_eq!(GrowableOp::from_abi(6), None);
+        assert_eq!(GrowableOp::from_abi(7), None);
+
+        for (code, op) in [
+            (0, RunOp::CopyBytes),
+            (1, RunOp::CopyWords),
+            (2, RunOp::SliceWords),
+        ] {
+            assert_eq!(op.abi(), code);
+            assert_eq!(RunOp::from_abi(code), Some(op));
+        }
+        assert_eq!(RunOp::from_abi(3), None);
     }
 
     /// Zero is not a raise, which is what makes a fresh context's

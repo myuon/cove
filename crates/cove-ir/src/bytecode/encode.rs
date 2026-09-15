@@ -322,6 +322,20 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
         },
         // The byte member has no opcode until `String.sliceBytes` needs one, and
         // `crate::verify` refuses it before a program is encoded.
+        Inst::GrowableTruncate {
+            owner,
+            len,
+            storage,
+        } => match storage {
+            Storage::PackedBytes => return Err(TooWide::Storage { storage }),
+            Storage::Words(elem) => build(
+                Op::GrowableTruncateWords,
+                slot(owner)?,
+                slot(len)?,
+                0,
+                halves(elem.0, 0),
+            ),
+        },
         Inst::RunSlice { args, storage } => match storage {
             Storage::PackedBytes => return Err(TooWide::Storage { storage }),
             Storage::Words(elem) => build(Op::RunSliceWords, 0, 0, 0, halves(args.0, elem.0)),
@@ -879,6 +893,14 @@ mod tests {
             ),
             (
                 0,
+                Inst::GrowableTruncate {
+                    owner: 1,
+                    len: 2,
+                    storage: Storage::Words(L),
+                },
+            ),
+            (
+                0,
                 Inst::GrowableAlloc {
                     dst: 1,
                     capacity: 2,
@@ -1337,6 +1359,17 @@ mod tests {
             encode(
                 &Inst::RunSlice {
                     args: ArgsId(0),
+                    storage: bytes,
+                },
+                0
+            ),
+            Err(TooWide::Storage { storage: bytes })
+        );
+        assert_eq!(
+            encode(
+                &Inst::GrowableTruncate {
+                    owner: 0,
+                    len: 1,
                     storage: bytes,
                 },
                 0

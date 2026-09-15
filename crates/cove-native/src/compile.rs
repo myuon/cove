@@ -791,6 +791,15 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.growable_op(GrowableOp::Extend, args.0, 0);
                 false
             }
+            // `Vector.pop` and `Vector.remove`'s truncate, handed over whole.
+            Inst::GrowableTruncate {
+                owner,
+                len,
+                storage: Storage::Words(_),
+            } => {
+                self.growable_op(GrowableOp::TruncateWords, *owner, *len);
+                false
+            }
             Inst::RunFinish {
                 dst,
                 owner,
