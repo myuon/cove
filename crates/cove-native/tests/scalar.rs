@@ -198,6 +198,21 @@ fn a_push_refuses_a_null_receiver() {
 }
 
 #[test]
+fn a_freeze_relabels_the_store_in_place() {
+    suite::a_freeze_relabels_the_store_in_place::<Cranelift>();
+}
+
+#[test]
+fn every_cold_path_of_a_freeze_goes_to_the_runtime() {
+    suite::every_cold_path_of_a_freeze_goes_to_the_runtime::<Cranelift>();
+}
+
+#[test]
+fn a_freeze_refuses_a_null_receiver() {
+    suite::a_freeze_refuses_a_null_receiver::<Cranelift>();
+}
+
+#[test]
 fn a_set_in_range_writes_the_element_and_answers_the_old_one() {
     suite::a_set_in_range_writes_the_element_and_answers_the_old_one::<Cranelift>();
 }
@@ -240,6 +255,26 @@ fn a_store_elem_strides_and_bounds_its_index() {
 #[test]
 fn a_byte_at_reads_one_byte_and_bounds_it() {
     suite::a_byte_at_reads_one_byte_and_bounds_it::<Cranelift>();
+}
+
+#[test]
+fn a_field_access_reads_and_writes_a_fixed_object() {
+    suite::a_field_access_reads_and_writes_a_fixed_object::<Cranelift>();
+}
+
+#[test]
+fn a_field_access_refuses_a_null_receiver() {
+    suite::a_field_access_refuses_a_null_receiver::<Cranelift>();
+}
+
+#[test]
+fn a_field_access_on_a_variable_payload_object_goes_to_the_runtime() {
+    suite::a_field_access_on_a_variable_payload_object_goes_to_the_runtime::<Cranelift>();
+}
+
+#[test]
+fn a_refused_field_access_publishes_its_unpaid_work() {
+    suite::a_refused_field_access_publishes_its_unpaid_work::<Cranelift>();
 }
 
 #[test]

@@ -290,6 +290,48 @@ pub(crate) enum Method {
         builtin: u32,
         args: u32,
     },
+    /// `Vector.freeze() -> Array<T>`.
+    ///
+    /// `vm::builtins::seq::vector_freeze` is `vector()` and then three writes:
+    /// `Memory::relabel` turns the store in place into the `Array` it already
+    /// holds — a header write, and a free block for the capacity it gives up —
+    /// and the two payload words of the `Vector` header are zeroed, which is
+    /// `freeze()`'s mark. `Memory::relabel` is documented as "two heap word
+    /// writes and nothing else, no free-list surgery", so all of it is
+    /// emitted; there is no cold half the way [`Method::Push`]'s growth is.
+    ///
+    /// The `Array<T>` layout `relabel` writes is a **compile-time constant**:
+    /// `make::elements(program, elem, false)` only searches the program's own
+    /// layout table for a [`Shape::Elements`] of `elem` that is not growable,
+    /// and that search is exactly as available here as it is to the runtime —
+    /// see [`method_of`]'s `("Vector", "freeze")` arm. A program whose checker
+    /// admitted `.freeze()` at all has that layout, so the search failing is
+    /// the same class of impossibility [`Inst::AddrOfField`]'s bound is;
+    /// refusing the call site rather than asserting keeps that claim untested
+    /// by a program this crate cannot see the whole of.
+    ///
+    /// Two preconditions go to [`BuiltinFn`](crate::abi::BuiltinFn), for
+    /// [`Method::Push`]'s reasons exactly: the receiver's object is not the
+    /// declared `Shape::Vector` layout, and the store word is already nought —
+    /// a *second* `freeze()`, whose message names the method. The null
+    /// receiver is emitted as [`Raise::NullObject`].
+    Freeze {
+        /// Where the answer goes: the store's own linear address, which
+        /// `relabel` leaves it at.
+        dst: Slot,
+        /// The receiver's slot: one `Repr::Ref` word naming the `Vector` header.
+        recv: Slot,
+        /// The layout the call site declares the receiver to be.
+        vector: LayoutId,
+        /// The element layout's width, `Growable::stride` — needed to turn the
+        /// element count `relabel` is given into the payload words it releases.
+        stride: u32,
+        /// The `Array<T>` layout `relabel` writes into the store's header.
+        array: LayoutId,
+        /// The builtin and its argument list, for the cold path.
+        builtin: u32,
+        args: u32,
+    },
 }
 
 /// Which [`Method`] a `call-builtin` is, or `None` for one no arm lowers.
@@ -405,6 +447,40 @@ pub(crate) fn method_of(
                 some_case,
                 some_at,
                 none_case,
+                builtin: builtin.0,
+                args: args.0,
+            })
+        }
+        // `vm::builtins::seq::vector_freeze`. The receiver's declared layout is
+        // read exactly as `Push`'s and `Set`'s is; what is new is the *answer's*
+        // layout, which is not declared anywhere on the call site the way
+        // `Set`'s `Option<T>` is; it is `make::elements(program, elem, false)`'s
+        // own search over the program's layout table, repeated here rather than
+        // called, because this crate does not depend on `cove-runtime`.
+        ("Vector", "freeze") => {
+            // The receiver alone — `operand::method`'s split and the arity its
+            // refusal names.
+            if list.len() != 1 || program.layout(named.result).width() != 1 {
+                return None;
+            }
+            let recv = reference(0)?;
+            let vector = list[0].layout;
+            let Shape::Vector { elem } = program.layout(vector).shape else {
+                return None;
+            };
+            let array = program
+                .layouts
+                .iter()
+                .position(|layout| {
+                    matches!(layout.shape, Shape::Elements { elem: e, growable } if e == elem && !growable)
+                })
+                .map(|index| LayoutId(index as u32))?;
+            Some(Method::Freeze {
+                dst,
+                recv,
+                vector,
+                stride: program.layout(elem).width(),
+                array,
                 builtin: builtin.0,
                 args: args.0,
             })
@@ -663,21 +739,33 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         Inst::Not { dst, a } => slot(*dst) && slot(*a),
         // ---- places ---------------------------------------------------------
         //
-        // Four of the six, and the two that are missing are missing on purpose.
+        // Six of the eight, and the two that are missing are missing on purpose.
         //
-        // [`Inst::AddrOfField`] refuses through `Machine::checked`, whose message
-        // names the object's layout and its payload word count — "this reads word
-        // {at} of a `{name}`, which has {words}" — and that count is
-        // `Layout::payload_words` over the whole layout table. Naming it would be
-        // a new `Raise` carrying a `LayoutId`, and the guard it protects is a
-        // *lowering bug* rather than anything a program can reach.
+        // [`Inst::LoadField`] and [`Inst::StoreField`] refuse through
+        // `Machine::checked`, whose bound is dynamic — `Layout::payload_words`
+        // reads the object's own runtime header — but `Layout::fixed_payload_words`
+        // answers that bound at compile time for every shape the census reaches:
+        // `NativeCtx::fixed_payload_words` is a table of it, one `u32` per
+        // `LayoutId` with `0` standing in for "ask the runtime". Both arms read the
+        // object's layout out of its header, look the bound up in one load, and
+        // take the fast path if the field fits; a `0` entry — a variable-payload
+        // shape such as `Any` — always fails that comparison and falls to
+        // [`crate::abi::FieldLoadFn`]/[`FieldStoreFn`], which perform the whole
+        // access through `Machine::checked` itself. So the bound is emitted without
+        // a new `Raise` ever naming a `LayoutId`, and the runtime's own message is
+        // what a program would see if the lowering were ever wrong about `at`.
         //
-        // [`Inst::AddrOfElem`] would be cheap — its refusal is
-        // `Raise::IndexOutOfRange`, which `load_elem` already emits — and it is
-        // still left out, because neither it nor `AddrOfField` occurs once in the
-        // corpus this slice is widened by. See the philosophy's "Earn complexity
-        // through use": a form that is imaginable is not a form that has shown
-        // friction.
+        // [`Inst::AddrOfField`] is a different question — it does not read a field,
+        // it forms the *address* of one, and that address has to be sound whatever
+        // it is later used with. Emitting the same table lookup for it would refuse
+        // whole and cheaply, but nothing in the corpus this slice is widened by
+        // forms one, so it stays out. See the philosophy's "Earn complexity through
+        // use".
+        //
+        // [`Inst::AddrOfElem`] would be cheap for the same reason `LoadElem`'s own
+        // bound is — its refusal is `Raise::IndexOutOfRange`, which `load_elem`
+        // already emits — and it is still left out because neither it nor
+        // `AddrOfField` occurs once in that corpus.
         Inst::AddrOfSlot { dst, slot: at } => slot(*dst) && slot(*at),
         // `at` has to fit an `i32`, and that is the *template* arm's bound rather
         // than a bound on the language: it adds the offset with `add r64, imm32`.
@@ -701,6 +789,50 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                 && layout.words.iter().copied().all(is_lowered)
                 && run(*src, layout.width())
                 && slot(*addr)
+        }
+        // `encoded.rs`'s `LOAD_FIELD` arm. `layout` here is the *field's own*
+        // value-type layout — used only for its width, exactly as `Load`'s and
+        // `Copy`'s are — and is not the object's; the object's own layout is a
+        // run-time fact `NativeCtx::fixed_payload_words` or
+        // `crate::abi::FieldLoadFn` reads out of its header, and neither is
+        // bounded here because neither can be wrong: the table's sentinel `0`
+        // sends every layout it does not answer for to the helper. `at` has to
+        // fit an `i32` once `width` is added to it, for `Inst::AddrOfPart`'s
+        // reason — the *template* arm forms each payload word's address with
+        // `add r64, imm32`.
+        Inst::LoadField {
+            dst,
+            obj,
+            at,
+            layout,
+        } => {
+            let layout = program.layout(*layout);
+            layout.width() <= MAX_RUN_WORDS
+                && layout.words.iter().copied().all(is_lowered)
+                && at
+                    .checked_add(layout.width())
+                    .and_then(|last| i32::try_from(last).ok())
+                    .is_some()
+                && run(*dst, layout.width())
+                && slot(*obj)
+        }
+        // `encoded.rs`'s `STORE_FIELD` arm: [`Inst::LoadField`] backwards, bounded
+        // the same way and for the same reason.
+        Inst::StoreField {
+            obj,
+            at,
+            src,
+            layout,
+        } => {
+            let layout = program.layout(*layout);
+            layout.width() <= MAX_RUN_WORDS
+                && layout.words.iter().copied().all(is_lowered)
+                && at
+                    .checked_add(layout.width())
+                    .and_then(|last| i32::try_from(last).ok())
+                    .is_some()
+                && run(*src, layout.width())
+                && slot(*obj)
         }
         // `encoded.rs`'s `NEG_INT` arm, which is `checked_neg` and nothing else.
         //
@@ -911,6 +1043,25 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                         && slot(index)
                         && run(value, stride)
                 }
+                // No `run` bound the way `Push`'s and `Set`'s is: the relabel
+                // this emits is one header write and (at most) one free-block
+                // write, whatever `stride` is — there is no per-element loop
+                // for a width to bound.
+                Some(Method::Freeze {
+                    dst,
+                    recv,
+                    vector,
+                    array,
+                    ..
+                }) => {
+                    // See `Push`'s note on the same bound for `vector`, and the
+                    // same reason again for `array`: the *template* arm tests
+                    // each against the header's high half with `cmp r64, imm32`.
+                    i32::try_from(vector.0).is_ok()
+                        && i32::try_from(array.0).is_ok()
+                        && slot(dst)
+                        && slot(recv)
+                }
                 None => return Some(Reason::Instruction),
             }
         }
@@ -1080,7 +1231,7 @@ mod tests {
     /// **`blockers` answers every refused instruction; `refusal` answers only
     /// the first.**
     ///
-    /// `AddrOfField` and `StoreField` are both left outside the slice on
+    /// `AddrOfField` and `AddrOfElem` are both left outside the slice on
     /// purpose — see this module's note on `Inst::AddrOfField` — so a body
     /// that reaches one of each and then a second `AddrOfField` is refused at
     /// three separate pcs. `refusal` is the first of them, because that is
@@ -1095,10 +1246,10 @@ mod tests {
                 obj: 0,
                 at: 0,
             },
-            Inst::StoreField {
+            Inst::AddrOfElem {
+                dst: 0,
                 obj: 0,
-                at: 0,
-                src: 0,
+                index: 0,
                 layout: LayoutId(2),
             },
             Inst::AddrOfField {
@@ -1302,5 +1453,117 @@ mod tests {
             ],
         );
         assert_eq!(method_of(&program, 3, BuiltinId(0), ArgsId(1)), None);
+    }
+
+    // --- `method_of`'s `("Vector", "freeze")` arm ---------------------------
+
+    const FREEZE_INT: LayoutId = LayoutId(1);
+    const FREEZE_REF: LayoutId = LayoutId(2);
+    const FREEZE_VECTOR: LayoutId = LayoutId(3);
+    const FREEZE_ARRAY: LayoutId = LayoutId(4);
+
+    /// A layout table for `Vector<Int>.freeze() -> Ref`, with `Array<Int>` at
+    /// [`FREEZE_ARRAY`] only when `with_array` says so — the one precondition
+    /// this arm cannot read off the call site itself and has to find by
+    /// searching the program's own table, exactly as `make::elements` does.
+    fn program_with_freeze(function: Function, args: Vec<Arg>, with_array: bool) -> Program {
+        let mut layouts = vec![
+            Layout::free(),
+            Layout::word("Int", Repr::Int),
+            Layout::word("Ref", Repr::Ref),
+            Layout::object("Vector", Shape::Vector { elem: FREEZE_INT }),
+        ];
+        if with_array {
+            layouts.push(Layout::object(
+                "Array",
+                Shape::Elements {
+                    elem: FREEZE_INT,
+                    growable: false,
+                },
+            ));
+        }
+        Program {
+            functions: vec![function],
+            layouts,
+            args: vec![Vec::new(), args],
+            builtins: vec![Builtin {
+                receiver: Arc::from("Vector"),
+                operation: Arc::from("freeze"),
+                result: FREEZE_REF,
+            }],
+            ..Program::default()
+        }
+    }
+
+    /// The receiver alone — `method_of`'s admitted shape — answers a
+    /// [`Method::Freeze`] whose `array` is [`FREEZE_ARRAY`], found by the
+    /// search and not assumed to be the next id after the vector's.
+    #[test]
+    fn vector_freeze_is_admitted_with_the_layout_the_table_has() {
+        let function = function(vec![Repr::Ref, Repr::Ref], FREEZE_REF, vec![]);
+        let program = program_with_freeze(
+            function,
+            vec![Arg {
+                slot: 0,
+                layout: FREEZE_VECTOR,
+            }],
+            true,
+        );
+        let method = method_of(&program, 1, BuiltinId(0), ArgsId(1));
+        assert_eq!(
+            method,
+            Some(Method::Freeze {
+                dst: 1,
+                recv: 0,
+                vector: FREEZE_VECTOR,
+                stride: 1,
+                array: FREEZE_ARRAY,
+                builtin: 0,
+                args: 1,
+            })
+        );
+    }
+
+    /// `operand::method`'s split asks for the receiver and no argument; a call
+    /// site with one more refuses, for [`vector_set_refuses_the_wrong_arity`]'s
+    /// reason.
+    #[test]
+    fn vector_freeze_refuses_the_wrong_arity() {
+        let function = function(vec![Repr::Ref, Repr::Ref, Repr::Ref], FREEZE_REF, vec![]);
+        let program = program_with_freeze(
+            function,
+            vec![
+                Arg {
+                    slot: 0,
+                    layout: FREEZE_VECTOR,
+                },
+                Arg {
+                    slot: 1,
+                    layout: FREEZE_VECTOR,
+                },
+            ],
+            true,
+        );
+        assert_eq!(method_of(&program, 2, BuiltinId(0), ArgsId(1)), None);
+    }
+
+    /// `make::elements(program, elem, false)`'s own search, repeated here
+    /// rather than called: a program whose layout table has no non-growable
+    /// `Elements` of the vector's element is refused rather than assumed to
+    /// have one. A program the checker built for a real `.freeze()` always
+    /// has it; this is the same defensive `?` every other lookup in this arm
+    /// already is.
+    #[test]
+    fn vector_freeze_refuses_a_program_with_no_array_layout() {
+        let function = function(vec![Repr::Ref, Repr::Ref], FREEZE_REF, vec![]);
+        let program = program_with_freeze(
+            function,
+            vec![Arg {
+                slot: 0,
+                layout: FREEZE_VECTOR,
+            }],
+            false,
+        );
+        assert_eq!(method_of(&program, 1, BuiltinId(0), ArgsId(1)), None);
     }
 }

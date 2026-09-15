@@ -712,6 +712,58 @@ pub type BuiltinFn = unsafe extern "C" fn(
     args: u32,
 ) -> u32;
 
+/// What the field-access cold path is: [`Inst::LoadField`](cove_ir::Inst::LoadField),
+/// whose bound [`NativeCtx::fixed_payload_words`] could not answer, handed to the
+/// runtime whole.
+///
+/// The emitted fast path answers `at + width <= words` itself, where `words` is
+/// one table load away for every *fixed*-payload shape — see
+/// [`NativeCtx::fixed_payload_words`]. What it cannot answer is the bound for a
+/// *variable*-payload shape, because that depends on `Layout::payload_words`'
+/// per-shape arithmetic, which is not worth emitting for a family the census
+/// never reaches. This helper is that arithmetic, run once: it is
+/// `Machine::checked` — the same bound, dynamic and exact — and then the copy
+/// `encoded.rs`'s `LOAD_FIELD` arm makes.
+///
+/// Unlike [`AllocFn`] and [`BuiltinFn`] this is **not a safepoint**: neither the
+/// bound check nor the copy it guards can allocate, so there is nothing to
+/// charge and no cached pointer a call here could stale.
+///
+/// `addr` is the object's own linear address — not a frame slot, but the
+/// *value* emitted code already holds in a register, exactly as
+/// [`Inst::AddrOfSlot`](cove_ir::Inst::AddrOfSlot) forms one — and `into` is the
+/// linear address the answer's words are copied to, which is the frame's own
+/// address plus the destination slot, formed the same way. `at` is the field's
+/// static payload-word offset and `width` its static width. There is no `base`:
+/// both addresses are already resolved, so there is nothing left to resolve one
+/// against.
+///
+/// The answer is an [`Outcome`] as a `u32`, read exactly as [`BuiltinFn`]'s is.
+///
+/// # Safety
+///
+/// As [`AllocFn`]: `ctx` is the pointer the entry point was called with.
+pub type FieldLoadFn = unsafe extern "C" fn(
+    ctx: *mut NativeCtx,
+    pc: u32,
+    addr: u64,
+    at: u32,
+    width: u32,
+    into: u64,
+) -> u32;
+
+/// [`FieldLoadFn`], the other direction: [`Inst::StoreField`](cove_ir::Inst::StoreField)'s
+/// cold path. `from` is the linear address the words are copied *out of*, in
+/// place of `into`.
+pub type FieldStoreFn = unsafe extern "C" fn(
+    ctx: *mut NativeCtx,
+    pc: u32,
+    addr: u64,
+    at: u32,
+    width: u32,
+    from: u64,
+) -> u32;
+
 /// Which of [ADR 0052]'s four growable-buffer instructions a [`BufferFn`] was
 /// handed.
 ///
@@ -864,6 +916,10 @@ pub struct NativeHelpers {
     pub builtin: BuiltinFn,
     /// See [`BufferFn`].
     pub buffer: BufferFn,
+    /// See [`FieldLoadFn`].
+    pub field_load: FieldLoadFn,
+    /// See [`FieldStoreFn`].
+    pub field_store: FieldStoreFn,
 }
 
 /// The mutable state one native call reads and writes.
@@ -926,6 +982,37 @@ pub struct NativeCtx {
     ///
     /// [ADR 0045]: ../../../../docs/adr/0045-a-literal-is-there-before-the-program-runs.md
     pub literals: *const u64,
+    /// Every layout's fixed payload width, in `LayoutId` order — `0` where
+    /// there is none.
+    ///
+    /// `Layout::fixed_payload_words` answers `Some` for every shape whose
+    /// heap object has a payload width that does not depend on its runtime
+    /// header — `Word`, `Struct`, `Enum`, `Vector`, `ByteBuffer`, `Shared` and
+    /// `Closure` — and `None` for the rest (`Free`, `Str`, `Bytes`,
+    /// `Elements`, `Members`, `Entries`, `Boxed`), whose width is `len`-
+    /// dependent arithmetic `Layout::payload_words` performs at run time.
+    /// This table is the `Some` half of that, one `u32` per layout, with `0`
+    /// standing in for `None` — which is safe because a `0`-word fixed object
+    /// does not exist and a genuine `0` would refuse every field access
+    /// anyway.
+    ///
+    /// [`Inst::LoadField`](cove_ir::Inst::LoadField) and
+    /// [`Inst::StoreField`](cove_ir::Inst::StoreField) are the readers: the
+    /// object's own header names a `LayoutId`, this table answers that
+    /// layout's fixed width in one load, and a field whose `at + width` fits
+    /// is answered without leaving compiled code. A `0` entry always fails
+    /// that comparison for a non-empty field, so a variable-payload object
+    /// takes [`FieldLoadFn`]/[`FieldStoreFn`]'s cold path without this arm
+    /// ever asking which shape it is.
+    ///
+    /// Published **once**, exactly as [`NativeCtx::literals`] is and for the
+    /// same reason: the table is derived from the program's own layout table,
+    /// which a run never changes, so nothing republishes it and a caller may
+    /// cache it for as long as it likes.
+    ///
+    /// Null for a caller whose compiled code loads no field, [`NativeCtx::literals`]'s
+    /// rule. [`NativeCtx::over_payload_words`] is how a caller with fields says so.
+    pub fixed_payload_words: *const u32,
     /// The linear address of word zero of the task's stack segment.
     ///
     /// What [`NativeCtx::words`] points *at*, as a number in the one address
@@ -1001,6 +1088,7 @@ impl NativeCtx {
             words,
             chunks: std::ptr::null(),
             literals: std::ptr::null(),
+            fixed_payload_words: std::ptr::null(),
             stack_origin,
             pending_work: 0,
             raise_code: 0,
@@ -1028,6 +1116,16 @@ impl NativeCtx {
     /// which is why it is a builder rather than a field a helper writes.
     pub fn over_literals(mut self, literals: *const u64) -> Self {
         self.literals = literals;
+        self
+    }
+
+    /// The same context, over the table `fixed_payload_words` begins.
+    ///
+    /// See [`NativeCtx::fixed_payload_words`]. [`NativeCtx::over_literals`]'s
+    /// reason: the table is derived once from the program's layouts and never
+    /// changes, so it is a builder rather than a field a helper republishes.
+    pub fn over_payload_words(mut self, fixed_payload_words: *const u32) -> Self {
+        self.fixed_payload_words = fixed_payload_words;
         self
     }
 
@@ -1110,10 +1208,16 @@ mod tests {
         let ctx = NativeCtx::new(std::ptr::null_mut(), words.as_mut_ptr(), 0);
         assert!(ctx.chunks.is_null());
         assert!(ctx.literals.is_null());
+        assert!(ctx.fixed_payload_words.is_null());
 
         let addrs = [7u64, 9];
         let ctx = ctx.over_literals(addrs.as_ptr());
         assert!(ctx.chunks.is_null());
         assert_eq!(unsafe { *ctx.literals.add(1) }, 9);
+        assert!(ctx.fixed_payload_words.is_null());
+
+        let widths = [0u32, 3];
+        let ctx = ctx.over_payload_words(widths.as_ptr());
+        assert_eq!(unsafe { *ctx.fixed_payload_words.add(1) }, 3);
     }
 }

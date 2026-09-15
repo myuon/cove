@@ -616,6 +616,107 @@ unsafe extern "C" fn alloc(ctx: *mut NativeCtx, pc: u32, layout: u32, len: i64) 
     }
 }
 
+/// The field-load helper: one [`Inst::LoadField`](cove_ir::Inst::LoadField),
+/// whose bound the emitted table lookup could not answer.
+///
+/// See [`cove_native::FieldLoadFn`] for what this is *for*: emitted code answers
+/// its own object's field bound in one table load for every *fixed*-payload
+/// shape, and falls here for a *variable* one — `Any`, in practice, which is
+/// `Shape::Boxed`. What runs here is `encoded.rs`'s `LOAD_FIELD` arm exactly:
+/// `Machine::checked`, dynamic and exact, and then the copy — both `addr` and
+/// `into` arrive as linear addresses emitted code already formed, so there is
+/// no slot to resolve against a frame here.
+///
+/// Unlike [`alloc`] and [`builtin`] this is **not a safepoint**. Neither the
+/// bound check nor the copy it guards can allocate, so there is no unpaid work
+/// to publish and no cached pointer for [`republish`] to fix.
+///
+/// # Safety
+///
+/// As [`safepoint`]. `into` is a valid destination of `width` words, which
+/// `crate::subset`'s `supported` bounded.
+unsafe extern "C" fn field_load(
+    ctx: *mut NativeCtx,
+    pc: u32,
+    addr: u64,
+    at: u32,
+    width: u32,
+    into: u64,
+) -> u32 {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+
+    let answered = {
+        let machine = &mut *machine;
+        machine.sync(pc as usize);
+        let function = machine
+            .frames
+            .last()
+            .expect("a native frame is executing")
+            .function;
+        machine
+            .checked(addr, at, width)
+            .map(|()| {
+                machine
+                    .mem
+                    .copy_words(into, machine.mem.payload_addr(addr, at), width);
+            })
+            .map_err(|error| error.at(machine.span(function, pc as usize)))
+    };
+    match answered {
+        Ok(()) => Outcome::Returned.abi(),
+        Err(error) => {
+            (*host).left = Some(error);
+            Outcome::Raised.abi()
+        }
+    }
+}
+
+/// [`field_load`], the other direction: one
+/// [`Inst::StoreField`](cove_ir::Inst::StoreField). See
+/// [`cove_native::FieldStoreFn`]. `from` is the linear address the words are
+/// copied out of, in place of `into`.
+///
+/// # Safety
+///
+/// As [`field_load`].
+unsafe extern "C" fn field_store(
+    ctx: *mut NativeCtx,
+    pc: u32,
+    addr: u64,
+    at: u32,
+    width: u32,
+    from: u64,
+) -> u32 {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+
+    let answered = {
+        let machine = &mut *machine;
+        machine.sync(pc as usize);
+        let function = machine
+            .frames
+            .last()
+            .expect("a native frame is executing")
+            .function;
+        machine
+            .checked(addr, at, width)
+            .map(|()| {
+                machine
+                    .mem
+                    .copy_words(machine.mem.payload_addr(addr, at), from, width);
+            })
+            .map_err(|error| error.at(machine.span(function, pc as usize)))
+    };
+    match answered {
+        Ok(()) => Outcome::Returned.abi(),
+        Err(error) => {
+            (*host).left = Some(error);
+            Outcome::Raised.abi()
+        }
+    }
+}
+
 /// The builtin helper: one `Inst::CallBuiltin`, handed over whole.
 ///
 /// See [`cove_native::BuiltinFn`] for what this is *for*, which is the half of it
@@ -1092,7 +1193,8 @@ unsafe fn enter<const MASK: u64>(
             machine.mem.stack_origin(),
         )
         .over_heap((*host).table())
-        .over_literals(machine.literals_ptr());
+        .over_literals(machine.literals_ptr())
+        .over_payload_words(machine.fixed_payload_words_ptr());
         // The destination as the callee is given it: a word index, taken *after*
         // the frame was pushed and stable whatever a later `push_frame` does to
         // the `Vec`. This is the line ADR 0057's "never pointers" is about.
@@ -1554,6 +1656,8 @@ pub fn helpers() -> NativeHelpers {
         alloc,
         builtin,
         buffer,
+        field_load,
+        field_store,
     }
 }
 
@@ -1646,6 +1750,8 @@ pub fn helpers_ablated<const MASK: u64>() -> NativeHelpers {
         alloc,
         builtin,
         buffer,
+        field_load,
+        field_store,
     }
 }
 
@@ -2033,7 +2139,8 @@ unsafe fn again_ctx(
         machine.mem.stack_origin(),
     )
     .over_heap((*host).table())
-    .over_literals(machine.literals_ptr());
+    .over_literals(machine.literals_ptr())
+    .over_payload_words(machine.fixed_payload_words_ptr());
     std::hint::black_box(&ctx);
     std::hint::black_box(machine.mem.stack_index(base) as u64);
     std::hint::black_box(machine.mem.stack_index(into.base) as u64);
@@ -2161,7 +2268,8 @@ unsafe fn mediation_again(
             machine.mem.stack_origin(),
         )
         .over_heap((*host).table())
-        .over_literals(machine.literals_ptr());
+        .over_literals(machine.literals_ptr())
+        .over_payload_words(machine.fixed_payload_words_ptr());
         std::hint::black_box(&held);
         std::hint::black_box(machine.mem.stack_index(callee_base) as u64);
         std::hint::black_box(machine.mem.stack_index(caller_base) as u64);

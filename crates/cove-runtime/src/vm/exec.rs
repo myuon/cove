@@ -755,6 +755,16 @@ pub(crate) struct Machine<'a> {
     /// layouts are fixed by then: there is no invalidation to get wrong and
     /// no entry that can be missing.
     widths: Arc<[u32]>,
+    /// Every layout's fixed payload width, in `LayoutId` order — `0` where
+    /// there is none.
+    ///
+    /// `cove_native::NativeCtx::fixed_payload_words`'s table, built here and
+    /// published to it exactly as [`Machine::literal_addrs`] is: one
+    /// `Layout::fixed_payload_words` per layout, computed once before the
+    /// first instruction because a program's layouts are fixed by then, and
+    /// shared with every task of a run — a `Vector`'s two payload words is
+    /// one fact, not one per task that asks it.
+    fixed_payload_words: Arc<[u32]>,
     /// [ADR 0055]'s function-entry table, while one is installed.
     ///
     /// `Program + FunctionId -> encoded entry | native entry`, and the reason it
@@ -877,6 +887,11 @@ impl<'a> Machine<'a> {
                 .iter()
                 .map(|layout| layout.width())
                 .collect(),
+            fixed_payload_words: program
+                .layouts
+                .iter()
+                .map(|layout| layout.fixed_payload_words(&program.layouts).unwrap_or(0))
+                .collect(),
             tier: None,
         };
         machine.literal_addrs = machine.place_literals();
@@ -912,6 +927,7 @@ impl<'a> Machine<'a> {
         encoded: Arc<cove_ir::bytecode::Encoded>,
         literal_addrs: Arc<[u64]>,
         widths: Arc<[u32]>,
+        fixed_payload_words: Arc<[u32]>,
     ) -> Machine<'a> {
         Machine {
             program,
@@ -950,6 +966,8 @@ impl<'a> Machine<'a> {
             // The parent's, for the reason `encoded` is: a table derived from
             // a program the whole run shares is the same table in every task.
             widths,
+            // The parent's, for the same reason.
+            fixed_payload_words,
             // Not the parent's: see the field. A spawned task runs on the
             // encoded tier.
             tier: None,
@@ -2155,6 +2173,11 @@ impl<'a> Machine<'a> {
             .as_ptr()
     }
 
+    /// See [`Machine::fixed_payload_words`].
+    pub(crate) fn fixed_payload_words_ptr(&self) -> *const u32 {
+        self.fixed_payload_words.as_ptr()
+    }
+
     #[inline]
     fn literal_addr(&self, text: StrId) -> u64 {
         self.literal_addrs
@@ -3039,10 +3062,25 @@ impl<'a> Machine<'a> {
         // And the same widths, for the reason the field gives: a table
         // derived from a program the whole run shares is one table.
         let widths = Arc::clone(&self.widths);
+        let fixed_payload_words = Arc::clone(&self.fixed_payload_words);
         let handle = threads.spawn(move || {
             run_task(
-                program, hosts, runtime, resources, segment, meter, flag, id, object, home, span,
-                watcher, form, literals, widths,
+                program,
+                hosts,
+                runtime,
+                resources,
+                segment,
+                meter,
+                flag,
+                id,
+                object,
+                home,
+                span,
+                watcher,
+                form,
+                literals,
+                widths,
+                fixed_payload_words,
             )
         });
 
@@ -3876,6 +3914,7 @@ fn run_task(
     encoded: Arc<cove_ir::bytecode::Encoded>,
     literal_addrs: Arc<[u64]>,
     widths: Arc<[u32]>,
+    fixed_payload_words: Arc<[u32]>,
 ) -> Outcome {
     let mut machine = Machine::for_task(
         program,
@@ -3888,6 +3927,7 @@ fn run_task(
         encoded,
         literal_addrs,
         widths,
+        fixed_payload_words,
     );
     machine.watch(debugger);
     let started = Instant::now();
@@ -6257,6 +6297,7 @@ pub(crate) mod tests {
             entry.code().expect("this fixture encodes"),
             entry.literals().expect("the literals placed"),
             Arc::clone(&entry.widths),
+            Arc::clone(&entry.fixed_payload_words),
         );
 
         assert_eq!(

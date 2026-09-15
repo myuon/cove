@@ -77,6 +77,14 @@ const BUILTIN: &str = "cove_native_builtin";
 /// applies.
 const BUFFER: &str = "cove_native_buffer";
 
+/// The name the field-load helper is imported under. [`SAFEPOINT`]'s note
+/// applies.
+const FIELD_LOAD: &str = "cove_native_field_load";
+
+/// The name the field-store helper is imported under. [`SAFEPOINT`]'s note
+/// applies.
+const FIELD_STORE: &str = "cove_native_field_store";
+
 // The `NativeCtx` field offsets, read from the declaration rather than
 // written out. `offset_of!` is a const expression, so the numbers compiled
 // into the machine code and the numbers Rust uses to read the struct are the
@@ -85,6 +93,7 @@ const BUFFER: &str = "cove_native_buffer";
 const OFF_WORDS: i32 = offset_of!(NativeCtx, words) as i32;
 const OFF_CHUNKS: i32 = offset_of!(NativeCtx, chunks) as i32;
 const OFF_LITERALS: i32 = offset_of!(NativeCtx, literals) as i32;
+const OFF_FIXED_PAYLOAD_WORDS: i32 = offset_of!(NativeCtx, fixed_payload_words) as i32;
 const OFF_STACK_ORIGIN: i32 = offset_of!(NativeCtx, stack_origin) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
 const OFF_RAISE_CODE: i32 = offset_of!(NativeCtx, raise_code) as i32;
@@ -137,6 +146,8 @@ pub struct Jit {
     alloc: FuncId,
     builtin: FuncId,
     buffer: FuncId,
+    field_load: FuncId,
+    field_store: FuncId,
     /// How many functions have been declared, which is how the symbol names
     /// are kept distinct. Compiling the same [`FunctionId`] twice is a
     /// caller's policy question, not an error here, so the name cannot be
@@ -161,6 +172,8 @@ impl Jit {
         builder.symbol(ALLOC, helpers.alloc as usize as *const u8);
         builder.symbol(BUILTIN, helpers.builtin as usize as *const u8);
         builder.symbol(BUFFER, helpers.buffer as usize as *const u8);
+        builder.symbol(FIELD_LOAD, helpers.field_load as usize as *const u8);
+        builder.symbol(FIELD_STORE, helpers.field_store as usize as *const u8);
         let mut module = JITModule::new(builder);
 
         // Pointers are added to a `u64` word index scaled by eight, so a
@@ -187,6 +200,9 @@ impl Jit {
         // words would be a second place for the shape to drift.
         let signature = builtin_signature(&module);
         let buffer = module.declare_function(BUFFER, Linkage::Import, &signature)?;
+        let signature = field_signature(&module);
+        let field_load = module.declare_function(FIELD_LOAD, Linkage::Import, &signature)?;
+        let field_store = module.declare_function(FIELD_STORE, Linkage::Import, &signature)?;
         Ok(Jit {
             ctx: module.make_context(),
             module,
@@ -196,6 +212,8 @@ impl Jit {
             alloc,
             builtin,
             buffer,
+            field_load,
+            field_store,
             declared: 0,
             finalized: false,
         })
@@ -233,6 +251,12 @@ impl Jit {
             let alloc = self.module.declare_func_in_func(self.alloc, builder.func);
             let builtin = self.module.declare_func_in_func(self.builtin, builder.func);
             let buffer = self.module.declare_func_in_func(self.buffer, builder.func);
+            let field_load = self
+                .module
+                .declare_func_in_func(self.field_load, builder.func);
+            let field_store = self
+                .module
+                .declare_func_in_func(self.field_store, builder.func);
             Lower::new(
                 &mut builder,
                 program,
@@ -243,6 +267,8 @@ impl Jit {
                     alloc,
                     builtin,
                     buffer,
+                    field_load,
+                    field_store,
                 },
             )
             .run();
@@ -391,6 +417,27 @@ fn builtin_signature(module: &JITModule) -> Signature {
     signature
 }
 
+/// [`crate::abi::FieldLoadFn`] and [`crate::abi::FieldStoreFn`], in Cranelift's
+/// terms.
+///
+/// [`call_signature`]'s shape, with two of the five operands as `I64`: `addr`
+/// and the destination-or-source address are linear addresses emitted code
+/// already formed — [`Lower::load_slot`]'s object and [`Lower::frame_addr`]'s
+/// own answer — so there is no `base` to resolve either against.
+fn field_signature(module: &JITModule) -> Signature {
+    let mut signature = module.make_signature();
+    signature
+        .params
+        .push(AbiParam::new(module.target_config().pointer_type()));
+    signature.params.push(AbiParam::new(types::I32)); // pc
+    signature.params.push(AbiParam::new(types::I64)); // addr
+    signature.params.push(AbiParam::new(types::I32)); // at
+    signature.params.push(AbiParam::new(types::I32)); // width
+    signature.params.push(AbiParam::new(types::I64)); // into / from
+    signature.returns.push(AbiParam::new(types::I32));
+    signature
+}
+
 /// The helpers this arm calls, as references inside one function.
 ///
 /// A struct rather than that many parameters of [`Lower::new`], because they
@@ -403,6 +450,8 @@ struct Bound {
     alloc: FuncRef,
     builtin: FuncRef,
     buffer: FuncRef,
+    field_load: FuncRef,
+    field_store: FuncRef,
 }
 
 /// One function's lowering.
@@ -634,6 +683,24 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.store_through(*addr, *src, self.program.layout(*layout).width());
                 false
             }
+            Inst::LoadField {
+                dst,
+                obj,
+                at,
+                layout,
+            } => {
+                self.load_field(*dst, *obj, *at, self.program.layout(*layout).width());
+                false
+            }
+            Inst::StoreField {
+                obj,
+                at,
+                src,
+                layout,
+            } => {
+                self.store_field(*obj, *at, *src, self.program.layout(*layout).width());
+                false
+            }
             // `encoded.rs`'s `NOT` arm tests the whole *word* against zero, not
             // the low byte, so that is what is tested here.
             Inst::Not { dst, a } => {
@@ -844,6 +911,15 @@ impl<'a, 'f> Lower<'a, 'f> {
                         dst, recv, vector, index, value, stride, width, some_case, some_at,
                         none_case, builtin, args,
                     ),
+                    Some(Method::Freeze {
+                        dst,
+                        recv,
+                        vector,
+                        stride,
+                        array,
+                        builtin,
+                        args,
+                    }) => self.vector_freeze(dst, recv, vector, stride, array, builtin, args),
                     None => unreachable!("`supported` admitted a builtin no arm lowers"),
                 }
                 false
@@ -1391,6 +1467,126 @@ impl<'a, 'f> Lower<'a, 'f> {
         self.forget();
     }
 
+    /// `vm::builtins::seq::vector_freeze`: `Memory::relabel` turning the store
+    /// into the `Array<T>` it already holds, in place, and the two words of the
+    /// `Vector` header that mark it frozen.
+    ///
+    /// See [`Method::Freeze`] for which preconditions are emitted and which go
+    /// to [`BuiltinFn`](crate::abi::BuiltinFn): the receiver's declared layout
+    /// against the object's own header, and the store word against nought,
+    /// exactly as [`Lower::vector_push`]'s are. What is new is that there is no
+    /// third cold half — `relabel` is O(1) whatever `len` and `capacity` are, so
+    /// every precondition that holds is answered here and nothing is bounded by
+    /// a run.
+    ///
+    /// `spare`, `payload` and the new header word are `Memory::relabel`'s own
+    /// arithmetic, read off `Machine::relabel`'s wrapper: `payload = len *
+    /// stride` is the `Array`'s own payload width, which is where the free
+    /// block — if there is one — begins, and `spare = (capacity - len) *
+    /// stride` is what it releases in words.
+    #[allow(clippy::too_many_arguments)]
+    fn vector_freeze(
+        &mut self,
+        dst: Slot,
+        recv: Slot,
+        vector: LayoutId,
+        stride: u32,
+        array: LayoutId,
+        builtin: u32,
+        args: u32,
+    ) {
+        let cold = self.b.create_block();
+        let join = self.b.create_block();
+
+        let header = self.load_slot(recv);
+        // `vector()`'s `if addr == 0 { null_value() }`, which is the one
+        // refusal of this builtin a program reaches and this crate can name.
+        self.refuse_null(header);
+
+        // `machine.object_layout(addr)`: the header's high half.
+        let word = self.heap_word(header);
+        let named = self.b.ins().ushr_imm_u(word, 32);
+        let wrong = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, named, i64::from(vector.0));
+        let known = self.b.create_block();
+        self.b.ins().brif(wrong, cold, &[], known, &[]);
+        self.b.switch_to_block(known);
+
+        // `machine.payload(addr, 1)`: the store. A second `freeze()` leaves
+        // nought here.
+        let one = self.b.ins().iconst(types::I64, 1);
+        let store = self.payload(header, one);
+        let frozen = self.b.ins().icmp_imm_s(IntCC::Equal, store, 0);
+        let live = self.b.create_block();
+        self.b.ins().brif(frozen, cold, &[], live, &[]);
+        self.b.switch_to_block(live);
+
+        // `items.len` and `items.capacity`, `Lower::vector_push`'s own reads.
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let held = self.payload(header, zero);
+        let len = self.b.ins().band_imm_u(held, LEN_MASK);
+        let capacity = self.object_len(store);
+
+        let stride_val = self.b.ins().iconst(types::I64, i64::from(stride));
+        // `payload = len * stride`: the `Array`'s own payload width, and where
+        // the free block — if there is one — begins.
+        let payload_words = self.b.ins().imul(len, stride_val);
+        // `spare = (capacity - len) * stride`, in words.
+        let spare_elems = self.b.ins().isub(capacity, len);
+        let spare_words = self.b.ins().imul(spare_elems, stride_val);
+
+        // `self.write(addr, header(layout, len))`: the array's own bits do not
+        // overlap the length's, so the OR `mem::header` performs is an add.
+        let array_id = self.b.ins().iconst(types::I64, i64::from(array.0));
+        let shifted = self.b.ins().ishl_imm_u(array_id, 32);
+        let new_header = self.b.ins().iadd(shifted, len);
+        let store_ptr = self.heap_ptr(store);
+        self.b
+            .ins()
+            .store(MemFlagsData::trusted(), new_header, store_ptr, 0);
+
+        // `if spare > 0 { self.write(addr + 1 + payload, header(FREE, spare - 1)) }`.
+        // `LayoutId::FREE` is `0`, so that header word is `spare - 1` alone.
+        let has_spare = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::SignedGreaterThan, spare_words, 0);
+        let write_spare = self.b.create_block();
+        let after_spare = self.b.create_block();
+        self.b
+            .ins()
+            .brif(has_spare, write_spare, &[], after_spare, &[]);
+        self.b.switch_to_block(write_spare);
+        let free_len = self.b.ins().iadd_imm_s(spare_words, -1);
+        let at_free = self.b.ins().iadd_imm_s(store, 1);
+        let at_free = self.b.ins().iadd(at_free, payload_words);
+        let free_ptr = self.heap_ptr(at_free);
+        self.b
+            .ins()
+            .store(MemFlagsData::trusted(), free_len, free_ptr, 0);
+        self.b.ins().jump(after_spare, &[]);
+        self.b.switch_to_block(after_spare);
+
+        // `machine.set_payload(items.header, 0, 0)` and `(items.header, 1, 0)`:
+        // the `Vector`'s own two words, cleared — `freeze()`'s mark, the same
+        // nought `vector()` refuses a later push or set against.
+        self.set_payload(header, zero, zero);
+        self.set_payload(header, one, zero);
+
+        // The answer is the store's own address: `relabel` moved nothing.
+        self.store_slot(dst, store);
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(cold);
+        self.builtin_call(dst, builtin, args);
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(join);
+        self.forget();
+    }
+
     /// One case of an `Option<T>` answer into `dst`: `width` words, zeroed
     /// first and then the tag and `words` written over it.
     ///
@@ -1615,6 +1811,169 @@ impl<'a, 'f> Lower<'a, 'f> {
         let moved = self.b.ins().ushr(word, shift);
         let byte = self.b.ins().band_imm_u(moved, 0xFF);
         self.store_slot(dst, byte);
+    }
+
+    /// `NativeCtx::fixed_payload_words[layout]`, where `layout` is the header's
+    /// high half of the object at `addr` — `0` for a variable-payload shape.
+    ///
+    /// One load of the table pointer and one of the entry it names. The table is
+    /// not cached the way [`Lower::frame`], [`Lower::heap_chunks`] and
+    /// [`Lower::literals`] are, because a field access reads it once and a second
+    /// read within the same instruction never happens.
+    fn fixed_payload_words(&mut self, addr: Value) -> Value {
+        let word = self.heap_word(addr);
+        let layout = self.b.ins().ushr_imm_u(word, 32);
+        let table = self.b.ins().load(
+            self.pointer,
+            MemFlagsData::trusted(),
+            self.ctx,
+            OFF_FIXED_PAYLOAD_WORDS,
+        );
+        // Four bytes per `u32` entry, not eight: this table is not `chunks` or
+        // `literals`.
+        let offset = self.b.ins().ishl_imm_u(layout, 2);
+        let entry = self.b.ins().iadd(table, offset);
+        let value = self
+            .b
+            .ins()
+            .load(types::I32, MemFlagsData::trusted(), entry, 0);
+        self.b.ins().uextend(types::I64, value)
+    }
+
+    /// `encoded.rs`'s `LOAD_FIELD` arm: `Machine::checked` and a copy of `width`
+    /// words out of the object's payload — with the bound answered in emitted
+    /// code wherever [`Lower::fixed_payload_words`] can answer it.
+    ///
+    /// `at` and `width` are both compile-time constants, so the comparison this
+    /// makes is `words < at + width` against one immediate rather than a runtime
+    /// addition — `Machine::checked`'s `at + width > words` turned around and
+    /// folded. A `0` table entry always takes the cold path for a non-empty
+    /// field, which is what sends a variable-payload object to
+    /// [`crate::abi::FieldLoadFn`] without this arm ever asking which shape it
+    /// is.
+    fn load_field(&mut self, dst: Slot, obj: Slot, at: u32, width: u32) {
+        let cold = self.b.create_block();
+        let fast = self.b.create_block();
+        let join = self.b.create_block();
+
+        let addr = self.load_slot(obj);
+        self.refuse_null(addr);
+
+        let words = self.fixed_payload_words(addr);
+        let short = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThan, words, i64::from(at + width));
+        self.b.ins().brif(short, cold, &[], fast, &[]);
+
+        self.b.switch_to_block(fast);
+        for word in 0..width {
+            let off = self.b.ins().iadd_imm_s(addr, i64::from(1 + at + word));
+            let ptr = self.heap_ptr(off);
+            let value = self
+                .b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), ptr, 0);
+            self.store_slot(dst + word, value);
+        }
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(cold);
+        // `into`: the frame's own linear address plus the destination slot,
+        // [`Inst::AddrOfSlot`](cove_ir::Inst::AddrOfSlot)'s arithmetic, because
+        // that is what [`crate::abi::FieldLoadFn`] copies the answer to.
+        let frame_addr = self.frame_addr();
+        let into = self.b.ins().iadd_imm_s(frame_addr, i64::from(dst));
+        self.field_call(self.bound.field_load, addr, at, width, into);
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(join);
+        self.forget();
+    }
+
+    /// [`Lower::load_field`], the other direction: `encoded.rs`'s `STORE_FIELD`
+    /// arm.
+    fn store_field(&mut self, obj: Slot, at: u32, src: Slot, width: u32) {
+        let cold = self.b.create_block();
+        let fast = self.b.create_block();
+        let join = self.b.create_block();
+
+        let addr = self.load_slot(obj);
+        self.refuse_null(addr);
+
+        let words = self.fixed_payload_words(addr);
+        let short = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThan, words, i64::from(at + width));
+        self.b.ins().brif(short, cold, &[], fast, &[]);
+
+        self.b.switch_to_block(fast);
+        for word in 0..width {
+            let held = self.load_slot(src + word);
+            let off = self.b.ins().iadd_imm_s(addr, i64::from(1 + at + word));
+            let ptr = self.heap_ptr(off);
+            self.b.ins().store(MemFlagsData::trusted(), held, ptr, 0);
+        }
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(cold);
+        let frame_addr = self.frame_addr();
+        let from = self.b.ins().iadd_imm_s(frame_addr, i64::from(src));
+        self.field_call(self.bound.field_store, addr, at, width, from);
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(join);
+        self.forget();
+    }
+
+    /// One [`crate::abi::FieldLoadFn`]/[`crate::abi::FieldStoreFn`] call, handed
+    /// to the runtime whole. [`Lower::builtin_call`]'s shape, with no safepoint
+    /// discipline around it — neither helper can allocate — and two of its
+    /// operands already linear addresses rather than immediates.
+    fn field_call(&mut self, callee: FuncRef, addr: Value, at: u32, width: u32, into: Value) {
+        let pc = self.b.ins().iconst(types::I32, self.pc as i64);
+        let atv = self.b.ins().iconst(types::I32, i64::from(at));
+        let widthv = self.b.ins().iconst(types::I32, i64::from(width));
+        let call = self
+            .b
+            .ins()
+            .call(callee, &[self.ctx, pc, addr, atv, widthv, into]);
+        let outcome = self.b.inst_results(call)[0];
+        self.forget();
+
+        let left = self.b.create_block();
+        let on = self.b.create_block();
+        let returned =
+            self.b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, outcome, i64::from(Outcome::Returned.abi()));
+        self.b.ins().brif(returned, on, &[], left, &[]);
+
+        self.b.switch_to_block(left);
+        // This frame's unpaid work, published before leaving. `native::call`
+        // charges `pending_work` "on every exit — a return, a raise and a stop
+        // alike", so an exit that does not publish does not under-charge by a
+        // little: the whole block's work is never charged at all, and ADR 0040's
+        // `S + T` bound is then computed from a number that is short.
+        //
+        // [`Lower::builtin_call`] and [`Lower::buffer_op`] publish *before* the
+        // call instead, and clear the accumulator, because each of them is a
+        // safepoint and the helper may charge. This one cannot do that: a field
+        // helper is deliberately **not** a safepoint — neither
+        // [`crate::abi::FieldLoadFn`] nor [`crate::abi::FieldStoreFn`] can
+        // allocate — so publishing early would put a charge where there is no
+        // safepoint. It publishes here instead, on the one path that leaves, and
+        // does not clear: there is nothing after this for a cleared accumulator
+        // to be right for.
+        let work = self.b.use_var(self.work);
+        self.store_ctx(OFF_PENDING_WORK, work);
+        // Not `leave`: what this returns is the helper's outcome and not one this
+        // function chose, and every field that outcome needs the helper has written.
+        self.b.ins().return_(&[outcome]);
+
+        self.b.switch_to_block(on);
+        self.forget();
     }
 
     fn load_slot(&mut self, slot: Slot) -> Value {
