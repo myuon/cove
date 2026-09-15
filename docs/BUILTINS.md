@@ -70,6 +70,11 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `refuseDuplicate` | `core.refuseDuplicate(key: T, method: String, role: String) -> Unit` |
 | `memberAt` | `core.memberAt(members: Set<T>, at: Int) -> T` |
 | `entryAt` | `core.entryAt(entries: Map<K, V>, at: Int) -> MapEntry<K, V>` |
+| `vectorWithCapacity` | `core.vectorWithCapacity(capacity: Int) -> Vector<T>` |
+| `extendFromSet` | `core.extendFromSet(out: Vector<T>, items: Set<T>, from: Int, count: Int) -> Unit` |
+| `extendFromMap` | `core.extendFromMap(out: Vector<MapEntry<K, V>>, entries: Map<K, V>, from: Int, count: Int) -> Unit` |
+| `setFinish` | `core.setFinish(run: Vector<T>) -> Set<T>` |
+| `mapFinish` | `core.mapFinish(run: Vector<MapEntry<K, V>>) -> Map<K, V>` |
 
 ## Builtin types
 

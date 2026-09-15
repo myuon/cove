@@ -1352,10 +1352,10 @@ pub struct CoreIntrinsicSchema {
     /// [`MethodSchema::fresh`]'s claim, made by the same table for the same
     /// reader: `cove_sema::unique::creates` trusts it, and only inside a
     /// standard-library module, which is the only place a core intrinsic can be
-    /// written. [`CORE_BYTES_ALLOCATE`] is the one entry that says `true` — the
-    /// byte run it answers was allocated by the call — and it is what lets
-    /// `std.stringbuilder`'s `withCapacity` be proved to answer a builder its
-    /// caller may finish.
+    /// written. [`CORE_BYTES_ALLOCATE`] says `true` — the byte run it answers
+    /// was allocated by the call — and it is what lets `std.stringbuilder`'s
+    /// `withCapacity` be proved to answer a builder its caller may finish.
+    /// [`CORE_VECTOR_WITH_CAPACITY`] says it of the vector it allocates.
     pub fresh: bool,
 }
 
@@ -1411,6 +1411,11 @@ impl CoreIntrinsicSchema {
 /// [`CORE_ADMIT_KEY`], the refusal of a key the language does not admit;
 /// [`CORE_REFUSE_DUPLICATE`], the refusal of a literal with a key twice; and
 /// [`CORE_MEMBER_AT`] and [`CORE_ENTRY_AT`], the element reads of a sorted run.
+/// A keyed update is Cove over five more (P4-5): [`CORE_VECTOR_WITH_CAPACITY`],
+/// a growable vector with room for exactly the run it will hold;
+/// [`CORE_EXTEND_FROM_SET`] and [`CORE_EXTEND_FROM_MAP`], a range of the old
+/// run copied onto it; and [`CORE_SET_FINISH`] and [`CORE_MAP_FINISH`], the
+/// keyed finish that relabels it into the new set or map.
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_PUSH,
@@ -1435,6 +1440,11 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_REFUSE_DUPLICATE,
     CORE_MEMBER_AT,
     CORE_ENTRY_AT,
+    CORE_VECTOR_WITH_CAPACITY,
+    CORE_EXTEND_FROM_SET,
+    CORE_EXTEND_FROM_MAP,
+    CORE_SET_FINISH,
+    CORE_MAP_FINISH,
 ];
 
 /// Every core intrinsic.
@@ -2010,6 +2020,133 @@ pub const CORE_ENTRY_AT: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::MapEntry(&BuiltinType::Param("K"), &BuiltinType::Param("V")),
+    fresh: false,
+};
+
+/// `core.vectorWithCapacity<T>(capacity: Int) -> Vector<T>`: an empty vector
+/// whose store has room for exactly `capacity` elements.
+///
+/// The store, an `Int` nought and the vector's two-word header, as
+/// `core.arrayToVector` builds them, with no copy: `Inst::Alloc` of the store
+/// at `capacity` and of the header, and the two field writes. Exact rather
+/// than raised to the growth floor, because what a keyed update builds is a
+/// run whose final length it knows — `n + 1` or `n - 1` — and a finish gives
+/// back nothing it did not allocate. A push past the capacity grows the store
+/// as any push does.
+///
+/// Fresh: the vector was allocated by the call, which is what lets a body that
+/// holds it prove it may finish it.
+pub const CORE_VECTOR_WITH_CAPACITY: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "vectorWithCapacity",
+    generics: &["T"],
+    params: &[ParamSchema {
+        name: "capacity",
+        ty: BuiltinType::Int,
+    }],
+    result: BuiltinType::Vector(&BuiltinType::Param("T")),
+    fresh: true,
+};
+
+/// `core.extendFromSet<T>(out: Vector<T>, items: Set<T>, from: Int, count: Int)
+/// -> Unit`: the `count` members of `items` from `from` appended to `out`,
+/// whose store already has room for them.
+///
+/// `Inst::LoadField` of the store and of the length, one word `Inst::RunCopy`
+/// out of the set into the store at the length — a set's run read as the
+/// elements it is (#378, P4-5) — and the length raised by `count`. **No growth.**
+/// The copy's destination bound is the store's capacity, so a body that did not
+/// allocate the room is refused by the copy, with nothing written and the length
+/// unchanged; `std.set` allocates it with [`CORE_VECTOR_WITH_CAPACITY`] first.
+pub const CORE_EXTEND_FROM_SET: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "extendFromSet",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "out",
+            ty: BuiltinType::Vector(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "items",
+            ty: BuiltinType::Set(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "from",
+            ty: BuiltinType::Int,
+        },
+        ParamSchema {
+            name: "count",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Unit,
+    fresh: false,
+};
+
+/// `core.extendFromMap<K, V>(out: Vector<MapEntry<K, V>>, entries: Map<K, V>,
+/// from: Int, count: Int) -> Unit`: [`CORE_EXTEND_FROM_SET`] over a map's run,
+/// whose unit is a `MapEntry<K, V>` word for word.
+pub const CORE_EXTEND_FROM_MAP: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "extendFromMap",
+    generics: &["K", "V"],
+    params: &[
+        ParamSchema {
+            name: "out",
+            ty: BuiltinType::Vector(&BuiltinType::MapEntry(
+                &BuiltinType::Param("K"),
+                &BuiltinType::Param("V"),
+            )),
+        },
+        ParamSchema {
+            name: "entries",
+            ty: BuiltinType::Map(&BuiltinType::Param("K"), &BuiltinType::Param("V")),
+        },
+        ParamSchema {
+            name: "from",
+            ty: BuiltinType::Int,
+        },
+        ParamSchema {
+            name: "count",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Unit,
+    fresh: false,
+};
+
+/// `core.setFinish<T>(run: Vector<T>) -> Set<T>`: the vector's store relabelled
+/// into the `Set` of its live prefix, and the vector consumed.
+///
+/// ADR 0058's word `Inst::RunFinish` with a keyed target (#378, P4-5): the same
+/// relabel `core.vectorFinish` makes into an `Array`. **The run must already be
+/// ascending and distinct** — a finish does not sort (ADR 0059) — which the
+/// standard-library body that built it established, and which the machine
+/// asserts under `debug_assertions` (Q4.10). Like `core.vectorFinish`, it
+/// records no consumption: the vector is the body's own.
+pub const CORE_SET_FINISH: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "setFinish",
+    generics: &["T"],
+    params: &[ParamSchema {
+        name: "run",
+        ty: BuiltinType::Vector(&BuiltinType::Param("T")),
+    }],
+    result: BuiltinType::Set(&BuiltinType::Param("T")),
+    fresh: false,
+};
+
+/// `core.mapFinish<K, V>(run: Vector<MapEntry<K, V>>) -> Map<K, V>`:
+/// [`CORE_SET_FINISH`] into a `Map`, whose run of entries a run of `MapEntry`s
+/// already is — the key's words, then the value's. Ascending and distinct by key.
+pub const CORE_MAP_FINISH: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "mapFinish",
+    generics: &["K", "V"],
+    params: &[ParamSchema {
+        name: "run",
+        ty: BuiltinType::Vector(&BuiltinType::MapEntry(
+            &BuiltinType::Param("K"),
+            &BuiltinType::Param("V"),
+        )),
+    }],
+    result: BuiltinType::Map(&BuiltinType::Param("K"), &BuiltinType::Param("V")),
     fresh: false,
 };
 

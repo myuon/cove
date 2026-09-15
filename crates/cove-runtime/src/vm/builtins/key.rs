@@ -261,6 +261,36 @@ pub(super) fn admit_key(machine: &Machine, operands: &[Operand<'_>]) -> Result<u
     admits(machine, &method, &role, None, held, 0).map(|()| 0)
 }
 
+/// Whether the `len` units of the run at `addr` are ascending and distinct by
+/// the key each begins with: `stride` words a unit, of which the first
+/// `width` are a value of `key`.
+///
+/// A keyed finish's invariant, which the relabel cannot establish and the
+/// standard-library body that built the run did (#378, Q4.10). It is asked
+/// only under `debug_assertions`, by `Machine::finish_words`, because it is a
+/// check of the library's algorithm rather than of a program: one order per
+/// adjacent pair, where the finish itself is constant work. A pair the order
+/// cannot compare — a key nested past the depth bound — answers `false`, for
+/// the run holds a key no search over it could have placed.
+#[cfg(debug_assertions)]
+pub(crate) fn is_ascending_and_distinct(
+    machine: &Machine,
+    key: LayoutId,
+    addr: u64,
+    stride: u32,
+    width: u32,
+    len: u32,
+) -> bool {
+    (1..len).all(|at| {
+        let before = machine.payload_run(addr, (at - 1) * stride, width);
+        let after = machine.payload_run(addr, at * stride, width);
+        matches!(
+            order(machine, Key::Held(key, &before), Key::Held(key, &after), 0),
+            Ok(Ordering::Less)
+        )
+    })
+}
+
 // --- looking through a description -----------------------------------------
 
 /// The value `key` names, one description in, or `None` when it is already a

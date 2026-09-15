@@ -213,6 +213,11 @@ fn every_cold_path_of_a_freeze_goes_to_the_runtime() {
 }
 
 #[test]
+fn a_keyed_finish_relabels_the_store_into_a_set_or_a_map() {
+    suite::a_keyed_finish_relabels_the_store_into_a_set_or_a_map::<Cranelift>();
+}
+
+#[test]
 fn a_freeze_refuses_a_null_receiver() {
     suite::a_freeze_refuses_a_null_receiver::<Cranelift>();
 }

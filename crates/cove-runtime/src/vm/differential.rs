@@ -2513,3 +2513,116 @@ export fn main() -> Int {
         assert_eq!(machine, oracle, "`{name}` answers alike");
     }
 }
+
+/// #378 P4-5's keyed construction intrinsics answer alike on both evaluators:
+/// a vector with exact room, ranges of an old set or map copied onto it around
+/// a pushed unit, and the keyed finish into the new run — over one-word
+/// members, `String` members and a map of two-word values. The old run is
+/// untouched, and the machine lowers each to run instructions.
+#[test]
+fn the_keyed_construction_intrinsics_agree() {
+    let probe = "\
+/// A two-word value.
+struct ProbeSpot {
+  x: Int
+  y: Int
+}
+
+/// `Set<Int>`: a member pushed between two ranges of the old run.
+export fn probeSetInts() -> String {
+  let old = Set.of(1, 3, 4)
+  let out: Vector<Int> = core.vectorWithCapacity(4)
+  core.extendFromSet(out, old, 0, 1)
+  core.vectorPush(out, 2)
+  core.extendFromSet(out, old, 1, 2)
+  let built = core.setFinish(out)
+  \"{built} {built.length()} {old}\"
+}
+
+/// `Set<String>`: a member at either end, and an empty range.
+export fn probeSetStrings() -> String {
+  let old = Set.of(\"b\", \"c\")
+  let low: Vector<String> = core.vectorWithCapacity(3)
+  core.vectorPush(low, \"a\")
+  core.extendFromSet(low, old, 0, 2)
+  let high: Vector<String> = core.vectorWithCapacity(3)
+  core.extendFromSet(high, old, 0, 2)
+  core.vectorPush(high, \"d\")
+  core.extendFromSet(high, old, 2, 0)
+  let empty: Vector<String> = core.vectorWithCapacity(0)
+  \"{core.setFinish(low)} {core.setFinish(high)} {core.setFinish(empty)}\"
+}
+
+/// `Map<String, ProbeSpot>`: an entry replaced by skipping the old one.
+export fn probeMap() -> String {
+  let old = Map.of(
+    MapEntry(key: \"a\", value: ProbeSpot(x: 1, y: 2)),
+    MapEntry(key: \"b\", value: ProbeSpot(x: 3, y: 4)),
+    MapEntry(key: \"c\", value: ProbeSpot(x: 5, y: 6)),
+  )
+  let out: Vector<MapEntry<String, ProbeSpot>> = core.vectorWithCapacity(3)
+  core.extendFromMap(out, old, 0, 1)
+  core.vectorPush(out, MapEntry(key: \"b\", value: ProbeSpot(x: 9, y: 9)))
+  core.extendFromMap(out, old, 2, 1)
+  let built = core.mapFinish(out)
+  \"{built} {built.length()} {old}\"
+}
+";
+    let source = "\
+use std.set
+
+export fn main() -> Int {
+  1
+}
+";
+    let (sources, checked) = checked_with_probe(source, "std.set", probe);
+    let program = lowered(&sources, &checked);
+    for name in ["probeSetInts", "probeSetStrings", "probeMap"] {
+        let function = program
+            .functions
+            .iter()
+            .find(|f| &*f.module == "std.set" && &*f.name == name)
+            .unwrap_or_else(|| panic!("`{name}` is lowered"));
+        let count = |keep: fn(&cove_ir::Inst) -> bool| {
+            function.code.iter().filter(|inst| keep(inst)).count()
+        };
+        let finishes = count(|inst| matches!(inst, cove_ir::Inst::RunFinish { .. }));
+        let copies = count(|inst| matches!(inst, cove_ir::Inst::RunCopy { .. }));
+        assert!(
+            finishes >= 1 && copies >= 1,
+            "`{name}`: {:?}",
+            function.code
+        );
+    }
+
+    let wanted = [
+        ("probeSetInts", "{1, 2, 3, 4} 4 {1, 3, 4}"),
+        ("probeSetStrings", "{a, b, c} {b, c, d} {}"),
+        (
+            "probeMap",
+            "{a: ProbeSpot(x: 1, y: 2), b: ProbeSpot(x: 9, y: 9), c: ProbeSpot(x: 5, y: 6)} 3 \
+             {a: ProbeSpot(x: 1, y: 2), b: ProbeSpot(x: 3, y: 4), c: ProbeSpot(x: 5, y: 6)}",
+        ),
+    ];
+    for (name, want) in wanted {
+        let oracle = on_a_deep_stack(move || {
+            let (sources, program) = checked_with_probe(source, "std.set", probe);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts);
+            said(Interpreter::new(&runtime).invoke("std.set", name, vec![]))
+        });
+        let machine = on_a_deep_stack(move || {
+            let (sources, program) = checked_with_probe(source, "std.set", probe);
+            let ir = lowered(&sources, &program);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts.clone());
+            said(Vm::new(&runtime, &hosts, &ir).invoke("std.set", name, vec![]))
+        });
+        assert_eq!(
+            oracle,
+            Answer::Value(want.to_string()),
+            "`{name}` on the oracle"
+        );
+        assert_eq!(machine, oracle, "`{name}` answers alike");
+    }
+}

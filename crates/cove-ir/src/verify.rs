@@ -1435,14 +1435,19 @@ impl Check<'_> {
     }
 
     /// A word [`Inst::RunFinish`]: `Vector.freeze()`'s, which relabels a store
-    /// of `elem` elements into the `Array` of them it already is.
+    /// of `elem` elements into the `Array` of them it already is — or a keyed
+    /// finish, which relabels it into the `Set` or `Map` whose unit `elem` is.
     ///
     /// There is nothing to validate in a run of whole elements, so the
     /// validation is [`crate::Validation::None`]; and the target is the
-    /// non-growable [`crate::Shape::Elements`] of the same element, because the
+    /// non-growable [`crate::Shape::Elements`] of the same element, a
+    /// [`crate::Shape::Members`] of it, or a [`crate::Shape::Entries`] whose
+    /// entry it is word for word ([`crate::layout::is_entry_of`]), because the
     /// relabelled store is traced by the target's reference map from then on
     /// and a finish into another family would have the collector follow the
-    /// wrong words.
+    /// wrong words. That a keyed run is ascending and distinct is not a static
+    /// fact: the standard-library body that built it established it, and the
+    /// machine asserts it under `debug_assertions` (#378, Q4.10).
     fn check_word_finish(
         &mut self,
         at: Option<usize>,
@@ -1463,17 +1468,19 @@ impl Check<'_> {
                 ),
             );
         }
+        let shape = &self.program.layout(target).shape;
         let fits = matches!(
-            self.program.layout(target).shape,
-            Shape::Elements { elem: held, growable: false } if held == elem
-        );
+            shape,
+            Shape::Elements { elem: held, growable: false } if *held == elem
+        ) || crate::layout::finishes_as_keyed_run_of(&self.program.layouts, shape, elem);
         if !fits {
             let named = self.name_of(target);
             self.fault(
                 at,
                 format!(
                     "finishes a run of `{name}` words into `{named}`, and a word run finishes \
-                     into the fixed `Elements` of the same element"
+                     into the fixed `Elements` of the same element, or the `Members` or \
+                     `Entries` whose unit it is"
                 ),
             );
         }
@@ -1654,7 +1661,7 @@ mod tests {
 
     use super::*;
     use crate::inst::{ArithOp, CmpOp, Compare, Inst, Num};
-    use crate::layout::{Case, Layout, Shape};
+    use crate::layout::{Case, Field, Layout, Shape};
     use crate::program::{Arg, Function, HostOp, Local, Table, TableId};
     use crate::{ArgsId, HostOpId};
 
@@ -1675,6 +1682,12 @@ mod tests {
     const ENUM: LayoutId = LayoutId(7);
     /// `Array<Int>`: what a word finish of `Int` elements relabels its store to.
     const ARRAY_INT: LayoutId = LayoutId(8);
+    /// `Set<Int>`: what a keyed finish of `Int` elements relabels its store to.
+    const SET_INT: LayoutId = LayoutId(9);
+    /// `MapEntry<Int, Int>`: a key at word 0 and a value at word 1.
+    const ENTRY_INT: LayoutId = LayoutId(10);
+    /// `Map<Int, Int>`, whose entry [`ENTRY_INT`] is.
+    const MAP_INT: LayoutId = LayoutId(11);
 
     fn layouts() -> Vec<Layout> {
         vec![
@@ -1734,6 +1747,33 @@ mod tests {
                 Shape::Elements {
                     elem: INT,
                     growable: false,
+                },
+            ),
+            Layout::object("Set<Int>", Shape::Members { elem: INT }),
+            Layout::inline(
+                "MapEntry",
+                Shape::Struct {
+                    fields: vec![
+                        Field {
+                            name: Arc::from("key"),
+                            layout: INT,
+                            at: 0,
+                        },
+                        Field {
+                            name: Arc::from("value"),
+                            layout: INT,
+                            at: 1,
+                        },
+                    ],
+                    opaque: false,
+                },
+                vec![Repr::Int, Repr::Int],
+            ),
+            Layout::object(
+                "Map<Int, Int>",
+                Shape::Entries {
+                    key: INT,
+                    value: INT,
                 },
             ),
         ]
@@ -2683,15 +2723,33 @@ mod tests {
             one(truncate(bytes)),
             vec!["truncates a run of packed bytes, and this instruction admits only words"]
         );
-        // A word finish is admitted into the fixed run of its element, with
-        // nothing to validate, and refused into anything else.
+        // A word finish is admitted into the fixed run of its element, and
+        // into the `Set` of it or the `Map` whose entry it is (#378, P4-5),
+        // with nothing to validate, and refused into anything else.
+        let refused_into = |unit: &str, named: &str| {
+            vec![format!(
+                "finishes a run of `{unit}` words into `{named}`, and a word run finishes into \
+                 the fixed `Elements` of the same element, or the `Members` or `Entries` whose \
+                 unit it is"
+            )]
+        };
         assert_eq!(one(finish(ARRAY_INT, Validation::None, words)), none);
+        assert_eq!(one(finish(SET_INT, Validation::None, words)), none);
+        assert_eq!(
+            one(finish(MAP_INT, Validation::None, Storage::Words(ENTRY_INT))),
+            none
+        );
+        assert_eq!(
+            one(finish(MAP_INT, Validation::None, words)),
+            refused_into("Int", "Map<Int, Int>")
+        );
+        assert_eq!(
+            one(finish(SET_INT, Validation::None, Storage::Words(ENTRY_INT))),
+            refused_into("MapEntry", "Set<Int>")
+        );
         assert_eq!(
             one(finish(STR, Validation::None, words)),
-            vec![
-                "finishes a run of `Int` words into `String`, and a word run finishes into the \
-                 fixed `Elements` of the same element"
-            ]
+            refused_into("Int", "String")
         );
         assert_eq!(
             one(finish(ARRAY_INT, Validation::Utf8, words)),

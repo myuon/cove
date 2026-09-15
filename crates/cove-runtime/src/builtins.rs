@@ -716,14 +716,115 @@ pub fn call_core(
             };
             let at = core_index(&shown, &args[1], entries.len(), span)?;
             let (key, value) = &entries[at];
-            Ok(Value(Repr::Struct(Rc::new(StructValue {
-                type_name: MAP_ENTRY.name.into(),
-                fields: vec![
-                    (MAP_ENTRY.fields[0].name.into(), key.to_value()),
-                    (MAP_ENTRY.fields[1].name.into(), value.clone()),
-                ],
-                opaque: false,
-            }))))
+            Ok(map_entry(key, value))
+        }
+        // The growable vector a keyed update is built in, with room for the run
+        // it will hold. A `Vec`'s capacity is a hint here as it is for a byte
+        // buffer: nothing a program asks reads it back. A negative capacity is
+        // the machine's allocation refusal there and a broken invariant here.
+        "vectorWithCapacity" => {
+            let Value(Repr::Int(capacity)) = &args[0] else {
+                return Err(type_error(&shown, "capacity", "Int", &args[0], span));
+            };
+            let Ok(capacity) = usize::try_from(*capacity) else {
+                return Err(RuntimeError::new(format!(
+                    "`{shown}`'s capacity is `{capacity}`, and a capacity is 0 or more"
+                ))
+                .at(span));
+            };
+            Ok(host.allocate_vector(Vec::with_capacity(capacity)))
+        }
+        // A range of a sorted run appended to that vector: a member as the value
+        // it is, an entry as the `MapEntry` `core.entryAt` answers. The body
+        // held the range inside the run, so the refusal is the machine's
+        // `run-copy` bound.
+        "extendFromSet" | "extendFromMap" => {
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "out", "Vector", &args[0], span));
+            };
+            check_consumed(storage, span)?;
+            let appended: Vec<Value> = match &args[1] {
+                Value(Repr::Set(items)) if name == "extendFromSet" => {
+                    let range = core_range(
+                        &shown,
+                        "runCopy",
+                        "element(s)",
+                        &args[2],
+                        &args[3],
+                        items.len(),
+                        span,
+                    )?;
+                    items[range].iter().map(MapKey::to_value).collect()
+                }
+                Value(Repr::Map(entries)) if name == "extendFromMap" => {
+                    let range = core_range(
+                        &shown,
+                        "runCopy",
+                        "element(s)",
+                        &args[2],
+                        &args[3],
+                        entries.len(),
+                        span,
+                    )?;
+                    entries[range]
+                        .iter()
+                        .map(|(key, value)| map_entry(key, value))
+                        .collect()
+                }
+                other => {
+                    let (role, family) = match name {
+                        "extendFromSet" => ("items", "Set"),
+                        _ => ("entries", "Map"),
+                    };
+                    return Err(type_error(&shown, role, family, other, span));
+                }
+            };
+            storage.elements.borrow_mut().extend(appended);
+            Ok(Value(Repr::Unit))
+        }
+        // The keyed finish: the vector's elements taken out as the sorted run of
+        // a `Set` or a `Map`, and the vector consumed, as `vectorFinish` takes
+        // them as an `Array`. The body built the run ascending and distinct;
+        // under `debug_assertions` that is asserted, as the machine asserts it
+        // (#378, Q4.10).
+        "setFinish" | "mapFinish" => {
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "run", "Vector", &args[0], span));
+            };
+            check_consumed(storage, span)?;
+            let elements = storage.elements.take();
+            *storage.frozen.borrow_mut() = true;
+            let key_of = |value: &Value| {
+                MapKey::from_value(value)
+                    .map_err(|invalid| invalid_key_error(&shown, "key", &invalid, span))
+            };
+            if name == "setFinish" {
+                let members = elements
+                    .iter()
+                    .map(key_of)
+                    .collect::<Result<Vec<MapKey>, _>>()?;
+                debug_assert!(
+                    members.windows(2).all(|pair| pair[0] < pair[1]),
+                    "`core.setFinish` was handed a run that is not ascending and distinct"
+                );
+                return Ok(Value(Repr::Set(members.into())));
+            }
+            let mut pairs = Vec::with_capacity(elements.len());
+            for element in &elements {
+                let Value(Repr::Struct(entry)) = element else {
+                    return Err(expects_map_entry(element, span));
+                };
+                let key = entry.get("key").expect("MapEntry always has a `key` field");
+                let value = entry
+                    .get("value")
+                    .expect("MapEntry always has a `value` field");
+                pairs.push((key_of(key)?, value.clone()));
+            }
+            debug_assert!(
+                pairs.windows(2).all(|pair| pair[0].0 < pair[1].0),
+                "`core.mapFinish` was handed a run that is not ascending and distinct"
+            );
+            Ok(Value(Repr::Map(pairs.into())))
         }
         // A name the table declares and nothing here executes. No program can
         // reach one of these from its own modules, so the check that every
@@ -731,6 +832,18 @@ pub fn call_core(
         // from a standard-library module on both evaluators.
         _ => Err(RuntimeError::new(format!("unknown core intrinsic `{shown}`")).at(span)),
     }
+}
+
+/// The `MapEntry(key:, value:)` one entry of a map's sorted run is, as a value.
+fn map_entry(key: &MapKey, value: &Value) -> Value {
+    Value(Repr::Struct(Rc::new(StructValue {
+        type_name: MAP_ENTRY.name.into(),
+        fields: vec![
+            (MAP_ENTRY.fields[0].name.into(), key.to_value()),
+            (MAP_ENTRY.fields[1].name.into(), value.clone()),
+        ],
+        opaque: false,
+    })))
 }
 
 /// The method and the role a keyed refusal is written in, as the standard

@@ -849,6 +849,16 @@ pub const BOXED: LayoutId = LayoutId(17);
 pub const ARRAY_INT: LayoutId = LayoutId(18);
 /// `Array<Pair>`, the stride-two case of [`ARRAY_INT`].
 pub const ARRAY_PAIR: LayoutId = LayoutId(19);
+/// `Set<Int>`: what a keyed finish of `Int` elements relabels its store to
+/// (#378, P4-5).
+pub const SET_INT: LayoutId = LayoutId(20);
+/// `MapEntry<Int, Int>`: two `Int` fields, `key` at word 0 and `value` at
+/// word 1 — word for word one entry of [`MAP_INT`].
+pub const ENTRY_INT: LayoutId = LayoutId(21);
+/// `Map<Int, Int>`, whose entry [`ENTRY_INT`] is.
+pub const MAP_INT: LayoutId = LayoutId(22);
+/// `Vector<MapEntry<Int, Int>>`, the owner a map's next run is built in.
+pub const ENTRY_VECTOR: LayoutId = LayoutId(23);
 
 pub fn span() -> Span {
     Span::new(FileId(0), 0, 0)
@@ -956,6 +966,30 @@ pub fn program(function: Function) -> Program {
             elem: PAIR,
             growable: false,
         },
+    ));
+    layouts.push(Layout::object("Set", cove_ir::Shape::Members { elem: INT }));
+    let (fields, words) = cove_ir::struct_layout(
+        &[(Arc::from("key"), INT), (Arc::from("value"), INT)],
+        &layouts,
+    );
+    layouts.push(Layout::inline(
+        "MapEntry",
+        cove_ir::Shape::Struct {
+            fields,
+            opaque: false,
+        },
+        words,
+    ));
+    layouts.push(Layout::object(
+        "Map",
+        cove_ir::Shape::Entries {
+            key: INT,
+            value: INT,
+        },
+    ));
+    layouts.push(Layout::object(
+        "Vector",
+        cove_ir::Shape::Vector { elem: ENTRY_INT },
     ));
     Program {
         functions: vec![function],
@@ -3909,6 +3943,67 @@ pub fn a_freeze_relabels_the_store_in_place<A: Arm>() {
 
         assert_eq!(heap.get(at + 1), 0, "the vector's own length word, cleared");
         assert_eq!(heap.get(at + 2), 0, "the vector's own store word, cleared");
+    }
+    forget_built();
+}
+
+/// A keyed finish — `core.setFinish` and `core.mapFinish`, #378 P4-5 — is the
+/// same emitted relabel as a freeze, into the `Set` or the `Map` the store's
+/// unit is: nothing handed to the runtime, the answer aliases the store, the
+/// header names the keyed layout at the logical length and the spare room is a
+/// free block.
+pub fn a_keyed_finish_relabels_the_store_into_a_set_or_a_map<A: Arm>() {
+    let cases: [(LayoutId, LayoutId, LayoutId, u32); 2] = [
+        (VECTOR, INT, SET_INT, 1),
+        (ENTRY_VECTOR, ENTRY_INT, MAP_INT, 2),
+    ];
+    for (vector, elem, target, stride) in cases {
+        forget_built();
+        let held = program(function(
+            vec![Repr::Ref, Repr::Ref],
+            REF,
+            vec![
+                Inst::RunFinish {
+                    dst: 1,
+                    owner: 0,
+                    target,
+                    validation: Validation::None,
+                    storage: Storage::Words(elem),
+                },
+                Inst::Return { src: 1 },
+            ],
+        ));
+        let (len, capacity) = (2u32, 5u32);
+        let at = HEAP_CHUNK_WORDS + 33;
+        let mut heap = Heap::new(2);
+        let header = a_vector(&mut heap, at, vector, len, capacity);
+        let store = heap.addr(at + 8);
+        for word in 0..(len * stride) {
+            heap.set(at + 8 + 1 + u64::from(word), 900 + u64::from(word));
+        }
+        let mut words = vec![header, UNWRITTEN];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "stride {stride}");
+        assert!(built().is_empty(), "emitted whole: {:?}", built());
+        assert_eq!(words[1], store, "the answer aliases the store");
+        assert_eq!(
+            heap.get(at + 8),
+            (u64::from(target.0) << 32) | u64::from(len),
+            "the store's header names the keyed run and its length"
+        );
+        for word in 0..(len * stride) {
+            assert_eq!(
+                heap.get(at + 8 + 1 + u64::from(word)),
+                900 + u64::from(word)
+            );
+        }
+        assert_eq!(
+            heap.get(at + 8 + 1 + u64::from(len * stride)),
+            u64::from((capacity - len) * stride - 1),
+            "a free block of the spare room"
+        );
+        assert_eq!(heap.get(at + 1), 0, "the vector's length word, cleared");
+        assert_eq!(heap.get(at + 2), 0, "the vector's store word, cleared");
     }
     forget_built();
 }

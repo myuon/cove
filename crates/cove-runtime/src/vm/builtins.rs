@@ -50,6 +50,8 @@ use crate::vm::exec::Machine;
 
 mod equal;
 mod key;
+#[cfg(debug_assertions)]
+pub(crate) use key::is_ascending_and_distinct;
 mod keyed;
 mod make;
 pub(crate) mod operand;
