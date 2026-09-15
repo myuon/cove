@@ -21,3 +21,100 @@ export fn isEmpty(text: String) -> Bool {
 export fn byteLength(text: String) -> Int {
   core.byteLength(text)
 }
+
+/// The text between two byte offsets, or why there is none.
+///
+/// Both offsets are **byte** offsets — the ones `byteLength`, `byteAt` and
+/// `codePointAtByte` deal in — and the range they name has to be in the string,
+/// run forwards, and begin and end at the start of a character (the end of the
+/// string counts as one). It refuses rather than clamps, which is where it parts
+/// from `slice`: an offset outside the string or inside a character is one this
+/// type never handed out, and moving it to the nearest legal one would answer a
+/// question nobody asked.
+///
+/// The range is decided here, in Cove, and the copy beneath it is a core
+/// intrinsic: ADR 0058's run slice over packed bytes, which allocates the answer
+/// at exactly its length and validates nothing. It needs to validate nothing
+/// because of the checks above it — a run of valid UTF-8 cut at two character
+/// boundaries is valid UTF-8 — so the order below is not a courtesy to the
+/// copy, it is the copy's precondition.
+///
+/// The success path asks only whether `0 <= from <= to <= length` and whether
+/// the byte at each end is a continuation byte; which of the five things is
+/// wrong, and in what words, is [`refuseRange`]'s, so the common path
+/// carries no message.
+///
+/// **Each question is an `if` of its own rather than one condition joined by
+/// `&&` or `||`**, and that is for the machine rather than the reader. A
+/// comparison that is all an `if` branches on is one instruction (ADR 0054),
+/// but the arms of `a || b` meet at a shared test that nothing can fuse, so
+/// joining the five range and byte questions cost this body three more
+/// dispatches per call — on a method `examples/covefmt` calls 870 thousand
+/// times. The answer is a `return` rather than the body's last expression for
+/// the same reason: an `Ok` in tail position is built aside and copied into the
+/// answer, which was two dispatches more.
+export fn sliceBytes(
+  text: String,
+  from: Int,
+  to: Int,
+) -> Result<String, Error> {
+  let length = core.byteLength(text)
+  if from < 0 {
+    return refuseRange(text, from, to)
+  }
+  if from > to {
+    return refuseRange(text, from, to)
+  }
+  if to > length {
+    return refuseRange(text, from, to)
+  }
+  // A continuation byte is `10xxxxxx`, 128 through 191, and an ASCII byte is
+  // below both; the end of the string is a boundary and has no byte to look at.
+  if from < length {
+    let first = text.byteAt(from)
+    if first >= 128 {
+      if first < 192 {
+        return refuseRange(text, from, to)
+      }
+    }
+  }
+  if to < length {
+    let last = text.byteAt(to)
+    if last >= 128 {
+      if last < 192 {
+        return refuseRange(text, from, to)
+      }
+    }
+  }
+  return Ok(core.stringSlice(text, from, to - from))
+}
+
+/// The `Err` that says what is wrong with the byte range `from` to `to` of
+/// `text`, which [`sliceBytes`] has already found to be wrong.
+///
+/// Five things can be wrong, asked in the order a reader would ask them: is
+/// `from` an offset into this string at all, is `to`, do they run forwards, and
+/// does each begin a character. A range that is wrong in several ways is told
+/// about the first. The sentences are the ones `StringBuilder.appendSlice` stops
+/// a run with, word for word — a builder's append holds its range to this rule
+/// too.
+///
+/// A function of its own so that the path that succeeds carries no
+/// interpolation, and the whole `Result` rather than its `Error` so that each
+/// refusal in [`sliceBytes`] is a call answered straight into what that body
+/// returns, with nothing built around it afterwards.
+fn refuseRange(text: String, from: Int, to: Int) -> Result<String, Error> {
+  let length = core.byteLength(text)
+  let message = if from < 0 || from > length {
+    "`from` is `{from}`, and a byte offset into this string is 0 to {length}"
+  } else if to < 0 || to > length {
+    "`to` is `{to}`, and a byte offset into this string is 0 to {length}"
+  } else if from > to {
+    "`from` is `{from}` and `to` is `{to}`, so this range runs backwards"
+  } else if from < length && text.byteAt(from) >= 128 && text.byteAt(from) < 192 {
+    "`from` is `{from}`, which is inside a character rather than at the start of one"
+  } else {
+    "`to` is `{to}`, which is inside a character rather than at the start of one"
+  }
+  return Err(Error(message))
+}

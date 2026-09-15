@@ -90,8 +90,15 @@ fn two_occurrences_of_the_same_text_share_one_string_id() {
     let (sources, checked) = super::checked("fn twice() -> Bool { \"dup\" == \"dup\" }");
     let program = super::lower(&checked, &sources, &cove_schema::HostSchemas::new())
         .expect("the program lowers");
+    // Counted by text rather than by the table's length: the standard library
+    // is lowered with every package, and `std.string`'s own messages are
+    // literals of their own.
     assert_eq!(
-        program.strings.len(),
+        program
+            .strings
+            .iter()
+            .filter(|text| &***text == "dup")
+            .count(),
         1,
         "one text, written twice, is one entry: {:?}",
         program.strings

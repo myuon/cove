@@ -837,11 +837,12 @@ impl<'a, 'f> Lower<'a, 'f> {
             }
             // ADR 0058's `run-slice`: the same helper, which allocates the run
             // and writes it into the row's `dst` before it copies into it.
-            Inst::RunSlice {
-                args,
-                storage: Storage::Words(elem),
-            } => {
-                self.run_copy(args.0, RunOp::SliceWords, elem.0);
+            Inst::RunSlice { args, storage } => {
+                let (kind, elem) = match storage {
+                    Storage::PackedBytes => (RunOp::SliceBytes, 0),
+                    Storage::Words(elem) => (RunOp::SliceWords, elem.0),
+                };
+                self.run_copy(args.0, kind, elem);
                 false
             }
             Inst::Alloc { dst, layout, len } => {

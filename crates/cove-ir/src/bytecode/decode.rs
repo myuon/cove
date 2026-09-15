@@ -266,6 +266,10 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             args: ArgsId(lo),
             storage: Storage::Words(LayoutId(hi)),
         },
+        Op::RunSliceBytes => Inst::RunSlice {
+            args: ArgsId(lo),
+            storage: Storage::PackedBytes,
+        },
         Op::RunSliceWords => Inst::RunSlice {
             args: ArgsId(lo),
             storage: Storage::Words(LayoutId(hi)),

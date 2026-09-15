@@ -133,13 +133,15 @@ export fn firstByte(s: String, at: Int) -> Int {
 }
 
 /// The allocation a collection is forced with. It runs on the VM in every case —
-/// `sliceBytes` is outside anything a native tier lowers — which is what makes
+/// `String.slice` is outside anything a native tier lowers — which is what makes
 /// it a native-to-VM call besides.
+///
+/// It was `sliceBytes` until ADR 0058 moved that into the standard library over
+/// a byte run slice, which both code generators lower. `slice` counts characters
+/// rather than bytes, and every character of the text it is handed is ASCII, so
+/// the answer is the same number.
 export fn allocates(s: String, n: Int) -> Int {
-  match s.sliceBytes(held(0), n) {
-    Ok(cut) => cut.byteLength()
-    Err(_) => 0
-  }
+  s.slice(held(0), n).byteLength()
 }
 
 /// A reference held in a native frame's destination slot across an allocation,
@@ -1633,7 +1635,7 @@ fn a_collection_during_a_direct_chain_keeps_every_reference() {
 /// comes back through all of it.
 ///
 /// `refThroughCollection` is entered directly, calls `echoes` directly, and calls
-/// `allocates` — which the subset refuses, because it reaches `String.sliceBytes`
+/// `allocates` — which the subset refuses, because it reaches `String.slice`
 /// — so that call is the mediated helper and the encoded dispatch loop. Both
 /// callees answer into destinations in frames the direct path opened.
 ///

@@ -146,12 +146,18 @@ fn the_run_writes_the_recording_a_run_writes() {
     // that literal cost nothing; here it costs its bytes once, which is the
     // regression the ADR names and asks to be measured rather than assumed
     // small.
+    //
+    // It is 40 since ADR 0058 moved `String.sliceBytes` into `std.string`: this
+    // fixture lowers the whole package with `cove_ir::lower`, which lowers the
+    // standard library attached to it, and `refuseRange`'s five sentences are
+    // literals too. `cove run` lowers the slice its entry reaches, where an
+    // unreached library body is a stub and places nothing.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(10), capacity_words: Some(10) }"
+            "HeapSummary { collections: 0, allocated_words: Some(40), capacity_words: Some(40) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

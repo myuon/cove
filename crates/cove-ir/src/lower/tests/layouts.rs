@@ -235,6 +235,12 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             "<tag>",
             "Bytes",
             "ByteBuffer",
+            // `std.string.sliceBytes` answers a `Result<String, Error>`, and
+            // `lower` lowers the whole standard library attached to every
+            // package, so its two layouts are declared here too: the `Error`,
+            // and then the `Result` around it.
+            "Error",
+            "Result",
             // The one *declaration* in this list, and it is here because
             // `lower` lowers a whole package: `std.stringbuilder` is attached
             // to every package, and a method of it names its own receiver, so

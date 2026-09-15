@@ -662,10 +662,10 @@ impl<'a> Emit<'a> {
             },
             // ADR 0058's `run-slice`: the same helper, which allocates the run
             // and writes it into the row's `dst` before it copies into it.
-            Inst::RunSlice {
-                args,
-                storage: Storage::Words(elem),
-            } => self.run_copy(args.0, RunOp::SliceWords, elem.0),
+            Inst::RunSlice { args, storage } => match storage {
+                Storage::PackedBytes => self.run_copy(args.0, RunOp::SliceBytes, 0),
+                Storage::Words(elem) => self.run_copy(args.0, RunOp::SliceWords, elem.0),
+            },
             Inst::Alloc { dst, layout, len } => self.allocate(*dst, layout.0, *len),
             Inst::Switch { on, table } => self.switch(*on, *table),
             // `encoded.rs`'s `NEG_INT` arm: `checked_neg`, whose `None` is
