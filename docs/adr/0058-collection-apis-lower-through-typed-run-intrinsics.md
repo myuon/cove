@@ -1,6 +1,8 @@
 # ADR 0058: Collection APIs lower through typed run intrinsics, not builtin dispatch
 
-- Status: Accepted
+- Status: Accepted. Superseded in part by
+  [ADR 0059](0059-a-keyed-collection-is-searched-by-order-not-hashed.md),
+  which replaces the Phase 4 `value-hash` intrinsic with `value-order`
 - Date: 2026-09-15
 - Decides: what belongs in executable IR beneath `String`, `Array`,
   `Vector`, builders, `Map` and `Set`; how the standard library reaches
