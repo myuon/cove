@@ -338,11 +338,9 @@ impl<'p> Flow<'p> {
             | Inst::CmpBranch { dst, .. }
             | Inst::CmpImmBranch { dst, .. }
             | Inst::Convert { dst, .. }
-            | Inst::ByteAt { dst, .. }
-            | Inst::AllocBytes { dst, .. }
-            | Inst::FinishString { dst, .. }
-            | Inst::AllocBuffer { dst, .. }
-            | Inst::FinishBuffer { dst, .. }
+            | Inst::RunLoad { dst, .. }
+            | Inst::GrowableAlloc { dst, .. }
+            | Inst::RunFinish { dst, .. }
             | Inst::Len { dst, .. }
             | Inst::LayoutOf { dst, .. }
             | Inst::Alloc { dst, .. }
@@ -404,10 +402,9 @@ impl<'p> Flow<'p> {
             Inst::Store { .. }
             | Inst::StoreField { .. }
             | Inst::StoreElem { .. }
-            | Inst::WriteByte { .. }
             | Inst::RunCopy { .. }
-            | Inst::AppendByte { .. }
-            | Inst::AppendBytes { .. }
+            | Inst::GrowablePush { .. }
+            | Inst::GrowableExtend { .. }
             | Inst::ScopeCancel { .. }
             | Inst::Cancel { .. }
             | Inst::SharedLock { .. }
@@ -486,29 +483,22 @@ impl<'p> Flow<'p> {
                 }
             }
             Inst::LoadField { obj, .. }
-            | Inst::ByteAt { obj, .. }
+            | Inst::RunLoad { run: obj, .. }
             | Inst::Len { obj, .. }
             | Inst::LayoutOf { obj, .. }
             | Inst::AddrOfField { obj, .. } => f(obj, 1),
-            Inst::AllocBytes { len, .. } => f(len, 1),
-            Inst::WriteByte { bytes, at, value } => {
-                f(bytes, 1);
-                f(at, 1);
-                f(value, 1);
-            }
             // The five operands live in the args row, exactly as a call's
             // do, so they are read the same way.
             Inst::RunCopy { args: list, .. } => args(list, f),
-            Inst::FinishString { bytes, .. } => f(bytes, 1),
-            Inst::AllocBuffer { capacity, .. } => f(capacity, 1),
-            Inst::AppendByte { buffer, value } => {
-                f(buffer, 1);
-                f(value, 1);
+            Inst::GrowableAlloc { capacity, .. } => f(capacity, 1),
+            Inst::GrowablePush { owner, src, .. } => {
+                f(owner, 1);
+                f(src, 1);
             }
             // All four operands live in the args row, exactly as
             // `Inst::RunCopy`'s five do.
-            Inst::AppendBytes { args: list } => args(list, f),
-            Inst::FinishBuffer { buffer, .. } => f(buffer, 1),
+            Inst::GrowableExtend { args: list, .. } => args(list, f),
+            Inst::RunFinish { owner, .. } => f(owner, 1),
             Inst::StoreField {
                 obj, src, layout, ..
             } => {

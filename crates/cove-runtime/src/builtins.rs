@@ -700,7 +700,7 @@ pub fn call_method(
                 // requires in as many words. What differs from `sliceBytes` is
                 // what a refusal *is*: `sliceBytes` answers a `Result` because
                 // a caller asked for a value, and this stops the run because
-                // `Inst::AppendBytes` does and the schema declares `Unit`.
+                // `Inst::GrowableExtend` does and the schema declares `Unit`.
                 "appendSlice" => {
                     let args = expect_args("appendSlice", args, 3, span)?;
                     let Value(Repr::Str(text)) = &args[0] else {
@@ -996,7 +996,7 @@ pub fn call_method(
                 // Refused rather than answered, which is `sliceBytes`'s rule
                 // and not `codePointAtByte`'s: a byte offset out of range is
                 // one this type never handed out, and `byteLength()` is how a
-                // caller knows the range. The VM's `Inst::ByteAt` refuses in
+                // caller knows the range. The VM's `Inst::RunLoad` refuses in
                 // the same words.
                 match usize::try_from(*offset)
                     .ok()

@@ -83,12 +83,12 @@
 
 #[cfg(test)]
 use cove_ir::Program;
-use cove_ir::{LayoutId, Repr, Shape, Storage};
+use cove_ir::{LayoutId, Repr, Shape, Storage, Validation};
 
 use crate::error::RuntimeError;
 use crate::vm::builtins::operand::Operand;
 use crate::vm::builtins::{equal, make, operand};
-use crate::vm::exec::runs::{self, Growable, Validation, GROWABLE_LEN, GROWABLE_STORE};
+use crate::vm::exec::runs::{self, Growable, GROWABLE_LEN, GROWABLE_STORE};
 use crate::vm::exec::Machine;
 
 /// A value's words, off the operand and out of the way of a `&mut Machine`.

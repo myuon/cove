@@ -104,7 +104,7 @@
 //! It is honoured by the rule above and by nothing else. **Neither code
 //! generator keeps a Cove value in a register across an instruction
 //! boundary**, so at every place a collection can happen — the safepoint
-//! helper, the call helper, and now [`AllocFn`], [`BuiltinFn`] and [`BufferFn`],
+//! helper, the call helper, and now [`AllocFn`], [`BuiltinFn`] and [`GrowableFn`],
 //! which are all the calls either arm emits — every live reference is already in
 //! the slot the frame's static `Function::refs` map names. The collector walks exactly what it
 //! walks for an encoded frame, and there is no spill sequence, because there is
@@ -120,12 +120,12 @@
 //! `native_tier.rs`'s forced-collection cases are how that is checked rather
 //! than argued.
 //!
-//! [`BufferFn`] is where that argument had to be made a second time and could
+//! [`GrowableFn`] is where that argument had to be made a second time and could
 //! not be weakened. A growable buffer is a *stable owner over a replaceable
 //! store* — [ADR 0052] — so between allocating the store and allocating the
 //! owner there is a live object nothing in any frame names. The runtime holds it
 //! with `Machine::push_temp`, and that is exactly why the whole of
-//! `alloc-buffer` is one helper rather than two [`AllocFn`] calls with emitted
+//! `growable-alloc` is one helper rather than two [`AllocFn`] calls with emitted
 //! code in between: the half-built state has a root discipline of its own, and it
 //! is not the frame's.
 //!
@@ -358,14 +358,14 @@ pub enum Raise {
     Trapped = 9,
     /// `null_object()` — a reference read before it was given one.
     ///
-    /// What `encoded.rs`'s `LEN`, `BYTE_AT` and `Machine::element` each answer
+    /// What `encoded.rs`'s `LEN`, `RUN_LOAD_BYTES` and `Machine::element` each answer
     /// for a zero address, in that one word: the message is one sentence with
     /// no operand in it, so this variant carries nothing.
     NullObject = 10,
     /// `Machine::element`'s "index {a} is outside a collection of {b}", where
     /// the two numbers are [`NativeCtx::raise_a`] and [`NativeCtx::raise_b`].
     IndexOutOfRange = 11,
-    /// `encoded.rs`'s `BYTE_AT` refusal: "`byteAt` is `{a}`, and a byte offset
+    /// `encoded.rs`'s `RUN_LOAD_BYTES` refusal: "`byteAt` is `{a}`, and a byte offset
     /// into this string is 0 to `{b} - 1`".
     ///
     /// `raise_b` is the string's byte length rather than the last legal offset,
@@ -764,12 +764,12 @@ pub type FieldStoreFn = unsafe extern "C" fn(
     from: u64,
 ) -> u32;
 
-/// Which of [ADR 0052]'s four growable-buffer instructions a [`BufferFn`] was
-/// handed.
+/// Which of [ADR 0058]'s growable-run instructions a [`GrowableFn`] was handed:
+/// [ADR 0052]'s four growable-buffer instructions, by their run-family names.
 ///
 /// `#[repr(u32)]` with the values written out, for [`Outcome`]'s reason: the
 /// generated code materialises them as integer constants and the runtime matches
-/// on them, and [`BufferOp::abi`] is the one place that conversion is spelled.
+/// on them, and [`GrowableOp::abi`] is the one place that conversion is spelled.
 ///
 /// They are one helper and one enum rather than four helpers because every
 /// property the boundary cares about is the same for all four — each is a
@@ -780,30 +780,37 @@ pub type FieldStoreFn = unsafe extern "C" fn(
 /// drift. They are also ADR 0052's four: a build that had three of them would be
 /// a build that could allocate a builder it could not finish.
 ///
+/// Only the [`Storage::PackedBytes`](cove_ir::Storage::PackedBytes) member of
+/// each is admitted by `crate::subset`, and the values are the ones the four had
+/// as `BufferOp`, so the ABI did not change when the names did.
+///
 /// [ADR 0052]: ../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
+/// [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BufferOp {
-    /// [`Inst::AllocBuffer`](cove_ir::Inst::AllocBuffer). `a` is `dst` and `b` the
-    /// slot holding the capacity.
+pub enum GrowableOp {
+    /// [`Inst::GrowableAlloc`](cove_ir::Inst::GrowableAlloc). `a` is `dst` and `b`
+    /// the slot holding the capacity.
     Alloc = 0,
-    /// [`Inst::AppendByte`](cove_ir::Inst::AppendByte). `a` is the owner's slot
-    /// and `b` the value's; there is no destination.
-    AppendByte = 1,
-    /// [`Inst::AppendBytes`](cove_ir::Inst::AppendBytes). `a` is the `ArgsId`
-    /// whose four entries are `buffer`, `src`, `from` and `to`; `b` is unused.
+    /// [`Inst::GrowablePush`](cove_ir::Inst::GrowablePush). `a` is the owner's
+    /// slot and `b` the unit's; there is no destination.
+    Push = 1,
+    /// [`Inst::GrowableExtend`](cove_ir::Inst::GrowableExtend). `a` is the
+    /// `ArgsId` whose four entries are `owner`, `src`, `from` and `to`; `b` is
+    /// unused.
     ///
     /// The operands are behind an argument list rather than in `a` and `b`
-    /// because the instruction has four of them — see `Inst::AppendBytes`'s own
-    /// note — and the helper resolves the list out of the program, exactly as
-    /// `encoded.rs`'s arm does.
-    AppendBytes = 2,
-    /// [`Inst::FinishBuffer`](cove_ir::Inst::FinishBuffer). `a` is `dst` and `b`
-    /// the owner's slot.
+    /// because the instruction has four of them — see `Inst::GrowableExtend`'s
+    /// own note — and the helper resolves the list out of the program, exactly
+    /// as `encoded.rs`'s arm does.
+    Extend = 2,
+    /// [`Inst::RunFinish`](cove_ir::Inst::RunFinish). `a` is `dst` and `b` the
+    /// owner's slot. The target layout and the validation are not operands: the
+    /// helper reads them off the instruction at the pc it is handed.
     Finish = 3,
 }
 
-impl BufferOp {
+impl GrowableOp {
     /// The integer the generated code passes for this operation.
     pub const fn abi(self) -> u32 {
         self as u32
@@ -812,17 +819,18 @@ impl BufferOp {
     /// Which operation `code` names, or `None` for a number no arm emits.
     pub const fn from_abi(code: u32) -> Option<Self> {
         match code {
-            0 => Some(BufferOp::Alloc),
-            1 => Some(BufferOp::AppendByte),
-            2 => Some(BufferOp::AppendBytes),
-            3 => Some(BufferOp::Finish),
+            0 => Some(GrowableOp::Alloc),
+            1 => Some(GrowableOp::Push),
+            2 => Some(GrowableOp::Extend),
+            3 => Some(GrowableOp::Finish),
             _ => None,
         }
     }
 }
 
-/// What a growable-buffer helper is: one of [ADR 0052]'s four instructions,
-/// handed to the runtime whole.
+/// What a growable-run helper is: one of [ADR 0052]'s four instructions — ADR
+/// 0058's `growable-alloc`, `growable-push`, `growable-extend` and
+/// `run-finish` over packed bytes — handed to the runtime whole.
 ///
 /// [`AllocFn`]'s relationship to `Inst::Alloc`, for the builder. ADR 0055's
 /// "Runtime operations whose correctness already lives in Rust … remain runtime
@@ -830,7 +838,7 @@ impl BufferOp {
 /// sentence's next four cases, each for a reason of its own rather than by
 /// analogy. They were measured against emitting a fast path, and each one lost:
 ///
-/// - **`AllocBuffer` allocates twice, and nothing in a frame can name what the
+/// - **`GrowableAlloc` allocates twice, and nothing in a frame can name what the
 ///   first one answered.** `Machine::alloc_buffer` allocates the store, holds it
 ///   with `Machine::push_temp` across the *owner's* allocation, and only then
 ///   writes the store into the owner's payload. Emitted code could make both
@@ -841,7 +849,7 @@ impl BufferOp {
 ///   of this tier's collector discipline and it is exactly what splitting this
 ///   would break. The temporary root exists because a Rust local is not a root;
 ///   a register in a compiled frame is not one either;
-/// - **`AppendBytes` copies in bounded chunks with a safepoint between them**,
+/// - **`GrowableExtend` copies in bounded chunks with a safepoint between them**,
 ///   which is ADR 0052's "bulk work remains proportionally charged" and ADR
 ///   0040's stop bound. A generated fast path must not skip that. It could not
 ///   honour it either without emitting `Machine::copy_string_bytes` — a
@@ -849,12 +857,12 @@ impl BufferOp {
 ///   in front of all of it the eight refusals whose sentences name offsets and
 ///   lengths the runtime formats. So it is mediated, and the chunking stays where
 ///   it already works;
-/// - **`FinishBuffer` validates and then relabels, and only the second half is
+/// - **`RunFinish` validates and then relabels, and only the second half is
 ///   small.** The relabel is a header write and a free block, which is emittable;
 ///   the validation walks the live prefix through `std::str::from_utf8`, which is
 ///   not. Emitting the tail of an operation whose head is a helper call buys
 ///   nothing, because the call is already made;
-/// - **`AppendByte` is three lines and is here anyway.** It is not on the census
+/// - **`GrowablePush` is three lines and is here anyway.** It is not on the census
 ///   — the corpus appends ranges, not bytes — but a subset that lowered the other
 ///   three would refuse a function for the one scalar append in it, which is a
 ///   refusal with no work behind it.
@@ -871,11 +879,11 @@ impl BufferOp {
 /// This is the other kind, the kind [`AllocFn`] is: the operation's correctness
 /// lives in Rust and stays there, and what the lowering buys is not a faster
 /// append — it is that **the function around it compiles**. `covefmt.spacing` and
-/// `covefmt.flattened` were refused whole for one `alloc-buffer` each; every
+/// `covefmt.flattened` were refused whole for one `growable-alloc` each; every
 /// other instruction in them ran on the encoded tier because of it.
 ///
 /// `base` is the caller's frame as a word index, `pc` the instruction's index,
-/// and `a` and `b` the operands [`BufferOp`] names for each variant. Six integer
+/// and `a` and `b` the operands [`GrowableOp`] names for each variant. Six integer
 /// arguments, which is what the System V ABI passes in registers and what the
 /// template arm's call sequence depends on. The answer is an [`Outcome`] as a
 /// `u32`, read exactly as [`BuiltinFn`]'s is.
@@ -887,7 +895,7 @@ impl BufferOp {
 /// are re-derived by the generated code afterwards.
 ///
 /// [ADR 0052]: ../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
-pub type BufferFn =
+pub type GrowableFn =
     unsafe extern "C" fn(ctx: *mut NativeCtx, base: u64, pc: u32, op: u32, a: u32, b: u32) -> u32;
 
 /// The runtime's side of the boundary, as function pointers.
@@ -914,8 +922,8 @@ pub struct NativeHelpers {
     pub alloc: AllocFn,
     /// See [`BuiltinFn`].
     pub builtin: BuiltinFn,
-    /// See [`BufferFn`].
-    pub buffer: BufferFn,
+    /// See [`GrowableFn`].
+    pub growable: GrowableFn,
     /// See [`FieldLoadFn`].
     pub field_load: FieldLoadFn,
     /// See [`FieldStoreFn`].
@@ -1174,15 +1182,15 @@ mod tests {
         assert_eq!(Raise::from_abi(15), None);
 
         for (code, op) in [
-            (0, BufferOp::Alloc),
-            (1, BufferOp::AppendByte),
-            (2, BufferOp::AppendBytes),
-            (3, BufferOp::Finish),
+            (0, GrowableOp::Alloc),
+            (1, GrowableOp::Push),
+            (2, GrowableOp::Extend),
+            (3, GrowableOp::Finish),
         ] {
             assert_eq!(op.abi(), code);
-            assert_eq!(BufferOp::from_abi(code), Some(op));
+            assert_eq!(GrowableOp::from_abi(code), Some(op));
         }
-        assert_eq!(BufferOp::from_abi(4), None);
+        assert_eq!(GrowableOp::from_abi(4), None);
     }
 
     /// Zero is not a raise, which is what makes a fresh context's

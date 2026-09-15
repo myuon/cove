@@ -42,7 +42,7 @@ use cove_syntax::ast::{Arg, Expr};
 use super::frame::Val;
 use super::shapes::{self, RANGE_END, RANGE_INCLUSIVE, RANGE_START};
 use super::{Body, Dest, PENDING};
-use crate::inst::{ArithOp, CmpOp, Compare, Inst, Num, Slot};
+use crate::inst::{ArithOp, CmpOp, Compare, Inst, Num, Slot, Storage};
 use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
 use crate::program::Builtin;
@@ -115,7 +115,7 @@ impl Body<'_> {
             // `cove_ir::lower::collections` makes for a sequence and for the
             // same reason: what a builtin call costs is worth paying for
             // `split` or `replace`, and is most of what `byteAt` costs. See
-            // [`Inst::ByteAt`].
+            // [`Inst::RunLoad`].
             Ty::Str if name == "byteAt" && args.len() == 1 => {
                 self.byte_at(expr, base, &args[0].value, want)
             }
@@ -178,7 +178,7 @@ impl Body<'_> {
         }
     }
 
-    /// `s.byteAt(i)`, as [`Inst::ByteAt`].
+    /// `s.byteAt(i)`, as a byte [`Inst::RunLoad`].
     ///
     /// Two operands and a destination, and nothing else: the bounds check is
     /// the instruction's, because the machine is already holding the header
@@ -195,10 +195,11 @@ impl Body<'_> {
         let at = self.expr(index);
         let dst = self.answer_at(want, shapes::INT);
         self.emit(
-            Inst::ByteAt {
+            Inst::RunLoad {
                 dst: dst.slot,
-                obj: obj.slot,
-                at: at.slot,
+                run: obj.slot,
+                index: at.slot,
+                storage: Storage::PackedBytes,
             },
             expr.span,
         );

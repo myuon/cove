@@ -13,7 +13,7 @@
 
 use cove_ir::{
     ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Function, Inst, Intrinsic, LayoutId, Len, Num,
-    Program, Repr, Shape, Slot, StrId,
+    Program, Repr, Shape, Slot, Storage, StrId,
 };
 use cove_schema::builtins::{NONE_CASE, SOME_CASE};
 
@@ -931,7 +931,14 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                 && slot(*obj)
                 && slot(*index)
         }
-        Inst::ByteAt { dst, obj, at } => slot(*dst) && slot(*obj) && slot(*at),
+        // A byte `run-load`, and only that: the word member has no opcode and
+        // no arm, and `cove_ir::verify` refuses it before it could get here.
+        Inst::RunLoad {
+            dst,
+            run,
+            index,
+            storage: Storage::PackedBytes,
+        } => slot(*dst) && slot(*run) && slot(*index),
         // A call is admitted whatever the callee is: it is handed to
         // `NativeHelpers::call`, which opens the frame with the runtime's own
         // `open_frame` and runs the callee on whichever tier it is on. So the
@@ -952,10 +959,15 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         Inst::Trap { .. } => true,
         // ---- [ADR 0052]'s growable buffer -----------------------------------
         //
-        // All four, handed to [`BufferFn`](crate::abi::BufferFn) whole, and that
+        // All four, handed to [`GrowableFn`](crate::abi::GrowableFn) whole, and that
         // helper's own documentation is where the decision for each of them is
         // written down — including why none of them has an emitted fast path and
-        // why `AppendByte` is here although the census never named it.
+        // why `GrowablePush` is here although the census never named it.
+        //
+        // Each is admitted over `Storage::PackedBytes` and nothing else: the
+        // helper is the byte buffer's, and a word member has no arm in it. A
+        // word member falls to the `_` below with every other unlowered
+        // instruction, which `cove_ir::verify` refuses before it gets here.
         //
         // They are admitted together. Three of them without the fourth would be a
         // subset that could allocate a builder and not finish it, and the first
@@ -971,19 +983,35 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // builds — a second rejection here would be a second message for one rule.
         //
         // [ADR 0052]: ../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
-        Inst::AllocBuffer { dst, capacity } => slot(*dst) && slot(*capacity),
-        Inst::AppendByte { buffer, value } => slot(*buffer) && slot(*value),
-        // Four operands behind an `ArgsId` — `buffer`, `src`, `from`, `to` — which
+        Inst::GrowableAlloc {
+            dst,
+            capacity,
+            storage: Storage::PackedBytes,
+        } => slot(*dst) && slot(*capacity),
+        Inst::GrowablePush {
+            owner,
+            src,
+            storage: Storage::PackedBytes,
+        } => slot(*owner) && slot(*src),
+        // Four operands behind an `ArgsId` — `owner`, `src`, `from`, `to` — which
         // is the row `cove_ir::verify` already holds to that shape and width. Each
         // is one word, so each is bounded as a slot rather than as a run.
-        Inst::AppendBytes { args } => {
+        Inst::GrowableExtend {
+            args,
+            storage: Storage::PackedBytes,
+        } => {
             let list = program.arg_list(*args);
             list.len() == 4
                 && list
                     .iter()
                     .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))
         }
-        Inst::FinishBuffer { dst, buffer } => slot(*dst) && slot(*buffer),
+        Inst::RunFinish {
+            dst,
+            owner,
+            storage: Storage::PackedBytes,
+            ..
+        } => slot(*dst) && slot(*owner),
         // A builtin is decoded by [`method_of`] and by nothing here, so that the
         // name this tier lowers is written down once. `None` is a family nothing
         // emits and falls to `Reason::Instruction` with every other unlowered
@@ -1082,7 +1110,7 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // before for the `call-builtin` it replaced, which `method_of` never
         // decoded either, so naming it records that the refusal is the same one
         // and not a regression. Lowering it is a helper call with a chunk poll —
-        // [`BufferFn`](crate::abi::BufferFn)'s shape — and is later work.
+        // [`GrowableFn`](crate::abi::GrowableFn)'s shape — and is later work.
         //
         // [ADR 0058]: ../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
         Inst::RunCopy { .. } => return Some(Reason::Instruction),

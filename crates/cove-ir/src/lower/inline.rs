@@ -329,14 +329,13 @@ fn is_expandable(f: &Function, limit: usize) -> bool {
 /// This is a `matches!` exclusion list rather than an exhaustive match, so
 /// nothing here forces a new [`Inst`] variant to be considered — unlike
 /// [`written`] and [`slots_of`] below, a variant left out compiles silently.
-/// [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
-/// `AllocBytes`, `WriteByte`, `RunCopy` and `FinishString` make no call and
-/// touch no scope or cell, so they belong in the list of things this refuses
-/// nothing for — correctly left out of the `matches!` above — but that is a
-/// fact worth writing down here precisely because the compiler cannot check
-/// it. The same is true of
+/// [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)'s
+/// `RunCopy` makes no call and touches no scope or cell, so it belongs in the
+/// list of things this refuses nothing for — correctly left out of the
+/// `matches!` above — but that is a fact worth writing down here precisely
+/// because the compiler cannot check it. The same is true of
 /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
-/// `AllocBuffer`, `AppendByte`, `AppendBytes` and `FinishBuffer`: they
+/// `GrowableAlloc`, `GrowablePush`, `GrowableExtend` and `RunFinish`: they
 /// allocate and they copy, and an allocation is not a call.
 fn reaches_nothing(inst: &Inst) -> bool {
     !matches!(
@@ -420,11 +419,9 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::CmpImmBranch { dst, .. }
             | Inst::Alloc { dst, .. }
             | Inst::Box { dst, .. }
-            | Inst::ByteAt { dst, .. }
-            | Inst::AllocBytes { dst, .. }
-            | Inst::FinishString { dst, .. }
-            | Inst::AllocBuffer { dst, .. }
-            | Inst::FinishBuffer { dst, .. }
+            | Inst::RunLoad { dst, .. }
+            | Inst::GrowableAlloc { dst, .. }
+            | Inst::RunFinish { dst, .. }
             | Inst::Len { dst, .. }
             | Inst::LayoutOf { dst, .. }
             | Inst::AddrOfSlot { dst, .. }
@@ -435,15 +432,14 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             // word, so it marks nothing; the rest are what `reaches_nothing`
             // refuses. Written out rather than caught by a `_` for the reason
             // `slots_of`'s own tail gives at length: a `_` here is a promise
-            // that two lists are complements, and `Inst::ByteAt` is the
-            // instruction that broke it.
+            // that two lists are complements, and `Inst::RunLoad` (as
+            // `ByteAt`) is the instruction that broke it.
             Inst::StoreField { .. }
             | Inst::StoreElem { .. }
             | Inst::Store { .. }
-            | Inst::WriteByte { .. }
             | Inst::RunCopy { .. }
-            | Inst::AppendByte { .. }
-            | Inst::AppendBytes { .. }
+            | Inst::GrowablePush { .. }
+            | Inst::GrowableExtend { .. }
             | Inst::Jump { .. }
             | Inst::BranchFalse { .. }
             | Inst::Switch { .. }
@@ -816,7 +812,7 @@ fn expand(program: &mut Program, id: FunctionId, small: &[bool], wide: &[bool], 
             }
             Inst::CallBuiltin { args, .. }
             | Inst::RunCopy { args, .. }
-            | Inst::AppendBytes { args }
+            | Inst::GrowableExtend { args, .. }
                 if args.0 >= PLACED =>
             {
                 *args = crate::ArgsId(listed + (args.0 - PLACED));
@@ -901,12 +897,12 @@ fn relocated(
         // An argument list is `Program::args` and not part of the
         // instruction, so shifting the slots the instruction names does not
         // reach it. A builtin is the one call a leaf may hold, and
-        // `Inst::RunCopy` and `Inst::AppendBytes` are the non-call
+        // `Inst::RunCopy` and `Inst::GrowableExtend` are the non-call
         // instructions that also name one — each is the list relocated into a
         // list of its own.
         Inst::CallBuiltin { args, .. }
         | Inst::RunCopy { args, .. }
-        | Inst::AppendBytes { args } => {
+        | Inst::GrowableExtend { args, .. } => {
             lists.push(
                 program
                     .arg_list(*args)
@@ -1026,18 +1022,17 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         Inst::StoreElem {
             obj, index, src, ..
         } => vec![obj, index, src],
-        Inst::ByteAt { dst, obj, at } => vec![dst, obj, at],
-        Inst::AllocBytes { dst, len } => vec![dst, len],
-        Inst::WriteByte { bytes, at, value } => vec![bytes, at, value],
-        Inst::FinishString { dst, bytes } => vec![dst, bytes],
-        Inst::AllocBuffer { dst, capacity } => vec![dst, capacity],
-        Inst::AppendByte { buffer, value } => vec![buffer, value],
-        Inst::FinishBuffer { dst, buffer } => vec![dst, buffer],
+        Inst::RunLoad {
+            dst, run, index, ..
+        } => vec![dst, run, index],
+        Inst::GrowableAlloc { dst, capacity, .. } => vec![dst, capacity],
+        Inst::GrowablePush { owner, src, .. } => vec![owner, src],
+        Inst::RunFinish { dst, owner, .. } => vec![dst, owner],
         // The five operands live in the args row rather than on the
         // instruction, exactly as a call's do — `relocated` moves that row
         // and repoints `args` at the copy, the same way it does for
         // `Inst::CallBuiltin`.
-        Inst::RunCopy { .. } | Inst::AppendBytes { .. } => Vec::new(),
+        Inst::RunCopy { .. } | Inst::GrowableExtend { .. } => Vec::new(),
         Inst::Len { dst, obj } | Inst::LayoutOf { dst, obj } => vec![dst, obj],
         Inst::AddrOfSlot { dst, slot } => vec![dst, slot],
         Inst::AddrOfField { dst, obj, .. } => vec![dst, obj],
@@ -1057,7 +1052,8 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         // Listed rather than caught by a `_`, and the difference is not
         // tidiness. A `_` here makes this function's correctness depend on a
         // *promise* made in `reaches_nothing` — that the two lists are each
-        // other's complement — and nothing checked it. `Inst::ByteAt` was
+        // other's complement — and nothing checked it. `Inst::ByteAt` (now
+        // `Inst::RunLoad`) was
         // added, `reaches_nothing` let it through because it reaches nothing,
         // and this returned no slots for it: an expansion that renumbered
         // every other instruction left that one pointing into the callee's

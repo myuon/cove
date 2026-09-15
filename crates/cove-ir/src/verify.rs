@@ -277,37 +277,26 @@ impl Check<'_> {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
-                Inst::ByteAt { dst, .. } | Inst::Len { dst, .. } | Inst::LayoutOf { dst, .. } => {
+                Inst::RunLoad { dst, .. } | Inst::Len { dst, .. } | Inst::LayoutOf { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
-                // `AllocBytes` always allocates `Program::bytes_layout`, but
-                // this poisons `dst` exactly as `ByteAt` does rather than
-                // `identify`ing it the way `Inst::Alloc` and `Inst::Str` do:
-                // a byte run under construction is not a value this pass
-                // needs to reason about by layout, only by `Repr`, and
-                // `FinishString` immediately relabels the same slot to a
-                // `Str` object anyway.
-                Inst::AllocBytes { dst, .. } | Inst::FinishString { dst, .. } => {
-                    poison(&mut objects, dst, 1);
-                    poison(&mut funcs, dst, 1);
-                }
-                // ADR 0052's two, and the same answer for the same reason:
-                // `AllocBuffer` always allocates `Program::buffer_layout` and
-                // `FinishBuffer` answers the store its owner was holding,
+                // ADR 0052's two poison `dst` exactly as `RunLoad` does rather
+                // than `identify`ing it the way `Inst::Alloc` and `Inst::Str`
+                // do: `GrowableAlloc` always allocates `Program::buffer_layout`
+                // and `RunFinish` answers the store its owner was holding,
                 // relabelled to a `Str` object. Neither is a layout this pass
                 // reasons about, only a `Repr`.
-                Inst::AllocBuffer { dst, .. } | Inst::FinishBuffer { dst, .. } => {
+                Inst::GrowableAlloc { dst, .. } | Inst::RunFinish { dst, .. } => {
                     poison(&mut objects, dst, 1);
                     poison(&mut funcs, dst, 1);
                 }
-                // Neither writes a frame slot: `WriteByte` writes a byte of
-                // the object `bytes` already names, and `RunCopy` writes
-                // into the object its `args` table's `dst` already names.
-                Inst::WriteByte { .. } | Inst::RunCopy { .. } => {}
+                // Writes no frame slot: `RunCopy` writes into the object its
+                // `args` table's `dst` already names.
+                Inst::RunCopy { .. } => {}
                 // Nor do the growable appends: what each changes is the store
-                // the owner in `buffer` names, and the owner's own length word.
-                Inst::AppendByte { .. } | Inst::AppendBytes { .. } => {}
+                // the owner in `owner` names, and the owner's own length word.
+                Inst::GrowablePush { .. } | Inst::GrowableExtend { .. } => {}
                 // Forming the address of a slot is also a write to it, as
                 // far as this is concerned: a `var` argument is that address
                 // handed to a callee, and what the callee stores through it
@@ -850,45 +839,76 @@ impl Check<'_> {
                     self.fits(at, src, layout, "what an element is written from");
                 }
             }
-            Inst::ByteAt {
+            Inst::RunLoad {
                 dst,
-                obj,
-                at: offset,
+                run,
+                index,
+                storage,
             } => {
-                self.expect(at, obj, &[Repr::Ref]);
-                self.expect(at, offset, &[Repr::Int]);
+                self.expect(at, run, &[Repr::Ref]);
+                self.expect(at, index, &[Repr::Int]);
+                self.admit_storage(at, "loads a unit of", storage);
                 self.expect(at, dst, &[Repr::Int]);
             }
-            Inst::AllocBytes { dst, len } => {
-                self.expect(at, dst, &[Repr::Ref]);
-                self.expect(at, len, &[Repr::Int]);
-            }
-            Inst::WriteByte {
-                bytes,
-                at: offset,
-                value,
-            } => {
-                self.expect(at, bytes, &[Repr::Ref]);
-                self.expect(at, offset, &[Repr::Int]);
-                self.expect(at, value, &[Repr::Int]);
-            }
             Inst::RunCopy { args, storage } => self.check_run_copy(at, args, storage),
-            Inst::FinishString { dst, bytes } => {
-                self.expect(at, dst, &[Repr::Ref]);
-                self.expect(at, bytes, &[Repr::Ref]);
-            }
-            Inst::AllocBuffer { dst, capacity } => {
+            // The growable family's admission table: in Phase 2 of ADR 0058
+            // every member admits `PackedBytes` and nothing else, and a byte
+            // finish is a UTF-8 finish into `Program::str_layout`.
+            Inst::GrowableAlloc {
+                dst,
+                capacity,
+                storage,
+            } => {
+                self.admit_storage(at, "allocates", storage);
                 self.expect(at, dst, &[Repr::Ref]);
                 self.expect(at, capacity, &[Repr::Int]);
             }
-            Inst::AppendByte { buffer, value } => {
-                self.expect(at, buffer, &[Repr::Ref]);
-                self.expect(at, value, &[Repr::Int]);
+            Inst::GrowablePush {
+                owner,
+                src,
+                storage,
+            } => {
+                self.admit_storage(at, "pushes onto", storage);
+                self.expect(at, owner, &[Repr::Ref]);
+                self.expect(at, src, &[Repr::Int]);
             }
-            Inst::AppendBytes { args } => self.check_append_bytes_args(at, args),
-            Inst::FinishBuffer { dst, buffer } => {
+            Inst::GrowableExtend { args, storage } => {
+                self.admit_storage(at, "extends", storage);
+                self.check_growable_extend_args(at, args);
+            }
+            Inst::RunFinish {
+                dst,
+                owner,
+                target,
+                validation,
+                storage,
+            } => {
+                self.admit_storage(at, "finishes", storage);
+                if storage == crate::Storage::PackedBytes {
+                    if validation != crate::Validation::Utf8 {
+                        self.fault(
+                            at,
+                            format!(
+                                "finishes a run of packed bytes with validation \
+                                 `{validation:?}`, and a byte run becomes a `String` only \
+                                 through `Utf8`"
+                            ),
+                        );
+                    }
+                    if target != self.program.str_layout {
+                        let named = self.name_of(target);
+                        let string = self.name_of(self.program.str_layout);
+                        self.fault(
+                            at,
+                            format!(
+                                "finishes a run of packed bytes into `{named}`, and a byte \
+                                 run finishes into `{string}`"
+                            ),
+                        );
+                    }
+                }
                 self.expect(at, dst, &[Repr::Ref]);
-                self.expect(at, buffer, &[Repr::Ref]);
+                self.expect(at, owner, &[Repr::Ref]);
             }
             Inst::Len { dst, obj } => {
                 self.expect(at, obj, &[Repr::Ref]);
@@ -1304,6 +1324,26 @@ impl Check<'_> {
         }
     }
 
+    /// Refuses a run instruction over a storage ADR 0058's Phase 2 does not
+    /// admit it for: every run family but [`Inst::RunCopy`] — the load, the
+    /// three growable operations and the finish — has only its
+    /// [`crate::Storage::PackedBytes`] member so far.
+    ///
+    /// The word members arrive with their first producer, and until then a
+    /// [`crate::Storage::Words`] here is a lowering mistake the machine has no
+    /// opcode for, not a unit it could load.
+    fn admit_storage(&mut self, at: Option<usize>, what: &str, storage: crate::Storage) {
+        if let crate::Storage::Words(layout) = storage {
+            let name = self.name_of(layout);
+            self.fault(
+                at,
+                format!(
+                    "{what} a run of `{name}` words, and this instruction admits only packed bytes"
+                ),
+            );
+        }
+    }
+
     /// [`Inst::RunCopy`]'s five arguments — `dst`, `dst_at`, `src`, `src_at`,
     /// `count`, in that order — and its storage.
     ///
@@ -1343,26 +1383,26 @@ impl Check<'_> {
         }
     }
 
-    /// [`Inst::AppendBytes`]'s four arguments: `buffer`, `src`, `from`, `to`,
+    /// [`Inst::GrowableExtend`]'s four arguments: `owner`, `src`, `from`, `to`,
     /// in that order.
     ///
     /// Checked by `Repr` rather than by declared [`LayoutId`], for
     /// [`Self::check_run_copy`]'s reason: `src` may be a `String` or a
     /// [`crate::Shape::Bytes`] run and which of the two is a run-time fact. So
-    /// is whether `buffer` names a real owner; what is static is that both are
+    /// is whether `owner` names a real owner; what is static is that both are
     /// references and both offsets are integers.
-    fn check_append_bytes_args(&mut self, at: Option<usize>, args: crate::ArgsId) {
+    fn check_growable_extend_args(&mut self, at: Option<usize>, args: crate::ArgsId) {
         if !self.in_range(at, args.index(), self.program.args.len(), "argument list") {
             return;
         }
-        const NAMES: [&str; 4] = ["buffer", "src", "from", "to"];
+        const NAMES: [&str; 4] = ["owner", "src", "from", "to"];
         const WANTS: [Repr; 4] = [Repr::Ref, Repr::Ref, Repr::Int, Repr::Int];
         let passed = self.program.arg_list(args).to_vec();
         if passed.len() != NAMES.len() {
             self.fault(
                 at,
                 format!(
-                    "appends bytes with {} argument(s), and this needs {} ({})",
+                    "extends a growable run with {} argument(s), and this needs {} ({})",
                     passed.len(),
                     NAMES.len(),
                     NAMES.join(", ")
@@ -2295,6 +2335,125 @@ mod tests {
         assert_eq!(
             faults(&program(vec![f])),
             vec!["what a clear zeroes is `Option`, whose word 0 is int, but slot 1 holds ref"]
+        );
+    }
+
+    /// A run load is admitted over packed bytes and nothing else, until the
+    /// word member has an opcode and a producer (ADR 0058, Phase 2): a
+    /// `Storage::Words` here is refused by name, and the byte form beside it
+    /// is well formed.
+    #[test]
+    fn a_run_load_over_words_is_a_fault() {
+        let load = |storage| {
+            function(
+                vec![Repr::Ref, Repr::Int, Repr::Int],
+                INT,
+                vec![
+                    Inst::RunLoad {
+                        dst: 2,
+                        run: 0,
+                        index: 1,
+                        storage,
+                    },
+                    Inst::Return { src: 2 },
+                ],
+            )
+        };
+        assert_eq!(
+            faults(&program(vec![load(crate::Storage::PackedBytes)])),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            faults(&program(vec![load(crate::Storage::Words(INT))])),
+            vec!["loads a unit of a run of `Int` words, and this instruction admits only packed bytes"]
+        );
+    }
+
+    /// ADR 0058's Phase 2 admission table for the growable family and its
+    /// finish: every member over packed bytes, and a byte finish only as a
+    /// UTF-8 finish into `String`. Each disallowed combination is refused by
+    /// name, and the admitted form of each is well formed.
+    #[test]
+    fn a_growable_instruction_outside_the_phase_two_table_is_a_fault() {
+        use crate::{Storage, Validation};
+        let bytes = Storage::PackedBytes;
+        let words = Storage::Words(INT);
+        // s0: owner, s1: int, s2: ref answer.
+        let one = |inst: Inst| {
+            let mut held = program(vec![function(
+                vec![Repr::Ref, Repr::Int, Repr::Ref],
+                INT,
+                vec![inst, Inst::Return { src: 1 }],
+            )]);
+            held.args.push(vec![
+                Arg {
+                    slot: 0,
+                    layout: STR,
+                },
+                Arg {
+                    slot: 2,
+                    layout: STR,
+                },
+                Arg {
+                    slot: 1,
+                    layout: INT,
+                },
+                Arg {
+                    slot: 1,
+                    layout: INT,
+                },
+            ]);
+            faults(&held)
+        };
+        let alloc = |storage| Inst::GrowableAlloc {
+            dst: 0,
+            capacity: 1,
+            storage,
+        };
+        let push = |storage| Inst::GrowablePush {
+            owner: 0,
+            src: 1,
+            storage,
+        };
+        let extend = |storage| Inst::GrowableExtend {
+            args: ArgsId(0),
+            storage,
+        };
+        let finish = |target, validation, storage| Inst::RunFinish {
+            dst: 2,
+            owner: 0,
+            target,
+            validation,
+            storage,
+        };
+        let none: Vec<String> = Vec::new();
+        assert_eq!(one(alloc(bytes)), none);
+        assert_eq!(one(push(bytes)), none);
+        assert_eq!(one(extend(bytes)), none);
+        assert_eq!(one(finish(STR, Validation::Utf8, bytes)), none);
+
+        let refused = |what: &str| {
+            vec![format!(
+                "{what} a run of `Int` words, and this instruction admits only packed bytes"
+            )]
+        };
+        assert_eq!(one(alloc(words)), refused("allocates"));
+        assert_eq!(one(push(words)), refused("pushes onto"));
+        assert_eq!(one(extend(words)), refused("extends"));
+        assert_eq!(
+            one(finish(STR, Validation::None, words)),
+            refused("finishes")
+        );
+        assert_eq!(
+            one(finish(STR, Validation::None, bytes)),
+            vec![
+                "finishes a run of packed bytes with validation `None`, and a byte run becomes \
+                 a `String` only through `Utf8`"
+            ]
+        );
+        assert_eq!(
+            one(finish(POINT, Validation::Utf8, bytes)),
+            vec!["finishes a run of packed bytes into `Point`, and a byte run finishes into `String`"]
         );
     }
 }

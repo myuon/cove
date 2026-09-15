@@ -72,8 +72,8 @@ pub struct HelperCalls {
     /// [`BuiltinFn`](cove_native::BuiltinFn): the cold half of a builtin fast
     /// path.
     pub builtin: u64,
-    /// [`BufferFn`](cove_native::BufferFn): one growable-buffer operation.
-    pub buffer: u64,
+    /// [`GrowableFn`](cove_native::GrowableFn): one growable-run operation.
+    pub growable: u64,
     /// [`FieldLoadFn`](cove_native::abi::FieldLoadFn): a field bound the emitted
     /// table could not answer.
     pub field_load: u64,
@@ -96,7 +96,7 @@ impl HelperCalls {
             ("close", self.close),
             ("alloc", self.alloc),
             ("builtin", self.builtin),
-            ("buffer", self.buffer),
+            ("growable", self.growable),
             ("field_load", self.field_load),
             ("field_store", self.field_store),
         ]

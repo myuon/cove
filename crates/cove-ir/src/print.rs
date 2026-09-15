@@ -48,7 +48,7 @@
 
 use std::fmt::Write as _;
 
-use crate::inst::{ArithOp, CmpOp, Compare, Convert, Inst, Len, Num, Slot, Storage};
+use crate::inst::{ArithOp, CmpOp, Compare, Convert, Inst, Len, Num, Slot, Storage, Validation};
 use crate::layout::{LayoutId, Shape};
 use crate::program::{Function, FunctionId, Program};
 
@@ -331,13 +331,25 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             src,
             layout,
         } => format!("store-elem {} {} {}", s(*obj), s(*index), v(*src, *layout)),
-        Inst::ByteAt { dst, obj, at } => {
-            format!("byte-at {} {} {}", s(*dst), s(*obj), s(*at))
-        }
-        Inst::AllocBytes { dst, len } => format!("alloc-bytes {} {}", s(*dst), s(*len)),
-        Inst::WriteByte { bytes, at, value } => {
-            format!("write-byte {} {} {}", s(*bytes), s(*at), s(*value))
-        }
+        // Written the way `run-copy` is: the storage an encoding splits by, in
+        // the name.
+        Inst::RunLoad {
+            dst,
+            run,
+            index,
+            storage,
+        } => match storage {
+            Storage::PackedBytes => {
+                format!("run-load.bytes {} {} {}", s(*dst), s(*run), s(*index))
+            }
+            Storage::Words(elem) => format!(
+                "run-load.words {} {} {} {}",
+                l(*elem),
+                s(*dst),
+                s(*run),
+                s(*index)
+            ),
+        },
         // The storage is written the way an encoding splits it, because a
         // reader of a dump wants to see which copy runs without decoding a
         // payload: `run-copy.bytes` or `run-copy.words` and the element layout.
@@ -347,19 +359,50 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
                 format!("run-copy.words {} ({})", l(*elem), args_of(program, *args))
             }
         },
-        Inst::FinishString { dst, bytes } => {
-            format!("finish-string {} {}", s(*dst), s(*bytes))
-        }
-        Inst::AllocBuffer { dst, capacity } => {
-            format!("alloc-buffer {} {}", s(*dst), s(*capacity))
-        }
-        Inst::AppendByte { buffer, value } => {
-            format!("append-byte {} {}", s(*buffer), s(*value))
-        }
-        Inst::AppendBytes { args } => format!("append-bytes ({})", args_of(program, *args)),
-        Inst::FinishBuffer { dst, buffer } => {
-            format!("finish-buffer {} {}", s(*dst), s(*buffer))
-        }
+        // The growable family, named the way `run-copy` is: the storage an
+        // encoding splits by, in the name.
+        Inst::GrowableAlloc {
+            dst,
+            capacity,
+            storage,
+        } => format!(
+            "growable-alloc{} {} {}",
+            unit(program, *storage),
+            s(*dst),
+            s(*capacity)
+        ),
+        Inst::GrowablePush {
+            owner,
+            src,
+            storage,
+        } => format!(
+            "growable-push{} {} {}",
+            unit(program, *storage),
+            s(*owner),
+            s(*src)
+        ),
+        Inst::GrowableExtend { args, storage } => format!(
+            "growable-extend{} ({})",
+            unit(program, *storage),
+            args_of(program, *args)
+        ),
+        Inst::RunFinish {
+            dst,
+            owner,
+            target,
+            validation,
+            storage,
+        } => format!(
+            "run-finish{} {} {} {} {}",
+            unit(program, *storage),
+            s(*dst),
+            s(*owner),
+            l(*target),
+            match validation {
+                Validation::None => "unchecked",
+                Validation::Utf8 => "utf8",
+            }
+        ),
         Inst::Len { dst, obj } => format!("len {} {}", s(*dst), s(*obj)),
         Inst::LayoutOf { dst, obj } => format!("layout-of {} {}", s(*dst), s(*obj)),
         Inst::AddrOfSlot { dst, slot } => format!("addr-of-slot {} {}", s(*dst), s(*slot)),
@@ -467,6 +510,15 @@ fn name_of(program: &Program, layout: LayoutId) -> String {
 /// the callee will read. A listing that showed `s3:int` for a `Point` would
 /// show the same thing for its `x`, and which of the two a call passes is the
 /// question the argument list exists to answer.
+/// The storage a run instruction's name carries: `.bytes`, or `.words` and the
+/// element layout, as `run-copy` writes it.
+fn unit(program: &Program, storage: Storage) -> String {
+    match storage {
+        Storage::PackedBytes => ".bytes".to_string(),
+        Storage::Words(elem) => format!(".words {}", name_of(program, elem)),
+    }
+}
+
 fn args_of(program: &Program, args: crate::ArgsId) -> String {
     match program.args.get(args.index()) {
         Some(list) => list

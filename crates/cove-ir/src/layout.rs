@@ -173,9 +173,12 @@ pub enum Shape {
     /// [`Shape::Str`]'s payload — but not yet a `String`.
     ///
     /// [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)
-    /// gives lowering an internal construction run: an object [`crate::Inst::AllocBytes`]
-    /// allocates, [`crate::Inst::WriteByte`] and [`crate::Inst::RunCopy`] fill, and
-    /// [`crate::Inst::FinishString`] turns into a `String` without copying. It is an
+    /// gives lowering an internal construction run, and
+    /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)
+    /// makes it the store beneath a byte buffer: an object
+    /// [`crate::Inst::GrowableAlloc`] allocates, [`crate::Inst::GrowablePush`],
+    /// [`crate::Inst::GrowableExtend`] and [`crate::Inst::RunCopy`] fill, and
+    /// [`crate::Inst::RunFinish`] turns into a `String` without copying. It is an
     /// IR/runtime value, not a Cove type — no declaration names it and no
     /// source expression produces one.
     ///

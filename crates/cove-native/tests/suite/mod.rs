@@ -34,9 +34,9 @@ use std::sync::Arc;
 use cove_diag::{FileId, Span};
 use cove_ir::{
     Arg, ArgsId, ArithOp, BuiltinId, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout,
-    LayoutId, Len, Num, Program, RefMap, Repr, Slot, StrId, Table, TableId,
+    LayoutId, Len, Num, Program, RefMap, Repr, Slot, Storage, StrId, Table, TableId, Validation,
 };
-use cove_native::{BufferOp, Entry, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
+use cove_native::{Entry, GrowableOp, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
 use cove_native::{HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS};
 
 // --- the safepoint helper -----------------------------------------------------
@@ -390,7 +390,7 @@ pub fn mediated_answers(outcomes: &[Outcome]) {
 // --- the growable-buffer helper -----------------------------------------------
 
 /// One of ADR 0052's four instructions compiled code handed back through
-/// [`BufferFn`](cove_native::BufferFn).
+/// [`GrowableFn`](cove_native::GrowableFn).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Built {
     pub base: u64,
@@ -417,16 +417,16 @@ thread_local! {
 /// a frame holds — into the destination *of the two operations that have one*.
 ///
 /// That last clause is the part worth stating. `a` is `dst` for
-/// [`BufferOp::Alloc`] and [`BufferOp::Finish`]; it is the owner's slot for
-/// [`BufferOp::AppendByte`], which the real helper reads and never writes; and it
-/// is an `ArgsId` for [`BufferOp::AppendBytes`], which is not a slot at all. A
+/// [`GrowableOp::Alloc`] and [`GrowableOp::Finish`]; it is the owner's slot for
+/// [`GrowableOp::Push`], which the real helper reads and never writes; and it
+/// is an `ArgsId` for [`GrowableOp::Extend`], which is not a slot at all. A
 /// double that wrote through it in every case would be asserting a store the
 /// runtime does not make.
 ///
 /// # Safety
 ///
 /// As [`alloc`]. `base` indexes into the words the entry point was given.
-unsafe extern "C" fn buffer(
+unsafe extern "C" fn growable(
     ctx: *mut NativeCtx,
     base: u64,
     pc: u32,
@@ -452,7 +452,7 @@ unsafe extern "C" fn buffer(
     match answer {
         Some(outcome) if outcome != Outcome::Returned.abi() => outcome,
         _ => {
-            if op == BufferOp::Alloc.abi() || op == BufferOp::Finish.abi() {
+            if op == GrowableOp::Alloc.abi() || op == GrowableOp::Finish.abi() {
                 (*ctx)
                     .words
                     .add((base + u64::from(a)) as usize)
@@ -622,7 +622,7 @@ pub fn helpers() -> NativeHelpers {
         close,
         alloc,
         builtin,
-        buffer,
+        growable,
         field_load,
         field_store,
     }
@@ -2556,7 +2556,7 @@ pub fn a_literal_past_the_table_refuses_the_function<A: Arm>() {
 /// ADR 0052's four, each handed to the runtime whole with its operands.
 ///
 /// There is no fast path to check here and that is the design — see
-/// [`cove_native::BufferFn`] for why each of the four is the helper and not half
+/// [`cove_native::GrowableFn`] for why each of the four is the helper and not half
 /// of one. So what a case can say is the three things that *are* emitted code:
 /// the operation and its two operands reach the helper unchanged; the unpaid
 /// work is published and the accumulator cleared, because every one of them is a
@@ -2564,7 +2564,7 @@ pub fn a_literal_past_the_table_refuses_the_function<A: Arm>() {
 ///
 /// The four run in **one body**, in the order a builder is used, so the pcs are
 /// four different numbers and an emitter that dropped `self.pc` is a wrong pc
-/// rather than a coincidence. `alloc-buffer` and `finish-buffer` write a
+/// rather than a coincidence. `growable-alloc` and `run-finish` write a
 /// destination and the two appends do not, which is the double's own note.
 pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
     forget_built();
@@ -2574,20 +2574,31 @@ pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
             vec![Repr::Ref, Repr::Int, Repr::Ref],
             REF,
             vec![
-                Inst::AllocBuffer {
+                Inst::GrowableAlloc {
                     dst: 0,
                     capacity: 1,
+                    storage: Storage::PackedBytes,
                 },
-                Inst::AppendByte {
-                    buffer: 0,
-                    value: 1,
+                Inst::GrowablePush {
+                    owner: 0,
+                    src: 1,
+                    storage: Storage::PackedBytes,
                 },
-                Inst::AppendBytes { args: ArgsId(1) },
-                Inst::FinishBuffer { dst: 2, buffer: 0 },
+                Inst::GrowableExtend {
+                    args: ArgsId(1),
+                    storage: Storage::PackedBytes,
+                },
+                Inst::RunFinish {
+                    dst: 2,
+                    owner: 0,
+                    target: REF,
+                    validation: Validation::Utf8,
+                    storage: Storage::PackedBytes,
+                },
                 Inst::Return { src: 2 },
             ],
         ),
-        // `buffer`, `src`, `from`, `to` — the row `Inst::AppendBytes` is defined
+        // `owner`, `src`, `from`, `to` — the row `Inst::GrowableExtend` is defined
         // to hold, each one word.
         vec![
             Arg {
@@ -2619,7 +2630,7 @@ pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
             Built {
                 base: 0,
                 pc: 0,
-                op: BufferOp::Alloc.abi(),
+                op: GrowableOp::Alloc.abi(),
                 a: 0,
                 b: 1,
                 // The block is five instructions and the charge is made at block
@@ -2630,7 +2641,7 @@ pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
             Built {
                 base: 0,
                 pc: 1,
-                op: BufferOp::AppendByte.abi(),
+                op: GrowableOp::Push.abi(),
                 a: 0,
                 b: 1,
                 work: 0,
@@ -2638,7 +2649,7 @@ pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
             Built {
                 base: 0,
                 pc: 2,
-                op: BufferOp::AppendBytes.abi(),
+                op: GrowableOp::Extend.abi(),
                 // The `ArgsId`, not a slot: the four operands are behind it and the
                 // helper resolves them out of the program.
                 a: 1,
@@ -2648,7 +2659,7 @@ pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
             Built {
                 base: 0,
                 pc: 3,
-                op: BufferOp::Finish.abi(),
+                op: GrowableOp::Finish.abi(),
                 a: 2,
                 b: 0,
                 work: 0,
@@ -2657,8 +2668,8 @@ pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
         "the four operations, in order, with their operands"
     );
     // What the double wrote, in the two slots that have a destination.
-    assert_eq!(words[0], u64::from(BufferOp::Alloc.abi()) * 1000);
-    assert_eq!(words[2], u64::from(BufferOp::Finish.abi()) * 1000 + 2);
+    assert_eq!(words[0], u64::from(GrowableOp::Alloc.abi()) * 1000);
+    assert_eq!(words[2], u64::from(GrowableOp::Finish.abi()) * 1000 + 2);
     assert_eq!(words[1], 3, "and the operand slot was not written");
     assert_eq!(answer.returned[0], words[2], "the answer at the boundary");
     assert_eq!(
@@ -2677,8 +2688,8 @@ pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
         vec![4, 4, 4, 4],
         "the frame the operands are read out of"
     );
-    assert_eq!(words[4], u64::from(BufferOp::Alloc.abi()) * 1000);
-    assert_eq!(words[6], u64::from(BufferOp::Finish.abi()) * 1000 + 2);
+    assert_eq!(words[4], u64::from(GrowableOp::Alloc.abi()) * 1000);
+    assert_eq!(words[6], u64::from(GrowableOp::Finish.abi()) * 1000 + 2);
     assert_eq!(&words[..4], &[9, 9, 9, 9]);
 }
 
@@ -2698,9 +2709,10 @@ pub fn a_buffer_op_the_runtime_refused_leaves_with_that_outcome<A: Arm>() {
             REF,
             vec![
                 Inst::Int { dst: 1, value: 8 },
-                Inst::AllocBuffer {
+                Inst::GrowableAlloc {
                     dst: 0,
                     capacity: 1,
+                    storage: Storage::PackedBytes,
                 },
                 Inst::Return { src: 0 },
             ],
@@ -2717,7 +2729,7 @@ pub fn a_buffer_op_the_runtime_refused_leaves_with_that_outcome<A: Arm>() {
     }
 }
 
-/// The four are admitted together, and an `append-bytes` whose row is not four
+/// The four are admitted together, and an `growable-extend` whose row is not four
 /// one-word operands is not one.
 ///
 /// `cove_ir::verify` holds the row to that shape too, so the second half of this
@@ -2732,29 +2744,45 @@ pub fn a_growable_buffer_is_admitted_as_a_family<A: Arm>() {
         ))
     };
     for inst in [
-        Inst::AllocBuffer {
+        Inst::GrowableAlloc {
             dst: 0,
             capacity: 1,
+            storage: Storage::PackedBytes,
         },
-        Inst::AppendByte {
-            buffer: 0,
-            value: 1,
+        Inst::GrowablePush {
+            owner: 0,
+            src: 1,
+            storage: Storage::PackedBytes,
         },
-        Inst::FinishBuffer { dst: 0, buffer: 0 },
+        Inst::RunFinish {
+            dst: 0,
+            owner: 0,
+            target: REF,
+            validation: Validation::Utf8,
+            storage: Storage::PackedBytes,
+        },
     ] {
         assert!(compiles::<A>(&one(inst.clone())), "{inst:?}");
         // The same instruction at a slot the frame does not have is `Operands`
         // rather than `Instruction`, and is refused.
         let past = match inst {
-            Inst::AllocBuffer { .. } => Inst::AllocBuffer {
+            Inst::GrowableAlloc { .. } => Inst::GrowableAlloc {
                 dst: 9,
                 capacity: 1,
+                storage: Storage::PackedBytes,
             },
-            Inst::AppendByte { .. } => Inst::AppendByte {
-                buffer: 9,
-                value: 1,
+            Inst::GrowablePush { .. } => Inst::GrowablePush {
+                owner: 9,
+                src: 1,
+                storage: Storage::PackedBytes,
             },
-            _ => Inst::FinishBuffer { dst: 0, buffer: 9 },
+            _ => Inst::RunFinish {
+                dst: 0,
+                owner: 9,
+                target: REF,
+                validation: Validation::Utf8,
+                storage: Storage::PackedBytes,
+            },
         };
         assert!(
             !compiles::<A>(&one(past)),
@@ -2762,13 +2790,75 @@ pub fn a_growable_buffer_is_admitted_as_a_family<A: Arm>() {
         );
     }
 
+    // A word member of any of the four is not the byte buffer's helper, and is
+    // refused rather than handed to it.
+    let words = Storage::Words(INT);
+    for inst in [
+        Inst::GrowableAlloc {
+            dst: 0,
+            capacity: 1,
+            storage: words,
+        },
+        Inst::GrowablePush {
+            owner: 0,
+            src: 1,
+            storage: words,
+        },
+        Inst::RunFinish {
+            dst: 0,
+            owner: 0,
+            target: REF,
+            validation: Validation::None,
+            storage: words,
+        },
+    ] {
+        assert!(!compiles::<A>(&one(inst.clone())), "{inst:?}");
+    }
+    assert!(
+        !compiles::<A>(&program_with_args(
+            function(
+                vec![Repr::Ref, Repr::Int],
+                REF,
+                vec![
+                    Inst::GrowableExtend {
+                        args: ArgsId(1),
+                        storage: words,
+                    },
+                    Inst::Return { src: 0 },
+                ],
+            ),
+            vec![
+                Arg {
+                    slot: 0,
+                    layout: REF
+                },
+                Arg {
+                    slot: 0,
+                    layout: REF
+                },
+                Arg {
+                    slot: 1,
+                    layout: INT
+                },
+                Arg {
+                    slot: 1,
+                    layout: INT
+                },
+            ],
+        )),
+        "a word extend"
+    );
+
     let row = |args: Vec<Arg>| {
         program_with_args(
             function(
                 vec![Repr::Ref, Repr::Int],
                 REF,
                 vec![
-                    Inst::AppendBytes { args: ArgsId(1) },
+                    Inst::GrowableExtend {
+                        args: ArgsId(1),
+                        storage: Storage::PackedBytes,
+                    },
                     Inst::Return { src: 0 },
                 ],
             ),
@@ -2797,7 +2887,7 @@ pub fn a_growable_buffer_is_admitted_as_a_family<A: Arm>() {
             word(1),
             word(1),
         ])),
-        "three operands is not an `append-bytes` row"
+        "three operands is not an `growable-extend` row"
     );
     assert!(
         !compiles::<A>(&row(vec![
@@ -3780,17 +3870,18 @@ pub fn a_store_elem_strides_and_bounds_its_index<A: Arm>() {
     assert_eq!(answer.raise, Some(Raise::NullObject));
 }
 
-/// `encoded.rs`'s `BYTE_AT` arm (line 1456): a payload read, a shift and a mask,
+/// `encoded.rs`'s `RUN_LOAD_BYTES` arm (line 1456): a payload read, a shift and a mask,
 /// eight bytes to a word and least-significant byte first.
 pub fn a_byte_at_reads_one_byte_and_bounds_it<A: Arm>() {
     let held = program(function(
         vec![Repr::Ref, Repr::Int, Repr::Int],
         INT,
         vec![
-            Inst::ByteAt {
+            Inst::RunLoad {
                 dst: 2,
-                obj: 0,
-                at: 1,
+                run: 0,
+                index: 1,
+                storage: Storage::PackedBytes,
             },
             Inst::Return { src: 2 },
         ],

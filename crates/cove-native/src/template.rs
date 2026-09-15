@@ -26,12 +26,13 @@ use std::mem::offset_of;
 use std::ptr;
 
 use cove_ir::{
-    ArgsId, ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot, StrId,
+    ArgsId, ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot, Storage,
+    StrId,
 };
 
 use crate::abi::{
-    BufferOp, Entry, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
-    HEAP_ORIGIN_WORDS,
+    Entry, GrowableOp, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT,
+    HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
     by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported, Method,
@@ -239,7 +240,7 @@ struct Helpers {
     close: usize,
     alloc: usize,
     builtin: usize,
-    buffer: usize,
+    growable: usize,
     field_load: usize,
     field_store: usize,
 }
@@ -265,7 +266,7 @@ impl Jit {
                 close: helpers.close as usize,
                 alloc: helpers.alloc as usize,
                 builtin: helpers.builtin as usize,
-                buffer: helpers.buffer as usize,
+                growable: helpers.growable as usize,
                 field_load: helpers.field_load as usize,
                 field_store: helpers.field_store as usize,
             },
@@ -370,7 +371,7 @@ struct Emit<'a> {
     close: usize,
     alloc: usize,
     builtin: usize,
-    buffer: usize,
+    growable: usize,
     field_load: usize,
     field_store: usize,
     /// Whether a compiled callee is reached by emitted code. See [`Jit::direct`].
@@ -410,7 +411,7 @@ impl<'a> Emit<'a> {
             close: helpers.close,
             alloc: helpers.alloc,
             builtin: helpers.builtin,
-            buffer: helpers.buffer,
+            growable: helpers.growable,
             field_load: helpers.field_load,
             field_store: helpers.field_store,
             direct,
@@ -589,18 +590,37 @@ impl<'a> Emit<'a> {
             } => {
                 self.store_elem(*obj, *index, *src, self.program.layout(*layout).width());
             }
-            Inst::ByteAt { dst, obj, at } => self.byte_at(*dst, *obj, *at),
+            Inst::RunLoad {
+                dst,
+                run,
+                index,
+                storage: Storage::PackedBytes,
+            } => self.byte_at(*dst, *run, *index),
             Inst::Call { dst, callee, args } => self.callee(*dst, callee.0, args.0),
             // ADR 0052's four, each handed to the runtime whole. See
-            // [`crate::abi::BufferFn`] for why none of them has an emitted fast
+            // [`crate::abi::GrowableFn`] for why none of them has an emitted fast
             // path — one rooting discipline that is not the frame's, one chunked
             // safepoint contract, and one UTF-8 walk.
-            Inst::AllocBuffer { dst, capacity } => self.buffer_op(BufferOp::Alloc, *dst, *capacity),
-            Inst::AppendByte { buffer, value } => {
-                self.buffer_op(BufferOp::AppendByte, *buffer, *value)
-            }
-            Inst::AppendBytes { args } => self.buffer_op(BufferOp::AppendBytes, args.0, 0),
-            Inst::FinishBuffer { dst, buffer } => self.buffer_op(BufferOp::Finish, *dst, *buffer),
+            Inst::GrowableAlloc {
+                dst,
+                capacity,
+                storage: Storage::PackedBytes,
+            } => self.growable_op(GrowableOp::Alloc, *dst, *capacity),
+            Inst::GrowablePush {
+                owner,
+                src,
+                storage: Storage::PackedBytes,
+            } => self.growable_op(GrowableOp::Push, *owner, *src),
+            Inst::GrowableExtend {
+                args,
+                storage: Storage::PackedBytes,
+            } => self.growable_op(GrowableOp::Extend, args.0, 0),
+            Inst::RunFinish {
+                dst,
+                owner,
+                storage: Storage::PackedBytes,
+                ..
+            } => self.growable_op(GrowableOp::Finish, *dst, *owner),
             Inst::Alloc { dst, layout, len } => self.allocate(*dst, layout.0, *len),
             Inst::Switch { on, table } => self.switch(*on, *table),
             // `encoded.rs`'s `NEG_INT` arm: `checked_neg`, whose `None` is
@@ -1458,19 +1478,19 @@ impl<'a> Emit<'a> {
     /// shift back to a word index, the same test of the outcome — with the
     /// operand pair in place of the destination and the builtin, and one more
     /// register spent on saying which of the four this is. See
-    /// [`crate::abi::BufferFn`] for what each operand means and, more to the
+    /// [`crate::abi::GrowableFn`] for what each operand means and, more to the
     /// point, why *all* of it is the helper rather than a fast path and a cold
     /// one.
     ///
     /// It is a safepoint and it is one for a reason each of the four has: an
-    /// `alloc-buffer` allocates twice, an `append` may grow the store, and a
+    /// `growable-alloc` allocates twice, an `append` may grow the store, and a
     /// `finish` walks the live prefix and charges the bulk work it did. The
     /// unpaid work is published and the accumulator cleared before the call, and
     /// the frame pointer is dropped after it, because a collection may have grown
     /// the stack and an allocation may have committed a heap chunk.
     ///
     /// [ADR 0052]: ../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
-    fn buffer_op(&mut self, op: BufferOp, a: u32, b: u32) {
+    fn growable_op(&mut self, op: GrowableOp, a: u32, b: u32) {
         self.store(CTX, OFF_PENDING_WORK, WORK);
         self.xor_rr(WORK, WORK);
 
@@ -1481,7 +1501,7 @@ impl<'a> Emit<'a> {
         self.mov_imm32(RCX, op.abi() as i32);
         self.mov_imm32(R8, a as i32);
         self.mov_imm32(R9, b as i32);
-        self.mov_imm64(RAX, self.buffer as i64);
+        self.mov_imm64(RAX, self.growable as i64);
         self.call(RAX);
 
         // Anything but `Returned` leaves, and leaves with that outcome: the helper
@@ -1512,7 +1532,7 @@ impl<'a> Emit<'a> {
 
     /// Refuses a null reference, which every reader of an object does first.
     ///
-    /// `Machine::element`, `encoded.rs`'s `LEN` and its `BYTE_AT` each begin
+    /// `Machine::element`, `encoded.rs`'s `LEN` and its `RUN_LOAD_BYTES` each begin
     /// with `if addr == 0` and each answers `null_object()`.
     fn refuse_null(&mut self, reg: u8) {
         self.test_rr(reg, reg);
@@ -1608,10 +1628,10 @@ impl<'a> Emit<'a> {
         }
     }
 
-    /// `encoded.rs`'s `BYTE_AT` arm: a payload read, a shift and a mask.
+    /// `encoded.rs`'s `RUN_LOAD_BYTES` arm: a payload read, a shift and a mask.
     ///
     /// The bound is the string's *byte* length and the refusal is not
-    /// `Array.get`'s — see [`Inst::ByteAt`](cove_ir::Inst::ByteAt) for why a
+    /// `Array.get`'s — see [`Inst::RunLoad`](cove_ir::Inst::RunLoad) for why a
     /// byte offset out of range stops the run rather than answering an `Option`.
     fn byte_at(&mut self, dst: Slot, obj: Slot, at: Slot) {
         self.load_slot(RAX, obj);
@@ -1759,7 +1779,7 @@ impl<'a> Emit<'a> {
         // the caller's [`WORK`] back, which is a different thing entirely. Its
         // other caller [`Emit::callee`] needs no store here because
         // [`Emit::callee_direct`] published and cleared before the call;
-        // [`Emit::builtin_call`] and [`Emit::buffer_op`] do the same. This one
+        // [`Emit::builtin_call`] and [`Emit::growable_op`] do the same. This one
         // cannot, because a field helper is deliberately **not** a safepoint —
         // neither [`crate::abi::FieldLoadFn`] nor [`crate::abi::FieldStoreFn`]
         // can allocate — so publishing early would put a charge where there is no

@@ -96,7 +96,7 @@
 //! - [`Inst::Not`](cove_ir::Inst::Not);
 //! - [`Inst::Len`](cove_ir::Inst::Len),
 //!   [`Inst::LoadElem`](cove_ir::Inst::LoadElem) and
-//!   [`Inst::ByteAt`](cove_ir::Inst::ByteAt), which are the three heap reads —
+//!   a byte [`Inst::RunLoad`](cove_ir::Inst::RunLoad), which are the three heap reads —
 //!   each with the bounds check, the tag range and the null refusal
 //!   `cove_runtime::vm::exec::encoded` performs, because a native `load-elem`
 //!   that skips a check the VM makes is a wrong answer and not a fast one;
@@ -117,9 +117,9 @@
 //!
 //! ADR 0056 settled the race, and that reason stopped applying with it. Since
 //! then the subset has taken [`Inst::Alloc`](cove_ir::Inst::Alloc) and [ADR
-//! 0052]'s four growable-buffer instructions — see [`AllocFn`] and [`BufferFn`]
+//! 0052]'s four growable-buffer instructions — see [`AllocFn`] and [`GrowableFn`]
 //! — and what they buy is not a faster allocation but a **compiled function
-//! around one**. A body refused for its single `alloc-buffer` ran every other
+//! around one**. A body refused for its single `growable-alloc` ran every other
 //! instruction it had on the encoded tier.
 //!
 //! `Jit` and `Jit::compile` are named above without links on purpose: they
@@ -135,7 +135,7 @@
 pub mod abi;
 
 pub use abi::{
-    AllocFn, BufferFn, BufferOp, BuiltinFn, CallFn, CloseFn, Entry, NativeCtx, NativeHelpers,
+    AllocFn, BuiltinFn, CallFn, CloseFn, Entry, GrowableFn, GrowableOp, NativeCtx, NativeHelpers,
     OpenFn, Opened, Outcome, Raise, SafepointFn, HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS,
     HEAP_ORIGIN_WORDS,
 };

@@ -19,7 +19,7 @@
 //! loop. A verified program is executed from its bytes; this is how a human
 //! reads them back.
 
-use crate::inst::{Inst, Len, Pc, Slot, Storage};
+use crate::inst::{Inst, Len, Pc, Slot, Storage, Validation};
 use crate::layout::LayoutId;
 use crate::{ArgsId, BuiltinId, FunctionId, HostOpId, StrId, TableId};
 
@@ -252,16 +252,11 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             src: c,
             layout,
         },
-        Op::ByteAt => Inst::ByteAt {
+        Op::RunLoadBytes => Inst::RunLoad {
             dst: a,
-            obj: b,
-            at: c,
-        },
-        Op::AllocBytes => Inst::AllocBytes { dst: a, len: b },
-        Op::WriteByte => Inst::WriteByte {
-            bytes: a,
-            at: b,
-            value: c,
+            run: b,
+            index: c,
+            storage: Storage::PackedBytes,
         },
         Op::RunCopyBytes => Inst::RunCopy {
             args: ArgsId(lo),
@@ -271,17 +266,27 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             args: ArgsId(lo),
             storage: Storage::Words(LayoutId(hi)),
         },
-        Op::FinishString => Inst::FinishString { dst: a, bytes: b },
-        Op::AllocBuffer => Inst::AllocBuffer {
+        Op::GrowableAllocBytes => Inst::GrowableAlloc {
             dst: a,
             capacity: b,
+            storage: Storage::PackedBytes,
         },
-        Op::AppendByte => Inst::AppendByte {
-            buffer: a,
-            value: b,
+        Op::GrowablePushByte => Inst::GrowablePush {
+            owner: a,
+            src: b,
+            storage: Storage::PackedBytes,
         },
-        Op::AppendBytes => Inst::AppendBytes { args: ArgsId(lo) },
-        Op::FinishBuffer => Inst::FinishBuffer { dst: a, buffer: b },
+        Op::GrowableExtendBytes => Inst::GrowableExtend {
+            args: ArgsId(lo),
+            storage: Storage::PackedBytes,
+        },
+        Op::RunFinishBytes => Inst::RunFinish {
+            dst: a,
+            owner: b,
+            target: LayoutId(lo),
+            validation: Validation::Utf8,
+            storage: Storage::PackedBytes,
+        },
         Op::Len => Inst::Len { dst: a, obj: b },
         Op::LayoutOf => Inst::LayoutOf { dst: a, obj: b },
         Op::AddrOfSlot => Inst::AddrOfSlot { dst: a, slot: b },
