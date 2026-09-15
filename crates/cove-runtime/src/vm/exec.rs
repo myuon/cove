@@ -2642,6 +2642,16 @@ impl<'a> Machine<'a> {
     /// layout — the instruction names it — and without a question it never
     /// asked: whether the vector had a second holder is `cove_sema::unique`'s
     /// to have proved.
+    ///
+    /// # Never inlined into the dispatch loop
+    ///
+    /// The `RUN_FINISH_WORDS` arm is one call, as every run arm is, and this is
+    /// what keeps it one: left to the optimiser, this function and
+    /// `growable_finish`'s relabel were inlined into `encoded::dispatch`, and
+    /// `benches/arith` — which finishes nothing — ran 47.0 ms against 55.3 on
+    /// the same tree, the loop around every arm paying for an arm it never
+    /// took. A finish is once per vector, so the call costs nothing that shows.
+    #[inline(never)]
     pub(crate) fn finish_words(
         &mut self,
         owner: u64,
