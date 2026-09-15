@@ -9,6 +9,48 @@ export fn isEmpty<T>(items: Array<T>) -> Bool {
   items.length() == 0
 }
 
+/// Whether any element is `==` to `element`.
+///
+/// `==` is the language's value equality, so an element equal to `element` is
+/// found whether or not it is the one that was put there: a string by its
+/// bytes, a struct field by field, an array element by element, and a `Float`
+/// by IEEE-754, so a `NaN` is never found. An empty array holds nothing.
+///
+/// A loop over the elements and nothing else. It was a Rust walk in each
+/// evaluator, and ADR 0058 (#378) moved it here: what an `Int` or a `String`
+/// element costs is now one comparison instruction, and what a wider element
+/// costs is the machine's value equality once per element rather than once
+/// per search — `benches/seqsearch` is where both are measured.
+export fn contains<T>(items: Array<T>, element: T) -> Bool {
+  for item in items {
+    if item == element {
+      return true
+    }
+  }
+  false
+}
+
+/// The position of the **first** element `==` to `element`, or `None`.
+///
+/// The same equality [`contains`] asks, so the two cannot disagree about
+/// whether an element is there. `None` answers both a value that is not there
+/// and an empty array, which is `get`'s answer to a position that is not there.
+///
+/// The `None` is a `return` rather than the body's last expression, as
+/// `std.string.sliceBytes`' answer is and for its reason: an answer in tail
+/// position is built aside and copied into the location the call answers in,
+/// which was a copy per instantiation that the `return` does not make.
+export fn indexOf<T>(items: Array<T>, element: T) -> Option<Int> {
+  var at = 0
+  for item in items {
+    if item == element {
+      return Some(at)
+    }
+    at += 1
+  }
+  return None
+}
+
 /// The elements at indices `from` up to but not including `to`, as a new
 /// array.
 ///

@@ -356,20 +356,6 @@ pub(super) fn format_digits(digits: i64) -> RuntimeError {
     )
 }
 
-/// A vector `freeze()` already consumed.
-///
-/// The oracle's `check_live`. There it is a flag on the storage every alias
-/// shares; here it is the vector's own word 1, which `freeze()` clears — so
-/// the answer reaches every alias for the same reason, that the two words a
-/// `Vector` *is* are shared by every copy of it.
-pub(super) fn frozen(method: &str) -> RuntimeError {
-    RuntimeError::new(format!(
-        "`{method}` was called on a vector that `freeze()` already consumed"
-    ))
-    .with_rule("`freeze()` consumes its vector; the source vector is no longer usable.")
-    .with_help("use the `Array` that `freeze()` returned, or build a new vector")
-}
-
 /// A reference slot that was read before anything was written to it.
 ///
 /// Not the oracle's: a `Value` is never absent, and a null `Repr::Ref` is

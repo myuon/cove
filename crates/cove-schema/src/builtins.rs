@@ -714,6 +714,23 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.array",
         function: "fold",
     },
+    // The two searches are Cove loops over `==` (#378, P3-14): an array's walks
+    // its elements with `for`, a vector's loads each one through
+    // `core.vectorLoad` below the length it read.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Array",
+        method: "contains",
+        module: "std.array",
+        function: "contains",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Array",
+        method: "indexOf",
+        module: "std.array",
+        function: "indexOf",
+    },
     // `slice`'s clamping is Cove; the copy beneath it is `core.arraySlice`, a
     // run slice. `toVector` is `core.arrayToVector`, the store, the copy and the
     // header the runtime arm made, as instructions.
@@ -751,6 +768,20 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "fold",
         module: "std.vector",
         function: "fold",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Vector",
+        method: "contains",
+        module: "std.vector",
+        function: "contains",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Vector",
+        method: "indexOf",
+        module: "std.vector",
+        function: "indexOf",
     },
     // The first `var self` method to move, and the first binding over a core
     // intrinsic that writes: `std.vector.push` is `core.vectorPush(items,

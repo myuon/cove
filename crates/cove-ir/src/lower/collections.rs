@@ -1262,10 +1262,11 @@ impl Body<'_> {
 /// instruction set.
 ///
 /// Each of them either builds an object whose family only the layout table
-/// knows — a `Set`'s `toArray`, the keyed updates — or walks the elements
-/// with the language's own equality, which is not something an instruction
-/// expresses. A sequence's `slice`, `toVector` and `toArray` were the first
-/// kind and are `std.array`/`std.vector` over a run slice now.
+/// knows — a `Set`'s `toArray`, the keyed updates — or searches a sorted run
+/// by the order the machine defines. A sequence's `slice`, `toVector` and
+/// `toArray` were the first kind and are `std.array`/`std.vector` over a run
+/// slice now; its `contains` and `indexOf` walked the elements with the
+/// language's own equality, and are `std.array`/`std.vector` loops over `==`.
 /// `map` and `sorted` are not here and never will be: a builtin that invoked
 /// their closure would re-enter the dispatch loop from inside a Rust
 /// function, which is the one thing `docs/LINEAR_VM.md` asks this backend
@@ -1285,10 +1286,6 @@ impl Body<'_> {
 /// machine by accident would be a runtime refusal where a gap should have
 /// named the work.
 const HANDED_OVER: &[(&str, &str)] = &[
-    ("Array", "contains"),
-    ("Array", "indexOf"),
-    ("Vector", "contains"),
-    ("Vector", "indexOf"),
     ("Set", "contains"),
     ("Set", "inserted"),
     ("Set", "removed"),

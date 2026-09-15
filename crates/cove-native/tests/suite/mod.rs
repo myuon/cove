@@ -3414,8 +3414,8 @@ pub fn a_builtin_no_arm_lowers_refuses_the_function<A: Arm>() {
     ))));
     for (receiver, operation) in [
         ("String", "length"),
-        ("Array", "contains"),
-        ("Vector", "contains"),
+        ("Set", "contains"),
+        ("Map", "contains"),
     ] {
         assert!(
             !compiles::<A>(&one(receiver, operation)),

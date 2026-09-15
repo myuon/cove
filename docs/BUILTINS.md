@@ -77,8 +77,8 @@ written as a namespace; binds `T`.
 | `get(index: Int) -> Option<T>` |  |  |  | `machine` |
 | `length() -> Int` |  |  |  | `machine` |
 | `isEmpty() -> Bool` |  |  |  | `std.array.isEmpty` |
-| `contains(element: T) -> Bool` |  |  |  | `machine` |
-| `indexOf(element: T) -> Option<Int>` |  |  |  | `machine` |
+| `contains(element: T) -> Bool` |  |  |  | `std.array.contains` |
+| `indexOf(element: T) -> Option<Int>` |  |  |  | `std.array.indexOf` |
 | `slice(from: Int, to: Int) -> Array<T>` |  |  |  | `std.array.slice` |
 | `map(transform: fn(T) -> R) -> Array<R>` |  |  | `R` | `machine` |
 | `filter(keep: fn(T) -> Bool) -> Array<T>` |  |  |  | `std.array.filter` |
@@ -104,8 +104,8 @@ written as a namespace; binds `T`.
 | `get(index: Int) -> Option<T>` |  |  |  | `machine` |
 | `length() -> Int` |  |  |  | `machine` |
 | `isEmpty() -> Bool` |  |  |  | `std.vector.isEmpty` |
-| `contains(element: T) -> Bool` |  |  |  | `machine` |
-| `indexOf(element: T) -> Option<Int>` |  |  |  | `machine` |
+| `contains(element: T) -> Bool` |  |  |  | `std.vector.contains` |
+| `indexOf(element: T) -> Option<Int>` |  |  |  | `std.vector.indexOf` |
 | `slice(from: Int, to: Int) -> Array<T>` |  |  |  | `std.vector.slice` |
 | `map(transform: fn(T) -> R) -> Array<R>` |  |  | `R` | `machine` |
 | `filter(keep: fn(T) -> Bool) -> Array<T>` |  |  |  | `std.vector.filter` |
