@@ -702,6 +702,37 @@ export fn callsKeepsWhatItStillNeeds(a: String, b: String, n: Int) -> Int {
   let nothing = Shared(0).lock(fn(v) { v })
   keepsWhatItStillNeeds(a, b, n)
 }
+
+/// A compiled loop over one intrinsic that never reaches the runtime and one that
+/// sometimes does: `String.byteLength()` is a header read in emitted code, and
+/// `Vector.push` is an emitted fast path whose growth is the `builtin` helper.
+/// `counts(0)` for `pushesOnto`'s reason.
+export fn measuresAndPushes(s: String, given: Vector<Int>, n: Int) -> Int {
+  var v = given
+  var at = 0
+  while at < n {
+    v.push(s.byteLength())
+    at = at + 1
+  }
+  at + counts(0)
+}
+
+/// A refused caller making `n` calls to `String.sliceBytes`, which nothing lowers,
+/// before handing the same `n` to the compiled loop above.
+export fn countsTheBoundary(s: String, n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  var cut = 0
+  var at = 0
+  while at < n {
+    match s.sliceBytes(0, 1) {
+      Ok(piece) => cut = cut + 1
+      Err(_) => cut = cut - 1
+    }
+    at = at + 1
+  }
+  var v = Vector.of(7)
+  measuresAndPushes(s, v, n) * 1000 + cut
+}
 ";
 
 fn checked() -> (Arc<SourceMap>, Arc<cove_sema::resolve::Program>) {
@@ -2320,4 +2351,195 @@ fn an_allocation_that_exhausts_the_heap_raises_the_vm_s_sentence() {
         "and it was compiled code that asked: {:?}",
         session.tiers()
     );
+}
+
+/// One run of `countsTheBoundary`, counted when `count` says so, answering the
+/// report it took.
+fn counted_run(
+    lowered: &cove_ir::Program,
+    runtime: &Runtime,
+    hosts: &HostRegistry,
+    native: Option<&cove_runtime::NativeProgram>,
+    count: bool,
+    n: i64,
+) -> Option<cove_runtime::BoundaryReport> {
+    let mut vm = match native {
+        Some(native) => Vm::with_native(runtime, hosts, lowered, native),
+        None => Vm::new(runtime, hosts, lowered),
+    };
+    if count {
+        vm.count_boundary();
+    }
+    let answered = vm
+        .invoke(
+            MODULE,
+            "countsTheBoundary",
+            vec![Value::string("hello"), Value::int(n)],
+        )
+        .map(|value| value.to_string())
+        .map_err(|error| error.message);
+    assert_eq!(
+        answered,
+        Ok(format!("{}", n * 1000 + n)),
+        "the loop's counter, then the `sliceBytes` that answered"
+    );
+    vm.boundary()
+}
+
+/// **The boundary report counts each quantity apart, and exactly.**
+///
+/// ADR 0058's Phase 1 asks for "emitted IR, mediated intrinsics, encoded VM
+/// instructions, native-to-VM crossings and native-to-runtime calls" to be
+/// reported separately. `countsTheBoundary` is refused and calls `sliceBytes`
+/// `n` times on the encoded tier; `measuresAndPushes` is compiled and calls
+/// `byteLength` and `push` `n` times each in machine code. So the three
+/// intrinsics land in three different places, and a report that lumped any two
+/// of them together would fail one of the rows below:
+///
+/// - `String.sliceBytes`: `n` from the encoded tier, none from native code;
+/// - `String.byteLength`: none at all on the native run — a header read in
+///   emitted code is not a mediated call — and `n` on the VM-only run;
+/// - `Vector.push`: only its growths reach the runtime from native code. The
+///   vector starts as `Vector.of(7)`, one element in a store of exactly one, and
+///   `vm::builtins::seq::grow` doubles from a minimum of four, so forty pushes
+///   grow the store at lengths 1, 4, 8, 16 and 32 — five mediated calls.
+///
+/// The program is lowered from the one entry, as `cove run` lowers it, so the
+/// static counts are this slice's own.
+#[test]
+fn the_boundary_report_counts_each_quantity_apart() {
+    use cove_ir::Intrinsic;
+    use cove_runtime::BoundaryReport;
+    const N: i64 = 40;
+    let (sources, program) = checked();
+    let lowered = cove_ir::lower_entry(
+        &program,
+        &sources,
+        &cove_sema::HostSchemas::new(),
+        MODULE,
+        "countsTheBoundary",
+    )
+    .expect("the fixture lowers");
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    on_each_tier(&["measuresAndPushes"], &["countsTheBoundary"]);
+    let counting = cove_runtime::compile_native_counting(&lowered).expect("this host compiles");
+    let production = cove_runtime::compile_native(&lowered).expect("this host compiles");
+
+    // Off unless asked: a run that did not ask has no report, whichever table it
+    // was given — the counting one included.
+    for native in [None, Some(&counting), Some(&production)] {
+        assert_eq!(
+            counted_run(&lowered, &runtime, &hosts, native, false, N),
+            None,
+            "nothing was asked for, so nothing is reported"
+        );
+    }
+
+    let on_vm = counted_run(&lowered, &runtime, &hosts, None, true, N).expect("asked for");
+    let on_native =
+        counted_run(&lowered, &runtime, &hosts, Some(&counting), true, N).expect("asked for");
+    let uncounted =
+        counted_run(&lowered, &runtime, &hosts, Some(&production), true, N).expect("asked for");
+
+    // Emitted IR is a fact about the program, so every run says the same.
+    assert_eq!(on_vm.emitted, on_native.emitted);
+    assert_eq!(on_vm.emitted, uncounted.emitted);
+    assert!(
+        on_vm.emitted.instructions > on_vm.emitted.builtin_sites,
+        "{:?}",
+        on_vm.emitted
+    );
+    let row = |report: &BoundaryReport, intrinsic: Intrinsic| {
+        report
+            .intrinsic(intrinsic)
+            .unwrap_or_else(|| panic!("the program names {intrinsic}"))
+    };
+    for intrinsic in [
+        Intrinsic::StringSliceBytes,
+        Intrinsic::StringByteLength,
+        Intrinsic::VectorPush,
+    ] {
+        assert_eq!(row(&on_vm, intrinsic).sites, 1, "{intrinsic}");
+    }
+    assert_eq!(
+        on_vm.emitted.builtin_sites,
+        on_vm.intrinsics.iter().map(|row| row.sites).sum::<u64>(),
+        "every site is some intrinsic's"
+    );
+
+    // Mediated intrinsics, by tier.
+    let n = N as u64;
+    let calls = |report: &BoundaryReport, intrinsic: Intrinsic| {
+        let held = row(report, intrinsic);
+        (held.encoded, held.native)
+    };
+    assert_eq!(calls(&on_vm, Intrinsic::StringSliceBytes), (n, 0));
+    assert_eq!(calls(&on_vm, Intrinsic::StringByteLength), (n, 0));
+    assert_eq!(calls(&on_vm, Intrinsic::VectorPush), (n, 0));
+    for report in [&on_native, &uncounted] {
+        assert_eq!(calls(report, Intrinsic::StringSliceBytes), (n, 0));
+        assert_eq!(
+            calls(report, Intrinsic::StringByteLength),
+            (0, 0),
+            "a header read in emitted code is not a mediated call"
+        );
+        assert_eq!(
+            calls(report, Intrinsic::VectorPush),
+            (0, 5),
+            "only the five growths reached the runtime"
+        );
+        // Sorted by dynamic calls, most first.
+        assert!(report
+            .intrinsics
+            .windows(2)
+            .all(|pair| pair[0].calls() >= pair[1].calls()));
+    }
+
+    // Encoded instructions: the native run dispatched fewer, because the loop of
+    // `measuresAndPushes` was machine code.
+    assert!(
+        on_native.encoded_instructions < on_vm.encoded_instructions,
+        "{} against {}",
+        on_native.encoded_instructions,
+        on_vm.encoded_instructions
+    );
+    assert_eq!(
+        on_native.encoded_instructions,
+        uncounted.encoded_instructions
+    );
+
+    // Crossings: none without a tier, and the tier's own counts with one.
+    assert_eq!(on_vm.tiers, None);
+    assert_eq!(on_vm.helpers, None);
+    let tiers = on_native.tiers.expect("a native tier was installed");
+    // Two: the marker's `fn(v) { v }`, which compiles, and `measuresAndPushes`.
+    assert_eq!(tiers.vm_to_native, 2, "{tiers:?}");
+    assert_eq!(uncounted.tiers, Some(tiers));
+
+    // Native-to-runtime calls: counted with the counting table, and said to be
+    // uncounted with the production one rather than printed as zeroes.
+    assert_eq!(uncounted.helpers, None);
+    let helpers = on_native.helpers.expect("the counting helpers were bound");
+    assert_eq!(
+        helpers.builtin, 5,
+        "one `builtin` helper call per mediated growth: {helpers:?}"
+    );
+    // Every call compiled code made went out through `open` or `call` — an `open`
+    // whose callee has no machine code runs the mediated call itself, and is
+    // still one `open` — and only a direct one comes back through `close`.
+    assert_eq!(
+        helpers.open + helpers.call,
+        tiers.native_to_native_direct + tiers.native_to_native_mediated + tiers.native_to_vm,
+        "{helpers:?}"
+    );
+    assert_eq!(helpers.close, tiers.native_to_native_direct, "{helpers:?}");
+
+    let printed = on_native.to_string();
+    assert!(printed.contains("boundary: native -> runtime helper calls"));
+    assert!(uncounted.to_string().contains("were not counted"));
 }

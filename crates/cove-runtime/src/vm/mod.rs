@@ -122,6 +122,7 @@ pub(crate) mod exec;
 pub(crate) mod mem;
 pub mod profile;
 pub(crate) mod render;
+pub(crate) mod report;
 
 /// The words a run's heap region may grow to, for every [`Vm`] [`Vm::new`]
 /// builds. [`Vm::with_heap_words`] is the one way to build a run over a
@@ -295,6 +296,31 @@ impl<'a> Vm<'a> {
     /// tiers.
     pub fn tiers(&self) -> native::Tiers {
         self.machine.tiers()
+    }
+
+    /// Starts counting what this run sends across each boundary, from now.
+    ///
+    /// [ADR 0058]'s five quantities — emitted IR, mediated intrinsics, encoded
+    /// instructions, tier crossings and native-to-runtime calls — read back with
+    /// [`Vm::boundary`]. Off unless this is called, and what a run that never
+    /// calls it pays is one `Option` test per builtin call; see
+    /// [`BoundaryReport`](crate::BoundaryReport).
+    ///
+    /// The native-to-runtime counts need the native table to have been built by
+    /// [`compile_native_counting`](crate::compile_native_counting). A table built
+    /// by [`compile_native`](crate::compile_native) binds helpers that count
+    /// nothing, and the report says so rather than printing zeroes.
+    ///
+    /// [ADR 0058]: ../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+    pub fn count_boundary(&mut self) {
+        let tiers = self.machine.tiers();
+        self.machine.count_boundary(tiers);
+    }
+
+    /// What was counted since [`Vm::count_boundary`], or `None` if it was never
+    /// called.
+    pub fn boundary(&self) -> Option<crate::BoundaryReport> {
+        self.machine.boundary(self.machine.tier.as_deref())
     }
 
     /// Dynamic calls to each function that stayed on the encoded tier, by

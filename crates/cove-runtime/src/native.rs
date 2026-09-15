@@ -81,6 +81,9 @@ pub struct NativeProgram {
     compiled: usize,
     code_bytes: u64,
     compile: Duration,
+    /// Whether the code was compiled against the counting helpers. See
+    /// [`compile_counting`].
+    counts_helpers: bool,
 }
 
 /// One function that has no machine code, and why.
@@ -186,6 +189,10 @@ impl Tiered for NativeProgram {
     fn entry(&self, id: FunctionId) -> Option<NativeEntry> {
         self.entries.get(id.index()).copied().flatten()
     }
+
+    fn counts_helpers(&self) -> bool {
+        self.counts_helpers
+    }
 }
 
 impl NativeProgram {
@@ -257,13 +264,35 @@ impl NativeProgram {
 /// or the operating system would not hand out an executable mapping. A *program*
 /// never makes this fail — a function the generator refuses is recorded and runs
 /// encoded.
-#[cfg(feature = "template")]
 pub fn compile(program: &Program) -> Result<NativeProgram, Unavailable> {
+    compile_with(program, false)
+}
+
+/// [`compile()`], binding helpers that count each call compiled code makes into
+/// the runtime.
+///
+/// What a run that wants a [`BoundaryReport`](crate::BoundaryReport)'s
+/// native-to-runtime counts compiles with. The code is the code [`compile()`]
+/// emits — the only difference is the helper addresses it loads — and each
+/// helper is one counter write in front of the production body; see
+/// [`native_helpers_counting`](crate::native_helpers_counting). A run that did not
+/// ask for the counts should not use this: it is a table that pays for a question
+/// nobody asked.
+pub fn compile_counting(program: &Program) -> Result<NativeProgram, Unavailable> {
+    compile_with(program, true)
+}
+
+#[cfg(feature = "template")]
+fn compile_with(program: &Program, counting: bool) -> Result<NativeProgram, Unavailable> {
     use crate::wallclock::Instant;
 
+    let helpers = match counting {
+        false => crate::native_helpers(),
+        true => crate::native_helpers_counting(),
+    };
     // Direct native-to-native calls are on, which is PR #368 and what issue #369
     // says to measure: "Direct native-to-native calls from PR #368 are enabled."
-    let mut jit = cove_native::template::Jit::new(crate::native_helpers())?.calling_directly();
+    let mut jit = cove_native::template::Jit::new(helpers)?.calling_directly();
     let mut entries = vec![None; program.functions.len()];
     let mut refusals = Vec::new();
     let mut done = Vec::new();
@@ -306,6 +335,7 @@ pub fn compile(program: &Program) -> Result<NativeProgram, Unavailable> {
         stubs,
         code_bytes,
         compile,
+        counts_helpers: counting,
     })
 }
 
@@ -469,7 +499,7 @@ fn opcode_at(function: &cove_ir::Function, pc: u32) -> Option<String> {
 /// **capability diagnostic** and not a silent fallback — the same answer the
 /// x86-64-only generator gives on another architecture, and for the same reason.
 #[cfg(not(feature = "template"))]
-pub fn compile(_program: &Program) -> Result<NativeProgram, Unavailable> {
+fn compile_with(_program: &Program, _counting: bool) -> Result<NativeProgram, Unavailable> {
     Err(Unavailable::new(
         "this build has no native code generator; rebuild with `--features template`",
     ))

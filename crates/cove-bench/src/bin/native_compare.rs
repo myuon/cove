@@ -993,6 +993,7 @@ fn compile_slice(
         refused: Vec::new(),
         bytes: 0,
         bytes_of: std::collections::BTreeMap::new(),
+        counts_helpers: false,
     };
     let mut compile = Vec::new();
     let mut done = Vec::new();
@@ -1193,6 +1194,29 @@ fn decomposed(
                 .to_string(),
         );
     }
+    println!();
+
+    // ADR 0058's boundary report over the same untimed pass, on the table the
+    // tier itself compiles — direct calls on, and the counting helpers in place of
+    // the production ones. Taken rather than read, so the timed arms below do not
+    // count.
+    let (_boundary_jit, mut boundary_tier, _) =
+        compile_slice(ir, cove_runtime::native_helpers_counting(), true)?;
+    boundary_tier.counts_helpers = true;
+    session.count_boundary();
+    for args in calls {
+        session
+            .call(&boundary_tier, args)
+            .map_err(|error| format!("the boundary pass refused a call: {}", error.message))?;
+    }
+    let boundary = session
+        .take_boundary()
+        .ok_or("the session was asked to count and has no report")?;
+    println!(
+        "  the boundary, over one untimed pass of {} call(s) on the direct-call table:",
+        calls.len()
+    );
+    print!("{boundary}");
     println!();
 
     let variants = variants();
@@ -1906,11 +1930,18 @@ struct Tier {
     /// The machine code of each function, by id, for the per-function figure the
     /// arith scenario reports and the totals above cannot give.
     bytes_of: std::collections::BTreeMap<cove_ir::FunctionId, u32>,
+    /// Whether the table was compiled against `native_helpers_counting`, which is
+    /// what lets a boundary report read its helper counts.
+    counts_helpers: bool,
 }
 
 impl cove_runtime::Tiered for Tier {
     fn entry(&self, id: cove_ir::FunctionId) -> Option<cove_runtime::NativeEntry> {
         self.entries.get(id.index()).copied().flatten()
+    }
+
+    fn counts_helpers(&self) -> bool {
+        self.counts_helpers
     }
 }
 
@@ -1981,6 +2012,7 @@ impl Compiled {
                     refused: Vec::new(),
                     bytes: 0,
                     bytes_of: std::collections::BTreeMap::new(),
+                    counts_helpers: false,
                 };
                 let mut compile = Vec::new();
                 let mut done = Vec::new();
