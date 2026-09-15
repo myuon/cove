@@ -71,6 +71,10 @@ pub(super) fn elements(
 }
 
 /// The layout of a `Vector` header over `elem` elements.
+///
+/// Only the tests build a vector in Rust since ADR 0058 moved `Array.toVector`
+/// into instructions.
+#[cfg(test)]
 pub(super) fn vector(program: &Program, elem: LayoutId) -> Result<LayoutId, RuntimeError> {
     find(
         program,
@@ -284,6 +288,9 @@ pub(super) fn strings<S: AsRef<str>>(
 /// The store is allocated to exactly the elements it was given. See
 /// [`crate::vm::exec::runs::growable_ensure`] for what happens when it
 /// fills.
+///
+/// Only the tests build one here, for [`vector`]'s reason.
+#[cfg(test)]
 pub(super) fn vector_of(
     machine: &mut Machine,
     elem: LayoutId,

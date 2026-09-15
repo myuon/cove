@@ -2635,6 +2635,35 @@ impl<'a> Machine<'a> {
         Ok(())
     }
 
+    /// A word [`Inst::GrowableTruncate`]: the vector at `owner` shortened to
+    /// `len`, and the elements it no longer holds cleared.
+    ///
+    /// [`Machine::vector_run`]'s owner checks, then the one invariant a truncate
+    /// has: it only lowers. A `len` below zero or above the length is a broken
+    /// invariant of the standard-library body that computed it from the length
+    /// it had just read, and is refused rather than read as a growth.
+    ///
+    /// Never inlined into the dispatch loop, for [`Machine::finish_words`]'
+    /// reason.
+    #[inline(never)]
+    pub(crate) fn truncate_words(
+        &mut self,
+        owner: u64,
+        elem: LayoutId,
+        len: i64,
+    ) -> Result<(), RuntimeError> {
+        let mut run = self.vector_run(owner, elem)?;
+        if len < 0 || len > i64::from(run.len) {
+            return Err(RuntimeError::new(format!(
+                "`growableTruncate` would take a length of {} to {len}, and a truncate only \
+                 lowers a length",
+                run.len
+            )));
+        }
+        runs::growable_truncate(self, &mut run, len as u32);
+        Ok(())
+    }
+
     /// A word [`Inst::RunFinish`]: the vector's store relabelled to `target` at
     /// its live length, and the vector emptied.
     ///

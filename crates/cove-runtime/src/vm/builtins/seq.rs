@@ -172,61 +172,6 @@ fn vector(machine: &Machine, method: &str, receiver: Operand<'_>) -> Result<Item
     })
 }
 
-/// The family of the value in `operand`.
-///
-/// The argument's own layout, which is what a call carries now. It used to be
-/// read back out of the word — a `Repr` for a scalar, the object's header for
-/// a reference — because that was the only place the answer existed, and that
-/// reading could not describe an inline value at all.
-fn family(machine: &Machine, operand: Operand<'_>) -> Result<LayoutId, RuntimeError> {
-    if matches!(operand::as_word(machine, operand), Some((Repr::Ref, 0))) {
-        return Err(operand::null_value());
-    }
-    Ok(operand.layout)
-}
-
-/// A non-negative `Int` names a position, a negative one names none.
-///
-/// The oracle's `index_of`, and the reason `get`, `set` and `remove` answer
-/// `None` for `-1` rather than stopping the run: a program has one rule about
-/// indices, and an index outside the collection is not one of them.
-fn index(
-    machine: &Machine,
-    method: &str,
-    argument: Operand<'_>,
-) -> Result<Option<usize>, RuntimeError> {
-    let at = operand::int(machine, method, "index", argument)?;
-    Ok((at >= 0).then_some(at as usize))
-}
-
-/// The words of the elements `store[from..to]`, with both bounds clamped into
-/// the sequence and a `to` at or below `from` answering nothing.
-///
-/// The bounds are elements and the answer is their words flattened, which is
-/// what [`make::array_of`] takes — so the one multiplication by the stride is
-/// the one that turns the clamped element range into a payload run.
-fn sliced(
-    machine: &Machine,
-    shown: &str,
-    store: u64,
-    stride: u32,
-    len: u32,
-    args: &[Operand<'_>],
-) -> Result<Vec<u64>, RuntimeError> {
-    if args.len() != 2 {
-        return Err(operand::arity(shown, 2, args.len()));
-    }
-    let bound = |at: usize, parameter: &str| {
-        operand::int(machine, shown, parameter, args[at]).map(|i| i.clamp(0, len as i64) as u32)
-    };
-    let from = bound(0, "from")?;
-    let to = bound(1, "to")?;
-    if to <= from {
-        return Ok(Vec::new());
-    }
-    Ok(machine.payload_run(store, from * stride, (to - from) * stride))
-}
-
 /// The position of the first element equal to `wanted`, if there is one.
 ///
 /// The element is read out of the store as the value location it is — the
@@ -257,39 +202,6 @@ fn position(
 }
 
 // --- Array -----------------------------------------------------------------
-
-/// `Array.get(index) -> Option<T>`.
-///
-/// The answer is the `Option`'s words, with the element's run inline in the
-/// payload region: an `Option<Point>` is `[disc, x, y]` and not an address.
-pub(super) fn array_get(
-    machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
-) -> Result<(), RuntimeError> {
-    let (receiver, args) = operand::method("Array.get", operands, 1)?;
-    let items = array(machine, "get", receiver)?;
-    match index(machine, "Array.get", args[0])? {
-        Some(at) if at < items.len as usize => {
-            let words = machine.payload_run(items.addr, at as u32 * items.stride, items.stride);
-            make::some(machine, result, &words, out)
-        }
-        _ => make::none(machine, result, out),
-    }
-}
-
-/// `Array.length() -> Int`.
-///
-/// Elements, not words: the header's length is the count the language asks
-/// about, whatever an element of this array is made of.
-pub(super) fn array_length(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, _) = operand::method("length", operands, 0)?;
-    Ok(array(machine, "length", receiver)?.len as u64)
-}
 
 /// `Array.contains(element) -> Bool`.
 pub(super) fn array_contains(
@@ -331,159 +243,7 @@ pub(super) fn array_index_of(
     }
 }
 
-/// `Array.slice(from, to) -> Array<T>`.
-pub(super) fn array_slice(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, args) = operand::method("Array.slice", operands, 2)?;
-    let items = array(machine, "slice", receiver)?;
-    let words = sliced(
-        machine,
-        "Array.slice",
-        items.addr,
-        items.stride,
-        items.len,
-        args,
-    )?;
-    make::array_of(machine, items.elem, &words)
-}
-
-/// `Array.toVector() -> Vector<T>`.
-///
-/// `Vector.toArray()` run backwards: a growable copy of these elements that
-/// nothing else holds a handle to. The elements are copied as they are rather
-/// than snapshotted, which is `toArray`'s own rule read the other way — this
-/// separates the sequence and nothing inside it.
-pub(super) fn array_to_vector(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, _) = operand::method("toVector", operands, 0)?;
-    let items = array(machine, "toVector", receiver)?;
-    let words = machine.payload_run(items.addr, 0, items.len * items.stride);
-    make::vector_of(machine, items.elem, &words)
-}
-
 // --- Vector ----------------------------------------------------------------
-
-/// `Vector.of(items...) -> Vector<T>`.
-///
-/// The element family comes from the first operand: the one-word layout of a
-/// scalar's `Repr`, or, for a reference, the layout the object's own header
-/// states. `Vector.of()` with no operands therefore says nothing about what
-/// it is a vector of, and this refuses it rather than guessing — a store's
-/// layout is what the collector traces its words by, so a `Vector<Int>` store
-/// that a later `push` put a reference in would drop the object on the next
-/// collection. The lowering knows the layout the checker resolved and can
-/// allocate an empty vector itself, which is the one place the answer exists.
-///
-/// An element of any width arrives as itself, because an argument carries the
-/// layout of the location it names.
-pub(super) fn vector_of(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let Some(first) = operands.first() else {
-        return Err(RuntimeError::new(
-            "`Vector.of()` with no elements does not say what it is a vector of",
-        )
-        .with_rule(
-            "A layout describes a family of values, and a builtin is told which one by the values it is given.",
-        )
-        .with_help("allocate the empty vector where the element type is known"));
-    };
-    let elem = family(machine, *first)?;
-    let mut words = Vec::with_capacity(operands.len());
-    for operand in operands {
-        words.extend_from_slice(operand::run_of(machine, "Vector.of", elem, *operand)?);
-    }
-    make::vector_of(machine, elem, &words)
-}
-
-/// `Vector.pop() -> Option<T>`.
-///
-/// The empty case is `remove(length() - 1)` on an empty vector, where that
-/// index is `-1`, which `get`, `set` and `remove` all answer `None` for. One
-/// rule about indices rather than a rule about indices and a rule about
-/// emptiness.
-pub(super) fn vector_pop(
-    machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
-) -> Result<(), RuntimeError> {
-    let (receiver, _) = operand::method("Vector.pop", operands, 0)?;
-    let items = vector(machine, "pop", receiver)?;
-    if items.run.len == 0 {
-        return make::none(machine, result, out);
-    }
-    let at = items.run.len - 1;
-    let was = machine.payload_run(items.run.store, at * items.stride, items.stride);
-    machine.set_payload_run(
-        items.run.store,
-        at * items.stride,
-        &vec![0; items.stride as usize],
-    );
-    machine.set_payload(items.run.owner, 0, at as u64);
-    make::some(machine, result, &was, out)
-}
-
-/// `Vector.remove(index) -> Option<T>`.
-///
-/// What follows the hole moves down by one *element*, which is one run copy
-/// of `stride` words apiece rather than a word each — and the element the
-/// vector no longer holds is zeroed out of the room it kept.
-pub(super) fn vector_remove(
-    machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
-) -> Result<(), RuntimeError> {
-    let (receiver, args) = operand::method("Vector.remove", operands, 1)?;
-    let items = vector(machine, "remove", receiver)?;
-    let Some(at) = index(machine, "Vector.remove", args[0])? else {
-        return make::none(machine, result, out);
-    };
-    if at >= items.run.len as usize {
-        return make::none(machine, result, out);
-    }
-    let at = at as u32;
-    let stride = items.stride;
-    let was = machine.payload_run(items.run.store, at * stride, stride);
-    let tail = machine.payload_run(
-        items.run.store,
-        (at + 1) * stride,
-        (items.run.len - at - 1) * stride,
-    );
-    machine.set_payload_run(items.run.store, at * stride, &tail);
-    machine.set_payload_run(
-        items.run.store,
-        (items.run.len - 1) * stride,
-        &vec![0; stride as usize],
-    );
-    machine.set_payload(items.run.owner, 0, items.run.len as u64 - 1);
-    make::some(machine, result, &was, out)
-}
-
-/// `Vector.get(index) -> Option<T>`.
-pub(super) fn vector_get(
-    machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
-) -> Result<(), RuntimeError> {
-    let (receiver, args) = operand::method("Vector.get", operands, 1)?;
-    let items = vector(machine, "get", receiver)?;
-    match index(machine, "Vector.get", args[0])? {
-        Some(at) if at < items.run.len as usize => {
-            let words =
-                machine.payload_run(items.run.store, at as u32 * items.stride, items.stride);
-            make::some(machine, result, &words, out)
-        }
-        _ => make::none(machine, result, out),
-    }
-}
 
 /// `Vector.contains(element) -> Bool`.
 pub(super) fn vector_contains(
@@ -523,48 +283,6 @@ pub(super) fn vector_index_of(
         Some(at) => make::some(machine, result, &[at as u64], out),
         None => make::none(machine, result, out),
     }
-}
-
-/// `Vector.slice(from, to) -> Array<T>`.
-///
-/// An **`Array`**, not a `Vector`: the oracle answers one, and it is the
-/// right answer — a slice is a reading of a sequence and nothing about it
-/// asks to be grown.
-pub(super) fn vector_slice(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, args) = operand::method("Vector.slice", operands, 2)?;
-    let items = vector(machine, "slice", receiver)?;
-    let words = sliced(
-        machine,
-        "Vector.slice",
-        items.run.store,
-        items.stride,
-        items.run.len,
-        args,
-    )?;
-    make::array_of(machine, items.elem, &words)
-}
-
-/// `Vector.length() -> Int`.
-pub(super) fn vector_length(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, _) = operand::method("length", operands, 0)?;
-    Ok(vector(machine, "length", receiver)?.run.len as u64)
-}
-
-/// `Vector.toArray() -> Array<T>`, copying the elements.
-pub(super) fn vector_to_array(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, _) = operand::method("toArray", operands, 0)?;
-    let items = vector(machine, "toArray", receiver)?;
-    let words = machine.payload_run(items.run.store, 0, items.run.len * items.stride);
-    make::array_of(machine, items.elem, &words)
 }
 
 #[cfg(test)]
@@ -623,51 +341,6 @@ mod tests {
     }
 
     #[test]
-    fn an_array_reports_what_it_holds() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let items = array_of(&mut machine, &[10, 20, 30]);
-        let empty = array_of(&mut machine, &[]);
-
-        // `isEmpty` is not a machine builtin: it is `std.array.isEmpty`,
-        // `length() == 0` written in Cove, so it is `cove-sema`'s and
-        // `cove-ir`'s tests that check it rather than a word read off the
-        // machine here. `length` is still the machine's, for both an array
-        // that holds something and one that holds nothing.
-        assert_eq!(
-            word(&mut machine, "Array", "length", &[(Repr::Ref, items)]).unwrap(),
-            3
-        );
-        assert_eq!(
-            word(&mut machine, "Array", "length", &[(Repr::Ref, empty)]).unwrap(),
-            0
-        );
-    }
-
-    /// `get` answers `None` for every index that is not already there, which
-    /// is one rule rather than one for a negative index and one for a large
-    /// one.
-    #[test]
-    fn an_array_get_answers_none_outside_itself() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let items = array_of(&mut machine, &[10, 20, 30]);
-        let get = |machine: &mut Machine, at: i64| {
-            let words = run(
-                machine,
-                "Array",
-                "get",
-                &[(Repr::Ref, items), (Repr::Int, at as u64)],
-            )
-            .unwrap();
-            option_int(&program, &words)
-        };
-        assert_eq!(get(&mut machine, 1), ("Some".to_string(), vec![20]));
-        assert_eq!(get(&mut machine, -1).0, "None");
-        assert_eq!(get(&mut machine, 3).0, "None");
-    }
-
-    #[test]
     fn an_array_finds_an_element_by_value() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
@@ -704,36 +377,10 @@ mod tests {
         assert_eq!(option_int(&program, &words).0, "None");
     }
 
-    /// Both bounds are clamped and a `to` at or below `from` answers nothing,
-    /// so no bound can stop the run.
-    #[test]
-    fn an_array_slice_clamps_both_bounds() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let items = array_of(&mut machine, &[10, 20, 30]);
-        let slice = |machine: &mut Machine, from: i64, to: i64| {
-            let addr = word(
-                machine,
-                "Array",
-                "slice",
-                &[
-                    (Repr::Ref, items),
-                    (Repr::Int, from as u64),
-                    (Repr::Int, to as u64),
-                ],
-            )
-            .unwrap();
-            words_of(machine, addr)
-        };
-        assert_eq!(slice(&mut machine, 1, 3), vec![20, 30]);
-        assert_eq!(slice(&mut machine, -5, 99), vec![10, 20, 30]);
-        assert_eq!(slice(&mut machine, 2, 1), Vec::<u64>::new());
-    }
-
     /// An `Array<Point>` is a run of two-word elements. Everything that walks
     /// one counts in elements and offsets in words, and this is where that
     /// distinction is load-bearing: a length of three is three `Point`s and
-    /// six words, and a `get` answers a pair.
+    /// six words, and a `pop` answers a pair.
     #[test]
     fn an_array_of_points_is_walked_at_a_two_word_stride() {
         let program = world();
@@ -743,80 +390,24 @@ mod tests {
         let items = machine.new_object(layout, 3).unwrap();
         machine.set_payload_run(items, 0, &[1, 2, 3, 4, 5, 6]);
 
-        // The header's length is elements, and so is what `length()` answers.
+        // The header's length is elements.
         assert_eq!(machine.object_len(items), 3);
-        assert_eq!(
-            word(&mut machine, "Array", "length", &[(Repr::Ref, items)]).unwrap(),
-            3
-        );
-
-        // `get` answers the whole element, inline in the `Some`'s payload
-        // region: `[disc, x, y]` and not an address.
-        let words = run(
-            &mut machine,
-            "Array",
-            "get",
-            &[(Repr::Ref, items), (Repr::Int, 1)],
-        )
-        .unwrap();
-        assert_eq!(words, vec![1, 3, 4]);
-        assert_eq!(
-            option_of(&program, point, &words),
-            ("Some".to_string(), vec![3, 4])
-        );
-        // The bound is in elements, so index 3 is past the end of three
-        // `Point`s even though word 3 is inside the payload.
-        let words = run(
-            &mut machine,
-            "Array",
-            "get",
-            &[(Repr::Ref, items), (Repr::Int, 3)],
-        )
-        .unwrap();
-        assert_eq!(option_of(&program, point, &words).0, "None");
-
-        // A slice is a shorter run of the same elements: two of them, which
-        // is four words.
-        let slice = word(
-            &mut machine,
-            "Array",
-            "slice",
-            &[(Repr::Ref, items), (Repr::Int, 1), (Repr::Int, 3)],
-        )
-        .unwrap();
-        assert_eq!(machine.object_len(slice), 2);
-        assert_eq!(words_of(&machine, slice), vec![3, 4, 5, 6]);
 
         // And a `Vector` over the same elements keeps both: three in the
         // header's count, six in the store.
-        let grown = word(&mut machine, "Array", "toVector", &[(Repr::Ref, items)]).unwrap();
+        let grown = make::vector_of(&mut machine, point, &[1, 2, 3, 4, 5, 6]).unwrap();
         assert_eq!(machine.payload(grown, 0), 3);
         let store = machine.payload(grown, 1);
         assert_eq!(machine.object_len(store), 3);
         assert_eq!(words_of(&machine, store), vec![1, 2, 3, 4, 5, 6]);
 
-        // `pop` takes a whole element off and zeroes both of its words.
-        let words = run(&mut machine, "Vector", "pop", &[(Repr::Ref, grown)]).unwrap();
-        assert_eq!(
-            option_of(&program, point, &words),
-            ("Some".to_string(), vec![5, 6])
-        );
+        // A truncate — `pop`'s and `remove`'s last step — takes whole elements
+        // off and zeroes every word of each.
+        machine.truncate_words(grown, point, 2).unwrap();
         assert_eq!(machine.payload(grown, 0), 2);
         assert_eq!(words_of(&machine, store), vec![1, 2, 3, 4, 0, 0]);
-
-        // As does `remove`, and what follows it moves down by an element.
-        let words = run(
-            &mut machine,
-            "Vector",
-            "remove",
-            &[(Repr::Ref, grown), (Repr::Int, 0)],
-        )
-        .unwrap();
-        assert_eq!(
-            option_of(&program, point, &words),
-            ("Some".to_string(), vec![1, 2])
-        );
-        assert_eq!(words_of(&machine, store), vec![3, 4, 0, 0, 0, 0]);
+        machine.truncate_words(grown, point, 0).unwrap();
+        assert_eq!(words_of(&machine, store), vec![0, 0, 0, 0, 0, 0]);
     }
 
     /// The other side of the stride: an operand is a value location, so an
@@ -835,7 +426,7 @@ mod tests {
         let items = machine.new_object(layout, 2).unwrap();
         machine.set_payload_run(items, 0, &[1, 2, 3, 4]);
         let arrays = machine.object_layout(items);
-        let grown = word(&mut machine, "Array", "toVector", &[(Repr::Ref, items)]).unwrap();
+        let grown = make::vector_of(&mut machine, point, &[1, 2, 3, 4]).unwrap();
         let vectors = machine.object_layout(grown);
 
         assert_eq!(
@@ -894,19 +485,6 @@ mod tests {
         let store = machine.new_object(layout, 1).unwrap();
         let grown = machine.new_object(vector(&program, point), 0).unwrap();
         machine.set_payload(grown, 1, store);
-        // `Vector.of` takes its family from the first element and holds every
-        // other one to it.
-        let error = values(
-            &mut machine,
-            "Vector",
-            "of",
-            &[(point, &[1, 2]), (int, &[1])],
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Vector.of` expects `Point` here, but found `Int`"
-        );
         // A word `growable-push` is given its element layout by the lowering
         // rather than by an operand, so what it holds to the store's family is
         // the owner: a vector of another element is refused before a word moves.
@@ -914,27 +492,6 @@ mod tests {
         assert_eq!(
             error.message,
             "a growable run of `Int` was expected here, and this object is not one"
-        );
-    }
-
-    #[test]
-    fn an_array_becomes_a_vector_and_a_vector_an_array() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let items = array_of(&mut machine, &[10, 20]);
-
-        let grown = word(&mut machine, "Array", "toVector", &[(Repr::Ref, items)]).unwrap();
-        assert_eq!(machine.payload(grown, 0), 2);
-        assert_eq!(words_of(&machine, machine.payload(grown, 1)), vec![10, 20]);
-
-        let back = word(&mut machine, "Vector", "toArray", &[(Repr::Ref, grown)]).unwrap();
-        assert_eq!(words_of(&machine, back), vec![10, 20]);
-        // A copy, not the store: `toArray` is the O(n) conversion, and the
-        // vector is still usable afterwards.
-        assert_ne!(back, machine.payload(grown, 1));
-        assert_eq!(
-            word(&mut machine, "Vector", "length", &[(Repr::Ref, grown)]).unwrap(),
-            2
         );
     }
 
@@ -988,74 +545,57 @@ mod tests {
         let alias = items;
 
         push(&mut machine, items, scalar(&program, Repr::Int), &[3]).unwrap();
-        assert_eq!(
-            word(&mut machine, "Vector", "length", &[(Repr::Ref, alias)]).unwrap(),
-            3
-        );
+        assert_eq!(machine.payload(alias, 0), 3);
         let words = run(
             &mut machine,
             "Vector",
-            "get",
-            &[(Repr::Ref, alias), (Repr::Int, 2)],
+            "indexOf",
+            &[(Repr::Ref, alias), (Repr::Int, 3)],
         )
         .unwrap();
-        assert_eq!(option_int(&program, &words), ("Some".to_string(), vec![3]));
+        assert_eq!(option_int(&program, &words), ("Some".to_string(), vec![2]));
     }
 
-    /// The store keeps its room and loses its dead element: the words a `pop`
-    /// vacates are zeroed, because a store's whole capacity is elements as far
-    /// as the collector is concerned.
+    /// The store keeps its room and loses its dead elements: the words a
+    /// truncate vacates are zeroed, because a store's whole capacity is
+    /// elements as far as the collector is concerned — and a truncate only
+    /// lowers, so a length above the current one is refused with nothing
+    /// written.
     #[test]
-    fn pop_shortens_the_vector_and_clears_the_words_it_vacates() {
+    fn a_truncate_shortens_the_vector_and_clears_the_words_it_vacates() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
-        let items = growable(&mut machine, &[1, 2]);
+        let int = scalar(&program, Repr::Int);
+        let items = growable(&mut machine, &[1, 2, 3]);
         let store = machine.payload(items, 1);
 
-        let words = run(&mut machine, "Vector", "pop", &[(Repr::Ref, items)]).unwrap();
-        assert_eq!(option_int(&program, &words), ("Some".to_string(), vec![2]));
+        machine.truncate_words(items, int, 1).unwrap();
         assert_eq!(machine.payload(items, 0), 1);
         assert_eq!(
             machine.payload(items, 1),
             store,
             "the store is not replaced"
         );
-        assert_eq!(words_of(&machine, store), vec![1, 0]);
+        assert_eq!(words_of(&machine, store), vec![1, 0, 0]);
+        // A truncate to the length it already has writes nothing.
+        machine.truncate_words(items, int, 1).unwrap();
+        assert_eq!(words_of(&machine, store), vec![1, 0, 0]);
 
-        run(&mut machine, "Vector", "pop", &[(Repr::Ref, items)]).unwrap();
-        let words = run(&mut machine, "Vector", "pop", &[(Repr::Ref, items)]).unwrap();
-        assert_eq!(option_int(&program, &words).0, "None");
+        for len in [2, -1] {
+            let error = machine.truncate_words(items, int, len).unwrap_err();
+            assert_eq!(
+                error.message,
+                format!(
+                    "`growableTruncate` would take a length of 1 to {len}, and a truncate only \
+                     lowers a length"
+                )
+            );
+            assert_eq!(machine.payload(items, 0), 1);
+        }
     }
 
     #[test]
-    fn remove_moves_what_follows_down_one() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let items = growable(&mut machine, &[1, 2, 3]);
-
-        let words = run(
-            &mut machine,
-            "Vector",
-            "remove",
-            &[(Repr::Ref, items), (Repr::Int, 0)],
-        )
-        .unwrap();
-        assert_eq!(option_int(&program, &words), ("Some".to_string(), vec![1]));
-        assert_eq!(machine.payload(items, 0), 2);
-        assert_eq!(words_of(&machine, machine.payload(items, 1)), vec![2, 3, 0]);
-
-        let words = run(
-            &mut machine,
-            "Vector",
-            "remove",
-            &[(Repr::Ref, items), (Repr::Int, 9)],
-        )
-        .unwrap();
-        assert_eq!(option_int(&program, &words).0, "None");
-    }
-
-    #[test]
-    fn a_vector_finds_an_element_and_slices_into_an_array() {
+    fn a_vector_finds_an_element() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
         let items = growable(&mut machine, &[1, 2, 3]);
@@ -1082,23 +622,7 @@ mod tests {
         // `isEmpty` is not a machine builtin for `Vector` either: it is
         // `std.vector.isEmpty`, and it is `cove-sema`'s and `cove-ir`'s
         // tests that check it rather than a word read off the machine here.
-
-        // An `Array`, not a `Vector`: a slice is a reading of a sequence.
-        let addr = word(
-            &mut machine,
-            "Vector",
-            "slice",
-            &[(Repr::Ref, items), (Repr::Int, 0), (Repr::Int, 2)],
-        )
-        .unwrap();
-        assert_eq!(words_of(&machine, addr), vec![1, 2]);
-        assert!(matches!(
-            machine.program().layout(machine.object_layout(addr)).shape,
-            Shape::Elements {
-                growable: false,
-                ..
-            }
-        ));
+        // Nor are `slice` and `toArray`: each is `std.vector` over a run slice.
     }
 
     /// `freeze()` hands back the store it was already holding, and empties
@@ -1135,7 +659,13 @@ mod tests {
         // Consumed: the header stays where it is and answers that it has no
         // storage, which is the state a checked program cannot reach.
         assert_eq!(machine.payload(items, 1), 0);
-        let error = word(&mut machine, "Vector", "length", &[(Repr::Ref, items)]).unwrap_err();
+        let error = word(
+            &mut machine,
+            "Vector",
+            "contains",
+            &[(Repr::Ref, items), (Repr::Int, 1)],
+        )
+        .unwrap_err();
         assert!(error.message.contains("freeze"), "{}", error.message);
     }
 
@@ -1192,10 +722,16 @@ mod tests {
         let int = scalar(&program, Repr::Int);
         let header = machine.new_object(vector(&program, int), 0).unwrap();
 
-        let error = run(&mut machine, "Vector", "length", &[(Repr::Ref, header)]).unwrap_err();
+        let error = run(
+            &mut machine,
+            "Vector",
+            "contains",
+            &[(Repr::Ref, header), (Repr::Int, 1)],
+        )
+        .unwrap_err();
         assert_eq!(
             error.message,
-            "`length` was called on a vector that `freeze()` already consumed"
+            "`contains` was called on a vector that `freeze()` already consumed"
         );
         assert_eq!(
             error.rule.as_deref(),
@@ -1206,52 +742,11 @@ mod tests {
         let finished = machine
             .finish_words(header, elements(&program, int, false), int)
             .unwrap_err();
-        for error in [pushed, finished] {
+        let truncated = machine.truncate_words(header, int, 0).unwrap_err();
+        for error in [pushed, finished, truncated] {
             assert_eq!(error.message, crate::builtins::CONSUMED_VECTOR);
             assert_eq!(error.rule, None);
         }
-    }
-
-    /// The elements say what family the vector belongs to, so a call with
-    /// none says nothing and is refused rather than guessed at.
-    #[test]
-    fn vector_of_builds_from_its_elements_and_needs_one() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-
-        let items = word(
-            &mut machine,
-            "Vector",
-            "of",
-            &[(Repr::Int, 1), (Repr::Int, 2)],
-        )
-        .unwrap();
-        assert_eq!(machine.payload(items, 0), 2);
-        assert_eq!(words_of(&machine, machine.payload(items, 1)), vec![1, 2]);
-        assert_eq!(
-            machine.object_layout(items),
-            vector(&program, scalar(&program, Repr::Int))
-        );
-
-        // A reference says which family it belongs to out of its own header,
-        // which is the one place the answer is: a `Repr::Ref` says a word is
-        // an address and nothing about what is at the end of it.
-        let text = machine.new_string("a").unwrap();
-        let items = word(&mut machine, "Vector", "of", &[(Repr::Ref, text)]).unwrap();
-        assert_eq!(
-            machine.object_layout(items),
-            vector(&program, program.str_layout)
-        );
-        assert_eq!(
-            read(&machine, machine.payload(machine.payload(items, 1), 0)),
-            "a"
-        );
-
-        let error = run(&mut machine, "Vector", "of", &[]).unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Vector.of()` with no elements does not say what it is a vector of"
-        );
     }
 
     /// The refusals a call that got the shape wrong reaches, in the oracle's
@@ -1262,36 +757,78 @@ mod tests {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
         let items = array_of(&mut machine, &[1]);
-        let text = machine.new_string("no").unwrap();
 
-        let error = run(&mut machine, "Array", "get", &[(Repr::Ref, items)]).unwrap_err();
+        let error = run(&mut machine, "Array", "contains", &[(Repr::Ref, items)]).unwrap_err();
         assert_eq!(
             error.message,
-            "`Array.get` takes 1 argument(s), but 0 were given"
+            "`Array.contains` takes 1 argument(s), but 0 were given"
         );
 
         let error = run(
             &mut machine,
-            "Array",
-            "get",
-            &[(Repr::Ref, items), (Repr::Ref, text)],
+            "Vector",
+            "contains",
+            &[(Repr::Ref, items), (Repr::Int, 1)],
         )
         .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Array.get` expects `Int` for `index`, but found `String`"
-        );
+        assert_eq!(error.message, "`Array` has no method `contains`");
 
-        let error = run(&mut machine, "Vector", "length", &[(Repr::Ref, items)]).unwrap_err();
-        assert_eq!(error.message, "`Array` has no method `length`");
-
-        let error = run(&mut machine, "Array", "length", &[(Repr::Ref, 0)]).unwrap_err();
+        let error = run(
+            &mut machine,
+            "Array",
+            "contains",
+            &[(Repr::Ref, 0), (Repr::Int, 1)],
+        )
+        .unwrap_err();
         assert_eq!(error.message, "this value was read before it was given one");
 
         assert_eq!(
-            word(&mut machine, "Array", "length", &[(Repr::Ref, items)]).unwrap(),
+            word(
+                &mut machine,
+                "Array",
+                "contains",
+                &[(Repr::Ref, items), (Repr::Int, 1)]
+            )
+            .unwrap(),
             1
         );
+    }
+
+    /// **A string a truncate takes out of a `Vector<String>` is garbage at the
+    /// next collection, and the strings it leaves are not.**
+    ///
+    /// What `pop` and `remove` rely on the cleared words for: the store is still
+    /// reachable through the vector, and its spare room is traced as elements,
+    /// so a vacated word left holding the address would keep the string alive.
+    #[test]
+    fn a_string_a_truncate_takes_out_is_collected() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 12);
+        let text = program.str_layout;
+        let store = machine
+            .new_object(elements(&program, text, true), 2)
+            .unwrap();
+        machine.push_temp(store);
+        let items = machine.new_object(vector(&program, text), 0).unwrap();
+        machine.push_temp(items);
+        let kept = machine.new_string("kept").unwrap();
+        machine.set_payload(store, 0, kept);
+        let taken = machine.new_string("taken").unwrap();
+        machine.set_payload(store, 1, taken);
+        machine.set_payload(items, 0, 2);
+        machine.set_payload(items, 1, store);
+        let mark = machine.temps();
+        machine.release_temps(mark - 1);
+
+        machine.truncate_words(items, text, 1).unwrap();
+        machine.collect();
+        assert_eq!(
+            machine.object_layout(taken),
+            LayoutId::FREE,
+            "the taken string was swept"
+        );
+        assert_eq!(machine.object_layout(kept), text, "the kept one was not");
+        assert_eq!(read(&machine, kept), "kept");
     }
 
     /// The one window a builtin has to get rooting wrong: a growth allocates a

@@ -136,32 +136,31 @@ fn a_vector_is_walked_through_a_copy_taken_before_the_first_call() {
         ),
         "\
 fn @m.f(Vector) -> Array
-  frame 11: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:ref s7:int s8:bool s9:int s10:int
-  local v -> s0:Vector [0, 24)
+  frame 11: s0!:ref s1:ref s2:int s3:ref s4:int s5:ref s6:ref s7:int s8:bool s9:int s10:int
+  local v -> s0:Vector [0, 23)
      0  load-field s2:Int s0:ref +0
      1  load-field s3:<ref> s0:ref +1
-     2  alloc s4:ref Array<array> xs2:int
-     3  int s5:int 0
-     4  run-copy.words Int (s4:Array s5:Int s3:<ref> s5:Int s2:Int)
-     5  clear s3:<ref>
-     6  alloc s3:ref closure m.f#0<closure>
-     7  func-ref s2:int @m.f#0
-     8  store-field s3:ref +0 s2:Int
-     9  len s2:int s4:ref
-    10  alloc s6:ref Array<array> xs2:int
-    11  int s5:int 0
-    12  int s7:int 1
-    13  jump 15
-    14  add.int s5:int s5:int s7:int
-    15  lt.int.branch s8:bool s5:int s2:int 20
-    16  load-elem s9:Int s4:ref s5:int
-    17  call-closure s10:Int s3:ref (s9:Int)
-    18  store-elem s6:ref s5:int s10:Int
-    19  jump 14
-    20  clear s3:fn
-    21  clear s4:Array
-    22  copy s1:Array s6:Array
-    23  return s1:Array
+     2  int s4:int 0
+     3  run-slice.words Int (s5:Array s3:<ref> s4:Int s2:Int)
+     4  clear s3:<ref>
+     5  alloc s3:ref closure m.f#0<closure>
+     6  func-ref s2:int @m.f#0
+     7  store-field s3:ref +0 s2:Int
+     8  len s2:int s5:ref
+     9  alloc s6:ref Array<array> xs2:int
+    10  int s4:int 0
+    11  int s7:int 1
+    12  jump 14
+    13  add.int s4:int s4:int s7:int
+    14  lt.int.branch s8:bool s4:int s2:int 19
+    15  load-elem s9:Int s5:ref s4:int
+    16  call-closure s10:Int s3:ref (s9:Int)
+    17  store-elem s6:ref s4:int s10:Int
+    18  jump 13
+    19  clear s3:fn
+    20  clear s5:Array
+    21  copy s1:Array s6:Array
+    22  return s1:Array
 "
     );
 }
@@ -287,7 +286,7 @@ fn @m.f(Array) -> Array
      3  store-field s3:ref +0 s4:Int
      4  len s4:int s2:ref
      5  int s5:int 0
-     6  call-builtin s6:Array Array.slice (s2:Array s5:Int s4:Int)
+     6  run-slice.words Int (s6:Array s2:Array s5:Int s4:Int)
      7  clear s2:Array
      8  alloc s2:ref Array<array> xs4:int
      9  int s7:int 1

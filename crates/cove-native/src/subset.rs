@@ -868,6 +868,16 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                 && slot(finish.dst)
                 && slot(finish.owner)
         }),
+        // `Vector.pop` and `Vector.remove`'s truncate, handed to the growable
+        // helper whole: two slots it reads, and an element layout it reads off
+        // the instruction, bounded against the table. There is no emitted fast
+        // path — a truncate clears a stride of words and writes the length, and
+        // the helper is one call per pop.
+        Inst::GrowableTruncate {
+            owner,
+            len,
+            storage: Storage::Words(elem),
+        } => elem.index() < program.layouts.len() && slot(*owner) && slot(*len),
         // A builtin is decoded by [`method_of`] and by nothing here, so that the
         // name this tier lowers is written down once. `None` is a family nothing
         // emits and falls to `Reason::Instruction` with every other unlowered
@@ -915,6 +925,26 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                 }
             };
             elem && list.len() == 5
+                && list
+                    .iter()
+                    .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))
+        }
+        // [ADR 0058]'s run slice, the same helper with [`RunOp::SliceWords`]: an
+        // allocation and the run copy that fills it. Bounded as a word
+        // `run-copy` is — four one-word operands the frame has, and an element
+        // layout the table has that fits the template arm's immediate. Only the
+        // word member exists.
+        //
+        // [`RunOp::SliceWords`]: crate::abi::RunOp::SliceWords
+        // [ADR 0058]: ../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+        Inst::RunSlice {
+            args,
+            storage: Storage::Words(elem),
+        } => {
+            let list = program.arg_list(*args);
+            elem.index() < program.layouts.len()
+                && i32::try_from(elem.0).is_ok()
+                && list.len() == 4
                 && list
                     .iter()
                     .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))

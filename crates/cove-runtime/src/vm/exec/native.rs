@@ -82,7 +82,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cove_ir::{ArgsId, BuiltinId, FunctionId, Inst, LayoutId, Slot, Storage, StrId};
-use cove_native::{Entry, GrowableOp, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
+use cove_native::{Entry, GrowableOp, NativeCtx, NativeHelpers, Opened, Outcome, Raise, RunOp};
 
 use super::{divided_by_zero, null_object, overflowed, Frame, Machine, Overflow};
 use crate::budget::Meter;
@@ -905,6 +905,22 @@ unsafe extern "C" fn growable(
                         machine.mem.set_slot(base, a as Slot, array);
                         Ok(())
                     }
+                    // A word truncate, through the same `Machine::truncate_words`
+                    // the `GROWABLE_TRUNCATE_WORDS` arm calls; the element layout
+                    // is the instruction's.
+                    GrowableOp::TruncateWords => {
+                        let owner = machine.mem.slot(base, a as Slot);
+                        let len = machine.mem.slot(base, b as Slot) as i64;
+                        let code = &machine.program.function(frame.function).code;
+                        let Inst::GrowableTruncate {
+                            storage: Storage::Words(elem),
+                            ..
+                        } = code[pc as usize]
+                        else {
+                            unreachable!("a word truncate was handed over for a pc that is not one")
+                        };
+                        machine.truncate_words(owner, elem, len)
+                    }
                     GrowableOp::PushWords => {
                         let owner = machine.mem.slot(base, a as Slot);
                         let code = &machine.program.function(frame.function).code;
@@ -968,14 +984,15 @@ unsafe extern "C" fn growable(
     }
 }
 
-/// The run-copy helper: one [ADR 0058] `Inst::RunCopy`, handed over whole.
+/// The run-copy helper: one [ADR 0058] `Inst::RunCopy` or `Inst::RunSlice`,
+/// handed over whole.
 ///
 /// See [`cove_native::RunCopyFn`] for why the copy is a helper rather than an
-/// emitted loop. What happens here is `encoded.rs`'s `RUN_COPY_BYTES` and
-/// `RUN_COPY_WORDS` arms, and *is* those arms: the same `run_copy_bytes` and
-/// `run_copy_words`, so the checks, the refusals' sentences, the direction a
-/// self-overlapping copy walks and the chunk loop's polls are the dispatch loop's
-/// and nowhere else.
+/// emitted loop. What happens here is `encoded.rs`'s `RUN_COPY_BYTES`,
+/// `RUN_COPY_WORDS` and `RUN_SLICE_WORDS` arms, and *is* those arms: the same
+/// `run_copy_bytes`, `run_copy_words` and `run_slice_words`, so the checks, the
+/// refusals' sentences, the direction a self-overlapping copy walks and the chunk
+/// loop's polls are the dispatch loop's and nowhere else.
 ///
 /// One thing is in front of them, and it is [`growable`]'s: the unpaid work is
 /// charged and ADR 0040's three steps are taken before the copy. The encoded arms
@@ -994,7 +1011,7 @@ unsafe extern "C" fn run_copy(
     base: u64,
     pc: u32,
     args: u32,
-    words: u32,
+    kind: u32,
     elem: u32,
 ) -> u32 {
     let host = (*ctx).host.cast::<Bridge>();
@@ -1022,8 +1039,9 @@ unsafe extern "C" fn run_copy(
                 // The frame's *address* rather than its index, for [`builtin`]'s
                 // reason. Both cores attach the instruction's span to their own
                 // refusals.
-                match words {
-                    0 => super::encoded::run_copy_bytes(
+                match RunOp::from_abi(kind).expect("a code generator emitted a run op that is one")
+                {
+                    RunOp::CopyBytes => super::encoded::run_copy_bytes(
                         machine,
                         program,
                         budget,
@@ -1032,7 +1050,17 @@ unsafe extern "C" fn run_copy(
                         frame.function,
                         pc as usize,
                     ),
-                    _ => super::encoded::run_copy_words(
+                    RunOp::CopyWords => super::encoded::run_copy_words(
+                        machine,
+                        program,
+                        budget,
+                        frame.base,
+                        args,
+                        LayoutId(elem),
+                        frame.function,
+                        pc as usize,
+                    ),
+                    RunOp::SliceWords => super::encoded::run_slice_words(
                         machine,
                         program,
                         budget,
@@ -2008,7 +2036,7 @@ counted!(
 );
 counted!(
     /// [`run_copy`], counted.
-    counted_run_copy => run_copy.run_copy(base: u64, pc: u32, args: u32, words: u32, elem: u32) -> u32
+    counted_run_copy => run_copy.run_copy(base: u64, pc: u32, args: u32, kind: u32, elem: u32) -> u32
 );
 counted!(
     /// [`field_load`], counted.

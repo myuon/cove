@@ -202,29 +202,28 @@ fn a_for_over_a_vector_walks_a_snapshot() {
         ),
         "\
 fn @m.count(Vector) -> Int
-  frame 10: s0!:ref s1:int s2:int s3:int s4:ref s5:ref s6:int s7:int s8:bool s9:int
-  local v -> s0:Vector [0, 19)
-  local t -> s2:Int [1, 18)
-  local x -> s9:Int [14, 15)
+  frame 10: s0!:ref s1:int s2:int s3:int s4:ref s5:int s6:ref s7:int s8:bool s9:int
+  local v -> s0:Vector [0, 18)
+  local t -> s2:Int [1, 17)
+  local x -> s9:Int [13, 14)
      0  int s2:int 0
      1  load-field s3:Int s0:ref +0
      2  load-field s4:<ref> s0:ref +1
-     3  alloc s5:ref Array<array> xs3:int
-     4  int s6:int 0
-     5  run-copy.words Int (s5:Array s6:Int s4:<ref> s6:Int s3:Int)
-     6  clear s4:<ref>
-     7  len s3:int s5:ref
-     8  int s6:int 0
-     9  int s7:int 1
-    10  jump 12
-    11  add.int s6:int s6:int s7:int
-    12  lt.int.branch s8:bool s6:int s3:int 16
-    13  load-elem s9:Int s5:ref s6:int
-    14  add.int s2:int s2:int s9:int
-    15  jump 11
-    16  clear s5:Array
-    17  copy s1:Int s2:Int
-    18  return s1:Int
+     3  int s5:int 0
+     4  run-slice.words Int (s6:Array s4:<ref> s5:Int s3:Int)
+     5  clear s4:<ref>
+     6  len s3:int s6:ref
+     7  int s5:int 0
+     8  int s7:int 1
+     9  jump 11
+    10  add.int s5:int s5:int s7:int
+    11  lt.int.branch s8:bool s5:int s3:int 15
+    12  load-elem s9:Int s6:ref s5:int
+    13  add.int s2:int s2:int s9:int
+    14  jump 10
+    15  clear s6:Array
+    16  copy s1:Int s2:Int
+    17  return s1:Int
 "
     );
 }

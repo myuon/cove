@@ -324,6 +324,10 @@ impl Check<'_> {
             // carried layout claims. A word copy's element layout is a
             // `Half::Layout`, range-checked by the uniform payload pass.
             Inst::RunCopy { args, .. } => self.args_fit(at, args),
+            // `Op::RunSliceWords`' four operands, by the same uniform rule; its
+            // fixed shape (`dst`, `src`, `from`, `count`) is `crate::verify`'s
+            // `check_run_slice`.
+            Inst::RunSlice { args, .. } => self.args_fit(at, args),
             // `Op::GrowableExtendBytes`'s four operands live behind an `ArgsId`
             // for the same reason and are checked by the same uniform rule;
             // `crate::verify`'s `check_growable_extend_args` is where the fixed

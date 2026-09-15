@@ -226,9 +226,9 @@ impl Body<'_> {
     /// Two runs of the receiver's length and passes of doubling width, which
     /// is `merge_sort` exactly:
     ///
-    /// - `source` is `Array.slice(items, 0, len)` — the copy the sort works
-    ///   in, made by the one builtin that already answers a part of a
-    ///   sequence as a finished one. The receiver is never written through.
+    /// - `source` is a run slice of `items` from nought for `len` — the copy
+    ///   the sort works in, made by the one instruction that answers a part of
+    ///   a sequence as a finished one. The receiver is never written through.
     /// - `merged` is an allocation of the same length, and the two are
     ///   **swapped** at the end of each pass rather than copied back.
     /// - A pass walks blocks of `width * 2`, merging the two runs inside
@@ -279,19 +279,12 @@ impl Body<'_> {
 
         let count = self.length_of(&obj, span);
         let zero = self.int(0, span);
-        // The working copy. `Array.slice` is the language's own "a part of a
+        // The working copy. A slice is the language's own "a part of a
         // sequence is a finished sequence", and the whole of one is a part of
-        // it — so the copy the sort needs is a call this lowering already
-        // makes rather than a loop of its own.
+        // it — so the copy the sort needs is the run slice `Array.slice` is
+        // made of, rather than a loop of its own.
         let source = self.temp(result);
-        self.emit_builtin(
-            source.slot,
-            "Array",
-            "slice",
-            &[obj.arg(), zero.arg(), count.arg()],
-            result,
-            span,
-        );
+        self.run_slice_words(source.slot, result, element, &obj, &zero, &count, span);
         self.release(obj, span);
         let merged = self.temp(result);
         self.emit(

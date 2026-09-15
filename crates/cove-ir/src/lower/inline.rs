@@ -495,6 +495,12 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             Inst::CallBuiltin { dst, builtin, .. } => {
                 mark(dst, width(program.builtin(builtin).result))
             }
+            // The first entry of its row is the one frame word it writes.
+            Inst::RunSlice { args, .. } => {
+                if let Some(dst) = program.arg_list(args).first() {
+                    mark(dst.slot, 1)
+                }
+            }
             Inst::Unit { dst }
             | Inst::Bool { dst, .. }
             | Inst::Int { dst, .. }
@@ -534,6 +540,7 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::RunCopy { .. }
             | Inst::GrowablePush { .. }
             | Inst::GrowableExtend { .. }
+            | Inst::GrowableTruncate { .. }
             | Inst::Jump { .. }
             | Inst::BranchFalse { .. }
             | Inst::Switch { .. }
@@ -924,6 +931,7 @@ fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called
             }
             Inst::CallBuiltin { args, .. }
             | Inst::RunCopy { args, .. }
+            | Inst::RunSlice { args, .. }
             | Inst::GrowableExtend { args, .. }
                 if args.0 >= PLACED =>
             {
@@ -1014,6 +1022,7 @@ fn relocated(
         // list of its own.
         Inst::CallBuiltin { args, .. }
         | Inst::RunCopy { args, .. }
+        | Inst::RunSlice { args, .. }
         | Inst::GrowableExtend { args, .. } => {
             lists.push(
                 program
@@ -1139,12 +1148,13 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         } => vec![dst, run, index],
         Inst::GrowableAlloc { dst, capacity, .. } => vec![dst, capacity],
         Inst::GrowablePush { owner, src, .. } => vec![owner, src],
+        Inst::GrowableTruncate { owner, len, .. } => vec![owner, len],
         Inst::RunFinish { dst, owner, .. } => vec![dst, owner],
         // The five operands live in the args row rather than on the
         // instruction, exactly as a call's do — `relocated` moves that row
         // and repoints `args` at the copy, the same way it does for
         // `Inst::CallBuiltin`.
-        Inst::RunCopy { .. } | Inst::GrowableExtend { .. } => Vec::new(),
+        Inst::RunCopy { .. } | Inst::RunSlice { .. } | Inst::GrowableExtend { .. } => Vec::new(),
         Inst::Len { dst, obj } | Inst::LayoutOf { dst, obj } => vec![dst, obj],
         Inst::AddrOfSlot { dst, slot } => vec![dst, slot],
         Inst::AddrOfField { dst, obj, .. } => vec![dst, obj],

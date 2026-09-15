@@ -506,11 +506,12 @@ impl Body<'_> {
             }
             // A vector of values that each answer themselves is a vector of
             // words, so the independent copy is the words in a store of their
-            // own: `Vector.toArray` clones them out and `Array.toVector`
-            // allocates the new vector around them. That is the oracle's
-            // `allocate_vector(snapshotted)` for the case where snapshotting
-            // an element is the identity, and it costs one intermediate
-            // object rather than an instruction the machine does not have.
+            // own: a run slice clones them out and `Array.toVector`'s
+            // construction allocates the new vector around them. That is the
+            // oracle's `allocate_vector(snapshotted)` for the case where
+            // snapshotting an element is the identity, and it costs one
+            // intermediate object rather than an instruction the machine does
+            // not have.
             Ty::Vector(elem) if snapshots_itself(elem) => {
                 let elem = (**elem).clone();
                 let value = self.expr(base);
@@ -519,18 +520,12 @@ impl Body<'_> {
                     return self.dead(expr);
                 };
                 self.release(value, expr.span);
-                let layout = self.layout_of(expr);
-                let dst = self.temp(layout);
-                self.emit_builtin(
-                    dst.slot,
-                    "Array",
-                    "toVector",
-                    &[array.arg()],
-                    layout,
-                    expr.span,
-                );
+                let copy = self.vector_of_elements(&array, &elem, None, expr.span);
                 self.release(array, expr.span);
-                dst
+                match copy {
+                    Some(dst) => dst,
+                    None => self.dead(expr),
+                }
             }
             // An element that has a graph of its own has to be snapshotted
             // one at a time, and one of the ways it answers is a call to the

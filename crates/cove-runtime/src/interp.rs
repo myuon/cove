@@ -2779,7 +2779,7 @@ impl<'a> Interpreter<'a> {
                             let args = self.eval_args(env, args, trailing)?;
                             let shown = format!("{head}.{}", name.node);
                             let mut values = plain_values(args, &shown)?;
-                            return Ok(builtins::call_core(&name.node, &mut values, span)?);
+                            return Ok(builtins::call_core(self, &name.node, &mut values, span)?);
                         }
                         if self.is_host_module(&module, head) {
                             // `http.Route(method: ..., path: ...)` initializes

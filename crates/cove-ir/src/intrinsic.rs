@@ -40,8 +40,6 @@ use std::fmt;
 /// directly instead of reconstructing a name to dispatch on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Intrinsic {
-    StringText,
-    StringConcat,
     StringInterpolate,
     StringLength,
     StringWords,
@@ -60,23 +58,11 @@ pub enum Intrinsic {
     StringFromCodePoint,
     StringCodePointAtByte,
     StringSliceBytes,
-    ArrayGet,
-    ArrayLength,
     ArrayContains,
     ArrayIndexOf,
-    ArraySlice,
-    ArrayToVector,
-    VectorOf,
-    VectorPop,
-    VectorRemove,
-    VectorGet,
     VectorContains,
     VectorIndexOf,
-    VectorSlice,
-    VectorLength,
-    VectorToArray,
     SetOf,
-    SetLength,
     SetContains,
     SetToArray,
     SetInserted,
@@ -84,7 +70,6 @@ pub enum Intrinsic {
     MapOf,
     MapGet,
     MapContains,
-    MapLength,
     MapKeys,
     MapValues,
     MapInserted,
@@ -110,8 +95,6 @@ pub enum Intrinsic {
 /// walk to check the table has no gap and no duplicate — the two ways a hand-
 /// written list like this one goes wrong.
 pub const ALL: &[Intrinsic] = &[
-    Intrinsic::StringText,
-    Intrinsic::StringConcat,
     Intrinsic::StringInterpolate,
     Intrinsic::StringLength,
     Intrinsic::StringWords,
@@ -130,23 +113,11 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringFromCodePoint,
     Intrinsic::StringCodePointAtByte,
     Intrinsic::StringSliceBytes,
-    Intrinsic::ArrayGet,
-    Intrinsic::ArrayLength,
     Intrinsic::ArrayContains,
     Intrinsic::ArrayIndexOf,
-    Intrinsic::ArraySlice,
-    Intrinsic::ArrayToVector,
-    Intrinsic::VectorOf,
-    Intrinsic::VectorPop,
-    Intrinsic::VectorRemove,
-    Intrinsic::VectorGet,
     Intrinsic::VectorContains,
     Intrinsic::VectorIndexOf,
-    Intrinsic::VectorSlice,
-    Intrinsic::VectorLength,
-    Intrinsic::VectorToArray,
     Intrinsic::SetOf,
-    Intrinsic::SetLength,
     Intrinsic::SetContains,
     Intrinsic::SetToArray,
     Intrinsic::SetInserted,
@@ -154,7 +125,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::MapOf,
     Intrinsic::MapGet,
     Intrinsic::MapContains,
-    Intrinsic::MapLength,
     Intrinsic::MapKeys,
     Intrinsic::MapValues,
     Intrinsic::MapInserted,
@@ -182,8 +152,6 @@ impl Intrinsic {
     /// comment where `cove-runtime` dispatches it.
     pub const fn receiver(self) -> &'static str {
         match self {
-            Intrinsic::StringText => "String",
-            Intrinsic::StringConcat => "String",
             Intrinsic::StringInterpolate => "String",
             Intrinsic::StringLength => "String",
             Intrinsic::StringWords => "String",
@@ -202,23 +170,11 @@ impl Intrinsic {
             Intrinsic::StringFromCodePoint => "String",
             Intrinsic::StringCodePointAtByte => "String",
             Intrinsic::StringSliceBytes => "String",
-            Intrinsic::ArrayGet => "Array",
-            Intrinsic::ArrayLength => "Array",
             Intrinsic::ArrayContains => "Array",
             Intrinsic::ArrayIndexOf => "Array",
-            Intrinsic::ArraySlice => "Array",
-            Intrinsic::ArrayToVector => "Array",
-            Intrinsic::VectorOf => "Vector",
-            Intrinsic::VectorPop => "Vector",
-            Intrinsic::VectorRemove => "Vector",
-            Intrinsic::VectorGet => "Vector",
             Intrinsic::VectorContains => "Vector",
             Intrinsic::VectorIndexOf => "Vector",
-            Intrinsic::VectorSlice => "Vector",
-            Intrinsic::VectorLength => "Vector",
-            Intrinsic::VectorToArray => "Vector",
             Intrinsic::SetOf => "Set",
-            Intrinsic::SetLength => "Set",
             Intrinsic::SetContains => "Set",
             Intrinsic::SetToArray => "Set",
             Intrinsic::SetInserted => "Set",
@@ -226,7 +182,6 @@ impl Intrinsic {
             Intrinsic::MapOf => "Map",
             Intrinsic::MapGet => "Map",
             Intrinsic::MapContains => "Map",
-            Intrinsic::MapLength => "Map",
             Intrinsic::MapKeys => "Map",
             Intrinsic::MapValues => "Map",
             Intrinsic::MapInserted => "Map",
@@ -250,8 +205,6 @@ impl Intrinsic {
     /// The operation's own name: `split`, `push`, `toFloat`.
     pub const fn operation(self) -> &'static str {
         match self {
-            Intrinsic::StringText => "text",
-            Intrinsic::StringConcat => "concat",
             Intrinsic::StringInterpolate => "interpolate",
             Intrinsic::StringLength => "length",
             Intrinsic::StringWords => "words",
@@ -270,23 +223,11 @@ impl Intrinsic {
             Intrinsic::StringFromCodePoint => "fromCodePoint",
             Intrinsic::StringCodePointAtByte => "codePointAtByte",
             Intrinsic::StringSliceBytes => "sliceBytes",
-            Intrinsic::ArrayGet => "get",
-            Intrinsic::ArrayLength => "length",
             Intrinsic::ArrayContains => "contains",
             Intrinsic::ArrayIndexOf => "indexOf",
-            Intrinsic::ArraySlice => "slice",
-            Intrinsic::ArrayToVector => "toVector",
-            Intrinsic::VectorOf => "of",
-            Intrinsic::VectorPop => "pop",
-            Intrinsic::VectorRemove => "remove",
-            Intrinsic::VectorGet => "get",
             Intrinsic::VectorContains => "contains",
             Intrinsic::VectorIndexOf => "indexOf",
-            Intrinsic::VectorSlice => "slice",
-            Intrinsic::VectorLength => "length",
-            Intrinsic::VectorToArray => "toArray",
             Intrinsic::SetOf => "of",
-            Intrinsic::SetLength => "length",
             Intrinsic::SetContains => "contains",
             Intrinsic::SetToArray => "toArray",
             Intrinsic::SetInserted => "inserted",
@@ -294,7 +235,6 @@ impl Intrinsic {
             Intrinsic::MapOf => "of",
             Intrinsic::MapGet => "get",
             Intrinsic::MapContains => "contains",
-            Intrinsic::MapLength => "length",
             Intrinsic::MapKeys => "keys",
             Intrinsic::MapValues => "values",
             Intrinsic::MapInserted => "inserted",
@@ -336,8 +276,8 @@ impl Intrinsic {
     /// Assigned by reading the VM arm each intrinsic dispatches to in
     /// `cove-runtime`'s `vm::builtins`, not by a rule applied to every
     /// member of a family — two operations of the same receiver may answer
-    /// differently, the way [`Intrinsic::VectorGet`] does not write memory
-    /// and [`Intrinsic::VectorPop`] does.
+    /// differently, the way [`Intrinsic::StringContains`] allocates nothing
+    /// and [`Intrinsic::StringSlice`] does.
     pub const fn effects(self) -> Effects {
         use Effects as E;
         // Every arm below validates its own operand count and shape before
@@ -355,7 +295,7 @@ impl Intrinsic {
             // Rendering walks whatever value it was handed, which may be a
             // collection nested arbitrarily deep, and answers a freshly
             // allocated `String`.
-            Intrinsic::StringText | Intrinsic::StringConcat | Intrinsic::StringInterpolate => raise
+            Intrinsic::StringInterpolate => raise
                 .union(E::MAY_ALLOCATE)
                 .union(E::MAY_COLLECT)
                 .union(E::READS_MEMORY)
@@ -402,59 +342,24 @@ impl Intrinsic {
             // with.
             Intrinsic::StringFromCodePoint => raise.union(E::MAY_ALLOCATE).union(E::MAY_COLLECT),
 
-            // A read of one element or the header's length, at whatever
-            // stride the element layout says: constant work, no write.
-            Intrinsic::ArrayGet | Intrinsic::ArrayLength => raise.union(E::READS_MEMORY),
             // A linear search over the elements.
             Intrinsic::ArrayContains | Intrinsic::ArrayIndexOf => {
                 raise.union(E::READS_MEMORY).union(E::BULK_WORK)
             }
-            // `slice` and `toVector` copy a run of elements into a freshly
-            // allocated object.
-            Intrinsic::ArraySlice | Intrinsic::ArrayToVector => raise
-                .union(E::READS_MEMORY)
-                .union(E::BULK_WORK)
-                .union(E::MAY_ALLOCATE)
-                .union(E::MAY_COLLECT),
-
-            // `Vector.of` has no receiver to read; it allocates the header
-            // and the store and writes every operand into the store, one
-            // pass over the argument list.
-            Intrinsic::VectorOf => raise
-                .union(E::MAY_ALLOCATE)
-                .union(E::MAY_COLLECT)
-                .union(E::BULK_WORK),
-            // `push` is not here: it is `std.vector.push` over the core
-            // intrinsic that is a word `Inst::GrowablePush`.
-            // `pop` and `get` touch exactly one element's words and never
-            // allocate; `remove` additionally shifts every element past the
-            // one it takes out, which is what makes it the one of the three
-            // that is proportional to the vector. `set` was the fourth, and is
-            // `std.vector.set` over an element load and store now.
-            Intrinsic::VectorPop => raise.union(E::READS_MEMORY).union(E::WRITES_MEMORY),
-            Intrinsic::VectorRemove => raise
-                .union(E::READS_MEMORY)
-                .union(E::WRITES_MEMORY)
-                .union(E::BULK_WORK),
-            Intrinsic::VectorGet | Intrinsic::VectorLength => raise.union(E::READS_MEMORY),
+            // `slice` and `toVector` are not here: each is `std.array` over a
+            // run slice or a run copy now.
             Intrinsic::VectorContains | Intrinsic::VectorIndexOf => {
                 raise.union(E::READS_MEMORY).union(E::BULK_WORK)
             }
-            Intrinsic::VectorSlice | Intrinsic::VectorToArray => raise
-                .union(E::READS_MEMORY)
-                .union(E::BULK_WORK)
-                .union(E::MAY_ALLOCATE)
-                .union(E::MAY_COLLECT),
-            // `push`, `set` and `freeze` are not here: each is `std.vector`
-            // over run instructions now.
+            // `push`, `set`, `pop`, `remove`, `freeze`, `slice` and `toArray` are
+            // not here: each is `std.vector` over run instructions now.
 
             // A `Set` or a `Map` is immutable, so every update below
             // allocates a new run rather than writing through the receiver
-            // — none of this family ever carries `WRITES_MEMORY`. `length`
-            // and the two membership tests are a binary search or a header
-            // read, neither proportional to the collection; everything
-            // else opens or copies a run proportional to it.
-            Intrinsic::SetLength | Intrinsic::MapLength => raise.union(E::READS_MEMORY),
+            // — none of this family ever carries `WRITES_MEMORY`. The
+            // membership tests and `get` are a binary search, not
+            // proportional to the collection; everything else opens or
+            // copies a run proportional to it.
             Intrinsic::SetContains | Intrinsic::MapContains | Intrinsic::MapGet => {
                 raise.union(E::READS_MEMORY)
             }
@@ -612,7 +517,7 @@ mod tests {
     /// variant left out, or one written down twice. Counting catches the
     /// first without repeating the ninety-line list a second time, and a
     /// duplicate is caught by comparing every pair — `Intrinsic` has no
-    /// `Ord`, so a `BTreeSet` is not the cheap way to ask, and sixty-some
+    /// `Ord`, so a `BTreeSet` is not the cheap way to ask, and fifty-some
     /// items is nowhere near where that would matter.
     #[test]
     fn all_names_every_variant_once() {
@@ -621,9 +526,7 @@ mod tests {
         // match has to name every one of them.
         fn count(intrinsic: Intrinsic) -> usize {
             match intrinsic {
-                Intrinsic::StringText
-                | Intrinsic::StringConcat
-                | Intrinsic::StringInterpolate
+                Intrinsic::StringInterpolate
                 | Intrinsic::StringLength
                 | Intrinsic::StringWords
                 | Intrinsic::StringChars
@@ -641,23 +544,11 @@ mod tests {
                 | Intrinsic::StringFromCodePoint
                 | Intrinsic::StringCodePointAtByte
                 | Intrinsic::StringSliceBytes
-                | Intrinsic::ArrayGet
-                | Intrinsic::ArrayLength
                 | Intrinsic::ArrayContains
                 | Intrinsic::ArrayIndexOf
-                | Intrinsic::ArraySlice
-                | Intrinsic::ArrayToVector
-                | Intrinsic::VectorOf
-                | Intrinsic::VectorPop
-                | Intrinsic::VectorRemove
-                | Intrinsic::VectorGet
                 | Intrinsic::VectorContains
                 | Intrinsic::VectorIndexOf
-                | Intrinsic::VectorSlice
-                | Intrinsic::VectorLength
-                | Intrinsic::VectorToArray
                 | Intrinsic::SetOf
-                | Intrinsic::SetLength
                 | Intrinsic::SetContains
                 | Intrinsic::SetToArray
                 | Intrinsic::SetInserted
@@ -665,7 +556,6 @@ mod tests {
                 | Intrinsic::MapOf
                 | Intrinsic::MapGet
                 | Intrinsic::MapContains
-                | Intrinsic::MapLength
                 | Intrinsic::MapKeys
                 | Intrinsic::MapValues
                 | Intrinsic::MapInserted
@@ -715,7 +605,7 @@ mod tests {
 
     #[test]
     fn display_prints_receiver_dot_operation() {
-        assert_eq!(Intrinsic::VectorPop.to_string(), "Vector.pop");
+        assert_eq!(Intrinsic::VectorContains.to_string(), "Vector.contains");
         assert_eq!(Intrinsic::AnyEquals.to_string(), "Any.equals");
     }
 

@@ -268,10 +268,12 @@ const STORE_ELEM: u8 = Op::StoreElem.number();
 const RUN_LOAD_BYTES: u8 = Op::RunLoadBytes.number();
 const RUN_COPY_BYTES: u8 = Op::RunCopyBytes.number();
 const RUN_COPY_WORDS: u8 = Op::RunCopyWords.number();
+const RUN_SLICE_WORDS: u8 = Op::RunSliceWords.number();
 const GROWABLE_ALLOC_BYTES: u8 = Op::GrowableAllocBytes.number();
 const GROWABLE_PUSH_BYTE: u8 = Op::GrowablePushByte.number();
 const GROWABLE_PUSH_WORDS: u8 = Op::GrowablePushWords.number();
 const GROWABLE_EXTEND_BYTES: u8 = Op::GrowableExtendBytes.number();
+const GROWABLE_TRUNCATE_WORDS: u8 = Op::GrowableTruncateWords.number();
 const RUN_FINISH_BYTES: u8 = Op::RunFinishBytes.number();
 const RUN_FINISH_WORDS: u8 = Op::RunFinishWords.number();
 const LEN: u8 = Op::Len.number();
@@ -343,10 +345,12 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::RunLoadBytes
         | Op::RunCopyBytes
         | Op::RunCopyWords
+        | Op::RunSliceWords
         | Op::GrowableAllocBytes
         | Op::GrowablePushByte
         | Op::GrowablePushWords
         | Op::GrowableExtendBytes
+        | Op::GrowableTruncateWords
         | Op::RunFinishBytes
         | Op::RunFinishWords
         | Op::LoadField
@@ -864,6 +868,122 @@ pub(super) fn run_copy_words(
             words
         },
     )
+}
+
+/// [`Inst::RunSlice`] over [`cove_ir::Storage::Words`]: a fresh fixed run of
+/// `count` elements of `elem`, copied out of `src` from `from`, written into
+/// `dst`.
+///
+/// Out of line, and never inlined into the dispatch loop, for
+/// [`run_copy_bytes`]' reason — and for the one #378 measured on
+/// `Machine::finish_words`, whose inlining into its rare arm cost the loop
+/// around every other arm 15%.
+///
+/// # What is checked
+///
+/// Everything before the allocation, so a refused slice allocates nothing: the
+/// source is not null, the count is not negative, the source is a
+/// [`Shape::Elements`] of exactly `elem` — an `Array` or a `Vector`'s store —
+/// and `from .. from + count` is inside its header length. That length is a
+/// store's capacity rather than a vector's length, which is why every caller
+/// clamps into the logical length first; each refusal here is a broken
+/// invariant of the lowering, in `runCopy`'s sentences with this instruction's
+/// name.
+///
+/// # Why the answer is written last
+///
+/// The fresh run is held as a temporary root while [`in_chunks`] fills it, and
+/// written into `dst` only when it is whole. Until then `src` is still named by
+/// the frame even where `dst` is the same slot, so a collection at a chunk's
+/// poll finds both — and a run stopped part way through leaves `dst` as it
+/// was rather than holding a run that is part zeroes. The copy is `run_copy_words`'
+/// chunks, charge and polls exactly: one chunk is a whole number of elements.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_slice_words(
+    machine: &mut Machine<'_>,
+    program: &Program,
+    budget: &Meter,
+    base: u64,
+    args: &[cove_ir::Arg],
+    elem: LayoutId,
+    id: FunctionId,
+    pc: usize,
+) -> Result<(), RuntimeError> {
+    let refuse = |machine: &Machine<'_>, error: RuntimeError| error.at(machine.span(id, pc));
+    let target = args[0].layout;
+    let src = machine.mem.slot(base, args[1].slot);
+    let from = machine.mem.slot(base, args[2].slot) as i64;
+    let count = machine.mem.slot(base, args[3].slot) as i64;
+    if src == 0 {
+        return Err(refuse(machine, null_object()));
+    }
+    if count < 0 {
+        return Err(refuse(
+            machine,
+            RuntimeError::new(format!(
+                "`runSlice`'s count is `{count}`, and a copy cannot have a negative length"
+            )),
+        ));
+    }
+    let is_run = matches!(
+        program.layout(machine.mem.object_layout(src)).shape,
+        Shape::Elements { elem: held, .. } if held == elem
+    );
+    if !is_run {
+        return Err(refuse(
+            machine,
+            RuntimeError::new(format!(
+                "`runSlice`'s source is not a run of `{}` elements",
+                program.layout(elem).name
+            )),
+        ));
+    }
+    let len = machine.mem.object_len(src) as i64;
+    if from < 0 || from.checked_add(count).is_none_or(|end| end > len) {
+        return Err(refuse(
+            machine,
+            RuntimeError::new(format!(
+                "`runSlice` reads {count} element(s) from {from} of a source of {len}"
+            )),
+        ));
+    }
+    let fresh = machine
+        .allocate(target, count)
+        .map_err(|error| refuse(machine, error))?;
+    let stride = u64::from(machine.width(elem));
+    if stride > 0 && count > 0 {
+        let mark = machine.temps();
+        machine.push_temp(fresh);
+        // Whole elements a piece, as `run_copy_words` takes them.
+        let chunk = (BULK_CHUNK_WORDS / stride).max(1);
+        let copied = in_chunks(
+            machine,
+            budget,
+            id,
+            pc,
+            count as u64,
+            chunk,
+            false,
+            |machine, offset, take| {
+                // Every product fits a `u32`: both runs' payloads, `len *
+                // stride` words, were sized as a `u32` when they were allocated.
+                let words = take * stride;
+                let to = offset * stride;
+                let at = (from as u64 + offset) * stride;
+                machine.mem.copy_words(
+                    machine.mem.payload_addr(fresh, to as u32),
+                    machine.mem.payload_addr(src, at as u32),
+                    words as u32,
+                );
+                words
+            },
+        );
+        machine.release_temps(mark);
+        copied?;
+    }
+    machine.mem.set_slot(base, args[0].slot, fresh);
+    Ok(())
 }
 
 /// A byte [`Inst::GrowableExtend`], checked, grown once and copied in bounded chunks.
@@ -1765,6 +1885,16 @@ pub(super) fn dispatch<'s, 'a>(
                 let elem = LayoutId(held.hi());
                 run_copy_words(machine, program, budget, base, args, elem, id, pc - 1)?;
             }
+            // ADR 0058's exact construction: an allocation and the word copy
+            // that fills it, as one arm and one call, for `RUN_COPY_BYTES`'
+            // reason. `dst`, `src`, `from` and `count` are the row; the element
+            // layout is the high half and the answer's layout the row's `dst`.
+            RUN_SLICE_WORDS => {
+                machine.sync(pc - 1);
+                let args = program.arg_list(ArgsId(held.lo()));
+                let elem = LayoutId(held.hi());
+                run_slice_words(machine, program, budget, base, args, elem, id, pc - 1)?;
+            }
             // ADR 0058's growable family over bytes, and its finish — ADR 0052's
             // four. Each arm is a read of its operands and one call,
             // for `RUN_COPY_BYTES`' reason: the checks, the capacity arithmetic and
@@ -1802,6 +1932,17 @@ pub(super) fn dispatch<'s, 'a>(
                 let elem = LayoutId(held.lo());
                 machine.sync(pc - 1);
                 if let Err(error) = machine.push_words(owner, elem, base + held.b() as u64) {
+                    fail!(error);
+                }
+            }
+            // `Vector.pop` and `Vector.remove`'s last step since ADR 0058: the
+            // length lowered and the vacated element cleared, as one call.
+            GROWABLE_TRUNCATE_WORDS => {
+                let owner = machine.mem.word_at(base_at + (a!() as usize));
+                let len = machine.mem.word_at(base_at + (b!() as usize)) as i64;
+                let elem = LayoutId(held.lo());
+                machine.sync(pc - 1);
+                if let Err(error) = machine.truncate_words(owner, elem, len) {
                     fail!(error);
                 }
             }
@@ -3318,6 +3459,209 @@ mod tests {
         }
     }
 
+    // --- ADR 0058: the run slice --------------------------------------------
+
+    /// `slice_words(src, from, count) -> target`: one word `run-slice` of `elem`
+    /// out of a run of `source`, answering a fresh `target`.
+    fn word_slicer(
+        build: &mut Build,
+        source: LayoutId,
+        target: LayoutId,
+        elem: LayoutId,
+    ) -> FunctionId {
+        let int = build.scalar(Repr::Int);
+        let args = build.args(&[(3, target), (0, source), (1, int), (2, int)]);
+        build.function(
+            "slice_words",
+            &[source, int, int],
+            &[Repr::Ref, Repr::Int, Repr::Int, Repr::Ref],
+            target,
+            vec![
+                Inst::RunSlice {
+                    args,
+                    storage: Storage::Words(elem),
+                },
+                Inst::Return { src: 3 },
+            ],
+        )
+    }
+
+    /// **A word slice answers a fresh array of whole elements, from an array or
+    /// from a vector's store, charged for the words it moves.**
+    ///
+    /// Two-word `Point`s, so an offset counted in words would land mid-element;
+    /// every case is Rust's own slice of the same words, the empty ones included,
+    /// and the source is held to what it was.
+    #[test]
+    fn a_word_slice_answers_a_fresh_array_of_whole_elements() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let point = build.structure("Point", &[("x", int), ("y", int)]);
+        let points = build.layout(
+            "Array<Point>",
+            Shape::Elements {
+                elem: point,
+                growable: false,
+            },
+        );
+        let store = build.layout(
+            "Store<Point>",
+            Shape::Elements {
+                elem: point,
+                growable: true,
+            },
+        );
+        let from_array = word_slicer(&mut build, points, points, point);
+        let from_store = word_slicer(&mut build, store, points, point);
+        let program = build.done();
+
+        const SRC: u32 = 10;
+        let source: Vec<u64> = (0..u64::from(SRC) * 2).map(|n| 100 + n).collect();
+        for (family, entry) in [(points, from_array), (store, from_store)] {
+            for (from, count) in [(0u32, 10u32), (3, 5), (9, 1), (0, 0), (10, 0)] {
+                let mut machine = Machine::new(&program, 1 << 16);
+                let src = machine.allocate(family, i64::from(SRC)).unwrap();
+                machine.set_payload_run(src, 0, &source);
+                let answer = machine
+                    .run(entry, &[src, u64::from(from), u64::from(count)], &budget())
+                    .expect("a slice within its bounds answers")[0];
+                assert_ne!(answer, src, "a fresh run, not the source");
+                assert_eq!(machine.object_layout(answer), points);
+                assert_eq!(machine.object_len(answer), count);
+                assert_eq!(
+                    machine.payload_run(answer, 0, count * 2),
+                    source[(from * 2) as usize..((from + count) * 2) as usize].to_vec(),
+                    "from={from} count={count}"
+                );
+                assert_eq!(machine.payload_run(src, 0, SRC * 2), source);
+                assert!(machine.work() >= u64::from(count) * 2);
+            }
+        }
+    }
+
+    /// **Every refusal is made before anything is allocated, and the answer's
+    /// slot is left as it was.**
+    ///
+    /// None is reachable from a checked program — the standard library clamps
+    /// into the length first — so each is a broken invariant, reported in
+    /// `runCopy`'s sentences with this instruction's name.
+    #[test]
+    fn a_word_slice_refuses_a_range_outside_its_source() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let point = build.structure("Point", &[("x", int), ("y", int)]);
+        let points = build.layout(
+            "Array<Point>",
+            Shape::Elements {
+                elem: point,
+                growable: false,
+            },
+        );
+        let ints = build.layout(
+            "Array<Int>",
+            Shape::Elements {
+                elem: int,
+                growable: false,
+            },
+        );
+        let entry = word_slicer(&mut build, points, points, point);
+        let program = build.done();
+        for (what, family, from, count, message) in [
+            (
+                "one element past the source",
+                Some(points),
+                1i64,
+                4i64,
+                "`runSlice` reads 4 element(s) from 1 of a source of 4",
+            ),
+            (
+                "a negative offset",
+                Some(points),
+                -1,
+                1,
+                "`runSlice` reads 1 element(s) from -1 of a source of 4",
+            ),
+            (
+                "a negative count",
+                Some(points),
+                0,
+                -1,
+                "`runSlice`'s count is `-1`, and a copy cannot have a negative length",
+            ),
+            (
+                "another family",
+                Some(ints),
+                0,
+                1,
+                "`runSlice`'s source is not a run of `Point` elements",
+            ),
+            ("a null source", None, 0, 1, null_object().message.as_str()),
+        ] {
+            let mut machine = Machine::new(&program, 1 << 16);
+            let src = match family {
+                Some(family) => machine.allocate(family, 4).unwrap(),
+                None => 0,
+            };
+            let before = machine.allocations();
+            let error = machine
+                .run(entry, &[src, from as u64, count as u64], &budget())
+                .expect_err(what);
+            assert_eq!(error.message, message, "{what}");
+            assert!(error.span.is_some(), "{what}: at the instruction");
+            assert_eq!(machine.allocations(), before, "{what}: nothing allocated");
+        }
+    }
+
+    /// **The source of a slice survives the collection its own allocation
+    /// makes, and so do the references it copies.**
+    ///
+    /// The heap is full of garbage when the slice allocates, so the allocation
+    /// collects with the source named only by the frame; every string in the
+    /// answer must still be the string it was.
+    #[test]
+    fn a_word_slice_holds_its_source_across_the_collection_it_makes() {
+        const COUNT: i64 = 10;
+        let mut build = Build::default();
+        let text = build.string_layout();
+        let strings = build.layout(
+            "Array<String>",
+            Shape::Elements {
+                elem: text,
+                growable: false,
+            },
+        );
+        let entry = word_slicer(&mut build, strings, strings, text);
+        let program = build.done();
+
+        let mut machine = Machine::new(&program, 600);
+        let src = machine.allocate(strings, COUNT).unwrap();
+        machine.push_temp(src);
+        for at in 0..COUNT {
+            let word = machine.new_string(&format!("string {at}")).unwrap();
+            machine.set_payload(src, at as u32, word);
+        }
+        while machine.heap_words() + 4 <= 600 {
+            machine.new_string("dead").unwrap();
+        }
+        machine.release_temps(0);
+        let before = machine.collected().collections;
+        let answer = machine
+            .run(entry, &[src, 2, (COUNT - 2) as u64], &budget())
+            .expect("the slice answers")[0];
+        assert!(
+            machine.collected().collections > before,
+            "the fixture did not force a collection"
+        );
+        for at in 0..COUNT - 2 {
+            let word = machine.payload(answer, at as u32);
+            assert_eq!(
+                machine.string_bytes(word),
+                format!("string {}", at + 2).into_bytes(),
+                "element {at} kept its text"
+            );
+        }
+    }
+
     // --- ADR 0052: the byte-buffer instructions ----------------------------
 
     /// A program with every function ADR 0052's tests share, so each test
@@ -4382,6 +4726,97 @@ mod tests {
                     );
                     assert_eq!(words, want);
                 }
+            }
+        }
+
+        /// **A word slice from compiled code answers the VM's fresh array, from an
+        /// array and from a store, across chunk edges — and refuses what the VM
+        /// refuses, in its words.**
+        #[test]
+        fn a_compiled_word_slice_agrees_with_the_vm() {
+            let mut build = Build::default();
+            let int = build.scalar(Repr::Int);
+            let triple = build.structure("Triple", &[("a", int), ("b", int), ("c", int)]);
+            let array = build.layout(
+                "Array<Triple>",
+                Shape::Elements {
+                    elem: triple,
+                    growable: false,
+                },
+            );
+            let store = build.layout(
+                "Store<Triple>",
+                Shape::Elements {
+                    elem: triple,
+                    growable: true,
+                },
+            );
+            let slicer = word_slicer(&mut build, store, array, triple);
+            let entry = through_a_call(&mut build, slicer, Repr::Ref);
+            let program = build.done();
+            let native = compiled(&program, slicer);
+
+            let chunk = BULK_CHUNK_WORDS / 3;
+            let elements = 3 * chunk + 5;
+            let pattern: Vec<u64> = (0..elements * 3).collect();
+            for family in [array, store] {
+                for (from, count) in [
+                    (0u64, elements),
+                    (chunk + 1, 2 * chunk),
+                    (1, elements - 1),
+                    (7, 1),
+                    (0, 0),
+                    (elements, 0),
+                    // Refused: one past the source, and a negative count.
+                    (1, elements),
+                    (0, u64::MAX),
+                ] {
+                    let prepare = |machine: &mut Machine<'_>| {
+                        let src = machine.allocate(family, elements as i64).unwrap();
+                        machine.set_payload_run(src, 0, &pattern);
+                        vec![src, from, count]
+                    };
+                    let inspect = |machine: &Machine<'_>, _: &[u64]| machine.allocations();
+                    let (said, _) = agree(
+                        &format!("{family:?}: {from} {count}"),
+                        &program,
+                        &native,
+                        entry,
+                        &prepare,
+                        &inspect,
+                    );
+                    let in_range = (count as i64) >= 0
+                        && from.checked_add(count).is_some_and(|end| end <= elements);
+                    match said {
+                        Ok(_) => assert!(in_range, "{from} {count} answered"),
+                        Err((message, ..)) => {
+                            assert!(!in_range, "{from} {count}: {message}");
+                            assert!(message.contains("runSlice"), "{message}");
+                        }
+                    }
+                }
+            }
+            // What the answer holds, read on each tier.
+            let prepare = |machine: &mut Machine<'_>| {
+                let src = machine.allocate(store, elements as i64).unwrap();
+                machine.set_payload_run(src, 0, &pattern);
+                vec![src, chunk + 1, 2 * chunk]
+            };
+            for tier in [None, Some(&native)] {
+                let mut machine = Machine::new(&program, 1 << 16);
+                if let Some(native) = tier {
+                    // Safety: `native` outlives this machine.
+                    unsafe { machine.install_native(native) };
+                }
+                let args = prepare(&mut machine);
+                let answer = machine.run(entry, &args, &budget()).expect("answers")[0];
+                assert_eq!(machine.object_layout(answer), array);
+                assert_eq!(
+                    machine.payload_run(answer, 0, (2 * chunk * 3) as u32),
+                    pattern[((chunk + 1) * 3) as usize..((3 * chunk + 1) * 3) as usize].to_vec(),
+                    "native: {}",
+                    tier.is_some()
+                );
             }
         }
 

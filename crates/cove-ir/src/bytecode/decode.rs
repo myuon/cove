@@ -266,6 +266,10 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             args: ArgsId(lo),
             storage: Storage::Words(LayoutId(hi)),
         },
+        Op::RunSliceWords => Inst::RunSlice {
+            args: ArgsId(lo),
+            storage: Storage::Words(LayoutId(hi)),
+        },
         Op::GrowableAllocBytes => Inst::GrowableAlloc {
             dst: a,
             capacity: b,
@@ -284,6 +288,11 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
         Op::GrowableExtendBytes => Inst::GrowableExtend {
             args: ArgsId(lo),
             storage: Storage::PackedBytes,
+        },
+        Op::GrowableTruncateWords => Inst::GrowableTruncate {
+            owner: a,
+            len: b,
+            storage: Storage::Words(LayoutId(lo)),
         },
         Op::RunFinishBytes => Inst::RunFinish {
             dst: a,

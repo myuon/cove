@@ -14,19 +14,21 @@
 //! So nothing downstream of this file learns that a public method moved. The
 //! verifier, both encoders and the native code generators see run instructions
 //! — a `len`, a word `growable-push`, a `load-elem` or `store-elem` of a store, a
-//! word `run-finish` — and never the name of the method above them; a function
-//! the standard library wraps around a single one of them is small enough that
-//! `super::inline` expands it where it is called.
+//! word `run-finish`, a word `run-slice`, a word `growable-truncate` — and never the
+//! name of the method above
+//! them; a function the standard library wraps around a single one of them is
+//! small enough that `super::inline` expands it where it is called.
 
 use cove_diag::Span;
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Arg, Expr};
 
 use super::frame::Val;
-use super::shapes::{self, VECTOR_STORE};
+use super::shapes::{self, VECTOR_LEN, VECTOR_STORE};
 use super::{Body, Dest};
-use crate::inst::{Inst, Slot, Storage, Validation};
+use crate::inst::{Inst, Len, Slot, Storage, Validation};
 use crate::layout::LayoutId;
+use crate::program::Arg as Operand;
 
 impl Body<'_> {
     /// `core.name(args)`, written in a standard-library module.
@@ -55,6 +57,22 @@ impl Body<'_> {
                 self.core_vector_store(expr, &items.value, &index.value, &value.value, want)
             }
             ("vectorFinish", [items]) => self.core_vector_finish(expr, &items.value, want),
+            ("arraySlice", [items, from, count]) => {
+                self.core_array_slice(expr, &items.value, &from.value, &count.value, want)
+            }
+            ("vectorSlice", [items, from, count]) => {
+                self.core_vector_slice(expr, &items.value, &from.value, &count.value, want)
+            }
+            ("arrayToVector", [items]) => self.core_array_to_vector(expr, &items.value, want),
+            ("vectorTruncate", [items, len]) => {
+                self.core_vector_truncate(expr, &items.value, &len.value, want)
+            }
+            ("vectorMove", [items, to, from, count]) => self.core_vector_move(
+                expr,
+                &items.value,
+                [&to.value, &from.value, &count.value],
+                want,
+            ),
             _ => self.gap(&format!("`core.{name}`"), expr),
         }
     }
@@ -245,6 +263,316 @@ impl Body<'_> {
         );
         self.release(owner, expr.span);
         dst
+    }
+
+    /// `core.vectorTruncate(items, len)`: the vector's length lowered to `len`,
+    /// and the elements above it cleared.
+    ///
+    /// One [`Inst::GrowableTruncate`] over [`Storage::Words`] of the element,
+    /// then the `()` the call answers, written where the surrounding form asked
+    /// for it as [`Body::core_vector_push`]'s is. `len` is the body's to have
+    /// computed from the length it read; a `len` above it is refused.
+    fn core_vector_truncate(
+        &mut self,
+        expr: &Expr,
+        items: &Expr,
+        len: &Expr,
+        want: Option<Dest>,
+    ) -> Val {
+        let Some(elem) = self.vector_element(items) else {
+            return self.dead(expr);
+        };
+        let owner = self.expr(items);
+        let to = self.expr(len);
+        self.emit(
+            Inst::GrowableTruncate {
+                owner: owner.slot,
+                len: to.slot,
+                storage: Storage::Words(elem),
+            },
+            expr.span,
+        );
+        self.release(to, expr.span);
+        self.release(owner, expr.span);
+        self.unit_answer(expr, want)
+    }
+
+    /// `core.vectorMove(items, to, from, count)`: `count` elements of the
+    /// vector's store moved from `from` to `to`, as memmove.
+    ///
+    /// [`Inst::LoadField`] of the store and one word [`Inst::RunCopy`] of the
+    /// store into itself, then the `()`. The bounds the copy checks are the
+    /// store's capacity, so this is a vector write only where the body has held
+    /// both ranges inside `items.length()` first — `std.vector.remove` moves
+    /// the tail above the index it takes out.
+    fn core_vector_move(
+        &mut self,
+        expr: &Expr,
+        items: &Expr,
+        [to, from, count]: [&Expr; 3],
+        want: Option<Dest>,
+    ) -> Val {
+        let Some(elem) = self.vector_element(items) else {
+            return self.dead(expr);
+        };
+        let owner = self.expr(items);
+        let at = self.expr(to);
+        let source = self.expr(from);
+        let many = self.expr(count);
+        let store = self.vector_store(owner.slot, expr.span);
+        let row = self.pool.args.intern(vec![
+            store.arg(),
+            at.arg(),
+            store.arg(),
+            source.arg(),
+            many.arg(),
+        ]);
+        self.emit(
+            Inst::RunCopy {
+                args: row,
+                storage: Storage::Words(elem),
+            },
+            expr.span,
+        );
+        self.release(store, expr.span);
+        self.release(many, expr.span);
+        self.release(source, expr.span);
+        self.release(at, expr.span);
+        self.release(owner, expr.span);
+        self.unit_answer(expr, want)
+    }
+
+    /// One word [`Inst::RunSlice`]: `dst` becomes a fresh `target` run holding
+    /// `count` elements of `elem` copied out of `src` from `from`.
+    ///
+    /// The one place a lowering builds the instruction's row, so the order —
+    /// `dst`, `src`, `from`, `count` — and the rule that `dst`'s layout is the
+    /// answer's are written once. Every caller has already decided the range:
+    /// the bounds the machine checks are the source's header length, which for
+    /// a vector's store is its capacity.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn run_slice_words(
+        &mut self,
+        dst: Slot,
+        target: LayoutId,
+        elem: LayoutId,
+        src: &Val,
+        from: &Val,
+        count: &Val,
+        span: Span,
+    ) {
+        let row = self.pool.args.intern(vec![
+            Operand {
+                slot: dst,
+                layout: target,
+            },
+            src.arg(),
+            from.arg(),
+            count.arg(),
+        ]);
+        self.emit(
+            Inst::RunSlice {
+                args: row,
+                storage: Storage::Words(elem),
+            },
+            span,
+        );
+    }
+
+    /// The element `Ty` of the `Array<T>` `items` is, and the layouts of the
+    /// array and of the element.
+    fn array_element(&mut self, items: &Expr) -> Option<(Ty, LayoutId, LayoutId)> {
+        let ty = self.settled_ty(items)?;
+        let Ty::Array(elem) = &ty else {
+            self.errors.push(super::gap::gap(
+                "an array core intrinsic over something that is not an `Array`",
+                items.span,
+            ));
+            return None;
+        };
+        let elem = (**elem).clone();
+        let array = self.layout(&ty, items.span)?;
+        let element = self.layout(&elem, items.span)?;
+        Some((elem, array, element))
+    }
+
+    /// `core.arraySlice(items, from, count)`: a fresh `Array` of the `count`
+    /// elements of `items` from `from`.
+    ///
+    /// One [`Inst::RunSlice`] whose source is the array itself and whose answer
+    /// is the array's own layout. `std.array.slice` has clamped the range into
+    /// the array before it asks, which is the policy this has none of.
+    fn core_array_slice(
+        &mut self,
+        expr: &Expr,
+        items: &Expr,
+        from: &Expr,
+        count: &Expr,
+        want: Option<Dest>,
+    ) -> Val {
+        let Some((_, array, elem)) = self.array_element(items) else {
+            return self.dead(expr);
+        };
+        let src = self.expr(items);
+        let at = self.expr(from);
+        let many = self.expr(count);
+        let dst = self.answer_at(want, array);
+        self.run_slice_words(dst.slot, array, elem, &src, &at, &many, expr.span);
+        self.release(many, expr.span);
+        self.release(at, expr.span);
+        self.release(src, expr.span);
+        dst
+    }
+
+    /// `core.vectorSlice(items, from, count)`: a fresh `Array` of the `count`
+    /// elements of the vector from `from`.
+    ///
+    /// [`Inst::LoadField`] of the store and one [`Inst::RunSlice`] out of it,
+    /// answering the `Array<T>` layout, which is declared here by asking for it.
+    /// Bounded, as [`Body::core_vector_load`] is, by the store's capacity: the
+    /// body that calls it — `std.vector.slice`, `std.vector.toArray` — holds the
+    /// range inside `items.length()` first.
+    fn core_vector_slice(
+        &mut self,
+        expr: &Expr,
+        items: &Expr,
+        from: &Expr,
+        count: &Expr,
+        want: Option<Dest>,
+    ) -> Val {
+        let Some(elem) = self.vector_element(items) else {
+            return self.dead(expr);
+        };
+        let Some(Ty::Vector(of)) = self.settled_ty(items) else {
+            return self.dead(expr);
+        };
+        let Some(target) = self.layout(&Ty::Array(of), expr.span) else {
+            return self.dead(expr);
+        };
+        let owner = self.expr(items);
+        let at = self.expr(from);
+        let many = self.expr(count);
+        let store = self.vector_store(owner.slot, expr.span);
+        let dst = self.answer_at(want, target);
+        self.run_slice_words(dst.slot, target, elem, &store, &at, &many, expr.span);
+        self.release(store, expr.span);
+        self.release(many, expr.span);
+        self.release(at, expr.span);
+        self.release(owner, expr.span);
+        dst
+    }
+
+    /// `core.arrayToVector(items)`: a fresh `Vector` over a copy of the array's
+    /// elements.
+    fn core_array_to_vector(&mut self, expr: &Expr, items: &Expr, want: Option<Dest>) -> Val {
+        let Some((elem, _, _)) = self.array_element(items) else {
+            return self.dead(expr);
+        };
+        let src = self.expr(items);
+        let answer = self.vector_of_elements(&src, &elem, want, expr.span);
+        self.release(src, expr.span);
+        match answer {
+            Some(dst) => dst,
+            None => self.dead(expr),
+        }
+    }
+
+    /// A fresh `Vector<elem>` whose store is a copy of the fixed run `src` —
+    /// `Array.toVector`, and the second half of a vector's `snapshot()`.
+    ///
+    /// The exact construction the runtime's `Array.toVector` made, in
+    /// instructions this lowering already has: the length, a store of exactly
+    /// that many elements, one [`Inst::RunCopy`] of whole elements into it, and
+    /// the two-word header [`Body::vector_of`] builds. No spare room is
+    /// allocated, so the allocations and the words they take are the builtin's.
+    /// It is not a word `growable-alloc` and `growable-extend`, which would
+    /// raise an empty or short store to the growable floor and so change what a
+    /// program allocates for nothing a `toVector` needs.
+    ///
+    /// The source is read by the copy **before** the header is written into the
+    /// answer, so an answer location that is the source's own is not read after
+    /// it is overwritten; and the store is held in a slot of its own across the
+    /// header's allocation, which may collect.
+    pub(super) fn vector_of_elements(
+        &mut self,
+        src: &Val,
+        elem: &Ty,
+        want: Option<Dest>,
+        span: Span,
+    ) -> Option<Val> {
+        let vector = self.layout(&Ty::Vector(Box::new(elem.clone())), span)?;
+        let element = self.layout(elem, span)?;
+        let store_layout = self.pool.shapes.store_of(element);
+        let len = self.temp(shapes::INT);
+        self.emit(
+            Inst::Len {
+                dst: len.slot,
+                obj: src.slot,
+            },
+            span,
+        );
+        let store = self.temp(shapes::REF);
+        self.emit(
+            Inst::Alloc {
+                dst: store.slot,
+                layout: store_layout,
+                len: Len::Slot(len.slot),
+            },
+            span,
+        );
+        let zero = self.temp(shapes::INT);
+        self.emit(
+            Inst::Int {
+                dst: zero.slot,
+                value: 0,
+            },
+            span,
+        );
+        let row = self.pool.args.intern(vec![
+            store.arg(),
+            zero.arg(),
+            src.arg(),
+            zero.arg(),
+            len.arg(),
+        ]);
+        self.emit(
+            Inst::RunCopy {
+                args: row,
+                storage: Storage::Words(element),
+            },
+            span,
+        );
+        self.give_back(zero.slot, zero.layout);
+        let dst = self.answer_at(want, vector);
+        self.emit(
+            Inst::Alloc {
+                dst: dst.slot,
+                layout: vector,
+                len: Len::Fixed,
+            },
+            span,
+        );
+        self.emit(
+            Inst::StoreField {
+                obj: dst.slot,
+                at: VECTOR_LEN,
+                src: len.slot,
+                layout: shapes::INT,
+            },
+            span,
+        );
+        self.emit(
+            Inst::StoreField {
+                obj: dst.slot,
+                at: VECTOR_STORE,
+                src: store.slot,
+                layout: shapes::REF,
+            },
+            span,
+        );
+        self.give_back(len.slot, len.layout);
+        self.release(store, span);
+        Some(dst)
     }
 
     /// `core.byteLength(text)`: the string object's header length, which is

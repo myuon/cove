@@ -470,6 +470,22 @@ fn both_arms_answer_the_same_thing() {
             &[outcome],
         );
     }
+    // And the run slice, which is the same helper writing the row's `dst`.
+    for (words, base) in [(vec![9u64, 2, 3, 77], 0), (vec![5, 5, 9, 2, 3, 77], 2)] {
+        agree_over("a word slice", &suite::run_slices(), &words, base, || {
+            Heap::new(1)
+        });
+    }
+    for outcome in [Outcome::Raised, Outcome::Stopped] {
+        agree_answering(
+            &format!("a run slice that answered {outcome:?}"),
+            &suite::run_slices(),
+            &[9, 2, 3, 77],
+            0,
+            || Heap::new(1),
+            &[outcome],
+        );
+    }
 
     agree_over(
         "a load-elem of a null reference",

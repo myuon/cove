@@ -9,6 +9,42 @@ export fn isEmpty<T>(items: Array<T>) -> Bool {
   items.length() == 0
 }
 
+/// The elements at indices `from` up to but not including `to`, as a new
+/// array.
+///
+/// Both bounds are clamped into `0..length()`, and a `to` at or below `from`
+/// answers an empty array, so no argument stops the program: a negative bound,
+/// a bound past the end and a reversed pair are each answered. That decision
+/// is this body's; the copy beneath it is a core intrinsic, ADR 0058's run
+/// slice, which is handed a range already inside the array.
+export fn slice<T>(items: Array<T>, from: Int, to: Int) -> Array<T> {
+  let length = items.length()
+  let start = if from < 0 {
+    0
+  } else if from > length {
+    length
+  } else {
+    from
+  }
+  let end = if to < start {
+    start
+  } else if to > length {
+    length
+  } else {
+    to
+  }
+  core.arraySlice(items, start, end - start)
+}
+
+/// A new vector holding a copy of these elements, with no spare room.
+///
+/// The elements are copied as they are rather than snapshotted, so the
+/// sequence is separated and nothing inside it is. The body is one core
+/// intrinsic: the store, the copy and the vector around them.
+export fn toVector<T>(items: Array<T>) -> Vector<T> {
+  core.arrayToVector(items)
+}
+
 /// The elements `keep` answers `true` for, in the order they were in.
 ///
 /// A loop and a `Vector` that is frozen at the end, which is what the walk

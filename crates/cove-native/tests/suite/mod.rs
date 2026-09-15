@@ -36,7 +36,7 @@ use cove_ir::{
     Arg, ArgsId, ArithOp, BuiltinId, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout,
     LayoutId, Len, Num, Program, RefMap, Repr, Slot, Storage, StrId, Table, TableId, Validation,
 };
-use cove_native::{Entry, GrowableOp, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
+use cove_native::{Entry, GrowableOp, NativeCtx, NativeHelpers, Opened, Outcome, Raise, RunOp};
 use cove_native::{HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS};
 
 // --- the safepoint helper -----------------------------------------------------
@@ -491,7 +491,8 @@ pub struct Copied {
     pub base: u64,
     pub pc: u32,
     pub args: u32,
-    pub words: u32,
+    /// Which [`cove_native::RunOp`] it was, as the integer the arm passed.
+    pub kind: u32,
     pub elem: u32,
     /// The unpaid work the caller published before handing over.
     pub work: u64,
@@ -519,7 +520,7 @@ unsafe extern "C" fn run_copy(
     base: u64,
     pc: u32,
     args: u32,
-    words: u32,
+    kind: u32,
     elem: u32,
 ) -> u32 {
     COPIED.with(|held| {
@@ -527,7 +528,7 @@ unsafe extern "C" fn run_copy(
             base,
             pc,
             args,
-            words,
+            kind,
             elem,
             work: (*ctx).pending_work,
         })
@@ -3019,7 +3020,7 @@ pub fn a_run_copy_is_handed_to_the_runtime_whole<A: Arm>() {
                 base: 0,
                 pc: 0,
                 args: 1,
-                words: 0,
+                kind: RunOp::CopyBytes.abi(),
                 elem: 0,
                 // The block is three instructions, charged at its entry, so the
                 // first hand-over carries all of it.
@@ -3029,7 +3030,7 @@ pub fn a_run_copy_is_handed_to_the_runtime_whole<A: Arm>() {
                 base: 0,
                 pc: 1,
                 args: 1,
-                words: 1,
+                kind: RunOp::CopyWords.abi(),
                 elem: PAIR.0,
                 work: 0,
             },
@@ -3128,6 +3129,203 @@ pub fn a_run_copy_is_admitted_with_five_one_word_operands<A: Arm>() {
     );
 }
 
+/// A word truncate — `Vector.pop` and `Vector.remove`'s last step — handed to
+/// the growable helper whole as [`GrowableOp::TruncateWords`], with the owner's
+/// slot and the length's, at its own pc; admitted over words with both slots in
+/// the frame, and refused at a slot the frame does not have or over bytes.
+pub fn a_word_truncate_is_handed_to_the_runtime_whole<A: Arm>() {
+    let one = |owner: u32, storage: Storage| {
+        program(function(
+            vec![Repr::Ref, Repr::Int],
+            INT,
+            vec![
+                Inst::GrowableTruncate {
+                    owner,
+                    len: 1,
+                    storage,
+                },
+                Inst::Return { src: 1 },
+            ],
+        ))
+    };
+    forget_built();
+    let heap = Heap::new(1);
+    let mut words = vec![7u64, 2];
+    let answer = run_over::<A>(&one(0, Storage::Words(PAIR)), &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(
+        built(),
+        vec![Built {
+            base: 0,
+            pc: 0,
+            op: GrowableOp::TruncateWords.abi(),
+            a: 0,
+            b: 1,
+            work: 2,
+        }]
+    );
+    assert_eq!(answer.returned[0], 2);
+    for outcome in [Outcome::Raised, Outcome::Stopped] {
+        forget_built();
+        built_answers(&[outcome]);
+        let mut words = vec![7u64, 2];
+        let answer = run_over::<A>(&one(0, Storage::Words(PAIR)), &mut words, 0, &heap);
+        assert_eq!(answer.outcome, outcome);
+        assert_eq!(answer.returned[0], UNWRITTEN);
+    }
+    assert!(compiles::<A>(&one(0, Storage::Words(INT))));
+    assert!(
+        !compiles::<A>(&one(9, Storage::Words(INT))),
+        "a slot the frame does not have"
+    );
+    assert!(
+        !compiles::<A>(&one(0, Storage::PackedBytes)),
+        "no byte member"
+    );
+}
+
+/// A run slice's four operands, as `ArgsId(1)`: `dst` in slot 3, `src` in 0,
+/// `from` in 1 and `count` in 2 — the destination last in the frame and first in
+/// the row, so an arm that confused the row's order with the frame's is caught.
+pub fn run_slice_row() -> Vec<Arg> {
+    vec![
+        Arg {
+            slot: 3,
+            layout: STORE,
+        },
+        Arg {
+            slot: 0,
+            layout: REF,
+        },
+        Arg {
+            slot: 1,
+            layout: INT,
+        },
+        Arg {
+            slot: 2,
+            layout: INT,
+        },
+    ]
+}
+
+/// One word run slice and a return of its destination, over [`run_slice_row`].
+pub fn run_slices() -> Program {
+    program_with_args(
+        function(
+            vec![Repr::Ref, Repr::Int, Repr::Int, Repr::Ref],
+            REF,
+            vec![
+                Inst::RunSlice {
+                    args: ArgsId(1),
+                    storage: Storage::Words(PAIR),
+                },
+                Inst::Return { src: 3 },
+            ],
+        ),
+        run_slice_row(),
+    )
+}
+
+/// ADR 0058's `run-slice`, handed to the runtime whole on the run-copy helper.
+///
+/// [`a_run_copy_is_handed_to_the_runtime_whole`]'s case for the slice: the row
+/// and the element reach the helper unchanged as [`RunOp::SliceWords`], at the
+/// instruction's own pc, with the unpaid work published — and the destination is
+/// read back out of the frame *after* the call, so the answer is whatever the
+/// helper left in the slot. The double writes nothing, so that is the word that
+/// was there; a real helper writes the fresh run, and an arm that had cached the
+/// slot across the call would answer the stale word either way, which is why the
+/// frame is given a word there to go stale.
+pub fn a_run_slice_is_handed_to_the_runtime_whole<A: Arm>() {
+    forget_copied();
+    let held = run_slices();
+    let heap = Heap::new(1);
+    let frame = [9u64, 2, 3, 77];
+    let mut words = frame.to_vec();
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(
+        copied(),
+        vec![Copied {
+            base: 0,
+            pc: 0,
+            args: 1,
+            kind: RunOp::SliceWords.abi(),
+            elem: PAIR.0,
+            work: 2,
+        }],
+        "the slice, with its storage"
+    );
+    assert_eq!(words, frame, "the double wrote nothing");
+    assert_eq!(
+        answer.returned[0], 77,
+        "the destination, read after the call"
+    );
+
+    // A refusal leaves with that outcome and answers nothing.
+    for outcome in [Outcome::Raised, Outcome::Stopped] {
+        forget_copied();
+        copied_answers(&[outcome]);
+        let mut words = frame.to_vec();
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, outcome);
+        assert_eq!(answer.returned[0], UNWRITTEN);
+    }
+}
+
+/// A run slice is admitted over words with four one-word operands the frame has,
+/// and refused otherwise.
+pub fn a_run_slice_is_admitted_with_four_one_word_operands<A: Arm>() {
+    let one = |storage: Storage, row: Vec<Arg>| {
+        program_with_args(
+            function(
+                vec![Repr::Ref, Repr::Int, Repr::Int, Repr::Ref],
+                REF,
+                vec![
+                    Inst::RunSlice {
+                        args: ArgsId(1),
+                        storage,
+                    },
+                    Inst::Return { src: 3 },
+                ],
+            ),
+            row,
+        )
+    };
+    for storage in [Storage::Words(INT), Storage::Words(PAIR)] {
+        assert!(
+            compiles::<A>(&one(storage, run_slice_row())),
+            "{storage:?} is admitted"
+        );
+        let mut short = run_slice_row();
+        short.pop();
+        assert!(
+            !compiles::<A>(&one(storage, short)),
+            "{storage:?}: three operands is not a `run-slice` row"
+        );
+        let mut past = run_slice_row();
+        past[0].slot = 9;
+        assert!(
+            !compiles::<A>(&one(storage, past)),
+            "{storage:?}: a destination at a slot the frame does not have"
+        );
+        let mut wide = run_slice_row();
+        wide[2].layout = PAIR;
+        assert!(
+            !compiles::<A>(&one(storage, wide)),
+            "{storage:?}: an operand that is two words"
+        );
+    }
+    assert!(
+        !compiles::<A>(&one(Storage::PackedBytes, run_slice_row())),
+        "no byte member"
+    );
+    assert!(
+        !compiles::<A>(&one(Storage::Words(LayoutId(9_999)), run_slice_row())),
+        "an element layout the program does not have"
+    );
+}
+
 /// A `call-builtin` of a name no arm lowers refuses the whole function.
 ///
 /// The name is the decision — see `subset::method_of` — so this is the one case
@@ -3165,7 +3363,11 @@ pub fn a_builtin_no_arm_lowers_refuses_the_function<A: Arm>() {
         INT,
         vec![Inst::Len { dst: 1, obj: 0 }, Inst::Return { src: 1 }],
     ))));
-    for (receiver, operation) in [("String", "length"), ("Array", "length"), ("Vector", "pop")] {
+    for (receiver, operation) in [
+        ("String", "length"),
+        ("Array", "contains"),
+        ("Vector", "contains"),
+    ] {
         assert!(
             !compiles::<A>(&one(receiver, operation)),
             "`{receiver}.{operation}` is not lowered, so the function is refused"

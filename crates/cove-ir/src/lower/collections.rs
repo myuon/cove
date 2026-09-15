@@ -21,9 +21,9 @@
 //! walk over it costs nothing extra; a `Set` and a `Map` are immutable for
 //! the same reason — `inserted` and `removed` answer new objects — so neither
 //! is copied either. A `Vector` can be pushed to from inside the body it is
-//! being walked by, so the loop takes a copy first — `Vector.toArray`, an
-//! allocation and one [`Inst::RunCopy`] of whole elements, which is the same
-//! copy `items_of` makes when it clones the elements out.
+//! being walked by, so the loop takes a copy first — `Vector.toArray`'s one
+//! [`Inst::RunSlice`] of whole elements, which is the same copy `items_of`
+//! makes when it clones the elements out.
 //!
 //! # A range yields what it was written to yield, and never traps doing it
 //!
@@ -54,7 +54,7 @@ use super::frame::Val;
 use super::gap;
 use super::shapes::{self, RANGE_END, RANGE_INCLUSIVE, RANGE_START, VECTOR_LEN, VECTOR_STORE};
 use super::{Body, Dest, Loop, PENDING};
-use crate::inst::{ArithOp, CmpOp, Compare, Inst, Len, Num, Pc, Slot, Storage};
+use crate::inst::{ArithOp, CmpOp, Compare, Inst, Len, Num, Pc, Slot};
 use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
 use crate::program::Builtin;
@@ -399,16 +399,14 @@ impl Body<'_> {
         }
     }
 
-    /// `items.push(x)`, `items.length()`, `items.get(i)`, `items.toArray()`.
+    /// `items.length()`, `items.get(i)`, and the walks.
     ///
     /// Reading a vector is ordinary instructions — the length is payload word
-    /// 0 and the elements are in the store payload word 1 names. `toArray`,
-    /// which builds an immutable copy, is ordinary instructions too since
-    /// [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
-    /// gave the IR a typed run copy: an allocation at the length and one
-    /// [`Inst::RunCopy`] of the store's elements — see
-    /// [`Body::vector_to_array`]. `push`, which replaces the store with a
-    /// larger one when the old one is full, still goes to the machine.
+    /// 0 and the elements are in the store payload word 1 names. `push`, `set`,
+    /// `freeze`, `slice` and `toArray` are not reached from here: each is a
+    /// `std.vector` function over core intrinsics since
+    /// [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md),
+    /// resolved by `Body::call_builtin_method` before this is asked.
     ///
     /// `isEmpty` used to answer here too, `length() == 0`. It is not reached
     /// from here any more: `Body::call_builtin_method` resolves it to a
@@ -474,15 +472,6 @@ impl Body<'_> {
                 };
                 self.release(items, expr.span);
                 self.walk_with(expr, snapshot, &elem, name, args)
-            }
-            ("toArray", 0) => {
-                let items = self.expr(base);
-                let Some(copy) = self.vector_to_array(&items, elem, want, expr.span) else {
-                    self.release(items, expr.span);
-                    return self.dead(expr);
-                };
-                self.release(items, expr.span);
-                copy
             }
             _ if HANDED_OVER.contains(&("Vector", name)) => {
                 self.machine_call(expr, Some(base), "Vector", name, args, want)
@@ -746,25 +735,22 @@ impl Body<'_> {
         self.vector_to_array(vector, elem, None, span)
     }
 
-    /// `Vector.toArray`, written into `want` where the surrounding form
-    /// asked for one: an `Array` allocated at the vector's length, and one
-    /// [`Inst::RunCopy`] of whole elements out of the vector's store.
+    /// A copy of a vector's live elements as an `Array`, written into `want`
+    /// where the surrounding form asked for one: one word [`Inst::RunSlice`] of
+    /// the vector's store from nought for its length.
     ///
     /// [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
-    /// names this conversion as one of the copies `run-copy` is beneath, and
-    /// it is the first to lower to it: every part of it is an instruction
-    /// this lowering already had except the copy. The length and the store
-    /// are the two words [`Body::vector_parts`] reads, the destination is the
-    /// same [`Inst::Alloc`] an array literal makes, and nothing about it needs
-    /// the runtime to find a family by searching the layout table, build an
-    /// operand array or hold the elements in a Rust buffer between reading
-    /// them and allocating the answer.
+    /// names this conversion as one of the copies `run-copy` is beneath. It was
+    /// an [`Inst::Alloc`] at the length and a [`Inst::RunCopy`] into it, and is
+    /// the run slice that pair is now one instruction of. `Vector.toArray`
+    /// itself is `std.vector.toArray`, the same slice through
+    /// `core.vectorSlice`; this is the lowering's own copy, for the `for` above.
     ///
-    /// The store is read *before* the allocation and held in a reference
-    /// location of its own, so a collection the allocation triggers finds it
-    /// through the frame as well as through the vector; and the length is the
-    /// length at that moment, which is the snapshot `items_of` takes. Nothing
-    /// between the read and the copy runs Cove code that could push.
+    /// The store is read into a reference location of its own, so a collection
+    /// the slice's allocation triggers finds it through the frame as well as
+    /// through the vector; and the length is the length at that moment, which
+    /// is the snapshot `items_of` takes. Nothing between the read and the copy
+    /// runs Cove code that could push.
     fn vector_to_array(
         &mut self,
         vector: &Val,
@@ -776,15 +762,6 @@ impl Body<'_> {
         let layout = self.layout(&array, span)?;
         let element = self.layout(elem, span)?;
         let (len, store) = self.vector_parts(vector.slot, span);
-        let dst = self.answer_at(want, layout);
-        self.emit(
-            Inst::Alloc {
-                dst: dst.slot,
-                layout,
-                len: Len::Slot(len.slot),
-            },
-            span,
-        );
         let zero = self.temp(shapes::INT);
         self.emit(
             Inst::Int {
@@ -793,20 +770,8 @@ impl Body<'_> {
             },
             span,
         );
-        let row = self.pool.args.intern(vec![
-            dst.arg(),
-            zero.arg(),
-            store.arg(),
-            zero.arg(),
-            len.arg(),
-        ]);
-        self.emit(
-            Inst::RunCopy {
-                args: row,
-                storage: Storage::Words(element),
-            },
-            span,
-        );
+        let dst = self.answer_at(want, layout);
+        self.run_slice_words(dst.slot, layout, element, &store, &zero, &len, span);
         self.give_back(zero.slot, zero.layout);
         self.give_back(len.slot, len.layout);
         self.release(store, span);
@@ -1297,8 +1262,10 @@ impl Body<'_> {
 /// instruction set.
 ///
 /// Each of them either builds an object whose family only the layout table
-/// knows — `slice`, `toVector`, `toArray` — or walks the elements with the
-/// language's own equality, which is not something an instruction expresses.
+/// knows — a `Set`'s `toArray`, the keyed updates — or walks the elements
+/// with the language's own equality, which is not something an instruction
+/// expresses. A sequence's `slice`, `toVector` and `toArray` were the first
+/// kind and are `std.array`/`std.vector` over a run slice now.
 /// `map` and `sorted` are not here and never will be: a builtin that invoked
 /// their closure would re-enter the dispatch loop from inside a Rust
 /// function, which is the one thing `docs/LINEAR_VM.md` asks this backend
@@ -1320,13 +1287,8 @@ impl Body<'_> {
 const HANDED_OVER: &[(&str, &str)] = &[
     ("Array", "contains"),
     ("Array", "indexOf"),
-    ("Array", "slice"),
-    ("Array", "toVector"),
-    ("Vector", "pop"),
-    ("Vector", "remove"),
     ("Vector", "contains"),
     ("Vector", "indexOf"),
-    ("Vector", "slice"),
     ("Set", "contains"),
     ("Set", "inserted"),
     ("Set", "removed"),

@@ -672,7 +672,7 @@ unsafe extern "C" fn no_run_copy(
     _base: u64,
     _pc: u32,
     _args: u32,
-    _words: u32,
+    _kind: u32,
     _elem: u32,
 ) -> u32 {
     cove_native::Outcome::Raised.abi()

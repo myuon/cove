@@ -202,6 +202,36 @@ pub(crate) fn growable_commit(machine: &mut Machine<'_>, run: &mut Growable, cou
     run.len = len as u32;
 }
 
+/// Lowers `run`'s logical length to `len` and clears the units it vacates:
+/// [`growable_commit`]'s inverse, beneath `Vector.pop` and `Vector.remove`.
+///
+/// The units in `[len, run.len)` are zeroed **before** the length word is
+/// written. A store's shape says its whole capacity is elements and the
+/// collector traces it that way, so a vacated unit that still held a reference
+/// would be a root for whatever it named. The store is kept, and so is its
+/// capacity.
+///
+/// Only a word run has a truncate: `crate::verify` admits no byte member.
+/// `len` is at most the length, which the one caller checks and refuses.
+pub(crate) fn growable_truncate(machine: &mut Machine<'_>, run: &mut Growable, len: u32) {
+    debug_assert!(
+        len <= run.len,
+        "a truncate of {} to {len} raises it",
+        run.len
+    );
+    let Storage::Words(elem) = run.storage else {
+        unreachable!("a byte run has no truncate, and `cove_ir::verify` refuses one")
+    };
+    let stride = machine.width(elem);
+    let vacated = (run.len - len) * stride;
+    let from = machine.mem.payload_addr(run.store, len * stride);
+    machine.mem.clear_words(from, vacated);
+    machine
+        .mem
+        .set_payload(run.owner, GROWABLE_LEN, u64::from(len));
+    run.len = len;
+}
+
 /// Consumes `run`'s owner and answers its store, relabelled to `target` at the
 /// logical length.
 ///

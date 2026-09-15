@@ -825,6 +825,12 @@ pub enum GrowableOp {
     /// element layout are read off the instruction at the pc, as for
     /// [`GrowableOp::Finish`].
     FinishWords = 5,
+    /// [`Inst::GrowableTruncate`](cove_ir::Inst::GrowableTruncate) over
+    /// [`Storage::Words`](cove_ir::Storage::Words) — `Vector.pop` and
+    /// `Vector.remove` — handed over whole. `a` is the owner's slot and `b` the
+    /// new length's; the element layout is read off the instruction at the pc,
+    /// as for [`GrowableOp::PushWords`].
+    TruncateWords = 6,
 }
 
 impl GrowableOp {
@@ -842,6 +848,7 @@ impl GrowableOp {
             3 => Some(GrowableOp::Finish),
             4 => Some(GrowableOp::PushWords),
             5 => Some(GrowableOp::FinishWords),
+            6 => Some(GrowableOp::TruncateWords),
             _ => None,
         }
     }
@@ -946,16 +953,24 @@ pub type GrowableFn =
 /// they had on the encoded tier because of it.
 ///
 /// `base` is the caller's frame as a word index and `pc` the instruction's index,
-/// as for [`GrowableFn`]. `args` is the `ArgsId` whose five entries are `dst`,
-/// `dst_at`, `src`, `src_at` and `count`. `words` is `0` for
-/// [`Storage::PackedBytes`](cove_ir::Storage::PackedBytes) and `1` for
-/// [`Storage::Words`](cove_ir::Storage::Words), and `elem` is that storage's
-/// element `LayoutId` — nought, and unread, for bytes. The storage is an operand
-/// rather than something the helper reads back off the instruction at `pc`
-/// because it is static and the double in `cove-native`'s own suite can then
-/// check that an arm passed the right one. Six integer arguments, which is what
-/// the System V ABI passes in registers. The answer is an [`Outcome`] as a `u32`,
-/// read exactly as [`GrowableFn`]'s is.
+/// as for [`GrowableFn`]. `args` is the instruction's `ArgsId`. `kind` is a
+/// [`RunOp`] — which instruction, over which storage — and `elem` is a word
+/// storage's element `LayoutId`, nought and unread for bytes. The storage is an
+/// operand rather than something the helper reads back off the instruction at
+/// `pc` because it is static and the double in `cove-native`'s own suite can
+/// then check that an arm passed the right one. Six integer arguments, which is
+/// what the System V ABI passes in registers. The answer is an [`Outcome`] as a
+/// `u32`, read exactly as [`GrowableFn`]'s is.
+///
+/// # The run slice is this helper too
+///
+/// [`Inst::RunSlice`](cove_ir::Inst::RunSlice) is a run copy into a run it
+/// allocates first, and every reason above is its reason: the same chunks and
+/// polls, the same refusals, the same layout check — and one more, that the
+/// allocation may collect. So it is [`RunOp::SliceWords`] on this helper rather
+/// than a helper of its own, and the helper writes the fresh run's address into
+/// the frame slot the row names as `dst`, which is why generated code forgets
+/// what it knew about the frame after any call to it.
 ///
 /// # Safety
 ///
@@ -970,9 +985,44 @@ pub type RunCopyFn = unsafe extern "C" fn(
     base: u64,
     pc: u32,
     args: u32,
-    words: u32,
+    kind: u32,
     elem: u32,
 ) -> u32;
+
+/// Which run instruction a [`RunCopyFn`] was handed.
+///
+/// `#[repr(u32)]` with the values written out, for [`GrowableOp`]'s reason. The
+/// two copies keep the numbers they had when the operand was `0` for bytes and
+/// `1` for words, so the ABI did not change when the slice joined them.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunOp {
+    /// [`Inst::RunCopy`](cove_ir::Inst::RunCopy) over packed bytes: `args` is
+    /// `dst`, `dst_at`, `src`, `src_at`, `count`.
+    CopyBytes = 0,
+    /// [`Inst::RunCopy`](cove_ir::Inst::RunCopy) over words, the same five.
+    CopyWords = 1,
+    /// [`Inst::RunSlice`](cove_ir::Inst::RunSlice) over words: `args` is `dst`,
+    /// `src`, `from`, `count`, and `dst` is written.
+    SliceWords = 2,
+}
+
+impl RunOp {
+    /// The integer the generated code passes for this operation.
+    pub const fn abi(self) -> u32 {
+        self as u32
+    }
+
+    /// Which operation `code` names, or `None` for a number no arm emits.
+    pub const fn from_abi(code: u32) -> Option<Self> {
+        match code {
+            0 => Some(RunOp::CopyBytes),
+            1 => Some(RunOp::CopyWords),
+            2 => Some(RunOp::SliceWords),
+            _ => None,
+        }
+    }
+}
 
 /// The runtime's side of the boundary, as function pointers.
 ///
@@ -1266,11 +1316,22 @@ mod tests {
             (3, GrowableOp::Finish),
             (4, GrowableOp::PushWords),
             (5, GrowableOp::FinishWords),
+            (6, GrowableOp::TruncateWords),
         ] {
             assert_eq!(op.abi(), code);
             assert_eq!(GrowableOp::from_abi(code), Some(op));
         }
-        assert_eq!(GrowableOp::from_abi(6), None);
+        assert_eq!(GrowableOp::from_abi(7), None);
+
+        for (code, op) in [
+            (0, RunOp::CopyBytes),
+            (1, RunOp::CopyWords),
+            (2, RunOp::SliceWords),
+        ] {
+            assert_eq!(op.abi(), code);
+            assert_eq!(RunOp::from_abi(code), Some(op));
+        }
+        assert_eq!(RunOp::from_abi(3), None);
     }
 
     /// Zero is not a raise, which is what makes a fresh context's

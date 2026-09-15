@@ -644,7 +644,7 @@ pub struct StdBinding {
 /// Every builtin method whose body has moved out of Rust and into the
 /// standard library.
 ///
-/// Thirty-three entries, and what is *not* here is as informative as what is.
+/// Thirty-nine entries, and what is *not* here is as informative as what is.
 ///
 /// `Result.mapError` is here, and it is the only one that needed a language
 /// change to arrive. While a callback's arity was adapted rather than
@@ -666,7 +666,7 @@ pub struct StdBinding {
 /// That is what retires ADR 0043's "It must be total" condition, so a
 /// fallible method is no longer kept out of this table for its diagnostic.
 ///
-/// Ten of the thirty-three are `Duration`'s, and they are the first entries
+/// Ten of the thirty-nine are `Duration`'s, and they are the first entries
 /// that come in pairs: `micros`, `millis`, `seconds`, `minutes`, and `hours`
 /// each name a method (`d.millis()`, the reader) and, separately, an
 /// associated function (`Duration.millis(n)`, the builder) — see
@@ -728,6 +728,23 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.array",
         function: "fold",
     },
+    // `slice`'s clamping is Cove; the copy beneath it is `core.arraySlice`, a
+    // run slice. `toVector` is `core.arrayToVector`, the store, the copy and the
+    // header the runtime arm made, as instructions.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Array",
+        method: "slice",
+        module: "std.array",
+        function: "slice",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Array",
+        method: "toVector",
+        module: "std.array",
+        function: "toVector",
+    },
     StdBinding {
         kind: StdBindingKind::Method,
         receiver: "Vector",
@@ -779,6 +796,38 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "freeze",
         module: "std.vector",
         function: "freeze",
+    },
+    // `slice` clamps in Cove as `Array.slice` does, over `core.vectorSlice`;
+    // `toArray` is the same slice of the whole vector.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Vector",
+        method: "slice",
+        module: "std.vector",
+        function: "slice",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Vector",
+        method: "toArray",
+        module: "std.vector",
+        function: "toArray",
+    },
+    // `pop` and `remove` decide their index and build their `Option` in Cove,
+    // over an element load, a move of the tail and a truncate.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Vector",
+        method: "pop",
+        module: "std.vector",
+        function: "pop",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Vector",
+        method: "remove",
+        module: "std.vector",
+        function: "remove",
     },
     StdBinding {
         kind: StdBindingKind::Method,
@@ -1255,13 +1304,22 @@ impl CoreIntrinsicSchema {
 /// first with policy around it: its range decision and its `Option` are Cove,
 /// and [`CORE_VECTOR_LOAD`] and [`CORE_VECTOR_STORE`] are the element read and
 /// write beneath them. `Vector.freeze` is [`CORE_VECTOR_FINISH`], the word run
-/// finish.
+/// finish. The slices of both sequences are [`CORE_ARRAY_SLICE`] and
+/// [`CORE_VECTOR_SLICE`], an exact construction beneath a range policy written
+/// in Cove, and `Array.toVector` is [`CORE_ARRAY_TO_VECTOR`]. `Vector.pop` and
+/// `Vector.remove` are an element load, [`CORE_VECTOR_MOVE`] of the tail and
+/// [`CORE_VECTOR_TRUNCATE`], which gives the last element back.
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_PUSH,
     CORE_VECTOR_LOAD,
     CORE_VECTOR_STORE,
     CORE_VECTOR_FINISH,
+    CORE_ARRAY_SLICE,
+    CORE_VECTOR_SLICE,
+    CORE_ARRAY_TO_VECTOR,
+    CORE_VECTOR_TRUNCATE,
+    CORE_VECTOR_MOVE,
 ];
 
 /// Every core intrinsic.
@@ -1380,6 +1438,130 @@ pub const CORE_VECTOR_FINISH: CoreIntrinsicSchema = CoreIntrinsicSchema {
         ty: BuiltinType::Vector(&BuiltinType::Param("T")),
     }],
     result: BuiltinType::Array(&BuiltinType::Param("T")),
+};
+
+/// `core.arraySlice<T>(items: Array<T>, from: Int, count: Int) -> Array<T>`: a
+/// fresh array of the `count` elements of `items` from `from`, which the caller
+/// has already held inside the array.
+///
+/// ADR 0058's `run-alloc` and `run-copy` as one exact construction,
+/// `Inst::RunSlice` over `Storage::Words` of the element (#378, Q3). It clamps
+/// nothing: `Array.slice`'s answer to a bound outside the array is
+/// `std.array.slice`'s, in Cove, and a range this is handed outside the source
+/// is a broken invariant.
+pub const CORE_ARRAY_SLICE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "arraySlice",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "items",
+            ty: BuiltinType::Array(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "from",
+            ty: BuiltinType::Int,
+        },
+        ParamSchema {
+            name: "count",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Array(&BuiltinType::Param("T")),
+};
+
+/// `core.vectorSlice<T>(items: Vector<T>, from: Int, count: Int) -> Array<T>`:
+/// a fresh array of the `count` elements of the vector from `from`, which the
+/// caller has already held inside `items.length()`.
+///
+/// `Inst::LoadField` of the store and one `Inst::RunSlice` out of it, bounded,
+/// as [`CORE_VECTOR_LOAD`] is, by the store's capacity rather than the length.
+pub const CORE_VECTOR_SLICE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "vectorSlice",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "items",
+            ty: BuiltinType::Vector(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "from",
+            ty: BuiltinType::Int,
+        },
+        ParamSchema {
+            name: "count",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Array(&BuiltinType::Param("T")),
+};
+
+/// `core.arrayToVector<T>(items: Array<T>) -> Vector<T>`: a fresh vector over a
+/// copy of the array's elements, with no spare room.
+///
+/// The length, a store of exactly that many elements, one word `Inst::RunCopy`
+/// into it and the vector's two-word header — the allocations the runtime's
+/// `Array.toVector` made, as instructions.
+pub const CORE_ARRAY_TO_VECTOR: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "arrayToVector",
+    generics: &["T"],
+    params: &[ParamSchema {
+        name: "items",
+        ty: BuiltinType::Array(&BuiltinType::Param("T")),
+    }],
+    result: BuiltinType::Vector(&BuiltinType::Param("T")),
+};
+
+/// `core.vectorTruncate<T>(items: Vector<T>, len: Int) -> Unit`: the vector's
+/// length lowered to `len`, which the caller computed from the length it read,
+/// and the elements above it cleared.
+///
+/// `Inst::GrowableTruncate` over `Storage::Words` of the element, #378's Q5 —
+/// `growable-commit`'s inverse. The cleared elements are what keep the collector
+/// from following a reference the vector no longer holds.
+pub const CORE_VECTOR_TRUNCATE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "vectorTruncate",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "items",
+            ty: BuiltinType::Vector(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "len",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Unit,
+};
+
+/// `core.vectorMove<T>(items: Vector<T>, to: Int, from: Int, count: Int) ->
+/// Unit`: `count` elements of the vector moved from `from` to `to`, with
+/// memmove semantics, both ranges already inside `items.length()`.
+///
+/// `Inst::LoadField` of the store and one word `Inst::RunCopy` of it into
+/// itself, bounded, as [`CORE_VECTOR_LOAD`] is, by the capacity.
+pub const CORE_VECTOR_MOVE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "vectorMove",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "items",
+            ty: BuiltinType::Vector(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "to",
+            ty: BuiltinType::Int,
+        },
+        ParamSchema {
+            name: "from",
+            ty: BuiltinType::Int,
+        },
+        ParamSchema {
+            name: "count",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Unit,
 };
 
 // ----------------------------------------------------- the shared signatures

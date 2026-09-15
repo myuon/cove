@@ -350,6 +350,163 @@ fn @m.f(Int) -> Array
     );
 }
 
+/// `Vector.toArray` is `std.vector.toArray`, whose body is `core.vectorSlice` of
+/// the whole vector: a length, a store and one word `run-slice` into the
+/// `Array` of the element, expanded where it is called.
+#[test]
+fn a_to_array_is_a_word_run_slice_where_it_is_written() {
+    assert_eq!(
+        listing(
+            "fn f(v: Vector<Int>) -> Array<Int> {\n  v.toArray()\n}",
+            "f"
+        ),
+        "\
+fn @m.f(Vector) -> Array
+  frame 6: s0!:ref s1:ref s2:ref s3:int s4:int s5:ref
+  local v -> s0:Vector [0, 5)
+     0  int s3:int 0
+     1  load-field s4:Int s0:ref +0
+     2  load-field s5:<ref> s0:ref +1
+     3  run-slice.words Int (s1:Array s5:<ref> s3:Int s4:Int)
+     4  return s1:Array
+"
+    );
+}
+
+/// `Array.slice` is `std.array.slice`: the clamping is Cove, and beneath it
+/// `core.arraySlice` is one word `run-slice` of the array itself.
+#[test]
+fn an_array_slice_clamps_in_cove_over_a_word_run_slice() {
+    let source = "fn f(a: Array<Int>, x: Int, y: Int) -> Array<Int> {\n  a.slice(x, y)\n}";
+    assert!(
+        listing(source, "f")
+            .contains("call s3:Array std.array.slice<Int> (s0:Array s1:Int s2:Int)"),
+        "a cold call site calls the body"
+    );
+    let (sources, checked) = super::checked(source);
+    let program = super::lower(&checked, &sources, &cove_schema::HostSchemas::new())
+        .expect("the program lowers");
+    let id = program
+        .functions
+        .iter()
+        .position(|f| &*f.module == "std.array" && f.name.starts_with("slice<"))
+        .map(|at| crate::FunctionId(at as u32))
+        .expect("the body was lowered");
+    assert_eq!(
+        crate::print::function(&program, id),
+        "\
+fn @std.array.slice<Int>(Array Int Int) -> Array
+  frame 9: s0!:ref s1!:int s2!:int s3:ref s4:int s5:int s6:bool s7:int s8:int
+  local items -> s0:Array [0, 18)
+  local from -> s1:Int [0, 18)
+  local to -> s2:Int [0, 18)
+  local length -> s4:Int [1, 17)
+  local start -> s5:Int [8, 17)
+  local end -> s7:Int [15, 17)
+     0  len s4:int s0:ref
+     1  lt.int.imm.branch s6:bool s1:int 0 4
+     2  int s5:int 0
+     3  jump 8
+     4  gt.int.branch s6:bool s1:int s4:int 7
+     5  copy s5:Int s4:Int
+     6  jump 8
+     7  copy s5:Int s1:Int
+     8  lt.int.branch s6:bool s2:int s5:int 11
+     9  copy s7:Int s5:Int
+    10  jump 15
+    11  gt.int.branch s6:bool s2:int s4:int 14
+    12  copy s7:Int s4:Int
+    13  jump 15
+    14  copy s7:Int s2:Int
+    15  sub.int s8:int s7:int s5:int
+    16  run-slice.words Int (s3:Array s0:Array s5:Int s8:Int)
+    17  return s3:Array
+"
+    );
+}
+
+/// `Vector.pop` and `Vector.remove` are `std.vector` bodies: the index decided
+/// and the `Option` built in Cove, over an element load, a word `run-copy` of
+/// the store into itself for `remove`'s tail, and a word `growable-truncate`
+/// that lowers the length and clears what it vacates.
+#[test]
+fn pop_and_remove_are_cove_over_a_growable_truncate() {
+    let source = "fn f(v: Vector<Int>) -> Option<Int> {\n  var w = v\n  w.remove(1)\n  w.pop()\n}";
+    let (sources, checked) = super::checked(source);
+    let program = super::lower(&checked, &sources, &cove_schema::HostSchemas::new())
+        .expect("the program lowers");
+    let body = |name: &str| {
+        let id = program
+            .functions
+            .iter()
+            .position(|f| &*f.module == "std.vector" && f.name.starts_with(name))
+            .map(|at| crate::FunctionId(at as u32))
+            .unwrap_or_else(|| panic!("`{name}` was lowered"));
+        crate::print::function(&program, id)
+    };
+    assert_eq!(
+        body("pop<"),
+        "\
+fn @std.vector.pop<Int>(Vector) -> Option
+  frame 11: s0!:ref s1:tag s2:int s3:int s4:bool s5:tag s6:int s7:int s8:ref s9:int s10:unit
+  local items -> s0:Vector [0, 16)
+  local length -> s3:Int [1, 15)
+  local last -> s9:Int [9, 15)
+     0  load-field s3:Int s0:ref +0
+     1  eq.int.imm.branch s4:bool s3:int 0 5
+     2  tag s5:tag Option.None
+     3  copy s1..s2:Option s5..s6:Option
+     4  jump 15
+     5  sub.int.imm s7:int s3:int 1
+     6  load-field s8:<ref> s0:ref +1
+     7  load-elem s9:Int s8:ref s7:int
+     8  clear s8:<ref>
+     9  sub.int.imm s7:int s3:int 1
+    10  growable-truncate.words Int s0:ref s7:int
+    11  unit s10:unit
+    12  tag s5:tag Option.Some
+    13  copy s6:Int s9:Int
+    14  copy s1..s2:Option s5..s6:Option
+    15  return s1..s2:Option
+"
+    );
+    assert_eq!(
+        body("remove<"),
+        "\
+fn @std.vector.remove<Int>(Vector Int) -> Option
+  frame 14: s0!:ref s1!:int s2:tag s3:int s4:int s5:bool s6:ref s7:int s8:int s9:int s10:int s11:unit s12:tag s13:int
+  local items -> s0:Vector [0, 24)
+  local index -> s1:Int [0, 24)
+  local length -> s4:Int [1, 23)
+  local was -> s7:Int [7, 20)
+     0  load-field s4:Int s0:ref +0
+     1  ge.int.imm.branch s5:bool s1:int 0 3
+     2  lt.int s5:bool s1:int s4:int
+     3  branch-false s5:bool 21
+     4  load-field s6:<ref> s0:ref +1
+     5  load-elem s7:Int s6:ref s1:int
+     6  clear s6:<ref>
+     7  add.int.imm s8:int s1:int 1
+     8  sub.int s9:int s4:int s1:int
+     9  sub.int.imm s10:int s9:int 1
+    10  load-field s6:<ref> s0:ref +1
+    11  run-copy.words Int (s6:<ref> s1:Int s6:<ref> s8:Int s10:Int)
+    12  clear s6:<ref>
+    13  unit s11:unit
+    14  sub.int.imm s8:int s4:int 1
+    15  growable-truncate.words Int s0:ref s8:int
+    16  unit s11:unit
+    17  tag s12:tag Option.Some
+    18  copy s13:Int s7:Int
+    19  copy s2..s3:Option s12..s13:Option
+    20  jump 23
+    21  tag s12:tag Option.None
+    22  copy s2..s3:Option s12..s13:Option
+    23  return s2..s3:Option
+"
+    );
+}
+
 /// `mapError` moved out of the lowering the same way `isSome` and
 /// `unwrapOr` did above: `cove_schema::builtins::STANDARD_LIBRARY` names it
 /// too, so `Int.parse(t).mapError(fn(error) { ... })` is an ordinary

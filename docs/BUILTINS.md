@@ -52,6 +52,11 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `vectorLoad` | `core.vectorLoad(items: Vector<T>, index: Int) -> T` |
 | `vectorStore` | `core.vectorStore(items: Vector<T>, index: Int, value: T) -> Unit` |
 | `vectorFinish` | `core.vectorFinish(items: Vector<T>) -> Array<T>` |
+| `arraySlice` | `core.arraySlice(items: Array<T>, from: Int, count: Int) -> Array<T>` |
+| `vectorSlice` | `core.vectorSlice(items: Vector<T>, from: Int, count: Int) -> Array<T>` |
+| `arrayToVector` | `core.arrayToVector(items: Array<T>) -> Vector<T>` |
+| `vectorTruncate` | `core.vectorTruncate(items: Vector<T>, len: Int) -> Unit` |
+| `vectorMove` | `core.vectorMove(items: Vector<T>, to: Int, from: Int, count: Int) -> Unit` |
 
 ## Builtin types
 
@@ -68,12 +73,12 @@ written as a namespace; binds `T`.
 | `isEmpty() -> Bool` |  |  |  | `std.array.isEmpty` |
 | `contains(element: T) -> Bool` |  |  |  | `machine` |
 | `indexOf(element: T) -> Option<Int>` |  |  |  | `machine` |
-| `slice(from: Int, to: Int) -> Array<T>` |  |  |  | `machine` |
+| `slice(from: Int, to: Int) -> Array<T>` |  |  |  | `std.array.slice` |
 | `map(transform: fn(T) -> R) -> Array<R>` |  |  | `R` | `machine` |
 | `filter(keep: fn(T) -> Bool) -> Array<T>` |  |  |  | `std.array.filter` |
 | `fold(initial: R, step: fn(R, T) -> R) -> R` |  |  | `R` | `std.array.fold` |
 | `sorted(by: fn(T, T) -> Bool) -> Array<T>` |  |  |  | `machine` |
-| `toVector() -> Vector<T>` |  |  |  | `machine` |
+| `toVector() -> Vector<T>` |  |  |  | `std.array.toVector` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Vector<T>`
@@ -95,17 +100,17 @@ written as a namespace; binds `T`.
 | `isEmpty() -> Bool` |  |  |  | `std.vector.isEmpty` |
 | `contains(element: T) -> Bool` |  |  |  | `machine` |
 | `indexOf(element: T) -> Option<Int>` |  |  |  | `machine` |
-| `slice(from: Int, to: Int) -> Array<T>` |  |  |  | `machine` |
+| `slice(from: Int, to: Int) -> Array<T>` |  |  |  | `std.vector.slice` |
 | `map(transform: fn(T) -> R) -> Array<R>` |  |  | `R` | `machine` |
 | `filter(keep: fn(T) -> Bool) -> Array<T>` |  |  |  | `std.vector.filter` |
 | `fold(initial: R, step: fn(R, T) -> R) -> R` |  |  | `R` | `std.vector.fold` |
 | `sorted(by: fn(T, T) -> Bool) -> Array<T>` |  |  |  | `machine` |
 | `push(value: T) -> Unit` | yes |  |  | `std.vector.push` |
 | `set(index: Int, value: T) -> Option<T>` | yes |  |  | `std.vector.set` |
-| `pop() -> Option<T>` | yes |  |  | `machine` |
-| `remove(index: Int) -> Option<T>` | yes |  |  | `machine` |
+| `pop() -> Option<T>` | yes |  |  | `std.vector.pop` |
+| `remove(index: Int) -> Option<T>` | yes |  |  | `std.vector.remove` |
 | `freeze() -> Array<T>` | yes |  |  | `std.vector.freeze` |
-| `toArray() -> Array<T>` |  |  |  | `machine` |
+| `toArray() -> Array<T>` |  |  |  | `std.vector.toArray` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `Map<K, V>`

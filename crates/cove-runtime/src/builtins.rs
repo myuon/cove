@@ -327,7 +327,12 @@ pub fn call_constructor(
 /// around it. The interpreter asks only from a module
 /// `cove_sema::stdlib::is_library_module` answers for, which is the question
 /// the checker asked before it admitted the call.
-pub fn call_core(name: &str, args: &mut Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+pub fn call_core(
+    host: &mut dyn Callable,
+    name: &str,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, RuntimeError> {
     let Some(schema) = cove_schema::builtins::core_intrinsic(name) else {
         return Err(RuntimeError::new(format!("unknown core intrinsic `core.{name}`")).at(span));
     };
@@ -395,6 +400,74 @@ pub fn call_core(name: &str, args: &mut Vec<Value>, span: Span) -> Result<Value,
             *storage.frozen.borrow_mut() = true;
             Ok(Value(Repr::Array(elements.into())))
         }
+        // Beneath `std.vector.pop` and `std.vector.remove`: the length lowered,
+        // the elements above it dropped. The body computed `len` from the
+        // length it read, so the refusal is the machine's truncate invariant.
+        "vectorTruncate" => {
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Vector", &args[0], span));
+            };
+            check_consumed(storage, span)?;
+            let Value(Repr::Int(len)) = &args[1] else {
+                return Err(type_error(&shown, "len", "Int", &args[1], span));
+            };
+            let mut elements = storage.elements.borrow_mut();
+            let had = elements.len();
+            match usize::try_from(*len) {
+                Ok(len) if len <= had => {
+                    elements.truncate(len);
+                    Ok(Value(Repr::Unit))
+                }
+                _ => Err(RuntimeError::new(format!(
+                    "`growableTruncate` would take a length of {had} to {len}, and a truncate \
+                     only lowers a length"
+                ))
+                .at(span)),
+            }
+        }
+        // `std.vector.remove`'s shift of the tail: memmove over the elements,
+        // both ranges inside the length the body read.
+        "vectorMove" => {
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Vector", &args[0], span));
+            };
+            check_consumed(storage, span)?;
+            let mut elements = storage.elements.borrow_mut();
+            let len = elements.len();
+            let from = core_range(&shown, "runCopy", &args[2], &args[3], len, span)?;
+            let to = core_range(&shown, "runCopy", &args[1], &args[3], len, span)?;
+            let moved: Vec<Value> = elements[from].to_vec();
+            elements[to].clone_from_slice(&moved);
+            Ok(Value(Repr::Unit))
+        }
+        // The copies beneath `std.array.slice`, `std.vector.slice` and
+        // `std.vector.toArray`. Each body has clamped its range into the
+        // sequence first, so the refusal here is the machine's `run-slice`
+        // bound and not a sentence a checked program reaches.
+        "arraySlice" => {
+            let Value(Repr::Array(items)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Array", &args[0], span));
+            };
+            let range = core_range(&shown, "runSlice", &args[1], &args[2], items.len(), span)?;
+            Ok(Value(Repr::Array(Rc::from(&items[range]))))
+        }
+        "vectorSlice" => {
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Vector", &args[0], span));
+            };
+            check_consumed(storage, span)?;
+            let elements = storage.elements.borrow();
+            let range = core_range(&shown, "runSlice", &args[1], &args[2], elements.len(), span)?;
+            Ok(Value(Repr::Array(Rc::from(&elements[range]))))
+        }
+        // `std.array.toVector`'s whole body: a growable copy of the elements
+        // as they are, from the running task's heap like every other `Vector`.
+        "arrayToVector" => {
+            let Value(Repr::Array(items)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Array", &args[0], span));
+            };
+            Ok(host.allocate_vector(items.to_vec()))
+        }
         // A name the table declares and nothing here executes. No program can
         // reach one of these from its own modules, so the check that every
         // entry has a body here is `vm::differential`'s, which calls each
@@ -418,6 +491,41 @@ fn check_consumed(storage: &Rc<VectorStorage>, span: Span) -> Result<(), Runtime
         return Err(RuntimeError::new(CONSUMED_VECTOR).at(span));
     }
     Ok(())
+}
+
+/// A core intrinsic's element range, `from` for `count`, inside a run of `len`.
+///
+/// The machine's `run-slice` or `run-copy` refusal — `instruction` names which —
+/// in its words: a range outside the source is a broken invariant of the
+/// standard-library body that asked, which decided the range first.
+fn core_range(
+    shown: &str,
+    instruction: &str,
+    from: &Value,
+    count: &Value,
+    len: usize,
+    span: Span,
+) -> Result<std::ops::Range<usize>, RuntimeError> {
+    let Value(Repr::Int(from)) = from else {
+        return Err(type_error(shown, "from", "Int", from, span));
+    };
+    let Value(Repr::Int(count)) = count else {
+        return Err(type_error(shown, "count", "Int", count, span));
+    };
+    let (from, count) = (*from, *count);
+    if count < 0 {
+        return Err(RuntimeError::new(format!(
+            "`{instruction}`'s count is `{count}`, and a copy cannot have a negative length"
+        ))
+        .at(span));
+    }
+    match from.checked_add(count) {
+        Some(end) if from >= 0 && end <= len as i64 => Ok(from as usize..end as usize),
+        _ => Err(RuntimeError::new(format!(
+            "`{instruction}` reads {count} element(s) from {from} of a source of {len}"
+        ))
+        .at(span)),
+    }
 }
 
 /// A core intrinsic's element index, inside a run of `len`.
@@ -652,18 +760,9 @@ pub fn call_method(
             // `cove_schema::builtins::standard_binding`.
             "contains" => contains("Array.contains", items, args, span),
             "indexOf" => index_of_element("Array.indexOf", items, args, span),
-            "slice" => Ok(Value(Repr::Array(slice("Array.slice", items, args, span)?))),
-            // `Vector.toArray` run backwards: a growable copy of these
-            // elements that nothing else holds a handle to, so a `freeze()`
-            // on it is the O(1) one. The elements are cloned as they are
-            // rather than snapshotted, which is `toArray`'s own rule — this
-            // separates the sequence and nothing inside it. The storage
-            // comes from the running task's heap like every other `Vector`,
-            // so the collector sees it.
-            "toVector" => {
-                expect_args("toVector", args, 0, span)?;
-                Ok(host.allocate_vector(items.to_vec()))
-            }
+            // `slice` and `toVector` are not here: they are `std.array.slice`,
+            // a clamp in Cove over `call_core`'s `arraySlice`, and
+            // `std.array.toVector` over its `arrayToVector`.
             // `filter` and `fold` used to answer here too, through
             // `walk_with` below. Neither reaches this arm any more:
             // `Interpreter::eval_method_call` resolves both to a call into
@@ -681,39 +780,10 @@ pub fn call_method(
                 // `set` is not here either: it is `std.vector.set`, whose
                 // range decision and `Option` are Cove over `call_core`'s
                 // `vectorLoad` and `vectorStore`.
-                // Takes the last element out and answers it, or answers
-                // `None` and writes nothing when there is no last element.
-                //
-                // The empty case is `remove(length() - 1)` on an empty
-                // vector, where that index is `-1` — which `get`, `set` and
-                // `remove` all answer `None` for. One rule about indices,
-                // rather than a rule about indices and a rule about
-                // emptiness.
-                "pop" => {
-                    expect_args("Vector.pop", args, 0, span)?;
-                    Ok(storage
-                        .elements
-                        .borrow_mut()
-                        .pop()
-                        .map(Value::some)
-                        .unwrap_or_else(Value::none))
-                }
-                // Takes the element at `index` out, moves everything after
-                // it down one, and answers what was there — or answers
-                // `None` and removes nothing for an index that is not
-                // already in the vector, which is `get`'s answer and
-                // `set`'s. The write goes through the storage handle, as
-                // `push`'s and `set`'s do, so an alias observes the shrink.
-                "remove" => {
-                    let Some(index) = index_of("Vector.remove", args, span)? else {
-                        return Ok(Value::none());
-                    };
-                    let mut elements = storage.elements.borrow_mut();
-                    if index >= elements.len() {
-                        return Ok(Value::none());
-                    }
-                    Ok(Value::some(elements.remove(index)))
-                }
+                // `pop` and `remove` are not here either: they are
+                // `std.vector.pop` and `std.vector.remove`, whose index
+                // decisions and `Option`s are Cove over `call_core`'s
+                // `vectorLoad`, `vectorMove` and `vectorTruncate`.
                 "get" => Ok(index_of("Vector.get", args, span)?
                     .and_then(|i| storage.elements.borrow().get(i).cloned())
                     .map(Value::some)
@@ -722,10 +792,8 @@ pub fn call_method(
                 "indexOf" => {
                     index_of_element("Vector.indexOf", &storage.elements.borrow(), args, span)
                 }
-                "slice" => {
-                    let sliced = slice("Vector.slice", &storage.elements.borrow(), args, span)?;
-                    Ok(Value(Repr::Array(sliced)))
-                }
+                // `slice` is not here: it is `std.vector.slice`, over
+                // `call_core`'s `vectorSlice`.
                 "length" => {
                     expect_args(name, args, 0, span)?;
                     Ok(Value(Repr::Int(storage.len() as i64)))
@@ -736,13 +804,8 @@ pub fn call_method(
                 // `std.vector.isEmpty` before this function is ever asked
                 // about it — see `cove_schema::builtins::standard_binding`.
                 // `freeze` is `std.vector.freeze` the same way, over
-                // `call_core`'s `vectorFinish`.
-                "toArray" => {
-                    expect_args("toArray", args, 0, span)?;
-                    Ok(Value(Repr::Array(
-                        storage.elements.borrow().iter().cloned().collect(),
-                    )))
-                }
+                // `call_core`'s `vectorFinish`, and `toArray` is
+                // `std.vector.toArray`, over its `vectorSlice`.
                 // `filter` and `fold` used to answer here too, through
                 // `walk_with` below, taking the same copy first. Neither
                 // reaches this arm any more: `Interpreter::eval_method_call`
@@ -1556,35 +1619,6 @@ fn index_of_element(
         .position(|item| item.eq_value(&args[0]))
         .map(|at| Value::some(Value(Repr::Int(at as i64))))
         .unwrap_or_else(Value::none))
-}
-
-/// `slice(from, to)` on a sequence: the elements at `from..<to`.
-///
-/// Both bounds are clamped into `0..len` and a `to` at or below `from`
-/// answers nothing, which is `String.slice`'s rule applied where the same
-/// question arises rather than a second answer to it. So no argument can
-/// stop the run: this refuses only a bound that is not an `Int` at all,
-/// which is the receiver being called wrongly rather than an index being out
-/// of range.
-fn slice(
-    method: &str,
-    items: &[Value],
-    args: &[Value],
-    span: Span,
-) -> Result<Rc<[Value]>, RuntimeError> {
-    if args.len() != 2 {
-        return Err(arity_error(method, 2, args.len(), span));
-    }
-    let bound = |at: usize, parameter: &str| match &args[at] {
-        Value(Repr::Int(index)) => Ok((*index).clamp(0, items.len() as i64) as usize),
-        other => Err(type_error(method, parameter, "Int", other, span)),
-    };
-    let from = bound(0, "from")?;
-    let to = bound(1, "to")?;
-    if to <= from {
-        return Ok(Rc::from([]));
-    }
-    Ok(Rc::from(&items[from..to]))
 }
 
 fn index_of(method: &str, args: &[Value], span: Span) -> Result<Option<usize>, RuntimeError> {
