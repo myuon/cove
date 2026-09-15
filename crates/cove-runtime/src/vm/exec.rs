@@ -63,6 +63,7 @@ use crate::trace::TraceEvent;
 use crate::vm::builtins::operand::Operand;
 use crate::vm::debug::{halted, Debugger, Resume, Stop};
 use crate::vm::mem::{Collected, Memory, NoSegment, Overflow, Parked, Rooted, Roots};
+use crate::vm::report::Counting;
 use crate::vm::{boundary, builtins, cell};
 use crate::wallclock::Instant;
 // The one import of the public `Value` outside `boundary`, and the one thing
@@ -791,6 +792,16 @@ pub(crate) struct Machine<'a> {
     ///
     /// [ADR 0055]: ../../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
     pub(crate) tier: Option<Box<native::Tiering>>,
+    /// What this run sent across each boundary, when a caller asked for it.
+    ///
+    /// `None` is the ordinary answer and costs a run one `Option` test per
+    /// builtin call and nothing per instruction; see [`crate::vm::report`]. A
+    /// `Box` for [`Machine::tier`]'s reason: helpers write it through a raw
+    /// pointer to the machine.
+    ///
+    /// A spawned task's machine is built with `None`, for the reason `tier` is:
+    /// the report is the entry task's, as [`Machine::instructions`] is.
+    pub(crate) counting: Option<Box<Counting>>,
 }
 
 /// Which of [`Machine::cases`] a wrapper memoises into.
@@ -893,6 +904,7 @@ impl<'a> Machine<'a> {
                 .map(|layout| layout.fixed_payload_words(&program.layouts).unwrap_or(0))
                 .collect(),
             tier: None,
+            counting: None,
         };
         machine.literal_addrs = machine.place_literals();
         machine
@@ -971,6 +983,7 @@ impl<'a> Machine<'a> {
             // Not the parent's: see the field. A spawned task runs on the
             // encoded tier.
             tier: None,
+            counting: None,
         }
     }
 
@@ -1109,6 +1122,46 @@ impl<'a> Machine<'a> {
     /// How many instructions this machine has run.
     pub(crate) fn instructions(&self) -> u64 {
         self.instructions
+    }
+
+    /// Starts counting what this run sends across each boundary, from now.
+    ///
+    /// See [`crate::vm::report`]. Starting again forgets what was counted.
+    pub(crate) fn count_boundary(&mut self, tiers: native::Tiers) {
+        self.counting = Some(Box::new(Counting::new(
+            self.program,
+            self.instructions,
+            tiers,
+        )));
+    }
+
+    /// What has been counted since [`Machine::count_boundary`], or `None` if it
+    /// was not asked for.
+    ///
+    /// `tier` is the tier the run went through, which is the machine's own for a
+    /// run and a session's for a session — a session takes its tier back off the
+    /// machine between calls.
+    pub(crate) fn boundary(
+        &self,
+        tier: Option<&native::Tiering>,
+    ) -> Option<crate::vm::report::BoundaryReport> {
+        let counting = self.counting.as_deref()?;
+        Some(counting.report(
+            self.program,
+            self.instructions,
+            tier.map(native::Tiering::counts),
+            tier.is_some_and(native::Tiering::counts_helpers),
+        ))
+    }
+
+    /// One `CallBuiltin`, counted — out of line, for [`Machine::tiered`]'s
+    /// reason: what `call_builtin` keeps inline is the `Option` test.
+    #[inline(never)]
+    #[cold]
+    fn count_builtin(&mut self, builtin: BuiltinId) {
+        if let Some(counting) = self.counting.as_deref_mut() {
+            counting.builtin(builtin);
+        }
     }
 
     /// Which task this machine is running.
@@ -2023,6 +2076,13 @@ impl<'a> Machine<'a> {
         builtin: BuiltinId,
         args: ArgsId,
     ) -> Result<(), RuntimeError> {
+        // Nothing unless a caller asked for the boundary report; see
+        // [`Machine::counting`]. A `match` on the discriminant with the counting
+        // out of line, which is [`Machine::tiered`]'s shape.
+        match self.counting {
+            None => {}
+            Some(_) => self.count_builtin(builtin),
+        }
         let program = self.program;
         let list = program.arg_list(args);
 

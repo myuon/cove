@@ -190,6 +190,7 @@ literal `--` is a program argument, even if it looks like a flag):
   --max-tasks <n>       stop the run when it would hold more than <n> tasks at once
   --backend <ast|vm|native>  which backend runs the entry: `vm`, the linear-memory backend of ADR 0034 and the default, or `ast`, the tree-walking interpreter and the semantic oracle, or `native`, ADR 0055's experimental native tier — compiled machine code for the functions it can lower and the `vm` for the rest, reporting which was which. `native` needs a build with `--features template` and an x86-64 host, and says so rather than falling back when it does not have one
   --stats               print the backend's lowering and execution times and the instructions it executed, then fuel spent, host calls, irreversible writes, elapsed time, host-call wait, and the heap, to stderr
+  --boundary            report what the run sent across each boundary, to stderr: the lowered program's IR instructions and `CallBuiltin` sites, the builtin calls that reached the runtime by intrinsic and by the tier that made them, the instructions the encoded VM dispatched, and on `--backend native` the tier crossings and each call compiled code made into a runtime helper. Off by default, and a run without it pays nothing for it; `vm` and `native` only
   --profile             count every instruction the run executes and report which functions and which instructions they were, to stderr. A profiler is a debugger that never stops, so a run without it is unchanged and a run with it is several times slower; the counts are of instructions and not of time
   --files-root <path>   the one directory the `files` host may reach; defaults to `files/` in the package
   --allow-exec <path>   an absolute path `process.run` may start; repeat to allow more, and omit to allow none
@@ -1226,6 +1227,18 @@ pub(crate) fn execute_entry(
                 .to_string(),
         ));
     }
+    // ADR 0058's report is of the linear-memory backend's boundaries — its
+    // builtin calls, its dispatched instructions, and the native tier's crossings
+    // — and the tree-walking interpreter has none of them. Refused rather than
+    // silently printing nothing, for `--profile`'s reason above.
+    if flags.boundary && !flags.backend.lowers() {
+        return Err(ExecuteError::Setup(
+            "`--boundary` counts what crosses the linear-memory VM's and the native \
+             tier's boundaries, and the tree-walking interpreter has neither. Run it \
+             on `--backend vm` or `--backend native`."
+                .to_string(),
+        ));
+    }
     let lowered = match flags.backend.lowers() {
         false => None,
         true => {
@@ -1344,55 +1357,69 @@ pub(crate) fn execute_entry(
     // debugger is and the machine gains nothing for a run that asks for no
     // profile. See `cove_runtime::vm::profile`.
     let profiler = flags.profile.then(Profiler::new);
-    let (outcome, memory, instructions, coverage) = match lowered.as_ref().map(|l| &l.program) {
-        Some(ir) => {
-            // The whole entry table, compiled and finalized **before the run**,
-            // and owned for the length of it: `native` outlives `vm` because it
-            // owns the pages `vm`'s entries point into. See
-            // `cove_runtime::native`.
-            //
-            // Its cost is taken here rather than inside `started`'s interval,
-            // which is issue #369's "Compile time and execution time are reported
-            // separately" — a figure covering both would hide which.
-            let native = match flags.backend {
-                Backend::Native => Some(
-                    cove_runtime::compile_native(ir)
+    let (outcome, memory, instructions, coverage, boundary) =
+        match lowered.as_ref().map(|l| &l.program) {
+            Some(ir) => {
+                // The whole entry table, compiled and finalized **before the run**,
+                // and owned for the length of it: `native` outlives `vm` because it
+                // owns the pages `vm`'s entries point into. See
+                // `cove_runtime::native`.
+                //
+                // Its cost is taken here rather than inside `started`'s interval,
+                // which is issue #369's "Compile time and execution time are reported
+                // separately" — a figure covering both would hide which.
+                //
+                // A run that asked for the boundary report binds the counting
+                // helpers, and only such a run: they are the same code with a counter
+                // in front of every helper, so a run that did not ask does not pay.
+                let native = match flags.backend {
+                    Backend::Native => Some(
+                        match flags.boundary {
+                            false => cove_runtime::compile_native(ir),
+                            true => cove_runtime::compile_native_counting(ir),
+                        }
                         .map_err(|error| ExecuteError::Setup(error.to_string()))?,
-                ),
-                Backend::Ast | Backend::Vm => None,
-            };
-            let mut vm = match (profiler.as_ref(), native.as_ref()) {
-                (Some(profiler), _) => Vm::debugged(&runtime, runtime.hosts(), ir, profiler),
-                (None, Some(native)) => Vm::with_native(&runtime, runtime.hosts(), ir, native),
-                (None, None) => Vm::new(&runtime, runtime.hosts(), ir),
-            };
-            let outcome = vm.run_entry(module, entry, program_args);
-            // Read before `vm` and `native` go out of scope, because the report
-            // is printed after the timed region and neither lives that long.
-            let coverage = native.as_ref().map(|native| Coverage::taken(native, &vm));
-            (
-                outcome,
-                Memory::Words {
-                    held: vm.heap_words(),
-                    handed_out: vm.allocated_words(),
-                    allocations: vm.allocations(),
-                    collections: vm.collections(),
-                },
-                Some(vm.instructions()),
-                coverage,
-            )
-        }
-        None => {
-            let mut interpreter = Interpreter::new(&runtime);
-            let outcome = interpreter.run_entry(module, entry, program_args);
-            (
-                outcome,
-                Memory::Objects(interpreter.heap_stats()),
-                None,
-                None,
-            )
-        }
-    };
+                    ),
+                    Backend::Ast | Backend::Vm => None,
+                };
+                let mut vm = match (profiler.as_ref(), native.as_ref()) {
+                    (Some(profiler), _) => Vm::debugged(&runtime, runtime.hosts(), ir, profiler),
+                    (None, Some(native)) => Vm::with_native(&runtime, runtime.hosts(), ir, native),
+                    (None, None) => Vm::new(&runtime, runtime.hosts(), ir),
+                };
+                if flags.boundary {
+                    vm.count_boundary();
+                }
+                let outcome = vm.run_entry(module, entry, program_args);
+                // Read before `vm` and `native` go out of scope, because the report
+                // is printed after the timed region and neither lives that long.
+                let coverage = native.as_ref().map(|native| Coverage::taken(native, &vm));
+                let boundary = vm.boundary();
+                (
+                    outcome,
+                    Memory::Words {
+                        held: vm.heap_words(),
+                        handed_out: vm.allocated_words(),
+                        allocations: vm.allocations(),
+                        collections: vm.collections(),
+                    },
+                    Some(vm.instructions()),
+                    coverage,
+                    boundary,
+                )
+            }
+            None => {
+                let mut interpreter = Interpreter::new(&runtime);
+                let outcome = interpreter.run_entry(module, entry, program_args);
+                (
+                    outcome,
+                    Memory::Objects(interpreter.heap_stats()),
+                    None,
+                    None,
+                    None,
+                )
+            }
+        };
     let execution = started.elapsed();
 
     // Unconditionally, and not under `--stats`: ADR 0055 requires that "the run
@@ -1402,6 +1429,13 @@ pub(crate) fn execute_entry(
     // nobody asked for is what stops a silent claim.
     if let Some(coverage) = &coverage {
         coverage.print(execution);
+    }
+    // Beside the coverage report and after it, because the coverage report says
+    // which functions ran where and this says what crossed between them. Its own
+    // flag rather than part of that report, because that report is printed for
+    // every native run and costs nothing to take, and this one is counted.
+    if let Some(boundary) = &boundary {
+        eprint!("{boundary}");
     }
 
     if let (Some(profiler), Some(held)) = (profiler.as_ref(), lowered.as_ref()) {
@@ -2061,6 +2095,9 @@ pub(crate) struct RunFlags {
     trace_values: ValueCapture,
     stats: bool,
     profile: bool,
+    /// Whether to count and print ADR 0058's boundary report. See
+    /// [`cove_runtime::BoundaryReport`].
+    boundary: bool,
     /// The one directory the `files` host may reach.
     files_root: Option<PathBuf>,
     /// The executables `process.run` may start. Empty allows none.
@@ -2090,6 +2127,7 @@ impl RunFlags {
             trace_values: ValueCapture::Full,
             stats: false,
             profile: false,
+            boundary: false,
             files_root: None,
             allow_exec: Vec::new(),
             program_args: Vec::new(),
@@ -2339,6 +2377,7 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
         trace_values: ValueCapture::Full,
         stats: false,
         profile: false,
+        boundary: false,
         files_root: None,
         allow_exec: Vec::new(),
         program_args: Vec::new(),
@@ -2410,6 +2449,7 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
             }
             "--stats" => flags.stats = true,
             "--profile" => flags.profile = true,
+            "--boundary" => flags.boundary = true,
             "--files-root" => {
                 let value = flag_value(args, &mut i, "--files-root")?;
                 flags.files_root = Some(PathBuf::from(value));
@@ -3049,6 +3089,18 @@ module auth
     fn a_run_that_names_no_backend_gets_the_default() {
         assert_eq!(flags(&["input.txt"]).backend, Backend::Vm);
         assert_eq!(RunFlags::none().backend, Backend::Vm);
+    }
+
+    /// ADR 0058's boundary report is off unless asked for, because it is counted,
+    /// and asking for it is a flag like `--profile` that may sit anywhere.
+    #[test]
+    fn the_boundary_report_is_off_unless_asked_for() {
+        assert!(!flags(&["input.txt"]).boundary);
+        assert!(!RunFlags::none().boundary);
+        let asked = flags(&["first", "--boundary", "--backend", "native", "second"]);
+        assert!(asked.boundary);
+        assert_eq!(asked.backend, Backend::Native);
+        assert_eq!(asked.program_args, ["first", "second"]);
     }
 
     #[test]

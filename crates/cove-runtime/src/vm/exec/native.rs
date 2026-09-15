@@ -101,6 +101,17 @@ use crate::error::RuntimeError;
 pub trait Tiered {
     /// The compiled entry point of `id`, if it has one.
     fn entry(&self, id: FunctionId) -> Option<Entry>;
+
+    /// Whether the code behind these entries was compiled against
+    /// [`helpers_counting`], so that a boundary report may read its
+    /// native-to-runtime counts.
+    ///
+    /// `false` by default, which is the honest answer for a table compiled
+    /// against [`helpers`]: those count nothing, and a report that printed their
+    /// zeroes would be claiming compiled code never called the runtime.
+    fn counts_helpers(&self) -> bool {
+        false
+    }
 }
 
 /// Nothing is compiled.
@@ -266,6 +277,10 @@ pub(crate) struct Tiering {
     /// the code — 4 KiB reserved and cleared for every one of twenty thousand
     /// calls.
     chunks: Vec<*mut u64>,
+    /// Whether the table this was last aimed at counts its helper calls. See
+    /// [`Tiered::counts_helpers`]. Read once, at installation, because a
+    /// session's table is not alive after the call it was aimed for.
+    counts_helpers: bool,
 }
 
 impl Tiering {
@@ -285,6 +300,7 @@ impl Tiering {
             counts: Tiers::default(),
             refused: vec![0; functions],
             chunks: Vec::with_capacity(chunk_capacity),
+            counts_helpers: (*entries).counts_helpers(),
         }
     }
 
@@ -299,11 +315,17 @@ impl Tiering {
     /// As [`Tiering::new`].
     pub(crate) unsafe fn aim(&mut self, entries: *const (dyn Tiered + 'static)) {
         self.entries = entries;
+        self.counts_helpers = (*entries).counts_helpers();
     }
 
     /// Which transitions this run's calls took.
     pub(crate) fn counts(&self) -> Tiers {
         self.counts
+    }
+
+    /// Whether the table this was last aimed at counts its helper calls.
+    pub(crate) fn counts_helpers(&self) -> bool {
+        self.counts_helpers
     }
 
     /// Dynamic calls to each function that stayed on the encoded tier.
@@ -766,6 +788,12 @@ unsafe extern "C" fn builtin(
             // an argument: the top frame is this call's, and the runtime is
             // already holding it.
             .and_then(|()| {
+                // After the safepoint, so that a stop it raised is not a call. One
+                // `Option` test on what is only ever a fast path's cold half; see
+                // `crate::vm::report`.
+                if let Some(counting) = machine.counting.as_deref_mut() {
+                    counting.native_builtin(BuiltinId(builtin));
+                }
                 machine.call_builtin(frame.base, dst as Slot, BuiltinId(builtin), ArgsId(args))
             })
             .map_err(|error| error.at(machine.span(frame.function, pc as usize)))
@@ -1628,6 +1656,28 @@ impl<'v, 'a> Session<'v, 'a> {
             .map_or_else(Tiers::default, Tiering::counts)
     }
 
+    /// Starts counting what this session's calls send across each boundary, from
+    /// now. See [`BoundaryReport`](crate::BoundaryReport).
+    ///
+    /// The native-to-runtime counts need a table compiled against
+    /// [`helpers_counting`] *and* a [`Tiered`] that says so; the rest need
+    /// nothing but this.
+    pub fn count_boundary(&mut self) {
+        let tiers = self.tiers();
+        self.machine.count_boundary(tiers);
+    }
+
+    /// What was counted since [`Session::count_boundary`], and counting stops.
+    ///
+    /// Stopping is the point of taking: a harness counts one pass and times the
+    /// next ones, and a timed pass should not pay even the `Option` test's worth
+    /// of counting.
+    pub fn take_boundary(&mut self) -> Option<crate::BoundaryReport> {
+        let report = self.machine.boundary(self.tier.as_deref());
+        self.machine.counting = None;
+        report
+    }
+
     /// How many instructions the *encoded* tier has dispatched over this
     /// session.
     ///
@@ -1681,6 +1731,106 @@ pub fn helpers() -> NativeHelpers {
         field_store,
     }
 }
+
+/// The helpers, each counting its own call before it runs.
+///
+/// [ADR 0058]'s "native-to-runtime calls", which a boundary report prints one
+/// counter per helper for — see [`BoundaryReport`](crate::BoundaryReport). It is
+/// a **second table** rather than a branch in [`helpers`], and that is
+/// [`ablate::CENSUS`]'s discipline: a run that did not ask for the counts binds
+/// the production table, whose bodies are exactly what they were, and pays
+/// nothing. Each entry here is one counter write and then a call into the
+/// production helper of the same name, so what a counting run *computes* is what
+/// every other run computes.
+///
+/// The counts land only on a machine that was asked to count
+/// ([`Vm::count_boundary`](crate::Vm::count_boundary)); on any other, this table
+/// behaves as [`helpers`] does with one `Option` test in front.
+///
+/// [ADR 0058]: ../../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+pub fn helpers_counting() -> NativeHelpers {
+    NativeHelpers {
+        safepoint: counted_safepoint,
+        call: counted_call,
+        open: counted_open,
+        close: counted_close,
+        alloc: counted_alloc,
+        builtin: counted_builtin,
+        buffer: counted_buffer,
+        field_load: counted_field_load,
+        field_store: counted_field_store,
+    }
+}
+
+/// Charges one helper call to the machine `ctx` reaches, if it is counting.
+///
+/// The borrow of the counters ends before this returns, which is the module's
+/// aliasing rule: nothing is held across the production helper that follows.
+///
+/// # Safety
+///
+/// As [`safepoint`].
+#[inline(always)]
+unsafe fn charge(ctx: *mut NativeCtx, which: fn(&mut crate::vm::report::HelperCalls)) {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+    if let Some(counting) = (*machine).counting.as_deref_mut() {
+        which(&mut counting.helpers);
+    }
+}
+
+/// Writes one counting wrapper per helper: the charge, then the production body.
+macro_rules! counted {
+    ($(#[$doc:meta])* $name:ident => $inner:ident . $field:ident ($($arg:ident: $ty:ty),*) -> $ret:ty) => {
+        $(#[$doc])*
+        ///
+        /// # Safety
+        ///
+        /// As the helper it wraps.
+        unsafe extern "C" fn $name(ctx: *mut NativeCtx, $($arg: $ty),*) -> $ret {
+            charge(ctx, |calls| calls.$field += 1);
+            $inner(ctx, $($arg),*)
+        }
+    };
+}
+
+counted!(
+    /// [`safepoint`], counted.
+    counted_safepoint => safepoint.safepoint(pc: u32, work: u64) -> bool
+);
+counted!(
+    /// [`call`], counted.
+    counted_call => call.call(base: u64, pc: u32, callee: u32, args: u32, dst: u32) -> u32
+);
+counted!(
+    /// [`open`], counted.
+    counted_open => open.open(base: u64, pc: u32, callee: u32, args: u32, dst: u32) -> Opened
+);
+counted!(
+    /// [`close`], counted.
+    counted_close => close.close(outcome: u32, callee: u32) -> u32
+);
+counted!(
+    /// [`alloc`], counted.
+    counted_alloc => alloc.alloc(pc: u32, layout: u32, len: i64) -> u64
+);
+counted!(
+    /// [`builtin`], counted. Which intrinsic it was is counted by [`builtin`]
+    /// itself, whichever table was bound; see `crate::vm::report`.
+    counted_builtin => builtin.builtin(base: u64, pc: u32, dst: u32, id: u32, args: u32) -> u32
+);
+counted!(
+    /// [`buffer`], counted.
+    counted_buffer => buffer.buffer(base: u64, pc: u32, op: u32, a: u32, b: u32) -> u32
+);
+counted!(
+    /// [`field_load`], counted.
+    counted_field_load => field_load.field_load(pc: u32, addr: u64, at: u32, width: u32, into: u64) -> u32
+);
+counted!(
+    /// [`field_store`], counted.
+    counted_field_store => field_store.field_store(pc: u32, addr: u64, at: u32, width: u32, from: u64) -> u32
+);
 
 /// Which component of the call path a variant of the helper does **twice**.
 ///
