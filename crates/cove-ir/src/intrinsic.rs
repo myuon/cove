@@ -67,7 +67,6 @@ pub enum Intrinsic {
     ArraySlice,
     ArrayToVector,
     VectorOf,
-    VectorSet,
     VectorPop,
     VectorRemove,
     VectorGet,
@@ -139,7 +138,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::ArraySlice,
     Intrinsic::ArrayToVector,
     Intrinsic::VectorOf,
-    Intrinsic::VectorSet,
     Intrinsic::VectorPop,
     Intrinsic::VectorRemove,
     Intrinsic::VectorGet,
@@ -213,7 +211,6 @@ impl Intrinsic {
             Intrinsic::ArraySlice => "Array",
             Intrinsic::ArrayToVector => "Array",
             Intrinsic::VectorOf => "Vector",
-            Intrinsic::VectorSet => "Vector",
             Intrinsic::VectorPop => "Vector",
             Intrinsic::VectorRemove => "Vector",
             Intrinsic::VectorGet => "Vector",
@@ -283,7 +280,6 @@ impl Intrinsic {
             Intrinsic::ArraySlice => "slice",
             Intrinsic::ArrayToVector => "toVector",
             Intrinsic::VectorOf => "of",
-            Intrinsic::VectorSet => "set",
             Intrinsic::VectorPop => "pop",
             Intrinsic::VectorRemove => "remove",
             Intrinsic::VectorGet => "get",
@@ -345,7 +341,7 @@ impl Intrinsic {
     /// `cove-runtime`'s `vm::builtins`, not by a rule applied to every
     /// member of a family — two operations of the same receiver may answer
     /// differently, the way [`Intrinsic::VectorGet`] does not write memory
-    /// and [`Intrinsic::VectorSet`] does.
+    /// and [`Intrinsic::VectorPop`] does.
     pub const fn effects(self) -> Effects {
         use Effects as E;
         // Every arm below validates its own operand count and shape before
@@ -434,13 +430,12 @@ impl Intrinsic {
                 .union(E::BULK_WORK),
             // `push` is not here: it is `std.vector.push` over the core
             // intrinsic that is a word `Inst::GrowablePush`.
-            // `set`, `pop` and `get` touch exactly one element's words and
-            // never allocate; `remove` additionally shifts every element
-            // past the one it takes out, which is what makes it the one of
-            // the three that is proportional to the vector.
-            Intrinsic::VectorSet | Intrinsic::VectorPop => {
-                raise.union(E::READS_MEMORY).union(E::WRITES_MEMORY)
-            }
+            // `pop` and `get` touch exactly one element's words and never
+            // allocate; `remove` additionally shifts every element past the
+            // one it takes out, which is what makes it the one of the three
+            // that is proportional to the vector. `set` was the fourth, and is
+            // `std.vector.set` over an element load and store now.
+            Intrinsic::VectorPop => raise.union(E::READS_MEMORY).union(E::WRITES_MEMORY),
             Intrinsic::VectorRemove => raise
                 .union(E::READS_MEMORY)
                 .union(E::WRITES_MEMORY)
@@ -659,7 +654,6 @@ mod tests {
                 | Intrinsic::ArraySlice
                 | Intrinsic::ArrayToVector
                 | Intrinsic::VectorOf
-                | Intrinsic::VectorSet
                 | Intrinsic::VectorPop
                 | Intrinsic::VectorRemove
                 | Intrinsic::VectorGet

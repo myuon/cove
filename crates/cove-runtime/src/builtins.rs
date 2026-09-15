@@ -353,11 +353,54 @@ pub fn call_core(name: &str, args: &mut Vec<Value>, span: Span) -> Result<Value,
             storage.elements.borrow_mut().push(value);
             Ok(Value(Repr::Unit))
         }
+        // The element read and write beneath `std.vector.set`. The body holds the
+        // index below `items.length()` before either is asked, so the refusal
+        // here is the machine's `LoadElem`/`StoreElem` bound and not a sentence a
+        // checked program reaches.
+        "vectorLoad" => {
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Vector", &args[0], span));
+            };
+            check_live(storage, "set", span)?;
+            let elements = storage.elements.borrow();
+            let at = core_index(&shown, &args[1], elements.len(), span)?;
+            Ok(elements[at].clone())
+        }
+        "vectorStore" => {
+            let value = args.remove(2);
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Vector", &args[0], span));
+            };
+            check_live(storage, "set", span)?;
+            let mut elements = storage.elements.borrow_mut();
+            let at = core_index(&shown, &args[1], elements.len(), span)?;
+            elements[at] = value;
+            Ok(Value(Repr::Unit))
+        }
         // A name the table declares and nothing here executes. No program can
         // reach one of these from its own modules, so the check that every
         // entry has a body here is `vm::differential`'s, which calls each
         // from a standard-library module on both evaluators.
         _ => Err(RuntimeError::new(format!("unknown core intrinsic `{shown}`")).at(span)),
+    }
+}
+
+/// A core intrinsic's element index, inside a run of `len`.
+///
+/// `Machine::element`'s refusal, in its words: an index outside the run a core
+/// intrinsic reads is a broken invariant of the standard-library body that
+/// called it, not a program's mistake.
+fn core_index(shown: &str, index: &Value, len: usize, span: Span) -> Result<usize, RuntimeError> {
+    let Value(Repr::Int(at)) = index else {
+        return Err(type_error(shown, "index", "Int", index, span));
+    };
+    match usize::try_from(*at) {
+        Ok(at) if at < len => Ok(at),
+        _ => Err(
+            RuntimeError::new(format!("index {at} is outside a collection of {len}"))
+                .at(span)
+                .with_rule("An index outside a collection is a broken invariant."),
+        ),
     }
 }
 
@@ -600,26 +643,9 @@ pub fn call_method(
             match name {
                 // `push` is not here: it is `std.vector.push`, over
                 // `call_core`'s `vectorPush`.
-                // Replaces the element at `index` and answers what was
-                // there, or answers `None` and writes nothing when `index`
-                // is not already in the vector — which is `get`'s answer to
-                // the same bad index, so a program has one rule about
-                // indices rather than two. The write goes through the
-                // storage handle, exactly as `push`'s does, so an alias
-                // observes it and there is nothing to write back to the
-                // receiver's own slot.
-                "set" => {
-                    let args = expect_args("Vector.set", args, 2, span)?;
-                    let value = args.remove(1);
-                    let Some(index) = index_of("Vector.set", args, span)? else {
-                        return Ok(Value::none());
-                    };
-                    let mut elements = storage.elements.borrow_mut();
-                    let Some(slot) = elements.get_mut(index) else {
-                        return Ok(Value::none());
-                    };
-                    Ok(Value::some(std::mem::replace(slot, value)))
-                }
+                // `set` is not here either: it is `std.vector.set`, whose
+                // range decision and `Option` are Cove over `call_core`'s
+                // `vectorLoad` and `vectorStore`.
                 // Takes the last element out and answers it, or answers
                 // `None` and writes nothing when there is no last element.
                 //

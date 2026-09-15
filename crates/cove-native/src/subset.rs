@@ -15,7 +15,6 @@ use cove_ir::{
     ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Function, Inst, Intrinsic, LayoutId, Len, Num,
     Program, Repr, Shape, Slot, Storage, StrId,
 };
-use cove_schema::builtins::{NONE_CASE, SOME_CASE};
 
 use crate::abi::Raise;
 
@@ -228,77 +227,6 @@ pub(crate) fn word_push(
 /// this builtin outside a bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Method {
-    /// `Vector.set(index, value) -> Option<T>`, the path where the index is
-    /// in range.
-    ///
-    /// `vm::builtins::seq::vector_set` reads the receiver, reads the index,
-    /// answers `None` for one outside `[0, len)`, and otherwise reads the
-    /// element that was there — **before** overwriting it, because `set`
-    /// answers what `get` would have — and hands that back as `Some`. Every
-    /// one of those is a static fact of the call site or a comparison this
-    /// tier can already do, so unlike [`WordPush`] there is no cold half
-    /// to a range that fits: an in-range `set` and an out-of-range one are
-    /// both emitted, and only the receiver's own preconditions go to
-    /// [`BuiltinFn`](crate::abi::BuiltinFn).
-    ///
-    /// Those preconditions are [`WordPush`]'s two, for the same reasons:
-    ///
-    /// - **the receiver's object is the layout the call site names**, read out
-    ///   of the header the way `vector()` does, because the element's layout,
-    ///   its stride and therefore where it sits in the store are all derived
-    ///   from the declared one;
-    /// - **`freeze()` has not consumed it**, which `vector()` refuses with
-    ///   `operand::frozen` — a message this crate cannot build any more than
-    ///   `Push`'s could.
-    ///
-    /// The null receiver is emitted as [`Raise::NullObject`] for the same
-    /// reason `Push`'s is: it is the one refusal whose message names no
-    /// operand.
-    ///
-    /// # Building the `Option`
-    ///
-    /// The answer is not a builtin's ordinary one-word or `stride`-word run:
-    /// it is a case of an enum, which is a tag word and a payload region wide
-    /// enough for whichever case is written — [`crate::abi`] and
-    /// `vm::builtins::make`'s `case_words` agree that constructing a case
-    /// *zeroes* the payload words it does not fill, so a stale word from a
-    /// wider case never reads through a narrower one. `some_at` and `width`
-    /// are read out of the call site's declared `Option<T>` layout by
-    /// [`method_of`] rather than assumed to be zero and `1 + stride`: an enum
-    /// lays a case's parts into the lowest free run, and a reader that
-    /// guessed would be trusting a fact this crate can simply look up.
-    #[allow(clippy::too_many_arguments)]
-    Set {
-        /// Where the `Option<T>` answer goes: a tag word and the payload
-        /// region, `width` words wide in all.
-        dst: Slot,
-        /// The receiver's slot: one `Repr::Ref` word naming the `Vector` header.
-        recv: Slot,
-        /// The layout the call site declares the receiver to be, whose shape is
-        /// a [`Shape::Vector`] and which the object's own header is compared
-        /// against.
-        vector: LayoutId,
-        /// The index argument's slot: one `Repr::Int` word.
-        index: Slot,
-        /// The value argument's slot, `stride` words wide.
-        value: Slot,
-        /// The element layout's width, which is `Growable::stride`.
-        stride: u32,
-        /// The `Option<T>` layout's total width: the tag word plus its whole
-        /// payload region, which bounds every word this method writes.
-        width: u32,
-        /// The tag value a `Some` answer holds.
-        some_case: u32,
-        /// The word offset of `Some`'s one part within the payload region —
-        /// after the tag word, so its `stride` words sit at
-        /// `dst + 1 + some_at`.
-        some_at: u32,
-        /// The tag value a `None` answer holds.
-        none_case: u32,
-        /// The builtin and its argument list, for the cold path.
-        builtin: u32,
-        args: u32,
-    },
     /// `Vector.freeze() -> Array<T>`.
     ///
     /// `vm::builtins::seq::vector_freeze` is `vector()` and then three writes:
@@ -364,63 +292,12 @@ pub(crate) fn method_of(
         (program.layout(arg.layout).words.as_slice() == [Repr::Ref]).then_some(arg.slot)
     };
     match named.intrinsic {
-        // `vm::builtins::seq::vector_set`. The receiver's declared layout and
-        // the element's own layout are read exactly as `Push`'s are, and for
-        // the same reason; what is new here is the *answer*'s layout, an
-        // `Option<T>` the call site also declares — and its `Some`/`None` tag
-        // values and `Some`'s payload offset are read out of it rather than
-        // assumed, because [`cove_ir::layout::enum_layout`] places a case's
-        // parts wherever they first fit rather than always at word zero.
-        Intrinsic::VectorSet => {
-            // The receiver, the index and the value — `operand::method`'s
-            // split and the arity its refusal names.
-            if list.len() != 3 {
-                return None;
-            }
-            let recv = reference(0)?;
-            let vector = list[0].layout;
-            let Shape::Vector { elem } = program.layout(vector).shape else {
-                return None;
-            };
-            // `operand::int` requires the index to be one `Repr::Int` word.
-            if program.layout(list[1].layout).words.as_slice() != [Repr::Int] {
-                return None;
-            }
-            // `operand::run_of(machine, .., items.elem, args[1])` requires the
-            // value argument's layout to *be* the element's, so a call site
-            // where the two differ is one the VM refuses. Refusing to compile
-            // it leaves the refusal where its message is.
-            if list[2].layout != elem {
-                return None;
-            }
-            let option = program.layout(named.result);
-            let Shape::Enum { cases, .. } = &option.shape else {
-                return None;
-            };
-            let some_case = option.case(SOME_CASE.name)?;
-            let none_case = option.case(NONE_CASE.name)?;
-            let some_at = cases[some_case as usize].parts.first()?.at;
-            Some(Method::Set {
-                dst,
-                recv,
-                vector,
-                index: list[1].slot,
-                value: list[2].slot,
-                stride: program.layout(elem).width(),
-                width: option.width(),
-                some_case,
-                some_at,
-                none_case,
-                builtin: builtin.0,
-                args: args.0,
-            })
-        }
         // `vm::builtins::seq::vector_freeze`. The receiver's declared layout is
-        // read exactly as `Push`'s and `Set`'s is; what is new is the *answer's*
-        // layout, which is not declared anywhere on the call site the way
-        // `Set`'s `Option<T>` is; it is `make::elements(program, elem, false)`'s
-        // own search over the program's layout table, repeated here rather than
-        // called, because this crate does not depend on `cove-runtime`.
+        // read off the argument list; what is not declared anywhere on the call
+        // site is the *answer's* layout: it is `make::elements(program, elem,
+        // false)`'s own search over the program's layout table, repeated here
+        // rather than called, because this crate does not depend on
+        // `cove-runtime`.
         Intrinsic::VectorFreeze => {
             // The receiver alone — `operand::method`'s split and the arity its
             // refusal names.
@@ -1006,33 +883,7 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // instruction; a family that *is* emitted is bounded like any other.
         Inst::CallBuiltin { dst, builtin, args } => {
             match method_of(program, *dst, *builtin, *args) {
-                // The answer is a tag word and a `width - 1`-word payload
-                // region, so `dst` is bounded as a run of `width` words the
-                // way `Push`'s `value` is bounded as a run of `stride` — and
-                // `width` is checked directly rather than derived from
-                // `stride`, because the two agree for `Option<T>` but nothing
-                // here should assume it.
-                Some(Method::Set {
-                    dst,
-                    recv,
-                    vector,
-                    index,
-                    value,
-                    stride,
-                    width,
-                    ..
-                }) => {
-                    // See `Push`'s note on the same bound: the *template* arm
-                    // tests the header's high half with `cmp r64, imm32`.
-                    i32::try_from(vector.0).is_ok()
-                        && stride <= MAX_RUN_WORDS
-                        && width <= MAX_RUN_WORDS
-                        && run(dst, width)
-                        && slot(recv)
-                        && slot(index)
-                        && run(value, stride)
-                }
-                // No `run` bound the way `Push`'s and `Set`'s is: the relabel
+                // No `run` bound the way a word push's is: the relabel
                 // this emits is one header write and (at most) one free-block
                 // write, whatever `stride` is — there is no per-element loop
                 // for a width to bound.
@@ -1043,7 +894,7 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                     array,
                     ..
                 }) => {
-                    // See `Push`'s note on the same bound for `vector`, and the
+                    // See the word push's note on the same bound for `vector`, and the
                     // same reason again for `array`: the *template* arm tests
                     // each against the header's high half with `cmp r64, imm32`.
                     i32::try_from(vector.0).is_ok()
@@ -1209,7 +1060,7 @@ pub(crate) fn by_zero_of(op: ArithOp) -> Raise {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cove_ir::{enum_layout, Arg, Builtin, Layout, RefMap};
+    use cove_ir::{Arg, Builtin, Layout, RefMap};
     use std::sync::Arc;
 
     fn span() -> cove_diag::Span {
@@ -1326,153 +1177,6 @@ mod tests {
         assert_eq!(blockers(&program, function), vec![expected]);
     }
 
-    // --- `method_of`'s `Intrinsic::VectorSet` arm ------------------------------
-
-    const SET_INT: LayoutId = LayoutId(1);
-    const SET_REF: LayoutId = LayoutId(2);
-    const SET_VECTOR: LayoutId = LayoutId(3);
-    const SET_OPTION: LayoutId = LayoutId(4);
-
-    /// A layout table wide enough for `Vector.set(Int, Int) -> Option<Int>`:
-    /// `Int`, `Ref`, `Vector<Int>` and `Option<Int>` — with one `Builtin` at
-    /// `BuiltinId(0)` naming `Vector.set` and `args` at `ArgsId(0)` and
-    /// `ArgsId(1)` for the empty list and the one this module's tests build.
-    ///
-    /// `Option<Int>`'s `Some`/`None` case order is not the checker's — this
-    /// table is built by hand and puts `Some` first — and that is deliberate:
-    /// it is what proves `method_of` reads the tag values and the payload
-    /// offset out of the layout rather than assuming `Some` is index 0 or
-    /// that its one part sits at word 0, the way `cove_ir::enum_layout`
-    /// itself does not promise either.
-    fn program_with_set(function: Function, args: Vec<Arg>) -> Program {
-        let mut layouts = vec![
-            Layout::free(),
-            Layout::word("Int", Repr::Int),
-            Layout::word("Ref", Repr::Ref),
-            Layout::object("Vector", Shape::Vector { elem: SET_INT }),
-        ];
-        let (cases, payload) = enum_layout(
-            &[
-                (Arc::from("Some"), vec![SET_INT]),
-                (Arc::from("None"), vec![]),
-            ],
-            &layouts,
-        );
-        let mut words = vec![Repr::Tag];
-        words.extend_from_slice(&payload);
-        layouts.push(Layout::inline(
-            "Option",
-            Shape::Enum { cases, payload },
-            words,
-        ));
-        Program {
-            functions: vec![function],
-            layouts,
-            args: vec![Vec::new(), args],
-            builtins: vec![Builtin {
-                intrinsic: Intrinsic::VectorSet,
-                result: SET_OPTION,
-            }],
-            ..Program::default()
-        }
-    }
-
-    /// The receiver, the index and a value of the element's own layout —
-    /// `method_of`'s admitted shape — answers a [`Method::Set`] whose case
-    /// tags and payload offset are the ones [`program_with_set`] built,
-    /// rather than the `0`/`1 + 0` a reader might have assumed.
-    #[test]
-    fn vector_set_is_admitted_with_the_right_arity_and_layouts() {
-        let function = function(vec![Repr::Ref, Repr::Int, Repr::Int], SET_OPTION, vec![]);
-        let program = program_with_set(
-            function,
-            vec![
-                Arg {
-                    slot: 0,
-                    layout: SET_VECTOR,
-                },
-                Arg {
-                    slot: 1,
-                    layout: SET_INT,
-                },
-                Arg {
-                    slot: 2,
-                    layout: SET_INT,
-                },
-            ],
-        );
-        let method = method_of(&program, 3, BuiltinId(0), ArgsId(1));
-        assert_eq!(
-            method,
-            Some(Method::Set {
-                dst: 3,
-                recv: 0,
-                vector: SET_VECTOR,
-                index: 1,
-                value: 2,
-                stride: 1,
-                width: 2,
-                some_case: 0,
-                some_at: 0,
-                none_case: 1,
-                builtin: 0,
-                args: 1,
-            })
-        );
-    }
-
-    /// `operand::method`'s split asks for the receiver and exactly two
-    /// arguments; a call site with only one refuses, because `method_of`'s own
-    /// note is that a call site the VM would refuse for arity is one this
-    /// tier leaves refused rather than compiling into a read of a slot that
-    /// is not there.
-    #[test]
-    fn vector_set_refuses_the_wrong_arity() {
-        let function = function(vec![Repr::Ref, Repr::Int], SET_OPTION, vec![]);
-        let program = program_with_set(
-            function,
-            vec![
-                Arg {
-                    slot: 0,
-                    layout: SET_VECTOR,
-                },
-                Arg {
-                    slot: 1,
-                    layout: SET_INT,
-                },
-            ],
-        );
-        assert_eq!(method_of(&program, 2, BuiltinId(0), ArgsId(1)), None);
-    }
-
-    /// `operand::run_of(machine, .., items.elem, args[1])` requires the value
-    /// argument's layout to *be* the element's, so a call site where they
-    /// differ is one the VM refuses — `Vector<Int>.set(_, someRef)`, here.
-    /// Refusing to compile it leaves the refusal where its message is, rather
-    /// than emitting a write `operand::run_of` would never have allowed.
-    #[test]
-    fn vector_set_refuses_a_value_layout_that_is_not_the_element() {
-        let function = function(vec![Repr::Ref, Repr::Int, Repr::Ref], SET_OPTION, vec![]);
-        let program = program_with_set(
-            function,
-            vec![
-                Arg {
-                    slot: 0,
-                    layout: SET_VECTOR,
-                },
-                Arg {
-                    slot: 1,
-                    layout: SET_INT,
-                },
-                Arg {
-                    slot: 2,
-                    layout: SET_REF,
-                },
-            ],
-        );
-        assert_eq!(method_of(&program, 3, BuiltinId(0), ArgsId(1)), None);
-    }
-
     // --- `method_of`'s `Intrinsic::VectorFreeze` arm ---------------------------
 
     const FREEZE_INT: LayoutId = LayoutId(1);
@@ -1541,9 +1245,9 @@ mod tests {
         );
     }
 
-    /// `operand::method`'s split asks for the receiver and no argument; a call
-    /// site with one more refuses, for [`vector_set_refuses_the_wrong_arity`]'s
-    /// reason.
+    /// `operand::method`'s split asks for the receiver and no argument, and a
+    /// call site the VM would refuse for arity is one this tier leaves refused
+    /// rather than compiling into a read of a slot that is not there.
     #[test]
     fn vector_freeze_refuses_the_wrong_arity() {
         let function = function(vec![Repr::Ref, Repr::Ref, Repr::Ref], FREEZE_REF, vec![]);

@@ -482,13 +482,23 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// per push: a push in statement position writes its unit and nothing else
 /// (`lower::tests::methods`'s listing of one).
 ///
+/// **The twelfth rise is `Vector.set` following it.** 2256 to 2264. The
+/// builtin answered its `Option` straight into the call's destination;
+/// `std.vector.set<T>` is a Cove body that builds `Some(was)` or `None` in a
+/// temporary and copies it into its answer, the shape `Body::struct_literal`'s
+/// seventh-rise note describes for an initializer. One `ret` copy per
+/// instantiation — `examples:life` and `tests/e2e:coll_vector` 1 each,
+/// `tests/e2e:coll_vector_edges` 3 (`Int`, `String`, a two-word struct) — and in
+/// `examples:covefmtBench` 1 `ret` and 2 `prod`, where the body is also expanded
+/// into a caller that holds the same shape.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2256;
+const FORWARDABLE_COPIES: usize = 2264;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

@@ -148,7 +148,8 @@ pub(crate) fn call(
         // `Vector.push` is not here: it is `std.vector.push` over the core
         // intrinsic that is a word `Inst::GrowablePush` — see
         // `Machine::push_words`.
-        Intrinsic::VectorSet => seq::vector_set(machine, builtin.result, operands, out),
+        // `Vector.set` is not here: it is `std.vector.set`, a range check and
+        // an `Option` in Cove over an element `LoadElem` and `StoreElem`.
         Intrinsic::VectorPop => seq::vector_pop(machine, builtin.result, operands, out),
         Intrinsic::VectorRemove => seq::vector_remove(machine, builtin.result, operands, out),
         Intrinsic::VectorGet => seq::vector_get(machine, builtin.result, operands, out),

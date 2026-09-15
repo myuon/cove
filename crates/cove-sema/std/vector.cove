@@ -22,6 +22,28 @@ export fn push<T>(items: Vector<T>, value: T) {
   core.vectorPush(items, value)
 }
 
+/// Replaces the element at `index` with `value`, answering what was there.
+///
+/// An index that is not already in the vector — negative, at or past
+/// `length()`, or any index of an empty vector — answers `None` and writes
+/// nothing, which is `get`'s answer to the same index. It replaces and never
+/// appends: a vector grows by `push`, and a `set` that sometimes grew would
+/// make the length depend on the index. The write goes through the shared
+/// storage, so every alias sees it.
+///
+/// The range decision and the `Option` are this body's; the element read and
+/// write beneath them are core intrinsics, bounded by the storage rather than
+/// by the length, which is why the range is decided first.
+export fn set<T>(items: Vector<T>, index: Int, value: T) -> Option<T> {
+  if index >= 0 && index < items.length() {
+    let was = core.vectorLoad(items, index)
+    core.vectorStore(items, index, value)
+    Some(was)
+  } else {
+    None
+  }
+}
+
 /// The elements `keep` answers `true` for, in the order they were in.
 ///
 /// **Through a copy taken before the first call.** A vector shares its

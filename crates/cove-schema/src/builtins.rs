@@ -644,7 +644,7 @@ pub struct StdBinding {
 /// Every builtin method whose body has moved out of Rust and into the
 /// standard library.
 ///
-/// Thirty-one entries, and what is *not* here is as informative as what is.
+/// Thirty-two entries, and what is *not* here is as informative as what is.
 ///
 /// `Result.mapError` is here, and it is the only one that needed a language
 /// change to arrive. While a callback's arity was adapted rather than
@@ -666,7 +666,7 @@ pub struct StdBinding {
 /// That is what retires ADR 0043's "It must be total" condition, so a
 /// fallible method is no longer kept out of this table for its diagnostic.
 ///
-/// Ten of the thirty-one are `Duration`'s, and they are the first entries
+/// Ten of the thirty-two are `Duration`'s, and they are the first entries
 /// that come in pairs: `micros`, `millis`, `seconds`, `minutes`, and `hours`
 /// each name a method (`d.millis()`, the reader) and, separately, an
 /// associated function (`Duration.millis(n)`, the builder) — see
@@ -760,6 +760,15 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "push",
         module: "std.vector",
         function: "push",
+    },
+    // `set`'s range decision and its `Option` are Cove; only the element read
+    // and write beneath them are core intrinsics.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Vector",
+        method: "set",
+        module: "std.vector",
+        function: "set",
     },
     StdBinding {
         kind: StdBindingKind::Method,
@@ -1232,8 +1241,16 @@ impl CoreIntrinsicSchema {
 /// of the object that holds it, and `String.byteLength` was the first public
 /// method written in Cove over one of these. The second is the first that
 /// writes: `Vector.push` is `std.vector` over [`CORE_VECTOR_PUSH`], which is
-/// ADR 0058's growable push over a run of element words.
-pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[CORE_BYTE_LENGTH, CORE_VECTOR_PUSH];
+/// ADR 0058's growable push over a run of element words. `Vector.set` is the
+/// first with policy around it: its range decision and its `Option` are Cove,
+/// and [`CORE_VECTOR_LOAD`] and [`CORE_VECTOR_STORE`] are the element read and
+/// write beneath them.
+pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
+    CORE_BYTE_LENGTH,
+    CORE_VECTOR_PUSH,
+    CORE_VECTOR_LOAD,
+    CORE_VECTOR_STORE,
+];
 
 /// Every core intrinsic.
 pub fn core_intrinsics() -> &'static [CoreIntrinsicSchema] {
@@ -1277,6 +1294,55 @@ pub const CORE_VECTOR_PUSH: CoreIntrinsicSchema = CoreIntrinsicSchema {
         ParamSchema {
             name: "items",
             ty: BuiltinType::Vector(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "value",
+            ty: BuiltinType::Param("T"),
+        },
+    ],
+    result: BuiltinType::Unit,
+};
+
+/// `core.vectorLoad<T>(items: Vector<T>, index: Int) -> T`: the element at
+/// `index`, which the caller has already held below `items.length()`.
+///
+/// `Inst::LoadField` of the store and `Inst::LoadElem` out of it. The bound the
+/// load checks is the store's capacity, not the vector's length — ADR 0058's
+/// "bounds are in logical units" is kept by the standard library body that
+/// decides the range first, which is the policy this intrinsic has none of.
+pub const CORE_VECTOR_LOAD: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "vectorLoad",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "items",
+            ty: BuiltinType::Vector(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "index",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Param("T"),
+};
+
+/// `core.vectorStore<T>(items: Vector<T>, index: Int, value: T) -> Unit`:
+/// `value` over the element at `index`, which the caller has already held
+/// below `items.length()`.
+///
+/// `Inst::LoadField` of the store and `Inst::StoreElem` into it, bounded as
+/// [`CORE_VECTOR_LOAD`] is.
+pub const CORE_VECTOR_STORE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "vectorStore",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "items",
+            ty: BuiltinType::Vector(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "index",
+            ty: BuiltinType::Int,
         },
         ParamSchema {
             name: "value",

@@ -91,56 +91,6 @@ use crate::vm::builtins::{equal, make, operand};
 use crate::vm::exec::runs::{self, Growable, GROWABLE_LEN, GROWABLE_STORE};
 use crate::vm::exec::Machine;
 
-/// A value's words, off the operand and out of the way of a `&mut Machine`.
-///
-/// An operand's words point into the machine's own memory, so a write that
-/// needs `&mut Machine` cannot hold them. Copying them out is the whole of
-/// the answer and `to_vec()` was how, which is a `malloc` and a `free` for
-/// **every `push`** — `examples/covefmt` makes five million of them, and the
-/// profile priced one at 287 ns against a floor of 53. `push` no longer comes
-/// here at all — it is `Machine::push_words`, reading the element straight out
-/// of the frame — and `set` is the caller left.
-///
-/// A value is a run of words its layout describes, and the layouts a
-/// collection holds are small: a `String` handle is one word, a `Point` is
-/// two, `examples/covefmt`'s `Token` is three. So the run goes on the stack,
-/// and a value wider than [`INLINE`] — which nothing in the corpus is —
-/// falls back to the heap rather than being refused.
-struct Held {
-    inline: [u64; INLINE],
-    spilled: Vec<u64>,
-    len: usize,
-}
-
-/// How many words of a value are copied without touching the heap.
-///
-/// Eight, which is two more than the widest element layout in the corpus and
-/// sixty-four bytes of stack in a function that is called five million times.
-const INLINE: usize = 8;
-
-impl Held {
-    fn new() -> Held {
-        Held {
-            inline: [0; INLINE],
-            spilled: Vec::new(),
-            len: 0,
-        }
-    }
-
-    /// `words`, copied out, and a borrow of the copy.
-    fn take(&mut self, words: &[u64]) -> &[u64] {
-        self.len = words.len();
-        if self.len <= INLINE {
-            self.inline[..self.len].copy_from_slice(words);
-            &self.inline[..self.len]
-        } else {
-            self.spilled.clear();
-            self.spilled.extend_from_slice(words);
-            &self.spilled
-        }
-    }
-}
-
 // --- reading a receiver ----------------------------------------------------
 
 /// The elements of an `Array`.
@@ -448,38 +398,6 @@ pub(super) fn vector_of(
         words.extend_from_slice(operand::run_of(machine, "Vector.of", elem, *operand)?);
     }
     make::vector_of(machine, elem, &words)
-}
-
-/// `Vector.set(index, value) -> Option<T>`.
-///
-/// Answers what the index held before, which is what `get` would have
-/// answered — so a caller that wants the displaced element does not have to
-/// read it first and a caller that does not can ignore one word instead of
-/// making two calls. An index outside the vector answers `None` and writes
-/// nothing: a vector grows by `push`, and a `set` that sometimes grew would
-/// make the length depend on the index.
-pub(super) fn vector_set(
-    machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
-) -> Result<(), RuntimeError> {
-    let (receiver, args) = operand::method("Vector.set", operands, 2)?;
-    let items = vector(machine, "set", receiver)?;
-    let mut held = Held::new();
-    let element = held.take(operand::run_of(machine, "Vector.set", items.elem, args[1])?);
-    let Some(at) = index(machine, "Vector.set", args[0])? else {
-        return make::none(machine, result, out);
-    };
-    if at >= items.run.len as usize {
-        return make::none(machine, result, out);
-    }
-    let at = at as u32 * items.stride;
-    // What the index held before, read out before it is overwritten:
-    // `v.set(i, x)` answers what `v.get(i)` would have.
-    let was = machine.payload_run(items.run.store, at, items.stride);
-    machine.set_payload_run(items.run.store, at, element);
-    make::some(machine, result, &was, out)
 }
 
 /// `Vector.pop() -> Option<T>`.
@@ -1003,28 +921,13 @@ mod tests {
             ("Some".to_string(), vec![1])
         );
 
-        // A `push` writes both words at the element's own stride, and a `set`
-        // answers the two words the position held before it.
+        // A `push` writes both words at the element's own stride.
         push(&mut machine, grown, point, &[5, 6]).unwrap();
         // The store grew, so its spare room is zeroed room past the length —
         // the three elements are the first six words of it.
         let store = machine.payload(grown, 1);
         assert_eq!(machine.payload_run(store, 0, 6), vec![1u64, 2, 3, 4, 5, 6]);
-        let was = values(
-            &mut machine,
-            "Vector",
-            "set",
-            &[(vectors, &[grown]), (int, &[0]), (point, &[7, 8])],
-        )
-        .unwrap();
-        assert_eq!(
-            option_of(&program, point, &was),
-            ("Some".to_string(), vec![1, 2])
-        );
-        assert_eq!(
-            machine.payload_run(machine.payload(grown, 1), 0, 6),
-            vec![7u64, 8, 3, 4, 5, 6]
-        );
+        assert_eq!(machine.object_layout(grown), vectors);
     }
 
     /// A store is traced by its element layout's reference map and searched
@@ -1041,17 +944,18 @@ mod tests {
         let store = machine.new_object(layout, 1).unwrap();
         let grown = machine.new_object(vector(&program, point), 0).unwrap();
         machine.set_payload(grown, 1, store);
-        let vectors = machine.object_layout(grown);
+        // `Vector.of` takes its family from the first element and holds every
+        // other one to it.
         let error = values(
             &mut machine,
             "Vector",
-            "set",
-            &[(vectors, &[grown]), (int, &[0]), (int, &[1])],
+            "of",
+            &[(point, &[1, 2]), (int, &[1])],
         )
         .unwrap_err();
         assert_eq!(
             error.message,
-            "`Vector.set` expects `Point` here, but found `Int`"
+            "`Vector.of` expects `Point` here, but found `Int`"
         );
         // A word `growable-push` is given its element layout by the lowering
         // rather than by an operand, so what it holds to the store's family is
@@ -1146,49 +1050,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(option_int(&program, &words), ("Some".to_string(), vec![3]));
-    }
-
-    #[test]
-    fn set_writes_where_the_index_is_already_there_and_nowhere_else() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let items = growable(&mut machine, &[1, 2, 3]);
-        let ints = scalar(&program, Repr::Int);
-
-        // The answer is what the index held before, which is what `get`
-        // would have answered.
-        let answer = run(
-            &mut machine,
-            "Vector",
-            "set",
-            &[(Repr::Ref, items), (Repr::Int, 1), (Repr::Int, 20)],
-        )
-        .unwrap();
-        assert_eq!(
-            option_of(&program, ints, &answer),
-            ("Some".to_string(), vec![2])
-        );
-        assert_eq!(
-            words_of(&machine, machine.payload(items, 1)),
-            vec![1, 20, 3]
-        );
-
-        // An index that is not already there writes nothing, which is `get`'s
-        // answer to the same bad index said as a store that did not happen.
-        for at in [-1i64, 3] {
-            let answer = run(
-                &mut machine,
-                "Vector",
-                "set",
-                &[(Repr::Ref, items), (Repr::Int, at as u64), (Repr::Int, 99)],
-            )
-            .unwrap();
-            assert_eq!(option_of(&program, ints, &answer).0, "None");
-        }
-        assert_eq!(
-            words_of(&machine, machine.payload(items, 1)),
-            vec![1, 20, 3]
-        );
     }
 
     /// The store keeps its room and loses its dead element: the words a `pop`

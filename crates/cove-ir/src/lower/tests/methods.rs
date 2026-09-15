@@ -299,6 +299,33 @@ fn @m.f(Vector Vector m.Point) -> Int
     );
 }
 
+/// `Vector.set` is `std.vector.set`: the range decision and the `Option` in
+/// Cove, over ADR 0058's `core.vectorLoad` and `core.vectorStore`, which are a
+/// `load-field` of the store and a `load-elem` or `store-elem` of it. What is
+/// left at the call site is an ordinary call — the body is eighteen
+/// instructions, past the leaf limit outside a loop — and no `call-builtin`.
+#[test]
+fn a_set_is_a_range_check_over_an_element_load_and_store() {
+    assert_eq!(
+        listing(
+            "fn f(xs: Vector<Int>, i: Int) -> Option<Int> {\n  var ints = xs\n  ints.set(i, 7)\n}",
+            "f"
+        ),
+        "\
+fn @m.f(Vector Int) -> Option
+  frame 8: s0!:ref s1!:int s2:tag s3:int s4:ref s5:int s6:tag s7:int
+  local xs -> s0:Vector [0, 5)
+  local i -> s1:Int [0, 5)
+  local ints -> s4:Vector [1, 4)
+     0  copy s4:Vector s0:Vector
+     1  int s5:int 7
+     2  call s6..s7:Option std.vector.set<Int> (s4:Vector s1:Int s5:Int)
+     3  copy s2..s3:Option s6..s7:Option
+     4  return s2..s3:Option
+"
+    );
+}
+
 /// `mapError` moved out of the lowering the same way `isSome` and
 /// `unwrapOr` did above: `cove_schema::builtins::STANDARD_LIBRARY` names it
 /// too, so `Int.parse(t).mapError(fn(error) { ... })` is an ordinary

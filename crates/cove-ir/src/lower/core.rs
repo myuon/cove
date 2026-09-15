@@ -17,13 +17,14 @@
 //! standard library wraps around it is small enough that `super::inline`
 //! expands it where it is called.
 
+use cove_diag::Span;
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Arg, Expr};
 
 use super::frame::Val;
-use super::shapes;
+use super::shapes::{self, VECTOR_STORE};
 use super::{Body, Dest};
-use crate::inst::{Inst, Storage};
+use crate::inst::{Inst, Slot, Storage};
 use crate::layout::LayoutId;
 
 impl Body<'_> {
@@ -45,6 +46,12 @@ impl Body<'_> {
             ("byteLength", [text]) => self.core_byte_length(expr, &text.value, want),
             ("vectorPush", [items, value]) => {
                 self.core_vector_push(expr, &items.value, &value.value, want)
+            }
+            ("vectorLoad", [items, index]) => {
+                self.core_vector_load(expr, &items.value, &index.value, want)
+            }
+            ("vectorStore", [items, index, value]) => {
+                self.core_vector_store(expr, &items.value, &index.value, &value.value, want)
             }
             _ => self.gap(&format!("`core.{name}`"), expr),
         }
@@ -99,6 +106,103 @@ impl Body<'_> {
             expr.span,
         );
         self.release(src, expr.span);
+        self.release(owner, expr.span);
+        self.unit_answer(expr, want)
+    }
+
+    /// The store a vector's elements are in: payload word 1 of the owner, in a
+    /// reference location of its own.
+    ///
+    /// Held in a slot rather than read through, because an element read or
+    /// write is a read or write of *that* object, and the collector has to see
+    /// it held for as long as it is being used — `Body::vector_parts`' reason.
+    fn vector_store(&mut self, owner: Slot, span: Span) -> Val {
+        let store = self.temp(shapes::REF);
+        self.emit(
+            Inst::LoadField {
+                dst: store.slot,
+                obj: owner,
+                at: VECTOR_STORE,
+                layout: shapes::REF,
+            },
+            span,
+        );
+        store
+    }
+
+    /// `core.vectorLoad(items, index)`: the element at `index` of the vector's
+    /// store.
+    ///
+    /// [`Inst::LoadField`] of the store and [`Inst::LoadElem`] out of it — #378's
+    /// Q11 default, two instructions rather than a composite. The bound
+    /// `LoadElem` checks is the **store's** header length, which is the capacity
+    /// and not the logical length: an index in `[length, capacity)` reads spare
+    /// room, which is zeroed. So this is only a vector read where the caller has
+    /// already held `index` below `items.length()`, which is what every standard
+    /// library body that calls it does first; a program cannot call it at all.
+    fn core_vector_load(
+        &mut self,
+        expr: &Expr,
+        items: &Expr,
+        index: &Expr,
+        want: Option<Dest>,
+    ) -> Val {
+        let Some(elem) = self.vector_element(items) else {
+            return self.dead(expr);
+        };
+        let owner = self.expr(items);
+        let at = self.expr(index);
+        let store = self.vector_store(owner.slot, expr.span);
+        let dst = self.answer_at(want, elem);
+        self.emit(
+            Inst::LoadElem {
+                dst: dst.slot,
+                obj: store.slot,
+                index: at.slot,
+                layout: elem,
+            },
+            expr.span,
+        );
+        self.release(store, expr.span);
+        self.release(at, expr.span);
+        self.release(owner, expr.span);
+        dst
+    }
+
+    /// `core.vectorStore(items, index, value)`: `value` written over the element
+    /// at `index` of the vector's store.
+    ///
+    /// [`Inst::LoadField`] of the store and [`Inst::StoreElem`] into it, then the
+    /// `()` the call answers. Bounded as [`Body::core_vector_load`] is, by the
+    /// capacity, and so a vector write only where the caller held `index` below
+    /// the length first.
+    fn core_vector_store(
+        &mut self,
+        expr: &Expr,
+        items: &Expr,
+        index: &Expr,
+        value: &Expr,
+        want: Option<Dest>,
+    ) -> Val {
+        let Some(elem) = self.vector_element(items) else {
+            return self.dead(expr);
+        };
+        let owner = self.expr(items);
+        let at = self.expr(index);
+        let src = self.expr(value);
+        let store = self.vector_store(owner.slot, expr.span);
+        self.emit(
+            Inst::StoreElem {
+                obj: store.slot,
+                index: at.slot,
+                src: src.slot,
+                layout: elem,
+            },
+            expr.span,
+        );
+        self.release(store, expr.span);
+        self.release(src, expr.span);
+        self.release(at, expr.span);
         self.release(owner, expr.span);
         self.unit_answer(expr, want)
     }
