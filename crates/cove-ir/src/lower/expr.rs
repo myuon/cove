@@ -53,6 +53,7 @@ use super::pattern::UNPLACED;
 use super::shapes;
 use super::{Body, Dest, Loop, PENDING};
 use crate::inst::{ArithOp, CmpOp, Compare, Inst, Num, Slot};
+use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
 use crate::program::{Builtin, HostOp};
 use crate::repr::Repr;
@@ -560,8 +561,7 @@ impl Body<'_> {
 
         let args = self.pool.args.intern(pieces.iter().map(Val::arg).collect());
         let builtin = self.pool.builtin(Builtin {
-            receiver: "String".into(),
-            operation: "interpolate".into(),
+            intrinsic: Intrinsic::StringInterpolate,
             result: shapes::STR,
         });
         // The pieces are in locations of their own by now, so the join

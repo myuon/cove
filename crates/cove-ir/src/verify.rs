@@ -1985,8 +1985,7 @@ mod tests {
         );
         let mut held = program(vec![f]);
         held.builtins = vec![crate::Builtin {
-            receiver: Arc::from("Any"),
-            operation: Arc::from("equals"),
+            intrinsic: crate::Intrinsic::AnyEquals,
             result: INT,
         }];
         held.args = vec![vec![Arg {

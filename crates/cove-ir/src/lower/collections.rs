@@ -55,6 +55,7 @@ use super::gap;
 use super::shapes::{self, RANGE_END, RANGE_INCLUSIVE, RANGE_START, VECTOR_LEN, VECTOR_STORE};
 use super::{Body, Dest, Loop, PENDING};
 use crate::inst::{ArithOp, CmpOp, Compare, Inst, Len, Num, Pc, Slot};
+use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
 use crate::program::Builtin;
 
@@ -1174,8 +1175,7 @@ impl Body<'_> {
             return;
         }
         let builtin = self.pool.builtin(Builtin {
-            receiver: "Any".into(),
-            operation: "equals".into(),
+            intrinsic: Intrinsic::AnyEquals,
             result: shapes::BOOL,
         });
         let args = self.pool.args.intern(vec![a.arg(), b.arg()]);
@@ -1280,4 +1280,24 @@ pub(super) fn namespace_of(head: &str, ty: &Ty) -> bool {
         (head, ty),
         ("Vector", Ty::Vector(_)) | ("Set", Ty::Set(_)) | ("Map", Ty::Map(..))
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every pair [`HANDED_OVER`] names is an [`Intrinsic`] `emit_builtin`
+    /// can resolve, for the reason `lower::methods`' own test of
+    /// `MACHINE_METHODS` and `ASSOCIATED` gives: a table entry with no
+    /// `Intrinsic` would not fail here on its own, it would panic the first
+    /// time a program's lowering reached it.
+    #[test]
+    fn handed_over_is_all_named_intrinsics() {
+        for &(receiver, operation) in HANDED_OVER {
+            assert!(
+                Intrinsic::from_names(receiver, operation).is_some(),
+                "`{receiver}.{operation}` has no `Intrinsic`"
+            );
+        }
+    }
 }

@@ -43,6 +43,7 @@ use super::frame::Val;
 use super::shapes::{self, RANGE_END, RANGE_INCLUSIVE, RANGE_START};
 use super::{Body, Dest, PENDING};
 use crate::inst::{ArithOp, CmpOp, Compare, Inst, Num, Slot};
+use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
 use crate::program::Builtin;
 
@@ -390,6 +391,19 @@ impl Body<'_> {
 
     /// One [`Inst::CallBuiltin`], and the [`Builtin`] it names.
     ///
+    /// `receiver` and `operation` are the language reference's naming of the
+    /// call — `"Array"`, `"slice"` — and this resolves the pair to the
+    /// [`Intrinsic`] `cove-runtime` dispatches on rather than carrying the
+    /// pair itself: [ADR
+    /// 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
+    /// asks that a builtin be identified statically, not matched by string at
+    /// run time. Every caller's pair is a member of [`MACHINE_METHODS`],
+    /// [`ASSOCIATED`] or `cove_ir::lower::collections`'s own `HANDED_OVER` —
+    /// tables this lowering is written against — so a pair that resolves to
+    /// nothing is a mismatch between this module and `cove_ir::intrinsic`
+    /// and is reported as the internal bug it is rather than lowered as a
+    /// call nothing answers.
+    ///
     /// The pool interns, so a program that splits a string in twenty places
     /// names one builtin and one argument list per distinct operand shape.
     pub(super) fn emit_builtin(
@@ -401,11 +415,13 @@ impl Body<'_> {
         result: LayoutId,
         span: Span,
     ) {
-        let builtin = self.pool.builtin(Builtin {
-            receiver: receiver.into(),
-            operation: operation.into(),
-            result,
+        let intrinsic = Intrinsic::from_names(receiver, operation).unwrap_or_else(|| {
+            unreachable!(
+                "`{receiver}.{operation}` has no `Intrinsic`; `cove_ir::intrinsic` was not \
+                 taught an operation this lowering emits"
+            )
         });
+        let builtin = self.pool.builtin(Builtin { intrinsic, result });
         let args = self.pool.args.intern(args.to_vec());
         self.emit(Inst::CallBuiltin { dst, builtin, args }, span);
     }
@@ -910,4 +926,28 @@ fn receiver_name(ty: &Ty) -> Option<&'static str> {
         Ty::Scope => "Scope",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every pair [`MACHINE_METHODS`] and [`ASSOCIATED`] name is an
+    /// [`Intrinsic`] `emit_builtin` can resolve.
+    ///
+    /// `emit_builtin` treats a pair with no `Intrinsic` as an internal bug —
+    /// see its doc comment — so a table entry that resolved to nothing would
+    /// not fail here; it would panic the first time a program's lowering
+    /// reached it. This is what checks the two tables against
+    /// `cove_ir::intrinsic` directly, independent of which corpus programs
+    /// happen to exercise which entry.
+    #[test]
+    fn machine_methods_and_associated_are_all_named_intrinsics() {
+        for &(receiver, operation) in MACHINE_METHODS.iter().chain(ASSOCIATED) {
+            assert!(
+                Intrinsic::from_names(receiver, operation).is_some(),
+                "`{receiver}.{operation}` has no `Intrinsic`"
+            );
+        }
+    }
 }

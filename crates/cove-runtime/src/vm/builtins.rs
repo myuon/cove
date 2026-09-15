@@ -2,10 +2,14 @@
 //!
 //! A builtin is a method of a type the language ships — `String`, `Array`,
 //! `Int` — that is too large or too specific to be an [`Inst`](cove_ir::Inst)
-//! and too fixed to be a Host call. [`cove_ir::Builtin`] names one by its
-//! receiver and its operation rather than numbering it, because the set of
-//! them is the language reference's: adding one is a change here, not a
-//! renumbering of the IR.
+//! and too fixed to be a Host call. [`cove_ir::Builtin`] names one by a
+//! closed [`cove_ir::Intrinsic`] rather than by a pair of strings matched at
+//! run time — see [ADR
+//! 0058](../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
+//! — so the match below is exhaustive: teaching the machine one more
+//! operation is adding a variant to `cove_ir::intrinsic` and an arm here,
+//! and there is no longer a name this backend has not been taught to fall
+//! through to.
 //!
 //! # A builtin is not a boundary
 //!
@@ -35,7 +39,7 @@
 
 use std::fmt::Write as _;
 
-use cove_ir::{Builtin, LayoutId, Repr, Shape};
+use cove_ir::{Builtin, Intrinsic, LayoutId, Repr, Shape};
 use cove_schema::builtins::{ERROR, MESSAGE_FIELD};
 
 use crate::vm::boundary::{is_range, short};
@@ -72,17 +76,20 @@ pub(crate) fn call(
     operands: &[Operand<'_>],
     out: &mut Vec<u64>,
 ) -> Result<(), RuntimeError> {
-    // One match over the pair the IR names, so that teaching the machine an
-    // operation is adding an arm and nothing else.
-    match (&*builtin.receiver, &*builtin.operation) {
-        ("String", "text") => {
+    // One match over the intrinsic the IR names, so that teaching the
+    // machine an operation is adding a variant to `cove_ir::intrinsic` and
+    // an arm here. The match is exhaustive: there is no pair left to fall
+    // through on, because `Intrinsic` is the closed set this backend has
+    // been taught.
+    match builtin.intrinsic {
+        Intrinsic::StringText => {
             let [operand] = operands else {
                 return Err(operand::operands("String.text", 1, operands.len()));
             };
             let text = render_value(machine, operand.layout, operand.words, 0)?;
             machine.new_string(&text).map(|word| out.push(word))
         }
-        ("String", "concat") => {
+        Intrinsic::StringConcat => {
             let mut text = String::new();
             for operand in operands {
                 match operand::as_word(machine, *operand) {
@@ -101,7 +108,7 @@ pub(crate) fn call(
         // What `"{p}"` puts in the string. An operand is a value location, so
         // an inline struct or enum renders as the value it is rather than as
         // its first word — which is what `"{Point(x: 1)}"` answering `1` was.
-        ("String", "interpolate") => {
+        Intrinsic::StringInterpolate => {
             let mut text = String::new();
             for operand in operands {
                 text.push_str(&render_value(machine, operand.layout, operand.words, 0)?);
@@ -121,100 +128,118 @@ pub(crate) fn call(
         // ns of an 86 ns call; see `Machine::builtin_answer`. What each one means
         // is in the module it delegates to, beside the reading of the oracle
         // it follows.
-        ("Array", "get") => seq::array_get(machine, builtin.result, operands, out),
-        ("Array", "length") => seq::array_length(machine, operands).map(|word| out.push(word)),
+        Intrinsic::ArrayGet => seq::array_get(machine, builtin.result, operands, out),
+        Intrinsic::ArrayLength => seq::array_length(machine, operands).map(|word| out.push(word)),
         // `Array.isEmpty` is not here: it is `std.array.isEmpty`, the first
         // builtin method whose body is Cove rather than a machine builtin —
         // see `cove_schema::builtins::standard_binding` and
         // `cove_ir::lower::methods::Body::call_std_binding`.
-        ("Array", "contains") => seq::array_contains(machine, operands).map(|word| out.push(word)),
-        ("Array", "indexOf") => seq::array_index_of(machine, builtin.result, operands, out),
-        ("Array", "slice") => seq::array_slice(machine, operands).map(|word| out.push(word)),
-        ("Array", "toVector") => seq::array_to_vector(machine, operands).map(|word| out.push(word)),
+        Intrinsic::ArrayContains => {
+            seq::array_contains(machine, operands).map(|word| out.push(word))
+        }
+        Intrinsic::ArrayIndexOf => seq::array_index_of(machine, builtin.result, operands, out),
+        Intrinsic::ArraySlice => seq::array_slice(machine, operands).map(|word| out.push(word)),
+        Intrinsic::ArrayToVector => {
+            seq::array_to_vector(machine, operands).map(|word| out.push(word))
+        }
 
         // ---- Vector ------------------------------------------------------
-        ("Vector", "of") => seq::vector_of(machine, operands).map(|word| out.push(word)),
-        ("Vector", "push") => seq::vector_push(machine, operands).map(|word| out.push(word)),
-        ("Vector", "set") => seq::vector_set(machine, builtin.result, operands, out),
-        ("Vector", "pop") => seq::vector_pop(machine, builtin.result, operands, out),
-        ("Vector", "remove") => seq::vector_remove(machine, builtin.result, operands, out),
-        ("Vector", "get") => seq::vector_get(machine, builtin.result, operands, out),
-        ("Vector", "contains") => seq::vector_contains(machine, operands).map(|word| out.push(word)),
-        ("Vector", "indexOf") => seq::vector_index_of(machine, builtin.result, operands, out),
-        ("Vector", "slice") => seq::vector_slice(machine, operands).map(|word| out.push(word)),
-        ("Vector", "length") => seq::vector_length(machine, operands).map(|word| out.push(word)),
+        Intrinsic::VectorOf => seq::vector_of(machine, operands).map(|word| out.push(word)),
+        Intrinsic::VectorPush => seq::vector_push(machine, operands).map(|word| out.push(word)),
+        Intrinsic::VectorSet => seq::vector_set(machine, builtin.result, operands, out),
+        Intrinsic::VectorPop => seq::vector_pop(machine, builtin.result, operands, out),
+        Intrinsic::VectorRemove => seq::vector_remove(machine, builtin.result, operands, out),
+        Intrinsic::VectorGet => seq::vector_get(machine, builtin.result, operands, out),
+        Intrinsic::VectorContains => {
+            seq::vector_contains(machine, operands).map(|word| out.push(word))
+        }
+        Intrinsic::VectorIndexOf => seq::vector_index_of(machine, builtin.result, operands, out),
+        Intrinsic::VectorSlice => seq::vector_slice(machine, operands).map(|word| out.push(word)),
+        Intrinsic::VectorLength => seq::vector_length(machine, operands).map(|word| out.push(word)),
         // `Vector.isEmpty` is not here: it is `std.vector.isEmpty` — see
         // `cove_schema::builtins::standard_binding`.
-        ("Vector", "toArray") => seq::vector_to_array(machine, operands).map(|word| out.push(word)),
-        ("Vector", "freeze") => seq::vector_freeze(machine, operands).map(|word| out.push(word)),
+        Intrinsic::VectorToArray => {
+            seq::vector_to_array(machine, operands).map(|word| out.push(word))
+        }
+        Intrinsic::VectorFreeze => seq::vector_freeze(machine, operands).map(|word| out.push(word)),
 
         // ---- Set ---------------------------------------------------------
         //
         // A `Set` and a `Map` are sorted runs, so every one of these is a
         // binary search over `key`'s order or a walk of a run already in it.
-        ("Set", "of") => keyed::set_of(machine, operands).map(|word| out.push(word)),
-        ("Set", "length") => keyed::set_length(machine, operands).map(|word| out.push(word)),
+        Intrinsic::SetOf => keyed::set_of(machine, operands).map(|word| out.push(word)),
+        Intrinsic::SetLength => keyed::set_length(machine, operands).map(|word| out.push(word)),
         // `Set.isEmpty` is not here: it is `std.set.isEmpty` — see
         // `cove_schema::builtins::standard_binding`.
-        ("Set", "contains") => keyed::set_contains(machine, operands).map(|word| out.push(word)),
-        ("Set", "toArray") => keyed::set_to_array(machine, operands).map(|word| out.push(word)),
-        ("Set", "inserted") => keyed::set_inserted(machine, operands).map(|word| out.push(word)),
-        ("Set", "removed") => keyed::set_removed(machine, operands).map(|word| out.push(word)),
+        Intrinsic::SetContains => keyed::set_contains(machine, operands).map(|word| out.push(word)),
+        Intrinsic::SetToArray => keyed::set_to_array(machine, operands).map(|word| out.push(word)),
+        Intrinsic::SetInserted => keyed::set_inserted(machine, operands).map(|word| out.push(word)),
+        Intrinsic::SetRemoved => keyed::set_removed(machine, operands).map(|word| out.push(word)),
 
         // ---- Map ---------------------------------------------------------
-        ("Map", "of") => keyed::map_of(machine, operands).map(|word| out.push(word)),
-        ("Map", "get") => keyed::map_get(machine, builtin.result, operands, out),
-        ("Map", "contains") => keyed::map_contains(machine, operands).map(|word| out.push(word)),
-        ("Map", "length") => keyed::map_length(machine, operands).map(|word| out.push(word)),
+        Intrinsic::MapOf => keyed::map_of(machine, operands).map(|word| out.push(word)),
+        Intrinsic::MapGet => keyed::map_get(machine, builtin.result, operands, out),
+        Intrinsic::MapContains => keyed::map_contains(machine, operands).map(|word| out.push(word)),
+        Intrinsic::MapLength => keyed::map_length(machine, operands).map(|word| out.push(word)),
         // `Map.isEmpty` is not here: it is `std.map.isEmpty` — see
         // `cove_schema::builtins::standard_binding`.
-        ("Map", "keys") => keyed::map_keys(machine, operands).map(|word| out.push(word)),
-        ("Map", "values") => keyed::map_values(machine, operands).map(|word| out.push(word)),
-        ("Map", "inserted") => keyed::map_inserted(machine, operands).map(|word| out.push(word)),
-        ("Map", "removed") => keyed::map_removed(machine, operands).map(|word| out.push(word)),
+        Intrinsic::MapKeys => keyed::map_keys(machine, operands).map(|word| out.push(word)),
+        Intrinsic::MapValues => keyed::map_values(machine, operands).map(|word| out.push(word)),
+        Intrinsic::MapInserted => keyed::map_inserted(machine, operands).map(|word| out.push(word)),
+        Intrinsic::MapRemoved => keyed::map_removed(machine, operands).map(|word| out.push(word)),
 
         // ---- String ------------------------------------------------------
-        ("String", "length") => text::length(machine, operands).map(|word| out.push(word)),
+        Intrinsic::StringLength => text::length(machine, operands).map(|word| out.push(word)),
         // `String.isEmpty` is not here: it is `std.string.isEmpty` — see
         // `cove_schema::builtins::standard_binding`.
-        ("String", "words") => text::words(machine, operands).map(|word| out.push(word)),
-        ("String", "chars") => text::chars(machine, operands).map(|word| out.push(word)),
-        ("String", "split") => text::split(machine, operands).map(|word| out.push(word)),
-        ("String", "join") => text::join(machine, operands).map(|word| out.push(word)),
-        ("String", "slice") => text::slice(machine, operands).map(|word| out.push(word)),
-        ("String", "trim") => text::trim(machine, operands).map(|word| out.push(word)),
-        ("String", "contains") => text::contains(machine, operands).map(|word| out.push(word)),
-        ("String", "startsWith") => text::starts_with(machine, operands).map(|word| out.push(word)),
-        ("String", "endsWith") => text::ends_with(machine, operands).map(|word| out.push(word)),
-        ("String", "indexOf") => text::index_of(machine, builtin.result, operands, out),
-        ("String", "replace") => text::replace(machine, operands).map(|word| out.push(word)),
-        ("String", "toUpper") => text::to_upper(machine, operands).map(|word| out.push(word)),
-        ("String", "toLower") => text::to_lower(machine, operands).map(|word| out.push(word)),
-        ("String", "fromCodePoint") => text::from_code_point(machine, builtin.result, operands, out),
+        Intrinsic::StringWords => text::words(machine, operands).map(|word| out.push(word)),
+        Intrinsic::StringChars => text::chars(machine, operands).map(|word| out.push(word)),
+        Intrinsic::StringSplit => text::split(machine, operands).map(|word| out.push(word)),
+        Intrinsic::StringJoin => text::join(machine, operands).map(|word| out.push(word)),
+        Intrinsic::StringSlice => text::slice(machine, operands).map(|word| out.push(word)),
+        Intrinsic::StringTrim => text::trim(machine, operands).map(|word| out.push(word)),
+        Intrinsic::StringContains => text::contains(machine, operands).map(|word| out.push(word)),
+        Intrinsic::StringStartsWith => {
+            text::starts_with(machine, operands).map(|word| out.push(word))
+        }
+        Intrinsic::StringEndsWith => text::ends_with(machine, operands).map(|word| out.push(word)),
+        Intrinsic::StringIndexOf => text::index_of(machine, builtin.result, operands, out),
+        Intrinsic::StringReplace => text::replace(machine, operands).map(|word| out.push(word)),
+        Intrinsic::StringToUpper => text::to_upper(machine, operands).map(|word| out.push(word)),
+        Intrinsic::StringToLower => text::to_lower(machine, operands).map(|word| out.push(word)),
+        Intrinsic::StringFromCodePoint => {
+            text::from_code_point(machine, builtin.result, operands, out)
+        }
         // The three that count bytes. Every one of them reads the object's
         // header or a word of its payload rather than decoding the whole
         // string, which is the only reason they are worth having.
-        ("String", "byteLength") => text::byte_length(machine, operands).map(|word| out.push(word)),
-        ("String", "codePointAtByte") => text::code_point_at_byte(machine, builtin.result, operands, out),
-        ("String", "sliceBytes") => text::slice_bytes(machine, builtin.result, operands, out),
+        Intrinsic::StringByteLength => {
+            text::byte_length(machine, operands).map(|word| out.push(word))
+        }
+        Intrinsic::StringCodePointAtByte => {
+            text::code_point_at_byte(machine, builtin.result, operands, out)
+        }
+        Intrinsic::StringSliceBytes => text::slice_bytes(machine, builtin.result, operands, out),
 
         // ---- Int ---------------------------------------------------------
-        ("Int", "toFloat") => scalar::int_to_float(machine, operands).map(|word| out.push(word)),
+        Intrinsic::IntToFloat => scalar::int_to_float(machine, operands).map(|word| out.push(word)),
         // `Int.min`, `Int.max`, and `Int.abs` are not here: they are
         // `std.int.min`, `std.int.max`, and `std.int.abs` — see
         // `cove_schema::builtins::standard_binding`.
-        ("Int", "parse") => scalar::int_parse(machine, builtin.result, operands, out),
-        ("Int", "parseRadix") => scalar::int_parse_radix(machine, builtin.result, operands, out),
+        Intrinsic::IntParse => scalar::int_parse(machine, builtin.result, operands, out),
+        Intrinsic::IntParseRadix => scalar::int_parse_radix(machine, builtin.result, operands, out),
 
         // ---- Float -------------------------------------------------------
-        ("Float", "toInt") => scalar::float_to_int(machine, builtin.result, operands, out),
-        ("Float", "round") => scalar::float_round(machine, operands).map(|word| out.push(word)),
-        ("Float", "abs") => scalar::float_abs(machine, operands).map(|word| out.push(word)),
-        ("Float", "sqrt") => scalar::float_sqrt(machine, operands).map(|word| out.push(word)),
-        ("Float", "min") => scalar::float_min(machine, operands).map(|word| out.push(word)),
-        ("Float", "max") => scalar::float_max(machine, operands).map(|word| out.push(word)),
-        ("Float", "format") => scalar::float_format(machine, operands).map(|word| out.push(word)),
-        ("Float", "parse") => scalar::float_parse(machine, builtin.result, operands, out),
+        Intrinsic::FloatToInt => scalar::float_to_int(machine, builtin.result, operands, out),
+        Intrinsic::FloatRound => scalar::float_round(machine, operands).map(|word| out.push(word)),
+        Intrinsic::FloatAbs => scalar::float_abs(machine, operands).map(|word| out.push(word)),
+        Intrinsic::FloatSqrt => scalar::float_sqrt(machine, operands).map(|word| out.push(word)),
+        Intrinsic::FloatMin => scalar::float_min(machine, operands).map(|word| out.push(word)),
+        Intrinsic::FloatMax => scalar::float_max(machine, operands).map(|word| out.push(word)),
+        Intrinsic::FloatFormat => {
+            scalar::float_format(machine, operands).map(|word| out.push(word))
+        }
+        Intrinsic::FloatParse => scalar::float_parse(machine, builtin.result, operands, out),
 
         // ---- Duration ----------------------------------------------------
         //
@@ -228,7 +253,9 @@ pub(crate) fn call(
         // `Bool` is not below this line because `Bool` has no operations: the
         // schema gives it none beyond `snapshot`, and `!`, `&&` and `||` are
         // instructions rather than builtins.
-        ("Duration", "nanos") => scalar::duration_nanos(machine, operands).map(|word| out.push(word)),
+        Intrinsic::DurationNanos => {
+            scalar::duration_nanos(machine, operands).map(|word| out.push(word))
+        }
 
         // ---- equality ----------------------------------------------------
         //
@@ -237,14 +264,7 @@ pub(crate) fn call(
         // language gives an equality, rather than a method a type declares —
         // `crates/cove-runtime/src/builtins.rs` has no entry for it, and
         // `crate::interp` reaches it as an operator.
-        ("Any", "equals") => equal::equals(machine, operands).map(|word| out.push(word)),
-
-        (receiver, operation) => Err(RuntimeError::new(format!(
-            "`{receiver}.{operation}` is not an operation this backend has been taught"
-        ))
-        .with_rule(
-            "Every valid checked program runs; an operation this backend has not been taught is a gap in the backend.",
-        )),
+        Intrinsic::AnyEquals => equal::equals(machine, operands).map(|word| out.push(word)),
     }
 }
 
@@ -628,7 +648,6 @@ mod tests {
     use super::*;
     use crate::vm::exec::tests::{budget, Build};
     use cove_ir::{BuiltinId, Inst, LayoutId, Program, Repr, Shape};
-    use std::sync::Arc;
 
     /// The program every builtin test is run against.
     ///
@@ -787,16 +806,9 @@ mod tests {
         // builtin writes into one the machine reuses, and a test wants what
         // it wrote rather than a place to have written it.
         let mut out = Vec::new();
-        call(
-            machine,
-            &Builtin {
-                receiver: Arc::from(receiver),
-                operation: Arc::from(operation),
-                result,
-            },
-            &passed,
-            &mut out,
-        )?;
+        let intrinsic = Intrinsic::from_names(receiver, operation)
+            .unwrap_or_else(|| panic!("`{receiver}.{operation}` has no `Intrinsic`"));
+        call(machine, &Builtin { intrinsic, result }, &passed, &mut out)?;
         Ok(out)
     }
 
@@ -1073,11 +1085,9 @@ mod tests {
         operation: &str,
         result: LayoutId,
     ) -> BuiltinId {
-        program.builtins.push(Builtin {
-            receiver: Arc::from(receiver),
-            operation: Arc::from(operation),
-            result,
-        });
+        let intrinsic = Intrinsic::from_names(receiver, operation)
+            .unwrap_or_else(|| panic!("`{receiver}.{operation}` has no `Intrinsic`"));
+        program.builtins.push(Builtin { intrinsic, result });
         BuiltinId(program.builtins.len() as u32 - 1)
     }
 
@@ -1304,37 +1314,6 @@ mod tests {
         assert_eq!(
             error.message,
             "`String.concat` joins strings, and this operand is not one"
-        );
-    }
-
-    #[test]
-    fn an_operation_the_backend_has_not_been_taught_says_so() {
-        let mut build = Build::default();
-        let str_layout = build.layout("String", Shape::Str);
-        build.program.str_layout = str_layout;
-        let none = build.args(&[]);
-        let unknown = builtin(&mut build.program, "String", "reverse", str_layout);
-        let f = build.function(
-            "f",
-            &[],
-            &[Repr::Ref],
-            str_layout,
-            vec![
-                Inst::CallBuiltin {
-                    dst: 0,
-                    builtin: unknown,
-                    args: none,
-                },
-                Inst::Return { src: 0 },
-            ],
-        );
-        let program = build.done();
-        let error = Machine::new(&program, 1 << 14)
-            .run(f, &[], &budget())
-            .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`String.reverse` is not an operation this backend has been taught"
         );
     }
 
