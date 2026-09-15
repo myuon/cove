@@ -65,7 +65,6 @@
 
 mod assertions;
 mod branches;
-mod buffers;
 mod cells;
 mod closures;
 mod collections;

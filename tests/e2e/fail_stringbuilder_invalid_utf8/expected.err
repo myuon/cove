@@ -5,8 +5,8 @@ error[cove::runtime]: this string's bytes are not valid UTF-8
    |   ^^^^^^^^^^^^
    --> std/stringbuilder.cove:163:5
     |
-163 |     self.buffer.finish()
-    |     ^^^^^^^^^^^^^^^^^^^^ in the standard library
+163 |     core.bytesFinish(self.buffer)
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
   --> <e2e>/fail_stringbuilder_invalid_utf8/main.cove:20:14
    |
 20 |   let text = truncated()

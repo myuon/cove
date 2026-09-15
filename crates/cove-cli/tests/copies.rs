@@ -436,7 +436,7 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// checking rather than assuming: an append answers `()`, and a `Unit` built in
 /// a temporary and copied into the answer would have been a fourth row per
 /// program. `Body::unit_answer` is why they are not — see
-/// `cove_ir::lower::buffers`.
+/// `cove_ir::lower::core`, where the byte builder's appends are lowered now.
 ///
 /// **The eighth rise is one new row, and it is at the floor.** 2231 to 2235,
 /// all four of them `tests/e2e:fail_stringbuilder_byte_range`, the end-to-end

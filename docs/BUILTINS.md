@@ -15,9 +15,9 @@ unless the run was granted the capability it names.
 
 | | |
 | --- | --- |
-| builtin types | 19 |
-| builtin methods | 106 |
-| builtin associated functions | 14 |
+| builtin types | 18 |
+| builtin methods | 102 |
+| builtin associated functions | 13 |
 | free builtins | 7 |
 | host modules | 8 |
 | host operations | 25 |
@@ -58,6 +58,11 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `vectorTruncate` | `core.vectorTruncate(items: Vector<T>, len: Int) -> Unit` |
 | `vectorMove` | `core.vectorMove(items: Vector<T>, to: Int, from: Int, count: Int) -> Unit` |
 | `stringSlice` | `core.stringSlice(text: String, from: Int, count: Int) -> String` |
+| `bytesAllocate` | `core.bytesAllocate(capacity: Int) -> ByteBuffer` |
+| `bytesPush` | `core.bytesPush(buffer: ByteBuffer, byte: Int) -> Unit` |
+| `bytesExtend` | `core.bytesExtend(buffer: ByteBuffer, text: String, from: Int, to: Int) -> Unit` |
+| `bytesFinish` | `core.bytesFinish(buffer: ByteBuffer) -> String` |
+| `bytesLength` | `core.bytesLength(buffer: ByteBuffer) -> Int` |
 
 ## Builtin types
 
@@ -200,25 +205,6 @@ written as a namespace.
 | `codePointAtByte(offset: Int) -> Option<Int>` |  |  |  | `machine` |
 | `sliceBytes(from: Int, to: Int) -> Result<String, Error>` |  |  |  | `std.string.sliceBytes` |
 | `snapshot() -> Self` |  |  |  | `machine` |
-
-### `ByteBuffer`
-
-written as a namespace.
-
-**Associated functions.**
-
-| signature | variadic | binds | implemented by |
-| --- | --- | --- | --- |
-| `allocate(capacity: Int) -> ByteBuffer` |  |  | `machine` |
-
-**Methods.**
-
-| signature | `var self` | variadic | binds | implemented by |
-| --- | --- | --- | --- | --- |
-| `length() -> Int` |  |  |  | `machine` |
-| `appendByte(value: Int) -> Unit` | yes |  |  | `machine` |
-| `appendSlice(text: String, from: Int, to: Int) -> Unit` | yes |  |  | `machine` |
-| `finish() -> String` | yes |  |  | `machine` |
 
 ### `Range`
 

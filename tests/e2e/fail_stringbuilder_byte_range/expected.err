@@ -5,8 +5,8 @@ error[cove::runtime]: `appendByte`'s value is `300`, and a byte is 0 to 255
   |   ^^^^^^^^^^^^^^^^^^^^^
    --> std/stringbuilder.cove:147:5
     |
-147 |     self.buffer.appendByte(value)
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+147 |     core.bytesPush(self.buffer, value)
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
   --> <e2e>/fail_stringbuilder_byte_range/main.cove:18:3
    |
 18 |   emit(var out, 300)

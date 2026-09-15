@@ -434,7 +434,7 @@ use std::sync::Arc;
 use cove_diag::{Diagnostic, FileId, Severity, Span};
 use cove_schema::builtins::{
     BuiltinSchema, BuiltinType, FreeBuiltinKind, FreeBuiltinSchema, MethodSchema, ParamSchema,
-    CORE_NAMESPACE, MAP_ENTRY, NONE_CASE, SCOPE,
+    CORE_BYTE_RUN_TYPE, CORE_NAMESPACE, MAP_ENTRY, NONE_CASE, SCOPE,
 };
 use cove_schema::{
     HostSchemas, HostType, ModuleSchema, OperationSchema, ResourceSchema, TypeSchema,
@@ -1068,6 +1068,10 @@ pub enum Ty {
     Duration,
     /// `ByteBuffer`: the growable packed byte run ADR 0052 assembles a
     /// `String` in, and the field an `opaque struct StringBuilder` wraps.
+    ///
+    /// Only a standard-library module can write it, and nothing has a method
+    /// on it: the `core.bytes*` intrinsics are the whole of what can be done
+    /// with one — see `cove_schema::builtins::CORE_BYTE_RUN_TYPE`.
     ///
     /// Shared mutable storage exactly as a [`Ty::Vector`] is — a copy of the
     /// value aliases the same owner, and an append through either is visible
@@ -3725,6 +3729,18 @@ impl<'a> Checker<'a> {
         if name == SCOPE.name {
             return None;
         }
+        // The growable byte run is written only by the standard library, which
+        // wraps it in `StringBuilder` — the privilege `core.` has, decided by
+        // the same question. Anywhere else the name falls through to what the
+        // module declares, and a module that declares nothing by it is told so
+        // as it would be of any other name.
+        if name == CORE_BYTE_RUN_TYPE {
+            if !crate::stdlib::is_library_module(&self.module.name) {
+                return None;
+            }
+            self.check_type_arity(name, 0, args.len(), span);
+            return Some(Ty::ByteBuffer);
+        }
         let arity = cove_schema::builtin(name)?.parameters.len();
         self.check_type_arity(name, arity, args.len(), span);
         let first = args.first().cloned().unwrap_or(Ty::recovery());
@@ -3736,7 +3752,6 @@ impl<'a> Checker<'a> {
             "Float" => Ty::Float,
             "String" => Ty::Str,
             "Duration" => Ty::Duration,
-            "ByteBuffer" => Ty::ByteBuffer,
             "Error" => Ty::Error,
             "Range" => Ty::Range,
             "Array" => Ty::Array(Box::new(first)),
@@ -9431,7 +9446,6 @@ pub(crate) fn builtin_schema_of(receiver: &Ty) -> Option<&'static BuiltinSchema>
         Ty::Float => "Float",
         Ty::Str => "String",
         Ty::Duration => "Duration",
-        Ty::ByteBuffer => "ByteBuffer",
         Ty::Error => "Error",
         Ty::Range => "Range",
         Ty::Array(_) => "Array",
@@ -11789,7 +11803,7 @@ fn run() -> Counter {
         assert_eq!(error.message, "`Array` has no associated function `of`");
         assert_eq!(
             error.rule.unwrap(),
-            "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, `String.fromCodePoint`, `ByteBuffer.allocate`, `Int.parse`, `Int.parseRadix`, `Float.parse`, `Duration.nanos`, `Duration.micros`, `Duration.millis`, `Duration.seconds`, `Duration.minutes`, and `Duration.hours`."
+            "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, `String.fromCodePoint`, `Int.parse`, `Int.parseRadix`, `Float.parse`, `Duration.nanos`, `Duration.micros`, `Duration.millis`, `Duration.seconds`, `Duration.minutes`, and `Duration.hours`."
         );
     }
 
@@ -15661,6 +15675,39 @@ fn secret() -> Int {
             "/// Entry point.\nexport fn main() -> Int {\n  core.byteLength(\"x\")\n}\n",
         )]);
         assert_eq!(error.code, UNKNOWN_NAME, "{}", error.message);
+    }
+
+    /// The growable byte run is a type only where `core.` is the core: a
+    /// standard-library module writes `ByteBuffer` and the `core.bytes*` calls
+    /// over it, and a program is told the name is no type it can see — the
+    /// diagnostic any undeclared type name gets (#378, Phase 3 Q8).
+    #[test]
+    fn only_the_standard_library_can_name_the_byte_run() {
+        accepts_modules(&[(
+            "std.stringbuilder",
+            "/// Bytes.\nexport fn probe(text: String) -> String {\n  let buffer: ByteBuffer = core.bytesAllocate(4)\n  core.bytesExtend(buffer, text, 0, core.byteLength(text))\n  core.bytesPush(buffer, 33)\n  let n = core.bytesLength(buffer)\n  core.bytesFinish(buffer)\n}\n",
+        )]);
+        let error = rejects_modules(&[(
+            "app",
+            "/// Entry point.\nexport fn main(buffer: ByteBuffer) -> Int {\n  0\n}\n",
+        )]);
+        assert_eq!(error.code, UNKNOWN_TYPE, "{}", error.message);
+        assert_eq!(
+            error.message,
+            "`ByteBuffer` names no type this module can see"
+        );
+        // Nor is it a namespace a program can reach its old constructor through.
+        let error = rejects_modules(&[(
+            "app",
+            "/// Entry point.\nexport fn main() -> Int {\n  let out = ByteBuffer.allocate(4)\n  0\n}\n",
+        )]);
+        assert_eq!(error.code, UNRESOLVED_NAME, "{}", error.message);
+        assert_eq!(error.message, "cannot find `ByteBuffer` in this scope");
+        // And a package may declare a type of its own by the name.
+        accepts_modules(&[(
+            "app",
+            "/// A buffer of the package's own.\nexport struct ByteBuffer {\n  size: Int\n}\n\n/// Entry point.\nexport fn main() -> Int {\n  ByteBuffer(size: 3).size\n}\n",
+        )]);
     }
 
     /// A package with a module of its own called `core` keeps it: the name is

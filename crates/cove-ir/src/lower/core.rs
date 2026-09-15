@@ -11,6 +11,17 @@
 //! intrinsic is not a name for the machine to dispatch on; it is the operation
 //! the name stands for.
 //!
+//! The string builder is the one core type here with no public method of its
+//! own. `std.stringbuilder`'s `StringBuilder` wraps a `ByteBuffer` — ADR 0052's
+//! growable packed byte run — and its five operations are the five
+//! `core.bytes*` intrinsics: a byte `growable-alloc`, `growable-push` and
+//! `growable-extend`, a `run-finish` into `String`, and a field read of the
+//! owner's length word. The owner is a reference, so nothing needs an address:
+//! a `var self` builder is a `var` slot holding that reference, the body loads
+//! it, and every append writes *through* it — which is why a growth that
+//! replaces the store beneath the owner is visible to every frame naming the
+//! builder.
+//!
 //! So nothing downstream of this file learns that a public method moved. The
 //! verifier, both encoders and the native code generators see run instructions
 //! — a `len`, a word `growable-push`, a `load-elem` or `store-elem` of a store, a
@@ -24,7 +35,7 @@ use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Arg, Expr};
 
 use super::frame::Val;
-use super::shapes::{self, VECTOR_LEN, VECTOR_STORE};
+use super::shapes::{self, BUFFER_LEN, VECTOR_LEN, VECTOR_STORE};
 use super::{Body, Dest};
 use crate::inst::{Inst, Len, Slot, Storage, Validation};
 use crate::layout::LayoutId;
@@ -76,6 +87,18 @@ impl Body<'_> {
             ("stringSlice", [text, from, count]) => {
                 self.core_string_slice(expr, &text.value, &from.value, &count.value, want)
             }
+            ("bytesAllocate", [capacity]) => self.core_bytes_allocate(expr, &capacity.value, want),
+            ("bytesPush", [buffer, byte]) => {
+                self.core_bytes_push(expr, &buffer.value, &byte.value, want)
+            }
+            ("bytesExtend", [buffer, text, from, to]) => self.core_bytes_extend(
+                expr,
+                &buffer.value,
+                [&text.value, &from.value, &to.value],
+                want,
+            ),
+            ("bytesFinish", [buffer]) => self.core_bytes_finish(expr, &buffer.value, want),
+            ("bytesLength", [buffer]) => self.core_bytes_length(expr, &buffer.value, want),
             _ => self.gap(&format!("`core.{name}`"), expr),
         }
     }
@@ -617,6 +640,158 @@ impl Body<'_> {
         self.release(many, expr.span);
         self.release(at, expr.span);
         self.release(src, expr.span);
+        dst
+    }
+
+    /// `core.bytesAllocate(capacity)`: an empty byte [`Inst::GrowableAlloc`].
+    ///
+    /// Both layouts it allocates — the owner and its store — are program-wide
+    /// constants the machine already holds, so there is nothing for the call to
+    /// say beyond the capacity. That is a hint: a store too small for what is
+    /// appended grows, and one larger than the final length gives the tail back
+    /// at [`Inst::RunFinish`], so no value here changes what a program answers.
+    fn core_bytes_allocate(&mut self, expr: &Expr, capacity: &Expr, want: Option<Dest>) -> Val {
+        let capacity = self.expr(capacity);
+        let dst = self.answer_at(want, shapes::BYTE_BUFFER);
+        self.emit(
+            Inst::GrowableAlloc {
+                dst: dst.slot,
+                capacity: capacity.slot,
+                storage: Storage::PackedBytes,
+            },
+            expr.span,
+        );
+        self.release(capacity, expr.span);
+        dst
+    }
+
+    /// `core.bytesPush(buffer, byte)`: one byte [`Inst::GrowablePush`], then
+    /// the `()`.
+    ///
+    /// The instruction writes no destination, so the unit is written where the
+    /// surrounding form asked for it — [`Body::unit_answer`] — and a value that
+    /// is not a byte stops the run in the machine's own words.
+    fn core_bytes_push(
+        &mut self,
+        expr: &Expr,
+        buffer: &Expr,
+        byte: &Expr,
+        want: Option<Dest>,
+    ) -> Val {
+        let owner = self.expr(buffer);
+        let value = self.expr(byte);
+        self.emit(
+            Inst::GrowablePush {
+                owner: owner.slot,
+                src: value.slot,
+                storage: Storage::PackedBytes,
+            },
+            expr.span,
+        );
+        self.release(value, expr.span);
+        self.release(owner, expr.span);
+        self.unit_answer(expr, want)
+    }
+
+    /// `core.bytesExtend(buffer, text, from, to)`: one byte
+    /// [`Inst::GrowableExtend`], then the `()`.
+    ///
+    /// Four operands and an encoded instruction with room for three, so the row
+    /// goes in the argument pool the way a call's does — `[owner, src, from,
+    /// to]`, in that order, each carrying its own layout so the bytecode
+    /// verifier checks them by the rule it checks a call's arguments by.
+    ///
+    /// The range is checked by the machine, in `String.sliceBytes`'s words, and a
+    /// range that fails stops the run. Nothing is checked here: the machine is
+    /// already holding the header the bounds are read from, and ADR 0052
+    /// requires the refusal to be the same refusal in the same sentence.
+    fn core_bytes_extend(
+        &mut self,
+        expr: &Expr,
+        buffer: &Expr,
+        [text, from, to]: [&Expr; 3],
+        want: Option<Dest>,
+    ) -> Val {
+        let owner = self.expr(buffer);
+        let src = self.expr(text);
+        let start = self.expr(from);
+        let end = self.expr(to);
+        let row = self
+            .pool
+            .args
+            .intern(vec![owner.arg(), src.arg(), start.arg(), end.arg()]);
+        self.emit(
+            Inst::GrowableExtend {
+                args: row,
+                storage: Storage::PackedBytes,
+            },
+            expr.span,
+        );
+        self.release(end, expr.span);
+        self.release(start, expr.span);
+        self.release(src, expr.span);
+        self.release(owner, expr.span);
+        self.unit_answer(expr, want)
+    }
+
+    /// `core.bytesFinish(buffer)`: a byte [`Inst::RunFinish`] into `String`,
+    /// validated as UTF-8.
+    ///
+    /// The live prefix is validated once and its store is relabelled down from
+    /// the capacity to the logical length, so the `String` this answers *is* the
+    /// bytes that were appended and not a copy of them. The owner is emptied by
+    /// the instruction, which is why `cove_sema::unique` records this call as a
+    /// consuming transition and has proved that nothing else holds the buffer.
+    fn core_bytes_finish(&mut self, expr: &Expr, buffer: &Expr, want: Option<Dest>) -> Val {
+        let owner = self.expr(buffer);
+        let dst = self.answer_at(want, shapes::STR);
+        self.emit(
+            Inst::RunFinish {
+                dst: dst.slot,
+                owner: owner.slot,
+                target: shapes::STR,
+                validation: Validation::Utf8,
+                storage: Storage::PackedBytes,
+            },
+            expr.span,
+        );
+        self.release(owner, expr.span);
+        dst
+    }
+
+    /// `core.bytesLength(buffer)`: payload word 0 of the owner.
+    ///
+    /// [`BUFFER_LEN`], where a `Vector` keeps its own length and read exactly as
+    /// that one is. What it must *not* read is the store's header length: that
+    /// is the capacity, and ADR 0052's "capacity is not an Array length" is this
+    /// distinction holding.
+    fn core_bytes_length(&mut self, expr: &Expr, buffer: &Expr, want: Option<Dest>) -> Val {
+        let obj = self.expr(buffer);
+        let dst = self.answer_at(want, shapes::INT);
+        self.emit(
+            Inst::LoadField {
+                dst: dst.slot,
+                obj: obj.slot,
+                at: BUFFER_LEN,
+                layout: shapes::INT,
+            },
+            expr.span,
+        );
+        self.release(obj, expr.span);
+        dst
+    }
+
+    /// The `()` a core intrinsic that writes no destination answers, in the
+    /// location the surrounding form asked for.
+    ///
+    /// [`Body::unit_value`] with a destination, which is the whole difference:
+    /// a push or an append is a statement in almost every program that writes
+    /// one, and a `Unit` written into a temporary that is then copied into the
+    /// location the answer belongs in is an instruction per append that nothing
+    /// reads. `crates/cove-cli/tests/copies.rs` counts every one of those.
+    pub(super) fn unit_answer(&mut self, expr: &Expr, want: Option<Dest>) -> Val {
+        let dst = self.answer_at(want, shapes::UNIT);
+        self.emit(Inst::Unit { dst: dst.slot }, expr.span);
         dst
     }
 

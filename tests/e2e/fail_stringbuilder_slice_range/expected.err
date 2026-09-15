@@ -5,8 +5,8 @@ error[cove::runtime]: `to` is `2`, which is inside a character rather than at th
   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    --> std/stringbuilder.cove:133:5
     |
-133 |     self.buffer.appendSlice(text, from, to)
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+133 |     core.bytesExtend(self.buffer, text, from, to)
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
   --> <e2e>/fail_stringbuilder_slice_range/main.cove:18:3
    |
 18 |   copy(var out, "héllo", 1, 2)

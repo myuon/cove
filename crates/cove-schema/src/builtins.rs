@@ -103,6 +103,9 @@ pub enum BuiltinType {
     Duration,
     /// `ByteBuffer`, the growable packed byte run ADR 0052 builds a `String`
     /// in. Non-generic because its storage unit is a byte and nothing else.
+    ///
+    /// Written only in the core intrinsics' signatures: the type is the
+    /// standard library's and not a program's — see [`CORE_BYTE_RUN_TYPE`].
     ByteBuffer,
     /// `Array<T>`, the fixed-length immutable sequence.
     Array(&'static BuiltinType),
@@ -493,25 +496,8 @@ impl FreeBuiltinSchema {
 /// The order is the order the associated functions read out in a diagnostic
 /// that has to list them, which is why the collections come first.
 pub static BUILTINS: &[BuiltinSchema] = &[
-    ARRAY,
-    VECTOR,
-    MAP,
-    MAP_ENTRY,
-    SET,
-    STRING,
-    BYTE_BUFFER,
-    RANGE,
-    OPTION,
-    RESULT,
-    INT,
-    FLOAT,
-    BOOL,
-    UNIT,
-    DURATION,
-    ERROR,
-    TASK,
-    SHARED,
-    SCOPE,
+    ARRAY, VECTOR, MAP, MAP_ENTRY, SET, STRING, RANGE, OPTION, RESULT, INT, FLOAT, BOOL, UNIT,
+    DURATION, ERROR, TASK, SHARED, SCOPE,
 ];
 
 /// Every builtin type the language defines.
@@ -1278,6 +1264,16 @@ pub struct CoreIntrinsicSchema {
     pub params: &'static [ParamSchema],
     /// The type the call produces.
     pub result: BuiltinType,
+    /// Whether the call answers an owner nothing else holds a handle to.
+    ///
+    /// [`MethodSchema::fresh`]'s claim, made by the same table for the same
+    /// reader: `cove_sema::unique::creates` trusts it, and only inside a
+    /// standard-library module, which is the only place a core intrinsic can be
+    /// written. [`CORE_BYTES_ALLOCATE`] is the one entry that says `true` — the
+    /// byte run it answers was allocated by the call — and it is what lets
+    /// `std.stringbuilder`'s `withCapacity` be proved to answer a builder its
+    /// caller may finish.
+    pub fresh: bool,
 }
 
 impl CoreIntrinsicSchema {
@@ -1319,7 +1315,11 @@ impl CoreIntrinsicSchema {
 /// `Vector.remove` are an element load, [`CORE_VECTOR_MOVE`] of the tail and
 /// [`CORE_VECTOR_TRUNCATE`], which gives the last element back.
 /// `String.sliceBytes` decides its range in Cove and copies it with
-/// [`CORE_STRING_SLICE`], the byte member of the same run slice.
+/// [`CORE_STRING_SLICE`], the byte member of the same run slice. And
+/// `std.stringbuilder`'s `StringBuilder` is Cove over the five `bytes*`
+/// entries — [`CORE_BYTES_ALLOCATE`], [`CORE_BYTES_PUSH`],
+/// [`CORE_BYTES_EXTEND`], [`CORE_BYTES_FINISH`] and [`CORE_BYTES_LENGTH`] —
+/// which are ADR 0052's growable byte run with no method of its own left.
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_PUSH,
@@ -1332,6 +1332,11 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_VECTOR_TRUNCATE,
     CORE_VECTOR_MOVE,
     CORE_STRING_SLICE,
+    CORE_BYTES_ALLOCATE,
+    CORE_BYTES_PUSH,
+    CORE_BYTES_EXTEND,
+    CORE_BYTES_FINISH,
+    CORE_BYTES_LENGTH,
 ];
 
 /// Every core intrinsic.
@@ -1358,6 +1363,7 @@ pub const CORE_BYTE_LENGTH: CoreIntrinsicSchema = CoreIntrinsicSchema {
         ty: BuiltinType::String,
     }],
     result: BuiltinType::Int,
+    fresh: false,
 };
 
 /// `core.vectorPush<T>(items: Vector<T>, value: T) -> Unit`: one element onto
@@ -1383,6 +1389,7 @@ pub const CORE_VECTOR_PUSH: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::Unit,
+    fresh: false,
 };
 
 /// `core.vectorLoad<T>(items: Vector<T>, index: Int) -> T`: the element at
@@ -1406,6 +1413,7 @@ pub const CORE_VECTOR_LOAD: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::Param("T"),
+    fresh: false,
 };
 
 /// `core.vectorStore<T>(items: Vector<T>, index: Int, value: T) -> Unit`:
@@ -1432,6 +1440,7 @@ pub const CORE_VECTOR_STORE: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::Unit,
+    fresh: false,
 };
 
 /// `core.vectorFinish<T>(items: Vector<T>) -> Array<T>`: the vector's store,
@@ -1450,6 +1459,7 @@ pub const CORE_VECTOR_FINISH: CoreIntrinsicSchema = CoreIntrinsicSchema {
         ty: BuiltinType::Vector(&BuiltinType::Param("T")),
     }],
     result: BuiltinType::Array(&BuiltinType::Param("T")),
+    fresh: false,
 };
 
 /// `core.arraySlice<T>(items: Array<T>, from: Int, count: Int) -> Array<T>`: a
@@ -1479,6 +1489,7 @@ pub const CORE_ARRAY_SLICE: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::Array(&BuiltinType::Param("T")),
+    fresh: false,
 };
 
 /// `core.vectorSlice<T>(items: Vector<T>, from: Int, count: Int) -> Array<T>`:
@@ -1505,6 +1516,7 @@ pub const CORE_VECTOR_SLICE: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::Array(&BuiltinType::Param("T")),
+    fresh: false,
 };
 
 /// `core.arrayToVector<T>(items: Array<T>) -> Vector<T>`: a fresh vector over a
@@ -1521,6 +1533,7 @@ pub const CORE_ARRAY_TO_VECTOR: CoreIntrinsicSchema = CoreIntrinsicSchema {
         ty: BuiltinType::Array(&BuiltinType::Param("T")),
     }],
     result: BuiltinType::Vector(&BuiltinType::Param("T")),
+    fresh: false,
 };
 
 /// `core.vectorTruncate<T>(items: Vector<T>, len: Int) -> Unit`: the vector's
@@ -1544,6 +1557,7 @@ pub const CORE_VECTOR_TRUNCATE: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::Unit,
+    fresh: false,
 };
 
 /// `core.vectorMove<T>(items: Vector<T>, to: Int, from: Int, count: Int) ->
@@ -1574,6 +1588,7 @@ pub const CORE_VECTOR_MOVE: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::Unit,
+    fresh: false,
 };
 
 /// `core.stringSlice(text: String, from: Int, count: Int) -> String`: a fresh
@@ -1604,6 +1619,137 @@ pub const CORE_STRING_SLICE: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::String,
+    fresh: false,
+};
+
+/// The name of the growable byte run a standard-library module may write as a
+/// type: `buffer: ByteBuffer`.
+///
+/// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
+/// stable owner over a replaceable packed byte run, which
+/// [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
+/// places in the core the standard library is compiled with, not importable by
+/// a program (#378, Phase 2 Q9 and Phase 3 Q8). It is not in [`BUILTINS`]: it
+/// has no method, no associated function and no namespace, and the checker
+/// resolves the name only in a module `cove_sema::stdlib::is_library_module`
+/// answers for — the rule `core.` is resolved by. In a program `ByteBuffer`
+/// names no type, and a package may declare one of its own.
+///
+/// What a builder *does* with one is the five `core.bytes*` intrinsics below,
+/// and what a program holds is `std.stringbuilder`'s `StringBuilder`.
+pub const CORE_BYTE_RUN_TYPE: &str = "ByteBuffer";
+
+/// `core.bytesAllocate(capacity: Int) -> ByteBuffer`: an empty growable byte
+/// run with room for `capacity` bytes before its first growth.
+///
+/// ADR 0052's owner and its store, as one `Inst::GrowableAlloc` over
+/// `Storage::PackedBytes`. `capacity` is a hint: a store too small grows, and
+/// one too large is given back at the finish. It is the one core intrinsic
+/// whose answer is [`CoreIntrinsicSchema::fresh`].
+pub const CORE_BYTES_ALLOCATE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "bytesAllocate",
+    generics: &[],
+    params: &[ParamSchema {
+        name: "capacity",
+        ty: BuiltinType::Int,
+    }],
+    result: BuiltinType::ByteBuffer,
+    fresh: true,
+};
+
+/// `core.bytesPush(buffer: ByteBuffer, byte: Int) -> Unit`: one byte at the
+/// logical length, which then becomes one more.
+///
+/// One `Inst::GrowablePush` over `Storage::PackedBytes`. A value outside
+/// `0..=255` is not a byte and stops the run in `appendByte`'s words, because
+/// `StringBuilder.appendByte` is the one caller and that is the sentence a
+/// program which wrote the call is owed.
+pub const CORE_BYTES_PUSH: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "bytesPush",
+    generics: &[],
+    params: &[
+        ParamSchema {
+            name: "buffer",
+            ty: BuiltinType::ByteBuffer,
+        },
+        ParamSchema {
+            name: "byte",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Unit,
+    fresh: false,
+};
+
+/// `core.bytesExtend(buffer: ByteBuffer, text: String, from: Int, to: Int) ->
+/// Unit`: the bytes of `text` from `from` up to `to`, appended.
+///
+/// One `Inst::GrowableExtend` over `Storage::PackedBytes`. The range is
+/// checked by the instruction — bounds, direction and character boundaries, in
+/// `String.sliceBytes`'s words — and a range that fails stops the run. The
+/// character-boundary rule is String policy inside a run instruction, which
+/// #378's Phase 2 Q6 left there and this entry does not move.
+pub const CORE_BYTES_EXTEND: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "bytesExtend",
+    generics: &[],
+    params: &[
+        ParamSchema {
+            name: "buffer",
+            ty: BuiltinType::ByteBuffer,
+        },
+        ParamSchema {
+            name: "text",
+            ty: BuiltinType::String,
+        },
+        ParamSchema {
+            name: "from",
+            ty: BuiltinType::Int,
+        },
+        ParamSchema {
+            name: "to",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Unit,
+    fresh: false,
+};
+
+/// `core.bytesFinish(buffer: ByteBuffer) -> String`: the run's live prefix,
+/// validated as UTF-8 and relabelled into the `String`, and the buffer
+/// consumed.
+///
+/// ADR 0058's `run-finish` over packed bytes with `Utf8` validation, one
+/// `Inst::RunFinish`. That nothing else holds the buffer is
+/// `cove_sema::unique`'s proof: it records this call as the consuming
+/// transition `ByteBuffer.finish()` was, so `StringBuilder.finish`, which calls
+/// it on `self.buffer`, demands a unique receiver of its callers exactly as it
+/// did.
+pub const CORE_BYTES_FINISH: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "bytesFinish",
+    generics: &[],
+    params: &[ParamSchema {
+        name: "buffer",
+        ty: BuiltinType::ByteBuffer,
+    }],
+    result: BuiltinType::String,
+    fresh: false,
+};
+
+/// `core.bytesLength(buffer: ByteBuffer) -> Int`: how many bytes are value.
+///
+/// `Inst::LoadField` of the owner's length word — never the store's header
+/// length, which is the capacity. ADR 0052's "capacity is not an Array length"
+/// is this entry answering two after two appends whatever the store was sized
+/// to.
+pub const CORE_BYTES_LENGTH: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "bytesLength",
+    generics: &[],
+    params: &[ParamSchema {
+        name: "buffer",
+        ty: BuiltinType::ByteBuffer,
+    }],
+    result: BuiltinType::Int,
+    fresh: false,
 };
 
 // ----------------------------------------------------- the shared signatures
@@ -2784,138 +2930,6 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
     }],
 };
 
-// -------------------------------------------------------------- ByteBuffer
-
-/// `ByteBuffer`: the growable packed byte run a `String` is assembled in.
-///
-/// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)
-/// is what this is, and the ADR's own words for it are "a stable owner over a
-/// replaceable run": the value a program holds is a two-word owner, and the
-/// packed bytes live in a store beneath it that a growth may replace. The
-/// owner not moving is the whole point — a buffer passed as a `var` argument
-/// down a recursion keeps working while the store under it doubles, which is
-/// what `examples/covefmt` needs and what a fixed run sized up front cannot
-/// give.
-///
-/// # It is the substrate and not the API
-///
-/// Nothing in a program is expected to write `ByteBuffer` directly. The type
-/// the standard library publishes is `std.stringbuilder`'s `StringBuilder`, an
-/// `opaque struct` whose one field is one of these, and the reason there are
-/// two names is the reason ADR 0052 gives for a privileged substrate:
-/// contiguous packed allocation and precise tracing cannot be written in
-/// ordinary Cove over no memory primitive, but everything above them can. So
-/// this entry is deliberately the smallest set of operations the builder needs
-/// and not a second collection: it appends, it reports a length, and it
-/// finishes. It has no indexing, no removal and no `snapshot`, because a
-/// shared mutable owner has no copy that means anything and nothing here asks
-/// for one.
-///
-/// It is a namespace because the standard library writes
-/// `ByteBuffer.allocate(capacity)`, and that is the only reason: a mistyped
-/// `ByteBuffer.withCapacity(...)` should be told what `ByteBuffer` is rather
-/// than that the name is undeclared.
-///
-/// # Why `appendSlice` answers `Unit` and `finish` does not fail
-///
-/// `appendSlice` checks its range the way `String.sliceBytes` checks one —
-/// bounds and character boundaries both — and a range that fails those checks
-/// **stops the run**. That is not a narrowing of ADR 0052; it is what
-/// `Inst::GrowableExtend` does, and a `Result` declared here would be a `Result`
-/// no instruction can produce. A caller that wants to *ask* whether a range is
-/// appendable asks `String` about it before appending.
-///
-/// `finish` answers a `String` rather than a `Result<String, Error>` for the
-/// same reason read off the other instruction: invalid UTF-8 in the live prefix
-/// is a broken invariant `Inst::RunFinish` refuses, in the words every other
-/// string operation refuses it in. Only `appendByte` can put a byte there that
-/// no `String` would have, so the fallibility ADR 0052 anticipated belongs to
-/// whoever calls that — and until a program does something with it, declaring a
-/// `Result` every caller would immediately unwrap is surface that has not
-/// earned its place.
-pub const BYTE_BUFFER: BuiltinSchema = BuiltinSchema {
-    name: "ByteBuffer",
-    parameters: &[],
-    // `ByteBuffer.allocate(capacity)` is how the standard library makes one.
-    namespace: true,
-    cases: &[],
-    fields: &[],
-    methods: &[
-        // How many bytes are *value*, which is the owner's own word and never
-        // the store's capacity. ADR 0052's "capacity is not an Array length"
-        // is this method answering two after two appends whatever the store
-        // was sized to.
-        LENGTH,
-        // One byte, at the logical length, which then becomes one more. There
-        // is no offset to pass: a buffer cannot leave a hole below its length,
-        // which is what makes it a buffer rather than a run with a cursor.
-        MethodSchema {
-            name: "appendByte",
-            generics: &[],
-            params: &[ParamSchema {
-                name: "value",
-                ty: BuiltinType::Int,
-            }],
-            variadic: false,
-            result: BuiltinType::Unit,
-            mutating: true,
-            fresh: false,
-        },
-        // The bulk append, and the one that matters: one dispatch moves the
-        // whole range straight out of `text` without materialising the slice.
-        MethodSchema {
-            name: "appendSlice",
-            generics: &[],
-            params: &[
-                ParamSchema {
-                    name: "text",
-                    ty: BuiltinType::String,
-                },
-                ParamSchema {
-                    name: "from",
-                    ty: BuiltinType::Int,
-                },
-                ParamSchema {
-                    name: "to",
-                    ty: BuiltinType::Int,
-                },
-            ],
-            variadic: false,
-            result: BuiltinType::Unit,
-            mutating: true,
-            fresh: false,
-        },
-        // `mutating` because it *consumes*: the owner is emptied, and a buffer
-        // read after a finish is refused rather than read as an empty one. It
-        // is `Vector.freeze()` in a buffer's vocabulary, and
-        // `cove_sema::unique` proves the same local uniqueness for both.
-        MethodSchema {
-            name: "finish",
-            generics: &[],
-            params: &[],
-            variadic: false,
-            result: BuiltinType::String,
-            mutating: true,
-            fresh: false,
-        },
-    ],
-    associated: &[MethodSchema {
-        name: "allocate",
-        generics: &[],
-        params: &[ParamSchema {
-            name: "capacity",
-            ty: BuiltinType::Int,
-        }],
-        variadic: false,
-        result: BuiltinType::ByteBuffer,
-        // A fresh owner nothing else holds, which is what lets
-        // `cove_sema::unique` prove the `finish()` that consumes it — the same
-        // assertion `Vector.of` makes for the same pass.
-        mutating: false,
-        fresh: true,
-    }],
-};
-
 // ------------------------------------------------------------------- Range
 
 /// `Range`: what `0..n` and `0..=n` produce.
@@ -3745,19 +3759,8 @@ mod tests {
         assert_eq!(
             namespaces,
             [
-                "Array",
-                "Vector",
-                "Map",
-                "Set",
-                "String",
-                "ByteBuffer",
-                "Option",
-                "Result",
-                "Int",
-                "Float",
-                "Bool",
-                "Duration",
-                "Error"
+                "Array", "Vector", "Map", "Set", "String", "Option", "Result", "Int", "Float",
+                "Bool", "Duration", "Error"
             ]
         );
         assert!(is_builtin_type("Vector"));
@@ -3765,6 +3768,11 @@ mod tests {
         // turn a number a program computed into one.
         assert!(is_builtin_type("Duration"));
         assert!(!is_builtin_type("Task"));
+        // The growable byte run is the standard library's and not a program's,
+        // so it is no namespace a program may write — see
+        // `CORE_BYTE_RUN_TYPE`.
+        assert!(!is_builtin_type(CORE_BYTE_RUN_TYPE));
+        assert!(builtin(CORE_BYTE_RUN_TYPE).is_none());
     }
 
     /// One `Duration.<unit>(count)` per suffix a duration literal may be
@@ -3811,11 +3819,12 @@ mod tests {
     /// name that says it answers a new collection while writing through the
     /// receiver.
     ///
-    /// `appendByte`, `appendSlice` and `finish` are ADR 0052's byte buffer, and
-    /// `finish` is the entry worth looking twice at: it *consumes*, as `freeze`
-    /// does, and a consuming transition is mutating because the owner it leaves
-    /// behind is empty. So the two transitions the language has are both in this
-    /// list, and neither is a past participle.
+    /// `freeze` is the entry worth looking twice at: it *consumes*, and a
+    /// consuming transition is mutating because the owner it leaves behind is
+    /// empty. The byte buffer's `appendByte`, `appendSlice` and `finish` were
+    /// here too until the buffer became the standard library's own type; they
+    /// are `StringBuilder`'s `var self` methods now, which the checker reads off
+    /// their declarations.
     #[test]
     fn the_mutating_methods_are_the_ones_that_write_through_the_receiver() {
         let mut mutating: Vec<&str> = BUILTINS
@@ -3825,19 +3834,7 @@ mod tests {
             .map(|method| method.name)
             .collect();
         mutating.sort_unstable();
-        assert_eq!(
-            mutating,
-            [
-                "appendByte",
-                "appendSlice",
-                "finish",
-                "freeze",
-                "pop",
-                "push",
-                "remove",
-                "set"
-            ]
-        );
+        assert_eq!(mutating, ["freeze", "pop", "push", "remove", "set"]);
         assert!(is_mutating_method("push"));
         assert!(is_mutating_method("set"));
         assert!(is_mutating_method("pop"));
@@ -4048,20 +4045,9 @@ mod tests {
             .filter(|entry| declares_length(entry.name))
             .map(|entry| entry.name)
             .collect();
-        // A `ByteBuffer` is here because it answers `length()`, which is the
-        // whole of the question: a program that wrote `out.count()` on one
-        // should be told the spelling rather than told there is no such method.
         assert_eq!(
             sequences,
-            [
-                "Array",
-                "Vector",
-                "Map",
-                "Set",
-                "String",
-                "ByteBuffer",
-                "Range"
-            ]
+            ["Array", "Vector", "Map", "Set", "String", "Range"]
         );
         assert!(!declares_length("Option"));
         assert!(!declares_length("Nothing"));
