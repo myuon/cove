@@ -104,8 +104,8 @@
 //! It is honoured by the rule above and by nothing else. **Neither code
 //! generator keeps a Cove value in a register across an instruction
 //! boundary**, so at every place a collection can happen — the safepoint
-//! helper, the call helper, and now [`AllocFn`], [`BuiltinFn`] and [`GrowableFn`],
-//! which are all the calls either arm emits — every live reference is already in
+//! helper, the call helper, and now [`AllocFn`], [`BuiltinFn`], [`GrowableFn`] and
+//! [`RunCopyFn`], which are all the calls either arm emits — every live reference is already in
 //! the slot the frame's static `Function::refs` map names. The collector walks exactly what it
 //! walks for an encoded frame, and there is no spill sequence, because there is
 //! nothing anywhere else to spill.
@@ -898,6 +898,63 @@ impl GrowableOp {
 pub type GrowableFn =
     unsafe extern "C" fn(ctx: *mut NativeCtx, base: u64, pc: u32, op: u32, a: u32, b: u32) -> u32;
 
+/// What a run-copy helper is: one [`Inst::RunCopy`](cove_ir::Inst::RunCopy) —
+/// [ADR 0058]'s `run-copy`, over either storage — handed to the runtime whole.
+///
+/// [`GrowableFn`]'s relationship to the builder, for the bulk copy beneath
+/// `Vector.toArray` and the conversions that follow it. The copy's correctness
+/// already lives in Rust, and all of it is the reason this is a helper rather
+/// than an emitted loop:
+///
+/// - **it is memmove, and it polls between chunks.** ADR 0058 gives `run-copy`
+///   memmove semantics and ADR 0040 a stop bound, so a long copy walks bounded
+///   chunks — backwards when a forward shift overlaps itself — with a safepoint
+///   between them. Emitting that would be emitting `in_chunks` and its poll, and
+///   a copy of *references* would then put a collection in the middle of
+///   emitted code;
+/// - **its refusals name numbers the runtime formats.** A null object, a
+///   negative count, a range past either end and a run of the wrong family each
+///   have a sentence of their own, and this crate names errors and never builds
+///   one;
+/// - **a word copy checks both objects' layouts against the element.** The
+///   collector traces each object by its own reference map, so a copy between two
+///   families would be words one map calls integers and the other follows. That
+///   check reads the program's layout table, which emitted code does not have.
+///
+/// What the lowering buys is [`GrowableFn`]'s answer again: not a faster copy but
+/// **a compiled function around one**. The census named `RunCopyWords` as the
+/// only blocker of several parser functions, which ran every other instruction
+/// they had on the encoded tier because of it.
+///
+/// `base` is the caller's frame as a word index and `pc` the instruction's index,
+/// as for [`GrowableFn`]. `args` is the `ArgsId` whose five entries are `dst`,
+/// `dst_at`, `src`, `src_at` and `count`. `words` is `0` for
+/// [`Storage::PackedBytes`](cove_ir::Storage::PackedBytes) and `1` for
+/// [`Storage::Words`](cove_ir::Storage::Words), and `elem` is that storage's
+/// element `LayoutId` — nought, and unread, for bytes. The storage is an operand
+/// rather than something the helper reads back off the instruction at `pc`
+/// because it is static and the double in `cove-native`'s own suite can then
+/// check that an arm passed the right one. Six integer arguments, which is what
+/// the System V ABI passes in registers. The answer is an [`Outcome`] as a `u32`,
+/// read exactly as [`GrowableFn`]'s is.
+///
+/// # Safety
+///
+/// As [`AllocFn`]: this is a safepoint — and a chunk's poll may collect, with a
+/// half-written run of references in the destination — so every live reference
+/// must already be in the slot the frame's `Function::refs` names, and both
+/// republished pointers are re-derived by the generated code afterwards.
+///
+/// [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+pub type RunCopyFn = unsafe extern "C" fn(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    args: u32,
+    words: u32,
+    elem: u32,
+) -> u32;
+
 /// The runtime's side of the boundary, as function pointers.
 ///
 /// This table is the whole reason `cove-native` does not depend on
@@ -924,6 +981,8 @@ pub struct NativeHelpers {
     pub builtin: BuiltinFn,
     /// See [`GrowableFn`].
     pub growable: GrowableFn,
+    /// See [`RunCopyFn`].
+    pub run_copy: RunCopyFn,
     /// See [`FieldLoadFn`].
     pub field_load: FieldLoadFn,
     /// See [`FieldStoreFn`].

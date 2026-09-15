@@ -932,6 +932,96 @@ unsafe extern "C" fn growable(
     }
 }
 
+/// The run-copy helper: one [ADR 0058] `Inst::RunCopy`, handed over whole.
+///
+/// See [`cove_native::RunCopyFn`] for why the copy is a helper rather than an
+/// emitted loop. What happens here is `encoded.rs`'s `RUN_COPY_BYTES` and
+/// `RUN_COPY_WORDS` arms, and *is* those arms: the same `run_copy_bytes` and
+/// `run_copy_words`, so the checks, the refusals' sentences, the direction a
+/// self-overlapping copy walks and the chunk loop's polls are the dispatch loop's
+/// and nowhere else.
+///
+/// One thing is in front of them, and it is [`growable`]'s: the unpaid work is
+/// charged and ADR 0040's three steps are taken before the copy. The encoded arms
+/// lean on the dispatch loop's stride for that, and compiled code has no loop to
+/// lean on — and the chunk loop's own poll compares the work since the last
+/// charge against the stride, so the work compiled code had not yet paid has to be
+/// in that account before the first chunk is measured against it.
+///
+/// # Safety
+///
+/// As [`safepoint`].
+///
+/// [ADR 0058]: ../../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+unsafe extern "C" fn run_copy(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    args: u32,
+    words: u32,
+    elem: u32,
+) -> u32 {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+    let budget = (*host).budget;
+
+    let work = (*ctx).pending_work;
+    (*ctx).pending_work = 0;
+
+    let answered = {
+        let machine = &mut *machine;
+        machine.bulk_work += work;
+        machine.sync(pc as usize);
+        let frame = *machine.frames.last().expect("a native frame is executing");
+        debug_assert_eq!(
+            machine.mem.stack_index(frame.base) as u64,
+            base,
+            "compiled code and the frame stack disagree about which frame the run copy is in"
+        );
+        machine
+            .safepoint(budget, frame.function, pc as usize)
+            .and_then(|()| {
+                let program = machine.program;
+                let args = program.arg_list(ArgsId(args));
+                // The frame's *address* rather than its index, for [`builtin`]'s
+                // reason. Both cores attach the instruction's span to their own
+                // refusals.
+                match words {
+                    0 => super::encoded::run_copy_bytes(
+                        machine,
+                        program,
+                        budget,
+                        frame.base,
+                        args,
+                        frame.function,
+                        pc as usize,
+                    ),
+                    _ => super::encoded::run_copy_words(
+                        machine,
+                        program,
+                        budget,
+                        frame.base,
+                        args,
+                        LayoutId(elem),
+                        frame.function,
+                        pc as usize,
+                    ),
+                }
+            })
+            .map_err(|error| error.at(machine.span(frame.function, pc as usize)))
+    };
+    // A chunk's poll may have collected and grown the stack, so both pointers
+    // compiled code cached are stale.
+    republish(ctx, host);
+    match answered {
+        Ok(()) => Outcome::Returned.abi(),
+        Err(error) => {
+            (*host).left = Some(error);
+            Outcome::Raised.abi()
+        }
+    }
+}
+
 /// The call helper: one `Inst::Call`, handed over whole.
 ///
 /// See [`cove_native::CallFn`] for the signature and
@@ -1741,6 +1831,7 @@ pub fn helpers() -> NativeHelpers {
         alloc,
         builtin,
         growable,
+        run_copy,
         field_load,
         field_store,
     }
@@ -1771,6 +1862,7 @@ pub fn helpers_counting() -> NativeHelpers {
         alloc: counted_alloc,
         builtin: counted_builtin,
         growable: counted_growable,
+        run_copy: counted_run_copy,
         field_load: counted_field_load,
         field_store: counted_field_store,
     }
@@ -1836,6 +1928,10 @@ counted!(
 counted!(
     /// [`growable`], counted.
     counted_growable => growable.growable(base: u64, pc: u32, op: u32, a: u32, b: u32) -> u32
+);
+counted!(
+    /// [`run_copy`], counted.
+    counted_run_copy => run_copy.run_copy(base: u64, pc: u32, args: u32, words: u32, elem: u32) -> u32
 );
 counted!(
     /// [`field_load`], counted.
@@ -1935,6 +2031,7 @@ pub fn helpers_ablated<const MASK: u64>() -> NativeHelpers {
         alloc,
         builtin,
         growable,
+        run_copy,
         field_load,
         field_store,
     }

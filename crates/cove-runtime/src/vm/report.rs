@@ -74,6 +74,8 @@ pub struct HelperCalls {
     pub builtin: u64,
     /// [`GrowableFn`](cove_native::GrowableFn): one growable-run operation.
     pub growable: u64,
+    /// [`RunCopyFn`](cove_native::RunCopyFn): one run copy, whole.
+    pub run_copy: u64,
     /// [`FieldLoadFn`](cove_native::abi::FieldLoadFn): a field bound the emitted
     /// table could not answer.
     pub field_load: u64,
@@ -88,7 +90,7 @@ impl HelperCalls {
     }
 
     /// Each helper's name, as `NativeHelpers` spells the field, and its count.
-    pub fn rows(self) -> [(&'static str, u64); 9] {
+    pub fn rows(self) -> [(&'static str, u64); 10] {
         [
             ("safepoint", self.safepoint),
             ("call", self.call),
@@ -97,6 +99,7 @@ impl HelperCalls {
             ("alloc", self.alloc),
             ("builtin", self.builtin),
             ("growable", self.growable),
+            ("run_copy", self.run_copy),
             ("field_load", self.field_load),
             ("field_store", self.field_store),
         ]

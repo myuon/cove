@@ -338,6 +338,21 @@ fn a_growable_buffer_is_admitted_as_a_family() {
 }
 
 #[test]
+fn a_run_copy_is_handed_to_the_runtime_whole() {
+    suite::a_run_copy_is_handed_to_the_runtime_whole::<Cranelift>();
+}
+
+#[test]
+fn a_run_copy_the_runtime_refused_leaves_with_that_outcome() {
+    suite::a_run_copy_the_runtime_refused_leaves_with_that_outcome::<Cranelift>();
+}
+
+#[test]
+fn a_run_copy_is_admitted_with_five_one_word_operands() {
+    suite::a_run_copy_is_admitted_with_five_one_word_operands::<Cranelift>();
+}
+
+#[test]
 fn a_unit_constant_is_a_zero_word() {
     suite::a_unit_constant_is_a_zero_word::<Cranelift>();
 }

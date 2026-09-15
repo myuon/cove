@@ -2118,7 +2118,7 @@ impl<'a> Machine<'a> {
         // whole corpus exercises this rather than only a fuzzer that hits
         // debug builds.
         #[cfg(debug_assertions)]
-        let allocations_before = self.allocations();
+        let allocations_before = super::mem::thread_allocations();
 
         let mut out = std::mem::take(&mut self.builtin_answer);
         out.clear();
@@ -2134,7 +2134,7 @@ impl<'a> Machine<'a> {
                  carry `MAY_RAISE`"
             );
             debug_assert!(
-                self.allocations() == allocations_before
+                super::mem::thread_allocations() == allocations_before
                     || effects.contains(cove_ir::Effects::MAY_ALLOCATE),
                 "`{intrinsic}` allocated, but its declared `Effects` do not carry \
                  `MAY_ALLOCATE`"

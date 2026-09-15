@@ -804,6 +804,8 @@ impl Space {
         self.store(addr, header(layout, len));
         alloc.allocated_words += words;
         alloc.allocations += 1;
+        #[cfg(debug_assertions)]
+        THREAD_ALLOCATIONS.with(|count| count.set(count.get() + 1));
         Some(addr)
     }
 
@@ -2155,6 +2157,24 @@ impl Memory {
     fn block_words(&self, addr: u64) -> u64 {
         self.space.block_words(addr)
     }
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    /// Objects this thread has allocated, from any space.
+    ///
+    /// The allocator's own count is shared by every task of a run, so a
+    /// builtin that allocated nothing can still see it move while another
+    /// task's thread allocates. `Machine::call_builtin` checks an
+    /// intrinsic's declared `Effects` against this one instead, which only
+    /// the calling thread moves.
+    static THREAD_ALLOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Objects the calling thread has allocated so far; see [`THREAD_ALLOCATIONS`].
+#[cfg(debug_assertions)]
+pub(crate) fn thread_allocations() -> u64 {
+    THREAD_ALLOCATIONS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
