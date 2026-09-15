@@ -210,12 +210,10 @@ pub(crate) fn call(
         Intrinsic::StringFromCodePoint => {
             text::from_code_point(machine, builtin.result, operands, out)
         }
-        // The three that count bytes. Every one of them reads the object's
-        // header or a word of its payload rather than decoding the whole
-        // string, which is the only reason they are worth having.
-        Intrinsic::StringByteLength => {
-            text::byte_length(machine, operands).map(|word| out.push(word))
-        }
+        // The two that count bytes. Each reads a word of the payload rather
+        // than decoding the whole string, which is the only reason they are
+        // worth having. The third, `byteLength`, is `std.string` over the
+        // core intrinsic that is an `Inst::Len`.
         Intrinsic::StringCodePointAtByte => {
             text::code_point_at_byte(machine, builtin.result, operands, out)
         }

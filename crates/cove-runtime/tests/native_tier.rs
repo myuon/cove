@@ -309,9 +309,9 @@ export fn keepsWhatItStillNeeds(a: String, b: String, n: Int) -> Int {
 
 /// `String.byteLength()` in a frame that is **compiled**.
 ///
-/// `vm::builtins::text::byte_length` is a null refusal and one header read, which
-/// is what `Inst::Len` already was, so this is the same emitter reached through a
-/// `call-builtin` — see `cove_native`'s `Method::ByteLength`. `counts(0)` is here
+/// `std.string.byteLength` is `core.byteLength(text)`, which lowers to
+/// `Inst::Len` — a null refusal and one header read — and is expanded into this
+/// frame, so there is no call and no builtin left in it. `counts(0)` is here
 /// for the reason it is everywhere else, and it earns one thing more: it makes
 /// this function's own call a **native-to-native direct** one, which is what says
 /// the measurement happened on this tier rather than on the VM. A refused
@@ -703,8 +703,8 @@ export fn callsKeepsWhatItStillNeeds(a: String, b: String, n: Int) -> Int {
   keepsWhatItStillNeeds(a, b, n)
 }
 
-/// A compiled loop over one intrinsic that never reaches the runtime and one that
-/// sometimes does: `String.byteLength()` is a header read in emitted code, and
+/// A compiled loop over one operation that never reaches the runtime and one that
+/// sometimes does: `String.byteLength()` is an expanded `Inst::Len`, and
 /// `Vector.push` is an emitted fast path whose growth is the `builtin` helper.
 /// `counts(0)` for `pushesOnto`'s reason.
 export fn measuresAndPushes(s: String, given: Vector<Int>, n: Int) -> Int {
@@ -1610,9 +1610,9 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
 /// **`String.byteLength()` in machine code, over a byte count and not a
 /// character count.**
 ///
-/// `vm::builtins::text::byte_length` is `receiver_addr` and `machine.object_len`,
-/// which is what `Inst::Len` already is — so both arms lower it with the emitter
-/// `Inst::Len` uses and this is the differential that says the two agree. The
+/// `std.string.byteLength` is `core.byteLength`, which is `Inst::Len` — so both
+/// arms lower it with the emitter `Inst::Len` uses and this is the differential
+/// that says the two agree. The
 /// multi-byte string is the half of it a character count would pass: `"héllo"` is
 /// five characters and six bytes, so an arm that answered `String.length`'s
 /// question would be off by exactly one here and by nothing on an ASCII string.
@@ -2554,13 +2554,15 @@ fn counted_run(
 /// instructions, native-to-VM crossings and native-to-runtime calls" to be
 /// reported separately. `countsTheBoundary` is refused and calls `sliceBytes`
 /// `n` times on the encoded tier; `measuresAndPushes` is compiled and calls
-/// `byteLength` and `push` `n` times each in machine code. So the three
-/// intrinsics land in three different places, and a report that lumped any two
-/// of them together would fail one of the rows below:
+/// `byteLength` and `push` `n` times each in machine code. So each lands in a
+/// different place, and a report that lumped any two of them together would fail
+/// one of the rows below:
 ///
 /// - `String.sliceBytes`: `n` from the encoded tier, none from native code;
-/// - `String.byteLength`: none at all on the native run — a header read in
-///   emitted code is not a mediated call — and `n` on the VM-only run;
+/// - `String.byteLength`: not an intrinsic at all. It is `std.string` over
+///   ADR 0058's `core.byteLength`, a thin wrapper the lowering expands into
+///   `measuresAndPushes` as an `Inst::Len` — so no site, no mediated call, and
+///   no library call left for either tier to make;
 /// - `Vector.push`: only its growths reach the runtime from native code. The
 ///   vector starts as `Vector.of(7)`, one element in a store of exactly one, and
 ///   `vm::builtins::seq::grow` doubles from a minimum of four, so forty pushes
@@ -2621,11 +2623,7 @@ fn the_boundary_report_counts_each_quantity_apart() {
             .intrinsic(intrinsic)
             .unwrap_or_else(|| panic!("the program names {intrinsic}"))
     };
-    for intrinsic in [
-        Intrinsic::StringSliceBytes,
-        Intrinsic::StringByteLength,
-        Intrinsic::VectorPush,
-    ] {
+    for intrinsic in [Intrinsic::StringSliceBytes, Intrinsic::VectorPush] {
         assert_eq!(row(&on_vm, intrinsic).sites, 1, "{intrinsic}");
     }
     assert_eq!(
@@ -2641,15 +2639,9 @@ fn the_boundary_report_counts_each_quantity_apart() {
         (held.encoded, held.native)
     };
     assert_eq!(calls(&on_vm, Intrinsic::StringSliceBytes), (n, 0));
-    assert_eq!(calls(&on_vm, Intrinsic::StringByteLength), (n, 0));
     assert_eq!(calls(&on_vm, Intrinsic::VectorPush), (n, 0));
     for report in [&on_native, &uncounted] {
         assert_eq!(calls(report, Intrinsic::StringSliceBytes), (n, 0));
-        assert_eq!(
-            calls(report, Intrinsic::StringByteLength),
-            (0, 0),
-            "a header read in emitted code is not a mediated call"
-        );
         assert_eq!(
             calls(report, Intrinsic::VectorPush),
             (0, 5),
@@ -2661,6 +2653,19 @@ fn the_boundary_report_counts_each_quantity_apart() {
             .windows(2)
             .all(|pair| pair[0].calls() >= pair[1].calls()));
     }
+
+    // The library: `byteLength` was expanded, so nothing is left to call.
+    assert_eq!(on_vm.emitted.library_call_sites, 0, "{:?}", on_vm.emitted);
+    assert_eq!(on_vm.library_calls.encoded, 0);
+    assert_eq!(
+        on_vm.library_calls.native, None,
+        "no tier, so no native count"
+    );
+    assert_eq!(on_native.library_calls.native, Some(0));
+    assert_eq!(
+        uncounted.library_calls.native, None,
+        "production helpers count nothing"
+    );
 
     // Encoded instructions: the native run dispatched fewer, because the loop of
     // `measuresAndPushes` was machine code.

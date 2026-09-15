@@ -824,7 +824,6 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
     ("String", "replace"),
     ("String", "toUpper"),
     ("String", "toLower"),
-    ("String", "byteLength"),
     ("String", "codePointAtByte"),
     ("String", "sliceBytes"),
     ("Int", "toFloat"),

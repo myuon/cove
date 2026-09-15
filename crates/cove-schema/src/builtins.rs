@@ -644,7 +644,7 @@ pub struct StdBinding {
 /// Every builtin method whose body has moved out of Rust and into the
 /// standard library.
 ///
-/// Twenty-nine entries, and what is *not* here is as informative as what is.
+/// Thirty entries, and what is *not* here is as informative as what is.
 ///
 /// `Result.mapError` is here, and it is the only one that needed a language
 /// change to arrive. While a callback's arity was adapted rather than
@@ -666,7 +666,7 @@ pub struct StdBinding {
 /// That is what retires ADR 0043's "It must be total" condition, so a
 /// fallible method is no longer kept out of this table for its diagnostic.
 ///
-/// Ten of the twenty-nine are `Duration`'s, and they are the first entries
+/// Ten of the thirty are `Duration`'s, and they are the first entries
 /// that come in pairs: `micros`, `millis`, `seconds`, `minutes`, and `hours`
 /// each name a method (`d.millis()`, the reader) and, separately, an
 /// associated function (`Duration.millis(n)`, the builder) — see
@@ -769,6 +769,18 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "isEmpty",
         module: "std.string",
         function: "isEmpty",
+    },
+    // The first binding over a core intrinsic: `std.string.byteLength` is
+    // `core.byteLength(text)`, which ADR 0058's library-only boundary lets the
+    // standard library write and nothing else. It is a binding, rather than a
+    // lowering straight to the instruction, so that the lowering never names a
+    // public API.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "byteLength",
+        module: "std.string",
+        function: "byteLength",
     },
     StdBinding {
         kind: StdBindingKind::Method,

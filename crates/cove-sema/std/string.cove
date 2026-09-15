@@ -6,3 +6,18 @@
 export fn isEmpty(text: String) -> Bool {
   text.length() == 0
 }
+
+/// How many bytes this string's UTF-8 encoding is.
+///
+/// Bytes and not characters: a two-byte character counts two here and one in
+/// `length()`. It is the range `byteAt`, `codePointAtByte` and `sliceBytes`
+/// take their offsets in, and what a `StringBuilder` copies when it appends
+/// the whole of a string.
+///
+/// The count is the header of the object that holds the bytes, which is a fact
+/// about representation this file cannot state — so the body is one core
+/// intrinsic and nothing else, and the lowering expands it wherever it is
+/// called. See ADR 0058.
+export fn byteLength(text: String) -> Int {
+  core.byteLength(text)
+}

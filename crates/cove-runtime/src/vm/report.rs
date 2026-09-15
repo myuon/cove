@@ -526,7 +526,7 @@ mod tests {
                     native: 7,
                 },
                 IntrinsicCalls {
-                    intrinsic: Intrinsic::StringByteLength,
+                    intrinsic: Intrinsic::StringSliceBytes,
                     sites: 3,
                     encoded: 0,
                     native: 0,
@@ -557,6 +557,6 @@ mod tests {
         assert!(text.contains("VM->native 2,"));
         assert!(text.contains("helper calls, 7 in all"));
         assert!(text.contains("           1,000              7       1  Vector.push"));
-        assert!(text.contains("               0              0       3  String.byteLength"));
+        assert!(text.contains("               0              0       3  String.sliceBytes"));
     }
 }

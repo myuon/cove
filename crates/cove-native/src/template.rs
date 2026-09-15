@@ -728,7 +728,6 @@ impl<'a> Emit<'a> {
             // operands come out of one function that both arms ask.
             Inst::CallBuiltin { dst, builtin, args } => {
                 match method_of(self.program, *dst, *builtin, *args) {
-                    Some(Method::ByteLength { dst, obj }) => self.len_of(dst, obj),
                     Some(Method::Push {
                         dst,
                         recv,
@@ -1567,12 +1566,11 @@ impl<'a> Emit<'a> {
     /// `encoded.rs`'s `LEN` arm, whole: the null refusal and the header's low
     /// half.
     ///
-    /// Two instructions reach it and that is the point of its being a method.
-    /// [`Inst::Len`](cove_ir::Inst::Len) is one, and
-    /// [`Method::ByteLength`](crate::subset::Method::ByteLength) is the other —
-    /// `String.byteLength()` is `object_len` of the receiver, so lowering it as a
-    /// second family would be two copies of the same three emitted instructions
-    /// and two places for the null refusal to be got wrong.
+    /// A method of its own because a `String.byteLength()` builtin used to reach
+    /// it too. That method is now `std.string` over ADR 0058's
+    /// `core.byteLength`, which lowers to [`Inst::Len`](cove_ir::Inst::Len)
+    /// before this crate sees it — so this code generator no longer names the
+    /// public method at all, which is what the ADR asks of it.
     fn len_of(&mut self, dst: Slot, obj: Slot) {
         self.load_slot(RAX, obj);
         self.refuse_null(RAX);

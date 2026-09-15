@@ -2405,74 +2405,21 @@ pub fn a_len_reads_the_header_and_refuses_null<A: Arm>() {
     assert_eq!(answer.outcome, Outcome::Returned);
     assert_eq!(words[1], 4242);
 
-    let mut words = vec![0u64, 0];
-    let answer = run_over::<A>(&held, &mut words, 0, &heap);
-    assert_eq!(answer.outcome, Outcome::Raised);
-    assert_eq!(answer.raise, Some(Raise::NullObject));
-    assert_eq!(answer.raise_pc, 0);
-}
-
-/// `String.byteLength()`, which is the `LEN` arm reached through a
-/// `call-builtin`.
-///
-/// `vm::builtins::text::byte_length` is `receiver_addr` and then
-/// `machine.object_len(addr)`: the same null refusal and the same header read as
-/// `Inst::Len`, so the same three assertions hold — including that the raise names
-/// the *builtin's* pc and not the `Len`'s, because a `String.byteLength()` that
-/// reported the wrong instruction would print the wrong span.
-pub fn a_byte_length_builtin_reads_the_header_and_refuses_null<A: Arm>() {
-    let held = program_with_builtin(
-        function(
-            vec![Repr::Ref, Repr::Int],
-            INT,
-            vec![
-                // One instruction ahead of the builtin, so that `raise_pc` is a
-                // number a dropped `self.pc` could not have answered by accident.
-                Inst::Int { dst: 1, value: 7 },
-                Inst::CallBuiltin {
-                    dst: 1,
-                    builtin: BuiltinId(0),
-                    args: ArgsId(1),
-                },
-                Inst::Return { src: 1 },
-            ],
-        ),
-        "String",
-        "byteLength",
-        INT,
-        vec![Arg {
-            slot: 0,
-            layout: REF,
-        }],
-    );
-
-    // A multi-byte string: the length field is a *byte* count, so a two-byte
-    // character is two. `mem::header`'s low half is what both arms read.
-    let at = HEAP_CHUNK_WORDS + 9;
-    let mut heap = Heap::new(2);
-    let addr = heap.object(at, INT, 2);
-    let mut words = vec![addr, 0];
-    let answer = run_over::<A>(&held, &mut words, 0, &heap);
-    assert_eq!(answer.outcome, Outcome::Returned);
-    assert_eq!(words[1], 2, "the header's low half, as a byte count");
-    assert_eq!(answer.returned[0], 2);
-
-    // A byte count that needs more than the low half of a word would be a
-    // different object; what is asserted here is that the *high* half — the
-    // layout — is not read into the answer.
+    // The *high* half of the header is the layout and is not read into the
+    // answer. A `String`'s byte length is this same read since ADR 0058 moved
+    // `String.byteLength` onto `core.byteLength`, so a count that happened to
+    // share its word with a wide layout number is what this pins.
     let addr = heap.object(at, PAIR, 0x1234_5678);
     let mut words = vec![addr, 0];
     let answer = run_over::<A>(&held, &mut words, 0, &heap);
     assert_eq!(answer.outcome, Outcome::Returned);
     assert_eq!(words[1], 0x1234_5678);
 
-    // `receiver_addr`'s `if addr == 0 { null_value() }`, which is the refusal
-    // `Raise::NullObject` names.
     let mut words = vec![0u64, 0];
     let answer = run_over::<A>(&held, &mut words, 0, &heap);
     assert_eq!(answer.outcome, Outcome::Raised);
     assert_eq!(answer.raise, Some(Raise::NullObject));
-    assert_eq!(answer.raise_pc, 1, "the builtin's pc, not the constant's");
+    assert_eq!(answer.raise_pc, 0);
 }
 
 /// `encoded.rs`'s `STR` arm: the address of a placed literal, into a slot.
@@ -3209,7 +3156,14 @@ pub fn a_builtin_no_arm_lowers_refuses_the_function<A: Arm>() {
             }],
         )
     };
-    assert!(compiles::<A>(&one("String", "byteLength")));
+    // The same frame, the same operands and the same answer, with the header
+    // read written as the instruction it is: this is the function the tier
+    // compiles, so what refuses each call below is the name.
+    assert!(compiles::<A>(&program(function(
+        vec![Repr::Ref, Repr::Int],
+        INT,
+        vec![Inst::Len { dst: 1, obj: 0 }, Inst::Return { src: 1 }],
+    ))));
     for (receiver, operation) in [
         ("String", "length"),
         ("Array", "length"),

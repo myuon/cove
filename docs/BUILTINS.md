@@ -185,7 +185,7 @@ written as a namespace.
 | `replace(old: String, new: String) -> String` |  |  |  | `machine` |
 | `toUpper() -> String` |  |  |  | `machine` |
 | `toLower() -> String` |  |  |  | `machine` |
-| `byteLength() -> Int` |  |  |  | `machine` |
+| `byteLength() -> Int` |  |  |  | `std.string.byteLength` |
 | `byteAt(offset: Int) -> Int` |  |  |  | `machine` |
 | `codePointAtByte(offset: Int) -> Option<Int>` |  |  |  | `machine` |
 | `sliceBytes(from: Int, to: Int) -> Result<String, Error>` |  |  |  | `machine` |

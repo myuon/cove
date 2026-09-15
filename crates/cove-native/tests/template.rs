@@ -235,11 +235,6 @@ fn a_set_refuses_a_null_receiver() {
 }
 
 #[test]
-fn a_byte_length_builtin_reads_the_header_and_refuses_null() {
-    suite::a_byte_length_builtin_reads_the_header_and_refuses_null::<Template>();
-}
-
-#[test]
 fn a_builtin_no_arm_lowers_refuses_the_function() {
     suite::a_builtin_no_arm_lowers_refuses_the_function::<Template>();
 }

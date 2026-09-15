@@ -1012,15 +1012,12 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Str(text.to_lowercase().into())))
             }
-            // The three byte-counted operations. Their diagnostics are
-            // written out again in `crates/cove-runtime/src/vm/builtins/text.rs`
-            // rather than shared, as every other builtin's are; what holds
-            // the two readings together is `tests/e2e/values_string`, which
-            // runs on both backends against one `expected.out`.
-            "byteLength" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Int(text.len() as i64)))
-            }
+            // The byte-counted operations. Their diagnostics are written out
+            // again in `crates/cove-runtime/src/vm/builtins/text.rs` rather
+            // than shared, as every other builtin's are; what holds the two
+            // readings together is `tests/e2e/values_string`, which runs on
+            // both backends against one `expected.out`. `byteLength` is not
+            // here: it is `std.string` over `call_core`'s `byteLength`.
             "byteAt" => {
                 let args = expect_args("String.byteAt", args, 1, span)?;
                 let Value(Repr::Int(offset)) = &args[0] else {
