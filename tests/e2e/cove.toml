@@ -339,3 +339,7 @@ allow = ["console"]
 [run.values_string_builder]
 entry = "values_string_builder.main"
 allow = ["console"]
+
+[run.values_string_bytes]
+entry = "values_string_bytes.main"
+allow = ["console"]
