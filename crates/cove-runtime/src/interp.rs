@@ -7026,11 +7026,15 @@ export fn main() -> Result<Unit, Error> {
         );
     }
 
+    /// Unreachable from a checked program — the checker holds `Map.of` to
+    /// `MapEntry` arguments — and this fixture skips the checker. Since
+    /// `Map.of` became `std.map.of` (#378, P4-8) the refusal is the library
+    /// body's first read of an entry's key rather than a sentence of its own.
     #[test]
     fn map_of_rejects_an_argument_that_is_not_a_map_entry() {
         let error = error_of("  let bad = Map.of(1)");
         assert!(
-            error.message.contains("`Map.of` expects `MapEntry` values"),
+            error.message.contains("`Int` has no field `key`"),
             "{}",
             error.message
         );

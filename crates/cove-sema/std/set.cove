@@ -20,6 +20,31 @@ export fn contains<T>(items: Set<T>, element: T) -> Bool {
   return seekSet(items, element) >= 0
 }
 
+/// A set of `items`, in ascending order whatever order they were written in.
+///
+/// Each element is admitted, searched for among the members placed so far, and
+/// placed where it belongs, so the run is ascending at every step and is
+/// finished into the set without sorting (ADR 0059, #378 P4-8). A duplicate is
+/// refused rather than collapsed — a literal with the same element twice is a
+/// mistake and not an intent — and the one named is the first found again in
+/// argument order. The run has exactly one member per argument, so its room is
+/// allocated once.
+///
+/// `Set.of()` with nothing in it does not reach here where the element type is
+/// known: the lowering allocates the empty set itself.
+export fn of<T>(items: T...) -> Set<T> {
+  let out: Vector<T> = core.vectorWithCapacity(items.length())
+  for element in items {
+    core.admitKey(element, "Set.of", "set element")
+    let at = seekPlaced(out, element)
+    if at >= 0 {
+      core.refuseDuplicate(element, "Set.of", "element")
+    }
+    placeAt(out, -at - 1, element)
+  }
+  core.setFinish(out)
+}
+
 /// This set with `element` in it, as a new set.
 ///
 /// An element already there answers **this set**, unchanged: nothing about
@@ -75,6 +100,34 @@ export fn removed<T>(items: Set<T>, element: T) -> Set<T> {
 /// at the member's stride.
 export fn toArray<T>(items: Set<T>) -> Array<T> {
   core.setSlice(items, 0, items.length())
+}
+
+/// Where `element` is among the ascending members a literal has placed in
+/// `run` so far: [`seekSet`]'s answer over a vector under construction.
+fn seekPlaced<T>(run: Vector<T>, element: T) -> Int {
+  var low = 0
+  var high = core.vectorLength(run)
+  while low < high {
+    let at = (low + high) / 2
+    let order = core.order(core.vectorLoad(run, at), element)
+    if order < 0 {
+      low = at + 1
+    } else if order > 0 {
+      high = at
+    } else {
+      return at
+    }
+  }
+  return -low - 1
+}
+
+/// `element` placed at `gap` of `run`, whose store has room for one more: the
+/// members from `gap` moved up by one, then the new one written into the hole.
+fn placeAt<T>(run: Vector<T>, gap: Int, element: T) {
+  let length = core.vectorLength(run)
+  core.vectorPush(run, element)
+  core.vectorMove(run, gap + 1, gap, length - gap)
+  core.vectorStore(run, gap, element)
 }
 
 /// Where `element` is among `items`' ascending members: its position when it

@@ -181,19 +181,17 @@ impl Body<'_> {
 
     /// `Set.of(a, b, c)` and `Map.of(MapEntry(key: k, value: v), ...)`.
     ///
-    /// The operands are the elements — for a `Map`, the `MapEntry` values the
-    /// literal built, which is the shape `cove_runtime::vm::builtins::keyed`
-    /// reads a pair out of. The machine places each one where it belongs as it
-    /// arrives, so the run is sorted at every step and a duplicate is refused
-    /// rather than collapsed; none of that is something an instruction
-    /// expresses, so it is one [`Inst::CallBuiltin`].
+    /// A call of `std.set.of` or `std.map.of` (ADR 0059, #378 P4-8): the
+    /// arguments are collected into the `Array` its variadic parameter is, and
+    /// the body places each where it belongs over a growable run and finishes
+    /// it into the set or the map, refusing a duplicate in today's words.
+    /// `cove_schema::builtins::standard_associated_binding` names the function,
+    /// so this lowering names no method.
     ///
     /// **A literal with nothing in it is allocated rather than called.** The
-    /// machine refuses `Set.of()` and `Map.of()` because a word says nothing
-    /// about its family and the element layout is what the collector traces
-    /// by — so the empty one has to be built where the layout is known, which
-    /// is here. That is the rule [`Body::vector_of`] already follows, said of
-    /// the two families whose emptiness a call could not describe.
+    /// layout is known here, and an empty run is one allocation — the empty
+    /// array, vector and finish a call would make are three. That is the rule
+    /// [`Body::vector_of`] follows for the empty vector.
     fn keyed_of(&mut self, expr: &Expr, args: &[Arg], what: &str) -> Val {
         let Some(ty) = self.settled_ty(expr) else {
             return self.dead(expr);
@@ -204,13 +202,8 @@ impl Body<'_> {
         if let Some(bad) = self.plain_arguments(args) {
             return self.gap(bad, expr);
         }
-
-        let mut held = Vec::with_capacity(args.len());
-        for arg in args {
-            held.push(self.expr(&arg.value));
-        }
-        let dst = self.temp(layout);
         if args.is_empty() {
+            let dst = self.temp(layout);
             self.emit(
                 Inst::Alloc {
                     dst: dst.slot,
@@ -221,12 +214,13 @@ impl Body<'_> {
             );
             return dst;
         }
-        let passed: Vec<crate::program::Arg> = held.iter().map(Val::arg).collect();
-        self.emit_builtin(dst.slot, what, "of", &passed, layout, expr.span);
-        for value in held.into_iter().rev() {
-            self.release(value, expr.span);
+        match cove_schema::builtins::standard_associated_binding(what, "of") {
+            Some(binding) => self.call_std_associated(expr, binding, args),
+            None => self.gap(
+                &format!("`{what}.of` with no standard-library binding"),
+                expr,
+            ),
         }
-        dst
     }
 
     /// `Vector.of(a, b, c)`: a store holding the elements, and a header

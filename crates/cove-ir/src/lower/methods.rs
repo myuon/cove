@@ -270,7 +270,7 @@ impl Body<'_> {
     /// call has no implicit receiver, so the call site's own argument list
     /// is already exactly what the declared function needs — there is
     /// nothing to push in front of it.
-    fn call_std_associated(
+    pub(super) fn call_std_associated(
         &mut self,
         expr: &Expr,
         binding: &cove_schema::builtins::StdBinding,
@@ -401,8 +401,8 @@ impl Body<'_> {
     /// 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
     /// asks that a builtin be identified statically, not matched by string at
     /// run time. Every caller's pair is a member of [`MACHINE_METHODS`] or
-    /// [`ASSOCIATED`], or a keyed literal's `of` — what this lowering is
-    /// written against — so a pair that resolves to
+    /// [`ASSOCIATED`] — the tables this lowering is written against — so a
+    /// pair that resolves to
     /// nothing is a mismatch between this module and `cove_ir::intrinsic`
     /// and is reported as the internal bug it is rather than lowered as a
     /// call nothing answers.

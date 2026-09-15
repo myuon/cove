@@ -36,7 +36,7 @@
 
 use cove_ir::{Layout, LayoutId, Program, Shape};
 use cove_schema::builtins::{
-    ERROR, ERR_CASE, MAP, MESSAGE_FIELD, NONE_CASE, OK_CASE, OPTION, RESULT, SET, SOME_CASE,
+    ERROR, ERR_CASE, MESSAGE_FIELD, NONE_CASE, OK_CASE, OPTION, RESULT, SOME_CASE,
 };
 
 use crate::error::RuntimeError;
@@ -87,14 +87,15 @@ pub(super) fn vector(program: &Program, elem: LayoutId) -> Result<LayoutId, Runt
 ///
 /// One layout per element layout, as everywhere else, and it is its own shape
 /// rather than an `Elements` with a name because "these words are sorted and
-/// distinct" is an invariant [`super::keyed`] relies on and an array's words
-/// are neither.
+/// distinct" is an invariant a keyed finish relies on and an array's words
+/// are neither. Only the tests build a set in Rust now (#378, P4-8).
+#[cfg(test)]
 pub(super) fn members(program: &Program, elem: LayoutId) -> Result<LayoutId, RuntimeError> {
     find(
         program,
         |layout| matches!(layout.shape, Shape::Members { elem: e } if e == elem),
     )
-    .ok_or_else(|| operand::unknown_family(SET.name))
+    .ok_or_else(|| operand::unknown_family(cove_schema::builtins::SET.name))
 }
 
 /// The layout of a `Map` from `key` to `value`.
@@ -102,6 +103,7 @@ pub(super) fn members(program: &Program, elem: LayoutId) -> Result<LayoutId, Run
 /// One layout per *pair* of layouts: a `Map<String, Int>` traces half its
 /// words and a `Map<Int, Int>` none of them, and the collector is told which
 /// by the layout rather than by looking.
+#[cfg(test)]
 pub(super) fn entries(
     program: &Program,
     key: LayoutId,
@@ -111,7 +113,7 @@ pub(super) fn entries(
         program,
         |layout| matches!(layout.shape, Shape::Entries { key: k, value: v } if k == key && v == value),
     )
-    .ok_or_else(|| operand::unknown_family(MAP.name))
+    .ok_or_else(|| operand::unknown_family(cove_schema::builtins::MAP.name))
 }
 
 /// The layout of the builtin `Error` struct.

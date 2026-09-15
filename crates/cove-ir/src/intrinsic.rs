@@ -56,8 +56,6 @@ pub enum Intrinsic {
     StringToUpper,
     StringToLower,
     StringFromCodePoint,
-    SetOf,
-    MapOf,
     IntToFloat,
     IntParse,
     IntParseRadix,
@@ -98,8 +96,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringToUpper,
     Intrinsic::StringToLower,
     Intrinsic::StringFromCodePoint,
-    Intrinsic::SetOf,
-    Intrinsic::MapOf,
     Intrinsic::IntToFloat,
     Intrinsic::IntParse,
     Intrinsic::IntParseRadix,
@@ -145,8 +141,6 @@ impl Intrinsic {
             Intrinsic::StringToUpper => "String",
             Intrinsic::StringToLower => "String",
             Intrinsic::StringFromCodePoint => "String",
-            Intrinsic::SetOf => "Set",
-            Intrinsic::MapOf => "Map",
             Intrinsic::IntToFloat => "Int",
             Intrinsic::IntParse => "Int",
             Intrinsic::IntParseRadix => "Int",
@@ -185,8 +179,6 @@ impl Intrinsic {
             Intrinsic::StringToUpper => "toUpper",
             Intrinsic::StringToLower => "toLower",
             Intrinsic::StringFromCodePoint => "fromCodePoint",
-            Intrinsic::SetOf => "of",
-            Intrinsic::MapOf => "of",
             Intrinsic::IntToFloat => "toFloat",
             Intrinsic::IntParse => "parse",
             Intrinsic::IntParseRadix => "parseRadix",
@@ -289,16 +281,11 @@ impl Intrinsic {
             // `slice`, `toVector`, `push`, `set`, `pop`, `remove`, `freeze` and
             // `toArray` are each Cove over run instructions.
 
-            // A keyed literal allocates its run and opens it once per element.
-            // Nothing else of a `Set` or a `Map` is here: the membership tests,
-            // `get`, `inserted`, `removed`, `toArray`, `keys` and `values` are
-            // `std.set` and `std.map` over the three `Value` intrinsics at the
-            // end, run copies and slices, and a keyed finish (ADR 0059).
-            Intrinsic::SetOf | Intrinsic::MapOf => raise
-                .union(E::READS_MEMORY)
-                .union(E::MAY_ALLOCATE)
-                .union(E::MAY_COLLECT)
-                .union(E::BULK_WORK),
+            // No `Set` or `Map` operation is here: the literals, the
+            // membership tests, `get`, `inserted`, `removed`, `toArray`, `keys`
+            // and `values` are `std.set` and `std.map` over the three `Value`
+            // intrinsics at the end, run copies and slices, and a keyed finish
+            // (ADR 0059).
 
             // A scalar reader or writer of its own word, with nothing on
             // the heap to read.
@@ -477,8 +464,6 @@ mod tests {
                 | Intrinsic::StringToUpper
                 | Intrinsic::StringToLower
                 | Intrinsic::StringFromCodePoint
-                | Intrinsic::SetOf
-                | Intrinsic::MapOf
                 | Intrinsic::IntToFloat
                 | Intrinsic::IntParse
                 | Intrinsic::IntParseRadix

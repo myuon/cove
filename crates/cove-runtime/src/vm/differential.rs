@@ -2422,11 +2422,8 @@ export fn main() -> Int {
         .count();
     assert_eq!(walks, 1 + 3 + 2 + 3 + 3 + 2 + 1 + 2);
     assert_eq!(
-        intrinsics("probeAdmitted")
-            .iter()
-            .filter(|intrinsic| **intrinsic != cove_ir::Intrinsic::SetOf)
-            .count(),
-        0,
+        intrinsics("probeAdmitted"),
+        Vec::new(),
         "an admission that cannot refuse is removed"
     );
     assert_eq!(

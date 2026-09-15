@@ -959,6 +959,25 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.map",
         function: "values",
     },
+    // The keyed literals (#378, P4-8), and the first variadic associated
+    // bindings: `Set.of(a, b)` calls `std.set.of`, whose `items: T...` receives
+    // the arguments as the `Array<T>` a variadic parameter is. A literal with
+    // nothing in it is still allocated by the lowering where the element type
+    // is known.
+    StdBinding {
+        kind: StdBindingKind::Associated,
+        receiver: "Set",
+        method: "of",
+        module: "std.set",
+        function: "of",
+    },
+    StdBinding {
+        kind: StdBindingKind::Associated,
+        receiver: "Map",
+        method: "of",
+        module: "std.map",
+        function: "of",
+    },
     StdBinding {
         kind: StdBindingKind::Method,
         receiver: "String",

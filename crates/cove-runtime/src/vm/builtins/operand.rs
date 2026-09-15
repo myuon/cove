@@ -86,33 +86,6 @@ pub(super) fn as_word(machine: &Machine, operand: Operand<'_>) -> Option<Word> {
     }
 }
 
-/// The words of `operand`, refused when it is not a value of `want`.
-///
-/// What every operation that puts a whole value *into* a collection asks: a
-/// member of a `Set<Point>` is two words and a store written one word at a
-/// time at a stride of two is a silently wrong set. The layouts are compared
-/// rather than only the widths, because two families of one width are still
-/// two families and a run is traced by the element layout's map.
-pub(super) fn run_of<'w>(
-    machine: &Machine,
-    method: &str,
-    want: LayoutId,
-    operand: Operand<'w>,
-) -> Result<&'w [u64], RuntimeError> {
-    let described = machine.program().layout(want);
-    if operand.layout == want && operand.words.len() == described.width() as usize {
-        return Ok(operand.words);
-    }
-    Err(RuntimeError::new(format!(
-        "`{method}` expects `{}` here, but found `{}`",
-        described.name,
-        machine.program().layout(operand.layout).name
-    ))
-    .with_rule(
-        "A value is a run of words its layout describes, and a collection holds values of one family.",
-    ))
-}
-
 /// The receiver and the arguments of a method call.
 ///
 /// A method's operands are its receiver followed by its arguments, so the

@@ -18,7 +18,6 @@
 //! through a real interpreter, so a signature declared with no body behind it
 //! fails a test rather than a program.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use cove_diag::Span;
@@ -966,47 +965,10 @@ pub fn call_associated(
 ) -> Result<Value, RuntimeError> {
     match (type_name, name) {
         ("Vector", "of") => Ok(host.allocate_vector(std::mem::take(args))),
-        // `Map.of` takes the `MapEntry` values `MapEntry(key:, value:)`
-        // builds. A literal with two identical keys is a mistake, not an
-        // intent, so a duplicate key is rejected rather than resolved by
-        // silently keeping the first or last entry.
-        ("Map", "of") => {
-            let mut map: BTreeMap<MapKey, Value> = BTreeMap::new();
-            for arg in args.drain(..) {
-                let Value(Repr::Struct(entry)) = &arg else {
-                    return Err(expects_map_entry(&arg, span));
-                };
-                if &*entry.type_name != MAP_ENTRY.name {
-                    return Err(expects_map_entry(&arg, span));
-                }
-                let key_value = entry.get("key").expect("MapEntry always has a `key` field");
-                let key = to_map_key("Map.of", "map key", key_value, span)?;
-                if map.contains_key(&key) {
-                    return Err(duplicate_key_error("Map.of", "key", &key, span));
-                }
-                let value = entry
-                    .get("value")
-                    .expect("MapEntry always has a `value` field")
-                    .clone();
-                map.insert(key, value);
-            }
-            // Ascending by construction: `BTreeMap::into_iter` already
-            // answers in `MapKey`'s `Ord`, which is exactly the order the
-            // sorted run `Repr::Map` stores needs.
-            Ok(Value(Repr::Map(map.into_iter().collect())))
-        }
-        // `Set.of` rejects a duplicate element for the same reason `Map.of`
-        // rejects a duplicate key.
-        ("Set", "of") => {
-            let mut set: BTreeSet<MapKey> = BTreeSet::new();
-            for item in args.drain(..) {
-                let key = to_map_key("Set.of", "set element", &item, span)?;
-                if !set.insert(key.clone()) {
-                    return Err(duplicate_key_error("Set.of", "element", &key, span));
-                }
-            }
-            Ok(Value(Repr::Set(set.into_iter().collect())))
-        }
+        // `Map.of` and `Set.of` are not here: each is `std.map.of` or
+        // `std.set.of` (#378, P4-8), which `Interpreter` reaches through
+        // `cove_schema::builtins::standard_associated_binding` before this
+        // function is asked.
         // `Duration.nanos(count)`: the one primitive builder left.
         // `micros` through `hours` are `std.duration.ofMicros` and its four
         // neighbours now — see `cove_schema::builtins::standard_associated_binding`
@@ -1975,12 +1937,6 @@ fn empty_needle_error(method: &str, parameter: &str, help: &str, span: Span) -> 
             "An empty separator or search string would match between every character, rather than answer the question the method asks.",
         )
         .with_help(help)
-}
-
-/// Converts `value` to a [`MapKey`], or reports why it cannot be a map key or
-/// set element.
-fn to_map_key(method: &str, role: &str, value: &Value, span: Span) -> Result<MapKey, RuntimeError> {
-    MapKey::from_value(value).map_err(|invalid| invalid_key_error(method, role, &invalid, span))
 }
 
 /// Names the specific offending part when the invalid value is nested, such

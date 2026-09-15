@@ -100,7 +100,7 @@
       "cases": [],
       "fields": [],
       "associated": [
-        {"name": "of", "signature": "of(entries: MapEntry<K, V>...) -> Map<K, V>", "generics": ["K", "V"], "params": [{"name": "entries", "type": "MapEntry<K, V>"}], "variadic": true, "result": "Map<K, V>", "implementedBy": "machine", "host": false}
+        {"name": "of", "signature": "of(entries: MapEntry<K, V>...) -> Map<K, V>", "generics": ["K", "V"], "params": [{"name": "entries", "type": "MapEntry<K, V>"}], "variadic": true, "result": "Map<K, V>", "implementedBy": "std.map.of", "host": false}
       ],
       "methods": [
         {"name": "get", "signature": "get(key: K) -> Option<V>", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Option<V>", "mutating": false, "implementedBy": "std.map.get", "host": false},
@@ -132,7 +132,7 @@
       "cases": [],
       "fields": [],
       "associated": [
-        {"name": "of", "signature": "of(items: T...) -> Set<T>", "generics": ["T"], "params": [{"name": "items", "type": "T"}], "variadic": true, "result": "Set<T>", "implementedBy": "machine", "host": false}
+        {"name": "of", "signature": "of(items: T...) -> Set<T>", "generics": ["T"], "params": [{"name": "items", "type": "T"}], "variadic": true, "result": "Set<T>", "implementedBy": "std.set.of", "host": false}
       ],
       "methods": [
         {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},

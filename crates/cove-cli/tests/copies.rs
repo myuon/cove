@@ -596,13 +596,24 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// move: `benches:keyed` +4, `examples:cq` and `examples:cqSample` +1 each and
 /// `examples:covecheck` +1.
 ///
+/// **The twenty-second rise is `Set.of` and `Map.of` moving into the standard
+/// library.** 2361 to 2390. ADR 0059's P4-8 (#378) makes a keyed literal a call
+/// of `std.set.of` or `std.map.of` over the array its variadic parameter
+/// receives, and each instantiation of `of` and of its private seek and place
+/// carries a copy after a producer, so the rise follows how many key types a
+/// program writes a literal of: `tests/e2e:coll_keyed_search` +18 (every key
+/// family the fixture pins), `examples:callbacks` and `examples:reviewPolicy`
+/// +2, and `benches:keyed`, `examples:covecheck`, `tests/e2e:coll_map`,
+/// `coll_set`, `fail_invalid_map_key`, `fail_key_duplicate_map` and
+/// `fail_key_duplicate_set` +1 each.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2361;
+const FORWARDABLE_COPIES: usize = 2390;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

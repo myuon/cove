@@ -3,6 +3,10 @@ error[cove::runtime]: `Map.of` was given the key `a` more than once
   |
 8 |   let bad = Map.of(
   |             ^^^^^^^
+  --> std/map.cove:49:7
+   |
+49 |       core.refuseDuplicate(entry.key, "Map.of", "key")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
   rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
   help: remove the duplicate, or give it a different key
 1 error(s)

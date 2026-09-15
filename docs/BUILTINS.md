@@ -140,7 +140,7 @@ written as a namespace; binds `K`, `V`.
 
 | signature | variadic | binds | implemented by |
 | --- | --- | --- | --- |
-| `of(entries: MapEntry<K, V>...) -> Map<K, V>` | yes | `K`, `V` | `machine` |
+| `of(entries: MapEntry<K, V>...) -> Map<K, V>` | yes | `K`, `V` | `std.map.of` |
 
 **Methods.**
 
@@ -170,7 +170,7 @@ written as a namespace; binds `T`.
 
 | signature | variadic | binds | implemented by |
 | --- | --- | --- | --- |
-| `of(items: T...) -> Set<T>` | yes | `T` | `machine` |
+| `of(items: T...) -> Set<T>` | yes | `T` | `std.set.of` |
 
 **Methods.**
 

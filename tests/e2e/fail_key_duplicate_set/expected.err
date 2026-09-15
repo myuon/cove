@@ -3,6 +3,10 @@ error[cove::runtime]: `Set.of` was given the element `Point(x: 1, y: 5)` more th
    |
 13 |   let bad = Set.of(
    |             ^^^^^^^
+  --> std/set.cove:41:7
+   |
+41 |       core.refuseDuplicate(element, "Set.of", "element")
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
   rule: A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.
   help: remove the duplicate, or give it a different element
 1 error(s)

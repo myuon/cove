@@ -31,6 +31,28 @@ export fn contains<K, V>(entries: Map<K, V>, key: K) -> Bool {
   return seekMap(entries, key) >= 0
 }
 
+/// A map of `entries`, in ascending key order whatever order they were written
+/// in.
+///
+/// [`std.set.of`]'s construction over `MapEntry`s: each key admitted, searched
+/// for among the keys placed so far, and its entry placed where it belongs, so
+/// the run is finished into the map without sorting (ADR 0059, #378 P4-8). A
+/// duplicate key is refused — keeping the first or the last silently would be
+/// resolving a mistake rather than reporting it — and the one named is the first
+/// found again in argument order.
+export fn of<K, V>(entries: MapEntry<K, V>...) -> Map<K, V> {
+  let out: Vector<MapEntry<K, V>> = core.vectorWithCapacity(entries.length())
+  for entry in entries {
+    core.admitKey(entry.key, "Map.of", "map key")
+    let at = seekPlaced(out, entry.key)
+    if at >= 0 {
+      core.refuseDuplicate(entry.key, "Map.of", "key")
+    }
+    placeAt(out, -at - 1, entry)
+  }
+  core.mapFinish(out)
+}
+
 /// This map with `key` mapped to `value`, as a new map.
 ///
 /// A key already there keeps its place and takes `value`: the entry is
@@ -108,6 +130,34 @@ export fn values<K, V>(entries: Map<K, V>) -> Array<V> {
     core.vectorPush(out, entry.value)
   }
   core.vectorFinish(out)
+}
+
+/// Where `key` is among the ascending keys a literal has placed in `run` so
+/// far: [`seekMap`]'s answer over a vector under construction.
+fn seekPlaced<K, V>(run: Vector<MapEntry<K, V>>, key: K) -> Int {
+  var low = 0
+  var high = core.vectorLength(run)
+  while low < high {
+    let at = (low + high) / 2
+    let placed: MapEntry<K, V> = core.vectorLoad(run, at)
+    let order = core.order(placed.key, key)
+    if order < 0 {
+      low = at + 1
+    } else if order > 0 {
+      high = at
+    } else {
+      return at
+    }
+  }
+  return -low - 1
+}
+
+/// `entry` placed at `gap` of `run`, whose store has room for one more.
+fn placeAt<K, V>(run: Vector<MapEntry<K, V>>, gap: Int, entry: MapEntry<K, V>) {
+  let length = core.vectorLength(run)
+  core.vectorPush(run, entry)
+  core.vectorMove(run, gap + 1, gap, length - gap)
+  core.vectorStore(run, gap, entry)
 }
 
 /// Where `key` is among `entries`' ascending keys: its entry's position when

@@ -473,8 +473,9 @@ impl Shapes {
             // and needs nothing built per turn.
             //
             // The name is the checker's, and `cove_schema::builtins::MAP_ENTRY`
-            // is what both ends read the two field names off, so a value built
-            // here is one `cove_runtime::vm::builtins::keyed` recognises.
+            // is what both ends read the two field names off. The same
+            // correspondence is what lets a run of `MapEntry`s be finished into a
+            // map (`crate::layout::is_entry_of`, #378 P4-5).
             Ty::MapEntry(..) => {
                 let declared = struct_fields(checked, module, ty)?;
                 let mut placed = Vec::with_capacity(declared.len());

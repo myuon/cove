@@ -648,7 +648,7 @@ pub(crate) struct Machine<'a> {
     ///
     /// **The reentrancy question this answers.** Nothing reachable from
     /// [`crate::vm::builtins::call`] — not the ~100-arm dispatch in
-    /// `builtins.rs`, nor `seq.rs`, `keyed.rs`, `key.rs`, `text.rs`,
+    /// `builtins.rs`, nor `seq.rs`, `key.rs`, `text.rs`,
     /// `scalar.rs`, `make.rs`, or `equal.rs` — calls [`Machine::call_host`],
     /// [`Machine::call_resource`], [`Machine::call_from_host`], or anything
     /// else that runs the dispatch loop again: a builtin is a leaf call. The

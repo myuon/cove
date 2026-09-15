@@ -92,9 +92,11 @@ use crate::vm::builtins::{equal, render_value};
 use crate::vm::exec::Machine;
 
 /// What a `Map`'s key argument is called in a refusal.
+#[cfg(test)]
 pub(super) const MAP_KEY: &str = "map key";
 
 /// What a `Set`'s element argument is called in one.
+#[cfg(test)]
 pub(super) const SET_ELEMENT: &str = "set element";
 
 /// A value on its way through the order.
@@ -138,6 +140,7 @@ impl Step {
 /// oracle asks it: `Map.get` converts its argument to a `MapKey` before it
 /// looks at a single entry, so a `Float` is refused by an empty map as loudly
 /// as by a full one.
+#[cfg(test)]
 pub(super) fn check(
     machine: &Machine,
     method: &str,
@@ -159,6 +162,7 @@ pub(super) fn check(
 /// What `Map.of` asks of the key it read out of a `MapEntry`: a key that is a
 /// struct is a run of words rather than an address, so there is no operand to
 /// ask about and the layout is what says which words are what.
+#[cfg(test)]
 pub(super) fn check_value(
     machine: &Machine,
     method: &str,
@@ -173,6 +177,7 @@ pub(super) fn check_value(
 ///
 /// Both are keys: every word that reaches this either passed [`check`] or was
 /// written into a sorted run by something that did.
+#[cfg(test)]
 pub(super) fn cmp_value(
     machine: &Machine,
     layout: LayoutId,
@@ -313,6 +318,58 @@ pub(crate) fn is_ascending_and_distinct(
                 Ok(Ordering::Less)
             )
         }),
+    }
+}
+
+// --- a literal's duplicate --------------------------------------------------
+
+/// `core.refuseDuplicate(key, method, role)`: always the refusal a literal
+/// with `key` twice is given, in `method`'s words and naming the key by
+/// `role`.
+///
+/// ADR 0059 has a standard-library literal *find* a duplicate, as a value
+/// order of equal, and raise it through this — so the sentence is still the
+/// one [`duplicate`] writes, over the key as it renders.
+pub(super) fn refuse_duplicate(
+    machine: &Machine,
+    operands: &[Operand<'_>],
+) -> Result<(), RuntimeError> {
+    let [key, method, role] = operands else {
+        return Err(operand::operands(
+            "Value.refuseDuplicate",
+            3,
+            operands.len(),
+        ));
+    };
+    let text = |operand: &Operand<'_>| {
+        String::from_utf8_lossy(&machine.string_bytes(operand.word())).into_owned()
+    };
+    Err(duplicate(
+        &text(method),
+        &text(role),
+        render_value(machine, key.layout, key.words, 0),
+    ))
+}
+
+/// `` `{method}` was given the {role} `{key}` more than once ``.
+///
+/// [`crate::builtins`]' `duplicate_key_error`, over the key as it renders —
+/// which is what `MapKey`'s `Display` is on that side, and why the rendering
+/// is what names it here. The caller does the rendering because a key that
+/// arrived as an operand and one that arrived as a run of words are rendered
+/// by two different readers.
+fn duplicate(method: &str, role: &str, shown: Result<String, RuntimeError>) -> RuntimeError {
+    match shown {
+        Ok(shown) => RuntimeError::new(format!(
+            "`{method}` was given the {role} `{shown}` more than once"
+        ))
+        .with_rule(
+            "A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.",
+        )
+        .with_help(format!("remove the duplicate, or give it a different {role}")),
+        // A key this run cannot render is a key it cannot name, and the
+        // rendering's own refusal says more than a message with a hole in it.
+        Err(error) => error,
     }
 }
 
