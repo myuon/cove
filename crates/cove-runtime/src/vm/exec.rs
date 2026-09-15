@@ -60,7 +60,7 @@ use crate::interp::stopped_here;
 use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::task;
 use crate::trace::TraceEvent;
-use crate::vm::builtins::operand::Operand;
+use crate::vm::builtins::operand::{Dest, Frame as Operands};
 use crate::vm::debug::{halted, Debugger, Resume, Stop};
 use crate::vm::mem::{Collected, Memory, NoSegment, Overflow, Parked, Rooted, Roots};
 use crate::vm::report::Counting;
@@ -105,15 +105,6 @@ use runs::{Growable, GROWABLE_LEN, GROWABLE_STORE, MIN_GROWABLE_BYTES};
 /// `crates/cove-runtime/tests/responsiveness.rs` measures each of them, so
 /// moving this number moves a stated maximum and costs both.
 pub const SAFEPOINT_STRIDE: u64 = 1024;
-
-/// How many [`crate::vm::builtins::operand::Operand`]s
-/// [`Machine::call_builtin`] holds inline before it spills to a `Vec`.
-///
-/// Sized for an ordinary fixed-arity builtin — a receiver and a couple of
-/// arguments — which is every call except the handful `cove-schema` declares
-/// `variadic: true` (`Vector.of`, `Map.of`, `Set.of`), and those spill
-/// instead of raising this for everyone else's sake.
-const INLINE_OPERANDS: usize = 8;
 
 /// One live call.
 ///
@@ -634,64 +625,15 @@ pub(crate) struct Machine<'a> {
     /// handed the parent's rather than encoding again, which is what makes
     /// one spawn cost a pointer instead of a second pass over the program.
     encoded: Result<Arc<cove_ir::bytecode::Encoded>, RuntimeError>,
-    /// [`Machine::call_builtin`]'s scratch buffer of argument words, taken
-    /// out for the duration of one call and put back afterwards.
-    ///
-    /// A builtin call reads every argument's words into one buffer before it
-    /// can hand out an [`crate::vm::builtins::operand::Operand`] pointing
-    /// into it, and a fresh `Vec` for that on every single call is exactly
-    /// the allocation issue #268's stage 1 is about. Keeping one here and
-    /// moving it in and out with [`std::mem::take`], instead of borrowing it
-    /// in place, is what lets the call stay `&mut self` without a second
-    /// borrow of `self` alive at the same time for the body that fills it —
-    /// and it is also what makes the following safe to be wrong about.
-    ///
-    /// **The reentrancy question this answers.** Nothing reachable from
-    /// [`crate::vm::builtins::call`] — not the ~100-arm dispatch in
-    /// `builtins.rs`, nor `seq.rs`, `key.rs`, `text.rs`,
-    /// `scalar.rs`, `make.rs`, or `equal.rs` — calls [`Machine::call_host`],
-    /// [`Machine::call_resource`], [`Machine::call_from_host`], or anything
-    /// else that runs the dispatch loop again: a builtin is a leaf call. The
-    /// AST interpreter's own builtin table
-    /// ([`crate::builtins::Callable`]) says the same thing of itself and
-    /// cites `docs/LINEAR_VM.md` for why, and the VM's higher-order
-    /// operations (`Result.mapError`, `map`, `sorted`) are lowered to
-    /// ordinary Cove-level loops that call back through `Inst::Call`, not
-    /// through `CallBuiltin`, so they never reach here at all. The one
-    /// genuinely reentrant path in this file, [`Machine::call_resource`] /
-    /// [`Machine::call_host`] parking the machine so a host call can run a
-    /// callback back through [`Machine::call_from_host`], is a different
-    /// method with its own local `values: Vec<Value>` and is never invoked
-    /// from inside [`Machine::call_builtin`].
-    ///
-    /// So today, taking this field's `Vec` out and putting it back is a
-    /// no-op around a leaf call. But it costs nothing to be wrong about
-    /// safely: because the buffer is moved out with `mem::take` rather than
-    /// borrowed, a `call_builtin` that somehow nested inside another one
-    /// finds `self.builtin_words` already emptied by the outer call and
-    /// allocates its own `Vec` rather than aliasing or clobbering the outer
-    /// call's words. And the restore keeps the *whole run* allocation-free
-    /// in that case too, not just the outer call: whichever of the outer
-    /// call's buffer and the inner call's buffer has the larger capacity is
-    /// the one left in this field, so the next call — nested or not — still
-    /// finds a buffer large enough not to grow.
-    builtin_words: Vec<u64>,
-    /// The same, for the words a builtin *answers* with.
-    ///
-    /// Every builtin used to build a fresh `Vec` for its answer, including
-    /// the ones that answer a single word: `Array.length` allocated a
-    /// one-element `Vec` and dropped it a few instructions later, once per
-    /// call. On `examples/covefmt` that was **39 ns of an 86 ns call** —
-    /// measured by adding a second such allocation to the path and watching
-    /// the call get 39 ns dearer — which is to say that nearly half of what
-    /// a builtin cost was the container its answer travelled home in.
-    ///
-    /// So a builtin writes into a buffer instead, and this is the one it
-    /// writes into. It is taken out and put back the way `builtin_words` is,
-    /// for the reasons that field's note gives at length; the two are
-    /// separate buffers because a builtin reads its operands out of the
-    /// first while it is filling the second.
-    builtin_answer: Vec<u64>,
+    /// Whether the intrinsic this machine is running has written its answer
+    /// yet: the checked half of the contract
+    /// [`crate::vm::builtins::operand::Frame`] states, that every operand is
+    /// read before the destination — which may be one of the operands' own
+    /// slots — is written (#378, Q5.2). There is no buffer for an operand or
+    /// an answer to be in any more, so this is the only thing that could tell
+    /// an arm it read a slot it had already overwritten.
+    #[cfg(debug_assertions)]
+    answered: bool,
     /// The last case index each enum wrapper resolved to, and for which
     /// layout.
     ///
@@ -859,8 +801,8 @@ impl<'a> Machine<'a> {
             // that happened later would happen after a frame was pushed. See
             // the field.
             encoded: encoded::prepare(program),
-            builtin_words: Vec::new(),
-            builtin_answer: Vec::new(),
+            #[cfg(debug_assertions)]
+            answered: false,
             cases: [None; 4],
             widths: program
                 .layouts
@@ -941,8 +883,8 @@ impl<'a> Machine<'a> {
             // second pass over the whole program for a pointer's worth of
             // sharing.
             encoded: Ok(encoded),
-            builtin_words: Vec::new(),
-            builtin_answer: Vec::new(),
+            #[cfg(debug_assertions)]
+            answered: false,
             cases: [None; 4],
             // The parent's, for the reason `encoded` is: a table derived from
             // a program the whole run shares is the same table in every task.
@@ -2032,20 +1974,25 @@ impl<'a> Machine<'a> {
         boundary::from_value(self, result, &answer).map_err(|error| error.at(span))
     }
 
-    /// Reads the operand words out of the frame and hands them to the
-    /// builtin.
+    /// Runs one `Inst::CallBuiltin`: the intrinsic it names, over operands
+    /// read where they are, answering into its destination.
     ///
-    /// An operand is a value location: the layout the argument names and the
-    /// words at its slot. Both halves are read here rather than in
-    /// [`crate::vm::builtins`] for the reason the boundary takes them here
-    /// too — a word is untagged and where it came from is a fact about this
-    /// frame, which a builtin has no business knowing about.
+    /// ADR 0058: a runtime call does not "allocate an operand vector, or copy
+    /// a variable result through an untyped temporary solely to cross the
+    /// boundary. Results are written directly to the destination named by the
+    /// slot ABI." So nothing is copied on the way in or on the way out (#378,
+    /// P5-4): the arm is handed the caller's frame base and the instruction's
+    /// own argument list — a [`Frame`](crate::vm::builtins::operand::Frame) —
+    /// and the destination — a [`Dest`](crate::vm::builtins::operand::Dest) —
+    /// and reads and writes the frame itself. Nothing is re-checked either:
+    /// the intrinsic's identity is static and its operand count, operand
+    /// layouts and answer layout were verified against its signature before
+    /// the program ran (P5-3).
     ///
-    /// The words are copied into one buffer and the operands point into it,
-    /// so a builtin reads a whole `Point` without holding a frame and
-    /// without the argument list having to promise that consecutive operands
-    /// are adjacent, which it never could: the lowering places each argument
-    /// where a run of the right shape was free.
+    /// Out of line on purpose. Every arm behind it is a cold call next to the
+    /// dispatch loop's own instructions, and the loop is sensitive to what is
+    /// inlined into it (#378): what this costs the loop is one call.
+    #[inline(never)]
     fn call_builtin(
         &mut self,
         base: u64,
@@ -2061,58 +2008,8 @@ impl<'a> Machine<'a> {
             Some(_) => self.count_builtin(builtin),
         }
         let program = self.program;
+        let called = program.builtin(builtin);
         let list = program.arg_list(args);
-
-        // The word buffer is [`Machine::builtin_words`], taken out for this
-        // call and put back at the end — see the field for why that is safe
-        // and what it costs if it is ever wrong.
-        let mut words = std::mem::take(&mut self.builtin_words);
-        words.clear();
-        words.reserve(list.len());
-        for arg in list {
-            let width = self.width(arg.layout);
-            for at in 0..width {
-                words.push(self.mem.slot(base, arg.slot + at));
-            }
-        }
-
-        // The operands point into `words`, so they cannot themselves live in
-        // the machine beside it: a field borrowed here would have to stay
-        // borrowed across `builtins::call(self, ...)`, which takes `&mut
-        // Machine`. [`INLINE_OPERANDS`] is sized for an ordinary fixed-arity
-        // call — a receiver and a couple of arguments — and only the
-        // builtins `cove-schema` declares `variadic: true` (`Vector.of`,
-        // `Map.of`, `Set.of`) can exceed it, so they spill to a `Vec` sized
-        // to the call instead of paying for a larger array on every call.
-        let mut inline: [Operand; INLINE_OPERANDS] = [Operand {
-            layout: LayoutId(0),
-            words: &[],
-        }; INLINE_OPERANDS];
-        let mut spill: Vec<Operand>;
-        let operands: &[Operand] = if list.len() <= INLINE_OPERANDS {
-            let mut offset = 0usize;
-            for (slot, arg) in inline.iter_mut().zip(list) {
-                let width = self.width(arg.layout) as usize;
-                *slot = Operand {
-                    layout: arg.layout,
-                    words: &words[offset..offset + width],
-                };
-                offset += width;
-            }
-            &inline[..list.len()]
-        } else {
-            let mut offset = 0usize;
-            spill = Vec::with_capacity(list.len());
-            for arg in list {
-                let width = self.width(arg.layout) as usize;
-                spill.push(Operand {
-                    layout: arg.layout,
-                    words: &words[offset..offset + width],
-                });
-                offset += width;
-            }
-            &spill
-        };
 
         // What the declared `Effects` of this call promise, checked against
         // what it actually did — see [ADR
@@ -2124,17 +2021,36 @@ impl<'a> Machine<'a> {
         // to would be silently unsound there; `cargo t` runs under
         // `--profile checked`, which keeps `debug_assertions` on, so the
         // whole corpus exercises this rather than only a fuzzer that hits
-        // debug builds.
+        // debug builds. The operand count is asserted here once for every
+        // arm, because the verifier already refused a call that disagrees
+        // with the signature and no arm re-checks it.
         #[cfg(debug_assertions)]
-        let allocations_before = super::mem::thread_allocations();
+        let allocations_before = {
+            let signature = called.intrinsic.signature();
+            debug_assert!(
+                match signature.rest {
+                    None => list.len() == signature.operands.len(),
+                    Some(_) => list.len() >= signature.operands.len(),
+                },
+                "`{}` was verified to take {} operand(s), and was handed {}",
+                called.intrinsic,
+                signature.operands.len(),
+                list.len()
+            );
+            super::mem::thread_allocations()
+        };
 
-        let mut out = std::mem::take(&mut self.builtin_answer);
-        out.clear();
-        let answered = builtins::call(self, program.builtin(builtin), operands, &mut out);
+        self.begin_intrinsic();
+        let answered = builtins::call(
+            self,
+            called.intrinsic,
+            Operands::new(base, list),
+            Dest::new(base, dst, called.result),
+        );
 
         #[cfg(debug_assertions)]
         {
-            let intrinsic = program.builtin(builtin).intrinsic;
+            let intrinsic = called.intrinsic;
             let effects = intrinsic.effects();
             debug_assert!(
                 answered.is_ok() || effects.contains(cove_ir::Effects::MAY_RAISE),
@@ -2147,29 +2063,98 @@ impl<'a> Machine<'a> {
                 "`{intrinsic}` allocated, but its declared `Effects` do not carry \
                  `MAY_ALLOCATE`"
             );
-        }
-
-        // Written into the frame here rather than by the dispatch loop,
-        // because the buffer has to come back: handing the answer out as a
-        // `Vec` would hand out the allocation with it, and this field would
-        // find itself empty on the next call and allocate again — which is
-        // the whole thing it exists not to do.
-        if answered.is_ok() {
-            for (at, word) in out.iter().enumerate() {
-                self.mem.set_slot(base, dst + at as u32, *word);
-            }
-        }
-
-        // Both buffers may have grown past what was already here — keep
-        // whichever of each pair has the larger capacity, per the fields'
-        // doc comments.
-        if words.capacity() >= self.builtin_words.capacity() {
-            self.builtin_words = words;
-        }
-        if out.capacity() >= self.builtin_answer.capacity() {
-            self.builtin_answer = out;
+            debug_assert!(
+                answered.is_err() || self.answered,
+                "`{intrinsic}` answered without writing its destination"
+            );
         }
         answered
+    }
+
+    /// Marks the start of one intrinsic's run, for the checked half of
+    /// [`Frame`](crate::vm::builtins::operand::Frame)'s read-before-write
+    /// contract. Nothing at all without `debug_assertions`.
+    #[inline(always)]
+    pub(crate) fn begin_intrinsic(&mut self) {
+        #[cfg(debug_assertions)]
+        {
+            self.answered = false;
+        }
+    }
+
+    /// Word `slot` of the frame based at `base`, read as an intrinsic's
+    /// operand.
+    ///
+    /// Panics under `debug_assertions` if the running intrinsic has already
+    /// written its answer: the destination may be this very slot.
+    #[inline(always)]
+    pub(crate) fn operand_word(&self, base: u64, slot: u32) -> u64 {
+        self.unanswered();
+        self.mem.slot(base, slot)
+    }
+
+    /// The value location of `layout` at `slot` of the frame based at `base`,
+    /// borrowed as an intrinsic's operand. See [`Machine::operand_word`].
+    #[inline(always)]
+    pub(crate) fn operand_words(&self, base: u64, slot: u32, layout: LayoutId) -> &[u64] {
+        self.unanswered();
+        self.mem.slots(base, slot, self.width(layout))
+    }
+
+    /// The `width` words of an intrinsic's destination at `slot` of the frame
+    /// based at `base`, to be written.
+    #[inline(always)]
+    pub(crate) fn answer_words(&mut self, base: u64, slot: u32, width: u32) -> &mut [u64] {
+        #[cfg(debug_assertions)]
+        {
+            self.answered = true;
+        }
+        self.mem.slots_mut(base, slot, width)
+    }
+
+    /// Writes one word of an intrinsic's answer. See
+    /// [`Machine::answer_words`].
+    #[inline(always)]
+    pub(crate) fn answer_word(&mut self, base: u64, slot: u32, word: u64) {
+        #[cfg(debug_assertions)]
+        {
+            self.answered = true;
+        }
+        self.mem.set_slot(base, slot, word);
+    }
+
+    #[inline(always)]
+    fn unanswered(&self) {
+        #[cfg(debug_assertions)]
+        assert!(
+            !self.answered,
+            "an intrinsic read an operand after writing its answer; every operand is read \
+             before the destination is written, because the destination may be one of them \
+             (#378, Q5.2)"
+        );
+    }
+
+    /// Pushes a frame holding `words` for a test to call an intrinsic in,
+    /// answering its base.
+    #[cfg(test)]
+    pub(crate) fn push_test_frame(&mut self, words: &[u64]) -> u64 {
+        let base = self
+            .mem
+            .push_frame(words.len() as u32)
+            .expect("a test frame fits the stack");
+        self.mem
+            .slots_mut(base, 0, words.len() as u32)
+            .copy_from_slice(words);
+        base
+    }
+
+    /// Pops a frame [`Machine::push_test_frame`] pushed, answering the `len`
+    /// words it holds now.
+    #[cfg(test)]
+    pub(crate) fn pop_test_frame(&mut self, base: u64, len: u32) -> Vec<u64> {
+        let words = self.mem.slots(base, 0, len).to_vec();
+        self.mem.pop_frame(base);
+        words
     }
 
     /// Places every entry of [`Program::strings`] into the heap, in

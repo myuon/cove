@@ -26,75 +26,61 @@
 //! that, so there is exactly one place either backend could be reading them
 //! differently, and it is this sentence.
 
-use cove_ir::{LayoutId, Repr, Shape};
+use cove_ir::{LayoutId, Shape};
 
 use crate::error::RuntimeError;
-use crate::vm::builtins::operand::Operand;
+use crate::vm::builtins::operand::{Dest, Frame};
 use crate::vm::builtins::{make, operand};
 use crate::vm::exec::Machine;
 
-/// The address of a `String` receiver, with nothing read out of it.
-fn receiver_addr(
-    machine: &Machine,
-    method: &str,
-    receiver: Operand<'_>,
-) -> Result<u64, RuntimeError> {
-    let Some((Repr::Ref, addr)) = operand::as_word(machine, receiver) else {
-        return Err(operand::no_method(machine, receiver, method));
-    };
-    if addr == 0 {
-        return Err(operand::null_value());
-    }
-    if !super::is_string(machine, addr) {
-        return Err(operand::no_method(machine, receiver, method));
-    }
-    Ok(addr)
-}
-
-/// The text of a `String` receiver.
-///
-/// This copies the whole object and validates it, once per call, which is
-/// what every operation above wanted and what the two byte-counted ones
-/// below exist to not do: they take [`receiver_addr`] and read the words they
-/// actually need.
-fn receiver(
-    machine: &Machine,
-    method: &str,
-    receiver: Operand<'_>,
-) -> Result<String, RuntimeError> {
-    super::string_of(machine, receiver_addr(machine, method, receiver)?)
-}
-
 /// `String.length() -> Int`, in characters.
-pub(super) fn length(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("length", operands, 0)?;
-    Ok(receiver(machine, "length", self_)?.chars().count() as u64)
+pub(super) fn length(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let count = operand::text(machine, frame, 0)?.chars().count();
+    dest.word(machine, count as u64);
+    Ok(())
 }
 
 /// `String.words() -> Array<String>`, split on ASCII whitespace.
-pub(super) fn words(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("words", operands, 0)?;
-    let text = receiver(machine, "words", self_)?;
+pub(super) fn words(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
     let parts: Vec<&str> = text.split_ascii_whitespace().collect();
-    make::strings(machine, &parts)
+    let array = make::strings(machine, &parts)?;
+    dest.word(machine, array);
+    Ok(())
 }
 
 /// `String.chars() -> Array<String>`.
 ///
 /// A character in Cove is a `String` of length 1; there is no `Character`
 /// type for this to answer instead.
-pub(super) fn chars(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("chars", operands, 0)?;
-    let text = receiver(machine, "chars", self_)?;
+pub(super) fn chars(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
     let parts: Vec<String> = text.chars().map(String::from).collect();
-    make::strings(machine, &parts)
+    let array = make::strings(machine, &parts)?;
+    dest.word(machine, array);
+    Ok(())
 }
 
 /// `String.split(separator) -> Array<String>`.
-pub(super) fn split(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("String.split", operands, 1)?;
-    let text = receiver(machine, "split", self_)?;
-    let separator = operand::text(machine, "String.split", "separator", args[0])?;
+pub(super) fn split(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
+    let separator = operand::text(machine, frame, 1)?;
     if separator.is_empty() {
         return Err(operand::empty_needle(
             "String.split",
@@ -103,81 +89,40 @@ pub(super) fn split(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u
         ));
     }
     let parts: Vec<&str> = text.split(&separator).collect();
-    make::strings(machine, &parts)
+    let array = make::strings(machine, &parts)?;
+    dest.word(machine, array);
+    Ok(())
 }
 
 /// `String.join(parts) -> String`, where the receiver is the separator.
-pub(super) fn join(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("String.join", operands, 1)?;
-    let separator_addr = receiver_addr(machine, "join", self_)?;
-    let items = args[0];
-    let addr = match operand::as_word(machine, items) {
-        Some((Repr::Ref, addr)) if addr != 0 => addr,
-        _ => 0,
-    };
-    let Some((elem, len)) = (addr != 0).then(|| elements_of(machine, addr)).flatten() else {
-        return Err(operand::type_error(
-            machine,
-            "String.join",
-            "parts",
-            "Array<String>",
-            items,
-        ));
-    };
-    // Each element is read as the value location it is, at the element
-    // layout's stride, and handed to the same reader an argument would be —
-    // so an array whose elements are not strings is refused by what it holds
-    // rather than by how wide it is.
-    let stride = machine.words_of(elem);
-    if let Some(parts) = string_run(machine, addr, elem, stride, len) {
-        return joined_bytes(machine, separator_addr, &parts);
-    }
-    let separator = super::string_of(machine, separator_addr)?;
-    let mut joined = String::new();
-    for at in 0..len {
-        if at > 0 {
-            joined.push_str(&separator);
-        }
-        let words = machine.payload_run(addr, at * stride, stride);
-        let held = Operand {
-            layout: elem,
-            words: &words,
-        };
-        joined.push_str(&operand::text(machine, "String.join", "parts", held)?);
-    }
-    machine.new_string(&joined)
-}
-
-/// The addresses of an `Array<String>`'s elements, or `None` when this is not
-/// one.
-///
-/// `Array<String>` is a run of one-word references and the element layout
-/// says so once for the whole array, so the parts can be collected without
-/// asking each of them what it is. Anything else — a wider element, an
-/// element that is not a string, a null — answers `None` and leaves the
-/// caller to the reader that produces the error message for it. That is why
-/// this refuses a null rather than treating it as the empty string: the
-/// slower path's wording is the wording the corpus has pinned, and there is
-/// no reason for two.
-fn string_run(
-    machine: &Machine,
-    addr: u64,
-    elem: LayoutId,
-    stride: u32,
-    len: u32,
-) -> Option<Vec<u64>> {
-    if elem != machine.program().str_layout || stride != 1 {
-        return None;
-    }
+pub(super) fn join(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let separator_addr = operand::string(machine, frame, 0);
+    let addr = frame.word(machine, 1);
+    // An `Array<String>` is what the verifier held `parts` to (#378, P5-3),
+    // so its element layout is not asked again: it is a run of one-word
+    // references, collected without asking each of them what it is.
+    debug_assert!(
+        elements_of(machine, addr).is_some(),
+        "an operand verified to be an `Array<String>`"
+    );
+    let len = machine.object_len(addr);
     let mut parts = Vec::with_capacity(len as usize);
     for at in 0..len {
         let part = machine.payload(addr, at);
+        // A null part is refused rather than joined as the empty string. No
+        // array a program builds holds one.
         if part == 0 {
-            return None;
+            return Err(operand::null_value());
         }
         parts.push(part);
     }
-    Some(parts)
+    let joined = joined_bytes(machine, separator_addr, &parts)?;
+    dest.word(machine, joined);
+    Ok(())
 }
 
 /// `parts` joined by the string at `separator`, as one allocation and a run
@@ -226,11 +171,14 @@ fn elements_of(machine: &Machine, addr: u64) -> Option<(LayoutId, u32)> {
 }
 
 /// `String.slice(from, to) -> String`, in character positions.
-pub(super) fn slice(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("String.slice", operands, 2)?;
-    let text = receiver(machine, "slice", self_)?;
-    let from = operand::int(machine, "String.slice", "from", args[0])?;
-    let to = operand::int(machine, "String.slice", "to", args[1])?;
+pub(super) fn slice(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
+    let from = operand::int(machine, frame, 1);
+    let to = operand::int(machine, frame, 2);
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len() as i64;
     let from = from.clamp(0, len) as usize;
@@ -240,80 +188,88 @@ pub(super) fn slice(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u
     } else {
         chars[from..to].iter().collect()
     };
-    machine.new_string(&sliced)
+    let word = machine.new_string(&sliced)?;
+    dest.word(machine, word);
+    Ok(())
 }
 
 /// `String.trim() -> String`.
-pub(super) fn trim(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("trim", operands, 0)?;
-    let text = receiver(machine, "trim", self_)?;
-    machine.new_string(text.trim())
+pub(super) fn trim(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
+    let word = machine.new_string(text.trim())?;
+    dest.word(machine, word);
+    Ok(())
 }
 
 /// `String.contains(text) -> Bool`.
 pub(super) fn contains(
     machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("String.contains", operands, 1)?;
-    let text = receiver(machine, "contains", self_)?;
-    let needle = operand::text(machine, "String.contains", "text", args[0])?;
-    Ok(text.contains(&needle) as u64)
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
+    let needle = operand::text(machine, frame, 1)?;
+    dest.word(machine, text.contains(&needle) as u64);
+    Ok(())
 }
 
 /// `String.startsWith(prefix) -> Bool`.
 pub(super) fn starts_with(
     machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("String.startsWith", operands, 1)?;
-    let text = receiver(machine, "startsWith", self_)?;
-    let prefix = operand::text(machine, "String.startsWith", "prefix", args[0])?;
-    Ok(text.starts_with(&prefix) as u64)
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
+    let prefix = operand::text(machine, frame, 1)?;
+    dest.word(machine, text.starts_with(&prefix) as u64);
+    Ok(())
 }
 
 /// `String.endsWith(suffix) -> Bool`.
 pub(super) fn ends_with(
     machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("String.endsWith", operands, 1)?;
-    let text = receiver(machine, "endsWith", self_)?;
-    let suffix = operand::text(machine, "String.endsWith", "suffix", args[0])?;
-    Ok(text.ends_with(&suffix) as u64)
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
+    let suffix = operand::text(machine, frame, 1)?;
+    dest.word(machine, text.ends_with(&suffix) as u64);
+    Ok(())
 }
 
 /// `String.indexOf(text) -> Option<Int>`, in character positions.
 ///
 /// An `Option` is inline, so what this answers is the run of words
-/// `[disc, Int]` rather than an address — and a `None` leaves the payload
-/// word zero, which is what makes the region's one static reference map right
-/// for both cases.
+/// `[disc, Int]` written into the destination rather than an address — and a
+/// `None` leaves the payload word zero, which is what makes the region's one
+/// static reference map right for both cases.
 pub(super) fn index_of(
     machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
+    frame: Frame<'_>,
+    dest: Dest,
 ) -> Result<(), RuntimeError> {
-    let (self_, args) = operand::method("String.indexOf", operands, 1)?;
-    let text = receiver(machine, "indexOf", self_)?;
-    let needle = operand::text(machine, "String.indexOf", "text", args[0])?;
+    let text = operand::text(machine, frame, 0)?;
+    let needle = operand::text(machine, frame, 1)?;
     match text.find(&needle) {
         // `find` answers a byte offset; the characters before it are counted
         // to convert that into the character index `length()` counts in.
-        Some(byte) => make::some(machine, result, &[text[..byte].chars().count() as u64], out),
-        None => make::none(machine, result, out),
+        Some(byte) => make::some(machine, dest, &[text[..byte].chars().count() as u64]),
+        None => make::none(machine, dest),
     }
 }
 
 /// `String.replace(old, new) -> String`.
 pub(super) fn replace(
     machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("String.replace", operands, 2)?;
-    let text = receiver(machine, "replace", self_)?;
-    let old = operand::text(machine, "String.replace", "old", args[0])?;
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
+    let old = operand::text(machine, frame, 1)?;
     if old.is_empty() {
         return Err(operand::empty_needle(
             "String.replace",
@@ -321,29 +277,35 @@ pub(super) fn replace(
             "`old` is the text to look for, and an empty `old` names none",
         ));
     }
-    let new = operand::text(machine, "String.replace", "new", args[1])?;
+    let new = operand::text(machine, frame, 2)?;
     let replaced = text.replace(&old, &new);
-    machine.new_string(&replaced)
+    let word = machine.new_string(&replaced)?;
+    dest.word(machine, word);
+    Ok(())
 }
 
 /// `String.toUpper() -> String`.
 pub(super) fn to_upper(
     machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("toUpper", operands, 0)?;
-    let text = receiver(machine, "toUpper", self_)?.to_uppercase();
-    machine.new_string(&text)
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?.to_uppercase();
+    let word = machine.new_string(&text)?;
+    dest.word(machine, word);
+    Ok(())
 }
 
 /// `String.toLower() -> String`.
 pub(super) fn to_lower(
     machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("toLower", operands, 0)?;
-    let text = receiver(machine, "toLower", self_)?.to_lowercase();
-    machine.new_string(&text)
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?.to_lowercase();
+    let word = machine.new_string(&text)?;
+    dest.word(machine, word);
+    Ok(())
 }
 
 /// `String.fromCodePoint(codePoint) -> Result<String, Error>`.
@@ -355,16 +317,14 @@ pub(super) fn to_lower(
 /// than a bad one.
 pub(super) fn from_code_point(
     machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
+    frame: Frame<'_>,
+    dest: Dest,
 ) -> Result<(), RuntimeError> {
-    let args = operand::free("String.fromCodePoint", operands, 1)?;
-    let code_point = operand::int(machine, "String.fromCodePoint", "codePoint", args[0])?;
+    let code_point = operand::int(machine, frame, 0);
     if (0xD800..=0xDFFF).contains(&code_point) {
         let message =
             format!("`{code_point}` is a surrogate half, which is not a character on its own");
-        return make::failed(machine, result, &message, out);
+        return make::failed(machine, dest, &message);
     }
     match u32::try_from(code_point).ok().and_then(char::from_u32) {
         Some(character) => {
@@ -372,11 +332,11 @@ pub(super) fn from_code_point(
             // Nothing allocates between the string and the `Ok` around it,
             // because a `Result` is words: the case is built out of the
             // layout table and the word it was just handed.
-            make::ok(machine, result, &[text], out)
+            make::ok(machine, dest, &[text])
         }
         None => {
             let message = format!("`{code_point}` is not a Unicode code point");
-            make::failed(machine, result, &message, out)
+            make::failed(machine, dest, &message)
         }
     }
 }
@@ -385,8 +345,9 @@ pub(super) fn from_code_point(
 mod tests {
     use super::*;
     use crate::vm::builtins::tests::{
-        elements, message_of, named, option_of, read, result_of, run, scalar, word, words_of, world,
+        elements, message_of, option_of, read, result_of, run, scalar, word, words_of, world,
     };
+    use cove_ir::Repr;
 
     /// The parts of an `Array<String>` a builtin answered.
     fn parts(machine: &Machine, addr: u64) -> Vec<String> {
@@ -521,8 +482,8 @@ mod tests {
         }
     }
 
-    /// An `Array<String>` holding a null is not a string run, and the reader
-    /// that refuses it is the one whose wording the corpus has pinned.
+    /// An `Array<String>` holding a null is refused rather than joined as if
+    /// the part were empty.
     #[test]
     fn a_join_over_a_null_part_is_refused_as_it_was() {
         let program = world();
@@ -557,39 +518,6 @@ mod tests {
 
         let joined = on(&mut machine, ", ", "join", &[(Repr::Ref, items)]);
         assert_eq!(read(&machine, joined), "a, b");
-
-        // Anything that is not an `Array` is refused by the type the schema
-        // declares for the parameter.
-        let self_ = machine.new_string(", ").unwrap();
-        let error = run(
-            &mut machine,
-            "String",
-            "join",
-            &[(Repr::Ref, self_), (Repr::Int, 1)],
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`String.join` expects `Array<String>` for `parts`, but found `Int`"
-        );
-
-        // Nor is an array of anything that is not a string. Each element is
-        // read as the value location it is, at the element layout's stride,
-        // so what is refused is the element rather than the width — the
-        // message names the `Point` and not the `Array` around it.
-        let points = elements(&program, named(&program, "Point"), false);
-        let items = machine.new_object(points, 1).unwrap();
-        let error = run(
-            &mut machine,
-            "String",
-            "join",
-            &[(Repr::Ref, self_), (Repr::Ref, items)],
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`String.join` expects `String` for `parts`, but found `Point`"
-        );
     }
 
     /// Character positions, and both bounds clamped, exactly as a sequence
@@ -733,29 +661,6 @@ mod tests {
         assert_eq!(
             message_of(&machine, string, &words),
             "`1114112` is not a Unicode code point"
-        );
-    }
-
-    /// Every `String` operation answers the same thing to a receiver that is
-    /// not one, in the oracle's words.
-    #[test]
-    fn a_receiver_that_is_not_a_string_says_so() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let error = run(&mut machine, "String", "trim", &[(Repr::Int, 1)]).unwrap_err();
-        assert_eq!(error.message, "`Int` has no method `trim`");
-
-        let self_ = machine.new_string("x").unwrap();
-        let error = run(
-            &mut machine,
-            "String",
-            "contains",
-            &[(Repr::Ref, self_), (Repr::Int, 1)],
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`String.contains` expects `String` for `text`, but found `Int`"
         );
     }
 

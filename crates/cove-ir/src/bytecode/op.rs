@@ -19,7 +19,7 @@
 //!   [`Inst::CmpImm`](crate::Inst::CmpImm) six and
 //!   [`Inst::CmpImmBranch`](crate::Inst::CmpImmBranch) six, the operator
 //!   alone;
-//! - [`Inst::Neg`](crate::Inst::Neg) two, [`Convert`] two;
+//! - [`Inst::Neg`](crate::Inst::Neg) two, [`Convert`] four;
 //! - [`Inst::Alloc`](crate::Inst::Alloc) three, one per [`Len`](crate::Len)
 //!   form, so no discriminant is stored anywhere.
 //!
@@ -77,7 +77,12 @@ const COMPARES: [Compare; 6] = [
     Compare::Tag,
 ];
 /// Every [`Convert`], in opcode order.
-const CONVERTS: [Convert; 2] = [Convert::IntToFloat, Convert::FloatToInt];
+const CONVERTS: [Convert; 4] = [
+    Convert::IntToFloat,
+    Convert::FloatToInt,
+    Convert::DurationToInt,
+    Convert::IntToDuration,
+];
 
 /// Where each family's opcodes begin.
 ///
@@ -744,6 +749,10 @@ impl Op {
                 let (from, into) = match to {
                     Convert::IntToFloat => (INT, FLOAT),
                     Convert::FloatToInt => (FLOAT, INT),
+                    // `INT` is `Int` or `Duration`, so a relabel's two fields
+                    // are one class here; `crate::verify` is where the two
+                    // `Repr`s are told apart.
+                    Convert::DurationToInt | Convert::IntToDuration => (INT, INT),
                 };
                 fields(
                     Operand::Word(into),
@@ -1047,15 +1056,17 @@ mod tests {
     /// truncate arrived with `Vector.pop`, and a hundred and sixty-two once the
     /// run slice gained its byte member for `String.sliceBytes`, and a hundred
     /// and sixty-eight once ADR 0059's three-way order arrived for a keyed
-    /// search, one per `Compare`. What the number is for is that a reader can see the
+    /// search, one per `Compare`, and a hundred and seventy once ADR 0058's
+    /// Phase 5 made `Duration.nanos` two relabel conversions rather than an
+    /// intrinsic. What the number is for is that a reader can see the
     /// headroom
     /// rather than be told about it: more than a third of the byte is still
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_sixty_eight_opcodes() {
-        assert_eq!(Op::all().len(), 168);
-        assert_eq!(OPCODES, 168);
+    fn there_are_a_hundred_and_seventy_opcodes() {
+        assert_eq!(Op::all().len(), 170);
+        assert_eq!(OPCODES, 170);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic
@@ -1116,7 +1127,7 @@ mod tests {
         assert_eq!(count(|op| matches!(op, Op::CmpBranch(_, _))), 36);
         assert_eq!(count(|op| matches!(op, Op::CmpImmBranch(_))), 6);
         assert_eq!(count(|op| matches!(op, Op::Neg(_))), 2);
-        assert_eq!(count(|op| matches!(op, Op::Convert(_))), 2);
+        assert_eq!(count(|op| matches!(op, Op::Convert(_))), 4);
         assert_eq!(
             count(|op| matches!(op, Op::AllocFixed | Op::AllocImm | Op::AllocSlot)),
             3

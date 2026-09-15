@@ -45,7 +45,7 @@
 use cove_ir::{LayoutId, Program, Repr, Shape};
 
 use crate::error::RuntimeError;
-use crate::vm::builtins::operand::{self, Operand, Word};
+use crate::vm::builtins::operand::{self, Dest, Frame, Operand, Word};
 use crate::vm::exec::Machine;
 
 /// A value: the layout that describes it, and the words it occupies.
@@ -55,11 +55,21 @@ use crate::vm::exec::Machine;
 type Held<'w> = (LayoutId, &'w [u64]);
 
 /// `a == b`, as the `Bool` word `0` or `1`.
-pub(super) fn equals(machine: &Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let [a, b] = operands else {
-        return Err(operand::operands("Any.equals", 2, operands.len()));
+pub(super) fn equals(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let equal = {
+        let machine = &*machine;
+        same(
+            machine,
+            frame.operand(machine, 0),
+            frame.operand(machine, 1),
+        )?
     };
-    Ok(same(machine, *a, *b)? as u64)
+    dest.word(machine, equal as u64);
+    Ok(())
 }
 
 /// Whether two values of `layout` are equal, given their words.
@@ -745,15 +755,9 @@ mod tests {
         let int = scalar(&program, Repr::Int);
         let option = two_case(&program, "Option", "Some", int);
 
-        let some = make::built(&mut machine, option, |m, l, out| {
-            make::some(m, l, &[1], out)
-        });
-        let alike = make::built(&mut machine, option, |m, l, out| {
-            make::some(m, l, &[1], out)
-        });
-        let other = make::built(&mut machine, option, |m, l, out| {
-            make::some(m, l, &[2], out)
-        });
+        let some = make::built(&mut machine, option, |m, dest| make::some(m, dest, &[1]));
+        let alike = make::built(&mut machine, option, |m, dest| make::some(m, dest, &[1]));
+        let other = make::built(&mut machine, option, |m, dest| make::some(m, dest, &[2]));
         let none = make::built(&mut machine, option, make::none);
         assert!(same_value(&machine, option, &some, &alike).unwrap());
         assert!(!same_value(&machine, option, &some, &other).unwrap());
@@ -902,16 +906,5 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.message, "this value nests too deeply to compare");
-    }
-
-    #[test]
-    fn equals_takes_two_operands() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let error = run(&mut machine, "Any", "equals", &[(Repr::Int, 1)]).unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Any.equals` takes 2 operand(s), but 1 were given"
-        );
     }
 }

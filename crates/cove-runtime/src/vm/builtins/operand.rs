@@ -17,14 +17,17 @@
 //! reference, an object the collector already reclaimed, a family the program
 //! does not declare — and the doc comment says so.
 //!
-//! Almost none of them is reachable from a checked program. `cove-sema` has
-//! already settled every receiver's type, every argument's type and every
-//! call's arity, so an arity or type refusal here is a lowering bug rather
-//! than a program's mistake. They are written out anyway, in the oracle's
-//! words, because "should never" is not "cannot" and a silent wrong answer
-//! costs more than the `match` arm that reports one.
+//! # The operands are not re-checked
+//!
+//! `cove-sema` settled every receiver's type, every argument's type and every
+//! call's arity, and `cove_ir::verify` holds every `CallBuiltin` to its
+//! intrinsic's [`cove_ir::Signature`] — the count, each operand's layout and
+//! the answer's — before anything runs (#378, P5-3). So nothing here refuses
+//! an operand for its count or its type any more: the readers below
+//! `debug_assert!` what the verifier established, which the `checked` profile
+//! every test and every measurement runs under keeps on, and read the word.
 
-use cove_ir::{LayoutId, Repr, Shape};
+use cove_ir::{Arg, LayoutId, Repr, Shape};
 
 use crate::error::RuntimeError;
 use crate::vm::exec::Machine;
@@ -35,6 +38,13 @@ use crate::vm::exec::Machine;
 /// The pair travels together everywhere, because neither half means anything
 /// without the other — a word is untagged, and a layout describes nothing on
 /// its own.
+///
+/// The words are borrowed **straight out of the caller's frame** — see
+/// [`Frame::operand`] — and not out of a buffer they were copied into, so an
+/// `Operand` lives no longer than the shared borrow of the machine it was
+/// read through. That is also what makes the aliasing contract hold by
+/// construction for a wide operand: nothing that writes the destination can
+/// run while one is held.
 ///
 /// It used to be a `Repr` and one word, and that was the shape of a call
 /// rather than a choice this file made: a `CallBuiltin`'s argument list was
@@ -57,160 +67,151 @@ pub(crate) struct Operand<'w> {
 /// address a value of a family that lives in the heap consists of.
 pub(super) type Word = (Repr, u64);
 
-impl Operand<'_> {
-    /// The first word of the location.
-    ///
-    /// Every layout a program can name is at least one word wide — `Unit`
-    /// takes a slot — so the fallback is unreachable, and it is zero rather
-    /// than a panic because a builtin is not a place to discover a lowering
-    /// bug by unwinding.
-    pub(super) fn word(self) -> u64 {
-        self.words.first().copied().unwrap_or(0)
-    }
-}
-
-/// The one word an operand is, where it is one.
+/// The operands of one intrinsic call, where they already are: the caller's
+/// frame, and the argument list the instruction names.
 ///
-/// A scalar answers its `Repr`, and so does a family that lives in the heap,
-/// because a value of one *is* the address of its object. An inline struct or
-/// an enum answers nothing however wide it happens to be: a
-/// `struct Error { message: String }` is one `Repr::Ref` word and is not a
-/// reference to an `Error`, so reading its word as one reads the declaration
-/// away. That is [`cove_ir::Layout::is_one_address`], asked here.
-pub(super) fn as_word(machine: &Machine, operand: Operand<'_>) -> Option<Word> {
-    let described = machine.program().layout(operand.layout);
-    match &described.shape {
-        Shape::Word(repr) => Some((*repr, operand.word())),
-        _ if described.is_one_address() => Some((Repr::Ref, operand.word())),
-        _ => None,
-    }
-}
-
-/// The receiver and the arguments of a method call.
+/// ADR 0058: a runtime call does not "allocate an operand vector, or copy a
+/// variable result through an untyped temporary solely to cross the
+/// boundary". This is the half of that about operands (#378, P5-4). Nothing
+/// is copied to make one: it is a frame base and the program's own
+/// [`cove_ir::Arg`] list, and an arm reads operand `n` by reading the frame —
+/// [`Frame::word`] for a one-word operand, [`Frame::operand`] for a value
+/// location as wide as its layout. A variadic intrinsic walks the list
+/// rather than collecting it.
 ///
-/// A method's operands are its receiver followed by its arguments, so the
-/// count this holds them to is the *argument* count — which is the count the
-/// schema declares and the count the oracle's message names.
-pub(super) fn method<'w, 'o>(
-    shown: &str,
-    operands: &'o [Operand<'w>],
-    arguments: usize,
-) -> Result<(Operand<'w>, &'o [Operand<'w>]), RuntimeError> {
-    match operands.split_first() {
-        Some((receiver, rest)) if rest.len() == arguments => Ok((*receiver, rest)),
-        Some((_, rest)) => Err(arity(shown, arguments, rest.len())),
-        // A method call with no receiver at all is a lowering that built the
-        // argument list wrongly, and there is nothing to report but that no
-        // argument arrived.
-        None => Err(arity(shown, arguments, 0)),
-    }
+/// # Every operand is read before the answer is written
+///
+/// The destination may be one of the operands' own slots — `x = x.trim()`
+/// lowers to a call whose destination is `x` (#378, Q5.2). So an arm reads
+/// everything it needs from the frame before its first write through
+/// [`Dest`], and one that has to read after writing copies what it needs
+/// first. The machine holds the contract under `debug_assertions`, which the
+/// `checked` profile keeps on: a read through a `Frame` after a write through
+/// the call's `Dest` panics.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Frame<'a> {
+    base: u64,
+    args: &'a [Arg],
 }
 
-/// The arguments of an associated function, which is called on a name rather
-/// than on a value and therefore has no receiver.
-pub(super) fn free<'w, 'o>(
-    shown: &str,
-    operands: &'o [Operand<'w>],
-    arguments: usize,
-) -> Result<&'o [Operand<'w>], RuntimeError> {
-    if operands.len() != arguments {
-        return Err(arity(shown, arguments, operands.len()));
+impl<'a> Frame<'a> {
+    /// The operands `args` names in the frame based at `base`.
+    pub(crate) fn new(base: u64, args: &'a [Arg]) -> Frame<'a> {
+        Frame { base, args }
     }
-    Ok(operands)
-}
 
-/// The `Int` in `operand`.
-pub(super) fn int(
-    machine: &Machine,
-    method: &str,
-    parameter: &str,
-    operand: Operand<'_>,
-) -> Result<i64, RuntimeError> {
-    match as_word(machine, operand) {
-        Some((Repr::Int, word)) => Ok(word as i64),
-        _ => Err(type_error(machine, method, parameter, "Int", operand)),
+    /// How many operands the call passes.
+    pub(crate) fn len(self) -> usize {
+        self.args.len()
     }
-}
 
-/// The `Float` in `operand`.
-pub(super) fn float(
-    machine: &Machine,
-    method: &str,
-    parameter: &str,
-    operand: Operand<'_>,
-) -> Result<f64, RuntimeError> {
-    match as_word(machine, operand) {
-        Some((Repr::Float, word)) => Ok(f64::from_bits(word)),
-        _ => Err(type_error(machine, method, parameter, "Float", operand)),
+    /// The layout of operand `at`.
+    pub(super) fn layout(self, at: usize) -> LayoutId {
+        self.args[at].layout
     }
-}
 
-/// The text of the `String` in `operand`.
-pub(super) fn text(
-    machine: &Machine,
-    method: &str,
-    parameter: &str,
-    operand: Operand<'_>,
-) -> Result<String, RuntimeError> {
-    match as_word(machine, operand) {
-        Some((Repr::Ref, addr)) if super::is_string(machine, addr) => {
-            super::string_of(machine, addr)
+    /// The first word of operand `at`, read out of the frame.
+    #[inline]
+    pub(super) fn word(self, machine: &Machine, at: usize) -> u64 {
+        machine.operand_word(self.base, self.args[at].slot)
+    }
+
+    /// Operand `at` as the value location it is: its layout, and its words
+    /// borrowed out of the frame.
+    #[inline]
+    pub(super) fn operand<'m>(self, machine: &'m Machine, at: usize) -> Operand<'m> {
+        let arg = self.args[at];
+        Operand {
+            layout: arg.layout,
+            words: machine.operand_words(self.base, arg.slot, arg.layout),
         }
-        _ => Err(type_error(machine, method, parameter, "String", operand)),
     }
 }
 
-/// `` `{method}` takes {expected} argument(s), but {found} were given ``.
-pub(super) fn arity(method: &str, expected: usize, found: usize) -> RuntimeError {
-    RuntimeError::new(format!(
-        "`{method}` takes {expected} argument(s), but {found} were given"
-    ))
-}
-
-/// The same, for the three builtins that have no receiver and no schema —
-/// `String.text`, `concat` and `interpolate` are the machine's own, and what
-/// they take is operands.
-pub(super) fn operands(shown: &str, wanted: usize, given: usize) -> RuntimeError {
-    RuntimeError::new(format!(
-        "`{shown}` takes {wanted} operand(s), but {given} were given"
-    ))
-}
-
-/// `` `{method}` expects `{expected}` for `{parameter}`, but found `{found}` ``.
-pub(super) fn type_error(
-    machine: &Machine,
-    method: &str,
-    parameter: &str,
-    expected: &str,
-    found: Operand<'_>,
-) -> RuntimeError {
-    RuntimeError::new(format!(
-        "`{method}` expects `{expected}` for `{parameter}`, but found `{}`",
-        name(machine, found)
-    ))
-}
-
-/// `` `{type}` has no method `{method}` ``.
+/// Where an intrinsic's answer goes: slot `slot` of the frame based at
+/// `base`, a value of `layout`.
 ///
-/// What a receiver of the wrong family is answered with. The oracle reaches
-/// this by falling off the end of its `match` on the receiver's
-/// representation; this reaches it by finding a shape the operation is not
-/// for, which is the same question asked of a header instead of an `enum`.
-pub(super) fn no_method(machine: &Machine, receiver: Operand<'_>, method: &str) -> RuntimeError {
-    RuntimeError::new(format!(
-        "`{}` has no method `{method}`",
-        name(machine, receiver)
-    ))
+/// The other half of ADR 0058's sentence: "Results are written directly to
+/// the destination named by the slot ABI." An arm writes its answer here —
+/// [`Dest::word`] for a one-word answer, `make`'s case builders for an
+/// `Option` or a `Result` — and nothing carries it home afterwards.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Dest {
+    base: u64,
+    slot: u32,
+    layout: LayoutId,
 }
 
-/// What the language calls the value in `operand`.
+impl Dest {
+    /// Slot `slot` of the frame based at `base`, for a value of `layout`.
+    pub(crate) fn new(base: u64, slot: u32, layout: LayoutId) -> Dest {
+        Dest { base, slot, layout }
+    }
+
+    /// The layout the answer is a value of — the instruction's, which is the
+    /// only thing that tells two instantiations of one family apart.
+    pub(super) fn layout(self) -> LayoutId {
+        self.layout
+    }
+
+    /// Writes a one-word answer.
+    #[inline]
+    pub(super) fn word(self, machine: &mut Machine, word: u64) {
+        machine.answer_word(self.base, self.slot, word);
+    }
+
+    /// The destination's `width` words, to be written in place.
+    ///
+    /// The run is the frame's own, so it is borrowed out of the machine and
+    /// nothing that reads the frame can run while it is held.
+    pub(super) fn run<'m>(self, machine: &'m mut Machine, width: u32) -> &'m mut [u64] {
+        machine.answer_words(self.base, self.slot, width)
+    }
+}
+
+/// Whether operand `at` of `frame` is one word of `repr`, which is what the
+/// verifier held it to.
+fn is_word(machine: &Machine, frame: Frame<'_>, at: usize, repr: Repr) -> bool {
+    machine.program().layout(frame.layout(at)).shape == Shape::Word(repr)
+}
+
+/// The `Int` operand `at` is.
+#[inline]
+pub(super) fn int(machine: &Machine, frame: Frame<'_>, at: usize) -> i64 {
+    debug_assert!(
+        is_word(machine, frame, at, Repr::Int),
+        "an operand verified to be an `Int`"
+    );
+    frame.word(machine, at) as i64
+}
+
+/// The `Float` operand `at` is.
+#[inline]
+pub(super) fn float(machine: &Machine, frame: Frame<'_>, at: usize) -> f64 {
+    debug_assert!(
+        is_word(machine, frame, at, Repr::Float),
+        "an operand verified to be a `Float`"
+    );
+    f64::from_bits(frame.word(machine, at))
+}
+
+/// The address of the `String` operand `at` is.
+#[inline]
+pub(super) fn string(machine: &Machine, frame: Frame<'_>, at: usize) -> u64 {
+    let addr = frame.word(machine, at);
+    debug_assert!(
+        super::is_string(machine, addr),
+        "an operand verified to be a `String`"
+    );
+    addr
+}
+
+/// The text of the `String` operand `at` is.
 ///
-/// Asked of the layout rather than of a `Repr`, which is what the operand
-/// carries now and what makes the answer right for an inline value: a
-/// `Point` that a refusal used to call an `Int` — its first word — is called
-/// a `Point`.
-pub(super) fn name(machine: &Machine, operand: Operand<'_>) -> String {
-    layout_name(machine, operand.layout, operand.word(), 0)
+/// The `Err` is a string object whose bytes are not UTF-8, which nothing that
+/// builds one can make.
+pub(super) fn text(machine: &Machine, frame: Frame<'_>, at: usize) -> Result<String, RuntimeError> {
+    super::string_of(machine, string(machine, frame, at))
 }
 
 /// What the language calls the value in `word`, read as `repr`.

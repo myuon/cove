@@ -87,7 +87,9 @@ use cove_ir::{Field, LayoutId, Part, Program, Repr, Shape};
 
 use crate::error::RuntimeError;
 use crate::vm::boundary::is_range;
-use crate::vm::builtins::operand::{self, Operand};
+#[cfg(test)]
+use crate::vm::builtins::operand::Operand;
+use crate::vm::builtins::operand::{self, Dest, Frame};
 use crate::vm::builtins::{equal, render_value};
 use crate::vm::exec::Machine;
 
@@ -227,23 +229,27 @@ fn cmp_held(
 /// [`admit_key`] first, as every refusal of a key is asked before anything
 /// is compared.
 pub(super) fn value_order(
-    machine: &Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let [a, b] = operands else {
-        return Err(operand::operands("Value.order", 2, operands.len()));
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let ordered = {
+        let machine = &*machine;
+        let (a, b) = (frame.operand(machine, 0), frame.operand(machine, 1));
+        order(
+            machine,
+            Key::Held(a.layout, a.words),
+            Key::Held(b.layout, b.words),
+            0,
+        )?
     };
-    let ordered = order(
-        machine,
-        Key::Held(a.layout, a.words),
-        Key::Held(b.layout, b.words),
-        0,
-    )?;
-    Ok(match ordered {
+    let answer = match ordered {
         Ordering::Less => -1i64 as u64,
         Ordering::Equal => 0,
         Ordering::Greater => 1,
-    })
+    };
+    dest.word(machine, answer);
+    Ok(())
 }
 
 /// `core.admitKey(key, method, role)`: nothing, or the refusal [`check`]
@@ -255,19 +261,25 @@ pub(super) fn value_order(
 /// asked once with nothing to name, and asked again with the names only when
 /// it failed. It is the same walk over the same words both times, so the
 /// second answers the refusal the first found.
-pub(super) fn admit_key(machine: &Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let [key, method, role] = operands else {
-        return Err(operand::operands("Value.admitKey", 3, operands.len()));
-    };
-    let held = Key::Held(key.layout, key.words);
-    if admits(machine, "", "", None, held, 0).is_ok() {
-        return Ok(0);
+pub(super) fn admit_key(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    {
+        let machine = &*machine;
+        let key = frame.operand(machine, 0);
+        let held = Key::Held(key.layout, key.words);
+        if admits(machine, "", "", None, held, 0).is_err() {
+            let text = |at: usize| {
+                String::from_utf8_lossy(&machine.string_bytes(frame.word(machine, at))).into_owned()
+            };
+            let (method, role) = (text(1), text(2));
+            admits(machine, &method, &role, None, held, 0)?;
+        }
     }
-    let text = |operand: &Operand<'_>| {
-        String::from_utf8_lossy(&machine.string_bytes(operand.word())).into_owned()
-    };
-    let (method, role) = (text(method), text(role));
-    admits(machine, &method, &role, None, held, 0).map(|()| 0)
+    dest.word(machine, 0);
+    Ok(())
 }
 
 /// Whether the `len` units of the run at `addr` are ascending and distinct by
@@ -330,23 +342,14 @@ pub(crate) fn is_ascending_and_distinct(
 /// ADR 0059 has a standard-library literal *find* a duplicate, as a value
 /// order of equal, and raise it through this — so the sentence is still the
 /// one [`duplicate`] writes, over the key as it renders.
-pub(super) fn refuse_duplicate(
-    machine: &Machine,
-    operands: &[Operand<'_>],
-) -> Result<(), RuntimeError> {
-    let [key, method, role] = operands else {
-        return Err(operand::operands(
-            "Value.refuseDuplicate",
-            3,
-            operands.len(),
-        ));
+pub(super) fn refuse_duplicate(machine: &Machine, frame: Frame<'_>) -> Result<(), RuntimeError> {
+    let text = |at: usize| {
+        String::from_utf8_lossy(&machine.string_bytes(frame.word(machine, at))).into_owned()
     };
-    let text = |operand: &Operand<'_>| {
-        String::from_utf8_lossy(&machine.string_bytes(operand.word())).into_owned()
-    };
+    let key = frame.operand(machine, 0);
     Err(duplicate(
-        &text(method),
-        &text(role),
+        &text(1),
+        &text(2),
         render_value(machine, key.layout, key.words, 0),
     ))
 }
@@ -1210,12 +1213,8 @@ mod tests {
         let result = two_case(&program, "Result", "Ok", int);
 
         let none = make::built(&mut machine, option, make::none);
-        let one = make::built(&mut machine, option, |m, l, out| {
-            make::some(m, l, &[1], out)
-        });
-        let two = make::built(&mut machine, option, |m, l, out| {
-            make::some(m, l, &[2], out)
-        });
+        let one = make::built(&mut machine, option, |m, dest| make::some(m, dest, &[1]));
+        let two = make::built(&mut machine, option, |m, dest| make::some(m, dest, &[2]));
         assert_eq!(
             cmp_value(&machine, option, &none, &one).unwrap(),
             Ordering::Less
@@ -1227,7 +1226,7 @@ mod tests {
 
         // `"Option" < "Result"`, whatever either carries — and the two are
         // different layouts, so this is the comparison a box makes.
-        let ok = make::built(&mut machine, result, |m, l, out| make::ok(m, l, &[1], out));
+        let ok = make::built(&mut machine, result, |m, dest| make::ok(m, dest, &[1]));
         let held = boxed(&mut machine, option, &two);
         let other = boxed(&mut machine, result, &ok);
         assert_eq!(

@@ -135,12 +135,24 @@ pub enum CmpOp {
 }
 
 /// A conversion between two scalar representations.
+///
+/// The two `Duration` members are relabels: a `Duration` is signed
+/// nanoseconds in one word, so reading its count out and building one from a
+/// count move the word unchanged and only the slot's `Repr` differs. They are
+/// instructions rather than [`Inst::Copy`]s because a copy is between two
+/// locations of one layout, and they are here rather than intrinsics because
+/// ADR 0058's Phase 5 (#378, P5-2) keeps a runtime call for work, not for a
+/// word that does not change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Convert {
-    /// `Int` to `Float`, as `as`-style widening.
+    /// `Int` to `Float`, as `as`-style widening: `Int.toFloat()`.
     IntToFloat,
     /// `Float` to `Int`, truncating toward zero.
     FloatToInt,
+    /// A `Duration`'s count of nanoseconds, as an `Int`: `d.nanos()`.
+    DurationToInt,
+    /// A count of nanoseconds, as a `Duration`: `Duration.nanos(n)`.
+    IntToDuration,
 }
 
 /// How many elements an [`Inst::Alloc`] asks for.

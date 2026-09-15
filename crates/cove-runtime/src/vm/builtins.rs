@@ -39,11 +39,11 @@
 
 use std::fmt::Write as _;
 
-use cove_ir::{Builtin, Intrinsic, LayoutId, Repr, Shape};
+use cove_ir::{Intrinsic, LayoutId, Repr, Shape};
 use cove_schema::builtins::{ERROR, MESSAGE_FIELD};
 
 use crate::vm::boundary::{is_range, short};
-use crate::vm::builtins::operand::Operand;
+use crate::vm::builtins::operand::{Dest, Frame};
 
 use crate::error::RuntimeError;
 use crate::vm::exec::Machine;
@@ -65,34 +65,29 @@ mod text;
 /// stack ran out.
 const MAX_DEPTH: usize = 128;
 
-/// Runs `builtin` over `operands`, answering the words it produces.
+/// Runs `intrinsic` over the operands `frame` names, writing its answer into
+/// `dest`.
 ///
-/// Each operand is a value location: the layout the call's argument names and
-/// the words at it. A word is untagged, so the pair is the whole of what a
-/// builtin has to work from, and reading it out of the frame is the caller's
-/// job because only the caller has a frame.
+/// Each operand is a value location in the caller's frame: the layout the
+/// call's argument names and the words at its slot. A word is untagged, so
+/// the pair is the whole of what a builtin has to work from — and it is read
+/// where it is, rather than copied into a buffer first, and the answer is
+/// written where it goes, rather than carried home in another (#378, P5-4).
+/// See [`Frame`] for the one rule that makes that sound: every operand is
+/// read before the answer is written.
 pub(crate) fn call(
     machine: &mut Machine,
-    builtin: &Builtin,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
+    intrinsic: Intrinsic,
+    frame: Frame<'_>,
+    dest: Dest,
 ) -> Result<(), RuntimeError> {
     // One match over the intrinsic the IR names, so that teaching the
     // machine an operation is adding a variant to `cove_ir::intrinsic` and
     // an arm here. The match is exhaustive: there is no pair left to fall
     // through on, because `Intrinsic` is the closed set this backend has
     // been taught.
-    match builtin.intrinsic {
-        // What `"{p}"` puts in the string. An operand is a value location, so
-        // an inline struct or enum renders as the value it is rather than as
-        // its first word — which is what `"{Point(x: 1)}"` answering `1` was.
-        Intrinsic::StringInterpolate => {
-            let mut text = String::new();
-            for operand in operands {
-                text.push_str(&render_value(machine, operand.layout, operand.words, 0)?);
-            }
-            machine.new_string(&text).map(|word| out.push(word))
-        }
+    match intrinsic {
+        Intrinsic::StringInterpolate => interpolate(machine, frame, dest),
 
         // ---- Array -------------------------------------------------------
         //
@@ -100,12 +95,12 @@ pub(crate) fn call(
         // this backend has been taught reads as a table.
         //
         // A builtin's answer is a value location like any other, so what an
-        // arm produces is a *run of words* at the destination. Most answer
-        // one, and `out.push` is what says so. It used to be a `one()` helper
-        // making a `Vec` — which was an allocation per builtin call, and 39
-        // ns of an 86 ns call; see `Machine::builtin_answer`. What each one means
-        // is in the module it delegates to, beside the reading of the oracle
-        // it follows.
+        // arm produces is a *run of words* at the destination, written there
+        // through `Dest`. It used to be a `Vec` per call — an allocation, and
+        // 39 ns of an 86 ns call — then a buffer the machine reused and copied
+        // into the frame afterwards; now it is neither. What each one means is
+        // in the module it delegates to, beside the reading of the oracle it
+        // follows.
         //
         // `get` and `length` are not here, for `Array` or `Vector`: the
         // lowering has always answered both with instructions, and neither
@@ -147,27 +142,23 @@ pub(crate) fn call(
         // and slices, and a keyed finish (ADR 0059, #378 Phase 4).
 
         // ---- String ------------------------------------------------------
-        Intrinsic::StringLength => text::length(machine, operands).map(|word| out.push(word)),
+        Intrinsic::StringLength => text::length(machine, frame, dest),
         // `String.isEmpty` is not here: it is `std.string.isEmpty` — see
         // `cove_schema::builtins::standard_binding`.
-        Intrinsic::StringWords => text::words(machine, operands).map(|word| out.push(word)),
-        Intrinsic::StringChars => text::chars(machine, operands).map(|word| out.push(word)),
-        Intrinsic::StringSplit => text::split(machine, operands).map(|word| out.push(word)),
-        Intrinsic::StringJoin => text::join(machine, operands).map(|word| out.push(word)),
-        Intrinsic::StringSlice => text::slice(machine, operands).map(|word| out.push(word)),
-        Intrinsic::StringTrim => text::trim(machine, operands).map(|word| out.push(word)),
-        Intrinsic::StringContains => text::contains(machine, operands).map(|word| out.push(word)),
-        Intrinsic::StringStartsWith => {
-            text::starts_with(machine, operands).map(|word| out.push(word))
-        }
-        Intrinsic::StringEndsWith => text::ends_with(machine, operands).map(|word| out.push(word)),
-        Intrinsic::StringIndexOf => text::index_of(machine, builtin.result, operands, out),
-        Intrinsic::StringReplace => text::replace(machine, operands).map(|word| out.push(word)),
-        Intrinsic::StringToUpper => text::to_upper(machine, operands).map(|word| out.push(word)),
-        Intrinsic::StringToLower => text::to_lower(machine, operands).map(|word| out.push(word)),
-        Intrinsic::StringFromCodePoint => {
-            text::from_code_point(machine, builtin.result, operands, out)
-        }
+        Intrinsic::StringWords => text::words(machine, frame, dest),
+        Intrinsic::StringChars => text::chars(machine, frame, dest),
+        Intrinsic::StringSplit => text::split(machine, frame, dest),
+        Intrinsic::StringJoin => text::join(machine, frame, dest),
+        Intrinsic::StringSlice => text::slice(machine, frame, dest),
+        Intrinsic::StringTrim => text::trim(machine, frame, dest),
+        Intrinsic::StringContains => text::contains(machine, frame, dest),
+        Intrinsic::StringStartsWith => text::starts_with(machine, frame, dest),
+        Intrinsic::StringEndsWith => text::ends_with(machine, frame, dest),
+        Intrinsic::StringIndexOf => text::index_of(machine, frame, dest),
+        Intrinsic::StringReplace => text::replace(machine, frame, dest),
+        Intrinsic::StringToUpper => text::to_upper(machine, frame, dest),
+        Intrinsic::StringToLower => text::to_lower(machine, frame, dest),
+        Intrinsic::StringFromCodePoint => text::from_code_point(machine, frame, dest),
         // No byte-counted operation is here any more. All three are
         // `std.string`: `byteLength` over the core intrinsic that is an
         // `Inst::Len`, `sliceBytes` over the one that is a byte
@@ -175,40 +166,42 @@ pub(crate) fn call(
         // `byteAt`, which is a byte `Inst::RunLoad`.
 
         // ---- Int ---------------------------------------------------------
-        Intrinsic::IntToFloat => scalar::int_to_float(machine, operands).map(|word| out.push(word)),
+        // `Int.toFloat` is not here: it is an `Inst::Convert`, as both halves
+        // of `Duration.nanos` are (#378, P5-2).
         // `Int.min`, `Int.max`, and `Int.abs` are not here: they are
         // `std.int.min`, `std.int.max`, and `std.int.abs` — see
         // `cove_schema::builtins::standard_binding`.
-        Intrinsic::IntParse => scalar::int_parse(machine, builtin.result, operands, out),
-        Intrinsic::IntParseRadix => scalar::int_parse_radix(machine, builtin.result, operands, out),
+        Intrinsic::IntParse => scalar::int_parse(machine, frame, dest),
+        Intrinsic::IntParseRadix => scalar::int_parse_radix(machine, frame, dest),
 
         // ---- Float -------------------------------------------------------
-        Intrinsic::FloatToInt => scalar::float_to_int(machine, builtin.result, operands, out),
-        Intrinsic::FloatRound => scalar::float_round(machine, operands).map(|word| out.push(word)),
-        Intrinsic::FloatAbs => scalar::float_abs(machine, operands).map(|word| out.push(word)),
-        Intrinsic::FloatSqrt => scalar::float_sqrt(machine, operands).map(|word| out.push(word)),
-        Intrinsic::FloatMin => scalar::float_min(machine, operands).map(|word| out.push(word)),
-        Intrinsic::FloatMax => scalar::float_max(machine, operands).map(|word| out.push(word)),
-        Intrinsic::FloatFormat => {
-            scalar::float_format(machine, operands).map(|word| out.push(word))
+        Intrinsic::FloatToInt => scalar::float_to_int(machine, frame, dest),
+        Intrinsic::FloatRound => {
+            scalar::float_round(machine, frame, dest);
+            Ok(())
         }
-        Intrinsic::FloatParse => scalar::float_parse(machine, builtin.result, operands, out),
+        Intrinsic::FloatAbs => {
+            scalar::float_abs(machine, frame, dest);
+            Ok(())
+        }
+        Intrinsic::FloatSqrt => {
+            scalar::float_sqrt(machine, frame, dest);
+            Ok(())
+        }
+        Intrinsic::FloatMin => {
+            scalar::float_min(machine, frame, dest);
+            Ok(())
+        }
+        Intrinsic::FloatMax => {
+            scalar::float_max(machine, frame, dest);
+            Ok(())
+        }
+        Intrinsic::FloatFormat => scalar::float_format(machine, frame, dest),
+        Intrinsic::FloatParse => scalar::float_parse(machine, frame, dest),
 
-        // ---- Duration ----------------------------------------------------
-        //
-        // `nanos` is the one name left here: it is both a reader and a
-        // builder, told apart by the operand's `Repr`, which
-        // `scalar::duration_nanos` is where that is read. Its five
-        // neighbours — `micros` through `hours` — are `std.duration`
-        // functions now; see `cove_schema::builtins::standard_binding` and
-        // `standard_associated_binding`.
-        //
-        // `Bool` is not below this line because `Bool` has no operations: the
-        // schema gives it none beyond `snapshot`, and `!`, `&&` and `||` are
-        // instructions rather than builtins.
-        Intrinsic::DurationNanos => {
-            scalar::duration_nanos(machine, operands).map(|word| out.push(word))
-        }
+        // `Bool` has no operations: the schema gives it none beyond
+        // `snapshot`, and `!`, `&&` and `||` are instructions rather than
+        // builtins.
 
         // ---- equality ----------------------------------------------------
         //
@@ -217,7 +210,7 @@ pub(crate) fn call(
         // language gives an equality, rather than a method a type declares —
         // `crates/cove-runtime/src/builtins.rs` has no entry for it, and
         // `crate::interp` reaches it as an operator.
-        Intrinsic::AnyEquals => equal::equals(machine, operands).map(|word| out.push(word)),
+        Intrinsic::AnyEquals => equal::equals(machine, frame, dest),
 
         // ---- keys --------------------------------------------------------
         //
@@ -226,10 +219,28 @@ pub(crate) fn call(
         // admission it asks of a key before anything is compared, and the
         // refusal a literal with a key twice is given. Each answers a word or
         // nothing; the admission's `()` is the zero word.
-        Intrinsic::ValueOrder => key::value_order(machine, operands).map(|word| out.push(word)),
-        Intrinsic::ValueAdmitKey => key::admit_key(machine, operands).map(|word| out.push(word)),
-        Intrinsic::ValueRefuseDuplicate => key::refuse_duplicate(machine, operands),
+        Intrinsic::ValueOrder => key::value_order(machine, frame, dest),
+        Intrinsic::ValueAdmitKey => key::admit_key(machine, frame, dest),
+        Intrinsic::ValueRefuseDuplicate => key::refuse_duplicate(machine, frame),
     }
+}
+
+/// What `"{p}"` puts in the string.
+///
+/// An operand is a value location, so an inline struct or enum renders as the
+/// value it is rather than as its first word — which is what
+/// `"{Point(x: 1)}"` answering `1` was. The pieces are walked where they are,
+/// however many there are: the one variadic intrinsic collects no operand
+/// list to do it.
+fn interpolate(machine: &mut Machine, frame: Frame<'_>, dest: Dest) -> Result<(), RuntimeError> {
+    let mut text = String::new();
+    for at in 0..frame.len() {
+        let operand = frame.operand(machine, at);
+        text.push_str(&render_value(machine, operand.layout, operand.words, 0)?);
+    }
+    let word = machine.new_string(&text)?;
+    dest.word(machine, word);
+    Ok(())
 }
 
 /// The text of `word`, read as `repr`.
@@ -610,8 +621,9 @@ fn duration(ns: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vm::builtins::operand::Operand;
     use crate::vm::exec::tests::{budget, Build};
-    use cove_ir::{BuiltinId, Inst, LayoutId, Program, Repr, Shape};
+    use cove_ir::{Builtin, BuiltinId, Inst, LayoutId, Program, Repr, Shape};
 
     /// The program every builtin test is run against.
     ///
@@ -759,21 +771,65 @@ mod tests {
         result: LayoutId,
         operands: &[(LayoutId, &[u64])],
     ) -> Result<Vec<u64>, RuntimeError> {
-        let passed: Vec<Operand<'_>> = operands
-            .iter()
-            .map(|(layout, words)| Operand {
-                layout: *layout,
-                words,
-            })
-            .collect();
-        // A test's own buffer, for the reason `make::built`'s note gives: a
-        // builtin writes into one the machine reuses, and a test wants what
-        // it wrote rather than a place to have written it.
-        let mut out = Vec::new();
         let intrinsic = Intrinsic::from_names(receiver, operation)
             .unwrap_or_else(|| panic!("`{receiver}.{operation}` has no `Intrinsic`"));
-        call(machine, &Builtin { intrinsic, result }, &passed, &mut out)?;
-        Ok(out)
+        in_frame(machine, operands, result, |machine, frame, dest| {
+            call(machine, intrinsic, frame, dest)
+        })
+    }
+
+    /// What `body` writes into a destination of `result`, given a frame
+    /// holding `operands` in order.
+    ///
+    /// The frame is a test's own, pushed onto the machine's stack for the
+    /// call and popped after it: operand 0 at slot 0, each next one where the
+    /// one before it ends, and the destination after the last. A free
+    /// `result` is a one-word answer whose layout the test does not care
+    /// about.
+    ///
+    /// Two guard words follow the destination and are checked afterwards,
+    /// because a builtin that wrote past its declared answer is the bug
+    /// `make`'s `a_builtin_answers_the_result_its_instruction_declares` pins,
+    /// and a destination in a frame cannot say how much of it was written.
+    pub(super) fn in_frame(
+        machine: &mut Machine,
+        operands: &[(LayoutId, &[u64])],
+        result: LayoutId,
+        body: impl FnOnce(&mut Machine, Frame<'_>, Dest) -> Result<(), RuntimeError>,
+    ) -> Result<Vec<u64>, RuntimeError> {
+        const GUARD: [u64; 2] = [0x5afe_5afe_5afe_5afe, 0xdead_beef_dead_beef];
+        let mut args = Vec::with_capacity(operands.len());
+        let mut words = Vec::new();
+        for (layout, held) in operands {
+            args.push(cove_ir::Arg {
+                slot: words.len() as u32,
+                layout: *layout,
+            });
+            words.extend_from_slice(held);
+        }
+        let dst = words.len() as u32;
+        let width = if result == LayoutId::FREE {
+            1
+        } else {
+            machine.words_of(result)
+        };
+        words.resize(words.len() + width as usize, 0);
+        words.extend_from_slice(&GUARD);
+
+        let base = machine.push_test_frame(&words);
+        machine.begin_intrinsic();
+        let answered = body(
+            machine,
+            Frame::new(base, &args),
+            Dest::new(base, dst, result),
+        );
+        let after = machine.pop_test_frame(base, words.len() as u32);
+        assert_eq!(
+            &after[(dst + width) as usize..],
+            &GUARD,
+            "a builtin wrote past the answer its instruction declares"
+        );
+        answered.map(|()| after[dst as usize..(dst + width) as usize].to_vec())
     }
 
     pub(super) fn values(
@@ -1207,6 +1263,81 @@ mod tests {
             String::from_utf8(machine.string_bytes(word[0])).unwrap(),
             "n is 7!"
         );
+    }
+
+    /// An answer may be written over one of its own operands: `x = x.trim()`
+    /// lowers to a call whose destination is `x`, and since the operands are
+    /// read where they are rather than copied out first, every arm reads all
+    /// of them before it writes (#378, Q5.2). Interpolation over its first
+    /// piece, and past eight pieces, is the same.
+    #[test]
+    fn an_answer_may_be_written_over_its_own_operand() {
+        let mut build = Build::default().strings(&["  ha  ", "-"]);
+        let str_layout = build.layout("String", Shape::Str);
+        build.program.str_layout = str_layout;
+        let ints = build.scalar(Repr::Int);
+        let trimmed = build.args(&[(0, str_layout)]);
+        let mut pieces = vec![(0, str_layout)];
+        for _ in 0..5 {
+            pieces.push((1, ints));
+            pieces.push((2, str_layout));
+        }
+        let pieces = build.args(&pieces);
+        let trim = builtin(&mut build.program, "String", "trim", str_layout);
+        let interpolate = builtin(&mut build.program, "String", "interpolate", str_layout);
+        let f = build.function(
+            "f",
+            &[],
+            &[Repr::Ref, Repr::Int, Repr::Ref],
+            str_layout,
+            vec![
+                Inst::Str {
+                    dst: 0,
+                    text: cove_ir::StrId(0),
+                },
+                Inst::CallBuiltin {
+                    dst: 0,
+                    builtin: trim,
+                    args: trimmed,
+                },
+                Inst::Int { dst: 1, value: 7 },
+                Inst::Str {
+                    dst: 2,
+                    text: cove_ir::StrId(1),
+                },
+                Inst::CallBuiltin {
+                    dst: 0,
+                    builtin: interpolate,
+                    args: pieces,
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let program = build.done();
+        let mut machine = Machine::new(&program, 1 << 14);
+        let word = machine.run(f, &[], &budget()).unwrap();
+        assert_eq!(
+            String::from_utf8(machine.string_bytes(word[0])).unwrap(),
+            "ha7-7-7-7-7-"
+        );
+    }
+
+    /// The contract that makes that sound is held, not hoped for: an arm that
+    /// read an operand after writing its answer would read what it wrote, and
+    /// under `debug_assertions` — which the `checked` profile keeps on — the
+    /// read panics instead.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "read an operand after writing its answer")]
+    fn reading_an_operand_after_writing_the_answer_panics() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 14);
+        let int = scalar(&program, Repr::Int);
+        let _ = in_frame(&mut machine, &[(int, &[1])], int, |machine, frame, dest| {
+            dest.word(machine, 2);
+            frame.word(machine, 0);
+            Ok(())
+        });
     }
 
     /// A rendering that allocates once, whatever it renders.

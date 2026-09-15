@@ -187,6 +187,8 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             match to {
                 Convert::IntToFloat => "int-to-float",
                 Convert::FloatToInt => "float-to-int",
+                Convert::DurationToInt => "duration-to-int",
+                Convert::IntToDuration => "int-to-duration",
             },
             s(*dst),
             s(*a)

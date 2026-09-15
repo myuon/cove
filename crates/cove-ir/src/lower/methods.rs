@@ -42,7 +42,7 @@ use cove_syntax::ast::{Arg, Expr};
 use super::frame::Val;
 use super::shapes::{self, RANGE_END, RANGE_INCLUSIVE, RANGE_START};
 use super::{Body, Dest, PENDING};
-use crate::inst::{ArithOp, CmpOp, Compare, Inst, Num, Slot, Storage};
+use crate::inst::{ArithOp, CmpOp, Compare, Convert, Inst, Num, Slot, Storage};
 use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
 use crate::program::Builtin;
@@ -343,6 +343,30 @@ impl Body<'_> {
         };
         if !self.answer_layouts(&ty, expr.span) {
             return self.dead(expr);
+        }
+
+        // A conversion between two scalar representations is one
+        // instruction over one operand, and not a runtime call — ADR 0058's
+        // Phase 5 (#378, P5-2). The operand is the receiver of a reader and
+        // the one argument of a builder, and the checker has settled that
+        // there is exactly one.
+        if let Some(to) = conversion(receiver, operation, base.is_some()) {
+            let operand = match (base, args) {
+                (Some(base), _) => self.expr(base),
+                (None, [arg]) => self.expr(&arg.value),
+                (None, _) => return self.gap(&format!("`{receiver}.{operation}`"), expr),
+            };
+            let dst = self.answer_at(want, result);
+            self.emit(
+                Inst::Convert {
+                    to,
+                    dst: dst.slot,
+                    a: operand.slot,
+                },
+                expr.span,
+            );
+            self.release(operand, expr.span);
+            return dst;
         }
 
         let held_receiver = base.map(|base| self.expr(base));
@@ -801,11 +825,14 @@ fn snapshots_itself(ty: &Ty) -> bool {
 ///
 /// `Duration.nanos` is the one `Duration` name left here: it is both a
 /// reader and a builder — [`ASSOCIATED`] holds the builder half and this
-/// holds the reader half, and the machine tells them apart by the `Repr` of
-/// operand 0 — and it is the one primitive `Duration` keeps, because
-/// something has to know how a duration is actually stored. Its five
+/// holds the reader half — and it is the one primitive `Duration` keeps,
+/// because something has to know how a duration is actually stored. Its five
 /// neighbours, `micros` through `hours`, moved to `std.duration` and are
 /// resolved by [`Body::call_std_binding`] before this table is ever asked.
+///
+/// `Int.toFloat` and both halves of `Duration.nanos` are in these tables and
+/// are not intrinsics: [`conversion`] names each as the [`Convert`] it
+/// lowers to.
 const MACHINE_METHODS: &[(&str, &str)] = &[
     ("String", "length"),
     ("String", "words"),
@@ -849,6 +876,21 @@ const ASSOCIATED: &[(&str, &str)] = &[
     ("Float", "parse"),
     ("Duration", "nanos"),
 ];
+
+/// The [`Convert`] a machine method or associated function is, where it is
+/// one: a word that changes representation, or only `Repr`, and needs no
+/// runtime call to do it.
+///
+/// `has_receiver` tells `d.nanos()` — a reader, written on a value — from
+/// `Duration.nanos(n)` — a builder, written on the type's name.
+fn conversion(receiver: &str, operation: &str, has_receiver: bool) -> Option<Convert> {
+    match (receiver, operation, has_receiver) {
+        ("Int", "toFloat", true) => Some(Convert::IntToFloat),
+        ("Duration", "nanos", true) => Some(Convert::DurationToInt),
+        ("Duration", "nanos", false) => Some(Convert::IntToDuration),
+        _ => None,
+    }
+}
 
 /// Whether `head.name(...)` is an associated function this lowering knows
 /// how to reach — the machine's own, or a builder the standard library
@@ -928,7 +970,8 @@ mod tests {
     use super::*;
 
     /// Every pair [`MACHINE_METHODS`] and [`ASSOCIATED`] name is an
-    /// [`Intrinsic`] `emit_builtin` can resolve.
+    /// [`Intrinsic`] `emit_builtin` can resolve, or a [`conversion`] that
+    /// never reaches it.
     ///
     /// `emit_builtin` treats a pair with no `Intrinsic` as an internal bug —
     /// see its doc comment — so a table entry that resolved to nothing would
@@ -938,10 +981,20 @@ mod tests {
     /// happen to exercise which entry.
     #[test]
     fn machine_methods_and_associated_are_all_named_intrinsics() {
-        for &(receiver, operation) in MACHINE_METHODS.iter().chain(ASSOCIATED) {
+        let named = |receiver, operation, has_receiver| {
+            Intrinsic::from_names(receiver, operation).is_some()
+                || conversion(receiver, operation, has_receiver).is_some()
+        };
+        for &(receiver, operation) in MACHINE_METHODS {
             assert!(
-                Intrinsic::from_names(receiver, operation).is_some(),
-                "`{receiver}.{operation}` has no `Intrinsic`"
+                named(receiver, operation, true),
+                "`{receiver}.{operation}` has no `Intrinsic` and is no conversion"
+            );
+        }
+        for &(receiver, operation) in ASSOCIATED {
+            assert!(
+                named(receiver, operation, false),
+                "`{receiver}.{operation}` has no `Intrinsic` and is no conversion"
             );
         }
     }

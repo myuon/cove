@@ -34,7 +34,8 @@
 use std::mem::offset_of;
 
 use cove_ir::{
-    ArithOp, CmpOp, Compare, Function, FunctionId, Inst, Len, Num, Program, Slot, Storage, StrId,
+    ArithOp, CmpOp, Compare, Convert, Function, FunctionId, Inst, Len, Num, Program, Slot, Storage,
+    StrId,
 };
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
@@ -741,6 +742,29 @@ impl<'a, 'f> Lower<'a, 'f> {
                 let x = self.load_slot(*a);
                 let answer = self.b.ins().icmp_imm_s(IntCC::Equal, x, 0);
                 self.store_flag(*dst, answer);
+                false
+            }
+            // `encoded.rs`'s `INT_TO_FLOAT` arm, `x as f64`, and the float's
+            // bits stored as the word they are.
+            Inst::Convert {
+                to: Convert::IntToFloat,
+                dst,
+                a,
+            } => {
+                let x = self.load_slot(*a);
+                let float = self.b.ins().fcvt_from_sint(types::F64, x);
+                let bits = self.b.ins().bitcast(types::I64, MemFlagsData::new(), float);
+                self.store_slot(*dst, bits);
+                false
+            }
+            // A relabel: the word moves unchanged.
+            Inst::Convert {
+                to: Convert::DurationToInt | Convert::IntToDuration,
+                dst,
+                a,
+            } => {
+                let x = self.load_slot(*a);
+                self.store_slot(*dst, x);
                 false
             }
             Inst::Len { dst, obj } => {

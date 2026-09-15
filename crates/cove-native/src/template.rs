@@ -26,8 +26,8 @@ use std::mem::offset_of;
 use std::ptr;
 
 use cove_ir::{
-    ArgsId, ArithOp, CmpOp, Compare, Function, FunctionId, Inst, Len, Num, Program, Slot, Storage,
-    StrId,
+    ArgsId, ArithOp, CmpOp, Compare, Convert, Function, FunctionId, Inst, Len, Num, Program, Slot,
+    Storage, StrId,
 };
 
 use crate::abi::{
@@ -576,6 +576,28 @@ impl<'a> Emit<'a> {
                 self.test_rr(RAX, RAX);
                 self.setcc(CC_E);
                 self.movzx_eax_al();
+                self.store_slot(*dst, RAX);
+            }
+            // `encoded.rs`'s `INT_TO_FLOAT` arm, `x as f64`: `cvtsi2sd` rounds to
+            // nearest under the default `MXCSR`, which is what `as` does, and the
+            // float's bits go back into the frame as the word they are.
+            Inst::Convert {
+                to: Convert::IntToFloat,
+                dst,
+                a,
+            } => {
+                self.load_slot(RAX, *a);
+                self.cvtsi2sd_xmm0_rax();
+                self.movq_rax_xmm0();
+                self.store_slot(*dst, RAX);
+            }
+            // A relabel: the word moves unchanged.
+            Inst::Convert {
+                to: Convert::DurationToInt | Convert::IntToDuration,
+                dst,
+                a,
+            } => {
+                self.load_slot(RAX, *a);
                 self.store_slot(*dst, RAX);
             }
             Inst::Len { dst, obj } => self.len_of(*dst, *obj),
@@ -2435,6 +2457,20 @@ impl<'a> Emit<'a> {
         self.byte(0x0f);
         self.byte(0xb6);
         self.byte(0xc0);
+    }
+
+    /// `cvtsi2sd xmm0, rax`
+    fn cvtsi2sd_xmm0_rax(&mut self) {
+        for byte in [0xf2, 0x48, 0x0f, 0x2a, 0xc0] {
+            self.byte(byte);
+        }
+    }
+
+    /// `movq rax, xmm0`
+    fn movq_rax_xmm0(&mut self) {
+        for byte in [0x66, 0x48, 0x0f, 0x7e, 0xc0] {
+            self.byte(byte);
+        }
     }
 
     /// `setcc cl`
