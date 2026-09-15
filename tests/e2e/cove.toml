@@ -30,6 +30,10 @@ allow = ["console"]
 entry = "coll_vector.main"
 allow = ["console"]
 
+[run.coll_sequence_search]
+entry = "coll_sequence_search.main"
+allow = ["console"]
+
 [run.coll_vector_edges]
 entry = "coll_vector_edges.main"
 allow = ["console"]

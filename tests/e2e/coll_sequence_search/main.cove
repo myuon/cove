@@ -1,0 +1,137 @@
+use console.println
+
+/// Two words inline: a search that read an element at the wrong stride would
+/// compare the wrong numbers.
+struct Span {
+  from: Int
+  to: Int
+}
+
+/// A payload-free case beside two that carry something, so equality has to
+/// look past the discriminant for some elements and not for others.
+enum Mark {
+  Plain
+  Count(Int)
+  Named(String)
+}
+
+/// Pins what `contains`, `indexOf`, `get` and `length` answer on an `Array`
+/// and a `Vector`, and what `String.codePointAtByte` answers at every offset,
+/// before ADR 0058 (#378) moves each of them into the standard library.
+///
+/// These are the answers the runtime's own methods give today: each move has
+/// to show no difference here, on every backend.
+export fn main() -> Result<Unit, Error> {
+  searches()?
+  reads()?
+  codePoints()?
+  Ok(())
+}
+
+/// `contains` and `indexOf` at every element shape a program can search.
+fn searches() -> Result<Unit, Error> {
+  let ints = [5, 3, 5, -1, 0]
+  println("ints {ints.contains(5)} {ints.contains(4)} {ints.indexOf(5)} {ints.indexOf(0)} {ints.indexOf(4)}")?
+  let empty: Array<Int> = []
+  println("empty {empty.contains(0)} {empty.indexOf(0)}")?
+
+  let floats = [0.0, 1.5, 0.0 / 0.0, -0.0]
+  let nan = 0.0 / 0.0
+  println("floats {floats.contains(nan)} {floats.indexOf(nan)} {floats.indexOf(-0.0)} {floats.indexOf(0.0)} {floats.indexOf(1.5)}")?
+
+  let bools = [false, false, true]
+  println("bools {bools.indexOf(true)} {bools.indexOf(false)} {[true].contains(false)}")?
+
+  let strings = ["", "a", "é", "a", "ab"]
+  println("strings {strings.indexOf("a")} {strings.indexOf("")} {strings.indexOf("é")} {strings.contains("b")} {strings.indexOf("ab")}")?
+
+  let spans = [Span(from: 1, to: 2), Span(from: 2, to: 1), Span(from: 1, to: 2)]
+  println("spans {spans.indexOf(Span(from: 2, to: 1))} {spans.indexOf(Span(from: 1, to: 2))} {spans.contains(Span(from: 1, to: 1))}")?
+
+  let marks = [Mark.Plain, Mark.Count(3), Mark.Named("x"), Mark.Count(4)]
+  println("marks {marks.indexOf(Mark.Count(4))} {marks.indexOf(Mark.Plain)} {marks.indexOf(Mark.Named("x"))} {marks.contains(Mark.Named("y"))}")?
+
+  let options = [None, Some(2), Some(1)]
+  println("options {options.indexOf(Some(1))} {options.indexOf(None)} {options.contains(Some(3))}")?
+
+  let nested = [[1, 2], [], [2, 1]]
+  let none: Array<Int> = []
+  println("nested {nested.indexOf([2, 1])} {nested.indexOf(none)} {nested.contains([1])}")?
+
+  var vector = Vector.of(7, 8, 9)
+  println(
+    "vector {vector.contains(9)} {vector.indexOf(8)} {vector.indexOf(10)}",
+  )?
+  vector.push(10)
+  println("pushed {vector.indexOf(10)}")?
+  let popped = vector.pop()
+  println("popped {popped} {vector.contains(10)} {vector.indexOf(10)}")?
+  let removed = vector.remove(0)
+  println("removed {removed} {vector.indexOf(7)} {vector.indexOf(9)}")?
+  let alias = vector
+  vector.set(0, 42)
+  println("alias {alias.indexOf(42)} {alias.contains(8)}")?
+  var grown: Vector<Span> = Vector.of()
+  var i = 0
+  while i < 20 {
+    grown.push(Span(from: i, to: i * i))
+    i += 1
+  }
+  println("grown {grown.indexOf(Span(from: 19, to: 361))} {grown.indexOf(Span(from: 19, to: 360))}")?
+  var drained: Vector<String> = Vector.of("a")
+  drained.pop()
+  println("drained {drained.contains("a")} {drained.indexOf("a")}")?
+  Ok(())
+}
+
+/// `get` and `length` at every index edge, at a one-word and a two-word
+/// element.
+fn reads() -> Result<Unit, Error> {
+  let most = 9223372036854775807
+  let least = -9223372036854775807 - 1
+  let ints = [10, 20, 30]
+  println("array length {ints.length()} get {ints.get(0)} {ints.get(2)} {ints.get(3)} {ints.get(-1)} {ints.get(most)} {ints.get(least)}")?
+  let spans = [Span(from: 1, to: 2), Span(from: 3, to: 4)]
+  println("spans length {spans.length()} get {spans.get(1)} {spans.get(2)} {spans.get(-2)}")?
+  let empty: Array<String> = []
+  println("empty length {empty.length()} get {empty.get(0)} {empty.get(-1)}")?
+
+  var vector: Vector<Span> = Vector.of()
+  println("vector length {vector.length()} get {vector.get(0)}")?
+  vector.push(Span(from: 5, to: 6))
+  vector.push(Span(from: 7, to: 8))
+  vector.push(Span(from: 9, to: 10))
+  println("vector length {vector.length()} get {vector.get(0)} {vector.get(2)} {vector.get(3)} {vector.get(-1)} {vector.get(most)} {vector.get(least)}")?
+  vector.pop()
+  println("after pop {vector.length()} {vector.get(2)} {vector.get(1)}")?
+  let frozen = vector.freeze()
+  println("frozen {frozen.length()} {frozen.get(1)} {frozen.get(2)}")?
+  Ok(())
+}
+
+/// `codePointAtByte` at every offset of a string holding a character of each
+/// UTF-8 width, and outside it.
+fn codePoints() -> Result<Unit, Error> {
+  let most = 9223372036854775807
+  let least = -9223372036854775807 - 1
+  let text = "aéあ😀z"
+  var at = -2
+  while at <= text.byteLength() + 1 {
+    println("{at} {text.codePointAtByte(at)}")?
+    at += 1
+  }
+  println("far {text.codePointAtByte(most)} {text.codePointAtByte(least)}")?
+  println("empty {"".codePointAtByte(0)} {"".codePointAtByte(-1)} {"".codePointAtByte(1)}")?
+  // The first and last scalar of each width, which are the lead bytes each
+  // decode turns on.
+  var edges = ""
+  for point in [127, 128, 2047, 2048, 65535, 65536, 1114111] {
+    edges = "{edges}{String.fromCodePoint(point)?}"
+  }
+  var offset = 0
+  while offset < edges.byteLength() {
+    println("edge {offset} {edges.codePointAtByte(offset)}")?
+    offset += 1
+  }
+  Ok(())
+}

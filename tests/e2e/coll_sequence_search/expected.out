@@ -1,0 +1,59 @@
+ints true false Some(0) Some(4) None
+empty false None
+floats false None Some(0) Some(0) Some(1)
+bools Some(2) Some(0) false
+strings Some(1) Some(0) Some(2) false Some(4)
+spans Some(1) Some(0) false
+marks Some(3) Some(0) Some(2) false
+options Some(2) Some(0) false
+nested Some(2) Some(1) false
+vector true Some(1) None
+pushed Some(3)
+popped Some(10) false None
+removed Some(7) None Some(1)
+alias Some(0) false
+grown Some(19) None
+drained false None
+array length 3 get Some(10) Some(30) None None None None
+spans length 2 get Some(Span(from: 3, to: 4)) None None
+empty length 0 get None None
+vector length 0 get None
+vector length 3 get Some(Span(from: 5, to: 6)) Some(Span(from: 9, to: 10)) None None None None
+after pop 2 None Some(Span(from: 7, to: 8))
+frozen 2 Some(Span(from: 7, to: 8)) None
+-2 None
+-1 None
+0 Some(97)
+1 Some(233)
+2 None
+3 Some(12354)
+4 None
+5 None
+6 Some(128512)
+7 None
+8 None
+9 None
+10 Some(122)
+11 None
+12 None
+far None None
+empty None None None
+edge 0 Some(127)
+edge 1 Some(128)
+edge 2 None
+edge 3 Some(2047)
+edge 4 None
+edge 5 Some(2048)
+edge 6 None
+edge 7 None
+edge 8 Some(65535)
+edge 9 None
+edge 10 None
+edge 11 Some(65536)
+edge 12 None
+edge 13 None
+edge 14 None
+edge 15 Some(1114111)
+edge 16 None
+edge 17 None
+edge 18 None
