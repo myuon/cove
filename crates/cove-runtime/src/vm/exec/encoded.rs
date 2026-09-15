@@ -92,8 +92,8 @@ use cove_diag::Span;
 
 use cove_ir::bytecode::{disasm, encode_program, verify, Encoded, EncodedInst, Op};
 use cove_ir::{
-    ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Convert, FunctionId, HostOpId, LayoutId, Num,
-    Program, Repr, Shape, Slot, StrId, TableId, Validation,
+    ArgsId, ArithOp, CmpOp, Compare, Convert, FunctionId, HostOpId, LayoutId, Num, Program, Repr,
+    Shape, SiteId, Slot, StrId, TableId, Validation,
 };
 
 use crate::budget::Meter;
@@ -265,7 +265,7 @@ const CALL: u8 = Op::Call.number();
 const CALL_CLOSURE: u8 = Op::CallClosure.number();
 const CALL_HOST: u8 = Op::CallHost.number();
 const CALL_RESOURCE: u8 = Op::CallResource.number();
-const CALL_BUILTIN: u8 = Op::CallBuiltin.number();
+const INTRINSIC_CALL: u8 = Op::IntrinsicCall.number();
 
 const ALLOC_FIXED: u8 = Op::AllocFixed.number();
 const ALLOC_IMM: u8 = Op::AllocImm.number();
@@ -348,7 +348,7 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::CallClosure
         | Op::CallHost
         | Op::CallResource
-        | Op::CallBuiltin
+        | Op::IntrinsicCall
         | Op::AllocFixed
         | Op::AllocImm
         | Op::AllocSlot
@@ -1901,11 +1901,11 @@ pub(super) fn dispatch<'s, 'a>(
             // Not a boundary, and not a frame: a builtin reads the words and
             // the objects the machine already holds and answers a value
             // location's worth of words.
-            CALL_BUILTIN => {
+            INTRINSIC_CALL => {
                 machine.sync(pc - 1);
                 let dst = a!();
                 if let Err(error) =
-                    machine.call_builtin(base, dst, BuiltinId(held.lo()), ArgsId(held.hi()))
+                    machine.call_intrinsic(base, dst, SiteId(held.lo()), ArgsId(held.hi()))
                 {
                     fail!(error)
                 }

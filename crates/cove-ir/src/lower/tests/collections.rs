@@ -179,7 +179,7 @@ fn @m.count(Array) -> Int
      6  add.int s5:int s5:int s6:int
      7  lt.int.branch s7:bool s5:int s4:int 13
      8  load-elem s8:String s3:ref s5:int
-     9  call-builtin s9:Int String.length (s8:String)
+     9  intrinsic-call s9:Int String.length (s8:String)
     10  add.int s2:int s2:int s9:int
     11  clear s8:String
     12  jump 6
@@ -388,7 +388,7 @@ fn @m.same(m.Point m.Point) -> Bool
   frame 5: s0!:int s1!:int s2!:int s3!:int s4:bool
   local a -> s0..s1:m.Point [0, 2)
   local b -> s2..s3:m.Point [0, 2)
-     0  call-builtin s4:Bool Any.equals (s0..s1:m.Point s2..s3:m.Point)
+     0  intrinsic-call s4:Bool Any.equals (s0..s1:m.Point s2..s3:m.Point)
      1  return s4:Bool
 "
     );
@@ -408,7 +408,7 @@ fn @m.same(Array Array) -> Bool
   frame 3: s0!:ref s1!:ref s2:bool
   local a -> s0:Array [0, 2)
   local b -> s1:Array [0, 2)
-     0  call-builtin s2:Bool Any.equals (s0:Array s1:Array)
+     0  intrinsic-call s2:Bool Any.equals (s0:Array s1:Array)
      1  return s2:Bool
 "
     );
@@ -705,7 +705,7 @@ fn an_empty_collection_literal_is_allocated_where_its_layout_is_known() {
             "an empty literal is built rather than called:\n{text}"
         );
         assert!(
-            !text.contains("call-builtin"),
+            !text.contains("intrinsic-call"),
             "and it is not the call the machine refuses:\n{text}"
         );
     }

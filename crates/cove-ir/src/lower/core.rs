@@ -7,7 +7,7 @@
 //! spells `core.<name>(...)` — `cove_schema::builtins::CORE_INTRINSICS` is the
 //! table. The checker admits such a call only inside a standard-library module,
 //! and this is the lowering's half: each entry becomes run instructions in the
-//! frame the call is written in, and never an [`Inst::CallBuiltin`] that names
+//! frame the call is written in, and never an [`Inst::IntrinsicCall`] that names
 //! a method — the keyed walks below are the one exception, and they name a
 //! static intrinsic identity. A core intrinsic is not a name for the machine to
 //! dispatch on; it is the operation the name stands for.
@@ -30,7 +30,7 @@
 //! of a key are layout-directed walks no instruction performs for a struct, an
 //! array or a set. So `core.order` is one `cmp` of `CmpOp::Order` where the
 //! key is a scalar, a `String` or a case index in name order, and a
-//! [`Inst::CallBuiltin`] of `Intrinsic::ValueOrder` otherwise;
+//! [`Inst::IntrinsicCall`] of `Intrinsic::ValueOrder` otherwise;
 //! `core.admitKey` is nothing at all where the key's layout cannot hold a
 //! refused part, and `Intrinsic::ValueAdmitKey` where it can; and
 //! `core.refuseDuplicate` is always `Intrinsic::ValueRefuseDuplicate`. Those
@@ -56,7 +56,7 @@ use super::{Body, Dest};
 use crate::inst::{ArithOp, CmpOp, Compare, Inst, Len, Num, Slot, Storage, Validation};
 use crate::intrinsic::Intrinsic;
 use crate::layout::{LayoutId, Shape};
-use crate::program::{Arg as Operand, Builtin};
+use crate::program::{Arg as Operand, IntrinsicSite};
 use crate::repr::Repr;
 
 /// How deep a key's layout may nest for `Body::always_admitted` to remove
@@ -884,7 +884,7 @@ impl Body<'_> {
     ///
     /// One [`Inst::Cmp`] of [`CmpOp::Order`] where the key's layout is one a
     /// comparison instruction orders exactly as `key::order` does — see
-    /// [`Body::ordered_by`] — and otherwise one [`Inst::CallBuiltin`] of
+    /// [`Body::ordered_by`] — and otherwise one [`Inst::IntrinsicCall`] of
     /// [`Intrinsic::ValueOrder`], the layout-directed walk.
     fn core_order(&mut self, expr: &Expr, a: &Expr, b: &Expr, want: Option<Dest>) -> Val {
         let Some(ty) = self.settled_ty(a) else {
@@ -951,7 +951,7 @@ impl Body<'_> {
     ///
     /// Nothing at all where `key`'s layout cannot hold a part the admission
     /// refuses — [`Body::always_admitted`] — and there the call answers a `()`
-    /// only if something reads one. Otherwise one [`Inst::CallBuiltin`] of
+    /// only if something reads one. Otherwise one [`Inst::IntrinsicCall`] of
     /// [`Intrinsic::ValueAdmitKey`] over the key and the two names.
     fn core_admit_key(
         &mut self,
@@ -977,7 +977,7 @@ impl Body<'_> {
         self.keyed_refusal(Intrinsic::ValueAdmitKey, expr, key, [method, role], want)
     }
 
-    /// `core.refuseDuplicate(key, method, role)`: one [`Inst::CallBuiltin`]
+    /// `core.refuseDuplicate(key, method, role)`: one [`Inst::IntrinsicCall`]
     /// of [`Intrinsic::ValueRefuseDuplicate`], which always raises.
     fn core_refuse_duplicate(
         &mut self,
@@ -989,7 +989,7 @@ impl Body<'_> {
         self.keyed_refusal(Intrinsic::ValueRefuseDuplicate, expr, key, names, want)
     }
 
-    /// One [`Inst::CallBuiltin`] of a keyed refusal over a key and the two
+    /// One [`Inst::IntrinsicCall`] of a keyed refusal over a key and the two
     /// names its message is written with, answering `()`.
     fn keyed_refusal(
         &mut self,
@@ -1016,7 +1016,7 @@ impl Body<'_> {
         dst
     }
 
-    /// One [`Inst::CallBuiltin`] of `intrinsic` over `args`, answering a
+    /// One [`Inst::IntrinsicCall`] of `intrinsic` over `args`, answering a
     /// value of `result` into `dst`.
     fn intrinsic_call(
         &mut self,
@@ -1026,12 +1026,14 @@ impl Body<'_> {
         args: &[&Val],
         span: Span,
     ) {
-        let builtin = self.pool.builtin(Builtin { intrinsic, result });
+        let site = self
+            .pool
+            .intrinsic_site(IntrinsicSite { intrinsic, result });
         let args = self
             .pool
             .args
             .intern(args.iter().map(|arg| arg.arg()).collect());
-        self.emit(Inst::CallBuiltin { dst, builtin, args }, span);
+        self.emit(Inst::IntrinsicCall { dst, site, args }, span);
     }
 
     /// Whether every value of `layout` is one the key admission admits, so

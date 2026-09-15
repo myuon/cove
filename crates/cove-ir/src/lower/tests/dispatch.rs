@@ -171,8 +171,8 @@ fn @m.Booking.line(m.Booking) -> String
   local self -> s0:m.Booking [0, 5)
      0  str s2:ref \"- \"
      1  str s5:ref \"booking \"
-     2  call-builtin s3:String String.interpolate (s5:String s0:Int)
-     3  call-builtin s1:String String.interpolate (s2:String s3:String)
+     2  intrinsic-call s3:String String.interpolate (s5:String s0:Int)
+     3  intrinsic-call s1:String String.interpolate (s2:String s3:String)
      4  return s1:String
 "
     );
@@ -184,7 +184,7 @@ fn @m.Receipt.line(m.Receipt) -> String
   local self -> s0:m.Receipt [0, 4)
      0  str s2:ref \"- \"
      1  str s3:ref \"receipt\"
-     2  call-builtin s1:String String.interpolate (s2:String s3:String)
+     2  intrinsic-call s1:String String.interpolate (s2:String s3:String)
      3  return s1:String
 "
     );
@@ -210,7 +210,7 @@ fn @m.Receipt.line(m.Receipt) -> String
   local self -> s0:m.Receipt [0, 4)
      0  str s2:ref \"  $ \"
      1  str s3:ref \"receipt\"
-     2  call-builtin s1:String String.interpolate (s2:String s3:String)
+     2  intrinsic-call s1:String String.interpolate (s2:String s3:String)
      3  return s1:String
 "
     );

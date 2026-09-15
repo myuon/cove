@@ -49,7 +49,7 @@ use std::time::Duration;
 
 use cove_diag::Span;
 use cove_ir::{
-    ArgsId, ArithOp, BuiltinId, CmpOp, FunctionId, HostOpId, LayoutId, Program, Repr, Shape, Slot,
+    ArgsId, ArithOp, CmpOp, FunctionId, HostOpId, LayoutId, Program, Repr, Shape, SiteId, Slot,
     StrId,
 };
 
@@ -60,11 +60,11 @@ use crate::interp::stopped_here;
 use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::task;
 use crate::trace::TraceEvent;
-use crate::vm::builtins::operand::{Dest, Frame as Operands};
 use crate::vm::debug::{halted, Debugger, Resume, Stop};
+use crate::vm::intrinsics::operand::{Dest, Frame as Operands};
 use crate::vm::mem::{Collected, Memory, NoSegment, Overflow, Parked, Rooted, Roots};
 use crate::vm::report::Counting;
-use crate::vm::{boundary, builtins, cell};
+use crate::vm::{boundary, cell, intrinsics};
 use crate::wallclock::Instant;
 // The one import of the public `Value` outside `boundary`, and the one thing
 // ADR 0034 allows it for: a host call's arguments and its answer exist as
@@ -627,7 +627,7 @@ pub(crate) struct Machine<'a> {
     encoded: Result<Arc<cove_ir::bytecode::Encoded>, RuntimeError>,
     /// Whether the intrinsic this machine is running has written its answer
     /// yet: the checked half of the contract
-    /// [`crate::vm::builtins::operand::Frame`] states, that every operand is
+    /// [`crate::vm::intrinsics::operand::Frame`] states, that every operand is
     /// read before the destination — which may be one of the operands' own
     /// slots — is written (#378, Q5.2). There is no buffer for an operand or
     /// an answer to be in any more, so this is the only thing that could tell
@@ -655,7 +655,7 @@ pub(crate) struct Machine<'a> {
     /// [`Machine::width`] was `program.layout(id).width()` — an index into
     /// `Program::layouts`, then the length of that `Layout`'s `words` — and
     /// the dispatch loop asks it fifteen times over, once per instruction
-    /// that names a value location. `Machine::call_builtin` asks it *twice
+    /// that names a value location. `Machine::call_intrinsic` asks it *twice
     /// per argument*: once to copy the words out of the frame and once to
     /// slice the buffer back into operands.
     ///
@@ -718,7 +718,7 @@ pub(crate) struct Machine<'a> {
 /// Which of [`Machine::cases`] a wrapper memoises into.
 ///
 /// Four constants rather than a hash of the name: the callers are the four
-/// functions in [`crate::vm::builtins::make`] and nothing else, so the set is
+/// functions in [`crate::vm::intrinsics::make`] and nothing else, so the set is
 /// closed and naming it costs nothing at run time.
 #[derive(Clone, Copy)]
 pub(crate) enum Wrapper {
@@ -1073,13 +1073,13 @@ impl<'a> Machine<'a> {
         ))
     }
 
-    /// One `CallBuiltin`, counted — out of line, for [`Machine::tiered`]'s
-    /// reason: what `call_builtin` keeps inline is the `Option` test.
+    /// One `IntrinsicCall`, counted — out of line, for [`Machine::tiered`]'s
+    /// reason: what `call_intrinsic` keeps inline is the `Option` test.
     #[inline(never)]
     #[cold]
-    fn count_builtin(&mut self, builtin: BuiltinId) {
+    fn count_intrinsic(&mut self, site: SiteId) {
         if let Some(counting) = self.counting.as_deref_mut() {
-            counting.builtin(builtin);
+            counting.intrinsic(site);
         }
     }
 
@@ -1644,8 +1644,8 @@ impl<'a> Machine<'a> {
     /// The index of `case` in the enum `layout`, remembered.
     ///
     /// Nothing is searched for. Which `Option` or `Result` a builtin answers
-    /// is carried by [`cove_ir::Inst::CallBuiltin`] and passed down from
-    /// `vm::builtins::call`, because the alternative — looking for an enum of
+    /// is carried by [`cove_ir::Inst::IntrinsicCall`] and passed down from
+    /// `vm::intrinsics::call`, because the alternative — looking for an enum of
     /// that name whose carrying case holds the right payload — cannot tell
     /// `Result<String, Error>` from `Result<String, cq.diag.Detail>`. Both are
     /// named `Result` and both carry a `String` in `Ok`, and they are two
@@ -1673,7 +1673,7 @@ impl<'a> Machine<'a> {
             .get(layout.index())
             .filter(|held| matches!(held.shape, Shape::Enum { .. }))
             .and_then(|held| held.case(case))
-            .ok_or_else(|| crate::vm::builtins::operand::unknown_family(family))?;
+            .ok_or_else(|| crate::vm::intrinsics::operand::unknown_family(family))?;
         self.cases[wrapper as usize] = Some((layout, index));
         Ok(index)
     }
@@ -1974,7 +1974,7 @@ impl<'a> Machine<'a> {
         boundary::from_value(self, result, &answer).map_err(|error| error.at(span))
     }
 
-    /// Runs one `Inst::CallBuiltin`: the intrinsic it names, over operands
+    /// Runs one `Inst::IntrinsicCall`: the intrinsic it names, over operands
     /// read where they are, answering into its destination.
     ///
     /// ADR 0058: a runtime call does not "allocate an operand vector, or copy
@@ -1982,8 +1982,8 @@ impl<'a> Machine<'a> {
     /// boundary. Results are written directly to the destination named by the
     /// slot ABI." So nothing is copied on the way in or on the way out (#378,
     /// P5-4): the arm is handed the caller's frame base and the instruction's
-    /// own argument list — a [`Frame`](crate::vm::builtins::operand::Frame) —
-    /// and the destination — a [`Dest`](crate::vm::builtins::operand::Dest) —
+    /// own argument list — a [`Frame`](crate::vm::intrinsics::operand::Frame) —
+    /// and the destination — a [`Dest`](crate::vm::intrinsics::operand::Dest) —
     /// and reads and writes the frame itself. Nothing is re-checked either:
     /// the intrinsic's identity is static and its operand count, operand
     /// layouts and answer layout were verified against its signature before
@@ -1993,11 +1993,11 @@ impl<'a> Machine<'a> {
     /// dispatch loop's own instructions, and the loop is sensitive to what is
     /// inlined into it (#378): what this costs the loop is one call.
     #[inline(never)]
-    fn call_builtin(
+    fn call_intrinsic(
         &mut self,
         base: u64,
         dst: Slot,
-        builtin: BuiltinId,
+        site: SiteId,
         args: ArgsId,
     ) -> Result<(), RuntimeError> {
         // Nothing unless a caller asked for the boundary report; see
@@ -2005,10 +2005,10 @@ impl<'a> Machine<'a> {
         // out of line, which is [`Machine::tiered`]'s shape.
         match self.counting {
             None => {}
-            Some(_) => self.count_builtin(builtin),
+            Some(_) => self.count_intrinsic(site),
         }
         let program = self.program;
-        let called = program.builtin(builtin);
+        let called = program.intrinsic_site(site);
         let list = program.arg_list(args);
 
         // What the declared `Effects` of this call promise, checked against
@@ -2041,7 +2041,7 @@ impl<'a> Machine<'a> {
         };
 
         self.begin_intrinsic();
-        let answered = builtins::call(
+        let answered = intrinsics::call(
             self,
             called.intrinsic,
             Operands::new(base, list),
@@ -2072,7 +2072,7 @@ impl<'a> Machine<'a> {
     }
 
     /// Marks the start of one intrinsic's run, for the checked half of
-    /// [`Frame`](crate::vm::builtins::operand::Frame)'s read-before-write
+    /// [`Frame`](crate::vm::intrinsics::operand::Frame)'s read-before-write
     /// contract. Nothing at all without `debug_assertions`.
     #[inline(always)]
     pub(crate) fn begin_intrinsic(&mut self) {
@@ -2654,7 +2654,7 @@ impl<'a> Machine<'a> {
     /// A word [`Inst::GrowablePush`]: the element whose words begin at the
     /// linear address `src` onto the end of the vector at `owner`.
     ///
-    /// `vm::builtins::seq::vector_push` without the operand array: the ensure
+    /// `vm::intrinsics::seq::vector_push` without the operand array: the ensure
     /// first, because it may allocate, and then the element's words straight
     /// out of the frame into the store at `len * stride`, and then the commit.
     /// Nothing is lost to a collection in the ensure — the frame does not
@@ -2707,7 +2707,7 @@ impl<'a> Machine<'a> {
     /// A word [`Inst::RunFinish`]: the vector's store relabelled to `target` at
     /// its live length, and the vector emptied.
     ///
-    /// `vm::builtins::seq::vector_freeze` without the search for the `Array`
+    /// `vm::intrinsics::seq::vector_freeze` without the search for the `Array`
     /// layout — the instruction names it — and without a question it never
     /// asked: whether the vector had a second holder is `cove_sema::unique`'s
     /// to have proved.
@@ -2757,7 +2757,7 @@ impl<'a> Machine<'a> {
         };
         let (stride, width) = (self.width(elem), self.width(key));
         assert!(
-            crate::vm::builtins::is_ascending_and_distinct(
+            crate::vm::intrinsics::is_ascending_and_distinct(
                 self, key, run.store, stride, width, run.len
             ),
             "a keyed finish into `{}` was handed a run that is not ascending and distinct",

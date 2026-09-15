@@ -302,13 +302,13 @@ fn object_to_value(machine: &Machine, addr: u64, depth: usize) -> Result<Value, 
         // A set materialises as a set and not as the run of words it is:
         // `Value::set` takes `MapKey`s, which is the restriction the language
         // puts on what may be one, showing through. Every member passed
-        // `builtins::key`'s check before it was written, so a member that is
+        // `intrinsics::key`'s check before it was written, so a member that is
         // not a key is a heap that stopped being a set.
         //
         // The members are already ascending — that is what the shape means —
         // and `MapKey`'s own `Ord` is what the `BTreeSet` re-sorts them by.
         // Nothing changes places unless the two orders disagree, which is the
-        // one thing that would say `builtins::key` has drifted from the
+        // one thing that would say `intrinsics::key` has drifted from the
         // oracle.
         Shape::Members { elem } => {
             let items = elements(machine, addr, *elem, machine.object_len(addr), 0, deeper)?;
@@ -676,7 +676,7 @@ fn object_from_value(
             Ok(header)
         }
         // The members arrive ascending, because a `BTreeSet<MapKey>` iterates
-        // that way and [`crate::vm::builtins::key`] reproduces the order it
+        // that way and [`crate::vm::intrinsics::key`] reproduces the order it
         // iterates in. So the run is sorted as it is written and nothing
         // sorts it afterwards, which is the invariant the shape promises and
         // every builtin over it relies on.
@@ -1399,7 +1399,7 @@ fn run<'w>(
 ///
 /// Not the oracle's, and not something a program reaches: a `Set`'s elements
 /// and a `Map`'s keys are `MapKey`s on that side by construction, and here
-/// every one of them passed [`crate::vm::builtins::key`]'s check before it
+/// every one of them passed [`crate::vm::intrinsics::key`]'s check before it
 /// was written. This reports a heap that stopped being a set, and it carries
 /// the rule the refusal would have carried so that a reader is told which of
 /// the two restrictions was broken.
@@ -1731,7 +1731,7 @@ mod tests {
     /// A set and a map cross as themselves, and the run they arrive as is
     /// sorted because it was written in the order it arrived in: a
     /// `BTreeSet<MapKey>` iterates ascending, and
-    /// [`crate::vm::builtins::key`] is the same order over words.
+    /// [`crate::vm::intrinsics::key`] is the same order over words.
     #[test]
     fn a_set_and_a_map_round_trip_in_ascending_order() {
         let world = World::new(|build, int, _, string| {

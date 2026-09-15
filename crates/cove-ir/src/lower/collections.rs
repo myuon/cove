@@ -57,7 +57,7 @@ use super::{Body, Dest, Loop, PENDING};
 use crate::inst::{ArithOp, CmpOp, Compare, Inst, Len, Num, Pc, Slot};
 use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
-use crate::program::Builtin;
+use crate::program::IntrinsicSite;
 
 impl Body<'_> {
     // ---- literals ---------------------------------------------------------
@@ -470,7 +470,7 @@ impl Body<'_> {
     ///
     /// Nothing else reaches here. `isEmpty`, `contains`, `inserted`, `removed`
     /// and `toArray` are `std.set` — a binary search over the order
-    /// `cove_runtime::vm::builtins::key` defines, and run copies, slices and a
+    /// `cove_runtime::vm::intrinsics::key` defines, and run copies, slices and a
     /// keyed finish (ADR 0059, #378) — which `Body::call_builtin_method`
     /// resolves through `cove_schema::builtins::standard_binding` before this
     /// function is ever called for it.
@@ -1124,7 +1124,7 @@ impl Body<'_> {
     ///
     /// # An inline value has to be boxed to be compared
     ///
-    /// [`Inst::CallBuiltin`] hands the machine slot numbers and nothing else:
+    /// [`Inst::IntrinsicCall`] hands the machine slot numbers and nothing else:
     /// there is no channel on it for the layout of each operand. A reference
     /// carries its description in the object's own header, so an array or a
     /// vector needs nothing; an *inline* struct, enum or range is a run of
@@ -1166,12 +1166,12 @@ impl Body<'_> {
             );
             return;
         }
-        let builtin = self.pool.builtin(Builtin {
+        let site = self.pool.intrinsic_site(IntrinsicSite {
             intrinsic: Intrinsic::AnyEquals,
             result: shapes::BOOL,
         });
         let args = self.pool.args.intern(vec![a.arg(), b.arg()]);
-        self.emit(Inst::CallBuiltin { dst, builtin, args }, expr.span);
+        self.emit(Inst::IntrinsicCall { dst, site, args }, expr.span);
         if !equal {
             self.emit(Inst::Not { dst, a: dst }, expr.span);
         }

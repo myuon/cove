@@ -673,7 +673,7 @@ export fn f(n: Int, x: Float, b: Bool) -> String {
 
 /// An `Error` renders as the message it carries rather than as the struct it
 /// happens to be, on both backends. The two say so in two places — the
-/// oracle in `Display for Value`, the machine in `vm::builtins` — because
+/// oracle in `Display for Value`, the machine in `vm::intrinsics` — because
 /// one reads a materialised tree and the other reads the heap, and this is
 /// what keeps the two copies in step.
 #[test]
@@ -2060,7 +2060,7 @@ export fn main(text: String) -> Int {
         assert!(
             f.code
                 .iter()
-                .all(|inst| !matches!(inst, cove_ir::Inst::CallBuiltin { .. })),
+                .all(|inst| !matches!(inst, cove_ir::Inst::IntrinsicCall { .. })),
             "`{}.{}` makes no builtin call: {:?}",
             f.module,
             f.name,
@@ -2383,8 +2383,8 @@ export fn main() -> Int {
             .code
             .iter()
             .filter_map(|inst| match inst {
-                cove_ir::Inst::CallBuiltin { builtin, .. } => {
-                    Some(program.builtin(*builtin).intrinsic)
+                cove_ir::Inst::IntrinsicCall { site, .. } => {
+                    Some(program.intrinsic_site(*site).intrinsic)
                 }
                 _ => None,
             })

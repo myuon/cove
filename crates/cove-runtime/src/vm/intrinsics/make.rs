@@ -1,7 +1,7 @@
 //! The values a builtin answers with, and the layouts they are built to.
 //!
 //! A builtin that answers an `Option`, a `Result`, an `Array` or a `Vector`
-//! has to name a family, and [`cove_ir::Builtin`] does not carry one for its
+//! has to name a family, and [`cove_ir::IntrinsicSite`] does not carry one for its
 //! operands — it names an operation by its receiver and its name rather than
 //! by the types the checker resolved for it. So the family is found the way
 //! [`crate::vm::boundary`] finds one for an erased destination: by searching
@@ -40,8 +40,8 @@ use cove_schema::builtins::{
 };
 
 use crate::error::RuntimeError;
-use crate::vm::builtins::operand::{self, Dest};
 use crate::vm::exec::{Machine, Wrapper};
+use crate::vm::intrinsics::operand::{self, Dest};
 
 // --- finding a family ------------------------------------------------------
 
@@ -147,7 +147,7 @@ pub(super) fn built(
     layout: LayoutId,
     build: impl FnOnce(&mut Machine, Dest) -> Result<(), RuntimeError>,
 ) -> Vec<u64> {
-    crate::vm::builtins::tests::in_frame(machine, &[], layout, |machine, _, dest| {
+    crate::vm::intrinsics::tests::in_frame(machine, &[], layout, |machine, _, dest| {
         build(machine, dest)
     })
     .expect("the value builds")
@@ -279,8 +279,8 @@ pub(super) fn vector_of(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::builtins::tests::{scalar, world};
     use crate::vm::exec::tests::Build;
+    use crate::vm::intrinsics::tests::{scalar, world};
     use cove_ir::{Repr, Shape};
 
     /// One layout per payload family, so the `Option` a `Some` is built to is
@@ -293,8 +293,8 @@ mod tests {
         let ints = scalar(&program, Repr::Int);
         let text = program.str_layout;
 
-        let texts = crate::vm::builtins::tests::two_case(&program, "Option", "Some", text);
-        let counts = crate::vm::builtins::tests::two_case(&program, "Option", "Some", ints);
+        let texts = crate::vm::intrinsics::tests::two_case(&program, "Option", "Some", text);
+        let counts = crate::vm::intrinsics::tests::two_case(&program, "Option", "Some", ints);
         let string = machine.new_string("x").unwrap();
         let held = built(&mut machine, texts, |m, dest| some(m, dest, &[string]));
         let counted = built(&mut machine, counts, |m, dest| some(m, dest, &[1]));
@@ -339,7 +339,7 @@ mod tests {
         );
 
         let mut machine = Machine::new(&program, 1 << 14);
-        let held = crate::vm::builtins::tests::answering(
+        let held = crate::vm::intrinsics::tests::answering(
             &mut machine,
             "String",
             "fromCodePoint",
@@ -377,7 +377,7 @@ mod tests {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
         let ints = scalar(&program, Repr::Int);
-        let results = crate::vm::builtins::tests::two_case(&program, "Result", "Ok", ints);
+        let results = crate::vm::intrinsics::tests::two_case(&program, "Result", "Ok", ints);
         let words = built(&mut machine, results, |m, dest| {
             failed(m, dest, "it did not")
         });
@@ -385,7 +385,7 @@ mod tests {
         // *is* the message's address — one object where the old model needed
         // three. Where in the region that word sits is the payload-agreement
         // rule's answer and not a fixture's, so the case is asked.
-        let (case, payload) = crate::vm::builtins::tests::result_of(&program, ints, &words);
+        let (case, payload) = crate::vm::intrinsics::tests::result_of(&program, ints, &words);
         assert_eq!(case, "Err");
         assert_eq!(
             String::from_utf8(machine.string_bytes(payload[0])).unwrap(),
@@ -407,10 +407,11 @@ mod tests {
         let program = build.done();
         let mut machine = Machine::new(&program, 1 << 14);
 
-        let error = crate::vm::builtins::tests::in_frame(&mut machine, &[], ints, |m, _, dest| {
-            none(m, dest)
-        })
-        .unwrap_err();
+        let error =
+            crate::vm::intrinsics::tests::in_frame(&mut machine, &[], ints, |m, _, dest| {
+                none(m, dest)
+            })
+            .unwrap_err();
         assert_eq!(
             error.message,
             "this program describes no `Option` for a value of that shape to be built as"

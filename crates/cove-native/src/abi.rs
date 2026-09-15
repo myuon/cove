@@ -104,7 +104,7 @@
 //! It is honoured by the rule above and by nothing else. **Neither code
 //! generator keeps a Cove value in a register across an instruction
 //! boundary**, so at every place a collection can happen — the safepoint
-//! helper, the call helper, and now [`AllocFn`], [`BuiltinFn`], [`GrowableFn`] and
+//! helper, the call helper, and now [`AllocFn`], [`IntrinsicFn`], [`GrowableFn`] and
 //! [`RunCopyFn`], which are all the calls either arm emits that can reach one
 //! ([`OrderStrFn`] is a leaf and cannot) — every live reference is already in
 //! the slot the frame's static `Function::refs` map names. The collector walks exactly what it
@@ -385,7 +385,7 @@ pub enum Raise {
     /// than three, because *the code carries no message*: there is nothing for a
     /// second number to distinguish. [`NativeHelpers::call`] ran a callee which
     /// failed; [`NativeHelpers::alloc`] could not allocate, or its safepoint said
-    /// stop; [`NativeHelpers::builtin`] ran a builtin which refused. The name is
+    /// stop; [`NativeHelpers::intrinsic`] ran an intrinsic which refused. The name is
     /// the oldest of the three and has stayed, because what it says is still what
     /// happened: something this code *called* failed.
     ///
@@ -668,7 +668,7 @@ pub type CloseFn = unsafe extern "C" fn(ctx: *mut NativeCtx, outcome: u32, calle
 /// [ADR 0055]: ../../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
 pub type AllocFn = unsafe extern "C" fn(ctx: *mut NativeCtx, pc: u32, layout: u32, len: i64) -> u64;
 
-/// What a builtin helper is: one [`Inst::CallBuiltin`](cove_ir::Inst::CallBuiltin),
+/// What the intrinsic helper is: one [`Inst::IntrinsicCall`](cove_ir::Inst::IntrinsicCall),
 /// handed to the runtime whole.
 ///
 /// [`CallFn`]'s relationship to [`OpenFn`], for builtins. A builtin whose fast
@@ -680,20 +680,20 @@ pub type AllocFn = unsafe extern "C" fn(ctx: *mut NativeCtx, pc: u32, layout: u3
 /// produces exactly the sentence it always produced. That is [`OpenFn`]'s "a mixed
 /// call keeps the path it had", one level down.
 ///
-/// **It is not a way to lower a builtin.** A `call-builtin` whose only lowering
-/// was this helper would be the encoded tier's `CALL_BUILTIN` arm reached through
+/// **It is not a way to lower a builtin.** An `intrinsic-call` whose only lowering
+/// was this helper would be the encoded tier's `INTRINSIC_CALL` arm reached through
 /// one more indirection: it would present a run as more native than it is, and
 /// — because the two code generators would emit the identical call — it would make
 /// the comparison between them measure nothing. `subset::method_of` is what admits
 /// a builtin, and it admits one only where a fast path is emitted for it.
 ///
-/// `base` is the **caller's** frame as a word index, and `dst`, `builtin` and
+/// `base` is the **caller's** frame as a word index, and `dst`, `site` and
 /// `args` are the three operands of the instruction as the plain numbers the IR
 /// carries. `base` is [`CallFn`]'s `base` and is there for the same two reasons:
 /// six integer arguments are what the System V ABI passes in registers, and a
 /// helper that is handed the frame it was called from can *check* it against the
 /// frame stack rather than assume it. The helper uses the stack's own address —
-/// `Machine::call_builtin` reads slots, which needs a linear address and not an
+/// `Machine::call_intrinsic` reads slots, which needs a linear address and not an
 /// index — and asserts the two agree.
 ///
 /// The answer is an [`Outcome`] as a `u32`, read exactly as [`CallFn`]'s is:
@@ -704,12 +704,12 @@ pub type AllocFn = unsafe extern "C" fn(ctx: *mut NativeCtx, pc: u32, layout: u3
 /// As [`AllocFn`]: a builtin may allocate, so this is a safepoint and every live
 /// reference must be in its slot, and both republished pointers are re-derived by
 /// the generated code afterwards.
-pub type BuiltinFn = unsafe extern "C" fn(
+pub type IntrinsicFn = unsafe extern "C" fn(
     ctx: *mut NativeCtx,
     base: u64,
     pc: u32,
     dst: u32,
-    builtin: u32,
+    site: u32,
     args: u32,
 ) -> u32;
 
@@ -726,7 +726,7 @@ pub type BuiltinFn = unsafe extern "C" fn(
 /// `Machine::checked` — the same bound, dynamic and exact — and then the copy
 /// `encoded.rs`'s `LOAD_FIELD` arm makes.
 ///
-/// Unlike [`AllocFn`] and [`BuiltinFn`] this is **not a safepoint**: neither the
+/// Unlike [`AllocFn`] and [`IntrinsicFn`] this is **not a safepoint**: neither the
 /// bound check nor the copy it guards can allocate, so there is nothing to
 /// charge and no cached pointer a call here could stale.
 ///
@@ -739,7 +739,7 @@ pub type BuiltinFn = unsafe extern "C" fn(
 /// both addresses are already resolved, so there is nothing left to resolve one
 /// against.
 ///
-/// The answer is an [`Outcome`] as a `u32`, read exactly as [`BuiltinFn`]'s is.
+/// The answer is an [`Outcome`] as a `u32`, read exactly as [`IntrinsicFn`]'s is.
 ///
 /// # Safety
 ///
@@ -894,12 +894,12 @@ impl GrowableOp {
 ///   three would refuse a function for the one scalar append in it, which is a
 ///   refusal with no work behind it.
 ///
-/// # It is a lowering, and [`BuiltinFn`] is not
+/// # It is a lowering, and [`IntrinsicFn`] is not
 ///
-/// [`BuiltinFn`]'s documentation says in as many words that it "is not a way to
+/// [`IntrinsicFn`]'s documentation says in as many words that it "is not a way to
 /// lower a builtin", and the distinction is worth keeping sharp rather than
 /// quietly crossing. That helper is the **cold path** of a builtin whose fast
-/// path is emitted; a `call-builtin` reached only through it would present a run
+/// path is emitted; an `intrinsic-call` reached only through it would present a run
 /// as more native than it is *and* would make both code generators emit the
 /// identical call, so the comparison between them would measure nothing.
 ///
@@ -913,7 +913,7 @@ impl GrowableOp {
 /// and `a` and `b` the operands [`GrowableOp`] names for each variant. Six integer
 /// arguments, which is what the System V ABI passes in registers and what the
 /// template arm's call sequence depends on. The answer is an [`Outcome`] as a
-/// `u32`, read exactly as [`BuiltinFn`]'s is.
+/// `u32`, read exactly as [`IntrinsicFn`]'s is.
 ///
 /// # Safety
 ///
@@ -1098,8 +1098,8 @@ pub struct NativeHelpers {
     pub close: CloseFn,
     /// See [`AllocFn`].
     pub alloc: AllocFn,
-    /// See [`BuiltinFn`].
-    pub builtin: BuiltinFn,
+    /// See [`IntrinsicFn`].
+    pub intrinsic: IntrinsicFn,
     /// See [`GrowableFn`].
     pub growable: GrowableFn,
     /// See [`RunCopyFn`].

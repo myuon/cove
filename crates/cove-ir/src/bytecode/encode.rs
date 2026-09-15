@@ -264,8 +264,8 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             0,
             halves(op.0, args.0),
         ),
-        Inst::CallBuiltin { dst, builtin, args } => {
-            build(Op::CallBuiltin, slot(dst)?, 0, 0, halves(builtin.0, args.0))
+        Inst::IntrinsicCall { dst, site, args } => {
+            build(Op::IntrinsicCall, slot(dst)?, 0, 0, halves(site.0, args.0))
         }
 
         // ---- the heap --------------------------------------------------------
@@ -539,7 +539,7 @@ mod tests {
     use crate::bytecode::op::Op;
     use crate::inst::{ArithOp, CmpOp, Compare, Convert, Num};
     use crate::layout::LayoutId;
-    use crate::{ArgsId, BuiltinId, FunctionId, HostOpId, StrId, TableId};
+    use crate::{ArgsId, FunctionId, HostOpId, SiteId, StrId, TableId};
 
     const L: LayoutId = LayoutId(3);
 
@@ -820,9 +820,9 @@ mod tests {
             ),
             (
                 0,
-                Inst::CallBuiltin {
+                Inst::IntrinsicCall {
                     dst: 1,
-                    builtin: BuiltinId(2),
+                    site: SiteId(2),
                     args: ArgsId(3),
                 },
             ),

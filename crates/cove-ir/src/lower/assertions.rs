@@ -8,7 +8,7 @@
 //!
 //! # They are lowered, not performed
 //!
-//! An assertion could have been an [`Inst::CallBuiltin`] — a receiver and an
+//! An assertion could have been an [`Inst::IntrinsicCall`] — a receiver and an
 //! operation the machine recognises — and it is not, because there is
 //! nothing in one the language does not already have. `assertEqual` asks
 //! whether two values are equal, which is `==`; it renders both when they
@@ -57,7 +57,7 @@ use cove_syntax::ast::{Arg, Expr};
 use crate::inst::{CmpOp, Inst, Slot};
 use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
-use crate::program::Builtin;
+use crate::program::IntrinsicSite;
 use crate::repr::Repr;
 
 use super::expr::compare_of;
@@ -289,15 +289,15 @@ impl Body<'_> {
             closing.arg(),
         ];
         let list = self.pool.args.intern(pieces);
-        let builtin = self.pool.builtin(Builtin {
+        let site = self.pool.intrinsic_site(IntrinsicSite {
             intrinsic: Intrinsic::StringInterpolate,
             result: shapes::STR,
         });
         let dst = self.temp(shapes::STR);
         self.emit(
-            Inst::CallBuiltin {
+            Inst::IntrinsicCall {
                 dst: dst.slot,
-                builtin,
+                site,
                 args: list,
             },
             expr.span,

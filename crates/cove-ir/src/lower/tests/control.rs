@@ -198,7 +198,7 @@ fn @m.f(Array) -> Int
      6  add.int s5:int s5:int s6:int
      7  lt.int.branch s7:bool s5:int s4:int 22
      8  load-elem s8:String s3:ref s5:int
-     9  call-builtin s9:String String.interpolate (s8:String)
+     9  intrinsic-call s9:String String.interpolate (s8:String)
     10  gt.int.imm.branch s7:bool s2:int 0 13
     11  copy s10:String s8:String
     12  jump 17

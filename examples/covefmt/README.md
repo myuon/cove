@@ -261,7 +261,7 @@ Two of `Scan.at`'s eight instructions are copies:
 ```text
    0  ge.int s4:bool s2:int s1:int
    1  branch-false s4:bool 5
-   5  call-builtin s8..s9:Option String.codePointAtByte (s0:String s2:Int)
+   5  intrinsic-call s8..s9:Option String.codePointAtByte (s0:String s2:Int)
    6  switch s8:tag [10 7] else 13
    7  copy s6:Int s9:Int      <- `Some(c)` binds the payload
    8  copy s3:Int s6:Int      <- the arm's body `c` into the answer

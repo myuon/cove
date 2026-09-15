@@ -2194,7 +2194,7 @@ thread_local! {
     ///
     /// The allocator's own count is shared by every task of a run, so a
     /// builtin that allocated nothing can still see it move while another
-    /// task's thread allocates. `Machine::call_builtin` checks an
+    /// task's thread allocates. `Machine::call_intrinsic` checks an
     /// intrinsic's declared `Effects` against this one instead, which only
     /// the calling thread moves.
     static THREAD_ALLOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };

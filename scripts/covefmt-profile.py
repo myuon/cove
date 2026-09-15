@@ -112,7 +112,7 @@ BUCKETS = [
         ],
     ),
     ("allocation and collection", list(ALLOCATOR) + ["7collect", "4Heap"]),
-    ("runtime builtins", ["8builtins", "12call_builtin"]),
+    ("runtime intrinsics", ["10intrinsics", "14call_intrinsic"]),
     (
         "encoded dispatch",
         [

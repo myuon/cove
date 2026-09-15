@@ -235,8 +235,8 @@ fn a_freeze_refuses_a_null_receiver() {
 }
 
 #[test]
-fn a_builtin_no_arm_lowers_refuses_the_function() {
-    suite::a_builtin_no_arm_lowers_refuses_the_function::<Template>();
+fn an_intrinsic_call_refuses_the_function() {
+    suite::an_intrinsic_call_refuses_the_function::<Template>();
 }
 
 #[test]
@@ -447,7 +447,7 @@ fn direct_helpers() -> NativeHelpers {
         // rather than two more panicking stubs: a table with a `todo!()` in it is
         // a table somebody has to keep honest.
         alloc: shared.alloc,
-        builtin: shared.builtin,
+        intrinsic: shared.intrinsic,
         growable: shared.growable,
         run_copy: shared.run_copy,
         field_load: shared.field_load,

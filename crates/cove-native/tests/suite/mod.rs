@@ -33,8 +33,8 @@ use std::sync::Arc;
 
 use cove_diag::{FileId, Span};
 use cove_ir::{
-    Arg, ArgsId, ArithOp, BuiltinId, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout,
-    LayoutId, Len, Num, Program, RefMap, Repr, Slot, Storage, StrId, Table, TableId, Validation,
+    Arg, ArgsId, ArithOp, CaseId, CmpOp, Compare, Function, FunctionId, Inst, Layout, LayoutId,
+    Len, Num, Program, RefMap, Repr, SiteId, Slot, Storage, StrId, Table, TableId, Validation,
 };
 use cove_native::{Entry, GrowableOp, NativeCtx, NativeHelpers, Opened, Outcome, Raise, RunOp};
 use cove_native::{HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS};
@@ -304,16 +304,16 @@ pub fn allocations_allowed(allowed: usize) {
     ALLOCS_ALLOWED.with(|held| held.set(allowed));
 }
 
-// --- the builtin helper -------------------------------------------------------
+// --- the intrinsic helper -----------------------------------------------------
 
 /// One builtin compiled code handed back through
-/// [`BuiltinFn`](cove_native::BuiltinFn).
+/// [`IntrinsicFn`](cove_native::IntrinsicFn).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mediated {
     pub base: u64,
     pub pc: u32,
     pub dst: u32,
-    pub builtin: u32,
+    pub site: u32,
     pub args: u32,
     /// The unpaid work the caller published before handing over.
     pub work: u64,
@@ -326,9 +326,9 @@ thread_local! {
     pub static MEDIATED_ANSWERS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }
 
-/// The runtime's builtin helper, as a test double.
+/// The runtime's intrinsic helper, as a test double.
 ///
-/// A real one is `Machine::call_builtin`, whole. This one records the hand-over
+/// A real one is `Machine::call_intrinsic`, whole. This one records the hand-over
 /// and writes one word into `dst` — `builtin * 1000 + dst`, a number no other
 /// part of a frame holds — so a case can say the cold path was taken *and* that
 /// the answer landed where the instruction said.
@@ -337,12 +337,12 @@ thread_local! {
 ///
 /// As [`alloc`]. `base` indexes into the words the entry point was given and
 /// `dst` is a slot of the frame there.
-unsafe extern "C" fn builtin(
+unsafe extern "C" fn intrinsic(
     ctx: *mut NativeCtx,
     base: u64,
     pc: u32,
     dst: u32,
-    builtin: u32,
+    site: u32,
     args: u32,
 ) -> u32 {
     MEDIATED.with(|held| {
@@ -350,7 +350,7 @@ unsafe extern "C" fn builtin(
             base,
             pc,
             dst,
-            builtin,
+            site,
             args,
             work: (*ctx).pending_work,
         })
@@ -366,7 +366,7 @@ unsafe extern "C" fn builtin(
             (*ctx)
                 .words
                 .add((base + u64::from(dst)) as usize)
-                .write(u64::from(builtin) * 1000 + u64::from(dst));
+                .write(u64::from(site) * 1000 + u64::from(dst));
             Outcome::Returned.abi()
         }
     }
@@ -744,7 +744,7 @@ pub fn helpers() -> NativeHelpers {
         open,
         close,
         alloc,
-        builtin,
+        intrinsic,
         growable,
         run_copy,
         field_load,
@@ -1079,15 +1079,15 @@ pub fn program_with_args(function: Function, args: Vec<Arg>) -> Program {
     held
 }
 
-/// The same program, with one builtin at `BuiltinId(0)` and its operands at
+/// The same program, with one builtin at `SiteId(0)` and its operands at
 /// `ArgsId(1)`.
 ///
 /// `receiver` and `operation` are resolved to the [`cove_ir::Intrinsic`]
-/// they name — see [`cove_ir::Builtin`] — so it is the *variant* that
+/// they name — see [`cove_ir::IntrinsicSite`] — so it is the *variant* that
 /// decides whether the tier lowers this call at all, and a case that passes
 /// one no native arm handles should be refused rather than compiled. That is
-/// what `a_builtin_no_arm_lowers_refuses_the_function` checks with them.
-pub fn program_with_builtin(
+/// what `an_intrinsic_call_refuses_the_function` checks with them.
+pub fn program_with_intrinsic(
     function: Function,
     receiver: &str,
     operation: &str,
@@ -1097,7 +1097,8 @@ pub fn program_with_builtin(
     let mut held = program_with_args(function, args);
     let intrinsic = cove_ir::Intrinsic::from_names(receiver, operation)
         .unwrap_or_else(|| panic!("`{receiver}.{operation}` has no `Intrinsic`"));
-    held.builtins.push(cove_ir::Builtin { intrinsic, result });
+    held.intrinsic_sites
+        .push(cove_ir::IntrinsicSite { intrinsic, result });
     held
 }
 
@@ -3652,21 +3653,21 @@ pub fn a_run_slice_is_admitted_with_four_one_word_operands<A: Arm>() {
     );
 }
 
-/// A `call-builtin` of a name no arm lowers refuses the whole function.
+/// An `intrinsic-call` of a name no arm lowers refuses the whole function.
 ///
 /// The name is the decision — see `subset::method_of` — so this is the one case
 /// that says the decision is really made on it: the same instruction, the same
 /// operands, the same widths, and a different pair of strings.
-pub fn a_builtin_no_arm_lowers_refuses_the_function<A: Arm>() {
+pub fn an_intrinsic_call_refuses_the_function<A: Arm>() {
     let one = |receiver: &str, operation: &str| {
-        program_with_builtin(
+        program_with_intrinsic(
             function(
                 vec![Repr::Ref, Repr::Int],
                 INT,
                 vec![
-                    Inst::CallBuiltin {
+                    Inst::IntrinsicCall {
                         dst: 1,
-                        builtin: BuiltinId(0),
+                        site: SiteId(0),
                         args: ArgsId(1),
                     },
                     Inst::Return { src: 1 },

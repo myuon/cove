@@ -3,7 +3,7 @@
 //! `crates/cove-runtime/src/builtins.rs` is the specification and it has two
 //! answers for a value no declared conformance speaks for: an immutable value
 //! answers itself, and a `Vector` answers a new vector. Neither is a builtin
-//! here — `cove_runtime::vm::builtins` has no `snapshot` arm — because the
+//! here — `cove_runtime::vm::intrinsics` has no `snapshot` arm — because the
 //! first is a copy the instruction set already makes and the second is a walk
 //! that may end in a call, which `docs/LINEAR_VM.md` puts in the lowering
 //! rather than in a builtin.

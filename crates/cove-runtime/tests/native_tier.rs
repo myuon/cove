@@ -1647,7 +1647,7 @@ fn every_address_family_resolves_on_a_later_stack_segment() {
 /// **A refusal says which builtin, or which allocation, stopped it.**
 ///
 /// `Refused::instruction` names an opcode, and for two opcodes that is not a task
-/// a reader can act on: `CallBuiltin` is every builtin the language has and the
+/// a reader can act on: `IntrinsicCall` is every builtin the language has and the
 /// `Alloc` opcodes are every layout a program declares. `Refused::blocked` is the
 /// second key, and what is asserted here is the join — that it is present for
 /// exactly those two opcodes, absent for every other, and names the thing the
@@ -1678,7 +1678,7 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
     let mut allocations = 0;
     for row in native.refusals() {
         match (row.instruction.as_deref(), &row.blocked) {
-            (Some("CallBuiltin"), Some(Blocked::Builtin(named))) => {
+            (Some("IntrinsicCall"), Some(Blocked::Intrinsic(named))) => {
                 assert!(
                     named.contains('.'),
                     "a builtin is a receiver and an operation: `{named}` in `{}`",
@@ -1720,7 +1720,7 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
     };
     assert_eq!(
         named("allocates"),
-        Some(Blocked::Builtin("String.slice".to_string()))
+        Some(Blocked::Intrinsic("String.slice".to_string()))
     );
     // `heapsThrough` constructs a `Shared(a)`, whose allocation now lowers — so it
     // is refused for the `store-field` that fills the object in, and an opcode that
@@ -2775,7 +2775,7 @@ fn the_boundary_report_counts_each_quantity_apart() {
     assert_eq!(on_vm.emitted, on_native.emitted);
     assert_eq!(on_vm.emitted, uncounted.emitted);
     assert!(
-        on_vm.emitted.instructions > on_vm.emitted.builtin_sites,
+        on_vm.emitted.instructions > on_vm.emitted.intrinsic_sites,
         "{:?}",
         on_vm.emitted
     );
@@ -2786,7 +2786,7 @@ fn the_boundary_report_counts_each_quantity_apart() {
     };
     assert_eq!(row(&on_vm, Intrinsic::StringIndexOf).sites, 1);
     assert_eq!(
-        on_vm.emitted.builtin_sites,
+        on_vm.emitted.intrinsic_sites,
         on_vm.intrinsics.iter().map(|row| row.sites).sum::<u64>(),
         "every site is some intrinsic's"
     );
@@ -2849,7 +2849,10 @@ fn the_boundary_report_counts_each_quantity_apart() {
         helpers.growable, 5,
         "one `growable` helper call per growth, and none for a push with room: {helpers:?}"
     );
-    assert_eq!(helpers.builtin, 0, "no builtin was mediated: {helpers:?}");
+    assert_eq!(
+        helpers.intrinsic, 0,
+        "no intrinsic was mediated: {helpers:?}"
+    );
     // Every call compiled code made went out through `open` or `call` — an `open`
     // whose callee has no machine code runs the mediated call itself, and is
     // still one `open` — and only a direct one comes back through `close`.

@@ -664,8 +664,8 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::LoadElem { dst, layout, .. }
             | Inst::Unbox { dst, layout, .. } => mark(dst, width(layout)),
             Inst::Clear { slot, layout } => mark(slot, width(layout)),
-            Inst::CallBuiltin { dst, builtin, .. } => {
-                mark(dst, width(program.builtin(builtin).result))
+            Inst::IntrinsicCall { dst, site, .. } => {
+                mark(dst, width(program.intrinsic_site(site).result))
             }
             // The first entry of its row is the one frame word it writes.
             Inst::RunSlice { args, .. } => {
@@ -1105,7 +1105,7 @@ fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called
             Inst::Switch { table, .. } if table.0 >= PLACED => {
                 *table = crate::TableId(first + (table.0 - PLACED));
             }
-            Inst::CallBuiltin { args, .. }
+            Inst::IntrinsicCall { args, .. }
             | Inst::RunCopy { args, .. }
             | Inst::RunSlice { args, .. }
             | Inst::GrowableExtend { args, .. }
@@ -1196,7 +1196,7 @@ fn relocated(
         // `Inst::RunCopy` and `Inst::GrowableExtend` are the non-call
         // instructions that also name one — each is the list relocated into a
         // list of its own.
-        Inst::CallBuiltin { args, .. }
+        Inst::IntrinsicCall { args, .. }
         | Inst::RunCopy { args, .. }
         | Inst::RunSlice { args, .. }
         | Inst::GrowableExtend { args, .. } => {
@@ -1329,7 +1329,7 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         // The five operands live in the args row rather than on the
         // instruction, exactly as a call's do — `relocated` moves that row
         // and repoints `args` at the copy, the same way it does for
-        // `Inst::CallBuiltin`.
+        // `Inst::IntrinsicCall`.
         Inst::RunCopy { .. } | Inst::RunSlice { .. } | Inst::GrowableExtend { .. } => Vec::new(),
         Inst::Len { dst, obj } | Inst::LayoutOf { dst, obj } => vec![dst, obj],
         Inst::AddrOfSlot { dst, slot } => vec![dst, slot],
@@ -1341,7 +1341,7 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         Inst::Load { dst, addr, .. } => vec![dst, addr],
         Inst::Store { addr, src, .. } => vec![addr, src],
         Inst::Box { dst, src, .. } | Inst::Unbox { dst, src, .. } => vec![dst, src],
-        Inst::CallBuiltin { dst, .. } => vec![dst],
+        Inst::IntrinsicCall { dst, .. } => vec![dst],
         Inst::AssertFailed { message } => vec![message],
         Inst::Jump { .. } | Inst::Trap { .. } => Vec::new(),
         // Every variant below is one `reaches_nothing` refuses, so a leaf

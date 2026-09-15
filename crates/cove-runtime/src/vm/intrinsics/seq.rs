@@ -81,7 +81,7 @@
 //! a work queue would retain everything it had ever held.
 
 #[cfg(test)]
-use crate::vm::builtins::make;
+use crate::vm::intrinsics::make;
 
 // `Array.contains`, `Array.indexOf`, `Vector.contains` and `Vector.indexOf`
 // are not here: each is `std.array` or `std.vector`, a Cove loop over `==`
@@ -96,8 +96,8 @@ mod tests {
     use cove_ir::{LayoutId, Repr, Shape};
 
     use crate::error::RuntimeError;
-    use crate::vm::builtins::tests::{elements, named, read, scalar, vector, words_of, world};
     use crate::vm::exec::Machine;
+    use crate::vm::intrinsics::tests::{elements, named, read, scalar, vector, words_of, world};
 
     /// A `Vector<Int>` holding `values`, with a store of exactly that many.
     fn growable(machine: &mut Machine, values: &[i64]) -> u64 {

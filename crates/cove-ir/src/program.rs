@@ -100,8 +100,8 @@ id!(
     HostOpId, "host"
 );
 id!(
-    /// Names a builtin in [`Program::builtins`].
-    BuiltinId, "builtin"
+    /// Names a builtin in [`Program::intrinsic_sites`].
+    SiteId, "builtin"
 );
 
 /// One argument of a call: where the value is, and what it is.
@@ -178,7 +178,7 @@ impl HostOp {
 /// derived from the intrinsic it carries rather than stored beside it, so
 /// there is exactly one place that pairing is written down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Builtin {
+pub struct IntrinsicSite {
     /// The operation this call performs.
     pub intrinsic: Intrinsic,
     pub result: LayoutId,
@@ -498,7 +498,7 @@ pub struct Program {
     pub args: Vec<Vec<Arg>>,
     pub tables: Vec<Table>,
     pub host_ops: Vec<HostOp>,
-    pub builtins: Vec<Builtin>,
+    pub intrinsic_sites: Vec<IntrinsicSite>,
     /// The layout every string object shares.
     ///
     /// One field rather than a layout in each [`Inst::Str`], because every
@@ -563,8 +563,8 @@ impl Program {
         &self.host_ops[id.index()]
     }
 
-    pub fn builtin(&self, id: BuiltinId) -> &Builtin {
-        &self.builtins[id.index()]
+    pub fn intrinsic_site(&self, id: SiteId) -> &IntrinsicSite {
+        &self.intrinsic_sites[id.index()]
     }
 
     /// The id of `module.name`, if the program has it.

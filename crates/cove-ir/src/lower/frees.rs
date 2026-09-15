@@ -388,8 +388,8 @@ impl<'p> Flow<'p> {
                 };
                 f(dst, answer);
             }
-            Inst::CallBuiltin { dst, builtin, .. } => {
-                let answer = match self.program.builtins.get(builtin.index()) {
+            Inst::IntrinsicCall { dst, site, .. } => {
+                let answer = match self.program.intrinsic_sites.get(site.index()) {
                     Some(builtin) => width(builtin.result),
                     None => 1,
                 };
@@ -468,7 +468,7 @@ impl<'p> Flow<'p> {
             Inst::Switch { on, .. } => f(on, 1),
             Inst::Return { src } => f(src, width(self.function.returns)),
             Inst::Call { args: list, .. } | Inst::CallHost { args: list, .. } => args(list, f),
-            Inst::CallBuiltin { args: list, .. } => args(list, f),
+            Inst::IntrinsicCall { args: list, .. } => args(list, f),
             Inst::CallClosure {
                 closure,
                 args: list,

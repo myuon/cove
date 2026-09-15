@@ -40,7 +40,7 @@
 //! function that ran once is in the report and a share is exact.
 //!
 //! It is also, alone, **not enough**, and that is why the three figures
-//! beside it are here. A `call-builtin` that allocates a string, a `call`
+//! beside it are here. An `intrinsic-call` that allocates a string, a `call`
 //! that pushes a frame and an `add.int` are one instruction each. Replacing
 //! a byte loop in `examples/covefmt` with one `String.contains` cut the run
 //! from 751.1 M instructions to 722.1 M and made it **slower**, and nothing
@@ -341,7 +341,7 @@ mod tests {
         assert_eq!(summed.words, total.words);
     }
 
-    /// **A `call-builtin` that allocates is dearer than an `add.int`, and the
+    /// **An `intrinsic-call` that allocates is dearer than an `add.int`, and the
     /// profile says so.**
     ///
     /// This is the whole reason the timing is here. A count cannot separate

@@ -111,7 +111,6 @@ use crate::vm::exec::Machine;
 use crate::value::Value;
 
 pub(crate) mod boundary;
-pub(crate) mod builtins;
 pub(crate) mod cell;
 pub(crate) mod debug;
 #[cfg(test)]
@@ -119,6 +118,7 @@ mod differential;
 #[cfg(test)]
 mod erasure;
 pub(crate) mod exec;
+pub(crate) mod intrinsics;
 pub(crate) mod mem;
 pub mod profile;
 pub(crate) mod render;

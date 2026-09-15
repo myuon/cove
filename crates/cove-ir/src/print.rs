@@ -286,10 +286,10 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
                 args_of(program, *args)
             )
         }
-        Inst::CallBuiltin { dst, builtin, args } => {
-            let builtin = program.builtin(*builtin);
+        Inst::IntrinsicCall { dst, site, args } => {
+            let builtin = program.intrinsic_site(*site);
             format!(
-                "call-builtin {} {} ({})",
+                "intrinsic-call {} {} ({})",
                 v(*dst, builtin.result),
                 builtin.intrinsic,
                 args_of(program, *args)

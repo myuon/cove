@@ -52,8 +52,8 @@ use crate::abi::{
     HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
-    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported,
-    word_finish, word_push, WordFinish, WordPush,
+    by_zero_of, leaders, literal_offset, overflow_of, slot_offset, supported, word_finish,
+    word_push, WordFinish, WordPush,
 };
 use crate::Unavailable;
 
@@ -201,13 +201,13 @@ impl Jit {
         let call = module.declare_function(CALL, Linkage::Import, &signature)?;
         let signature = alloc_signature(&module);
         let alloc = module.declare_function(ALLOC, Linkage::Import, &signature)?;
-        // `GrowableFn` is one pointer, one `I64` and four `I32`s — `BuiltinFn`'s
+        // `GrowableFn` is one pointer, one `I64` and four `I32`s — `IntrinsicFn`'s
         // shape, which no lowering calls any more since ADR 0058 moved the last
         // builtin this arm lowered into the standard library.
-        let signature = builtin_signature(&module);
+        let signature = intrinsic_signature(&module);
         let growable = module.declare_function(GROWABLE, Linkage::Import, &signature)?;
         // And again: `RunCopyFn` is the same six.
-        let signature = builtin_signature(&module);
+        let signature = intrinsic_signature(&module);
         let run_copy = module.declare_function(RUN_COPY, Linkage::Import, &signature)?;
         let signature = field_signature(&module);
         let field_load = module.declare_function(FIELD_LOAD, Linkage::Import, &signature)?;
@@ -418,18 +418,18 @@ fn alloc_signature(module: &JITModule) -> Signature {
     signature
 }
 
-/// [`crate::abi::BuiltinFn`]'s shape, in Cranelift's terms, which
+/// [`crate::abi::IntrinsicFn`]'s shape, in Cranelift's terms, which
 /// [`crate::abi::GrowableFn`] and [`crate::abi::RunCopyFn`] share.
 ///
 /// [`call_signature`]'s shape, for [`call_signature`]'s reason: the answer is an
 /// [`Outcome`] and is returned from the compiled function unchanged, so the two
 /// widths have to be the one width.
-fn builtin_signature(module: &JITModule) -> Signature {
+fn intrinsic_signature(module: &JITModule) -> Signature {
     let mut signature = module.make_signature();
     signature
         .params
         .push(AbiParam::new(module.target_config().pointer_type()));
-    // `base`, then `pc`, `dst`, `builtin`, `args`.
+    // `base`, then `pc`, `dst`, `site`, `args`.
     signature.params.push(AbiParam::new(types::I64));
     for _ in 0..4 {
         signature.params.push(AbiParam::new(types::I32));
@@ -1054,15 +1054,6 @@ impl<'a, 'f> Lower<'a, 'f> {
             Inst::Trap { message } => {
                 self.raise(Raise::Trapped, message.0);
                 true
-            }
-            // A builtin, decoded by the subset rather than here: see
-            // [`Method`](crate::subset::Method) for why the decision and the
-            // operands come out of one function that both arms ask.
-            Inst::CallBuiltin { dst, builtin, args } => {
-                match method_of(self.program, *dst, *builtin, *args) {
-                    Some(method) => match method {},
-                    None => unreachable!("`supported` admitted a builtin no arm lowers"),
-                }
             }
             other => unreachable!("`supported` admitted {other:?}, which is not lowered"),
         }

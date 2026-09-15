@@ -17,7 +17,7 @@ fn @m.parts(String) -> Array
   frame 3: s0!:ref s1:ref s2:ref
   local s -> s0:String [0, 3)
      0  str s2:ref \",\"
-     1  call-builtin s1:Array String.split (s0:String s2:String)
+     1  intrinsic-call s1:Array String.split (s0:String s2:String)
      2  return s1:Array
 "
     );
@@ -183,7 +183,7 @@ fn a_parser_answers_a_result_and_interns_the_error_it_may_carry() {
 fn @m.parse(String) -> Int
   frame 8: s0!:ref s1:int s2:tag s3:int s4:ref s5:int s6:int s7:int
   local s -> s0:String [0, 10)
-     0  call-builtin s2..s4:Result Int.parse (s0:String)
+     0  intrinsic-call s2..s4:Result Int.parse (s0:String)
      1  int s5:int 0
      2  switch s2:tag [3 6] else 8
      3  copy s7:Int s3:Int
@@ -278,7 +278,7 @@ fn @m.Point.bump(<addr>) -> Unit
 /// `Vector.push` is `std.vector.push`, whose body is ADR 0058's
 /// `core.vectorPush`: a word `growable-push` of the element's layout and the
 /// `()` the call answers. The wrapper is thin, so it is expanded wherever it is
-/// called, and neither a `call` nor a `call-builtin` is left — at a one-word
+/// called, and neither a `call` nor an `intrinsic-call` is left — at a one-word
 /// element and at a two-word one, whose source is the whole run.
 #[test]
 fn a_push_is_a_word_growable_push_where_it_is_written() {
@@ -314,7 +314,7 @@ fn @m.f(Vector Vector m.Point) -> Int
 /// Cove, over ADR 0058's `core.vectorLoad` and `core.vectorStore`, which are a
 /// `load-field` of the store and a `load-elem` or `store-elem` of it. What is
 /// left at the call site is an ordinary call — the body is eighteen
-/// instructions, past the leaf limit outside a loop — and no `call-builtin`.
+/// instructions, past the leaf limit outside a loop — and no `intrinsic-call`.
 #[test]
 fn a_set_is_a_range_check_over_an_element_load_and_store() {
     assert_eq!(
@@ -568,7 +568,7 @@ fn map_error_is_an_ordinary_call_into_the_standard_library() {
 fn @m.f(String) -> Result
   frame 10: s0!:ref s1:tag s2:int s3:tag s4:ref s5:tag s6:int s7:ref s8:ref s9:int
   local t -> s0:String [0, 7)
-     0  call-builtin s5..s7:Result Int.parse (s0:String)
+     0  intrinsic-call s5..s7:Result Int.parse (s0:String)
      1  alloc s8:ref closure m.f#0<closure>
      2  func-ref s9:int @m.f#0
      3  store-field s8:ref +0 s9:Int

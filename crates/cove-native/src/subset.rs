@@ -12,8 +12,8 @@
 //! [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
 
 use cove_ir::{
-    ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Convert, Function, Inst, LayoutId, Len, Num,
-    Program, Repr, Shape, Slot, Storage, StrId,
+    ArithOp, CmpOp, Compare, Convert, Function, Inst, LayoutId, Len, Num, Program, Repr, Shape,
+    Slot, Storage, StrId,
 };
 
 use crate::abi::Raise;
@@ -142,7 +142,7 @@ fn comparison_supported(on: Compare, op: CmpOp) -> bool {
 /// [ADR 0058] moved `Vector.push` into the standard library as
 /// `core.vectorPush(items, value)`, which lowers to this instruction, so this is
 /// no longer a builtin this crate recognises by name: it is a run instruction,
-/// decoded here once for both arms the way [`Method`] decodes a builtin.
+/// decoded here once for both arms.
 ///
 /// `Machine::push_words` is three steps: read the owner, ensure room for one
 /// more element, and write the element's words and the new length. **Only the
@@ -287,36 +287,6 @@ pub(crate) fn word_finish(
         stride: push.stride,
         array: target,
     })
-}
-
-/// A [`Inst::CallBuiltin`] both arms emit code for, with its operands decoded.
-///
-/// **There are none left.** A builtin is *named* rather than numbered — see
-/// [`cove_ir::Builtin`] — and this enum was where the pair of strings a tier
-/// lowered was decoded once for both arms: `String.byteLength`, `Vector.push`,
-/// `Vector.set` and `Vector.freeze`. [ADR 0058] moved each into the standard
-/// library over run instructions, which is what [`WordPush`] and [`WordFinish`]
-/// decode now, and the ADR's Phase 5 deletes this enum and [`method_of`] with
-/// `Inst::CallBuiltin` itself. Until then an uninhabited enum keeps the two
-/// arms' `CallBuiltin` arms written against the one decision.
-///
-/// [ADR 0058]: ../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Method {}
-
-/// Which [`Method`] a `call-builtin` is, or `None` for one no arm lowers — which
-/// is every one of them now.
-///
-/// `None` is [`Reason::Instruction`] and not [`Reason::Operands`], which is this
-/// module's own division read through one more level: a builtin nothing lowers is
-/// a family to write, and the *name* is what says which family it is.
-pub(crate) fn method_of(
-    _program: &Program,
-    _dst: Slot,
-    _builtin: BuiltinId,
-    _args: ArgsId,
-) -> Option<Method> {
-    None
 }
 
 /// Why a function has no machine code, as one stable reason.
@@ -465,7 +435,7 @@ pub fn refusal(program: &Program, function: &Function) -> Option<Refusal> {
 /// refused, and where — with the first blocker, because that is what marks a
 /// function refused at all and it is cheap to find. It does not answer the
 /// question a reader asks next: what would it take to *compile* this
-/// function. A function refused at its first `CallBuiltin` may be refused at
+/// function. A function refused at its first `IntrinsicCall` may be refused at
 /// nine more after it, and lowering the one family that stopped `refusal`
 /// would still leave it on the encoded tier — a lowering built from the first
 /// blocker alone is a lowering built for a function that still will not
@@ -916,16 +886,9 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             len,
             storage: Storage::Words(elem),
         } => elem.index() < program.layouts.len() && slot(*owner) && slot(*len),
-        // A builtin is decoded by [`method_of`] and by nothing here, so that the
-        // name this tier lowers is written down once. `None` is a family nothing
-        // emits and falls to `Reason::Instruction` with every other unlowered
-        // instruction; a family that *is* emitted is bounded like any other.
-        Inst::CallBuiltin { dst, builtin, args } => {
-            match method_of(program, *dst, *builtin, *args) {
-                Some(method) => match method {},
-                None => return Some(Reason::Instruction),
-            }
-        }
+        // An intrinsic call is lowered by neither arm: it falls to
+        // `Reason::Instruction` with every other unlowered instruction.
+        Inst::IntrinsicCall { .. } => return Some(Reason::Instruction),
         // `encoded.rs`'s `ALLOC_FIXED | ALLOC_IMM | ALLOC_SLOT` arm, which is
         // `Machine::allocate` and a store of the address it answered. The helper
         // is handed the layout and the length whole — see

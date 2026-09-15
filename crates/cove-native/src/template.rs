@@ -35,8 +35,8 @@ use crate::abi::{
     HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
-    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported,
-    word_finish, word_push, WordFinish, WordPush,
+    by_zero_of, leaders, literal_offset, overflow_of, slot_offset, supported, word_finish,
+    word_push, WordFinish, WordPush,
 };
 use crate::Unavailable;
 
@@ -808,15 +808,6 @@ impl<'a> Emit<'a> {
             // The message is a program string, so the `StrId` is what crosses
             // the boundary and `cove-runtime` looks it up.
             Inst::Trap { message } => self.raise(Raise::Trapped, message.0),
-            // A builtin, decoded by the subset rather than here: see
-            // [`Method`](crate::subset::Method) for why the decision and the
-            // operands come out of one function that both arms ask.
-            Inst::CallBuiltin { dst, builtin, args } => {
-                match method_of(self.program, *dst, *builtin, *args) {
-                    Some(method) => match method {},
-                    None => unreachable!("`supported` admitted a builtin no arm lowers"),
-                }
-            }
             other => unreachable!("`supported` admitted {other:?}, which is not lowered"),
         }
     }

@@ -190,7 +190,7 @@ literal `--` is a program argument, even if it looks like a flag):
   --max-tasks <n>       stop the run when it would hold more than <n> tasks at once
   --backend <ast|vm|native>  which backend runs the entry: `vm`, the linear-memory backend of ADR 0034 and the default, or `ast`, the tree-walking interpreter and the semantic oracle, or `native`, ADR 0055's experimental native tier — compiled machine code for the functions it can lower and the `vm` for the rest, reporting which was which. `native` needs a build with `--features template` and an x86-64 host, and says so rather than falling back when it does not have one
   --stats               print the backend's lowering and execution times and the instructions it executed, then fuel spent, host calls, irreversible writes, elapsed time, host-call wait, and the heap, to stderr
-  --boundary            report what the run sent across each boundary, to stderr: the lowered program's IR instructions and `CallBuiltin` sites, the builtin calls that reached the runtime by intrinsic and by the tier that made them, the instructions the encoded VM dispatched, and on `--backend native` the tier crossings and each call compiled code made into a runtime helper. Off by default, and a run without it pays nothing for it; `vm` and `native` only
+  --boundary            report what the run sent across each boundary, to stderr: the lowered program's IR instructions and `IntrinsicCall` sites, the builtin calls that reached the runtime by intrinsic and by the tier that made them, the instructions the encoded VM dispatched, and on `--backend native` the tier crossings and each call compiled code made into a runtime helper. Off by default, and a run without it pays nothing for it; `vm` and `native` only
   --profile             count every instruction the run executes and report which functions and which instructions they were, to stderr. A profiler is a debugger that never stops, so a run without it is unchanged and a run with it is several times slower; the counts are of instructions and not of time
   --files-root <path>   the one directory the `files` host may reach; defaults to `files/` in the package
   --allow-exec <path>   an absolute path `process.run` may start; repeat to allow more, and omit to allow none
@@ -1617,8 +1617,8 @@ impl Coverage {
                 row.name,
                 row.reason,
                 // Through `render_blocker` rather than the opcode alone, because
-                // `CallBuiltin` and the `Alloc` opcodes aggregate: a row reading
-                // "CallBuiltin at pc 44" names no work a reader can go and do,
+                // `IntrinsicCall` and the `Alloc` opcodes aggregate: a row reading
+                // "IntrinsicCall at pc 44" names no work a reader can go and do,
                 // and the continuation line below names the *other* blockers, so
                 // a function with exactly one is the case where nothing at all
                 // said which builtin it was. That was the whole of what stood
@@ -1653,8 +1653,8 @@ impl Coverage {
     ///
     /// The table above ranks by opcode, and for most opcodes that is the unit a
     /// reader acts on: `LoadField` is one lowering. Two of them are not.
-    /// `CallBuiltin` is every builtin the language has and the `Alloc` opcodes are
-    /// every layout a program declares, so a row saying `CallBuiltin` names a
+    /// `IntrinsicCall` is every builtin the language has and the `Alloc` opcodes are
+    /// every layout a program declares, so a row saying `IntrinsicCall` names a
     /// share and no task. These two tables say which builtin and which layout.
     ///
     /// **The accounting is the table above's, unchanged**, which is what makes the
@@ -1683,7 +1683,7 @@ impl Coverage {
         let mut allocations: BTreeMap<(&str, &str), (u64, usize)> = BTreeMap::new();
         for (row, made) in &self.refused {
             let held = match &row.blocked {
-                Some(Blocked::Builtin(named)) => builtins.entry(named).or_default(),
+                Some(Blocked::Intrinsic(named)) => builtins.entry(named).or_default(),
                 Some(Blocked::Allocation { name, shape }) => {
                     allocations.entry((name, shape)).or_default()
                 }
@@ -1697,9 +1697,9 @@ impl Coverage {
         // refusal table's own ordering and the reason these three are comparable.
         if !builtins.is_empty() {
             eprintln!(
-                "native: `CallBuiltin` refusals by builtin — a first blocker, so an upper bound on what lowering each would unlock"
+                "native: `IntrinsicCall` refusals by intrinsic — a first blocker, so an upper bound on what lowering each would unlock"
             );
-            eprintln!("  {:>13}  {:>9}  builtin", "dynamic calls", "functions");
+            eprintln!("  {:>13}  {:>9}  intrinsic", "dynamic calls", "functions");
             let mut rows: Vec<_> = builtins.into_iter().collect();
             rows.sort_by_key(|(_, (made, _))| std::cmp::Reverse(*made));
             for (named, (made, functions)) in rows {
@@ -1733,7 +1733,7 @@ impl Coverage {
 fn render_blocker(blocker: &cove_runtime::Blocker) -> String {
     use cove_runtime::Blocked;
     let subject = match &blocker.blocked {
-        Some(Blocked::Builtin(name)) => Some(name.clone()),
+        Some(Blocked::Intrinsic(name)) => Some(name.clone()),
         Some(Blocked::Allocation { name, shape }) => Some(format!("{name} ({shape})")),
         None => None,
     };
@@ -1986,7 +1986,7 @@ fn print_profile(program: &cove_ir::Program, profiler: &Profiler) {
 /// keep in step, and this one cannot fall out of step with the disassembly
 /// because it *is* the disassembly.
 ///
-/// A `call-builtin` keeps the builtin it calls. Grouping every one of them
+/// An `intrinsic-call` keeps the builtin it calls. Grouping every one of them
 /// together would put `String.contains`, which searches, beside
 /// `Int.toString`, which allocates, and answering *which builtin is dear* is
 /// most of what this reading is for.
@@ -1998,8 +1998,8 @@ fn opcode_of(program: &cove_ir::Program, id: cove_ir::FunctionId, pc: u32) -> St
     let line = cove_ir::print::one(program, function, inst);
     let mut words = line.split_whitespace();
     let head = words.next().unwrap_or("?");
-    if head == "call-builtin" {
-        // `call-builtin <destination> <Receiver>.<operation> (<arguments>)`,
+    if head == "intrinsic-call" {
+        // `intrinsic-call <destination> <Receiver>.<operation> (<arguments>)`,
         // and a destination never holds a space.
         if let Some(builtin) = words.nth(1) {
             return format!("{head} {builtin}");

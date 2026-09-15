@@ -381,8 +381,8 @@ impl Check<'_> {
                     poison(&mut objects, dst, width);
                     poison(&mut funcs, dst, width);
                 }
-                Inst::CallBuiltin { dst, builtin, .. } => {
-                    let width = match self.program.builtins.get(builtin.index()) {
+                Inst::IntrinsicCall { dst, site, .. } => {
+                    let width = match self.program.intrinsic_sites.get(site.index()) {
                         Some(builtin) => words(builtin.result),
                         None => 1,
                     };
@@ -815,9 +815,14 @@ impl Check<'_> {
                 }
                 self.each_arg(at, args);
             }
-            Inst::CallBuiltin { dst, builtin, args } => {
-                if self.in_range(at, builtin.index(), self.program.builtins.len(), "builtin") {
-                    let called = *self.program.builtin(builtin);
+            Inst::IntrinsicCall { dst, site, args } => {
+                if self.in_range(
+                    at,
+                    site.index(),
+                    self.program.intrinsic_sites.len(),
+                    "intrinsic site",
+                ) {
+                    let called = *self.program.intrinsic_site(site);
                     if self.layout_exists(at, called.result) {
                         self.fits(at, dst, called.result, "the answer of a builtin");
                         self.check_signature(at, called, args);
@@ -1367,7 +1372,7 @@ impl Check<'_> {
     /// of what an argument was — so a call passing the last slot of a frame
     /// as a two-word `Point` was checked by nothing, and the machine read the
     /// frame above it.
-    /// Whether a `CallBuiltin` passes what its intrinsic takes and names the
+    /// Whether an `IntrinsicCall` passes what its intrinsic takes and names the
     /// answer it writes: the argument count, each argument's layout and the
     /// answer's layout, against [`crate::Intrinsic::signature`].
     ///
@@ -1378,11 +1383,16 @@ impl Check<'_> {
     /// [`Check::each_arg`]'s; this is about its family.
     ///
     /// It is also where ADR 0058's Phase 5 makes "a new collection
-    /// `CallBuiltin` a verification failure": a `Text` or `Scalar` intrinsic
+    /// `IntrinsicCall` a verification failure": a `Text` or `Scalar` intrinsic
     /// handed a collection is refused as that, by name, whatever its
     /// signature says — `String.join`'s `Array<String>` is the one collection
     /// a signature names, and it names it exactly.
-    fn check_signature(&mut self, at: Option<usize>, called: crate::Builtin, args: crate::ArgsId) {
+    fn check_signature(
+        &mut self,
+        at: Option<usize>,
+        called: crate::IntrinsicSite,
+        args: crate::ArgsId,
+    ) {
         let intrinsic = called.intrinsic;
         let signature = intrinsic.signature();
         if let Some(fault) = self.class_fault(signature.result, called.result) {
@@ -2445,16 +2455,16 @@ mod tests {
             vec![Repr::Int, Repr::Int, Repr::Bool],
             INT,
             vec![
-                Inst::CallBuiltin {
+                Inst::IntrinsicCall {
                     dst: 0,
-                    builtin: crate::BuiltinId(0),
+                    site: crate::SiteId(0),
                     args: crate::ArgsId(0),
                 },
                 Inst::Return { src: 0 },
             ],
         );
         let mut held = program(vec![f]);
-        held.builtins = vec![crate::Builtin {
+        held.intrinsic_sites = vec![crate::IntrinsicSite {
             intrinsic: crate::Intrinsic::ValueOrder,
             result: INT,
         }];
@@ -2486,16 +2496,16 @@ mod tests {
             reprs,
             result,
             vec![
-                Inst::CallBuiltin {
+                Inst::IntrinsicCall {
                     dst: 0,
-                    builtin: crate::BuiltinId(0),
+                    site: crate::SiteId(0),
                     args: crate::ArgsId(0),
                 },
                 Inst::Return { src: 0 },
             ],
         );
         let mut held = program(vec![f]);
-        held.builtins = vec![crate::Builtin { intrinsic, result }];
+        held.intrinsic_sites = vec![crate::IntrinsicSite { intrinsic, result }];
         held.args = vec![args];
         held
     }

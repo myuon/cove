@@ -57,6 +57,6 @@ total = 20  (word 12, 1 word(s))
 debug_session.main:
      11 | str s3:ref "answer "
 =>   12 | call s13:Int debug_session.raise (s12:Int)
-     13 | call-builtin s14:String String.interpolate (s3:String s13:Int)
+     13 | intrinsic-call s14:String String.interpolate (s3:String s13:Int)
 (cove) quit
 the run was halted after 15 instruction(s).

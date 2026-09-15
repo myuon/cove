@@ -33,7 +33,7 @@ fn @m.greet(String) -> String
   local name -> s0:String [0, 4)
      0  str s2:ref \"hi \"
      1  str s3:ref \"!\"
-     2  call-builtin s1:String String.interpolate (s2:String s0:String s3:String)
+     2  intrinsic-call s1:String String.interpolate (s2:String s0:String s3:String)
      3  return s1:String
 "
     );
@@ -59,7 +59,7 @@ fn @m.show(m.Point) -> String
   frame 4: s0!:int s1!:int s2:ref s3:ref
   local p -> s0..s1:m.Point [0, 3)
      0  str s3:ref \"p=\"
-     1  call-builtin s2:String String.interpolate (s3:String s0..s1:m.Point)
+     1  intrinsic-call s2:String String.interpolate (s3:String s0..s1:m.Point)
      2  return s2:String
 "
     );

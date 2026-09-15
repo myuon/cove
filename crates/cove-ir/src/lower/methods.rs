@@ -8,8 +8,8 @@
 //!
 //! # The machine's table is the specification
 //!
-//! `cove_runtime::vm::builtins` dispatches on the pair
-//! [`Builtin`] names — a receiver and an operation — and what it implements
+//! `cove_runtime::vm::intrinsics` dispatches on the pair
+//! [`IntrinsicSite`] names — a receiver and an operation — and what it implements
 //! is what may be emitted here. Every one of them takes its operands in one
 //! shape: the receiver first where there is one, then the arguments in
 //! source order, and the answer is the word the checker settled for the
@@ -45,7 +45,7 @@ use super::{Body, Dest, PENDING};
 use crate::inst::{ArithOp, CmpOp, Compare, Convert, Inst, Num, Slot, Storage};
 use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
-use crate::program::Builtin;
+use crate::program::IntrinsicSite;
 
 impl Body<'_> {
     /// A method call on a value of a builtin type.
@@ -383,7 +383,7 @@ impl Body<'_> {
         // lowered, so the builtin may write the run the surrounding form
         // asked for. See `Body::expr_into`.
         let dst = self.answer_at(want, result);
-        self.emit_builtin(dst.slot, receiver, operation, &passed, result, expr.span);
+        self.emit_intrinsic_call(dst.slot, receiver, operation, &passed, result, expr.span);
         for value in held.into_iter().rev() {
             self.release(value, expr.span);
         }
@@ -398,7 +398,7 @@ impl Body<'_> {
     /// Interns the families the machine will look for while it builds this
     /// call's answer.
     ///
-    /// `cove_runtime::vm::builtins` finds a family by searching the
+    /// `cove_runtime::vm::intrinsics` finds a family by searching the
     /// program's layout table, so a family the program never otherwise
     /// mentions is a refusal at run time rather than a missing instruction.
     /// The answer's own layout is interned by the caller; what is left is
@@ -416,7 +416,7 @@ impl Body<'_> {
         true
     }
 
-    /// One [`Inst::CallBuiltin`], and the [`Builtin`] it names.
+    /// One [`Inst::IntrinsicCall`], and the [`IntrinsicSite`] it names.
     ///
     /// `receiver` and `operation` are the language reference's naming of the
     /// call — `"Array"`, `"slice"` — and this resolves the pair to the
@@ -433,7 +433,7 @@ impl Body<'_> {
     ///
     /// The pool interns, so a program that splits a string in twenty places
     /// names one builtin and one argument list per distinct operand shape.
-    pub(super) fn emit_builtin(
+    pub(super) fn emit_intrinsic_call(
         &mut self,
         dst: Slot,
         receiver: &str,
@@ -448,9 +448,11 @@ impl Body<'_> {
                  taught an operation this lowering emits"
             )
         });
-        let builtin = self.pool.builtin(Builtin { intrinsic, result });
+        let site = self
+            .pool
+            .intrinsic_site(IntrinsicSite { intrinsic, result });
         let args = self.pool.args.intern(args.to_vec());
-        self.emit(Inst::CallBuiltin { dst, builtin, args }, span);
+        self.emit(Inst::IntrinsicCall { dst, site, args }, span);
     }
 
     /// The argument shapes a builtin method has no place for, named as the
@@ -508,7 +510,7 @@ impl Body<'_> {
     /// `a`.
     ///
     /// There is no `("Any", "snapshot")` arm in
-    /// `cove_runtime::vm::builtins` and this does not want one. A copy is
+    /// `cove_runtime::vm::intrinsics` and this does not want one. A copy is
     /// instructions the machine already has, and the recursion the second
     /// answer needs is a walk that may call a conformance — which
     /// `docs/LINEAR_VM.md` puts in the lowering rather than in a builtin,
@@ -574,7 +576,7 @@ impl Body<'_> {
     ///
     /// A `Range` is three inline words — `start`, `end`, and whether the end
     /// is one the range yields — so every question about one is a comparison
-    /// of words already in the frame. `cove_runtime::vm::builtins` has no
+    /// of words already in the frame. `cove_runtime::vm::intrinsics` has no
     /// `Range` arm and does not need one, for the reason `Option` and
     /// `Result` have none: what a builtin would be handed is what the
     /// instruction set already reads.
@@ -813,7 +815,7 @@ fn snapshots_itself(ty: &Ty) -> bool {
 }
 
 /// The methods the machine performs, by the receiver and operation
-/// [`Builtin`] names them with.
+/// [`IntrinsicSite`] names them with.
 ///
 /// Every one of them is an operation of a value that is one word or is text,
 /// and none of them is something an instruction expresses: a `String`'s
@@ -930,7 +932,7 @@ fn answers(ty: &Ty, ok: &Ty) -> bool {
 
 /// What the language calls the type a method was written on.
 ///
-/// It is the name [`Builtin::receiver`] carries and the name a gap names the
+/// It is the name [`IntrinsicSite::receiver`] carries and the name a gap names the
 /// work with, and those are one name for one reason: the set of operations
 /// is the language reference's, and the reference writes `String.split` and
 /// `Array.map`.
@@ -970,10 +972,10 @@ mod tests {
     use super::*;
 
     /// Every pair [`MACHINE_METHODS`] and [`ASSOCIATED`] name is an
-    /// [`Intrinsic`] `emit_builtin` can resolve, or a [`conversion`] that
+    /// [`Intrinsic`] `emit_intrinsic_call` can resolve, or a [`conversion`] that
     /// never reaches it.
     ///
-    /// `emit_builtin` treats a pair with no `Intrinsic` as an internal bug —
+    /// `emit_intrinsic_call` treats a pair with no `Intrinsic` as an internal bug —
     /// see its doc comment — so a table entry that resolved to nothing would
     /// not fail here; it would panic the first time a program's lowering
     /// reached it. This is what checks the two tables against

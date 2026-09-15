@@ -21,7 +21,7 @@
 
 use crate::inst::{Inst, Len, Pc, Slot, Storage, Validation};
 use crate::layout::LayoutId;
-use crate::{ArgsId, BuiltinId, FunctionId, HostOpId, StrId, TableId};
+use crate::{ArgsId, FunctionId, HostOpId, SiteId, StrId, TableId};
 
 use super::op::{Half, Op, Operand, Payload};
 use super::EncodedInst;
@@ -208,9 +208,9 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             op: HostOpId(lo),
             args: ArgsId(hi),
         },
-        Op::CallBuiltin => Inst::CallBuiltin {
+        Op::IntrinsicCall => Inst::IntrinsicCall {
             dst: a,
-            builtin: BuiltinId(lo),
+            site: SiteId(lo),
             args: ArgsId(hi),
         },
         Op::AllocFixed => Inst::Alloc {

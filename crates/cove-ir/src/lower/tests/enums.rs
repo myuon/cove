@@ -83,7 +83,7 @@ fn @m.f(String) -> m.Msg
   local what -> s0:String [0, 10)
   local said -> s5..s6:m.Msg [5, 5)
      0  str s3:ref \"!\"
-     1  call-builtin s4:String String.interpolate (s0:String s3:String)
+     1  intrinsic-call s4:String String.interpolate (s0:String s3:String)
      2  tag s5:tag m.Msg.Text
      3  copy s6:String s4:String
      4  clear s4:String

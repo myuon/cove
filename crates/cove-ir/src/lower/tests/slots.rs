@@ -98,8 +98,8 @@ fn @m.shout(String String) -> Int
   frame 4: s0!:ref s1!:ref s2:int s3:ref
   local a -> s0:String [0, 3)
   local b -> s1:String [0, 3)
-     0  call-builtin s3:String String.interpolate (s0:String s1:String)
-     1  call-builtin s2:Int String.length (s3:String)
+     0  intrinsic-call s3:String String.interpolate (s0:String s1:String)
+     1  intrinsic-call s2:Int String.length (s3:String)
      2  return s2:Int
 "
     );
@@ -127,8 +127,8 @@ fn @m.f(String) -> Int
   local s -> s4:String [3, 4)
      0  int s2:int 0
      1  str s3:ref \"!\"
-     2  call-builtin s4:String String.interpolate (s0:String s3:String)
-     3  call-builtin s2:Int String.length (s4:String)
+     2  intrinsic-call s4:String String.interpolate (s0:String s3:String)
+     3  intrinsic-call s2:Int String.length (s4:String)
      4  clear s4:String
      5  copy s1:Int s2:Int
      6  return s1:Int

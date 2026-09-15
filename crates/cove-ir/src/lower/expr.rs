@@ -54,7 +54,7 @@ use super::{Body, Dest, Loop, PENDING};
 use crate::inst::{ArithOp, CmpOp, Compare, Inst, Num, Slot};
 use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
-use crate::program::{Builtin, HostOp};
+use crate::program::{HostOp, IntrinsicSite};
 use crate::repr::Repr;
 
 /// An assignable location, found by walking a chain of field accesses back
@@ -495,7 +495,7 @@ impl Body<'_> {
     /// something the instruction set should grow a case for — what `{x}`
     /// puts in a string is a rule of the language, stated in the language
     /// reference and not in the IR. So the whole literal becomes one
-    /// [`Inst::CallBuiltin`].
+    /// [`Inst::IntrinsicCall`].
     ///
     /// # What the builtin must do
     ///
@@ -503,7 +503,7 @@ impl Body<'_> {
     /// `String`: each operand rendered as `Display for Value` renders it,
     /// joined in order. Every operand is one word, because an operand that
     /// is not is boxed on the way in — a builtin receives slots and there is
-    /// no channel on [`Inst::CallBuiltin`] for the layout of each, so a
+    /// no channel on [`Inst::IntrinsicCall`] for the layout of each, so a
     /// value whose width is not one has to carry its own description.
     ///
     /// The runs of literal text are operands too, as `Str` objects, so the
@@ -559,7 +559,7 @@ impl Body<'_> {
         }
 
         let args = self.pool.args.intern(pieces.iter().map(Val::arg).collect());
-        let builtin = self.pool.builtin(Builtin {
+        let site = self.pool.intrinsic_site(IntrinsicSite {
             intrinsic: Intrinsic::StringInterpolate,
             result: shapes::STR,
         });
@@ -567,9 +567,9 @@ impl Body<'_> {
         // writes the destination the surrounding form asked for.
         let dst = self.answer_at(want, shapes::STR);
         self.emit(
-            Inst::CallBuiltin {
+            Inst::IntrinsicCall {
                 dst: dst.slot,
-                builtin,
+                site,
                 args,
             },
             expr.span,
