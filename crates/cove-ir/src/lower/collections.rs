@@ -337,12 +337,13 @@ impl Body<'_> {
 
     // ---- methods -----------------------------------------------------------
 
-    /// `items.length()`, `items.get(i)`.
+    /// `items.map(f)` and `items.sorted(f)`, the walks that take a closure.
     ///
-    /// An `Array` keeps its elements in the object, so its length is the
-    /// object's own header length and an element is one [`Inst::LoadElem`].
-    /// There is no element assignment beside them: an `Array` is immutable,
-    /// and the growable sequence is a `Vector`.
+    /// `length` and `get` used to answer here, as [`Inst::Len`] and a range
+    /// check around an [`Inst::LoadElem`]. They are not reached from here any
+    /// more: since ADR 0058's P3-15 (#378) `Body::call_builtin_method` resolves
+    /// both to `std.array.length` and `std.array.get`, a core intrinsic and a
+    /// range decision in Cove over one, so this lowering names neither.
     ///
     /// `isEmpty` used to answer here too, the same `length() == 0` every
     /// other sequence still answers with. It is not reached from here any
@@ -365,27 +366,6 @@ impl Body<'_> {
         want: Option<Dest>,
     ) -> Val {
         match (name, args.len()) {
-            ("length", 0) => self.header_length(expr, base, name),
-            ("get", 1) => {
-                let Some(element) = self.layout(elem, expr.span) else {
-                    return self.dead(expr);
-                };
-                let obj = self.expr(base);
-                let index = self.expr(&args[0].value);
-                let len = self.temp(shapes::INT);
-                self.emit(
-                    Inst::Len {
-                        dst: len.slot,
-                        obj: obj.slot,
-                    },
-                    expr.span,
-                );
-                let answer = self.element_option(expr, obj.slot, len.slot, index.slot, element);
-                self.give_back(len.slot, len.layout);
-                self.release(index, expr.span);
-                self.release(obj, expr.span);
-                answer
-            }
             ("map", 1) | ("sorted", 1) => {
                 let elem = elem.clone();
                 let items = self.expr(base);
@@ -399,12 +379,11 @@ impl Body<'_> {
         }
     }
 
-    /// `items.length()`, `items.get(i)`, and the walks.
+    /// The walks that take a closure.
     ///
-    /// Reading a vector is ordinary instructions — the length is payload word
-    /// 0 and the elements are in the store payload word 1 names. `push`, `set`,
-    /// `freeze`, `slice` and `toArray` are not reached from here: each is a
-    /// `std.vector` function over core intrinsics since
+    /// `length`, `get`, `push`, `set`, `freeze`, `slice` and `toArray` are not
+    /// reached from here: each is a `std.vector` function over core intrinsics
+    /// since
     /// [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md),
     /// resolved by `Body::call_builtin_method` before this is asked.
     ///
@@ -430,35 +409,6 @@ impl Body<'_> {
         want: Option<Dest>,
     ) -> Val {
         match (name, args.len()) {
-            ("length", 0) => {
-                let obj = self.expr(base);
-                let len = self.temp(shapes::INT);
-                self.emit(
-                    Inst::LoadField {
-                        dst: len.slot,
-                        obj: obj.slot,
-                        at: VECTOR_LEN,
-                        layout: shapes::INT,
-                    },
-                    expr.span,
-                );
-                self.release(obj, expr.span);
-                self.length_answer(expr, name, len)
-            }
-            ("get", 1) => {
-                let Some(element) = self.layout(elem, expr.span) else {
-                    return self.dead(expr);
-                };
-                let obj = self.expr(base);
-                let index = self.expr(&args[0].value);
-                let (len, store) = self.vector_parts(obj.slot, expr.span);
-                let answer = self.element_option(expr, store.slot, len.slot, index.slot, element);
-                self.give_back(len.slot, len.layout);
-                self.release(store, expr.span);
-                self.release(index, expr.span);
-                self.release(obj, expr.span);
-                answer
-            }
             // The elements come out before the first call, because a
             // `Vector` shares its storage and the callback may reach the very
             // vector being walked. That is `Vector.toArray`, which is the
@@ -618,111 +568,6 @@ impl Body<'_> {
             span,
         );
         (len, store)
-    }
-
-    /// `Some(elements[index])`, or `None` when `index` is outside them.
-    ///
-    /// The `None` is written first, discriminant and zeroed payload, so an
-    /// index outside the elements falls through to an answer that is already
-    /// there. A negative index and an index at or past the length are one
-    /// case with one answer, which is the rule `get`, `set` and `remove` all
-    /// share.
-    fn element_option(
-        &mut self,
-        expr: &Expr,
-        elements: Slot,
-        len: Slot,
-        index: Slot,
-        elem: LayoutId,
-    ) -> Val {
-        let Some(ty) = self.settled_ty(expr) else {
-            return self.dead(expr);
-        };
-        let Some(layout) = self.layout(&ty, expr.span) else {
-            return self.dead(expr);
-        };
-        let span = expr.span;
-
-        let dst = self.temp(layout);
-        self.write_case(dst.slot, layout, 0, &[], span);
-        let Some((parts, _)) = self.case_of(layout, 1) else {
-            return self.gap("`get` answering something that is not an `Option`", expr);
-        };
-        let Some(part) = parts.first().cloned() else {
-            return self.gap("an `Option` whose `Some` carries nothing", expr);
-        };
-
-        let bound = self.temp(shapes::INT);
-        self.emit(
-            Inst::Int {
-                dst: bound.slot,
-                value: 0,
-            },
-            span,
-        );
-        let ok = self.temp(shapes::BOOL);
-        self.emit(
-            Inst::Cmp {
-                on: Compare::Int,
-                op: CmpOp::Ge,
-                dst: ok.slot,
-                a: index,
-                b: bound.slot,
-            },
-            span,
-        );
-        let below = self.emit(
-            Inst::BranchFalse {
-                cond: ok.slot,
-                to: PENDING,
-            },
-            span,
-        );
-        self.emit(
-            Inst::Cmp {
-                on: Compare::Int,
-                op: CmpOp::Lt,
-                dst: ok.slot,
-                a: index,
-                b: len,
-            },
-            span,
-        );
-        let above = self.emit(
-            Inst::BranchFalse {
-                cond: ok.slot,
-                to: PENDING,
-            },
-            span,
-        );
-        self.give_back(ok.slot, ok.layout);
-
-        // The `None` written above becomes a `Some`: the discriminant is the
-        // only word that changes, so this is a tag rather than the whole
-        // case.
-        self.emit(
-            Inst::Tag {
-                dst: dst.slot,
-                layout,
-                case: crate::CaseId(1),
-            },
-            span,
-        );
-        self.emit(
-            Inst::LoadElem {
-                dst: dst.slot + 1 + part.at,
-                obj: elements,
-                index,
-                layout: elem,
-            },
-            span,
-        );
-        self.give_back(bound.slot, bound.layout);
-
-        let rest = self.here();
-        self.patch(below, rest);
-        self.patch(above, rest);
-        dst
     }
 
     /// An immutable copy of a vector's elements, as an `Array`.

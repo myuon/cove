@@ -1,3 +1,26 @@
+/// How many elements this vector holds.
+///
+/// The header's length word, which is the vector's own and not its store's:
+/// the store's header counts the capacity. One core intrinsic, expanded
+/// wherever it is called (ADR 0058).
+export fn length<T>(items: Vector<T>) -> Int {
+  core.vectorLength(items)
+}
+
+/// The element at `index`, or `None` when there is no element there.
+///
+/// [`std.array.get`]'s rule, over the elements the vector holds when it is
+/// asked: the index is held below the length first, because the load beneath
+/// it is bounded by the store's capacity rather than by the length.
+export fn get<T>(items: Vector<T>, index: Int) -> Option<T> {
+  if index >= 0 {
+    if index < core.vectorLength(items) {
+      return Some(core.vectorLoad(items, index))
+    }
+  }
+  return None
+}
+
 /// Whether this vector holds nothing.
 ///
 /// The same one line as [`std.array.isEmpty`], and a separate function

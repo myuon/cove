@@ -693,6 +693,24 @@ pub struct StdBinding {
 /// two outcomes — a clippy failure, or a genuinely shared implementation —
 /// and never the third, silent one this note used to have to warn about.
 pub static STANDARD_LIBRARY: &[StdBinding] = &[
+    // `length` and `get` of a sequence (#378, P3-15). Both were lowered inline
+    // since the linear IR began, which named the public method in the lowering;
+    // `length` is one core intrinsic and `get` is a range decision and an
+    // `Option` in Cove over an element load.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Array",
+        method: "length",
+        module: "std.array",
+        function: "length",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Array",
+        method: "get",
+        module: "std.array",
+        function: "get",
+    },
     StdBinding {
         kind: StdBindingKind::Method,
         receiver: "Array",
@@ -782,6 +800,20 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "indexOf",
         module: "std.vector",
         function: "indexOf",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Vector",
+        method: "length",
+        module: "std.vector",
+        function: "length",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Vector",
+        method: "get",
+        module: "std.vector",
+        function: "get",
     },
     // The first `var self` method to move, and the first binding over a core
     // intrinsic that writes: `std.vector.push` is `core.vectorPush(items,
@@ -1351,6 +1383,9 @@ impl CoreIntrinsicSchema {
 /// entries — [`CORE_BYTES_ALLOCATE`], [`CORE_BYTES_PUSH`],
 /// [`CORE_BYTES_EXTEND`], [`CORE_BYTES_FINISH`] and [`CORE_BYTES_LENGTH`] —
 /// which are ADR 0052's growable byte run with no method of its own left.
+/// `length` and `get` of both sequences are [`CORE_ARRAY_LENGTH`],
+/// [`CORE_VECTOR_LENGTH`], and [`CORE_ARRAY_LOAD`] or [`CORE_VECTOR_LOAD`]
+/// beneath a range decision in Cove.
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_PUSH,
@@ -1368,6 +1403,9 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTES_EXTEND,
     CORE_BYTES_FINISH,
     CORE_BYTES_LENGTH,
+    CORE_ARRAY_LENGTH,
+    CORE_ARRAY_LOAD,
+    CORE_VECTOR_LENGTH,
 ];
 
 /// Every core intrinsic.
@@ -1778,6 +1816,63 @@ pub const CORE_BYTES_LENGTH: CoreIntrinsicSchema = CoreIntrinsicSchema {
     params: &[ParamSchema {
         name: "buffer",
         ty: BuiltinType::ByteBuffer,
+    }],
+    result: BuiltinType::Int,
+    fresh: false,
+};
+
+/// `core.arrayLength<T>(items: Array<T>) -> Int`: how many elements the array
+/// holds, which is its object header's length.
+///
+/// `Inst::Len` and nothing else — the instruction `core.byteLength` is, read of
+/// an object whose header counts elements rather than bytes.
+pub const CORE_ARRAY_LENGTH: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "arrayLength",
+    generics: &["T"],
+    params: &[ParamSchema {
+        name: "items",
+        ty: BuiltinType::Array(&BuiltinType::Param("T")),
+    }],
+    result: BuiltinType::Int,
+    fresh: false,
+};
+
+/// `core.arrayLoad<T>(items: Array<T>, index: Int) -> T`: the element at
+/// `index`, which the caller has already held inside the array.
+///
+/// One `Inst::LoadElem`, bounded by the array's header length, so an index
+/// outside the array stops the run in the machine's words rather than
+/// answering — the policy that turns such an index into `None` is
+/// `std.array.get`'s, and this has none of it.
+pub const CORE_ARRAY_LOAD: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "arrayLoad",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "items",
+            ty: BuiltinType::Array(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "index",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Param("T"),
+    fresh: false,
+};
+
+/// `core.vectorLength<T>(items: Vector<T>) -> Int`: how many elements the
+/// vector holds.
+///
+/// `Inst::LoadField` of the header's length word — never the store's header
+/// length, which is the capacity; [`CORE_BYTES_LENGTH`] is the same read of a
+/// byte run's owner.
+pub const CORE_VECTOR_LENGTH: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "vectorLength",
+    generics: &["T"],
+    params: &[ParamSchema {
+        name: "items",
+        ty: BuiltinType::Vector(&BuiltinType::Param("T")),
     }],
     result: BuiltinType::Int,
     fresh: false,

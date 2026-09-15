@@ -649,6 +649,30 @@ pub fn call_core(
             check_buffer_live(storage, "length", span)?;
             Ok(Value(Repr::Int(storage.len() as i64)))
         }
+        // Beneath `std.array.length`, `std.array.get` and `std.vector.length`.
+        // `get` holds the index inside the sequence before it asks, so the
+        // refusal in `arrayLoad` is the machine's `LoadElem` bound and not a
+        // sentence a checked program reaches.
+        "arrayLength" => {
+            let Value(Repr::Array(items)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Array", &args[0], span));
+            };
+            Ok(Value(Repr::Int(items.len() as i64)))
+        }
+        "arrayLoad" => {
+            let Value(Repr::Array(items)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Array", &args[0], span));
+            };
+            let at = core_index(&shown, &args[1], items.len(), span)?;
+            Ok(items[at].clone())
+        }
+        "vectorLength" => {
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Vector", &args[0], span));
+            };
+            check_consumed(storage, span)?;
+            Ok(Value(Repr::Int(storage.len() as i64)))
+        }
         // A name the table declares and nothing here executes. No program can
         // reach one of these from its own modules, so the check that every
         // entry has a body here is `vm::differential`'s, which calls each
@@ -891,14 +915,9 @@ pub fn call_method(
     }
     match receiver {
         Value(Repr::Array(items)) => match name {
-            "get" => Ok(index_of("Array.get", args, span)?
-                .and_then(|i| items.get(i).cloned())
-                .map(Value::some)
-                .unwrap_or_else(Value::none)),
-            "length" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Int(items.len() as i64)))
-            }
+            // `get` and `length` are not here: they are `std.array.get`, a
+            // range decision in Cove over `call_core`'s `arrayLoad`, and
+            // `std.array.length` over its `arrayLength`.
             // `isEmpty` used to answer here too, `length() == 0`. It does
             // not reach this arm any more: `Interpreter::eval_method_call`
             // resolves it to a call into `std.array.isEmpty` before this
@@ -930,19 +949,14 @@ pub fn call_method(
                 // `std.vector.pop` and `std.vector.remove`, whose index
                 // decisions and `Option`s are Cove over `call_core`'s
                 // `vectorLoad`, `vectorMove` and `vectorTruncate`.
-                "get" => Ok(index_of("Vector.get", args, span)?
-                    .and_then(|i| storage.elements.borrow().get(i).cloned())
-                    .map(Value::some)
-                    .unwrap_or_else(Value::none)),
+                // `get` and `length` are not here either: they are
+                // `std.vector.get` over `call_core`'s `vectorLoad`, and
+                // `std.vector.length` over its `vectorLength`.
                 // `contains` and `indexOf` are not here: they are
                 // `std.vector`'s loops over `==` and `call_core`'s
                 // `vectorLoad`.
                 // `slice` is not here: it is `std.vector.slice`, over
                 // `call_core`'s `vectorSlice`.
-                "length" => {
-                    expect_args(name, args, 0, span)?;
-                    Ok(Value(Repr::Int(storage.len() as i64)))
-                }
                 // `isEmpty` used to answer here too, `storage.is_empty()`.
                 // It does not reach this arm any more:
                 // `Interpreter::eval_method_call` resolves it to a call into
@@ -1615,17 +1629,6 @@ fn check_buffer_live(
         .with_help("use the `String` that `finish()` returned, or build a new buffer"));
     }
     Ok(())
-}
-
-fn index_of(method: &str, args: &[Value], span: Span) -> Result<Option<usize>, RuntimeError> {
-    if args.len() != 1 {
-        return Err(arity_error(method, 1, args.len(), span));
-    }
-    match &args[0] {
-        Value(Repr::Int(i)) if *i >= 0 => Ok(Some(*i as usize)),
-        Value(Repr::Int(_)) => Ok(None),
-        other => Err(type_error(method, "index", "Int", other, span)),
-    }
 }
 
 fn expect_args<'a>(

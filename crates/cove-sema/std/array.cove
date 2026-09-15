@@ -1,3 +1,32 @@
+/// How many elements this array holds.
+///
+/// The count is the header of the object the elements are in, which is a fact
+/// about representation this file cannot state — so the body is one core
+/// intrinsic, and the lowering expands it wherever it is called (ADR 0058).
+export fn length<T>(items: Array<T>) -> Int {
+  core.arrayLength(items)
+}
+
+/// The element at `index`, or `None` when there is no element there.
+///
+/// A negative index and an index at or past `length()` are one case with one
+/// answer, and no index stops the program. That decision and the `Option` are
+/// this body's; the read beneath them is a core intrinsic bounded by the
+/// array, handed an index already inside it.
+///
+/// Each bound is an `if` of its own rather than one condition joined by `&&`,
+/// so each comparison is the one instruction its branch is, and both answers
+/// are a `return` — an answer in tail position is built aside and copied, as
+/// `std.string.sliceBytes` says.
+export fn get<T>(items: Array<T>, index: Int) -> Option<T> {
+  if index >= 0 {
+    if index < core.arrayLength(items) {
+      return Some(core.arrayLoad(items, index))
+    }
+  }
+  return None
+}
+
 /// Whether this array holds nothing.
 ///
 /// This is here to be here: `isEmpty` used to be a Rust arm in each
