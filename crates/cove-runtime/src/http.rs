@@ -1951,7 +1951,10 @@ mod tests {
         let answer = http
             .call(
                 "json",
-                vec![Value(Repr::Int(200)), Value(Repr::Map(Rc::new(map)))],
+                vec![
+                    Value(Repr::Int(200)),
+                    Value(Repr::Map(map.into_iter().collect())),
+                ],
             )
             .unwrap();
         assert_eq!(response_body(answer), "{\"a\":1}");

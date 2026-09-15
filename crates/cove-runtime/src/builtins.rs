@@ -780,7 +780,10 @@ pub fn call_associated(
                     .clone();
                 map.insert(key, value);
             }
-            Ok(Value(Repr::Map(Rc::new(map))))
+            // Ascending by construction: `BTreeMap::into_iter` already
+            // answers in `MapKey`'s `Ord`, which is exactly the order the
+            // sorted run `Repr::Map` stores needs.
+            Ok(Value(Repr::Map(map.into_iter().collect())))
         }
         // `Set.of` rejects a duplicate element for the same reason `Map.of`
         // rejects a duplicate key.
@@ -792,7 +795,7 @@ pub fn call_associated(
                     return Err(duplicate_key_error("Set.of", "element", &key, span));
                 }
             }
-            Ok(Value(Repr::Set(Rc::new(set))))
+            Ok(Value(Repr::Set(set.into_iter().collect())))
         }
         // `Duration.nanos(count)`: the one primitive builder left.
         // `micros` through `hours` are `std.duration.ofMicros` and its four
@@ -986,15 +989,18 @@ pub fn call_method(
                 let args = expect_args("Map.get", args, 1, span)?;
                 let key = to_map_key("Map.get", "map key", &args[0], span)?;
                 Ok(entries
-                    .get(&key)
-                    .cloned()
+                    .binary_search_by(|(k, _)| k.cmp(&key))
+                    .ok()
+                    .map(|at| entries[at].1.clone())
                     .map(Value::some)
                     .unwrap_or_else(Value::none))
             }
             "contains" => {
                 let args = expect_args("Map.contains", args, 1, span)?;
                 let key = to_map_key("Map.contains", "map key", &args[0], span)?;
-                Ok(Value(Repr::Bool(entries.contains_key(&key))))
+                Ok(Value(Repr::Bool(
+                    entries.binary_search_by(|(k, _)| k.cmp(&key)).is_ok(),
+                )))
             }
             "length" => {
                 expect_args(name, args, 0, span)?;
@@ -1005,35 +1011,70 @@ pub fn call_method(
             // resolves it to a call into `std.map.isEmpty` before this
             // function is ever asked about it — see
             // `cove_schema::builtins::standard_binding`.
-            // Ascending key order, matching the `BTreeMap` storage and the
-            // order `for` iterates.
+            // Ascending key order, matching the sorted run's own order and
+            // the order `for` iterates.
             "keys" => {
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Array(
-                    entries.keys().map(MapKey::to_value).collect(),
+                    entries.iter().map(|(k, _)| MapKey::to_value(k)).collect(),
                 )))
             }
             "values" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Array(entries.values().cloned().collect())))
+                Ok(Value(Repr::Array(
+                    entries.iter().map(|(_, v)| v.clone()).collect(),
+                )))
             }
             // `Map` is immutable, so `inserted`/`removed` return a new map
             // rather than write through `entries`; the past-participle names
-            // say so, unlike `Vector`'s mutating `push`.
+            // say so, unlike `Vector`'s mutating `push`. Each searches once
+            // and then copies around the insertion or removal point, the
+            // same shape the linear-memory backend's own `Map.inserted` and
+            // `Map.removed` build their new run with.
             "inserted" => {
                 let args = expect_args("Map.inserted", args, 2, span)?;
                 let value = args.remove(1);
                 let key = to_map_key("Map.inserted", "map key", &args[0], span)?;
-                let mut next = (**entries).clone();
-                next.insert(key, value);
-                Ok(Value(Repr::Map(Rc::new(next))))
+                let next: Rc<[(MapKey, Value)]> =
+                    match entries.binary_search_by(|(k, _)| k.cmp(&key)) {
+                        // A key already there keeps the key the map was
+                        // holding and takes the new value — the two keys
+                        // compare equal, so which one the answer carries is
+                        // not something a program can tell apart.
+                        Ok(at) => {
+                            let mut next = Vec::with_capacity(entries.len());
+                            next.extend_from_slice(&entries[..at]);
+                            next.push((entries[at].0.clone(), value));
+                            next.extend_from_slice(&entries[at + 1..]);
+                            next.into()
+                        }
+                        Err(at) => {
+                            let mut next = Vec::with_capacity(entries.len() + 1);
+                            next.extend_from_slice(&entries[..at]);
+                            next.push((key, value));
+                            next.extend_from_slice(&entries[at..]);
+                            next.into()
+                        }
+                    };
+                Ok(Value(Repr::Map(next)))
             }
             "removed" => {
                 let args = expect_args("Map.removed", args, 1, span)?;
                 let key = to_map_key("Map.removed", "map key", &args[0], span)?;
-                let mut next = (**entries).clone();
-                next.remove(&key);
-                Ok(Value(Repr::Map(Rc::new(next))))
+                let next: Rc<[(MapKey, Value)]> =
+                    match entries.binary_search_by(|(k, _)| k.cmp(&key)) {
+                        Ok(at) => {
+                            let mut next = Vec::with_capacity(entries.len() - 1);
+                            next.extend_from_slice(&entries[..at]);
+                            next.extend_from_slice(&entries[at + 1..]);
+                            next.into()
+                        }
+                        // A key that was never there answers a copy of the same
+                        // handle — sharing the run costs nothing and is what a
+                        // copy with the same contents means for an `Rc`.
+                        Err(_) => Rc::clone(entries),
+                    };
+                Ok(Value(Repr::Map(next)))
             }
             _ => Err(no_method("Map", name, span)),
         },
@@ -1041,7 +1082,7 @@ pub fn call_method(
             "contains" => {
                 let args = expect_args("Set.contains", args, 1, span)?;
                 let key = to_map_key("Set.contains", "set element", &args[0], span)?;
-                Ok(Value(Repr::Bool(items.contains(&key))))
+                Ok(Value(Repr::Bool(items.binary_search(&key).is_ok())))
             }
             "length" => {
                 expect_args(name, args, 0, span)?;
@@ -1061,16 +1102,34 @@ pub fn call_method(
             "inserted" => {
                 let args = expect_args("Set.inserted", args, 1, span)?;
                 let key = to_map_key("Set.inserted", "set element", &args[0], span)?;
-                let mut next = (**items).clone();
-                next.insert(key);
-                Ok(Value(Repr::Set(Rc::new(next))))
+                let next: Rc<[MapKey]> = match items.binary_search(&key) {
+                    // An element already there answers a copy and keeps the
+                    // member the set was holding, exactly as `Map.inserted`
+                    // keeps the stored key.
+                    Ok(_) => Rc::clone(items),
+                    Err(at) => {
+                        let mut next = Vec::with_capacity(items.len() + 1);
+                        next.extend_from_slice(&items[..at]);
+                        next.push(key);
+                        next.extend_from_slice(&items[at..]);
+                        next.into()
+                    }
+                };
+                Ok(Value(Repr::Set(next)))
             }
             "removed" => {
                 let args = expect_args("Set.removed", args, 1, span)?;
                 let key = to_map_key("Set.removed", "set element", &args[0], span)?;
-                let mut next = (**items).clone();
-                next.remove(&key);
-                Ok(Value(Repr::Set(Rc::new(next))))
+                let next: Rc<[MapKey]> = match items.binary_search(&key) {
+                    Ok(at) => {
+                        let mut next = Vec::with_capacity(items.len() - 1);
+                        next.extend_from_slice(&items[..at]);
+                        next.extend_from_slice(&items[at + 1..]);
+                        next.into()
+                    }
+                    Err(_) => Rc::clone(items),
+                };
+                Ok(Value(Repr::Set(next)))
             }
             _ => Err(no_method("Set", name, span)),
         },
