@@ -291,6 +291,45 @@ fn agree_with_literals(
     drop(template_heap);
 }
 
+/// **Both arms order two strings the same way, through the same hand-overs.**
+///
+/// Every pair of `suite::ordered_strings` — equal, a prefix, the ninth byte, a
+/// two-byte character, empty, straddling a chunk, and null, which orders as the
+/// empty string on the encoded tier and so on both arms — over
+/// `suite::ordering_strings`, with the frame, the outcome and the unpaid work
+/// compared by [`agree_over`] and the leaf's hand-overs compared here.
+#[test]
+fn both_arms_order_strings_alike() {
+    let mut names = Heap::new(2);
+    let strings = suite::ordered_strings(&mut names);
+    let build = || {
+        let mut heap = Heap::new(2);
+        suite::ordered_strings(&mut heap);
+        heap
+    };
+    let program = suite::ordering_strings();
+    for (x, a) in &strings {
+        for (y, b) in &strings {
+            let words = [*a, *b, 0, 0, 0];
+            let what = format!("{x} against {y}");
+            suite::forget_ordered();
+            let mut heap = build();
+            let mut left = words.to_vec();
+            let cranelift = suite::run_over::<Cranelift>(&program, &mut left, 0, &heap);
+            let cranelift_ordered = suite::ordered();
+            suite::forget_ordered();
+            heap = build();
+            let mut right = words.to_vec();
+            let template = suite::run_over::<Template>(&program, &mut right, 0, &heap);
+            let template_ordered = suite::ordered();
+            assert_eq!(cranelift.outcome, template.outcome, "outcome: {what}");
+            assert_eq!(left, right, "the frame: {what}");
+            assert_eq!(cranelift_ordered, template_ordered, "hand-overs: {what}");
+            agree_over(&what, &program, &words, 0, build);
+        }
+    }
+}
+
 /// The loop, the arithmetic, the comparisons, the copy and the trap — the whole
 /// subset, on both arms, word for word.
 #[test]

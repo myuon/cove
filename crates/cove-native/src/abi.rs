@@ -105,7 +105,8 @@
 //! generator keeps a Cove value in a register across an instruction
 //! boundary**, so at every place a collection can happen — the safepoint
 //! helper, the call helper, and now [`AllocFn`], [`BuiltinFn`], [`GrowableFn`] and
-//! [`RunCopyFn`], which are all the calls either arm emits — every live reference is already in
+//! [`RunCopyFn`], which are all the calls either arm emits that can reach one
+//! ([`OrderStrFn`] is a leaf and cannot) — every live reference is already in
 //! the slot the frame's static `Function::refs` map names. The collector walks exactly what it
 //! walks for an encoded frame, and there is no spill sequence, because there is
 //! nothing anywhere else to spill.
@@ -989,6 +990,53 @@ pub type RunCopyFn = unsafe extern "C" fn(
     elem: u32,
 ) -> u32;
 
+/// What the string-order helper is: [`Inst::Cmp`](cove_ir::Inst::Cmp) of
+/// [`Compare::Str`](cove_ir::Compare::Str) and
+/// [`CmpOp::Order`](cove_ir::CmpOp::Order) — ADR 0059's `value-order` over a
+/// `String` key — answered by the runtime and nothing else.
+///
+/// `a` and `b` are the two words the instruction's slots hold, which are string
+/// objects' linear addresses; the answer is `-1`, `0` or `1` as `a` sorts
+/// before, equal to or after `b` by bytes, and emitted code stores it into the
+/// destination as a whole `Int` word. It is `encoded.rs`'s `ORDER_STR` arm,
+/// `Machine::order_strings`, exactly: the bytes are compared where they are,
+/// a payload word at a time, and **a null address reads as the empty string**
+/// there, so it does here — this is not a refusal, because the encoded tier
+/// does not refuse one either.
+///
+/// It exists because a standard-library search over `String` keys asks it once
+/// per binary-search step (#378, Q4.14), and without it every such search —
+/// `Map.get`, `Map.inserted`, `Map.of` over `String` keys — kept its function in
+/// the VM behind a native-to-VM crossing.
+///
+/// # A leaf, and what that promises
+///
+/// Unlike every other helper in this table this one is a **leaf**, and the
+/// contract is what lets emitted code call it as it would call `memcmp`:
+///
+/// - it **never allocates, collects, polls or charges work** — it reads two
+///   objects' headers and payloads and nothing else — so it is not a safepoint,
+///   generated code publishes no unpaid work before the call, and a collector
+///   can never walk the frame during it;
+/// - it **never grows the stack or commits a heap chunk**, so neither
+///   [`NativeCtx::words`] nor [`NativeCtx::chunks`] can move: generated code
+///   neither re-derives the frame pointer nor forgets a cached chunk table after
+///   it (no republish, no `forget()`);
+/// - it **never raises and never synchronises the program counter**, so there
+///   is no `pc` operand and no [`Outcome`] to test: every call answers.
+///
+/// [`FieldLoadFn`] is not a safepoint either, but it may raise, and so its
+/// callers still test an outcome and leave; this one has nothing to leave with.
+/// A future change that made it do any of the three would have to add those
+/// steps to both code generators first.
+///
+/// # Safety
+///
+/// `ctx` is the pointer the entry point was called with. `a` and `b` are each
+/// nought or the linear address of a live `String` object, which the verifier's
+/// `Compare::Str` operand types guarantee.
+pub type OrderStrFn = unsafe extern "C" fn(ctx: *mut NativeCtx, a: u64, b: u64) -> i64;
+
 /// Which run instruction a [`RunCopyFn`] was handed.
 ///
 /// `#[repr(u32)]` with the values written out, for [`GrowableOp`]'s reason. The
@@ -1060,6 +1108,9 @@ pub struct NativeHelpers {
     pub field_load: FieldLoadFn,
     /// See [`FieldStoreFn`].
     pub field_store: FieldStoreFn,
+    /// See [`OrderStrFn`]. The one leaf: called with nothing published before
+    /// it and nothing re-derived after it.
+    pub order_str: OrderStrFn,
 }
 
 /// The mutable state one native call reads and writes.

@@ -81,6 +81,9 @@ pub struct HelperCalls {
     pub field_load: u64,
     /// [`FieldStoreFn`](cove_native::abi::FieldStoreFn): the same, storing.
     pub field_store: u64,
+    /// [`OrderStrFn`](cove_native::abi::OrderStrFn): a `String` key's
+    /// three-way order, the one leaf helper.
+    pub order_str: u64,
 }
 
 impl HelperCalls {
@@ -90,7 +93,7 @@ impl HelperCalls {
     }
 
     /// Each helper's name, as `NativeHelpers` spells the field, and its count.
-    pub fn rows(self) -> [(&'static str, u64); 10] {
+    pub fn rows(self) -> [(&'static str, u64); 11] {
         [
             ("safepoint", self.safepoint),
             ("call", self.call),
@@ -102,6 +105,7 @@ impl HelperCalls {
             ("run_copy", self.run_copy),
             ("field_load", self.field_load),
             ("field_store", self.field_store),
+            ("order_str", self.order_str),
         ]
     }
 }

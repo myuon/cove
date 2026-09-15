@@ -136,7 +136,7 @@ pub mod abi;
 
 pub use abi::{
     AllocFn, BuiltinFn, CallFn, CloseFn, Entry, GrowableFn, GrowableOp, NativeCtx, NativeHelpers,
-    OpenFn, Opened, Outcome, Raise, RunCopyFn, RunOp, SafepointFn, HEAP_CHUNK_SHIFT,
+    OpenFn, Opened, OrderStrFn, Outcome, Raise, RunCopyFn, RunOp, SafepointFn, HEAP_CHUNK_SHIFT,
     HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 

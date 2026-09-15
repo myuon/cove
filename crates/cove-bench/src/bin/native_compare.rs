@@ -713,6 +713,17 @@ unsafe extern "C" fn no_field_store(
     cove_native::Outcome::Raised.abi()
 }
 
+/// The string-order helper, for a scenario that orders no string. See
+/// [`no_call`]. A leaf has no outcome to refuse with, so it answers `0`.
+///
+/// # Safety
+///
+/// Reads nothing through any of its arguments.
+#[cfg(any(feature = "cranelift", feature = "template"))]
+unsafe extern "C" fn no_order_str(_ctx: *mut cove_native::NativeCtx, _a: u64, _b: u64) -> i64 {
+    0
+}
+
 #[cfg(any(feature = "cranelift", feature = "template"))]
 fn helpers() -> cove_native::NativeHelpers {
     cove_native::NativeHelpers {
@@ -726,6 +737,7 @@ fn helpers() -> cove_native::NativeHelpers {
         run_copy: no_run_copy,
         field_load: no_field_load,
         field_store: no_field_store,
+        order_str: no_order_str,
     }
 }
 

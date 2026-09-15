@@ -113,6 +113,16 @@ fn a_three_way_order_writes_minus_one_zero_or_one() {
 }
 
 #[test]
+fn a_string_order_is_the_runtimes_leaf() {
+    suite::a_string_order_is_the_runtimes_leaf::<Cranelift>();
+}
+
+#[test]
+fn only_a_strings_order_is_in_the_slice() {
+    suite::only_a_strings_order_is_in_the_slice::<Cranelift>();
+}
+
+#[test]
 fn a_copy_moves_every_word_and_does_not_smear() {
     suite::a_copy_moves_every_word_and_does_not_smear::<Cranelift>();
 }
