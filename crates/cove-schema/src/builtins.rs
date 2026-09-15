@@ -935,6 +935,30 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.map",
         function: "removed",
     },
+    // A keyed projection is Cove (#378, P4-7): `Set.toArray` is a run slice of
+    // the whole set, and a map's `keys` and `values` a loop over its entries
+    // pushing onto a vector of exact room.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Set",
+        method: "toArray",
+        module: "std.set",
+        function: "toArray",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Map",
+        method: "keys",
+        module: "std.map",
+        function: "keys",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Map",
+        method: "values",
+        module: "std.map",
+        function: "values",
+    },
     StdBinding {
         kind: StdBindingKind::Method,
         receiver: "String",
@@ -1447,7 +1471,8 @@ impl CoreIntrinsicSchema {
 /// a growable vector with room for exactly the run it will hold;
 /// [`CORE_EXTEND_FROM_SET`] and [`CORE_EXTEND_FROM_MAP`], a range of the old
 /// run copied onto it; and [`CORE_SET_FINISH`] and [`CORE_MAP_FINISH`], the
-/// keyed finish that relabels it into the new set or map.
+/// keyed finish that relabels it into the new set or map. `Set.toArray` is
+/// [`CORE_SET_SLICE`], a run slice out of a set (P4-7).
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_PUSH,
@@ -1477,6 +1502,7 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_EXTEND_FROM_MAP,
     CORE_SET_FINISH,
     CORE_MAP_FINISH,
+    CORE_SET_SLICE,
 ];
 
 /// Every core intrinsic.
@@ -2179,6 +2205,34 @@ pub const CORE_MAP_FINISH: CoreIntrinsicSchema = CoreIntrinsicSchema {
         )),
     }],
     result: BuiltinType::Map(&BuiltinType::Param("K"), &BuiltinType::Param("V")),
+    fresh: false,
+};
+
+/// `core.setSlice<T>(items: Set<T>, from: Int, count: Int) -> Array<T>`: a
+/// fresh array of the `count` members of `items` from `from`, which the caller
+/// has already held inside the set.
+///
+/// [`CORE_ARRAY_SLICE`] with a set for its source: `Inst::RunSlice` over
+/// `Storage::Words` of the member, which reads a `Set`'s run as the elements it
+/// is (#378, P4-5) and answers the fixed `Array<T>`.
+pub const CORE_SET_SLICE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "setSlice",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "items",
+            ty: BuiltinType::Set(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "from",
+            ty: BuiltinType::Int,
+        },
+        ParamSchema {
+            name: "count",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Array(&BuiltinType::Param("T")),
     fresh: false,
 };
 

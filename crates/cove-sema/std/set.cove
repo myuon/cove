@@ -66,6 +66,17 @@ export fn removed<T>(items: Set<T>, element: T) -> Set<T> {
   return core.setFinish(out)
 }
 
+/// The members of this set as an `Array`, in ascending order.
+///
+/// Which is the order they are already in, so this copies rather than sorts:
+/// ascending is how a set is stored, and `toArray()` is where a program says
+/// it wants that order to be its own. One run slice of the whole set (ADR 0058,
+/// #378 P4-7) — a set's run read as the array of its members it already is,
+/// at the member's stride.
+export fn toArray<T>(items: Set<T>) -> Array<T> {
+  core.setSlice(items, 0, items.length())
+}
+
 /// Where `element` is among `items`' ascending members: its position when it
 /// is there, and `-(where it would go) - 1` when it is not.
 ///

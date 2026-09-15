@@ -122,14 +122,14 @@ impl Body<'_> {
             Ty::Range => self.range_method(expr, base, name, args),
             Ty::Array(elem) => {
                 let elem = (**elem).clone();
-                self.array_method(expr, base, &elem, name, args, want)
+                self.array_method(expr, base, &elem, name, args)
             }
             Ty::Vector(elem) => {
                 let elem = (**elem).clone();
-                self.vector_method(expr, base, &elem, name, args, want)
+                self.vector_method(expr, base, &elem, name, args)
             }
-            Ty::Set(_) => self.set_method(expr, base, name, args, want),
-            Ty::Map(..) => self.map_method(expr, base, name, args, want),
+            Ty::Set(_) => self.set_method(expr, base, name, args),
+            Ty::Map(..) => self.map_method(expr, base, name, args),
             // A scope and a task handle are the two values whose operations
             // are the scheduler's rather than the heap's, so they are
             // instructions rather than builtins: `cove_ir::lower::tasks` is
@@ -400,9 +400,9 @@ impl Body<'_> {
     /// pair itself: [ADR
     /// 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
     /// asks that a builtin be identified statically, not matched by string at
-    /// run time. Every caller's pair is a member of [`MACHINE_METHODS`],
-    /// [`ASSOCIATED`] or `cove_ir::lower::collections`'s own `HANDED_OVER` —
-    /// tables this lowering is written against — so a pair that resolves to
+    /// run time. Every caller's pair is a member of [`MACHINE_METHODS`] or
+    /// [`ASSOCIATED`], or a keyed literal's `of` — what this lowering is
+    /// written against — so a pair that resolves to
     /// nothing is a mismatch between this module and `cove_ir::intrinsic`
     /// and is reported as the internal bug it is rather than lowered as a
     /// call nothing answers.

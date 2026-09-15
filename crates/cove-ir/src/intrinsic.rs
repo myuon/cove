@@ -57,10 +57,7 @@ pub enum Intrinsic {
     StringToLower,
     StringFromCodePoint,
     SetOf,
-    SetToArray,
     MapOf,
-    MapKeys,
-    MapValues,
     IntToFloat,
     IntParse,
     IntParseRadix,
@@ -102,10 +99,7 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringToLower,
     Intrinsic::StringFromCodePoint,
     Intrinsic::SetOf,
-    Intrinsic::SetToArray,
     Intrinsic::MapOf,
-    Intrinsic::MapKeys,
-    Intrinsic::MapValues,
     Intrinsic::IntToFloat,
     Intrinsic::IntParse,
     Intrinsic::IntParseRadix,
@@ -152,10 +146,7 @@ impl Intrinsic {
             Intrinsic::StringToLower => "String",
             Intrinsic::StringFromCodePoint => "String",
             Intrinsic::SetOf => "Set",
-            Intrinsic::SetToArray => "Set",
             Intrinsic::MapOf => "Map",
-            Intrinsic::MapKeys => "Map",
-            Intrinsic::MapValues => "Map",
             Intrinsic::IntToFloat => "Int",
             Intrinsic::IntParse => "Int",
             Intrinsic::IntParseRadix => "Int",
@@ -195,10 +186,7 @@ impl Intrinsic {
             Intrinsic::StringToLower => "toLower",
             Intrinsic::StringFromCodePoint => "fromCodePoint",
             Intrinsic::SetOf => "of",
-            Intrinsic::SetToArray => "toArray",
             Intrinsic::MapOf => "of",
-            Intrinsic::MapKeys => "keys",
-            Intrinsic::MapValues => "values",
             Intrinsic::IntToFloat => "toFloat",
             Intrinsic::IntParse => "parse",
             Intrinsic::IntParseRadix => "parseRadix",
@@ -301,18 +289,12 @@ impl Intrinsic {
             // `slice`, `toVector`, `push`, `set`, `pop`, `remove`, `freeze` and
             // `toArray` are each Cove over run instructions.
 
-            // A `Set` or a `Map` is immutable, so every one below allocates
-            // a new run rather than writing through the receiver — none of
-            // this family ever carries `WRITES_MEMORY` — and opens or copies a
-            // run proportional to it. The membership tests, `get`, `inserted`
-            // and `removed` are not here: they are `std.set` and `std.map`
-            // binary searches over the three `Value` intrinsics at the end, and
-            // run copies and a keyed finish (ADR 0059).
-            Intrinsic::SetOf
-            | Intrinsic::SetToArray
-            | Intrinsic::MapOf
-            | Intrinsic::MapKeys
-            | Intrinsic::MapValues => raise
+            // A keyed literal allocates its run and opens it once per element.
+            // Nothing else of a `Set` or a `Map` is here: the membership tests,
+            // `get`, `inserted`, `removed`, `toArray`, `keys` and `values` are
+            // `std.set` and `std.map` over the three `Value` intrinsics at the
+            // end, run copies and slices, and a keyed finish (ADR 0059).
+            Intrinsic::SetOf | Intrinsic::MapOf => raise
                 .union(E::READS_MEMORY)
                 .union(E::MAY_ALLOCATE)
                 .union(E::MAY_COLLECT)
@@ -496,10 +478,7 @@ mod tests {
                 | Intrinsic::StringToLower
                 | Intrinsic::StringFromCodePoint
                 | Intrinsic::SetOf
-                | Intrinsic::SetToArray
                 | Intrinsic::MapOf
-                | Intrinsic::MapKeys
-                | Intrinsic::MapValues
                 | Intrinsic::IntToFloat
                 | Intrinsic::IntParse
                 | Intrinsic::IntParseRadix

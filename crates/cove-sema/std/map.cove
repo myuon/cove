@@ -85,6 +85,31 @@ export fn removed<K, V>(entries: Map<K, V>, key: K) -> Map<K, V> {
   return core.mapFinish(out)
 }
 
+/// The keys of this map as an `Array`, in ascending order.
+///
+/// A loop over the entries in the order the map keeps them, each key pushed
+/// onto a vector with room for exactly as many and the vector finished into the
+/// array (#378, P4-7). No program in the corpus asks for it on a hot path, so
+/// it is not a run operation of its own.
+export fn keys<K, V>(entries: Map<K, V>) -> Array<K> {
+  let out: Vector<K> = core.vectorWithCapacity(entries.length())
+  for entry in entries {
+    core.vectorPush(out, entry.key)
+  }
+  core.vectorFinish(out)
+}
+
+/// The values of this map as an `Array`, in ascending order of their keys.
+///
+/// [`keys`]' loop, pushing each entry's value.
+export fn values<K, V>(entries: Map<K, V>) -> Array<V> {
+  let out: Vector<V> = core.vectorWithCapacity(entries.length())
+  for entry in entries {
+    core.vectorPush(out, entry.value)
+  }
+  core.vectorFinish(out)
+}
+
 /// Where `key` is among `entries`' ascending keys: its entry's position when
 /// it is there, and `-(where it would go) - 1` when it is not.
 ///

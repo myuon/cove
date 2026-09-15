@@ -148,6 +148,9 @@ impl Body<'_> {
                 want,
             ),
             ("setFinish" | "mapFinish", [run]) => self.core_keyed_finish(expr, &run.value, want),
+            ("setSlice", [items, from, count]) => {
+                self.core_set_slice(expr, &items.value, &from.value, &count.value, want)
+            }
             _ => self.gap(&format!("`core.{name}`"), expr),
         }
     }
@@ -1159,6 +1162,45 @@ impl Body<'_> {
         );
         self.release(index, expr.span);
         self.release(obj, expr.span);
+        dst
+    }
+
+    /// `core.setSlice(items, from, count)`: a fresh `Array` of the `count`
+    /// members of `items` from `from`.
+    ///
+    /// One [`Inst::RunSlice`] whose source is the set itself — its run of
+    /// members, which the machine reads at the member's stride — answering the
+    /// `Array<T>` layout, declared here by asking for it. `std.set.toArray`
+    /// asks for the whole set, so there is no range policy above it.
+    fn core_set_slice(
+        &mut self,
+        expr: &Expr,
+        items: &Expr,
+        from: &Expr,
+        count: &Expr,
+        want: Option<Dest>,
+    ) -> Val {
+        let Some(ty) = self.settled_ty(items) else {
+            return self.dead(expr);
+        };
+        let Ty::Set(of) = ty.clone() else {
+            return self.gap("`core.setSlice` over something that is not a `Set`", expr);
+        };
+        let (Some(_), Some(elem), Some(target)) = (
+            self.layout(&ty, items.span),
+            self.layout(&of, items.span),
+            self.layout(&Ty::Array(of), expr.span),
+        ) else {
+            return self.dead(expr);
+        };
+        let src = self.expr(items);
+        let at = self.expr(from);
+        let many = self.expr(count);
+        let dst = self.answer_at(want, target);
+        self.run_slice_words(dst.slot, target, elem, &src, &at, &many, expr.span);
+        self.release(many, expr.span);
+        self.release(at, expr.span);
+        self.release(src, expr.span);
         dst
     }
 

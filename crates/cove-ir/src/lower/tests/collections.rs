@@ -558,8 +558,9 @@ fn @m.f(Map) -> Option
 }
 
 /// `keys` and `values` answer `Array`s in ascending key order, which is the
-/// order the entries are already in — so the machine copies rather than
-/// sorts.
+/// order the entries are already in — so `std.map.keys` pushes each key in
+/// that order rather than sorting (#378, P4-7), and the call answers straight
+/// into the destination the builtin did.
 #[test]
 fn a_map_answers_its_keys_as_an_array() {
     assert_eq!(
@@ -571,7 +572,7 @@ fn a_map_answers_its_keys_as_an_array() {
 fn @m.f(Map) -> Array
   frame 2: s0!:ref s1:ref
   local m -> s0:Map [0, 2)
-     0  call-builtin s1:Array Map.keys (s0:Map)
+     0  call s1:Array std.map.keys<String, Int> (s0:Map)
      1  return s1:Array
 "
     );

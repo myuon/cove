@@ -718,6 +718,25 @@ pub fn call_core(
             let (key, value) = &entries[at];
             Ok(map_entry(key, value))
         }
+        // The copy beneath `std.set.toArray`: the members, in the order the set
+        // keeps them, as the values they are.
+        "setSlice" => {
+            let Value(Repr::Set(items)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Set", &args[0], span));
+            };
+            let range = core_range(
+                &shown,
+                "runSlice",
+                "element(s)",
+                &args[1],
+                &args[2],
+                items.len(),
+                span,
+            )?;
+            Ok(Value(Repr::Array(
+                items[range].iter().map(MapKey::to_value).collect(),
+            )))
+        }
         // The growable vector a keyed update is built in, with room for the run
         // it will hold. A `Vec`'s capacity is a hint here as it is for a byte
         // buffer: nothing a program asks reads it back. A negative capacity is
@@ -1188,20 +1207,7 @@ pub fn call_method(
             // resolves it to a call into `std.map.isEmpty` before this
             // function is ever asked about it — see
             // `cove_schema::builtins::standard_binding`.
-            // Ascending key order, matching the sorted run's own order and
-            // the order `for` iterates.
-            "keys" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Array(
-                    entries.iter().map(|(k, _)| MapKey::to_value(k)).collect(),
-                )))
-            }
-            "values" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Array(
-                    entries.iter().map(|(_, v)| v.clone()).collect(),
-                )))
-            }
+            // `keys` and `values` are `std.map` loops over the entries (P4-7).
             // `inserted` and `removed` do not reach this arm either: each is
             // `std.map`'s seek and a growable run finished into the new map
             // (#378, P4-6), which `call_core` executes over this sorted run.
@@ -1219,13 +1225,7 @@ pub fn call_method(
             // resolves it to a call into `std.set.isEmpty` before this
             // function is ever asked about it — see
             // `cove_schema::builtins::standard_binding`.
-            "toArray" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Array(
-                    items.iter().map(MapKey::to_value).collect(),
-                )))
-            }
-            // `inserted` and `removed` are `std.set`'s, as `Map`'s are.
+            // `toArray`, `inserted` and `removed` are `std.set`'s (P4-6, P4-7).
             _ => Err(no_method("Set", name, span)),
         },
         Value(Repr::Str(text)) => match name {

@@ -237,25 +237,6 @@ fn error_value(machine: &mut Machine, message: &str) -> Result<Vec<u64>, Runtime
     Ok(vec![text])
 }
 
-/// An `Array` of `elem` holding `words`, which is the elements' words
-/// flattened at `elem`'s width.
-///
-/// The caller holds `words` rooted: every use of this reads them out of an
-/// operand — the receiver's own elements, or the arguments themselves — and
-/// an operand is a slot of the frame that called the builtin, which the
-/// collector already walks.
-pub(super) fn array_of(
-    machine: &mut Machine,
-    elem: LayoutId,
-    words: &[u64],
-) -> Result<u64, RuntimeError> {
-    let id = elements(machine.program(), elem, false)?;
-    let stride = machine.words_of(elem).max(1) as usize;
-    let addr = machine.new_object(id, (words.len() / stride) as u32)?;
-    machine.set_payload_run(addr, 0, words);
-    Ok(addr)
-}
-
 /// An `Array<String>` of `parts`.
 ///
 /// The array is allocated first and rooted, and each string is written into
@@ -432,19 +413,6 @@ mod tests {
         );
     }
 
-    /// An `Array<Point>` is a run of two-word elements, so the words a
-    /// builder is handed are the elements flattened and the header's length
-    /// is what the stride divides them into.
-    #[test]
-    fn a_run_of_multiword_elements_counts_elements_and_not_words() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let point = crate::vm::builtins::tests::named(&program, "Point");
-        let addr = array_of(&mut machine, point, &[1, 2, 3, 4]).unwrap();
-        assert_eq!(machine.object_len(addr), 2);
-        assert_eq!(machine.payload_run(addr, 0, 4), vec![1, 2, 3, 4]);
-    }
-
     /// A program that never mentions a family has no layout for it. Nothing a
     /// checked program does reaches this — the operation whose result it is
     /// was type-checked, so the lowering interned the layout — which is why
@@ -464,7 +432,7 @@ mod tests {
             error.message,
             "this program describes no `Option` for a value of that shape to be built as"
         );
-        let error = array_of(&mut machine, ints, &[]).unwrap_err();
+        let error = elements(&program, ints, false).unwrap_err();
         assert_eq!(
             error.message,
             "this program describes no `Array` for a value of that shape to be built as"

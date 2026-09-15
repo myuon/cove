@@ -75,6 +75,7 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `extendFromMap` | `core.extendFromMap(out: Vector<MapEntry<K, V>>, entries: Map<K, V>, from: Int, count: Int) -> Unit` |
 | `setFinish` | `core.setFinish(run: Vector<T>) -> Set<T>` |
 | `mapFinish` | `core.mapFinish(run: Vector<MapEntry<K, V>>) -> Map<K, V>` |
+| `setSlice` | `core.setSlice(items: Set<T>, from: Int, count: Int) -> Array<T>` |
 
 ## Builtin types
 
@@ -149,8 +150,8 @@ written as a namespace; binds `K`, `V`.
 | `length() -> Int` |  |  |  | `machine` |
 | `isEmpty() -> Bool` |  |  |  | `std.map.isEmpty` |
 | `contains(key: K) -> Bool` |  |  |  | `std.map.contains` |
-| `keys() -> Array<K>` |  |  |  | `machine` |
-| `values() -> Array<V>` |  |  |  | `machine` |
+| `keys() -> Array<K>` |  |  |  | `std.map.keys` |
+| `values() -> Array<V>` |  |  |  | `std.map.values` |
 | `inserted(key: K, value: V) -> Map<K, V>` |  |  |  | `std.map.inserted` |
 | `removed(key: K) -> Map<K, V>` |  |  |  | `std.map.removed` |
 | `snapshot() -> Self` |  |  |  | `machine` |
@@ -177,7 +178,7 @@ written as a namespace; binds `T`.
 | --- | --- | --- | --- | --- |
 | `length() -> Int` |  |  |  | `machine` |
 | `isEmpty() -> Bool` |  |  |  | `std.set.isEmpty` |
-| `toArray() -> Array<T>` |  |  |  | `machine` |
+| `toArray() -> Array<T>` |  |  |  | `std.set.toArray` |
 | `contains(element: T) -> Bool` |  |  |  | `std.set.contains` |
 | `inserted(element: T) -> Set<T>` |  |  |  | `std.set.inserted` |
 | `removed(element: T) -> Set<T>` |  |  |  | `std.set.removed` |
