@@ -1824,6 +1824,35 @@ impl Memory {
         self.stack.words[index] = word;
     }
 
+    /// The `words` words at `slot` of the frame based at `base`, borrowed.
+    ///
+    /// [`Memory::slot`] for a value location wider than a word: what an
+    /// intrinsic reads a wide operand through, in place, rather than copying
+    /// it out first (#378, P5-4).
+    #[inline(always)]
+    pub(crate) fn slots(&self, base: u64, slot: u32, words: u32) -> &[u64] {
+        let at = base + slot as u64;
+        debug_assert!(
+            is_stack(at) && self.holds(at, words),
+            "a {words}-word frame run at {at} stays on the stack"
+        );
+        let index = self.stack.at(at);
+        &self.stack.words[index..index + words as usize]
+    }
+
+    /// The same, to be written: where an intrinsic writes an answer wider
+    /// than a word.
+    #[inline(always)]
+    pub(crate) fn slots_mut(&mut self, base: u64, slot: u32, words: u32) -> &mut [u64] {
+        let at = base + slot as u64;
+        debug_assert!(
+            is_stack(at) && self.holds(at, words),
+            "a {words}-word frame run at {at} stays on the stack"
+        );
+        let index = self.stack.at(at);
+        &mut self.stack.words[index..index + words as usize]
+    }
+
     /// Copies `words` words from one frame slot to another.
     ///
     /// [`Memory::slot`]'s reason for a run rather than a word. Both addresses

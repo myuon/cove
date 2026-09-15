@@ -767,8 +767,9 @@ unsafe extern "C" fn field_store(
 /// that matters: it is the cold path of a builtin whose fast path emitted code
 /// takes, and it exists because the messages those cold paths produce name a
 /// rendered `Value` that `cove-native` cannot see. It is `encoded.rs`'s
-/// `CALL_BUILTIN` arm and nothing else — the same `Machine::call_builtin`, the same
-/// operand buffer, the same dispatch by two strings — so the sentence a refusal
+/// `CALL_BUILTIN` arm and nothing else — the same `Machine::call_builtin`, reading
+/// its operands out of the same frame and writing its answer into the same
+/// destination, with no buffer between (#378, P5-4) — so the sentence a refusal
 /// produces is the one the VM has always produced, rather than a second copy of it
 /// in a code generator.
 ///

@@ -45,7 +45,7 @@
 use cove_ir::{LayoutId, Program, Repr, Shape};
 
 use crate::error::RuntimeError;
-use crate::vm::builtins::operand::{self, Operand, Word};
+use crate::vm::builtins::operand::{self, Dest, Frame, Operand, Word};
 use crate::vm::exec::Machine;
 
 /// A value: the layout that describes it, and the words it occupies.
@@ -55,9 +55,21 @@ use crate::vm::exec::Machine;
 type Held<'w> = (LayoutId, &'w [u64]);
 
 /// `a == b`, as the `Bool` word `0` or `1`.
-pub(super) fn equals(machine: &Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    debug_assert_eq!(operands.len(), 2, "`Any.equals` was verified to take two");
-    Ok(same(machine, operands[0], operands[1])? as u64)
+pub(super) fn equals(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let equal = {
+        let machine = &*machine;
+        same(
+            machine,
+            frame.operand(machine, 0),
+            frame.operand(machine, 1),
+        )?
+    };
+    dest.word(machine, equal as u64);
+    Ok(())
 }
 
 /// Whether two values of `layout` are equal, given their words.
@@ -743,15 +755,9 @@ mod tests {
         let int = scalar(&program, Repr::Int);
         let option = two_case(&program, "Option", "Some", int);
 
-        let some = make::built(&mut machine, option, |m, l, out| {
-            make::some(m, l, &[1], out)
-        });
-        let alike = make::built(&mut machine, option, |m, l, out| {
-            make::some(m, l, &[1], out)
-        });
-        let other = make::built(&mut machine, option, |m, l, out| {
-            make::some(m, l, &[2], out)
-        });
+        let some = make::built(&mut machine, option, |m, dest| make::some(m, dest, &[1]));
+        let alike = make::built(&mut machine, option, |m, dest| make::some(m, dest, &[1]));
+        let other = make::built(&mut machine, option, |m, dest| make::some(m, dest, &[2]));
         let none = make::built(&mut machine, option, make::none);
         assert!(same_value(&machine, option, &some, &alike).unwrap());
         assert!(!same_value(&machine, option, &some, &other).unwrap());

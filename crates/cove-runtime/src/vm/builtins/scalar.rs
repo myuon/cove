@@ -15,17 +15,10 @@
 //! P5-2), because a conversion of one word is not a runtime call's worth of
 //! work.
 
-use cove_ir::LayoutId;
-
 use crate::error::RuntimeError;
-use crate::vm::builtins::operand::Operand;
+use crate::vm::builtins::operand::{Dest, Frame};
 use crate::vm::builtins::{make, operand};
 use crate::vm::exec::Machine;
-
-/// The `Float` a method was called on.
-fn float_receiver(machine: &Machine, receiver: Operand<'_>) -> f64 {
-    operand::float(machine, receiver)
-}
 
 // --- Int -------------------------------------------------------------------
 
@@ -36,15 +29,13 @@ fn float_receiver(machine: &Machine, receiver: Operand<'_>) -> f64 {
 /// an `Err` here.
 pub(super) fn int_parse(
     machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
+    frame: Frame<'_>,
+    dest: Dest,
 ) -> Result<(), RuntimeError> {
-    let args = operand::free("Int.parse", operands, 1);
-    let text = operand::text(machine, args[0])?;
+    let text = operand::text(machine, frame, 0)?;
     match text.parse::<i64>() {
-        Ok(value) => make::ok(machine, result, &[value as u64], out),
-        Err(_) => make::failed(machine, result, &format!("`{text}` is not an Int"), out),
+        Ok(value) => make::ok(machine, dest, &[value as u64]),
+        Err(_) => make::failed(machine, dest, &format!("`{text}` is not an Int")),
     }
 }
 
@@ -55,21 +46,19 @@ pub(super) fn int_parse(
 /// radix that does exist is the data's failure and answers `Err`.
 pub(super) fn int_parse_radix(
     machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
+    frame: Frame<'_>,
+    dest: Dest,
 ) -> Result<(), RuntimeError> {
-    let args = operand::free("Int.parseRadix", operands, 2);
-    let text = operand::text(machine, args[0])?;
-    let radix = operand::int(machine, args[1]);
+    let text = operand::text(machine, frame, 0)?;
+    let radix = operand::int(machine, frame, 1);
     let Some(base) = (2..=36).contains(&radix).then_some(radix as u32) else {
         return Err(operand::radix(radix));
     };
     match i64::from_str_radix(&text, base) {
-        Ok(value) => make::ok(machine, result, &[value as u64], out),
+        Ok(value) => make::ok(machine, dest, &[value as u64]),
         Err(_) => {
             let message = format!("`{text}` is not an Int in radix {base}");
-            make::failed(machine, result, &message, out)
+            make::failed(machine, dest, &message)
         }
     }
 }
@@ -79,48 +68,39 @@ pub(super) fn int_parse_radix(
 /// `Float.toInt() -> Result<Int, Error>`, truncating toward zero.
 pub(super) fn float_to_int(
     machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
+    frame: Frame<'_>,
+    dest: Dest,
 ) -> Result<(), RuntimeError> {
-    let (self_, _) = operand::method("toInt", operands, 0);
-    let x = float_receiver(machine, self_);
+    let x = operand::float(machine, frame, 0);
     if x.is_nan() {
         return make::failed(
             machine,
-            result,
+            dest,
             "`Float.toInt` cannot convert `NaN`, which is not a number",
-            out,
         );
     }
     if x.is_infinite() {
         let message = format!("`Float.toInt` cannot convert `{x}`, which has no truncation");
-        return make::failed(machine, result, &message, out);
+        return make::failed(machine, dest, &message);
     }
     let truncated = x.trunc();
     if truncated < i64::MIN as f64 || truncated >= i64::MAX as f64 {
         let message = format!("`Float.toInt` cannot convert `{x}`, which is outside Int's range");
-        return make::failed(machine, result, &message, out);
+        return make::failed(machine, dest, &message);
     }
-    make::ok(machine, result, &[truncated as i64 as u64], out)
+    make::ok(machine, dest, &[truncated as i64 as u64])
 }
 
 /// `Float.round() -> Float`.
-pub(super) fn float_round(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("round", operands, 0);
-    Ok(float_receiver(machine, self_).round().to_bits())
+pub(super) fn float_round(machine: &mut Machine, frame: Frame<'_>, dest: Dest) {
+    let x = operand::float(machine, frame, 0);
+    dest.word(machine, x.round().to_bits());
 }
 
 /// `Float.abs() -> Float`.
-pub(super) fn float_abs(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("abs", operands, 0);
-    Ok(float_receiver(machine, self_).abs().to_bits())
+pub(super) fn float_abs(machine: &mut Machine, frame: Frame<'_>, dest: Dest) {
+    let x = operand::float(machine, frame, 0);
+    dest.word(machine, x.abs().to_bits());
 }
 
 /// `Float.sqrt() -> Float`.
@@ -133,49 +113,40 @@ pub(super) fn float_abs(
 /// IEEE 754 does, and `Float`'s other primitives already leave `NaN` and
 /// signed-zero semantics undecided — see issue #254 — so this does not
 /// decide them either.
-pub(super) fn float_sqrt(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("sqrt", operands, 0);
-    Ok(float_receiver(machine, self_).sqrt().to_bits())
+pub(super) fn float_sqrt(machine: &mut Machine, frame: Frame<'_>, dest: Dest) {
+    let x = operand::float(machine, frame, 0);
+    dest.word(machine, x.sqrt().to_bits());
 }
 
 /// `Float.min(other) -> Float`.
-pub(super) fn float_min(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("Float.min", operands, 1);
-    let x = float_receiver(machine, self_);
-    let other = operand::float(machine, args[0]);
-    Ok(x.min(other).to_bits())
+pub(super) fn float_min(machine: &mut Machine, frame: Frame<'_>, dest: Dest) {
+    let x = operand::float(machine, frame, 0);
+    let other = operand::float(machine, frame, 1);
+    dest.word(machine, x.min(other).to_bits());
 }
 
 /// `Float.max(other) -> Float`.
-pub(super) fn float_max(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("Float.max", operands, 1);
-    let x = float_receiver(machine, self_);
-    let other = operand::float(machine, args[0]);
-    Ok(x.max(other).to_bits())
+pub(super) fn float_max(machine: &mut Machine, frame: Frame<'_>, dest: Dest) {
+    let x = operand::float(machine, frame, 0);
+    let other = operand::float(machine, frame, 1);
+    dest.word(machine, x.max(other).to_bits());
 }
 
 /// `Float.format(digits) -> String`, fixed-point.
 pub(super) fn float_format(
     machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("Float.format", operands, 1);
-    let x = float_receiver(machine, self_);
-    let digits = operand::int(machine, args[0]);
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let x = operand::float(machine, frame, 0);
+    let digits = operand::int(machine, frame, 1);
     if !(0..=17).contains(&digits) {
         return Err(operand::format_digits(digits));
     }
     let text = format!("{:.*}", digits as usize, x);
-    machine.new_string(&text)
+    let word = machine.new_string(&text)?;
+    dest.word(machine, word);
+    Ok(())
 }
 
 /// `Float.parse(text) -> Result<Float, Error>`.
@@ -185,15 +156,13 @@ pub(super) fn float_format(
 /// the same thing `Int.parse` does.
 pub(super) fn float_parse(
     machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
+    frame: Frame<'_>,
+    dest: Dest,
 ) -> Result<(), RuntimeError> {
-    let args = operand::free("Float.parse", operands, 1);
-    let text = operand::text(machine, args[0])?;
+    let text = operand::text(machine, frame, 0)?;
     match text.parse::<f64>() {
-        Ok(value) => make::ok(machine, result, &[value.to_bits()], out),
-        Err(_) => make::failed(machine, result, &format!("`{text}` is not a Float"), out),
+        Ok(value) => make::ok(machine, dest, &[value.to_bits()]),
+        Err(_) => make::failed(machine, dest, &format!("`{text}` is not a Float")),
     }
 }
 

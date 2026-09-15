@@ -29,49 +29,58 @@
 use cove_ir::{LayoutId, Shape};
 
 use crate::error::RuntimeError;
-use crate::vm::builtins::operand::Operand;
+use crate::vm::builtins::operand::{Dest, Frame};
 use crate::vm::builtins::{make, operand};
 use crate::vm::exec::Machine;
 
-/// The text of a `String` receiver.
-///
-/// This copies the whole object and validates it, once per call. The
-/// receiver is not re-checked for being a `String`: the verifier held the
-/// call to its signature (#378, P5-3).
-fn receiver(machine: &Machine, receiver: Operand<'_>) -> Result<String, RuntimeError> {
-    operand::text(machine, receiver)
-}
-
 /// `String.length() -> Int`, in characters.
-pub(super) fn length(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("length", operands, 0);
-    Ok(receiver(machine, self_)?.chars().count() as u64)
+pub(super) fn length(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let count = operand::text(machine, frame, 0)?.chars().count();
+    dest.word(machine, count as u64);
+    Ok(())
 }
 
 /// `String.words() -> Array<String>`, split on ASCII whitespace.
-pub(super) fn words(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("words", operands, 0);
-    let text = receiver(machine, self_)?;
+pub(super) fn words(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
     let parts: Vec<&str> = text.split_ascii_whitespace().collect();
-    make::strings(machine, &parts)
+    let array = make::strings(machine, &parts)?;
+    dest.word(machine, array);
+    Ok(())
 }
 
 /// `String.chars() -> Array<String>`.
 ///
 /// A character in Cove is a `String` of length 1; there is no `Character`
 /// type for this to answer instead.
-pub(super) fn chars(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("chars", operands, 0);
-    let text = receiver(machine, self_)?;
+pub(super) fn chars(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
     let parts: Vec<String> = text.chars().map(String::from).collect();
-    make::strings(machine, &parts)
+    let array = make::strings(machine, &parts)?;
+    dest.word(machine, array);
+    Ok(())
 }
 
 /// `String.split(separator) -> Array<String>`.
-pub(super) fn split(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("String.split", operands, 1);
-    let text = receiver(machine, self_)?;
-    let separator = operand::text(machine, args[0])?;
+pub(super) fn split(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
+    let separator = operand::text(machine, frame, 1)?;
     if separator.is_empty() {
         return Err(operand::empty_needle(
             "String.split",
@@ -80,14 +89,19 @@ pub(super) fn split(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u
         ));
     }
     let parts: Vec<&str> = text.split(&separator).collect();
-    make::strings(machine, &parts)
+    let array = make::strings(machine, &parts)?;
+    dest.word(machine, array);
+    Ok(())
 }
 
 /// `String.join(parts) -> String`, where the receiver is the separator.
-pub(super) fn join(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("String.join", operands, 1);
-    let separator_addr = operand::string(machine, self_);
-    let addr = args[0].word();
+pub(super) fn join(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let separator_addr = operand::string(machine, frame, 0);
+    let addr = frame.word(machine, 1);
     // An `Array<String>` is what the verifier held `parts` to (#378, P5-3),
     // so its element layout is not asked again: it is a run of one-word
     // references, collected without asking each of them what it is.
@@ -106,7 +120,9 @@ pub(super) fn join(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u6
         }
         parts.push(part);
     }
-    joined_bytes(machine, separator_addr, &parts)
+    let joined = joined_bytes(machine, separator_addr, &parts)?;
+    dest.word(machine, joined);
+    Ok(())
 }
 
 /// `parts` joined by the string at `separator`, as one allocation and a run
@@ -155,11 +171,14 @@ fn elements_of(machine: &Machine, addr: u64) -> Option<(LayoutId, u32)> {
 }
 
 /// `String.slice(from, to) -> String`, in character positions.
-pub(super) fn slice(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("String.slice", operands, 2);
-    let text = receiver(machine, self_)?;
-    let from = operand::int(machine, args[0]);
-    let to = operand::int(machine, args[1]);
+pub(super) fn slice(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
+    let from = operand::int(machine, frame, 1);
+    let to = operand::int(machine, frame, 2);
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len() as i64;
     let from = from.clamp(0, len) as usize;
@@ -169,80 +188,88 @@ pub(super) fn slice(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u
     } else {
         chars[from..to].iter().collect()
     };
-    machine.new_string(&sliced)
+    let word = machine.new_string(&sliced)?;
+    dest.word(machine, word);
+    Ok(())
 }
 
 /// `String.trim() -> String`.
-pub(super) fn trim(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("trim", operands, 0);
-    let text = receiver(machine, self_)?;
-    machine.new_string(text.trim())
+pub(super) fn trim(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
+    let word = machine.new_string(text.trim())?;
+    dest.word(machine, word);
+    Ok(())
 }
 
 /// `String.contains(text) -> Bool`.
 pub(super) fn contains(
     machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("String.contains", operands, 1);
-    let text = receiver(machine, self_)?;
-    let needle = operand::text(machine, args[0])?;
-    Ok(text.contains(&needle) as u64)
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
+    let needle = operand::text(machine, frame, 1)?;
+    dest.word(machine, text.contains(&needle) as u64);
+    Ok(())
 }
 
 /// `String.startsWith(prefix) -> Bool`.
 pub(super) fn starts_with(
     machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("String.startsWith", operands, 1);
-    let text = receiver(machine, self_)?;
-    let prefix = operand::text(machine, args[0])?;
-    Ok(text.starts_with(&prefix) as u64)
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
+    let prefix = operand::text(machine, frame, 1)?;
+    dest.word(machine, text.starts_with(&prefix) as u64);
+    Ok(())
 }
 
 /// `String.endsWith(suffix) -> Bool`.
 pub(super) fn ends_with(
     machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("String.endsWith", operands, 1);
-    let text = receiver(machine, self_)?;
-    let suffix = operand::text(machine, args[0])?;
-    Ok(text.ends_with(&suffix) as u64)
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
+    let suffix = operand::text(machine, frame, 1)?;
+    dest.word(machine, text.ends_with(&suffix) as u64);
+    Ok(())
 }
 
 /// `String.indexOf(text) -> Option<Int>`, in character positions.
 ///
 /// An `Option` is inline, so what this answers is the run of words
-/// `[disc, Int]` rather than an address — and a `None` leaves the payload
-/// word zero, which is what makes the region's one static reference map right
-/// for both cases.
+/// `[disc, Int]` written into the destination rather than an address — and a
+/// `None` leaves the payload word zero, which is what makes the region's one
+/// static reference map right for both cases.
 pub(super) fn index_of(
     machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
+    frame: Frame<'_>,
+    dest: Dest,
 ) -> Result<(), RuntimeError> {
-    let (self_, args) = operand::method("String.indexOf", operands, 1);
-    let text = receiver(machine, self_)?;
-    let needle = operand::text(machine, args[0])?;
+    let text = operand::text(machine, frame, 0)?;
+    let needle = operand::text(machine, frame, 1)?;
     match text.find(&needle) {
         // `find` answers a byte offset; the characters before it are counted
         // to convert that into the character index `length()` counts in.
-        Some(byte) => make::some(machine, result, &[text[..byte].chars().count() as u64], out),
-        None => make::none(machine, result, out),
+        Some(byte) => make::some(machine, dest, &[text[..byte].chars().count() as u64]),
+        None => make::none(machine, dest),
     }
 }
 
 /// `String.replace(old, new) -> String`.
 pub(super) fn replace(
     machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, args) = operand::method("String.replace", operands, 2);
-    let text = receiver(machine, self_)?;
-    let old = operand::text(machine, args[0])?;
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?;
+    let old = operand::text(machine, frame, 1)?;
     if old.is_empty() {
         return Err(operand::empty_needle(
             "String.replace",
@@ -250,29 +277,35 @@ pub(super) fn replace(
             "`old` is the text to look for, and an empty `old` names none",
         ));
     }
-    let new = operand::text(machine, args[1])?;
+    let new = operand::text(machine, frame, 2)?;
     let replaced = text.replace(&old, &new);
-    machine.new_string(&replaced)
+    let word = machine.new_string(&replaced)?;
+    dest.word(machine, word);
+    Ok(())
 }
 
 /// `String.toUpper() -> String`.
 pub(super) fn to_upper(
     machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("toUpper", operands, 0);
-    let text = receiver(machine, self_)?.to_uppercase();
-    machine.new_string(&text)
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?.to_uppercase();
+    let word = machine.new_string(&text)?;
+    dest.word(machine, word);
+    Ok(())
 }
 
 /// `String.toLower() -> String`.
 pub(super) fn to_lower(
     machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("toLower", operands, 0);
-    let text = receiver(machine, self_)?.to_lowercase();
-    machine.new_string(&text)
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let text = operand::text(machine, frame, 0)?.to_lowercase();
+    let word = machine.new_string(&text)?;
+    dest.word(machine, word);
+    Ok(())
 }
 
 /// `String.fromCodePoint(codePoint) -> Result<String, Error>`.
@@ -284,16 +317,14 @@ pub(super) fn to_lower(
 /// than a bad one.
 pub(super) fn from_code_point(
     machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
+    frame: Frame<'_>,
+    dest: Dest,
 ) -> Result<(), RuntimeError> {
-    let args = operand::free("String.fromCodePoint", operands, 1);
-    let code_point = operand::int(machine, args[0]);
+    let code_point = operand::int(machine, frame, 0);
     if (0xD800..=0xDFFF).contains(&code_point) {
         let message =
             format!("`{code_point}` is a surrogate half, which is not a character on its own");
-        return make::failed(machine, result, &message, out);
+        return make::failed(machine, dest, &message);
     }
     match u32::try_from(code_point).ok().and_then(char::from_u32) {
         Some(character) => {
@@ -301,11 +332,11 @@ pub(super) fn from_code_point(
             // Nothing allocates between the string and the `Ok` around it,
             // because a `Result` is words: the case is built out of the
             // layout table and the word it was just handed.
-            make::ok(machine, result, &[text], out)
+            make::ok(machine, dest, &[text])
         }
         None => {
             let message = format!("`{code_point}` is not a Unicode code point");
-            make::failed(machine, result, &message, out)
+            make::failed(machine, dest, &message)
         }
     }
 }

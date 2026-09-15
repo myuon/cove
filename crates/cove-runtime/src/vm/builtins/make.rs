@@ -40,7 +40,7 @@ use cove_schema::builtins::{
 };
 
 use crate::error::RuntimeError;
-use crate::vm::builtins::operand;
+use crate::vm::builtins::operand::{self, Dest};
 use crate::vm::exec::{Machine, Wrapper};
 
 // --- finding a family ------------------------------------------------------
@@ -138,105 +138,83 @@ fn error(program: &Program) -> Result<LayoutId, RuntimeError> {
 
 /// The words a builder writes, as a value a test can hold.
 ///
-/// A builder writes into a buffer the machine reuses rather than answering a
-/// `Vec`, because on a run that is one allocation per builtin call — 39 ns of
-/// an 86 ns call, measured. A test is not a run and wants the words to keep,
-/// so it brings its own buffer and takes it back.
+/// A builder writes into a destination in a frame rather than answering a
+/// `Vec`. A test is not a run and wants the words to keep, so it builds into a
+/// frame of its own and takes the words back out of it.
 #[cfg(test)]
 pub(super) fn built(
     machine: &mut Machine,
     layout: LayoutId,
-    build: impl FnOnce(&mut Machine, LayoutId, &mut Vec<u64>) -> Result<(), RuntimeError>,
+    build: impl FnOnce(&mut Machine, Dest) -> Result<(), RuntimeError>,
 ) -> Vec<u64> {
-    let mut out = Vec::new();
-    build(machine, layout, &mut out).expect("the value builds");
-    out
+    crate::vm::builtins::tests::in_frame(machine, &[], layout, |machine, _, dest| {
+        build(machine, dest)
+    })
+    .expect("the value builds")
 }
 
-/// The words of a case of the enum `layout`, with `parts` written into the
-/// payload region and the rest of it zero.
+/// Writes a case of the enum `dest` is a value of into `dest`, with `parts`
+/// written into the payload region and the rest of it zero.
 ///
 /// The zeroing is not tidiness. The payload region has one static reference
 /// map covering every case, so a word this case does not use has to read
 /// null — otherwise a `None` would keep alive whatever a `Some` left in the
 /// word before it.
+///
+/// Every part is a word the caller already holds, so nothing here reads an
+/// operand after the destination is written.
 fn case_words(
-    machine: &Machine,
-    layout: LayoutId,
+    machine: &mut Machine,
+    dest: Dest,
     index: u32,
     parts: &[&[u64]],
-    out: &mut Vec<u64>,
 ) -> Result<(), RuntimeError> {
-    let described = machine.program().layout(layout);
+    let described = machine.program().layout(dest.layout());
     let Shape::Enum { cases, .. } = &described.shape else {
         return Err(operand::unknown_family(&described.name));
     };
     let case = &cases[index as usize];
-    let at = out.len();
-    out.resize(at + described.width() as usize, 0);
-    out[at] = index as u64;
+    let run = dest.run(machine, described.width());
+    run.fill(0);
+    run[0] = index as u64;
     for (part, held) in case.parts.iter().zip(parts) {
-        let from = at + 1 + part.at as usize;
-        out[from..from + held.len()].copy_from_slice(held);
+        let from = 1 + part.at as usize;
+        run[from..from + held.len()].copy_from_slice(held);
     }
     Ok(())
 }
 
-/// `None`, in the `Option` the caller was told to answer.
-pub(super) fn none(
-    machine: &mut Machine,
-    option: LayoutId,
-    out: &mut Vec<u64>,
-) -> Result<(), RuntimeError> {
-    let case = machine.case_index(option, Wrapper::None, OPTION.name, NONE_CASE.name)?;
-    case_words(machine, option, case, &[], out)
+/// `None`, in the `Option` the destination was declared to hold.
+pub(super) fn none(machine: &mut Machine, dest: Dest) -> Result<(), RuntimeError> {
+    let case = machine.case_index(dest.layout(), Wrapper::None, OPTION.name, NONE_CASE.name)?;
+    case_words(machine, dest, case, &[])
 }
 
-/// `Some(words)`, in the `Option` the caller was told to answer.
-pub(super) fn some(
-    machine: &mut Machine,
-    option: LayoutId,
-    words: &[u64],
-    out: &mut Vec<u64>,
-) -> Result<(), RuntimeError> {
-    let case = machine.case_index(option, Wrapper::Some, OPTION.name, SOME_CASE.name)?;
-    case_words(machine, option, case, &[words], out)
+/// `Some(words)`, in the `Option` the destination was declared to hold.
+pub(super) fn some(machine: &mut Machine, dest: Dest, words: &[u64]) -> Result<(), RuntimeError> {
+    let case = machine.case_index(dest.layout(), Wrapper::Some, OPTION.name, SOME_CASE.name)?;
+    case_words(machine, dest, case, &[words])
 }
 
-/// `Ok(words)`, in the `Result` the caller was told to answer.
-pub(super) fn ok(
-    machine: &mut Machine,
-    result: LayoutId,
-    words: &[u64],
-    out: &mut Vec<u64>,
-) -> Result<(), RuntimeError> {
-    let case = machine.case_index(result, Wrapper::Ok, RESULT.name, OK_CASE.name)?;
-    case_words(machine, result, case, &[words], out)
+/// `Ok(words)`, in the `Result` the destination was declared to hold.
+pub(super) fn ok(machine: &mut Machine, dest: Dest, words: &[u64]) -> Result<(), RuntimeError> {
+    let case = machine.case_index(dest.layout(), Wrapper::Ok, RESULT.name, OK_CASE.name)?;
+    case_words(machine, dest, case, &[words])
 }
 
-/// `Err(Error(message))`, in the `Result` the caller was told to answer.
+/// `Err(Error(message))`, in the `Result` the destination was declared to
+/// hold.
 ///
 /// One allocation — the message — because an `Error` is its one `String`
 /// field inline and a `Result` is words. That is two objects fewer than the
 /// same value cost when every value was an address.
-pub(super) fn failed(
-    machine: &mut Machine,
-    result: LayoutId,
-    message: &str,
-    out: &mut Vec<u64>,
-) -> Result<(), RuntimeError> {
-    let case = machine.case_index(result, Wrapper::Err, RESULT.name, ERR_CASE.name)?;
-    let carried = error_value(machine, message)?;
-    case_words(machine, result, case, &[&carried], out)
-}
-
-/// An `Error` carrying `message`, as its words.
-fn error_value(machine: &mut Machine, message: &str) -> Result<Vec<u64>, RuntimeError> {
+pub(super) fn failed(machine: &mut Machine, dest: Dest, message: &str) -> Result<(), RuntimeError> {
+    let case = machine.case_index(dest.layout(), Wrapper::Err, RESULT.name, ERR_CASE.name)?;
     // The layout is looked up first, so that a program with no `Error` family
     // is refused before a string is allocated for a value it cannot build.
     error(machine.program())?;
     let text = machine.new_string(message)?;
-    Ok(vec![text])
+    case_words(machine, dest, case, &[&[text]])
 }
 
 /// An `Array<String>` of `parts`.
@@ -318,8 +296,8 @@ mod tests {
         let texts = crate::vm::builtins::tests::two_case(&program, "Option", "Some", text);
         let counts = crate::vm::builtins::tests::two_case(&program, "Option", "Some", ints);
         let string = machine.new_string("x").unwrap();
-        let held = built(&mut machine, texts, |m, l, out| some(m, l, &[string], out));
-        let counted = built(&mut machine, counts, |m, l, out| some(m, l, &[1], out));
+        let held = built(&mut machine, texts, |m, dest| some(m, dest, &[string]));
+        let counted = built(&mut machine, counts, |m, dest| some(m, dest, &[1]));
         assert_eq!(held, vec![1, string]);
         assert_eq!(counted, vec![1, 1]);
 
@@ -400,8 +378,8 @@ mod tests {
         let mut machine = Machine::new(&program, 1 << 14);
         let ints = scalar(&program, Repr::Int);
         let results = crate::vm::builtins::tests::two_case(&program, "Result", "Ok", ints);
-        let words = built(&mut machine, results, |m, l, out| {
-            failed(m, l, "it did not", out)
+        let words = built(&mut machine, results, |m, dest| {
+            failed(m, dest, "it did not")
         });
         // An `Error` is its one `String` field inline, so the payload word
         // *is* the message's address — one object where the old model needed
@@ -429,7 +407,10 @@ mod tests {
         let program = build.done();
         let mut machine = Machine::new(&program, 1 << 14);
 
-        let error = none(&mut machine, ints, &mut Vec::new()).unwrap_err();
+        let error = crate::vm::builtins::tests::in_frame(&mut machine, &[], ints, |m, _, dest| {
+            none(m, dest)
+        })
+        .unwrap_err();
         assert_eq!(
             error.message,
             "this program describes no `Option` for a value of that shape to be built as"
