@@ -1022,6 +1022,31 @@ unsafe extern "C" fn run_copy(
     }
 }
 
+/// The byte copy under an append compiled code emitted: `Machine::copy_string_bytes`
+/// and nothing else.
+///
+/// See [`cove_native::CopyBytesFn`] for why this is a **leaf** — no sync, no
+/// safepoint, no charge, no republish — and for the conditions emitted code checked
+/// before calling it. What runs is the byte blend the chunk loop under
+/// `encoded::append_bytes` calls, over the same two objects and the same offsets,
+/// so the words a fast append leaves are the words the cold path would have.
+///
+/// # Safety
+///
+/// As [`safepoint`], and as [`cove_native::CopyBytesFn`] says of the range.
+unsafe extern "C" fn copy_bytes(
+    ctx: *mut NativeCtx,
+    dst: u64,
+    dst_at: u64,
+    src: u64,
+    src_at: u64,
+    len: u64,
+) {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = &mut *(*host).machine;
+    machine.copy_string_bytes(dst, dst_at as usize, src, src_at as usize, len as usize);
+}
+
 /// The call helper: one `Inst::Call`, handed over whole.
 ///
 /// See [`cove_native::CallFn`] for the signature and
@@ -1832,6 +1857,7 @@ pub fn helpers() -> NativeHelpers {
         builtin,
         growable,
         run_copy,
+        copy_bytes,
         field_load,
         field_store,
     }
@@ -1863,6 +1889,7 @@ pub fn helpers_counting() -> NativeHelpers {
         builtin: counted_builtin,
         growable: counted_growable,
         run_copy: counted_run_copy,
+        copy_bytes: counted_copy_bytes,
         field_load: counted_field_load,
         field_store: counted_field_store,
     }
@@ -1933,6 +1960,23 @@ counted!(
     /// [`run_copy`], counted.
     counted_run_copy => run_copy.run_copy(base: u64, pc: u32, args: u32, words: u32, elem: u32) -> u32
 );
+/// [`copy_bytes`], counted. Written out rather than through `counted!`, because
+/// it answers nothing and the macro spells an answer.
+///
+/// # Safety
+///
+/// As the helper it wraps.
+unsafe extern "C" fn counted_copy_bytes(
+    ctx: *mut NativeCtx,
+    dst: u64,
+    dst_at: u64,
+    src: u64,
+    src_at: u64,
+    len: u64,
+) {
+    charge(ctx, |calls| calls.copy_bytes += 1);
+    copy_bytes(ctx, dst, dst_at, src, src_at, len)
+}
 counted!(
     /// [`field_load`], counted.
     counted_field_load => field_load.field_load(pc: u32, addr: u64, at: u32, width: u32, into: u64) -> u32
@@ -2032,6 +2076,7 @@ pub fn helpers_ablated<const MASK: u64>() -> NativeHelpers {
         builtin,
         growable,
         run_copy,
+        copy_bytes,
         field_load,
         field_store,
     }

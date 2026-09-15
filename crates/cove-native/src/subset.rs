@@ -961,8 +961,9 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         //
         // All four, handed to [`GrowableFn`](crate::abi::GrowableFn) whole, and that
         // helper's own documentation is where the decision for each of them is
-        // written down — including why none of them has an emitted fast path and
-        // why `GrowablePush` is here although the census never named it.
+        // written down — including why none of them has an emitted fast path, save
+        // the append that fits [`CopyBytesFn`](crate::abi::CopyBytesFn) describes,
+        // and why `GrowablePush` is here although the census never named it.
         //
         // Each is admitted over `Storage::PackedBytes` and nothing else: the
         // helper is the byte buffer's, and a word member has no arm in it. A
@@ -1137,6 +1138,22 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         _ => return Some(Reason::Instruction),
     };
     (!inside).then_some(Reason::Operands)
+}
+
+/// The two layouts an emitted append compares object headers against — the byte
+/// buffer's owner and the `String` — or `None` when either would not fit the
+/// template arm's `cmp r64, imm32`.
+///
+/// `None` is not a refusal. It is an append with no fast path: both arms then emit
+/// only the hand-over to [`GrowableFn`](crate::abi::GrowableFn), which is what an
+/// append was before [`CopyBytesFn`](crate::abi::CopyBytesFn). No program has two
+/// billion layouts, so this is [`Method::Push`]'s bound kept honest rather than a
+/// case anything reaches.
+pub(crate) fn append_layouts(program: &Program) -> Option<(i32, i32)> {
+    Some((
+        i32::try_from(program.buffer_layout.0).ok()?,
+        i32::try_from(program.str_layout.0).ok()?,
+    ))
 }
 
 /// Where a basic block begins, and how many instructions it holds.

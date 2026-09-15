@@ -455,6 +455,7 @@ fn direct_helpers() -> NativeHelpers {
         builtin: shared.builtin,
         growable: shared.growable,
         run_copy: shared.run_copy,
+        copy_bytes: shared.copy_bytes,
         field_load: shared.field_load,
         field_store: shared.field_store,
     }
@@ -716,6 +717,21 @@ fn a_run_copy_the_runtime_refused_leaves_with_that_outcome() {
 #[test]
 fn a_run_copy_is_admitted_with_five_one_word_operands() {
     suite::a_run_copy_is_admitted_with_five_one_word_operands::<Template>();
+}
+
+#[test]
+fn an_append_that_fits_is_emitted() {
+    suite::an_append_that_fits_is_emitted::<Template>();
+}
+
+#[test]
+fn an_append_that_does_not_fit_is_handed_over() {
+    suite::an_append_that_does_not_fit_is_handed_over::<Template>();
+}
+
+#[test]
+fn many_appends_in_one_block_stay_within_the_stride() {
+    suite::many_appends_in_one_block_stay_within_the_stride::<Template>();
 }
 
 #[test]

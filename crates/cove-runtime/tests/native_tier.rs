@@ -794,6 +794,48 @@ export fn callsSnapshotsWhileCollecting(n: Int) -> Int {
   snapshotsWhileCollecting(n)
 }
 
+/// A slice of `s` between two literals, appended in a compiled frame.
+///
+/// `appendSlice` is where an emitted append decides whether a range is its own: in
+/// range and at character boundaries it is copied in emitted code, and anything
+/// else — backwards, past the end, negative, inside a character — is handed to the
+/// runtime whole, whose sentence has to be the one that arrives.
+export fn slicesInto(s: String, from: Int, to: Int) -> String {
+  var out = StringBuilder.withCapacity(64 + counts(0))
+  out.append(\"<\")
+  out.appendSlice(s, from, to)
+  out.append(\">\")
+  out.finish()
+}
+
+/// A refused caller, so the appends are reached across the boundary.
+export fn callsSlicesInto(s: String, from: Int, to: Int) -> String {
+  let nothing = Shared(0).lock(fn(v) { v })
+  slicesInto(s, from, to)
+}
+
+/// Appends that outgrow a one-byte store, so the cold path grows it again and
+/// again, on a heap small enough that the growth collects.
+///
+/// Every growth allocates a larger store while the bytes appended so far hang off
+/// the owner, and the owner is a `Repr::Ref` slot of this compiled frame — so a
+/// collection inside the cold path that missed it would sweep a half-built run.
+export fn appendsWhileCollecting(s: String, n: Int) -> Int {
+  var out = StringBuilder.withCapacity(1 + counts(0))
+  var at = 0
+  while at < n {
+    out.append(s)
+    at = at + 1
+  }
+  out.finish().byteLength()
+}
+
+/// A refused caller, so the frame holding the builder is a compiled one.
+export fn callsAppendsWhileCollecting(s: String, n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  appendsWhileCollecting(s, n)
+}
+
 /// A refused caller making `n` calls to `String.sliceBytes`, which nothing lowers,
 /// before handing the same `n` to the compiled loop above.
 export fn countsTheBoundary(s: String, n: Int) -> Int {
@@ -2505,6 +2547,112 @@ fn a_snapshot_of_references_survives_a_collection_from_compiled_code() {
         assert!(
             session.collections() >= before + 8,
             "only {} collection(s) ran in {calls} call(s), so this case proved little",
+            session.collections() - before
+        );
+        (calls, session.tiers().vm_to_native)
+    };
+    assert!(
+        crossings >= calls,
+        "every call crossed into machine code: {crossings} of {calls}"
+    );
+}
+
+/// **An append that is emitted and an append that is handed over answer what the VM
+/// answers, sentence for sentence.**
+#[test]
+fn a_slice_appended_in_compiled_code_is_the_vm_s_answer_or_refusal() {
+    on_each_tier(&["slicesInto"], &["callsSlicesInto"]);
+    let text = "héllo wörld";
+    for (from, to) in [
+        (0i64, 5i64),
+        (1, 3),
+        (0, text.len() as i64),
+        (6, 6),
+        (2, 4),
+        (0, 2),
+        (5, 4),
+        (0, 99),
+        (-1, 3),
+    ] {
+        let both = both(
+            "callsSlicesInto",
+            vec![Value::string(text), Value::int(from), Value::int(to)],
+        );
+        assert_eq!(both.native, both.vm, "{from}..{to}");
+        assert!(both.tiers.vm_to_native >= 1, "{from}..{to}: {:?}", both.tiers);
+    }
+    let fits = both(
+        "callsSlicesInto",
+        vec![Value::string(text), Value::int(0), Value::int(3)],
+    );
+    assert_eq!(fits.vm, Ok("<hé>".to_string()));
+    let inside = both(
+        "callsSlicesInto",
+        vec![Value::string(text), Value::int(2), Value::int(4)],
+    );
+    assert_eq!(
+        inside.vm,
+        Err("`from` is `2`, which is inside a character rather than at the start of one".to_string())
+    );
+}
+
+/// **A collection inside the cold path of an append, with the half-built run live
+/// in a compiled frame.**
+///
+/// A [`cove_runtime::NativeSession`] over a small heap, for
+/// `a_half_built_run_survives_a_collection_from_compiled_code`' reason, calling until
+/// several collections have run. The only allocations the callee makes after its
+/// owner are the store's growths, which only the cold path makes.
+#[test]
+fn an_append_that_grows_collects_and_keeps_what_was_appended() {
+    const SMALL_HEAP_WORDS: usize = 1 << 13;
+    const N: i64 = 40;
+    let text = "a string of some length, appended many times over.";
+    on_each_tier(
+        &["appendsWhileCollecting"],
+        &["callsAppendsWhileCollecting"],
+    );
+
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+
+    let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, SMALL_HEAP_WORDS);
+    let (calls, crossings) = {
+        let mut session = vm
+            .native_session(
+                MODULE,
+                "callsAppendsWhileCollecting",
+                vec![Value::string(text), Value::int(N)],
+            )
+            .expect("the session opens");
+        let words = session.arguments().to_vec();
+        let expected = session
+            .call(&cove_runtime::NothingCompiled, &words)
+            .expect("the vm answers");
+        assert_eq!(expected, vec![N as u64 * text.len() as u64]);
+
+        let before = session.collections();
+        let mut calls = 0;
+        while session.collections() < before + 8 && calls < 20_000 {
+            let answered = session
+                .call(&native, &words)
+                .expect("the native tier answers");
+            assert_eq!(answered, expected, "call {calls} answered wrongly");
+            calls += 1;
+        }
+        assert!(
+            session.collections() >= before + 8,
+            "only {} collection(s) ran in {calls} call(s)",
             session.collections() - before
         );
         (calls, session.tiers().vm_to_native)

@@ -551,6 +551,73 @@ pub fn copied_answers(outcomes: &[Outcome]) {
         .with(|held| *held.borrow_mut() = outcomes.iter().map(|outcome| outcome.abi()).collect());
 }
 
+// --- the byte copy under an emitted append -------------------------------------
+
+/// One copy compiled code made through [`CopyBytesFn`](cove_native::CopyBytesFn).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BytesCopied {
+    pub dst: u64,
+    pub dst_at: u64,
+    pub src: u64,
+    pub src_at: u64,
+    pub len: u64,
+    /// `NativeCtx::pending_work` at the call. A leaf is handed no work, so this is
+    /// whatever the last hand-over left there — which is the assertion.
+    pub work: u64,
+}
+
+thread_local! {
+    /// Every byte copy this thread's compiled code made, in order.
+    pub static BYTES_COPIED: RefCell<Vec<BytesCopied>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The runtime's byte-copy leaf, as a test double that really copies.
+///
+/// A real one is `Machine::copy_string_bytes`. This one records the call and then
+/// moves the bytes through [`heap_word_ptr`], least significant byte first — so an
+/// arm that passed the offsets in the wrong registers leaves the wrong bytes in the
+/// store, and a case can read them.
+///
+/// # Safety
+///
+/// `ctx.chunks` is a [`Heap`]'s table and both ranges are inside it.
+unsafe extern "C" fn copy_bytes(
+    ctx: *mut NativeCtx,
+    dst: u64,
+    dst_at: u64,
+    src: u64,
+    src_at: u64,
+    len: u64,
+) {
+    BYTES_COPIED.with(|held| {
+        held.borrow_mut().push(BytesCopied {
+            dst,
+            dst_at,
+            src,
+            src_at,
+            len,
+            work: (*ctx).pending_work,
+        })
+    });
+    for at in 0..len {
+        let from = src_at + at;
+        let word = heap_word_ptr(ctx, src + 1 + from / 8).read();
+        let byte = (word >> ((from % 8) * 8)) & 0xFF;
+        let to = dst_at + at;
+        let into = heap_word_ptr(ctx, dst + 1 + to / 8);
+        let shift = (to % 8) * 8;
+        into.write((into.read() & !(0xFF << shift)) | (byte << shift));
+    }
+}
+
+pub fn bytes_copied() -> Vec<BytesCopied> {
+    BYTES_COPIED.with(|held| held.borrow().clone())
+}
+
+pub fn forget_bytes_copied() {
+    BYTES_COPIED.with(|held| held.borrow_mut().clear());
+}
+
 // --- the field-access cold path ------------------------------------------------
 
 /// One field access compiled code handed back through
@@ -697,6 +764,7 @@ pub fn helpers() -> NativeHelpers {
         builtin,
         growable,
         run_copy,
+        copy_bytes,
         field_load,
         field_store,
     }
@@ -3173,6 +3241,291 @@ pub fn a_run_copy_is_admitted_with_five_one_word_operands<A: Arm>() {
     assert!(
         !compiles::<A>(&one(Storage::Words(LayoutId(9_999)), run_copy_row())),
         "an element layout the program does not have"
+    );
+}
+
+/// A program of `count` byte `growable-extend`s in one block, and the three
+/// layouts an emitted append reads headers against.
+///
+/// The frame is `owner`, `src`, `from`, `to`; the answer is `from`, so a return is
+/// reached and the unpaid work is published by it.
+pub struct Appending {
+    pub program: Program,
+    pub buffer: LayoutId,
+    pub bytes: LayoutId,
+    pub text: LayoutId,
+}
+
+pub fn appending(count: usize) -> Appending {
+    let mut code = vec![
+        Inst::GrowableExtend {
+            args: ArgsId(1),
+            storage: Storage::PackedBytes,
+        };
+        count
+    ];
+    code.push(Inst::Return { src: 2 });
+    let mut program = program_with_args(
+        function(vec![Repr::Ref, Repr::Ref, Repr::Int, Repr::Int], INT, code),
+        vec![
+            Arg {
+                slot: 0,
+                layout: REF,
+            },
+            Arg {
+                slot: 1,
+                layout: REF,
+            },
+            Arg {
+                slot: 2,
+                layout: INT,
+            },
+            Arg {
+                slot: 3,
+                layout: INT,
+            },
+        ],
+    );
+    let mut push = |layout: Layout| {
+        program.layouts.push(layout);
+        LayoutId(program.layouts.len() as u32 - 1)
+    };
+    let buffer = push(Layout::object("ByteBuffer", cove_ir::Shape::ByteBuffer));
+    let bytes = push(Layout::object("Bytes", cove_ir::Shape::Bytes));
+    let text = push(Layout::object("String", cove_ir::Shape::Str));
+    program.buffer_layout = buffer;
+    program.bytes_layout = bytes;
+    program.str_layout = text;
+    Appending {
+        program,
+        buffer,
+        bytes,
+        text,
+    }
+}
+
+/// Where [`place_append`] put the three objects, as heap indices.
+#[derive(Clone, Copy, Debug)]
+pub struct Placed {
+    pub owner: u64,
+    pub store: u64,
+    pub src: u64,
+}
+
+/// A byte buffer of `len` bytes (all `b'a'`) in a store of `capacity`, and a
+/// `String` holding `text`, placed in `heap`.
+pub fn place_append(
+    heap: &mut Heap,
+    layouts: &Appending,
+    len: u64,
+    capacity: u32,
+    text: &[u8],
+) -> Placed {
+    let owner = 0;
+    let store = 3;
+    let src = store + 1 + u64::from(capacity).div_ceil(8);
+    heap.object(owner, layouts.buffer, 2);
+    heap.set(owner + 1, len);
+    heap.set(owner + 2, heap.addr(store));
+    heap.object(store, layouts.bytes, capacity);
+    put_bytes(heap, store, &vec![b'a'; len as usize]);
+    heap.object(src, layouts.text, text.len() as u32);
+    put_bytes(heap, src, text);
+    Placed { owner, store, src }
+}
+
+/// `bytes` into the payload of the object at heap index `obj`, from its first byte.
+pub fn put_bytes(heap: &mut Heap, obj: u64, bytes: &[u8]) {
+    for (at, byte) in bytes.iter().enumerate() {
+        let index = obj + 1 + at as u64 / 8;
+        let shift = (at as u64 % 8) * 8;
+        let word = heap.get(index);
+        heap.set(index, (word & !(0xFF << shift)) | (u64::from(*byte) << shift));
+    }
+}
+
+/// The first `n` payload bytes of the object at heap index `obj`.
+pub fn bytes_of(heap: &Heap, obj: u64, n: u64) -> Vec<u8> {
+    (0..n)
+        .map(|at| (heap.get(obj + 1 + at / 8) >> ((at % 8) * 8)) as u8)
+        .collect()
+}
+
+/// **A byte `growable-extend` that fits is emitted: the bytes through the leaf, the
+/// length word written, and nothing handed to the runtime.**
+///
+/// The source is text with a two-byte character in it, and the range starts at
+/// that character and ends at the end of the string — a boundary with no byte
+/// behind it. The work the copy moved goes onto the unpaid account and is
+/// published by the return.
+pub fn an_append_that_fits_is_emitted<A: Arm>() {
+    forget_built();
+    forget_bytes_copied();
+    let layouts = appending(1);
+    let text = "hé world".as_bytes();
+    let mut heap = Heap::new(1);
+    let placed = place_append(&mut heap, &layouts, 3, 32, text);
+    let (from, to) = (1u64, text.len() as u64);
+    let mut words = vec![
+        heap.addr(placed.owner),
+        heap.addr(placed.src),
+        from,
+        to,
+    ];
+    let answer = run_over::<A>(&layouts.program, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(built(), vec![], "nothing was handed to the runtime");
+    assert_eq!(
+        bytes_copied(),
+        vec![BytesCopied {
+            dst: heap.addr(placed.store),
+            dst_at: 3,
+            src: heap.addr(placed.src),
+            src_at: from,
+            len: to - from,
+            // A leaf is not a safepoint and is handed no work: the account stays in
+            // compiled code, and the context's copy of it is whatever it last was.
+            work: 0,
+        }]
+    );
+    let appended = 3 + to - from;
+    assert_eq!(heap.get(placed.owner + 1), appended, "the length word");
+    let mut want = b"aaa".to_vec();
+    want.extend_from_slice(&text[1..]);
+    assert_eq!(bytes_of(&heap, placed.store, appended), want);
+    assert_eq!(answer.returned[0], from);
+    assert_eq!(
+        answer.pending_work,
+        2 + (to - from).div_ceil(8),
+        "the copy's words are unpaid work, published at the return"
+    );
+}
+
+/// **Every append the fast path cannot vouch for is handed to the runtime whole,
+/// and nothing is written first.**
+///
+/// One row per condition in [`cove_native::CopyBytesFn`]'s list, each failing that
+/// condition alone, so a test an arm forgot is an append emitted where the runtime
+/// would have grown the store or refused.
+pub fn an_append_that_does_not_fit_is_handed_over<A: Arm>() {
+    let layouts = appending(1);
+    let text = "hé world".as_bytes();
+    let long = vec![b'x'; 8 * 1100];
+    // What to break, as a closure over the placed objects and the frame.
+    type Break = fn(&mut Heap, &Appending, &Placed, &mut [u64]);
+    let rows: [(&str, u32, &[u8], u64, u64, Break); 12] = [
+        ("no room in the store", 8, text, 0, 8, |_, _, _, _| {}),
+        ("from past to", 32, text, 5, 4, |_, _, _, _| {}),
+        ("to past the source", 32, text, 0, 10, |_, _, _, _| {}),
+        ("a negative from", 32, text, u64::MAX, 4, |_, _, _, _| {}),
+        ("from inside a character", 32, text, 2, 4, |_, _, _, _| {}),
+        ("to inside a character", 32, text, 0, 2, |_, _, _, _| {}),
+        ("a null source", 32, text, 0, 4, |_, _, _, words| words[1] = 0),
+        ("a null owner", 32, text, 0, 4, |_, _, _, words| words[0] = 0),
+        ("an owner of another layout", 32, text, 0, 4, |heap, layouts, placed, _| {
+            heap.object(placed.owner, layouts.bytes, 2);
+        }),
+        ("a consumed owner", 32, text, 0, 4, |heap, _, placed, _| {
+            heap.set(placed.owner + 2, 0);
+        }),
+        ("a source that is a byte run", 32, text, 0, 4, |heap, layouts, placed, _| {
+            heap.object(placed.src, layouts.bytes, 32);
+        }),
+        (
+            "more words than the stride has left",
+            8 * 1100,
+            long.as_slice(),
+            0,
+            8 * 1100,
+            |_, _, _, _| {},
+        ),
+    ];
+    for (what, capacity, source, from, to, broken) in rows {
+        forget_built();
+        forget_bytes_copied();
+        let mut heap = Heap::new(2);
+        let placed = place_append(&mut heap, &layouts, 3, capacity, source);
+        let mut words = vec![heap.addr(placed.owner), heap.addr(placed.src), from, to];
+        broken(&mut heap, &layouts, &placed, &mut words);
+        let before = bytes_of(&heap, placed.store, 16);
+        let answer = run_over::<A>(&layouts.program, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "{what}");
+        assert_eq!(bytes_copied(), vec![], "{what}: nothing was copied");
+        assert_eq!(
+            built().iter().map(|row| (row.pc, row.op, row.a)).collect::<Vec<_>>(),
+            vec![(0, GrowableOp::Extend.abi(), 1)],
+            "{what}: the append was handed over whole"
+        );
+        assert_eq!(built()[0].work, 2, "{what}: with the block's work");
+        if heap.get(placed.owner + 2) != 0 {
+            assert_eq!(heap.get(placed.owner + 1), 3, "{what}: the length is the runtime's");
+        }
+        assert_eq!(bytes_of(&heap, placed.store, 16), before, "{what}");
+    }
+
+    // And the boundary case that is *not* a refusal: `to` at a character's first
+    // byte, and `from` at the string's end with nothing to copy.
+    for (from, to) in [(0u64, 1u64), (1, 3), (9, 9)] {
+        forget_built();
+        forget_bytes_copied();
+        let mut heap = Heap::new(1);
+        let placed = place_append(&mut heap, &layouts, 3, 32, text);
+        let mut words = vec![heap.addr(placed.owner), heap.addr(placed.src), from, to];
+        let answer = run_over::<A>(&layouts.program, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned);
+        assert_eq!(built(), vec![], "{from}..{to} is emitted");
+        assert_eq!(heap.get(placed.owner + 1), 3 + to - from);
+    }
+}
+
+/// **Appends in one long block pay their work before the stride runs out.**
+///
+/// ADR 0055's "no compiled interval may exceed `T`", for the one emitted operation
+/// that adds more than one unit of work: three hundred appends of eight words each
+/// in a single block is 2,400 words, and not one safepoint or backedge among them.
+/// The fast path is taken only while the unpaid work plus the copy's words is below
+/// the stride, so the runtime is handed an append — a safepoint, which charges and
+/// clears the account — whenever it would not be, and no hand-over ever carries a
+/// stride's worth.
+///
+/// The double does not append, so the store is written only by the emitted ones,
+/// and the length word says exactly how many there were.
+pub fn many_appends_in_one_block_stay_within_the_stride<A: Arm>() {
+    const APPENDS: usize = 300;
+    forget_built();
+    forget_bytes_copied();
+    let layouts = appending(APPENDS);
+    let text = [b'z'; 64];
+    let mut heap = Heap::new(1);
+    let placed = place_append(&mut heap, &layouts, 0, (APPENDS * 64) as u32, &text);
+    let mut words = vec![heap.addr(placed.owner), heap.addr(placed.src), 0, 64];
+    let answer = run_over::<A>(&layouts.program, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    let emitted = bytes_copied();
+    let handed = built();
+    assert_eq!(emitted.len() + handed.len(), APPENDS);
+    assert!(
+        handed.len() >= 2,
+        "the stride ran out more than once: {} hand-over(s)",
+        handed.len()
+    );
+    for row in &handed {
+        assert!(
+            row.work < cove_native::SAFEPOINT_STRIDE_WORK,
+            "a hand-over carried {} unpaid work",
+            row.work
+        );
+    }
+    assert!(
+        emitted.iter().all(|row| row.work == 0),
+        "no emitted append published unpaid work"
+    );
+    assert!(answer.pending_work < cove_native::SAFEPOINT_STRIDE_WORK);
+    assert_eq!(heap.get(placed.owner + 1), emitted.len() as u64 * 64);
+    assert_eq!(
+        emitted.iter().map(|row| row.dst_at).collect::<Vec<_>>(),
+        (0..emitted.len() as u64).map(|at| at * 64).collect::<Vec<_>>(),
+        "each emitted append lands where the last one ended"
     );
 }
 

@@ -353,6 +353,21 @@ fn a_run_copy_is_admitted_with_five_one_word_operands() {
 }
 
 #[test]
+fn an_append_that_fits_is_emitted() {
+    suite::an_append_that_fits_is_emitted::<Cranelift>();
+}
+
+#[test]
+fn an_append_that_does_not_fit_is_handed_over() {
+    suite::an_append_that_does_not_fit_is_handed_over::<Cranelift>();
+}
+
+#[test]
+fn many_appends_in_one_block_stay_within_the_stride() {
+    suite::many_appends_in_one_block_stay_within_the_stride::<Cranelift>();
+}
+
+#[test]
 fn a_unit_constant_is_a_zero_word() {
     suite::a_unit_constant_is_a_zero_word::<Cranelift>();
 }

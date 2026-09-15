@@ -4532,6 +4532,107 @@ mod tests {
             }
         }
 
+        /// `appends(owner, src)`: three hundred appends of `src[0..64]` in one block,
+        /// answering `to`.
+        fn many_appends() -> (Program, FunctionId, FunctionId, usize) {
+            const APPENDS: usize = 300;
+            let mut build = Build::default();
+            let int = build.scalar(Repr::Int);
+            let text = build.string_layout();
+            build.bytes_layout();
+            let owner = build.buffer_layout();
+            let args = build.args(&[(0, owner), (1, text), (2, int), (3, int)]);
+            let mut code = vec![Inst::Int { dst: 2, value: 0 }, Inst::Int { dst: 3, value: 64 }];
+            code.extend(std::iter::repeat_n(
+                Inst::GrowableExtend {
+                    args,
+                    storage: Storage::PackedBytes,
+                },
+                APPENDS,
+            ));
+            code.push(Inst::Return { src: 3 });
+            let length = code.len();
+            let inner = build.function(
+                "appends",
+                &[owner, text],
+                &[Repr::Ref, Repr::Ref, Repr::Int, Repr::Int],
+                int,
+                code,
+            );
+            let entry = through_a_call(&mut build, inner, Repr::Int);
+            (build.done(), inner, entry, length)
+        }
+
+        /// **Appends in one long block, in compiled code, answer the VM's bytes and
+        /// stop within a stride of work.**
+        ///
+        /// Three hundred appends of eight words each is 2,400 words of work in a
+        /// block with no safepoint in it. An emitted append is taken only while the
+        /// unpaid work and its own words are below the stride, and the append that
+        /// would pass it is handed to the runtime, whose safepoint is where a
+        /// cancellation is seen — so a cancelled run stops having done less than a
+        /// stride plus the block, not the 2,700 it would have done had every append
+        /// been emitted.
+        #[test]
+        fn appends_in_one_block_stop_within_a_stride() {
+            let (program, inner, entry, length) = many_appends();
+            let native = compiled(&program, inner);
+            let prepare = |machine: &mut Machine<'_>| {
+                let owner = machine.alloc_buffer(300 * 64).unwrap();
+                let src = machine.new_string(&"z".repeat(64)).unwrap();
+                vec![owner, src]
+            };
+            let inspect = |machine: &Machine<'_>, args: &[u64]| {
+                let len = machine.mem.payload(args[0], runs::GROWABLE_LEN);
+                let store = machine.mem.payload(args[0], runs::GROWABLE_STORE);
+                (len, machine.string_bytes(store))
+            };
+            let (said, (len, bytes)) =
+                agree("three hundred appends", &program, &native, entry, &prepare, &inspect);
+            assert_eq!(said, Ok(vec![64]));
+            assert_eq!(len, 300 * 64);
+            assert!(bytes.iter().all(|byte| *byte == b'z'));
+
+            let nothing = |_: &Machine<'_>, _: &[u64]| ();
+            let bound = SAFEPOINT_STRIDE + length as u64;
+            for tier in [None, Some(&native)] {
+                let budget = crate::budget::Budget::new(crate::budget::Limits::default());
+                budget.cancellation().cancel();
+                let (said, (), tiers, work) =
+                    on(&program, tier, 1 << 16, &budget.meter(), entry, &prepare, &nothing);
+                let (.., outcome) = said.expect_err("a cancelled run does not answer");
+                assert_eq!(outcome, crate::trace::RunOutcome::Cancelled);
+                if tier.is_some() {
+                    assert!(tiers.vm_to_native >= 1, "{tiers:?}");
+                }
+                assert!(
+                    work < bound,
+                    "cancelled appends did {work} work (native: {}), past {bound}",
+                    tier.is_some()
+                );
+            }
+            for limit in [256u64, 1_024, 2_000] {
+                for tier in [None, Some(&native)] {
+                    let budget = crate::budget::Budget::new(crate::budget::Limits {
+                        fuel: Some(limit),
+                        ..crate::budget::Limits::default()
+                    });
+                    let (said, (), _, _) =
+                        on(&program, tier, 1 << 16, &budget.meter(), entry, &prepare, &nothing);
+                    let (.., outcome) = said.expect_err("appends past their fuel are stopped");
+                    assert_eq!(outcome, crate::trace::RunOutcome::Fuel);
+                    let spent = budget.fuel_spent();
+                    assert!(
+                        spent < limit + bound,
+                        "appends under a fuel limit of {limit} spent {spent} (native: {}), \
+                         past {}",
+                        tier.is_some(),
+                        limit + bound
+                    );
+                }
+            }
+        }
+
         /// **References copied by compiled code survive collections made from that
         /// compiled frame, half way through the copy and after the source is
         /// dropped.**

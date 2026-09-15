@@ -678,6 +678,23 @@ unsafe extern "C" fn no_run_copy(
     cove_native::Outcome::Raised.abi()
 }
 
+/// The byte copy under an emitted append, for a scenario that appends nothing.
+/// See [`no_call`].
+///
+/// # Safety
+///
+/// Reads nothing through any of its arguments.
+#[cfg(any(feature = "cranelift", feature = "template"))]
+unsafe extern "C" fn no_copy_bytes(
+    _ctx: *mut cove_native::NativeCtx,
+    _dst: u64,
+    _dst_at: u64,
+    _src: u64,
+    _src_at: u64,
+    _len: u64,
+) {
+}
+
 /// The field-access helpers, for a scenario that loads and stores no field.
 /// See [`no_call`].
 ///
@@ -724,6 +741,7 @@ fn helpers() -> cove_native::NativeHelpers {
         builtin: no_builtin,
         growable: no_growable,
         run_copy: no_run_copy,
+        copy_bytes: no_copy_bytes,
         field_load: no_field_load,
         field_store: no_field_store,
     }

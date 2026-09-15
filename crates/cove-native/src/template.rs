@@ -32,10 +32,11 @@ use cove_ir::{
 
 use crate::abi::{
     Entry, GrowableOp, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT,
-    HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
+    HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS, SAFEPOINT_STRIDE_WORK,
 };
 use crate::subset::{
-    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported, Method,
+    append_layouts, by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset,
+    supported, Method,
 };
 use crate::Unavailable;
 
@@ -63,6 +64,8 @@ const RSI: u8 = 6;
 const RDI: u8 = 7;
 const R8: u8 = 8;
 const R9: u8 = 9;
+const R10: u8 = 10;
+const R11: u8 = 11;
 const R12: u8 = 12;
 const R13: u8 = 13;
 const R14: u8 = 14;
@@ -104,6 +107,7 @@ const HEAP_SPARE: u8 = R15;
 // Condition codes, as the low nibble of a `jcc`/`setcc` opcode.
 const CC_NO: u8 = 0x1;
 const CC_B: u8 = 0x2;
+const CC_A: u8 = 0x7;
 const CC_AE: u8 = 0x3;
 const CC_E: u8 = 0x4;
 const CC_NE: u8 = 0x5;
@@ -242,6 +246,7 @@ struct Helpers {
     builtin: usize,
     growable: usize,
     run_copy: usize,
+    copy_bytes: usize,
     field_load: usize,
     field_store: usize,
 }
@@ -269,6 +274,7 @@ impl Jit {
                 builtin: helpers.builtin as usize,
                 growable: helpers.growable as usize,
                 run_copy: helpers.run_copy as usize,
+                copy_bytes: helpers.copy_bytes as usize,
                 field_load: helpers.field_load as usize,
                 field_store: helpers.field_store as usize,
             },
@@ -375,6 +381,7 @@ struct Emit<'a> {
     builtin: usize,
     growable: usize,
     run_copy: usize,
+    copy_bytes: usize,
     field_load: usize,
     field_store: usize,
     /// Whether a compiled callee is reached by emitted code. See [`Jit::direct`].
@@ -416,6 +423,7 @@ impl<'a> Emit<'a> {
             builtin: helpers.builtin,
             growable: helpers.growable,
             run_copy: helpers.run_copy,
+            copy_bytes: helpers.copy_bytes,
             field_load: helpers.field_load,
             field_store: helpers.field_store,
             direct,
@@ -604,7 +612,9 @@ impl<'a> Emit<'a> {
             // ADR 0052's four, each handed to the runtime whole. See
             // [`crate::abi::GrowableFn`] for why none of them has an emitted fast
             // path — one rooting discipline that is not the frame's, one chunked
-            // safepoint contract, and one UTF-8 walk.
+            // safepoint contract, and one UTF-8 walk — and
+            // [`crate::abi::CopyBytesFn`] for the one narrow exception, an append
+            // that fits.
             Inst::GrowableAlloc {
                 dst,
                 capacity,
@@ -618,7 +628,7 @@ impl<'a> Emit<'a> {
             Inst::GrowableExtend {
                 args,
                 storage: Storage::PackedBytes,
-            } => self.growable_op(GrowableOp::Extend, args.0, 0),
+            } => self.growable_extend(args.0),
             Inst::RunFinish {
                 dst,
                 owner,
@@ -1520,6 +1530,151 @@ impl<'a> Emit<'a> {
         self.jcc(CC_E, Target::Label(on));
         self.leave_answered();
         self.bind(on);
+        self.frame_live = false;
+    }
+
+    /// One byte `growable-extend`: emitted when it fits, handed over whole when it
+    /// does not.
+    ///
+    /// The Cranelift arm's `Lower::growable_extend`, test for test and in the same
+    /// order of *meaning*; see [`crate::abi::CopyBytesFn`] for the conditions. The
+    /// order of the tests differs, and the reason is registers: this arm has the
+    /// three scratch registers, the two argument registers `R8` and `R9` and the two
+    /// caller-saved `R10` and `R11`, and the two boundary tests need `RCX` for a
+    /// shift count. So the source's tests come first, while `from` and `to` are the
+    /// only offsets live:
+    ///
+    /// ```text
+    ///   rax = src          non-null, header layout `String`'s, or cold
+    ///   rdx = len(src)
+    ///   r8  = to           to <= len(src), or cold     -- unsigned
+    ///   r9  = from         from <= to, or cold         -- unsigned
+    ///   neither at a continuation byte where below len(src), or cold
+    ///   r8  = to - from    -- the take
+    ///   r10 = owner        non-null, header layout the byte buffer's, or cold
+    ///   r11 = store        non-null, or cold
+    ///   rdx = len          len <= capacity and take <= capacity - len, or cold
+    ///   rcx = work + words(take)   below the stride, or cold
+    ///   work = rcx
+    ///   r15 = len + take   -- callee-saved, so it survives the leaf
+    ///   copy_bytes(ctx, store, len, src, from, take)
+    ///   payload(owner, 0) = r15
+    /// ```
+    ///
+    /// A refusal the cold path would make is a refusal the cold path makes, so the
+    /// order in which this arm and the other find out that an append is not theirs
+    /// cannot be observed. **Every jump to the cold path is made with nothing
+    /// pushed**, for [`Emit::vector_push`]'s reason: the cold path is a C call.
+    ///
+    /// `R15` is [`HEAP_SPARE`], which [`Emit::heap_ptr`] clobbers and nothing else
+    /// holds between instructions; nothing between the store into it and the load
+    /// out of it forms a heap address.
+    fn growable_extend(&mut self, args: u32) {
+        let Some((buffer_layout, str_layout)) = append_layouts(self.program) else {
+            self.growable_op(GrowableOp::Extend, args, 0);
+            return;
+        };
+        let list = self.program.arg_list(ArgsId(args));
+        let (owner, src, from, to) = (list[0].slot, list[1].slot, list[2].slot, list[3].slot);
+        let cold = self.label();
+        let done = self.label();
+
+        self.load_slot(RAX, src);
+        self.test_rr(RAX, RAX);
+        self.jcc(CC_E, Target::Label(cold));
+        self.mov_rr(RDX, RAX);
+        self.heap_word(RDX);
+        self.mov_rr(RCX, RDX);
+        self.shr_imm8(RCX, 32);
+        self.cmp_imm32(RCX, str_layout);
+        self.jcc(CC_NE, Target::Label(cold));
+        self.mov_rr32(RDX, RDX);
+
+        self.load_slot(R8, to);
+        self.cmp_rr(R8, RDX);
+        self.jcc(CC_A, Target::Label(cold));
+        self.load_slot(R9, from);
+        self.cmp_rr(R9, R8);
+        self.jcc(CC_A, Target::Label(cold));
+
+        for at in [R9, R8] {
+            let checked = self.label();
+            self.cmp_rr(at, RDX);
+            self.jcc(CC_AE, Target::Label(checked));
+            // `(payload(src, at >> 3) >> ((at & 7) * 8)) & 0xC0`.
+            self.mov_rr(R10, at);
+            self.shr_imm8(R10, 3);
+            self.add_rr(R10, RAX);
+            self.add_imm32(R10, 1);
+            self.heap_word(R10);
+            self.mov_rr(RCX, at);
+            self.and_imm32(RCX, 7);
+            self.shl_imm8(RCX, 3);
+            self.shr_cl(R10);
+            self.and_imm32(R10, 0xC0);
+            self.cmp_imm32(R10, 0x80);
+            self.jcc(CC_E, Target::Label(cold));
+            self.bind(checked);
+        }
+        self.sub_rr(R8, R9);
+
+        self.load_slot(R10, owner);
+        self.test_rr(R10, R10);
+        self.jcc(CC_E, Target::Label(cold));
+        self.mov_rr(RCX, R10);
+        self.heap_word(RCX);
+        self.shr_imm8(RCX, 32);
+        self.cmp_imm32(RCX, buffer_layout);
+        self.jcc(CC_NE, Target::Label(cold));
+        self.mov_rr(R11, R10);
+        self.add_imm32(R11, 2);
+        self.heap_word(R11);
+        self.test_rr(R11, R11);
+        self.jcc(CC_E, Target::Label(cold));
+        self.mov_rr(RDX, R10);
+        self.add_imm32(RDX, 1);
+        self.heap_word(RDX);
+        self.mov_rr(RCX, R11);
+        self.object_len(RCX);
+        self.cmp_rr(RDX, RCX);
+        self.jcc(CC_A, Target::Label(cold));
+        self.sub_rr(RCX, RDX);
+        self.cmp_rr(R8, RCX);
+        self.jcc(CC_A, Target::Label(cold));
+
+        self.mov_rr(RCX, R8);
+        self.add_imm32(RCX, 7);
+        self.shr_imm8(RCX, 3);
+        self.add_rr(RCX, WORK);
+        self.cmp_imm32(RCX, SAFEPOINT_STRIDE_WORK as i32);
+        self.jcc(CC_AE, Target::Label(cold));
+
+        // Taken.
+        self.mov_rr(WORK, RCX);
+        self.mov_rr(HEAP_SPARE, RDX);
+        self.add_rr(HEAP_SPARE, R8);
+        self.mov_rr(RDI, CTX);
+        self.mov_rr(RSI, R11);
+        // `rdx` is the length already, and is `dst_at`.
+        self.mov_rr(RCX, RAX);
+        self.mov_rr(RAX, R8);
+        self.mov_rr(R8, R9);
+        self.mov_rr(R9, RAX);
+        self.mov_imm64(RAX, self.copy_bytes as i64);
+        self.call(RAX);
+        // The leaf moves no word a cached pointer names, so the frame pointer is
+        // still live.
+        self.mov_rr(RAX, HEAP_SPARE);
+        self.load_slot(RCX, owner);
+        self.add_imm32(RCX, 1);
+        self.heap_ptr(RCX);
+        self.store(HEAP_TABLE, 0, RAX);
+        self.jmp(Target::Label(done));
+
+        self.bind(cold);
+        self.growable_op(GrowableOp::Extend, args, 0);
+        self.bind(done);
+        // One predecessor of this join came through a helper.
         self.frame_live = false;
     }
 

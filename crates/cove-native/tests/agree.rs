@@ -82,6 +82,7 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
     suite::forget_mediated();
     suite::forget_built();
     suite::forget_copied();
+    suite::forget_bytes_copied();
     let mut cranelift_words = words.to_vec();
     let cranelift = suite::run::<Cranelift>(program, &mut cranelift_words, base);
     let cranelift_polls = suite::polls();
@@ -90,6 +91,7 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
     let cranelift_mediated = suite::mediated();
     let cranelift_built = suite::built();
     let cranelift_copied = suite::copied();
+    let cranelift_bytes = suite::bytes_copied();
 
     suite::forget_polls();
     suite::forget_calls();
@@ -97,6 +99,7 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
     suite::forget_mediated();
     suite::forget_built();
     suite::forget_copied();
+    suite::forget_bytes_copied();
     let mut template_words = words.to_vec();
     let template = suite::run::<Template>(program, &mut template_words, base);
     let template_polls = suite::polls();
@@ -105,6 +108,7 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
     let template_mediated = suite::mediated();
     let template_built = suite::built();
     let template_copied = suite::copied();
+    let template_bytes = suite::bytes_copied();
 
     assert_eq!(cranelift.outcome, template.outcome, "outcome: {what}");
     assert_eq!(
@@ -150,6 +154,10 @@ fn agree(what: &str, program: &Program, words: &[u64], base: u64) {
     assert_eq!(
         cranelift_copied, template_copied,
         "the run copies handed to the runtime, in order: {what}"
+    );
+    assert_eq!(
+        cranelift_bytes, template_bytes,
+        "the byte copies under emitted appends, in order: {what}"
     );
 }
 
@@ -204,6 +212,7 @@ fn agree_with_literals(
     // The same script for a run copy, which no program here mixes with a builder:
     // each queue is read only by its own helper.
     suite::forget_copied();
+    suite::forget_bytes_copied();
     suite::copied_answers(answers);
     let cranelift_heap = build();
     let mut cranelift_words = words.to_vec();
@@ -219,6 +228,7 @@ fn agree_with_literals(
     let cranelift_mediated = suite::mediated();
     let cranelift_built = suite::built();
     let cranelift_copied = suite::copied();
+    let cranelift_bytes = suite::bytes_copied();
 
     suite::forget_polls();
     suite::forget_calls();
@@ -229,6 +239,7 @@ fn agree_with_literals(
     // The same script for a run copy, which no program here mixes with a builder:
     // each queue is read only by its own helper.
     suite::forget_copied();
+    suite::forget_bytes_copied();
     suite::copied_answers(answers);
     let template_heap = build();
     let mut template_words = words.to_vec();
@@ -244,6 +255,7 @@ fn agree_with_literals(
     let template_mediated = suite::mediated();
     let template_built = suite::built();
     let template_copied = suite::copied();
+    let template_bytes = suite::bytes_copied();
 
     assert_eq!(cranelift.outcome, template.outcome, "outcome: {what}");
     assert_eq!(
@@ -275,6 +287,10 @@ fn agree_with_literals(
     assert_eq!(
         cranelift_copied, template_copied,
         "the run copies handed to the runtime, in order: {what}"
+    );
+    assert_eq!(
+        cranelift_bytes, template_bytes,
+        "the byte copies under emitted appends, in order: {what}"
     );
     // The two heaps started equal, so a difference here is one arm having read or
     // written a word the other did not. Until `Inst::Store` this was the weaker
@@ -470,6 +486,54 @@ fn both_arms_answer_the_same_thing() {
             &[outcome],
         );
     }
+
+    // A byte append: emitted where it fits, handed over where it does not. The two
+    // arms test the conditions in different orders, so what they must agree on is
+    // which appends were whose, and the bytes and the length word each left.
+    let text = "hé world".as_bytes();
+    for (what, capacity, from, to) in [
+        ("an append that fits", 32u32, 1u64, 9u64),
+        ("an append that needs growth", 8, 0, 8),
+        ("from at a boundary", 32, 3, 9),
+        ("from inside a character", 32, 2, 9),
+        ("to inside a character", 32, 0, 2),
+        ("from past to", 32, 5, 4),
+        ("to past the source", 32, 0, 10),
+    ] {
+        let layouts = suite::appending(2);
+        let build = || {
+            let mut heap = Heap::new(1);
+            suite::place_append(&mut heap, &layouts, 3, capacity, text);
+            heap
+        };
+        let placed = suite::place_append(&mut Heap::new(1), &layouts, 3, capacity, text);
+        let heap = Heap::new(1);
+        let frame = [heap.addr(placed.owner), heap.addr(placed.src), from, to];
+        agree_over(what, &layouts.program, &frame, 0, build);
+        let null_source = [heap.addr(placed.owner), 0, from, to];
+        agree_over(
+            &format!("{what}, from a null source"),
+            &layouts.program,
+            &null_source,
+            0,
+            build,
+        );
+    }
+    let layouts = suite::appending(300);
+    let build = || {
+        let mut heap = Heap::new(1);
+        suite::place_append(&mut heap, &layouts, 0, 300 * 64, &[b'z'; 64]);
+        heap
+    };
+    let placed = suite::place_append(&mut Heap::new(1), &layouts, 0, 300 * 64, &[b'z'; 64]);
+    let heap = Heap::new(1);
+    agree_over(
+        "three hundred appends in one block",
+        &layouts.program,
+        &[heap.addr(placed.owner), heap.addr(placed.src), 0, 64],
+        0,
+        build,
+    );
 
     agree_over(
         "a load-elem of a null reference",

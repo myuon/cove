@@ -48,10 +48,11 @@ use cranelift_module::{default_libcall_names, FuncId, Linkage, Module, ModuleErr
 
 use crate::abi::{
     Entry, GrowableOp, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT,
-    HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
+    HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS, SAFEPOINT_STRIDE_WORK,
 };
 use crate::subset::{
-    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported, Method,
+    append_layouts, by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset,
+    supported, Method,
 };
 use crate::Unavailable;
 
@@ -79,6 +80,9 @@ const GROWABLE: &str = "cove_native_growable";
 
 /// The name the run-copy helper is imported under. [`SAFEPOINT`]'s note applies.
 const RUN_COPY: &str = "cove_native_run_copy";
+
+/// The name the byte-copy leaf is imported under. [`SAFEPOINT`]'s note applies.
+const COPY_BYTES: &str = "cove_native_copy_bytes";
 
 /// The name the field-load helper is imported under. [`SAFEPOINT`]'s note
 /// applies.
@@ -150,6 +154,7 @@ pub struct Jit {
     builtin: FuncId,
     growable: FuncId,
     run_copy: FuncId,
+    copy_bytes: FuncId,
     field_load: FuncId,
     field_store: FuncId,
     /// How many functions have been declared, which is how the symbol names
@@ -177,6 +182,7 @@ impl Jit {
         builder.symbol(BUILTIN, helpers.builtin as usize as *const u8);
         builder.symbol(GROWABLE, helpers.growable as usize as *const u8);
         builder.symbol(RUN_COPY, helpers.run_copy as usize as *const u8);
+        builder.symbol(COPY_BYTES, helpers.copy_bytes as usize as *const u8);
         builder.symbol(FIELD_LOAD, helpers.field_load as usize as *const u8);
         builder.symbol(FIELD_STORE, helpers.field_store as usize as *const u8);
         let mut module = JITModule::new(builder);
@@ -208,6 +214,8 @@ impl Jit {
         // And again: `RunCopyFn` is the same six.
         let signature = builtin_signature(&module);
         let run_copy = module.declare_function(RUN_COPY, Linkage::Import, &signature)?;
+        let signature = copy_bytes_signature(&module);
+        let copy_bytes = module.declare_function(COPY_BYTES, Linkage::Import, &signature)?;
         let signature = field_signature(&module);
         let field_load = module.declare_function(FIELD_LOAD, Linkage::Import, &signature)?;
         let field_store = module.declare_function(FIELD_STORE, Linkage::Import, &signature)?;
@@ -221,6 +229,7 @@ impl Jit {
             builtin,
             growable,
             run_copy,
+            copy_bytes,
             field_load,
             field_store,
             declared: 0,
@@ -265,6 +274,9 @@ impl Jit {
             let run_copy = self
                 .module
                 .declare_func_in_func(self.run_copy, builder.func);
+            let copy_bytes = self
+                .module
+                .declare_func_in_func(self.copy_bytes, builder.func);
             let field_load = self
                 .module
                 .declare_func_in_func(self.field_load, builder.func);
@@ -282,6 +294,7 @@ impl Jit {
                     builtin,
                     growable,
                     run_copy,
+                    copy_bytes,
                     field_load,
                     field_store,
                 },
@@ -364,6 +377,18 @@ fn entry_signature(module: &JITModule) -> Signature {
 ///
 /// `I8` for the answer because that is Rust's `bool` across a C boundary: the
 /// low byte is 0 or 1, and `brif` on it reads exactly that byte.
+/// [`CopyBytesFn`](crate::abi::CopyBytesFn): the context and five `I64`s, and no
+/// answer.
+fn copy_bytes_signature(module: &JITModule) -> Signature {
+    let mut signature = module.make_signature();
+    let pointer = module.target_config().pointer_type();
+    signature.params.push(AbiParam::new(pointer));
+    for _ in 0..5 {
+        signature.params.push(AbiParam::new(types::I64));
+    }
+    signature
+}
+
 fn safepoint_signature(module: &JITModule) -> Signature {
     let mut signature = module.make_signature();
     signature
@@ -466,6 +491,7 @@ struct Bound {
     builtin: FuncRef,
     growable: FuncRef,
     run_copy: FuncRef,
+    copy_bytes: FuncRef,
     field_load: FuncRef,
     field_store: FuncRef,
 }
@@ -763,7 +789,9 @@ impl<'a, 'f> Lower<'a, 'f> {
             // ADR 0052's four, each handed to the runtime whole. See
             // [`crate::abi::GrowableFn`] for why none of them has an emitted fast
             // path — one rooting discipline that is not the frame's, one chunked
-            // safepoint contract, and one UTF-8 walk.
+            // safepoint contract, and one UTF-8 walk — and
+            // [`crate::abi::CopyBytesFn`] for the one narrow exception, an append
+            // that fits.
             Inst::GrowableAlloc {
                 dst,
                 capacity,
@@ -784,7 +812,7 @@ impl<'a, 'f> Lower<'a, 'f> {
                 args,
                 storage: Storage::PackedBytes,
             } => {
-                self.growable_op(GrowableOp::Extend, args.0, 0);
+                self.growable_extend(args.0);
                 false
             }
             Inst::RunFinish {
@@ -1740,6 +1768,145 @@ impl<'a, 'f> Lower<'a, 'f> {
 
         self.b.switch_to_block(on);
         self.forget();
+    }
+
+    /// One byte `growable-extend`: emitted when it fits, handed over whole when it
+    /// does not.
+    ///
+    /// See [`crate::abi::CopyBytesFn`] for the conditions and for why together they
+    /// keep the fast path free of every refusal, every allocation and every poll.
+    /// In order:
+    ///
+    /// ```text
+    ///   owner non-null, its header's layout the byte buffer's, its store non-null
+    ///   len <= capacity                       -- `Machine::buffer`'s consistency
+    ///   src non-null, its header's layout `String`'s
+    ///   to <= len(src), from <= to            -- unsigned, so a negative one is huge
+    ///   to - from <= capacity - len           -- room, so no growth
+    ///   unpaid work + words(to - from) < SAFEPOINT_STRIDE_WORK
+    ///   neither `from` nor `to` inside a character, where it is below len(src)
+    ///   copy_bytes(store, len, src, from, to - from)
+    ///   payload(owner, 0) = len + (to - from)  -- last, as `growable_commit`
+    /// ```
+    ///
+    /// Anything else is [`Lower::growable_op`], unchanged. The frame pointer and the
+    /// chunk table are derived before the first test, so the cold block — reached
+    /// from every test — is dominated by both.
+    fn growable_extend(&mut self, args: u32) {
+        let Some((buffer_layout, str_layout)) = append_layouts(self.program) else {
+            self.growable_op(GrowableOp::Extend, args, 0);
+            return;
+        };
+        let list = self.program.arg_list(cove_ir::ArgsId(args));
+        let (owner_slot, src_slot, from_slot, to_slot) =
+            (list[0].slot, list[1].slot, list[2].slot, list[3].slot);
+        let cold = self.b.create_block();
+        let join = self.b.create_block();
+        self.frame();
+        self.heap_chunks();
+
+        let owner = self.load_slot(owner_slot);
+        let src = self.load_slot(src_slot);
+        let from = self.load_slot(from_slot);
+        let to = self.load_slot(to_slot);
+
+        let null = self.b.ins().icmp_imm_s(IntCC::Equal, owner, 0);
+        self.cold_if(null, cold);
+        let header = self.heap_word(owner);
+        let named = self.b.ins().ushr_imm_u(header, 32);
+        let other = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, named, i64::from(buffer_layout));
+        self.cold_if(other, cold);
+        let one = self.b.ins().iconst(types::I64, 1);
+        let store = self.payload(owner, one);
+        let consumed = self.b.ins().icmp_imm_s(IntCC::Equal, store, 0);
+        self.cold_if(consumed, cold);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let len = self.payload(owner, zero);
+        let capacity = self.object_len(store);
+        let over = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThan, len, capacity);
+        self.cold_if(over, cold);
+
+        let null = self.b.ins().icmp_imm_s(IntCC::Equal, src, 0);
+        self.cold_if(null, cold);
+        let header = self.heap_word(src);
+        let named = self.b.ins().ushr_imm_u(header, 32);
+        let other = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, named, i64::from(str_layout));
+        self.cold_if(other, cold);
+        let src_len = self.b.ins().band_imm_u(header, LEN_MASK);
+        let past = self.b.ins().icmp(IntCC::UnsignedGreaterThan, to, src_len);
+        self.cold_if(past, cold);
+        let backwards = self.b.ins().icmp(IntCC::UnsignedGreaterThan, from, to);
+        self.cold_if(backwards, cold);
+
+        let take = self.b.ins().isub(to, from);
+        let room = self.b.ins().isub(capacity, len);
+        let full = self.b.ins().icmp(IntCC::UnsignedGreaterThan, take, room);
+        self.cold_if(full, cold);
+        let rounded = self.b.ins().iadd_imm_s(take, 7);
+        let words = self.b.ins().ushr_imm_u(rounded, 3);
+        let work = self.b.use_var(self.work);
+        let owed = self.b.ins().iadd(work, words);
+        let long = self.b.ins().icmp_imm_u(
+            IntCC::UnsignedGreaterThanOrEqual,
+            owed,
+            SAFEPOINT_STRIDE_WORK as i64,
+        );
+        self.cold_if(long, cold);
+
+        // `byte_of(src, at) & 0xC0 == 0x80` where `at < len(src)`: the end of the
+        // string is a boundary and has no byte to look at.
+        for at in [from, to] {
+            let inside = self.b.create_block();
+            let checked = self.b.create_block();
+            let below = self.b.ins().icmp(IntCC::UnsignedLessThan, at, src_len);
+            self.b.ins().brif(below, inside, &[], checked, &[]);
+            self.b.switch_to_block(inside);
+            let which = self.b.ins().ushr_imm_u(at, 3);
+            let word = self.payload(src, which);
+            let within = self.b.ins().band_imm_u(at, 7);
+            let shift = self.b.ins().ishl_imm_u(within, 3);
+            let moved = self.b.ins().ushr(word, shift);
+            let top = self.b.ins().band_imm_u(moved, 0xC0);
+            let continuing = self.b.ins().icmp_imm_u(IntCC::Equal, top, 0x80);
+            self.b.ins().brif(continuing, cold, &[], checked, &[]);
+            self.b.switch_to_block(checked);
+        }
+
+        // Taken: the words onto the unpaid account, the bytes through the leaf, and
+        // the length last. The leaf moves nothing a cached pointer names, so nothing
+        // is forgotten around it.
+        self.b.def_var(self.work, owed);
+        self.b.ins().call(
+            self.bound.copy_bytes,
+            &[self.ctx, store, len, src, from, take],
+        );
+        let grown = self.b.ins().iadd(len, take);
+        self.set_payload(owner, zero, grown);
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(cold);
+        self.growable_op(GrowableOp::Extend, args, 0);
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(join);
+        // One predecessor came through a helper that may have moved both pointers.
+        self.forget();
+    }
+
+    /// Leaves for `cold` when `flag` is set, and carries on in a new block when not.
+    fn cold_if(&mut self, flag: Value, cold: Block) {
+        let next = self.b.create_block();
+        self.b.ins().brif(flag, cold, &[], next, &[]);
+        self.b.switch_to_block(next);
     }
 
     /// One [ADR 0058] `run-copy`, handed to the runtime whole.

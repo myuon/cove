@@ -106,6 +106,13 @@ use runs::{Growable, GROWABLE_LEN, GROWABLE_STORE, MIN_GROWABLE_BYTES};
 /// moving this number moves a stated maximum and costs both.
 pub const SAFEPOINT_STRIDE: u64 = 1024;
 
+// Compiled code bounds the work an append it emits may leave unpaid by the same
+// stride, and it cannot name this constant. See `cove_native::CopyBytesFn`.
+const _: () = assert!(
+    SAFEPOINT_STRIDE == cove_native::SAFEPOINT_STRIDE_WORK,
+    "compiled code bounds unpaid work by the stride the runtime polls at"
+);
+
 /// How many [`crate::vm::builtins::operand::Operand`]s
 /// [`Machine::call_builtin`] holds inline before it spills to a `Vec`.
 ///

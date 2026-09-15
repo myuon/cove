@@ -236,6 +236,15 @@ pub const HEAP_CHUNK_SHIFT: u32 = 13;
 /// How many words one committed heap chunk holds.
 pub const HEAP_CHUNK_WORDS: u64 = 1 << HEAP_CHUNK_SHIFT;
 
+/// How much work compiled code may leave unpaid in front of an append it emits
+/// rather than hands over.
+///
+/// `cove_runtime::vm::exec`'s `SAFEPOINT_STRIDE`, which ADR 0040's bounds are
+/// stated in, declared here for [`HEAP_ORIGIN_WORDS`]' reason — this crate cannot
+/// name the runtime's — and asserted equal by the runtime. See [`CopyBytesFn`] for
+/// the one reader.
+pub const SAFEPOINT_STRIDE_WORK: u64 = 1024;
+
 /// A compiled function's entry point.
 ///
 /// `base` is the **word index** of the callee's frame within the task's stack
@@ -856,7 +865,10 @@ impl GrowableOp {
 ///   byte-blending copy over the two-region address decode — around a poll, and
 ///   in front of all of it the eight refusals whose sentences name offsets and
 ///   lengths the runtime formats. So it is mediated, and the chunking stays where
-///   it already works;
+///   it already works. An append *narrower* than all of that — no refusal, no
+///   growth, and less than a stride of work — is now emitted around
+///   [`CopyBytesFn`], whose documentation says what it leaves out and why that
+///   answers each of these; every other append is still this helper, whole;
 /// - **`RunFinish` validates and then relabels, and only the second half is
 ///   small.** The relabel is a header write and a free block, which is emittable;
 ///   the validation walks the live prefix through `std::str::from_utf8`, which is
@@ -955,6 +967,57 @@ pub type RunCopyFn = unsafe extern "C" fn(
     elem: u32,
 ) -> u32;
 
+/// What the byte copy under an emitted append is: bytes moved from one heap object
+/// to another, and nothing else.
+///
+/// [`GrowableFn`]'s documentation records that a fast path for `growable-extend`
+/// was measured and lost, and why: the operation copies in bounded chunks with a
+/// safepoint between them, and an emitted append could neither skip that nor honour
+/// it without emitting the chunk loop, its poll, a byte-blending copy over the
+/// two-region decode, and in front of it all eight refusals. The append that
+/// compiled code emits now is narrower than that on purpose, and each of those four
+/// is answered by what it leaves out:
+///
+/// - **every refusal is the cold path.** The fast path takes an append only when
+///   no refusal could apply to it — a live byte buffer, a `String` source, a range
+///   inside it whose ends are not inside a character, and room in the store — and
+///   hands every other one to [`GrowableFn`] whole, so no sentence is built here or
+///   emitted there;
+/// - **it never grows**, so it never allocates, and nothing in it can collect;
+/// - **it never polls.** It is taken only when the work compiled code has not yet
+///   paid, plus the words this copy moves, is below [`SAFEPOINT_STRIDE_WORK`] — the
+///   stride the chunk loop itself polls at — and the copy's words are added to that
+///   unpaid work, so the next safepoint charges them. A long append, or one after
+///   enough unpaid work, is the cold path, whose chunks poll. So no compiled
+///   interval is longer than it was by more than a stride, which is ADR 0040's
+///   bound stated in the unit the runtime already states it in;
+/// - **the copy is the runtime's.** This helper is `Machine::copy_string_bytes`,
+///   the byte blend the chunk loop calls, and emitted code does not reproduce it.
+///
+/// So it is a **leaf**: it does not synchronise the program counter, take a
+/// safepoint, grow the stack, commit a heap chunk or charge anything, and emitted
+/// code neither republishes nor forgets a cached pointer around it. It writes the
+/// bytes and returns; emitted code then writes the owner's length word, last, as
+/// `growable_commit` does.
+///
+/// `dst` and `src` are linear heap addresses of the store and the `String`, and
+/// `dst_at`, `src_at` and `len` are byte offsets and a byte count that emitted code
+/// has already bounded against both objects.
+///
+/// # Safety
+///
+/// `ctx` is the pointer the entry point was called with. `[dst_at, dst_at + len)`
+/// is inside `dst`'s payload bytes and `[src_at, src_at + len)` inside `src`'s,
+/// and the two objects are distinct.
+pub type CopyBytesFn = unsafe extern "C" fn(
+    ctx: *mut NativeCtx,
+    dst: u64,
+    dst_at: u64,
+    src: u64,
+    src_at: u64,
+    len: u64,
+);
+
 /// The runtime's side of the boundary, as function pointers.
 ///
 /// This table is the whole reason `cove-native` does not depend on
@@ -983,6 +1046,8 @@ pub struct NativeHelpers {
     pub growable: GrowableFn,
     /// See [`RunCopyFn`].
     pub run_copy: RunCopyFn,
+    /// See [`CopyBytesFn`].
+    pub copy_bytes: CopyBytesFn,
     /// See [`FieldLoadFn`].
     pub field_load: FieldLoadFn,
     /// See [`FieldStoreFn`].
