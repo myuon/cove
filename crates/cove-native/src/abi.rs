@@ -817,6 +817,14 @@ pub enum GrowableOp {
     /// helper reads it off the instruction at the pc it is handed, as
     /// [`GrowableOp::Finish`] reads its target.
     PushWords = 4,
+    /// [`Inst::RunFinish`](cove_ir::Inst::RunFinish) over
+    /// [`Storage::Words`](cove_ir::Storage::Words) — `Vector.freeze()` —
+    /// reached only as the cold path of an emitted relabel: a store word of
+    /// nought, or an owner whose header is not the vector the element layout
+    /// implies. `a` is `dst` and `b` the owner's slot; the target and the
+    /// element layout are read off the instruction at the pc, as for
+    /// [`GrowableOp::Finish`].
+    FinishWords = 5,
 }
 
 impl GrowableOp {
@@ -833,6 +841,7 @@ impl GrowableOp {
             2 => Some(GrowableOp::Extend),
             3 => Some(GrowableOp::Finish),
             4 => Some(GrowableOp::PushWords),
+            5 => Some(GrowableOp::FinishWords),
             _ => None,
         }
     }
@@ -1256,11 +1265,12 @@ mod tests {
             (2, GrowableOp::Extend),
             (3, GrowableOp::Finish),
             (4, GrowableOp::PushWords),
+            (5, GrowableOp::FinishWords),
         ] {
             assert_eq!(op.abi(), code);
             assert_eq!(GrowableOp::from_abi(code), Some(op));
         }
-        assert_eq!(GrowableOp::from_abi(5), None);
+        assert_eq!(GrowableOp::from_abi(6), None);
     }
 
     /// Zero is not a raise, which is what makes a fresh context's

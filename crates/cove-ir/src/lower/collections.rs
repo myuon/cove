@@ -1327,7 +1327,6 @@ const HANDED_OVER: &[(&str, &str)] = &[
     ("Vector", "contains"),
     ("Vector", "indexOf"),
     ("Vector", "slice"),
-    ("Vector", "freeze"),
     ("Set", "contains"),
     ("Set", "inserted"),
     ("Set", "removed"),

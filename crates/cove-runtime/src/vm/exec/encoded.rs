@@ -273,6 +273,7 @@ const GROWABLE_PUSH_BYTE: u8 = Op::GrowablePushByte.number();
 const GROWABLE_PUSH_WORDS: u8 = Op::GrowablePushWords.number();
 const GROWABLE_EXTEND_BYTES: u8 = Op::GrowableExtendBytes.number();
 const RUN_FINISH_BYTES: u8 = Op::RunFinishBytes.number();
+const RUN_FINISH_WORDS: u8 = Op::RunFinishWords.number();
 const LEN: u8 = Op::Len.number();
 const LAYOUT_OF: u8 = Op::LayoutOf.number();
 
@@ -347,6 +348,7 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::GrowablePushWords
         | Op::GrowableExtendBytes
         | Op::RunFinishBytes
+        | Op::RunFinishWords
         | Op::LoadField
         | Op::StoreField
         | Op::LoadElem
@@ -1822,6 +1824,20 @@ pub(super) fn dispatch<'s, 'a>(
                 machine.sync(pc - 1);
                 match machine.finish_buffer(owner, target, Validation::Utf8) {
                     Ok(text) => machine.mem.set_word_at(base_at + (a!()) as usize, text),
+                    Err(error) => fail!(error),
+                }
+            }
+            // A word finish: `Vector.freeze()`, since ADR 0058 moved it into the
+            // standard library. The store is relabelled to the `Array` the
+            // payload's low half names and the element layout is its high half;
+            // there is nothing to validate in a run of whole elements.
+            RUN_FINISH_WORDS => {
+                let owner = machine.mem.word_at(base_at + (b!() as usize));
+                let target = LayoutId(held.lo());
+                let elem = LayoutId(held.hi());
+                machine.sync(pc - 1);
+                match machine.finish_words(owner, target, elem) {
+                    Ok(array) => machine.mem.set_word_at(base_at + (a!()) as usize, array),
                     Err(error) => fail!(error),
                 }
             }

@@ -12,8 +12,8 @@
 //! [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
 
 use cove_ir::{
-    ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Function, Inst, Intrinsic, LayoutId, Len, Num,
-    Program, Repr, Shape, Slot, Storage, StrId,
+    ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Function, Inst, LayoutId, Len, Num, Program, Repr,
+    Shape, Slot, Storage, StrId,
 };
 
 use crate::abi::Raise;
@@ -210,124 +210,96 @@ pub(crate) fn word_push(
     })
 }
 
-/// A [`Inst::CallBuiltin`] both arms emit code for, with its operands decoded.
+/// An [`Inst::RunFinish`] over [`Storage::Words`] — `Vector.freeze()` — with
+/// the static facts its relabel is emitted from.
 ///
-/// A builtin is *named* rather than numbered — see [`cove_ir::Builtin`] — so the
-/// question "is this one the tier lowers" is a pair of string comparisons over
-/// the program's own table, and it is asked **once**, here, rather than in each
-/// arm. That is [`supported`]'s rule taken one level down: a family admitted by
-/// the subset and not emitted by an arm is a panic, and the only way to keep the
-/// two from drifting is for the decision and the operands to come out of the same
-/// function.
+/// `std.vector.freeze` is `core.vectorFinish(items)`, which lowers to this
+/// instruction. `Machine::finish_words` is the owner's checks and then
+/// `growable_finish`'s three writes: `Memory::relabel` turns the store in place
+/// into the `Array` it already holds — a header write, and a free block for the
+/// capacity it gives up — and the two payload words of the `Vector` header are
+/// zeroed, which is the consumed mark. `Memory::relabel` is documented as "two
+/// heap word writes and nothing else, no free-list surgery", so all of it is
+/// emitted; there is no cold half the way [`WordPush`]'s growth is.
 ///
-/// The operand checks that belong to the *shape* are here and the ones that
-/// belong to the *frame* are in [`inst_refused`], which is the same division
-/// every other instruction makes: a receiver that is not one `Repr::Ref` word is
-/// not this builtin at all, and a receiver at a slot the frame does not have is
-/// this builtin outside a bound.
+/// The `Array<T>` layout `relabel` writes is the instruction's own `target`,
+/// which `cove_ir::verify` holds to the fixed `Elements` of the element — it is
+/// no longer searched for, as a builtin's answer had to be.
+///
+/// Two preconditions go to [`GrowableFn`](crate::abi::GrowableFn) as
+/// [`GrowableOp::FinishWords`](crate::abi::GrowableOp::FinishWords), for
+/// [`WordPush`]'s reasons exactly: the owner's object is not the vector the
+/// element layout implies, and the store word is already nought. The null owner
+/// is emitted as [`Raise::NullObject`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Method {
-    /// `Vector.freeze() -> Array<T>`.
-    ///
-    /// `vm::builtins::seq::vector_freeze` is `vector()` and then three writes:
-    /// `Memory::relabel` turns the store in place into the `Array` it already
-    /// holds — a header write, and a free block for the capacity it gives up —
-    /// and the two payload words of the `Vector` header are zeroed, which is
-    /// `freeze()`'s mark. `Memory::relabel` is documented as "two heap word
-    /// writes and nothing else, no free-list surgery", so all of it is
-    /// emitted; there is no cold half the way [`WordPush`]'s growth is.
-    ///
-    /// The `Array<T>` layout `relabel` writes is a **compile-time constant**:
-    /// `make::elements(program, elem, false)` only searches the program's own
-    /// layout table for a [`Shape::Elements`] of `elem` that is not growable,
-    /// and that search is exactly as available here as it is to the runtime —
-    /// see [`method_of`]'s `Intrinsic::VectorFreeze` arm. A program whose checker
-    /// admitted `.freeze()` at all has that layout, so the search failing is
-    /// the same class of impossibility [`Inst::AddrOfField`]'s bound is;
-    /// refusing the call site rather than asserting keeps that claim untested
-    /// by a program this crate cannot see the whole of.
-    ///
-    /// Two preconditions go to [`BuiltinFn`](crate::abi::BuiltinFn), for
-    /// [`WordPush`]'s reasons exactly: the receiver's object is not the
-    /// declared `Shape::Vector` layout, and the store word is already nought —
-    /// a *second* `freeze()`, whose message names the method. The null
-    /// receiver is emitted as [`Raise::NullObject`].
-    Freeze {
-        /// Where the answer goes: the store's own linear address, which
-        /// `relabel` leaves it at.
-        dst: Slot,
-        /// The receiver's slot: one `Repr::Ref` word naming the `Vector` header.
-        recv: Slot,
-        /// The layout the call site declares the receiver to be.
-        vector: LayoutId,
-        /// The element layout's width, `Growable::stride` — needed to turn the
-        /// element count `relabel` is given into the payload words it releases.
-        stride: u32,
-        /// The `Array<T>` layout `relabel` writes into the store's header.
-        array: LayoutId,
-        /// The builtin and its argument list, for the cold path.
-        builtin: u32,
-        args: u32,
-    },
+pub(crate) struct WordFinish {
+    /// Where the answer goes: the store's own linear address, which `relabel`
+    /// leaves it at.
+    pub(crate) dst: Slot,
+    /// The owner's slot: one `Repr::Ref` word naming the `Vector` header.
+    pub(crate) owner: Slot,
+    /// The `Shape::Vector` layout over the element, which the object's own
+    /// header is compared against.
+    pub(crate) vector: LayoutId,
+    /// The element layout's width, `Growable::stride` — needed to turn the
+    /// element count `relabel` is given into the payload words it releases.
+    pub(crate) stride: u32,
+    /// The `Array<T>` layout `relabel` writes into the store's header.
+    pub(crate) array: LayoutId,
 }
 
-/// Which [`Method`] a `call-builtin` is, or `None` for one no arm lowers.
+/// The [`WordFinish`] a word `run-finish` of `elem` into `target` is, or `None`
+/// for a program whose table has no vector of `elem` or whose `target` is not
+/// the fixed run of it — neither of which a verified lowering produces, so
+/// `None` is a bound and not a family.
+pub(crate) fn word_finish(
+    program: &Program,
+    dst: Slot,
+    owner: Slot,
+    target: LayoutId,
+    elem: LayoutId,
+) -> Option<WordFinish> {
+    let push = word_push(program, owner, 0, elem)?;
+    let fixed = program.layouts.get(target.index()).is_some_and(
+        |layout| matches!(layout.shape, Shape::Elements { elem: e, growable: false } if e == elem),
+    );
+    fixed.then_some(WordFinish {
+        dst,
+        owner,
+        vector: push.vector,
+        stride: push.stride,
+        array: target,
+    })
+}
+
+/// A [`Inst::CallBuiltin`] both arms emit code for, with its operands decoded.
+///
+/// **There are none left.** A builtin is *named* rather than numbered — see
+/// [`cove_ir::Builtin`] — and this enum was where the pair of strings a tier
+/// lowered was decoded once for both arms: `String.byteLength`, `Vector.push`,
+/// `Vector.set` and `Vector.freeze`. [ADR 0058] moved each into the standard
+/// library over run instructions, which is what [`WordPush`] and [`WordFinish`]
+/// decode now, and the ADR's Phase 5 deletes this enum and [`method_of`] with
+/// `Inst::CallBuiltin` itself. Until then an uninhabited enum keeps the two
+/// arms' `CallBuiltin` arms written against the one decision.
+///
+/// [ADR 0058]: ../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Method {}
+
+/// Which [`Method`] a `call-builtin` is, or `None` for one no arm lowers — which
+/// is every one of them now.
 ///
 /// `None` is [`Reason::Instruction`] and not [`Reason::Operands`], which is this
 /// module's own division read through one more level: a builtin nothing lowers is
 /// a family to write, and the *name* is what says which family it is.
 pub(crate) fn method_of(
-    program: &Program,
-    dst: Slot,
-    builtin: BuiltinId,
-    args: ArgsId,
+    _program: &Program,
+    _dst: Slot,
+    _builtin: BuiltinId,
+    _args: ArgsId,
 ) -> Option<Method> {
-    let named = program.builtin(builtin);
-    let list = program.arg_list(args);
-    // The receiver is operand zero, which is `vm::builtins::operand::method`'s
-    // own split. One `Repr::Ref` word, because that is what `operand::as_word`
-    // requires of it and what an object address is.
-    let reference = |at: usize| -> Option<Slot> {
-        let arg = list.get(at)?;
-        (program.layout(arg.layout).words.as_slice() == [Repr::Ref]).then_some(arg.slot)
-    };
-    match named.intrinsic {
-        // `vm::builtins::seq::vector_freeze`. The receiver's declared layout is
-        // read off the argument list; what is not declared anywhere on the call
-        // site is the *answer's* layout: it is `make::elements(program, elem,
-        // false)`'s own search over the program's layout table, repeated here
-        // rather than called, because this crate does not depend on
-        // `cove-runtime`.
-        Intrinsic::VectorFreeze => {
-            // The receiver alone — `operand::method`'s split and the arity its
-            // refusal names.
-            if list.len() != 1 || program.layout(named.result).width() != 1 {
-                return None;
-            }
-            let recv = reference(0)?;
-            let vector = list[0].layout;
-            let Shape::Vector { elem } = program.layout(vector).shape else {
-                return None;
-            };
-            let array = program
-                .layouts
-                .iter()
-                .position(|layout| {
-                    matches!(layout.shape, Shape::Elements { elem: e, growable } if e == elem && !growable)
-                })
-                .map(|index| LayoutId(index as u32))?;
-            Some(Method::Freeze {
-                dst,
-                recv,
-                vector,
-                stride: program.layout(elem).width(),
-                array,
-                builtin: builtin.0,
-                args: args.0,
-            })
-        }
-        _ => None,
-    }
+    None
 }
 
 /// Why a function has no machine code, as one stable reason.
@@ -877,31 +849,32 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             storage: Storage::PackedBytes,
             ..
         } => slot(*dst) && slot(*owner),
+        // `Vector.freeze()`: an emitted relabel with [`WordFinish`]'s cold half,
+        // not the byte buffer's helper whole. No `run` bound the way a word
+        // push's is: the relabel is one header write and (at most) one
+        // free-block write, whatever the stride — there is no per-element loop
+        // for a width to bound. Both layout ids have to fit an `i32`, for the
+        // word push's reason: the *template* arm tests each against the header's
+        // high half with `cmp r64, imm32`.
+        Inst::RunFinish {
+            dst,
+            owner,
+            target,
+            storage: Storage::Words(elem),
+            ..
+        } => word_finish(program, *dst, *owner, *target, *elem).is_some_and(|finish| {
+            i32::try_from(finish.vector.0).is_ok()
+                && i32::try_from(finish.array.0).is_ok()
+                && slot(finish.dst)
+                && slot(finish.owner)
+        }),
         // A builtin is decoded by [`method_of`] and by nothing here, so that the
         // name this tier lowers is written down once. `None` is a family nothing
         // emits and falls to `Reason::Instruction` with every other unlowered
         // instruction; a family that *is* emitted is bounded like any other.
         Inst::CallBuiltin { dst, builtin, args } => {
             match method_of(program, *dst, *builtin, *args) {
-                // No `run` bound the way a word push's is: the relabel
-                // this emits is one header write and (at most) one free-block
-                // write, whatever `stride` is — there is no per-element loop
-                // for a width to bound.
-                Some(Method::Freeze {
-                    dst,
-                    recv,
-                    vector,
-                    array,
-                    ..
-                }) => {
-                    // See the word push's note on the same bound for `vector`, and the
-                    // same reason again for `array`: the *template* arm tests
-                    // each against the header's high half with `cmp r64, imm32`.
-                    i32::try_from(vector.0).is_ok()
-                        && i32::try_from(array.0).is_ok()
-                        && slot(dst)
-                        && slot(recv)
-                }
+                Some(method) => match method {},
                 None => return Some(Reason::Instruction),
             }
         }
@@ -1060,7 +1033,7 @@ pub(crate) fn by_zero_of(op: ArithOp) -> Raise {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cove_ir::{Arg, Builtin, Layout, RefMap};
+    use cove_ir::{Layout, RefMap};
     use std::sync::Arc;
 
     fn span() -> cove_diag::Span {
@@ -1177,114 +1150,75 @@ mod tests {
         assert_eq!(blockers(&program, function), vec![expected]);
     }
 
-    // --- `method_of`'s `Intrinsic::VectorFreeze` arm ---------------------------
+    // --- `word_push` and `word_finish` -------------------------------------------
 
-    const FREEZE_INT: LayoutId = LayoutId(1);
-    const FREEZE_REF: LayoutId = LayoutId(2);
-    const FREEZE_VECTOR: LayoutId = LayoutId(3);
-    const FREEZE_ARRAY: LayoutId = LayoutId(4);
+    const RUN_INT: LayoutId = LayoutId(1);
+    const RUN_VECTOR: LayoutId = LayoutId(2);
+    const RUN_ARRAY: LayoutId = LayoutId(3);
 
-    /// A layout table for `Vector<Int>.freeze() -> Ref`, with `Array<Int>` at
-    /// [`FREEZE_ARRAY`] only when `with_array` says so — the one precondition
-    /// this arm cannot read off the call site itself and has to find by
-    /// searching the program's own table, exactly as `make::elements` does.
-    fn program_with_freeze(function: Function, args: Vec<Arg>, with_array: bool) -> Program {
-        let mut layouts = vec![
-            Layout::free(),
-            Layout::word("Int", Repr::Int),
-            Layout::word("Ref", Repr::Ref),
-            Layout::object("Vector", Shape::Vector { elem: FREEZE_INT }),
-        ];
-        if with_array {
-            layouts.push(Layout::object(
-                "Array",
-                Shape::Elements {
-                    elem: FREEZE_INT,
-                    growable: false,
-                },
-            ));
-        }
+    /// A table with an `Int` element, a `Vector<Int>` at [`RUN_VECTOR`] only
+    /// when `with_vector` says so, and an `Array<Int>` at [`RUN_ARRAY`].
+    fn program_with_runs(with_vector: bool) -> Program {
+        let vector = if with_vector {
+            Layout::object("Vector", Shape::Vector { elem: RUN_INT })
+        } else {
+            Layout::word("Unit", Repr::Unit)
+        };
         Program {
-            functions: vec![function],
-            layouts,
-            args: vec![Vec::new(), args],
-            builtins: vec![Builtin {
-                intrinsic: Intrinsic::VectorFreeze,
-                result: FREEZE_REF,
-            }],
+            layouts: vec![
+                Layout::free(),
+                Layout::word("Int", Repr::Int),
+                vector,
+                Layout::object(
+                    "Array",
+                    Shape::Elements {
+                        elem: RUN_INT,
+                        growable: false,
+                    },
+                ),
+            ],
             ..Program::default()
         }
     }
 
-    /// The receiver alone — `method_of`'s admitted shape — answers a
-    /// [`Method::Freeze`] whose `array` is [`FREEZE_ARRAY`], found by the
-    /// search and not assumed to be the next id after the vector's.
+    /// The vector a word run's owner must be is found in the table by its
+    /// element, as `make::elements` finds an `Array`, and a finish's array is
+    /// the instruction's own target.
     #[test]
-    fn vector_freeze_is_admitted_with_the_layout_the_table_has() {
-        let function = function(vec![Repr::Ref, Repr::Ref], FREEZE_REF, vec![]);
-        let program = program_with_freeze(
-            function,
-            vec![Arg {
-                slot: 0,
-                layout: FREEZE_VECTOR,
-            }],
-            true,
-        );
-        let method = method_of(&program, 1, BuiltinId(0), ArgsId(1));
+    fn a_word_run_finds_its_vector_in_the_table() {
+        let program = program_with_runs(true);
         assert_eq!(
-            method,
-            Some(Method::Freeze {
-                dst: 1,
-                recv: 0,
-                vector: FREEZE_VECTOR,
+            word_push(&program, 0, 1, RUN_INT),
+            Some(WordPush {
+                owner: 0,
+                vector: RUN_VECTOR,
+                src: 1,
                 stride: 1,
-                array: FREEZE_ARRAY,
-                builtin: 0,
-                args: 1,
+            })
+        );
+        assert_eq!(
+            word_finish(&program, 2, 0, RUN_ARRAY, RUN_INT),
+            Some(WordFinish {
+                dst: 2,
+                owner: 0,
+                vector: RUN_VECTOR,
+                stride: 1,
+                array: RUN_ARRAY,
             })
         );
     }
 
-    /// `operand::method`'s split asks for the receiver and no argument, and a
-    /// call site the VM would refuse for arity is one this tier leaves refused
-    /// rather than compiling into a read of a slot that is not there.
+    /// A table with no vector of the element, an element past the table, and a
+    /// finish into something that is not the fixed run of the element are each
+    /// refused rather than assumed — none is reachable from a verified lowering.
     #[test]
-    fn vector_freeze_refuses_the_wrong_arity() {
-        let function = function(vec![Repr::Ref, Repr::Ref, Repr::Ref], FREEZE_REF, vec![]);
-        let program = program_with_freeze(
-            function,
-            vec![
-                Arg {
-                    slot: 0,
-                    layout: FREEZE_VECTOR,
-                },
-                Arg {
-                    slot: 1,
-                    layout: FREEZE_VECTOR,
-                },
-            ],
-            true,
-        );
-        assert_eq!(method_of(&program, 2, BuiltinId(0), ArgsId(1)), None);
-    }
-
-    /// `make::elements(program, elem, false)`'s own search, repeated here
-    /// rather than called: a program whose layout table has no non-growable
-    /// `Elements` of the vector's element is refused rather than assumed to
-    /// have one. A program the checker built for a real `.freeze()` always
-    /// has it; this is the same defensive `?` every other lookup in this arm
-    /// already is.
-    #[test]
-    fn vector_freeze_refuses_a_program_with_no_array_layout() {
-        let function = function(vec![Repr::Ref, Repr::Ref], FREEZE_REF, vec![]);
-        let program = program_with_freeze(
-            function,
-            vec![Arg {
-                slot: 0,
-                layout: FREEZE_VECTOR,
-            }],
-            false,
-        );
-        assert_eq!(method_of(&program, 1, BuiltinId(0), ArgsId(1)), None);
+    fn a_word_run_the_table_cannot_describe_is_refused() {
+        let program = program_with_runs(false);
+        assert_eq!(word_push(&program, 0, 1, RUN_INT), None);
+        assert_eq!(word_finish(&program, 2, 0, RUN_ARRAY, RUN_INT), None);
+        let program = program_with_runs(true);
+        assert_eq!(word_push(&program, 0, 1, LayoutId(99)), None);
+        assert_eq!(word_finish(&program, 2, 0, RUN_VECTOR, RUN_INT), None);
+        assert_eq!(word_finish(&program, 2, 0, LayoutId(99), RUN_INT), None);
     }
 }

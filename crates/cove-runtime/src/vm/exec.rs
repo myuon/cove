@@ -2580,16 +2580,12 @@ impl<'a> Machine<'a> {
     /// `Shape::Vector`, because the stride every write below is measured in is
     /// that layout's.
     ///
-    /// A null store is a vector `freeze()` already consumed, which a checked
-    /// program cannot reach — `cove_sema::unique` proves it — and which is
-    /// refused in the words `vm::builtins::seq`'s `vector()` has always used,
-    /// naming the method in `shown`.
-    fn vector_run(
-        &self,
-        shown: &str,
-        owner: u64,
-        elem: LayoutId,
-    ) -> Result<Growable, RuntimeError> {
+    /// A null store is a vector a finish already consumed. A checked program
+    /// cannot reach one — `cove_sema::unique` proves it at the `.freeze()` the
+    /// program wrote (#240) — so it is refused as the internal invariant it is,
+    /// in [`consumed_vector`]'s one sentence, which names no method: the
+    /// instruction is below every method that lowers to it.
+    fn vector_run(&self, owner: u64, elem: LayoutId) -> Result<Growable, RuntimeError> {
         if owner == 0 {
             return Err(null_object());
         }
@@ -2597,18 +2593,14 @@ impl<'a> Machine<'a> {
             Shape::Vector { elem: held } if held == elem => {}
             _ => {
                 return Err(RuntimeError::new(format!(
-                    "`{shown}` needs a vector of `{}`, and this is not one",
+                    "a growable run of `{}` was expected here, and this object is not one",
                     self.program.layout(elem).name
                 )))
             }
         }
         let store = self.mem.payload(owner, GROWABLE_STORE);
         if store == 0 {
-            return Err(RuntimeError::new(format!(
-                "`{shown}` was called on a vector that `freeze()` already consumed"
-            ))
-            .with_rule("`freeze()` consumes its vector; the source vector is no longer usable.")
-            .with_help("use the `Array` that `freeze()` returned, or build a new vector"));
+            return Err(consumed_vector());
         }
         Ok(Growable {
             owner,
@@ -2634,13 +2626,30 @@ impl<'a> Machine<'a> {
         elem: LayoutId,
         src: u64,
     ) -> Result<(), RuntimeError> {
-        let mut run = self.vector_run("push", owner, elem)?;
+        let mut run = self.vector_run(owner, elem)?;
         runs::growable_ensure(self, &mut run, 1)?;
         let width = self.width(elem);
         let into = self.mem.payload_addr(run.store, run.len * width);
         self.mem.copy_words(into, src, width);
         runs::growable_commit(self, &mut run, 1);
         Ok(())
+    }
+
+    /// A word [`Inst::RunFinish`]: the vector's store relabelled to `target` at
+    /// its live length, and the vector emptied.
+    ///
+    /// `vm::builtins::seq::vector_freeze` without the search for the `Array`
+    /// layout — the instruction names it — and without a question it never
+    /// asked: whether the vector had a second holder is `cove_sema::unique`'s
+    /// to have proved.
+    pub(crate) fn finish_words(
+        &mut self,
+        owner: u64,
+        target: LayoutId,
+        elem: LayoutId,
+    ) -> Result<u64, RuntimeError> {
+        let run = self.vector_run(owner, elem)?;
+        runs::growable_finish(self, &run, target, Validation::None)
     }
 
     /// A byte [`Inst::RunFinish`]: the buffer's live prefix, validated and
@@ -4122,6 +4131,18 @@ fn wrong_arity(callee: String, declared: usize, given: usize) -> RuntimeError {
 /// reaching the machine, reported rather than read through.
 fn null_object() -> RuntimeError {
     RuntimeError::new("this value was read before it was given one")
+}
+
+/// A vector's storage was used after a finish consumed it.
+///
+/// One sentence for every run instruction over a vector, and one the oracle's
+/// core intrinsics use too, because it is an internal invariant rather than a
+/// program's mistake: `cove_sema::unique` refuses a read of a vector after its
+/// `freeze()` and a `freeze()` of one another place still holds (#240), so a
+/// checked program never gets here. It names no method, since the instruction
+/// that finds it is below whichever method lowered to it (#378, Q9).
+pub(crate) fn consumed_vector() -> RuntimeError {
+    RuntimeError::new(crate::builtins::CONSUMED_VECTOR)
 }
 
 /// A `lock` taken by a task that already holds the same cell.

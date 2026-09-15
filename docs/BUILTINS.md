@@ -51,6 +51,7 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `vectorPush` | `core.vectorPush(items: Vector<T>, value: T) -> Unit` |
 | `vectorLoad` | `core.vectorLoad(items: Vector<T>, index: Int) -> T` |
 | `vectorStore` | `core.vectorStore(items: Vector<T>, index: Int, value: T) -> Unit` |
+| `vectorFinish` | `core.vectorFinish(items: Vector<T>) -> Array<T>` |
 
 ## Builtin types
 
@@ -103,7 +104,7 @@ written as a namespace; binds `T`.
 | `set(index: Int, value: T) -> Option<T>` | yes |  |  | `std.vector.set` |
 | `pop() -> Option<T>` | yes |  |  | `machine` |
 | `remove(index: Int) -> Option<T>` | yes |  |  | `machine` |
-| `freeze() -> Array<T>` | yes |  |  | `machine` |
+| `freeze() -> Array<T>` | yes |  |  | `std.vector.freeze` |
 | `toArray() -> Array<T>` |  |  |  | `machine` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 

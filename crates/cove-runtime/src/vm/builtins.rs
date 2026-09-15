@@ -164,7 +164,9 @@ pub(crate) fn call(
         Intrinsic::VectorToArray => {
             seq::vector_to_array(machine, operands).map(|word| out.push(word))
         }
-        Intrinsic::VectorFreeze => seq::vector_freeze(machine, operands).map(|word| out.push(word)),
+        // `Vector.freeze` is not here: it is `std.vector.freeze` over the core
+        // intrinsic that is a word `Inst::RunFinish` — see
+        // `Machine::finish_words`.
 
         // ---- Set ---------------------------------------------------------
         //

@@ -44,6 +44,21 @@ export fn set<T>(items: Vector<T>, index: Int, value: T) -> Option<T> {
   }
 }
 
+/// The elements of this vector as an `Array`, in O(1), consuming the vector.
+///
+/// The storage the vector was holding *is* the array: it is relabelled in
+/// place to the elements it holds, and whatever room the vector had grown
+/// into is given back. Nothing is copied, which is why the vector is no
+/// longer usable afterwards, and why the compiler has to be able to prove
+/// that nothing else is holding it — that proof is made at the call written
+/// in the program, and where it cannot be, `toArray()` copies instead.
+///
+/// The body is one core intrinsic, ADR 0058's run finish over the element's
+/// words, and the lowering expands it wherever it is called.
+export fn freeze<T>(items: Vector<T>) -> Array<T> {
+  core.vectorFinish(items)
+}
+
 /// The elements `keep` answers `true` for, in the order they were in.
 ///
 /// **Through a copy taken before the first call.** A vector shares its

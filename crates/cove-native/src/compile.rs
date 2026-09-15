@@ -34,7 +34,7 @@
 use std::mem::offset_of;
 
 use cove_ir::{
-    ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot, Storage, StrId,
+    ArithOp, CmpOp, Function, FunctionId, Inst, Len, Num, Program, Slot, Storage, StrId,
 };
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
@@ -51,8 +51,8 @@ use crate::abi::{
     HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
-    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported, word_push,
-    Method, WordPush,
+    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported,
+    word_finish, word_push, WordFinish, WordPush,
 };
 use crate::Unavailable;
 
@@ -70,9 +70,6 @@ const CALL: &str = "cove_native_call";
 
 /// The name the allocation helper is imported under. [`SAFEPOINT`]'s note applies.
 const ALLOC: &str = "cove_native_alloc";
-
-/// The name the builtin helper is imported under. [`SAFEPOINT`]'s note applies.
-const BUILTIN: &str = "cove_native_builtin";
 
 /// The name the growable-run helper is imported under. [`SAFEPOINT`]'s note
 /// applies.
@@ -148,7 +145,6 @@ pub struct Jit {
     safepoint: FuncId,
     call: FuncId,
     alloc: FuncId,
-    builtin: FuncId,
     growable: FuncId,
     run_copy: FuncId,
     field_load: FuncId,
@@ -175,7 +171,6 @@ impl Jit {
         builder.symbol(SAFEPOINT, helpers.safepoint as usize as *const u8);
         builder.symbol(CALL, helpers.call as usize as *const u8);
         builder.symbol(ALLOC, helpers.alloc as usize as *const u8);
-        builder.symbol(BUILTIN, helpers.builtin as usize as *const u8);
         builder.symbol(GROWABLE, helpers.growable as usize as *const u8);
         builder.symbol(RUN_COPY, helpers.run_copy as usize as *const u8);
         builder.symbol(FIELD_LOAD, helpers.field_load as usize as *const u8);
@@ -199,11 +194,9 @@ impl Jit {
         let call = module.declare_function(CALL, Linkage::Import, &signature)?;
         let signature = alloc_signature(&module);
         let alloc = module.declare_function(ALLOC, Linkage::Import, &signature)?;
-        let signature = builtin_signature(&module);
-        let builtin = module.declare_function(BUILTIN, Linkage::Import, &signature)?;
-        // The same signature: `GrowableFn` and `BuiltinFn` are one pointer, one
-        // `I64` and four `I32`s, and a second declaration that said so in its own
-        // words would be a second place for the shape to drift.
+        // `GrowableFn` is one pointer, one `I64` and four `I32`s — `BuiltinFn`'s
+        // shape, which no lowering calls any more since ADR 0058 moved the last
+        // builtin this arm lowered into the standard library.
         let signature = builtin_signature(&module);
         let growable = module.declare_function(GROWABLE, Linkage::Import, &signature)?;
         // And again: `RunCopyFn` is the same six.
@@ -219,7 +212,6 @@ impl Jit {
             safepoint,
             call,
             alloc,
-            builtin,
             growable,
             run_copy,
             field_load,
@@ -259,7 +251,6 @@ impl Jit {
                 .declare_func_in_func(self.safepoint, builder.func);
             let call = self.module.declare_func_in_func(self.call, builder.func);
             let alloc = self.module.declare_func_in_func(self.alloc, builder.func);
-            let builtin = self.module.declare_func_in_func(self.builtin, builder.func);
             let growable = self
                 .module
                 .declare_func_in_func(self.growable, builder.func);
@@ -280,7 +271,6 @@ impl Jit {
                     safepoint,
                     call,
                     alloc,
-                    builtin,
                     growable,
                     run_copy,
                     field_load,
@@ -414,7 +404,8 @@ fn alloc_signature(module: &JITModule) -> Signature {
     signature
 }
 
-/// [`crate::abi::BuiltinFn`], in Cranelift's terms.
+/// [`crate::abi::BuiltinFn`]'s shape, in Cranelift's terms, which
+/// [`crate::abi::GrowableFn`] and [`crate::abi::RunCopyFn`] share.
 ///
 /// [`call_signature`]'s shape, for [`call_signature`]'s reason: the answer is an
 /// [`Outcome`] and is returned from the compiled function unchanged, so the two
@@ -464,7 +455,6 @@ struct Bound {
     safepoint: FuncRef,
     call: FuncRef,
     alloc: FuncRef,
-    builtin: FuncRef,
     growable: FuncRef,
     run_copy: FuncRef,
     field_load: FuncRef,
@@ -810,6 +800,20 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.growable_op(GrowableOp::Finish, *dst, *owner);
                 false
             }
+            // `Vector.freeze()`: the relabel emitted, and the whole finish as its
+            // cold half. See [`WordFinish`](crate::subset::WordFinish).
+            Inst::RunFinish {
+                dst,
+                owner,
+                target,
+                storage: Storage::Words(elem),
+                ..
+            } => {
+                let finish = word_finish(self.program, *dst, *owner, *target, *elem)
+                    .expect("`supported` admitted a word finish it could decode");
+                self.vector_freeze(finish);
+                false
+            }
             // ADR 0058's `run-copy`, handed to the runtime whole. See
             // [`crate::abi::RunCopyFn`] for why it has no emitted loop — memmove in
             // bounded chunks with a poll between them, and refusals whose
@@ -943,18 +947,9 @@ impl<'a, 'f> Lower<'a, 'f> {
             // operands come out of one function that both arms ask.
             Inst::CallBuiltin { dst, builtin, args } => {
                 match method_of(self.program, *dst, *builtin, *args) {
-                    Some(Method::Freeze {
-                        dst,
-                        recv,
-                        vector,
-                        stride,
-                        array,
-                        builtin,
-                        args,
-                    }) => self.vector_freeze(dst, recv, vector, stride, array, builtin, args),
+                    Some(method) => match method {},
                     None => unreachable!("`supported` admitted a builtin no arm lowers"),
                 }
-                false
             }
             other => unreachable!("`supported` admitted {other:?}, which is not lowered"),
         }
@@ -1370,14 +1365,14 @@ impl<'a, 'f> Lower<'a, 'f> {
         self.forget();
     }
 
-    /// `vm::builtins::seq::vector_freeze`: `Memory::relabel` turning the store
-    /// into the `Array<T>` it already holds, in place, and the two words of the
-    /// `Vector` header that mark it frozen.
+    /// A word `run-finish` — `Vector.freeze()` — as `Memory::relabel` turning
+    /// the store into the `Array<T>` it already holds, in place, and the two
+    /// words of the `Vector` header that mark it consumed.
     ///
-    /// See [`Method::Freeze`] for which preconditions are emitted and which go
-    /// to [`BuiltinFn`](crate::abi::BuiltinFn): the receiver's declared layout
-    /// against the object's own header, and the store word against nought,
-    /// exactly as [`Lower::vector_push`]'s are. What is new is that there is no
+    /// See [`WordFinish`](crate::subset::WordFinish) for which preconditions are
+    /// emitted and which go to [`GrowableFn`](crate::abi::GrowableFn): the vector
+    /// layout the element implies against the object's own header, and the store
+    /// word against nought, exactly as [`Lower::vector_push`]'s are. What is new is that there is no
     /// third cold half — `relabel` is O(1) whatever `len` and `capacity` are, so
     /// every precondition that holds is answered here and nothing is bounded by
     /// a run.
@@ -1387,17 +1382,14 @@ impl<'a, 'f> Lower<'a, 'f> {
     /// stride` is the `Array`'s own payload width, which is where the free
     /// block — if there is one — begins, and `spare = (capacity - len) *
     /// stride` is what it releases in words.
-    #[allow(clippy::too_many_arguments)]
-    fn vector_freeze(
-        &mut self,
-        dst: Slot,
-        recv: Slot,
-        vector: LayoutId,
-        stride: u32,
-        array: LayoutId,
-        builtin: u32,
-        args: u32,
-    ) {
+    fn vector_freeze(&mut self, finish: WordFinish) {
+        let WordFinish {
+            dst,
+            owner: recv,
+            vector,
+            stride,
+            array,
+        } = finish;
         let cold = self.b.create_block();
         let join = self.b.create_block();
 
@@ -1483,62 +1475,19 @@ impl<'a, 'f> Lower<'a, 'f> {
         self.b.ins().jump(join, &[]);
 
         self.b.switch_to_block(cold);
-        self.builtin_call(dst, builtin, args);
+        self.growable_op(GrowableOp::FinishWords, dst, recv);
         self.b.ins().jump(join, &[]);
 
         self.b.switch_to_block(join);
         self.forget();
     }
 
-    /// One [`Inst::CallBuiltin`](cove_ir::Inst::CallBuiltin), handed to the runtime
-    /// whole.
-    ///
-    /// See [`crate::abi::BuiltinFn`] for what this is for and what it is not: it is
-    /// the cold path of a builtin whose fast path is emitted, and never a way to
-    /// lower one. The shape is [`Lower::callee`]'s, down to the outcome being
-    /// returned from this function unchanged.
-    fn builtin_call(&mut self, dst: Slot, builtin: u32, args: u32) {
-        // A builtin may allocate and an allocation may collect, so this is a
-        // safepoint and the unpaid work goes over with it.
-        let work = self.b.use_var(self.work);
-        self.store_ctx(OFF_PENDING_WORK, work);
-        let zero = self.b.ins().iconst(types::I64, 0);
-        self.b.def_var(self.work, zero);
-
-        let at = self.b.ins().iconst(types::I32, self.pc as i64);
-        let into = self.b.ins().iconst(types::I32, i64::from(dst));
-        let which = self.b.ins().iconst(types::I32, i64::from(builtin));
-        let list = self.b.ins().iconst(types::I32, i64::from(args));
-        let call = self.b.ins().call(
-            self.bound.builtin,
-            &[self.ctx, self.base, at, into, which, list],
-        );
-        let outcome = self.b.inst_results(call)[0];
-        self.forget();
-
-        let left = self.b.create_block();
-        let on = self.b.create_block();
-        let returned =
-            self.b
-                .ins()
-                .icmp_imm_s(IntCC::Equal, outcome, i64::from(Outcome::Returned.abi()));
-        self.b.ins().brif(returned, on, &[], left, &[]);
-
-        self.b.switch_to_block(left);
-        // Not `leave`: what this returns is the helper's outcome and not one this
-        // function chose, and every field that outcome needs the helper has written.
-        self.b.ins().return_(&[outcome]);
-
-        self.b.switch_to_block(on);
-        self.forget();
-    }
-
     /// One of [ADR 0052]'s four growable-buffer instructions, handed to the
     /// runtime whole.
     ///
-    /// [`Lower::builtin_call`]'s shape exactly, with the operand pair in place of
-    /// the destination and the builtin and one more argument saying which of the
-    /// four this is. See [`crate::abi::GrowableFn`] for what each operand means and
+    /// [`Lower::callee`]'s shape, with the operand pair and one more argument
+    /// saying which operation this is in place of the callee and its argument
+    /// list. See [`crate::abi::GrowableFn`] for what each operand means and
     /// why all of it is the helper rather than a fast path and a cold one.
     ///
     /// It is a safepoint: a `growable-alloc` allocates twice, an `append` may grow
@@ -1858,7 +1807,7 @@ impl<'a, 'f> Lower<'a, 'f> {
     }
 
     /// One [`crate::abi::FieldLoadFn`]/[`crate::abi::FieldStoreFn`] call, handed
-    /// to the runtime whole. [`Lower::builtin_call`]'s shape, with no safepoint
+    /// to the runtime whole. [`Lower::growable_op`]'s shape, with no safepoint
     /// discipline around it — neither helper can allocate — and two of its
     /// operands already linear addresses rather than immediates.
     fn field_call(&mut self, callee: FuncRef, addr: Value, at: u32, width: u32, into: Value) {
@@ -1887,7 +1836,7 @@ impl<'a, 'f> Lower<'a, 'f> {
         // little: the whole block's work is never charged at all, and ADR 0040's
         // `S + T` bound is then computed from a number that is short.
         //
-        // [`Lower::builtin_call`] and [`Lower::growable_op`] publish *before* the
+        // [`Lower::allocate`] and [`Lower::growable_op`] publish *before* the
         // call instead, and clear the accumulator, because each of them is a
         // safepoint and the helper may charge. This one cannot do that: a field
         // helper is deliberately **not** a safepoint — neither
@@ -2050,7 +1999,7 @@ impl<'a, 'f> Lower<'a, 'f> {
     ///
     /// Emitted on every backedge, which is the floor ADR 0055 sets
     /// ("Safepoints occur at least: on loop backedges; …"). It is no longer the
-    /// only one: [`Lower::allocate`] and [`Lower::builtin_call`] are the ADR's
+    /// only one: [`Lower::allocate`] and [`Lower::growable_op`] are the ADR's
     /// "around allocation or runtime calls which may collect", and each of their
     /// helpers takes the same three steps in the same order before it does
     /// anything else. Host effects are still outside this slice. One of the

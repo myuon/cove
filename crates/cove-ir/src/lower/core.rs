@@ -12,10 +12,11 @@
 //! the name stands for.
 //!
 //! So nothing downstream of this file learns that a public method moved. The
-//! verifier, both encoders and the native code generators see the same
-//! instruction they already see for an `Array`'s length, and the function the
-//! standard library wraps around it is small enough that `super::inline`
-//! expands it where it is called.
+//! verifier, both encoders and the native code generators see run instructions
+//! — a `len`, a word `growable-push`, a `load-elem` or `store-elem` of a store, a
+//! word `run-finish` — and never the name of the method above them; a function
+//! the standard library wraps around a single one of them is small enough that
+//! `super::inline` expands it where it is called.
 
 use cove_diag::Span;
 use cove_sema::typeck::Ty;
@@ -24,7 +25,7 @@ use cove_syntax::ast::{Arg, Expr};
 use super::frame::Val;
 use super::shapes::{self, VECTOR_STORE};
 use super::{Body, Dest};
-use crate::inst::{Inst, Slot, Storage};
+use crate::inst::{Inst, Slot, Storage, Validation};
 use crate::layout::LayoutId;
 
 impl Body<'_> {
@@ -53,6 +54,7 @@ impl Body<'_> {
             ("vectorStore", [items, index, value]) => {
                 self.core_vector_store(expr, &items.value, &index.value, &value.value, want)
             }
+            ("vectorFinish", [items]) => self.core_vector_finish(expr, &items.value, want),
             _ => self.gap(&format!("`core.{name}`"), expr),
         }
     }
@@ -205,6 +207,44 @@ impl Body<'_> {
         self.release(at, expr.span);
         self.release(owner, expr.span);
         self.unit_answer(expr, want)
+    }
+
+    /// `core.vectorFinish(items)`: the vector's store, relabelled to the `Array`
+    /// of its live prefix, and the vector consumed.
+    ///
+    /// One [`Inst::RunFinish`] over [`Storage::Words`] of the element, with
+    /// [`Validation::None`] and a `target` of the `Array<T>` layout, which is
+    /// declared here by asking for it: the relabelled store is traced by that
+    /// layout's reference map from then on. That the owner has no second holder
+    /// is `cove_sema::unique`'s proof at the program's own `.freeze()` call; this
+    /// lowering records nothing and asks nothing.
+    fn core_vector_finish(&mut self, expr: &Expr, items: &Expr, want: Option<Dest>) -> Val {
+        let Some(elem) = self.vector_element(items) else {
+            return self.dead(expr);
+        };
+        let Some(ty) = self.settled_ty(items) else {
+            return self.dead(expr);
+        };
+        let Ty::Vector(of) = ty else {
+            return self.dead(expr);
+        };
+        let Some(target) = self.layout(&Ty::Array(of), expr.span) else {
+            return self.dead(expr);
+        };
+        let owner = self.expr(items);
+        let dst = self.answer_at(want, target);
+        self.emit(
+            Inst::RunFinish {
+                dst: dst.slot,
+                owner: owner.slot,
+                target,
+                validation: Validation::None,
+                storage: Storage::Words(elem),
+            },
+            expr.span,
+        );
+        self.release(owner, expr.span);
+        dst
     }
 
     /// `core.byteLength(text)`: the string object's header length, which is

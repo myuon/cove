@@ -3190,7 +3190,9 @@ impl<'a> Interpreter<'a> {
         // rule but the last thing this evaluator can do with an argument it
         // was not given. `freeze` is the exception, because it has an answer
         // for a temporary — the temporary holds the only handle to its own
-        // storage, so freezing it writes nowhere.
+        // storage, so freezing it writes nowhere. (`freeze` is a standard
+        // library binding now and is answered above; the exception stays
+        // written here because the guard above repeats it.)
         //
         // Which names those are is the shared table's to say, and asking it
         // is what makes a mutating method the table gains arrive here with
@@ -3218,21 +3220,6 @@ impl<'a> Interpreter<'a> {
 
         let args = self.eval_args(env, args, trailing)?;
         let mut values = plain_values(args, name)?;
-
-        if name == "freeze" {
-            // `freeze` needs the storage handle where it lives, so that the
-            // uniqueness check counts the caller's own handle only once.
-            if let Some(place) = &place {
-                return Ok(place.with_mut(span, |slot| match slot {
-                    Value(Repr::Vector(storage)) => builtins::freeze(storage, span),
-                    other => Err(RuntimeError::new(format!(
-                        "`{}` has no method `freeze`",
-                        other.type_name()
-                    ))
-                    .at(span)),
-                })??);
-            }
-        }
 
         let receiver_value = match (place, temporary) {
             (Some(place), _) => place.read(span)?,
@@ -5886,6 +5873,9 @@ export fn main() -> Result<Unit, Error> {
         assert_eq!(run_entry_of(source, "main", &[]).output, "2 [1, 2]\n");
     }
 
+    /// A program that pushes after a freeze is refused by `cove_sema::unique`
+    /// before it runs; resolved but not checked, as here, the evaluator's own
+    /// liveness check is what stops it, in the one internal-invariant sentence.
     #[test]
     fn a_frozen_vector_is_no_longer_usable() {
         let source = r#"
@@ -5897,29 +5887,28 @@ export fn main() -> Result<Unit, Error> {
 }
 "#;
         let error = run_entry_of(source, "main", &[]).error();
-        assert!(
-            error.message.contains("already consumed"),
-            "{}",
-            error.message
-        );
+        assert_eq!(error.message, builtins::CONSUMED_VECTOR);
     }
 
+    /// A freeze of a vector another place still holds is `cove_sema::unique`'s
+    /// to refuse — `tests/e2e/fail_freeze_aliased` is that diagnostic — and
+    /// this evaluator no longer counts `Rc` handles to refuse it a second time
+    /// (#378, Q9). Resolved but not checked, as here, the freeze goes through
+    /// and what is left is the liveness check: the alias finds the storage
+    /// consumed.
     #[test]
-    fn freeze_on_aliased_storage_points_at_to_array() {
+    fn an_alias_of_a_frozen_vector_finds_it_consumed() {
         let source = r#"
 export fn main() -> Result<Unit, Error> {
   var items = Vector.of(1)
   var alias = items
   let frozen = items.freeze()
+  alias.push(2)
   Ok(())
 }
 "#;
         let error = run_entry_of(source, "main", &[]).error();
-        assert!(error.message.contains("freeze()"), "{}", error.message);
-        assert!(
-            error.help.unwrap().contains("toArray()"),
-            "the diagnostic names the O(n) fallback"
-        );
+        assert_eq!(error.message, builtins::CONSUMED_VECTOR);
     }
 
     #[test]

@@ -352,8 +352,9 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             Storage::Words(_) => return Err(TooWide::Storage { storage }),
         },
         // The opcode *is* the storage and the validation: a byte finish
-        // validates UTF-8, so `Validation::None` over bytes has no opcode. The
-        // target is the payload's low half, as `Op::LoadElem`'s layout is.
+        // validates UTF-8 and a word finish validates nothing, so the other
+        // pairing of each has no opcode. The target is the payload's low half,
+        // as `Op::LoadElem`'s layout is, and a word finish's element the high.
         Inst::RunFinish {
             dst,
             owner,
@@ -368,10 +369,16 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
                 0,
                 halves(target.0, 0),
             ),
-            (Storage::PackedBytes, Validation::None) => {
+            (Storage::Words(elem), Validation::None) => build(
+                Op::RunFinishWords,
+                slot(dst)?,
+                slot(owner)?,
+                0,
+                halves(target.0, elem.0),
+            ),
+            (Storage::PackedBytes, Validation::None) | (Storage::Words(_), Validation::Utf8) => {
                 return Err(TooWide::Validation { validation })
             }
-            (Storage::Words(_), _) => return Err(TooWide::Storage { storage }),
         },
         Inst::Len { dst, obj } => build(Op::Len, slot(dst)?, slot(obj)?, 0, 0),
         Inst::LayoutOf { dst, obj } => build(Op::LayoutOf, slot(dst)?, slot(obj)?, 0, 0),
@@ -898,6 +905,16 @@ mod tests {
                     storage: Storage::PackedBytes,
                 },
             ),
+            (
+                0,
+                Inst::RunFinish {
+                    dst: 1,
+                    owner: 2,
+                    target: L,
+                    validation: Validation::None,
+                    storage: Storage::Words(L),
+                },
+            ),
             (0, Inst::Len { dst: 1, obj: 2 }),
             (0, Inst::LayoutOf { dst: 1, obj: 2 }),
             (0, Inst::AddrOfSlot { dst: 1, slot: 2 }),
@@ -1296,13 +1313,6 @@ mod tests {
                 args: ArgsId(0),
                 storage: words,
             },
-            Inst::RunFinish {
-                dst: 0,
-                owner: 1,
-                target: LayoutId(0),
-                validation: Validation::None,
-                storage: words,
-            },
         ] {
             assert_eq!(
                 encode(&inst, 0),
@@ -1323,6 +1333,21 @@ mod tests {
             ),
             Err(TooWide::Validation {
                 validation: Validation::None
+            })
+        );
+        assert_eq!(
+            encode(
+                &Inst::RunFinish {
+                    dst: 0,
+                    owner: 1,
+                    target: LayoutId(0),
+                    validation: Validation::Utf8,
+                    storage: words,
+                },
+                0
+            ),
+            Err(TooWide::Validation {
+                validation: Validation::Utf8
             })
         );
         assert_eq!(

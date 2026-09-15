@@ -59,8 +59,9 @@
 //! in place and in O(1). That is only sound where the caller holds the only
 //! handle, and uniqueness is not a question this backend can answer — a
 //! handle is a word and words are not counted. It does not have to: the
-//! checker proves it before the program runs. [`vector_freeze`] says which
-//! pass, and why trusting it is the right shape rather than a shortcut.
+//! checker proves it before the program runs. Since ADR 0058 it is not this
+//! module's either: `freeze()` is `std.vector.freeze` over a word
+//! `Inst::RunFinish`, which is `Machine::finish_words`.
 //!
 //! # Growth
 //!
@@ -83,12 +84,12 @@
 
 #[cfg(test)]
 use cove_ir::Program;
-use cove_ir::{LayoutId, Repr, Shape, Storage, Validation};
+use cove_ir::{LayoutId, Repr, Shape, Storage};
 
 use crate::error::RuntimeError;
 use crate::vm::builtins::operand::Operand;
 use crate::vm::builtins::{equal, make, operand};
-use crate::vm::exec::runs::{self, Growable, GROWABLE_LEN, GROWABLE_STORE};
+use crate::vm::exec::runs::{Growable, GROWABLE_LEN, GROWABLE_STORE};
 use crate::vm::exec::Machine;
 
 // --- reading a receiver ----------------------------------------------------
@@ -566,57 +567,6 @@ pub(super) fn vector_to_array(
     make::array_of(machine, items.elem, &words)
 }
 
-/// `Vector.freeze() -> Array<T>`, consuming the store in place.
-///
-/// The one O(1) sequence conversion the language has, and O(1) here: the
-/// store is *already* the run of elements an `Array` is, so nothing is
-/// copied. [`Memory::relabel`](crate::vm::mem::Memory::relabel) rewrites its
-/// header from the growable family to the fixed one and shortens it from the
-/// capacity to the length, and the spare room the vector had grown into
-/// becomes a free block the next sweep folds back in. The address does not
-/// move, so the array this answers is the store the vector was holding.
-///
-/// Then the vector is emptied — length zero, store null — because `freeze()`
-/// *consumes*. There is no second handle to see that happen: which is the
-/// whole point, and it is a fact this machine is told rather than one it
-/// works out.
-///
-/// # Who proved it
-///
-/// [ADR 0001](../../../../docs/adr/0001-mvp-language-design.md) always
-/// said the compiler does: *"the compiler only performs conservative, local
-/// uniqueness checking for this explicit transition"*. The tree-walking
-/// oracle answered it a different way, by counting `Rc` handles at run time,
-/// and this machine cannot answer it at all — a handle here is a word and
-/// words are not counted. So [issue #240](https://github.com/myuon/cove/issues/240)
-/// put the proof where the ADR always had it, in
-/// [`cove_sema::unique`](../../../../crates/cove-sema/src/unique.rs), and
-/// this arm trusts it.
-///
-/// Trusting is the right shape rather than a shortcut. The alternatives are
-/// a sharing bit, a reference count or a uniqueness table, and #240 rules out
-/// all three; what is left is a check the machine cannot perform and a proof
-/// the checker can. A user-facing runtime error for something the compiler
-/// guarantees would report a compiler bug in the vocabulary of a program bug.
-///
-/// What stays is [`vector`]'s own liveness check, which every `Vector` method
-/// shares: a header whose store word is null answers [`operand::frozen`].
-/// For a checked program that state is unreachable — a read after a
-/// `freeze()` is `cove::unique::used_after_freeze` — so reaching it means the
-/// proof let one through, and an internal invariant that reports is better
-/// than one that reads a null store as a sequence.
-pub(super) fn vector_freeze(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, _) = operand::method("freeze", operands, 0)?;
-    let items = vector(machine, "freeze", receiver)?;
-    let array = make::elements(machine.program(), items.elem, false)?;
-    // The store is allocated to its capacity and holds its length, so what it
-    // gives up is the room in between, and `growable_finish` says how much.
-    runs::growable_finish(machine, &items.run, array, Validation::None)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -963,7 +913,7 @@ mod tests {
         let error = push(&mut machine, grown, int, &[1]).unwrap_err();
         assert_eq!(
             error.message,
-            "`push` needs a vector of `Int`, and this is not one"
+            "a growable run of `Int` was expected here, and this object is not one"
         );
     }
 
@@ -1023,7 +973,7 @@ mod tests {
         push(&mut machine, items, scalar(&program, Repr::Int), &[7]).unwrap();
         assert_eq!(
             u64::from(machine.object_len(machine.payload(items, 1))),
-            runs::MIN_GROWABLE_ELEMENTS
+            crate::vm::exec::runs::MIN_GROWABLE_ELEMENTS
         );
         assert_eq!(machine.payload(items, 0), 1);
     }
@@ -1164,8 +1114,11 @@ mod tests {
         let mut machine = Machine::new(&program, 1 << 14);
         let items = growable(&mut machine, &[1, 2]);
         let store = machine.payload(items, 1);
+        let int = scalar(&program, Repr::Int);
 
-        let frozen = word(&mut machine, "Vector", "freeze", &[(Repr::Ref, items)]).unwrap();
+        let frozen = machine
+            .finish_words(items, elements(&program, int, false), int)
+            .unwrap();
         assert_eq!(frozen, store);
         assert_eq!(words_of(&machine, frozen), vec![1, 2]);
         assert!(matches!(
@@ -1202,10 +1155,13 @@ mod tests {
         let store = machine.payload(items, 1);
         assert_eq!(
             u64::from(machine.object_len(store)),
-            runs::MIN_GROWABLE_ELEMENTS
+            crate::vm::exec::runs::MIN_GROWABLE_ELEMENTS
         );
 
-        let frozen = word(&mut machine, "Vector", "freeze", &[(Repr::Ref, items)]).unwrap();
+        let int = scalar(&program, Repr::Int);
+        let frozen = machine
+            .finish_words(items, elements(&program, int, false), int)
+            .unwrap();
         assert_eq!(frozen, store);
         assert_eq!(words_of(&machine, frozen), vec![1, 2]);
 
@@ -1221,13 +1177,14 @@ mod tests {
     }
 
     /// A header whose store word is null is still a state the machine can be
-    /// handed, and every method answers the same thing for it — whichever one
-    /// was called.
+    /// handed, and every operation refuses it.
     ///
-    /// Nothing in this backend produces one any more, now that `freeze()`
-    /// refuses. It is built by hand here because the reading of it is what is
-    /// under test: the check is at the top of the receiver, before the method
-    /// name is looked at, which is where the oracle asks it.
+    /// A checked program never produces one — `cove_sema::unique` proves a
+    /// vector is not read after its `freeze()` — so it is built by hand here,
+    /// because the reading of it is what is under test. A method still
+    /// dispatched here names itself, as the oracle's does; a run instruction
+    /// over the vector — `push` and `freeze` since ADR 0058 — is below every
+    /// method, and answers the one internal-invariant sentence.
     #[test]
     fn a_vector_with_no_storage_refuses_every_method() {
         let program = world();
@@ -1235,27 +1192,23 @@ mod tests {
         let int = scalar(&program, Repr::Int);
         let header = machine.new_object(vector(&program, int), 0).unwrap();
 
-        let pushed = push(&mut machine, header, int, &[1]).map(|()| Vec::new());
-        for (operation, answer) in [
-            (
-                "length",
-                run(&mut machine, "Vector", "length", &[(Repr::Ref, header)]),
-            ),
-            ("push", pushed),
-            (
-                "freeze",
-                run(&mut machine, "Vector", "freeze", &[(Repr::Ref, header)]),
-            ),
-        ] {
-            let error = answer.unwrap_err();
-            assert_eq!(
-                error.message,
-                format!("`{operation}` was called on a vector that `freeze()` already consumed")
-            );
-            assert_eq!(
-                error.rule.as_deref(),
-                Some("`freeze()` consumes its vector; the source vector is no longer usable.")
-            );
+        let error = run(&mut machine, "Vector", "length", &[(Repr::Ref, header)]).unwrap_err();
+        assert_eq!(
+            error.message,
+            "`length` was called on a vector that `freeze()` already consumed"
+        );
+        assert_eq!(
+            error.rule.as_deref(),
+            Some("`freeze()` consumes its vector; the source vector is no longer usable.")
+        );
+
+        let pushed = push(&mut machine, header, int, &[1]).unwrap_err();
+        let finished = machine
+            .finish_words(header, elements(&program, int, false), int)
+            .unwrap_err();
+        for error in [pushed, finished] {
+            assert_eq!(error.message, crate::builtins::CONSUMED_VECTOR);
+            assert_eq!(error.rule, None);
         }
     }
 

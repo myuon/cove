@@ -910,15 +910,28 @@ pub enum Inst {
     ///
     /// # For [`Storage::PackedBytes`]
     ///
-    /// ADR 0052's finish for a byte buffer, and the only form admitted today:
-    /// `crate::verify` requires [`Validation::Utf8`] and a `target` of
-    /// [`crate::Program::str_layout`]. The bytes are checked as UTF-8 exactly
-    /// once, because a run assembled from [`Inst::GrowablePush`] may hold
-    /// anything a byte can hold, and invalid UTF-8 fails with the same error a
-    /// source-level string operation already raises for it. `target` is carried
-    /// although it is a program-wide constant, because a word run's finish will
-    /// name an `Array` layout of its element and the family should not change
-    /// shape when it does.
+    /// ADR 0052's finish for a byte buffer: `crate::verify` requires
+    /// [`Validation::Utf8`] and a `target` of [`crate::Program::str_layout`].
+    /// The bytes are checked as UTF-8 exactly once, because a run assembled from
+    /// [`Inst::GrowablePush`] may hold anything a byte can hold, and invalid
+    /// UTF-8 fails with the same error a source-level string operation already
+    /// raises for it. `target` is carried although it is a program-wide
+    /// constant, because a word run's finish names an `Array` layout of its
+    /// element and the family does not change shape when it does.
+    ///
+    /// # For [`Storage::Words`]
+    ///
+    /// `Vector.freeze()`: `std.vector.freeze` is `core.vectorFinish(items)`, and
+    /// this is what that lowers to. `crate::verify` requires
+    /// [`Validation::None`] — a run of whole elements has nothing to validate —
+    /// and a `target` that is the non-growable [`crate::Shape::Elements`] of the
+    /// storage's element, because the relabelled store is traced by the target's
+    /// reference map from then on.
+    ///
+    /// Whether the owner had a second holder is not asked here, in either
+    /// storage. ADR 0001's "conservative, local uniqueness checking for this
+    /// explicit transition" is `cove_sema::unique`'s, at the program's own
+    /// `.freeze()` call site, and it is authoritative (#240, #378's Q9).
     ///
     /// [`crate::Shape::Bytes`] cannot cross a Cove call and neither can the
     /// owner cross the Host boundary, but the owner *can* cross a call, which

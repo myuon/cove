@@ -75,7 +75,6 @@ pub enum Intrinsic {
     VectorSlice,
     VectorLength,
     VectorToArray,
-    VectorFreeze,
     SetOf,
     SetLength,
     SetContains,
@@ -146,7 +145,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::VectorSlice,
     Intrinsic::VectorLength,
     Intrinsic::VectorToArray,
-    Intrinsic::VectorFreeze,
     Intrinsic::SetOf,
     Intrinsic::SetLength,
     Intrinsic::SetContains,
@@ -219,7 +217,6 @@ impl Intrinsic {
             Intrinsic::VectorSlice => "Vector",
             Intrinsic::VectorLength => "Vector",
             Intrinsic::VectorToArray => "Vector",
-            Intrinsic::VectorFreeze => "Vector",
             Intrinsic::SetOf => "Set",
             Intrinsic::SetLength => "Set",
             Intrinsic::SetContains => "Set",
@@ -288,7 +285,6 @@ impl Intrinsic {
             Intrinsic::VectorSlice => "slice",
             Intrinsic::VectorLength => "length",
             Intrinsic::VectorToArray => "toArray",
-            Intrinsic::VectorFreeze => "freeze",
             Intrinsic::SetOf => "of",
             Intrinsic::SetLength => "length",
             Intrinsic::SetContains => "contains",
@@ -449,10 +445,8 @@ impl Intrinsic {
                 .union(E::BULK_WORK)
                 .union(E::MAY_ALLOCATE)
                 .union(E::MAY_COLLECT),
-            // `freeze()` relabels the store the vector already owns down
-            // from capacity to length and empties the header — O(1), and
-            // nothing new is allocated.
-            Intrinsic::VectorFreeze => raise.union(E::READS_MEMORY).union(E::WRITES_MEMORY),
+            // `push`, `set` and `freeze` are not here: each is `std.vector`
+            // over run instructions now.
 
             // A `Set` or a `Map` is immutable, so every update below
             // allocates a new run rather than writing through the receiver
@@ -662,7 +656,6 @@ mod tests {
                 | Intrinsic::VectorSlice
                 | Intrinsic::VectorLength
                 | Intrinsic::VectorToArray
-                | Intrinsic::VectorFreeze
                 | Intrinsic::SetOf
                 | Intrinsic::SetLength
                 | Intrinsic::SetContains

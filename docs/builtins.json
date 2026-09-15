@@ -13,7 +13,8 @@
     {"name": "byteLength", "signature": "core.byteLength(text: String) -> Int", "generics": [], "params": [{"name": "text", "type": "String"}], "result": "Int", "libraryOnly": true},
     {"name": "vectorPush", "signature": "core.vectorPush(items: Vector<T>, value: T) -> Unit", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}, {"name": "value", "type": "T"}], "result": "Unit", "libraryOnly": true},
     {"name": "vectorLoad", "signature": "core.vectorLoad(items: Vector<T>, index: Int) -> T", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}, {"name": "index", "type": "Int"}], "result": "T", "libraryOnly": true},
-    {"name": "vectorStore", "signature": "core.vectorStore(items: Vector<T>, index: Int, value: T) -> Unit", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}, {"name": "index", "type": "Int"}, {"name": "value", "type": "T"}], "result": "Unit", "libraryOnly": true}
+    {"name": "vectorStore", "signature": "core.vectorStore(items: Vector<T>, index: Int, value: T) -> Unit", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}, {"name": "index", "type": "Int"}, {"name": "value", "type": "T"}], "result": "Unit", "libraryOnly": true},
+    {"name": "vectorFinish", "signature": "core.vectorFinish(items: Vector<T>) -> Array<T>", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}], "result": "Array<T>", "libraryOnly": true}
   ],
   "types": [
     {
@@ -63,7 +64,7 @@
         {"name": "set", "signature": "set(index: Int, value: T) -> Option<T>", "generics": [], "params": [{"name": "index", "type": "Int"}, {"name": "value", "type": "T"}], "variadic": false, "result": "Option<T>", "mutating": true, "implementedBy": "std.vector.set", "host": false},
         {"name": "pop", "signature": "pop() -> Option<T>", "generics": [], "params": [], "variadic": false, "result": "Option<T>", "mutating": true, "implementedBy": "machine", "host": false},
         {"name": "remove", "signature": "remove(index: Int) -> Option<T>", "generics": [], "params": [{"name": "index", "type": "Int"}], "variadic": false, "result": "Option<T>", "mutating": true, "implementedBy": "machine", "host": false},
-        {"name": "freeze", "signature": "freeze() -> Array<T>", "generics": [], "params": [], "variadic": false, "result": "Array<T>", "mutating": true, "implementedBy": "machine", "host": false},
+        {"name": "freeze", "signature": "freeze() -> Array<T>", "generics": [], "params": [], "variadic": false, "result": "Array<T>", "mutating": true, "implementedBy": "std.vector.freeze", "host": false},
         {"name": "toArray", "signature": "toArray() -> Array<T>", "generics": [], "params": [], "variadic": false, "result": "Array<T>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "implementedBy": "machine", "host": false}
       ]

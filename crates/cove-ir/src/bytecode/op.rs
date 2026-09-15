@@ -138,7 +138,10 @@ mod base {
     pub const GROWABLE_PUSH_WORDS: u8 = GROWABLE_PUSH_BYTE + 1;
     pub const GROWABLE_EXTEND_BYTES: u8 = GROWABLE_PUSH_WORDS + 1;
     pub const RUN_FINISH_BYTES: u8 = GROWABLE_EXTEND_BYTES + 1;
-    pub const LEN: u8 = RUN_FINISH_BYTES + 1;
+    /// A word finish, beside its byte twin: `Vector.freeze()` since ADR 0058
+    /// moved it into the standard library.
+    pub const RUN_FINISH_WORDS: u8 = RUN_FINISH_BYTES + 1;
+    pub const LEN: u8 = RUN_FINISH_WORDS + 1;
     pub const LAYOUT_OF: u8 = LEN + 1;
     pub const ADDR_OF_SLOT: u8 = LAYOUT_OF + 1;
     pub const ADDR_OF_FIELD: u8 = ADDR_OF_SLOT + 1;
@@ -227,6 +230,10 @@ pub enum Op {
     /// is always [`crate::Validation::Utf8`]; the target layout is the
     /// payload's low half.
     RunFinishBytes,
+    /// [`crate::Inst::RunFinish`] over [`crate::Storage::Words`], which is always
+    /// [`crate::Validation::None`]; the target layout is the payload's low half
+    /// and the element layout its high half.
+    RunFinishWords,
     Len,
     LayoutOf,
     AddrOfSlot,
@@ -492,6 +499,7 @@ impl Op {
             Op::GrowablePushWords,
             Op::GrowableExtendBytes,
             Op::RunFinishBytes,
+            Op::RunFinishWords,
             Op::Len,
             Op::LayoutOf,
             Op::AddrOfSlot,
@@ -579,6 +587,7 @@ impl Op {
             Op::GrowablePushWords => base::GROWABLE_PUSH_WORDS,
             Op::GrowableExtendBytes => base::GROWABLE_EXTEND_BYTES,
             Op::RunFinishBytes => base::RUN_FINISH_BYTES,
+            Op::RunFinishWords => base::RUN_FINISH_WORDS,
             Op::Len => base::LEN,
             Op::LayoutOf => base::LAYOUT_OF,
             Op::AddrOfSlot => base::ADDR_OF_SLOT,
@@ -851,6 +860,15 @@ impl Op {
                 NONE,
                 one(Half::Layout),
             ),
+            // The target `Array` layout and the element layout, both range-checked
+            // by the uniform payload pass; neither names an operand's width, since
+            // both operands are one reference word.
+            Op::RunFinishWords => fields(
+                Operand::Word(REF),
+                Operand::Word(REF),
+                NONE,
+                ids(Half::Layout, Half::Layout),
+            ),
             Op::Len => fields(Operand::Word(INT), Operand::Word(REF), NONE, Payload::Empty),
             Op::LayoutOf => fields(Operand::Word(INT), Operand::Word(REF), NONE, Payload::Empty),
             Op::AddrOfSlot => fields(
@@ -939,7 +957,7 @@ mod tests {
     use super::*;
 
     /// ADR 0041's count, which is the one number the format's headroom is
-    /// argued from: a hundred and fifty-eight opcodes out of the 256 a byte
+    /// argued from: a hundred and fifty-nine opcodes out of the 256 a byte
     /// names.
     ///
     /// It was a hundred and two until `Op::ByteAt` (now `Op::RunLoadBytes`), a
@@ -959,15 +977,16 @@ mod tests {
     /// once ADR 0058 deleted `AllocBytes`, `WriteByte` and `FinishString`,
     /// which no lowering had ever emitted, and a hundred and fifty-eight once
     /// ADR 0058's Phase 3 gave the growable push a word member for
-    /// `Vector.push`. What the number is for is that a reader can see the
+    /// `Vector.push`, and a hundred and fifty-nine once the finish gained one
+    /// for `Vector.freeze`. What the number is for is that a reader can see the
     /// headroom
     /// rather than be told about it: more than a third of the byte is still
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_fifty_eight_opcodes() {
-        assert_eq!(Op::all().len(), 158);
-        assert_eq!(OPCODES, 158);
+    fn there_are_a_hundred_and_fifty_nine_opcodes() {
+        assert_eq!(Op::all().len(), 159);
+        assert_eq!(OPCODES, 159);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

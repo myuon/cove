@@ -26,8 +26,7 @@ use std::mem::offset_of;
 use std::ptr;
 
 use cove_ir::{
-    ArgsId, ArithOp, CmpOp, Function, FunctionId, Inst, LayoutId, Len, Num, Program, Slot, Storage,
-    StrId,
+    ArgsId, ArithOp, CmpOp, Function, FunctionId, Inst, Len, Num, Program, Slot, Storage, StrId,
 };
 
 use crate::abi::{
@@ -35,8 +34,8 @@ use crate::abi::{
     HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
-    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported, word_push,
-    Method, WordPush,
+    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported,
+    word_finish, word_push, WordFinish, WordPush,
 };
 use crate::Unavailable;
 
@@ -240,7 +239,6 @@ struct Helpers {
     open: usize,
     close: usize,
     alloc: usize,
-    builtin: usize,
     growable: usize,
     run_copy: usize,
     field_load: usize,
@@ -267,7 +265,6 @@ impl Jit {
                 open: helpers.open as usize,
                 close: helpers.close as usize,
                 alloc: helpers.alloc as usize,
-                builtin: helpers.builtin as usize,
                 growable: helpers.growable as usize,
                 run_copy: helpers.run_copy as usize,
                 field_load: helpers.field_load as usize,
@@ -373,7 +370,6 @@ struct Emit<'a> {
     open: usize,
     close: usize,
     alloc: usize,
-    builtin: usize,
     growable: usize,
     run_copy: usize,
     field_load: usize,
@@ -414,7 +410,6 @@ impl<'a> Emit<'a> {
             open: helpers.open,
             close: helpers.close,
             alloc: helpers.alloc,
-            builtin: helpers.builtin,
             growable: helpers.growable,
             run_copy: helpers.run_copy,
             field_load: helpers.field_load,
@@ -638,6 +633,19 @@ impl<'a> Emit<'a> {
                 storage: Storage::PackedBytes,
                 ..
             } => self.growable_op(GrowableOp::Finish, *dst, *owner),
+            // `Vector.freeze()`: the relabel emitted, and the whole finish as its
+            // cold half. See [`WordFinish`](crate::subset::WordFinish).
+            Inst::RunFinish {
+                dst,
+                owner,
+                target,
+                storage: Storage::Words(elem),
+                ..
+            } => {
+                let finish = word_finish(self.program, *dst, *owner, *target, *elem)
+                    .expect("`supported` admitted a word finish it could decode");
+                self.vector_freeze(finish)
+            }
             // ADR 0058's `run-copy`, handed to the runtime whole. See
             // [`crate::abi::RunCopyFn`] for why it has no emitted loop — memmove in
             // bounded chunks with a poll between them, and refusals whose
@@ -741,15 +749,7 @@ impl<'a> Emit<'a> {
             // operands come out of one function that both arms ask.
             Inst::CallBuiltin { dst, builtin, args } => {
                 match method_of(self.program, *dst, *builtin, *args) {
-                    Some(Method::Freeze {
-                        dst,
-                        recv,
-                        vector,
-                        stride,
-                        array,
-                        builtin,
-                        args,
-                    }) => self.vector_freeze(dst, recv, vector, stride, array, builtin, args),
+                    Some(method) => match method {},
                     None => unreachable!("`supported` admitted a builtin no arm lowers"),
                 }
             }
@@ -1143,18 +1143,18 @@ impl<'a> Emit<'a> {
         self.frame_live = false;
     }
 
-    /// `vm::builtins::seq::vector_freeze`: `Memory::relabel` turning the store
-    /// into the `Array<T>` it already holds, in place, and the two words of the
-    /// `Vector` header that mark it frozen.
+    /// A word `run-finish` — `Vector.freeze()` — as `Memory::relabel` turning
+    /// the store into the `Array<T>` it already holds, in place, and the two
+    /// words of the `Vector` header that mark it consumed.
     ///
-    /// See [`Method::Freeze`](crate::subset::Method::Freeze) for which
-    /// preconditions are emitted and which go to
-    /// [`BuiltinFn`](crate::abi::BuiltinFn) — [`Emit::vector_push`]'s own two —
+    /// See [`WordFinish`](crate::subset::WordFinish) for which preconditions are
+    /// emitted and which go to [`GrowableFn`](crate::abi::GrowableFn) —
+    /// [`Emit::vector_push`]'s own two —
     /// and for why there is no *third* cold half: `relabel` is O(1) whatever
     /// `len` and `capacity` are, so once both preconditions hold, every
     /// remaining step is unconditional.
     ///
-    /// **`recv`'s address is reloaded from the frame wherever it is needed**
+    /// **The owner's address is reloaded from the frame wherever it is needed**
     /// rather than kept live across the run, which is this arm having three
     /// scratch registers and more than three addresses to have used —
     /// `header`, `store`, and the two write targets `heap_ptr` forms from them.
@@ -1166,17 +1166,14 @@ impl<'a> Emit<'a> {
     /// as `(capacity - len) * stride`, which is the same number
     /// `Machine::relabel`'s wrapper computes and one fewer register in the
     /// middle of it.
-    #[allow(clippy::too_many_arguments)]
-    fn vector_freeze(
-        &mut self,
-        dst: Slot,
-        recv: Slot,
-        vector: LayoutId,
-        stride: u32,
-        array: LayoutId,
-        builtin: u32,
-        args: u32,
-    ) {
+    fn vector_freeze(&mut self, finish: WordFinish) {
+        let WordFinish {
+            dst,
+            owner: recv,
+            vector,
+            stride,
+            array,
+        } = finish;
         let cold = self.label();
         let after_spare = self.label();
         let done = self.label();
@@ -1271,55 +1268,19 @@ impl<'a> Emit<'a> {
         self.jmp(Target::Label(done));
 
         self.bind(cold);
-        self.builtin_call(dst, builtin, args);
+        self.growable_op(GrowableOp::FinishWords, dst, recv);
         self.bind(done);
         // One predecessor of this join came through a helper, so the frame
         // pointer the other one derived is not to be trusted here.
         self.frame_live = false;
     }
 
-    /// One [`Inst::CallBuiltin`](cove_ir::Inst::CallBuiltin), handed to the runtime
-    /// whole.
-    ///
-    /// See [`crate::abi::BuiltinFn`] for what this is for and what it is not: it is
-    /// the cold path of a builtin whose fast path is emitted, and never a way to
-    /// lower one. Six arguments, which is what the System V ABI passes in
-    /// registers, and the same shape [`Emit::callee_mediated`] has — including the
-    /// shift that turns this arm's byte offset back into the word index the ABI is
-    /// written in.
-    fn builtin_call(&mut self, dst: Slot, builtin: u32, args: u32) {
-        // A builtin may allocate and an allocation may collect, so this is a
-        // safepoint and the unpaid work goes over with it.
-        self.store(CTX, OFF_PENDING_WORK, WORK);
-        self.xor_rr(WORK, WORK);
-
-        self.mov_rr(RDI, CTX);
-        self.mov_rr(RSI, BASE_BYTES);
-        self.shr_imm8(RSI, 3);
-        self.mov_imm32(RDX, self.pc as i32);
-        self.mov_imm32(RCX, dst as i32);
-        self.mov_imm32(R8, builtin as i32);
-        self.mov_imm32(R9, args as i32);
-        self.mov_imm64(RAX, self.builtin as i64);
-        self.call(RAX);
-
-        // Anything but `Returned` leaves, and leaves with that outcome: the helper
-        // has already written every field it needs.
-        let on = self.label();
-        self.test_rr32(RAX, RAX);
-        self.jcc(CC_E, Target::Label(on));
-        self.leave_answered();
-        self.bind(on);
-        self.frame_live = false;
-    }
-
     /// One of [ADR 0052]'s four growable-buffer instructions, handed to the
     /// runtime whole.
     ///
-    /// [`Emit::builtin_call`]'s shape exactly — the same six registers, the same
-    /// shift back to a word index, the same test of the outcome — with the
-    /// operand pair in place of the destination and the builtin, and one more
-    /// register spent on saying which of the four this is. See
+    /// [`Emit::callee_mediated`]'s shape — six registers, the same shift back to
+    /// a word index, the same test of the outcome — with the operand pair and
+    /// the operation in place of the callee and its argument list. See
     /// [`crate::abi::GrowableFn`] for what each operand means and, more to the
     /// point, why *all* of it is the helper rather than a fast path and a cold
     /// one.
@@ -1629,7 +1590,7 @@ impl<'a> Emit<'a> {
     }
 
     /// One [`crate::abi::FieldLoadFn`]/[`crate::abi::FieldStoreFn`] call, handed
-    /// to the runtime whole. [`Emit::builtin_call`]'s shape, with no safepoint
+    /// to the runtime whole. [`Emit::growable_op`]'s shape, with no safepoint
     /// discipline around it — neither helper can allocate, so there is no unpaid
     /// work to publish.
     ///
@@ -1661,7 +1622,7 @@ impl<'a> Emit<'a> {
         // the caller's [`WORK`] back, which is a different thing entirely. Its
         // other caller [`Emit::callee`] needs no store here because
         // [`Emit::callee_direct`] published and cleared before the call;
-        // [`Emit::builtin_call`] and [`Emit::growable_op`] do the same. This one
+        // [`Emit::allocate`] and [`Emit::growable_op`] do the same. This one
         // cannot, because a field helper is deliberately **not** a safepoint —
         // neither [`crate::abi::FieldLoadFn`] nor [`crate::abi::FieldStoreFn`]
         // can allocate — so publishing early would put a charge where there is no

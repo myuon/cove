@@ -417,7 +417,8 @@ thread_local! {
 /// a frame holds — into the destination *of the two operations that have one*.
 ///
 /// That last clause is the part worth stating. `a` is `dst` for
-/// [`GrowableOp::Alloc`] and [`GrowableOp::Finish`]; it is the owner's slot for
+/// [`GrowableOp::Alloc`], [`GrowableOp::Finish`] and [`GrowableOp::FinishWords`];
+/// it is the owner's slot for
 /// [`GrowableOp::Push`] and [`GrowableOp::PushWords`], which the real helper
 /// reads and never writes; and it is an `ArgsId` for [`GrowableOp::Extend`],
 /// which is not a slot at all. A double that wrote through it in every case
@@ -452,7 +453,10 @@ unsafe extern "C" fn growable(
     match answer {
         Some(outcome) if outcome != Outcome::Returned.abi() => outcome,
         _ => {
-            if op == GrowableOp::Alloc.abi() || op == GrowableOp::Finish.abi() {
+            if op == GrowableOp::Alloc.abi()
+                || op == GrowableOp::Finish.abi()
+                || op == GrowableOp::FinishWords.abi()
+            {
                 (*ctx)
                     .words
                     .add((base + u64::from(a)) as usize)
@@ -2809,10 +2813,12 @@ pub fn a_growable_buffer_is_admitted_as_a_family<A: Arm>() {
         );
     }
 
-    // A word member of the other three is not the byte buffer's helper, and is
-    // refused rather than handed to it. A word push is admitted, but as an
-    // emitted fast path of its own — `every_cold_path_of_a_push_goes_to_the_runtime`
-    // is where that is asserted — so it is not in this list.
+    // A word allocation is not the byte buffer's helper, and is refused rather
+    // than handed to it. A word push and a word finish are admitted, but as
+    // emitted fast paths of their own — `every_cold_path_of_a_push_goes_to_the_runtime`
+    // and `every_cold_path_of_a_freeze_goes_to_the_runtime` are where that is
+    // asserted — and a word finish into anything but the fixed run of its
+    // element is refused.
     let words = Storage::Words(INT);
     for inst in [
         Inst::GrowableAlloc {
@@ -3514,32 +3520,32 @@ pub fn a_push_refuses_a_null_receiver<A: Arm>() {
 
 // --- Vector.freeze ---------------------------------------------------------
 
-/// One `Vector.freeze() -> Array<T>`, answering into `dst`.
-pub fn freezing(vector: LayoutId) -> Program {
-    program_with_builtin(
-        function(
-            vec![Repr::Ref, Repr::Ref],
-            REF,
-            vec![
-                Inst::CallBuiltin {
-                    dst: 1,
-                    builtin: BuiltinId(0),
-                    args: ArgsId(1),
-                },
-                Inst::Return { src: 1 },
-            ],
-        ),
-        "Vector",
-        "freeze",
+/// One `Vector.freeze() -> Array<T>`, answering into `dst`: what
+/// `std.vector.freeze` is once the lowering has expanded it — a word
+/// `run-finish` of `stride`-wide elements into the `Array` of them.
+pub fn freezing(stride: u32) -> Program {
+    let (elem, target) = if stride == 2 {
+        (PAIR, ARRAY_PAIR)
+    } else {
+        (INT, ARRAY_INT)
+    };
+    program(function(
+        vec![Repr::Ref, Repr::Ref],
         REF,
-        vec![Arg {
-            slot: 0,
-            layout: vector,
-        }],
-    )
+        vec![
+            Inst::RunFinish {
+                dst: 1,
+                owner: 0,
+                target,
+                validation: Validation::None,
+                storage: Storage::Words(elem),
+            },
+            Inst::Return { src: 1 },
+        ],
+    ))
 }
 
-/// `vm::builtins::seq::vector_freeze`: `Memory::relabel` turning the store
+/// `Machine::finish_words`: `Memory::relabel` turning the store
 /// into the `Array<T>` it already holds, in place — nothing handed to the
 /// runtime, the answer aliases the store, and the elements read back exactly
 /// as a `Vector.get` would have answered them.
@@ -3556,8 +3562,8 @@ pub fn a_freeze_relabels_the_store_in_place<A: Arm>() {
         (PAIR_VECTOR, ARRAY_PAIR, 2, 2, 3),
     ];
     for (vector, array, stride, len, capacity) in cases {
-        forget_mediated();
-        let held = freezing(vector);
+        forget_built();
+        let held = freezing(stride);
         let at = HEAP_CHUNK_WORDS + 33;
         let mut heap = Heap::new(2);
         let header = a_vector(&mut heap, at, vector, len, capacity);
@@ -3573,9 +3579,9 @@ pub fn a_freeze_relabels_the_store_in_place<A: Arm>() {
             "{len}/{capacity} at stride {stride}"
         );
         assert!(
-            mediated().is_empty(),
-            "relabel is O(1) and has no cold half: {:?}",
-            mediated()
+            built().is_empty(),
+            "relabel is O(1) and emitted whole: {:?}",
+            built()
         );
 
         assert_eq!(
@@ -3611,16 +3617,17 @@ pub fn a_freeze_relabels_the_store_in_place<A: Arm>() {
         assert_eq!(heap.get(at + 1), 0, "the vector's own length word, cleared");
         assert_eq!(heap.get(at + 2), 0, "the vector's own store word, cleared");
     }
-    forget_mediated();
+    forget_built();
 }
 
 /// The two cold paths of `Vector.freeze`, each handed to the runtime whole.
 ///
-/// A store word of nought — a second `freeze()` — and a receiver whose object
-/// is not the layout the call site declared: [`Method::Freeze`]'s own two,
-/// a push's reasons exactly. Each message names a rendered `Value`
-/// or the method, which this crate cannot build, so the assertion is that
-/// emitted code **did not try**.
+/// A store word of nought — a second finish — and an owner whose object is not
+/// the vector the element layout implies: `cove_native`'s `WordFinish`, for a
+/// push's reasons exactly. Each sentence is the runtime's, which this crate
+/// cannot build, so the assertion is that emitted code **did not try**: the
+/// finish went over as [`GrowableOp::FinishWords`] and what the runtime
+/// answered landed in `dst`.
 pub fn every_cold_path_of_a_freeze_goes_to_the_runtime<A: Arm>() {
     let at = HEAP_CHUNK_WORDS + 33;
     let rows: [(&str, Build); 2] = [
@@ -3635,37 +3642,41 @@ pub fn every_cold_path_of_a_freeze_goes_to_the_runtime<A: Arm>() {
         ),
     ];
     for (why, build) in rows {
-        forget_mediated();
-        let held = freezing(VECTOR);
+        forget_built();
+        let held = freezing(1);
         let mut heap = Heap::new(2);
         let header = build(&mut heap, at);
         let mut words = vec![header, UNWRITTEN];
         let answer = run_over::<A>(&held, &mut words, 0, &heap);
         assert_eq!(answer.outcome, Outcome::Returned, "{why}");
         assert_eq!(
-            mediated(),
-            vec![Mediated {
+            built(),
+            vec![Built {
                 base: 0,
                 pc: 0,
-                dst: 1,
-                builtin: 0,
-                args: 1,
-                // A builtin is a safepoint, so the block's static work — two
+                op: GrowableOp::FinishWords.abi(),
+                a: 1,
+                b: 0,
+                // The helper is a safepoint, so the block's static work — two
                 // instructions — went over with the hand-over.
                 work: 2,
             }],
-            "{why}: the runtime was handed the builtin, whole"
+            "{why}: the runtime was handed the finish, whole"
         );
-        assert_eq!(words[1], 1, "{why}: the runtime's answer, in `dst`");
+        assert_eq!(
+            words[1],
+            u64::from(GrowableOp::FinishWords.abi()) * 1000 + 1,
+            "{why}: the runtime's answer, in `dst`"
+        );
     }
-    forget_mediated();
+    forget_built();
 }
 
-/// `Machine::checked`'s null refusal — no, `vector()`'s, a push's
-/// own note on which one refusal this builtin's family answers itself.
+/// `Machine::vector_run`'s null refusal — the one refusal of a finish this
+/// crate can name, so it is emitted rather than handed over.
 pub fn a_freeze_refuses_a_null_receiver<A: Arm>() {
-    forget_mediated();
-    let held = freezing(VECTOR);
+    forget_built();
+    let held = freezing(1);
     let heap = Heap::new(2);
     let mut words = vec![0u64, UNWRITTEN];
     let answer = run_over::<A>(&held, &mut words, 0, &heap);
@@ -3673,10 +3684,10 @@ pub fn a_freeze_refuses_a_null_receiver<A: Arm>() {
     assert_eq!(answer.raise, Some(Raise::NullObject));
     assert_eq!(answer.raise_pc, 0);
     assert!(
-        mediated().is_empty(),
+        built().is_empty(),
         "the null was refused here, not handed over"
     );
-    forget_mediated();
+    forget_built();
 }
 
 /// `encoded.rs`'s `LOAD_ELEM` arm (line 1425), which is `Machine::element` and

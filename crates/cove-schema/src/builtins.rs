@@ -644,7 +644,7 @@ pub struct StdBinding {
 /// Every builtin method whose body has moved out of Rust and into the
 /// standard library.
 ///
-/// Thirty-two entries, and what is *not* here is as informative as what is.
+/// Thirty-three entries, and what is *not* here is as informative as what is.
 ///
 /// `Result.mapError` is here, and it is the only one that needed a language
 /// change to arrive. While a callback's arity was adapted rather than
@@ -666,7 +666,7 @@ pub struct StdBinding {
 /// That is what retires ADR 0043's "It must be total" condition, so a
 /// fallible method is no longer kept out of this table for its diagnostic.
 ///
-/// Ten of the thirty-two are `Duration`'s, and they are the first entries
+/// Ten of the thirty-three are `Duration`'s, and they are the first entries
 /// that come in pairs: `micros`, `millis`, `seconds`, `minutes`, and `hours`
 /// each name a method (`d.millis()`, the reader) and, separately, an
 /// associated function (`Duration.millis(n)`, the builder) — see
@@ -769,6 +769,16 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "set",
         module: "std.vector",
         function: "set",
+    },
+    // `freeze` is one core intrinsic, like `push`. Its uniqueness proof stays at
+    // the call site the program wrote, which the checker sees before any
+    // binding is consulted.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Vector",
+        method: "freeze",
+        module: "std.vector",
+        function: "freeze",
     },
     StdBinding {
         kind: StdBindingKind::Method,
@@ -1244,12 +1254,14 @@ impl CoreIntrinsicSchema {
 /// ADR 0058's growable push over a run of element words. `Vector.set` is the
 /// first with policy around it: its range decision and its `Option` are Cove,
 /// and [`CORE_VECTOR_LOAD`] and [`CORE_VECTOR_STORE`] are the element read and
-/// write beneath them.
+/// write beneath them. `Vector.freeze` is [`CORE_VECTOR_FINISH`], the word run
+/// finish.
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_PUSH,
     CORE_VECTOR_LOAD,
     CORE_VECTOR_STORE,
+    CORE_VECTOR_FINISH,
 ];
 
 /// Every core intrinsic.
@@ -1350,6 +1362,24 @@ pub const CORE_VECTOR_STORE: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::Unit,
+};
+
+/// `core.vectorFinish<T>(items: Vector<T>) -> Array<T>`: the vector's store,
+/// relabelled in place to the `Array` of its live prefix, and the vector
+/// consumed.
+///
+/// ADR 0058's `run-finish` over a word run with no validation. That nothing
+/// else holds the vector is not this intrinsic's question: `cove_sema::unique`
+/// proves it at the program's own `.freeze()` call, which is still the call the
+/// checker sees, and neither evaluator counts handles.
+pub const CORE_VECTOR_FINISH: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "vectorFinish",
+    generics: &["T"],
+    params: &[ParamSchema {
+        name: "items",
+        ty: BuiltinType::Vector(&BuiltinType::Param("T")),
+    }],
+    result: BuiltinType::Array(&BuiltinType::Param("T")),
 };
 
 // ----------------------------------------------------- the shared signatures

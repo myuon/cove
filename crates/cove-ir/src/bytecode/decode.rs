@@ -292,6 +292,13 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             validation: Validation::Utf8,
             storage: Storage::PackedBytes,
         },
+        Op::RunFinishWords => Inst::RunFinish {
+            dst: a,
+            owner: b,
+            target: LayoutId(lo),
+            validation: Validation::None,
+            storage: Storage::Words(LayoutId(hi)),
+        },
         Op::Len => Inst::Len { dst: a, obj: b },
         Op::LayoutOf => Inst::LayoutOf { dst: a, obj: b },
         Op::AddrOfSlot => Inst::AddrOfSlot { dst: a, slot: b },

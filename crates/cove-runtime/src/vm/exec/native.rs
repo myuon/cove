@@ -887,6 +887,24 @@ unsafe extern "C" fn growable(
                     // exactly what the encoded tier answers. The element layout
                     // is the instruction's, read out of the IR at `pc` for
                     // `Finish`'s reason.
+                    // A word finish's cold path, through the same
+                    // `Machine::finish_words` the `RUN_FINISH_WORDS` arm calls.
+                    // The target and the element layout are the instruction's.
+                    GrowableOp::FinishWords => {
+                        let owner = machine.mem.slot(base, b as Slot);
+                        let code = &machine.program.function(frame.function).code;
+                        let Inst::RunFinish {
+                            target,
+                            storage: Storage::Words(elem),
+                            ..
+                        } = code[pc as usize]
+                        else {
+                            unreachable!("a word finish was handed over for a pc that is not one")
+                        };
+                        let array = machine.finish_words(owner, target, elem)?;
+                        machine.mem.set_slot(base, a as Slot, array);
+                        Ok(())
+                    }
                     GrowableOp::PushWords => {
                         let owner = machine.mem.slot(base, a as Slot);
                         let code = &machine.program.function(frame.function).code;

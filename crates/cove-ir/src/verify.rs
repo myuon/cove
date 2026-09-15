@@ -854,7 +854,8 @@ impl Check<'_> {
             // The growable family's admission table. Phase 2 of ADR 0058
             // admitted `PackedBytes` for every member and nothing else, with a
             // byte finish a UTF-8 finish into `Program::str_layout`; Phase 3
-            // admits `Words` for a push, which is what `Vector.push` became.
+            // admits `Words` for a push and a finish, which are what
+            // `Vector.push` and `Vector.freeze` became.
             Inst::GrowableAlloc {
                 dst,
                 capacity,
@@ -893,8 +894,9 @@ impl Check<'_> {
                 validation,
                 storage,
             } => {
-                self.admit_storage(at, "finishes", storage);
-                if storage == crate::Storage::PackedBytes {
+                if let crate::Storage::Words(elem) = storage {
+                    self.check_word_finish(at, elem, target, validation);
+                } else {
                     if validation != crate::Validation::Utf8 {
                         self.fault(
                             at,
@@ -1354,6 +1356,51 @@ impl Check<'_> {
         }
     }
 
+    /// A word [`Inst::RunFinish`]: `Vector.freeze()`'s, which relabels a store
+    /// of `elem` elements into the `Array` of them it already is.
+    ///
+    /// There is nothing to validate in a run of whole elements, so the
+    /// validation is [`crate::Validation::None`]; and the target is the
+    /// non-growable [`crate::Shape::Elements`] of the same element, because the
+    /// relabelled store is traced by the target's reference map from then on
+    /// and a finish into another family would have the collector follow the
+    /// wrong words.
+    fn check_word_finish(
+        &mut self,
+        at: Option<usize>,
+        elem: LayoutId,
+        target: LayoutId,
+        validation: crate::Validation,
+    ) {
+        if !self.layout_exists(at, elem) || !self.layout_exists(at, target) {
+            return;
+        }
+        let name = self.name_of(elem);
+        if validation != crate::Validation::None {
+            self.fault(
+                at,
+                format!(
+                    "finishes a run of `{name}` words with validation `{validation:?}`, and a \
+                     word run has nothing to validate"
+                ),
+            );
+        }
+        let fits = matches!(
+            self.program.layout(target).shape,
+            Shape::Elements { elem: held, growable: false } if held == elem
+        );
+        if !fits {
+            let named = self.name_of(target);
+            self.fault(
+                at,
+                format!(
+                    "finishes a run of `{name}` words into `{named}`, and a word run finishes \
+                     into the fixed `Elements` of the same element"
+                ),
+            );
+        }
+    }
+
     /// [`Inst::RunCopy`]'s five arguments — `dst`, `dst_at`, `src`, `src_at`,
     /// `count`, in that order — and its storage.
     ///
@@ -1470,6 +1517,8 @@ mod tests {
     const CLOSURE: LayoutId = LayoutId(6);
     /// A two-case enum, for the checks a case index needs an enum to make.
     const ENUM: LayoutId = LayoutId(7);
+    /// `Array<Int>`: what a word finish of `Int` elements relabels its store to.
+    const ARRAY_INT: LayoutId = LayoutId(8);
 
     fn layouts() -> Vec<Layout> {
         vec![
@@ -1523,6 +1572,13 @@ mod tests {
                     payload: vec![Repr::Int],
                 },
                 vec![Repr::Tag, Repr::Int],
+            ),
+            Layout::object(
+                "Array<Int>",
+                Shape::Elements {
+                    elem: INT,
+                    growable: false,
+                },
             ),
         ]
     }
@@ -2460,9 +2516,22 @@ mod tests {
             "{wide:?}"
         );
         assert_eq!(one(extend(words)), refused("extends"));
+        // A word finish is admitted into the fixed run of its element, with
+        // nothing to validate, and refused into anything else.
+        assert_eq!(one(finish(ARRAY_INT, Validation::None, words)), none);
         assert_eq!(
             one(finish(STR, Validation::None, words)),
-            refused("finishes")
+            vec![
+                "finishes a run of `Int` words into `String`, and a word run finishes into the \
+                 fixed `Elements` of the same element"
+            ]
+        );
+        assert_eq!(
+            one(finish(ARRAY_INT, Validation::Utf8, words)),
+            vec![
+                "finishes a run of `Int` words with validation `Utf8`, and a word run has \
+                 nothing to validate"
+            ]
         );
         assert_eq!(
             one(finish(STR, Validation::None, bytes)),
