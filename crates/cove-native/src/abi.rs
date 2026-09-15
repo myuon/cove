@@ -808,6 +808,15 @@ pub enum GrowableOp {
     /// owner's slot. The target layout and the validation are not operands: the
     /// helper reads them off the instruction at the pc it is handed.
     Finish = 3,
+    /// [`Inst::GrowablePush`](cove_ir::Inst::GrowablePush) over
+    /// [`Storage::Words`](cove_ir::Storage::Words) — `Vector.push` — reached
+    /// only as the **cold path** of an emitted fast path: a store that is full,
+    /// a store word of nought, or an owner whose header is not the vector the
+    /// element layout implies. `a` is the owner's slot and `b` the head of the
+    /// element's run in this frame. The element layout is not an operand: the
+    /// helper reads it off the instruction at the pc it is handed, as
+    /// [`GrowableOp::Finish`] reads its target.
+    PushWords = 4,
 }
 
 impl GrowableOp {
@@ -823,6 +832,7 @@ impl GrowableOp {
             1 => Some(GrowableOp::Push),
             2 => Some(GrowableOp::Extend),
             3 => Some(GrowableOp::Finish),
+            4 => Some(GrowableOp::PushWords),
             _ => None,
         }
     }
@@ -1245,11 +1255,12 @@ mod tests {
             (1, GrowableOp::Push),
             (2, GrowableOp::Extend),
             (3, GrowableOp::Finish),
+            (4, GrowableOp::PushWords),
         ] {
             assert_eq!(op.abi(), code);
             assert_eq!(GrowableOp::from_abi(code), Some(op));
         }
-        assert_eq!(GrowableOp::from_abi(4), None);
+        assert_eq!(GrowableOp::from_abi(5), None);
     }
 
     /// Zero is not a raise, which is what makes a fresh context's

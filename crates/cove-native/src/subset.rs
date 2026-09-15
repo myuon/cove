@@ -127,6 +127,90 @@ fn comparison_supported(on: Compare, op: CmpOp) -> bool {
     }
 }
 
+/// An [`Inst::GrowablePush`] over [`Storage::Words`] — `Vector.push` — with the
+/// static facts its fast path is emitted from.
+///
+/// [ADR 0058] moved `Vector.push` into the standard library as
+/// `core.vectorPush(items, value)`, which lowers to this instruction, so this is
+/// no longer a builtin this crate recognises by name: it is a run instruction,
+/// decoded here once for both arms the way [`Method`] decodes a builtin.
+///
+/// `Machine::push_words` is three steps: read the owner, ensure room for one
+/// more element, and write the element's words and the new length. **Only the
+/// second of those has a cold half, and that is the whole shape of this.** What
+/// is emitted is the push into spare capacity; a push that has to grow calls
+/// [`GrowableFn`](crate::abi::GrowableFn) with
+/// [`GrowableOp::PushWords`](crate::abi::GrowableOp::PushWords) and the VM does
+/// the whole push.
+///
+/// Growth is where the *allocation* is, so it is not that it was hard — [ADR
+/// 0055]'s allocation helper is right there, and `Inst::Alloc` goes through it.
+/// It is that growth is also a payload *copy of unbounded length*, which is a
+/// loop over `len * stride` heap words, and `capacity` doubles: the copy is
+/// amortised over the pushes that filled the store, so emitting it would be code
+/// proportional to the run in exchange for a share of the work that falls as the
+/// vector grows. The fast path is what the census counted.
+///
+/// Two other preconditions go the same way, and neither is a lowering bug a
+/// reader may dismiss:
+///
+/// - **the owner's object is the vector the element layout implies.**
+///   `Machine::vector_run` reads `Shape::Vector { elem }` out of the object's own
+///   header and holds it to the instruction's element layout — because the
+///   stride, and therefore where the element goes, is derived from that layout.
+///   The layout table interns one `Shape::Vector` per element layout, so the
+///   header is compared with [`WordPush::vector`], found by searching the table
+///   the way `make::elements` searches it for an `Array`;
+/// - **`freeze()` has not consumed it.** `Machine::vector_run` refuses a store
+///   word of nought, in a sentence this crate cannot build.
+///
+/// Both refusals are the runtime's to word, so both go to the helper. The null
+/// owner is the one refusal that is emitted, because [`Raise::NullObject`]
+/// already names it.
+///
+/// There is no destination: the `()` a push answers is a separate
+/// [`Inst::Unit`] the lowering writes after it.
+///
+/// [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
+/// [ADR 0058]: ../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WordPush {
+    /// The owner's slot: one `Repr::Ref` word naming the `Vector` header.
+    pub(crate) owner: Slot,
+    /// The `Shape::Vector` layout over the instruction's element layout, which
+    /// the object's own header is compared against.
+    pub(crate) vector: LayoutId,
+    /// The head of the element's run in this frame, `stride` words wide.
+    pub(crate) src: Slot,
+    /// The element layout's width, which is `Growable::stride`.
+    pub(crate) stride: u32,
+}
+
+/// The [`WordPush`] a word `growable-push` of `elem` is, or `None` for a program
+/// whose layout table has no vector of `elem` — which a lowering that pushed
+/// onto one always declared, so `None` is a bound and not a family.
+pub(crate) fn word_push(
+    program: &Program,
+    owner: Slot,
+    src: Slot,
+    elem: LayoutId,
+) -> Option<WordPush> {
+    if elem.index() >= program.layouts.len() {
+        return None;
+    }
+    let vector = program
+        .layouts
+        .iter()
+        .position(|layout| matches!(layout.shape, Shape::Vector { elem: e } if e == elem))
+        .map(|index| LayoutId(index as u32))?;
+    Some(WordPush {
+        owner,
+        vector,
+        src,
+        stride: program.layout(elem).width(),
+    })
+}
+
 /// A [`Inst::CallBuiltin`] both arms emit code for, with its operands decoded.
 ///
 /// A builtin is *named* rather than numbered — see [`cove_ir::Builtin`] — so the
@@ -144,59 +228,6 @@ fn comparison_supported(on: Compare, op: CmpOp) -> bool {
 /// this builtin outside a bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Method {
-    /// `Vector.push(value)`, the path where the store has room.
-    ///
-    /// `vm::builtins::seq::vector_push` is four steps: read the receiver, copy the
-    /// element's words out, pick a store — the one it has, or a larger one — and
-    /// write the element and the new length. **Only the third of those has a cold
-    /// half, and that is the whole shape of this.** What is emitted is the push
-    /// into spare capacity; a push that has to grow calls
-    /// [`BuiltinFn`](crate::abi::BuiltinFn) and the VM does the whole push.
-    ///
-    /// Growth is where the *allocation* is, so it is not that it was hard — [ADR
-    /// 0055]'s allocation helper is right there, and `Inst::Alloc` goes through it.
-    /// It is that growth is also a payload *copy of unbounded length*, which is a
-    /// loop over `len * stride` heap words, and `capacity` doubles: the copy is
-    /// amortised over the pushes that filled the store, so emitting it would be
-    /// code proportional to the run in exchange for a share of the work that falls
-    /// as the vector grows. The fast path is what the census counted.
-    ///
-    /// Two other preconditions go the same way, and neither is a lowering bug a
-    /// reader may dismiss:
-    ///
-    /// - **the receiver's object is the layout the call site names.** `vector()`
-    ///   reads `Shape::Vector { elem }` out of the object's own header, and this
-    ///   compares that header against the layout the argument list declares —
-    ///   because everything else here is derived from the declared one: the
-    ///   element's layout, its stride, and therefore where the element goes. A
-    ///   mismatch is what `operand::no_method` reports, whose message renders the
-    ///   receiver as a `Value`;
-    /// - **`freeze()` has not consumed it.** `vector()` refuses a store word of
-    ///   nought with `operand::frozen`, which a *program* reaches by pushing to a
-    ///   frozen vector, and whose message names the method.
-    ///
-    /// Both messages are the runtime's to build and this crate can build neither,
-    /// so both are tested and both go to the helper. The null receiver is the one
-    /// refusal that is emitted, because [`Raise::NullObject`] already names it.
-    ///
-    /// [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
-    Push {
-        /// Where the `Unit` answer goes: `vector_push` answers `Ok(0)`, so this is
-        /// one word of nought and not nothing.
-        dst: Slot,
-        /// The receiver's slot: one `Repr::Ref` word naming the `Vector` header.
-        recv: Slot,
-        /// The layout the call site declares the receiver to be, whose shape is a
-        /// [`Shape::Vector`] and which the object's own header is compared against.
-        vector: LayoutId,
-        /// The element's slot in this frame, `stride` words wide.
-        value: Slot,
-        /// The element layout's width, which is `Growable::stride`.
-        stride: u32,
-        /// The builtin and its argument list, for the cold path.
-        builtin: u32,
-        args: u32,
-    },
     /// `Vector.set(index, value) -> Option<T>`, the path where the index is
     /// in range.
     ///
@@ -205,12 +236,12 @@ pub(crate) enum Method {
     /// element that was there — **before** overwriting it, because `set`
     /// answers what `get` would have — and hands that back as `Some`. Every
     /// one of those is a static fact of the call site or a comparison this
-    /// tier can already do, so unlike [`Method::Push`] there is no cold half
+    /// tier can already do, so unlike [`WordPush`] there is no cold half
     /// to a range that fits: an in-range `set` and an out-of-range one are
     /// both emitted, and only the receiver's own preconditions go to
     /// [`BuiltinFn`](crate::abi::BuiltinFn).
     ///
-    /// Those preconditions are [`Method::Push`]'s two, for the same reasons:
+    /// Those preconditions are [`WordPush`]'s two, for the same reasons:
     ///
     /// - **the receiver's object is the layout the call site names**, read out
     ///   of the header the way `vector()` does, because the element's layout,
@@ -276,7 +307,7 @@ pub(crate) enum Method {
     /// and the two payload words of the `Vector` header are zeroed, which is
     /// `freeze()`'s mark. `Memory::relabel` is documented as "two heap word
     /// writes and nothing else, no free-list surgery", so all of it is
-    /// emitted; there is no cold half the way [`Method::Push`]'s growth is.
+    /// emitted; there is no cold half the way [`WordPush`]'s growth is.
     ///
     /// The `Array<T>` layout `relabel` writes is a **compile-time constant**:
     /// `make::elements(program, elem, false)` only searches the program's own
@@ -289,7 +320,7 @@ pub(crate) enum Method {
     /// by a program this crate cannot see the whole of.
     ///
     /// Two preconditions go to [`BuiltinFn`](crate::abi::BuiltinFn), for
-    /// [`Method::Push`]'s reasons exactly: the receiver's object is not the
+    /// [`WordPush`]'s reasons exactly: the receiver's object is not the
     /// declared `Shape::Vector` layout, and the store word is already nought —
     /// a *second* `freeze()`, whose message names the method. The null
     /// receiver is emitted as [`Raise::NullObject`].
@@ -333,40 +364,6 @@ pub(crate) fn method_of(
         (program.layout(arg.layout).words.as_slice() == [Repr::Ref]).then_some(arg.slot)
     };
     match named.intrinsic {
-        // `vm::builtins::seq::vector_push`. Everything the fast path needs is a
-        // static fact of the call site, and each one is read here rather than in
-        // an arm: the receiver's declared layout, whose shape says what the
-        // elements are; the element's own layout, which has to be that same one
-        // or `operand::run_of` would refuse the call; and the stride, which is
-        // that layout's width.
-        Intrinsic::VectorPush => {
-            // The receiver and one argument, which is `operand::method`'s split
-            // and the arity its refusal names.
-            if list.len() != 2 || program.layout(named.result).width() != 1 {
-                return None;
-            }
-            let recv = reference(0)?;
-            let vector = list[0].layout;
-            let Shape::Vector { elem } = program.layout(vector).shape else {
-                return None;
-            };
-            // `operand::run_of(machine, .., items.elem, args[0])` requires the
-            // argument's layout to *be* the element's, so a call site where the
-            // two differ is one the VM refuses. Refusing to compile it leaves the
-            // refusal where its message is.
-            if list[1].layout != elem {
-                return None;
-            }
-            Some(Method::Push {
-                dst,
-                recv,
-                vector,
-                value: list[1].slot,
-                stride: program.layout(elem).width(),
-                builtin: builtin.0,
-                args: args.0,
-            })
-        }
         // `vm::builtins::seq::vector_set`. The receiver's declared layout and
         // the element's own layout are read exactly as `Push`'s are, and for
         // the same reason; what is new here is the *answer*'s layout, an
@@ -931,10 +928,11 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // written down — including why none of them has an emitted fast path and
         // why `GrowablePush` is here although the census never named it.
         //
-        // Each is admitted over `Storage::PackedBytes` and nothing else: the
-        // helper is the byte buffer's, and a word member has no arm in it. A
-        // word member falls to the `_` below with every other unlowered
-        // instruction, which `cove_ir::verify` refuses before it gets here.
+        // Each is admitted over `Storage::PackedBytes`, and the helper is the byte
+        // buffer's. The one word member that exists, a push, is admitted in an arm
+        // of its own below, because it is an emitted fast path and not this
+        // helper whole; the rest fall to the `_` with every other unlowered
+        // instruction, which `cove_ir::verify` refuses before they get here.
         //
         // They are admitted together. Three of them without the fourth would be a
         // subset that could allocate a builder and not finish it, and the first
@@ -960,6 +958,29 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             src,
             storage: Storage::PackedBytes,
         } => slot(*owner) && slot(*src),
+        // `Vector.push`, which is not the byte buffer's helper whole but an
+        // emitted fast path with [`WordPush`]'s cold half. The element is a run of
+        // `stride` words of this frame, so it is bounded the way an
+        // `Inst::Copy`'s source is — and by `MAX_RUN_WORDS` too, because the
+        // emitted write is one store per word of it.
+        //
+        // The vector's layout id has to fit an `i32`, and that is the *template*
+        // arm's bound rather than a bound on the language: it tests the header's
+        // high half with `cmp r64, imm32`, whose immediate is sign-extended, so an
+        // id above `i32::MAX` would be compared against a negative number. No
+        // program has two billion layouts, so this refuses nothing real — but an
+        // arm that was silently wrong above a threshold is worse than one that
+        // refuses at it.
+        Inst::GrowablePush {
+            owner,
+            src,
+            storage: Storage::Words(elem),
+        } => word_push(program, *owner, *src, *elem).is_some_and(|push| {
+            i32::try_from(push.vector.0).is_ok()
+                && push.stride <= MAX_RUN_WORDS
+                && slot(push.owner)
+                && run(push.src, push.stride)
+        }),
         // Four operands behind an `ArgsId` — `owner`, `src`, `from`, `to` — which
         // is the row `cove_ir::verify` already holds to that shape and width. Each
         // is one word, so each is bounded as a slot rather than as a run.
@@ -985,32 +1006,6 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // instruction; a family that *is* emitted is bounded like any other.
         Inst::CallBuiltin { dst, builtin, args } => {
             match method_of(program, *dst, *builtin, *args) {
-                // The element is a run of `stride` words of this frame, so it is
-                // bounded the way an `Inst::Copy`'s source is — and by
-                // `MAX_RUN_WORDS` too, because the emitted write is one store per
-                // word of it.
-                Some(Method::Push {
-                    dst,
-                    recv,
-                    vector,
-                    value,
-                    stride,
-                    ..
-                }) => {
-                    // The layout id has to fit an `i32`, and that is the
-                    // *template* arm's bound rather than a bound on the language:
-                    // it tests the header's high half with `cmp r64, imm32`, whose
-                    // immediate is sign-extended, so an id above `i32::MAX` would
-                    // be compared against a negative number. No program has two
-                    // billion layouts, so this refuses nothing real — but an arm
-                    // that was silently wrong above a threshold is worse than one
-                    // that refuses at it.
-                    i32::try_from(vector.0).is_ok()
-                        && stride <= MAX_RUN_WORDS
-                        && slot(dst)
-                        && slot(recv)
-                        && run(value, stride)
-                }
                 // The answer is a tag word and a `width - 1`-word payload
                 // region, so `dst` is bounded as a run of `width` words the
                 // way `Push`'s `value` is bounded as a run of `stride` — and
@@ -1081,7 +1076,7 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // out of this frame. Five operands behind an `ArgsId` — `dst`, `dst_at`,
         // `src`, `src_at`, `count` — each one word, each bounded as a slot. A word
         // copy's element layout is bounded against the program's table, because
-        // the helper reads its width, and against an `i32`, for [`Method::Push`]'s
+        // the helper reads its width, and against an `i32`, for [`WordPush`]'s
         // reason: the template arm materialises it as a 32-bit immediate. Neither
         // is reachable for a verified program, and each is a read past a table
         // rather than a wrong answer if it were.

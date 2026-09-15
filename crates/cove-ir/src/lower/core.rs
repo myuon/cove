@@ -17,12 +17,14 @@
 //! standard library wraps around it is small enough that `super::inline`
 //! expands it where it is called.
 
+use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Arg, Expr};
 
 use super::frame::Val;
 use super::shapes;
 use super::{Body, Dest};
-use crate::inst::Inst;
+use crate::inst::{Inst, Storage};
+use crate::layout::LayoutId;
 
 impl Body<'_> {
     /// `core.name(args)`, written in a standard-library module.
@@ -41,8 +43,64 @@ impl Body<'_> {
     ) -> Val {
         match (name, args) {
             ("byteLength", [text]) => self.core_byte_length(expr, &text.value, want),
+            ("vectorPush", [items, value]) => {
+                self.core_vector_push(expr, &items.value, &value.value, want)
+            }
             _ => self.gap(&format!("`core.{name}`"), expr),
         }
+    }
+
+    /// The element layout of the `Vector<T>` `items` is, with the vector's
+    /// own layout declared on the way.
+    ///
+    /// Declaring the vector's layout is not incidental: `Body::vector_method`
+    /// says why meeting a value of the type is what declares it, and a growth
+    /// allocates its larger store in the family the old one was.
+    fn vector_element(&mut self, items: &Expr) -> Option<LayoutId> {
+        let ty = self.settled_ty(items)?;
+        let Ty::Vector(elem) = &ty else {
+            self.errors.push(super::gap::gap(
+                "a vector core intrinsic over something that is not a `Vector`",
+                items.span,
+            ));
+            return None;
+        };
+        let elem = (**elem).clone();
+        self.layout(&ty, items.span)?;
+        self.layout(&elem, items.span)
+    }
+
+    /// `core.vectorPush(items, value)`: one element onto the end of the
+    /// vector's growable run.
+    ///
+    /// One [`Inst::GrowablePush`] over [`Storage::Words`] of the element's
+    /// layout, and then the `()` the call answers. The instruction writes no
+    /// destination, so the unit is written separately into the location the
+    /// surrounding form asked for, which is `Body::unit_answer`'s reason: a
+    /// unit built in a temporary and copied out is a copy per push.
+    fn core_vector_push(
+        &mut self,
+        expr: &Expr,
+        items: &Expr,
+        value: &Expr,
+        want: Option<Dest>,
+    ) -> Val {
+        let Some(elem) = self.vector_element(items) else {
+            return self.dead(expr);
+        };
+        let owner = self.expr(items);
+        let src = self.expr(value);
+        self.emit(
+            Inst::GrowablePush {
+                owner: owner.slot,
+                src: src.slot,
+                storage: Storage::Words(elem),
+            },
+            expr.span,
+        );
+        self.release(src, expr.span);
+        self.release(owner, expr.span);
+        self.unit_answer(expr, want)
     }
 
     /// `core.byteLength(text)`: the string object's header length, which is

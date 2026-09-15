@@ -594,7 +594,7 @@ fn both_arms_answer_the_same_thing() {
     ] {
         agree_over(
             &format!("a push {what}"),
-            &suite::pushing(suite::VECTOR, 1),
+            &suite::pushing(1),
             &[cove_native::HEAP_ORIGIN_WORDS + 20, 70, 0],
             0,
             move || {

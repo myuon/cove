@@ -270,6 +270,7 @@ const RUN_COPY_BYTES: u8 = Op::RunCopyBytes.number();
 const RUN_COPY_WORDS: u8 = Op::RunCopyWords.number();
 const GROWABLE_ALLOC_BYTES: u8 = Op::GrowableAllocBytes.number();
 const GROWABLE_PUSH_BYTE: u8 = Op::GrowablePushByte.number();
+const GROWABLE_PUSH_WORDS: u8 = Op::GrowablePushWords.number();
 const GROWABLE_EXTEND_BYTES: u8 = Op::GrowableExtendBytes.number();
 const RUN_FINISH_BYTES: u8 = Op::RunFinishBytes.number();
 const LEN: u8 = Op::Len.number();
@@ -343,6 +344,7 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::RunCopyWords
         | Op::GrowableAllocBytes
         | Op::GrowablePushByte
+        | Op::GrowablePushWords
         | Op::GrowableExtendBytes
         | Op::RunFinishBytes
         | Op::LoadField
@@ -1785,6 +1787,19 @@ pub(super) fn dispatch<'s, 'a>(
                 let value = machine.mem.word_at(base_at + (b!() as usize)) as i64;
                 machine.sync(pc - 1);
                 if let Err(error) = machine.append_byte(owner, value) {
+                    fail!(error);
+                }
+            }
+            // One element at the logical length: `Vector.push`, since ADR 0058
+            // moved it into the standard library. The element is a run of the
+            // payload layout's width in this frame, copied into the store after
+            // the ensure, which may allocate and so comes first — the frame does
+            // not move and a collection does not either.
+            GROWABLE_PUSH_WORDS => {
+                let owner = machine.mem.word_at(base_at + (a!() as usize));
+                let elem = LayoutId(held.lo());
+                machine.sync(pc - 1);
+                if let Err(error) = machine.push_words(owner, elem, base + held.b() as u64) {
                     fail!(error);
                 }
             }

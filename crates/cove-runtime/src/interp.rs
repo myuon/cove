@@ -3097,6 +3097,18 @@ impl<'a> Interpreter<'a> {
             };
             if let Some(binding) = cove_schema::builtins::standard_binding(&builtin_receiver, name)
             {
+                // A `var self` method that moved — `Vector.push` was the first —
+                // is still refused on a temporary, by the guard written out below
+                // for the ones that have not. The binding is a function taking
+                // the handle by value, so nothing after this point would ask.
+                if name != "freeze" && place.is_none() {
+                    let is_var_self = cove_schema::builtins::builtin(&builtin_receiver)
+                        .and_then(|schema| schema.method(name))
+                        .is_some_and(|method| method.mutating);
+                    if is_var_self {
+                        return Err(var_self_needs_place(name, receiver, span).into());
+                    }
+                }
                 let receiver_value = match (place, temporary) {
                     (Some(place), _) => place.read(span)?,
                     (_, Some(value)) => value,

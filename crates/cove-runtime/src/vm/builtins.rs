@@ -145,7 +145,9 @@ pub(crate) fn call(
 
         // ---- Vector ------------------------------------------------------
         Intrinsic::VectorOf => seq::vector_of(machine, operands).map(|word| out.push(word)),
-        Intrinsic::VectorPush => seq::vector_push(machine, operands).map(|word| out.push(word)),
+        // `Vector.push` is not here: it is `std.vector.push` over the core
+        // intrinsic that is a word `Inst::GrowablePush` — see
+        // `Machine::push_words`.
         Intrinsic::VectorSet => seq::vector_set(machine, builtin.result, operands, out),
         Intrinsic::VectorPop => seq::vector_pop(machine, builtin.result, operands, out),
         Intrinsic::VectorRemove => seq::vector_remove(machine, builtin.result, operands, out),

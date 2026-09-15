@@ -340,6 +340,19 @@ pub fn call_core(name: &str, args: &mut Vec<Value>, span: Span) -> Result<Value,
             };
             Ok(Value(Repr::Int(text.len() as i64)))
         }
+        // `std.vector.push`'s whole body. The write goes through the storage
+        // handle, so every alias observes it, exactly as the `Vector` arm of
+        // `call_method` wrote it before `push` moved; the liveness check is that
+        // arm's too, in the same words.
+        "vectorPush" => {
+            let value = args.remove(1);
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Vector", &args[0], span));
+            };
+            check_live(storage, "push", span)?;
+            storage.elements.borrow_mut().push(value);
+            Ok(Value(Repr::Unit))
+        }
         // A name the table declares and nothing here executes. No program can
         // reach one of these from its own modules, so the check that every
         // entry has a body here is `vm::differential`'s, which calls each
@@ -585,11 +598,8 @@ pub fn call_method(
         Value(Repr::Vector(storage)) => {
             check_live(storage, name, span)?;
             match name {
-                "push" => {
-                    let args = expect_args("push", args, 1, span)?;
-                    storage.elements.borrow_mut().push(args.remove(0));
-                    Ok(Value(Repr::Unit))
-                }
+                // `push` is not here: it is `std.vector.push`, over
+                // `call_core`'s `vectorPush`.
                 // Replaces the element at `index` and answers what was
                 // there, or answers `None` and writes nothing when `index`
                 // is not already in the vector — which is `get`'s answer to

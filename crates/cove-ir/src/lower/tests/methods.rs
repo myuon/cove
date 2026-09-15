@@ -264,6 +264,41 @@ fn @m.Point.bump(<addr>) -> Unit
     );
 }
 
+/// `Vector.push` is `std.vector.push`, whose body is ADR 0058's
+/// `core.vectorPush`: a word `growable-push` of the element's layout and the
+/// `()` the call answers. The wrapper is thin, so it is expanded wherever it is
+/// called, and neither a `call` nor a `call-builtin` is left — at a one-word
+/// element and at a two-word one, whose source is the whole run.
+#[test]
+fn a_push_is_a_word_growable_push_where_it_is_written() {
+    assert_eq!(
+        listing(
+            "struct Point { x: Int, y: Int }\n\
+             fn f(xs: Vector<Int>, ps: Vector<Point>, p: Point) -> Int {\n  \
+               var ints = xs\n  var points = ps\n  ints.push(7)\n  points.push(p)\n  0\n}",
+            "f"
+        ),
+        "\
+fn @m.f(Vector Vector m.Point) -> Int
+  frame 11: s0!:ref s1!:ref s2!:int s3!:int s4:int s5:ref s6:ref s7:int s8:unit s9:unit s10:unit
+  local xs -> s0:Vector [0, 9)
+  local ps -> s1:Vector [0, 9)
+  local p -> s2..s3:m.Point [0, 9)
+  local ints -> s5:Vector [1, 8)
+  local points -> s6:Vector [2, 8)
+     0  copy s5:Vector s0:Vector
+     1  copy s6:Vector s1:Vector
+     2  int s7:int 7
+     3  growable-push.words Int s5:ref s7:Int
+     4  unit s8:unit
+     5  growable-push.words m.Point s6:ref s2..s3:m.Point
+     6  unit s8:unit
+     7  int s4:int 0
+     8  return s4:Int
+"
+    );
+}
+
 /// `mapError` moved out of the lowering the same way `isSome` and
 /// `unwrapOr` did above: `cove_schema::builtins::STANDARD_LIBRARY` names it
 /// too, so `Int.parse(t).mapError(fn(error) { ... })` is an ordinary

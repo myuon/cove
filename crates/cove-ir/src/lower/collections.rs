@@ -1322,7 +1322,6 @@ const HANDED_OVER: &[(&str, &str)] = &[
     ("Array", "indexOf"),
     ("Array", "slice"),
     ("Array", "toVector"),
-    ("Vector", "push"),
     ("Vector", "set"),
     ("Vector", "pop"),
     ("Vector", "remove"),

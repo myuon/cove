@@ -7,6 +7,21 @@ export fn isEmpty<T>(items: Vector<T>) -> Bool {
   items.length() == 0
 }
 
+/// Appends `value` at the end, growing the storage when it is full.
+///
+/// The write goes through the vector's shared storage, so every alias sees
+/// the new element and the new length; a growth replaces the storage beneath
+/// the vector without moving the vector itself, so no alias is left behind.
+/// Amortised O(1).
+///
+/// A push has no index to check and nothing to answer, so there is no policy
+/// here to write in Cove: the body is one core intrinsic, ADR 0058's growable
+/// push over the element's words, and the lowering expands it wherever it is
+/// called.
+export fn push<T>(items: Vector<T>, value: T) {
+  core.vectorPush(items, value)
+}
+
 /// The elements `keep` answers `true` for, in the order they were in.
 ///
 /// **Through a copy taken before the first call.** A vector shares its

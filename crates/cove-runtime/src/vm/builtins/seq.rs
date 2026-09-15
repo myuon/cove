@@ -97,7 +97,9 @@ use crate::vm::exec::Machine;
 /// needs `&mut Machine` cannot hold them. Copying them out is the whole of
 /// the answer and `to_vec()` was how, which is a `malloc` and a `free` for
 /// **every `push`** — `examples/covefmt` makes five million of them, and the
-/// profile priced one at 287 ns against a floor of 53.
+/// profile priced one at 287 ns against a floor of 53. `push` no longer comes
+/// here at all — it is `Machine::push_words`, reading the element straight out
+/// of the frame — and `set` is the caller left.
 ///
 /// A value is a run of words its layout describes, and the layouts a
 /// collection holds are small: a `String` handle is one word, a `Point` is
@@ -448,26 +450,6 @@ pub(super) fn vector_of(
     make::vector_of(machine, elem, &words)
 }
 
-/// `Vector.push(value)`.
-pub(super) fn vector_push(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, args) = operand::method("push", operands, 1)?;
-    let mut items = vector(machine, "push", receiver)?;
-    let mut held = Held::new();
-    let element = held.take(operand::run_of(
-        machine,
-        "Vector.push",
-        items.elem,
-        args[0],
-    )?);
-    runs::growable_ensure(machine, &mut items.run, 1)?;
-    machine.set_payload_run(items.run.store, items.run.len * items.stride, element);
-    runs::growable_commit(machine, &mut items.run, 1);
-    Ok(0)
-}
-
 /// `Vector.set(index, value) -> Option<T>`.
 ///
 /// Answers what the index held before, which is what `get` would have
@@ -744,6 +726,29 @@ mod tests {
         make::vector_of(machine, int, &words).expect("the fixture declares every family")
     }
 
+    /// `Vector.push(value)`, which is `Machine::push_words` since ADR 0058 moved
+    /// `push` into the standard library over a word `growable-push`.
+    ///
+    /// The instruction reads the element straight out of the frame by address;
+    /// there is no frame here, so the words are placed in an object of their
+    /// own, rooted for the call, and handed over by the address of its payload.
+    fn push(
+        machine: &mut Machine,
+        items: u64,
+        elem: LayoutId,
+        words: &[u64],
+    ) -> Result<(), RuntimeError> {
+        let holder = machine
+            .new_object(elements(machine.program(), elem, false), 1)
+            .expect("the fixture's heap is large enough");
+        let mark = machine.temps();
+        machine.push_temp(holder);
+        machine.set_payload_run(holder, 0, words);
+        let answer = machine.push_words(items, elem, holder + 1);
+        machine.release_temps(mark);
+        answer
+    }
+
     /// What the `Option<Int>` in `words` holds.
     fn option_int(program: &Program, words: &[u64]) -> (String, Vec<u64>) {
         option_of(program, scalar(program, Repr::Int), words)
@@ -1000,13 +1005,7 @@ mod tests {
 
         // A `push` writes both words at the element's own stride, and a `set`
         // answers the two words the position held before it.
-        values(
-            &mut machine,
-            "Vector",
-            "push",
-            &[(vectors, &[grown]), (point, &[5, 6])],
-        )
-        .unwrap();
+        push(&mut machine, grown, point, &[5, 6]).unwrap();
         // The store grew, so its spare room is zeroed room past the length —
         // the three elements are the first six words of it.
         let store = machine.payload(grown, 1);
@@ -1046,13 +1045,21 @@ mod tests {
         let error = values(
             &mut machine,
             "Vector",
-            "push",
-            &[(vectors, &[grown]), (int, &[1])],
+            "set",
+            &[(vectors, &[grown]), (int, &[0]), (int, &[1])],
         )
         .unwrap_err();
         assert_eq!(
             error.message,
-            "`Vector.push` expects `Point` here, but found `Int`"
+            "`Vector.set` expects `Point` here, but found `Int`"
+        );
+        // A word `growable-push` is given its element layout by the lowering
+        // rather than by an operand, so what it holds to the store's family is
+        // the owner: a vector of another element is refused before a word moves.
+        let error = push(&mut machine, grown, int, &[1]).unwrap_err();
+        assert_eq!(
+            error.message,
+            "`push` needs a vector of `Int`, and this is not one"
         );
     }
 
@@ -1087,13 +1094,8 @@ mod tests {
         let store = machine.payload(items, 1);
         assert_eq!(machine.object_len(store), 2);
 
-        word(
-            &mut machine,
-            "Vector",
-            "push",
-            &[(Repr::Ref, items), (Repr::Int, 3)],
-        )
-        .unwrap();
+        let int = scalar(&program, Repr::Int);
+        push(&mut machine, items, int, &[3]).unwrap();
         let grown = machine.payload(items, 1);
         assert_ne!(grown, store, "a full store is replaced");
         // Twice the capacity, from a floor of four.
@@ -1102,13 +1104,7 @@ mod tests {
         assert_eq!(words_of(&machine, grown), vec![1, 2, 3, 0]);
 
         // And the next push fits without replacing anything.
-        word(
-            &mut machine,
-            "Vector",
-            "push",
-            &[(Repr::Ref, items), (Repr::Int, 4)],
-        )
-        .unwrap();
+        push(&mut machine, items, int, &[4]).unwrap();
         assert_eq!(machine.payload(items, 1), grown);
         assert_eq!(machine.payload(items, 0), 4);
     }
@@ -1120,13 +1116,7 @@ mod tests {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
         let items = growable(&mut machine, &[]);
-        word(
-            &mut machine,
-            "Vector",
-            "push",
-            &[(Repr::Ref, items), (Repr::Int, 7)],
-        )
-        .unwrap();
+        push(&mut machine, items, scalar(&program, Repr::Int), &[7]).unwrap();
         assert_eq!(
             u64::from(machine.object_len(machine.payload(items, 1))),
             runs::MIN_GROWABLE_ELEMENTS
@@ -1143,13 +1133,7 @@ mod tests {
         let items = growable(&mut machine, &[1, 2]);
         let alias = items;
 
-        word(
-            &mut machine,
-            "Vector",
-            "push",
-            &[(Repr::Ref, items), (Repr::Int, 3)],
-        )
-        .unwrap();
+        push(&mut machine, items, scalar(&program, Repr::Int), &[3]).unwrap();
         assert_eq!(
             word(&mut machine, "Vector", "length", &[(Repr::Ref, alias)]).unwrap(),
             3
@@ -1353,13 +1337,7 @@ mod tests {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
         let items = growable(&mut machine, &[1]);
-        word(
-            &mut machine,
-            "Vector",
-            "push",
-            &[(Repr::Ref, items), (Repr::Int, 2)],
-        )
-        .unwrap();
+        push(&mut machine, items, scalar(&program, Repr::Int), &[2]).unwrap();
         let store = machine.payload(items, 1);
         assert_eq!(
             u64::from(machine.object_len(store)),
@@ -1396,12 +1374,19 @@ mod tests {
         let int = scalar(&program, Repr::Int);
         let header = machine.new_object(vector(&program, int), 0).unwrap();
 
-        for (operation, operands) in [
-            ("length", vec![(Repr::Ref, header)]),
-            ("push", vec![(Repr::Ref, header), (Repr::Int, 1)]),
-            ("freeze", vec![(Repr::Ref, header)]),
+        let pushed = push(&mut machine, header, int, &[1]).map(|()| Vec::new());
+        for (operation, answer) in [
+            (
+                "length",
+                run(&mut machine, "Vector", "length", &[(Repr::Ref, header)]),
+            ),
+            ("push", pushed),
+            (
+                "freeze",
+                run(&mut machine, "Vector", "freeze", &[(Repr::Ref, header)]),
+            ),
         ] {
-            let error = run(&mut machine, "Vector", operation, &operands).unwrap_err();
+            let error = answer.unwrap_err();
             assert_eq!(
                 error.message,
                 format!("`{operation}` was called on a vector that `freeze()` already consumed")
@@ -1522,6 +1507,13 @@ mod tests {
         machine.set_payload(store, 0, kept);
         machine.set_payload(items, 0, 1);
         machine.set_payload(items, 1, store);
+        // The element a push reads by address, placed and rooted before the heap
+        // is filled: a frame's slot, in a fixture that has no frame.
+        let holder = machine
+            .new_object(elements(&program, text, false), 1)
+            .unwrap();
+        machine.push_temp(holder);
+        machine.set_payload(holder, 0, kept);
 
         // Dead strings, two words each, until the heap is exactly full — so
         // that the larger store below cannot fit and has to collect.
@@ -1530,13 +1522,7 @@ mod tests {
         }
         let before = machine.collected().collections;
 
-        word(
-            &mut machine,
-            "Vector",
-            "push",
-            &[(Repr::Ref, items), (Repr::Ref, kept)],
-        )
-        .unwrap();
+        machine.push_words(items, text, holder + 1).unwrap();
         assert!(
             machine.collected().collections > before,
             "the fixture did not force a collection"

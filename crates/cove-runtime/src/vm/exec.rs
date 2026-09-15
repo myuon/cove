@@ -2569,6 +2569,80 @@ impl<'a> Machine<'a> {
         Ok(())
     }
 
+    /// A live `Vector` at `owner` whose elements are `elem`: its store, its
+    /// logical length and its capacity.
+    ///
+    /// [`Machine::buffer`]'s three checks for an element run, for its reasons:
+    /// nothing static says which family the object behind a `Ref` slot is, so
+    /// reading an arbitrary object's payload word 1 as a store is how a wrong
+    /// program becomes a write into the middle of the heap. The shape is
+    /// compared with the instruction's element layout as well as with
+    /// `Shape::Vector`, because the stride every write below is measured in is
+    /// that layout's.
+    ///
+    /// A null store is a vector `freeze()` already consumed, which a checked
+    /// program cannot reach — `cove_sema::unique` proves it — and which is
+    /// refused in the words `vm::builtins::seq`'s `vector()` has always used,
+    /// naming the method in `shown`.
+    fn vector_run(
+        &self,
+        shown: &str,
+        owner: u64,
+        elem: LayoutId,
+    ) -> Result<Growable, RuntimeError> {
+        if owner == 0 {
+            return Err(null_object());
+        }
+        match self.program.layout(self.mem.object_layout(owner)).shape {
+            Shape::Vector { elem: held } if held == elem => {}
+            _ => {
+                return Err(RuntimeError::new(format!(
+                    "`{shown}` needs a vector of `{}`, and this is not one",
+                    self.program.layout(elem).name
+                )))
+            }
+        }
+        let store = self.mem.payload(owner, GROWABLE_STORE);
+        if store == 0 {
+            return Err(RuntimeError::new(format!(
+                "`{shown}` was called on a vector that `freeze()` already consumed"
+            ))
+            .with_rule("`freeze()` consumes its vector; the source vector is no longer usable.")
+            .with_help("use the `Array` that `freeze()` returned, or build a new vector"));
+        }
+        Ok(Growable {
+            owner,
+            store,
+            len: self.mem.payload(owner, GROWABLE_LEN) as u32,
+            capacity: self.mem.object_len(store),
+            storage: cove_ir::Storage::Words(elem),
+        })
+    }
+
+    /// A word [`Inst::GrowablePush`]: the element whose words begin at the
+    /// linear address `src` onto the end of the vector at `owner`.
+    ///
+    /// `vm::builtins::seq::vector_push` without the operand array: the ensure
+    /// first, because it may allocate, and then the element's words straight
+    /// out of the frame into the store at `len * stride`, and then the commit.
+    /// Nothing is lost to a collection in the ensure — the frame does not
+    /// move, a collection moves nothing, and the element is still in the slots
+    /// the frame's reference map names.
+    pub(crate) fn push_words(
+        &mut self,
+        owner: u64,
+        elem: LayoutId,
+        src: u64,
+    ) -> Result<(), RuntimeError> {
+        let mut run = self.vector_run("push", owner, elem)?;
+        runs::growable_ensure(self, &mut run, 1)?;
+        let width = self.width(elem);
+        let into = self.mem.payload_addr(run.store, run.len * width);
+        self.mem.copy_words(into, src, width);
+        runs::growable_commit(self, &mut run, 1);
+        Ok(())
+    }
+
     /// A byte [`Inst::RunFinish`]: the buffer's live prefix, validated and
     /// relabelled to `target`, and the owner emptied.
     ///

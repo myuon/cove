@@ -81,7 +81,7 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cove_ir::{ArgsId, BuiltinId, FunctionId, Inst, LayoutId, Slot, StrId};
+use cove_ir::{ArgsId, BuiltinId, FunctionId, Inst, LayoutId, Slot, Storage, StrId};
 use cove_native::{Entry, GrowableOp, NativeCtx, NativeHelpers, Opened, Outcome, Raise};
 
 use super::{divided_by_zero, null_object, overflowed, Frame, Machine, Overflow};
@@ -880,6 +880,24 @@ unsafe extern "C" fn growable(
                         let owner = machine.mem.slot(base, a as Slot);
                         let value = machine.mem.slot(base, b as Slot) as i64;
                         machine.append_byte(owner, value)
+                    }
+                    // A word push's cold path: the whole push, through the same
+                    // `Machine::push_words` the `GROWABLE_PUSH_WORDS` arm calls,
+                    // so a growth, a consumed owner and a wrong family answer
+                    // exactly what the encoded tier answers. The element layout
+                    // is the instruction's, read out of the IR at `pc` for
+                    // `Finish`'s reason.
+                    GrowableOp::PushWords => {
+                        let owner = machine.mem.slot(base, a as Slot);
+                        let code = &machine.program.function(frame.function).code;
+                        let Inst::GrowablePush {
+                            storage: Storage::Words(elem),
+                            ..
+                        } = code[pc as usize]
+                        else {
+                            unreachable!("a word push was handed over for a pc that is not one")
+                        };
+                        machine.push_words(owner, elem, base + u64::from(b))
                     }
                     // The one that is not a `Machine` method, because its four
                     // operands, its eight refusals and its chunk loop are a page of

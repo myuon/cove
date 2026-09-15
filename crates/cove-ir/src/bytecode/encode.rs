@@ -320,8 +320,9 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             Storage::PackedBytes => build(Op::RunCopyBytes, 0, 0, 0, halves(args.0, 0)),
             Storage::Words(elem) => build(Op::RunCopyWords, 0, 0, 0, halves(args.0, elem.0)),
         },
-        // The growable family has only its byte members so far, so a word
-        // storage is refused here the way `crate::verify` refuses it first.
+        // The growable family's word members arrive one at a time with the
+        // method that needs each, so a word storage with no opcode is refused
+        // here the way `crate::verify` refuses it first.
         Inst::GrowableAlloc {
             dst,
             capacity,
@@ -338,7 +339,13 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             storage,
         } => match storage {
             Storage::PackedBytes => build(Op::GrowablePushByte, slot(owner)?, slot(src)?, 0, 0),
-            Storage::Words(_) => return Err(TooWide::Storage { storage }),
+            Storage::Words(elem) => build(
+                Op::GrowablePushWords,
+                slot(owner)?,
+                slot(src)?,
+                0,
+                halves(elem.0, 0),
+            ),
         },
         Inst::GrowableExtend { args, storage } => match storage {
             Storage::PackedBytes => build(Op::GrowableExtendBytes, 0, 0, 0, halves(args.0, 0)),
@@ -868,6 +875,14 @@ mod tests {
             ),
             (
                 0,
+                Inst::GrowablePush {
+                    owner: 1,
+                    src: 2,
+                    storage: Storage::Words(L),
+                },
+            ),
+            (
+                0,
                 Inst::GrowableExtend {
                     args: ArgsId(1),
                     storage: Storage::PackedBytes,
@@ -1275,11 +1290,6 @@ mod tests {
             Inst::GrowableAlloc {
                 dst: 0,
                 capacity: 1,
-                storage: words,
-            },
-            Inst::GrowablePush {
-                owner: 0,
-                src: 1,
                 storage: words,
             },
             Inst::GrowableExtend {

@@ -48,6 +48,7 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | name | signature |
 | --- | --- |
 | `byteLength` | `core.byteLength(text: String) -> Int` |
+| `vectorPush` | `core.vectorPush(items: Vector<T>, value: T) -> Unit` |
 
 ## Builtin types
 
@@ -96,7 +97,7 @@ written as a namespace; binds `T`.
 | `filter(keep: fn(T) -> Bool) -> Array<T>` |  |  |  | `std.vector.filter` |
 | `fold(initial: R, step: fn(R, T) -> R) -> R` |  |  | `R` | `std.vector.fold` |
 | `sorted(by: fn(T, T) -> Bool) -> Array<T>` |  |  |  | `machine` |
-| `push(value: T) -> Unit` | yes |  |  | `machine` |
+| `push(value: T) -> Unit` | yes |  |  | `std.vector.push` |
 | `set(index: Int, value: T) -> Option<T>` | yes |  |  | `machine` |
 | `pop() -> Option<T>` | yes |  |  | `machine` |
 | `remove(index: Int) -> Option<T>` | yes |  |  | `machine` |

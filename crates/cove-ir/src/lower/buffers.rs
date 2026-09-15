@@ -204,7 +204,7 @@ impl Body<'_> {
     /// an append is a statement in almost every program that writes one, and a
     /// `Unit` written into a temporary that is then copied into the location the
     /// answer belongs in is an instruction per append that nothing reads.
-    fn unit_answer(&mut self, expr: &Expr, want: Option<Dest>) -> Val {
+    pub(super) fn unit_answer(&mut self, expr: &Expr, want: Option<Dest>) -> Val {
         let dst = self.answer_at(want, shapes::UNIT);
         self.emit(Inst::Unit { dst: dst.slot }, expr.span);
         dst

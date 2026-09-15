@@ -788,6 +788,18 @@ pub enum Inst {
     /// `owner` must name a live byte buffer and `src` must be a byte,
     /// `0..=255`, because this is an instruction that puts an arbitrary integer
     /// into memory that [`Inst::RunFinish`] will later read back and validate.
+    ///
+    /// # For [`Storage::Words`]
+    ///
+    /// `Vector.push`: `std.vector.push` is `core.vectorPush(items, value)`, and
+    /// this is what that lowers to. `owner` names a `Vector<T>` whose element
+    /// layout is the storage's, and `src` is the **head of a run** of that
+    /// layout's width in this frame — a `Point` element is two words, and both
+    /// are written at `length * stride` in the store. Nothing about the value
+    /// is checked, because a run of words of the right layout is every value
+    /// of that layout; what is checked is the owner, which a checked program
+    /// always hands over live. The `()` a push answers is the lowering's to
+    /// write, as it is for a byte.
     GrowablePush {
         owner: Slot,
         src: Slot,

@@ -851,9 +851,10 @@ impl Check<'_> {
                 self.expect(at, dst, &[Repr::Int]);
             }
             Inst::RunCopy { args, storage } => self.check_run_copy(at, args, storage),
-            // The growable family's admission table: in Phase 2 of ADR 0058
-            // every member admits `PackedBytes` and nothing else, and a byte
-            // finish is a UTF-8 finish into `Program::str_layout`.
+            // The growable family's admission table. Phase 2 of ADR 0058
+            // admitted `PackedBytes` for every member and nothing else, with a
+            // byte finish a UTF-8 finish into `Program::str_layout`; Phase 3
+            // admits `Words` for a push, which is what `Vector.push` became.
             Inst::GrowableAlloc {
                 dst,
                 capacity,
@@ -863,14 +864,23 @@ impl Check<'_> {
                 self.expect(at, dst, &[Repr::Ref]);
                 self.expect(at, capacity, &[Repr::Int]);
             }
+            // The first member admitted over both storages: a byte is one `Int`
+            // word, and an element is a run of its layout's width, checked the
+            // way an `Inst::StoreElem`'s source is.
             Inst::GrowablePush {
                 owner,
                 src,
                 storage,
             } => {
-                self.admit_storage(at, "pushes onto", storage);
                 self.expect(at, owner, &[Repr::Ref]);
-                self.expect(at, src, &[Repr::Int]);
+                match storage {
+                    crate::Storage::PackedBytes => self.expect(at, src, &[Repr::Int]),
+                    crate::Storage::Words(elem) => {
+                        if self.layout_exists(at, elem) {
+                            self.fits(at, src, elem, "what a growable run is pushed from");
+                        }
+                    }
+                }
             }
             Inst::GrowableExtend { args, storage } => {
                 self.admit_storage(at, "extends", storage);
@@ -2369,12 +2379,13 @@ mod tests {
         );
     }
 
-    /// ADR 0058's Phase 2 admission table for the growable family and its
-    /// finish: every member over packed bytes, and a byte finish only as a
-    /// UTF-8 finish into `String`. Each disallowed combination is refused by
-    /// name, and the admitted form of each is well formed.
+    /// ADR 0058's admission table for the growable family and its finish:
+    /// every member over packed bytes, a push over words too, and a byte
+    /// finish only as a UTF-8 finish into `String`. Each disallowed
+    /// combination is refused by name, and the admitted form of each is well
+    /// formed.
     #[test]
-    fn a_growable_instruction_outside_the_phase_two_table_is_a_fault() {
+    fn a_growable_instruction_outside_the_admission_table_is_a_fault() {
         use crate::{Storage, Validation};
         let bytes = Storage::PackedBytes;
         let words = Storage::Words(INT);
@@ -2438,7 +2449,16 @@ mod tests {
             )]
         };
         assert_eq!(one(alloc(words)), refused("allocates"));
-        assert_eq!(one(push(words)), refused("pushes onto"));
+        // A word push is admitted, and its source is a run of the element's
+        // width: an `Int` element at `s1` fits, and a two-word `Point` there
+        // runs into the `Ref` at `s2`.
+        assert_eq!(one(push(words)), none);
+        let wide = one(push(Storage::Words(POINT)));
+        assert_eq!(wide.len(), 1, "{wide:?}");
+        assert!(
+            wide[0].starts_with("what a growable run is pushed from is `Point`"),
+            "{wide:?}"
+        );
         assert_eq!(one(extend(words)), refused("extends"));
         assert_eq!(
             one(finish(STR, Validation::None, words)),

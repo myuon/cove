@@ -51,7 +51,8 @@ use crate::abi::{
     HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
-    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported, Method,
+    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported, word_push,
+    Method, WordPush,
 };
 use crate::Unavailable;
 
@@ -780,6 +781,19 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.growable_op(GrowableOp::Push, *owner, *src);
                 false
             }
+            // `Vector.push`: a fast path into spare capacity and the whole push as
+            // its cold half. See [`WordPush`](crate::subset::WordPush), decoded
+            // by the subset so that the two arms read one set of facts.
+            Inst::GrowablePush {
+                owner,
+                src,
+                storage: Storage::Words(elem),
+            } => {
+                let push = word_push(self.program, *owner, *src, *elem)
+                    .expect("`supported` admitted a word push it could decode");
+                self.vector_push(push);
+                false
+            }
             Inst::GrowableExtend {
                 args,
                 storage: Storage::PackedBytes,
@@ -929,15 +943,6 @@ impl<'a, 'f> Lower<'a, 'f> {
             // operands come out of one function that both arms ask.
             Inst::CallBuiltin { dst, builtin, args } => {
                 match method_of(self.program, *dst, *builtin, *args) {
-                    Some(Method::Push {
-                        dst,
-                        recv,
-                        vector,
-                        value,
-                        stride,
-                        builtin,
-                        args,
-                    }) => self.vector_push(dst, recv, vector, value, stride, builtin, args),
                     Some(Method::Set {
                         dst,
                         recv,
@@ -1291,45 +1296,41 @@ impl<'a, 'f> Lower<'a, 'f> {
         self.store_slot(dst, addr);
     }
 
-    /// `vm::builtins::seq::vector_push`'s fast path: the element into spare
-    /// capacity, and the length bumped.
+    /// A word `growable-push`'s fast path — `Vector.push` — the element into
+    /// spare capacity, and the length bumped.
     ///
-    /// See [`Method::Push`](crate::subset::Method::Push) for which of the builtin's
-    /// preconditions are emitted and which go to
-    /// [`BuiltinFn`](crate::abi::BuiltinFn), and why. The three tests in front of
-    /// the write are the receiver's declared layout against the object's own
-    /// header, the store word against nought — which is what `freeze()` leaves —
-    /// and the length against the capacity. Each failure is a *cold* path and all
-    /// three share one, because what happens there is the same thing: the VM
-    /// performs the whole push.
+    /// See [`WordPush`](crate::subset::WordPush) for which of
+    /// `Machine::push_words`' preconditions are emitted and which go to
+    /// [`GrowableFn`](crate::abi::GrowableFn), and why. The three tests in front
+    /// of the write are the vector layout the element implies against the
+    /// object's own header, the store word against nought — which is what
+    /// `freeze()` leaves — and the length against the capacity. Each failure is
+    /// a *cold* path and all three share one, because what happens there is the
+    /// same thing: the VM performs the whole push.
     ///
     /// The comparison of length against capacity is unsigned and that is exact
     /// rather than clever: the length is a payload word narrowed to `u32` and the
     /// capacity is a header's low half, so both are below 2^32 and
     /// `UnsignedGreaterThanOrEqual` is `items.len < items.capacity` read the other
     /// way.
-    #[allow(clippy::too_many_arguments)]
-    fn vector_push(
-        &mut self,
-        dst: Slot,
-        recv: Slot,
-        vector: LayoutId,
-        value: Slot,
-        stride: u32,
-        builtin: u32,
-        args: u32,
-    ) {
+    fn vector_push(&mut self, push: WordPush) {
+        let WordPush {
+            owner,
+            vector,
+            src,
+            stride,
+        } = push;
         let cold = self.b.create_block();
         let join = self.b.create_block();
 
-        let header = self.load_slot(recv);
-        // `vector()`'s `if addr == 0 { null_value() }`, which is the one refusal of
-        // this builtin a program reaches and this crate can name.
+        let header = self.load_slot(owner);
+        // `Machine::vector_run`'s `if owner == 0 { null_object() }`, which is the
+        // one refusal of a push this crate can name.
         self.refuse_null(header);
 
-        // `machine.object_layout(addr)`: the header's high half. The call site's
-        // declared layout is what every static fact below was derived from, so a
-        // header that says something else is a receiver this code cannot push to.
+        // `machine.object_layout(addr)`: the header's high half. The element
+        // layout is what every static fact below was derived from, so a header
+        // that is not the vector of it is an owner this code cannot push to.
         let word = self.heap_word(header);
         let named = self.b.ins().ushr_imm_u(word, 32);
         let wrong = self
@@ -1367,20 +1368,17 @@ impl<'a, 'f> Lower<'a, 'f> {
         // the store's payload words are a `u32` and this is inside them.
         let at = self.b.ins().imul_imm_s(len, i64::from(stride));
         for word in 0..stride {
-            let held = self.load_slot(value + word);
+            let held = self.load_slot(src + word);
             let into = self.b.ins().iadd_imm_s(at, i64::from(word));
             self.set_payload(store, into, held);
         }
-        // `machine.set_payload(items.header, 0, items.len as u64 + 1)`.
+        // `growable_commit`: `machine.set_payload(owner, 0, len + 1)`.
         let grown = self.b.ins().iadd_imm_s(len, 1);
         self.set_payload(header, zero, grown);
-        // `Ok(0)`: one word of nought, which is the `Unit` the builtin answers.
-        let nothing = self.b.ins().iconst(types::I64, 0);
-        self.store_slot(dst, nothing);
         self.b.ins().jump(join, &[]);
 
         self.b.switch_to_block(cold);
-        self.builtin_call(dst, builtin, args);
+        self.growable_op(GrowableOp::PushWords, owner, src);
         self.b.ins().jump(join, &[]);
 
         self.b.switch_to_block(join);

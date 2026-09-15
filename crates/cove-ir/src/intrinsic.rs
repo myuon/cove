@@ -67,7 +67,6 @@ pub enum Intrinsic {
     ArraySlice,
     ArrayToVector,
     VectorOf,
-    VectorPush,
     VectorSet,
     VectorPop,
     VectorRemove,
@@ -140,7 +139,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::ArraySlice,
     Intrinsic::ArrayToVector,
     Intrinsic::VectorOf,
-    Intrinsic::VectorPush,
     Intrinsic::VectorSet,
     Intrinsic::VectorPop,
     Intrinsic::VectorRemove,
@@ -215,7 +213,6 @@ impl Intrinsic {
             Intrinsic::ArraySlice => "Array",
             Intrinsic::ArrayToVector => "Array",
             Intrinsic::VectorOf => "Vector",
-            Intrinsic::VectorPush => "Vector",
             Intrinsic::VectorSet => "Vector",
             Intrinsic::VectorPop => "Vector",
             Intrinsic::VectorRemove => "Vector",
@@ -286,7 +283,6 @@ impl Intrinsic {
             Intrinsic::ArraySlice => "slice",
             Intrinsic::ArrayToVector => "toVector",
             Intrinsic::VectorOf => "of",
-            Intrinsic::VectorPush => "push",
             Intrinsic::VectorSet => "set",
             Intrinsic::VectorPop => "pop",
             Intrinsic::VectorRemove => "remove",
@@ -436,16 +432,8 @@ impl Intrinsic {
                 .union(E::MAY_ALLOCATE)
                 .union(E::MAY_COLLECT)
                 .union(E::BULK_WORK),
-            // `push` mutates the header in place and, past capacity,
-            // allocates a larger store and copies the live prefix into it —
-            // amortised O(1), but the copy is real work on the turn it
-            // happens, so it carries the same flags a `grow` would.
-            Intrinsic::VectorPush => raise
-                .union(E::READS_MEMORY)
-                .union(E::WRITES_MEMORY)
-                .union(E::MAY_ALLOCATE)
-                .union(E::MAY_COLLECT)
-                .union(E::BULK_WORK),
+            // `push` is not here: it is `std.vector.push` over the core
+            // intrinsic that is a word `Inst::GrowablePush`.
             // `set`, `pop` and `get` touch exactly one element's words and
             // never allocate; `remove` additionally shifts every element
             // past the one it takes out, which is what makes it the one of
@@ -671,7 +659,6 @@ mod tests {
                 | Intrinsic::ArraySlice
                 | Intrinsic::ArrayToVector
                 | Intrinsic::VectorOf
-                | Intrinsic::VectorPush
                 | Intrinsic::VectorSet
                 | Intrinsic::VectorPop
                 | Intrinsic::VectorRemove
@@ -741,7 +728,7 @@ mod tests {
 
     #[test]
     fn display_prints_receiver_dot_operation() {
-        assert_eq!(Intrinsic::VectorPush.to_string(), "Vector.push");
+        assert_eq!(Intrinsic::VectorPop.to_string(), "Vector.pop");
         assert_eq!(Intrinsic::AnyEquals.to_string(), "Any.equals");
     }
 

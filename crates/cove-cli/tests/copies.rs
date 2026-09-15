@@ -469,13 +469,26 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// standard library (#378), so they land a commit ahead of the move and the
 /// lowering is the base's.
 ///
+/// **The eleventh rise is `Vector.push` moving into the standard library.**
+/// 2251 to 2256, all five in the `ret` column: `examples:callbacks` 2,
+/// `examples:covefmtBench`, `examples:values` and `tests/e2e:values_unit` 1
+/// each. Each is a function whose last expression is a `push` —
+/// `Router.get`, `BookingDraft.addGuest`, `record` — and so answers the push's
+/// `()`. The builtin wrote that unit straight into the answer; the push is now
+/// `std.vector.push` expanded where it is called, whose `unit` is written in
+/// the expansion's own slot and copied out by its `return`, because the
+/// expansion's answer forwarding declines a destination the arguments are
+/// read around. It is one static copy of a `Unit` per such function, and not
+/// per push: a push in statement position writes its unit and nothing else
+/// (`lower::tests::methods`'s listing of one).
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2251;
+const FORWARDABLE_COPIES: usize = 2256;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

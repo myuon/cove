@@ -644,7 +644,7 @@ pub struct StdBinding {
 /// Every builtin method whose body has moved out of Rust and into the
 /// standard library.
 ///
-/// Thirty entries, and what is *not* here is as informative as what is.
+/// Thirty-one entries, and what is *not* here is as informative as what is.
 ///
 /// `Result.mapError` is here, and it is the only one that needed a language
 /// change to arrive. While a callback's arity was adapted rather than
@@ -666,7 +666,7 @@ pub struct StdBinding {
 /// That is what retires ADR 0043's "It must be total" condition, so a
 /// fallible method is no longer kept out of this table for its diagnostic.
 ///
-/// Ten of the thirty are `Duration`'s, and they are the first entries
+/// Ten of the thirty-one are `Duration`'s, and they are the first entries
 /// that come in pairs: `micros`, `millis`, `seconds`, `minutes`, and `hours`
 /// each name a method (`d.millis()`, the reader) and, separately, an
 /// associated function (`Duration.millis(n)`, the builder) — see
@@ -748,6 +748,18 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "fold",
         module: "std.vector",
         function: "fold",
+    },
+    // The first `var self` method to move, and the first binding over a core
+    // intrinsic that writes: `std.vector.push` is `core.vectorPush(items,
+    // value)`. A `Vector` is a handle, so the function takes it by value and
+    // writes through it exactly as the runtime arm did; the checker still holds
+    // the call site to a writable place, from the schema's `mutating`.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Vector",
+        method: "push",
+        module: "std.vector",
+        function: "push",
     },
     StdBinding {
         kind: StdBindingKind::Method,
@@ -1216,10 +1228,12 @@ impl CoreIntrinsicSchema {
 
 /// Every core intrinsic the standard library may call.
 ///
-/// One entry, and it is the smallest: a `String`'s length in bytes is the
-/// header word of the object that holds it. `String.byteLength` is the first
-/// public method written in Cove over one of these.
-pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[CORE_BYTE_LENGTH];
+/// The first was the smallest: a `String`'s length in bytes is the header word
+/// of the object that holds it, and `String.byteLength` was the first public
+/// method written in Cove over one of these. The second is the first that
+/// writes: `Vector.push` is `std.vector` over [`CORE_VECTOR_PUSH`], which is
+/// ADR 0058's growable push over a run of element words.
+pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[CORE_BYTE_LENGTH, CORE_VECTOR_PUSH];
 
 /// Every core intrinsic.
 pub fn core_intrinsics() -> &'static [CoreIntrinsicSchema] {
@@ -1245,6 +1259,31 @@ pub const CORE_BYTE_LENGTH: CoreIntrinsicSchema = CoreIntrinsicSchema {
         ty: BuiltinType::String,
     }],
     result: BuiltinType::Int,
+};
+
+/// `core.vectorPush<T>(items: Vector<T>, value: T) -> Unit`: one element onto
+/// the end of a vector's growable run.
+///
+/// ADR 0058's `growable-ensure items, 1` → `run-store` → `growable-commit
+/// items, 1`, which the lowering emits as one `Inst::GrowablePush` over
+/// `Storage::Words` of the element's layout. A push has no index and no answer,
+/// so there is no policy for the standard library to write around it:
+/// `std.vector.push` is this call and nothing else, and it is a function only
+/// so that the lowering never names the public method.
+pub const CORE_VECTOR_PUSH: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "vectorPush",
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "items",
+            ty: BuiltinType::Vector(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "value",
+            ty: BuiltinType::Param("T"),
+        },
+    ],
+    result: BuiltinType::Unit,
 };
 
 // ----------------------------------------------------- the shared signatures

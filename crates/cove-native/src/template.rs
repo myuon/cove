@@ -35,7 +35,8 @@ use crate::abi::{
     HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
-    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported, Method,
+    by_zero_of, leaders, literal_offset, method_of, overflow_of, slot_offset, supported, word_push,
+    Method, WordPush,
 };
 use crate::Unavailable;
 
@@ -615,6 +616,18 @@ impl<'a> Emit<'a> {
                 src,
                 storage: Storage::PackedBytes,
             } => self.growable_op(GrowableOp::Push, *owner, *src),
+            // `Vector.push`: a fast path into spare capacity and the whole push as
+            // its cold half. See [`WordPush`](crate::subset::WordPush), decoded
+            // by the subset so that the two arms read one set of facts.
+            Inst::GrowablePush {
+                owner,
+                src,
+                storage: Storage::Words(elem),
+            } => {
+                let push = word_push(self.program, *owner, *src, *elem)
+                    .expect("`supported` admitted a word push it could decode");
+                self.vector_push(push)
+            }
             Inst::GrowableExtend {
                 args,
                 storage: Storage::PackedBytes,
@@ -728,15 +741,6 @@ impl<'a> Emit<'a> {
             // operands come out of one function that both arms ask.
             Inst::CallBuiltin { dst, builtin, args } => {
                 match method_of(self.program, *dst, *builtin, *args) {
-                    Some(Method::Push {
-                        dst,
-                        recv,
-                        vector,
-                        value,
-                        stride,
-                        builtin,
-                        args,
-                    }) => self.vector_push(dst, recv, vector, value, stride, builtin, args),
                     Some(Method::Set {
                         dst,
                         recv,
@@ -1031,15 +1035,15 @@ impl<'a> Emit<'a> {
         self.store_slot(dst, RAX);
     }
 
-    /// `vm::builtins::seq::vector_push`'s fast path: the element into spare
-    /// capacity, and the length bumped.
+    /// A word `growable-push`'s fast path — `Vector.push` — the element into
+    /// spare capacity, and the length bumped.
     ///
-    /// See [`Method::Push`](crate::subset::Method::Push) for which of the builtin's
-    /// preconditions are emitted and which go to
-    /// [`BuiltinFn`](crate::abi::BuiltinFn), and why. This is the shape:
+    /// See [`WordPush`](crate::subset::WordPush) for which of
+    /// `Machine::push_words`' preconditions are emitted and which go to
+    /// [`GrowableFn`](crate::abi::GrowableFn), and why. This is the shape:
     ///
     /// ```text
-    ///   rax = the receiver               -- a `Vector` header, refused if null
+    ///   rax = the owner                  -- a `Vector` header, refused if null
     ///   the header's layout is `vector`, or cold
     ///   rcx = payload(header, 1)         -- the store; nought is `freeze()`d, cold
     ///   rdx = payload(header, 0) as u32  -- the length
@@ -1049,12 +1053,14 @@ impl<'a> Emit<'a> {
     ///   rdx = len + 1
     ///   the element's words, out of this frame and into the store
     ///   payload(header, 0) = rdx
-    ///   dst = 0                          -- `Ok(0)`, which is one `Unit` word
     /// ```
+    ///
+    /// There is no answer to write: the `()` a push answers is the `Inst::Unit`
+    /// the lowering emits after it.
     ///
     /// Three things in it are load-bearing.
     ///
-    /// **The receiver is loaded twice.** Once at the top and once to bump the
+    /// **The owner is loaded twice.** Once at the top and once to bump the
     /// length, because the register that held it is the one the capacity is
     /// computed into — three scratch registers is what this arm has, and a frame
     /// load is four bytes against a spill and a reload.
@@ -1068,28 +1074,24 @@ impl<'a> Emit<'a> {
     /// words wait on the machine stack the way [`Emit::copy`]'s do — so a cold jump
     /// from inside that window would arrive misaligned. The order is the invariant
     /// and it is checked by reading, which is why it is written down.
-    #[allow(clippy::too_many_arguments)]
-    fn vector_push(
-        &mut self,
-        dst: Slot,
-        recv: Slot,
-        vector: LayoutId,
-        value: Slot,
-        stride: u32,
-        builtin: u32,
-        args: u32,
-    ) {
+    fn vector_push(&mut self, push: WordPush) {
+        let WordPush {
+            owner,
+            vector,
+            src,
+            stride,
+        } = push;
         let cold = self.label();
         let done = self.label();
 
-        self.load_slot(RAX, recv);
-        // `vector()`'s `if addr == 0 { null_value() }`, which is the one refusal of
-        // this builtin a program reaches and this crate can name.
+        self.load_slot(RAX, owner);
+        // `Machine::vector_run`'s `if owner == 0 { null_object() }`, which is the
+        // one refusal of a push this crate can name.
         self.refuse_null(RAX);
 
-        // `machine.object_layout(addr)`: the header's high half. The call site's
-        // declared layout is what every static fact below was derived from, so a
-        // header that says something else is a receiver this code cannot push to.
+        // `machine.object_layout(addr)`: the header's high half. The element
+        // layout is what every static fact below was derived from, so a header
+        // that is not the vector of it is an owner this code cannot push to.
         self.mov_rr(RDX, RAX);
         self.heap_word(RDX);
         self.shr_imm8(RDX, 32);
@@ -1130,7 +1132,7 @@ impl<'a> Emit<'a> {
         if stride > 0 {
             self.push(RDX);
             for word in 0..stride {
-                self.load_slot(RAX, value + word);
+                self.load_slot(RAX, src + word);
                 self.push(RAX);
             }
             for word in (0..stride).rev() {
@@ -1143,19 +1145,15 @@ impl<'a> Emit<'a> {
             self.pop(RDX);
         }
 
-        // `machine.set_payload(items.header, 0, items.len as u64 + 1)`.
-        self.load_slot(RAX, recv);
+        // `growable_commit`: `machine.set_payload(owner, 0, len + 1)`.
+        self.load_slot(RAX, owner);
         self.add_imm32(RAX, 1);
         self.heap_ptr(RAX);
         self.store(HEAP_TABLE, 0, RDX);
-
-        // `Ok(0)`: one word of nought, which is the `Unit` the builtin answers.
-        self.xor_rr(RAX, RAX);
-        self.store_slot(dst, RAX);
         self.jmp(Target::Label(done));
 
         self.bind(cold);
-        self.builtin_call(dst, builtin, args);
+        self.growable_op(GrowableOp::PushWords, owner, src);
         self.bind(done);
         // One predecessor of this join came through a helper, so the frame pointer
         // the other one derived is not to be trusted here.
