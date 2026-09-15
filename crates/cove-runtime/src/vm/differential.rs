@@ -2077,3 +2077,58 @@ export fn cuts() -> String {{
         Answer::Value(want.join("\n"))
     );
 }
+
+/// `String.join`, a standard-library body since ADR 0058, answers alike on both
+/// evaluators and answers what Rust's `join` does — at every separator width,
+/// because a separator whose length is not a multiple of eight is what puts
+/// each later part at an offset inside a word.
+#[test]
+fn every_join_agrees_and_is_rusts_join() {
+    const SEPARATORS: [&str; 8] = ["", " ", ", ", "--", "1234567", "12345678", "123456789", "・"];
+    const CASES: [&[&str]; 11] = [
+        &[],
+        &[""],
+        &["a"],
+        &["", ""],
+        &["a", ""],
+        &["", "b"],
+        &["one", "two", "three"],
+        &["12345678", "12345678"],
+        &["1234567", "123456789"],
+        &["h\u{e9}llo", "w\u{f6}rld", "\u{1f600}"],
+        &["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+    ];
+    let quoted = |parts: &[&str]| {
+        let inner: Vec<String> = parts.iter().map(|part| format!("\"{part}\"")).collect();
+        format!("[{}]", inner.join(", "))
+    };
+    let separators: Vec<String> = SEPARATORS.iter().map(|s| format!("\"{s}\"")).collect();
+    let cases: Vec<String> = CASES.iter().map(|parts| quoted(parts)).collect();
+    let source = format!(
+        "
+export fn joins() -> String {{
+  let separators = [{}]
+  let cases: Array<Array<String>> = [{}]
+  var out: Vector<String> = Vector.of()
+  for separator in separators {{
+    for parts in cases {{
+      out.push(\"<{{separator.join(parts)}}>\")
+    }}
+  }}
+  \"\\n\".join(out.freeze())
+}}
+",
+        separators.join(", "),
+        cases.join(", ")
+    );
+    let mut want = Vec::new();
+    for separator in SEPARATORS {
+        for parts in CASES {
+            want.push(format!("<{}>", parts.join(separator)));
+        }
+    }
+    assert_eq!(
+        agree(&source, "joins", Vec::new()),
+        Answer::Value(want.join("\n"))
+    );
+}

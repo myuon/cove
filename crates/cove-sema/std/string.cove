@@ -118,3 +118,46 @@ fn refuseRange(text: String, from: Int, to: Int) -> Result<String, Error> {
   }
   return Err(Error(message))
 }
+
+/// The strings of `parts` one after another, with this string between each
+/// two of them.
+///
+/// The receiver is the separator — `", ".join(names)` — so no part is followed
+/// by one and an empty array answers the empty string. A part may be empty and
+/// is still a part: the separator on each side of it is kept.
+///
+/// It is built the way a `StringBuilder` builds a string, and sized first so
+/// that it never grows: the parts and the separators are counted, a byte buffer
+/// is asked for exactly that many bytes, each is appended whole, and the finish
+/// hands the run over as the answer without copying it. What the count costs is
+/// one read of each part's length, which is a header word; what it saves is
+/// every growth a builder sized by guesswork would have copied.
+export fn join(separator: String, parts: Array<String>) -> String {
+  let count = parts.length()
+  if count == 0 {
+    return ""
+  }
+  let between = core.byteLength(separator)
+  var total = between * (count - 1)
+  for part in parts {
+    total += core.byteLength(part)
+  }
+  var out = ByteBuffer.allocate(total)
+  let start = 0
+  if between == 0 {
+    for part in parts {
+      out.appendSlice(part, start, core.byteLength(part))
+    }
+  } else {
+    var first = true
+    for part in parts {
+      if first {
+        first = false
+      } else {
+        out.appendSlice(separator, start, between)
+      }
+      out.appendSlice(part, start, core.byteLength(part))
+    }
+  }
+  out.finish()
+}

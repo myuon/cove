@@ -45,7 +45,6 @@ pub enum Intrinsic {
     StringWords,
     StringChars,
     StringSplit,
-    StringJoin,
     StringSlice,
     StringTrim,
     StringContains,
@@ -99,7 +98,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringWords,
     Intrinsic::StringChars,
     Intrinsic::StringSplit,
-    Intrinsic::StringJoin,
     Intrinsic::StringSlice,
     Intrinsic::StringTrim,
     Intrinsic::StringContains,
@@ -155,7 +153,6 @@ impl Intrinsic {
             Intrinsic::StringWords => "String",
             Intrinsic::StringChars => "String",
             Intrinsic::StringSplit => "String",
-            Intrinsic::StringJoin => "String",
             Intrinsic::StringSlice => "String",
             Intrinsic::StringTrim => "String",
             Intrinsic::StringContains => "String",
@@ -207,7 +204,6 @@ impl Intrinsic {
             Intrinsic::StringWords => "words",
             Intrinsic::StringChars => "chars",
             Intrinsic::StringSplit => "split",
-            Intrinsic::StringJoin => "join",
             Intrinsic::StringSlice => "slice",
             Intrinsic::StringTrim => "trim",
             Intrinsic::StringContains => "contains",
@@ -305,7 +301,6 @@ impl Intrinsic {
             Intrinsic::StringWords
             | Intrinsic::StringChars
             | Intrinsic::StringSplit
-            | Intrinsic::StringJoin
             | Intrinsic::StringSlice
             | Intrinsic::StringTrim
             | Intrinsic::StringReplace
@@ -519,7 +514,6 @@ mod tests {
                 | Intrinsic::StringWords
                 | Intrinsic::StringChars
                 | Intrinsic::StringSplit
-                | Intrinsic::StringJoin
                 | Intrinsic::StringSlice
                 | Intrinsic::StringTrim
                 | Intrinsic::StringContains

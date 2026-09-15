@@ -817,7 +817,6 @@ const MACHINE_METHODS: &[(&str, &str)] = &[
     ("String", "words"),
     ("String", "chars"),
     ("String", "split"),
-    ("String", "join"),
     ("String", "slice"),
     ("String", "trim"),
     ("String", "contains"),

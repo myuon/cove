@@ -862,6 +862,15 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.string",
         function: "byteLength",
     },
+    // `join` counts its parts and appends each into a byte buffer of exactly
+    // that size, in Cove, over the buffer's own instructions.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "join",
+        module: "std.string",
+        function: "join",
+    },
     // `sliceBytes`' five checks and its `Result` are Cove; the copy beneath them
     // is `core.stringSlice`, a byte run slice.
     StdBinding {

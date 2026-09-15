@@ -172,7 +172,6 @@ pub(crate) fn call(
         Intrinsic::StringWords => text::words(machine, operands).map(|word| out.push(word)),
         Intrinsic::StringChars => text::chars(machine, operands).map(|word| out.push(word)),
         Intrinsic::StringSplit => text::split(machine, operands).map(|word| out.push(word)),
-        Intrinsic::StringJoin => text::join(machine, operands).map(|word| out.push(word)),
         Intrinsic::StringSlice => text::slice(machine, operands).map(|word| out.push(word)),
         Intrinsic::StringTrim => text::trim(machine, operands).map(|word| out.push(word)),
         Intrinsic::StringContains => text::contains(machine, operands).map(|word| out.push(word)),

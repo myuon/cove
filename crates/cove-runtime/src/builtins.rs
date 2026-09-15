@@ -1115,26 +1115,6 @@ pub fn call_method(
                         .collect(),
                 )))
             }
-            "join" => {
-                let args = expect_args("String.join", args, 1, span)?;
-                let Value(Repr::Array(parts)) = &args[0] else {
-                    return Err(type_error(
-                        "String.join",
-                        "parts",
-                        "Array<String>",
-                        &args[0],
-                        span,
-                    ));
-                };
-                let mut joined = String::new();
-                for (index, part) in parts.iter().enumerate() {
-                    if index > 0 {
-                        joined.push_str(text);
-                    }
-                    joined.push_str(expect_str("String.join", "parts", part, span)?);
-                }
-                Ok(Value(Repr::Str(joined.into())))
-            }
             "slice" => {
                 let args = expect_args("String.slice", args, 2, span)?;
                 let Value(Repr::Int(from)) = &args[0] else {
