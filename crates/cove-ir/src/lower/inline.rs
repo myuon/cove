@@ -81,6 +81,44 @@
 //! and quiet — a range two counters out of place verifies, runs, and answers
 //! about the wrong instructions.
 //!
+//! # A `var` parameter, and why only the standard library's
+//!
+//! A `var` parameter is an address: the caller forms it with
+//! [`Inst::AddrOfSlot`] (or passes on one it was handed) and the callee reads
+//! and writes the caller's place through it with [`Inst::Load`] and
+//! [`Inst::Store`]. An expansion keeps that exactly — the address word is an
+//! argument like any other, the body's loads and stores go through it into the
+//! same place, and the place is in a frame that is still live, because it is the
+//! frame the expansion is in or one above it. So nothing about the address
+//! itself changes.
+//!
+//! What changes is *when* things are read. A call copies every argument into
+//! its frame before the body runs, and writes its answer after the body has
+//! finished; an expansion reads a parameter it never writes where the caller has
+//! it ([`Region::renamed`]) and may assemble its answer straight in the call's
+//! destination. Both are invisible when nothing else can write those words —
+//! and a body with an address to the caller's frame can. `bump(var a, a)`
+//! copies `a` into `y` before `x = x + 1` runs; read where it stands, `y` would
+//! see the write. So where a call to a callee that takes an address passes an
+//! argument, or names a destination, within reach of an address the caller
+//! formed of its own frame, that callee's expansions copy every argument but
+//! the addresses and write the answer into a run of their own: the order a call
+//! observes, at the price of the copies a call would have made. Within reach is
+//! the rest of the binding an [`Inst::AddrOfSlot`] names — see
+//! [`addressed_words`] — which is the belief `super::frees` rests on about the
+//! same words. A word no address the caller formed can reach is one the body
+//! can write only through a `var` the caller was itself handed, which points
+//! into a frame above it.
+//!
+//! The rule is still narrow: a `var` parameter is expanded only in a
+//! standard-library leaf. [ADR 0058](../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
+//! puts a builder's append protocol in `std.stringbuilder` behind `var self`
+//! methods of one or two instructions, and `examples/covefmt` made half a
+//! million calls to them a run that were a frame each around one instruction
+//! (#378, Phase 3 Q7). A program's own `var` functions stay calls until one
+//! shows the same cost; the argument above is the reason it is sound for them
+//! too, and nothing in this module but [`is_expandable`] would have to change.
+//!
 //! # Where the callee's slots go
 //!
 //! Appended to the caller's frame, once per callee rather than once per call
@@ -253,10 +291,12 @@ const HOT_LIMIT: usize = 48;
 /// `isEmpty` is a length, a constant and a comparison — and nothing with a
 /// loop in it.
 ///
-/// Such a function is still a leaf, still takes no captures and no `var`
-/// parameter, and is still not `async`: the mandatory rule waives the frame
-/// budget and the size limits, never what makes an expansion correct. See
-/// [`is_thin_library`].
+/// Such a function is still a leaf, still takes no captures, and is still not
+/// `async`: the mandatory rule waives the frame budget and the size limits,
+/// never what makes an expansion correct. A `var self` builder method is one
+/// — `appendByte` is a load of the owner through the address and one byte
+/// `growable-push` — and is expanded in the order [`ordered_callees`] decides.
+/// See [`is_thin_library`].
 const THIN: usize = 4;
 
 /// Whether every call to `f` is expanded, whatever the caller has spent.
@@ -296,23 +336,38 @@ struct Eligible<'a> {
 /// expansion then appends: charging the callee's whole frame refused the
 /// leaves whose parameters cost nothing, which are the ones that answer from
 /// what they were handed.
-pub(super) fn appended_words(program: &Program, leaf: &Function) -> usize {
-    leaf.reprs.len() - renamed_words(program, leaf) as usize
+pub(super) fn appended_words(program: &Program, leaf: &Function, ordered: bool) -> usize {
+    leaf.reprs.len() - renamed_words(program, leaf, ordered) as usize
 }
 
-/// How many of `leaf`'s leading parameter words it never writes.
+/// How many of `leaf`'s leading parameter words it never writes, and so reads
+/// where the caller has them.
 ///
 /// See [`Region::renamed`]. One function for the two readers — the budget in
 /// [`expand`] and the region it builds — so that what is charged and what is
 /// appended cannot come apart.
-fn renamed_words(program: &Program, leaf: &Function) -> u32 {
+///
+/// Where the expansion is `ordered` — see [`ordered_callees`] — only the leading
+/// addresses are read in place: an address is a temporary of the caller's that
+/// no place of the program names, so nothing the body writes can reach it, and
+/// every other argument is copied as the call would have copied it.
+fn renamed_words(program: &Program, leaf: &Function, ordered: bool) -> u32 {
     let assigned = written(program, leaf);
     let taken = leaf.param_words(&program.layouts) as usize;
-    assigned
+    let unwritten = assigned
         .iter()
         .take(taken)
         .position(|held| *held)
-        .unwrap_or(taken) as u32
+        .unwrap_or(taken);
+    if !ordered {
+        return unwritten as u32;
+    }
+    let addresses = leaf
+        .params
+        .iter()
+        .take_while(|layout| **layout == shapes::ADDR)
+        .count();
+    unwritten.min(addresses) as u32
 }
 
 /// Which functions are reached from a loop, and so run often enough to spend
@@ -403,14 +458,109 @@ fn is_expandable(f: &Function, limit: usize) -> bool {
     if f.stub || f.is_async || !f.captures.is_empty() || f.code.len() > limit {
         return false;
     }
-    // A `var` parameter is an address into the *caller's* frame, which an
-    // expansion would leave pointing at a run the expansion itself owns.
-    // Nothing about that is unsound, and nothing about it is simple either,
-    // so it waits for a program that shows the cost of leaving it out.
-    if f.params.contains(&shapes::ADDR) {
+    // A `var` parameter is an address into a frame above the body's. Expanding
+    // one is sound — see the module documentation for the order it has to keep
+    // — and it is done for the standard library's leaves, whose `var self`
+    // builder methods are a frame each around one instruction. A program's own
+    // stay calls until a program shows the cost of leaving them.
+    if takes_an_address(f) && !f.is_library() {
         return false;
     }
     f.code.iter().all(reaches_nothing)
+}
+
+/// Whether `f` has a `var` parameter, which is an address into its caller's
+/// frame or one above it.
+fn takes_an_address(f: &Function) -> bool {
+    f.params.contains(&shapes::ADDR)
+}
+
+/// The words of `f`'s frame an address `f` formed can reach.
+///
+/// [`Inst::AddrOfSlot`] is the only instruction that names a frame word as an
+/// address; the other three address-forming instructions answer heap
+/// addresses or offset an address that was already one of these. What an
+/// address formed from a value location names stays inside that value, which
+/// is the belief `super::frees` rests on and `crate::verify` records as a fact
+/// about the instruction that formed it. So the reach is the rest of the
+/// binding the slot is in — the [`Local`](crate::Local) live there, whose
+/// layout is the value's — and where no binding is recorded at that slot and
+/// that counter, `super::frees`' own bound: the widest layout the program
+/// declares.
+fn addressed_words(program: &Program, f: &Function) -> Vec<bool> {
+    let mut held = vec![false; f.reprs.len()];
+    let widest = program
+        .layouts
+        .iter()
+        .map(|layout| layout.width())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    for (pc, inst) in f.code.iter().enumerate() {
+        let Inst::AddrOfSlot { slot, .. } = *inst else {
+            continue;
+        };
+        let pc = pc as Pc;
+        let end = f
+            .locals
+            .iter()
+            .filter(|local| local.from <= pc && pc < local.to)
+            .map(|local| {
+                (
+                    local.slot,
+                    local.slot + program.layout(local.layout).width(),
+                )
+            })
+            .filter(|(from, to)| *from <= slot && slot < *to)
+            .map(|(_, to)| to)
+            .max()
+            .unwrap_or(slot.saturating_add(widest));
+        for at in slot..end {
+            if let Some(word) = held.get_mut(at as usize) {
+                *word = true;
+            }
+        }
+    }
+    held
+}
+
+/// The callees whose expansions into `caller` have to keep a call's order:
+/// copy the arguments before the body runs, and write the answer after it.
+///
+/// A callee is here when it takes an address, and some call to it in `caller`
+/// passes an argument other than an address, or names a destination, that an
+/// address `caller` formed of its own frame can reach — the only words the body
+/// could write that the call would have read before it ran or written after.
+/// Decided per callee rather than per call because the words an expansion
+/// appends are decided per callee: every call to one leaf shares one run. See
+/// the module documentation.
+fn ordered_callees(program: &Program, caller: &Function) -> Vec<FunctionId> {
+    let addressed = addressed_words(program, caller);
+    if !addressed.iter().any(|word| *word) {
+        return Vec::new();
+    }
+    let reached = |slot: Slot, layout: LayoutId| {
+        (slot..slot.saturating_add(program.layout(layout).width()))
+            .any(|at| addressed.get(at as usize).copied().unwrap_or(false))
+    };
+    let mut ordered = Vec::new();
+    for inst in &caller.code {
+        let Inst::Call { dst, callee, args } = inst else {
+            continue;
+        };
+        let leaf = program.function(*callee);
+        if !takes_an_address(leaf) || ordered.contains(callee) {
+            continue;
+        }
+        let passed = program
+            .arg_list(*args)
+            .iter()
+            .any(|arg| arg.layout != shapes::ADDR && reached(arg.slot, arg.layout));
+        if passed || reached(*dst, leaf.returns) {
+            ordered.push(*callee);
+        }
+    }
+    ordered
 }
 
 /// Whether an instruction leaves the function it is in.
@@ -617,6 +767,7 @@ fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called
     // What this caller may still take on. A callee's run is appended once
     // however many sites call it, so the budget is spent per *callee* and the
     // sites after the first are free.
+    let ordered = ordered_callees(program, &caller);
     let mut room = FRAME_BUDGET.saturating_sub(caller.reprs.len());
     let mut taken: Vec<FunctionId> = Vec::new();
     let wanted: Vec<bool> = caller
@@ -644,7 +795,8 @@ fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called
                 if taken.contains(callee) {
                     return true;
                 }
-                let words = appended_words(program, program.function(*callee));
+                let words =
+                    appended_words(program, program.function(*callee), ordered.contains(callee));
                 if words > room {
                     return false;
                 }
@@ -702,7 +854,7 @@ fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called
             // The leading parameter words the body never writes are read
             // where the caller already has them, so the run begins after them
             // and they cost neither a slot nor a copy.
-            let renamed = renamed_words(program, &leaf);
+            let renamed = renamed_words(program, &leaf, ordered.contains(callee));
             let base = reprs.len() as Slot;
             reprs.extend(leaf.reprs.iter().skip(renamed as usize).copied());
             Region {
@@ -737,7 +889,9 @@ fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called
         // not overlap an argument the body reads where it stands, because
         // writing the answer would then overwrite an argument still to be
         // read.
-        let answering = single_return(&leaf);
+        // A body that can write the caller's words through an address assembles
+        // its answer in a run of its own, as a call would: see `ordered_callees`.
+        let answering = single_return(&leaf).filter(|_| !ordered.contains(callee));
         let mut where_of: Vec<Slot> = (0..leaf.reprs.len() as u32)
             .map(|at| if at < renamed { 0 } else { base + at - renamed })
             .collect();

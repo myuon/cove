@@ -8,11 +8,11 @@ fn emit(var out: StringBuilder, value: Int) {
 
 /// Appends a byte that is not a byte, which `StringBuilder.appendByte` refuses
 /// inside `std/stringbuilder.cove`. That body takes its builder as a `var`
-/// parameter, so the linear-memory backend calls it through a frame rather
-/// than expanding it into `emit` — the other half of `fail_int_abs_overflow`,
-/// whose `abs` is expanded. Either way the diagnostic blames the line in
+/// parameter and is one instruction long, so the linear-memory backend expands
+/// it into `emit` as it expands `fail_int_abs_overflow`'s `abs`, and the fault
+/// is raised in `emit`'s own frame. The diagnostic still blames the line in
 /// `emit` that called the library, keeps the library's own line as context,
-/// and still says that `main` called `emit`. ADR 0058.
+/// and says that `main` called `emit`. ADR 0058.
 export fn main() -> Result<Unit, Error> {
   var out = StringBuilder.withCapacity(4)
   emit(var out, 300)

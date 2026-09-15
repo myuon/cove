@@ -253,7 +253,7 @@ fn the_frame_budget_is_charged_what_an_expansion_appends() {
         .find(|f| f.qualified() == "m.offset")
         .expect("`offset` was lowered")
         .clone();
-    let appended = inline::appended_words(&program, &leaf);
+    let appended = inline::appended_words(&program, &leaf, false);
     assert!(
         appended > 0 && appended + 4 <= leaf.reprs.len(),
         "the parameters are not charged: {appended} of {}",
@@ -324,5 +324,198 @@ fn a_thin_library_wrapper_is_expanded_past_the_budget() {
     assert!(
         still_calls(&program, own),
         "the program's own body of the same shape is left a call"
+    );
+}
+
+/// A standard-library method that takes `var self` is expanded where it is
+/// called, and a program's own function with a `var` parameter is not.
+///
+/// The builder's four `var self` methods are a load of the owner through the
+/// address and one byte run instruction each, which is what `examples/covefmt`
+/// made half a million calls a run to (#378, Phase 3 Q7). What is expanded is
+/// the body *with* its address: the owner is still read through it, so an
+/// append in the caller's frame reaches the builder the caller named.
+#[test]
+fn a_library_method_that_takes_var_self_is_expanded() {
+    let (program, main) = program(
+        "use std.stringbuilder.StringBuilder\n\
+         fn bump(var x: Int) {\n  x = x + 1\n}\n\
+         fn main() -> String {\n  var n = 0\n  bump(var n)\n  var out = StringBuilder.withCapacity(4)\n  \
+         out.append(\"a\")\n  out.appendSlice(\"bcd\", 1, 2)\n  out.appendByte(100)\n  out.finish()\n}",
+    );
+    let named = |id: FunctionId| program.function(id).qualified();
+    let calls: Vec<String> = main
+        .code
+        .iter()
+        .filter_map(|inst| match inst {
+            Inst::Call { callee, .. } => Some(named(*callee)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        ["m.bump"],
+        "only the program's own `var` function is still a call"
+    );
+    for method in ["append", "appendSlice", "appendByte", "finish"] {
+        assert!(
+            main.inlined.iter().any(|held| {
+                let name = named(held.callee);
+                name.starts_with("std.stringbuilder.") && name.ends_with(&format!(".{method}"))
+            }),
+            "`StringBuilder.{method}` was expanded into `main`"
+        );
+    }
+    let has = |wanted: fn(&Inst) -> bool| main.code.iter().any(wanted);
+    assert!(has(|inst| matches!(inst, Inst::GrowableExtend { .. })));
+    assert!(has(|inst| matches!(inst, Inst::GrowablePush { .. })));
+    assert!(has(|inst| matches!(inst, Inst::RunFinish { .. })));
+    assert!(
+        has(|inst| matches!(inst, Inst::Load { .. })),
+        "the owner is read through the address the caller formed"
+    );
+}
+
+/// A caller built by hand around one call to the library leaf at `callee`,
+/// passing the address of `a` (slot 1) and the `Int` in `value`, and answering
+/// into `dst`.
+///
+/// Slot 0 is the answer, slot 1 is the binding `a`, slot 2 the address of it and
+/// slot 3 another `Int`; the binding is recorded as a [`Local`](crate::Local),
+/// which is what says how far an address of it reaches. A `dst` of 1 is the
+/// shape `a = bumpThenAdd(var a, ...)` would have if the lowering handed the
+/// call the binding as its destination.
+fn var_caller_of(program: &mut Program, callee: FunctionId, value: u32, dst: u32) -> FunctionId {
+    use super::super::shapes::{ADDR, INT};
+    let leaf = program.function(callee).clone();
+    let listed = program.args.len() as u32;
+    program.args.push(vec![
+        crate::program::Arg {
+            slot: 2,
+            layout: ADDR,
+        },
+        crate::program::Arg {
+            slot: value,
+            layout: INT,
+        },
+    ]);
+    let reprs = vec![Repr::Int, Repr::Int, Repr::Addr, Repr::Int];
+    let mut caller = leaf.clone();
+    caller.module = "m".into();
+    caller.name = "caller".into();
+    caller.params = Vec::new();
+    caller.refs = RefMap::of(&reprs);
+    caller.reprs = reprs;
+    caller.code = vec![
+        Inst::Int { dst: 1, value: 1 },
+        Inst::Int { dst: 3, value: 1 },
+        Inst::AddrOfSlot { dst: 2, slot: 1 },
+        Inst::Call {
+            dst,
+            callee,
+            args: crate::ArgsId(listed),
+        },
+        Inst::Return { src: 0 },
+    ];
+    caller.spans = vec![leaf.span; 5];
+    caller.locals = vec![crate::Local {
+        name: "a".into(),
+        slot: 1,
+        layout: INT,
+        from: 0,
+        to: 5,
+    }];
+    caller.inlined = Vec::new();
+    program.functions.push(caller);
+    FunctionId(program.functions.len() as u32 - 1)
+}
+
+/// An argument an address the caller formed can reach is copied before an
+/// expanded body that writes through an address runs, and the answer is
+/// assembled apart from the destination — the order a call observes. An
+/// argument no such address reaches is read where the caller has it.
+///
+/// `bumpThenAdd` writes `x` and then reads `by`. Handed `var a` and `a` itself,
+/// a call copied `a` into `by` first; reading `by` in place after the write
+/// would answer one more than the call did. The body is the program's own,
+/// relabelled into `std.int` — being in a standard-library module is the whole
+/// of what makes a function the library's — so that the rule this pins is the
+/// expansion's and not the checker's.
+#[test]
+fn an_argument_an_address_reaches_is_copied_before_a_var_body_runs() {
+    let (mut program, _) = program(
+        "fn bumpThenAdd(var x: Int, by: Int) -> Int {\n  x = x + 1\n  x + by\n}\n\
+         fn main() -> Int {\n  var a = 1\n  bumpThenAdd(var a, 2)\n}",
+    );
+    let at = program
+        .functions
+        .iter()
+        .position(|f| f.qualified() == "m.bumpThenAdd")
+        .expect("`bumpThenAdd` was lowered");
+    program.functions[at].module = "std.int".into();
+    let leaf = FunctionId(at as u32);
+
+    let copied_before_the_store = |program: &Program, id: FunctionId, src: u32| {
+        let code = &program.function(id).code;
+        let store = code
+            .iter()
+            .position(|inst| matches!(inst, Inst::Store { .. }))
+            .expect("the body writes through the address");
+        code[..store]
+            .iter()
+            .any(|inst| matches!(inst, Inst::Copy { src: from, .. } if *from == src))
+    };
+    let copied_out = |program: &Program, id: FunctionId, into: u32| {
+        program
+            .function(id)
+            .code
+            .iter()
+            .any(|inst| matches!(inst, Inst::Copy { dst, .. } if *dst == into))
+    };
+
+    let reached = var_caller_of(&mut program, leaf, 1, 0);
+    inline::expand_cold(&mut program, reached);
+    assert!(
+        !still_calls(&program, reached),
+        "the library leaf is expanded"
+    );
+    assert!(
+        copied_before_the_store(&program, reached, 1),
+        "`a` is copied into the body's run before the body writes through its address: {:?}",
+        program.function(reached).code
+    );
+    assert!(
+        copied_out(&program, reached, 0),
+        "and the answer is assembled apart and copied out: {:?}",
+        program.function(reached).code
+    );
+
+    let apart = var_caller_of(&mut program, leaf, 3, 0);
+    inline::expand_cold(&mut program, apart);
+    assert!(
+        !still_calls(&program, apart),
+        "the library leaf is expanded"
+    );
+    assert!(
+        !copied_before_the_store(&program, apart, 3),
+        "an argument no address reaches is read where it stands: {:?}",
+        program.function(apart).code
+    );
+    assert!(
+        !copied_out(&program, apart, 0),
+        "and the answer is assembled in the destination: {:?}",
+        program.function(apart).code
+    );
+
+    // The destination alone within reach: the body would write `a` through its
+    // address after assembling an answer in `a`, so the answer is assembled apart
+    // and copied in when the body is done.
+    let into = var_caller_of(&mut program, leaf, 3, 1);
+    inline::expand_cold(&mut program, into);
+    assert!(!still_calls(&program, into), "the library leaf is expanded");
+    assert!(
+        copied_out(&program, into, 1),
+        "a destination an address reaches is written after the body: {:?}",
+        program.function(into).code
     );
 }
