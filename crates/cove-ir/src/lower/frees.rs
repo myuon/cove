@@ -405,7 +405,7 @@ impl<'p> Flow<'p> {
             | Inst::StoreField { .. }
             | Inst::StoreElem { .. }
             | Inst::WriteByte { .. }
-            | Inst::CopyBytes { .. }
+            | Inst::RunCopy { .. }
             | Inst::AppendByte { .. }
             | Inst::AppendBytes { .. }
             | Inst::ScopeCancel { .. }
@@ -498,7 +498,7 @@ impl<'p> Flow<'p> {
             }
             // The five operands live in the args row, exactly as a call's
             // do, so they are read the same way.
-            Inst::CopyBytes { args: list } => args(list, f),
+            Inst::RunCopy { args: list, .. } => args(list, f),
             Inst::FinishString { bytes, .. } => f(bytes, 1),
             Inst::AllocBuffer { capacity, .. } => f(capacity, 1),
             Inst::AppendByte { buffer, value } => {
@@ -506,7 +506,7 @@ impl<'p> Flow<'p> {
                 f(value, 1);
             }
             // All four operands live in the args row, exactly as
-            // `Inst::CopyBytes`'s five do.
+            // `Inst::RunCopy`'s five do.
             Inst::AppendBytes { args: list } => args(list, f),
             Inst::FinishBuffer { buffer, .. } => f(buffer, 1),
             Inst::StoreField {

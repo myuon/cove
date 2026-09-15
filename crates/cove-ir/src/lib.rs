@@ -52,7 +52,7 @@ pub mod repr;
 pub mod verify;
 
 pub use bytecode::{EncodedInst, MAX_FRAME_WORDS};
-pub use inst::{ArithOp, CmpOp, Compare, Convert, Inst, Len, Num, Pc, Slot};
+pub use inst::{ArithOp, CmpOp, Compare, Convert, Inst, Len, Num, Pc, Slot, Storage};
 pub use intrinsic::{Effects, Intrinsic};
 pub use layout::{
     enum_layout, struct_layout, Case, Field, Layout, LayoutId, Part, Shape, SHARED_STATE,

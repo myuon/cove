@@ -135,6 +135,38 @@ pub enum Len {
     Slot(Slot),
 }
 
+/// What the units of a run are: the storage descriptor of
+/// [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)'s
+/// `FixedRun(storage, length)`.
+///
+/// A run is a heap object whose header length counts *units*, and this says
+/// what one unit is. It is a static fact of the instruction that names it,
+/// never a tag a backend reads at run time: ADR 0058 requires that
+/// "`PackedBytes` and `Words(LayoutId)` are statically distinguished", so an
+/// encoding may split an operation by storage — [`Inst::RunCopy`] is two
+/// opcodes — without the IR growing a second instruction for it.
+///
+/// Offsets, counts and bounds are always in units. What turns a unit into the
+/// memory it occupies is this descriptor and nothing else, so a caller that
+/// holds a logical length never multiplies by a stride.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Storage {
+    /// Bytes, eight to a word, least-significant first — a `String`'s payload
+    /// and a [`crate::Shape::Bytes`] run's. One unit is one byte, and a run of
+    /// them holds no references.
+    PackedBytes,
+    /// Whole elements of this layout, laid end to end. One unit is one
+    /// element, and its **stride** is the layout's width in words — so an
+    /// `Array<Point>` is a run of two-word units, not a run of words.
+    ///
+    /// The layout is the *element's* layout, not the object's: the object is a
+    /// [`crate::Shape::Elements`] of it, and its reference map is what the
+    /// collector traces every unit by. That is why a copy between two runs is
+    /// held to one element layout — a unit written into a run of another
+    /// family would be traced by the wrong map.
+    Words(LayoutId),
+}
+
 /// One instruction.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Inst {
@@ -582,7 +614,7 @@ pub enum Inst {
     /// as how a `join` is expected to move text. Copying more than a
     /// handful of bytes through this would replace one native copy with as
     /// many dispatches as there are bytes, which is exactly the shape
-    /// [`Inst::CopyBytes`] exists to avoid.
+    /// [`Inst::RunCopy`] exists to avoid.
     ///
     /// `bytes` must name a live [`crate::Shape::Bytes`] object — writing into a
     /// `String` is refused, because a `String`'s bytes are the invariant
@@ -594,23 +626,50 @@ pub enum Inst {
     /// arbitrary integer into memory another instruction will one day read
     /// back and trust.
     WriteByte { bytes: Slot, at: Slot, value: Slot },
-    /// A bulk range copy into a run under construction: `dst[dst_at
-    /// .. dst_at+len] = src[src_at .. src_at+len]`.
+    /// A bulk range copy between two runs: `dst[dst_at .. dst_at+count] =
+    /// src[src_at .. src_at+count]`, in units of `storage`.
     ///
-    /// This is [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
-    /// principal instruction — the one a `join` or a fused `sliceBytes`
-    /// lowers to instead of `sliceBytes -> Vector.push -> join`'s hidden
-    /// allocations — and the reason it exists at all is that a byte loop
-    /// over [`Inst::WriteByte`] would multiply dispatch by the number of
-    /// bytes moved, which ADR 0051's "why a byte loop in IR is not enough"
-    /// rejects. One instruction, one native run copy.
+    /// [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)'s
+    /// `run-copy dst, dstOffset, src, srcOffset, count, storage`: the one
+    /// copy beneath string slicing and appending, `Vector.toArray`,
+    /// `Array.toVector`, vector growth, removal and bulk construction. It
+    /// began as [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
+    /// `copy-bytes`, and is that instruction with the unit named rather than
+    /// assumed: for [`Storage::PackedBytes`] a unit is a byte, and for
+    /// [`Storage::Words`] a unit is a whole element of the layout, `stride`
+    /// words wide. It is not a Cove loop over [`Inst::WriteByte`] or
+    /// [`Inst::StoreElem`], because that would turn one bulk operation into a
+    /// dispatch and a safepoint per unit — which ADR 0051's "why a byte loop in
+    /// IR is not enough" and ADR 0058 both reject.
+    ///
+    /// # What it means
+    ///
+    /// **`memmove`.** The source is read as it was before the copy, so the two
+    /// ranges may overlap — a run shifting its own units along is the obvious
+    /// use, and a vector's `remove` is exactly that.
+    ///
+    /// **Bounds in units, before any write.** `dst_at`, `src_at` and `count`
+    /// are checked against each object's header length, which is its logical
+    /// length in units, and a failure stops the run with nothing written. They
+    /// are never multiplied into words until after that check.
+    ///
+    /// **One family on both sides.** For [`Storage::PackedBytes`], `src` may be
+    /// a `String` **or** a [`crate::Shape::Bytes`] run — a fused slice copies
+    /// straight out of the run that produced it — and `dst` must be a
+    /// [`crate::Shape::Bytes`] run: writing into a `String` is refused for
+    /// [`Inst::WriteByte`]'s reason. For [`Storage::Words`], both must be
+    /// [`crate::Shape::Elements`] of exactly that element layout, fixed or
+    /// growable, because the collector traces each by its own layout's
+    /// reference map and a unit of another family would be traced wrongly.
     ///
     /// # What it costs, and what it is charged
     ///
     /// One dispatch and one unit of work per payload word moved, which is
     /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
     /// "charged proportionally to the bytes or words examined". A word is the
-    /// unit because a word is what the memory moves.
+    /// unit of *work* whatever the unit of the run is, because a word is what
+    /// the memory moves: a byte run is charged by the words its bytes touch
+    /// and an element run by `count * stride`.
     ///
     /// The charge is not folded into the count of instructions dispatched.
     /// That number is a public observable — the debugger, the trace, the
@@ -624,15 +683,20 @@ pub enum Inst {
     /// one instruction run arbitrarily far past a fuel or cancellation bound
     /// before anything looked, which
     /// [ADR 0040](../../../docs/adr/0040-a-bound-outlives-its-backend.md)'s
-    /// `S + T` forbids. One chunk is one stride of work, so a stopped run gets
-    /// no further than a stride past the bound whatever length it was given.
+    /// `S + T` forbids. One chunk is one stride of work in either storage — a
+    /// byte chunk and a word chunk move the same number of words — so a
+    /// stopped run gets no further than a stride past the bound whatever
+    /// length it was given. A word chunk is a whole number of elements.
     ///
-    /// A collection may therefore happen with the destination half written.
-    /// That is safe for the reason ADR 0051 gave for the run's payload holding
-    /// no references, and rooted for a second one: the caller has already
-    /// `sync`ed, and both objects are named by frame slots this instruction
-    /// read them out of, so the walk finds them where it finds every other
-    /// live reference.
+    /// A collection may therefore happen with the destination part written.
+    /// The collector is non-moving, so neither address changes across it, and
+    /// it needs no barrier: it is a stop-the-world mark from the roots, not a
+    /// generational or incremental one with a remembered set to keep. What it
+    /// does need is both objects rooted and the destination walkable, and both
+    /// hold: the caller has `sync`ed and both objects are named by frame slots
+    /// this instruction read them out of; a fresh destination's payload is
+    /// zeroed by allocation, and every word already copied is a whole word of
+    /// a unit whose layout the destination's reference map agrees with.
     ///
     /// [`Inst::AllocBytes`] and [`Inst::FinishString`] are **not** charged
     /// this way and not chunked. Their bulk work is inside the allocator's
@@ -642,35 +706,28 @@ pub enum Inst {
     /// remain one unit each, which is what an ordinary [`Inst::Alloc`] of a
     /// large `Array` has always been.
     ///
-    /// `src` may be a `String` **or** another [`crate::Shape::Bytes`] run — a fused
-    /// slice copies straight out of the run that produced it, without
-    /// finishing it as a `String` first — but `dst` must always be a
-    /// [`crate::Shape::Bytes`] run under construction: writing into a `String` is
-    /// refused for [`Inst::WriteByte`]'s reason. Bounds are checked against
-    /// both objects' declared lengths rather than left to whatever the
-    /// native copy routine happens to do with an out-of-range range.
-    ///
     /// # Why five operands live behind an [`ArgsId`]
     ///
     /// An encoded instruction has room for three slot-sized operands and a
     /// payload, and this needs five: `dst`, `dst_at`, `src`, `src_at` and
-    /// `len`. Rather than spend a fifth [`Inst`] variant or a second
-    /// instruction pair to carry the overflow, this reuses the machinery a
-    /// call's argument list already is — [`ArgsId`] names a row of
-    /// [`crate::Program::args`], and a call already demonstrates that an
-    /// arity larger than three operands is a solved problem in this format.
-    /// The row holds exactly five [`crate::Arg`]s, in the order `dst`,
-    /// `dst_at`, `src`, `src_at`, `len`, and carries each one's layout the
-    /// same way a call's arguments do, so the verifier checks them by the
-    /// same rule rather than by a new one.
-    CopyBytes { args: ArgsId },
+    /// `count`. Rather than spend a second instruction pair to carry the
+    /// overflow, this reuses the machinery a call's argument list already is —
+    /// [`ArgsId`] names a row of [`crate::Program::args`], and a call already
+    /// demonstrates that an arity larger than three operands is a solved
+    /// problem in this format. The row holds exactly five [`crate::Arg`]s, in
+    /// the order `dst`, `dst_at`, `src`, `src_at`, `count`, and carries each
+    /// one's layout the same way a call's arguments do, so the verifier checks
+    /// them by the same rule rather than by a new one. The storage is not in
+    /// the row: it is the instruction's own, and the encoding carries a
+    /// [`Storage::Words`] layout in the payload half the row leaves free.
+    RunCopy { args: ArgsId, storage: Storage },
     /// `dst = <the run at `bytes`, validated and turned into an immutable
     /// String, in place>`.
     ///
     /// The instruction [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)
     /// closes construction with. `bytes` must name a live [`crate::Shape::Bytes`]
     /// run; its packed payload is read and checked as UTF-8 exactly once,
-    /// because a run assembled from [`Inst::WriteByte`] and [`Inst::CopyBytes`]
+    /// because a run assembled from [`Inst::WriteByte`] and [`Inst::RunCopy`]
     /// may hold anything a byte can hold, and ADR 0051 refuses to skip that
     /// check for an arbitrary run. Invalid UTF-8 fails with the same error a
     /// source-level string operation already raises for it.
@@ -683,7 +740,7 @@ pub enum Inst {
     /// its `len` does not change at all — rather than an allocation and a
     /// copy. Not copying the payload is the whole performance argument this
     /// ADR makes: every byte a `join` moves is moved once, by
-    /// [`Inst::CopyBytes`], and finishing moves none of them again.
+    /// [`Inst::RunCopy`], and finishing moves none of them again.
     FinishString { dst: Slot, bytes: Slot },
     /// `dst = <a new, empty byte buffer whose store has room for `capacity`
     /// bytes>`.
@@ -733,7 +790,7 @@ pub enum Inst {
     AppendByte { buffer: Slot, value: Slot },
     /// A bulk range append: `buffer.append(src[from .. to])`.
     ///
-    /// ADR 0052's principal instruction, and [`Inst::CopyBytes`]'s growable
+    /// ADR 0052's principal instruction, and [`Inst::RunCopy`]'s growable
     /// counterpart. One dispatch moves the whole range, for the reason ADR
     /// 0051 gave when it refused a byte loop in IR: a loop of
     /// [`Inst::AppendByte`] would multiply dispatch by the number of bytes.
@@ -756,7 +813,7 @@ pub enum Inst {
     ///
     /// # What it costs, and what it is charged
     ///
-    /// [`Inst::CopyBytes`]'s answer, unchanged: one unit of work per payload
+    /// [`Inst::RunCopy`]'s answer, unchanged: one unit of work per payload
     /// word moved, in bounded chunks with a safepoint between them, so a
     /// stopped run gets no further than a stride past the bound whatever length
     /// it was given. Growth is charged as the allocation it is.
@@ -768,7 +825,7 @@ pub enum Inst {
     ///
     /// # Why four operands live behind an [`ArgsId`]
     ///
-    /// [`Inst::CopyBytes`]'s reason at one fewer operand: an encoded
+    /// [`Inst::RunCopy`]'s reason at one fewer operand: an encoded
     /// instruction has room for three slot-sized operands and this needs four —
     /// `buffer`, `src`, `from` and `to`. Rather than spend a second instruction
     /// to carry the overflow, this reuses the machinery a call's argument list

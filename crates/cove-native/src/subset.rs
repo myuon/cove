@@ -1076,6 +1076,16 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             Len::Fixed | Len::Count(_) => slot(*dst),
             Len::Slot(at) => slot(*dst) && slot(*at),
         },
+        // [ADR 0058]'s run copy is not lowered by either arm yet, and is named
+        // here rather than left to the `_` below because it is the instruction
+        // `Vector.toArray` now lowers to: a function refused for it was refused
+        // before for the `call-builtin` it replaced, which `method_of` never
+        // decoded either, so naming it records that the refusal is the same one
+        // and not a regression. Lowering it is a helper call with a chunk poll —
+        // [`BufferFn`](crate::abi::BufferFn)'s shape — and is later work.
+        //
+        // [ADR 0058]: ../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+        Inst::RunCopy { .. } => return Some(Reason::Instruction),
         _ => return Some(Reason::Instruction),
     };
     (!inside).then_some(Reason::Operands)

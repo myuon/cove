@@ -202,24 +202,29 @@ fn a_for_over_a_vector_walks_a_snapshot() {
         ),
         "\
 fn @m.count(Vector) -> Int
-  frame 9: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int
-  local v -> s0:Vector [0, 14)
-  local t -> s2:Int [1, 13)
-  local x -> s8:Int [9, 10)
+  frame 10: s0!:ref s1:int s2:int s3:int s4:ref s5:ref s6:int s7:int s8:bool s9:int
+  local v -> s0:Vector [0, 19)
+  local t -> s2:Int [1, 18)
+  local x -> s9:Int [14, 15)
      0  int s2:int 0
-     1  call-builtin s3:Array Vector.toArray (s0:Vector)
-     2  len s4:int s3:ref
-     3  int s5:int 0
-     4  int s6:int 1
-     5  jump 7
-     6  add.int s5:int s5:int s6:int
-     7  lt.int.branch s7:bool s5:int s4:int 11
-     8  load-elem s8:Int s3:ref s5:int
-     9  add.int s2:int s2:int s8:int
-    10  jump 6
-    11  clear s3:Array
-    12  copy s1:Int s2:Int
-    13  return s1:Int
+     1  load-field s3:Int s0:ref +0
+     2  load-field s4:<ref> s0:ref +1
+     3  alloc s5:ref Array<array> xs3:int
+     4  int s6:int 0
+     5  run-copy.words Int (s5:Array s6:Int s4:<ref> s6:Int s3:Int)
+     6  clear s4:<ref>
+     7  len s3:int s5:ref
+     8  int s6:int 0
+     9  int s7:int 1
+    10  jump 12
+    11  add.int s6:int s6:int s7:int
+    12  lt.int.branch s8:bool s6:int s3:int 16
+    13  load-elem s9:Int s5:ref s6:int
+    14  add.int s2:int s2:int s9:int
+    15  jump 11
+    16  clear s5:Array
+    17  copy s1:Int s2:Int
+    18  return s1:Int
 "
     );
 }

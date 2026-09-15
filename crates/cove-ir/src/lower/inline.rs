@@ -330,7 +330,7 @@ fn is_expandable(f: &Function, limit: usize) -> bool {
 /// nothing here forces a new [`Inst`] variant to be considered — unlike
 /// [`written`] and [`slots_of`] below, a variant left out compiles silently.
 /// [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)'s
-/// `AllocBytes`, `WriteByte`, `CopyBytes` and `FinishString` make no call and
+/// `AllocBytes`, `WriteByte`, `RunCopy` and `FinishString` make no call and
 /// touch no scope or cell, so they belong in the list of things this refuses
 /// nothing for — correctly left out of the `matches!` above — but that is a
 /// fact worth writing down here precisely because the compiler cannot check
@@ -441,7 +441,7 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::StoreElem { .. }
             | Inst::Store { .. }
             | Inst::WriteByte { .. }
-            | Inst::CopyBytes { .. }
+            | Inst::RunCopy { .. }
             | Inst::AppendByte { .. }
             | Inst::AppendBytes { .. }
             | Inst::Jump { .. }
@@ -815,7 +815,7 @@ fn expand(program: &mut Program, id: FunctionId, small: &[bool], wide: &[bool], 
                 *table = crate::TableId(first + (table.0 - PLACED));
             }
             Inst::CallBuiltin { args, .. }
-            | Inst::CopyBytes { args }
+            | Inst::RunCopy { args, .. }
             | Inst::AppendBytes { args }
                 if args.0 >= PLACED =>
             {
@@ -901,10 +901,12 @@ fn relocated(
         // An argument list is `Program::args` and not part of the
         // instruction, so shifting the slots the instruction names does not
         // reach it. A builtin is the one call a leaf may hold, and
-        // `Inst::CopyBytes` and `Inst::AppendBytes` are the non-call
+        // `Inst::RunCopy` and `Inst::AppendBytes` are the non-call
         // instructions that also name one — each is the list relocated into a
         // list of its own.
-        Inst::CallBuiltin { args, .. } | Inst::CopyBytes { args } | Inst::AppendBytes { args } => {
+        Inst::CallBuiltin { args, .. }
+        | Inst::RunCopy { args, .. }
+        | Inst::AppendBytes { args } => {
             lists.push(
                 program
                     .arg_list(*args)
@@ -1035,7 +1037,7 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         // instruction, exactly as a call's do — `relocated` moves that row
         // and repoints `args` at the copy, the same way it does for
         // `Inst::CallBuiltin`.
-        Inst::CopyBytes { .. } | Inst::AppendBytes { .. } => Vec::new(),
+        Inst::RunCopy { .. } | Inst::AppendBytes { .. } => Vec::new(),
         Inst::Len { dst, obj } | Inst::LayoutOf { dst, obj } => vec![dst, obj],
         Inst::AddrOfSlot { dst, slot } => vec![dst, slot],
         Inst::AddrOfField { dst, obj, .. } => vec![dst, obj],

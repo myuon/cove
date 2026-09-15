@@ -345,7 +345,7 @@ fn a_vector_spread_is_copied_out_before_it_is_walked() {
         "f",
     );
     assert!(
-        text.contains("     0  call-builtin s2:Array Vector.toArray (s0:Vector)\n"),
+        text.contains("     4  run-copy.words Int (s4:Array s5:Int s3:<ref> s5:Int s2:Int)\n"),
         "{text}"
     );
 }

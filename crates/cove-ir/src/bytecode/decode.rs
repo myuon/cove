@@ -19,7 +19,7 @@
 //! loop. A verified program is executed from its bytes; this is how a human
 //! reads them back.
 
-use crate::inst::{Inst, Len, Pc, Slot};
+use crate::inst::{Inst, Len, Pc, Slot, Storage};
 use crate::layout::LayoutId;
 use crate::{ArgsId, BuiltinId, FunctionId, HostOpId, StrId, TableId};
 
@@ -263,7 +263,14 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             at: b,
             value: c,
         },
-        Op::CopyBytes => Inst::CopyBytes { args: ArgsId(lo) },
+        Op::RunCopyBytes => Inst::RunCopy {
+            args: ArgsId(lo),
+            storage: Storage::PackedBytes,
+        },
+        Op::RunCopyWords => Inst::RunCopy {
+            args: ArgsId(lo),
+            storage: Storage::Words(LayoutId(hi)),
+        },
         Op::FinishString => Inst::FinishString { dst: a, bytes: b },
         Op::AllocBuffer => Inst::AllocBuffer {
             dst: a,

@@ -48,7 +48,7 @@
 
 use std::fmt::Write as _;
 
-use crate::inst::{ArithOp, CmpOp, Compare, Convert, Inst, Len, Num, Slot};
+use crate::inst::{ArithOp, CmpOp, Compare, Convert, Inst, Len, Num, Slot, Storage};
 use crate::layout::{LayoutId, Shape};
 use crate::program::{Function, FunctionId, Program};
 
@@ -338,7 +338,15 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::WriteByte { bytes, at, value } => {
             format!("write-byte {} {} {}", s(*bytes), s(*at), s(*value))
         }
-        Inst::CopyBytes { args } => format!("copy-bytes ({})", args_of(program, *args)),
+        // The storage is written the way an encoding splits it, because a
+        // reader of a dump wants to see which copy runs without decoding a
+        // payload: `run-copy.bytes` or `run-copy.words` and the element layout.
+        Inst::RunCopy { args, storage } => match storage {
+            Storage::PackedBytes => format!("run-copy.bytes ({})", args_of(program, *args)),
+            Storage::Words(elem) => {
+                format!("run-copy.words {} ({})", l(*elem), args_of(program, *args))
+            }
+        },
         Inst::FinishString { dst, bytes } => {
             format!("finish-string {} {}", s(*dst), s(*bytes))
         }
