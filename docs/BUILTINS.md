@@ -63,6 +63,8 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `bytesExtend` | `core.bytesExtend(buffer: ByteBuffer, text: String, from: Int, to: Int) -> Unit` |
 | `bytesFinish` | `core.bytesFinish(buffer: ByteBuffer) -> String` |
 | `bytesLength` | `core.bytesLength(buffer: ByteBuffer) -> Int` |
+| `arrayLength` | `core.arrayLength(items: Array<T>) -> Int` |
+| `vectorLength` | `core.vectorLength(items: Vector<T>) -> Int` |
 
 ## Builtin types
 
@@ -75,7 +77,7 @@ written as a namespace; binds `T`.
 | signature | `var self` | variadic | binds | implemented by |
 | --- | --- | --- | --- | --- |
 | `get(index: Int) -> Option<T>` |  |  |  | `machine` |
-| `length() -> Int` |  |  |  | `machine` |
+| `length() -> Int` |  |  |  | `std.array.length` |
 | `isEmpty() -> Bool` |  |  |  | `std.array.isEmpty` |
 | `contains(element: T) -> Bool` |  |  |  | `std.array.contains` |
 | `indexOf(element: T) -> Option<Int>` |  |  |  | `std.array.indexOf` |
@@ -102,7 +104,7 @@ written as a namespace; binds `T`.
 | signature | `var self` | variadic | binds | implemented by |
 | --- | --- | --- | --- | --- |
 | `get(index: Int) -> Option<T>` |  |  |  | `machine` |
-| `length() -> Int` |  |  |  | `machine` |
+| `length() -> Int` |  |  |  | `std.vector.length` |
 | `isEmpty() -> Bool` |  |  |  | `std.vector.isEmpty` |
 | `contains(element: T) -> Bool` |  |  |  | `std.vector.contains` |
 | `indexOf(element: T) -> Option<Int>` |  |  |  | `std.vector.indexOf` |

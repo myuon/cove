@@ -649,6 +649,22 @@ pub fn call_core(
             check_buffer_live(storage, "length", span)?;
             Ok(Value(Repr::Int(storage.len() as i64)))
         }
+        // `std.array.length` and `std.vector.length`'s whole bodies. The
+        // vector's is refused once a finish consumed it, in the words every
+        // other vector core intrinsic here refuses it in.
+        "arrayLength" => {
+            let Value(Repr::Array(items)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Array", &args[0], span));
+            };
+            Ok(Value(Repr::Int(items.len() as i64)))
+        }
+        "vectorLength" => {
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Vector", &args[0], span));
+            };
+            check_consumed(storage, span)?;
+            Ok(Value(Repr::Int(storage.len() as i64)))
+        }
         // A name the table declares and nothing here executes. No program can
         // reach one of these from its own modules, so the check that every
         // entry has a body here is `vm::differential`'s, which calls each
@@ -895,10 +911,8 @@ pub fn call_method(
                 .and_then(|i| items.get(i).cloned())
                 .map(Value::some)
                 .unwrap_or_else(Value::none)),
-            "length" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Int(items.len() as i64)))
-            }
+            // `length` is not here: it is `std.array.length`, over
+            // `call_core`'s `arrayLength`.
             // `isEmpty` used to answer here too, `length() == 0`. It does
             // not reach this arm any more: `Interpreter::eval_method_call`
             // resolves it to a call into `std.array.isEmpty` before this
@@ -934,15 +948,13 @@ pub fn call_method(
                     .and_then(|i| storage.elements.borrow().get(i).cloned())
                     .map(Value::some)
                     .unwrap_or_else(Value::none)),
+                // `length` is not here either: it is `std.vector.length`, over
+                // `call_core`'s `vectorLength`.
                 // `contains` and `indexOf` are not here: they are
                 // `std.vector`'s loops over `==` and `call_core`'s
                 // `vectorLoad`.
                 // `slice` is not here: it is `std.vector.slice`, over
                 // `call_core`'s `vectorSlice`.
-                "length" => {
-                    expect_args(name, args, 0, span)?;
-                    Ok(Value(Repr::Int(storage.len() as i64)))
-                }
                 // `isEmpty` used to answer here too, `storage.is_empty()`.
                 // It does not reach this arm any more:
                 // `Interpreter::eval_method_call` resolves it to a call into

@@ -554,13 +554,21 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// before ADR 0058 moves them into the standard library (#378). It lands ahead
 /// of the moves, so the lowering is the base's.
 ///
+/// **Then it falls, with `length` behind a thin wrapper.** 2347 to 2334. ADR
+/// 0058's P3-15 (#378) made a sequence's `length()` `std.array.length` and
+/// `std.vector.length`, one core intrinsic each, and an expanded wrapper writes
+/// the call's destination directly where the inline lowering answered a
+/// temporary its caller copied: a function whose answer is a `length()` loses
+/// that copy (`examples:life` 2, `benches:callback`, `examples:restricted` and
+/// six `tests/e2e:gc_*` rows 1 or 2 each, `gc_churn` and `gc_vector_grow` 3).
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2347;
+const FORWARDABLE_COPIES: usize = 2334;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

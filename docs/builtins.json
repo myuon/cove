@@ -25,7 +25,9 @@
     {"name": "bytesPush", "signature": "core.bytesPush(buffer: ByteBuffer, byte: Int) -> Unit", "generics": [], "params": [{"name": "buffer", "type": "ByteBuffer"}, {"name": "byte", "type": "Int"}], "result": "Unit", "libraryOnly": true},
     {"name": "bytesExtend", "signature": "core.bytesExtend(buffer: ByteBuffer, text: String, from: Int, to: Int) -> Unit", "generics": [], "params": [{"name": "buffer", "type": "ByteBuffer"}, {"name": "text", "type": "String"}, {"name": "from", "type": "Int"}, {"name": "to", "type": "Int"}], "result": "Unit", "libraryOnly": true},
     {"name": "bytesFinish", "signature": "core.bytesFinish(buffer: ByteBuffer) -> String", "generics": [], "params": [{"name": "buffer", "type": "ByteBuffer"}], "result": "String", "libraryOnly": true},
-    {"name": "bytesLength", "signature": "core.bytesLength(buffer: ByteBuffer) -> Int", "generics": [], "params": [{"name": "buffer", "type": "ByteBuffer"}], "result": "Int", "libraryOnly": true}
+    {"name": "bytesLength", "signature": "core.bytesLength(buffer: ByteBuffer) -> Int", "generics": [], "params": [{"name": "buffer", "type": "ByteBuffer"}], "result": "Int", "libraryOnly": true},
+    {"name": "arrayLength", "signature": "core.arrayLength(items: Array<T>) -> Int", "generics": ["T"], "params": [{"name": "items", "type": "Array<T>"}], "result": "Int", "libraryOnly": true},
+    {"name": "vectorLength", "signature": "core.vectorLength(items: Vector<T>) -> Int", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}], "result": "Int", "libraryOnly": true}
   ],
   "types": [
     {
@@ -38,7 +40,7 @@
       ],
       "methods": [
         {"name": "get", "signature": "get(index: Int) -> Option<T>", "generics": [], "params": [{"name": "index", "type": "Int"}], "variadic": false, "result": "Option<T>", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.array.length", "host": false},
         {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.array.isEmpty", "host": false},
         {"name": "contains", "signature": "contains(element: T) -> Bool", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.array.contains", "host": false},
         {"name": "indexOf", "signature": "indexOf(element: T) -> Option<Int>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Option<Int>", "mutating": false, "implementedBy": "std.array.indexOf", "host": false},
@@ -62,7 +64,7 @@
       ],
       "methods": [
         {"name": "get", "signature": "get(index: Int) -> Option<T>", "generics": [], "params": [{"name": "index", "type": "Int"}], "variadic": false, "result": "Option<T>", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.vector.length", "host": false},
         {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.vector.isEmpty", "host": false},
         {"name": "contains", "signature": "contains(element: T) -> Bool", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.vector.contains", "host": false},
         {"name": "indexOf", "signature": "indexOf(element: T) -> Option<Int>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Option<Int>", "mutating": false, "implementedBy": "std.vector.indexOf", "host": false},

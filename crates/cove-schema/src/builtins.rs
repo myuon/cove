@@ -693,6 +693,18 @@ pub struct StdBinding {
 /// two outcomes — a clippy failure, or a genuinely shared implementation —
 /// and never the third, silent one this note used to have to warn about.
 pub static STANDARD_LIBRARY: &[StdBinding] = &[
+    // `length` of a sequence (#378, P3-15) was lowered inline since the linear
+    // IR began, which named the public method in the lowering; it is one core
+    // intrinsic now, expanded wherever it is called. `get` is not here: as a
+    // range decision and an `Option` in Cove over an element load it measured
+    // not expanding at every call site, so it stays lowered inline.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Array",
+        method: "length",
+        module: "std.array",
+        function: "length",
+    },
     StdBinding {
         kind: StdBindingKind::Method,
         receiver: "Array",
@@ -782,6 +794,13 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "indexOf",
         module: "std.vector",
         function: "indexOf",
+    },
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "Vector",
+        method: "length",
+        module: "std.vector",
+        function: "length",
     },
     // The first `var self` method to move, and the first binding over a core
     // intrinsic that writes: `std.vector.push` is `core.vectorPush(items,
@@ -1351,6 +1370,8 @@ impl CoreIntrinsicSchema {
 /// entries — [`CORE_BYTES_ALLOCATE`], [`CORE_BYTES_PUSH`],
 /// [`CORE_BYTES_EXTEND`], [`CORE_BYTES_FINISH`] and [`CORE_BYTES_LENGTH`] —
 /// which are ADR 0052's growable byte run with no method of its own left.
+/// `length` of both sequences is [`CORE_ARRAY_LENGTH`] or
+/// [`CORE_VECTOR_LENGTH`].
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_PUSH,
@@ -1368,6 +1389,8 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTES_EXTEND,
     CORE_BYTES_FINISH,
     CORE_BYTES_LENGTH,
+    CORE_ARRAY_LENGTH,
+    CORE_VECTOR_LENGTH,
 ];
 
 /// Every core intrinsic.
@@ -1778,6 +1801,39 @@ pub const CORE_BYTES_LENGTH: CoreIntrinsicSchema = CoreIntrinsicSchema {
     params: &[ParamSchema {
         name: "buffer",
         ty: BuiltinType::ByteBuffer,
+    }],
+    result: BuiltinType::Int,
+    fresh: false,
+};
+
+/// `core.arrayLength<T>(items: Array<T>) -> Int`: how many elements the array
+/// holds, which is its object header's length.
+///
+/// `Inst::Len` and nothing else — the instruction `core.byteLength` is, read of
+/// an object whose header counts elements rather than bytes.
+pub const CORE_ARRAY_LENGTH: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "arrayLength",
+    generics: &["T"],
+    params: &[ParamSchema {
+        name: "items",
+        ty: BuiltinType::Array(&BuiltinType::Param("T")),
+    }],
+    result: BuiltinType::Int,
+    fresh: false,
+};
+
+/// `core.vectorLength<T>(items: Vector<T>) -> Int`: how many elements the
+/// vector holds.
+///
+/// `Inst::LoadField` of the header's length word — never the store's header
+/// length, which is the capacity; [`CORE_BYTES_LENGTH`] is the same read of a
+/// byte run's owner.
+pub const CORE_VECTOR_LENGTH: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "vectorLength",
+    generics: &["T"],
+    params: &[ParamSchema {
+        name: "items",
+        ty: BuiltinType::Vector(&BuiltinType::Param("T")),
     }],
     result: BuiltinType::Int,
     fresh: false,

@@ -1,3 +1,12 @@
+/// How many elements this array holds.
+///
+/// The count is the header of the object the elements are in, which is a fact
+/// about representation this file cannot state — so the body is one core
+/// intrinsic, and the lowering expands it wherever it is called (ADR 0058).
+export fn length<T>(items: Array<T>) -> Int {
+  core.arrayLength(items)
+}
+
 /// Whether this array holds nothing.
 ///
 /// This is here to be here: `isEmpty` used to be a Rust arm in each
@@ -6,7 +15,7 @@
 /// library, in Cove, checked and lowered like any call a program writes —
 /// proof that a builtin's body need not be Rust at all.
 export fn isEmpty<T>(items: Array<T>) -> Bool {
-  items.length() == 0
+  core.arrayLength(items) == 0
 }
 
 /// Whether any element is `==` to `element`.
@@ -60,7 +69,7 @@ export fn indexOf<T>(items: Array<T>, element: T) -> Option<Int> {
 /// is this body's; the copy beneath it is a core intrinsic, ADR 0058's run
 /// slice, which is handed a range already inside the array.
 export fn slice<T>(items: Array<T>, from: Int, to: Int) -> Array<T> {
-  let length = items.length()
+  let length = core.arrayLength(items)
   let start = if from < 0 {
     0
   } else if from > length {

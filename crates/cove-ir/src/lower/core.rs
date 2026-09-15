@@ -99,6 +99,8 @@ impl Body<'_> {
             ),
             ("bytesFinish", [buffer]) => self.core_bytes_finish(expr, &buffer.value, want),
             ("bytesLength", [buffer]) => self.core_bytes_length(expr, &buffer.value, want),
+            ("arrayLength", [items]) => self.core_array_length(expr, &items.value, want),
+            ("vectorLength", [items]) => self.core_vector_length(expr, &items.value, want),
             _ => self.gap(&format!("`core.{name}`"), expr),
         }
     }
@@ -420,6 +422,52 @@ impl Body<'_> {
         let array = self.layout(&ty, items.span)?;
         let element = self.layout(&elem, items.span)?;
         Some((elem, array, element))
+    }
+
+    /// `core.arrayLength(items)`: the array's header length, which counts its
+    /// elements.
+    ///
+    /// [`Inst::Len`], as [`Body::core_byte_length`] is. The array's layout is
+    /// declared on the way, because meeting a value of the type is what
+    /// declares it.
+    fn core_array_length(&mut self, expr: &Expr, items: &Expr, want: Option<Dest>) -> Val {
+        if self.array_element(items).is_none() {
+            return self.dead(expr);
+        }
+        let obj = self.expr(items);
+        let dst = self.answer_at(want, shapes::INT);
+        self.emit(
+            Inst::Len {
+                dst: dst.slot,
+                obj: obj.slot,
+            },
+            expr.span,
+        );
+        self.release(obj, expr.span);
+        dst
+    }
+
+    /// `core.vectorLength(items)`: payload word 0 of the vector's header.
+    ///
+    /// [`VECTOR_LEN`], read as [`Body::core_bytes_length`] reads a byte run's
+    /// owner — never the store's header length, which is the capacity.
+    fn core_vector_length(&mut self, expr: &Expr, items: &Expr, want: Option<Dest>) -> Val {
+        if self.vector_element(items).is_none() {
+            return self.dead(expr);
+        }
+        let obj = self.expr(items);
+        let dst = self.answer_at(want, shapes::INT);
+        self.emit(
+            Inst::LoadField {
+                dst: dst.slot,
+                obj: obj.slot,
+                at: VECTOR_LEN,
+                layout: shapes::INT,
+            },
+            expr.span,
+        );
+        self.release(obj, expr.span);
+        dst
     }
 
     /// `core.arraySlice(items, from, count)`: a fresh `Array` of the `count`
