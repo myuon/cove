@@ -1067,15 +1067,23 @@ impl<'a> Machine<'a> {
         // and is not the same thing: what has to stay small here is the code the
         // dispatch loop *inlines*, and the `?` form puts the table lookup and its
         // counters in it.
-        match self.tier {
-            None => None,
-            Some(_) => self.tier_of(callee),
+        //
+        // A run counting its boundary takes the out-of-line arm too, with or
+        // without a tier: that is where a call into the standard library is
+        // counted, and a run that counts nothing still tests two words here.
+        match (&self.tier, &self.counting) {
+            (None, None) => None,
+            _ => self.tier_of(callee),
         }
     }
 
-    /// [`Machine::tiered`] once a table is known to be installed.
+    /// [`Machine::tiered`] once a table is known to be installed, or the run is
+    /// counting its boundary.
     #[inline(never)]
     fn tier_of(&mut self, callee: FunctionId) -> Option<cove_native::Entry> {
+        if let Some(counting) = self.counting.as_deref_mut() {
+            counting.encoded_call(callee);
+        }
         let tier = self.tier.as_deref_mut()?;
         // Safety: the installer keeps the table alive for as long as it is
         // installed; see `Machine::install_native` and `native::Session::call`.

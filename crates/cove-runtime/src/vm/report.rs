@@ -46,7 +46,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use cove_ir::{BuiltinId, Inst, Intrinsic, Program};
+use cove_ir::{BuiltinId, FunctionId, Inst, Intrinsic, Program};
 
 use crate::vm::exec::native::Tiers;
 
@@ -138,6 +138,32 @@ pub struct Emitted {
     pub instructions: u64,
     /// How many of them are `CallBuiltin`.
     pub builtin_sites: u64,
+    /// How many of them are an `Inst::Call` to a standard-library function:
+    /// the library calls the lowering left calls rather than expanding.
+    ///
+    /// [ADR 0058] makes a thin library wrapper a mandatory expansion, so this
+    /// is what says whether one was missed; what remains is the library's
+    /// larger algorithms and the bodies `lower::inline` may not expand.
+    ///
+    /// [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+    pub library_call_sites: u64,
+}
+
+/// The `Call`s into standard-library functions a run made, by the tier that
+/// made them.
+///
+/// Counted where a call already reaches Rust — `Machine::tiered` for the
+/// encoded tier, and the counting `call` and `open` helpers for compiled code
+/// — so an uncounted run pays nothing for it. A closure call whose body is the
+/// library's is one too, because it opens the same frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LibraryCalls {
+    /// Calls the encoded dispatch loop made.
+    pub encoded: u64,
+    /// Calls compiled code made, through the `call` or `open` helper. `None`
+    /// when compiled code ran against the production helpers, which count
+    /// nothing, or when no native tier was installed.
+    pub native: Option<u64>,
 }
 
 impl Emitted {
@@ -150,11 +176,17 @@ impl Emitted {
             emitted.functions += 1;
             emitted.instructions += function.code.len() as u64;
             for inst in &function.code {
-                if let Inst::CallBuiltin { builtin, .. } = inst {
-                    emitted.builtin_sites += 1;
-                    if let Some(count) = sites.get_mut(builtin.index()) {
-                        *count += 1;
+                match inst {
+                    Inst::CallBuiltin { builtin, .. } => {
+                        emitted.builtin_sites += 1;
+                        if let Some(count) = sites.get_mut(builtin.index()) {
+                            *count += 1;
+                        }
                     }
+                    Inst::Call { callee, .. } if program.function(*callee).is_library() => {
+                        emitted.library_call_sites += 1;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -196,6 +228,8 @@ pub struct BoundaryReport {
     pub intrinsics: Vec<IntrinsicCalls>,
     /// Instructions the encoded dispatch loop dispatched while counting.
     pub encoded_instructions: u64,
+    /// The `Call`s into the standard library, by the tier that made them.
+    pub library_calls: LibraryCalls,
     /// How the calls divided between the tiers, or `None` when no native tier was
     /// installed.
     pub tiers: Option<Tiers>,
@@ -232,6 +266,12 @@ pub(crate) struct Counting {
     builtins: Vec<u64>,
     /// The ones among them the native `builtin` helper made.
     from_native: Vec<u64>,
+    /// Whether each function, by `FunctionId`, is the standard library's.
+    library: Vec<bool>,
+    /// Frames the encoded tier opened for a library function.
+    library_encoded: u64,
+    /// Frames compiled code opened for one, through the counting helpers.
+    library_native: u64,
     /// Native-to-runtime calls, which only [`helpers_counting`]'s table writes.
     ///
     /// [`helpers_counting`]: crate::native_helpers_counting
@@ -248,6 +288,13 @@ impl Counting {
         Counting {
             builtins: vec![0; program.builtins.len()],
             from_native: vec![0; program.builtins.len()],
+            library: program
+                .functions
+                .iter()
+                .map(cove_ir::Function::is_library)
+                .collect(),
+            library_encoded: 0,
+            library_native: 0,
             helpers: HelperCalls::default(),
             instructions_at: instructions,
             tiers_at: tiers,
@@ -258,6 +305,21 @@ impl Counting {
     pub(crate) fn builtin(&mut self, builtin: BuiltinId) {
         if let Some(count) = self.builtins.get_mut(builtin.index()) {
             *count += 1;
+        }
+    }
+
+    /// One call the encoded tier made to `callee`, counted if it is the
+    /// library's.
+    pub(crate) fn encoded_call(&mut self, callee: FunctionId) {
+        if self.library.get(callee.index()).copied().unwrap_or(false) {
+            self.library_encoded += 1;
+        }
+    }
+
+    /// One call compiled code made to `callee`, counted if it is the library's.
+    pub(crate) fn native_call(&mut self, callee: FunctionId) {
+        if self.library.get(callee.index()).copied().unwrap_or(false) {
+            self.library_native += 1;
         }
     }
 
@@ -309,10 +371,15 @@ impl Counting {
                 .then_with(|| a.intrinsic.to_string().cmp(&b.intrinsic.to_string()))
         });
         let tiers = tiers.map(|now| since(now, self.tiers_at));
+        let native_counted = tiers.is_some() && helpers_counted;
         BoundaryReport {
             emitted,
             intrinsics,
             encoded_instructions: instructions.saturating_sub(self.instructions_at),
+            library_calls: LibraryCalls {
+                encoded: self.library_encoded,
+                native: native_counted.then_some(self.library_native),
+            },
             helpers: (tiers.is_some() && helpers_counted).then_some(self.helpers),
             tiers,
         }
@@ -354,6 +421,18 @@ impl fmt::Display for BoundaryReport {
             f,
             "boundary: encoded VM, {} instruction(s) dispatched",
             thousands(self.encoded_instructions)
+        )?;
+        let library = self.library_calls;
+        writeln!(
+            f,
+            "boundary: standard library, {} `Call` site(s) left unexpanded; {} call(s) made \
+             from encoded, {} from native",
+            thousands(emitted.library_call_sites),
+            thousands(library.encoded),
+            match library.native {
+                Some(native) => thousands(native),
+                None => "uncounted".to_string(),
+            }
         )?;
         match self.tiers {
             Some(tiers) => writeln!(
@@ -437,6 +516,7 @@ mod tests {
                 functions: 3,
                 instructions: 12_345,
                 builtin_sites: 4,
+                library_call_sites: 2,
             },
             intrinsics: vec![
                 IntrinsicCalls {
@@ -453,6 +533,10 @@ mod tests {
                 },
             ],
             encoded_instructions: 1_234_567,
+            library_calls: LibraryCalls {
+                encoded: 9,
+                native: Some(1_001),
+            },
             tiers: Some(Tiers {
                 vm_to_native: 2,
                 ..Tiers::default()
@@ -466,6 +550,10 @@ mod tests {
         let text = report.to_string();
         assert!(text.contains("emitted IR, 12,345 instruction(s) in 3 function(s), 4 of them"));
         assert!(text.contains("encoded VM, 1,234,567 instruction(s) dispatched"));
+        assert!(text.contains(
+            "standard library, 2 `Call` site(s) left unexpanded; 9 call(s) made from encoded, \
+             1,001 from native"
+        ));
         assert!(text.contains("VM->native 2,"));
         assert!(text.contains("helper calls, 7 in all"));
         assert!(text.contains("           1,000              7       1  Vector.push"));

@@ -1904,14 +1904,55 @@ counted!(
     /// [`safepoint`], counted.
     counted_safepoint => safepoint.safepoint(pc: u32, work: u64) -> bool
 );
-counted!(
-    /// [`call`], counted.
-    counted_call => call.call(base: u64, pc: u32, callee: u32, args: u32, dst: u32) -> u32
-);
-counted!(
-    /// [`open`], counted.
-    counted_open => open.open(base: u64, pc: u32, callee: u32, args: u32, dst: u32) -> Opened
-);
+/// [`call`], counted, and the callee charged if it is the standard library's.
+///
+/// # Safety
+///
+/// As [`call`].
+unsafe extern "C" fn counted_call(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    callee: u32,
+    args: u32,
+    dst: u32,
+) -> u32 {
+    charge(ctx, |calls| calls.call += 1);
+    charge_callee(ctx, callee);
+    call(ctx, base, pc, callee, args, dst)
+}
+
+/// [`open`], counted, and the callee charged if it is the standard library's.
+///
+/// # Safety
+///
+/// As [`open`].
+unsafe extern "C" fn counted_open(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    callee: u32,
+    args: u32,
+    dst: u32,
+) -> Opened {
+    charge(ctx, |calls| calls.open += 1);
+    charge_callee(ctx, callee);
+    open(ctx, base, pc, callee, args, dst)
+}
+
+/// Charges one call compiled code made to `callee`, if the machine is counting.
+///
+/// # Safety
+///
+/// As [`charge`].
+#[inline(always)]
+unsafe fn charge_callee(ctx: *mut NativeCtx, callee: u32) {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+    if let Some(counting) = (*machine).counting.as_deref_mut() {
+        counting.native_call(FunctionId(callee));
+    }
+}
 counted!(
     /// [`close`], counted.
     counted_close => close.close(outcome: u32, callee: u32) -> u32

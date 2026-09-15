@@ -435,6 +435,17 @@ impl Function {
             .filter(move |held| held.from <= pc && pc < held.to)
     }
 
+    /// Whether the standard library declared this function.
+    ///
+    /// Read off [`Function::module`] through `cove_sema::stdlib`, the one list
+    /// of the library's module names — the same question the checker asks
+    /// before it admits a core intrinsic. `lower::inline` asks it to expand a
+    /// thin library wrapper wherever it is called, and a boundary report asks
+    /// it to count the library calls that were left calls.
+    pub fn is_library(&self) -> bool {
+        cove_sema::stdlib::is_library_module(&self.module)
+    }
+
     /// `module.name`, as a diagnostic writes it.
     pub fn qualified(&self) -> String {
         format!("{}.{}", self.module, self.name)

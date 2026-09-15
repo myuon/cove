@@ -30,6 +30,11 @@
 //! are copied by the call and are not arguments — and not be `async`, whose
 //! answer is a task the caller wraps rather than the value the body produced.
 //!
+//! A standard-library leaf of a handful of instructions is expanded
+//! *wherever* it is called, past both limits and the frame budget below: ADR
+//! 0058 makes a thin wrapper over a core intrinsic part of the lowering
+//! contract. See [`is_thin_library`].
+//!
 //! # Why there is no second rule about failing
 //!
 //! There was one, and it is worth recording what it was and what removed it,
@@ -130,13 +135,19 @@ pub(super) fn expand_small_leaf_calls(program: &mut Program) {
         let wide: Vec<bool> = (0..program.functions.len())
             .map(|at| is_expandable(&program.functions[at], HOT_LIMIT))
             .collect();
-        if !wide.iter().any(|held| *held) {
+        let thin: Vec<bool> = program.functions.iter().map(is_thin_library).collect();
+        if !wide.iter().chain(&thin).any(|held| *held) {
             return;
         }
         let hot = hot_functions(program);
         let before: usize = program.functions.iter().map(|f| f.code.len()).sum();
+        let eligible = Eligible {
+            small: &small,
+            wide: &wide,
+            thin: &thin,
+        };
         for (at, called_often) in hot.iter().enumerate() {
-            expand(program, FunctionId(at as u32), &small, &wide, *called_often);
+            expand(program, FunctionId(at as u32), &eligible, *called_often);
         }
         if program
             .functions
@@ -198,7 +209,11 @@ const ROUNDS: usize = 8;
 ///
 /// The ratchet in `crates/cove-cli/tests/bytecode_corpus.rs` watches the rest,
 /// and this keeps it where it was.
-const FRAME_BUDGET: usize = 96;
+///
+/// A callee is charged the words its expansion actually appends —
+/// [`appended_words`] — and not its whole frame, and a thin standard-library
+/// wrapper is charged nothing at all: see [`is_thin_library`].
+pub(super) const FRAME_BUDGET: usize = 96;
 
 /// How many instructions a function may hold and still be expanded into a
 /// call site that runs often.
@@ -220,6 +235,85 @@ const FRAME_BUDGET: usize = 96;
 /// table rather than derived, as [`LIMIT`] is, and the same measurement is
 /// what would move it.
 const HOT_LIMIT: usize = 48;
+
+/// How many instructions, not counting its `return`s, a standard-library
+/// function may hold and be expanded wherever it is called.
+///
+/// [ADR 0058](../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
+/// makes a thin public wrapper over a core intrinsic part of the lowering
+/// contract rather than a call-cost choice: "Small public wrappers over run
+/// intrinsics are mandatory inline candidates; larger algorithms retain the
+/// target-specific budgets". `String.byteLength` is one instruction and a
+/// `return` once its body is `core.byteLength(text)`, and a call to it is a
+/// frame, an argument copy and a copy back out around that one instruction —
+/// so leaving it a call anywhere would make moving a method into Cove a
+/// slowdown the method never had.
+///
+/// Four, which admits a wrapper that also compares or constructs — an
+/// `isEmpty` is a length, a constant and a comparison — and nothing with a
+/// loop in it.
+///
+/// Such a function is still a leaf, still takes no captures and no `var`
+/// parameter, and is still not `async`: the mandatory rule waives the frame
+/// budget and the size limits, never what makes an expansion correct. See
+/// [`is_thin_library`].
+const THIN: usize = 4;
+
+/// Whether every call to `f` is expanded, whatever the caller has spent.
+///
+/// A standard-library function of at most [`THIN`] instructions besides its
+/// returns that [`is_expandable`] admits with no size limit. It takes no share
+/// of [`FRAME_BUDGET`]: the words it appends are its parameters' copies and
+/// its answer, which is what the call it replaces would have pushed as a frame
+/// — and a caller that is over budget is the caller that is already hot and
+/// already wide, which is exactly where a wrapper left a call costs most.
+///
+/// [`MAX_FRAME_WORDS`](crate::MAX_FRAME_WORDS) still stands, because that
+/// limit is a fact about the encoding rather than a policy.
+pub(super) fn is_thin_library(f: &Function) -> bool {
+    f.is_library()
+        && is_expandable(f, usize::MAX)
+        && f.code
+            .iter()
+            .filter(|inst| !matches!(inst, Inst::Return { .. }))
+            .count()
+            <= THIN
+}
+
+/// Which callees a site may expand, by `FunctionId`: [`LIMIT`] at a cold site,
+/// [`HOT_LIMIT`] at a hot one, and [`is_thin_library`] at either.
+struct Eligible<'a> {
+    small: &'a [bool],
+    wide: &'a [bool],
+    thin: &'a [bool],
+}
+
+/// The words an expansion of `leaf` appends to its caller's frame.
+///
+/// Its slots, less the leading parameter words the body never writes, which
+/// are read where the caller already has them — [`Region::renamed`]. This is
+/// what [`FRAME_BUDGET`] is charged, and it has to be the same number the
+/// expansion then appends: charging the callee's whole frame refused the
+/// leaves whose parameters cost nothing, which are the ones that answer from
+/// what they were handed.
+pub(super) fn appended_words(program: &Program, leaf: &Function) -> usize {
+    leaf.reprs.len() - renamed_words(program, leaf) as usize
+}
+
+/// How many of `leaf`'s leading parameter words it never writes.
+///
+/// See [`Region::renamed`]. One function for the two readers — the budget in
+/// [`expand`] and the region it builds — so that what is charged and what is
+/// appended cannot come apart.
+fn renamed_words(program: &Program, leaf: &Function) -> u32 {
+    let assigned = written(program, leaf);
+    let taken = leaf.param_words(&program.layouts) as usize;
+    assigned
+        .iter()
+        .take(taken)
+        .position(|held| *held)
+        .unwrap_or(taken) as u32
+}
 
 /// Which functions are reached from a loop, and so run often enough to spend
 /// code size on.
@@ -486,8 +580,27 @@ struct Region {
     renamed: u32,
 }
 
+/// [`expand`] over one function, as the first round of the pass would, with
+/// every site treated as cold.
+///
+/// For `lower::tests::inlining`, which builds a caller whose frame is exactly
+/// where a budget rule decides and asks what one function's expansion did.
+#[cfg(test)]
+pub(super) fn expand_cold(program: &mut Program, id: FunctionId) {
+    let small: Vec<bool> = (0..program.functions.len())
+        .map(|at| is_expandable(&program.functions[at], LIMIT))
+        .collect();
+    let thin: Vec<bool> = program.functions.iter().map(is_thin_library).collect();
+    let eligible = Eligible {
+        small: &small,
+        wide: &small,
+        thin: &thin,
+    };
+    expand(program, id, &eligible, false);
+}
+
 /// Expands the calls in one function.
-fn expand(program: &mut Program, id: FunctionId, small: &[bool], wide: &[bool], called_hot: bool) {
+fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called_hot: bool) {
     let caller = program.function(id).clone();
     let hot: Vec<bool> = if called_hot {
         vec![true; caller.code.len()]
@@ -508,18 +621,23 @@ fn expand(program: &mut Program, id: FunctionId, small: &[bool], wide: &[bool], 
                 if *callee == id {
                     return false;
                 }
-                let eligible = if hot[at] {
-                    wide[callee.index()]
+                // A thin library wrapper is expanded wherever it is called and
+                // is charged nothing: see `is_thin_library`.
+                if eligible.thin[callee.index()] {
+                    return true;
+                }
+                let admitted = if hot[at] {
+                    eligible.wide[callee.index()]
                 } else {
-                    small[callee.index()]
+                    eligible.small[callee.index()]
                 };
-                if !eligible {
+                if !admitted {
                     return false;
                 }
                 if taken.contains(callee) {
                     return true;
                 }
-                let words = program.function(*callee).reprs.len();
+                let words = appended_words(program, program.function(*callee));
                 if words > room {
                     return false;
                 }
@@ -577,13 +695,7 @@ fn expand(program: &mut Program, id: FunctionId, small: &[bool], wide: &[bool], 
             // The leading parameter words the body never writes are read
             // where the caller already has them, so the run begins after them
             // and they cost neither a slot nor a copy.
-            let assigned = written(program, &leaf);
-            let taken = leaf.param_words(&program.layouts) as usize;
-            let renamed = assigned
-                .iter()
-                .take(taken)
-                .position(|held| *held)
-                .unwrap_or(taken) as u32;
+            let renamed = renamed_words(program, &leaf);
             let base = reprs.len() as Slot;
             reprs.extend(leaf.reprs.iter().skip(renamed as usize).copied());
             Region {
