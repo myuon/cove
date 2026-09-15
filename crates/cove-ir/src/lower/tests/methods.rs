@@ -24,10 +24,11 @@ fn @m.parts(String) -> Array
 }
 
 /// `Duration.nanos(1)` builds a duration and `d.nanos()` reads one back
-/// out, and the language spells them the same. The machine tells them apart
-/// by the `Repr` of operand 0, which is a static fact about the location
-/// chosen here. `nanos` is the one unit that still works this way — every
-/// other one moved to `std.duration`, below.
+/// out, and the language spells them the same. Neither is a runtime call:
+/// a `Duration` is a count of nanoseconds in one word, so each is a relabel
+/// conversion that moves the word into a slot of the other `Repr` (#378,
+/// P5-2). `nanos` is the one unit that works this way — every other one
+/// moved to `std.duration`, below.
 #[test]
 fn an_associated_function_has_no_receiver() {
     assert_eq!(
@@ -36,22 +37,38 @@ fn an_associated_function_has_no_receiver() {
 fn @m.wait() -> Duration
   frame 2: s0:duration s1:int
      0  int s1:int 1
-     1  call-builtin s0:Duration Duration.nanos (s1:Int)
+     1  int-to-duration s0:duration s1:int
      2  return s0:Duration
 "
     );
 }
 
 #[test]
-fn a_duration_reader_passes_its_receiver_as_operand_zero() {
+fn a_duration_reader_converts_its_receiver() {
     assert_eq!(
         listing("fn ns(d: Duration) -> Int { d.nanos() }", "ns"),
         "\
 fn @m.ns(Duration) -> Int
   frame 2: s0!:duration s1:int
   local d -> s0:Duration [0, 2)
-     0  call-builtin s1:Int Duration.nanos (s0:Duration)
+     0  duration-to-int s1:int s0:duration
      1  return s1:Int
+"
+    );
+}
+
+/// `Int.toFloat` is the conversion instruction the IR has always had, and
+/// not a runtime call.
+#[test]
+fn an_int_converts_to_a_float_in_one_instruction() {
+    assert_eq!(
+        listing("fn f(n: Int) -> Float { n.toFloat() }", "f"),
+        "\
+fn @m.f(Int) -> Float
+  frame 2: s0!:int s1:float
+  local n -> s0:Int [0, 2)
+     0  int-to-float s1:float s0:int
+     1  return s1:Float
 "
     );
 }
@@ -70,7 +87,7 @@ fn @m.wait() -> Duration
   frame 5: s0:duration s1:int s2:duration s3:duration s4:int
      0  int s1:int 1
      1  mul.int.imm s4:int s1:int 1000000
-     2  call-builtin s2:Duration Duration.nanos (s4:Int)
+     2  int-to-duration s2:duration s4:int
      3  copy s0:Duration s2:Duration
      4  return s0:Duration
 "
@@ -85,7 +102,7 @@ fn a_duration_reader_is_a_call_the_standard_library_implements() {
 fn @m.ms(Duration) -> Int
   frame 4: s0!:duration s1:int s2:int s3:int
   local d -> s0:Duration [0, 3)
-     0  call-builtin s3:Int Duration.nanos (s0:Duration)
+     0  duration-to-int s3:int s0:duration
      1  div.int.imm s1:int s3:int 1000000
      2  return s1:Int
 "

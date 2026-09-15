@@ -199,6 +199,8 @@ const GE_INT_IMM: u8 = Op::CmpImm(CmpOp::Ge).number();
 const NOT: u8 = Op::Not.number();
 const INT_TO_FLOAT: u8 = Op::Convert(Convert::IntToFloat).number();
 const FLOAT_TO_INT: u8 = Op::Convert(Convert::FloatToInt).number();
+const DURATION_TO_INT: u8 = Op::Convert(Convert::DurationToInt).number();
+const INT_TO_DURATION: u8 = Op::Convert(Convert::IntToDuration).number();
 
 const JUMP: u8 = Op::Jump.number();
 const BRANCH_FALSE: u8 = Op::BranchFalse.number();
@@ -1712,6 +1714,12 @@ pub(super) fn dispatch<'s, 'a>(
                     .mem
                     .set_word_at(base_at + (a!()) as usize, x as i64 as u64);
             }
+            // A relabel: the word is a count of nanoseconds on both sides, and
+            // only the slot's `Repr` changes.
+            DURATION_TO_INT | INT_TO_DURATION => {
+                let x = machine.mem.word_at(base_at + (b!() as usize));
+                machine.mem.set_word_at(base_at + (a!()) as usize, x);
+            }
 
             // ---- control flow ----------------------------------------
             // The displacement is `to - (pc + 1)` and `pc` is already past
@@ -2430,6 +2438,9 @@ mod tests {
     /// merely absent from the corpus: **the lowering has no site that emits
     /// three of them**, so no Cove source can reach them and neither the
     /// differential harness nor any fixture written in Cove can cover them.
+    /// (`Convert(IntToFloat)` has had a site since ADR 0058's Phase 5 made
+    /// `Int.toFloat` one; it stays below as the way out to the `Float` the
+    /// other conversion reads.)
     ///
     /// A program written in the IR directly is the only thing that can, which
     /// is what `super::tests::Build` is for. Before the cutover this

@@ -175,7 +175,8 @@ pub(crate) fn call(
         // `byteAt`, which is a byte `Inst::RunLoad`.
 
         // ---- Int ---------------------------------------------------------
-        Intrinsic::IntToFloat => scalar::int_to_float(machine, operands).map(|word| out.push(word)),
+        // `Int.toFloat` is not here: it is an `Inst::Convert`, as both halves
+        // of `Duration.nanos` are (#378, P5-2).
         // `Int.min`, `Int.max`, and `Int.abs` are not here: they are
         // `std.int.min`, `std.int.max`, and `std.int.abs` — see
         // `cove_schema::builtins::standard_binding`.
@@ -194,21 +195,9 @@ pub(crate) fn call(
         }
         Intrinsic::FloatParse => scalar::float_parse(machine, builtin.result, operands, out),
 
-        // ---- Duration ----------------------------------------------------
-        //
-        // `nanos` is the one name left here: it is both a reader and a
-        // builder, told apart by the operand's `Repr`, which
-        // `scalar::duration_nanos` is where that is read. Its five
-        // neighbours — `micros` through `hours` — are `std.duration`
-        // functions now; see `cove_schema::builtins::standard_binding` and
-        // `standard_associated_binding`.
-        //
-        // `Bool` is not below this line because `Bool` has no operations: the
-        // schema gives it none beyond `snapshot`, and `!`, `&&` and `||` are
-        // instructions rather than builtins.
-        Intrinsic::DurationNanos => {
-            scalar::duration_nanos(machine, operands).map(|word| out.push(word))
-        }
+        // `Bool` has no operations: the schema gives it none beyond
+        // `snapshot`, and `!`, `&&` and `||` are instructions rather than
+        // builtins.
 
         // ---- equality ----------------------------------------------------
         //

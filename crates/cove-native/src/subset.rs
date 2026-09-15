@@ -12,8 +12,8 @@
 //! [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
 
 use cove_ir::{
-    ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Function, Inst, LayoutId, Len, Num, Program, Repr,
-    Shape, Slot, Storage, StrId,
+    ArgsId, ArithOp, BuiltinId, CmpOp, Compare, Convert, Function, Inst, LayoutId, Len, Num,
+    Program, Repr, Shape, Slot, Storage, StrId,
 };
 
 use crate::abi::Raise;
@@ -567,6 +567,20 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             width <= MAX_RUN_WORDS && run(*at, width)
         }
         Inst::Not { dst, a } => slot(*dst) && slot(*a),
+        // `encoded.rs`'s `INT_TO_FLOAT`, `DURATION_TO_INT` and `INT_TO_DURATION`
+        // arms: one word in, one word out, nothing that can fail. `Int.toFloat`
+        // and both halves of `Duration.nanos` lower to these since ADR 0058's
+        // Phase 5 (#378, P5-2) took them off the intrinsic boundary, and a
+        // function this admits would otherwise have been refused at the call.
+        //
+        // `FloatToInt` is not here and falls to `Reason::Instruction`: no
+        // lowering emits it, and its saturating truncation is not the one
+        // `cvttsd2si` answers out of range.
+        Inst::Convert {
+            to: Convert::IntToFloat | Convert::DurationToInt | Convert::IntToDuration,
+            dst,
+            a,
+        } => slot(*dst) && slot(*a),
         // ---- places ---------------------------------------------------------
         //
         // Six of the eight, and the two that are missing are missing on purpose.

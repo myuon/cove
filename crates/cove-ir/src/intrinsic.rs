@@ -56,7 +56,6 @@ pub enum Intrinsic {
     StringToUpper,
     StringToLower,
     StringFromCodePoint,
-    IntToFloat,
     IntParse,
     IntParseRadix,
     FloatToInt,
@@ -67,7 +66,6 @@ pub enum Intrinsic {
     FloatMax,
     FloatFormat,
     FloatParse,
-    DurationNanos,
     AnyEquals,
     ValueOrder,
     ValueAdmitKey,
@@ -96,7 +94,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringToUpper,
     Intrinsic::StringToLower,
     Intrinsic::StringFromCodePoint,
-    Intrinsic::IntToFloat,
     Intrinsic::IntParse,
     Intrinsic::IntParseRadix,
     Intrinsic::FloatToInt,
@@ -107,7 +104,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::FloatMax,
     Intrinsic::FloatFormat,
     Intrinsic::FloatParse,
-    Intrinsic::DurationNanos,
     Intrinsic::AnyEquals,
     Intrinsic::ValueOrder,
     Intrinsic::ValueAdmitKey,
@@ -141,7 +137,6 @@ impl Intrinsic {
             Intrinsic::StringToUpper => "String",
             Intrinsic::StringToLower => "String",
             Intrinsic::StringFromCodePoint => "String",
-            Intrinsic::IntToFloat => "Int",
             Intrinsic::IntParse => "Int",
             Intrinsic::IntParseRadix => "Int",
             Intrinsic::FloatToInt => "Float",
@@ -152,7 +147,6 @@ impl Intrinsic {
             Intrinsic::FloatMax => "Float",
             Intrinsic::FloatFormat => "Float",
             Intrinsic::FloatParse => "Float",
-            Intrinsic::DurationNanos => "Duration",
             Intrinsic::AnyEquals => "Any",
             Intrinsic::ValueOrder => "Value",
             Intrinsic::ValueAdmitKey => "Value",
@@ -160,7 +154,7 @@ impl Intrinsic {
         }
     }
 
-    /// The operation's own name: `split`, `push`, `toFloat`.
+    /// The operation's own name: `split`, `join`, `parse`.
     pub const fn operation(self) -> &'static str {
         match self {
             Intrinsic::StringInterpolate => "interpolate",
@@ -179,7 +173,6 @@ impl Intrinsic {
             Intrinsic::StringToUpper => "toUpper",
             Intrinsic::StringToLower => "toLower",
             Intrinsic::StringFromCodePoint => "fromCodePoint",
-            Intrinsic::IntToFloat => "toFloat",
             Intrinsic::IntParse => "parse",
             Intrinsic::IntParseRadix => "parseRadix",
             Intrinsic::FloatToInt => "toInt",
@@ -190,7 +183,6 @@ impl Intrinsic {
             Intrinsic::FloatMax => "max",
             Intrinsic::FloatFormat => "format",
             Intrinsic::FloatParse => "parse",
-            Intrinsic::DurationNanos => "nanos",
             Intrinsic::AnyEquals => "equals",
             Intrinsic::ValueOrder => "order",
             Intrinsic::ValueAdmitKey => "admitKey",
@@ -289,13 +281,11 @@ impl Intrinsic {
 
             // A scalar reader or writer of its own word, with nothing on
             // the heap to read.
-            Intrinsic::IntToFloat
-            | Intrinsic::FloatRound
+            Intrinsic::FloatRound
             | Intrinsic::FloatAbs
             | Intrinsic::FloatSqrt
             | Intrinsic::FloatMin
-            | Intrinsic::FloatMax
-            | Intrinsic::DurationNanos => raise,
+            | Intrinsic::FloatMax => raise,
             // The three parsers read a `String` receiver's bytes and
             // allocate the message an `Err` carries; `format` allocates the
             // `String` it always answers. None of the four is proportional
@@ -464,7 +454,6 @@ mod tests {
                 | Intrinsic::StringToUpper
                 | Intrinsic::StringToLower
                 | Intrinsic::StringFromCodePoint
-                | Intrinsic::IntToFloat
                 | Intrinsic::IntParse
                 | Intrinsic::IntParseRadix
                 | Intrinsic::FloatToInt
@@ -475,7 +464,6 @@ mod tests {
                 | Intrinsic::FloatMax
                 | Intrinsic::FloatFormat
                 | Intrinsic::FloatParse
-                | Intrinsic::DurationNanos
                 | Intrinsic::AnyEquals
                 | Intrinsic::ValueOrder
                 | Intrinsic::ValueAdmitKey
