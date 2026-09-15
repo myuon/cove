@@ -3530,6 +3530,18 @@ fn resolve_calls(
                 receiver_ident,
                 method,
             } => {
+                // `core.byteLength(text)` in a standard-library module is a
+                // core intrinsic, and an intrinsic is not a declaration: there
+                // is nothing to draw an edge to, as there is nothing for a
+                // builtin, and nothing is open about it either. Read on, it
+                // would be charged as a call to every `byteLength` method the
+                // module can reach.
+                if receiver_ident.as_deref() == Some(cove_schema::builtins::CORE_NAMESPACE)
+                    && crate::stdlib::is_library_module(module)
+                    && cove_schema::builtins::core_intrinsic(method).is_some()
+                {
+                    continue;
+                }
                 let owner = receiver_ident.as_ref().and_then(|head| {
                     declaring_module(program, resolved, head, |owner| {
                         owner.structs.contains_key(head) || owner.enums.contains_key(head)

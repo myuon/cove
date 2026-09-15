@@ -122,6 +122,20 @@ pub fn module_names() -> &'static [&'static str] {
     })
 }
 
+/// Whether `module` is one of the standard library's modules.
+///
+/// This is the one question the privilege of calling a core intrinsic is
+/// decided by: the checker resolves `core.byteLength(text)` only in a module
+/// this answers `true` for, the lowering emits the intrinsic's instructions
+/// only there, and the oracle executes it only there — see
+/// `cove_schema::builtins::CORE_INTRINSICS`. It reads [`module_names`], the
+/// same list `package::load` and `Compiler::compile` ask, so a module is
+/// privileged by being the standard library's rather than by any mark in its
+/// source.
+pub fn is_library_module(module: &str) -> bool {
+    module_names().contains(&module)
+}
+
 /// Adds the standard library's sources to `sources` and answers the modules
 /// to put in a package.
 ///
@@ -208,6 +222,70 @@ mod tests {
         let mut expected: Vec<&str> = module_names().to_vec();
         expected.sort();
         assert_eq!(names, expected);
+    }
+
+    /// No function the schema binds to `Receiver.method` calls
+    /// `Receiver.method` on its own receiver.
+    ///
+    /// A binding turns every `text.byteLength()` into a call to
+    /// `std.string.byteLength`, *including the one inside that function*. So a
+    /// body that moved out of Rust and still wrote the method it replaced —
+    /// `text.byteLength()` where it meant `core.byteLength(text)` — would
+    /// check, lower, and recurse until the stack ran out, on both evaluators
+    /// alike, and the differential corpus would call that agreement.
+    ///
+    /// It reads the source of each bound body for the receiver parameter —
+    /// or, for an associated function, the type's name — followed by
+    /// `.method(`. That is a syntactic guard rather than a typed one, and it
+    /// is conservative in the direction that matters: it cannot miss the
+    /// written call, and a false alarm is a line to rephrase.
+    #[test]
+    fn no_bound_function_calls_the_method_it_implements() {
+        let mut sources = SourceMap::new();
+        let modules = attach(&mut sources).expect("the embedded standard library parses");
+        for binding in cove_schema::builtins::standard_library() {
+            let (_, module) = modules
+                .iter()
+                .find(|(name, _)| name == binding.module)
+                .unwrap_or_else(|| panic!("no embedded module named `{}`", binding.module));
+            for unit in &module.units {
+                for item in &unit.ast.items {
+                    let cove_syntax::ast::ItemKind::Fn(decl) = &item.kind else {
+                        continue;
+                    };
+                    if decl.name.node != binding.function {
+                        continue;
+                    }
+                    let head = match binding.kind {
+                        cove_schema::builtins::StdBindingKind::Method => decl
+                            .params
+                            .first()
+                            .map(|param| param.name.node.clone())
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "`{}.{}` is bound as a method and takes no receiver",
+                                    binding.module, binding.function
+                                )
+                            }),
+                        cove_schema::builtins::StdBindingKind::Associated => {
+                            binding.receiver.to_string()
+                        }
+                    };
+                    let span = decl.body.span;
+                    let body = &sources.get(span.file).text[span.start as usize..span.end as usize];
+                    let written = format!("{head}.{}(", binding.method);
+                    assert!(
+                        !body.contains(&written),
+                        "`{}.{}` implements `{}.{}` and calls `{written}...)` itself, which the \
+                         binding resolves back to this function",
+                        binding.module,
+                        binding.function,
+                        binding.receiver,
+                        binding.method
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -9,6 +9,9 @@
     {"name": "assert", "kind": "assertion", "signature": "assert(condition: Bool) -> Result<Unit, Error>", "generics": [], "params": [{"name": "condition", "type": "Bool"}], "result": "Result<Unit, Error>", "host": false},
     {"name": "assertEqual", "kind": "assertion", "signature": "assertEqual(actual: T, expected: T) -> Result<Unit, Error>", "generics": ["T"], "params": [{"name": "actual", "type": "T"}, {"name": "expected", "type": "T"}], "result": "Result<Unit, Error>", "host": false}
   ],
+  "coreIntrinsics": [
+    {"name": "byteLength", "signature": "core.byteLength(text: String) -> Int", "generics": [], "params": [{"name": "text", "type": "String"}], "result": "Int", "libraryOnly": true}
+  ],
   "types": [
     {
       "name": "Array",

@@ -2068,6 +2068,15 @@ impl Body<'_> {
         let ExprKind::Ident(head) = &base.kind else {
             return self.gap("a call reached through an expression", expr);
         };
+        // `core.byteLength(text)` in a standard-library module: a core
+        // intrinsic, which is run instructions and not a call of any kind.
+        // The checker asked the same two questions before it typed the call,
+        // so in any other module `core` is whatever the program declared.
+        if head == cove_schema::builtins::CORE_NAMESPACE
+            && cove_sema::stdlib::is_library_module(self.module)
+        {
+            return self.core_call(expr, name, args, want);
+        }
         if self.is_host_module(head) {
             // `http.Route(method: ..., path: ...)` initializes a type the
             // host declares; anything else is one of its operations. The
