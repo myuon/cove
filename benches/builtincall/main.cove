@@ -1,17 +1,38 @@
 use console.println
 use clock.now
 
+/// Two words inline, so that `==` on it is the intrinsic rather than one
+/// comparison instruction.
+struct Point {
+  x: Int
+  y: Int
+}
+
 /// One builtin call per turn, and nothing else the loop can be about.
 ///
-/// The three shapes a builtin answers in, timed apart, because they do not
-/// cost the same: `byteLength` answers one word, `codePointAtByte` answers an
-/// `Option` the machine has to assemble, and `sliceBytes` answers a `Result`
-/// carrying a heap object it has to allocate.
+/// The first three rows are where the boundary was first priced: `byteLength`
+/// answered one word, `codePointAtByte` an `Option` the machine had to
+/// assemble, and `sliceBytes` a `Result` carrying a heap object it had to
+/// allocate. All three are `std.string` now (ADR 0058), so what they report
+/// is the Cove that replaced the call, and they stay as the history.
+///
+/// The four after them are the shapes of the intrinsic boundary that is left
+/// (#378, Phase 5), each timed apart because each pays a different part of
+/// it:
+///
+/// - `String.length` answers one word;
+/// - `Int.parse` answers a `Result`, several words written into the
+///   destination;
+/// - `==` on a two-word struct is `Any.equals` over two operands wider than a
+///   word;
+/// - a ten-piece interpolation is a variadic call past eight operands, which
+///   is where an operand list stops fitting inline.
 export fn main() -> Result<Unit, Error> {
   let text = "the quick brown fox jumps over the lazy dog"
+  let digits = "1234567"
   let rounds = 2000000
 
-  // The loop itself, with no builtin in it, so that what the three below
+  // The loop itself, with no builtin in it, so that what the rows below
   // report is the call and not the turn.
   let bareFrom = now()
   var sum = 0
@@ -49,15 +70,70 @@ export fn main() -> Result<Unit, Error> {
   }
   let sliceTo = now()
 
+  let lengthFrom = now()
+  var characters = 0
+  i = 0
+  while i < rounds {
+    characters = characters + text.length()
+    i = i + 1
+  }
+  let lengthTo = now()
+
+  let parseFrom = now()
+  var parsed = 0
+  i = 0
+  while i < rounds {
+    parsed = parsed + match Int.parse(digits) {
+      Ok(n) => n % 7
+      Err(_) => 0
+    }
+    i = i + 1
+  }
+  let parseTo = now()
+
+  let here = Point(x: 3, y: 4)
+  let there = Point(x: 3, y: 4)
+  let wideFrom = now()
+  var same = 0
+  i = 0
+  while i < rounds {
+    if here == there {
+      same = same + 1
+    }
+    i = i + 1
+  }
+  let wideTo = now()
+
+  let pieceFrom = now()
+  var built = 0
+  i = 0
+  while i < rounds {
+    built = built + "a{i}b{i}c{i}d{i}e{i}".byteLength() % 7
+    i = i + 1
+  }
+  let pieceTo = now()
+
   let bare = (bareTo - bareFrom).micros()
   let word = (wordTo - wordFrom).micros()
   let option = (optionTo - optionFrom).micros()
   let slice = (sliceTo - sliceFrom).micros()
+  let length = (lengthTo - lengthFrom).micros()
+  let parse = (parseTo - parseFrom).micros()
+  let wide = (wideTo - wideFrom).micros()
+  let piece = (pieceTo - pieceFrom).micros()
   println("bare loop            {bare * 1000 / rounds} ns/turn ({sum})")?
   println(
     "byteLength  (1 word) {(word - bare) * 1000 / rounds} ns/call ({counted})",
   )?
   println("codePointAtByte (Option) {(option - bare) * 1000 / rounds} ns/call ({scalars})")?
   println("sliceBytes  (Result+heap) {(slice - bare) * 1000 / rounds} ns/call ({bytes})")?
+  println("length      (1 word) {(length - bare) * 1000 / rounds} ns/call ({characters})")?
+  println(
+    "Int.parse   (Result) {(parse - bare) * 1000 / rounds} ns/call ({parsed})",
+  )?
+  println(
+    "==          (wide)   {(wide - bare) * 1000 / rounds} ns/call ({same})",
+  )?
+  println("interpolate (10 pieces) {(piece - bare) * 1000 / rounds} ns/call ({built})")?
   Ok(())
 }
