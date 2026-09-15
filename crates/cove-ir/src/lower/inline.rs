@@ -179,6 +179,7 @@ pub(super) fn expand_small_leaf_calls(program: &mut Program) {
         }
         let hot = hot_functions(program);
         let before: usize = program.functions.iter().map(|f| f.code.len()).sum();
+        let wrapped = thin_calls(program, &thin);
         let eligible = Eligible {
             small: &small,
             wide: &wide,
@@ -187,16 +188,37 @@ pub(super) fn expand_small_leaf_calls(program: &mut Program) {
         for (at, called_often) in hot.iter().enumerate() {
             expand(program, FunctionId(at as u32), &eligible, *called_often);
         }
-        if program
-            .functions
-            .iter()
-            .map(|f| f.code.len())
-            .sum::<usize>()
-            == before
-        {
+        let after: usize = program.functions.iter().map(|f| f.code.len()).sum();
+        if after == before && thin_calls(program, &thin) == wrapped {
             return;
         }
     }
+}
+
+/// How many [`Inst::Call`]s the program holds to a function [`is_thin_library`]
+/// admits.
+///
+/// Half of what says whether a round of [`expand_small_leaf_calls`] did
+/// anything; the other half is the total instruction count, which a round that
+/// expanded something usually changes. A thin standard-library wrapper can
+/// leave it where it was: `std.array.length` is one instruction that writes the
+/// call's destination, so expanding it is one instruction for one, and the
+/// round after it — where a caller it made a leaf is expanded in turn — would
+/// never run. Since ADR 0058's P3-15 moved `length` behind such a wrapper, a
+/// program's own `fn count(items: Array<Int>) -> Int { items.length() }` was a
+/// leaf that expanded and would have become a call; this is what keeps it one
+/// that expands. It is counted over thin callees only, so a round that
+/// expanded no thin wrapper stops where it always did; one that did is followed
+/// by another, which may now expand a caller that only became a leaf because of
+/// it (`lower::tests::calls` documents the fixtures that had leaned on the
+/// pass stopping early).
+fn thin_calls(program: &Program, thin: &[bool]) -> usize {
+    program
+        .functions
+        .iter()
+        .flat_map(|f| &f.code)
+        .filter(|inst| matches!(inst, Inst::Call { callee, .. } if thin[callee.index()]))
+        .count()
 }
 
 /// How many times the pass is run over its own answer.

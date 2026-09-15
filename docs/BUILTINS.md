@@ -63,6 +63,8 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `bytesExtend` | `core.bytesExtend(buffer: ByteBuffer, text: String, from: Int, to: Int) -> Unit` |
 | `bytesFinish` | `core.bytesFinish(buffer: ByteBuffer) -> String` |
 | `bytesLength` | `core.bytesLength(buffer: ByteBuffer) -> Int` |
+| `arrayLength` | `core.arrayLength(items: Array<T>) -> Int` |
+| `vectorLength` | `core.vectorLength(items: Vector<T>) -> Int` |
 
 ## Builtin types
 
@@ -75,10 +77,10 @@ written as a namespace; binds `T`.
 | signature | `var self` | variadic | binds | implemented by |
 | --- | --- | --- | --- | --- |
 | `get(index: Int) -> Option<T>` |  |  |  | `machine` |
-| `length() -> Int` |  |  |  | `machine` |
+| `length() -> Int` |  |  |  | `std.array.length` |
 | `isEmpty() -> Bool` |  |  |  | `std.array.isEmpty` |
-| `contains(element: T) -> Bool` |  |  |  | `machine` |
-| `indexOf(element: T) -> Option<Int>` |  |  |  | `machine` |
+| `contains(element: T) -> Bool` |  |  |  | `std.array.contains` |
+| `indexOf(element: T) -> Option<Int>` |  |  |  | `std.array.indexOf` |
 | `slice(from: Int, to: Int) -> Array<T>` |  |  |  | `std.array.slice` |
 | `map(transform: fn(T) -> R) -> Array<R>` |  |  | `R` | `machine` |
 | `filter(keep: fn(T) -> Bool) -> Array<T>` |  |  |  | `std.array.filter` |
@@ -102,10 +104,10 @@ written as a namespace; binds `T`.
 | signature | `var self` | variadic | binds | implemented by |
 | --- | --- | --- | --- | --- |
 | `get(index: Int) -> Option<T>` |  |  |  | `machine` |
-| `length() -> Int` |  |  |  | `machine` |
+| `length() -> Int` |  |  |  | `std.vector.length` |
 | `isEmpty() -> Bool` |  |  |  | `std.vector.isEmpty` |
-| `contains(element: T) -> Bool` |  |  |  | `machine` |
-| `indexOf(element: T) -> Option<Int>` |  |  |  | `machine` |
+| `contains(element: T) -> Bool` |  |  |  | `std.vector.contains` |
+| `indexOf(element: T) -> Option<Int>` |  |  |  | `std.vector.indexOf` |
 | `slice(from: Int, to: Int) -> Array<T>` |  |  |  | `std.vector.slice` |
 | `map(transform: fn(T) -> R) -> Array<R>` |  |  | `R` | `machine` |
 | `filter(keep: fn(T) -> Bool) -> Array<T>` |  |  |  | `std.vector.filter` |
@@ -202,7 +204,7 @@ written as a namespace.
 | `toLower() -> String` |  |  |  | `machine` |
 | `byteLength() -> Int` |  |  |  | `std.string.byteLength` |
 | `byteAt(offset: Int) -> Int` |  |  |  | `machine` |
-| `codePointAtByte(offset: Int) -> Option<Int>` |  |  |  | `machine` |
+| `codePointAtByte(offset: Int) -> Option<Int>` |  |  |  | `std.string.codePointAtByte` |
 | `sliceBytes(from: Int, to: Int) -> Result<String, Error>` |  |  |  | `std.string.sliceBytes` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 

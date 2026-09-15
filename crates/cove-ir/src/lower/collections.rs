@@ -337,12 +337,20 @@ impl Body<'_> {
 
     // ---- methods -----------------------------------------------------------
 
-    /// `items.length()`, `items.get(i)`.
+    /// `items.get(i)`, and the walks that take a closure.
     ///
-    /// An `Array` keeps its elements in the object, so its length is the
-    /// object's own header length and an element is one [`Inst::LoadElem`].
-    /// There is no element assignment beside them: an `Array` is immutable,
-    /// and the growable sequence is a `Vector`.
+    /// An `Array` keeps its elements in the object, so an element is one
+    /// [`Inst::LoadElem`] bounded by the object's own header length. There is
+    /// no element assignment beside it: an `Array` is immutable, and the
+    /// growable sequence is a `Vector`.
+    ///
+    /// `length` used to answer here too, as that header length. It is not
+    /// reached from here any more: since ADR 0058's P3-15 (#378)
+    /// `Body::call_builtin_method` resolves it to `std.array.length`, one core
+    /// intrinsic that is the same [`Inst::Len`], so this lowering does not name
+    /// it. `get` stays: written in Cove it is a range decision and an `Option`
+    /// around a load, more than a thin wrapper, and it did not expand at every
+    /// call site `examples/covefmt` makes.
     ///
     /// `isEmpty` used to answer here too, the same `length() == 0` every
     /// other sequence still answers with. It is not reached from here any
@@ -365,7 +373,6 @@ impl Body<'_> {
         want: Option<Dest>,
     ) -> Val {
         match (name, args.len()) {
-            ("length", 0) => self.header_length(expr, base, name),
             ("get", 1) => {
                 let Some(element) = self.layout(elem, expr.span) else {
                     return self.dead(expr);
@@ -399,10 +406,12 @@ impl Body<'_> {
         }
     }
 
-    /// `items.length()`, `items.get(i)`, and the walks.
+    /// `items.get(i)`, and the walks.
     ///
     /// Reading a vector is ordinary instructions — the length is payload word
-    /// 0 and the elements are in the store payload word 1 names. `push`, `set`,
+    /// 0 and the elements are in the store payload word 1 names. `length` is
+    /// `std.vector.length` over the core intrinsic that reads that word, for
+    /// `std.array.length`'s reason, and `get` stays here for its. `push`, `set`,
     /// `freeze`, `slice` and `toArray` are not reached from here: each is a
     /// `std.vector` function over core intrinsics since
     /// [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md),
@@ -430,21 +439,6 @@ impl Body<'_> {
         want: Option<Dest>,
     ) -> Val {
         match (name, args.len()) {
-            ("length", 0) => {
-                let obj = self.expr(base);
-                let len = self.temp(shapes::INT);
-                self.emit(
-                    Inst::LoadField {
-                        dst: len.slot,
-                        obj: obj.slot,
-                        at: VECTOR_LEN,
-                        layout: shapes::INT,
-                    },
-                    expr.span,
-                );
-                self.release(obj, expr.span);
-                self.length_answer(expr, name, len)
-            }
             ("get", 1) => {
                 let Some(element) = self.layout(elem, expr.span) else {
                     return self.dead(expr);
@@ -1262,10 +1256,11 @@ impl Body<'_> {
 /// instruction set.
 ///
 /// Each of them either builds an object whose family only the layout table
-/// knows — a `Set`'s `toArray`, the keyed updates — or walks the elements
-/// with the language's own equality, which is not something an instruction
-/// expresses. A sequence's `slice`, `toVector` and `toArray` were the first
-/// kind and are `std.array`/`std.vector` over a run slice now.
+/// knows — a `Set`'s `toArray`, the keyed updates — or searches a sorted run
+/// by the order the machine defines. A sequence's `slice`, `toVector` and
+/// `toArray` were the first kind and are `std.array`/`std.vector` over a run
+/// slice now; its `contains` and `indexOf` walked the elements with the
+/// language's own equality, and are `std.array`/`std.vector` loops over `==`.
 /// `map` and `sorted` are not here and never will be: a builtin that invoked
 /// their closure would re-enter the dispatch loop from inside a Rust
 /// function, which is the one thing `docs/LINEAR_VM.md` asks this backend
@@ -1285,10 +1280,6 @@ impl Body<'_> {
 /// machine by accident would be a runtime refusal where a gap should have
 /// named the work.
 const HANDED_OVER: &[(&str, &str)] = &[
-    ("Array", "contains"),
-    ("Array", "indexOf"),
-    ("Vector", "contains"),
-    ("Vector", "indexOf"),
     ("Set", "contains"),
     ("Set", "inserted"),
     ("Set", "removed"),

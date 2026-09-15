@@ -149,3 +149,14 @@ allow = ["console", "clock"]
 [run.scanshape]
 entry = "scanshape.main"
 allow = ["console", "clock"]
+
+# `contains` and `indexOf` over `Array<Int>`, `Vector<Int>`, `Array<String>`
+# and a two-word struct element, found and not found, at n = 8 and n = 1024 —
+# #378's Phase 3 Q10. Both searches move from Rust into a Cove loop over `==`,
+# and these rows are what says whether that is a constant factor or a change
+# of class. The first argument is how many element comparisons each row
+# spends; `seqsearch/args` makes it a test's size for the corpus surveys.
+
+[run.seqsearch]
+entry = "seqsearch.main"
+allow = ["console", "clock"]

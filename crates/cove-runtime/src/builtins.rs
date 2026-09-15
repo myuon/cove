@@ -649,6 +649,22 @@ pub fn call_core(
             check_buffer_live(storage, "length", span)?;
             Ok(Value(Repr::Int(storage.len() as i64)))
         }
+        // `std.array.length` and `std.vector.length`'s whole bodies. The
+        // vector's is refused once a finish consumed it, in the words every
+        // other vector core intrinsic here refuses it in.
+        "arrayLength" => {
+            let Value(Repr::Array(items)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Array", &args[0], span));
+            };
+            Ok(Value(Repr::Int(items.len() as i64)))
+        }
+        "vectorLength" => {
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Vector", &args[0], span));
+            };
+            check_consumed(storage, span)?;
+            Ok(Value(Repr::Int(storage.len() as i64)))
+        }
         // A name the table declares and nothing here executes. No program can
         // reach one of these from its own modules, so the check that every
         // entry has a body here is `vm::differential`'s, which calls each
@@ -895,17 +911,15 @@ pub fn call_method(
                 .and_then(|i| items.get(i).cloned())
                 .map(Value::some)
                 .unwrap_or_else(Value::none)),
-            "length" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Int(items.len() as i64)))
-            }
+            // `length` is not here: it is `std.array.length`, over
+            // `call_core`'s `arrayLength`.
             // `isEmpty` used to answer here too, `length() == 0`. It does
             // not reach this arm any more: `Interpreter::eval_method_call`
             // resolves it to a call into `std.array.isEmpty` before this
             // function is ever asked about it — see
             // `cove_schema::builtins::standard_binding`.
-            "contains" => contains("Array.contains", items, args, span),
-            "indexOf" => index_of_element("Array.indexOf", items, args, span),
+            // `contains` and `indexOf` are not here: they are `std.array`'s
+            // loops over `==`, which this interpreter runs as Cove.
             // `slice` and `toVector` are not here: they are `std.array.slice`,
             // a clamp in Cove over `call_core`'s `arraySlice`, and
             // `std.array.toVector` over its `arrayToVector`.
@@ -934,16 +948,13 @@ pub fn call_method(
                     .and_then(|i| storage.elements.borrow().get(i).cloned())
                     .map(Value::some)
                     .unwrap_or_else(Value::none)),
-                "contains" => contains("Vector.contains", &storage.elements.borrow(), args, span),
-                "indexOf" => {
-                    index_of_element("Vector.indexOf", &storage.elements.borrow(), args, span)
-                }
+                // `length` is not here either: it is `std.vector.length`, over
+                // `call_core`'s `vectorLength`.
+                // `contains` and `indexOf` are not here: they are
+                // `std.vector`'s loops over `==` and `call_core`'s
+                // `vectorLoad`.
                 // `slice` is not here: it is `std.vector.slice`, over
                 // `call_core`'s `vectorSlice`.
-                "length" => {
-                    expect_args(name, args, 0, span)?;
-                    Ok(Value(Repr::Int(storage.len() as i64)))
-                }
                 // `isEmpty` used to answer here too, `storage.is_empty()`.
                 // It does not reach this arm any more:
                 // `Interpreter::eval_method_call` resolves it to a call into
@@ -1203,7 +1214,8 @@ pub fn call_method(
             // than shared, as every other builtin's are; what holds the two
             // readings together is `tests/e2e/values_string`, which runs on
             // both backends against one `expected.out`. `byteLength` is not
-            // here: it is `std.string` over `call_core`'s `byteLength`.
+            // here: it is `std.string` over `call_core`'s `byteLength`, and
+            // `codePointAtByte` is `std.string`'s decode over `byteAt` below.
             "byteAt" => {
                 let args = expect_args("String.byteAt", args, 1, span)?;
                 let Value(Repr::Int(offset)) = &args[0] else {
@@ -1225,32 +1237,6 @@ pub fn call_method(
                     ))
                     .at(span)),
                 }
-            }
-            "codePointAtByte" => {
-                let args = expect_args("String.codePointAtByte", args, 1, span)?;
-                let Value(Repr::Int(offset)) = &args[0] else {
-                    return Err(type_error(
-                        "String.codePointAtByte",
-                        "offset",
-                        "Int",
-                        &args[0],
-                        span,
-                    ));
-                };
-                // Past the end, before the start, and inside a character are
-                // one answer on purpose: a scanner that advances by the width
-                // of what it read reaches none of them, and telling them
-                // apart would cost a `Result` on the one path this exists for.
-                Ok(
-                    match usize::try_from(*offset)
-                        .ok()
-                        .filter(|at| *at < text.len() && text.is_char_boundary(*at))
-                        .and_then(|at| text[at..].chars().next())
-                    {
-                        Some(character) => Value::some(Value(Repr::Int(character as i64))),
-                        None => Value::none(),
-                    },
-                )
             }
             _ => Err(no_method("String", name, span)),
         },
@@ -1616,45 +1602,6 @@ fn check_buffer_live(
         .with_help("use the `String` that `finish()` returned, or build a new buffer"));
     }
     Ok(())
-}
-
-/// `contains(element)` on a sequence: whether any element is `==` to it.
-///
-/// Equality is [`Value::eq_value`], the same one `==` is and the same one
-/// `Map` and `Set` are keyed by, so a sequence answers membership exactly as
-/// a comparison of the two values would. An empty receiver answers `false`,
-/// and no argument can be refused: every value has an equality.
-fn contains(
-    method: &str,
-    items: &[Value],
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, RuntimeError> {
-    let args = expect_args(method, args, 1, span)?;
-    Ok(Value(Repr::Bool(
-        items.iter().any(|item| item.eq_value(&args[0])),
-    )))
-}
-
-/// `indexOf(element)` on a sequence: the first position holding a value `==`
-/// to it, or `None`.
-///
-/// The same equality [`contains`] uses, so the two cannot disagree about
-/// whether an element is there. An empty receiver and an element that is not
-/// in the sequence both answer `None`, which is what `String.indexOf` and
-/// `Array.get` answer a question with no position to name.
-fn index_of_element(
-    method: &str,
-    items: &[Value],
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, RuntimeError> {
-    let args = expect_args(method, args, 1, span)?;
-    Ok(items
-        .iter()
-        .position(|item| item.eq_value(&args[0]))
-        .map(|at| Value::some(Value(Repr::Int(at as i64))))
-        .unwrap_or_else(Value::none))
 }
 
 fn index_of(method: &str, args: &[Value], span: Span) -> Result<Option<usize>, RuntimeError> {

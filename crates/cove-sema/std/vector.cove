@@ -1,10 +1,55 @@
+/// How many elements this vector holds.
+///
+/// The header's length word, which is the vector's own and not its store's:
+/// the store's header counts the capacity. One core intrinsic, expanded
+/// wherever it is called (ADR 0058).
+export fn length<T>(items: Vector<T>) -> Int {
+  core.vectorLength(items)
+}
+
 /// Whether this vector holds nothing.
 ///
 /// The same one line as [`std.array.isEmpty`], and a separate function
 /// because `Array` and `Vector` are separate types rather than one type with
 /// a flag. Sharing a body would need a bound the language does not have.
 export fn isEmpty<T>(items: Vector<T>) -> Bool {
-  items.length() == 0
+  core.vectorLength(items) == 0
+}
+
+/// Whether any element is `==` to `element`.
+///
+/// [`std.array.contains`]'s question and its equality, asked of the elements
+/// the vector holds when it is called. Nothing `==` does can reach the vector,
+/// so nothing can push onto it or take from it part way through, and the
+/// elements are read where they are rather than out of a copy: a load per
+/// element, bounded by the length read first.
+export fn contains<T>(items: Vector<T>, element: T) -> Bool {
+  let length = core.vectorLength(items)
+  var at = 0
+  while at < length {
+    if core.vectorLoad(items, at) == element {
+      return true
+    }
+    at += 1
+  }
+  false
+}
+
+/// The position of the **first** element `==` to `element`, or `None`.
+///
+/// [`std.array.indexOf`] over the vector's storage, read in place as
+/// [`contains`] reads it. A position is only a position until the vector
+/// changes: a `remove` before it moves what is there.
+export fn indexOf<T>(items: Vector<T>, element: T) -> Option<Int> {
+  let length = core.vectorLength(items)
+  var at = 0
+  while at < length {
+    if core.vectorLoad(items, at) == element {
+      return Some(at)
+    }
+    at += 1
+  }
+  return None
 }
 
 /// Appends `value` at the end, growing the storage when it is full.
@@ -35,7 +80,7 @@ export fn push<T>(items: Vector<T>, value: T) {
 /// write beneath them are core intrinsics, bounded by the storage rather than
 /// by the length, which is why the range is decided first.
 export fn set<T>(items: Vector<T>, index: Int, value: T) -> Option<T> {
-  if index >= 0 && index < items.length() {
+  if index >= 0 && index < core.vectorLength(items) {
     let was = core.vectorLoad(items, index)
     core.vectorStore(items, index, value)
     Some(was)
@@ -53,7 +98,7 @@ export fn set<T>(items: Vector<T>, index: Int, value: T) -> Option<T> {
 /// truncate beneath this clears the words it vacates, so nothing the vector no
 /// longer holds is kept alive by it.
 export fn pop<T>(items: Vector<T>) -> Option<T> {
-  let length = items.length()
+  let length = core.vectorLength(items)
   if length == 0 {
     None
   } else {
@@ -75,7 +120,7 @@ export fn pop<T>(items: Vector<T>) -> Option<T> {
 /// load, one bulk move of the tail over the hole, and the truncate `pop` ends
 /// with.
 export fn remove<T>(items: Vector<T>, index: Int) -> Option<T> {
-  let length = items.length()
+  let length = core.vectorLength(items)
   if index >= 0 && index < length {
     let was = core.vectorLoad(items, index)
     core.vectorMove(items, index, index + 1, length - index - 1)
@@ -110,7 +155,7 @@ export fn freeze<T>(items: Vector<T>) -> Array<T> {
 /// beneath the decision is a core intrinsic over the vector's storage, handed a
 /// range already inside the length.
 export fn slice<T>(items: Vector<T>, from: Int, to: Int) -> Array<T> {
-  let length = items.length()
+  let length = core.vectorLength(items)
   let start = if from < 0 {
     0
   } else if from > length {
@@ -135,7 +180,7 @@ export fn slice<T>(items: Vector<T>, from: Int, to: Int) -> Array<T> {
 /// the slice of the whole vector: one core intrinsic, and the lowering expands
 /// it wherever it is called.
 export fn toArray<T>(items: Vector<T>) -> Array<T> {
-  core.vectorSlice(items, 0, items.length())
+  core.vectorSlice(items, 0, core.vectorLength(items))
 }
 
 /// The elements `keep` answers `true` for, in the order they were in.

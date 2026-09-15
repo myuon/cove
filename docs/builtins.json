@@ -25,7 +25,9 @@
     {"name": "bytesPush", "signature": "core.bytesPush(buffer: ByteBuffer, byte: Int) -> Unit", "generics": [], "params": [{"name": "buffer", "type": "ByteBuffer"}, {"name": "byte", "type": "Int"}], "result": "Unit", "libraryOnly": true},
     {"name": "bytesExtend", "signature": "core.bytesExtend(buffer: ByteBuffer, text: String, from: Int, to: Int) -> Unit", "generics": [], "params": [{"name": "buffer", "type": "ByteBuffer"}, {"name": "text", "type": "String"}, {"name": "from", "type": "Int"}, {"name": "to", "type": "Int"}], "result": "Unit", "libraryOnly": true},
     {"name": "bytesFinish", "signature": "core.bytesFinish(buffer: ByteBuffer) -> String", "generics": [], "params": [{"name": "buffer", "type": "ByteBuffer"}], "result": "String", "libraryOnly": true},
-    {"name": "bytesLength", "signature": "core.bytesLength(buffer: ByteBuffer) -> Int", "generics": [], "params": [{"name": "buffer", "type": "ByteBuffer"}], "result": "Int", "libraryOnly": true}
+    {"name": "bytesLength", "signature": "core.bytesLength(buffer: ByteBuffer) -> Int", "generics": [], "params": [{"name": "buffer", "type": "ByteBuffer"}], "result": "Int", "libraryOnly": true},
+    {"name": "arrayLength", "signature": "core.arrayLength(items: Array<T>) -> Int", "generics": ["T"], "params": [{"name": "items", "type": "Array<T>"}], "result": "Int", "libraryOnly": true},
+    {"name": "vectorLength", "signature": "core.vectorLength(items: Vector<T>) -> Int", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}], "result": "Int", "libraryOnly": true}
   ],
   "types": [
     {
@@ -38,10 +40,10 @@
       ],
       "methods": [
         {"name": "get", "signature": "get(index: Int) -> Option<T>", "generics": [], "params": [{"name": "index", "type": "Int"}], "variadic": false, "result": "Option<T>", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.array.length", "host": false},
         {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.array.isEmpty", "host": false},
-        {"name": "contains", "signature": "contains(element: T) -> Bool", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "indexOf", "signature": "indexOf(element: T) -> Option<Int>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Option<Int>", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "contains", "signature": "contains(element: T) -> Bool", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.array.contains", "host": false},
+        {"name": "indexOf", "signature": "indexOf(element: T) -> Option<Int>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Option<Int>", "mutating": false, "implementedBy": "std.array.indexOf", "host": false},
         {"name": "slice", "signature": "slice(from: Int, to: Int) -> Array<T>", "generics": [], "params": [{"name": "from", "type": "Int"}, {"name": "to", "type": "Int"}], "variadic": false, "result": "Array<T>", "mutating": false, "implementedBy": "std.array.slice", "host": false},
         {"name": "map", "signature": "map(transform: fn(T) -> R) -> Array<R>", "generics": ["R"], "params": [{"name": "transform", "type": "fn(T) -> R"}], "variadic": false, "result": "Array<R>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "filter", "signature": "filter(keep: fn(T) -> Bool) -> Array<T>", "generics": [], "params": [{"name": "keep", "type": "fn(T) -> Bool"}], "variadic": false, "result": "Array<T>", "mutating": false, "implementedBy": "std.array.filter", "host": false},
@@ -62,10 +64,10 @@
       ],
       "methods": [
         {"name": "get", "signature": "get(index: Int) -> Option<T>", "generics": [], "params": [{"name": "index", "type": "Int"}], "variadic": false, "result": "Option<T>", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.vector.length", "host": false},
         {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.vector.isEmpty", "host": false},
-        {"name": "contains", "signature": "contains(element: T) -> Bool", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "indexOf", "signature": "indexOf(element: T) -> Option<Int>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Option<Int>", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "contains", "signature": "contains(element: T) -> Bool", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.vector.contains", "host": false},
+        {"name": "indexOf", "signature": "indexOf(element: T) -> Option<Int>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Option<Int>", "mutating": false, "implementedBy": "std.vector.indexOf", "host": false},
         {"name": "slice", "signature": "slice(from: Int, to: Int) -> Array<T>", "generics": [], "params": [{"name": "from", "type": "Int"}, {"name": "to", "type": "Int"}], "variadic": false, "result": "Array<T>", "mutating": false, "implementedBy": "std.vector.slice", "host": false},
         {"name": "map", "signature": "map(transform: fn(T) -> R) -> Array<R>", "generics": ["R"], "params": [{"name": "transform", "type": "fn(T) -> R"}], "variadic": false, "result": "Array<R>", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "filter", "signature": "filter(keep: fn(T) -> Bool) -> Array<T>", "generics": [], "params": [{"name": "keep", "type": "fn(T) -> Bool"}], "variadic": false, "result": "Array<T>", "mutating": false, "implementedBy": "std.vector.filter", "host": false},
@@ -158,7 +160,7 @@
         {"name": "toLower", "signature": "toLower() -> String", "generics": [], "params": [], "variadic": false, "result": "String", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "byteLength", "signature": "byteLength() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.string.byteLength", "host": false},
         {"name": "byteAt", "signature": "byteAt(offset: Int) -> Int", "generics": [], "params": [{"name": "offset", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "codePointAtByte", "signature": "codePointAtByte(offset: Int) -> Option<Int>", "generics": [], "params": [{"name": "offset", "type": "Int"}], "variadic": false, "result": "Option<Int>", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "codePointAtByte", "signature": "codePointAtByte(offset: Int) -> Option<Int>", "generics": [], "params": [{"name": "offset", "type": "Int"}], "variadic": false, "result": "Option<Int>", "mutating": false, "implementedBy": "std.string.codePointAtByte", "host": false},
         {"name": "sliceBytes", "signature": "sliceBytes(from: Int, to: Int) -> Result<String, Error>", "generics": [], "params": [{"name": "from", "type": "Int"}, {"name": "to", "type": "Int"}], "variadic": false, "result": "Result<String, Error>", "mutating": false, "implementedBy": "std.string.sliceBytes", "host": false},
         {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "implementedBy": "machine", "host": false}
       ]

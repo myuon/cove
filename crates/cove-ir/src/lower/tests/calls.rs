@@ -13,6 +13,14 @@
 //! what makes a function not a leaf, and `keep()` is the smallest thing there
 //! is to call.
 //!
+//! That holds for one round of the pass. `keep()` is itself a leaf and is
+//! expanded in the first, and a round that expanded a thin standard-library
+//! wrapper is followed by another in which the callee `keep()` was in has
+//! become a leaf too — so a callee here that asks a sequence its `length()`,
+//! which is `std.array.length` since ADR 0058's P3-15, would be expanded after
+//! all. The variadic fixtures sum their elements in a loop instead, which calls
+//! nothing the pass counts.
+//!
 //! Where the callee's *own* listing is what a case is about — the multiword
 //! parameters one — the fixture is left alone, because nothing expands a
 //! function into itself. Where the *call* is incidental to what a case
@@ -244,7 +252,7 @@ fn @m.f() -> Int
 fn a_variadic_parameter_collects_its_arguments_into_an_array() {
     assert_eq!(
         listing(
-            "fn keep() {}\nfn total(items: Int...) -> Int { keep()\n  items.length() }\nfn f() -> Int { total(1, 2, 3) }",
+            "fn keep() {}\nfn total(items: Int...) -> Int { keep()\n  var n = 0\n  for item in items {\n    n += item\n  }\n  n }\nfn f() -> Int { total(1, 2, 3) }",
             "f"
         ),
         "\
@@ -275,7 +283,7 @@ fn @m.f() -> Int
 fn a_variadic_parameter_given_nothing_is_an_empty_array() {
     assert_eq!(
         listing(
-            "fn keep() {}\nfn total(items: Int...) -> Int { keep()\n  items.length() }\nfn f() -> Int { total() }",
+            "fn keep() {}\nfn total(items: Int...) -> Int { keep()\n  var n = 0\n  for item in items {\n    n += item\n  }\n  n }\nfn f() -> Int { total() }",
             "f"
         ),
         "\
@@ -300,7 +308,7 @@ fn @m.f() -> Int
 fn a_spread_argument_is_counted_and_then_walked_into_the_run() {
     assert_eq!(
         listing(
-            "fn keep() {}\nfn total(items: Int...) -> Int { keep()\n  items.length() }\n\
+            "fn keep() {}\nfn total(items: Int...) -> Int { keep()\n  var n = 0\n  for item in items {\n    n += item\n  }\n  n }\n\
              fn f(xs: Array<Int>) -> Int { total(0, ...xs, 9) }",
             "f"
         ),
