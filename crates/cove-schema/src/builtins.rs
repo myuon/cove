@@ -898,6 +898,15 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.string",
         function: "byteLength",
     },
+    // `codePointAtByte`'s UTF-8 decode is Cove over `byteAt`, one run load a
+    // byte (#378, Q5.9); a `String` is valid UTF-8, so the lead byte decides.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "codePointAtByte",
+        module: "std.string",
+        function: "codePointAtByte",
+    },
     // `sliceBytes`' five checks and its `Result` are Cove; the copy beneath them
     // is `core.stringSlice`, a byte run slice.
     StdBinding {

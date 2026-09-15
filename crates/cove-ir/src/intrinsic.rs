@@ -28,7 +28,7 @@ use std::fmt;
 /// One core operation a `CallBuiltin` may name.
 ///
 /// A variant is named `ReceiverOperation` in upper camel case — `String`'s
-/// `codePointAtByte` is [`Intrinsic::StringCodePointAtByte`] — because that pair is
+/// `fromCodePoint` is [`Intrinsic::StringFromCodePoint`] — because that pair is
 /// the language reference's own naming of it: [`Intrinsic::receiver`] and
 /// [`Intrinsic::operation`] answer the two halves back apart, and
 /// [`Display`](fmt::Display) prints them the way `cove-ir`'s printer and
@@ -56,7 +56,6 @@ pub enum Intrinsic {
     StringToUpper,
     StringToLower,
     StringFromCodePoint,
-    StringCodePointAtByte,
     SetOf,
     SetContains,
     SetToArray,
@@ -106,7 +105,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringToUpper,
     Intrinsic::StringToLower,
     Intrinsic::StringFromCodePoint,
-    Intrinsic::StringCodePointAtByte,
     Intrinsic::SetOf,
     Intrinsic::SetContains,
     Intrinsic::SetToArray,
@@ -158,7 +156,6 @@ impl Intrinsic {
             Intrinsic::StringToUpper => "String",
             Intrinsic::StringToLower => "String",
             Intrinsic::StringFromCodePoint => "String",
-            Intrinsic::StringCodePointAtByte => "String",
             Intrinsic::SetOf => "Set",
             Intrinsic::SetContains => "Set",
             Intrinsic::SetToArray => "Set",
@@ -206,7 +203,6 @@ impl Intrinsic {
             Intrinsic::StringToUpper => "toUpper",
             Intrinsic::StringToLower => "toLower",
             Intrinsic::StringFromCodePoint => "fromCodePoint",
-            Intrinsic::StringCodePointAtByte => "codePointAtByte",
             Intrinsic::SetOf => "of",
             Intrinsic::SetContains => "contains",
             Intrinsic::SetToArray => "toArray",
@@ -305,9 +301,8 @@ impl Intrinsic {
             | Intrinsic::StringStartsWith
             | Intrinsic::StringEndsWith
             | Intrinsic::StringIndexOf => raise.union(E::READS_MEMORY).union(E::BULK_WORK),
-            // `codePointAtByte` decodes one character at a fixed cost, not
-            // proportional to the whole string.
-            Intrinsic::StringCodePointAtByte => raise.union(E::READS_MEMORY),
+            // `codePointAtByte` is not here: it is `std.string`, a decode in
+            // Cove over one run load a byte.
             // `fromCodePoint` reads no receiver — its one argument is an
             // `Int` word — and allocates the one-character `String` it
             // answers, or the message an out-of-range code point fails
@@ -507,7 +502,6 @@ mod tests {
                 | Intrinsic::StringToUpper
                 | Intrinsic::StringToLower
                 | Intrinsic::StringFromCodePoint
-                | Intrinsic::StringCodePointAtByte
                 | Intrinsic::SetOf
                 | Intrinsic::SetContains
                 | Intrinsic::SetToArray

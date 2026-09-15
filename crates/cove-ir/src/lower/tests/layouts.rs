@@ -235,6 +235,10 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
             "<tag>",
             "Bytes",
             "ByteBuffer",
+            // `std.string.codePointAtByte` answers an `Option<Int>` and is the
+            // first non-generic library function that does, so whole-package
+            // lowering declares it before anything else can.
+            "Option",
             // `std.string.sliceBytes` answers a `Result<String, Error>`, and
             // `lower` lowers the whole standard library attached to every
             // package, so its two layouts are declared here too: the `Error`,

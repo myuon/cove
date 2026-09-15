@@ -816,14 +816,14 @@ export fn callsSnapshotsWhileCollecting(n: Int) -> Int {
   snapshotsWhileCollecting(n)
 }
 
-/// A refused caller making `n` calls to `String.codePointAtByte`, which nothing
+/// A refused caller making `n` calls to `String.indexOf`, which nothing
 /// lowers, before handing the same `n` to the compiled loop above.
 export fn countsTheBoundary(s: String, n: Int) -> Int {
   let nothing = Shared(0).lock(fn(v) { v })
   var cut = 0
   var at = 0
   while at < n {
-    match s.codePointAtByte(0) {
+    match s.indexOf(\"h\") {
       Some(_) => cut = cut + 1
       None => cut = cut - 1
     }
@@ -2622,7 +2622,7 @@ fn counted_run(
     assert_eq!(
         answered,
         Ok(format!("{}", n * 1000 + n)),
-        "the loop's counter, then the `codePointAtByte` that answered"
+        "the loop's counter, then the `indexOf` that answered"
     );
     vm.boundary()
 }
@@ -2632,12 +2632,12 @@ fn counted_run(
 /// ADR 0058's Phase 1 asks for "emitted IR, mediated intrinsics, encoded VM
 /// instructions, native-to-VM crossings and native-to-runtime calls" to be
 /// reported separately. `countsTheBoundary` is refused and calls
-/// `codePointAtByte` `n` times on the encoded tier; `measuresAndPushes` is compiled and calls
+/// `indexOf` `n` times on the encoded tier; `measuresAndPushes` is compiled and calls
 /// `byteLength` and `push` `n` times each in machine code. So each lands in a
 /// different place, and a report that lumped any two of them together would fail
 /// one of the rows below:
 ///
-/// - `String.codePointAtByte`: `n` from the encoded tier, none from native code;
+/// - `String.indexOf`: `n` from the encoded tier, none from native code;
 /// - `String.byteLength`: not an intrinsic at all. It is `std.string` over
 ///   ADR 0058's `core.byteLength`, a thin wrapper the lowering expands into
 ///   `measuresAndPushes` as an `Inst::Len` — so no site, no mediated call, and
@@ -2705,7 +2705,7 @@ fn the_boundary_report_counts_each_quantity_apart() {
             .intrinsic(intrinsic)
             .unwrap_or_else(|| panic!("the program names {intrinsic}"))
     };
-    assert_eq!(row(&on_vm, Intrinsic::StringCodePointAtByte).sites, 1);
+    assert_eq!(row(&on_vm, Intrinsic::StringIndexOf).sites, 1);
     assert_eq!(
         on_vm.emitted.builtin_sites,
         on_vm.intrinsics.iter().map(|row| row.sites).sum::<u64>(),
@@ -2718,9 +2718,9 @@ fn the_boundary_report_counts_each_quantity_apart() {
         let held = row(report, intrinsic);
         (held.encoded, held.native)
     };
-    assert_eq!(calls(&on_vm, Intrinsic::StringCodePointAtByte), (n, 0));
+    assert_eq!(calls(&on_vm, Intrinsic::StringIndexOf), (n, 0));
     for report in [&on_native, &uncounted] {
-        assert_eq!(calls(report, Intrinsic::StringCodePointAtByte), (n, 0));
+        assert_eq!(calls(report, Intrinsic::StringIndexOf), (n, 0));
         // Sorted by dynamic calls, most first.
         assert!(report
             .intrinsics

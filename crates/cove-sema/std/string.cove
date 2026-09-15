@@ -22,6 +22,53 @@ export fn byteLength(text: String) -> Int {
   core.byteLength(text)
 }
 
+/// The Unicode scalar value of the character that begins at byte `offset`, or
+/// `None` when no character begins there.
+///
+/// Before the start, at or past the end, and inside a character are one answer
+/// on purpose: a scanner that advances by the width of what it read reaches
+/// none of them, and telling them apart would cost a `Result` on the one path
+/// this exists for.
+///
+/// A `String` is valid UTF-8 in its shortest form — nothing makes one from
+/// anything else — so the lead byte alone says how wide the character is and
+/// every byte after it is a continuation byte that is there: `10xxxxxx`, whose
+/// low six bits are the next six bits of the scalar. That is why this reads
+/// only as many bytes as the character has, and checks neither that they are
+/// continuation bytes nor that the string is long enough to hold them; a lead
+/// byte of `11111xxx` cannot occur, so the last case needs no test of its own.
+///
+/// It was a Rust decode in each evaluator. ADR 0058 (#378, Q5.9) moved it here
+/// over `byteAt`, which is one run load, and each question is an `if` of its own
+/// with a `return` for the reason [`sliceBytes`] gives. ASCII, the case a lexer
+/// is almost always in, is decided after one load and two comparisons.
+export fn codePointAtByte(text: String, offset: Int) -> Option<Int> {
+  if offset < 0 {
+    return None
+  }
+  if offset >= core.byteLength(text) {
+    return None
+  }
+  let lead = text.byteAt(offset)
+  if lead < 128 {
+    return Some(lead)
+  }
+  // A continuation byte, 128 through 191, is the inside of a character.
+  if lead < 192 {
+    return None
+  }
+  let second = text.byteAt(offset + 1) - 128
+  if lead < 224 {
+    return Some((lead - 192) * 64 + second)
+  }
+  let third = text.byteAt(offset + 2) - 128
+  if lead < 240 {
+    return Some(((lead - 224) * 64 + second) * 64 + third)
+  }
+  let fourth = text.byteAt(offset + 3) - 128
+  return Some((((lead - 240) * 64 + second) * 64 + third) * 64 + fourth)
+}
+
 /// The text between two byte offsets, or why there is none.
 ///
 /// Both offsets are **byte** offsets — the ones `byteLength`, `byteAt` and

@@ -204,7 +204,7 @@ written as a namespace.
 | `toLower() -> String` |  |  |  | `machine` |
 | `byteLength() -> Int` |  |  |  | `std.string.byteLength` |
 | `byteAt(offset: Int) -> Int` |  |  |  | `machine` |
-| `codePointAtByte(offset: Int) -> Option<Int>` |  |  |  | `machine` |
+| `codePointAtByte(offset: Int) -> Option<Int>` |  |  |  | `std.string.codePointAtByte` |
 | `sliceBytes(from: Int, to: Int) -> Result<String, Error>` |  |  |  | `std.string.sliceBytes` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 

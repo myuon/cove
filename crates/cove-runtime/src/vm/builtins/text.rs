@@ -65,61 +65,6 @@ fn receiver(
     super::string_of(machine, receiver_addr(machine, method, receiver)?)
 }
 
-/// The byte at `at` in the string object at `addr`.
-///
-/// The payload holds eight bytes to a word, least-significant byte first —
-/// this is the inverse of `Machine::write_bytes` — so one byte is one word
-/// read and a shift, and no part of the object is copied.
-fn byte_at(machine: &Machine, addr: u64, at: usize) -> u8 {
-    machine.byte_of(addr, at)
-}
-
-/// The Unicode scalar value beginning at byte `at`, or `None` when `at` is
-/// inside a character.
-///
-/// Nothing writes a string object except from a Rust `&str`, so the bytes are
-/// valid UTF-8 in the shortest form and the lead byte alone gives the width.
-/// A continuation byte in the lead position is the whole of "this offset is
-/// not a character boundary".
-fn decode(machine: &Machine, addr: u64, at: usize, len: usize) -> Option<u32> {
-    let lead = byte_at(machine, addr, at);
-    let (width, mut scalar) = match lead {
-        0x00..=0x7F => return Some(lead as u32),
-        0xC0..=0xDF => (2usize, (lead & 0x1F) as u32),
-        0xE0..=0xEF => (3, (lead & 0x0F) as u32),
-        0xF0..=0xF7 => (4, (lead & 0x07) as u32),
-        _ => return None,
-    };
-    if at + width > len {
-        return None;
-    }
-    for step in 1..width {
-        scalar = (scalar << 6) | (byte_at(machine, addr, at + step) & 0x3F) as u32;
-    }
-    Some(scalar)
-}
-
-/// `String.codePointAtByte(offset) -> Option<Int>`.
-pub(super) fn code_point_at_byte(
-    machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
-) -> Result<(), RuntimeError> {
-    let (self_, args) = operand::method("String.codePointAtByte", operands, 1)?;
-    let addr = receiver_addr(machine, "codePointAtByte", self_)?;
-    let offset = operand::int(machine, "String.codePointAtByte", "offset", args[0])?;
-    let len = machine.object_len(addr) as usize;
-    match usize::try_from(offset)
-        .ok()
-        .filter(|at| *at < len)
-        .and_then(|at| decode(machine, addr, at, len))
-    {
-        Some(scalar) => make::some(machine, result, &[scalar as u64], out),
-        None => make::none(machine, result, out),
-    }
-}
-
 /// `String.length() -> Int`, in characters.
 pub(super) fn length(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
     let (self_, _) = operand::method("length", operands, 0)?;

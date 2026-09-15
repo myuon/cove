@@ -526,7 +526,7 @@ mod tests {
                     native: 7,
                 },
                 IntrinsicCalls {
-                    intrinsic: Intrinsic::StringCodePointAtByte,
+                    intrinsic: Intrinsic::StringFromCodePoint,
                     sites: 3,
                     encoded: 0,
                     native: 0,
@@ -557,6 +557,6 @@ mod tests {
         assert!(text.contains("VM->native 2,"));
         assert!(text.contains("helper calls, 7 in all"));
         assert!(text.contains("           1,000              7       1  Set.contains"));
-        assert!(text.contains("               0              0       3  String.codePointAtByte"));
+        assert!(text.contains("               0              0       3  String.fromCodePoint"));
     }
 }

@@ -183,14 +183,11 @@ pub(crate) fn call(
         Intrinsic::StringFromCodePoint => {
             text::from_code_point(machine, builtin.result, operands, out)
         }
-        // The one that counts bytes and is still here. It reads a word of the
-        // payload rather than decoding the whole string, which is the only
-        // reason it is worth having. The other two are `std.string`:
-        // `byteLength` over the core intrinsic that is an `Inst::Len`, and
-        // `sliceBytes` over the one that is a byte `Inst::RunSlice`.
-        Intrinsic::StringCodePointAtByte => {
-            text::code_point_at_byte(machine, builtin.result, operands, out)
-        }
+        // No byte-counted operation is here any more. All three are
+        // `std.string`: `byteLength` over the core intrinsic that is an
+        // `Inst::Len`, `sliceBytes` over the one that is a byte
+        // `Inst::RunSlice`, and `codePointAtByte` a UTF-8 decode in Cove over
+        // `byteAt`, which is a byte `Inst::RunLoad`.
 
         // ---- Int ---------------------------------------------------------
         Intrinsic::IntToFloat => scalar::int_to_float(machine, operands).map(|word| out.push(word)),
@@ -826,7 +823,6 @@ mod tests {
             ("Array" | "Vector", "get" | "set" | "pop" | "remove") => inside(),
             ("Map", "get") => inside(),
             ("String", "indexOf") => ints(),
-            ("String", "codePointAtByte") => ints(),
             ("Int", "parse" | "parseRadix") | ("Float", "toInt") => ints(),
             ("Float", "parse") => word_layout(program, Repr::Float),
             ("String", "fromCodePoint") => Some(program.str_layout),

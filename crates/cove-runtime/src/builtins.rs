@@ -1214,7 +1214,8 @@ pub fn call_method(
             // than shared, as every other builtin's are; what holds the two
             // readings together is `tests/e2e/values_string`, which runs on
             // both backends against one `expected.out`. `byteLength` is not
-            // here: it is `std.string` over `call_core`'s `byteLength`.
+            // here: it is `std.string` over `call_core`'s `byteLength`, and
+            // `codePointAtByte` is `std.string`'s decode over `byteAt` below.
             "byteAt" => {
                 let args = expect_args("String.byteAt", args, 1, span)?;
                 let Value(Repr::Int(offset)) = &args[0] else {
@@ -1236,32 +1237,6 @@ pub fn call_method(
                     ))
                     .at(span)),
                 }
-            }
-            "codePointAtByte" => {
-                let args = expect_args("String.codePointAtByte", args, 1, span)?;
-                let Value(Repr::Int(offset)) = &args[0] else {
-                    return Err(type_error(
-                        "String.codePointAtByte",
-                        "offset",
-                        "Int",
-                        &args[0],
-                        span,
-                    ));
-                };
-                // Past the end, before the start, and inside a character are
-                // one answer on purpose: a scanner that advances by the width
-                // of what it read reaches none of them, and telling them
-                // apart would cost a `Result` on the one path this exists for.
-                Ok(
-                    match usize::try_from(*offset)
-                        .ok()
-                        .filter(|at| *at < text.len() && text.is_char_boundary(*at))
-                        .and_then(|at| text[at..].chars().next())
-                    {
-                        Some(character) => Value::some(Value(Repr::Int(character as i64))),
-                        None => Value::none(),
-                    },
-                )
             }
             _ => Err(no_method("String", name, span)),
         },
