@@ -1486,18 +1486,17 @@ impl Check<'_> {
     /// declared layout that is not a run-time fact: `dst`'s, which is what the
     /// answer is allocated as. For [`crate::Storage::Words`] it must be the
     /// fixed [`crate::Shape::Elements`] of the storage's element, because the
-    /// fresh run is traced by that layout's reference map. The byte member is
-    /// refused until `String.sliceBytes` needs it.
+    /// fresh run is traced by that layout's reference map. For
+    /// [`crate::Storage::PackedBytes`] it must be [`Program::str_layout`]: a byte
+    /// slice answers a `String` and nothing else, because the one thing that
+    /// makes its answer one — both ends at a character boundary of a valid
+    /// `String` — is decided by `std.string.sliceBytes` before it asks, and a
+    /// byte slice into a run under construction has no producer to admit.
     fn check_run_slice(&mut self, at: Option<usize>, args: crate::ArgsId, storage: crate::Storage) {
-        let crate::Storage::Words(elem) = storage else {
-            self.fault(
-                at,
-                "slices a run of packed bytes, and this instruction admits only words".to_string(),
-            );
-            return;
-        };
-        if !self.layout_exists(at, elem) {
-            return;
+        if let crate::Storage::Words(elem) = storage {
+            if !self.layout_exists(at, elem) {
+                return;
+            }
         }
         if !self.in_range(at, args.index(), self.program.args.len(), "argument list") {
             return;
@@ -1524,20 +1523,37 @@ impl Check<'_> {
         if !self.layout_exists(at, target) {
             return;
         }
-        let fits = matches!(
-            self.program.layout(target).shape,
-            Shape::Elements { elem: held, growable: false } if held == elem
-        );
-        if !fits {
-            let name = self.name_of(elem);
-            let named = self.name_of(target);
-            self.fault(
-                at,
-                format!(
-                    "slices a run of `{name}` words into `{named}`, and a word slice answers \
-                     the fixed `Elements` of the same element"
-                ),
-            );
+        match storage {
+            crate::Storage::Words(elem) => {
+                let fits = matches!(
+                    self.program.layout(target).shape,
+                    Shape::Elements { elem: held, growable: false } if held == elem
+                );
+                if !fits {
+                    let name = self.name_of(elem);
+                    let named = self.name_of(target);
+                    self.fault(
+                        at,
+                        format!(
+                            "slices a run of `{name}` words into `{named}`, and a word slice \
+                             answers the fixed `Elements` of the same element"
+                        ),
+                    );
+                }
+            }
+            crate::Storage::PackedBytes => {
+                if target != self.program.str_layout {
+                    let named = self.name_of(target);
+                    let string = self.name_of(self.program.str_layout);
+                    self.fault(
+                        at,
+                        format!(
+                            "slices a run of packed bytes into `{named}`, and a byte slice \
+                             answers `{string}`"
+                        ),
+                    );
+                }
+            }
         }
     }
 
@@ -2659,8 +2675,8 @@ mod tests {
     }
 
     /// A run slice is admitted over words, answering the fixed run of its
-    /// element from a row of four — `dst`, `src`, `from`, `count` — and each
-    /// other shape is refused by name.
+    /// element, and over bytes, answering a `String`, from a row of four —
+    /// `dst`, `src`, `from`, `count` — and each other shape is refused by name.
     #[test]
     fn a_run_slice_answers_the_fixed_run_of_its_element() {
         use crate::Storage;
@@ -2709,9 +2725,12 @@ mod tests {
                  `Elements` of the same element"
             ]
         );
+        assert_eq!(one(Storage::PackedBytes, row(STR)), Vec::<String>::new());
         assert_eq!(
-            one(Storage::PackedBytes, row(STR)),
-            vec!["slices a run of packed bytes, and this instruction admits only words"]
+            one(Storage::PackedBytes, row(ARRAY_INT)),
+            vec![
+                "slices a run of packed bytes into `Array<Int>`, and a byte slice answers `String`"
+            ]
         );
         let mut short = row(ARRAY_INT);
         short.pop();

@@ -355,8 +355,10 @@ mod tests {
     /// not a wrong discriminant — it is a word run one word too long, written
     /// into a destination sized for the other, and in a real program it ran
     /// off the end of the frame. `cq.json` hit it: `String.sliceBytes`
-    /// answers `Result<String, Error>` in a module that also has
-    /// `Result<String, cq.diag.Detail>`.
+    /// answered `Result<String, Error>` in a module that also has
+    /// `Result<String, cq.diag.Detail>`. `sliceBytes` has since moved into the
+    /// standard library, and `String.fromCodePoint` is the builtin that still
+    /// answers that `Result`.
     #[test]
     fn a_builtin_answers_the_result_its_instruction_declares() {
         let program = world();
@@ -376,17 +378,12 @@ mod tests {
         );
 
         let mut machine = Machine::new(&program, 1 << 14);
-        let source = machine.new_string("hello").unwrap();
         let held = crate::vm::builtins::tests::answering(
             &mut machine,
             "String",
-            "sliceBytes",
+            "fromCodePoint",
             narrow.0,
-            &[
-                (text, &[source]),
-                (scalar(&program, Repr::Int), &[0]),
-                (scalar(&program, Repr::Int), &[2]),
-            ],
+            &[(scalar(&program, Repr::Int), &[104])],
         )
         .unwrap();
         assert_eq!(

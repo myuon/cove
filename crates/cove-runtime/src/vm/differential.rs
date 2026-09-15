@@ -2011,3 +2011,69 @@ export fn main(text: String) -> Int {
         assert_eq!(oracle, Answer::Value(want.to_string()));
     }
 }
+
+/// `String.sliceBytes`, a standard-library body since ADR 0058, answers every
+/// range of a string alike on both evaluators — and what both answer is Rust's
+/// own reading of the same bytes, in the five sentences the method refuses
+/// with, in the order it asks them.
+///
+/// Every `from` and `to` from one before the string to one past it, over text
+/// with a one-, two-, three- and four-byte character, so each continuation byte
+/// is a refused end and each boundary an answered one.
+#[test]
+fn every_byte_range_agrees_and_is_rusts_reading() {
+    const TEXT: &str = "aé→😀z";
+    let source = format!(
+        "
+export fn cuts() -> String {{
+  let text = \"{TEXT}\"
+  var out: Vector<String> = Vector.of()
+  var from = -1
+  while from <= text.byteLength() + 1 {{
+    var to = -1
+    while to <= text.byteLength() + 1 {{
+      match text.sliceBytes(from, to) {{
+        Ok(part) => out.push(\"[{{part}}]\")
+        Err(error) => out.push(error.message)
+      }}
+      to += 1
+    }}
+    from += 1
+  }}
+  \"\\n\".join(out.freeze())
+}}
+"
+    );
+    let len = TEXT.len() as i64;
+    let mut want = Vec::new();
+    for from in -1..=len + 1 {
+        for to in -1..=len + 1 {
+            let range = |name: &str, value: i64| {
+                format!("`{name}` is `{value}`, and a byte offset into this string is 0 to {len}")
+            };
+            let inside = |name: &str, value: i64| {
+                format!(
+                    "`{name}` is `{value}`, which is inside a character rather than at the start \
+                     of one"
+                )
+            };
+            want.push(if from < 0 || from > len {
+                range("from", from)
+            } else if to < 0 || to > len {
+                range("to", to)
+            } else if from > to {
+                format!("`from` is `{from}` and `to` is `{to}`, so this range runs backwards")
+            } else if !TEXT.is_char_boundary(from as usize) {
+                inside("from", from)
+            } else if !TEXT.is_char_boundary(to as usize) {
+                inside("to", to)
+            } else {
+                format!("[{}]", &TEXT[from as usize..to as usize])
+            });
+        }
+    }
+    assert_eq!(
+        agree(&source, "cuts", Vec::new()),
+        Answer::Value(want.join("\n"))
+    );
+}

@@ -14,7 +14,7 @@
 //! So nothing downstream of this file learns that a public method moved. The
 //! verifier, both encoders and the native code generators see run instructions
 //! — a `len`, a word `growable-push`, a `load-elem` or `store-elem` of a store, a
-//! word `run-finish`, a word `run-slice`, a word `growable-truncate` — and never the
+//! word `run-finish`, a word or byte `run-slice`, a word `growable-truncate` — and never the
 //! name of the method above
 //! them; a function the standard library wraps around a single one of them is
 //! small enough that `super::inline` expands it where it is called.
@@ -73,6 +73,9 @@ impl Body<'_> {
                 [&to.value, &from.value, &count.value],
                 want,
             ),
+            ("stringSlice", [text, from, count]) => {
+                self.core_string_slice(expr, &text.value, &from.value, &count.value, want)
+            }
             _ => self.gap(&format!("`core.{name}`"), expr),
         }
     }
@@ -573,6 +576,48 @@ impl Body<'_> {
         self.give_back(len.slot, len.layout);
         self.release(store, span);
         Some(dst)
+    }
+
+    /// `core.stringSlice(text, from, count)`: a fresh `String` of the `count`
+    /// bytes of `text` from `from`.
+    ///
+    /// One [`Inst::RunSlice`] over [`Storage::PackedBytes`], whose row's `dst`
+    /// is [`shapes::STR`] — the answer is allocated as a `String` and is one
+    /// the moment the copy has filled it. `std.string.sliceBytes` has held the
+    /// range inside the string and both ends at character boundaries before it
+    /// asks, which is the whole of why the instruction validates nothing.
+    fn core_string_slice(
+        &mut self,
+        expr: &Expr,
+        text: &Expr,
+        from: &Expr,
+        count: &Expr,
+        want: Option<Dest>,
+    ) -> Val {
+        let src = self.expr(text);
+        let at = self.expr(from);
+        let many = self.expr(count);
+        let dst = self.answer_at(want, shapes::STR);
+        let row = self.pool.args.intern(vec![
+            Operand {
+                slot: dst.slot,
+                layout: shapes::STR,
+            },
+            src.arg(),
+            at.arg(),
+            many.arg(),
+        ]);
+        self.emit(
+            Inst::RunSlice {
+                args: row,
+                storage: Storage::PackedBytes,
+            },
+            expr.span,
+        );
+        self.release(many, expr.span);
+        self.release(at, expr.span);
+        self.release(src, expr.span);
+        dst
     }
 
     /// `core.byteLength(text)`: the string object's header length, which is

@@ -989,8 +989,9 @@ unsafe extern "C" fn growable(
 ///
 /// See [`cove_native::RunCopyFn`] for why the copy is a helper rather than an
 /// emitted loop. What happens here is `encoded.rs`'s `RUN_COPY_BYTES`,
-/// `RUN_COPY_WORDS` and `RUN_SLICE_WORDS` arms, and *is* those arms: the same
-/// `run_copy_bytes`, `run_copy_words` and `run_slice_words`, so the checks, the
+/// `RUN_COPY_WORDS`, `RUN_SLICE_BYTES` and `RUN_SLICE_WORDS` arms, and *is* those
+/// arms: the same `run_copy_bytes`, `run_copy_words`, `run_slice_bytes` and
+/// `run_slice_words`, so the checks, the
 /// refusals' sentences, the direction a self-overlapping copy walks and the chunk
 /// loop's polls are the dispatch loop's and nowhere else.
 ///
@@ -1057,6 +1058,15 @@ unsafe extern "C" fn run_copy(
                         frame.base,
                         args,
                         LayoutId(elem),
+                        frame.function,
+                        pc as usize,
+                    ),
+                    RunOp::SliceBytes => super::encoded::run_slice_bytes(
+                        machine,
+                        program,
+                        budget,
+                        frame.base,
+                        args,
                         frame.function,
                         pc as usize,
                     ),

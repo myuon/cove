@@ -929,22 +929,24 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
                     .iter()
                     .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))
         }
-        // [ADR 0058]'s run slice, the same helper with [`RunOp::SliceWords`]: an
-        // allocation and the run copy that fills it. Bounded as a word
-        // `run-copy` is — four one-word operands the frame has, and an element
-        // layout the table has that fits the template arm's immediate. Only the
-        // word member exists.
+        // [ADR 0058]'s run slice, the same helper with [`RunOp::SliceWords`] or
+        // [`RunOp::SliceBytes`]: an allocation and the run copy that fills it.
+        // Bounded as a `run-copy` is — four one-word operands the frame has, and
+        // for words an element layout the table has that fits the template arm's
+        // immediate.
         //
         // [`RunOp::SliceWords`]: crate::abi::RunOp::SliceWords
+        // [`RunOp::SliceBytes`]: crate::abi::RunOp::SliceBytes
         // [ADR 0058]: ../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
-        Inst::RunSlice {
-            args,
-            storage: Storage::Words(elem),
-        } => {
+        Inst::RunSlice { args, storage } => {
             let list = program.arg_list(*args);
-            elem.index() < program.layouts.len()
-                && i32::try_from(elem.0).is_ok()
-                && list.len() == 4
+            let elem = match storage {
+                Storage::PackedBytes => true,
+                Storage::Words(elem) => {
+                    elem.index() < program.layouts.len() && i32::try_from(elem.0).is_ok()
+                }
+            };
+            elem && list.len() == 4
                 && list
                     .iter()
                     .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))

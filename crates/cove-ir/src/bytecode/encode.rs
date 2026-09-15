@@ -337,7 +337,7 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             ),
         },
         Inst::RunSlice { args, storage } => match storage {
-            Storage::PackedBytes => return Err(TooWide::Storage { storage }),
+            Storage::PackedBytes => build(Op::RunSliceBytes, 0, 0, 0, halves(args.0, 0)),
             Storage::Words(elem) => build(Op::RunSliceWords, 0, 0, 0, halves(args.0, elem.0)),
         },
         // The growable family's word members arrive one at a time with the
@@ -893,6 +893,13 @@ mod tests {
             ),
             (
                 0,
+                Inst::RunSlice {
+                    args: ArgsId(1),
+                    storage: Storage::PackedBytes,
+                },
+            ),
+            (
+                0,
                 Inst::GrowableTruncate {
                     owner: 1,
                     len: 2,
@@ -1355,16 +1362,6 @@ mod tests {
                 "{inst:?}"
             );
         }
-        assert_eq!(
-            encode(
-                &Inst::RunSlice {
-                    args: ArgsId(0),
-                    storage: bytes,
-                },
-                0
-            ),
-            Err(TooWide::Storage { storage: bytes })
-        );
         assert_eq!(
             encode(
                 &Inst::GrowableTruncate {

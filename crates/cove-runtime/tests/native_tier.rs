@@ -260,14 +260,16 @@ export fn threads(n: Int) -> Int {
   total * 1000 + seen
 }
 
-/// The allocation a collection is forced with. `sliceBytes` is outside anything
+/// The allocation a collection is forced with. `String.slice` is outside anything
 /// the template compiler lowers, so this runs on the encoded tier in every case.
 /// It needs no marker of its own for that reason.
+///
+/// It was `sliceBytes` until ADR 0058 moved that into the standard library over
+/// a byte run slice, which both code generators lower. `slice` counts characters
+/// rather than bytes, and every character of the text it is handed is ASCII, so
+/// the answer is the same number.
 export fn allocates(s: String, n: Int) -> Int {
-  match s.sliceBytes(held(0), n) {
-    Ok(cut) => cut.byteLength()
-    Err(_) => 0
-  }
+  s.slice(held(0), n).byteLength()
 }
 
 /// A `Shared` keeps its value in a **heap object**, and `lock` hands the closure
@@ -795,16 +797,16 @@ export fn callsSnapshotsWhileCollecting(n: Int) -> Int {
   snapshotsWhileCollecting(n)
 }
 
-/// A refused caller making `n` calls to `String.sliceBytes`, which nothing lowers,
-/// before handing the same `n` to the compiled loop above.
+/// A refused caller making `n` calls to `String.codePointAtByte`, which nothing
+/// lowers, before handing the same `n` to the compiled loop above.
 export fn countsTheBoundary(s: String, n: Int) -> Int {
   let nothing = Shared(0).lock(fn(v) { v })
   var cut = 0
   var at = 0
   while at < n {
-    match s.sliceBytes(0, 1) {
-      Ok(piece) => cut = cut + 1
-      Err(_) => cut = cut - 1
+    match s.codePointAtByte(0) {
+      Some(_) => cut = cut + 1
+      None => cut = cut - 1
     }
     at = at + 1
   }
@@ -1587,7 +1589,7 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
     );
 
     // And the one the fixture's own source writes, by name: `allocates` calls
-    // `s.sliceBytes(..)`, which nothing lowers.
+    // `s.slice(..)`, which nothing lowers.
     let named = |of: &str| {
         let full = format!("{MODULE}.{of}");
         native
@@ -1600,7 +1602,7 @@ fn a_refusal_says_which_builtin_or_which_allocation_blocked_it() {
     };
     assert_eq!(
         named("allocates"),
-        Some(Blocked::Builtin("String.sliceBytes".to_string()))
+        Some(Blocked::Builtin("String.slice".to_string()))
     );
     // `heapsThrough` constructs a `Shared(a)`, whose allocation now lowers — so it
     // is refused for the `store-field` that fills the object in, and an opcode that
@@ -2544,7 +2546,7 @@ fn counted_run(
     assert_eq!(
         answered,
         Ok(format!("{}", n * 1000 + n)),
-        "the loop's counter, then the `sliceBytes` that answered"
+        "the loop's counter, then the `codePointAtByte` that answered"
     );
     vm.boundary()
 }
@@ -2553,13 +2555,13 @@ fn counted_run(
 ///
 /// ADR 0058's Phase 1 asks for "emitted IR, mediated intrinsics, encoded VM
 /// instructions, native-to-VM crossings and native-to-runtime calls" to be
-/// reported separately. `countsTheBoundary` is refused and calls `sliceBytes`
-/// `n` times on the encoded tier; `measuresAndPushes` is compiled and calls
+/// reported separately. `countsTheBoundary` is refused and calls
+/// `codePointAtByte` `n` times on the encoded tier; `measuresAndPushes` is compiled and calls
 /// `byteLength` and `push` `n` times each in machine code. So each lands in a
 /// different place, and a report that lumped any two of them together would fail
 /// one of the rows below:
 ///
-/// - `String.sliceBytes`: `n` from the encoded tier, none from native code;
+/// - `String.codePointAtByte`: `n` from the encoded tier, none from native code;
 /// - `String.byteLength`: not an intrinsic at all. It is `std.string` over
 ///   ADR 0058's `core.byteLength`, a thin wrapper the lowering expands into
 ///   `measuresAndPushes` as an `Inst::Len` — so no site, no mediated call, and
@@ -2627,7 +2629,7 @@ fn the_boundary_report_counts_each_quantity_apart() {
             .intrinsic(intrinsic)
             .unwrap_or_else(|| panic!("the program names {intrinsic}"))
     };
-    assert_eq!(row(&on_vm, Intrinsic::StringSliceBytes).sites, 1);
+    assert_eq!(row(&on_vm, Intrinsic::StringCodePointAtByte).sites, 1);
     assert_eq!(
         on_vm.emitted.builtin_sites,
         on_vm.intrinsics.iter().map(|row| row.sites).sum::<u64>(),
@@ -2640,9 +2642,9 @@ fn the_boundary_report_counts_each_quantity_apart() {
         let held = row(report, intrinsic);
         (held.encoded, held.native)
     };
-    assert_eq!(calls(&on_vm, Intrinsic::StringSliceBytes), (n, 0));
+    assert_eq!(calls(&on_vm, Intrinsic::StringCodePointAtByte), (n, 0));
     for report in [&on_native, &uncounted] {
-        assert_eq!(calls(report, Intrinsic::StringSliceBytes), (n, 0));
+        assert_eq!(calls(report, Intrinsic::StringCodePointAtByte), (n, 0));
         // Sorted by dynamic calls, most first.
         assert!(report
             .intrinsics

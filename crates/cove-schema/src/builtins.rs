@@ -862,6 +862,15 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         module: "std.string",
         function: "byteLength",
     },
+    // `sliceBytes`' five checks and its `Result` are Cove; the copy beneath them
+    // is `core.stringSlice`, a byte run slice.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "sliceBytes",
+        module: "std.string",
+        function: "sliceBytes",
+    },
     StdBinding {
         kind: StdBindingKind::Method,
         receiver: "Option",
@@ -1309,6 +1318,8 @@ impl CoreIntrinsicSchema {
 /// in Cove, and `Array.toVector` is [`CORE_ARRAY_TO_VECTOR`]. `Vector.pop` and
 /// `Vector.remove` are an element load, [`CORE_VECTOR_MOVE`] of the tail and
 /// [`CORE_VECTOR_TRUNCATE`], which gives the last element back.
+/// `String.sliceBytes` decides its range in Cove and copies it with
+/// [`CORE_STRING_SLICE`], the byte member of the same run slice.
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_BYTE_LENGTH,
     CORE_VECTOR_PUSH,
@@ -1320,6 +1331,7 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_ARRAY_TO_VECTOR,
     CORE_VECTOR_TRUNCATE,
     CORE_VECTOR_MOVE,
+    CORE_STRING_SLICE,
 ];
 
 /// Every core intrinsic.
@@ -1562,6 +1574,36 @@ pub const CORE_VECTOR_MOVE: CoreIntrinsicSchema = CoreIntrinsicSchema {
         },
     ],
     result: BuiltinType::Unit,
+};
+
+/// `core.stringSlice(text: String, from: Int, count: Int) -> String`: a fresh
+/// string of the `count` bytes of `text` from `from`, a range the caller has
+/// already held inside the string and at the start of a character at each end.
+///
+/// `Inst::RunSlice` over `Storage::PackedBytes`, answering a `String` (#378,
+/// Q3). It validates nothing, and that is the reason it is safe to call only
+/// from the standard library: a range of valid UTF-8 whose two ends are
+/// character boundaries is valid UTF-8, and `std.string.sliceBytes` refuses
+/// any other range before it asks, so a check here would be walking the
+/// answer a second time to be told what the body already knows.
+pub const CORE_STRING_SLICE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "stringSlice",
+    generics: &[],
+    params: &[
+        ParamSchema {
+            name: "text",
+            ty: BuiltinType::String,
+        },
+        ParamSchema {
+            name: "from",
+            ty: BuiltinType::Int,
+        },
+        ParamSchema {
+            name: "count",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::String,
 };
 
 // ----------------------------------------------------- the shared signatures

@@ -476,6 +476,15 @@ fn both_arms_answer_the_same_thing() {
             Heap::new(1)
         });
     }
+    for (words, base) in [(vec![9u64, 2, 3, 77], 0), (vec![5, 5, 9, 2, 3, 77], 2)] {
+        agree_over(
+            "a byte slice",
+            &suite::run_byte_slices(),
+            &words,
+            base,
+            || Heap::new(1),
+        );
+    }
     for outcome in [Outcome::Raised, Outcome::Stopped] {
         agree_answering(
             &format!("a run slice that answered {outcome:?}"),

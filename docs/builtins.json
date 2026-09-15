@@ -19,7 +19,8 @@
     {"name": "vectorSlice", "signature": "core.vectorSlice(items: Vector<T>, from: Int, count: Int) -> Array<T>", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}, {"name": "from", "type": "Int"}, {"name": "count", "type": "Int"}], "result": "Array<T>", "libraryOnly": true},
     {"name": "arrayToVector", "signature": "core.arrayToVector(items: Array<T>) -> Vector<T>", "generics": ["T"], "params": [{"name": "items", "type": "Array<T>"}], "result": "Vector<T>", "libraryOnly": true},
     {"name": "vectorTruncate", "signature": "core.vectorTruncate(items: Vector<T>, len: Int) -> Unit", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}, {"name": "len", "type": "Int"}], "result": "Unit", "libraryOnly": true},
-    {"name": "vectorMove", "signature": "core.vectorMove(items: Vector<T>, to: Int, from: Int, count: Int) -> Unit", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}, {"name": "to", "type": "Int"}, {"name": "from", "type": "Int"}, {"name": "count", "type": "Int"}], "result": "Unit", "libraryOnly": true}
+    {"name": "vectorMove", "signature": "core.vectorMove(items: Vector<T>, to: Int, from: Int, count: Int) -> Unit", "generics": ["T"], "params": [{"name": "items", "type": "Vector<T>"}, {"name": "to", "type": "Int"}, {"name": "from", "type": "Int"}, {"name": "count", "type": "Int"}], "result": "Unit", "libraryOnly": true},
+    {"name": "stringSlice", "signature": "core.stringSlice(text: String, from: Int, count: Int) -> String", "generics": [], "params": [{"name": "text", "type": "String"}, {"name": "from", "type": "Int"}, {"name": "count", "type": "Int"}], "result": "String", "libraryOnly": true}
   ],
   "types": [
     {
@@ -153,7 +154,7 @@
         {"name": "byteLength", "signature": "byteLength() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "std.string.byteLength", "host": false},
         {"name": "byteAt", "signature": "byteAt(offset: Int) -> Int", "generics": [], "params": [{"name": "offset", "type": "Int"}], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "codePointAtByte", "signature": "codePointAtByte(offset: Int) -> Option<Int>", "generics": [], "params": [{"name": "offset", "type": "Int"}], "variadic": false, "result": "Option<Int>", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "sliceBytes", "signature": "sliceBytes(from: Int, to: Int) -> Result<String, Error>", "generics": [], "params": [{"name": "from", "type": "Int"}, {"name": "to", "type": "Int"}], "variadic": false, "result": "Result<String, Error>", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "sliceBytes", "signature": "sliceBytes(from: Int, to: Int) -> Result<String, Error>", "generics": [], "params": [{"name": "from", "type": "Int"}, {"name": "to", "type": "Int"}], "variadic": false, "result": "Result<String, Error>", "mutating": false, "implementedBy": "std.string.sliceBytes", "host": false},
         {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "implementedBy": "machine", "host": false}
       ]
     },
