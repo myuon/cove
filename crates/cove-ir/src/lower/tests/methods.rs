@@ -561,3 +561,68 @@ fn @m.f(String) -> Result
 "
     );
 }
+
+/// `String.sliceBytes` is `std.string.sliceBytes`: the range decided in Cove,
+/// and beneath it `core.stringSlice` is one byte `run-slice` of the string.
+///
+/// The listing is the body's whole cost on the path that answers: a length,
+/// five fused comparisons, a byte load per end and a comparison of each against
+/// 128 (an ASCII byte stops there), the count, the slice, and the `Ok` written
+/// straight into what is returned. Every refusal is a `call` of `refuseRange`
+/// answering into the body's own answer, so none of the five sentences is on
+/// that path.
+#[test]
+fn slice_bytes_decides_its_range_in_cove_over_a_byte_run_slice() {
+    let source =
+        "fn f(s: String, x: Int, y: Int) -> Result<String, Error> {\n  s.sliceBytes(x, y)\n}";
+    let (sources, checked) = super::checked(source);
+    let program = super::lower(&checked, &sources, &cove_schema::HostSchemas::new())
+        .expect("the program lowers");
+    let id = program
+        .functions
+        .iter()
+        .position(|f| &*f.module == "std.string" && &*f.name == "sliceBytes")
+        .map(|at| crate::FunctionId(at as u32))
+        .expect("the body was lowered");
+    assert_eq!(
+        crate::print::function(&program, id),
+        "\
+fn @std.string.sliceBytes(String Int Int) -> Result
+  frame 12: s0!:ref s1!:int s2!:int s3:tag s4:ref s5:int s6:bool s7:unit s8:int s9:ref s10:tag s11:ref
+  local text -> s0:String [0, 28)
+  local from -> s1:Int [0, 28)
+  local to -> s2:Int [0, 28)
+  local length -> s5:Int [1, 27)
+  local first -> s8:Int [12, 16)
+  local last -> s8:Int [18, 22)
+     0  len s5:int s0:ref
+     1  lt.int.imm.branch s6:bool s1:int 0 4
+     2  call s3..s4:Result std.string.refuseRange (s0:String s1:Int s2:Int)
+     3  return s3..s4:Result
+     4  gt.int.branch s6:bool s1:int s2:int 7
+     5  call s3..s4:Result std.string.refuseRange (s0:String s1:Int s2:Int)
+     6  return s3..s4:Result
+     7  gt.int.branch s6:bool s2:int s5:int 10
+     8  call s3..s4:Result std.string.refuseRange (s0:String s1:Int s2:Int)
+     9  return s3..s4:Result
+    10  lt.int.branch s6:bool s1:int s5:int 16
+    11  run-load.bytes s8:int s0:ref s1:int
+    12  ge.int.imm.branch s6:bool s8:int 128 16
+    13  lt.int.imm.branch s6:bool s8:int 192 16
+    14  call s3..s4:Result std.string.refuseRange (s0:String s1:Int s2:Int)
+    15  return s3..s4:Result
+    16  lt.int.branch s6:bool s2:int s5:int 22
+    17  run-load.bytes s8:int s0:ref s2:int
+    18  ge.int.imm.branch s6:bool s8:int 128 22
+    19  lt.int.imm.branch s6:bool s8:int 192 22
+    20  call s3..s4:Result std.string.refuseRange (s0:String s1:Int s2:Int)
+    21  return s3..s4:Result
+    22  sub.int s8:int s2:int s1:int
+    23  run-slice.bytes (s9:String s0:String s1:Int s8:Int)
+    24  tag s10:tag Result.Ok
+    25  copy s11:String s9:String
+    26  return s10..s11:Result
+    27  return s3..s4:Result
+"
+    );
+}

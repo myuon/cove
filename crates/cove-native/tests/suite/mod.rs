@@ -3271,6 +3271,48 @@ pub fn a_run_slice_is_handed_to_the_runtime_whole<A: Arm>() {
         assert_eq!(answer.outcome, outcome);
         assert_eq!(answer.returned[0], UNWRITTEN);
     }
+
+    // And the byte member, which is the same helper with `RunOp::SliceBytes` and
+    // no element: nought, and unread.
+    forget_copied();
+    let bytes = run_byte_slices();
+    let mut words = frame.to_vec();
+    let answer = run_over::<A>(&bytes, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(
+        copied(),
+        vec![Copied {
+            base: 0,
+            pc: 0,
+            args: 1,
+            kind: RunOp::SliceBytes.abi(),
+            elem: 0,
+            work: 2,
+        }],
+        "the byte slice, with its storage"
+    );
+    assert_eq!(
+        answer.returned[0], 77,
+        "the destination, read after the call"
+    );
+}
+
+/// One byte run slice and a return of its destination, over [`run_slice_row`].
+pub fn run_byte_slices() -> Program {
+    program_with_args(
+        function(
+            vec![Repr::Ref, Repr::Int, Repr::Int, Repr::Ref],
+            REF,
+            vec![
+                Inst::RunSlice {
+                    args: ArgsId(1),
+                    storage: Storage::PackedBytes,
+                },
+                Inst::Return { src: 3 },
+            ],
+        ),
+        run_slice_row(),
+    )
 }
 
 /// A run slice is admitted over words with four one-word operands the frame has,
@@ -3316,9 +3358,16 @@ pub fn a_run_slice_is_admitted_with_four_one_word_operands<A: Arm>() {
             "{storage:?}: an operand that is two words"
         );
     }
+    // The byte member, `String.sliceBytes`' copy, admitted by the same bounds.
     assert!(
-        !compiles::<A>(&one(Storage::PackedBytes, run_slice_row())),
-        "no byte member"
+        compiles::<A>(&one(Storage::PackedBytes, run_slice_row())),
+        "the byte member is admitted"
+    );
+    let mut short = run_slice_row();
+    short.pop();
+    assert!(
+        !compiles::<A>(&one(Storage::PackedBytes, short)),
+        "bytes: three operands is not a `run-slice` row"
     );
     assert!(
         !compiles::<A>(&one(Storage::Words(LayoutId(9_999)), run_slice_row())),

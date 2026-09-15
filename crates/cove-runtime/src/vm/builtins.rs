@@ -187,14 +187,14 @@ pub(crate) fn call(
         Intrinsic::StringFromCodePoint => {
             text::from_code_point(machine, builtin.result, operands, out)
         }
-        // The two that count bytes. Each reads a word of the payload rather
-        // than decoding the whole string, which is the only reason they are
-        // worth having. The third, `byteLength`, is `std.string` over the
-        // core intrinsic that is an `Inst::Len`.
+        // The one that counts bytes and is still here. It reads a word of the
+        // payload rather than decoding the whole string, which is the only
+        // reason it is worth having. The other two are `std.string`:
+        // `byteLength` over the core intrinsic that is an `Inst::Len`, and
+        // `sliceBytes` over the one that is a byte `Inst::RunSlice`.
         Intrinsic::StringCodePointAtByte => {
             text::code_point_at_byte(machine, builtin.result, operands, out)
         }
-        Intrinsic::StringSliceBytes => text::slice_bytes(machine, builtin.result, operands, out),
 
         // ---- Int ---------------------------------------------------------
         Intrinsic::IntToFloat => scalar::int_to_float(machine, operands).map(|word| out.push(word)),
@@ -833,13 +833,13 @@ mod tests {
             ("String", "codePointAtByte") => ints(),
             ("Int", "parse" | "parseRadix") | ("Float", "toInt") => ints(),
             ("Float", "parse") => word_layout(program, Repr::Float),
-            ("String", "sliceBytes" | "fromCodePoint") => Some(program.str_layout),
+            ("String", "fromCodePoint") => Some(program.str_layout),
             _ => None,
         };
         let (family, carrier) = match (receiver, operation) {
             ("Int", "parse" | "parseRadix")
             | ("Float", "parse" | "toInt")
-            | ("String", "sliceBytes" | "fromCodePoint") => ("Result", "Ok"),
+            | ("String", "fromCodePoint") => ("Result", "Ok"),
             _ => ("Option", "Some"),
         };
         payload

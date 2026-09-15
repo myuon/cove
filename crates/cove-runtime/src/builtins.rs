@@ -434,8 +434,24 @@ pub fn call_core(
             check_consumed(storage, span)?;
             let mut elements = storage.elements.borrow_mut();
             let len = elements.len();
-            let from = core_range(&shown, "runCopy", &args[2], &args[3], len, span)?;
-            let to = core_range(&shown, "runCopy", &args[1], &args[3], len, span)?;
+            let from = core_range(
+                &shown,
+                "runCopy",
+                "element(s)",
+                &args[2],
+                &args[3],
+                len,
+                span,
+            )?;
+            let to = core_range(
+                &shown,
+                "runCopy",
+                "element(s)",
+                &args[1],
+                &args[3],
+                len,
+                span,
+            )?;
             let moved: Vec<Value> = elements[from].to_vec();
             elements[to].clone_from_slice(&moved);
             Ok(Value(Repr::Unit))
@@ -448,7 +464,15 @@ pub fn call_core(
             let Value(Repr::Array(items)) = &args[0] else {
                 return Err(type_error(&shown, "items", "Array", &args[0], span));
             };
-            let range = core_range(&shown, "runSlice", &args[1], &args[2], items.len(), span)?;
+            let range = core_range(
+                &shown,
+                "runSlice",
+                "element(s)",
+                &args[1],
+                &args[2],
+                items.len(),
+                span,
+            )?;
             Ok(Value(Repr::Array(Rc::from(&items[range]))))
         }
         "vectorSlice" => {
@@ -457,7 +481,15 @@ pub fn call_core(
             };
             check_consumed(storage, span)?;
             let elements = storage.elements.borrow();
-            let range = core_range(&shown, "runSlice", &args[1], &args[2], elements.len(), span)?;
+            let range = core_range(
+                &shown,
+                "runSlice",
+                "element(s)",
+                &args[1],
+                &args[2],
+                elements.len(),
+                span,
+            )?;
             Ok(Value(Repr::Array(Rc::from(&elements[range]))))
         }
         // `std.array.toVector`'s whole body: a growable copy of the elements
@@ -467,6 +499,34 @@ pub fn call_core(
                 return Err(type_error(&shown, "items", "Array", &args[0], span));
             };
             Ok(host.allocate_vector(items.to_vec()))
+        }
+        // The copy beneath `std.string.sliceBytes`, which has held the range
+        // inside the string and both ends at character boundaries before it
+        // asks. So the refusals here are the machine's `run-slice` bound, and a
+        // cut inside a character — which `str` would refuse by panicking — is a
+        // broken invariant said in words rather than a sentence a checked program
+        // reaches.
+        "stringSlice" => {
+            let Value(Repr::Str(text)) = &args[0] else {
+                return Err(type_error(&shown, "text", "String", &args[0], span));
+            };
+            let range = core_range(
+                &shown,
+                "runSlice",
+                "byte(s)",
+                &args[1],
+                &args[2],
+                text.len(),
+                span,
+            )?;
+            match text.get(range.clone()) {
+                Some(cut) => Ok(Value(Repr::Str(cut.into()))),
+                None => Err(RuntimeError::new(format!(
+                    "`runSlice` cuts `{}..{}` of a string inside a character",
+                    range.start, range.end
+                ))
+                .at(span)),
+            }
         }
         // A name the table declares and nothing here executes. No program can
         // reach one of these from its own modules, so the check that every
@@ -493,14 +553,16 @@ fn check_consumed(storage: &Rc<VectorStorage>, span: Span) -> Result<(), Runtime
     Ok(())
 }
 
-/// A core intrinsic's element range, `from` for `count`, inside a run of `len`.
+/// A core intrinsic's range, `from` for `count` units, inside a run of `len`.
 ///
-/// The machine's `run-slice` or `run-copy` refusal — `instruction` names which —
-/// in its words: a range outside the source is a broken invariant of the
-/// standard-library body that asked, which decided the range first.
+/// The machine's `run-slice` or `run-copy` refusal — `instruction` names which,
+/// and `unit` what it counts — in its words: a range outside the source is a
+/// broken invariant of the standard-library body that asked, which decided the
+/// range first.
 fn core_range(
     shown: &str,
     instruction: &str,
+    unit: &str,
     from: &Value,
     count: &Value,
     len: usize,
@@ -522,7 +584,7 @@ fn core_range(
     match from.checked_add(count) {
         Some(end) if from >= 0 && end <= len as i64 => Ok(from as usize..end as usize),
         _ => Err(RuntimeError::new(format!(
-            "`{instruction}` reads {count} element(s) from {from} of a source of {len}"
+            "`{instruction}` reads {count} {unit} from {from} of a source of {len}"
         ))
         .at(span)),
     }
@@ -862,7 +924,9 @@ pub fn call_method(
                 //
                 // The bounds and the character-boundary rule are
                 // `String.sliceBytes`'s, from `byte_range`, which ADR 0052
-                // requires in as many words. What differs from `sliceBytes` is
+                // requires in as many words — and which `std.string.sliceBytes`'
+                // `refuseRange` writes out again in Cove, since that method
+                // moved into the standard library. What differs from `sliceBytes` is
                 // what a refusal *is*: `sliceBytes` answers a `Result` because
                 // a caller asked for a value, and this stops the run because
                 // `Inst::GrowableExtend` does and the schema declares `Unit`.
@@ -1196,25 +1260,6 @@ pub fn call_method(
                         None => Value::none(),
                     },
                 )
-            }
-            "sliceBytes" => {
-                let args = expect_args("String.sliceBytes", args, 2, span)?;
-                let Value(Repr::Int(from)) = &args[0] else {
-                    return Err(type_error(
-                        "String.sliceBytes",
-                        "from",
-                        "Int",
-                        &args[0],
-                        span,
-                    ));
-                };
-                let Value(Repr::Int(to)) = &args[1] else {
-                    return Err(type_error("String.sliceBytes", "to", "Int", &args[1], span));
-                };
-                Ok(match byte_range(text, *from, *to) {
-                    Ok(range) => Value::ok(Value(Repr::Str(text[range].into()))),
-                    Err(message) => Value::err(Value::error(message)),
-                })
             }
             _ => Err(no_method("String", name, span)),
         },
@@ -1748,10 +1793,13 @@ fn format_digits_error(digits: i64, span: Span) -> RuntimeError {
         )
 }
 
-/// The byte range `sliceBytes(from, to)` names, or what is wrong with it.
+/// The byte range `appendSlice(text, from, to)` names, or what is wrong with it.
 ///
-/// Four things can be, and they are checked in the order a reader would ask
-/// them: is each end a byte offset into this string at all, do they run
+/// It is `String.sliceBytes`' rule, and was that method's own until ADR 0058
+/// moved it into `std.string`, whose `refuseRange` now says the same
+/// sentences in Cove. Four things can be wrong, and they are checked in the
+/// order a reader would ask them: is each end a byte offset into this string at
+/// all, do they run
 /// forwards, and does each begin a character. The last is the one `slice` has
 /// no equivalent of, and it is why this refuses where `slice` clamps — an
 /// offset inside a character was never handed out by `codePointAtByte`, so

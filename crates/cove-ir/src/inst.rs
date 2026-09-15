@@ -734,8 +734,9 @@ pub enum Inst {
     ///
     /// It is what `Array.slice`, `Vector.slice` and `Vector.toArray` lower to
     /// beneath their Cove bodies — `core.arraySlice` and `core.vectorSlice` —
-    /// and what the lowering's own copies (a `for` over a vector, `sorted`'s
-    /// working copy) emit directly.
+    /// what the lowering's own copies (a `for` over a vector, `sorted`'s
+    /// working copy) emit directly, and, over bytes, what `String.sliceBytes`
+    /// lowers to beneath its own — `core.stringSlice`.
     ///
     /// # What it means
     ///
@@ -754,9 +755,19 @@ pub enum Inst {
     /// **One family on both sides.** For [`Storage::Words`], `src` must be a
     /// [`crate::Shape::Elements`] of the element, fixed or growable — an
     /// `Array` or a `Vector`'s store — and the answer is the *fixed*
-    /// [`crate::Shape::Elements`] of it, an `Array<T>`. Only
-    /// [`Storage::Words`] is admitted today; `String.sliceBytes` brings the
-    /// byte member.
+    /// [`crate::Shape::Elements`] of it, an `Array<T>`.
+    ///
+    /// For [`Storage::PackedBytes`], `src` must be a `String` and the answer is
+    /// a `String` — `crate::verify` holds `dst`'s layout to
+    /// [`crate::Program::str_layout`]. **Nothing about the bytes is validated**,
+    /// and not because validation was forgotten: a range of a valid `String`
+    /// whose two ends are character boundaries is valid UTF-8, and
+    /// `std.string.sliceBytes` refuses every other range before it asks (#378,
+    /// Q3). That is a precondition this instruction trusts and does not check —
+    /// the boundary test is `String` policy, written once, in Cove — so the only
+    /// producer is that body, through a core intrinsic no program can call. A
+    /// run under construction is not admitted as a source: nothing slices one,
+    /// and its bytes are not text until a finish says so.
     ///
     /// # Why the destination is in the row
     ///

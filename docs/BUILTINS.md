@@ -57,6 +57,7 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `arrayToVector` | `core.arrayToVector(items: Array<T>) -> Vector<T>` |
 | `vectorTruncate` | `core.vectorTruncate(items: Vector<T>, len: Int) -> Unit` |
 | `vectorMove` | `core.vectorMove(items: Vector<T>, to: Int, from: Int, count: Int) -> Unit` |
+| `stringSlice` | `core.stringSlice(text: String, from: Int, count: Int) -> String` |
 
 ## Builtin types
 
@@ -197,7 +198,7 @@ written as a namespace.
 | `byteLength() -> Int` |  |  |  | `std.string.byteLength` |
 | `byteAt(offset: Int) -> Int` |  |  |  | `machine` |
 | `codePointAtByte(offset: Int) -> Option<Int>` |  |  |  | `machine` |
-| `sliceBytes(from: Int, to: Int) -> Result<String, Error>` |  |  |  | `machine` |
+| `sliceBytes(from: Int, to: Int) -> Result<String, Error>` |  |  |  | `std.string.sliceBytes` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `ByteBuffer`

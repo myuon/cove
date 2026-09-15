@@ -967,8 +967,8 @@ pub type GrowableFn =
 /// [`Inst::RunSlice`](cove_ir::Inst::RunSlice) is a run copy into a run it
 /// allocates first, and every reason above is its reason: the same chunks and
 /// polls, the same refusals, the same layout check — and one more, that the
-/// allocation may collect. So it is [`RunOp::SliceWords`] on this helper rather
-/// than a helper of its own, and the helper writes the fresh run's address into
+/// allocation may collect. So it is [`RunOp::SliceWords`] and
+/// [`RunOp::SliceBytes`] on this helper rather than a helper of its own, and the helper writes the fresh run's address into
 /// the frame slot the row names as `dst`, which is why generated code forgets
 /// what it knew about the frame after any call to it.
 ///
@@ -1005,6 +1005,9 @@ pub enum RunOp {
     /// [`Inst::RunSlice`](cove_ir::Inst::RunSlice) over words: `args` is `dst`,
     /// `src`, `from`, `count`, and `dst` is written.
     SliceWords = 2,
+    /// [`Inst::RunSlice`](cove_ir::Inst::RunSlice) over packed bytes, the same
+    /// four: `String.sliceBytes`' copy, answering a `String`.
+    SliceBytes = 3,
 }
 
 impl RunOp {
@@ -1019,6 +1022,7 @@ impl RunOp {
             0 => Some(RunOp::CopyBytes),
             1 => Some(RunOp::CopyWords),
             2 => Some(RunOp::SliceWords),
+            3 => Some(RunOp::SliceBytes),
             _ => None,
         }
     }
@@ -1327,11 +1331,12 @@ mod tests {
             (0, RunOp::CopyBytes),
             (1, RunOp::CopyWords),
             (2, RunOp::SliceWords),
+            (3, RunOp::SliceBytes),
         ] {
             assert_eq!(op.abi(), code);
             assert_eq!(RunOp::from_abi(code), Some(op));
         }
-        assert_eq!(RunOp::from_abi(3), None);
+        assert_eq!(RunOp::from_abi(4), None);
     }
 
     /// Zero is not a raise, which is what makes a fresh context's

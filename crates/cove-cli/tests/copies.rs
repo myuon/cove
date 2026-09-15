@@ -520,13 +520,27 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// lowering is the base's, and the row is a `match` per printed slice whose
 /// arms each answer a `println`.
 ///
+/// **The fifteenth rise is `String.sliceBytes` moving into the standard
+/// library.** 2262 to 2291, all of it the `prod` column, and it is two
+/// movements rather than one. `std.string.sliceBytes` is in every program's
+/// survey and holds one copy after a producer — its byte `run-slice` answers a
+/// temporary and the `Ok` copies it in — so each of the 136 rows gains one.
+/// And the programs that call it lose some, because a `sliceBytes` that was a
+/// builtin answered into a temporary its caller then copied, where the binding
+/// is a call handed the destination: net of the one above, `examples:cq` and
+/// `examples:cqSample` fall by 38 each, `examples:covecheck` by 19 and
+/// `examples:covefmtBench` by 8. `refuseRange`
+/// answers the whole `Result` so each refusal is a call into the body's answer
+/// with no copy after it; its first shape, answering the `Error` alone, was
+/// five more copies per row.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2262;
+const FORWARDABLE_COPIES: usize = 2291;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

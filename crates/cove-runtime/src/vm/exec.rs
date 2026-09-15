@@ -2761,7 +2761,7 @@ impl<'a> Machine<'a> {
     /// when neither is.
     ///
     /// The caller owns the bounds. Every caller here has already established
-    /// them — a slice from [`crate::vm::builtins::text`]'s `byte_range`, a
+    /// them — a run copy or a run slice from the bounds it checked first, a
     /// join from the lengths it summed to size the answer — and an
     /// out-of-range write would be a payload write past the object, which is
     /// the one thing this must not be asked to check per byte if it is to be

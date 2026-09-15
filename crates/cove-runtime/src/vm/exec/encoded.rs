@@ -268,6 +268,7 @@ const STORE_ELEM: u8 = Op::StoreElem.number();
 const RUN_LOAD_BYTES: u8 = Op::RunLoadBytes.number();
 const RUN_COPY_BYTES: u8 = Op::RunCopyBytes.number();
 const RUN_COPY_WORDS: u8 = Op::RunCopyWords.number();
+const RUN_SLICE_BYTES: u8 = Op::RunSliceBytes.number();
 const RUN_SLICE_WORDS: u8 = Op::RunSliceWords.number();
 const GROWABLE_ALLOC_BYTES: u8 = Op::GrowableAllocBytes.number();
 const GROWABLE_PUSH_BYTE: u8 = Op::GrowablePushByte.number();
@@ -345,6 +346,7 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::RunLoadBytes
         | Op::RunCopyBytes
         | Op::RunCopyWords
+        | Op::RunSliceBytes
         | Op::RunSliceWords
         | Op::GrowableAllocBytes
         | Op::GrowablePushByte
@@ -986,6 +988,109 @@ pub(super) fn run_slice_words(
     Ok(())
 }
 
+/// [`Inst::RunSlice`] over [`cove_ir::Storage::PackedBytes`]: a fresh `String` of
+/// `count` bytes copied out of the `String` `src` from `from`, written into
+/// `dst`.
+///
+/// Out of line, and never inlined into the dispatch loop, for
+/// [`run_slice_words`]' reason: it is reached from one arm of `dispatch`, and a
+/// slow path inlined into a rare arm has cost every other arm before (#378).
+///
+/// # What is checked, and what is not
+///
+/// Everything [`run_slice_words`] checks, before the allocation, with a byte in
+/// place of an element: the source is not null, the count is not negative, the
+/// source is a `String` and `from .. from + count` is inside its byte length.
+/// Each is a broken invariant of the lowering, in `runSlice`'s sentences.
+///
+/// **Neither end is checked to be a character boundary, and the bytes are not
+/// validated.** `std.string.sliceBytes` decides both before it asks — a range of
+/// valid UTF-8 cut at two boundaries is valid UTF-8 — and this is the copy that
+/// precondition exists for (#378, Q3). A byte run under construction is not a
+/// source, because nothing slices one and its bytes are not yet text.
+///
+/// # Why the answer is written last
+///
+/// [`run_slice_words`]' reason. A string holds no references, so a collection at
+/// a chunk's poll has nothing inside the half-written answer to follow — but the
+/// answer itself has to survive it, so it is a temporary root until it is whole
+/// and in `dst`. The chunks, the charge and the polls are [`run_copy_bytes`]'.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_slice_bytes(
+    machine: &mut Machine<'_>,
+    program: &Program,
+    budget: &Meter,
+    base: u64,
+    args: &[cove_ir::Arg],
+    id: FunctionId,
+    pc: usize,
+) -> Result<(), RuntimeError> {
+    let refuse = |machine: &Machine<'_>, error: RuntimeError| error.at(machine.span(id, pc));
+    let src = machine.mem.slot(base, args[1].slot);
+    let from = machine.mem.slot(base, args[2].slot) as i64;
+    let count = machine.mem.slot(base, args[3].slot) as i64;
+    if src == 0 {
+        return Err(refuse(machine, null_object()));
+    }
+    if count < 0 {
+        return Err(refuse(
+            machine,
+            RuntimeError::new(format!(
+                "`runSlice`'s count is `{count}`, and a copy cannot have a negative length"
+            )),
+        ));
+    }
+    if !matches!(
+        program.layout(machine.mem.object_layout(src)).shape,
+        Shape::Str
+    ) {
+        return Err(refuse(
+            machine,
+            RuntimeError::new("`runSlice`'s source is not a `String`"),
+        ));
+    }
+    let len = machine.mem.object_len(src) as i64;
+    if from < 0 || from.checked_add(count).is_none_or(|end| end > len) {
+        return Err(refuse(
+            machine,
+            RuntimeError::new(format!(
+                "`runSlice` reads {count} byte(s) from {from} of a source of {len}"
+            )),
+        ));
+    }
+    let fresh = machine
+        .new_string_of(count)
+        .map_err(|error| refuse(machine, error))?;
+    if count > 0 {
+        let mark = machine.temps();
+        machine.push_temp(fresh);
+        let copied = in_chunks(
+            machine,
+            budget,
+            id,
+            pc,
+            count as u64,
+            BULK_CHUNK_BYTES as u64,
+            false,
+            |machine, offset, take| {
+                machine.copy_string_bytes(
+                    fresh,
+                    offset as usize,
+                    src,
+                    from as usize + offset as usize,
+                    take as usize,
+                );
+                words_of_bytes(take as i64)
+            },
+        );
+        machine.release_temps(mark);
+        copied?;
+    }
+    machine.mem.set_slot(base, args[0].slot, fresh);
+    Ok(())
+}
+
 /// A byte [`Inst::GrowableExtend`], checked, grown once and copied in bounded chunks.
 ///
 /// Out of line and out of the dispatch loop's body for [`run_copy_bytes`]'
@@ -995,8 +1100,8 @@ pub(super) fn run_slice_words(
 /// # What is checked, and in whose words
 ///
 /// The bounds and the character-boundary rule are `String.sliceBytes`'s, in
-/// `String.sliceBytes`'s sentences —
-/// [`crate::vm::builtins::text`]'s `byte_range` is where they are written, and
+/// `String.sliceBytes`'s sentences — `std.string`'s `refuseRange` is where
+/// they are written for that method since ADR 0058 moved it into Cove, and
 /// ADR 0052 requires that `appendSlice` "checks the same bounds and UTF-8
 /// boundaries as `String.sliceBytes`". Two operations that make the same
 /// refusal in different words are two rules a reader has to learn.
@@ -1058,7 +1163,7 @@ pub(super) fn append_bytes(
         )),
     };
     let len = machine.mem.object_len(src) as i64;
-    // `byte_range`'s two refusals, in `byte_range`'s words.
+    // `refuseRange`'s two range refusals, in its words.
     for (name, value) in [("from", from), ("to", to)] {
         if value < 0 || value > len {
             return Err(refuse(
@@ -1885,10 +1990,16 @@ pub(super) fn dispatch<'s, 'a>(
                 let elem = LayoutId(held.hi());
                 run_copy_words(machine, program, budget, base, args, elem, id, pc - 1)?;
             }
-            // ADR 0058's exact construction: an allocation and the word copy
-            // that fills it, as one arm and one call, for `RUN_COPY_BYTES`'
-            // reason. `dst`, `src`, `from` and `count` are the row; the element
-            // layout is the high half and the answer's layout the row's `dst`.
+            // ADR 0058's exact construction: an allocation and the copy that
+            // fills it, as one arm and one call per storage, for
+            // `RUN_COPY_BYTES`' reason. `dst`, `src`, `from` and `count` are the
+            // row; a word slice's element layout is the high half, and the
+            // answer's layout is the row's `dst` — a `String` for bytes.
+            RUN_SLICE_BYTES => {
+                machine.sync(pc - 1);
+                let args = program.arg_list(ArgsId(held.lo()));
+                run_slice_bytes(machine, program, budget, base, args, id, pc - 1)?;
+            }
             RUN_SLICE_WORDS => {
                 machine.sync(pc - 1);
                 let args = program.arg_list(ArgsId(held.lo()));
@@ -3662,6 +3773,174 @@ mod tests {
         }
     }
 
+    /// `slice_bytes(src, from, count) -> String`: one byte `run-slice` out of a
+    /// string, answering a fresh `String`.
+    fn byte_slicer(build: &mut Build) -> FunctionId {
+        let text = build.string_layout();
+        let int = build.scalar(Repr::Int);
+        let args = build.args(&[(3, text), (0, text), (1, int), (2, int)]);
+        build.function(
+            "slice_bytes",
+            &[text, int, int],
+            &[Repr::Ref, Repr::Int, Repr::Int, Repr::Ref],
+            text,
+            vec![
+                Inst::RunSlice {
+                    args,
+                    storage: Storage::PackedBytes,
+                },
+                Inst::Return { src: 3 },
+            ],
+        )
+    }
+
+    /// **A byte slice answers the same range a byte-at-a-time reading does, at
+    /// every alignment, as a fresh string charged for the words it moves.**
+    ///
+    /// The cases that matter are the middles: a source offset that is not a
+    /// multiple of eight makes each answer word two payload reads shifted against
+    /// each other, and an off-by-one there answers a string of the right *length*
+    /// and the wrong bytes. So every range of a string of several words is cut,
+    /// and each is compared with the bytes themselves — and word for word with the
+    /// same text written directly, because `eq.str` compares payload words and a
+    /// cut that left anything in its last word's tail would be unequal to it.
+    #[test]
+    fn a_byte_slice_answers_every_range_at_every_alignment() {
+        let mut build = Build::default();
+        let entry = byte_slicer(&mut build);
+        let program = build.done();
+        // Deliberately not a multiple of eight, so the last word is partial.
+        let source: String = (0..29u8).map(|n| (b'a' + n % 26) as char).collect();
+        let bytes = source.as_bytes();
+        for from in 0..=bytes.len() {
+            for to in from..=bytes.len() {
+                let mut machine = Machine::new(&program, 1 << 16);
+                let src = machine.new_string(&source).unwrap();
+                let before = machine.allocations();
+                let answer = machine
+                    .run(entry, &[src, from as u64, (to - from) as u64], &budget())
+                    .expect("a slice within its string answers")[0];
+                assert_ne!(answer, src, "a fresh string, not the source");
+                assert_eq!(machine.allocations(), before + 1, "one allocation");
+                assert_eq!(machine.object_layout(answer), program.str_layout);
+                assert_eq!(machine.object_len(answer) as usize, to - from);
+                assert_eq!(machine.string_bytes(answer), &bytes[from..to]);
+                let direct = machine.new_string(&source[from..to]).unwrap();
+                for word in 0..((to - from) as u32).div_ceil(8) {
+                    assert_eq!(
+                        machine.payload(answer, word),
+                        machine.payload(direct, word),
+                        "{from}..{to} payload word {word}, padding included"
+                    );
+                }
+                assert!(machine.work() >= (to - from).div_ceil(8) as u64);
+            }
+        }
+    }
+
+    /// **Every refusal is made before anything is allocated.**
+    ///
+    /// None is reachable from a checked program — `std.string.sliceBytes` holds
+    /// the range inside the string first — so each is a broken invariant,
+    /// reported in `runSlice`'s sentences with a byte for a unit. A cut inside a
+    /// character is *not* among them: that is the standard library's question,
+    /// and this instruction copies the bytes it is told to.
+    #[test]
+    fn a_byte_slice_refuses_a_range_outside_its_string() {
+        let mut build = Build::default();
+        let entry = byte_slicer(&mut build);
+        let ints = build.layout(
+            "Array<Int>",
+            Shape::Elements {
+                elem: LayoutId(0),
+                growable: false,
+            },
+        );
+        let program = build.done();
+        for (what, source, from, count, message) in [
+            (
+                "one byte past the string",
+                Some(false),
+                1i64,
+                4i64,
+                "`runSlice` reads 4 byte(s) from 1 of a source of 4",
+            ),
+            (
+                "a negative offset",
+                Some(false),
+                -1,
+                1,
+                "`runSlice` reads 1 byte(s) from -1 of a source of 4",
+            ),
+            (
+                "a negative count",
+                Some(false),
+                0,
+                -1,
+                "`runSlice`'s count is `-1`, and a copy cannot have a negative length",
+            ),
+            (
+                "a source that is not a string",
+                Some(true),
+                0,
+                1,
+                "`runSlice`'s source is not a `String`",
+            ),
+            ("a null source", None, 0, 1, null_object().message.as_str()),
+        ] {
+            let mut machine = Machine::new(&program, 1 << 16);
+            let src = match source {
+                Some(false) => machine.new_string("abcd").unwrap(),
+                Some(true) => machine.allocate(ints, 4).unwrap(),
+                None => 0,
+            };
+            let before = machine.allocations();
+            let error = machine
+                .run(entry, &[src, from as u64, count as u64], &budget())
+                .expect_err(what);
+            assert_eq!(error.message, message, "{what}");
+            assert!(error.span.is_some(), "{what}: at the instruction");
+            assert_eq!(machine.allocations(), before, "{what}: nothing allocated");
+        }
+        // Inside a character, which is the body's refusal and not this one's.
+        let mut machine = Machine::new(&program, 1 << 16);
+        let src = machine.new_string("a\u{e9}").unwrap();
+        let answer = machine
+            .run(entry, &[src, 0, 2], &budget())
+            .expect("the bytes it is told to copy")[0];
+        assert_eq!(machine.string_bytes(answer), vec![b'a', 0xC3]);
+    }
+
+    /// **The source of a byte slice survives the collection its own allocation
+    /// makes, and so does a long answer across its chunks' polls.**
+    #[test]
+    fn a_byte_slice_holds_its_source_across_the_collection_it_makes() {
+        let mut build = Build::default();
+        let entry = byte_slicer(&mut build);
+        let program = build.done();
+        let text: String = (0..4000u32)
+            .map(|n| (b'a' + (n % 26) as u8) as char)
+            .collect();
+
+        let mut machine = Machine::new(&program, 1400);
+        let src = machine.new_string(&text).unwrap();
+        machine.push_temp(src);
+        while machine.heap_words() + 4 <= 1400 {
+            machine.new_string("dead").unwrap();
+        }
+        machine.release_temps(0);
+        let before = machine.collected().collections;
+        let answer = machine
+            .run(entry, &[src, 7, 3000], &budget())
+            .expect("the slice answers")[0];
+        assert!(
+            machine.collected().collections > before,
+            "the fixture did not force a collection"
+        );
+        assert_eq!(machine.string_bytes(answer), &text.as_bytes()[7..3007]);
+        assert_eq!(machine.string_bytes(src), text.as_bytes());
+    }
+
     // --- ADR 0052: the byte-buffer instructions ----------------------------
 
     /// A program with every function ADR 0052's tests share, so each test
@@ -4726,6 +5005,74 @@ mod tests {
                     );
                     assert_eq!(words, want);
                 }
+            }
+        }
+
+        /// **A byte slice from compiled code answers the VM's fresh string across
+        /// chunk edges, and refuses what the VM refuses, in its words.**
+        #[test]
+        fn a_compiled_byte_slice_agrees_with_the_vm() {
+            let mut build = Build::default();
+            let slicer = byte_slicer(&mut build);
+            let entry = through_a_call(&mut build, slicer, Repr::Ref);
+            let program = build.done();
+            let native = compiled(&program, slicer);
+
+            let chunk = BULK_CHUNK_BYTES as u64;
+            let len = 3 * chunk + 5;
+            let text: String = (0..len).map(|n| (b'a' + (n % 26) as u8) as char).collect();
+            for (from, count) in [
+                (0u64, len),
+                (chunk + 1, 2 * chunk),
+                (1, len - 1),
+                (7, 1),
+                (0, 0),
+                (len, 0),
+                // Refused: one past the string, and a negative count.
+                (1, len),
+                (0, u64::MAX),
+            ] {
+                let prepare = |machine: &mut Machine<'_>| {
+                    let src = machine.new_string(&text).unwrap();
+                    vec![src, from, count]
+                };
+                let inspect = |machine: &Machine<'_>, _: &[u64]| machine.allocations();
+                let (said, _) = agree(
+                    &format!("{from} {count}"),
+                    &program,
+                    &native,
+                    entry,
+                    &prepare,
+                    &inspect,
+                );
+                let in_range =
+                    (count as i64) >= 0 && from.checked_add(count).is_some_and(|end| end <= len);
+                match said {
+                    Ok(_) => assert!(in_range, "{from} {count} answered"),
+                    Err((message, ..)) => {
+                        assert!(!in_range, "{from} {count}: {message}");
+                        assert!(message.contains("runSlice"), "{message}");
+                    }
+                }
+            }
+            // What the answer holds, read on each tier.
+            for tier in [None, Some(&native)] {
+                let mut machine = Machine::new(&program, 1 << 16);
+                if let Some(native) = tier {
+                    // Safety: `native` outlives this machine.
+                    unsafe { machine.install_native(native) };
+                }
+                let src = machine.new_string(&text).unwrap();
+                let answer = machine
+                    .run(entry, &[src, chunk + 1, 2 * chunk], &budget())
+                    .expect("answers")[0];
+                assert_eq!(machine.object_layout(answer), program.str_layout);
+                assert_eq!(
+                    machine.string_bytes(answer),
+                    &text.as_bytes()[(chunk + 1) as usize..(3 * chunk + 1) as usize],
+                    "native: {}",
+                    tier.is_some()
+                );
             }
         }
 

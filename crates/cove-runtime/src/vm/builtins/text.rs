@@ -99,45 +99,6 @@ fn decode(machine: &Machine, addr: u64, at: usize, len: usize) -> Option<u32> {
     Some(scalar)
 }
 
-/// The byte range `sliceBytes(from, to)` names, or what is wrong with it.
-///
-/// The oracle's reading, in `crates/cove-runtime/src/builtins.rs`'s
-/// `byte_range` — the same four questions in the same order and the same
-/// words, so that `tests/e2e/values_string` can pin one `expected.out` for
-/// both backends. Neither reads the other; this comment is the join.
-fn byte_range(
-    machine: &Machine,
-    addr: u64,
-    len: usize,
-    from: i64,
-    to: i64,
-) -> Result<(usize, usize), String> {
-    let offset = |name: &str, value: i64| -> Result<usize, String> {
-        usize::try_from(value)
-            .ok()
-            .filter(|at| *at <= len)
-            .ok_or_else(|| {
-                format!("`{name}` is `{value}`, and a byte offset into this string is 0 to {len}")
-            })
-    };
-    let start = offset("from", from)?;
-    let end = offset("to", to)?;
-    if start > end {
-        return Err(format!(
-            "`from` is `{from}` and `to` is `{to}`, so this range runs backwards"
-        ));
-    }
-    for (name, at) in [("from", start), ("to", end)] {
-        // The end of the string is a boundary and has no byte to look at.
-        if at < len && byte_at(machine, addr, at) & 0xC0 == 0x80 {
-            return Err(format!(
-                "`{name}` is `{at}`, which is inside a character rather than at the start of one"
-            ));
-        }
-    }
-    Ok((start, end))
-}
-
 /// `String.codePointAtByte(offset) -> Option<Int>`.
 pub(super) fn code_point_at_byte(
     machine: &mut Machine,
@@ -157,33 +118,6 @@ pub(super) fn code_point_at_byte(
         Some(scalar) => make::some(machine, result, &[scalar as u64], out),
         None => make::none(machine, result, out),
     }
-}
-
-/// `String.sliceBytes(from, to) -> Result<String, Error>`.
-pub(super) fn slice_bytes(
-    machine: &mut Machine,
-    result: LayoutId,
-    operands: &[Operand<'_>],
-    out: &mut Vec<u64>,
-) -> Result<(), RuntimeError> {
-    let (self_, args) = operand::method("String.sliceBytes", operands, 2)?;
-    let addr = receiver_addr(machine, "sliceBytes", self_)?;
-    let from = operand::int(machine, "String.sliceBytes", "from", args[0])?;
-    let to = operand::int(machine, "String.sliceBytes", "to", args[1])?;
-    let len = machine.object_len(addr) as usize;
-    let (start, end) = match byte_range(machine, addr, len, from, to) {
-        Ok(range) => range,
-        Err(message) => return make::failed(machine, result, &message, out),
-    };
-    // Proportional to the answer rather than to the receiver, which is the
-    // point: a field taken out of a long line copies the field. It copies it
-    // eight bytes a turn and it never becomes a Rust `String` on the way:
-    // `byte_range` has already refused a cut inside a character, so a slice
-    // of valid UTF-8 between two boundaries is valid UTF-8 and validating it
-    // again would be walking the answer a second time to be told so.
-    let word = machine.new_string_of((end - start) as i64)?;
-    machine.copy_string_bytes(word, 0, addr, start, end - start);
-    make::ok(machine, result, &[word], out)
 }
 
 /// `String.length() -> Int`, in characters.
@@ -603,103 +537,6 @@ mod tests {
 
     /// The receiver is the separator and the argument is the parts, which is
     /// the way round the schema declares it.
-    /// `sliceBytes` copies eight bytes a turn, so every combination of
-    /// alignments has to answer what a byte-at-a-time reading of the same
-    /// range answers.
-    ///
-    /// The interesting cases are not the ends but the middles: a source
-    /// offset that is not a multiple of eight makes each output word two
-    /// payload reads shifted against each other, and an off-by-one in that
-    /// shift produces a string that is the right *length* and the wrong
-    /// bytes — which a test that only checked a round trip of `"hello"`
-    /// would not see. So this walks every range of a string long enough to
-    /// have several words and compares against the bytes themselves.
-    #[test]
-    fn slice_bytes_answers_the_same_range_at_every_alignment() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 18);
-        // Deliberately not a multiple of eight, so the last word is partial.
-        let source: String = (0..29u8).map(|n| (b'a' + n % 26) as char).collect();
-        let bytes = source.as_bytes().to_vec();
-        for from in 0..=bytes.len() {
-            for to in from..=bytes.len() {
-                let self_ = machine.new_string(&source).unwrap();
-                let answer = run(
-                    &mut machine,
-                    "String",
-                    "sliceBytes",
-                    &[
-                        (Repr::Ref, self_),
-                        (Repr::Int, from as u64),
-                        (Repr::Int, to as u64),
-                    ],
-                )
-                .unwrap();
-                let (case, payload) = result_of(&program, program.str_layout, &answer);
-                assert_eq!(case, "Ok", "an ASCII cut is on a boundary");
-                let word = payload[0];
-                let want = std::str::from_utf8(&bytes[from..to]).unwrap();
-                assert_eq!(
-                    read(&machine, word),
-                    want,
-                    "sliceBytes({from}, {to}) of a {}-byte string",
-                    bytes.len()
-                );
-                // The header has to agree with the bytes, because `eq.str`
-                // reads the length and then the words.
-                assert_eq!(machine.object_len(word) as usize, to - from);
-            }
-        }
-    }
-
-    /// A copy must not leave anything in the tail of the answer's last word.
-    ///
-    /// `eq.str` compares payload words, not bytes, so two strings with the
-    /// same text and different padding would be unequal. Allocation zeroes
-    /// the payload and the copy is asked never to write past the length; this
-    /// checks the two together by cutting a range whose length is not a
-    /// multiple of eight out of a longer string and comparing it against the
-    /// same text built the other way.
-    #[test]
-    fn a_slice_is_equal_to_the_same_text_written_directly() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 18);
-        let source = machine.new_string("0123456789abcdefghij").unwrap();
-        for (from, to) in [(0usize, 3usize), (1, 4), (7, 9), (8, 13), (3, 20), (19, 20)] {
-            let answer = run(
-                &mut machine,
-                "String",
-                "sliceBytes",
-                &[
-                    (Repr::Ref, source),
-                    (Repr::Int, from as u64),
-                    (Repr::Int, to as u64),
-                ],
-            )
-            .unwrap();
-            let (case, payload) = result_of(&program, program.str_layout, &answer);
-            assert_eq!(case, "Ok");
-            let cut = payload[0];
-            let direct = machine
-                .new_string(&"0123456789abcdefghij"[from..to])
-                .unwrap();
-            assert_eq!(
-                machine.object_len(cut),
-                machine.object_len(direct),
-                "{from}..{to} lengths"
-            );
-            let words = machine.object_len(direct).div_ceil(8);
-            for at in 0..words {
-                assert_eq!(
-                    machine.payload(cut, at),
-                    machine.payload(direct, at),
-                    "{from}..{to} payload word {at}: a cut and a written string must be \
-                     the same words, padding included"
-                );
-            }
-        }
-    }
-
     /// A join sizes its answer by summing the parts, so every part and every
     /// separator lands at an offset the previous ones decided. A separator
     /// whose length is not a multiple of eight is what makes those offsets
