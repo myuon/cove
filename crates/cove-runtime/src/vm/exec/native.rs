@@ -694,6 +694,28 @@ unsafe extern "C" fn field_load(
     }
 }
 
+/// The string-order helper: one [`Inst::Cmp`](cove_ir::Inst::Cmp) of
+/// `Compare::Str` and `CmpOp::Order`, the three-way order a standard-library
+/// search over `String` keys asks at every step (ADR 0059, #378 Q4.14).
+///
+/// See [`cove_native::OrderStrFn`] for the contract: a **leaf**. It is
+/// `encoded.rs`'s `ORDER_STR` arm exactly — [`Machine::order_strings`], which
+/// compares the two objects' payloads in place, allocates nothing and reads a
+/// null address as the empty string — and it does nothing else: no
+/// `Machine::sync`, no charge, no poll, nothing that could move the stack or
+/// commit a heap chunk, so nothing for [`republish`] to fix and no error to
+/// stash. The machine is borrowed shared, for as long as the comparison.
+///
+/// # Safety
+///
+/// As [`safepoint`]. `a` and `b` are each nought or a live `String` object's
+/// linear address, which the verifier's operand types guarantee.
+unsafe extern "C" fn order_str(ctx: *mut NativeCtx, a: u64, b: u64) -> i64 {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = &*(*host).machine;
+    machine.order_strings(a, b)
+}
+
 /// [`field_load`], the other direction: one
 /// [`Inst::StoreField`](cove_ir::Inst::StoreField). See
 /// [`cove_native::FieldStoreFn`]. `from` is the linear address the words are
@@ -1908,6 +1930,7 @@ pub fn helpers() -> NativeHelpers {
         run_copy,
         field_load,
         field_store,
+        order_str,
     }
 }
 
@@ -1939,6 +1962,7 @@ pub fn helpers_counting() -> NativeHelpers {
         run_copy: counted_run_copy,
         field_load: counted_field_load,
         field_store: counted_field_store,
+        order_str: counted_order_str,
     }
 }
 
@@ -2056,6 +2080,12 @@ counted!(
     /// [`field_store`], counted.
     counted_field_store => field_store.field_store(pc: u32, addr: u64, at: u32, width: u32, from: u64) -> u32
 );
+counted!(
+    /// [`order_str`], counted. The charge is one counter write on a machine that
+    /// asked for counts, which is nothing the leaf contract forbids: it neither
+    /// allocates nor moves anything.
+    counted_order_str => order_str.order_str(a: u64, b: u64) -> i64
+);
 
 /// Which component of the call path a variant of the helper does **twice**.
 ///
@@ -2149,6 +2179,7 @@ pub fn helpers_ablated<const MASK: u64>() -> NativeHelpers {
         run_copy,
         field_load,
         field_store,
+        order_str,
     }
 }
 

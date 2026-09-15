@@ -572,6 +572,48 @@ export fn callsFreezesInto(size: Int) -> Int {
   freezesInto(size)
 }
 
+/// `String`-keyed searches, whose binary-search steps are `Cmp(Str, Order)`:
+/// `std.set.contains<String>` and `std.map.get<String, Int>` compile since the
+/// string order became a leaf helper (#378, Q4.14). The keys hold the empty
+/// string, a prefix chain, a difference in the ninth byte and a two-byte
+/// character; the probes add misses on either side of each. Each probe shifts
+/// one bit into the answer, so a single wrong order changes it.
+export fn ordersStrings(which: Int) -> Int {
+  let keys = Set.of(\"\", \"a\", \"ab\", \"abc\", \"abcdefghi\", \"abcdefghj\", \"h\u{e9}llo\", \"Z\")
+  let ranks = Map.of(
+    MapEntry(key: \"abcdefghi\", value: 3),
+    MapEntry(key: \"h\u{e9}llo\", value: 5),
+    MapEntry(key: \"\", value: 7),
+    MapEntry(key: \"ab\", value: 11),
+  )
+  let probes = [\"\", \"a\", \"aa\", \"ab\", \"abcd\", \"abcdefgh\", \"abcdefghi\", \"abcdefghk\", \"hello\", \"h\u{e9}llo\", \"Z\", \"zz\"]
+  var found = which
+  var at = 0
+  while at < probes.length() {
+    match probes.get(at) {
+      Some(probe) => {
+        found = found * 2
+        if keys.contains(probe) {
+          found = found + 1
+        }
+        match ranks.get(probe) {
+          Some(rank) => found = found + rank * 10000
+          None => found = found
+        }
+      }
+      None => found = found - 1
+    }
+    at = at + 1
+  }
+  found + counts(0)
+}
+
+/// A refused caller, so `ordersStrings`' searches run behind a compiled frame.
+export fn callsOrdersStrings(which: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  ordersStrings(which)
+}
+
 /// Allocations from a compiled frame that are **kept**, so the heap runs out.
 ///
 /// Every array goes into the vector, so nothing a collection could reclaim is
@@ -2410,6 +2452,43 @@ fn a_freeze_from_compiled_code_answers_the_same_elements() {
         assert!(
             both.tiers.vm_to_native >= 1,
             "size {size}: {:?}",
+            both.tiers
+        );
+    }
+}
+
+/// **A `String` key's order from compiled code agrees with the VM's.**
+///
+/// `std.set.contains<String>` and `std.map.get<String, Int>` search by
+/// `Cmp(Str, Order)`, which both code generators hand to the leaf
+/// `OrderStrFn` since #378's Q4.14 was answered. What is compared is the answer
+/// every probe's membership and rank folded into, on the encoded tier and on the
+/// native one, and that the searches did run natively.
+#[test]
+fn a_string_order_from_compiled_code_agrees_with_the_vm() {
+    on_each_tier(&["ordersStrings"], &["callsOrdersStrings"]);
+    let names = compiled_names();
+    for search in [
+        "std.set.seekSet<String>",
+        "std.map.seekMap<String, Int>",
+        "std.set.seekPlaced<String>",
+        "std.map.seekPlaced<String, Int>",
+    ] {
+        assert!(
+            names.iter().any(|name| name == search),
+            "`{search}` steps by `Cmp(Str, Order)` and is compiled: {names:?}"
+        );
+    }
+    for which in [0i64, 1, 5] {
+        let both = both("callsOrdersStrings", vec![Value::int(which)]);
+        assert!(both.vm.is_ok(), "which {which}: {:?}", both.vm);
+        assert_eq!(
+            both.native, both.vm,
+            "which {which}: compiled string orders agree with the VM"
+        );
+        assert!(
+            both.tiers.vm_to_native >= 1,
+            "which {which}: {:?}",
             both.tiers
         );
     }

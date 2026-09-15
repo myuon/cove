@@ -50,7 +50,8 @@ use crate::vm::exec::Machine;
 
 mod equal;
 mod key;
-mod keyed;
+#[cfg(test)]
+pub(crate) use key::is_ascending_and_distinct;
 mod make;
 pub(crate) mod operand;
 mod scalar;
@@ -138,25 +139,12 @@ pub(crate) fn call(
         // `Machine::finish_words`. `slice` and `toArray` are `std.vector` over
         // a word `Inst::RunSlice`.
 
-        // ---- Set ---------------------------------------------------------
+        // ---- Set and Map -------------------------------------------------
         //
-        // A `Set` and a `Map` are sorted runs, so every one of these is a
-        // binary search over `key`'s order or a walk of a run already in it.
-        Intrinsic::SetOf => keyed::set_of(machine, operands).map(|word| out.push(word)),
-        // `Set.isEmpty` is not here: it is `std.set.isEmpty` — see
-        // `cove_schema::builtins::standard_binding`.
-        Intrinsic::SetToArray => keyed::set_to_array(machine, operands).map(|word| out.push(word)),
-        Intrinsic::SetInserted => keyed::set_inserted(machine, operands).map(|word| out.push(word)),
-        Intrinsic::SetRemoved => keyed::set_removed(machine, operands).map(|word| out.push(word)),
-
-        // ---- Map ---------------------------------------------------------
-        Intrinsic::MapOf => keyed::map_of(machine, operands).map(|word| out.push(word)),
-        // `Map.isEmpty` is not here: it is `std.map.isEmpty` — see
-        // `cove_schema::builtins::standard_binding`.
-        Intrinsic::MapKeys => keyed::map_keys(machine, operands).map(|word| out.push(word)),
-        Intrinsic::MapValues => keyed::map_values(machine, operands).map(|word| out.push(word)),
-        Intrinsic::MapInserted => keyed::map_inserted(machine, operands).map(|word| out.push(word)),
-        Intrinsic::MapRemoved => keyed::map_removed(machine, operands).map(|word| out.push(word)),
+        // Nothing. Every public operation of both — the literals, the
+        // searches, the updates and the projections — is `std.set` or
+        // `std.map` over the three `Value` intrinsics at the end, run copies
+        // and slices, and a keyed finish (ADR 0059, #378 Phase 4).
 
         // ---- String ------------------------------------------------------
         Intrinsic::StringLength => text::length(machine, operands).map(|word| out.push(word)),
@@ -240,7 +228,7 @@ pub(crate) fn call(
         // nothing; the admission's `()` is the zero word.
         Intrinsic::ValueOrder => key::value_order(machine, operands).map(|word| out.push(word)),
         Intrinsic::ValueAdmitKey => key::admit_key(machine, operands).map(|word| out.push(word)),
-        Intrinsic::ValueRefuseDuplicate => keyed::refuse_duplicate(machine, operands),
+        Intrinsic::ValueRefuseDuplicate => key::refuse_duplicate(machine, operands),
     }
 }
 

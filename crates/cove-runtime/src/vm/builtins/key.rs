@@ -92,9 +92,11 @@ use crate::vm::builtins::{equal, render_value};
 use crate::vm::exec::Machine;
 
 /// What a `Map`'s key argument is called in a refusal.
+#[cfg(test)]
 pub(super) const MAP_KEY: &str = "map key";
 
 /// What a `Set`'s element argument is called in one.
+#[cfg(test)]
 pub(super) const SET_ELEMENT: &str = "set element";
 
 /// A value on its way through the order.
@@ -138,6 +140,7 @@ impl Step {
 /// oracle asks it: `Map.get` converts its argument to a `MapKey` before it
 /// looks at a single entry, so a `Float` is refused by an empty map as loudly
 /// as by a full one.
+#[cfg(test)]
 pub(super) fn check(
     machine: &Machine,
     method: &str,
@@ -159,6 +162,7 @@ pub(super) fn check(
 /// What `Map.of` asks of the key it read out of a `MapEntry`: a key that is a
 /// struct is a run of words rather than an address, so there is no operand to
 /// ask about and the layout is what says which words are what.
+#[cfg(test)]
 pub(super) fn check_value(
     machine: &Machine,
     method: &str,
@@ -173,6 +177,7 @@ pub(super) fn check_value(
 ///
 /// Both are keys: every word that reaches this either passed [`check`] or was
 /// written into a sorted run by something that did.
+#[cfg(test)]
 pub(super) fn cmp_value(
     machine: &Machine,
     layout: LayoutId,
@@ -192,7 +197,11 @@ pub(super) fn cmp_value(
 /// wherever the two disagree — a boxed `Int` looked for in a `Set<Int>` is
 /// one address and one integer, and comparing them as integers would compare
 /// a heap address with a number.
-pub(super) fn cmp_held(
+///
+/// Only this module's tests ask it now: the searches that did moved into
+/// `std.set` and `std.map` (#378, P4-4 and P4-6).
+#[cfg(test)]
+fn cmp_held(
     machine: &Machine,
     layout: LayoutId,
     held: &[u64],
@@ -259,6 +268,109 @@ pub(super) fn admit_key(machine: &Machine, operands: &[Operand<'_>]) -> Result<u
     };
     let (method, role) = (text(method), text(role));
     admits(machine, &method, &role, None, held, 0).map(|()| 0)
+}
+
+/// Whether the `len` units of the run at `addr` are ascending and distinct by
+/// the key each begins with: `stride` words a unit, of which the first
+/// `width` are a value of `key`.
+///
+/// A keyed finish's invariant, which the relabel cannot establish and the
+/// standard-library body that built the run did (#378, Q4.10). It is asked by
+/// `Machine::finish_words` in this crate's own tests, because it is a check of
+/// the library's algorithm rather than of a program: one order per adjacent
+/// pair, where the finish itself is constant work. A pair the order cannot
+/// compare — a key nested past the depth bound — answers `false`, for the run
+/// holds a key no search over it could have placed.
+///
+/// **Not under `debug_assertions`**, which is where Q4.10 put it first: the
+/// `checked` profile keeps them on and every measurement is taken with it, and
+/// the check made `benches/keyed`'s nine `String`-keyed `inserted`s 2.6x the
+/// builtin through [`order`] (which copies both strings out) and still 1.31x
+/// with the fast paths below, against 1.17x without it (#378, P4-6). The same
+/// Cove body runs on the oracle, whose keyed finish `debug_assert`s the order
+/// on every `checked` run, so the algorithm is still checked wherever a program
+/// runs on both evaluators.
+///
+/// The key families a comparison instruction orders are compared as that
+/// instruction compares them — a signed word, a `Bool`, a `String`'s bytes in
+/// place — and every other key through [`order`].
+#[cfg(test)]
+pub(crate) fn is_ascending_and_distinct(
+    machine: &Machine,
+    key: LayoutId,
+    addr: u64,
+    stride: u32,
+    width: u32,
+    len: u32,
+) -> bool {
+    let word = |at: u32| machine.payload(addr, at * stride);
+    match machine.program().layout(key).shape {
+        Shape::Word(Repr::Int | Repr::Duration) => {
+            (1..len).all(|at| (word(at - 1) as i64) < (word(at) as i64))
+        }
+        Shape::Word(Repr::Bool) => (1..len).all(|at| word(at - 1) < word(at)),
+        Shape::Str => (1..len).all(|at| machine.order_strings(word(at - 1), word(at)) < 0),
+        _ => (1..len).all(|at| {
+            let before = machine.payload_run(addr, (at - 1) * stride, width);
+            let after = machine.payload_run(addr, at * stride, width);
+            matches!(
+                order(machine, Key::Held(key, &before), Key::Held(key, &after), 0),
+                Ok(Ordering::Less)
+            )
+        }),
+    }
+}
+
+// --- a literal's duplicate --------------------------------------------------
+
+/// `core.refuseDuplicate(key, method, role)`: always the refusal a literal
+/// with `key` twice is given, in `method`'s words and naming the key by
+/// `role`.
+///
+/// ADR 0059 has a standard-library literal *find* a duplicate, as a value
+/// order of equal, and raise it through this — so the sentence is still the
+/// one [`duplicate`] writes, over the key as it renders.
+pub(super) fn refuse_duplicate(
+    machine: &Machine,
+    operands: &[Operand<'_>],
+) -> Result<(), RuntimeError> {
+    let [key, method, role] = operands else {
+        return Err(operand::operands(
+            "Value.refuseDuplicate",
+            3,
+            operands.len(),
+        ));
+    };
+    let text = |operand: &Operand<'_>| {
+        String::from_utf8_lossy(&machine.string_bytes(operand.word())).into_owned()
+    };
+    Err(duplicate(
+        &text(method),
+        &text(role),
+        render_value(machine, key.layout, key.words, 0),
+    ))
+}
+
+/// `` `{method}` was given the {role} `{key}` more than once ``.
+///
+/// [`crate::builtins`]' `duplicate_key_error`, over the key as it renders —
+/// which is what `MapKey`'s `Display` is on that side, and why the rendering
+/// is what names it here. The caller does the rendering because a key that
+/// arrived as an operand and one that arrived as a run of words are rendered
+/// by two different readers.
+fn duplicate(method: &str, role: &str, shown: Result<String, RuntimeError>) -> RuntimeError {
+    match shown {
+        Ok(shown) => RuntimeError::new(format!(
+            "`{method}` was given the {role} `{shown}` more than once"
+        ))
+        .with_rule(
+            "A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.",
+        )
+        .with_help(format!("remove the duplicate, or give it a different {role}")),
+        // A key this run cannot render is a key it cannot name, and the
+        // rendering's own refusal says more than a message with a hole in it.
+        Err(error) => error,
+    }
 }
 
 // --- looking through a description -----------------------------------------

@@ -34,7 +34,7 @@
 use std::mem::offset_of;
 
 use cove_ir::{
-    ArithOp, CmpOp, Function, FunctionId, Inst, Len, Num, Program, Slot, Storage, StrId,
+    ArithOp, CmpOp, Compare, Function, FunctionId, Inst, Len, Num, Program, Slot, Storage, StrId,
 };
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
@@ -85,6 +85,10 @@ const FIELD_LOAD: &str = "cove_native_field_load";
 /// The name the field-store helper is imported under. [`SAFEPOINT`]'s note
 /// applies.
 const FIELD_STORE: &str = "cove_native_field_store";
+
+/// The name the string-order helper is imported under. [`SAFEPOINT`]'s note
+/// applies.
+const ORDER_STR: &str = "cove_native_order_str";
 
 // The `NativeCtx` field offsets, read from the declaration rather than
 // written out. `offset_of!` is a const expression, so the numbers compiled
@@ -149,6 +153,7 @@ pub struct Jit {
     run_copy: FuncId,
     field_load: FuncId,
     field_store: FuncId,
+    order_str: FuncId,
     /// How many functions have been declared, which is how the symbol names
     /// are kept distinct. Compiling the same [`FunctionId`] twice is a
     /// caller's policy question, not an error here, so the name cannot be
@@ -175,6 +180,7 @@ impl Jit {
         builder.symbol(RUN_COPY, helpers.run_copy as usize as *const u8);
         builder.symbol(FIELD_LOAD, helpers.field_load as usize as *const u8);
         builder.symbol(FIELD_STORE, helpers.field_store as usize as *const u8);
+        builder.symbol(ORDER_STR, helpers.order_str as usize as *const u8);
         let mut module = JITModule::new(builder);
 
         // Pointers are added to a `u64` word index scaled by eight, so a
@@ -205,6 +211,8 @@ impl Jit {
         let signature = field_signature(&module);
         let field_load = module.declare_function(FIELD_LOAD, Linkage::Import, &signature)?;
         let field_store = module.declare_function(FIELD_STORE, Linkage::Import, &signature)?;
+        let signature = order_str_signature(&module);
+        let order_str = module.declare_function(ORDER_STR, Linkage::Import, &signature)?;
         Ok(Jit {
             ctx: module.make_context(),
             module,
@@ -216,6 +224,7 @@ impl Jit {
             run_copy,
             field_load,
             field_store,
+            order_str,
             declared: 0,
             finalized: false,
         })
@@ -263,6 +272,9 @@ impl Jit {
             let field_store = self
                 .module
                 .declare_func_in_func(self.field_store, builder.func);
+            let order_str = self
+                .module
+                .declare_func_in_func(self.order_str, builder.func);
             Lower::new(
                 &mut builder,
                 program,
@@ -275,6 +287,7 @@ impl Jit {
                     run_copy,
                     field_load,
                     field_store,
+                    order_str,
                 },
             )
             .run();
@@ -445,6 +458,19 @@ fn field_signature(module: &JITModule) -> Signature {
     signature
 }
 
+/// [`crate::abi::OrderStrFn`], in Cranelift's terms: the context pointer, the
+/// two string words, and the `I64` order.
+fn order_str_signature(module: &JITModule) -> Signature {
+    let mut signature = module.make_signature();
+    signature
+        .params
+        .push(AbiParam::new(module.target_config().pointer_type()));
+    signature.params.push(AbiParam::new(types::I64)); // a
+    signature.params.push(AbiParam::new(types::I64)); // b
+    signature.returns.push(AbiParam::new(types::I64));
+    signature
+}
+
 /// The helpers this arm calls, as references inside one function.
 ///
 /// A struct rather than that many parameters of [`Lower::new`], because they
@@ -459,6 +485,7 @@ struct Bound {
     run_copy: FuncRef,
     field_load: FuncRef,
     field_store: FuncRef,
+    order_str: FuncRef,
 }
 
 /// One function's lowering.
@@ -885,6 +912,25 @@ impl<'a, 'f> Lower<'a, 'f> {
                 let x = self.load_slot(*a);
                 let y = self.b.ins().iconst(types::I64, *value);
                 self.arith(*op, *dst, x, y);
+                false
+            }
+            // `encoded.rs`'s `ORDER_STR`: one call of the leaf
+            // [`crate::abi::OrderStrFn`] over the two words, its `I64` answer
+            // stored whole. A leaf, so nothing is published before the call and
+            // nothing is forgotten after it: the frame and chunk pointers this
+            // block cached are still the pointers (#378, Q4.14).
+            Inst::Cmp {
+                on: Compare::Str,
+                op: CmpOp::Order,
+                dst,
+                a,
+                b,
+            } => {
+                let x = self.load_slot(*a);
+                let y = self.load_slot(*b);
+                let call = self.b.ins().call(self.bound.order_str, &[self.ctx, x, y]);
+                let answer = self.b.inst_results(call)[0];
+                self.store_slot(*dst, answer);
                 false
             }
             // `encoded.rs`'s `ORDER_INT | ORDER_BOOL | ORDER_TAG`: `(x > y) -

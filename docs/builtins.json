@@ -32,7 +32,13 @@
     {"name": "admitKey", "signature": "core.admitKey(key: T, method: String, role: String) -> Unit", "generics": ["T"], "params": [{"name": "key", "type": "T"}, {"name": "method", "type": "String"}, {"name": "role", "type": "String"}], "result": "Unit", "libraryOnly": true},
     {"name": "refuseDuplicate", "signature": "core.refuseDuplicate(key: T, method: String, role: String) -> Unit", "generics": ["T"], "params": [{"name": "key", "type": "T"}, {"name": "method", "type": "String"}, {"name": "role", "type": "String"}], "result": "Unit", "libraryOnly": true},
     {"name": "memberAt", "signature": "core.memberAt(members: Set<T>, at: Int) -> T", "generics": ["T"], "params": [{"name": "members", "type": "Set<T>"}, {"name": "at", "type": "Int"}], "result": "T", "libraryOnly": true},
-    {"name": "entryAt", "signature": "core.entryAt(entries: Map<K, V>, at: Int) -> MapEntry<K, V>", "generics": ["K", "V"], "params": [{"name": "entries", "type": "Map<K, V>"}, {"name": "at", "type": "Int"}], "result": "MapEntry<K, V>", "libraryOnly": true}
+    {"name": "entryAt", "signature": "core.entryAt(entries: Map<K, V>, at: Int) -> MapEntry<K, V>", "generics": ["K", "V"], "params": [{"name": "entries", "type": "Map<K, V>"}, {"name": "at", "type": "Int"}], "result": "MapEntry<K, V>", "libraryOnly": true},
+    {"name": "vectorWithCapacity", "signature": "core.vectorWithCapacity(capacity: Int) -> Vector<T>", "generics": ["T"], "params": [{"name": "capacity", "type": "Int"}], "result": "Vector<T>", "libraryOnly": true},
+    {"name": "extendFromSet", "signature": "core.extendFromSet(out: Vector<T>, items: Set<T>, from: Int, count: Int) -> Unit", "generics": ["T"], "params": [{"name": "out", "type": "Vector<T>"}, {"name": "items", "type": "Set<T>"}, {"name": "from", "type": "Int"}, {"name": "count", "type": "Int"}], "result": "Unit", "libraryOnly": true},
+    {"name": "extendFromMap", "signature": "core.extendFromMap(out: Vector<MapEntry<K, V>>, entries: Map<K, V>, from: Int, count: Int) -> Unit", "generics": ["K", "V"], "params": [{"name": "out", "type": "Vector<MapEntry<K, V>>"}, {"name": "entries", "type": "Map<K, V>"}, {"name": "from", "type": "Int"}, {"name": "count", "type": "Int"}], "result": "Unit", "libraryOnly": true},
+    {"name": "setFinish", "signature": "core.setFinish(run: Vector<T>) -> Set<T>", "generics": ["T"], "params": [{"name": "run", "type": "Vector<T>"}], "result": "Set<T>", "libraryOnly": true},
+    {"name": "mapFinish", "signature": "core.mapFinish(run: Vector<MapEntry<K, V>>) -> Map<K, V>", "generics": ["K", "V"], "params": [{"name": "run", "type": "Vector<MapEntry<K, V>>"}], "result": "Map<K, V>", "libraryOnly": true},
+    {"name": "setSlice", "signature": "core.setSlice(items: Set<T>, from: Int, count: Int) -> Array<T>", "generics": ["T"], "params": [{"name": "items", "type": "Set<T>"}, {"name": "from", "type": "Int"}, {"name": "count", "type": "Int"}], "result": "Array<T>", "libraryOnly": true}
   ],
   "types": [
     {
@@ -94,17 +100,17 @@
       "cases": [],
       "fields": [],
       "associated": [
-        {"name": "of", "signature": "of(entries: MapEntry<K, V>...) -> Map<K, V>", "generics": ["K", "V"], "params": [{"name": "entries", "type": "MapEntry<K, V>"}], "variadic": true, "result": "Map<K, V>", "implementedBy": "machine", "host": false}
+        {"name": "of", "signature": "of(entries: MapEntry<K, V>...) -> Map<K, V>", "generics": ["K", "V"], "params": [{"name": "entries", "type": "MapEntry<K, V>"}], "variadic": true, "result": "Map<K, V>", "implementedBy": "std.map.of", "host": false}
       ],
       "methods": [
         {"name": "get", "signature": "get(key: K) -> Option<V>", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Option<V>", "mutating": false, "implementedBy": "std.map.get", "host": false},
         {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.map.isEmpty", "host": false},
         {"name": "contains", "signature": "contains(key: K) -> Bool", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.map.contains", "host": false},
-        {"name": "keys", "signature": "keys() -> Array<K>", "generics": [], "params": [], "variadic": false, "result": "Array<K>", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "values", "signature": "values() -> Array<V>", "generics": [], "params": [], "variadic": false, "result": "Array<V>", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "inserted", "signature": "inserted(key: K, value: V) -> Map<K, V>", "generics": [], "params": [{"name": "key", "type": "K"}, {"name": "value", "type": "V"}], "variadic": false, "result": "Map<K, V>", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "removed", "signature": "removed(key: K) -> Map<K, V>", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Map<K, V>", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "keys", "signature": "keys() -> Array<K>", "generics": [], "params": [], "variadic": false, "result": "Array<K>", "mutating": false, "implementedBy": "std.map.keys", "host": false},
+        {"name": "values", "signature": "values() -> Array<V>", "generics": [], "params": [], "variadic": false, "result": "Array<V>", "mutating": false, "implementedBy": "std.map.values", "host": false},
+        {"name": "inserted", "signature": "inserted(key: K, value: V) -> Map<K, V>", "generics": [], "params": [{"name": "key", "type": "K"}, {"name": "value", "type": "V"}], "variadic": false, "result": "Map<K, V>", "mutating": false, "implementedBy": "std.map.inserted", "host": false},
+        {"name": "removed", "signature": "removed(key: K) -> Map<K, V>", "generics": [], "params": [{"name": "key", "type": "K"}], "variadic": false, "result": "Map<K, V>", "mutating": false, "implementedBy": "std.map.removed", "host": false},
         {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "implementedBy": "machine", "host": false}
       ]
     },
@@ -126,15 +132,15 @@
       "cases": [],
       "fields": [],
       "associated": [
-        {"name": "of", "signature": "of(items: T...) -> Set<T>", "generics": ["T"], "params": [{"name": "items", "type": "T"}], "variadic": true, "result": "Set<T>", "implementedBy": "machine", "host": false}
+        {"name": "of", "signature": "of(items: T...) -> Set<T>", "generics": ["T"], "params": [{"name": "items", "type": "T"}], "variadic": true, "result": "Set<T>", "implementedBy": "std.set.of", "host": false}
       ],
       "methods": [
         {"name": "length", "signature": "length() -> Int", "generics": [], "params": [], "variadic": false, "result": "Int", "mutating": false, "implementedBy": "machine", "host": false},
         {"name": "isEmpty", "signature": "isEmpty() -> Bool", "generics": [], "params": [], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.set.isEmpty", "host": false},
-        {"name": "toArray", "signature": "toArray() -> Array<T>", "generics": [], "params": [], "variadic": false, "result": "Array<T>", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "toArray", "signature": "toArray() -> Array<T>", "generics": [], "params": [], "variadic": false, "result": "Array<T>", "mutating": false, "implementedBy": "std.set.toArray", "host": false},
         {"name": "contains", "signature": "contains(element: T) -> Bool", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Bool", "mutating": false, "implementedBy": "std.set.contains", "host": false},
-        {"name": "inserted", "signature": "inserted(element: T) -> Set<T>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Set<T>", "mutating": false, "implementedBy": "machine", "host": false},
-        {"name": "removed", "signature": "removed(element: T) -> Set<T>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Set<T>", "mutating": false, "implementedBy": "machine", "host": false},
+        {"name": "inserted", "signature": "inserted(element: T) -> Set<T>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Set<T>", "mutating": false, "implementedBy": "std.set.inserted", "host": false},
+        {"name": "removed", "signature": "removed(element: T) -> Set<T>", "generics": [], "params": [{"name": "element", "type": "T"}], "variadic": false, "result": "Set<T>", "mutating": false, "implementedBy": "std.set.removed", "host": false},
         {"name": "snapshot", "signature": "snapshot() -> Self", "generics": [], "params": [], "variadic": false, "result": "Self", "mutating": false, "implementedBy": "machine", "host": false}
       ]
     },

@@ -117,11 +117,13 @@ pub(crate) fn literal_offset(text: StrId) -> Option<i32> {
 /// ADR 0059's three-way [`CmpOp::Order`] is in the slice over the same three,
 /// because `encoded.rs`'s `ORDER_INT | ORDER_BOOL | ORDER_TAG` arm is one
 /// signed comparison of the two words for all of them. A `String`'s order is
-/// not: `ORDER_STR` walks two objects' bytes, which is a helper this slice does
-/// not have, so a standard-library search over `String` keys stays encoded
-/// (#378, Q4.14).
+/// in the slice too, and only its order: `ORDER_STR` walks two objects' bytes,
+/// which both arms hand to [`OrderStrFn`](crate::abi::OrderStrFn), a leaf helper
+/// that cannot allocate, raise or move anything — so a standard-library search
+/// over `String` keys compiles (#378, Q4.14). `Str` equality and the ordered
+/// comparisons `cmp_str!` answers copy both strings out and stay outside.
 ///
-/// Everything else — [`Compare::Float`], [`Str`](Compare::Str),
+/// Everything else — [`Compare::Float`], `Str` but for its order,
 /// [`Identity`](Compare::Identity) — is outside the slice. `Identity` would be
 /// one integer comparison and is left out because nothing the raced slice does
 /// asks it, which is the rule this predicate is widened by.
@@ -129,7 +131,8 @@ fn comparison_supported(on: Compare, op: CmpOp) -> bool {
     match on {
         Compare::Int => true,
         Compare::Bool | Compare::Tag => matches!(op, CmpOp::Eq | CmpOp::Ne | CmpOp::Order),
-        Compare::Float | Compare::Str | Compare::Identity => false,
+        Compare::Str => op == CmpOp::Order,
+        Compare::Float | Compare::Identity => false,
     }
 }
 
@@ -267,9 +270,16 @@ pub(crate) fn word_finish(
     elem: LayoutId,
 ) -> Option<WordFinish> {
     let push = word_push(program, owner, 0, elem)?;
-    let fixed = program.layouts.get(target.index()).is_some_and(
-        |layout| matches!(layout.shape, Shape::Elements { elem: e, growable: false } if e == elem),
-    );
+    // The fixed run of the element, or — a keyed finish, #378 P4-5 — the `Set`
+    // of it or the `Map` whose entry it is. The emitted relabel is the same
+    // header write and free block for all three: each is `len` units of
+    // `stride` words under the same reference map. The sorted-and-distinct
+    // assertion `Machine::finish_words` makes in the runtime's own tests is not
+    // emitted.
+    let fixed = program.layouts.get(target.index()).is_some_and(|layout| {
+        matches!(layout.shape, Shape::Elements { elem: e, growable: false } if e == elem)
+            || cove_ir::finishes_as_keyed_run_of(&program.layouts, &layout.shape, elem)
+    });
     fixed.then_some(WordFinish {
         dst,
         owner,

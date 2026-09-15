@@ -70,6 +70,12 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `refuseDuplicate` | `core.refuseDuplicate(key: T, method: String, role: String) -> Unit` |
 | `memberAt` | `core.memberAt(members: Set<T>, at: Int) -> T` |
 | `entryAt` | `core.entryAt(entries: Map<K, V>, at: Int) -> MapEntry<K, V>` |
+| `vectorWithCapacity` | `core.vectorWithCapacity(capacity: Int) -> Vector<T>` |
+| `extendFromSet` | `core.extendFromSet(out: Vector<T>, items: Set<T>, from: Int, count: Int) -> Unit` |
+| `extendFromMap` | `core.extendFromMap(out: Vector<MapEntry<K, V>>, entries: Map<K, V>, from: Int, count: Int) -> Unit` |
+| `setFinish` | `core.setFinish(run: Vector<T>) -> Set<T>` |
+| `mapFinish` | `core.mapFinish(run: Vector<MapEntry<K, V>>) -> Map<K, V>` |
+| `setSlice` | `core.setSlice(items: Set<T>, from: Int, count: Int) -> Array<T>` |
 
 ## Builtin types
 
@@ -134,7 +140,7 @@ written as a namespace; binds `K`, `V`.
 
 | signature | variadic | binds | implemented by |
 | --- | --- | --- | --- |
-| `of(entries: MapEntry<K, V>...) -> Map<K, V>` | yes | `K`, `V` | `machine` |
+| `of(entries: MapEntry<K, V>...) -> Map<K, V>` | yes | `K`, `V` | `std.map.of` |
 
 **Methods.**
 
@@ -144,10 +150,10 @@ written as a namespace; binds `K`, `V`.
 | `length() -> Int` |  |  |  | `machine` |
 | `isEmpty() -> Bool` |  |  |  | `std.map.isEmpty` |
 | `contains(key: K) -> Bool` |  |  |  | `std.map.contains` |
-| `keys() -> Array<K>` |  |  |  | `machine` |
-| `values() -> Array<V>` |  |  |  | `machine` |
-| `inserted(key: K, value: V) -> Map<K, V>` |  |  |  | `machine` |
-| `removed(key: K) -> Map<K, V>` |  |  |  | `machine` |
+| `keys() -> Array<K>` |  |  |  | `std.map.keys` |
+| `values() -> Array<V>` |  |  |  | `std.map.values` |
+| `inserted(key: K, value: V) -> Map<K, V>` |  |  |  | `std.map.inserted` |
+| `removed(key: K) -> Map<K, V>` |  |  |  | `std.map.removed` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `MapEntry<K, V>`
@@ -164,7 +170,7 @@ written as a namespace; binds `T`.
 
 | signature | variadic | binds | implemented by |
 | --- | --- | --- | --- |
-| `of(items: T...) -> Set<T>` | yes | `T` | `machine` |
+| `of(items: T...) -> Set<T>` | yes | `T` | `std.set.of` |
 
 **Methods.**
 
@@ -172,10 +178,10 @@ written as a namespace; binds `T`.
 | --- | --- | --- | --- | --- |
 | `length() -> Int` |  |  |  | `machine` |
 | `isEmpty() -> Bool` |  |  |  | `std.set.isEmpty` |
-| `toArray() -> Array<T>` |  |  |  | `machine` |
+| `toArray() -> Array<T>` |  |  |  | `std.set.toArray` |
 | `contains(element: T) -> Bool` |  |  |  | `std.set.contains` |
-| `inserted(element: T) -> Set<T>` |  |  |  | `machine` |
-| `removed(element: T) -> Set<T>` |  |  |  | `machine` |
+| `inserted(element: T) -> Set<T>` |  |  |  | `std.set.inserted` |
+| `removed(element: T) -> Set<T>` |  |  |  | `std.set.removed` |
 | `snapshot() -> Self` |  |  |  | `machine` |
 
 ### `String`

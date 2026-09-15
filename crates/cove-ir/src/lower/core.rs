@@ -40,7 +40,8 @@
 //! So nothing downstream of this file learns that a public method moved. The
 //! verifier, both encoders and the native code generators see run instructions
 //! — a `len`, a word `growable-push`, a `load-elem` or `store-elem` of a store, a
-//! word `run-finish`, a word or byte `run-slice`, a word `growable-truncate` — and never the
+//! word `run-finish` into an `Array`, a `Set` or a `Map`, a word or byte
+//! `run-slice`, a word `run-copy` out of a sorted run, a word `growable-truncate` — and never the
 //! name of the method above
 //! them; a function the standard library wraps around a single one of them is
 //! small enough that `super::inline` expands it where it is called.
@@ -52,7 +53,7 @@ use cove_syntax::ast::{Arg, Expr};
 use super::frame::Val;
 use super::shapes::{self, BUFFER_LEN, VECTOR_LEN, VECTOR_STORE};
 use super::{Body, Dest};
-use crate::inst::{CmpOp, Compare, Inst, Len, Slot, Storage, Validation};
+use crate::inst::{ArithOp, CmpOp, Compare, Inst, Len, Num, Slot, Storage, Validation};
 use crate::intrinsic::Intrinsic;
 use crate::layout::{LayoutId, Shape};
 use crate::program::{Arg as Operand, Builtin};
@@ -137,6 +138,19 @@ impl Body<'_> {
                 self.core_member_at(expr, &members.value, &at.value, want)
             }
             ("entryAt", [entries, at]) => self.core_entry_at(expr, &entries.value, &at.value, want),
+            ("vectorWithCapacity", [capacity]) => {
+                self.core_vector_with_capacity(expr, &capacity.value, want)
+            }
+            ("extendFromSet" | "extendFromMap", [out, run, from, count]) => self.core_extend_keyed(
+                expr,
+                &out.value,
+                [&run.value, &from.value, &count.value],
+                want,
+            ),
+            ("setFinish" | "mapFinish", [run]) => self.core_keyed_finish(expr, &run.value, want),
+            ("setSlice", [items, from, count]) => {
+                self.core_set_slice(expr, &items.value, &from.value, &count.value, want)
+            }
             _ => self.gap(&format!("`core.{name}`"), expr),
         }
     }
@@ -1148,6 +1162,258 @@ impl Body<'_> {
         );
         self.release(index, expr.span);
         self.release(obj, expr.span);
+        dst
+    }
+
+    /// `core.setSlice(items, from, count)`: a fresh `Array` of the `count`
+    /// members of `items` from `from`.
+    ///
+    /// One [`Inst::RunSlice`] whose source is the set itself — its run of
+    /// members, which the machine reads at the member's stride — answering the
+    /// `Array<T>` layout, declared here by asking for it. `std.set.toArray`
+    /// asks for the whole set, so there is no range policy above it.
+    fn core_set_slice(
+        &mut self,
+        expr: &Expr,
+        items: &Expr,
+        from: &Expr,
+        count: &Expr,
+        want: Option<Dest>,
+    ) -> Val {
+        let Some(ty) = self.settled_ty(items) else {
+            return self.dead(expr);
+        };
+        let Ty::Set(of) = ty.clone() else {
+            return self.gap("`core.setSlice` over something that is not a `Set`", expr);
+        };
+        let (Some(_), Some(elem), Some(target)) = (
+            self.layout(&ty, items.span),
+            self.layout(&of, items.span),
+            self.layout(&Ty::Array(of), expr.span),
+        ) else {
+            return self.dead(expr);
+        };
+        let src = self.expr(items);
+        let at = self.expr(from);
+        let many = self.expr(count);
+        let dst = self.answer_at(want, target);
+        self.run_slice_words(dst.slot, target, elem, &src, &at, &many, expr.span);
+        self.release(many, expr.span);
+        self.release(at, expr.span);
+        self.release(src, expr.span);
+        dst
+    }
+
+    /// `core.vectorWithCapacity(capacity)`: an empty `Vector` whose store has
+    /// room for exactly `capacity` elements.
+    ///
+    /// [`Body::vector_of_elements`]' two allocations and two field writes with
+    /// no copy between them: an [`Inst::Alloc`] of the store at `capacity`, an
+    /// `Int` nought, the header's [`Inst::Alloc`], and its length and store
+    /// fields. The store is zeroed by its allocation, so every unit above the
+    /// length traces as null until something writes it, and it is held in a
+    /// slot of its own across the header's allocation, which may collect. A
+    /// negative capacity is refused by the store's allocation, in the words
+    /// every allocation is.
+    fn core_vector_with_capacity(
+        &mut self,
+        expr: &Expr,
+        capacity: &Expr,
+        want: Option<Dest>,
+    ) -> Val {
+        let Some(ty) = self.settled_ty(expr) else {
+            return self.dead(expr);
+        };
+        let Ty::Vector(elem) = &ty else {
+            self.errors.push(super::gap::gap(
+                "`core.vectorWithCapacity` answering something that is not a `Vector`",
+                expr.span,
+            ));
+            return self.dead(expr);
+        };
+        let (Some(vector), Some(element)) =
+            (self.layout(&ty, expr.span), self.layout(elem, expr.span))
+        else {
+            return self.dead(expr);
+        };
+        let store_layout = self.pool.shapes.store_of(element);
+        let room = self.expr(capacity);
+        let store = self.temp(shapes::REF);
+        self.emit(
+            Inst::Alloc {
+                dst: store.slot,
+                layout: store_layout,
+                len: Len::Slot(room.slot),
+            },
+            expr.span,
+        );
+        self.release(room, expr.span);
+        let zero = self.temp(shapes::INT);
+        self.emit(
+            Inst::Int {
+                dst: zero.slot,
+                value: 0,
+            },
+            expr.span,
+        );
+        let dst = self.answer_at(want, vector);
+        self.emit(
+            Inst::Alloc {
+                dst: dst.slot,
+                layout: vector,
+                len: Len::Fixed,
+            },
+            expr.span,
+        );
+        self.emit(
+            Inst::StoreField {
+                obj: dst.slot,
+                at: VECTOR_LEN,
+                src: zero.slot,
+                layout: shapes::INT,
+            },
+            expr.span,
+        );
+        self.emit(
+            Inst::StoreField {
+                obj: dst.slot,
+                at: VECTOR_STORE,
+                src: store.slot,
+                layout: shapes::REF,
+            },
+            expr.span,
+        );
+        self.give_back(zero.slot, zero.layout);
+        self.release(store, expr.span);
+        dst
+    }
+
+    /// `core.extendFromSet(out, items, from, count)` and
+    /// `core.extendFromMap(out, entries, from, count)`: `count` units of a
+    /// sorted run from `from`, appended to a vector whose store has room.
+    ///
+    /// [`Inst::LoadField`] of the store and of the length, one word
+    /// [`Inst::RunCopy`] out of the keyed run into the store at the length, an
+    /// `Int` add, and the length written back: ADR 0058's run copy and commit,
+    /// with no ensure, because the one body that calls this allocated the room
+    /// with `core.vectorWithCapacity` (#378, P4-5). The copy is the ensure's
+    /// guard: its destination bound is the store's capacity, so a range with no
+    /// room is refused before anything is written, and the length is raised only
+    /// after the copy has written every unit below it, in the same block with
+    /// nothing between that could reach the vector. The unit is the vector's
+    /// element — a member, or a `MapEntry` a map's entry is word for word — and
+    /// the machine holds the source to being that run.
+    fn core_extend_keyed(
+        &mut self,
+        expr: &Expr,
+        out: &Expr,
+        [run, from, count]: [&Expr; 3],
+        want: Option<Dest>,
+    ) -> Val {
+        let Some(elem) = self.vector_element(out) else {
+            return self.dead(expr);
+        };
+        let Some(ty) = self.settled_ty(run) else {
+            return self.dead(expr);
+        };
+        if !matches!(ty, Ty::Set(_) | Ty::Map(..)) || self.layout(&ty, run.span).is_none() {
+            return self.gap(
+                "a keyed extend from something that is not a `Set` or a `Map`",
+                expr,
+            );
+        }
+        let owner = self.expr(out);
+        let src = self.expr(run);
+        let at = self.expr(from);
+        let many = self.expr(count);
+        let store = self.vector_store(owner.slot, expr.span);
+        let len = self.temp(shapes::INT);
+        self.emit(
+            Inst::LoadField {
+                dst: len.slot,
+                obj: owner.slot,
+                at: VECTOR_LEN,
+                layout: shapes::INT,
+            },
+            expr.span,
+        );
+        let row = self.pool.args.intern(vec![
+            store.arg(),
+            len.arg(),
+            src.arg(),
+            at.arg(),
+            many.arg(),
+        ]);
+        self.emit(
+            Inst::RunCopy {
+                args: row,
+                storage: Storage::Words(elem),
+            },
+            expr.span,
+        );
+        self.emit(
+            Inst::Arith {
+                num: Num::Int,
+                op: ArithOp::Add,
+                dst: len.slot,
+                a: len.slot,
+                b: many.slot,
+            },
+            expr.span,
+        );
+        self.emit(
+            Inst::StoreField {
+                obj: owner.slot,
+                at: VECTOR_LEN,
+                src: len.slot,
+                layout: shapes::INT,
+            },
+            expr.span,
+        );
+        self.give_back(len.slot, len.layout);
+        self.release(store, expr.span);
+        self.release(many, expr.span);
+        self.release(at, expr.span);
+        self.release(src, expr.span);
+        self.release(owner, expr.span);
+        self.unit_answer(expr, want)
+    }
+
+    /// `core.setFinish(run)` and `core.mapFinish(run)`: the vector's store
+    /// relabelled into the `Set` of its elements or the `Map` of its
+    /// `MapEntry`s, and the vector consumed.
+    ///
+    /// One [`Inst::RunFinish`] over [`Storage::Words`] of the element, with
+    /// [`Validation::None`] — [`Body::core_vector_finish`] with a keyed target,
+    /// which `crate::verify` admits where the element is the set's member or
+    /// the map's entry word for word. The run is ascending and distinct because
+    /// the body built it so; nothing here sorts (ADR 0059).
+    fn core_keyed_finish(&mut self, expr: &Expr, run: &Expr, want: Option<Dest>) -> Val {
+        let Some(elem) = self.vector_element(run) else {
+            return self.dead(expr);
+        };
+        let Some(ty) = self.settled_ty(expr) else {
+            return self.dead(expr);
+        };
+        if !matches!(ty, Ty::Set(_) | Ty::Map(..)) {
+            return self.gap("a keyed finish answering neither a `Set` nor a `Map`", expr);
+        }
+        let Some(target) = self.layout(&ty, expr.span) else {
+            return self.dead(expr);
+        };
+        let owner = self.expr(run);
+        let dst = self.answer_at(want, target);
+        self.emit(
+            Inst::RunFinish {
+                dst: dst.slot,
+                owner: owner.slot,
+                target,
+                validation: Validation::None,
+                storage: Storage::Words(elem),
+            },
+            expr.span,
+        );
+        self.release(owner, expr.span);
         dst
     }
 

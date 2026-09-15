@@ -34,11 +34,9 @@
 //! Until an argument carried a layout they refused, and so did `contains`
 //! and `indexOf`. A call said where an operand began and never how wide it
 //! was, so a `Vector<Point>.push(p)` would have written `p.x` into the store
-//! and called it a `Point`, and refusing was the honest answer. What remains
-//! is [`operand::run_of`](crate::vm::builtins::operand::run_of),
-//! which holds an incoming element to the receiver's element layout: a store
-//! is traced by that layout's reference map, so a value of another family
-//! written into one would be a collection following the wrong words.
+//! and called it a `Point`, and refusing was the honest answer. None of those
+//! operations is a builtin any more: each is `std.vector` over run
+//! instructions whose element layout the lowering states.
 //!
 //! # The receiver is the vector, not a place that holds one
 //!

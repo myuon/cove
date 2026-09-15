@@ -26,7 +26,8 @@ use std::mem::offset_of;
 use std::ptr;
 
 use cove_ir::{
-    ArgsId, ArithOp, CmpOp, Function, FunctionId, Inst, Len, Num, Program, Slot, Storage, StrId,
+    ArgsId, ArithOp, CmpOp, Compare, Function, FunctionId, Inst, Len, Num, Program, Slot, Storage,
+    StrId,
 };
 
 use crate::abi::{
@@ -243,6 +244,7 @@ struct Helpers {
     run_copy: usize,
     field_load: usize,
     field_store: usize,
+    order_str: usize,
 }
 
 impl Jit {
@@ -269,6 +271,7 @@ impl Jit {
                 run_copy: helpers.run_copy as usize,
                 field_load: helpers.field_load as usize,
                 field_store: helpers.field_store as usize,
+                order_str: helpers.order_str as usize,
             },
             code: Vec::new(),
             finalized: false,
@@ -374,6 +377,7 @@ struct Emit<'a> {
     run_copy: usize,
     field_load: usize,
     field_store: usize,
+    order_str: usize,
     /// Whether a compiled callee is reached by emitted code. See [`Jit::direct`].
     direct: bool,
     /// Which IR instruction is being emitted.
@@ -414,6 +418,7 @@ impl<'a> Emit<'a> {
             run_copy: helpers.run_copy,
             field_load: helpers.field_load,
             field_store: helpers.field_store,
+            order_str: helpers.order_str,
             direct,
             pc: 0,
             code: Vec::new(),
@@ -699,6 +704,15 @@ impl<'a> Emit<'a> {
                 self.mov_imm64(RCX, *value);
                 self.arith(*op, *dst);
             }
+            // `encoded.rs`'s `ORDER_STR`, through the leaf helper. See
+            // [`Emit::order_str`].
+            Inst::Cmp {
+                on: Compare::Str,
+                op: CmpOp::Order,
+                dst,
+                a,
+                b,
+            } => self.order_str(*dst, *a, *b),
             // `encoded.rs`'s `ORDER_INT | ORDER_BOOL | ORDER_TAG`, which
             // `crate::subset` admits for those three and no other.
             Inst::Cmp {
@@ -1769,6 +1783,26 @@ impl<'a> Emit<'a> {
     /// Both `setcc`s read the flags one `cmp` left, the two bytes are widened
     /// into whole registers, and the subtraction is over sixty-four bits, so a
     /// `0 - 1` is all ones rather than `255`.
+    /// `encoded.rs`'s `ORDER_STR`: one call of the leaf
+    /// [`crate::abi::OrderStrFn`], its answer stored whole.
+    ///
+    /// The System V argument registers are `RDI`, `RSI` and `RDX`, and
+    /// [`Emit::load_slot`] writes only its target and [`FRAME`], so both words are
+    /// loaded straight into place. Because the helper is a leaf nothing is
+    /// published before the call — [`WORK`] keeps accumulating — and nothing is
+    /// re-derived after it: [`FRAME`] is `R14`, which the callee preserves, and
+    /// the helper cannot have moved the segment it points into, so the frame
+    /// stays live. The heap scratch registers the call clobbers are loaded fresh
+    /// by every heap access anyway.
+    fn order_str(&mut self, dst: Slot, a: Slot, b: Slot) {
+        self.load_slot(RSI, a);
+        self.load_slot(RDX, b);
+        self.mov_rr(RDI, CTX);
+        self.mov_imm64(RAX, self.order_str as i64);
+        self.call(RAX);
+        self.store_slot(dst, RAX);
+    }
+
     fn order(&mut self, dst: Slot) {
         self.cmp_rr(RAX, RCX);
         self.setcc(CC_G);

@@ -788,13 +788,18 @@ pub(super) fn run_copy_bytes(
 ///
 /// # What is checked
 ///
-/// Both objects must be [`Shape::Elements`] of exactly `elem` — an `Array`'s
-/// elements or a `Vector`'s store, since `growable` changes nothing about the
-/// words. That is not a courtesy check. The collector traces each object by
-/// its *own* layout's reference map, so a unit copied between runs of two
-/// families would be words one map calls integers and the other follows as
-/// addresses. The bounds are then [`run_bounds`]'s, in elements, and only
-/// after both is anything multiplied by the stride.
+/// The destination must be a [`Shape::Elements`] of exactly `elem` — an
+/// `Array`'s elements or a `Vector`'s store, since `growable` changes nothing
+/// about the words. The source may also be a `Set` of `elem` or a `Map` whose
+/// entry `elem` is ([`cove_ir::reads_as_units_of`]): a sorted run is the same
+/// words at the same stride, and `std.set`/`std.map` build an updated run by
+/// copying the unchanged ranges of the old one into a growable vector (#378,
+/// P4-5). It is never a destination, because its order is an invariant only
+/// its construction establishes. That is not a courtesy check. The collector
+/// traces each object by its *own* layout's reference map, so a unit copied
+/// between runs of two families would be words one map calls integers and the
+/// other follows as addresses. The bounds are then [`run_bounds`]'s, in
+/// elements, and only after both is anything multiplied by the stride.
 ///
 /// # Why nothing more is needed for a run of references
 ///
@@ -823,10 +828,11 @@ pub(super) fn run_copy_words(
     let refuse = |machine: &Machine<'_>, error: RuntimeError| error.at(machine.span(id, pc));
     let range = run_range(machine, base, args).map_err(|error| refuse(machine, error))?;
     for (end, addr) in [("destination", range.dst), ("source", range.src)] {
-        let is_run = matches!(
-            program.layout(machine.mem.object_layout(addr)).shape,
-            Shape::Elements { elem: held, .. } if held == elem
-        );
+        let shape = &program.layout(machine.mem.object_layout(addr)).shape;
+        let is_run = match end {
+            "source" => cove_ir::reads_as_units_of(&program.layouts, shape, elem),
+            _ => matches!(shape, Shape::Elements { elem: held, .. } if *held == elem),
+        };
         if !is_run {
             return Err(refuse(
                 machine,
@@ -893,7 +899,7 @@ pub(super) fn run_copy_words(
 /// Everything before the allocation, so a refused slice allocates nothing: the
 /// source is not null, the count is not negative, the source is a
 /// [`Shape::Elements`] of exactly `elem` — an `Array` or a `Vector`'s store —
-/// and `from .. from + count` is inside its header length. That length is a
+/// or the `Set` or `Map` whose unit `elem` is, and `from .. from + count` is inside its header length. That length is a
 /// store's capacity rather than a vector's length, which is why every caller
 /// clamps into the logical length first; each refusal here is a broken
 /// invariant of the lowering, in `runCopy`'s sentences with this instruction's
@@ -935,9 +941,12 @@ pub(super) fn run_slice_words(
             )),
         ));
     }
-    let is_run = matches!(
-        program.layout(machine.mem.object_layout(src)).shape,
-        Shape::Elements { elem: held, .. } if held == elem
+    // A `Set` or a `Map` whose unit `elem` is reads as the run it is: `Set.toArray`
+    // is a slice of the whole set (#378, P4-7).
+    let is_run = cove_ir::reads_as_units_of(
+        &program.layouts,
+        &program.layout(machine.mem.object_layout(src)).shape,
+        elem,
     );
     if !is_run {
         return Err(refuse(
@@ -3806,6 +3815,300 @@ mod tests {
                 "element {at} kept its text"
             );
         }
+    }
+
+    // --- #378 P4-5: a sorted run as a word source, and a keyed finish -------
+
+    /// The layouts a keyed update over `String`s moves words between: a
+    /// `Set<String>` and a `Map<String, String>`, the vectors and stores a
+    /// standard-library body builds their next run in, the arrays a slice of
+    /// one answers, and an `Array<Int>` for garbage.
+    struct KeyedLayouts {
+        int: LayoutId,
+        text: LayoutId,
+        entry: LayoutId,
+        set: LayoutId,
+        map: LayoutId,
+        texts: LayoutId,
+        entries: LayoutId,
+        text_store: LayoutId,
+        entry_store: LayoutId,
+        text_vector: LayoutId,
+        entry_vector: LayoutId,
+        ints: LayoutId,
+    }
+
+    fn keyed_layouts(build: &mut Build) -> KeyedLayouts {
+        let int = build.scalar(Repr::Int);
+        let text = build.string_layout();
+        let entry = build.structure("MapEntry", &[("key", text), ("value", text)]);
+        let elements = |elem, growable| Shape::Elements { elem, growable };
+        KeyedLayouts {
+            int,
+            text,
+            entry,
+            set: build.layout("Set<String>", Shape::Members { elem: text }),
+            map: build.layout(
+                "Map<String, String>",
+                Shape::Entries {
+                    key: text,
+                    value: text,
+                },
+            ),
+            texts: build.layout("Array<String>", elements(text, false)),
+            entries: build.layout("Array<MapEntry>", elements(entry, false)),
+            text_store: build.layout("store<String>", elements(text, true)),
+            entry_store: build.layout("store<MapEntry>", elements(entry, true)),
+            text_vector: build.layout("Vector<String>", Shape::Vector { elem: text }),
+            entry_vector: build.layout("Vector<MapEntry>", Shape::Vector { elem: entry }),
+            ints: build.layout("Array<Int>", elements(int, false)),
+        }
+    }
+
+    /// `finish(owner) -> target`: one keyed word `run-finish` of `elem` into
+    /// `target`, then the owner dropped and five allocations of garbage that
+    /// the fixture's heap cannot hold without collecting.
+    fn keyed_finisher(
+        build: &mut Build,
+        layouts: &KeyedLayouts,
+        vector: LayoutId,
+        target: LayoutId,
+        elem: LayoutId,
+    ) -> FunctionId {
+        let mut code = vec![
+            Inst::RunFinish {
+                dst: 1,
+                owner: 0,
+                target,
+                validation: Validation::None,
+                storage: Storage::Words(elem),
+            },
+            Inst::Clear {
+                slot: 0,
+                layout: vector,
+            },
+        ];
+        for _ in 0..5 {
+            code.push(Inst::Alloc {
+                dst: 2,
+                layout: layouts.ints,
+                len: Len::Count(200),
+            });
+            code.push(Inst::Clear {
+                slot: 2,
+                layout: layouts.ints,
+            });
+        }
+        code.push(Inst::Return { src: 1 });
+        build.function(
+            "keyed_finish",
+            &[vector],
+            &[Repr::Ref, Repr::Ref, Repr::Ref],
+            target,
+            code,
+        )
+    }
+
+    /// A vector of `stride`-word elements holding `words` and room for
+    /// `spare` more, allocated the way `core.vectorWithCapacity` and the
+    /// commits after it leave one.
+    fn filled_vector(
+        machine: &mut Machine<'_>,
+        vector: LayoutId,
+        store: LayoutId,
+        stride: u32,
+        words: &[u64],
+        spare: u32,
+    ) -> u64 {
+        let len = words.len() as u32 / stride;
+        let held = machine.allocate(store, i64::from(len + spare)).unwrap();
+        machine.set_payload_run(held, 0, words);
+        let mark = machine.temps();
+        machine.push_temp(held);
+        let owner = machine.allocate(vector, 0).unwrap();
+        machine.release_temps(mark);
+        machine.set_payload(owner, 0, u64::from(len));
+        machine.set_payload(owner, 1, held);
+        owner
+    }
+
+    /// **A keyed finish relabels a growable store into a `Set` or a `Map` in
+    /// place, gives the spare room back, and the references it holds are
+    /// traced by the target's own map across the collections that follow.**
+    ///
+    /// The owner is dropped before the garbage, so after the finish the answer
+    /// alone holds every string — keys and, for the map, values.
+    #[test]
+    fn a_keyed_finish_keeps_what_its_run_holds_alive_across_a_collection() {
+        const COUNT: u32 = 10;
+        let mut build = Build::default();
+        let layouts = keyed_layouts(&mut build);
+        let to_set = keyed_finisher(
+            &mut build,
+            &layouts,
+            layouts.text_vector,
+            layouts.set,
+            layouts.text,
+        );
+        let to_map = keyed_finisher(
+            &mut build,
+            &layouts,
+            layouts.entry_vector,
+            layouts.map,
+            layouts.entry,
+        );
+        let program = build.done();
+
+        for (entry, target, stride) in [(to_set, layouts.set, 1u32), (to_map, layouts.map, 2)] {
+            let mut machine = Machine::new(&program, 700);
+            let mut words = Vec::new();
+            let mark = machine.temps();
+            for at in 0..COUNT * stride {
+                let word = machine.new_string(&format!("text {at:02}")).unwrap();
+                machine.push_temp(word);
+                words.push(word);
+            }
+            let (vector, store) = match stride {
+                1 => (layouts.text_vector, layouts.text_store),
+                _ => (layouts.entry_vector, layouts.entry_store),
+            };
+            let owner = filled_vector(&mut machine, vector, store, stride, &words, 3);
+            machine.release_temps(mark);
+            let before = machine.collected().collections;
+            let answer = machine
+                .run(entry, &[owner], &budget())
+                .expect("a sorted run finishes")[0];
+            assert!(
+                machine.collected().collections > before,
+                "the fixture did not force a collection"
+            );
+            assert_eq!(machine.object_layout(answer), target);
+            assert_eq!(machine.object_len(answer), COUNT);
+            for at in 0..COUNT * stride {
+                let word = machine.payload(answer, at);
+                assert_eq!(
+                    machine.string_bytes(word),
+                    format!("text {at:02}").into_bytes(),
+                    "word {at} of the keyed run kept its text"
+                );
+            }
+        }
+    }
+
+    /// **In this crate's tests a keyed finish of a run that is not ascending
+    /// and distinct is a broken invariant of the body that built it** (#378,
+    /// Q4.10): a finish does not sort, and a set that renders out of order is
+    /// worse than a stopped run.
+    #[test]
+    #[should_panic(expected = "not ascending and distinct")]
+    fn a_keyed_finish_of_an_unsorted_run_is_a_broken_invariant() {
+        let mut build = Build::default();
+        let layouts = keyed_layouts(&mut build);
+        let entry = keyed_finisher(
+            &mut build,
+            &layouts,
+            layouts.text_vector,
+            layouts.set,
+            layouts.text,
+        );
+        let program = build.done();
+        let mut machine = Machine::new(&program, 1 << 14);
+        let b = machine.new_string("b").unwrap();
+        let a = machine.new_string("a").unwrap();
+        let owner = filled_vector(
+            &mut machine,
+            layouts.text_vector,
+            layouts.text_store,
+            1,
+            &[b, a],
+            0,
+        );
+        let _ = machine.run(entry, &[owner], &budget());
+    }
+
+    /// **A `Set` and a `Map` are word sources for a run copy and a run slice,
+    /// at their own stride, and never a run copy's destination.**
+    #[test]
+    fn a_sorted_run_is_read_as_units_and_never_written() {
+        let mut build = Build::default();
+        let layouts = keyed_layouts(&mut build);
+        // copy(dst, src): two units of `String` from 0 to 0.
+        let row = build.args(&[
+            (0, layouts.texts),
+            (2, layouts.int),
+            (1, layouts.set),
+            (2, layouts.int),
+            (3, layouts.int),
+        ]);
+        let copy = build.function(
+            "copy_members",
+            &[layouts.texts, layouts.set],
+            &[Repr::Ref, Repr::Ref, Repr::Int, Repr::Int],
+            layouts.texts,
+            vec![
+                Inst::Int { dst: 2, value: 0 },
+                Inst::Int { dst: 3, value: 2 },
+                Inst::RunCopy {
+                    args: row,
+                    storage: Storage::Words(layouts.text),
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let members = word_slicer(&mut build, layouts.set, layouts.texts, layouts.text);
+        let pairs = word_slicer(&mut build, layouts.map, layouts.entries, layouts.entry);
+        let program = build.done();
+
+        let mut machine = Machine::new(&program, 1 << 14);
+        let (a, b, c, d) = (
+            machine.new_string("a").unwrap(),
+            machine.new_string("b").unwrap(),
+            machine.new_string("c").unwrap(),
+            machine.new_string("d").unwrap(),
+        );
+        let set = machine.allocate(layouts.set, 2).unwrap();
+        machine.set_payload_run(set, 0, &[a, b]);
+        let map = machine.allocate(layouts.map, 2).unwrap();
+        machine.set_payload_run(map, 0, &[a, c, b, d]);
+
+        let array = machine.allocate(layouts.texts, 2).unwrap();
+        machine
+            .run(copy, &[array, set], &budget())
+            .expect("a set is a word source");
+        assert_eq!(machine.payload_run(array, 0, 2), vec![a, b]);
+
+        let other = machine.allocate(layouts.set, 2).unwrap();
+        let error = machine
+            .run(copy, &[other, set], &budget())
+            .expect_err("a set is not a destination");
+        assert_eq!(
+            error.message,
+            "`runCopy`'s destination is not a run of `String` elements"
+        );
+        assert_eq!(
+            machine.payload_run(other, 0, 2),
+            vec![0, 0],
+            "nothing written"
+        );
+
+        let sliced = machine
+            .run(members, &[set, 1, 1], &budget())
+            .expect("a set slices")[0];
+        assert_eq!(machine.object_layout(sliced), layouts.texts);
+        assert_eq!(machine.payload_run(sliced, 0, 1), vec![b]);
+        let sliced = machine
+            .run(pairs, &[map, 0, 2], &budget())
+            .expect("a map slices as its entries")[0];
+        assert_eq!(machine.object_layout(sliced), layouts.entries);
+        assert_eq!(machine.object_len(sliced), 2);
+        assert_eq!(machine.payload_run(sliced, 0, 4), vec![a, c, b, d]);
+
+        // A map is not a run of its keys: a unit of the wrong width is refused.
+        let wrong = machine.run(members, &[map, 0, 1], &budget()).unwrap_err();
+        assert_eq!(
+            wrong.message,
+            "`runSlice`'s source is not a run of `String` elements"
+        );
     }
 
     /// `slice_bytes(src, from, count) -> String`: one byte `run-slice` out of a

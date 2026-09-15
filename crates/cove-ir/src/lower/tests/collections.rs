@@ -441,29 +441,42 @@ fn @m.same(Vector Vector) -> Bool
 /// each element is placed where it belongs as it arrives, so the run is
 /// sorted at every step and a duplicate is refused rather than collapsed.
 ///
-/// None of that is something an instruction expresses, and the ascending
-/// order is part of the value rather than an implementation's leftovers —
-/// the language says a set iterates and renders that way.
+/// The call is `std.set.of`, whose variadic parameter receives the elements
+/// as the `Array` any variadic call builds (#378, P4-8) — the literal names no
+/// builtin. The ascending order is part of the value rather than an
+/// implementation's leftovers: the language says a set iterates and renders
+/// that way.
 #[test]
 fn a_set_literal_is_one_call_over_its_elements() {
     assert_eq!(
         listing("fn f() -> Set<Int> { Set.of(3, 1, 2) }", "f"),
         "\
 fn @m.f() -> Set
-  frame 5: s0:ref s1:int s2:int s3:int s4:ref
+  frame 8: s0:ref s1:int s2:int s3:int s4:ref s5:int s6:int s7:ref
      0  int s1:int 3
      1  int s2:int 1
      2  int s3:int 2
-     3  call-builtin s4:Set Set.of (s1:Int s2:Int s3:Int)
-     4  copy s0:Set s4:Set
-     5  return s0:Set
+     3  alloc s4:ref Array<array> x3
+     4  int s5:int 1
+     5  int s6:int 0
+     6  store-elem s4:ref s6:int s1:Int
+     7  add.int s6:int s6:int s5:int
+     8  store-elem s4:ref s6:int s2:Int
+     9  add.int s6:int s6:int s5:int
+    10  store-elem s4:ref s6:int s3:Int
+    11  add.int s6:int s6:int s5:int
+    12  call s7:Set std.set.of<Int> (s4:Array)
+    13  clear s4:Array
+    14  copy s0:Set s7:Set
+    15  return s0:Set
 "
     );
 }
 
 /// A map literal's operands are the `MapEntry` values it was written with,
 /// and a `MapEntry` is an ordinary inline struct: two words here, the key's
-/// address and the value.
+/// address and the value, stored whole into the `Array` `std.map.of`'s
+/// variadic parameter receives.
 ///
 /// That is the same run one entry of the map occupies, which is what makes a
 /// `for` over a map a single load — see
@@ -477,15 +490,21 @@ fn a_map_literal_passes_its_entries_as_inline_pairs() {
         ),
         "\
 fn @m.f() -> Map
-  frame 5: s0:ref s1:ref s2:int s3:ref s4:int
+  frame 7: s0:ref s1:ref s2:int s3:ref s4:int s5:int s6:ref
      0  str s1:ref \"a\"
      1  int s2:int 1
      2  copy s3:String s1:String
      3  copy s4:Int s2:Int
-     4  call-builtin s1:Map Map.of (s3..s4:MapEntry)
-     5  clear s3..s4:MapEntry
-     6  copy s0:Map s1:Map
-     7  return s0:Map
+     4  alloc s1:ref Array<array> x1
+     5  int s2:int 1
+     6  int s5:int 0
+     7  store-elem s1:ref s5:int s3..s4:MapEntry
+     8  add.int s5:int s5:int s2:int
+     9  clear s3..s4:MapEntry
+    10  call s6:Map std.map.of<String, Int> (s1:Array)
+    11  clear s1:Array
+    12  copy s0:Map s6:Map
+    13  return s0:Map
 "
     );
 }
@@ -511,12 +530,14 @@ fn @m.f(Set) -> Int
     );
 }
 
-/// An immutable update is a new object, and the machine builds it: the search
-/// that finds where the element goes also answers whether it was already
-/// there, so the run is allocated to its final length and filled sorted in
-/// one pass.
+/// An immutable update is a new object, and the standard library builds it:
+/// `std.set.inserted` searches, answers the receiver when the element is
+/// already there, and otherwise copies the run's two ranges around it into a
+/// vector of exact room and finishes that into the new set (ADR 0059, #378
+/// P4-6). At the call site it is a call answering straight into the
+/// destination, where it was a builtin.
 #[test]
-fn an_immutable_update_is_the_machine_s_and_answers_a_new_set() {
+fn an_immutable_update_is_the_standard_library_s_and_answers_a_new_set() {
     assert_eq!(
         listing("fn f(s: Set<Int>) -> Set<Int> { s.inserted(4) }", "f"),
         "\
@@ -524,7 +545,7 @@ fn @m.f(Set) -> Set
   frame 3: s0!:ref s1:ref s2:int
   local s -> s0:Set [0, 3)
      0  int s2:int 4
-     1  call-builtin s1:Set Set.inserted (s0:Set s2:Int)
+     1  call s1:Set std.set.inserted<Int> (s0:Set s2:Int)
      2  return s1:Set
 "
     );
@@ -556,8 +577,9 @@ fn @m.f(Map) -> Option
 }
 
 /// `keys` and `values` answer `Array`s in ascending key order, which is the
-/// order the entries are already in — so the machine copies rather than
-/// sorts.
+/// order the entries are already in — so `std.map.keys` pushes each key in
+/// that order rather than sorting (#378, P4-7), and the call answers straight
+/// into the destination the builtin did.
 #[test]
 fn a_map_answers_its_keys_as_an_array() {
     assert_eq!(
@@ -569,7 +591,7 @@ fn a_map_answers_its_keys_as_an_array() {
 fn @m.f(Map) -> Array
   frame 2: s0!:ref s1:ref
   local m -> s0:Map [0, 2)
-     0  call-builtin s1:Array Map.keys (s0:Map)
+     0  call s1:Array std.map.keys<String, Int> (s0:Map)
      1  return s1:Array
 "
     );

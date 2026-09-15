@@ -648,7 +648,7 @@ pub(crate) struct Machine<'a> {
     ///
     /// **The reentrancy question this answers.** Nothing reachable from
     /// [`crate::vm::builtins::call`] — not the ~100-arm dispatch in
-    /// `builtins.rs`, nor `seq.rs`, `keyed.rs`, `key.rs`, `text.rs`,
+    /// `builtins.rs`, nor `seq.rs`, `key.rs`, `text.rs`,
     /// `scalar.rs`, `make.rs`, or `equal.rs` — calls [`Machine::call_host`],
     /// [`Machine::call_resource`], [`Machine::call_from_host`], or anything
     /// else that runs the dispatch loop again: a builtin is a leaf call. The
@@ -2735,6 +2735,16 @@ impl<'a> Machine<'a> {
     /// `benches/arith` — which finishes nothing — ran 47.0 ms against 55.3 on
     /// the same tree, the loop around every arm paying for an arm it never
     /// took. A finish is once per vector, so the call costs nothing that shows.
+    ///
+    /// # A keyed finish
+    ///
+    /// `target` may also be the `Set` or `Map` whose unit `elem` is, which
+    /// `cove_ir::verify` admits (#378, P4-5): `std.set` and `std.map` build an
+    /// updated sorted run in a growable vector and finish it here. The relabel is
+    /// the same three writes. The run's being ascending and distinct is the
+    /// body's to have established; this crate's tests assert it before the
+    /// relabel (Q4.10), and a `checked` binary does not, for the cost
+    /// `key::is_ascending_and_distinct` records.
     #[inline(never)]
     pub(crate) fn finish_words(
         &mut self,
@@ -2743,7 +2753,31 @@ impl<'a> Machine<'a> {
         elem: LayoutId,
     ) -> Result<u64, RuntimeError> {
         let run = self.vector_run(owner, elem)?;
+        #[cfg(test)]
+        self.assert_keyed_order(&run, target, elem);
         runs::growable_finish(self, &run, target, Validation::None)
+    }
+
+    /// In this crate's tests, panics if a keyed finish's run is not
+    /// ascending and distinct by key; a finish into an `Array` asks nothing.
+    ///
+    /// A `Set`'s unit is its key. A `Map`'s unit is a `MapEntry`, whose key is
+    /// its first field and so the first words of the unit.
+    #[cfg(test)]
+    fn assert_keyed_order(&self, run: &Growable, target: LayoutId, elem: LayoutId) {
+        let key = match self.program.layout(target).shape {
+            Shape::Members { elem } => elem,
+            Shape::Entries { key, .. } => key,
+            _ => return,
+        };
+        let (stride, width) = (self.width(elem), self.width(key));
+        assert!(
+            crate::vm::builtins::is_ascending_and_distinct(
+                self, key, run.store, stride, width, run.len
+            ),
+            "a keyed finish into `{}` was handed a run that is not ascending and distinct",
+            self.program.layout(target).name
+        );
     }
 
     /// A byte [`Inst::RunFinish`]: the buffer's live prefix, validated and

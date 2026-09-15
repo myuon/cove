@@ -692,6 +692,51 @@ pub fn fielded_answers(outcomes: &[Outcome]) {
         .with(|held| *held.borrow_mut() = outcomes.iter().map(|outcome| outcome.abi()).collect());
 }
 
+thread_local! {
+    /// Every string order this thread's compiled code handed to the runtime,
+    /// as the two words, in order.
+    pub static ORDERED: RefCell<Vec<(u64, u64)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The runtime's string-order helper, as a test double that is not a stub.
+///
+/// `Machine::order_strings` compares two string objects' bytes and reads a null
+/// address as the empty string; this does the same over a [`Heap`] — the header's
+/// low half is the byte count and the payload is eight bytes a word, least
+/// significant first — through [`heap_word_ptr`], and records the hand-over. It
+/// touches nothing else in `ctx`, which is the leaf contract seen from the
+/// callee's side.
+///
+/// # Safety
+///
+/// `a` and `b` are each nought or the address of a string object in the heap
+/// `ctx.chunks` names.
+unsafe extern "C" fn order_str(ctx: *mut NativeCtx, a: u64, b: u64) -> i64 {
+    ORDERED.with(|held| held.borrow_mut().push((a, b)));
+    let bytes = |addr: u64| -> Vec<u8> {
+        if addr == 0 {
+            return Vec::new();
+        }
+        let len = (*heap_word_ptr(ctx, addr) & 0xffff_ffff) as usize;
+        (0..len)
+            .map(|at| (*heap_word_ptr(ctx, addr + 1 + (at / 8) as u64) >> ((at % 8) * 8)) as u8)
+            .collect()
+    };
+    match bytes(a).cmp(&bytes(b)) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+pub fn ordered() -> Vec<(u64, u64)> {
+    ORDERED.with(|held| held.borrow().clone())
+}
+
+pub fn forget_ordered() {
+    ORDERED.with(|held| held.borrow_mut().clear());
+}
+
 pub fn helpers() -> NativeHelpers {
     NativeHelpers {
         safepoint,
@@ -704,6 +749,7 @@ pub fn helpers() -> NativeHelpers {
         run_copy,
         field_load,
         field_store,
+        order_str,
     }
 }
 
@@ -849,6 +895,16 @@ pub const BOXED: LayoutId = LayoutId(17);
 pub const ARRAY_INT: LayoutId = LayoutId(18);
 /// `Array<Pair>`, the stride-two case of [`ARRAY_INT`].
 pub const ARRAY_PAIR: LayoutId = LayoutId(19);
+/// `Set<Int>`: what a keyed finish of `Int` elements relabels its store to
+/// (#378, P4-5).
+pub const SET_INT: LayoutId = LayoutId(20);
+/// `MapEntry<Int, Int>`: two `Int` fields, `key` at word 0 and `value` at
+/// word 1 — word for word one entry of [`MAP_INT`].
+pub const ENTRY_INT: LayoutId = LayoutId(21);
+/// `Map<Int, Int>`, whose entry [`ENTRY_INT`] is.
+pub const MAP_INT: LayoutId = LayoutId(22);
+/// `Vector<MapEntry<Int, Int>>`, the owner a map's next run is built in.
+pub const ENTRY_VECTOR: LayoutId = LayoutId(23);
 
 pub fn span() -> Span {
     Span::new(FileId(0), 0, 0)
@@ -956,6 +1012,30 @@ pub fn program(function: Function) -> Program {
             elem: PAIR,
             growable: false,
         },
+    ));
+    layouts.push(Layout::object("Set", cove_ir::Shape::Members { elem: INT }));
+    let (fields, words) = cove_ir::struct_layout(
+        &[(Arc::from("key"), INT), (Arc::from("value"), INT)],
+        &layouts,
+    );
+    layouts.push(Layout::inline(
+        "MapEntry",
+        cove_ir::Shape::Struct {
+            fields,
+            opaque: false,
+        },
+        words,
+    ));
+    layouts.push(Layout::object(
+        "Map",
+        cove_ir::Shape::Entries {
+            key: INT,
+            value: INT,
+        },
+    ));
+    layouts.push(Layout::object(
+        "Vector",
+        cove_ir::Shape::Vector { elem: ENTRY_INT },
     ));
     Program {
         functions: vec![function],
@@ -2206,7 +2286,7 @@ pub fn a_unit_constant_is_a_zero_word<A: Arm>() {
 /// comparison of the two words and a subtraction of its two flags, stored as
 /// a whole word — so `-1` is all ones, and a lowering that widened a flag
 /// byte with a sign, or subtracted in eight bits, would write `255` or a mask.
-/// The `String` order is outside the slice and refuses the function.
+/// The `String` order goes through a helper and has cases of its own below.
 pub fn a_three_way_order_writes_minus_one_zero_or_one<A: Arm>() {
     for (on, repr, a, b, answer) in [
         (Compare::Int, Repr::Int, 1i64, 2i64, -1i64),
@@ -2238,6 +2318,161 @@ pub fn a_three_way_order_writes_minus_one_zero_or_one<A: Arm>() {
         let outcome = run::<A>(&held, &mut words, 0);
         assert_eq!(outcome.outcome, Outcome::Returned, "{on:?} {a} {b}");
         assert_eq!(words[2] as i64, answer, "{on:?} {a} {b}");
+    }
+}
+
+/// A string object of `text`'s bytes at heap word `index`, as `Machine::new_string`
+/// lays one out: the byte count in the header, eight bytes a payload word, least
+/// significant first, and a zero tail.
+pub fn a_string(heap: &mut Heap, index: u64, text: &[u8]) -> u64 {
+    let addr = heap.object(index, LayoutId(0), text.len() as u32);
+    for (word, chunk) in text.chunks(8).enumerate() {
+        let mut packed = 0u64;
+        for (at, byte) in chunk.iter().enumerate() {
+            packed |= u64::from(*byte) << (at * 8);
+        }
+        heap.set(index + 1 + word as u64, packed);
+    }
+    addr
+}
+
+/// Two string orders — `a` against `b` into `s2`, then `b` against `a` into `s3`
+/// — and their sum into `s4`, answering `s2`. Slots `s0` and `s1` are the two
+/// strings.
+///
+/// The second order and the add read and write the frame **after** a call of the
+/// leaf helper with nothing re-derived in between, which is the part of the leaf
+/// contract an arm could get wrong without any answer changing on the first
+/// instruction alone.
+pub fn ordering_strings() -> Program {
+    let order = |dst, a, b| Inst::Cmp {
+        on: Compare::Str,
+        op: CmpOp::Order,
+        dst,
+        a,
+        b,
+    };
+    program(function(
+        vec![Repr::Ref, Repr::Ref, Repr::Int, Repr::Int, Repr::Int],
+        INT,
+        vec![
+            order(2, 0, 1),
+            order(3, 1, 0),
+            Inst::Arith {
+                num: Num::Int,
+                op: ArithOp::Add,
+                dst: 4,
+                a: 2,
+                b: 3,
+            },
+            Inst::Return { src: 2 },
+        ],
+    ))
+}
+
+/// The strings [`a_string_order_is_the_runtimes_leaf`] orders, placed in two
+/// chunks so a string straddling the boundary is among them, and the address of
+/// each — nought for the null reference.
+pub fn ordered_strings(heap: &mut Heap) -> Vec<(&'static str, u64)> {
+    let straddle = HEAP_CHUNK_WORDS - 1;
+    vec![
+        ("null", 0),
+        ("empty", a_string(heap, 40, b"")),
+        ("a", a_string(heap, 42, b"a")),
+        ("ab", a_string(heap, 44, b"ab")),
+        ("abc", a_string(heap, 46, b"abc")),
+        ("abcdefghi", a_string(heap, 48, b"abcdefghi")),
+        ("abcdefghj", a_string(heap, 52, b"abcdefghj")),
+        ("abcdefgh", a_string(heap, 56, b"abcdefgh")),
+        ("h\u{e9}llo", a_string(heap, 60, "h\u{e9}llo".as_bytes())),
+        ("hello", a_string(heap, 64, b"hello")),
+        ("Z", a_string(heap, 68, b"Z")),
+        ("straddling", a_string(heap, straddle, b"abcdefghijklmnop")),
+    ]
+}
+
+/// **A `String`'s three-way order is the runtime's leaf helper, called once per
+/// instruction with the two words, its answer stored whole — and no safepoint
+/// or re-derived frame around it.**
+///
+/// Every pair of an equal string, a prefix, a difference in the ninth byte, a
+/// two-byte character against its ASCII neighbour, an upper-case letter, the empty
+/// string, a string straddling a chunk boundary and the null reference, which
+/// `encoded.rs`'s `ORDER_STR` reads as the empty string rather than refusing — so
+/// a null against the empty string is `0` and not a raise. `-1` is all ones, so an
+/// arm that stored the answer's low byte or widened it without a sign would write
+/// `255` or `0xffff_ffff` into `s2`, and the sum in `s4` is `0` only if the second
+/// call and the add used a frame the first call did not stale.
+pub fn a_string_order_is_the_runtimes_leaf<A: Arm>() {
+    let mut heap = Heap::new(2);
+    let strings = ordered_strings(&mut heap);
+    let order = |x: &str, y: &str| -> i64 {
+        let text = |name: &str| -> Vec<u8> {
+            match name {
+                "null" | "empty" => Vec::new(),
+                "straddling" => b"abcdefghijklmnop".to_vec(),
+                other => other.as_bytes().to_vec(),
+            }
+        };
+        match text(x).cmp(&text(y)) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        }
+    };
+    let held = ordering_strings();
+    for (x, a) in &strings {
+        for (y, b) in &strings {
+            forget_polls();
+            forget_ordered();
+            let mut words = vec![*a, *b, 0xdead, 0xdead, 0xdead];
+            let answer = run_over::<A>(&held, &mut words, 0, &heap);
+            assert_eq!(answer.outcome, Outcome::Returned, "{x} against {y}");
+            assert_eq!(words[2] as i64, order(x, y), "{x} against {y}");
+            assert_eq!(words[3] as i64, order(y, x), "{y} against {x}");
+            assert_eq!(words[4], 0, "{x} and {y}: the frame after the leaf call");
+            assert_eq!(
+                ordered(),
+                vec![(*a, *b), (*b, *a)],
+                "{x} against {y}: one hand-over per instruction, with the two words"
+            );
+            assert!(
+                polls().is_empty(),
+                "{x} against {y}: a leaf is no safepoint"
+            );
+        }
+    }
+    forget_ordered();
+}
+
+/// A `String`'s order is the only `String` comparison in the slice: equality and
+/// the ordered forms `cmp_str!` answers copy both strings out, and still refuse
+/// the function.
+pub fn only_a_strings_order_is_in_the_slice<A: Arm>() {
+    assert!(compiles::<A>(&ordering_strings()));
+    for op in [
+        CmpOp::Eq,
+        CmpOp::Ne,
+        CmpOp::Lt,
+        CmpOp::Le,
+        CmpOp::Gt,
+        CmpOp::Ge,
+    ] {
+        let held = program(function(
+            vec![Repr::Ref, Repr::Ref, Repr::Bool],
+            BOOL,
+            vec![
+                Inst::Cmp {
+                    on: Compare::Str,
+                    op,
+                    dst: 2,
+                    a: 0,
+                    b: 1,
+                },
+                Inst::Return { src: 2 },
+            ],
+        ));
+        assert!(!compiles::<A>(&held), "`Str` {op:?} is outside the slice");
     }
 }
 
@@ -3456,8 +3691,8 @@ pub fn a_builtin_no_arm_lowers_refuses_the_function<A: Arm>() {
     ))));
     for (receiver, operation) in [
         ("String", "length"),
-        ("Set", "inserted"),
-        ("Map", "inserted"),
+        ("String", "trim"),
+        ("String", "toUpper"),
     ] {
         assert!(
             !compiles::<A>(&one(receiver, operation)),
@@ -3909,6 +4144,67 @@ pub fn a_freeze_relabels_the_store_in_place<A: Arm>() {
 
         assert_eq!(heap.get(at + 1), 0, "the vector's own length word, cleared");
         assert_eq!(heap.get(at + 2), 0, "the vector's own store word, cleared");
+    }
+    forget_built();
+}
+
+/// A keyed finish — `core.setFinish` and `core.mapFinish`, #378 P4-5 — is the
+/// same emitted relabel as a freeze, into the `Set` or the `Map` the store's
+/// unit is: nothing handed to the runtime, the answer aliases the store, the
+/// header names the keyed layout at the logical length and the spare room is a
+/// free block.
+pub fn a_keyed_finish_relabels_the_store_into_a_set_or_a_map<A: Arm>() {
+    let cases: [(LayoutId, LayoutId, LayoutId, u32); 2] = [
+        (VECTOR, INT, SET_INT, 1),
+        (ENTRY_VECTOR, ENTRY_INT, MAP_INT, 2),
+    ];
+    for (vector, elem, target, stride) in cases {
+        forget_built();
+        let held = program(function(
+            vec![Repr::Ref, Repr::Ref],
+            REF,
+            vec![
+                Inst::RunFinish {
+                    dst: 1,
+                    owner: 0,
+                    target,
+                    validation: Validation::None,
+                    storage: Storage::Words(elem),
+                },
+                Inst::Return { src: 1 },
+            ],
+        ));
+        let (len, capacity) = (2u32, 5u32);
+        let at = HEAP_CHUNK_WORDS + 33;
+        let mut heap = Heap::new(2);
+        let header = a_vector(&mut heap, at, vector, len, capacity);
+        let store = heap.addr(at + 8);
+        for word in 0..(len * stride) {
+            heap.set(at + 8 + 1 + u64::from(word), 900 + u64::from(word));
+        }
+        let mut words = vec![header, UNWRITTEN];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "stride {stride}");
+        assert!(built().is_empty(), "emitted whole: {:?}", built());
+        assert_eq!(words[1], store, "the answer aliases the store");
+        assert_eq!(
+            heap.get(at + 8),
+            (u64::from(target.0) << 32) | u64::from(len),
+            "the store's header names the keyed run and its length"
+        );
+        for word in 0..(len * stride) {
+            assert_eq!(
+                heap.get(at + 8 + 1 + u64::from(word)),
+                900 + u64::from(word)
+            );
+        }
+        assert_eq!(
+            heap.get(at + 8 + 1 + u64::from(len * stride)),
+            u64::from((capacity - len) * stride - 1),
+            "a free block of the spare room"
+        );
+        assert_eq!(heap.get(at + 1), 0, "the vector's length word, cleared");
+        assert_eq!(heap.get(at + 2), 0, "the vector's store word, cleared");
     }
     forget_built();
 }

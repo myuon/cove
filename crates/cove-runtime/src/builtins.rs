@@ -18,7 +18,6 @@
 //! through a real interpreter, so a signature declared with no body behind it
 //! fails a test rather than a program.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use cove_diag::Span;
@@ -716,14 +715,135 @@ pub fn call_core(
             };
             let at = core_index(&shown, &args[1], entries.len(), span)?;
             let (key, value) = &entries[at];
-            Ok(Value(Repr::Struct(Rc::new(StructValue {
-                type_name: MAP_ENTRY.name.into(),
-                fields: vec![
-                    (MAP_ENTRY.fields[0].name.into(), key.to_value()),
-                    (MAP_ENTRY.fields[1].name.into(), value.clone()),
-                ],
-                opaque: false,
-            }))))
+            Ok(map_entry(key, value))
+        }
+        // The copy beneath `std.set.toArray`: the members, in the order the set
+        // keeps them, as the values they are.
+        "setSlice" => {
+            let Value(Repr::Set(items)) = &args[0] else {
+                return Err(type_error(&shown, "items", "Set", &args[0], span));
+            };
+            let range = core_range(
+                &shown,
+                "runSlice",
+                "element(s)",
+                &args[1],
+                &args[2],
+                items.len(),
+                span,
+            )?;
+            Ok(Value(Repr::Array(
+                items[range].iter().map(MapKey::to_value).collect(),
+            )))
+        }
+        // The growable vector a keyed update is built in, with room for the run
+        // it will hold. A `Vec`'s capacity is a hint here as it is for a byte
+        // buffer: nothing a program asks reads it back. A negative capacity is
+        // the machine's allocation refusal there and a broken invariant here.
+        "vectorWithCapacity" => {
+            let Value(Repr::Int(capacity)) = &args[0] else {
+                return Err(type_error(&shown, "capacity", "Int", &args[0], span));
+            };
+            let Ok(capacity) = usize::try_from(*capacity) else {
+                return Err(RuntimeError::new(format!(
+                    "`{shown}`'s capacity is `{capacity}`, and a capacity is 0 or more"
+                ))
+                .at(span));
+            };
+            Ok(host.allocate_vector(Vec::with_capacity(capacity)))
+        }
+        // A range of a sorted run appended to that vector: a member as the value
+        // it is, an entry as the `MapEntry` `core.entryAt` answers. The body
+        // held the range inside the run, so the refusal is the machine's
+        // `run-copy` bound.
+        "extendFromSet" | "extendFromMap" => {
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "out", "Vector", &args[0], span));
+            };
+            check_consumed(storage, span)?;
+            let appended: Vec<Value> = match &args[1] {
+                Value(Repr::Set(items)) if name == "extendFromSet" => {
+                    let range = core_range(
+                        &shown,
+                        "runCopy",
+                        "element(s)",
+                        &args[2],
+                        &args[3],
+                        items.len(),
+                        span,
+                    )?;
+                    items[range].iter().map(MapKey::to_value).collect()
+                }
+                Value(Repr::Map(entries)) if name == "extendFromMap" => {
+                    let range = core_range(
+                        &shown,
+                        "runCopy",
+                        "element(s)",
+                        &args[2],
+                        &args[3],
+                        entries.len(),
+                        span,
+                    )?;
+                    entries[range]
+                        .iter()
+                        .map(|(key, value)| map_entry(key, value))
+                        .collect()
+                }
+                other => {
+                    let (role, family) = match name {
+                        "extendFromSet" => ("items", "Set"),
+                        _ => ("entries", "Map"),
+                    };
+                    return Err(type_error(&shown, role, family, other, span));
+                }
+            };
+            storage.elements.borrow_mut().extend(appended);
+            Ok(Value(Repr::Unit))
+        }
+        // The keyed finish: the vector's elements taken out as the sorted run of
+        // a `Set` or a `Map`, and the vector consumed, as `vectorFinish` takes
+        // them as an `Array`. The body built the run ascending and distinct;
+        // under `debug_assertions` that is asserted here — the machine asserts it
+        // only in its own tests, where the cost does not reach a measurement
+        // (#378, Q4.10).
+        "setFinish" | "mapFinish" => {
+            let Value(Repr::Vector(storage)) = &args[0] else {
+                return Err(type_error(&shown, "run", "Vector", &args[0], span));
+            };
+            check_consumed(storage, span)?;
+            let elements = storage.elements.take();
+            *storage.frozen.borrow_mut() = true;
+            let key_of = |value: &Value| {
+                MapKey::from_value(value)
+                    .map_err(|invalid| invalid_key_error(&shown, "key", &invalid, span))
+            };
+            if name == "setFinish" {
+                let members = elements
+                    .iter()
+                    .map(key_of)
+                    .collect::<Result<Vec<MapKey>, _>>()?;
+                debug_assert!(
+                    members.windows(2).all(|pair| pair[0] < pair[1]),
+                    "`core.setFinish` was handed a run that is not ascending and distinct"
+                );
+                return Ok(Value(Repr::Set(members.into())));
+            }
+            let mut pairs = Vec::with_capacity(elements.len());
+            for element in &elements {
+                let Value(Repr::Struct(entry)) = element else {
+                    return Err(expects_map_entry(element, span));
+                };
+                let key = entry.get("key").expect("MapEntry always has a `key` field");
+                let value = entry
+                    .get("value")
+                    .expect("MapEntry always has a `value` field");
+                pairs.push((key_of(key)?, value.clone()));
+            }
+            debug_assert!(
+                pairs.windows(2).all(|pair| pair[0].0 < pair[1].0),
+                "`core.mapFinish` was handed a run that is not ascending and distinct"
+            );
+            Ok(Value(Repr::Map(pairs.into())))
         }
         // A name the table declares and nothing here executes. No program can
         // reach one of these from its own modules, so the check that every
@@ -731,6 +851,18 @@ pub fn call_core(
         // from a standard-library module on both evaluators.
         _ => Err(RuntimeError::new(format!("unknown core intrinsic `{shown}`")).at(span)),
     }
+}
+
+/// The `MapEntry(key:, value:)` one entry of a map's sorted run is, as a value.
+fn map_entry(key: &MapKey, value: &Value) -> Value {
+    Value(Repr::Struct(Rc::new(StructValue {
+        type_name: MAP_ENTRY.name.into(),
+        fields: vec![
+            (MAP_ENTRY.fields[0].name.into(), key.to_value()),
+            (MAP_ENTRY.fields[1].name.into(), value.clone()),
+        ],
+        opaque: false,
+    })))
 }
 
 /// The method and the role a keyed refusal is written in, as the standard
@@ -833,47 +965,10 @@ pub fn call_associated(
 ) -> Result<Value, RuntimeError> {
     match (type_name, name) {
         ("Vector", "of") => Ok(host.allocate_vector(std::mem::take(args))),
-        // `Map.of` takes the `MapEntry` values `MapEntry(key:, value:)`
-        // builds. A literal with two identical keys is a mistake, not an
-        // intent, so a duplicate key is rejected rather than resolved by
-        // silently keeping the first or last entry.
-        ("Map", "of") => {
-            let mut map: BTreeMap<MapKey, Value> = BTreeMap::new();
-            for arg in args.drain(..) {
-                let Value(Repr::Struct(entry)) = &arg else {
-                    return Err(expects_map_entry(&arg, span));
-                };
-                if &*entry.type_name != MAP_ENTRY.name {
-                    return Err(expects_map_entry(&arg, span));
-                }
-                let key_value = entry.get("key").expect("MapEntry always has a `key` field");
-                let key = to_map_key("Map.of", "map key", key_value, span)?;
-                if map.contains_key(&key) {
-                    return Err(duplicate_key_error("Map.of", "key", &key, span));
-                }
-                let value = entry
-                    .get("value")
-                    .expect("MapEntry always has a `value` field")
-                    .clone();
-                map.insert(key, value);
-            }
-            // Ascending by construction: `BTreeMap::into_iter` already
-            // answers in `MapKey`'s `Ord`, which is exactly the order the
-            // sorted run `Repr::Map` stores needs.
-            Ok(Value(Repr::Map(map.into_iter().collect())))
-        }
-        // `Set.of` rejects a duplicate element for the same reason `Map.of`
-        // rejects a duplicate key.
-        ("Set", "of") => {
-            let mut set: BTreeSet<MapKey> = BTreeSet::new();
-            for item in args.drain(..) {
-                let key = to_map_key("Set.of", "set element", &item, span)?;
-                if !set.insert(key.clone()) {
-                    return Err(duplicate_key_error("Set.of", "element", &key, span));
-                }
-            }
-            Ok(Value(Repr::Set(set.into_iter().collect())))
-        }
+        // `Map.of` and `Set.of` are not here: each is `std.map.of` or
+        // `std.set.of` (#378, P4-8), which `Interpreter` reaches through
+        // `cove_schema::builtins::standard_associated_binding` before this
+        // function is asked.
         // `Duration.nanos(count)`: the one primitive builder left.
         // `micros` through `hours` are `std.duration.ofMicros` and its four
         // neighbours now — see `cove_schema::builtins::standard_associated_binding`
@@ -1074,71 +1169,10 @@ pub fn call_method(
             // resolves it to a call into `std.map.isEmpty` before this
             // function is ever asked about it — see
             // `cove_schema::builtins::standard_binding`.
-            // Ascending key order, matching the sorted run's own order and
-            // the order `for` iterates.
-            "keys" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Array(
-                    entries.iter().map(|(k, _)| MapKey::to_value(k)).collect(),
-                )))
-            }
-            "values" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Array(
-                    entries.iter().map(|(_, v)| v.clone()).collect(),
-                )))
-            }
-            // `Map` is immutable, so `inserted`/`removed` return a new map
-            // rather than write through `entries`; the past-participle names
-            // say so, unlike `Vector`'s mutating `push`. Each searches once
-            // and then copies around the insertion or removal point, the
-            // same shape the linear-memory backend's own `Map.inserted` and
-            // `Map.removed` build their new run with.
-            "inserted" => {
-                let args = expect_args("Map.inserted", args, 2, span)?;
-                let value = args.remove(1);
-                let key = to_map_key("Map.inserted", "map key", &args[0], span)?;
-                let next: Rc<[(MapKey, Value)]> =
-                    match entries.binary_search_by(|(k, _)| k.cmp(&key)) {
-                        // A key already there keeps the key the map was
-                        // holding and takes the new value — the two keys
-                        // compare equal, so which one the answer carries is
-                        // not something a program can tell apart.
-                        Ok(at) => {
-                            let mut next = Vec::with_capacity(entries.len());
-                            next.extend_from_slice(&entries[..at]);
-                            next.push((entries[at].0.clone(), value));
-                            next.extend_from_slice(&entries[at + 1..]);
-                            next.into()
-                        }
-                        Err(at) => {
-                            let mut next = Vec::with_capacity(entries.len() + 1);
-                            next.extend_from_slice(&entries[..at]);
-                            next.push((key, value));
-                            next.extend_from_slice(&entries[at..]);
-                            next.into()
-                        }
-                    };
-                Ok(Value(Repr::Map(next)))
-            }
-            "removed" => {
-                let args = expect_args("Map.removed", args, 1, span)?;
-                let key = to_map_key("Map.removed", "map key", &args[0], span)?;
-                let next: Rc<[(MapKey, Value)]> =
-                    match entries.binary_search_by(|(k, _)| k.cmp(&key)) {
-                        Ok(at) => {
-                            let mut next = Vec::with_capacity(entries.len() - 1);
-                            next.extend_from_slice(&entries[..at]);
-                            next.extend_from_slice(&entries[at + 1..]);
-                            next.into()
-                        }
-                        // A key that was never there answers a copy of the same
-                        // handle — sharing the run costs nothing and is what a
-                        // copy with the same contents means for an `Rc`.
-                        Err(_) => Rc::clone(entries),
-                    };
-                Ok(Value(Repr::Map(next)))
-            }
+            // `keys` and `values` are `std.map` loops over the entries (P4-7).
+            // `inserted` and `removed` do not reach this arm either: each is
+            // `std.map`'s seek and a growable run finished into the new map
+            // (#378, P4-6), which `call_core` executes over this sorted run.
             _ => Err(no_method("Map", name, span)),
         },
         Value(Repr::Set(items)) => match name {
@@ -1153,44 +1187,7 @@ pub fn call_method(
             // resolves it to a call into `std.set.isEmpty` before this
             // function is ever asked about it — see
             // `cove_schema::builtins::standard_binding`.
-            "toArray" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Array(
-                    items.iter().map(MapKey::to_value).collect(),
-                )))
-            }
-            "inserted" => {
-                let args = expect_args("Set.inserted", args, 1, span)?;
-                let key = to_map_key("Set.inserted", "set element", &args[0], span)?;
-                let next: Rc<[MapKey]> = match items.binary_search(&key) {
-                    // An element already there answers a copy and keeps the
-                    // member the set was holding, exactly as `Map.inserted`
-                    // keeps the stored key.
-                    Ok(_) => Rc::clone(items),
-                    Err(at) => {
-                        let mut next = Vec::with_capacity(items.len() + 1);
-                        next.extend_from_slice(&items[..at]);
-                        next.push(key);
-                        next.extend_from_slice(&items[at..]);
-                        next.into()
-                    }
-                };
-                Ok(Value(Repr::Set(next)))
-            }
-            "removed" => {
-                let args = expect_args("Set.removed", args, 1, span)?;
-                let key = to_map_key("Set.removed", "set element", &args[0], span)?;
-                let next: Rc<[MapKey]> = match items.binary_search(&key) {
-                    Ok(at) => {
-                        let mut next = Vec::with_capacity(items.len() - 1);
-                        next.extend_from_slice(&items[..at]);
-                        next.extend_from_slice(&items[at + 1..]);
-                        next.into()
-                    }
-                    Err(_) => Rc::clone(items),
-                };
-                Ok(Value(Repr::Set(next)))
-            }
+            // `toArray`, `inserted` and `removed` are `std.set`'s (P4-6, P4-7).
             _ => Err(no_method("Set", name, span)),
         },
         Value(Repr::Str(text)) => match name {
@@ -1940,12 +1937,6 @@ fn empty_needle_error(method: &str, parameter: &str, help: &str, span: Span) -> 
             "An empty separator or search string would match between every character, rather than answer the question the method asks.",
         )
         .with_help(help)
-}
-
-/// Converts `value` to a [`MapKey`], or reports why it cannot be a map key or
-/// set element.
-fn to_map_key(method: &str, role: &str, value: &Value, span: Span) -> Result<MapKey, RuntimeError> {
-    MapKey::from_value(value).map_err(|invalid| invalid_key_error(method, role, &invalid, span))
 }
 
 /// Names the specific offending part when the invalid value is nested, such

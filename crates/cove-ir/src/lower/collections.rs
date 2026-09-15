@@ -181,19 +181,17 @@ impl Body<'_> {
 
     /// `Set.of(a, b, c)` and `Map.of(MapEntry(key: k, value: v), ...)`.
     ///
-    /// The operands are the elements — for a `Map`, the `MapEntry` values the
-    /// literal built, which is the shape `cove_runtime::vm::builtins::keyed`
-    /// reads a pair out of. The machine places each one where it belongs as it
-    /// arrives, so the run is sorted at every step and a duplicate is refused
-    /// rather than collapsed; none of that is something an instruction
-    /// expresses, so it is one [`Inst::CallBuiltin`].
+    /// A call of `std.set.of` or `std.map.of` (ADR 0059, #378 P4-8): the
+    /// arguments are collected into the `Array` its variadic parameter is, and
+    /// the body places each where it belongs over a growable run and finishes
+    /// it into the set or the map, refusing a duplicate in today's words.
+    /// `cove_schema::builtins::standard_associated_binding` names the function,
+    /// so this lowering names no method.
     ///
     /// **A literal with nothing in it is allocated rather than called.** The
-    /// machine refuses `Set.of()` and `Map.of()` because a word says nothing
-    /// about its family and the element layout is what the collector traces
-    /// by — so the empty one has to be built where the layout is known, which
-    /// is here. That is the rule [`Body::vector_of`] already follows, said of
-    /// the two families whose emptiness a call could not describe.
+    /// layout is known here, and an empty run is one allocation — the empty
+    /// array, vector and finish a call would make are three. That is the rule
+    /// [`Body::vector_of`] follows for the empty vector.
     fn keyed_of(&mut self, expr: &Expr, args: &[Arg], what: &str) -> Val {
         let Some(ty) = self.settled_ty(expr) else {
             return self.dead(expr);
@@ -204,13 +202,8 @@ impl Body<'_> {
         if let Some(bad) = self.plain_arguments(args) {
             return self.gap(bad, expr);
         }
-
-        let mut held = Vec::with_capacity(args.len());
-        for arg in args {
-            held.push(self.expr(&arg.value));
-        }
-        let dst = self.temp(layout);
         if args.is_empty() {
+            let dst = self.temp(layout);
             self.emit(
                 Inst::Alloc {
                     dst: dst.slot,
@@ -221,12 +214,13 @@ impl Body<'_> {
             );
             return dst;
         }
-        let passed: Vec<crate::program::Arg> = held.iter().map(Val::arg).collect();
-        self.emit_builtin(dst.slot, what, "of", &passed, layout, expr.span);
-        for value in held.into_iter().rev() {
-            self.release(value, expr.span);
+        match cove_schema::builtins::standard_associated_binding(what, "of") {
+            Some(binding) => self.call_std_associated(expr, binding, args),
+            None => self.gap(
+                &format!("`{what}.of` with no standard-library binding"),
+                expr,
+            ),
         }
-        dst
     }
 
     /// `Vector.of(a, b, c)`: a store holding the elements, and a header
@@ -370,7 +364,6 @@ impl Body<'_> {
         elem: &Ty,
         name: &str,
         args: &[Arg],
-        want: Option<Dest>,
     ) -> Val {
         match (name, args.len()) {
             ("get", 1) => {
@@ -398,9 +391,6 @@ impl Body<'_> {
                 let items = self.expr(base);
                 let obj = self.own_iterable(items, expr.span);
                 self.walk_with(expr, obj, &elem, name, args)
-            }
-            _ if HANDED_OVER.contains(&("Array", name)) => {
-                self.machine_call(expr, Some(base), "Array", name, args, want)
             }
             _ => self.gap(&format!("`Array.{name}`"), expr),
         }
@@ -436,7 +426,6 @@ impl Body<'_> {
         elem: &Ty,
         name: &str,
         args: &[Arg],
-        want: Option<Dest>,
     ) -> Val {
         match (name, args.len()) {
             ("get", 1) => {
@@ -467,9 +456,6 @@ impl Body<'_> {
                 self.release(items, expr.span);
                 self.walk_with(expr, snapshot, &elem, name, args)
             }
-            _ if HANDED_OVER.contains(&("Vector", name)) => {
-                self.machine_call(expr, Some(base), "Vector", name, args, want)
-            }
             _ => self.gap(&format!("`Vector.{name}`"), expr),
         }
     }
@@ -482,28 +468,15 @@ impl Body<'_> {
     /// `Set.length` too and the two agree about the answer; what differs is
     /// that the lowering already knows where to read it.
     ///
-    /// The rest go to the machine, because each of them is a binary search
-    /// over the order [`cove_runtime::vm::builtins::key`] defines or a run
-    /// built sorted in one pass, and neither is something an instruction
-    /// expresses.
-    ///
-    /// `isEmpty` used to answer here too, `length() == 0`. It is not reached
-    /// from here any more: `Body::call_builtin_method` resolves it to a
-    /// standard-library call — `cove_schema::builtins::standard_binding`
-    /// names `std.set.isEmpty` — before this function is ever called for it.
-    pub(super) fn set_method(
-        &mut self,
-        expr: &Expr,
-        base: &Expr,
-        name: &str,
-        args: &[Arg],
-        want: Option<Dest>,
-    ) -> Val {
+    /// Nothing else reaches here. `isEmpty`, `contains`, `inserted`, `removed`
+    /// and `toArray` are `std.set` — a binary search over the order
+    /// `cove_runtime::vm::builtins::key` defines, and run copies, slices and a
+    /// keyed finish (ADR 0059, #378) — which `Body::call_builtin_method`
+    /// resolves through `cove_schema::builtins::standard_binding` before this
+    /// function is ever called for it.
+    pub(super) fn set_method(&mut self, expr: &Expr, base: &Expr, name: &str, args: &[Arg]) -> Val {
         match (name, args.len()) {
             ("length", 0) => self.header_length(expr, base, name),
-            _ if HANDED_OVER.contains(&("Set", name)) => {
-                self.machine_call(expr, Some(base), "Set", name, args, want)
-            }
             _ => self.gap(&format!("`Set.{name}`"), expr),
         }
     }
@@ -512,25 +485,11 @@ impl Body<'_> {
     ///
     /// The header's length counts *entries* rather than words, so the same
     /// [`Inst::Len`] a `Set` reads its member count with reads a map's entry
-    /// count. See [`Body::set_method`] for why the rest are the machine's.
-    ///
-    /// `isEmpty` used to answer here too, `length() == 0`. It is not reached
-    /// from here any more: `Body::call_builtin_method` resolves it to a
-    /// standard-library call — `cove_schema::builtins::standard_binding`
-    /// names `std.map.isEmpty` — before this function is ever called for it.
-    pub(super) fn map_method(
-        &mut self,
-        expr: &Expr,
-        base: &Expr,
-        name: &str,
-        args: &[Arg],
-        want: Option<Dest>,
-    ) -> Val {
+    /// count. Nothing else reaches here, for [`Body::set_method`]'s reason:
+    /// every other `Map` method is `std.map`.
+    pub(super) fn map_method(&mut self, expr: &Expr, base: &Expr, name: &str, args: &[Arg]) -> Val {
         match (name, args.len()) {
             ("length", 0) => self.header_length(expr, base, name),
-            _ if HANDED_OVER.contains(&("Map", name)) => {
-                self.machine_call(expr, Some(base), "Map", name, args, want)
-            }
             _ => self.gap(&format!("`Map.{name}`"), expr),
         }
     }
@@ -1252,44 +1211,6 @@ impl Body<'_> {
     }
 }
 
-/// The operations of a sequence the machine performs rather than the
-/// instruction set.
-///
-/// Each of them either builds an object whose family only the layout table
-/// knows — a `Set`'s `toArray`, the keyed updates — or searches a sorted run
-/// by the order the machine defines. A sequence's `slice`, `toVector` and
-/// `toArray` were the first kind and are `std.array`/`std.vector` over a run
-/// slice now; its `contains` and `indexOf` walked the elements with the
-/// language's own equality, and are `std.array`/`std.vector` loops over `==`.
-/// `map` and `sorted` are not here and never will be: a builtin that invoked
-/// their closure would re-enter the dispatch loop from inside a Rust
-/// function, which is the one thing `docs/LINEAR_VM.md` asks this backend
-/// not to do — so both are loops in the IR, in `cove_ir::lower::walks`,
-/// instead. `filter` and `fold` took a closure too and are not here either,
-/// but for a different reason now: they are ordinary calls into
-/// `std.array`/`std.vector`, resolved before this table is ever consulted —
-/// see `Body::array_method` and `Body::vector_method`.
-///
-/// A `Set` and a `Map` are here for what is left of their tables: both are
-/// sorted runs, and every one of these builds a run sorted in one pass. Their
-/// `contains` and a map's `get` are not — each is `std.set` or `std.map`, a
-/// binary search in Cove over the order `cove_runtime::vm::builtins::key`
-/// defines (ADR 0059, #378) — and nor are `length` and `isEmpty`.
-///
-/// It is a list rather than a fall-through, because what this lowering emits
-/// is a contract the machine is written against: a name that reached the
-/// machine by accident would be a runtime refusal where a gap should have
-/// named the work.
-const HANDED_OVER: &[(&str, &str)] = &[
-    ("Set", "inserted"),
-    ("Set", "removed"),
-    ("Set", "toArray"),
-    ("Map", "keys"),
-    ("Map", "values"),
-    ("Map", "inserted"),
-    ("Map", "removed"),
-];
-
 /// Whether the checker knows `head` as a builtin type that is written as a
 /// namespace, and `ty` as what its `of` answers: `Vector.of(1, 2)`,
 /// `Set.of(1, 2)`, `Map.of(MapEntry(key: "a", value: 1))`.
@@ -1301,24 +1222,4 @@ pub(super) fn namespace_of(head: &str, ty: &Ty) -> bool {
         (head, ty),
         ("Vector", Ty::Vector(_)) | ("Set", Ty::Set(_)) | ("Map", Ty::Map(..))
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Every pair [`HANDED_OVER`] names is an [`Intrinsic`] `emit_builtin`
-    /// can resolve, for the reason `lower::methods`' own test of
-    /// `MACHINE_METHODS` and `ASSOCIATED` gives: a table entry with no
-    /// `Intrinsic` would not fail here on its own, it would panic the first
-    /// time a program's lowering reached it.
-    #[test]
-    fn handed_over_is_all_named_intrinsics() {
-        for &(receiver, operation) in HANDED_OVER {
-            assert!(
-                Intrinsic::from_names(receiver, operation).is_some(),
-                "`{receiver}.{operation}` has no `Intrinsic`"
-            );
-        }
-    }
 }

@@ -582,6 +582,70 @@ impl Layout {
     }
 }
 
+/// Whether a value of `unit` is, word for word, one entry of a
+/// [`Shape::Entries`] of `key` and `value`: a two-field struct whose first
+/// field is a `key` at word 0, whose second is a `value` at the key's width,
+/// and which is no wider than the two.
+///
+/// That is `MapEntry<K, V>`'s layout, and it is why a map's run and a run of
+/// `MapEntry`s are the same words traced by the same reference map — the
+/// fact a word copy out of a map, and a keyed finish into one, rest on (ADR
+/// 0059, #378 P4-5). It is a question about the layout's structure and not
+/// its name: what the collector and a copy's stride depend on is where the
+/// words are, and two fields answer that in constant time.
+pub fn is_entry_of(layouts: &[Layout], unit: LayoutId, key: LayoutId, value: LayoutId) -> bool {
+    let (Some(held), Some(keys), Some(values)) = (
+        layouts.get(unit.index()),
+        layouts.get(key.index()),
+        layouts.get(value.index()),
+    ) else {
+        return false;
+    };
+    let Shape::Struct { fields, .. } = &held.shape else {
+        return false;
+    };
+    matches!(
+        fields.as_slice(),
+        [first, second]
+            if first.layout == key
+                && first.at == 0
+                && second.layout == value
+                && second.at == keys.width()
+    ) && held.width() == keys.width() + values.width()
+}
+
+/// Whether an object of `shape` is a run of whole `unit`s laid end to end, so
+/// that a word run operation over [`crate::Storage::Words`] of `unit` may
+/// **read** it: an `Array` or a vector's store of `unit`, a `Set` of `unit`, or
+/// a `Map` whose entry `unit` is (see [`is_entry_of`]).
+///
+/// The keyed two are sources and never destinations: a sorted run's order is
+/// an invariant its construction establishes, and nothing writes into one
+/// after its finish.
+pub fn reads_as_units_of(layouts: &[Layout], shape: &Shape, unit: LayoutId) -> bool {
+    match shape {
+        Shape::Elements { elem, .. } | Shape::Members { elem } => *elem == unit,
+        Shape::Entries { key, value } => is_entry_of(layouts, unit, *key, *value),
+        _ => false,
+    }
+}
+
+/// Whether `shape` is a sorted run a growable run of `unit`s may be
+/// **finished into**: a `Set` of `unit`, or a `Map` whose entry `unit` is.
+///
+/// The relabel a finish makes is sound for these for the reason it is for an
+/// `Array`: the store's payload is the same words at the same stride under
+/// the same reference map. What the relabel cannot establish is the order,
+/// which is the producer's — a standard-library body that built the run
+/// ascending and distinct.
+pub fn finishes_as_keyed_run_of(layouts: &[Layout], shape: &Shape, unit: LayoutId) -> bool {
+    match shape {
+        Shape::Members { elem } => *elem == unit,
+        Shape::Entries { key, value } => is_entry_of(layouts, unit, *key, *value),
+        _ => false,
+    }
+}
+
 /// Lays out a struct's fields, answering the fields and the flattened words.
 ///
 /// Fields are placed in declaration order with no padding: a word is a word
