@@ -904,8 +904,8 @@ pub fn call_method(
             // resolves it to a call into `std.array.isEmpty` before this
             // function is ever asked about it — see
             // `cove_schema::builtins::standard_binding`.
-            "contains" => contains("Array.contains", items, args, span),
-            "indexOf" => index_of_element("Array.indexOf", items, args, span),
+            // `contains` and `indexOf` are not here: they are `std.array`'s
+            // loops over `==`, which this interpreter runs as Cove.
             // `slice` and `toVector` are not here: they are `std.array.slice`,
             // a clamp in Cove over `call_core`'s `arraySlice`, and
             // `std.array.toVector` over its `arrayToVector`.
@@ -934,10 +934,9 @@ pub fn call_method(
                     .and_then(|i| storage.elements.borrow().get(i).cloned())
                     .map(Value::some)
                     .unwrap_or_else(Value::none)),
-                "contains" => contains("Vector.contains", &storage.elements.borrow(), args, span),
-                "indexOf" => {
-                    index_of_element("Vector.indexOf", &storage.elements.borrow(), args, span)
-                }
+                // `contains` and `indexOf` are not here: they are
+                // `std.vector`'s loops over `==` and `call_core`'s
+                // `vectorLoad`.
                 // `slice` is not here: it is `std.vector.slice`, over
                 // `call_core`'s `vectorSlice`.
                 "length" => {
@@ -1616,45 +1615,6 @@ fn check_buffer_live(
         .with_help("use the `String` that `finish()` returned, or build a new buffer"));
     }
     Ok(())
-}
-
-/// `contains(element)` on a sequence: whether any element is `==` to it.
-///
-/// Equality is [`Value::eq_value`], the same one `==` is and the same one
-/// `Map` and `Set` are keyed by, so a sequence answers membership exactly as
-/// a comparison of the two values would. An empty receiver answers `false`,
-/// and no argument can be refused: every value has an equality.
-fn contains(
-    method: &str,
-    items: &[Value],
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, RuntimeError> {
-    let args = expect_args(method, args, 1, span)?;
-    Ok(Value(Repr::Bool(
-        items.iter().any(|item| item.eq_value(&args[0])),
-    )))
-}
-
-/// `indexOf(element)` on a sequence: the first position holding a value `==`
-/// to it, or `None`.
-///
-/// The same equality [`contains`] uses, so the two cannot disagree about
-/// whether an element is there. An empty receiver and an element that is not
-/// in the sequence both answer `None`, which is what `String.indexOf` and
-/// `Array.get` answer a question with no position to name.
-fn index_of_element(
-    method: &str,
-    items: &[Value],
-    args: &mut Vec<Value>,
-    span: Span,
-) -> Result<Value, RuntimeError> {
-    let args = expect_args(method, args, 1, span)?;
-    Ok(items
-        .iter()
-        .position(|item| item.eq_value(&args[0]))
-        .map(|at| Value::some(Value(Repr::Int(at as i64))))
-        .unwrap_or_else(Value::none))
 }
 
 fn index_of(method: &str, args: &[Value], span: Span) -> Result<Option<usize>, RuntimeError> {

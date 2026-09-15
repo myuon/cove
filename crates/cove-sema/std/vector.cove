@@ -7,6 +7,42 @@ export fn isEmpty<T>(items: Vector<T>) -> Bool {
   items.length() == 0
 }
 
+/// Whether any element is `==` to `element`.
+///
+/// [`std.array.contains`]'s question and its equality, asked of the elements
+/// the vector holds when it is called. Nothing `==` does can reach the vector,
+/// so nothing can push onto it or take from it part way through, and the
+/// elements are read where they are rather than out of a copy: a load per
+/// element, bounded by the length read first.
+export fn contains<T>(items: Vector<T>, element: T) -> Bool {
+  let length = items.length()
+  var at = 0
+  while at < length {
+    if core.vectorLoad(items, at) == element {
+      return true
+    }
+    at += 1
+  }
+  false
+}
+
+/// The position of the **first** element `==` to `element`, or `None`.
+///
+/// [`std.array.indexOf`] over the vector's storage, read in place as
+/// [`contains`] reads it. A position is only a position until the vector
+/// changes: a `remove` before it moves what is there.
+export fn indexOf<T>(items: Vector<T>, element: T) -> Option<Int> {
+  let length = items.length()
+  var at = 0
+  while at < length {
+    if core.vectorLoad(items, at) == element {
+      return Some(at)
+    }
+    at += 1
+  }
+  return None
+}
+
 /// Appends `value` at the end, growing the storage when it is full.
 ///
 /// The write goes through the vector's shared storage, so every alias sees

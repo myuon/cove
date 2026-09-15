@@ -57,10 +57,6 @@ pub enum Intrinsic {
     StringToLower,
     StringFromCodePoint,
     StringCodePointAtByte,
-    ArrayContains,
-    ArrayIndexOf,
-    VectorContains,
-    VectorIndexOf,
     SetOf,
     SetContains,
     SetToArray,
@@ -111,10 +107,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringToLower,
     Intrinsic::StringFromCodePoint,
     Intrinsic::StringCodePointAtByte,
-    Intrinsic::ArrayContains,
-    Intrinsic::ArrayIndexOf,
-    Intrinsic::VectorContains,
-    Intrinsic::VectorIndexOf,
     Intrinsic::SetOf,
     Intrinsic::SetContains,
     Intrinsic::SetToArray,
@@ -167,10 +159,6 @@ impl Intrinsic {
             Intrinsic::StringToLower => "String",
             Intrinsic::StringFromCodePoint => "String",
             Intrinsic::StringCodePointAtByte => "String",
-            Intrinsic::ArrayContains => "Array",
-            Intrinsic::ArrayIndexOf => "Array",
-            Intrinsic::VectorContains => "Vector",
-            Intrinsic::VectorIndexOf => "Vector",
             Intrinsic::SetOf => "Set",
             Intrinsic::SetContains => "Set",
             Intrinsic::SetToArray => "Set",
@@ -219,10 +207,6 @@ impl Intrinsic {
             Intrinsic::StringToLower => "toLower",
             Intrinsic::StringFromCodePoint => "fromCodePoint",
             Intrinsic::StringCodePointAtByte => "codePointAtByte",
-            Intrinsic::ArrayContains => "contains",
-            Intrinsic::ArrayIndexOf => "indexOf",
-            Intrinsic::VectorContains => "contains",
-            Intrinsic::VectorIndexOf => "indexOf",
             Intrinsic::SetOf => "of",
             Intrinsic::SetContains => "contains",
             Intrinsic::SetToArray => "toArray",
@@ -330,17 +314,10 @@ impl Intrinsic {
             // with.
             Intrinsic::StringFromCodePoint => raise.union(E::MAY_ALLOCATE).union(E::MAY_COLLECT),
 
-            // A linear search over the elements.
-            Intrinsic::ArrayContains | Intrinsic::ArrayIndexOf => {
-                raise.union(E::READS_MEMORY).union(E::BULK_WORK)
-            }
-            // `slice` and `toVector` are not here: each is `std.array` over a
-            // run slice or a run copy now.
-            Intrinsic::VectorContains | Intrinsic::VectorIndexOf => {
-                raise.union(E::READS_MEMORY).union(E::BULK_WORK)
-            }
-            // `push`, `set`, `pop`, `remove`, `freeze`, `slice` and `toArray` are
-            // not here: each is `std.vector` over run instructions now.
+            // No `Array` or `Vector` operation is here. `contains` and
+            // `indexOf` are `std.array` and `std.vector` loops over `==`;
+            // `slice`, `toVector`, `push`, `set`, `pop`, `remove`, `freeze` and
+            // `toArray` are each Cove over run instructions.
 
             // A `Set` or a `Map` is immutable, so every update below
             // allocates a new run rather than writing through the receiver
@@ -531,10 +508,6 @@ mod tests {
                 | Intrinsic::StringToLower
                 | Intrinsic::StringFromCodePoint
                 | Intrinsic::StringCodePointAtByte
-                | Intrinsic::ArrayContains
-                | Intrinsic::ArrayIndexOf
-                | Intrinsic::VectorContains
-                | Intrinsic::VectorIndexOf
                 | Intrinsic::SetOf
                 | Intrinsic::SetContains
                 | Intrinsic::SetToArray
@@ -592,7 +565,7 @@ mod tests {
 
     #[test]
     fn display_prints_receiver_dot_operation() {
-        assert_eq!(Intrinsic::VectorContains.to_string(), "Vector.contains");
+        assert_eq!(Intrinsic::SetContains.to_string(), "Set.contains");
         assert_eq!(Intrinsic::AnyEquals.to_string(), "Any.equals");
     }
 
