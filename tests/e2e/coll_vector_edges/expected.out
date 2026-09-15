@@ -22,3 +22,9 @@ frozen [item 0, item 1, item 2, item 3, item 4, item 5, item 6, item 7, item 8, 
 frozen spans 9 Some(Span(from: 8, to: 80)) None
 frozen spans sum 396
 an empty freeze [] 0
+vector slice [b, c] [a, b] [d, e]
+vector slice empty [] [] [] []
+array slice [a, b, c, d, e] [] [] [a] []
+copies [a, b, c, d, e] [a, b, c, d, e, f] [A, b, c, d, e] 6 5
+empty conversions [] [Span(from: 1, to: 1)] [Span(from: 1, to: 1)]
+span slices [Span(from: 50, to: 60), Span(from: 7, to: 8)] [Span(from: 7, to: 8)]

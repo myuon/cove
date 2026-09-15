@@ -334,7 +334,7 @@ fn @m.f(Array) -> Int
     );
 }
 
-/// A `Vector` spread is copied out with `Vector.toArray` before it is walked,
+/// A `Vector` spread is copied out with a run slice before it is walked,
 /// which is the clone `bind_params` makes of `storage.elements` and for the
 /// same reason: what is spread is the elements the vector had.
 #[test]
@@ -345,7 +345,7 @@ fn a_vector_spread_is_copied_out_before_it_is_walked() {
         "f",
     );
     assert!(
-        text.contains("     4  run-copy.words Int (s4:Array s5:Int s3:<ref> s5:Int s2:Int)\n"),
+        text.contains("     3  run-slice.words Int (s5:Array s3:<ref> s4:Int s2:Int)\n"),
         "{text}"
     );
 }

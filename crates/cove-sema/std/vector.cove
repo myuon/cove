@@ -59,6 +59,43 @@ export fn freeze<T>(items: Vector<T>) -> Array<T> {
   core.vectorFinish(items)
 }
 
+/// The elements at indices `from` up to but not including `to`, as an
+/// `Array`.
+///
+/// An `Array` and not a `Vector`: a part of a sequence is a finished sequence.
+/// Both bounds are clamped into `0..length()` and a `to` at or below `from`
+/// answers an empty array, exactly as [`std.array.slice`] does; the copy
+/// beneath the decision is a core intrinsic over the vector's storage, handed a
+/// range already inside the length.
+export fn slice<T>(items: Vector<T>, from: Int, to: Int) -> Array<T> {
+  let length = items.length()
+  let start = if from < 0 {
+    0
+  } else if from > length {
+    length
+  } else {
+    from
+  }
+  let end = if to < start {
+    start
+  } else if to > length {
+    length
+  } else {
+    to
+  }
+  core.vectorSlice(items, start, end - start)
+}
+
+/// The elements of this vector as an `Array`, copied, leaving the vector as it
+/// was.
+///
+/// The O(n) conversion, where `freeze()` is the O(1) one that consumes. It is
+/// the slice of the whole vector: one core intrinsic, and the lowering expands
+/// it wherever it is called.
+export fn toArray<T>(items: Vector<T>) -> Array<T> {
+  core.vectorSlice(items, 0, items.length())
+}
+
 /// The elements `keep` answers `true` for, in the order they were in.
 ///
 /// **Through a copy taken before the first call.** A vector shares its

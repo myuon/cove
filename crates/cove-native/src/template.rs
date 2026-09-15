@@ -30,7 +30,7 @@ use cove_ir::{
 };
 
 use crate::abi::{
-    Entry, GrowableOp, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT,
+    Entry, GrowableOp, NativeCtx, NativeHelpers, Outcome, Raise, RunOp, HEAP_CHUNK_SHIFT,
     HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
@@ -650,7 +650,16 @@ impl<'a> Emit<'a> {
             // [`crate::abi::RunCopyFn`] for why it has no emitted loop — memmove in
             // bounded chunks with a poll between them, and refusals whose
             // sentences only the runtime can build.
-            Inst::RunCopy { args, storage } => self.run_copy(args.0, *storage),
+            Inst::RunCopy { args, storage } => match storage {
+                Storage::PackedBytes => self.run_copy(args.0, RunOp::CopyBytes, 0),
+                Storage::Words(elem) => self.run_copy(args.0, RunOp::CopyWords, elem.0),
+            },
+            // ADR 0058's `run-slice`: the same helper, which allocates the run
+            // and writes it into the row's `dst` before it copies into it.
+            Inst::RunSlice {
+                args,
+                storage: Storage::Words(elem),
+            } => self.run_copy(args.0, RunOp::SliceWords, elem.0),
             Inst::Alloc { dst, layout, len } => self.allocate(*dst, layout.0, *len),
             Inst::Switch { on, table } => self.switch(*on, *table),
             // `encoded.rs`'s `NEG_INT` arm: `checked_neg`, whose `None` is
@@ -1317,24 +1326,22 @@ impl<'a> Emit<'a> {
         self.frame_live = false;
     }
 
-    /// One [ADR 0058] `run-copy`, handed to the runtime whole.
+    /// One [ADR 0058] `run-copy` or `run-slice`, handed to the runtime whole.
     ///
     /// [`Emit::growable_op`]'s shape exactly — the same six registers, the same
     /// shift back to a word index, the same test of the outcome — with the
-    /// argument list and the storage in place of the operation and its pair. See
-    /// [`crate::abi::RunCopyFn`] for what the operands mean and why the copy is the
-    /// helper's.
+    /// argument list, the [`RunOp`] and the element in place of the operation and
+    /// its pair. See [`crate::abi::RunCopyFn`] for what the operands mean and why
+    /// the copy is the helper's.
     ///
-    /// It is a safepoint: the helper takes one before the copy, and a long copy
-    /// polls between chunks, either of which may collect. So the unpaid work is
-    /// published before the call and the frame pointer dropped after it.
+    /// It is a safepoint: the helper takes one before the copy, a slice
+    /// allocates, and a long copy polls between chunks, any of which may collect.
+    /// So the unpaid work is published before the call and the frame pointer
+    /// dropped after it.
     ///
     /// [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
-    fn run_copy(&mut self, args: u32, storage: Storage) {
-        let (words, elem) = match storage {
-            Storage::PackedBytes => (0, 0),
-            Storage::Words(elem) => (1, elem.0),
-        };
+    fn run_copy(&mut self, args: u32, kind: RunOp, elem: u32) {
+        let words = kind.abi() as i32;
         self.store(CTX, OFF_PENDING_WORK, WORK);
         self.xor_rr(WORK, WORK);
 

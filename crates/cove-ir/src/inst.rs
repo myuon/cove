@@ -718,6 +718,60 @@ pub enum Inst {
     /// the row: it is the instruction's own, and the encoding carries a
     /// [`Storage::Words`] layout in the payload half the row leaves free.
     RunCopy { args: ArgsId, storage: Storage },
+    /// `dst = <a fresh fixed run holding src[from .. from+count]>`, in units
+    /// of `storage`.
+    ///
+    /// # In ADR 0058's families
+    ///
+    /// `run-alloc dst, storage, count` → `run-copy dst, 0, src, from, count`,
+    /// as one instruction: #378's Q3, an exact construction that never exposes
+    /// an unfinished fixed run to Cove. Between the two halves the fresh run is
+    /// allocated and not yet filled, and a split form would hand a Cove program
+    /// a run whose units are zeroes rather than elements; as one instruction
+    /// the run is written into `dst` only once the machine holds it, and the
+    /// copy that fills it is [`Inst::RunCopy`]'s, chunks, polls and charge
+    /// included.
+    ///
+    /// It is what `Array.slice`, `Vector.slice` and `Vector.toArray` lower to
+    /// beneath their Cove bodies — `core.arraySlice` and `core.vectorSlice` —
+    /// and what the lowering's own copies (a `for` over a vector, `sorted`'s
+    /// working copy) emit directly.
+    ///
+    /// # What it means
+    ///
+    /// **Bounds in units, before anything is allocated.** `from` and `count`
+    /// are checked against `src`'s header length, which for a vector's store is
+    /// its capacity and not the vector's length: the standard-library body that
+    /// calls it has already clamped the range into the logical length, which is
+    /// the policy this instruction has none of. A range outside the source, a
+    /// negative count and a null source stop the run with nothing allocated —
+    /// each is a broken invariant of the lowering, never a program's mistake.
+    ///
+    /// **A fresh object.** The answer is allocated at exactly `count` units, so
+    /// nothing else holds it and a later `freeze` or `toVector` of it is free
+    /// to reason as if the copy were the only one — it is.
+    ///
+    /// **One family on both sides.** For [`Storage::Words`], `src` must be a
+    /// [`crate::Shape::Elements`] of the element, fixed or growable — an
+    /// `Array` or a `Vector`'s store — and the answer is the *fixed*
+    /// [`crate::Shape::Elements`] of it, an `Array<T>`. Only
+    /// [`Storage::Words`] is admitted today; `String.sliceBytes` brings the
+    /// byte member.
+    ///
+    /// # Why the destination is in the row
+    ///
+    /// Four operands — `dst`, `src`, `from`, `count` — and two layouts: the
+    /// element the storage names and the `Array` the answer is allocated as. A
+    /// sixteen-byte instruction has three slot operands and a payload of two
+    /// ids, so the operands live behind an [`ArgsId`] as
+    /// [`Inst::RunCopy`]'s do, the element is the payload's other half as
+    /// `RunCopyWords`' is, and the answer's layout is the one the row already
+    /// carries for `dst`: the row holds exactly four [`crate::Arg`]s in the
+    /// order `dst`, `src`, `from`, `count`, and `dst`'s layout is the
+    /// allocation's. Unlike [`Inst::RunCopy`]'s `dst`, this one is **written**:
+    /// it is a frame slot that receives the fresh run's address, which every
+    /// pass asking what an instruction writes reads out of the row.
+    RunSlice { args: ArgsId, storage: Storage },
     /// `dst = <a new, empty growable run in `storage` whose store has room for
     /// `capacity` units>`.
     ///

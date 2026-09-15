@@ -117,10 +117,8 @@ pub(crate) fn call(
             seq::array_contains(machine, operands).map(|word| out.push(word))
         }
         Intrinsic::ArrayIndexOf => seq::array_index_of(machine, builtin.result, operands, out),
-        Intrinsic::ArraySlice => seq::array_slice(machine, operands).map(|word| out.push(word)),
-        Intrinsic::ArrayToVector => {
-            seq::array_to_vector(machine, operands).map(|word| out.push(word))
-        }
+        // `slice` and `toVector` are not here: they are `std.array` over a
+        // word `Inst::RunSlice` and a word `Inst::RunCopy`.
 
         // ---- Vector ------------------------------------------------------
         // `Vector.of` is not here: the lowering allocates it — see
@@ -136,12 +134,12 @@ pub(crate) fn call(
             seq::vector_contains(machine, operands).map(|word| out.push(word))
         }
         Intrinsic::VectorIndexOf => seq::vector_index_of(machine, builtin.result, operands, out),
-        Intrinsic::VectorSlice => seq::vector_slice(machine, operands).map(|word| out.push(word)),
         // `Vector.isEmpty` is not here: it is `std.vector.isEmpty` — see
         // `cove_schema::builtins::standard_binding`.
         // `Vector.freeze` is not here: it is `std.vector.freeze` over the core
         // intrinsic that is a word `Inst::RunFinish` — see
-        // `Machine::finish_words`.
+        // `Machine::finish_words`. `slice` and `toArray` are `std.vector` over
+        // a word `Inst::RunSlice`.
 
         // ---- Set ---------------------------------------------------------
         //

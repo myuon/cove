@@ -186,34 +186,6 @@ fn index(
     Ok((at >= 0).then_some(at as usize))
 }
 
-/// The words of the elements `store[from..to]`, with both bounds clamped into
-/// the sequence and a `to` at or below `from` answering nothing.
-///
-/// The bounds are elements and the answer is their words flattened, which is
-/// what [`make::array_of`] takes — so the one multiplication by the stride is
-/// the one that turns the clamped element range into a payload run.
-fn sliced(
-    machine: &Machine,
-    shown: &str,
-    store: u64,
-    stride: u32,
-    len: u32,
-    args: &[Operand<'_>],
-) -> Result<Vec<u64>, RuntimeError> {
-    if args.len() != 2 {
-        return Err(operand::arity(shown, 2, args.len()));
-    }
-    let bound = |at: usize, parameter: &str| {
-        operand::int(machine, shown, parameter, args[at]).map(|i| i.clamp(0, len as i64) as u32)
-    };
-    let from = bound(0, "from")?;
-    let to = bound(1, "to")?;
-    if to <= from {
-        return Ok(Vec::new());
-    }
-    Ok(machine.payload_run(store, from * stride, (to - from) * stride))
-}
-
 /// The position of the first element equal to `wanted`, if there is one.
 ///
 /// The element is read out of the store as the value location it is — the
@@ -283,40 +255,6 @@ pub(super) fn array_index_of(
         Some(at) => make::some(machine, result, &[at as u64], out),
         None => make::none(machine, result, out),
     }
-}
-
-/// `Array.slice(from, to) -> Array<T>`.
-pub(super) fn array_slice(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, args) = operand::method("Array.slice", operands, 2)?;
-    let items = array(machine, "slice", receiver)?;
-    let words = sliced(
-        machine,
-        "Array.slice",
-        items.addr,
-        items.stride,
-        items.len,
-        args,
-    )?;
-    make::array_of(machine, items.elem, &words)
-}
-
-/// `Array.toVector() -> Vector<T>`.
-///
-/// `Vector.toArray()` run backwards: a growable copy of these elements that
-/// nothing else holds a handle to. The elements are copied as they are rather
-/// than snapshotted, which is `toArray`'s own rule read the other way — this
-/// separates the sequence and nothing inside it.
-pub(super) fn array_to_vector(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, _) = operand::method("toVector", operands, 0)?;
-    let items = array(machine, "toVector", receiver)?;
-    let words = machine.payload_run(items.addr, 0, items.len * items.stride);
-    make::vector_of(machine, items.elem, &words)
 }
 
 // --- Vector ----------------------------------------------------------------
@@ -426,28 +364,6 @@ pub(super) fn vector_index_of(
     }
 }
 
-/// `Vector.slice(from, to) -> Array<T>`.
-///
-/// An **`Array`**, not a `Vector`: the oracle answers one, and it is the
-/// right answer — a slice is a reading of a sequence and nothing about it
-/// asks to be grown.
-pub(super) fn vector_slice(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (receiver, args) = operand::method("Vector.slice", operands, 2)?;
-    let items = vector(machine, "slice", receiver)?;
-    let words = sliced(
-        machine,
-        "Vector.slice",
-        items.run.store,
-        items.stride,
-        items.run.len,
-        args,
-    )?;
-    make::array_of(machine, items.elem, &words)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,32 +456,6 @@ mod tests {
         assert_eq!(option_int(&program, &words).0, "None");
     }
 
-    /// Both bounds are clamped and a `to` at or below `from` answers nothing,
-    /// so no bound can stop the run.
-    #[test]
-    fn an_array_slice_clamps_both_bounds() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let items = array_of(&mut machine, &[10, 20, 30]);
-        let slice = |machine: &mut Machine, from: i64, to: i64| {
-            let addr = word(
-                machine,
-                "Array",
-                "slice",
-                &[
-                    (Repr::Ref, items),
-                    (Repr::Int, from as u64),
-                    (Repr::Int, to as u64),
-                ],
-            )
-            .unwrap();
-            words_of(machine, addr)
-        };
-        assert_eq!(slice(&mut machine, 1, 3), vec![20, 30]);
-        assert_eq!(slice(&mut machine, -5, 99), vec![10, 20, 30]);
-        assert_eq!(slice(&mut machine, 2, 1), Vec::<u64>::new());
-    }
-
     /// An `Array<Point>` is a run of two-word elements. Everything that walks
     /// one counts in elements and offsets in words, and this is where that
     /// distinction is load-bearing: a length of three is three `Point`s and
@@ -582,21 +472,9 @@ mod tests {
         // The header's length is elements.
         assert_eq!(machine.object_len(items), 3);
 
-        // A slice is a shorter run of the same elements: two of them, which
-        // is four words.
-        let slice = word(
-            &mut machine,
-            "Array",
-            "slice",
-            &[(Repr::Ref, items), (Repr::Int, 1), (Repr::Int, 3)],
-        )
-        .unwrap();
-        assert_eq!(machine.object_len(slice), 2);
-        assert_eq!(words_of(&machine, slice), vec![3, 4, 5, 6]);
-
         // And a `Vector` over the same elements keeps both: three in the
         // header's count, six in the store.
-        let grown = word(&mut machine, "Array", "toVector", &[(Repr::Ref, items)]).unwrap();
+        let grown = make::vector_of(&mut machine, point, &[1, 2, 3, 4, 5, 6]).unwrap();
         assert_eq!(machine.payload(grown, 0), 3);
         let store = machine.payload(grown, 1);
         assert_eq!(machine.object_len(store), 3);
@@ -642,7 +520,7 @@ mod tests {
         let items = machine.new_object(layout, 2).unwrap();
         machine.set_payload_run(items, 0, &[1, 2, 3, 4]);
         let arrays = machine.object_layout(items);
-        let grown = word(&mut machine, "Array", "toVector", &[(Repr::Ref, items)]).unwrap();
+        let grown = make::vector_of(&mut machine, point, &[1, 2, 3, 4]).unwrap();
         let vectors = machine.object_layout(grown);
 
         assert_eq!(
@@ -709,30 +587,6 @@ mod tests {
             error.message,
             "a growable run of `Int` was expected here, and this object is not one"
         );
-    }
-
-    #[test]
-    fn an_array_becomes_a_vector_and_a_vector_an_array() {
-        let program = world();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let items = array_of(&mut machine, &[10, 20]);
-
-        let grown = word(&mut machine, "Array", "toVector", &[(Repr::Ref, items)]).unwrap();
-        assert_eq!(machine.payload(grown, 0), 2);
-        assert_eq!(words_of(&machine, machine.payload(grown, 1)), vec![10, 20]);
-
-        let back = word(
-            &mut machine,
-            "Vector",
-            "slice",
-            &[(Repr::Ref, grown), (Repr::Int, 0), (Repr::Int, 2)],
-        )
-        .unwrap();
-        assert_eq!(words_of(&machine, back), vec![10, 20]);
-        // A copy, not the store: a slice of the whole is the O(n) conversion,
-        // and the vector is still what it was afterwards.
-        assert_ne!(back, machine.payload(grown, 1));
-        assert_eq!(machine.payload(grown, 0), 2);
     }
 
     /// The whole point of the indirection: the header a program is holding
@@ -849,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn a_vector_finds_an_element_and_slices_into_an_array() {
+    fn a_vector_finds_an_element() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
         let items = growable(&mut machine, &[1, 2, 3]);
@@ -876,23 +730,7 @@ mod tests {
         // `isEmpty` is not a machine builtin for `Vector` either: it is
         // `std.vector.isEmpty`, and it is `cove-sema`'s and `cove-ir`'s
         // tests that check it rather than a word read off the machine here.
-
-        // An `Array`, not a `Vector`: a slice is a reading of a sequence.
-        let addr = word(
-            &mut machine,
-            "Vector",
-            "slice",
-            &[(Repr::Ref, items), (Repr::Int, 0), (Repr::Int, 2)],
-        )
-        .unwrap();
-        assert_eq!(words_of(&machine, addr), vec![1, 2]);
-        assert!(matches!(
-            machine.program().layout(machine.object_layout(addr)).shape,
-            Shape::Elements {
-                growable: false,
-                ..
-            }
-        ));
+        // Nor are `slice` and `toArray`: each is `std.vector` over a run slice.
     }
 
     /// `freeze()` hands back the store it was already holding, and empties
@@ -1026,24 +864,11 @@ mod tests {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
         let items = array_of(&mut machine, &[1]);
-        let text = machine.new_string("no").unwrap();
 
         let error = run(&mut machine, "Array", "contains", &[(Repr::Ref, items)]).unwrap_err();
         assert_eq!(
             error.message,
             "`Array.contains` takes 1 argument(s), but 0 were given"
-        );
-
-        let error = run(
-            &mut machine,
-            "Array",
-            "slice",
-            &[(Repr::Ref, items), (Repr::Ref, text), (Repr::Int, 1)],
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.message,
-            "`Array.slice` expects `Int` for `from`, but found `String`"
         );
 
         let error = run(

@@ -105,5 +105,23 @@ export fn main() -> Result<Unit, Error> {
   var nothing: Vector<Int> = Vector.of()
   let none = nothing.freeze()
   println("an empty freeze {none} {none.length()}")?
+
+  // Slices and conversions: both bounds are clamped into the length, a range
+  // at or below its start answers nothing, and every answer is a copy.
+  var ranged: Vector<String> = Vector.of("a", "b", "c", "d")
+  ranged.push("e")
+  let fixed = ranged.toArray()
+  println("vector slice {ranged.slice(1, 3)} {ranged.slice(-2, 2)} {ranged.slice(3, 99)}")?
+  println("vector slice empty {ranged.slice(4, 2)} {ranged.slice(5, 5)} {ranged.slice(-9, -1)} {ranged.slice(99, 100)}")?
+  println("array slice {fixed.slice(0, 5)} {fixed.slice(2, 2)} {fixed.slice(6, 9)} {fixed.slice(-1, 1)} {fixed.slice(3, 0)}")?
+  var back = fixed.toVector()
+  back.push("f")
+  ranged.set(0, "A")
+  println("copies {fixed} {back} {ranged.toArray()} {back.length()} {ranged.length()}")?
+  let noSpans: Array<Span> = []
+  var grownFromNothing = noSpans.toVector()
+  grownFromNothing.push(Span(from: 1, to: 1))
+  println("empty conversions {noSpans.slice(0, 1)} {grownFromNothing} {grownFromNothing.toArray()}")?
+  println("span slices {pairs.slice(1, 3)} {pairs.toArray().slice(2, 99).toVector().slice(-1, 1)}")?
   Ok(())
 }

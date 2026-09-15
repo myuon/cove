@@ -60,13 +60,10 @@ pub enum Intrinsic {
     StringSliceBytes,
     ArrayContains,
     ArrayIndexOf,
-    ArraySlice,
-    ArrayToVector,
     VectorPop,
     VectorRemove,
     VectorContains,
     VectorIndexOf,
-    VectorSlice,
     SetOf,
     SetContains,
     SetToArray,
@@ -120,13 +117,10 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringSliceBytes,
     Intrinsic::ArrayContains,
     Intrinsic::ArrayIndexOf,
-    Intrinsic::ArraySlice,
-    Intrinsic::ArrayToVector,
     Intrinsic::VectorPop,
     Intrinsic::VectorRemove,
     Intrinsic::VectorContains,
     Intrinsic::VectorIndexOf,
-    Intrinsic::VectorSlice,
     Intrinsic::SetOf,
     Intrinsic::SetContains,
     Intrinsic::SetToArray,
@@ -182,13 +176,10 @@ impl Intrinsic {
             Intrinsic::StringSliceBytes => "String",
             Intrinsic::ArrayContains => "Array",
             Intrinsic::ArrayIndexOf => "Array",
-            Intrinsic::ArraySlice => "Array",
-            Intrinsic::ArrayToVector => "Array",
             Intrinsic::VectorPop => "Vector",
             Intrinsic::VectorRemove => "Vector",
             Intrinsic::VectorContains => "Vector",
             Intrinsic::VectorIndexOf => "Vector",
-            Intrinsic::VectorSlice => "Vector",
             Intrinsic::SetOf => "Set",
             Intrinsic::SetContains => "Set",
             Intrinsic::SetToArray => "Set",
@@ -240,13 +231,10 @@ impl Intrinsic {
             Intrinsic::StringSliceBytes => "sliceBytes",
             Intrinsic::ArrayContains => "contains",
             Intrinsic::ArrayIndexOf => "indexOf",
-            Intrinsic::ArraySlice => "slice",
-            Intrinsic::ArrayToVector => "toVector",
             Intrinsic::VectorPop => "pop",
             Intrinsic::VectorRemove => "remove",
             Intrinsic::VectorContains => "contains",
             Intrinsic::VectorIndexOf => "indexOf",
-            Intrinsic::VectorSlice => "slice",
             Intrinsic::SetOf => "of",
             Intrinsic::SetContains => "contains",
             Intrinsic::SetToArray => "toArray",
@@ -366,13 +354,8 @@ impl Intrinsic {
             Intrinsic::ArrayContains | Intrinsic::ArrayIndexOf => {
                 raise.union(E::READS_MEMORY).union(E::BULK_WORK)
             }
-            // `slice` and `toVector` copy a run of elements into a freshly
-            // allocated object.
-            Intrinsic::ArraySlice | Intrinsic::ArrayToVector => raise
-                .union(E::READS_MEMORY)
-                .union(E::BULK_WORK)
-                .union(E::MAY_ALLOCATE)
-                .union(E::MAY_COLLECT),
+            // `slice` and `toVector` are not here: each is `std.array` over a
+            // run slice or a run copy now.
 
             // `push` is not here: it is `std.vector.push` over the core
             // intrinsic that is a word `Inst::GrowablePush`.
@@ -388,13 +371,8 @@ impl Intrinsic {
             Intrinsic::VectorContains | Intrinsic::VectorIndexOf => {
                 raise.union(E::READS_MEMORY).union(E::BULK_WORK)
             }
-            Intrinsic::VectorSlice => raise
-                .union(E::READS_MEMORY)
-                .union(E::BULK_WORK)
-                .union(E::MAY_ALLOCATE)
-                .union(E::MAY_COLLECT),
-            // `push`, `set` and `freeze` are not here: each is `std.vector`
-            // over run instructions now.
+            // `push`, `set`, `freeze`, `slice` and `toArray` are not here: each
+            // is `std.vector` over run instructions now.
 
             // A `Set` or a `Map` is immutable, so every update below
             // allocates a new run rather than writing through the receiver
@@ -588,13 +566,10 @@ mod tests {
                 | Intrinsic::StringSliceBytes
                 | Intrinsic::ArrayContains
                 | Intrinsic::ArrayIndexOf
-                | Intrinsic::ArraySlice
-                | Intrinsic::ArrayToVector
                 | Intrinsic::VectorPop
                 | Intrinsic::VectorRemove
                 | Intrinsic::VectorContains
                 | Intrinsic::VectorIndexOf
-                | Intrinsic::VectorSlice
                 | Intrinsic::SetOf
                 | Intrinsic::SetContains
                 | Intrinsic::SetToArray

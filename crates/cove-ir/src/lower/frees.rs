@@ -395,6 +395,13 @@ impl<'p> Flow<'p> {
                 };
                 f(dst, answer);
             }
+            // The one row whose first entry is written rather than read: a run
+            // slice's `dst`, which receives the fresh run's address.
+            Inst::RunSlice { args, .. } => {
+                if let Some(dst) = self.program.arg_list(args).first() {
+                    f(dst.slot, 1);
+                }
+            }
             // The ones that write no word of this frame. A store writes an
             // address's words, a scope instruction writes the scheduler's
             // table, a lock writes the cell's own word, and `AssertFailed`
@@ -490,6 +497,12 @@ impl<'p> Flow<'p> {
             // The five operands live in the args row, exactly as a call's
             // do, so they are read the same way.
             Inst::RunCopy { args: list, .. } => args(list, f),
+            // Everything in the row but `dst`, which it writes.
+            Inst::RunSlice { args: list, .. } => {
+                for arg in self.program.arg_list(list).iter().skip(1) {
+                    f(arg.slot, width(arg.layout));
+                }
+            }
             Inst::GrowableAlloc { capacity, .. } => f(capacity, 1),
             Inst::GrowablePush { owner, src, .. } => {
                 f(owner, 1);

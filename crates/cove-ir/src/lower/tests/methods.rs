@@ -350,6 +350,81 @@ fn @m.f(Int) -> Array
     );
 }
 
+/// `Vector.toArray` is `std.vector.toArray`, whose body is `core.vectorSlice` of
+/// the whole vector: a length, a store and one word `run-slice` into the
+/// `Array` of the element, expanded where it is called.
+#[test]
+fn a_to_array_is_a_word_run_slice_where_it_is_written() {
+    assert_eq!(
+        listing(
+            "fn f(v: Vector<Int>) -> Array<Int> {\n  v.toArray()\n}",
+            "f"
+        ),
+        "\
+fn @m.f(Vector) -> Array
+  frame 6: s0!:ref s1:ref s2:ref s3:int s4:int s5:ref
+  local v -> s0:Vector [0, 5)
+     0  int s3:int 0
+     1  load-field s4:Int s0:ref +0
+     2  load-field s5:<ref> s0:ref +1
+     3  run-slice.words Int (s1:Array s5:<ref> s3:Int s4:Int)
+     4  return s1:Array
+"
+    );
+}
+
+/// `Array.slice` is `std.array.slice`: the clamping is Cove, and beneath it
+/// `core.arraySlice` is one word `run-slice` of the array itself.
+#[test]
+fn an_array_slice_clamps_in_cove_over_a_word_run_slice() {
+    let source = "fn f(a: Array<Int>, x: Int, y: Int) -> Array<Int> {\n  a.slice(x, y)\n}";
+    assert!(
+        listing(source, "f")
+            .contains("call s3:Array std.array.slice<Int> (s0:Array s1:Int s2:Int)"),
+        "a cold call site calls the body"
+    );
+    let (sources, checked) = super::checked(source);
+    let program = super::lower(&checked, &sources, &cove_schema::HostSchemas::new())
+        .expect("the program lowers");
+    let id = program
+        .functions
+        .iter()
+        .position(|f| &*f.module == "std.array" && f.name.starts_with("slice<"))
+        .map(|at| crate::FunctionId(at as u32))
+        .expect("the body was lowered");
+    assert_eq!(
+        crate::print::function(&program, id),
+        "\
+fn @std.array.slice<Int>(Array Int Int) -> Array
+  frame 9: s0!:ref s1!:int s2!:int s3:ref s4:int s5:int s6:bool s7:int s8:int
+  local items -> s0:Array [0, 18)
+  local from -> s1:Int [0, 18)
+  local to -> s2:Int [0, 18)
+  local length -> s4:Int [1, 17)
+  local start -> s5:Int [8, 17)
+  local end -> s7:Int [15, 17)
+     0  len s4:int s0:ref
+     1  lt.int.imm.branch s6:bool s1:int 0 4
+     2  int s5:int 0
+     3  jump 8
+     4  gt.int.branch s6:bool s1:int s4:int 7
+     5  copy s5:Int s4:Int
+     6  jump 8
+     7  copy s5:Int s1:Int
+     8  lt.int.branch s6:bool s2:int s5:int 11
+     9  copy s7:Int s5:Int
+    10  jump 15
+    11  gt.int.branch s6:bool s2:int s4:int 14
+    12  copy s7:Int s4:Int
+    13  jump 15
+    14  copy s7:Int s2:Int
+    15  sub.int s8:int s7:int s5:int
+    16  run-slice.words Int (s3:Array s0:Array s5:Int s8:Int)
+    17  return s3:Array
+"
+    );
+}
+
 /// `mapError` moved out of the lowering the same way `isSome` and
 /// `unwrapOr` did above: `cove_schema::builtins::STANDARD_LIBRARY` names it
 /// too, so `Int.parse(t).mapError(fn(error) { ... })` is an ordinary

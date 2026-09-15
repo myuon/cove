@@ -1,4 +1,4 @@
-//! The hundred and fifty-seven opcodes, and what each one makes of the four
+//! The hundred and sixty opcodes, and what each one makes of the four
 //! fields.
 //!
 //! # One opcode per concrete operation
@@ -126,12 +126,16 @@ mod base {
     /// lets an encoding split it into by storage.
     pub const RUN_COPY_BYTES: u8 = RUN_LOAD_BYTES + 1;
     pub const RUN_COPY_WORDS: u8 = RUN_COPY_BYTES + 1;
+    /// [`crate::Inst::RunSlice`]'s word member, beside the copy it is made of:
+    /// `Array.slice`, `Vector.slice` and `Vector.toArray` since ADR 0058 moved
+    /// them into the standard library.
+    pub const RUN_SLICE_WORDS: u8 = RUN_COPY_WORDS + 1;
     /// The byte members of ADR 0058's growable family and its finish —
     /// [ADR 0052](../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
     /// four byte-buffer instructions, renamed in place — in the order
     /// [`crate::Inst`] declares them and directly after the run copy they fill
     /// with.
-    pub const GROWABLE_ALLOC_BYTES: u8 = RUN_COPY_WORDS + 1;
+    pub const GROWABLE_ALLOC_BYTES: u8 = RUN_SLICE_WORDS + 1;
     pub const GROWABLE_PUSH_BYTE: u8 = GROWABLE_ALLOC_BYTES + 1;
     /// The first word member of the growable family, beside its byte twin:
     /// `Vector.push` since ADR 0058 moved it into the standard library.
@@ -217,6 +221,10 @@ pub enum Op {
     /// [`crate::Inst::RunCopy`] over [`crate::Storage::Words`], whose element
     /// layout is the payload's high half.
     RunCopyWords,
+    /// [`crate::Inst::RunSlice`] over [`crate::Storage::Words`], whose element
+    /// layout is the payload's high half; the answer's layout is the row's
+    /// `dst`.
+    RunSliceWords,
     /// [`crate::Inst::GrowableAlloc`] over [`crate::Storage::PackedBytes`].
     GrowableAllocBytes,
     /// [`crate::Inst::GrowablePush`] over [`crate::Storage::PackedBytes`].
@@ -494,6 +502,7 @@ impl Op {
             Op::RunLoadBytes,
             Op::RunCopyBytes,
             Op::RunCopyWords,
+            Op::RunSliceWords,
             Op::GrowableAllocBytes,
             Op::GrowablePushByte,
             Op::GrowablePushWords,
@@ -582,6 +591,7 @@ impl Op {
             Op::RunLoadBytes => base::RUN_LOAD_BYTES,
             Op::RunCopyBytes => base::RUN_COPY_BYTES,
             Op::RunCopyWords => base::RUN_COPY_WORDS,
+            Op::RunSliceWords => base::RUN_SLICE_WORDS,
             Op::GrowableAllocBytes => base::GROWABLE_ALLOC_BYTES,
             Op::GrowablePushByte => base::GROWABLE_PUSH_BYTE,
             Op::GrowablePushWords => base::GROWABLE_PUSH_WORDS,
@@ -826,6 +836,11 @@ impl Op {
             // which is where `Op::CallClosure` keeps its answer's layout too.
             Op::RunCopyBytes => fields(NONE, NONE, NONE, one(Half::Args)),
             Op::RunCopyWords => fields(NONE, NONE, NONE, ids(Half::Args, Half::Layout)),
+            // `RunCopyWords`' arrangement at four operands: `dst`, `src`,
+            // `from` and `count` behind the `ArgsId`, the element layout in the
+            // free half, and the answer's `Array` layout the one the row
+            // carries for `dst` — see `Inst::RunSlice`'s doc.
+            Op::RunSliceWords => fields(NONE, NONE, NONE, ids(Half::Args, Half::Layout)),
             // No `Half::Layout` on either of the two allocating buffer
             // opcodes, for the reason `Op::Str` carries none, twice over: an
             // owner is always `Program::buffer_layout` and its store is always
@@ -957,7 +972,7 @@ mod tests {
     use super::*;
 
     /// ADR 0041's count, which is the one number the format's headroom is
-    /// argued from: a hundred and fifty-nine opcodes out of the 256 a byte
+    /// argued from: a hundred and sixty opcodes out of the 256 a byte
     /// names.
     ///
     /// It was a hundred and two until `Op::ByteAt` (now `Op::RunLoadBytes`), a
@@ -978,15 +993,16 @@ mod tests {
     /// which no lowering had ever emitted, and a hundred and fifty-eight once
     /// ADR 0058's Phase 3 gave the growable push a word member for
     /// `Vector.push`, and a hundred and fifty-nine once the finish gained one
-    /// for `Vector.freeze`. What the number is for is that a reader can see the
+    /// for `Vector.freeze`, and a hundred and sixty once the run slice arrived
+    /// with `Array.slice`. What the number is for is that a reader can see the
     /// headroom
     /// rather than be told about it: more than a third of the byte is still
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_fifty_nine_opcodes() {
-        assert_eq!(Op::all().len(), 159);
-        assert_eq!(OPCODES, 159);
+    fn there_are_a_hundred_and_sixty_opcodes() {
+        assert_eq!(Op::all().len(), 160);
+        assert_eq!(OPCODES, 160);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

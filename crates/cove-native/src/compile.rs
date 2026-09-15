@@ -47,7 +47,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module, ModuleError};
 
 use crate::abi::{
-    Entry, GrowableOp, NativeCtx, NativeHelpers, Outcome, Raise, HEAP_CHUNK_SHIFT,
+    Entry, GrowableOp, NativeCtx, NativeHelpers, Outcome, Raise, RunOp, HEAP_CHUNK_SHIFT,
     HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
@@ -819,7 +819,20 @@ impl<'a, 'f> Lower<'a, 'f> {
             // bounded chunks with a poll between them, and refusals whose
             // sentences only the runtime can build.
             Inst::RunCopy { args, storage } => {
-                self.run_copy(args.0, *storage);
+                let (kind, elem) = match storage {
+                    Storage::PackedBytes => (RunOp::CopyBytes, 0),
+                    Storage::Words(elem) => (RunOp::CopyWords, elem.0),
+                };
+                self.run_copy(args.0, kind, elem);
+                false
+            }
+            // ADR 0058's `run-slice`: the same helper, which allocates the run
+            // and writes it into the row's `dst` before it copies into it.
+            Inst::RunSlice {
+                args,
+                storage: Storage::Words(elem),
+            } => {
+                self.run_copy(args.0, RunOp::SliceWords, elem.0);
                 false
             }
             Inst::Alloc { dst, layout, len } => {
@@ -1528,30 +1541,26 @@ impl<'a, 'f> Lower<'a, 'f> {
         self.forget();
     }
 
-    /// One [ADR 0058] `run-copy`, handed to the runtime whole.
+    /// One [ADR 0058] `run-copy` or `run-slice`, handed to the runtime whole.
     ///
-    /// [`Lower::growable_op`]'s shape exactly, with the argument list and the
-    /// storage in place of the operation and its pair. See
+    /// [`Lower::growable_op`]'s shape exactly, with the argument list, the
+    /// [`RunOp`] and the element in place of the operation and its pair. See
     /// [`crate::abi::RunCopyFn`] for what the operands mean and why the copy is the
     /// helper's.
     ///
-    /// It is a safepoint: the helper takes one before the copy, and a long copy
-    /// polls between chunks, either of which may collect.
+    /// It is a safepoint: the helper takes one before the copy, a slice
+    /// allocates, and a long copy polls between chunks, any of which may collect.
     ///
     /// [ADR 0058]: ../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
-    fn run_copy(&mut self, args: u32, storage: Storage) {
+    fn run_copy(&mut self, args: u32, kind: RunOp, elem: u32) {
         let work = self.b.use_var(self.work);
         self.store_ctx(OFF_PENDING_WORK, work);
         let zero = self.b.ins().iconst(types::I64, 0);
         self.b.def_var(self.work, zero);
 
-        let (words, elem) = match storage {
-            Storage::PackedBytes => (0i64, 0u32),
-            Storage::Words(elem) => (1i64, elem.0),
-        };
         let at = self.b.ins().iconst(types::I32, self.pc as i64);
         let list = self.b.ins().iconst(types::I32, i64::from(args));
-        let words = self.b.ins().iconst(types::I32, words);
+        let words = self.b.ins().iconst(types::I32, i64::from(kind.abi()));
         let elem = self.b.ins().iconst(types::I32, i64::from(elem));
         let call = self.b.ins().call(
             self.bound.run_copy,

@@ -320,6 +320,12 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
             Storage::PackedBytes => build(Op::RunCopyBytes, 0, 0, 0, halves(args.0, 0)),
             Storage::Words(elem) => build(Op::RunCopyWords, 0, 0, 0, halves(args.0, elem.0)),
         },
+        // The byte member has no opcode until `String.sliceBytes` needs one, and
+        // `crate::verify` refuses it before a program is encoded.
+        Inst::RunSlice { args, storage } => match storage {
+            Storage::PackedBytes => return Err(TooWide::Storage { storage }),
+            Storage::Words(elem) => build(Op::RunSliceWords, 0, 0, 0, halves(args.0, elem.0)),
+        },
         // The growable family's word members arrive one at a time with the
         // method that needs each, so a word storage with no opcode is refused
         // here the way `crate::verify` refuses it first.
@@ -866,6 +872,13 @@ mod tests {
             ),
             (
                 0,
+                Inst::RunSlice {
+                    args: ArgsId(1),
+                    storage: Storage::Words(L),
+                },
+            ),
+            (
+                0,
                 Inst::GrowableAlloc {
                     dst: 1,
                     capacity: 2,
@@ -1320,6 +1333,16 @@ mod tests {
                 "{inst:?}"
             );
         }
+        assert_eq!(
+            encode(
+                &Inst::RunSlice {
+                    args: ArgsId(0),
+                    storage: bytes,
+                },
+                0
+            ),
+            Err(TooWide::Storage { storage: bytes })
+        );
         assert_eq!(
             encode(
                 &Inst::RunFinish {
