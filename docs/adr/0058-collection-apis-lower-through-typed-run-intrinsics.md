@@ -1,22 +1,25 @@
 # ADR 0058: Collection APIs lower through typed run intrinsics, not builtin dispatch
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-15
 - Decides: what belongs in executable IR beneath `String`, `Array`,
   `Vector`, builders, `Map` and `Set`; how the standard library reaches
   representation-dependent operations; and the path by which
   `Inst::CallBuiltin` leaves collection hot paths
-- Amends:
+- Supersedes:
   [ADR 0042](0042-a-builtin-is-a-primitive-a-library-or-a-capability.md)'s
-  primitive/library boundary and
+  **Primitive** test, which kept a whole public method in the runtime when
+  only its smallest representation-dependent operation needed to be there;
+  and
   [ADR 0043](0043-a-method-moves-if-it-is-total-and-takes-no-closure.md)'s
-  treatment of fallible library methods
+  **"It must be total"** condition, whose reason — the caller's span
+  disappearing into `std/` — this ADR removes at its source by carrying blame
 - Elaborates:
   [ADR 0052](0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
   common packed-run substrate and
   [ADR 0055](0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md)'s
   shared semantic optimization
-- Supersedes no source-language API
+- Changes no source-language API
 
 ## Context
 
@@ -75,7 +78,7 @@ runtime-dispatched builtin.
 
 `Inst::CallBuiltin` remains during migration, but it is not a target
 architecture. No new collection API is implemented by adding another
-name-dispatched runtime arm unless this ADR is first amended.
+name-dispatched runtime arm unless a later ADR supersedes this decision.
 
 ### Collections lower to fixed and growable typed runs
 

@@ -2,7 +2,10 @@
 
 - Status: Accepted. Superseded in part by
   [ADR 0043](0043-a-method-moves-if-it-is-total-and-takes-no-closure.md),
-  which narrows the **Library** test and strikes the `Duration` row
+  which narrows the **Library** test and strikes the `Duration` row, and by
+  [ADR 0058](0058-collection-apis-lower-through-typed-run-intrinsics.md),
+  which narrows the **Primitive** test to the smallest
+  representation-dependent operation
 - Date: 2026-09-06
 - Decides: which of the 18 builtin types' 97 methods, 13 associated functions
   and 7 free builtins stay in the runtime, which become Cove source in a

@@ -4,7 +4,10 @@
   superseded by
   [ADR 0044](0044-a-callback-takes-what-its-type-declares.md), which found
   that the condition generalised from one case and that the four methods
-  named under it were never subject to it
+  named under it were never subject to it. Its **"It must be total"**
+  condition is superseded by
+  [ADR 0058](0058-collection-apis-lower-through-typed-run-intrinsics.md),
+  which carries the caller's blame through a fallible intrinsic
 - Date: 2026-09-06
 - Supersedes: [ADR 0042](0042-a-builtin-is-a-primitive-a-library-or-a-capability.md)'s
   **Library** test, and its `Duration` row

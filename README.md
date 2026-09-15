@@ -475,6 +475,22 @@ wider aliasing contract than "a callee touches only its own frame" and is
 written down as one; publication stays on the no-safepoint return path until a
 GC argument extends it.
 
+[ADR 0058](docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
+separates *what a builtin is called* from *how it runs*. A schema entry such as
+`Vector.set` is a source-language fact; `CallBuiltin Vector.set`, dispatched by
+receiver and method name through Rust, is an execution decision the first fact
+never required. Bringing the native tier up on covefmt had both code generators
+recognising `String.byteLength`, `Vector.push`, `Vector.set` and
+`Vector.freeze` one by one — nominal library APIs repeated per backend, with
+nothing for common optimization to see. So `String`, `Array`, the string
+builder and `Vector` become nominal wrappers over ADR 0052's fixed and growable
+runs, executable IR gains six typed run operations (allocate, load and store,
+copy, ensure, commit, and finish), and the public algorithms move into Cove
+source over them. What stays in Rust is reached by a static intrinsic id with
+declared effects rather than by name, and a fallible intrinsic carries its
+source call site's blame — which retires ADR 0043's totality condition at its
+reason. `CallBuiltin` is deprecated by architecture before it leaves the tree.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles
