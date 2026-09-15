@@ -1,0 +1,193 @@
+use console.println
+
+/// Declared out of name order, so that an order by case index and the order a
+/// set keeps would not agree.
+enum Color {
+  Red
+  Green
+  Blue
+}
+
+/// Cases with payloads beside one without.
+enum Shape {
+  Square(Int)
+  Circle(Int)
+  Dot
+  Label(String)
+}
+
+/// A two-word key.
+struct Point {
+  x: Int
+  y: Int
+}
+
+/// Pins what `Map` and `Set` lookups and updates answer, across key families,
+/// before ADR 0058's Phase 4 (ADR 0059, #378) moves them into the standard
+/// library: `get` and `contains` found and not found at both ends and in the
+/// middle, `inserted` over a key already there, `removed` of a key that is not,
+/// and the order each collection renders in.
+export fn main() -> Result<Unit, Error> {
+  ints()?
+  strings()?
+  enums()?
+  structs()?
+  nested()?
+  scalars()?
+  updates()?
+  Ok(())
+}
+
+/// `Int` keys, including the least and greatest `Int` and a negative one.
+fn ints() -> Result<Unit, Error> {
+  let least = -9223372036854775807 - 1
+  let greatest = 9223372036854775807
+  let byInt = Map.of(
+    MapEntry(key: 7, value: "seven"),
+    MapEntry(key: -3, value: "minus three"),
+    MapEntry(key: greatest, value: "greatest"),
+    MapEntry(key: 0, value: "zero"),
+    MapEntry(key: least, value: "least"),
+  )
+  println("ints {byInt}")?
+  println("  get {byInt.get(least)} {byInt.get(-3)} {byInt.get(0)} {byInt.get(7)} {byInt.get(greatest)}")?
+  println("  miss {byInt.get(-4)} {byInt.get(1)} {byInt.get(8)} {byInt.get(least + 1)} {byInt.get(greatest - 1)}")?
+  println("  contains {byInt.contains(least)} {byInt.contains(7)} {byInt.contains(6)} {byInt.contains(greatest)}")?
+  let empty: Map<Int, String> = Map.of()
+  println("  empty {empty.get(0)} {empty.contains(0)}")?
+  let one = Map.of(MapEntry(key: 5, value: "five"))
+  println("  one {one.get(4)} {one.get(5)} {one.get(6)} {one.contains(5)}")?
+  let members = Set.of(4, -1, 9, 0, 2)
+  println("  set {members} {members.contains(-1)} {members.contains(9)} {members.contains(1)} {members.contains(10)} {members.contains(-2)}")?
+  let noInts: Set<Int> = Set.of()
+  println("  empty set {noInts.contains(0)}")
+}
+
+/// `String` keys: the empty string, a prefix of another key, multibyte text.
+fn strings() -> Result<Unit, Error> {
+  let byName = Map.of(
+    MapEntry(key: "abc", value: 3),
+    MapEntry(key: "", value: 0),
+    MapEntry(key: "ab", value: 2),
+    MapEntry(key: "é", value: 9),
+    MapEntry(key: "b", value: 5),
+    MapEntry(key: "Z", value: 26),
+  )
+  println("strings {byName}")?
+  println("  get {byName.get("")} {byName.get("ab")} {byName.get("abc")} {byName.get("b")} {byName.get("é")} {byName.get("Z")}")?
+  println("  miss {byName.get("a")} {byName.get("abcd")} {byName.get("e")} {byName.get("z")} {byName.get("B")}")?
+  println("  contains {byName.contains("")} {byName.contains("é")} {byName.contains("ac")}")?
+  let words = Set.of("pear", "apple", "fig", "")
+  println("  set {words} {words.contains("fig")} {words.contains("")} {words.contains("figs")} {words.contains("app")}")
+}
+
+/// Enum keys, with and without payloads: ordered by case name, then payload.
+fn enums() -> Result<Unit, Error> {
+  let colors = Set.of(Color.Red, Color.Green, Color.Blue)
+  println("colors {colors} {colors.contains(Color.Green)}")?
+  let partial = Set.of(Color.Red, Color.Blue)
+  println("  partial {partial.contains(Color.Green)} {partial.contains(Color.Red)} {partial.contains(Color.Blue)}")?
+  let byColor = Map.of(
+    MapEntry(key: Color.Green, value: 2),
+    MapEntry(key: Color.Red, value: 1),
+  )
+  println("  map {byColor} {byColor.get(Color.Red)} {byColor.get(Color.Blue)} {byColor.contains(Color.Green)}")?
+  let shapes = Set.of(
+    Shape.Square(2),
+    Shape.Circle(3),
+    Shape.Dot,
+    Shape.Circle(1),
+    Shape.Label("b"),
+    Shape.Label("a"),
+  )
+  println("shapes {shapes}")?
+  println("  contains {shapes.contains(Shape.Circle(3))} {shapes.contains(Shape.Circle(2))} {shapes.contains(Shape.Dot)} {shapes.contains(Shape.Label("a"))} {shapes.contains(Shape.Label("c"))} {shapes.contains(Shape.Square(-2))}")?
+  let nothing: Option<Int> = None
+  let options = Map.of(
+    MapEntry(key: Some(2), value: "two"),
+    MapEntry(key: nothing, value: "none"),
+    MapEntry(key: Some(-1), value: "minus one"),
+  )
+  println("  options {options} {options.get(nothing)} {options.get(Some(2))} {options.get(Some(3))}")
+}
+
+/// Struct keys, ordered field by field.
+fn structs() -> Result<Unit, Error> {
+  let byPoint = Map.of(
+    MapEntry(key: Point(x: 1, y: 2), value: "a"),
+    MapEntry(key: Point(x: 0, y: 9), value: "b"),
+    MapEntry(key: Point(x: 1, y: -2), value: "c"),
+  )
+  println("points {byPoint}")?
+  println("  get {byPoint.get(Point(x: 1, y: 2))} {byPoint.get(Point(x: 0, y: 9))} {byPoint.get(Point(x: 1, y: -2))}")?
+  println("  miss {byPoint.get(Point(x: 2, y: 1))} {byPoint.get(Point(x: 1, y: 0))} {byPoint.get(Point(x: -1, y: 9))}")?
+  let points = Set.of(Point(x: 3, y: 3), Point(x: -3, y: 3))
+  println("  set {points} {points.contains(Point(x: 3, y: 3))} {points.contains(Point(x: 3, y: -3))}")
+}
+
+/// Keys that hold collections: arrays, sets and maps, compared element by
+/// element with the shorter first.
+fn nested() -> Result<Unit, Error> {
+  let arrays = Set.of([1, 2], [1], [], [2], [1, 2, 0])
+  println("arrays {arrays}")?
+  println("  contains {arrays.contains([])} {arrays.contains([1, 2])} {arrays.contains([1, 3])} {arrays.contains([2, 0])} {arrays.contains([1, 2, 0])}")?
+  let sets = Set.of(Set.of(2, 3), Set.of(1), Set.of(1, 2))
+  println(
+    "sets {sets} {sets.contains(Set.of(3, 2))} {sets.contains(Set.of(2))}",
+  )?
+  let maps = Map.of(
+    MapEntry(key: Map.of(MapEntry(key: "b", value: 1)), value: "b1"),
+    MapEntry(key: Map.of(MapEntry(key: "a", value: 2)), value: "a2"),
+  )
+  println("maps {maps} {maps.get(Map.of(MapEntry(key: "a", value: 2)))} {maps.get(Map.of(MapEntry(key: "a", value: 1)))}")?
+  let deep = Map.of(
+    MapEntry(key: [Point(x: 1, y: 1)], value: 1),
+    MapEntry(key: [Point(x: 0, y: 5), Point(x: 0, y: 0)], value: 2),
+  )
+  println("  deep {deep.get([Point(x: 0, y: 5), Point(x: 0, y: 0)])} {deep.get([Point(x: 0, y: 5)])}")
+}
+
+/// `Bool`, `Duration`, `Unit` and range keys.
+fn scalars() -> Result<Unit, Error> {
+  let flags = Set.of(true, false)
+  println("bools {flags} {flags.contains(false)}")?
+  let onlyTrue = Set.of(true)
+  println("  only true {onlyTrue.contains(false)} {onlyTrue.contains(true)}")?
+  let waits = Map.of(
+    MapEntry(key: Duration.seconds(2), value: "two"),
+    MapEntry(key: Duration.millis(-5), value: "minus"),
+  )
+  println("durations {waits.get(Duration.seconds(2))} {waits.get(Duration.millis(-5))} {waits.get(Duration.millis(2))}")?
+  let units = Set.of(())
+  println("units {units.contains(())}")?
+  let ranges = Set.of(0..<3, 0..3, 1..<2)
+  println("ranges {ranges} {ranges.contains(0..<3)} {ranges.contains(0..2)}")
+}
+
+/// `inserted` replacing a value, and at either end; `removed` of a key that is
+/// not there; the receiver unchanged by both.
+fn updates() -> Result<Unit, Error> {
+  let base = Map.of(
+    MapEntry(key: "m", value: 1),
+    MapEntry(key: "c", value: 2),
+    MapEntry(key: "x", value: 3),
+  )
+  let replaced = base.inserted("c", 20)
+  println("replaced {replaced} {replaced.get("c")} {replaced.length()}")?
+  let low = base.inserted("a", 0)
+  let high = base.inserted("z", 9)
+  let middle = base.inserted("n", 5)
+  println("  grown {low} {high} {middle}")?
+  let absent = base.removed("q")
+  println("  removed absent {absent} {absent == base} {absent.length()}")?
+  let present = base.removed("m")
+  println("  removed present {present} {present.get("m")}")?
+  let emptied = Map.of(MapEntry(key: "only", value: 1)).removed("only")
+  println("  emptied {emptied} {emptied.isEmpty()} {emptied.get("only")}")?
+  println("  base {base}")?
+
+  let members = Set.of(3, 1)
+  println("  set {members.inserted(1)} {members.inserted(2)} {members.removed(5)} {members.removed(1)} {members}")?
+  let wide = Set.of(Point(x: 5, y: 5))
+  println("  wide {wide.inserted(Point(x: 5, y: 5))} {wide.inserted(Point(x: 5, y: 4))} {wide.removed(Point(x: 5, y: 6))}")
+}

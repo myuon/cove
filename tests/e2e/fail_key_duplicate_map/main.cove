@@ -1,0 +1,16 @@
+use console.println
+
+/// Builds a map literal holding two different keys twice each: the refusal
+/// names the first key found again in argument order, which is `"a"` — its
+/// second entry comes before the second `"b"`.
+export fn main() -> Result<Unit, Error> {
+  println("about to build a map with duplicate keys")?
+  let bad = Map.of(
+    MapEntry(key: "b", value: 1),
+    MapEntry(key: "a", value: 2),
+    MapEntry(key: "a", value: 3),
+    MapEntry(key: "b", value: 4),
+  )
+  println("never printed {bad}")?
+  Ok(())
+}

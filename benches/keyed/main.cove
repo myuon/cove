@@ -1,0 +1,279 @@
+use console.println
+use clock.now
+
+/// Two words inline, ordered field by field: the key no single comparison
+/// instruction can order.
+struct Point {
+  x: Int
+  y: Int
+}
+
+/// One row per keyed mechanism, each an `arith`-style loop with that one
+/// operation added.
+///
+/// ADR 0058's Phase 4, as ADR 0059 decides it (#378), moves `Map` and `Set`
+/// lookups and updates out of Rust and into Cove over a layout-directed value
+/// order: a binary search pays one order per step where Rust made one call per
+/// search. What that costs depends on the key — an `Int` is one comparison, a
+/// `String` a byte comparison, a struct a walk — and on how many steps a search
+/// takes, so each row names its key family and its size:
+///
+/// - `keyed_get_str9`: `Map<String, Int>.get` over nine keys, every key in turn;
+/// - `keyed_get_int1k`: `Map<Int, Int>.get` over 1,024 keys, every key in turn;
+/// - `keyed_contains_set3`: `Set<String>.contains` over three members;
+/// - `keyed_build_str9`: nine `inserted`s onto an empty `Map<String, Int>`;
+/// - `keyed_of5`: a five-entry `Map.of` literal;
+/// - `keyed_wide`: `Set<Point>.contains` over sixteen two-word members.
+///
+/// The first argument is how many turns a lookup row takes, a million unless it
+/// says otherwise; a construction row takes a tenth of that. Each row prints
+/// nanoseconds per turn.
+export fn main(args: Array<String>) -> Result<Unit, Error> {
+  let turns = match args.get(0) {
+    Some(text) => Int.parse(text)?
+    None => 1000000
+  }
+  let builds = turns / 10
+
+  let words = names(9)
+  let byName = nameMap(words)
+  var from = now()
+  let named = getStrings(byName, words, turns)
+  report("keyed_get_str9", turns, from)?
+  assertEqual(named, sumTo(9) * (turns / 9) + sumTo(turns % 9))?
+
+  let byInt = intMap(1024)
+  from = now()
+  let counted = getInts(byInt, 1024, turns)
+  report("keyed_get_int1k", turns, from)?
+  assertEqual(counted, turns)?
+
+  let three = names(3)
+  let members = nameSet(three)
+  from = now()
+  let held = containsStrings(members, three, turns)
+  report("keyed_contains_set3", turns, from)?
+  assertEqual(held, turns)?
+
+  from = now()
+  let built = buildStrings(words, builds)
+  report("keyed_build_str9", builds, from)?
+  assertEqual(built, 9 * builds)?
+
+  from = now()
+  let literals = ofFive(builds)
+  report("keyed_of5", builds, from)?
+  assertEqual(literals, 5 * builds)?
+
+  let points = pointSet(16)
+  from = now()
+  let wide = containsPoints(points, 16, turns)
+  report("keyed_wide", turns, from)?
+  assertEqual(wide, turns)?
+  Ok(())
+}
+
+/// `n` distinct strings, `"key-{i}"` at `i`.
+fn names(n: Int) -> Array<String> {
+  var out: Vector<String> = Vector.of()
+  for i in 0..<n {
+    out.push("key-{i}")
+  }
+  out.freeze()
+}
+
+/// `1 + 2 + … + n`.
+fn sumTo(n: Int) -> Int {
+  n * (n + 1) / 2
+}
+
+/// Each of `words` mapped to its position plus one.
+fn nameMap(words: Array<String>) -> Map<String, Int> {
+  var out: Map<String, Int> = Map.of()
+  var at = 0
+  for word in words {
+    at += 1
+    out = out.inserted(word, at)
+  }
+  out
+}
+
+/// `i * 3` mapped to `1` for each `i` below `n`.
+fn intMap(n: Int) -> Map<Int, Int> {
+  var out: Map<Int, Int> = Map.of()
+  for i in 0..<n {
+    out = out.inserted(i * 3, 1)
+  }
+  out
+}
+
+/// Each of `words` as a member.
+fn nameSet(words: Array<String>) -> Set<String> {
+  var out: Set<String> = Set.of()
+  for word in words {
+    out = out.inserted(word)
+  }
+  out
+}
+
+/// `Point(x: i, y: -i)` for each `i` below `n`.
+fn pointSet(n: Int) -> Set<Point> {
+  var out: Set<Point> = Set.of()
+  for i in 0..<n {
+    out = out.inserted(Point(x: i, y: -i))
+  }
+  out
+}
+
+/// Sets `count` to nothing.
+///
+/// Each loop below calls this once before it starts, for the reason
+/// `benches/seqsearch` gives: a function that calls a `var` function is not a
+/// leaf, so the loop stays a function the native tier can compile rather than
+/// being expanded into `main`, which reads the clock.
+fn reset(var count: Int) {
+  count = 0
+}
+
+/// The sum of what `turns` lookups answered, cycling through `words`.
+fn getStrings(
+  entries: Map<String, Int>,
+  words: Array<String>,
+  turns: Int,
+) -> Int {
+  var sum = 1
+  reset(var sum)
+  var turn = 0
+  var at = 0
+  let n = words.length()
+  while turn < turns {
+    let word = words.get(at).unwrapOr("")
+    sum += entries.get(word).unwrapOr(0)
+    at += 1
+    if at == n {
+      at = 0
+    }
+    turn += 1
+  }
+  sum
+}
+
+/// The sum of what `turns` lookups answered, cycling through `0, 3, …`.
+fn getInts(entries: Map<Int, Int>, n: Int, turns: Int) -> Int {
+  var sum = 1
+  reset(var sum)
+  var turn = 0
+  var at = 0
+  while turn < turns {
+    sum += entries.get(at * 3).unwrapOr(0)
+    at += 1
+    if at == n {
+      at = 0
+    }
+    turn += 1
+  }
+  sum
+}
+
+/// How many of `turns` membership tests found their member, cycling through
+/// `words`.
+fn containsStrings(
+  members: Set<String>,
+  words: Array<String>,
+  turns: Int,
+) -> Int {
+  var found = 1
+  reset(var found)
+  var turn = 0
+  var at = 0
+  let n = words.length()
+  while turn < turns {
+    let word = words.get(at).unwrapOr("")
+    if members.contains(word) {
+      found += 1
+    }
+    at += 1
+    if at == n {
+      at = 0
+    }
+    turn += 1
+  }
+  found
+}
+
+/// How many of `turns` membership tests found their point, cycling through
+/// the points `pointSet` put there.
+fn containsPoints(members: Set<Point>, n: Int, turns: Int) -> Int {
+  var found = 1
+  reset(var found)
+  var turn = 0
+  var at = 0
+  while turn < turns {
+    if members.contains(Point(x: at, y: -at)) {
+      found += 1
+    }
+    at += 1
+    if at == n {
+      at = 0
+    }
+    turn += 1
+  }
+  found
+}
+
+/// The total length of `turns` maps, each built by inserting all of `words`
+/// in turn onto an empty map.
+fn buildStrings(words: Array<String>, turns: Int) -> Int {
+  var total = 1
+  reset(var total)
+  let empty: Map<String, Int> = Map.of()
+  let a = words.get(4).unwrapOr("")
+  let b = words.get(1).unwrapOr("")
+  let c = words.get(7).unwrapOr("")
+  let d = words.get(0).unwrapOr("")
+  let e = words.get(8).unwrapOr("")
+  let f = words.get(2).unwrapOr("")
+  let g = words.get(6).unwrapOr("")
+  let h = words.get(3).unwrapOr("")
+  let i = words.get(5).unwrapOr("")
+  var turn = 0
+  while turn < turns {
+    let built = empty.inserted(a, 1)
+      .inserted(b, 2)
+      .inserted(c, 3)
+      .inserted(d, 4)
+      .inserted(e, 5)
+      .inserted(f, 6)
+      .inserted(g, 7)
+      .inserted(h, 8)
+      .inserted(i, 9)
+    total += built.length()
+    turn += 1
+  }
+  total
+}
+
+/// The total length of `turns` five-entry map literals.
+fn ofFive(turns: Int) -> Int {
+  var total = 1
+  reset(var total)
+  var turn = 0
+  while turn < turns {
+    let built = Map.of(
+      MapEntry(key: "delta", value: turn),
+      MapEntry(key: "alpha", value: 1),
+      MapEntry(key: "echo", value: 2),
+      MapEntry(key: "charlie", value: 3),
+      MapEntry(key: "bravo", value: 4),
+    )
+    total += built.length()
+    turn += 1
+  }
+  total
+}
+
+/// One row: its name, and what the turns since `from` cost per turn.
+fn report(row: String, turns: Int, from: Duration) -> Result<Unit, Error> {
+  let micros = (now() - from).micros()
+  println("{row} {micros * 1000 / turns} ns/turn")
+}

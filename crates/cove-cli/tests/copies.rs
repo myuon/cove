@@ -562,13 +562,25 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// that copy (`examples:life` 2, `benches:callback`, `examples:restricted` and
 /// six `tests/e2e:gc_*` rows 1 or 2 each, `gc_churn` and `gc_vector_grow` 3).
 ///
+/// **The nineteenth rise is six new rows, over a constant that had not
+/// followed the corpus down.** 2334 to 2339. Without the new rows the corpus
+/// measures 2271 — the Phase 3 commits after the fall above removed 63 more
+/// and left the constant where it was — and the rows that pin `Map` and `Set`
+/// before ADR 0058's Phase 4 moves them into the standard library (#378, ADR
+/// 0059) add 68: `benches:keyed` 36 (its row functions' `Result`s and counts
+/// handed back through calls, as `benches:seqsearch`'s are),
+/// `tests/e2e:fail_key_nested_float` 8, and `tests/e2e:coll_keyed_search`,
+/// `fail_key_duplicate_map`, `fail_key_duplicate_set` and
+/// `fail_key_float_empty_map` 6 each, which is the floor every program's
+/// standard library sets. The lowering is the base's.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2334;
+const FORWARDABLE_COPIES: usize = 2339;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

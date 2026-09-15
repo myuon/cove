@@ -10,6 +10,10 @@ allow = ["console"]
 entry = "coll_freeze.main"
 allow = ["console"]
 
+[run.coll_keyed_search]
+entry = "coll_keyed_search.main"
+allow = ["console"]
+
 [run.coll_map]
 entry = "coll_map.main"
 allow = ["console"]
@@ -354,4 +358,20 @@ allow = ["console"]
 
 [run.values_string_bytes]
 entry = "values_string_bytes.main"
+allow = ["console"]
+
+[run.fail_key_duplicate_map]
+entry = "fail_key_duplicate_map.main"
+allow = ["console"]
+
+[run.fail_key_duplicate_set]
+entry = "fail_key_duplicate_set.main"
+allow = ["console"]
+
+[run.fail_key_float_empty_map]
+entry = "fail_key_float_empty_map.main"
+allow = ["console"]
+
+[run.fail_key_nested_float]
+entry = "fail_key_nested_float.main"
 allow = ["console"]

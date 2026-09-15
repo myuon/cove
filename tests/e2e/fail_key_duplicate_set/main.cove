@@ -1,0 +1,21 @@
+use console.println
+
+/// A two-word member.
+struct Point {
+  x: Int
+  y: Int
+}
+
+/// Builds a set literal holding two different points twice each: the refusal
+/// names the first member found again in argument order.
+export fn main() -> Result<Unit, Error> {
+  println("about to build a set with duplicate members")?
+  let bad = Set.of(
+    Point(x: 2, y: 0),
+    Point(x: 1, y: 5),
+    Point(x: 1, y: 5),
+    Point(x: 2, y: 0),
+  )
+  println("never printed {bad}")?
+  Ok(())
+}
