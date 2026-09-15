@@ -54,7 +54,7 @@ fn receiver_addr(
 /// The text of a `String` receiver.
 ///
 /// This copies the whole object and validates it, once per call, which is
-/// what every operation above wanted and what the three byte-counted ones
+/// what every operation above wanted and what the two byte-counted ones
 /// below exist to not do: they take [`receiver_addr`] and read the words they
 /// actually need.
 fn receiver(
@@ -136,20 +136,6 @@ fn byte_range(
         }
     }
     Ok((start, end))
-}
-
-/// `String.byteLength() -> Int`.
-///
-/// The object header's own length field — one word, no decode, no
-/// allocation. `length()` above it still counts characters and still walks
-/// them, which is the whole difference between the two.
-pub(super) fn byte_length(
-    machine: &mut Machine,
-    operands: &[Operand<'_>],
-) -> Result<u64, RuntimeError> {
-    let (self_, _) = operand::method("byteLength", operands, 0)?;
-    let addr = receiver_addr(machine, "byteLength", self_)?;
-    Ok(machine.object_len(addr) as u64)
 }
 
 /// `String.codePointAtByte(offset) -> Option<Int>`.

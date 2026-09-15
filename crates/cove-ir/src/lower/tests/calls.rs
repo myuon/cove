@@ -496,6 +496,36 @@ fn @app.f() -> Int
     );
 }
 
+/// A program's own module called `core` is reached as any other module is.
+///
+/// `core.byteLength(text)` is a core intrinsic only inside the standard
+/// library — ADR 0058's library-only boundary — so a package that declares a
+/// `core` of its own keeps the call it wrote, and nothing about the name is
+/// reserved in the program's modules.
+#[test]
+fn a_program_s_own_core_module_is_an_ordinary_call() {
+    assert_eq!(
+        super::listing_in(
+            &[
+                (
+                    "core",
+                    "fn keep() {}\nexport fn byteLength(n: Int) -> Int { keep()\n  n * 2 }\n"
+                ),
+                ("app", "use core\nfn f() -> Int { core.byteLength(21) }\n"),
+            ],
+            "app",
+            "f",
+        ),
+        "\
+fn @app.f() -> Int
+  frame 2: s0:int s1:int
+     0  int s1:int 21
+     1  call s0:Int core.byteLength (s1:Int)
+     2  return s0:Int
+"
+    );
+}
+
 /// The other half of the same name: a struct the module exports, initialized
 /// through it.
 ///

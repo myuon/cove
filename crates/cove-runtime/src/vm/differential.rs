@@ -1894,3 +1894,120 @@ export fn viaAppendByte(value: Int) -> Int {
         );
     }
 }
+
+/// A core intrinsic, called where only the standard library may call one,
+/// answers alike on both evaluators — and on the machine it is the instruction
+/// it names rather than a builtin call.
+///
+/// ADR 0058's `core.byteLength(text)` has no public caller until a method moves
+/// onto it, so this installs one: a second file in `std.string`, which is a
+/// standard-library module by name and therefore privileged by the same
+/// question the checker, the lowering and the oracle each ask. The text has a
+/// two-byte character in it, so a length counted in characters would not pass.
+#[test]
+fn a_core_intrinsic_agrees_and_is_an_instruction() {
+    const PROBE: &str = "\
+/// The bytes of `text`, through the core intrinsic.
+export fn probeBytes(text: String) -> Int {
+  core.byteLength(text)
+}
+";
+    const MAIN: &str = "\
+use std.string
+
+export fn main(text: String) -> Int {
+  string.probeBytes(text) + 1
+}
+";
+    fn probed() -> (Arc<SourceMap>, Arc<Checked>) {
+        let mut sources = SourceMap::new();
+        let file = sources.add("m/main.cove", MAIN.to_string());
+        let ast = cove_syntax::parse_file(&sources, file).expect("the program parses");
+        let mut modules = BTreeMap::from([(
+            "m".to_string(),
+            Module {
+                name: "m".to_string(),
+                dir: PathBuf::from("m"),
+                units: vec![Unit {
+                    file,
+                    path: PathBuf::from("m/main.cove"),
+                    ast,
+                }],
+            },
+        )]);
+        for (name, module) in cove_sema::stdlib::attach(&mut sources).expect("stdlib parses") {
+            modules.insert(name, module);
+        }
+        let path = PathBuf::from("std/string_probe.cove");
+        let file = sources.add_library(path.clone(), PROBE);
+        let ast = cove_syntax::parse_file(&sources, file).expect("the probe parses");
+        modules
+            .get_mut("std.string")
+            .expect("the standard library has `std.string`")
+            .units
+            .push(Unit { file, path, ast });
+        let package = Package {
+            root: PathBuf::from("."),
+            config: Config::default(),
+            modules,
+        };
+        match cove_sema::Compiler::new().compile(&package) {
+            Ok(program) => (Arc::new(sources), Arc::new(program)),
+            Err(items) => panic!("the probe checks:\n{}", rendered(&sources, &items)),
+        }
+    }
+
+    let (sources, program) = probed();
+    let ir = lowered(&sources, &program);
+    let probe = ir
+        .functions
+        .iter()
+        .find(|f| &*f.module == "std.string" && &*f.name == "probeBytes")
+        .expect("the probe was lowered");
+    assert!(
+        probe
+            .code
+            .iter()
+            .any(|inst| matches!(inst, cove_ir::Inst::Len { .. })),
+        "`core.byteLength` is a `len`: {:?}",
+        probe.code
+    );
+    let main = ir
+        .functions
+        .iter()
+        .find(|f| &*f.module == "m" && &*f.name == "main")
+        .expect("the caller was lowered");
+    for f in [probe, main] {
+        assert!(
+            f.code
+                .iter()
+                .all(|inst| !matches!(inst, cove_ir::Inst::CallBuiltin { .. })),
+            "`{}.{}` makes no builtin call: {:?}",
+            f.module,
+            f.name,
+            f.code
+        );
+    }
+
+    for (module, name, arg) in [
+        ("std.string", "probeBytes", "h\u{e9}llo"),
+        ("m", "main", "caf\u{e9}"),
+    ] {
+        let oracle = on_a_deep_stack(move || {
+            let (sources, program) = probed();
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts);
+            said(Interpreter::new(&runtime).invoke(module, name, vec![Value::string(arg)]))
+        });
+        let machine = on_a_deep_stack(move || {
+            let (sources, program) = probed();
+            let ir = lowered(&sources, &program);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts.clone());
+            said(Vm::new(&runtime, &hosts, &ir).invoke(module, name, vec![Value::string(arg)]))
+        });
+        assert_eq!(machine, oracle, "`{module}.{name}` answers alike");
+        let want = arg.len() as i64 + i64::from(module == "m");
+        assert_eq!(oracle, Answer::Value(want.to_string()));
+    }
+}

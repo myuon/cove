@@ -434,7 +434,7 @@ use std::sync::Arc;
 use cove_diag::{Diagnostic, FileId, Severity, Span};
 use cove_schema::builtins::{
     BuiltinSchema, BuiltinType, FreeBuiltinKind, FreeBuiltinSchema, MethodSchema, ParamSchema,
-    MAP_ENTRY, NONE_CASE, SCOPE,
+    CORE_NAMESPACE, MAP_ENTRY, NONE_CASE, SCOPE,
 };
 use cove_schema::{
     HostSchemas, HostType, ModuleSchema, OperationSchema, ResourceSchema, TypeSchema,
@@ -6431,6 +6431,86 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `core.name(...)` written in a standard-library module: one of
+    /// `cove_schema::builtins::CORE_INTRINSICS`, typed as a free builtin is.
+    ///
+    /// Only [`Checker::call_qualified`] reaches this, and only for a module
+    /// `crate::stdlib` declares — which is the whole of the privilege. In any
+    /// other module `core` is an ordinary name and the call is checked as the
+    /// program wrote it: a module of the package called `core`, or a name
+    /// that is not in scope.
+    fn core_intrinsic(
+        &mut self,
+        name: &Ident,
+        args: &[Arg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Ty {
+        let Some(schema) = cove_schema::builtins::core_intrinsic(&name.node) else {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    UNKNOWN_ASSOCIATED,
+                    format!("`{CORE_NAMESPACE}` has no intrinsic `{}`", name.node),
+                )
+                .at(span)
+                .rule("A standard-library module calls the core intrinsics `cove_schema::builtins::CORE_INTRINSICS` declares.")
+                .help(format!(
+                    "`{CORE_NAMESPACE}` declares {}",
+                    list(
+                        &cove_schema::builtins::core_intrinsics()
+                            .iter()
+                            .map(|entry| entry.name.to_string())
+                            .collect::<Vec<_>>()
+                    )
+                )),
+            );
+            self.check_args_freely(args, trailing);
+            return Ty::recovery();
+        };
+        let supplied: Vec<&Expr> = args.iter().map(|arg| &arg.value).chain(trailing).collect();
+        if supplied.len() != schema.arity() {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    ARITY,
+                    format!(
+                        "`{CORE_NAMESPACE}.{}` takes {} argument(s), but {} were given",
+                        schema.name,
+                        schema.arity(),
+                        supplied.len()
+                    ),
+                )
+                .at(span)
+                .help(format!("write `{}`", schema.signature())),
+            );
+            self.check_args_freely(args, trailing);
+            return Ty::recovery();
+        }
+        let open: Vec<Ty> = schema
+            .generics
+            .iter()
+            .map(|_| self.fresh_var(span))
+            .collect();
+        let mut bindings = FreeBindings::of(schema.generics, open);
+        for (param, value) in schema.params.iter().zip(supplied) {
+            let declared = bindings.open(&param.ty);
+            if declared.is_wild() {
+                let found = self.expr(value, None);
+                self.constrain(&found, &declared, value.span);
+                bindings.bind(&param.ty, found, value.span);
+            } else {
+                let reason = format!(
+                    "`{CORE_NAMESPACE}.{}` takes a `{declared}` {}",
+                    schema.name, param.name
+                );
+                let expected = Expected::new(declared, bindings.origin(&param.ty, span), reason);
+                self.expr(value, Some(&expected));
+            }
+        }
+        let result = bindings.open(&schema.result);
+        self.produced(&result);
+        result
+    }
+
     /// `head.name(...)` where `head` is not a local binding: a host
     /// operation, an enum case, an associated function, or a method reached
     /// through its type's name.
@@ -6447,6 +6527,9 @@ impl<'a> Checker<'a> {
     ) -> Option<Ty> {
         if self.module.host_uses.contains(head) {
             return Some(self.host_call(head, &name.node, args, trailing, span));
+        }
+        if head == CORE_NAMESPACE && crate::stdlib::is_library_module(&self.module.name) {
+            return Some(self.core_intrinsic(name, args, trailing, span));
         }
         // A module imported whole answers a qualified call with whatever it
         // exports under that name: a function to call, or a struct to
@@ -9481,8 +9564,14 @@ impl FreeBindings {
     /// does, `Checker::finish_inference` says so where the value was
     /// written.
     fn new(schema: &'static FreeBuiltinSchema, open: Vec<Ty>) -> FreeBindings {
+        FreeBindings::of(schema.generics, open)
+    }
+
+    /// The same, for a signature that is not a [`FreeBuiltinSchema`] — a core
+    /// intrinsic's, which has the generics and parameters of one and no kind.
+    fn of(generics: &'static [&'static str], open: Vec<Ty>) -> FreeBindings {
         FreeBindings {
-            types: schema.generics.iter().copied().zip(open).collect(),
+            types: generics.iter().copied().zip(open).collect(),
             origins: BTreeMap::new(),
         }
     }
@@ -15527,6 +15616,65 @@ fn secret() -> Int {
             (
                 "app",
                 "use levels.load\n\n/// Entry point.\nexport fn main() -> Int {\n  load().port\n}\n",
+            ),
+        ]);
+    }
+
+    // ------------------------------------------ core intrinsics (ADR 0058)
+
+    /// A standard-library module calls `core.byteLength` and it checks as the
+    /// schema declares it: a `String` in, an `Int` out.
+    #[test]
+    fn a_library_module_calls_a_core_intrinsic() {
+        accepts_modules(&[(
+            "std.string",
+            "/// Bytes.\nexport fn probe(text: String) -> Int {\n  core.byteLength(text)\n}\n",
+        )]);
+        let error = rejects_modules(&[(
+            "std.string",
+            "/// Bytes.\nexport fn probe(text: Int) -> Int {\n  core.byteLength(text)\n}\n",
+        )]);
+        assert_eq!(error.code, MISMATCH, "{}", error.message);
+        let error = rejects_modules(&[(
+            "std.string",
+            "/// Bytes.\nexport fn probe(text: String) -> Int {\n  core.byteLengthOf(text)\n}\n",
+        )]);
+        assert_eq!(error.code, UNKNOWN_ASSOCIATED, "{}", error.message);
+        assert!(error
+            .message
+            .contains("`core` has no intrinsic `byteLengthOf`"));
+    }
+
+    /// In a program's own module `core` is an ordinary name, and a call
+    /// through it is told so exactly as a call through any unknown name is.
+    #[test]
+    fn a_program_cannot_call_a_core_intrinsic() {
+        let error = rejects_modules(&[(
+            "app",
+            "/// Entry point.\nexport fn main() -> Int {\n  core.byteLength(\"x\")\n}\n",
+        )]);
+        assert_eq!(error.code, UNKNOWN_NAME, "{}", error.message);
+        assert!(error.message.contains("`core`"), "{}", error.message);
+        // Nor does a module merely named like the library's get the privilege.
+        let error = rejects_modules(&[(
+            "std.mine",
+            "/// Entry point.\nexport fn main() -> Int {\n  core.byteLength(\"x\")\n}\n",
+        )]);
+        assert_eq!(error.code, UNKNOWN_NAME, "{}", error.message);
+    }
+
+    /// A package with a module of its own called `core` keeps it: the name is
+    /// reserved nowhere but inside the standard library.
+    #[test]
+    fn a_program_s_own_core_module_is_untouched() {
+        accepts_modules(&[
+            (
+                "core",
+                "/// A byte length of the package's own.\nexport fn byteLength(text: String) -> Bool {\n  text == \"x\"\n}\n",
+            ),
+            (
+                "app",
+                "use core\n\n/// Entry point.\nexport fn main() -> Bool {\n  core.byteLength(\"x\")\n}\n",
             ),
         ]);
     }

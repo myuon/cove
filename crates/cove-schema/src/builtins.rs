@@ -644,7 +644,7 @@ pub struct StdBinding {
 /// Every builtin method whose body has moved out of Rust and into the
 /// standard library.
 ///
-/// Twenty-nine entries, and what is *not* here is as informative as what is.
+/// Thirty entries, and what is *not* here is as informative as what is.
 ///
 /// `Result.mapError` is here, and it is the only one that needed a language
 /// change to arrive. While a callback's arity was adapted rather than
@@ -666,7 +666,7 @@ pub struct StdBinding {
 /// That is what retires ADR 0043's "It must be total" condition, so a
 /// fallible method is no longer kept out of this table for its diagnostic.
 ///
-/// Ten of the twenty-nine are `Duration`'s, and they are the first entries
+/// Ten of the thirty are `Duration`'s, and they are the first entries
 /// that come in pairs: `micros`, `millis`, `seconds`, `minutes`, and `hours`
 /// each name a method (`d.millis()`, the reader) and, separately, an
 /// associated function (`Duration.millis(n)`, the builder) — see
@@ -769,6 +769,18 @@ pub static STANDARD_LIBRARY: &[StdBinding] = &[
         method: "isEmpty",
         module: "std.string",
         function: "isEmpty",
+    },
+    // The first binding over a core intrinsic: `std.string.byteLength` is
+    // `core.byteLength(text)`, which ADR 0058's library-only boundary lets the
+    // standard library write and nothing else. It is a binding, rather than a
+    // lowering straight to the instruction, so that the lowering never names a
+    // public API.
+    StdBinding {
+        kind: StdBindingKind::Method,
+        receiver: "String",
+        method: "byteLength",
+        module: "std.string",
+        function: "byteLength",
     },
     StdBinding {
         kind: StdBindingKind::Method,
@@ -1137,6 +1149,102 @@ pub const ASSERT_EQUAL: FreeBuiltinSchema = FreeBuiltinSchema {
         },
     ],
     result: BuiltinType::Result(&BuiltinType::Unit, &BuiltinType::Error),
+};
+
+// ------------------------------------------ the library's core intrinsics
+
+/// The name a standard-library body writes a core intrinsic through:
+/// `core.byteLength(text)`.
+///
+/// It is a *spelling*, not a module. No package declares it, no `use` imports
+/// it, and outside a standard-library module it is an ordinary name — a
+/// program that writes `core.byteLength(s)` is told `core` is not in scope,
+/// and a package with a module of its own called `core` keeps it.
+pub const CORE_NAMESPACE: &str = "core";
+
+/// One typed operation over Cove's representation that only the standard
+/// library may call.
+///
+/// [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
+/// splits a builtin into its public API — which moves into
+/// `crates/cove-sema/std/` as ordinary Cove — and the smallest
+/// representation-dependent operation beneath it, which stays with the
+/// compiler. This is the second half. Its shape is [`FreeBuiltinSchema`]'s
+/// without the kind: a core intrinsic is called on nothing, binds its own type
+/// parameters, and neither constructs nor asserts — it *is* an operation.
+///
+/// The checker resolves `core.<name>(...)` to one of these only inside a
+/// standard-library module, the lowering turns it into run instructions and
+/// never into a `CallBuiltin`, and the tree-walking oracle executes it with
+/// one small Rust function per entry. So a method that moves costs the oracle
+/// its per-method arm, and the Cove body both evaluators run is the one place
+/// the method's algorithm is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CoreIntrinsicSchema {
+    /// The name after `core.`, such as `byteLength`.
+    pub name: &'static str,
+    /// The type parameters this signature binds.
+    pub generics: &'static [&'static str],
+    /// Parameters in declaration order, labelled as a diagnostic names them.
+    pub params: &'static [ParamSchema],
+    /// The type the call produces.
+    pub result: BuiltinType,
+}
+
+impl CoreIntrinsicSchema {
+    /// How many arguments a call must supply.
+    pub fn arity(&self) -> usize {
+        self.params.len()
+    }
+
+    /// The signature, as the standard library writes a call to it:
+    /// `core.byteLength(text: String) -> Int`.
+    pub fn signature(&self) -> String {
+        let params: Vec<String> = self
+            .params
+            .iter()
+            .map(|param| format!("{}: {}", param.name, param.ty))
+            .collect();
+        format!(
+            "{CORE_NAMESPACE}.{}({}) -> {}",
+            self.name,
+            params.join(", "),
+            self.result
+        )
+    }
+}
+
+/// Every core intrinsic the standard library may call.
+///
+/// One entry, and it is the smallest: a `String`'s length in bytes is the
+/// header word of the object that holds it. `String.byteLength` is the first
+/// public method written in Cove over one of these.
+pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[CORE_BYTE_LENGTH];
+
+/// Every core intrinsic.
+pub fn core_intrinsics() -> &'static [CoreIntrinsicSchema] {
+    CORE_INTRINSICS
+}
+
+/// The core intrinsic `core.<name>` names, if there is one.
+///
+/// This answers for a name alone. Whether the module asking may call it is the
+/// checker's question, and the answer is only when that module is the
+/// standard library's.
+pub fn core_intrinsic(name: &str) -> Option<&'static CoreIntrinsicSchema> {
+    CORE_INTRINSICS.iter().find(|entry| entry.name == name)
+}
+
+/// `core.byteLength(text: String) -> Int`: the string's length in bytes, which
+/// is its object header's length and needs no decode.
+pub const CORE_BYTE_LENGTH: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "byteLength",
+    generics: &[],
+    params: &[ParamSchema {
+        name: "text",
+        ty: BuiltinType::String,
+    }],
+    result: BuiltinType::Int,
 };
 
 // ----------------------------------------------------- the shared signatures

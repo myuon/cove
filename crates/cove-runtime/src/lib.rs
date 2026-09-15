@@ -85,5 +85,5 @@ pub use vm::exec::native::{
 };
 pub use vm::exec::SAFEPOINT_STRIDE;
 pub use vm::profile::{Cost, Profiler};
-pub use vm::report::{BoundaryReport, Emitted, HelperCalls, IntrinsicCalls};
+pub use vm::report::{BoundaryReport, Emitted, HelperCalls, IntrinsicCalls, LibraryCalls};
 pub use vm::Vm;

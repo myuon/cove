@@ -315,6 +315,39 @@ pub fn call_constructor(
     })
 }
 
+/// `core.byteLength(text)`: a core intrinsic, which only a standard-library
+/// module may call.
+///
+/// [ADR 0058](../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
+/// keeps a public method's algorithm in Cove and only its smallest
+/// representation-dependent operation here, so this is the oracle's whole
+/// share of a method that moved: one small function per entry of
+/// `cove_schema::builtins::CORE_INTRINSICS`, over values, and the standard
+/// library's Cove body — which this interpreter runs as it runs any other —
+/// around it. The interpreter asks only from a module
+/// `cove_sema::stdlib::is_library_module` answers for, which is the question
+/// the checker asked before it admitted the call.
+pub fn call_core(name: &str, args: &mut Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+    let Some(schema) = cove_schema::builtins::core_intrinsic(name) else {
+        return Err(RuntimeError::new(format!("unknown core intrinsic `core.{name}`")).at(span));
+    };
+    let shown = format!("core.{name}");
+    let args = expect_args(&shown, args, schema.arity(), span)?;
+    match name {
+        "byteLength" => {
+            let Value(Repr::Str(text)) = &args[0] else {
+                return Err(type_error(&shown, "text", "String", &args[0], span));
+            };
+            Ok(Value(Repr::Int(text.len() as i64)))
+        }
+        // A name the table declares and nothing here executes. No program can
+        // reach one of these from its own modules, so the check that every
+        // entry has a body here is `vm::differential`'s, which calls each
+        // from a standard-library module on both evaluators.
+        _ => Err(RuntimeError::new(format!("unknown core intrinsic `{shown}`")).at(span)),
+    }
+}
+
 /// `Vector.of(...)` and `Int.parse(...)`.
 pub fn call_associated(
     host: &mut dyn Callable,
@@ -979,15 +1012,12 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value(Repr::Str(text.to_lowercase().into())))
             }
-            // The three byte-counted operations. Their diagnostics are
-            // written out again in `crates/cove-runtime/src/vm/builtins/text.rs`
-            // rather than shared, as every other builtin's are; what holds
-            // the two readings together is `tests/e2e/values_string`, which
-            // runs on both backends against one `expected.out`.
-            "byteLength" => {
-                expect_args(name, args, 0, span)?;
-                Ok(Value(Repr::Int(text.len() as i64)))
-            }
+            // The byte-counted operations. Their diagnostics are written out
+            // again in `crates/cove-runtime/src/vm/builtins/text.rs` rather
+            // than shared, as every other builtin's are; what holds the two
+            // readings together is `tests/e2e/values_string`, which runs on
+            // both backends against one `expected.out`. `byteLength` is not
+            // here: it is `std.string` over `call_core`'s `byteLength`.
             "byteAt" => {
                 let args = expect_args("String.byteAt", args, 1, span)?;
                 let Value(Repr::Int(offset)) = &args[0] else {

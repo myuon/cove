@@ -36,7 +36,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use cove_schema::builtins::{
-    builtins, free_builtins, BuiltinSchema, FreeBuiltinKind, FreeBuiltinSchema, MethodSchema,
+    builtins, core_intrinsics, free_builtins, BuiltinSchema, FreeBuiltinKind, FreeBuiltinSchema,
+    MethodSchema,
 };
 use cove_schema::hosts::shipped;
 use cove_schema::{Effect, ModuleSchema};
@@ -179,6 +180,20 @@ fn render_markdown() -> String {
             free_kind(entry),
             entry.signature()
         );
+    }
+    out.push('\n');
+
+    out.push_str("## Core intrinsics (library-only)\n\n");
+    out.push_str(
+        "Not callable from a program. The standard library writes these as `core.<name>(...)`\n\
+         in its own modules, and the checker resolves `core` that way nowhere else — in a\n\
+         program `core` is an ordinary name. Each is the smallest representation-dependent\n\
+         operation beneath a public method whose algorithm is Cove source: ADR 0058's core\n\
+         intrinsics, lowered to run instructions rather than a builtin call.\n\n",
+    );
+    out.push_str("| name | signature |\n| --- | --- |\n");
+    for entry in core_intrinsics() {
+        let _ = writeln!(out, "| `{}` | `{}` |", entry.name, entry.signature());
     }
     out.push('\n');
 
@@ -422,6 +437,21 @@ fn render_json() -> String {
         );
         out.push_str(if at + 1 == free.len() { "}\n" } else { "},\n" });
     }
+    out.push_str("  ],\n  \"coreIntrinsics\": [\n");
+    let core = core_intrinsics();
+    for (at, entry) in core.iter().enumerate() {
+        out.push_str("    {");
+        let _ = write!(
+            out,
+            "\"name\": {}, \"signature\": {}, \"generics\": {}, \"params\": {}, \"result\": {}, \"libraryOnly\": true",
+            quote(entry.name),
+            quote(&entry.signature()),
+            string_list(entry.generics),
+            params_json(entry.params),
+            quote(&entry.result.to_string()),
+        );
+        out.push_str(if at + 1 == core.len() { "}\n" } else { "},\n" });
+    }
     out.push_str("  ],\n  \"types\": [\n");
     let types = builtins();
     for (at, schema) in types.iter().enumerate() {
@@ -659,6 +689,11 @@ mod tests {
             .and_then(|value| value.as_array())
             .expect("`freeBuiltins` is an array");
         assert_eq!(free.len(), free_builtins().len());
+        let core = parsed
+            .get("coreIntrinsics")
+            .and_then(|value| value.as_array())
+            .expect("`coreIntrinsics` is an array");
+        assert_eq!(core.len(), core_intrinsics().len());
         let hosts = parsed
             .get("hostModules")
             .and_then(|value| value.as_array())

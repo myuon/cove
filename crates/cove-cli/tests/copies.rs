@@ -448,13 +448,26 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// here carries, the standard library's among them, which is what any new row
 /// costs.
 ///
+/// **The ninth rise is one copy, and it is the inliner charging less.** 2235 to
+/// 2236, in `examples:life`. `lower::inline`'s frame budget used to charge a
+/// callee its whole frame, including the leading parameter words an expansion
+/// reads where the caller already has them and never appends; charged by the
+/// words it actually appends, three examples now fit expansions the budget
+/// used to refuse — `reviewPolicy`, `life` and `covecheck` grow by 22, 26 and
+/// 16 instructions — and the code `life` gained holds one more copy after a
+/// producer: a candidate the expanded body carried as a function, now counted
+/// in its caller. Measured apart: the same change with the
+/// thin-library rule switched off moves the survey identically, so the rule
+/// that makes a small standard-library wrapper a mandatory expansion adds
+/// nothing here.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2235;
+const FORWARDABLE_COPIES: usize = 2236;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

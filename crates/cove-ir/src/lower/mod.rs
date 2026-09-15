@@ -69,6 +69,7 @@ mod buffers;
 mod cells;
 mod closures;
 mod collections;
+mod core;
 mod dispatch;
 mod dropping;
 mod expr;

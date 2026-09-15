@@ -144,28 +144,6 @@ fn comparison_supported(on: Compare, op: CmpOp) -> bool {
 /// this builtin outside a bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Method {
-    /// `String.byteLength() -> Int`.
-    ///
-    /// `vm::builtins::text::byte_length` is `receiver_addr` and then
-    /// `machine.object_len(addr)`, which is what [`Inst::Len`] already is: a null
-    /// refusal and the header's low half. So this lowers to the *same emitter*
-    /// `Inst::Len` uses in both arms rather than to a family of its own — see
-    /// each arm's `len_of`.
-    ///
-    /// One check of `receiver_addr`'s three is **not** emitted, and it is worth
-    /// saying which. `receiver_addr` asks `super::is_string(machine, addr)` after
-    /// the null test and answers `no_method` for an object that is not a
-    /// `Shape::Str`. That question cannot have a different answer here: a
-    /// `call-builtin` of `String.byteLength` is emitted by
-    /// `cove_ir::lower::methods` only where the checker settled the receiver's
-    /// type as `Ty::Str`, so the receiver word is a reference to a `Shape::Str`
-    /// object or it is null. It is the same class of guard as the one
-    /// [`Inst::AddrOfField`] is refused for — a *lowering bug*, not something a
-    /// program can reach — and it is left out for the same reason: naming it
-    /// would be a [`Raise`] carrying the message `no_method` builds out of an
-    /// operand's rendered value, which is a whole `Value` this crate cannot see.
-    /// The null refusal is a program's to reach and is emitted.
-    ByteLength { dst: Slot, obj: Slot },
     /// `Vector.push(value)`, the path where the store has room.
     ///
     /// `vm::builtins::seq::vector_push` is four steps: read the receiver, copy the
@@ -355,17 +333,6 @@ pub(crate) fn method_of(
         (program.layout(arg.layout).words.as_slice() == [Repr::Ref]).then_some(arg.slot)
     };
     match named.intrinsic {
-        Intrinsic::StringByteLength => {
-            // The answer is one `Int` word written at `dst`, which is what
-            // `Machine::call_builtin` copies out of the builtin's `out` buffer.
-            if list.len() != 1 || program.layout(named.result).width() != 1 {
-                return None;
-            }
-            Some(Method::ByteLength {
-                dst,
-                obj: reference(0)?,
-            })
-        }
         // `vm::builtins::seq::vector_push`. Everything the fast path needs is a
         // static fact of the call site, and each one is read here rather than in
         // an arm: the receiver's declared layout, whose shape says what the
@@ -1018,7 +985,6 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // instruction; a family that *is* emitted is bounded like any other.
         Inst::CallBuiltin { dst, builtin, args } => {
             match method_of(program, *dst, *builtin, *args) {
-                Some(Method::ByteLength { dst, obj }) => slot(dst) && slot(obj),
                 // The element is a run of `stride` words of this frame, so it is
                 // bounded the way an `Inst::Copy`'s source is — and by
                 // `MAX_RUN_WORDS` too, because the emitted write is one store per

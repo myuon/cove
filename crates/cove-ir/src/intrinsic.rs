@@ -28,7 +28,7 @@ use std::fmt;
 /// One core operation a `CallBuiltin` may name.
 ///
 /// A variant is named `ReceiverOperation` in upper camel case — `String`'s
-/// `byteLength` is [`Intrinsic::StringByteLength`] — because that pair is
+/// `sliceBytes` is [`Intrinsic::StringSliceBytes`] — because that pair is
 /// the language reference's own naming of it: [`Intrinsic::receiver`] and
 /// [`Intrinsic::operation`] answer the two halves back apart, and
 /// [`Display`](fmt::Display) prints them the way `cove-ir`'s printer and
@@ -58,7 +58,6 @@ pub enum Intrinsic {
     StringToUpper,
     StringToLower,
     StringFromCodePoint,
-    StringByteLength,
     StringCodePointAtByte,
     StringSliceBytes,
     ArrayGet,
@@ -132,7 +131,6 @@ pub const ALL: &[Intrinsic] = &[
     Intrinsic::StringToUpper,
     Intrinsic::StringToLower,
     Intrinsic::StringFromCodePoint,
-    Intrinsic::StringByteLength,
     Intrinsic::StringCodePointAtByte,
     Intrinsic::StringSliceBytes,
     Intrinsic::ArrayGet,
@@ -208,7 +206,6 @@ impl Intrinsic {
             Intrinsic::StringToUpper => "String",
             Intrinsic::StringToLower => "String",
             Intrinsic::StringFromCodePoint => "String",
-            Intrinsic::StringByteLength => "String",
             Intrinsic::StringCodePointAtByte => "String",
             Intrinsic::StringSliceBytes => "String",
             Intrinsic::ArrayGet => "Array",
@@ -280,7 +277,6 @@ impl Intrinsic {
             Intrinsic::StringToUpper => "toUpper",
             Intrinsic::StringToLower => "toLower",
             Intrinsic::StringFromCodePoint => "fromCodePoint",
-            Intrinsic::StringByteLength => "byteLength",
             Intrinsic::StringCodePointAtByte => "codePointAtByte",
             Intrinsic::StringSliceBytes => "sliceBytes",
             Intrinsic::ArrayGet => "get",
@@ -401,12 +397,9 @@ impl Intrinsic {
             | Intrinsic::StringStartsWith
             | Intrinsic::StringEndsWith
             | Intrinsic::StringIndexOf => raise.union(E::READS_MEMORY).union(E::BULK_WORK),
-            // `byteLength` and `codePointAtByte` read the header or decode
-            // one character at a fixed cost, neither proportional to the
-            // whole string.
-            Intrinsic::StringByteLength | Intrinsic::StringCodePointAtByte => {
-                raise.union(E::READS_MEMORY)
-            }
+            // `codePointAtByte` decodes one character at a fixed cost, not
+            // proportional to the whole string.
+            Intrinsic::StringCodePointAtByte => raise.union(E::READS_MEMORY),
             // `sliceBytes` copies the answer out of the receiver a word at a
             // time, proportional to the slice rather than to the whole
             // string.
@@ -669,7 +662,6 @@ mod tests {
                 | Intrinsic::StringToUpper
                 | Intrinsic::StringToLower
                 | Intrinsic::StringFromCodePoint
-                | Intrinsic::StringByteLength
                 | Intrinsic::StringCodePointAtByte
                 | Intrinsic::StringSliceBytes
                 | Intrinsic::ArrayGet

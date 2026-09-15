@@ -2768,6 +2768,19 @@ impl<'a> Interpreter<'a> {
                 if let ExprKind::Ident(head) = &base.kind {
                     if env.lookup(head).is_none() {
                         let module = env.module.clone();
+                        // `core.byteLength(text)` in a standard-library
+                        // module: a core intrinsic, asked on the checker's
+                        // two conditions and executed by one small function
+                        // over values. In any other module `core` is what
+                        // the program declared.
+                        if head == cove_schema::builtins::CORE_NAMESPACE
+                            && cove_sema::stdlib::is_library_module(&module)
+                        {
+                            let args = self.eval_args(env, args, trailing)?;
+                            let shown = format!("{head}.{}", name.node);
+                            let mut values = plain_values(args, &shown)?;
+                            return Ok(builtins::call_core(&name.node, &mut values, span)?);
+                        }
                         if self.is_host_module(&module, head) {
                             // `http.Route(method: ..., path: ...)` initializes
                             // a type the host declares; anything else is one

@@ -37,6 +37,18 @@ own type parameters, because there is no receiver to read one off.
 | `assert` | assertion | `assert(condition: Bool) -> Result<Unit, Error>` |
 | `assertEqual` | assertion | `assertEqual(actual: T, expected: T) -> Result<Unit, Error>` |
 
+## Core intrinsics (library-only)
+
+Not callable from a program. The standard library writes these as `core.<name>(...)`
+in its own modules, and the checker resolves `core` that way nowhere else — in a
+program `core` is an ordinary name. Each is the smallest representation-dependent
+operation beneath a public method whose algorithm is Cove source: ADR 0058's core
+intrinsics, lowered to run instructions rather than a builtin call.
+
+| name | signature |
+| --- | --- |
+| `byteLength` | `core.byteLength(text: String) -> Int` |
+
 ## Builtin types
 
 ### `Array<T>`
@@ -173,7 +185,7 @@ written as a namespace.
 | `replace(old: String, new: String) -> String` |  |  |  | `machine` |
 | `toUpper() -> String` |  |  |  | `machine` |
 | `toLower() -> String` |  |  |  | `machine` |
-| `byteLength() -> Int` |  |  |  | `machine` |
+| `byteLength() -> Int` |  |  |  | `std.string.byteLength` |
 | `byteAt(offset: Int) -> Int` |  |  |  | `machine` |
 | `codePointAtByte(offset: Int) -> Option<Int>` |  |  |  | `machine` |
 | `sliceBytes(from: Int, to: Int) -> Result<String, Error>` |  |  |  | `machine` |
