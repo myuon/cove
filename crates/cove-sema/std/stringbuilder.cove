@@ -31,9 +31,9 @@
 /// the writes have happened.
 ///
 /// That is [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md),
-/// and `ByteBuffer` below is the intrinsic it decides. Contiguous packed
+/// and the `core.bytes*` calls below are the run it decides. Contiguous packed
 /// allocation and precise collection cannot be written in ordinary Cove over no
-/// memory primitive; everything in this file can, and is.
+/// memory primitive; everything in this file around those calls can, and is.
 ///
 /// # A copy is an alias, as a `Vector`'s is
 ///
@@ -59,23 +59,23 @@
 /// needs, and `crates/cove-sema/src/unique.rs` is where it is made. That proof
 /// trusts a creation it can *see*, and a call to `withCapacity` is one: the
 /// uniqueness pass reads this body, finds that its only answer is a struct
-/// literal built here out of a fresh `ByteBuffer`, and derives the fact. It is
+/// literal built here around a `core.bytesAllocate`, and derives the fact. It is
 /// not taking this file's word for anything — no declaration here claims
 /// freshness and none could, because a claim would be unchecked.
 ///
 /// That derivation is what lets the type be `opaque`. `ByteBuffer` is the
-/// memory primitive ADR 0052 decides and it has no business in a program that
-/// only wants to assemble a string; while the proof needed a creation written
-/// at the use site, the field had to be public so callers could write one, and
-/// the intrinsic leaked into every body that finished a builder. Now the name
-/// and the methods are the whole of what this module publishes.
+/// memory primitive ADR 0052 decides, and ADR 0058 gives it to the standard
+/// library alone: a program cannot name the type, and it has no methods — the
+/// `core.bytes*` intrinsics are all anything can do with one, and only a
+/// standard-library module can call them. So the name and the methods below
+/// are the whole of what a program can see of a builder.
 export opaque struct StringBuilder {
   /// The packed run the appends go into.
   ///
   /// One field, one reference word: a `StringBuilder` costs what the buffer
   /// costs and the wrapper is a name. Nothing outside this module can read it
-  /// or write it — that is what `opaque` says — so `ByteBuffer` appears here
-  /// and in the bodies below and nowhere else.
+  /// or write it — that is what `opaque` says — and no module outside the
+  /// standard library could name its type if it tried.
   buffer: ByteBuffer
 }
 
@@ -95,7 +95,7 @@ impl StringBuilder {
   /// to answer a builder it was handed instead and the derivation stops —
   /// correctly, and with no annotation anywhere to fall out of date.
   export fn withCapacity(capacity: Int) -> StringBuilder {
-    StringBuilder(buffer: ByteBuffer.allocate(capacity))
+    StringBuilder(buffer: core.bytesAllocate(capacity))
   }
 
   /// How many bytes have been appended.
@@ -105,7 +105,7 @@ impl StringBuilder {
   /// given two answers two. Spare capacity is not value, which is the whole of
   /// ADR 0052's "capacity is not an Array length" as a program can observe it.
   export fn length(self) -> Int {
-    self.buffer.length()
+    core.bytesLength(self.buffer)
   }
 
   /// Appends the whole of `text`.
@@ -114,7 +114,7 @@ impl StringBuilder {
   /// allocated: the intermediate `String` a `slice` would have produced is
   /// exactly what a builder exists to avoid.
   export fn append(var self, text: String) {
-    self.buffer.appendSlice(text, 0, text.byteLength())
+    core.bytesExtend(self.buffer, text, 0, core.byteLength(text))
   }
 
   /// Appends the bytes of `text` from `from` up to but not including `to`.
@@ -130,7 +130,7 @@ impl StringBuilder {
   /// Ask `String` about a range you are unsure of; a builder's job is to copy
   /// one that is already known to be a range.
   export fn appendSlice(var self, text: String, from: Int, to: Int) {
-    self.buffer.appendSlice(text, from, to)
+    core.bytesExtend(self.buffer, text, from, to)
   }
 
   /// Appends one byte, `0` through `255`.
@@ -144,7 +144,7 @@ impl StringBuilder {
   /// together to mean that character. [`finish`] is where a run that is not
   /// valid UTF-8 is caught.
   export fn appendByte(var self, value: Int) {
-    self.buffer.appendByte(value)
+    core.bytesPush(self.buffer, value)
   }
 
   /// The bytes appended so far, as a `String`, consuming the builder.
@@ -160,6 +160,6 @@ impl StringBuilder {
   /// could keep it is refused here rather than silently leaving a second holder
   /// naming bytes that have become a string.
   export fn finish(var self) -> String {
-    self.buffer.finish()
+    core.bytesFinish(self.buffer)
   }
 }

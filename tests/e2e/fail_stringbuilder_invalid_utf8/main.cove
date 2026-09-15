@@ -1,0 +1,23 @@
+use std.stringbuilder.StringBuilder
+
+/// The first byte of `é` and nothing after it, finished. Not the standard
+/// library: an ordinary Cove function with a caller, between `main` and the
+/// library body that fails.
+fn truncated() -> String {
+  var out = StringBuilder.withCapacity(4)
+  out.append("caf")
+  out.appendByte(195)
+  out.finish()
+}
+
+/// Finishes a builder whose bytes end in half a character, which
+/// `StringBuilder.finish` refuses inside `std/stringbuilder.cove`: every append
+/// was accepted, because `appendByte` takes any byte, and the run is found not
+/// to be UTF-8 only when it would become a `String`. The diagnostic blames the
+/// `finish()` in `truncated`, keeps the library's own line as context, and
+/// still says that `main` called `truncated`. ADR 0058.
+export fn main() -> Result<Unit, Error> {
+  let text = truncated()
+  assertEqual(text, "caf")?
+  Ok(())
+}

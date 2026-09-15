@@ -78,6 +78,56 @@ fn rendered(sources: &SourceMap, items: &[cove_diag::Diagnostic]) -> String {
         .join("\n")
 }
 
+/// [`checked`], with `probe` added to the standard-library module `library` as
+/// a file of its own.
+///
+/// For a case that needs a standard-library body the library does not have: a
+/// file in a library module is a library file, privileged and blamed as one,
+/// by the same questions the checker, the lowering and the oracle each ask.
+fn checked_with_probe(source: &str, library: &str, probe: &str) -> (Arc<SourceMap>, Arc<Checked>) {
+    let mut sources = SourceMap::new();
+    let file = sources.add("m/main.cove", source.to_string());
+    let ast = match cove_syntax::parse_file(&sources, file) {
+        Ok(ast) => ast,
+        Err(items) => panic!("the source parses:\n{}", rendered(&sources, &items)),
+    };
+    let mut modules = BTreeMap::from([(
+        "m".to_string(),
+        Module {
+            name: "m".to_string(),
+            dir: PathBuf::from("m"),
+            units: vec![Unit {
+                file,
+                path: PathBuf::from("m/main.cove"),
+                ast,
+            }],
+        },
+    )]);
+    for (name, module) in cove_sema::stdlib::attach(&mut sources).expect("stdlib parses") {
+        modules.insert(name, module);
+    }
+    let path = PathBuf::from("std/probe.cove");
+    let file = sources.add_library(path.clone(), probe);
+    let ast = match cove_syntax::parse_file(&sources, file) {
+        Ok(ast) => ast,
+        Err(items) => panic!("the probe parses:\n{}", rendered(&sources, &items)),
+    };
+    modules
+        .get_mut(library)
+        .unwrap_or_else(|| panic!("the standard library has `{library}`"))
+        .units
+        .push(Unit { file, path, ast });
+    let package = Package {
+        root: PathBuf::from("."),
+        config: Config::default(),
+        modules,
+    };
+    match cove_sema::Compiler::new().compile(&package) {
+        Ok(program) => (Arc::new(sources), Arc::new(program)),
+        Err(items) => panic!("the probe checks:\n{}", rendered(&sources, &items)),
+    }
+}
+
 /// What one backend answered, reduced to what both can be asked for.
 ///
 /// The message rather than the whole [`crate::RuntimeError`], because the two
@@ -1784,17 +1834,20 @@ export fn f(n: Int) -> Int {
 /// ADR 0058's "Fallibility preserves the source call site's blame".
 /// `RuntimeError::with_chain` is the one place the rule is, and it reads only
 /// spans; what this pins is that the spans each evaluator hands it make the
-/// rule come out the same. The two fixtures are chosen for the one difference
-/// that could break that on the machine: `abs` is a small leaf, so
-/// `cove_ir::lower::inline` expands it into `viaAbs` and the call site is
-/// recovered from [`cove_ir::program::Inlined`]; `appendByte` takes its
-/// builder as a `var` parameter, which the inliner refuses, so its call site
-/// is a real frame's. Both assertions about which is which are made first, so
-/// a change to the inliner that moved either fixture fails here by name rather
-/// than quietly testing one path twice.
+/// rule come out the same. The fixtures are chosen for the one difference that
+/// could break that on the machine: `abs` is a small leaf, and `appendByte` a
+/// `var self` leaf, so `cove_ir::lower::inline` expands both into their callers
+/// and the call site is recovered from [`cove_ir::program::Inlined`];
+/// `appendByteBelow` is a standard-library body the inliner cannot expand,
+/// because it calls itself, so its call site is a real frame's. The probe is
+/// installed for exactly that: since the builder's methods are expanded, no
+/// standard-library body that can fault is left a call. The assertions about
+/// which is which are made first, so a change to the inliner that moved a
+/// fixture fails here by name rather than quietly testing one path twice.
 #[test]
 fn a_fault_in_the_standard_library_is_blamed_on_its_caller() {
     let source = "
+use std.stringbuilder
 use std.stringbuilder.StringBuilder
 
 export fn viaAbs(n: Int) -> Int {
@@ -1806,8 +1859,24 @@ export fn viaAppendByte(value: Int) -> Int {
   out.appendByte(value)
   out.length()
 }
+
+export fn viaAppendByteBelow(value: Int) -> Int {
+  var out = StringBuilder.withCapacity(4)
+  stringbuilder.appendByteBelow(var out, value, 0)
+  out.length()
+}
 ";
-    let (sources, checked) = checked(source);
+    let probe = "
+/// `appendByte`, `depth` frames down a recursion no expansion can reach.
+export fn appendByteBelow(var out: StringBuilder, value: Int, depth: Int) {
+  if depth > 0 {
+    appendByteBelow(var out, value, depth - 1)
+  } else {
+    out.appendByte(value)
+  }
+}
+";
+    let (sources, checked) = checked_with_probe(source, "std.stringbuilder", probe);
     let program = lowered(&sources, &checked);
     let callee = |module: &str, name: &str| {
         program
@@ -1816,35 +1885,40 @@ export fn viaAppendByte(value: Int) -> Int {
                 program
                     .functions
                     .iter()
-                    .position(|f| &*f.module == module && &*f.name == name)
+                    .position(|f| &*f.module == module && f.name.ends_with(name))
                     .map(|at| cove_ir::FunctionId(at as u32))
             })
             .unwrap_or_else(|| panic!("`{module}.{name}` is lowered"))
     };
     let caller = |name: &str| program.function(callee("m", name));
+    let expands = |via: &str, module: &str, name: &str| {
+        let target = callee(module, name);
+        let held = caller(via);
+        held.inlined.iter().any(|record| record.callee == target)
+            && !held
+                .code
+                .iter()
+                .any(|inst| matches!(inst, cove_ir::Inst::Call { callee, .. } if *callee == target))
+    };
 
-    let abs = callee("std.int", "abs");
     assert!(
-        caller("viaAbs")
-            .inlined
-            .iter()
-            .any(|held| held.callee == abs),
-        "`abs` is expanded into its caller, which is what makes this the inlined case"
+        expands("viaAbs", "std.int", "abs"),
+        "`abs` is expanded into its caller, which is what makes this an inlined case"
     );
-    let append = program
-        .functions
-        .iter()
-        .position(|f| &*f.module == "std.stringbuilder" && f.name.ends_with("appendByte"))
-        .map(|at| cove_ir::FunctionId(at as u32))
-        .expect("`StringBuilder.appendByte` is lowered");
-    let via_append = caller("viaAppendByte");
     assert!(
-        via_append.inlined.iter().all(|held| held.callee != append)
-            && via_append.code.iter().any(|inst| matches!(
+        expands("viaAppendByte", "std.stringbuilder", "appendByte"),
+        "`appendByte` is expanded into its caller, `var self` and all"
+    );
+    let below = callee("std.stringbuilder", "appendByteBelow");
+    assert!(
+        caller("viaAppendByteBelow")
+            .code
+            .iter()
+            .any(|inst| matches!(
                 inst,
-                cove_ir::Inst::Call { callee, .. } if *callee == append
+                cove_ir::Inst::Call { callee, .. } if *callee == below
             )),
-        "`appendByte` is called through a frame, which is what makes this the framed case"
+        "`appendByteBelow` is called through a frame, which is what makes this the framed case"
     );
 
     let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
@@ -1860,6 +1934,11 @@ export fn viaAppendByte(value: Int) -> Int {
     for (name, arg, called) in [
         ("viaAbs", i64::MIN, "n.abs()"),
         ("viaAppendByte", 300, "out.appendByte(value)"),
+        (
+            "viaAppendByteBelow",
+            300,
+            "stringbuilder.appendByteBelow(var out, value, 0)",
+        ),
     ] {
         let oracle = blame(
             Interpreter::new(&runtime)
@@ -2076,4 +2155,111 @@ export fn cuts() -> String {{
         agree(&source, "cuts", Vec::new()),
         Answer::Value(want.join("\n"))
     );
+}
+
+/// **An expanded standard-library body that writes through a `var` parameter
+/// answers what the call answered**, including where the caller hands it the
+/// place it writes a second time.
+///
+/// `bumpThenAdd(var a, a)` copies `a` into `by` before `x = x + 1` writes `a`,
+/// so a call answers `3` and leaves `a` at `2`. An expansion reads a parameter
+/// it never writes where the caller has it, and would read `a` *after* the
+/// write and answer `4`. `a = bumpBefore(var a, 10)` answers the `1` it read
+/// before writing `11`; an expansion that assembled that answer straight in `a`
+/// would have the write land on it, which today's lowering does not risk — it
+/// hands the call a temporary — and `cove_ir`'s `inlining` tests pin by hand.
+/// `cove_ir::lower::inline` keeps a
+/// call's order for exactly the callees a call like these reaches, and this is
+/// the oracle's word that it does. Probes, because no body the standard library
+/// has takes a `var` and another argument of the same type.
+#[test]
+fn an_expanded_var_body_reads_its_arguments_before_it_writes_through_them() {
+    let source = "
+use std.int
+
+export fn twice(start: Int) -> Int {
+  var a = start
+  let b = int.bumpThenAdd(var a, a)
+  a * 100 + b
+}
+
+export fn overwrites(start: Int) -> Int {
+  var a = start
+  a = int.bumpBefore(var a, 10)
+  a
+}
+
+export fn apart(start: Int) -> Int {
+  var a = start
+  let by = 5
+  let b = int.bumpThenAdd(var a, by)
+  a * 100 + b
+}
+";
+    let probe = "
+/// `x` raised by one, and then `by` added to what it became.
+export fn bumpThenAdd(var x: Int, by: Int) -> Int {
+  x = x + 1
+  x + by
+}
+
+/// What `x` was, after raising it by `by`.
+export fn bumpBefore(var x: Int, by: Int) -> Int {
+  let before = x
+  x = x + by
+  before
+}
+";
+    let (sources, checked) = checked_with_probe(source, "std.int", probe);
+    let program = lowered(&sources, &checked);
+    let probed = |name: &str| {
+        program
+            .functions
+            .iter()
+            .position(|f| &*f.module == "std.int" && &*f.name == name)
+            .map(|at| cove_ir::FunctionId(at as u32))
+            .unwrap_or_else(|| panic!("`{name}` is lowered"))
+    };
+    for (name, called) in [
+        ("twice", "bumpThenAdd"),
+        ("overwrites", "bumpBefore"),
+        ("apart", "bumpThenAdd"),
+    ] {
+        let target = probed(called);
+        let f = program
+            .functions
+            .iter()
+            .find(|f| &*f.module == "m" && &*f.name == name)
+            .expect("the caller is lowered");
+        assert!(
+            f.inlined.iter().any(|record| record.callee == target)
+                && !f.code.iter().any(
+                    |inst| matches!(inst, cove_ir::Inst::Call { callee, .. } if *callee == target)
+                ),
+            "`{name}`: `{called}` is expanded, which is what this is about: {:?}",
+            f.code
+        );
+    }
+
+    for (name, want) in [("twice", 203), ("overwrites", 1), ("apart", 207)] {
+        let oracle = on_a_deep_stack(move || {
+            let (sources, program) = checked_with_probe(source, "std.int", probe);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts);
+            said(Interpreter::new(&runtime).invoke("m", name, vec![Value::int(1)]))
+        });
+        let machine = on_a_deep_stack(move || {
+            let (sources, program) = checked_with_probe(source, "std.int", probe);
+            let ir = lowered(&sources, &program);
+            let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+            let runtime = Runtime::new(program, sources, hosts.clone());
+            said(Vm::new(&runtime, &hosts, &ir).invoke("m", name, vec![Value::int(1)]))
+        });
+        assert_eq!(
+            oracle,
+            Answer::Value(want.to_string()),
+            "`{name}` on the oracle"
+        );
+        assert_eq!(machine, oracle, "`{name}` answers alike");
+    }
 }

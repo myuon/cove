@@ -1,0 +1,20 @@
+use std.stringbuilder.StringBuilder
+
+/// Appends `text` from `from` up to `to`. Not the standard library: an ordinary
+/// Cove function with a caller, between `main` and the library body that fails.
+fn copy(var out: StringBuilder, text: String, from: Int, to: Int) {
+  out.appendSlice(text, from, to)
+}
+
+/// Appends a range whose end is inside a character, which
+/// `StringBuilder.appendSlice` refuses inside `std/stringbuilder.cove` in
+/// `String.sliceBytes`'s words. The range before it is a legal one, so the
+/// builder already holds bytes when the refusal comes: the diagnostic blames
+/// the line in `copy` that called the library, keeps the library's own line as
+/// context, and still says that `main` called `copy`. ADR 0058.
+export fn main() -> Result<Unit, Error> {
+  var out = StringBuilder.withCapacity(4)
+  copy(var out, "héllo", 0, 1)
+  copy(var out, "héllo", 1, 2)
+  Ok(())
+}

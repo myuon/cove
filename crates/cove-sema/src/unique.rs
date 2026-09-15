@@ -266,7 +266,8 @@ struct Consume {
 enum Transition {
     /// `Vector.freeze()`, written here.
     Freeze,
-    /// `ByteBuffer.finish()`, written here.
+    /// `core.bytesFinish(buffer)`, written here in the standard library — the
+    /// byte run's finish, which `StringBuilder.finish` wraps.
     Finish,
     /// A call to a declared method that consumes through its own receiver,
     /// named `Type.method`.
@@ -348,10 +349,27 @@ struct Scan<'a> {
     answers: Vec<&'a Expr>,
 }
 
+/// Where an expression was written, as far as freshness is concerned: its
+/// file, and whether that file is a standard-library module's.
+///
+/// The second half is what a core intrinsic needs. `core.bytesAllocate(n)` is
+/// a fresh creation only where `core.` names the core intrinsics, which is a
+/// standard-library module and nowhere else — in a program `core` is an
+/// ordinary name, and a `core.bytesAllocate` there is whatever the program
+/// declared under it.
+#[derive(Clone, Copy)]
+struct Site {
+    file: FileId,
+    library: bool,
+}
+
 /// One body to analyse.
 struct Body<'a> {
     key: Option<FnKey>,
     file: FileId,
+    /// Whether this body is a standard-library module's, where `core.` names
+    /// the core intrinsics.
+    library: bool,
     /// Parameter names, receiver excluded.
     params: Vec<&'a str>,
     /// `Some(is_var)` when this body has a receiver.
@@ -361,6 +379,15 @@ struct Body<'a> {
     /// resolves to this declaration by name.
     receiver_may_demand: bool,
     block: &'a Block,
+}
+
+impl Body<'_> {
+    fn site(&self) -> Site {
+        Site {
+            file: self.file,
+            library: self.library,
+        }
+    }
 }
 
 /// The named types whose values can reach a linear owner.
@@ -527,7 +554,7 @@ fn prove(
                 );
                 return;
             };
-            if !establishes(init, &consumed.place.fields, facts, body.file, fresh) {
+            if !establishes(init, &consumed.place.fields, facts, body.site(), fresh) {
                 refuse(
                     init.span,
                     format!(
@@ -797,7 +824,7 @@ fn answers_fresh<'a>(
             let proved = scanned
                 .answers
                 .iter()
-                .all(|answer| constructs(answer, facts, body.file, &fresh));
+                .all(|answer| constructs(answer, facts, body.site(), &fresh));
             if proved {
                 changed |= fresh.answers.insert(key.clone());
             }
@@ -813,7 +840,8 @@ fn answers_fresh<'a>(
 ///
 /// Three shapes, and [`Freshness`] says why there are no more:
 ///
-/// - a builtin call [`creates`] recognises, such as `ByteBuffer.allocate(n)`;
+/// - a builtin call [`creates`] recognises, such as `Vector.of(...)` or, in the
+///   standard library, `core.bytesAllocate(n)`;
 /// - a call to a declared function already proved to answer fresh;
 /// - a struct literal whose every argument is itself a construction, or is of
 ///   a type that cannot reach an owner — a scalar, a `String`, an `Array`.
@@ -824,8 +852,8 @@ fn answers_fresh<'a>(
 /// A call carrying a trailing closure is not a construction either: the
 /// closure may have captured an owner, and the argument list this walks is
 /// not where it would be found.
-fn constructs(expr: &Expr, facts: &Facts, file: FileId, fresh: &Freshness<'_>) -> bool {
-    if creates(expr, facts, file) {
+fn constructs(expr: &Expr, facts: &Facts, site: Site, fresh: &Freshness<'_>) -> bool {
+    if creates(expr, facts, site) {
         return true;
     }
     let ExprKind::Call {
@@ -842,7 +870,7 @@ fn constructs(expr: &Expr, facts: &Facts, file: FileId, fresh: &Freshness<'_>) -
     }
     // A method or an associated function: the checker resolved which
     // declaration this reaches and recorded it, so there is nothing to guess.
-    if let Some(target) = facts.target(file, expr.id) {
+    if let Some(target) = facts.target(site.file, expr.id) {
         return fresh.answers.contains(&(
             target.module.clone(),
             Some(target.type_name.clone()),
@@ -855,7 +883,7 @@ fn constructs(expr: &Expr, facts: &Facts, file: FileId, fresh: &Freshness<'_>) -
     // A callee the checker gave a type is a call *through a value* — a
     // binding holding a closure — and names no declaration at all. See the
     // `facts` module: that absence is the fact, not a gap in the table.
-    if facts.ty(file, callee.id).is_some() {
+    if facts.ty(site.file, callee.id).is_some() {
         return false;
     }
     // A struct literal, unless the name is also some module's function — in
@@ -866,9 +894,9 @@ fn constructs(expr: &Expr, facts: &Facts, file: FileId, fresh: &Freshness<'_>) -
     if fresh.structs.contains(head.as_str()) && !fresh.functions.contains_key(head.as_str()) {
         return args.iter().all(|arg| {
             let harmless = facts
-                .ty(file, arg.value.id)
+                .ty(site.file, arg.value.id)
                 .is_some_and(|ty| !holds_owned(fresh.bearing, ty));
-            harmless || constructs(&arg.value, facts, file, fresh)
+            harmless || constructs(&arg.value, facts, site, fresh)
         });
     }
     fresh.by_name(head)
@@ -879,7 +907,7 @@ fn constructs(expr: &Expr, facts: &Facts, file: FileId, fresh: &Freshness<'_>) -
 ///
 /// Two ways, and the first is what lets a builder be built by a function.
 /// When the whole initialiser is a [`constructs`] — `StringBuilder.withCapacity(16)`,
-/// `ByteBuffer.allocate(64)`, `Builder(buffer: ByteBuffer.allocate(64))` —
+/// `core.bytesAllocate(64)`, `Builder(buffer: core.bytesAllocate(64))` —
 /// then *every* field path inside it is fresh, because the value was built
 /// here out of parts that were built here: there is no field of it that some
 /// other holder could have supplied. Nothing needs to be found in the
@@ -893,10 +921,10 @@ fn establishes(
     init: &Expr,
     fields: &[String],
     facts: &Facts,
-    file: FileId,
+    site: Site,
     fresh: &Freshness<'_>,
 ) -> bool {
-    if constructs(init, facts, file, fresh) {
+    if constructs(init, facts, site, fresh) {
         return true;
     }
     let Some((first, rest)) = fields.split_first() else {
@@ -906,7 +934,7 @@ fn establishes(
         ExprKind::Call { args, .. } => args
             .iter()
             .find(|arg| arg.label.as_ref().is_some_and(|label| label.node == *first))
-            .is_some_and(|arg| establishes(&arg.value, rest, facts, file, fresh)),
+            .is_some_and(|arg| establishes(&arg.value, rest, facts, site, fresh)),
         _ => false,
     }
 }
@@ -951,13 +979,19 @@ fn establishes(
 /// `filter`'s result is not the direct initialiser of anything `creates`
 /// looks at. See `MethodSchema::fresh` for who may assert freshness and why
 /// a declared `fn` is not on that list.
-fn creates(init: &Expr, facts: &Facts, file: FileId) -> bool {
+fn creates(init: &Expr, facts: &Facts, site: Site) -> bool {
     let ExprKind::Call { callee, .. } = &init.kind else {
         return false;
     };
     let ExprKind::Field { base, name } = &callee.kind else {
         return false;
     };
+    // `core.bytesAllocate(n)`, in a standard-library module: a core intrinsic
+    // `cove-schema` marks fresh, which is the same table making the same claim.
+    if let Some(schema) = core_intrinsic_called(base, &name.node, facts, site) {
+        return schema.fresh;
+    }
+    let file = site.file;
     if let ExprKind::Ident(head) = &base.kind {
         if facts.ty(file, base.id).is_none() {
             if let Some(schema) = cove_schema::builtin(head) {
@@ -974,6 +1008,29 @@ fn creates(init: &Expr, facts: &Facts, file: FileId) -> bool {
         .is_some_and(|method| method.fresh)
 }
 
+/// The core intrinsic `base.name(...)` calls, when it calls one.
+///
+/// `core.<name>` names one only in a standard-library module, and only where
+/// `core` is no value the checker typed — the same questions the checker asked
+/// before it resolved the call to `cove_schema::builtins::CORE_INTRINSICS`.
+fn core_intrinsic_called(
+    base: &Expr,
+    name: &str,
+    facts: &Facts,
+    site: Site,
+) -> Option<&'static cove_schema::builtins::CoreIntrinsicSchema> {
+    let ExprKind::Ident(head) = &base.kind else {
+        return None;
+    };
+    if !site.library
+        || head != cove_schema::builtins::CORE_NAMESPACE
+        || facts.ty(site.file, base.id).is_some()
+    {
+        return None;
+    }
+    cove_schema::builtins::core_intrinsic(name)
+}
+
 // --- reading a body --------------------------------------------------------
 
 /// The places one body reads, writes, creates and consumes.
@@ -982,6 +1039,7 @@ fn scan<'a>(body: &Body<'a>, facts: &Facts, bearing: &Bearing) -> Scan<'a> {
         facts,
         bearing,
         file: body.file,
+        library: body.library,
         regions: Vec::new(),
         depth: 0,
         terminal: false,
@@ -1010,6 +1068,8 @@ struct Walk<'a, 'f> {
     facts: &'f Facts,
     bearing: &'f Bearing,
     file: FileId,
+    /// Whether the body is a standard-library module's. See [`Site`].
+    library: bool,
     /// The loop and closure bodies enclosing the expression being walked.
     regions: Vec<Span>,
     depth: usize,
@@ -1277,7 +1337,20 @@ impl<'a> Walk<'a, '_> {
             .facts
             .ty(self.file, call.id)
             .is_some_and(|ty| self.holds_owned(ty));
+        let site = Site {
+            file: self.file,
+            library: self.library,
+        };
         let receiver = match &callee.kind {
+            // `core.bytesFinish(buffer)`: the byte run's consuming transition,
+            // which is a core intrinsic and not a method, so it has no receiver
+            // and `core` is no place. See `Walk::core_intrinsic`.
+            ExprKind::Field { base, name }
+                if core_intrinsic_called(base, &name.node, self.facts, site).is_some() =>
+            {
+                self.core_intrinsic(call, &name.node, args);
+                None
+            }
             ExprKind::Field { base, name } => {
                 self.method(call, base, &name.node, result_holds);
                 Some(base)
@@ -1327,24 +1400,52 @@ impl<'a> Walk<'a, '_> {
         }
     }
 
+    /// A core intrinsic call, and whether it is a consumption.
+    ///
+    /// `core.bytesFinish(buffer)` is one: it relabels a byte run into a `String`
+    /// and empties the owner, which is the transition `ByteBuffer.finish()` was
+    /// before the byte run became the standard library's own. ADR 0052 asks for
+    /// exactly this — "finishing requires the same conservative local
+    /// uniqueness proof as `Vector.freeze()`" — so it is recorded here as a
+    /// freeze is, on the place its argument names, and everything downstream
+    /// treats the two identically. `std.stringbuilder`'s `finish(var self)`
+    /// calls it on `self.buffer`, which is what makes that method demand a
+    /// uniquely owned receiver of every program that calls it.
+    ///
+    /// The other core intrinsics consume nothing. The vector's run finish is
+    /// not recorded here, because the transition a program wrote is its own
+    /// `.freeze()` — see [`Walk::method`] — and `std.vector.freeze` takes the
+    /// vector by value, where a consumption would demand nothing of anyone.
+    fn core_intrinsic(&mut self, call: &'a Expr, name: &str, args: &'a [Arg]) {
+        if name != cove_schema::builtins::CORE_BYTES_FINISH.name {
+            return;
+        }
+        let Some(place) = args.first().and_then(|arg| self.place_of(&arg.value)) else {
+            return;
+        };
+        self.scan.freezes.push(Consume {
+            place,
+            span: call.span,
+            regions: self.regions.clone(),
+            terminal: self.terminal,
+            transition: Transition::Finish,
+        });
+    }
+
     /// A method call's receiver, and whether this call is a consumption.
     ///
-    /// Two calls consume, and they are the two transitions the language has:
-    /// `Vector.freeze()`, which relabels a vector's store into an immutable
-    /// `Array`, and `ByteBuffer.finish()`, which relabels a buffer's run into a
-    /// `String`. ADR 0052 asks for exactly this — "finishing requires the same
-    /// conservative local uniqueness proof as `Vector.freeze()`" — so a finish
-    /// is recorded here as a freeze is, and everything downstream of this
-    /// function treats the two identically.
+    /// One method consumes: `Vector.freeze()`, which relabels a vector's store
+    /// into an immutable `Array`. The byte run's finish is the other transition
+    /// the language has, and it is a core intrinsic — see
+    /// [`Walk::core_intrinsic`].
     ///
     /// The receiver's *type* is asked and not the name alone, because a name is
-    /// not a transition: a program's own `finish()` on a declared type is an
-    /// ordinary method, and `examples/values`'s `BookingDraft.finish` is one.
+    /// not a transition: a program's own `freeze()` on a declared type is an
+    /// ordinary method.
     fn method(&mut self, call: &'a Expr, base: &'a Expr, name: &str, result_holds: bool) {
         let receiver = self.place_of(base);
         let consumes = match self.facts.ty(self.file, base.id) {
             Some(Ty::Vector(_)) if name == "freeze" => Some(Transition::Freeze),
-            Some(Ty::ByteBuffer) if name == "finish" => Some(Transition::Finish),
             _ => None,
         };
         if let Some(transition) = consumes {
@@ -1532,10 +1633,12 @@ fn bodies(program: &Program) -> Vec<Body<'_>> {
 
     let mut out = Vec::new();
     for (module_name, module) in &program.modules {
+        let library = crate::stdlib::is_library_module(module_name);
         for (name, entry) in &module.functions {
             out.push(Body {
                 key: Some((module_name.clone(), None, name.clone())),
                 file: entry.decl.span.file,
+                library,
                 params: names(&entry.decl.params),
                 receiver: entry.decl.receiver.map(|receiver| receiver.is_var),
                 receiver_may_demand: false,
@@ -1549,6 +1652,7 @@ fn bodies(program: &Program) -> Vec<Body<'_>> {
             out.push(Body {
                 key: Some((module_name.clone(), Some(type_name.clone()), name.clone())),
                 file: entry.decl.span.file,
+                library,
                 params: names(&entry.decl.params),
                 receiver: entry.decl.receiver.map(|receiver| receiver.is_var),
                 receiver_may_demand: !through_a_trait.contains(name.as_str()),
@@ -1563,6 +1667,7 @@ fn bodies(program: &Program) -> Vec<Body<'_>> {
                 out.push(Body {
                     key: None,
                     file: method.span.file,
+                    library,
                     params: names(&method.params),
                     receiver: method.receiver.map(|receiver| receiver.is_var),
                     receiver_may_demand: false,
@@ -1598,6 +1703,19 @@ mod tests {
         errors_of_package(source, false)
     }
 
+    /// Everything `cove check` reports about one module checked as if it were
+    /// the standard library's, where `core.` names the core intrinsics and
+    /// `ByteBuffer` is a type.
+    ///
+    /// For the tests of the byte run's own transition, which no program can
+    /// write. The module takes a standard-library module's name and nothing
+    /// else of it: the standard library is not attached, so the name is the
+    /// whole of the privilege, exactly as `crate::stdlib::is_library_module`
+    /// decides it.
+    fn errors_in_library(source: &str) -> Vec<Diagnostic> {
+        errors_of_module(source, false, "std.stringbuilder")
+    }
+
     /// The same, with the standard library attached.
     ///
     /// Only for a test that names something the standard library declares —
@@ -1610,15 +1728,19 @@ mod tests {
     }
 
     fn errors_of_package(source: &str, with_std: bool) -> Vec<Diagnostic> {
+        errors_of_module(source, with_std, "main")
+    }
+
+    fn errors_of_module(source: &str, with_std: bool, name: &str) -> Vec<Diagnostic> {
         let mut sources = SourceMap::new();
         let path = PathBuf::from("main.cove");
         let file = sources.add(path.clone(), source);
         let ast = cove_syntax::parse_file(&sources, file).expect("test source parses");
         let mut modules = BTreeMap::from([(
-            "main".to_string(),
+            name.to_string(),
             Module {
-                name: "main".to_string(),
-                dir: PathBuf::from("main"),
+                name: name.to_string(),
+                dir: PathBuf::from(name),
                 units: vec![Unit { file, path, ast }],
             },
         )]);
@@ -1644,6 +1766,18 @@ mod tests {
     #[track_caller]
     fn proves(source: &str) {
         report(errors_of(source));
+    }
+
+    /// [`proves`], of a module checked as the standard library's.
+    #[track_caller]
+    fn proves_in_library(source: &str) {
+        report(errors_in_library(source));
+    }
+
+    /// [`refuses`], of a module checked as the standard library's.
+    #[track_caller]
+    fn refuses_in_library(source: &str) -> Diagnostic {
+        sole(errors_in_library(source))
     }
 
     /// [`proves`], of a source that names the standard library.
@@ -2257,25 +2391,31 @@ fn build(given: Vector<Int>) -> Array<Int> {
     }
     // ------------------------------------------------ ADR 0052's byte buffer
     //
-    // `ByteBuffer.finish()` is the second consuming transition and it is proved
-    // by the same machinery, so these are the `Vector` tests above asked again
-    // of a buffer. What is worth pinning is that nothing had to be added per
-    // transition: the creation is trusted because `cove-schema` marks
-    // `allocate` fresh, and the struct that wraps a buffer is registered as
-    // bearing linear state because `names_an_owner` recognises the written type.
+    // `core.bytesFinish(buffer)` is the second consuming transition and it is
+    // proved by the same machinery, so these are the `Vector` tests above asked
+    // again of a buffer. What is worth pinning is that nothing had to be added
+    // per transition: the creation is trusted because `cove-schema` marks
+    // `core.bytesAllocate` fresh, and the struct that wraps a buffer is
+    // registered as bearing linear state because `names_an_owner` recognises
+    // the written type.
+    //
+    // The byte run is the standard library's own (ADR 0058, #378), so a program
+    // cannot write one: each of these is checked as a standard-library module
+    // would be — see `errors_in_library` — and what a program sees of the same
+    // proof is `StringBuilder`, in the tests after them.
 
     /// The shape `finish()` was written for: allocate, append, hand the string
     /// over.
     #[test]
     fn a_buffer_built_here_and_finished_is_proved() {
-        proves(
+        proves_in_library(
             "\
 fn build(upTo: Int) -> String {
-  var out = ByteBuffer.allocate(16)
+  var out = core.bytesAllocate(16)
   for n in 1..upTo {
-    out.appendByte(65)
+    core.bytesPush(out, 65)
   }
-  out.finish()
+  core.bytesFinish(out)
 }
 ",
         );
@@ -2287,19 +2427,19 @@ fn build(upTo: Int) -> String {
     /// finish — and the pass must not read the `var` argument as an escape.
     #[test]
     fn a_buffer_passed_as_a_var_argument_is_still_finishable() {
-        proves(
+        proves_in_library(
             "\
 fn fill(var out: ByteBuffer, depth: Int) {
-  out.appendByte(65)
+  core.bytesPush(out, 65)
   if depth > 0 {
     fill(var out, depth - 1)
   }
 }
 
 fn build() -> String {
-  var out = ByteBuffer.allocate(8)
+  var out = core.bytesAllocate(8)
   fill(var out, 3)
-  out.finish()
+  core.bytesFinish(out)
 }
 ",
         );
@@ -2315,7 +2455,7 @@ fn build() -> String {
     /// holding linear state, and the demand was recorded and then never checked.
     #[test]
     fn a_struct_wrapping_a_buffer_carries_the_demand_to_its_caller() {
-        proves(
+        proves_in_library(
             "\
 struct Builder {
   buffer: ByteBuffer
@@ -2323,16 +2463,16 @@ struct Builder {
 
 impl Builder {
   fn add(var self, text: String) {
-    self.buffer.appendSlice(text, 0, text.byteLength())
+    core.bytesExtend(self.buffer, text, 0, core.byteLength(text))
   }
 
   fn finish(var self) -> String {
-    self.buffer.finish()
+    core.bytesFinish(self.buffer)
   }
 }
 
 fn build() -> String {
-  var out = Builder(buffer: ByteBuffer.allocate(16))
+  var out = Builder(buffer: core.bytesAllocate(16))
   out.add(\"hello\")
   out.finish()
 }
@@ -2345,13 +2485,13 @@ fn build() -> String {
     /// conversion to offer.
     #[test]
     fn a_second_binding_defeats_a_finish_and_the_help_does_not_offer_to_array() {
-        let error = refuses(
+        let error = refuses_in_library(
             "\
 fn build() -> String {
-  var out = ByteBuffer.allocate(8)
+  var out = core.bytesAllocate(8)
   var alias = out
-  alias.appendByte(65)
-  out.finish()
+  core.bytesPush(alias, 65)
+  core.bytesFinish(out)
 }
 ",
         );
@@ -2374,7 +2514,7 @@ fn build() -> String {
     /// the answer.
     #[test]
     fn a_buffer_that_escapes_into_a_call_is_refused() {
-        let error = refuses(
+        let error = refuses_in_library(
             "\
 struct Builder {
   buffer: ByteBuffer
@@ -2385,9 +2525,9 @@ fn keep(out: ByteBuffer) -> Builder {
 }
 
 fn build() -> String {
-  var out = ByteBuffer.allocate(8)
+  var out = core.bytesAllocate(8)
   let held = keep(out)
-  out.finish()
+  core.bytesFinish(out)
 }
 ",
         );
@@ -2401,12 +2541,12 @@ fn build() -> String {
     /// A buffer read after it was finished is reported where the read is.
     #[test]
     fn a_read_after_the_finish_is_reported() {
-        let error = refuses(
+        let error = refuses_in_library(
             "\
 fn build() -> Int {
-  var out = ByteBuffer.allocate(8)
-  let text = out.finish()
-  out.length()
+  var out = core.bytesAllocate(8)
+  let text = core.bytesFinish(out)
+  core.bytesLength(out)
 }
 ",
         );
@@ -2430,13 +2570,13 @@ fn build() -> Int {
     /// function answers one, and the caller finishes it.
     ///
     /// Three clauses of [`constructs`] at once. `Builder.withCapacity`'s answer
-    /// is a struct literal; its `buffer:` argument is a builtin fresh call; its
+    /// is a struct literal; its `buffer:` argument is a core fresh call; its
     /// `limit:` argument is an `Int`, which cannot reach an owner and so is
     /// waved through without being a construction itself. `make` is then the
     /// fixpoint's second round: a call to something the first round added.
     #[test]
     fn an_associated_function_that_builds_one_answers_fresh() {
-        proves(
+        proves_in_library(
             "\
 struct Builder {
   buffer: ByteBuffer
@@ -2445,11 +2585,11 @@ struct Builder {
 
 impl Builder {
   fn withCapacity(capacity: Int) -> Builder {
-    Builder(buffer: ByteBuffer.allocate(capacity), limit: capacity)
+    Builder(buffer: core.bytesAllocate(capacity), limit: capacity)
   }
 
   fn finish(var self) -> String {
-    self.buffer.finish()
+    core.bytesFinish(self.buffer)
   }
 }
 
@@ -2523,7 +2663,7 @@ fn build() -> String {
     /// this would prove, and the proof would be wrong.
     #[test]
     fn a_function_that_answers_a_parameter_is_not_a_creation() {
-        let error = refuses(
+        let error = refuses_in_library(
             "\
 fn handed(buffer: ByteBuffer) -> ByteBuffer {
   return buffer
@@ -2531,7 +2671,7 @@ fn handed(buffer: ByteBuffer) -> ByteBuffer {
 
 fn build(given: ByteBuffer) -> String {
   var out = handed(given)
-  out.finish()
+  core.bytesFinish(out)
 }
 ",
         );
@@ -2553,7 +2693,7 @@ fn build(given: ByteBuffer) -> String {
     /// wrapper being freshly allocated says nothing about the run inside it.
     #[test]
     fn a_struct_literal_over_a_parameter_is_not_a_construction() {
-        let error = refuses(
+        let error = refuses_in_library(
             "\
 struct Builder {
   buffer: ByteBuffer
@@ -2561,7 +2701,7 @@ struct Builder {
 
 impl Builder {
   fn finish(var self) -> String {
-    self.buffer.finish()
+    core.bytesFinish(self.buffer)
   }
 }
 
@@ -2601,7 +2741,7 @@ fn build(given: ByteBuffer) -> String {
     /// exist until the answer was built.
     #[test]
     fn a_construction_that_passed_through_a_call_before_being_answered_is_refused() {
-        let error = refuses(
+        let error = refuses_in_library(
             "\
 struct Holder {
   buffer: ByteBuffer
@@ -2612,14 +2752,14 @@ fn stash(buffer: ByteBuffer) -> Holder {
 }
 
 fn leaked() -> ByteBuffer {
-  var out = ByteBuffer.allocate(8)
+  var out = core.bytesAllocate(8)
   let kept = stash(out)
   out
 }
 
 fn build() -> String {
   var out = leaked()
-  out.finish()
+  core.bytesFinish(out)
 }
 ",
         );

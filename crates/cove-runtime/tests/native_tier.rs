@@ -45,6 +45,7 @@ const MODULE: &str = "m";
 /// crossing that no longer happens — and `counts` is recursive, so nothing that
 /// calls it can be expanded either.
 const SOURCE: &str = "\
+use std.stringbuilder
 use std.stringbuilder.StringBuilder
 
 /// Recursive, so no caller of this can be inlined away. `counts(0)` is zero.
@@ -642,6 +643,24 @@ export fn callsBuildsAByte(n: Int) -> String {
   buildsAByte(n)
 }
 
+/// `buildsAByte` with the byte appended in a standard-library *frame*.
+///
+/// `appendByte` is expanded wherever it is called, so a fault in it is raised in
+/// its caller's frame. `appendByteBelow` — [`PROBE`], installed in
+/// `std.stringbuilder` — calls itself, so no expansion reaches it, and the call
+/// here is one a compiled frame waits on.
+export fn buildsAByteBelow(n: Int) -> String {
+  var out = StringBuilder.withCapacity(4 + counts(0))
+  stringbuilder.appendByteBelow(var out, n, 0)
+  out.finish()
+}
+
+/// A refused caller, so the refusal crosses the boundary.
+export fn callsBuildsAByteBelow(n: Int) -> String {
+  let nothing = Shared(0).lock(fn(v) { v })
+  buildsAByteBelow(n)
+}
+
 /// Refused, and it appends to a builder it was lent.
 export fn addsTo(var out: StringBuilder, text: String) {
   let nothing = Shared(0).lock(fn(v) { v })
@@ -815,6 +834,23 @@ export fn countsTheBoundary(s: String, n: Int) -> Int {
 }
 ";
 
+/// A standard-library body that can fault and that no expansion reaches.
+///
+/// Installed in `std.stringbuilder` by [`checked`], because the library has no
+/// such body of its own once the builder's `var self` methods are expanded
+/// wherever they are called: a fault in the library under a compiled frame
+/// that waits on a library call needs a library call to wait on.
+const PROBE: &str = "\
+/// `appendByte`, `depth` frames down a recursion no expansion can reach.
+export fn appendByteBelow(var out: StringBuilder, value: Int, depth: Int) {
+  if depth > 0 {
+    appendByteBelow(var out, value, depth - 1)
+  } else {
+    out.appendByte(value)
+  }
+}
+";
+
 fn checked() -> (Arc<SourceMap>, Arc<cove_sema::resolve::Program>) {
     let mut sources = SourceMap::new();
     let path = PathBuf::from("m/main.cove");
@@ -831,6 +867,14 @@ fn checked() -> (Arc<SourceMap>, Arc<cove_sema::resolve::Program>) {
     for (name, module) in cove_sema::stdlib::attach(&mut sources).expect("stdlib parses") {
         modules.insert(name, module);
     }
+    let path = PathBuf::from("std/stringbuilder_probe.cove");
+    let file = sources.add_library(path.clone(), PROBE);
+    let ast = cove_syntax::parse_file(&sources, file).expect("the probe parses");
+    modules
+        .get_mut("std.stringbuilder")
+        .expect("the standard library has `std.stringbuilder`")
+        .units
+        .push(Unit { file, path, ast });
     let package = Package {
         root: PathBuf::new(),
         config: Config::default(),
@@ -1093,17 +1137,22 @@ fn negation_and_its_overflow_are_the_vm_s() {
 /// is handed, so what has to be the VM's is every one of those: the primary span,
 /// the library context and the chain.
 ///
-/// Two fixtures, for the two ways a call site reaches the rule. `absolutes`
-/// expands `abs`, so its call site comes out of `Function::inlined` at the
-/// faulting instruction. `buildsAByte` *calls* `appendByte` — a `var self` is
-/// never expanded — so its call site is read from a compiled frame waiting on
-/// that call, whose program counter compiled code syncs to the call itself
-/// rather than to the instruction after it.
+/// Three fixtures, for the two ways a call site reaches the rule. `absolutes`
+/// expands `abs` and `buildsAByte` expands `appendByte`, a `var self` method, so
+/// their call sites come out of `Function::inlined` at the faulting
+/// instruction. `buildsAByteBelow` *calls* the probe `appendByteBelow`, which
+/// calls itself and so is never expanded, and its call site is read from a
+/// compiled frame waiting on that call, whose program counter compiled code
+/// syncs to the call itself rather than to the instruction after it.
 #[test]
 fn a_fault_in_a_library_body_under_compiled_code_is_blamed_on_its_caller() {
     on_each_tier(
-        &["absolutes", "buildsAByte"],
-        &["callsAbsolutes", "callsBuildsAByte"],
+        &["absolutes", "buildsAByte", "buildsAByteBelow"],
+        &[
+            "callsAbsolutes",
+            "callsBuildsAByte",
+            "callsBuildsAByteBelow",
+        ],
     );
 
     let (sources, program) = checked();
@@ -1116,6 +1165,27 @@ fn a_fault_in_a_library_body_under_compiled_code_is_blamed_on_its_caller() {
         Arc::clone(&program),
         Arc::clone(&sources),
         Arc::clone(&hosts),
+    );
+    let calls = |caller: &str, callee: &str| {
+        lowered
+            .functions
+            .iter()
+            .find(|f| &*f.module == MODULE && &*f.name == caller)
+            .expect("the fixture is lowered")
+            .code
+            .iter()
+            .any(|inst| {
+                matches!(inst, cove_ir::Inst::Call { callee: id, .. }
+                    if lowered.function(*id).name.ends_with(callee))
+            })
+    };
+    assert!(
+        !calls("buildsAByte", "appendByte"),
+        "`appendByte` is expanded into `buildsAByte`"
+    );
+    assert!(
+        calls("buildsAByteBelow", "appendByteBelow"),
+        "`appendByteBelow` is a call, which is what makes it the framed case"
     );
     let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
     let text = |span: cove_diag::Span| {
@@ -1137,6 +1207,12 @@ fn a_fault_in_a_library_body_under_compiled_code_is_blamed_on_its_caller() {
             300,
             "out.appendByte(n)",
             "buildsAByte(n)",
+        ),
+        (
+            "callsBuildsAByteBelow",
+            300,
+            "stringbuilder.appendByteBelow(var out, n, 0)",
+            "buildsAByteBelow(n)",
         ),
     ] {
         let args = vec![Value::int(arg)];

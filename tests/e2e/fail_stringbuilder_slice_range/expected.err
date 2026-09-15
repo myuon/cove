@@ -1,0 +1,14 @@
+error[cove::runtime]: `to` is `2`, which is inside a character rather than at the start of one
+ --> <e2e>/fail_stringbuilder_slice_range/main.cove:6:3
+  |
+6 |   out.appendSlice(text, from, to)
+  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   --> std/stringbuilder.cove:133:5
+    |
+133 |     core.bytesExtend(self.buffer, text, from, to)
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+  --> <e2e>/fail_stringbuilder_slice_range/main.cove:18:3
+   |
+18 |   copy(var out, "héllo", 1, 2)
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ called from here
+1 error(s)
