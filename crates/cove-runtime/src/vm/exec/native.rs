@@ -791,8 +791,11 @@ unsafe extern "C" fn field_store(
 ///
 /// An intrinsic that may not raise is not tested for an outcome by compiled code,
 /// so answering anything but `Returned` for one would be answering into a
-/// register nobody reads; `Machine::call_intrinsic` already asserts that such an
-/// intrinsic did not raise.
+/// register nobody reads — and stashing an error the *next* raise would report.
+/// `Machine::call_intrinsic` makes that impossible rather than unlikely: an `Err`
+/// from an intrinsic whose effects lack `MAY_RAISE` is a broken invariant and ends
+/// the run there, in every profile (`vm::exec`'s `unraisable`). So the `Raised`
+/// arm below is reachable only for an intrinsic that declares it.
 ///
 /// # Safety
 ///

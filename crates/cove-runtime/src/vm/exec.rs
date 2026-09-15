@@ -2048,15 +2048,30 @@ impl<'a> Machine<'a> {
             Dest::new(base, dst, called.result),
         );
 
+        // An intrinsic that answered a `RuntimeError` while its declared
+        // `Effects` do not carry `MAY_RAISE` has broken an invariant this
+        // backend relies on, and it is checked in *every* profile rather than
+        // under `debug_assertions` with the three below it. Compiled code omits
+        // the outcome test for such a call — see
+        // [`IntrinsicProtocol`](cove_native::IntrinsicProtocol) — so the error
+        // would be stashed in the native bridge and read by whatever raised
+        // next: a sentence from somewhere else, attached to a fault somewhere
+        // else, which is the worst failure available. One test on a path that
+        // only an `Err` reaches, and the panic itself is out of line.
+        if let Err(error) = &answered {
+            if !called
+                .intrinsic
+                .effects()
+                .contains(cove_ir::Effects::MAY_RAISE)
+            {
+                unraisable(called.intrinsic, error);
+            }
+        }
+
         #[cfg(debug_assertions)]
         {
             let intrinsic = called.intrinsic;
             let effects = intrinsic.effects();
-            debug_assert!(
-                answered.is_ok() || effects.contains(cove_ir::Effects::MAY_RAISE),
-                "`{intrinsic}` raised a `RuntimeError`, but its declared `Effects` do not \
-                 carry `MAY_RAISE`"
-            );
             debug_assert!(
                 super::mem::thread_allocations() == allocations_before
                     || effects.contains(cove_ir::Effects::MAY_ALLOCATE),
@@ -4217,6 +4232,42 @@ fn float_arith(op: ArithOp, a: f64, b: f64) -> f64 {
         ArithOp::Div => a / b,
         ArithOp::Rem => a % b,
     }
+}
+
+/// An intrinsic answered a `RuntimeError` while its declared
+/// [`Effects`](cove_ir::Effects) do not carry `MAY_RAISE`: a broken internal
+/// invariant rather than a program error, and the end of this run.
+///
+/// [ADR 0058](../../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md)
+/// narrows `MAY_RAISE` to *language-level* failure (#378, Q5.3), and generated
+/// code reads that as licence to omit the outcome test around a call that cannot
+/// raise (#378, P5-6). So the `Err` an arm may still produce for an invariant the
+/// language does not define — a `String` whose bytes are not valid UTF-8, a
+/// reference inside a walk that names nothing — has no reader: it would be stashed
+/// in the native bridge and handed back at whatever raised *next*, one sentence
+/// attached to another fault. That is the failure mode this exists to make
+/// impossible.
+///
+/// It is a panic and not a stop, which is this file's convention for a fact no
+/// program can make false — `unreachable!("joining a task leaves it settled,
+/// failed, or cancelled")` and its neighbours — and it is right here rather than
+/// as a stop for two reasons: a stop is a thing a Cove program can be written to
+/// observe, and this is not about the program; and a panic reaching an
+/// `extern "C"` helper aborts rather than unwinding through machine code, which
+/// is exactly what should happen to a run whose runtime has broken its own rule.
+///
+/// The arm that produced it is named, with the sentence it built, because the
+/// pair is what says which of the two is wrong: the arm, or the effects it
+/// declares.
+#[cold]
+#[inline(never)]
+fn unraisable(intrinsic: cove_ir::Intrinsic, error: &RuntimeError) -> ! {
+    panic!(
+        "`{intrinsic}` answered a `RuntimeError` — \"{}\" — and its declared `Effects` do not \
+         carry `MAY_RAISE`, so no caller reads it. Either the arm must not fail this way, or \
+         the intrinsic's effects are wrong.",
+        error.message
+    )
 }
 
 fn overflowed(operation: &str) -> RuntimeError {
@@ -8805,6 +8856,46 @@ pub(crate) mod tests {
         assert!(machine.held.is_empty());
         let addr = machine.mem.slot(machine.frames[0].base, 1);
         assert_eq!(cell::holder(&machine.mem, addr), 0);
+    }
+
+    /// **An intrinsic that cannot raise, answering an error, ends the run where
+    /// it happened.**
+    ///
+    /// `String.contains` declares no `MAY_RAISE` — searching a valid `String`
+    /// cannot fail — but its arm decodes the receiver, and a receiver whose bytes
+    /// are not valid UTF-8 is an `Err`. That is an invariant the language does not
+    /// define, so nothing is allowed to observe it as a program error: compiled
+    /// code omits the outcome test for exactly this call
+    /// (`cove_native::IntrinsicProtocol`), and an error that reached the native
+    /// bridge would be stashed and reported at whatever raised next. See
+    /// [`unraisable`], which is what this drives, in every profile rather than only
+    /// under `debug_assertions`.
+    ///
+    /// The receiver is built here rather than reached through a Cove program on
+    /// purpose: no checked program can produce one, which is the whole reason this
+    /// is a broken invariant and not a refusal.
+    #[test]
+    #[should_panic(expected = "`String.contains` answered a `RuntimeError`")]
+    fn an_intrinsic_that_cannot_raise_must_not_answer_an_error() {
+        let mut build = Build::default();
+        let boolean = build.word("Bool", Repr::Bool);
+        let string = build.string_layout();
+        let args = build.args(&[(0, string), (1, string)]);
+        build.program.intrinsic_sites.push(cove_ir::IntrinsicSite {
+            intrinsic: cove_ir::Intrinsic::StringContains,
+            result: boolean,
+        });
+        let program = build.done();
+        let mut machine = Machine::new(&program, 1 << 12);
+
+        // Two bytes, the first of which is a lone continuation byte: a `String`
+        // object no `Inst::RunFinish` would have answered.
+        let text = machine.new_string_of(2).expect("the heap has room");
+        machine.mem.set_payload(text, 0, 0xff);
+
+        let base = machine.push_test_frame(&[text, text, 0]);
+        machine.begin_intrinsic();
+        let _ = machine.call_intrinsic(base, 2, cove_ir::SiteId(0), args);
     }
 
     // --- ADR 0052: the safepoint schedule is work, not a multiple ----------

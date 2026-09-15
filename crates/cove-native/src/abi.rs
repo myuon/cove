@@ -710,7 +710,9 @@ pub type AllocFn = unsafe extern "C" fn(ctx: *mut NativeCtx, pc: u32, layout: u3
 /// The answer is an [`Outcome`] as a `u32`, read exactly as [`CallFn`]'s is:
 /// [`Outcome::Returned`] means the answer's words are in `dst` already. Generated
 /// code reads it only where [`IntrinsicProtocol::tests_outcome`] says so; where it
-/// does not, the answer is always `Returned`, and the helper asserts that it is.
+/// does not, the answer is always `Returned`: an intrinsic whose effects lack
+/// `MAY_RAISE` answering an error is a broken invariant, and the runtime ends the
+/// run at one rather than handing back an outcome nobody reads.
 ///
 /// # Safety
 ///
