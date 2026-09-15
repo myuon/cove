@@ -534,13 +534,20 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// with no copy after it; its first shape, answering the `Error` alone, was
 /// five more copies per row.
 ///
+/// **The sixteenth rise is two new rows, at the floor.** 2291 to 2303, six
+/// each for `tests/e2e:fail_stringbuilder_slice_range` and
+/// `tests/e2e:fail_stringbuilder_invalid_utf8` — the `prod` and `ret` columns
+/// `fail_divide_by_zero` and `fail_stringbuilder_byte_range` already have. They
+/// pin the builder's other two faults before ADR 0058 moves the builder onto
+/// core intrinsics (#378), so the lowering is the base's.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2291;
+const FORWARDABLE_COPIES: usize = 2303;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

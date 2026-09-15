@@ -100,6 +100,14 @@ allow = ["console"]
 entry = "fail_stringbuilder_byte_range.main"
 allow = ["console"]
 
+[run.fail_stringbuilder_invalid_utf8]
+entry = "fail_stringbuilder_invalid_utf8.main"
+allow = ["console"]
+
+[run.fail_stringbuilder_slice_range]
+entry = "fail_stringbuilder_slice_range.main"
+allow = ["console"]
+
 [run.flow_bindings]
 entry = "flow_bindings.main"
 allow = ["console"]

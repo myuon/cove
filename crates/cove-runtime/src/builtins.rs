@@ -964,16 +964,16 @@ pub fn call_method(
                     expect_args("finish", args, 0, span)?;
                     let bytes = storage.bytes.take();
                     *storage.finished.borrow_mut() = true;
+                    // The machine's sentence and nothing more: the linear-memory
+                    // backend's `growable_finish` raises it with no rule and no
+                    // help, and `tests/e2e/fail_stringbuilder_invalid_utf8`
+                    // compares the rendered diagnostic across both evaluators.
                     match String::from_utf8(bytes) {
                         Ok(text) => Ok(Value(Repr::Str(text.into()))),
-                        Err(_) => Err(RuntimeError::new("this string's bytes are not valid UTF-8")
-                            .at(span)
-                            .with_rule(
-                                "A `String` is valid UTF-8, and `appendByte` accepts any byte.",
-                            )
-                            .with_help(
-                                "append text with `appendSlice`, or append the bytes of a whole character together",
-                            )),
+                        Err(_) => {
+                            Err(RuntimeError::new("this string's bytes are not valid UTF-8")
+                                .at(span))
+                        }
                     }
                 }
                 _ => Err(no_method("ByteBuffer", name, span)),
