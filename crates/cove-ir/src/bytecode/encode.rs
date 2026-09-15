@@ -13,7 +13,7 @@
 //! its program counter, every field an opcode does not use is written zero,
 //! and two encodings of one program are byte-identical.
 
-use crate::inst::{Inst, Len, Pc, Slot};
+use crate::inst::{Inst, Len, Pc, Slot, Storage};
 use crate::program::{Function, Program};
 
 use super::op::Op;
@@ -285,7 +285,10 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
         Inst::WriteByte { bytes, at, value } => {
             build(Op::WriteByte, slot(bytes)?, slot(at)?, slot(value)?, 0)
         }
-        Inst::CopyBytes { args } => build(Op::CopyBytes, 0, 0, 0, halves(args.0, 0)),
+        Inst::RunCopy { args, storage } => match storage {
+            Storage::PackedBytes => build(Op::RunCopyBytes, 0, 0, 0, halves(args.0, 0)),
+            Storage::Words(elem) => build(Op::RunCopyWords, 0, 0, 0, halves(args.0, elem.0)),
+        },
         Inst::FinishString { dst, bytes } => {
             build(Op::FinishString, slot(dst)?, slot(bytes)?, 0, 0)
         }
@@ -777,7 +780,20 @@ mod tests {
                     value: 3,
                 },
             ),
-            (0, Inst::CopyBytes { args: ArgsId(1) }),
+            (
+                0,
+                Inst::RunCopy {
+                    args: ArgsId(1),
+                    storage: Storage::PackedBytes,
+                },
+            ),
+            (
+                0,
+                Inst::RunCopy {
+                    args: ArgsId(1),
+                    storage: Storage::Words(L),
+                },
+            ),
             (0, Inst::FinishString { dst: 1, bytes: 2 }),
             (
                 0,

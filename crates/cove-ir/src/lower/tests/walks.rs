@@ -140,27 +140,32 @@ fn a_vector_is_walked_through_a_copy_taken_before_the_first_call() {
         ),
         "\
 fn @m.f(Vector) -> Array
-  frame 11: s0!:ref s1:ref s2:ref s3:ref s4:int s5:ref s6:int s7:int s8:bool s9:int s10:int
-  local v -> s0:Vector [0, 19)
-     0  call-builtin s2:Array Vector.toArray (s0:Vector)
-     1  alloc s3:ref closure m.f#0<closure>
-     2  func-ref s4:int @m.f#0
-     3  store-field s3:ref +0 s4:Int
-     4  len s4:int s2:ref
-     5  alloc s5:ref Array<array> xs4:int
-     6  int s6:int 0
-     7  int s7:int 1
-     8  jump 10
-     9  add.int s6:int s6:int s7:int
-    10  lt.int.branch s8:bool s6:int s4:int 15
-    11  load-elem s9:Int s2:ref s6:int
-    12  call-closure s10:Int s3:ref (s9:Int)
-    13  store-elem s5:ref s6:int s10:Int
-    14  jump 9
-    15  clear s3:fn
-    16  clear s2:Array
-    17  copy s1:Array s5:Array
-    18  return s1:Array
+  frame 11: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:ref s7:int s8:bool s9:int s10:int
+  local v -> s0:Vector [0, 24)
+     0  load-field s2:Int s0:ref +0
+     1  load-field s3:<ref> s0:ref +1
+     2  alloc s4:ref Array<array> xs2:int
+     3  int s5:int 0
+     4  run-copy.words Int (s4:Array s5:Int s3:<ref> s5:Int s2:Int)
+     5  clear s3:<ref>
+     6  alloc s3:ref closure m.f#0<closure>
+     7  func-ref s2:int @m.f#0
+     8  store-field s3:ref +0 s2:Int
+     9  len s2:int s4:ref
+    10  alloc s6:ref Array<array> xs2:int
+    11  int s5:int 0
+    12  int s7:int 1
+    13  jump 15
+    14  add.int s5:int s5:int s7:int
+    15  lt.int.branch s8:bool s5:int s2:int 20
+    16  load-elem s9:Int s4:ref s5:int
+    17  call-closure s10:Int s3:ref (s9:Int)
+    18  store-elem s6:ref s5:int s10:Int
+    19  jump 14
+    20  clear s3:fn
+    21  clear s4:Array
+    22  copy s1:Array s6:Array
+    23  return s1:Array
 "
     );
 }

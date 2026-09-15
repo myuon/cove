@@ -302,9 +302,9 @@ impl Check<'_> {
                     poison(&mut funcs, dst, 1);
                 }
                 // Neither writes a frame slot: `WriteByte` writes a byte of
-                // the object `bytes` already names, and `CopyBytes` writes
+                // the object `bytes` already names, and `RunCopy` writes
                 // into the object its `args` table's `dst` already names.
-                Inst::WriteByte { .. } | Inst::CopyBytes { .. } => {}
+                Inst::WriteByte { .. } | Inst::RunCopy { .. } => {}
                 // Nor do the growable appends: what each changes is the store
                 // the owner in `buffer` names, and the owner's own length word.
                 Inst::AppendByte { .. } | Inst::AppendBytes { .. } => {}
@@ -872,7 +872,7 @@ impl Check<'_> {
                 self.expect(at, offset, &[Repr::Int]);
                 self.expect(at, value, &[Repr::Int]);
             }
-            Inst::CopyBytes { args } => self.check_copy_bytes_args(at, args),
+            Inst::RunCopy { args, storage } => self.check_run_copy(at, args, storage),
             Inst::FinishString { dst, bytes } => {
                 self.expect(at, dst, &[Repr::Ref]);
                 self.expect(at, bytes, &[Repr::Ref]);
@@ -1304,28 +1304,33 @@ impl Check<'_> {
         }
     }
 
-    /// [`Inst::CopyBytes`]'s five arguments: `dst`, `dst_at`, `src`,
-    /// `src_at`, `len`, in that order.
+    /// [`Inst::RunCopy`]'s five arguments — `dst`, `dst_at`, `src`, `src_at`,
+    /// `count`, in that order — and its storage.
     ///
     /// Checked by `Repr` rather than by [`Self::check_args`]'s declared
-    /// [`LayoutId`], because `dst` and `src` do not have one: `src` may be a
-    /// `String` or another [`crate::Shape::Bytes`] run, and which of the two
-    /// is a run-time fact rather than something a lowering could declare the
-    /// way a call declares its parameters. What is static is that both are
-    /// references and the other three are integers, so that is what this
-    /// asks.
-    fn check_copy_bytes_args(&mut self, at: Option<usize>, args: crate::ArgsId) {
+    /// [`LayoutId`], because `dst` and `src` do not have one: a byte copy's
+    /// `src` may be a `String` or another [`crate::Shape::Bytes`] run, a word
+    /// copy's either end may be an `Array`'s elements or a `Vector`'s store,
+    /// and which is a run-time fact rather than something a lowering could
+    /// declare the way a call declares its parameters. What is static is that
+    /// both are references, the other three are integers, and a
+    /// [`crate::Storage::Words`] layout is one the table has — so that is what
+    /// this asks.
+    fn check_run_copy(&mut self, at: Option<usize>, args: crate::ArgsId, storage: crate::Storage) {
+        if let crate::Storage::Words(layout) = storage {
+            self.layout_exists(at, layout);
+        }
         if !self.in_range(at, args.index(), self.program.args.len(), "argument list") {
             return;
         }
-        const NAMES: [&str; 5] = ["dst", "dst_at", "src", "src_at", "len"];
+        const NAMES: [&str; 5] = ["dst", "dst_at", "src", "src_at", "count"];
         const WANTS: [Repr; 5] = [Repr::Ref, Repr::Int, Repr::Ref, Repr::Int, Repr::Int];
         let passed = self.program.arg_list(args).to_vec();
         if passed.len() != NAMES.len() {
             self.fault(
                 at,
                 format!(
-                    "copies bytes with {} argument(s), and this needs {} ({})",
+                    "copies a run with {} argument(s), and this needs {} ({})",
                     passed.len(),
                     NAMES.len(),
                     NAMES.join(", ")
@@ -1342,7 +1347,7 @@ impl Check<'_> {
     /// in that order.
     ///
     /// Checked by `Repr` rather than by declared [`LayoutId`], for
-    /// [`Self::check_copy_bytes_args`]'s reason: `src` may be a `String` or a
+    /// [`Self::check_run_copy`]'s reason: `src` may be a `String` or a
     /// [`crate::Shape::Bytes`] run and which of the two is a run-time fact. So
     /// is whether `buffer` names a real owner; what is static is that both are
     /// references and both offsets are integers.

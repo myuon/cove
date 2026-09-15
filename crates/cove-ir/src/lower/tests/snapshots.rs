@@ -63,13 +63,18 @@ fn a_vector_of_immutable_elements_is_copied_out_and_back() {
         ),
         "\
 fn @m.v(Vector) -> Vector
-  frame 4: s0!:ref s1:ref s2:ref s3:ref
-  local xs -> s0:Vector [0, 5)
-     0  call-builtin s2:Array Vector.toArray (s0:Vector)
-     1  call-builtin s3:Vector Array.toVector (s2:Array)
-     2  clear s2:Array
-     3  copy s1:Vector s3:Vector
-     4  return s1:Vector
+  frame 6: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int
+  local xs -> s0:Vector [0, 10)
+     0  load-field s2:Int s0:ref +0
+     1  load-field s3:<ref> s0:ref +1
+     2  alloc s4:ref Array<array> xs2:int
+     3  int s5:int 0
+     4  run-copy.words String (s4:Array s5:Int s3:<ref> s5:Int s2:Int)
+     5  clear s3:<ref>
+     6  call-builtin s3:Vector Array.toVector (s4:Array)
+     7  clear s4:Array
+     8  copy s1:Vector s3:Vector
+     9  return s1:Vector
 "
     );
 }

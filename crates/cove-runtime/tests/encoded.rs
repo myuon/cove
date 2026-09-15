@@ -192,7 +192,8 @@ export fn main() -> Result<Unit, Error> {
 /// each instruction works — `differential.rs` runs the whole corpus for that —
 /// but that a run mixing allocation, field access, element access and a
 /// closure call reaches the answer the oracle reaches, having charged itself
-/// one unit of fuel per instruction while doing it.
+/// one unit of fuel per instruction while doing it — and one per word its one
+/// bulk copy moved, which ADR 0058 charges in proportion rather than as one.
 #[test]
 fn the_heap_and_a_closure_answer_what_the_oracle_answers() {
     let source = "\
@@ -223,7 +224,11 @@ export fn main() -> Result<Unit, Error> {
     let ran = run(source);
     assert_eq!(described(&ran.answer), described(&on_the_oracle(source)));
     assert_eq!(described(&ran.answer), "Ok(Ok(()))");
-    assert_eq!(ran.fuel_spent, ran.instructions);
+    // One unit per instruction, and one per word a bulk copy moved: `map`
+    // walks a snapshot of the vector, and since ADR 0058 that snapshot is a
+    // `run-copy` of 64 two-word `Point`s, charged the 128 words it moves
+    // rather than the one `call-builtin` it used to hide them behind.
+    assert_eq!(ran.fuel_spent, ran.instructions + 64 * 2);
 }
 
 /// A failure inside a call points at the place the oracle points at.

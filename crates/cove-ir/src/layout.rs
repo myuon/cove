@@ -174,7 +174,7 @@ pub enum Shape {
     ///
     /// [ADR 0051](../../../docs/adr/0051-a-string-is-built-as-a-byte-run.md)
     /// gives lowering an internal construction run: an object [`crate::Inst::AllocBytes`]
-    /// allocates, [`crate::Inst::WriteByte`] and [`crate::Inst::CopyBytes`] fill, and
+    /// allocates, [`crate::Inst::WriteByte`] and [`crate::Inst::RunCopy`] fill, and
     /// [`crate::Inst::FinishString`] turns into a `String` without copying. It is an
     /// IR/runtime value, not a Cove type — no declaration names it and no
     /// source expression produces one.

@@ -268,7 +268,8 @@ const STORE_ELEM: u8 = Op::StoreElem.number();
 const BYTE_AT: u8 = Op::ByteAt.number();
 const ALLOC_BYTES: u8 = Op::AllocBytes.number();
 const WRITE_BYTE: u8 = Op::WriteByte.number();
-const COPY_BYTES: u8 = Op::CopyBytes.number();
+const RUN_COPY_BYTES: u8 = Op::RunCopyBytes.number();
+const RUN_COPY_WORDS: u8 = Op::RunCopyWords.number();
 const FINISH_STRING: u8 = Op::FinishString.number();
 const ALLOC_BUFFER: u8 = Op::AllocBuffer.number();
 const APPEND_BYTE: u8 = Op::AppendByte.number();
@@ -343,7 +344,8 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::ByteAt
         | Op::AllocBytes
         | Op::WriteByte
-        | Op::CopyBytes
+        | Op::RunCopyBytes
+        | Op::RunCopyWords
         | Op::FinishString
         | Op::AllocBuffer
         | Op::AppendByte
@@ -533,122 +535,82 @@ fn words_of_bytes(bytes: i64) -> u64 {
     (bytes.max(0) as u64).div_ceil(8)
 }
 
-/// How many bytes a bulk operation moves between two safepoints.
+/// How many payload words a bulk operation moves between two safepoints.
 ///
-/// One [`SAFEPOINT_STRIDE`] of work, expressed in bytes, so a chunk costs
-/// exactly the stride and the poll that follows it is due. This is the `T` of
+/// One [`SAFEPOINT_STRIDE`] of work, so a chunk costs exactly the stride and
+/// the poll that follows it is due. This is the `T` of
 /// [ADR 0040](../../../../docs/adr/0040-a-bound-outlives-its-backend.md)'s
 /// `S + T` for a bulk operation: a cancelled or out-of-fuel run gets no
 /// further than one chunk past the bound, whatever the length it was asked
 /// to copy.
-const BULK_CHUNK_BYTES: i64 = (SAFEPOINT_STRIDE * 8) as i64;
-
-/// [`Inst::CopyBytes`], checked and copied in bounded chunks.
 ///
-/// Out of line, and out of the dispatch loop's body, for the reason
-/// [`crate::vm::debug`] records: this loop is sensitive to how much code sits
-/// in it, not only to what that code does.
+/// It is stated in words because work is. A byte chunk and an element chunk
+/// are the same chunk measured in different units, so a run of `String`
+/// handles stops as promptly as a run of text of the same size.
+const BULK_CHUNK_WORDS: u64 = SAFEPOINT_STRIDE;
+
+/// [`BULK_CHUNK_WORDS`] in bytes, which is the chunk a packed-byte copy takes.
+const BULK_CHUNK_BYTES: i64 = (BULK_CHUNK_WORDS * 8) as i64;
+
+/// The chunk loop every bulk run copy shares: `count` units, at most `chunk`
+/// of them a piece, each piece charged the words `piece` answers it moved and
+/// followed by a safepoint once a stride of work has gathered.
+///
+/// [`run_copy_bytes`], [`run_copy_words`] and [`append_bytes`] are this loop
+/// with a different piece, so the three cannot disagree about when a bulk copy
+/// polls or what it is charged. `#[inline(always)]` because each of them is
+/// already out of line, and a closure called through a function that was not
+/// inlined would be an indirect call per chunk for nothing.
 ///
 /// The chunking is the correctness argument rather than a refinement of it.
-/// One `copy-bytes` may move far more than a stride of work, and charging for
-/// all of it afterwards would let a cancelled or out-of-fuel run copy the
-/// whole range first —
-/// [ADR 0040](../../../../docs/adr/0040-a-bound-outlives-its-backend.md)
+/// One copy may move far more than a stride of work, and charging for all of
+/// it afterwards would let a cancelled or out-of-fuel run copy the whole range
+/// first — [ADR 0040](../../../../docs/adr/0040-a-bound-outlives-its-backend.md)
 /// promises `S + T` of Cove work once a bound becomes true, not `S + T` plus
 /// the length of the copy.
 ///
-/// The caller has already `sync`ed, so a collection reached from inside here
-/// walks a current frame, and `dst` and `src` are rooted by the slots this
-/// read them out of.
-#[inline(never)]
+/// # Direction
+///
+/// `descending` walks the pieces from the tail. Splitting a `memmove` into
+/// pieces does not preserve its meaning by itself: copying a run's units to a
+/// higher offset in *itself*, front first, makes each piece overwrite the input
+/// of the next — and every piece being correct in isolation does not save it.
+/// So an overlapping forward shift is chunked from the tail, which is the same
+/// reason each piece walks backwards inside itself.
+///
+/// # Why the addresses survive the poll
+///
+/// A piece closes over the two objects' addresses, read once before the first
+/// piece, and a safepoint between pieces may collect. That is sound without
+/// reading them again because the collector does not move objects —
+/// `crate::vm::mem`'s "why the collector does not move objects" — and it needs
+/// no write barrier either, because it is a stop-the-world mark from the roots
+/// with no generations or remembered set for a store of a reference to keep
+/// up to date. What a collection *does* need is both objects reachable, and
+/// that is every caller's to establish before it gets here: each has `sync`ed,
+/// and each object is named by a slot of that frame or by a payload word of an
+/// object that is.
+#[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn copy_bytes(
-    machine: &mut Machine<'_>,
-    program: &Program,
+fn in_chunks<'a>(
+    machine: &mut Machine<'a>,
     budget: &Meter,
-    base: u64,
-    args: &[cove_ir::Arg],
     id: FunctionId,
     pc: usize,
+    count: u64,
+    chunk: u64,
+    descending: bool,
+    mut piece: impl FnMut(&mut Machine<'a>, u64, u64) -> u64,
 ) -> Result<(), RuntimeError> {
-    let refuse = |machine: &Machine<'_>, error: RuntimeError| error.at(machine.span(id, pc));
-    let dst = machine.mem.slot(base, args[0].slot);
-    let dst_at = machine.mem.slot(base, args[1].slot) as i64;
-    let src = machine.mem.slot(base, args[2].slot);
-    let src_at = machine.mem.slot(base, args[3].slot) as i64;
-    let len = machine.mem.slot(base, args[4].slot) as i64;
-    if dst == 0 || src == 0 {
-        return Err(refuse(machine, null_object()));
-    }
-    if len < 0 {
-        return Err(refuse(
-            machine,
-            RuntimeError::new(format!(
-                "`copyBytes`'s length is `{len}`, and a copy cannot have a negative length"
-            )),
-        ));
-    }
-    if !matches!(
-        program.layout(machine.mem.object_layout(dst)).shape,
-        Shape::Bytes
-    ) {
-        return Err(refuse(
-            machine,
-            RuntimeError::new(
-                "`copyBytes`'s destination is not a byte run under construction, and only one \
-                 of those may be written into",
-            ),
-        ));
-    }
-    if !matches!(
-        program.layout(machine.mem.object_layout(src)).shape,
-        Shape::Str | Shape::Bytes
-    ) {
-        return Err(refuse(
-            machine,
-            RuntimeError::new(
-                "`copyBytes`'s source is neither a `String` nor a byte run under construction",
-            ),
-        ));
-    }
-    let src_len = machine.mem.object_len(src) as i64;
-    if src_at < 0 || src_at.checked_add(len).is_none_or(|end| end > src_len) {
-        return Err(refuse(
-            machine,
-            RuntimeError::new(format!(
-                "`copyBytes` reads {len} byte(s) from {src_at} of a source of {src_len}"
-            )),
-        ));
-    }
-    let dst_len = machine.mem.object_len(dst) as i64;
-    if dst_at < 0 || dst_at.checked_add(len).is_none_or(|end| end > dst_len) {
-        return Err(refuse(
-            machine,
-            RuntimeError::new(format!(
-                "`copyBytes` writes {len} byte(s) to {dst_at} of a destination of {dst_len}"
-            )),
-        ));
-    }
-    // The chunks run in the direction the whole copy runs in. Splitting a
-    // `memmove` into pieces does not preserve its meaning by itself: copying
-    // a run's bytes to a higher offset in *itself*, front first, makes each
-    // chunk overwrite the input of the next — and every chunk being correct
-    // in isolation does not save it. So an overlapping forward shift is
-    // chunked from the tail, which is the same reason
-    // `Machine::copy_string_bytes` walks it backwards inside one chunk.
-    let descending = dst == src && dst_at > src_at;
-    let mut done: i64 = 0;
-    while done < len {
-        let take = (len - done).min(BULK_CHUNK_BYTES);
-        let offset = if descending { len - done - take } else { done };
-        machine.copy_string_bytes(
-            dst,
-            (dst_at + offset) as usize,
-            src,
-            (src_at + offset) as usize,
-            take as usize,
-        );
-        machine.bulk_work += words_of_bytes(take);
+    let mut done = 0;
+    while done < count {
+        let take = (count - done).min(chunk);
+        let offset = if descending {
+            count - done - take
+        } else {
+            done
+        };
+        machine.bulk_work += piece(machine, offset, take);
         done += take;
         if machine.work() - machine.charged_work >= SAFEPOINT_STRIDE {
             machine.safepoint(budget, id, pc)?;
@@ -658,9 +620,257 @@ fn copy_bytes(
     Ok(())
 }
 
+/// The five operands of an [`Inst::RunCopy`], in units, and the one relation
+/// between them — which copy direction — that does not depend on the storage.
+#[derive(Clone, Copy)]
+struct RunRange {
+    dst: u64,
+    dst_at: i64,
+    src: u64,
+    src_at: i64,
+    count: i64,
+}
+
+impl RunRange {
+    /// A forward shift within one object, which has to be walked from the
+    /// tail. See [`in_chunks`].
+    fn descending(&self) -> bool {
+        self.dst == self.src && self.dst_at > self.src_at
+    }
+}
+
+/// Reads an [`Inst::RunCopy`]'s five operands and makes the checks that are
+/// the same whatever a unit is: neither object is null and the count is not
+/// negative.
+fn run_range(
+    machine: &Machine<'_>,
+    base: u64,
+    args: &[cove_ir::Arg],
+) -> Result<RunRange, RuntimeError> {
+    let range = RunRange {
+        dst: machine.mem.slot(base, args[0].slot),
+        dst_at: machine.mem.slot(base, args[1].slot) as i64,
+        src: machine.mem.slot(base, args[2].slot),
+        src_at: machine.mem.slot(base, args[3].slot) as i64,
+        count: machine.mem.slot(base, args[4].slot) as i64,
+    };
+    if range.dst == 0 || range.src == 0 {
+        return Err(null_object());
+    }
+    if range.count < 0 {
+        return Err(RuntimeError::new(format!(
+            "`runCopy`'s count is `{}`, and a copy cannot have a negative length",
+            range.count
+        )));
+    }
+    Ok(range)
+}
+
+/// The bounds of an [`Inst::RunCopy`], in units, against each object's header
+/// length — which is its logical length in those same units, bytes for a
+/// packed run and elements for a word run.
+///
+/// Both are checked before anything is written, so a refused copy leaves the
+/// destination as it was. `checked_add` because a wrapped end would pass the
+/// comparison and then be a write past the object.
+fn run_bounds(machine: &Machine<'_>, range: &RunRange, unit: &str) -> Result<(), RuntimeError> {
+    let RunRange {
+        dst,
+        dst_at,
+        src,
+        src_at,
+        count,
+    } = *range;
+    let src_len = machine.mem.object_len(src) as i64;
+    if src_at < 0 || src_at.checked_add(count).is_none_or(|end| end > src_len) {
+        return Err(RuntimeError::new(format!(
+            "`runCopy` reads {count} {unit} from {src_at} of a source of {src_len}"
+        )));
+    }
+    let dst_len = machine.mem.object_len(dst) as i64;
+    if dst_at < 0 || dst_at.checked_add(count).is_none_or(|end| end > dst_len) {
+        return Err(RuntimeError::new(format!(
+            "`runCopy` writes {count} {unit} to {dst_at} of a destination of {dst_len}"
+        )));
+    }
+    Ok(())
+}
+
+/// [`Inst::RunCopy`] over [`cove_ir::Storage::PackedBytes`], checked and
+/// copied in bounded chunks.
+///
+/// Out of line, and out of the dispatch loop's body, for the reason
+/// [`crate::vm::debug`] records: this loop is sensitive to how much code sits
+/// in it, not only to what that code does.
+///
+/// A byte run holds no references, so a collection at a chunk's poll has
+/// nothing in the half-written destination to follow; `dst` and `src` are
+/// rooted by the slots this read them out of.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn run_copy_bytes(
+    machine: &mut Machine<'_>,
+    program: &Program,
+    budget: &Meter,
+    base: u64,
+    args: &[cove_ir::Arg],
+    id: FunctionId,
+    pc: usize,
+) -> Result<(), RuntimeError> {
+    let refuse = |machine: &Machine<'_>, error: RuntimeError| error.at(machine.span(id, pc));
+    let range = run_range(machine, base, args).map_err(|error| refuse(machine, error))?;
+    if !matches!(
+        program.layout(machine.mem.object_layout(range.dst)).shape,
+        Shape::Bytes
+    ) {
+        return Err(refuse(
+            machine,
+            RuntimeError::new(
+                "`runCopy`'s destination is not a byte run under construction, and only one \
+                 of those may be written into",
+            ),
+        ));
+    }
+    if !matches!(
+        program.layout(machine.mem.object_layout(range.src)).shape,
+        Shape::Str | Shape::Bytes
+    ) {
+        return Err(refuse(
+            machine,
+            RuntimeError::new(
+                "`runCopy`'s source is neither a `String` nor a byte run under construction",
+            ),
+        ));
+    }
+    run_bounds(machine, &range, "byte(s)").map_err(|error| refuse(machine, error))?;
+    let descending = range.descending();
+    let RunRange {
+        dst,
+        dst_at,
+        src,
+        src_at,
+        count,
+    } = range;
+    in_chunks(
+        machine,
+        budget,
+        id,
+        pc,
+        count as u64,
+        BULK_CHUNK_BYTES as u64,
+        descending,
+        |machine, offset, take| {
+            machine.copy_string_bytes(
+                dst,
+                dst_at as usize + offset as usize,
+                src,
+                src_at as usize + offset as usize,
+                take as usize,
+            );
+            words_of_bytes(take as i64)
+        },
+    )
+}
+
+/// [`Inst::RunCopy`] over [`cove_ir::Storage::Words`]: whole elements of
+/// `elem`, checked in elements and copied in chunks of whole elements.
+///
+/// # What is checked
+///
+/// Both objects must be [`Shape::Elements`] of exactly `elem` — an `Array`'s
+/// elements or a `Vector`'s store, since `growable` changes nothing about the
+/// words. That is not a courtesy check. The collector traces each object by
+/// its *own* layout's reference map, so a unit copied between runs of two
+/// families would be words one map calls integers and the other follows as
+/// addresses. The bounds are then [`run_bounds`]'s, in elements, and only
+/// after both is anything multiplied by the stride.
+///
+/// # Why nothing more is needed for a run of references
+///
+/// A word copy moves references, and a collector that had to be told about
+/// a stored reference would need a barrier here. This one does not: it is
+/// non-moving and stop-the-world, it marks from the roots at each collection
+/// rather than keeping a remembered set, and the builtins that already store
+/// references into a store — `Vector.push`, `Array.toVector` — do nothing
+/// beyond writing the words, which is what this does. What matters at a
+/// chunk's poll is that the destination is walkable part-way through, and it
+/// is: its payload was zeroed at allocation, so an element not yet written
+/// traces as null, and a chunk is a whole number of elements, so no element is
+/// ever half its old words and half its new ones.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn run_copy_words(
+    machine: &mut Machine<'_>,
+    program: &Program,
+    budget: &Meter,
+    base: u64,
+    args: &[cove_ir::Arg],
+    elem: LayoutId,
+    id: FunctionId,
+    pc: usize,
+) -> Result<(), RuntimeError> {
+    let refuse = |machine: &Machine<'_>, error: RuntimeError| error.at(machine.span(id, pc));
+    let range = run_range(machine, base, args).map_err(|error| refuse(machine, error))?;
+    for (end, addr) in [("destination", range.dst), ("source", range.src)] {
+        let is_run = matches!(
+            program.layout(machine.mem.object_layout(addr)).shape,
+            Shape::Elements { elem: held, .. } if held == elem
+        );
+        if !is_run {
+            return Err(refuse(
+                machine,
+                RuntimeError::new(format!(
+                    "`runCopy`'s {end} is not a run of `{}` elements",
+                    program.layout(elem).name
+                )),
+            ));
+        }
+    }
+    run_bounds(machine, &range, "element(s)").map_err(|error| refuse(machine, error))?;
+    let stride = u64::from(machine.width(elem));
+    if stride == 0 {
+        return Ok(());
+    }
+    let descending = range.descending();
+    let RunRange {
+        dst,
+        dst_at,
+        src,
+        src_at,
+        count,
+    } = range;
+    // Whole elements a piece, and at least one: an element wider than a
+    // stride of words is one piece on its own, which overshoots the chunk by
+    // less than one element rather than splitting it.
+    let chunk = (BULK_CHUNK_WORDS / stride).max(1);
+    in_chunks(
+        machine,
+        budget,
+        id,
+        pc,
+        count as u64,
+        chunk,
+        descending,
+        |machine, offset, take| {
+            // Every product fits a `u32`: the bounds above hold each end
+            // inside an object whose payload, `len * stride` words, was sized
+            // as a `u32` when it was allocated.
+            let words = take * stride;
+            let to = (dst_at as u64 + offset) * stride;
+            let from = (src_at as u64 + offset) * stride;
+            machine.mem.copy_words(
+                machine.mem.payload_addr(dst, to as u32),
+                machine.mem.payload_addr(src, from as u32),
+                words as u32,
+            );
+            words
+        },
+    )
+}
+
 /// [`Inst::AppendBytes`], checked, grown once and copied in bounded chunks.
 ///
-/// Out of line and out of the dispatch loop's body for [`copy_bytes`]'s
+/// Out of line and out of the dispatch loop's body for [`run_copy_bytes`]'
 /// reason, which is the only reason that matters here: this loop is sensitive
 /// to how much code sits in it, not only to what that code does.
 ///
@@ -687,7 +897,7 @@ fn copy_bytes(
 /// for no gain over asking for the final length at the start.
 ///
 /// After the reservation nothing here allocates, so the chunk loop's safepoints
-/// are safe for the reason [`copy_bytes`]'s are and one more: the store is
+/// are safe for the reason [`in_chunks`] gives and one more: the store is
 /// reachable from the owner's word 1 and the owner is a frame slot this read it
 /// out of, so a collection walking mid-copy finds both ends of the copy where it
 /// finds every other live reference.
@@ -778,23 +988,29 @@ pub(super) fn append_bytes(
     let store = machine
         .reserve_bytes(&buffer, needed)
         .map_err(|error| refuse(machine, error))?;
-    let mut done: i64 = 0;
-    while done < take {
-        let chunk = (take - done).min(BULK_CHUNK_BYTES);
-        machine.copy_string_bytes(
-            store,
-            buffer.len as usize + done as usize,
-            src,
-            (from + done) as usize,
-            chunk as usize,
-        );
-        machine.bulk_work += words_of_bytes(chunk);
-        done += chunk;
-        if machine.work() - machine.charged_work >= SAFEPOINT_STRIDE {
-            machine.safepoint(budget, id, pc)?;
-            machine.next_check = machine.next_question();
-        }
-    }
+    // `RunCopy`'s chunk loop, ascending: the source is a `String` or a run
+    // under construction and never this buffer's own store, so the two ranges
+    // cannot overlap.
+    let at = buffer.len as usize;
+    in_chunks(
+        machine,
+        budget,
+        id,
+        pc,
+        take as u64,
+        BULK_CHUNK_BYTES as u64,
+        false,
+        |machine, offset, chunk| {
+            machine.copy_string_bytes(
+                store,
+                at + offset as usize,
+                src,
+                from as usize + offset as usize,
+                chunk as usize,
+            );
+            words_of_bytes(chunk as i64)
+        },
+    )?;
     machine.set_payload(buffer.owner, BUFFER_LEN, needed);
     Ok(())
 }
@@ -1581,16 +1797,17 @@ pub(super) fn dispatch<'s, 'a>(
                     .mem
                     .set_payload(bytes, word_at, (word & !mask) | ((value as u64) << shift));
             }
-            // The bulk copy ADR 0051 exists for. All five operands — `dst`,
-            // `dst_at`, `src`, `src_at`, `len` — live behind the `ArgsId` in
-            // the payload's low half rather than in `a`, `b` and `c`; see
-            // `Inst::CopyBytes`'s doc for why.
+            // ADR 0058's run copy, one arm per storage. All five operands —
+            // `dst`, `dst_at`, `src`, `src_at`, `count` — live behind the
+            // `ArgsId` in the payload's low half rather than in `a`, `b` and
+            // `c`; see `Inst::RunCopy`'s doc for why. A word copy's element
+            // layout is the high half, so the storage is never a tag this loop
+            // reads: it is which arm the opcode already chose.
             //
-            // `Machine::copy_string_bytes` documents its caller as owning
-            // every bound it copies within, so everything below the read of
-            // the five words is a check this dispatch arm must make before
-            // calling it — nothing past this point may fail.
-            COPY_BYTES => {
+            // `Machine::copy_string_bytes` and `Memory::copy_words` document
+            // their callers as owning every bound they copy within, so each
+            // helper checks everything before its first write.
+            RUN_COPY_BYTES => {
                 machine.sync(pc - 1);
                 // The whole of this instruction lives behind one call. The
                 // bounds checks and the chunk loop together are far more code
@@ -1599,7 +1816,13 @@ pub(super) fn dispatch<'s, 'a>(
                 // `crate::vm::debug` measured 4.3% for a smaller body in this
                 // same loop.
                 let args = program.arg_list(ArgsId(held.lo()));
-                copy_bytes(machine, program, budget, base, args, id, pc - 1)?;
+                run_copy_bytes(machine, program, budget, base, args, id, pc - 1)?;
+            }
+            RUN_COPY_WORDS => {
+                machine.sync(pc - 1);
+                let args = program.arg_list(ArgsId(held.lo()));
+                let elem = LayoutId(held.hi());
+                run_copy_words(machine, program, budget, base, args, elem, id, pc - 1)?;
             }
             // ADR 0051's finish: validated once, and turned into the answer
             // without copying its payload. A `Shape::Bytes` run and a
@@ -1631,7 +1854,7 @@ pub(super) fn dispatch<'s, 'a>(
                 machine.mem.set_word_at(base_at + (a!()) as usize, bytes);
             }
             // ADR 0052's four. Each arm is a read of its operands and one call,
-            // for `COPY_BYTES`'s reason: the checks, the capacity arithmetic and
+            // for `RUN_COPY_BYTES`' reason: the checks, the capacity arithmetic and
             // the growth are far more code than a dispatch arm should put in the
             // way of the arms around it. `Machine::alloc_buffer` documents which
             // of its two allocations happens first and why nothing is lost
@@ -1954,7 +2177,7 @@ pub(super) fn dispatch<'s, 'a>(
 
 #[cfg(test)]
 mod tests {
-    use cove_ir::{Convert as ConvertTo, Inst, Len, Shape};
+    use cove_ir::{Convert as ConvertTo, Inst, Len, Shape, Storage};
 
     use super::super::tests::{budget, run_words, Build};
     use super::super::MIN_BUFFER_BYTES;
@@ -2279,7 +2502,13 @@ mod tests {
             &[bytes, int, bytes, int, int],
             &[Repr::Ref, Repr::Int, Repr::Ref, Repr::Int, Repr::Int],
             bytes,
-            vec![Inst::CopyBytes { args }, Inst::Return { src: 0 }],
+            vec![
+                Inst::RunCopy {
+                    args,
+                    storage: Storage::PackedBytes,
+                },
+                Inst::Return { src: 0 },
+            ],
         );
         let program = build.done();
         Fixture {
@@ -2488,7 +2717,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_bytes_refuses_a_null_destination() {
+    fn run_copy_bytes_refuses_a_null_destination() {
         let Fixture {
             program, copy_into, ..
         } = fixture();
@@ -2501,7 +2730,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_bytes_refuses_a_null_source() {
+    fn run_copy_bytes_refuses_a_null_source() {
         let Fixture {
             program,
             alloc_bytes_case,
@@ -2517,7 +2746,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_bytes_refuses_a_negative_length() {
+    fn run_copy_bytes_refuses_a_negative_length() {
         let Fixture {
             program,
             alloc_bytes_case,
@@ -2538,7 +2767,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_bytes_refuses_a_string_destination() {
+    fn run_copy_bytes_refuses_a_string_destination() {
         let Fixture {
             program, copy_into, ..
         } = fixture();
@@ -2552,7 +2781,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_bytes_refuses_an_out_of_range_source() {
+    fn run_copy_bytes_refuses_an_out_of_range_source() {
         let Fixture {
             program,
             alloc_bytes_case,
@@ -2573,7 +2802,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_bytes_refuses_an_out_of_range_destination() {
+    fn run_copy_bytes_refuses_an_out_of_range_destination() {
         let Fixture {
             program,
             alloc_bytes_case,
@@ -2593,12 +2822,12 @@ mod tests {
         );
     }
 
-    /// `CopyBytes` from a `String` source and from another `Shape::Bytes`
+    /// A byte `RunCopy` from a `String` source and from another `Shape::Bytes`
     /// run, at aligned and unaligned `dst_at`/`src_at`, agrees with Rust's
     /// own byte-slicing of the same data — including the zero-length copy,
     /// which is the one case that touches no byte at all.
     #[test]
-    fn copy_bytes_agrees_with_rust_at_every_alignment() {
+    fn run_copy_bytes_agrees_with_rust_at_every_alignment() {
         let Fixture {
             program,
             alloc_bytes_case,
@@ -2649,7 +2878,7 @@ mod tests {
 
     // --- ADR 0052: bulk work is bounded work -------------------------------
 
-    /// A run that copies `bytes` bytes in one `copy-bytes`, with a fixture
+    /// A run that copies `bytes` bytes in one byte `run-copy`, with a fixture
     /// whose only other instructions are the two allocations and a return.
     fn one_big_copy(bytes: i64) -> (cove_ir::Program, cove_ir::FunctionId) {
         let mut build = Build::default();
@@ -2666,7 +2895,10 @@ mod tests {
                 Inst::AllocBytes { dst: 1, len: 0 },
                 Inst::AllocBytes { dst: 2, len: 0 },
                 Inst::Int { dst: 3, value: 0 },
-                Inst::CopyBytes { args: copy },
+                Inst::RunCopy {
+                    args: copy,
+                    storage: Storage::PackedBytes,
+                },
                 Inst::Return { src: 1 },
             ],
         );
@@ -2752,7 +2984,7 @@ mod tests {
     /// passes when no collection happens at all, which is what the first
     /// version of it did.
     ///
-    /// The collection lands between two `copy-bytes` rather than inside one,
+    /// The collection lands between two byte `run-copy`s rather than inside one,
     /// and that is not a weaker test than it sounds: it is the only place a
     /// single-task run can put one. `Memory::poll` collects when another task
     /// has *requested* a stop-the-world, and a copy allocates nothing, so
@@ -2797,7 +3029,10 @@ mod tests {
                     value: BYTES / 2,
                 },
                 // The first half, so the run is half written from here on.
-                Inst::CopyBytes { args: first },
+                Inst::RunCopy {
+                    args: first,
+                    storage: Storage::PackedBytes,
+                },
                 // Garbage, cleared between allocations so the previous one
                 // is unreachable when the next is asked for. The heap holds
                 // the two runs and one spare, so every allocation after the
@@ -2818,7 +3053,10 @@ mod tests {
                     layout: run,
                 },
                 // And the second half, into a run a collection has now walked.
-                Inst::CopyBytes { args: second },
+                Inst::RunCopy {
+                    args: second,
+                    storage: Storage::PackedBytes,
+                },
                 Inst::FinishString { dst: 1, bytes: 1 },
                 Inst::Return { src: 1 },
             ],
@@ -2848,7 +3086,7 @@ mod tests {
     /// **An overlapping copy answers the source as it was, in both directions
     /// and across chunk boundaries.**
     ///
-    /// `Inst::CopyBytes` admits a `Shape::Bytes` source, so `src` and `dst` may
+    /// `Inst::RunCopy` admits a `Shape::Bytes` source, so `src` and `dst` may
     /// be one run and the ranges may overlap. A range copy means `memmove`: a
     /// forward shift has to be walked from the tail, or each write lands on a
     /// byte the copy has not read yet.
@@ -2873,7 +3111,13 @@ mod tests {
             &[run, int, int, int],
             &[Repr::Ref, Repr::Int, Repr::Int, Repr::Int],
             run,
-            vec![Inst::CopyBytes { args }, Inst::Return { src: 0 }],
+            vec![
+                Inst::RunCopy {
+                    args,
+                    storage: Storage::PackedBytes,
+                },
+                Inst::Return { src: 0 },
+            ],
         );
         let program = build.done();
 
@@ -2906,6 +3150,452 @@ mod tests {
                 want,
                 "copy_within({src_at}..{}, {dst_at}) over {BYTES} bytes",
                 src_at + len
+            );
+        }
+    }
+
+    // --- ADR 0058: a run copy of whole elements -----------------------------
+
+    /// `copy(dst, dst_at, src, src_at, count) -> dst` over `Words(elem)`, for
+    /// an `elements` layout of `elem`: the word-run half of the byte fixture.
+    fn word_copier(build: &mut Build, elements: LayoutId, elem: LayoutId) -> FunctionId {
+        let int = build.scalar(Repr::Int);
+        let args = build.args(&[(0, elements), (1, int), (2, elements), (3, int), (4, int)]);
+        build.function(
+            "copy_words",
+            &[elements, int, elements, int, int],
+            &[Repr::Ref, Repr::Int, Repr::Ref, Repr::Int, Repr::Int],
+            elements,
+            vec![
+                Inst::RunCopy {
+                    args,
+                    storage: Storage::Words(elem),
+                },
+                Inst::Return { src: 0 },
+            ],
+        )
+    }
+
+    /// **A word copy moves whole elements, at the element's stride, and bounds
+    /// in elements.**
+    ///
+    /// A two-word `Point` is the case a copy that counted in words would get
+    /// wrong in both directions at once: the offsets would land mid-element
+    /// and the count would move half the elements. Every case is checked
+    /// against Rust's own slice copy of the same words, the zero-length copies
+    /// included, and the destination's words outside the range are held to
+    /// what they were.
+    #[test]
+    fn a_word_copy_moves_whole_elements_at_the_stride() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let point = build.structure("Point", &[("x", int), ("y", int)]);
+        let points = build.layout(
+            "Array<Point>",
+            Shape::Elements {
+                elem: point,
+                growable: false,
+            },
+        );
+        let entry = word_copier(&mut build, points, point);
+        let program = build.done();
+
+        const SRC: u32 = 10;
+        const DST: u32 = 8;
+        let source: Vec<u64> = (0..u64::from(SRC) * 2).map(|n| 100 + n).collect();
+        for (dst_at, src_at, count) in [
+            (0u32, 0u32, 5u32),
+            (3, 0, 5),
+            (0, 2, 8),
+            (7, 9, 1),
+            (1, 1, 6),
+            (0, 0, 0),
+            (8, 10, 0),
+        ] {
+            let mut machine = Machine::new(&program, 1 << 16);
+            let src = machine.allocate(points, i64::from(SRC)).unwrap();
+            machine.set_payload_run(src, 0, &source);
+            let dst = machine.allocate(points, i64::from(DST)).unwrap();
+            let filler: Vec<u64> = (0..u64::from(DST) * 2).map(|n| 900 + n).collect();
+            machine.set_payload_run(dst, 0, &filler);
+            let answer = machine
+                .run(
+                    entry,
+                    &[
+                        dst,
+                        u64::from(dst_at),
+                        src,
+                        u64::from(src_at),
+                        u64::from(count),
+                    ],
+                    &budget(),
+                )
+                .expect("a copy within its bounds answers")[0];
+            assert_eq!(answer, dst);
+            let mut want = filler.clone();
+            want[(dst_at * 2) as usize..((dst_at + count) * 2) as usize]
+                .copy_from_slice(&source[(src_at * 2) as usize..((src_at + count) * 2) as usize]);
+            assert_eq!(
+                machine.payload_run(dst, 0, DST * 2),
+                want,
+                "dst_at={dst_at} src_at={src_at} count={count}"
+            );
+            // Two elements' worth of work, not one word's and not one unit's.
+            assert!(machine.work() >= u64::from(count) * 2);
+        }
+    }
+
+    /// **Every refusal is made in elements, before anything is written.**
+    ///
+    /// Out of range by one *element* is refused even where it is in range by
+    /// words, which is what a check against the payload's width would have
+    /// missed; a run of another element family is refused at either end,
+    /// because the collector traces each object by its own layout.
+    #[test]
+    fn a_word_copy_refuses_what_is_not_a_run_of_its_elements() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        build.string_layout();
+        let point = build.structure("Point", &[("x", int), ("y", int)]);
+        let points = build.layout(
+            "Array<Point>",
+            Shape::Elements {
+                elem: point,
+                growable: false,
+            },
+        );
+        let ints = build.layout(
+            "Array<Int>",
+            Shape::Elements {
+                elem: int,
+                growable: false,
+            },
+        );
+        let entry = word_copier(&mut build, points, point);
+        let program = build.done();
+
+        let refused = |dst_len: i64, src_len: i64, family: LayoutId, args: [i64; 3]| {
+            let mut machine = Machine::new(&program, 1 << 16);
+            let src = machine.allocate(points, src_len).unwrap();
+            machine.set_payload_run(src, 0, &vec![7; (src_len * 2) as usize]);
+            let dst = machine.allocate(family, dst_len).unwrap();
+            let error = machine
+                .run(
+                    entry,
+                    &[dst, args[0] as u64, src, args[1] as u64, args[2] as u64],
+                    &budget(),
+                )
+                .expect_err("the copy is refused");
+            let untouched = machine.payload_run(dst, 0, machine.object_len(dst));
+            assert!(
+                untouched.iter().all(|word| *word == 0),
+                "nothing was written"
+            );
+            error.message
+        };
+
+        let past_the_source = refused(8, 4, points, [0, 1, 4]);
+        assert!(
+            past_the_source.contains("reads 4 element(s) from 1 of a source of 4"),
+            "{past_the_source}"
+        );
+        let past_the_destination = refused(4, 8, points, [1, 0, 4]);
+        assert!(
+            past_the_destination.contains("writes 4 element(s) to 1 of a destination of 4"),
+            "{past_the_destination}"
+        );
+        let negative = refused(4, 4, points, [0, 0, -1]);
+        assert!(negative.contains("negative length"), "{negative}");
+        // Eight words is room for eight `Int`s and four `Point`s: the family
+        // is refused before its length is looked at.
+        let wrong_family = refused(8, 4, ints, [0, 0, 1]);
+        assert!(
+            wrong_family.contains("destination is not a run of `Point` elements"),
+            "{wrong_family}"
+        );
+
+        let mut machine = Machine::new(&program, 1 << 16);
+        let dst = machine.allocate(points, 4).unwrap();
+        let text = machine.new_string("not elements").unwrap();
+        let error = machine
+            .run(entry, &[dst, 0, text, 0, 1], &budget())
+            .unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("source is not a run of `Point` elements"),
+            "{}",
+            error.message
+        );
+        let error = machine
+            .run(entry, &[dst, 0, 0, 0, 0], &budget())
+            .unwrap_err();
+        assert_eq!(error.message, null_object().message);
+    }
+
+    /// **An overlapping word copy answers the source as it was, across chunk
+    /// boundaries, and a chunk is a whole number of elements.**
+    ///
+    /// A three-word element makes a chunk `BULK_CHUNK_WORDS / 3` elements,
+    /// which does not divide the stride evenly — so a loop that chunked in
+    /// words would split an element across a poll, and a loop that chunked
+    /// front-first would overwrite its own input. Both are what `remove`
+    /// shifting a vector's tail down, and an insertion shifting it up, will
+    /// ask of this.
+    #[test]
+    fn an_overlapping_word_copy_moves_elements_as_memmove_does() {
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let triple = build.structure("Triple", &[("a", int), ("b", int), ("c", int)]);
+        let store = build.layout(
+            "Store<Triple>",
+            Shape::Elements {
+                elem: triple,
+                growable: true,
+            },
+        );
+        let args = build.args(&[(0, store), (1, int), (0, store), (2, int), (3, int)]);
+        let entry = build.function(
+            "shift",
+            &[store, int, int, int],
+            &[Repr::Ref, Repr::Int, Repr::Int, Repr::Int],
+            store,
+            vec![
+                Inst::RunCopy {
+                    args,
+                    storage: Storage::Words(triple),
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let program = build.done();
+
+        let chunk = (BULK_CHUNK_WORDS / 3) as i64;
+        let elements = 3 * chunk + 5;
+        let pattern: Vec<u64> = (0..elements as u64 * 3).collect();
+        for (dst_at, src_at, count) in [
+            (chunk + 1, 0i64, 2 * chunk),
+            (0, chunk + 1, 2 * chunk),
+            (1, 0, elements - 1),
+            (0, 1, elements - 1),
+            (chunk, chunk - 1, chunk + 1),
+        ] {
+            let mut machine = Machine::new(&program, 1 << 16);
+            let obj = machine.allocate(store, elements).expect("a store fits");
+            machine.set_payload_run(obj, 0, &pattern);
+            machine
+                .run(
+                    entry,
+                    &[obj, dst_at as u64, src_at as u64, count as u64],
+                    &budget(),
+                )
+                .expect("a copy within its bounds answers");
+            let mut want = pattern.clone();
+            want.copy_within(
+                (src_at * 3) as usize..((src_at + count) * 3) as usize,
+                (dst_at * 3) as usize,
+            );
+            assert_eq!(
+                machine.payload_run(obj, 0, elements as u32 * 3),
+                want,
+                "copy_within({src_at}..{}, {dst_at}) over {elements} elements",
+                src_at + count
+            );
+        }
+    }
+
+    /// **A word copy is charged for the words it moves and overspends its fuel
+    /// by less than one chunk plus one stride.**
+    ///
+    /// `a_bulk_copy_overspends_its_fuel_by_less_than_one_chunk` for the other
+    /// storage. The two share one chunk loop, and this is what holds the word
+    /// arm to it: a copy that charged per *element*, or that made one chunk of
+    /// the whole range, passes every agreement test above and fails here.
+    #[test]
+    fn a_word_copy_overspends_its_fuel_by_less_than_one_chunk() {
+        const ELEMENTS: i64 = 1 << 17;
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let ints = build.layout(
+            "Array<Int>",
+            Shape::Elements {
+                elem: int,
+                growable: false,
+            },
+        );
+        let copy = build.args(&[(1, ints), (3, int), (2, ints), (3, int), (0, int)]);
+        let entry = build.function(
+            "copier",
+            &[int],
+            &[Repr::Int, Repr::Ref, Repr::Ref, Repr::Int],
+            ints,
+            vec![
+                Inst::Alloc {
+                    dst: 1,
+                    layout: ints,
+                    len: Len::Slot(0),
+                },
+                Inst::Alloc {
+                    dst: 2,
+                    layout: ints,
+                    len: Len::Slot(0),
+                },
+                Inst::Int { dst: 3, value: 0 },
+                Inst::RunCopy {
+                    args: copy,
+                    storage: Storage::Words(int),
+                },
+                Inst::Return { src: 1 },
+            ],
+        );
+        let program = build.done();
+        let words = ELEMENTS as u64;
+        for limit in [1_024u64, 8_192, 40_000] {
+            let budget = crate::budget::Budget::new(crate::budget::Limits {
+                fuel: Some(limit),
+                ..crate::budget::Limits::default()
+            });
+            let mut machine = Machine::new(&program, 1 << 20);
+            let error = machine
+                .run(entry, &[ELEMENTS as u64], &budget.meter())
+                .expect_err("a copy past its fuel is stopped");
+            assert_eq!(error.outcome, crate::trace::RunOutcome::Fuel);
+            let bound = limit + BULK_CHUNK_WORDS + SAFEPOINT_STRIDE;
+            let spent = budget.fuel_spent();
+            assert!(
+                spent <= bound && spent < words,
+                "a {ELEMENTS}-element copy under a fuel limit of {limit} spent {spent}, \
+                 past the bound of {bound}; the whole copy would have been {words}"
+            );
+        }
+    }
+
+    /// **References copied into a run are traced from it: a collection with a
+    /// half-copied run of `String`s live keeps every string copied so far, and
+    /// one after the source is dropped keeps the rest.**
+    ///
+    /// This is the property a word copy has that a byte copy never had — its
+    /// units may be addresses — and so the one a barrier would exist for. The
+    /// collector needs none (it is non-moving and marks from the roots), so
+    /// what this holds is the thing it does need: the destination is walkable
+    /// part-way through, and once the source is gone the destination alone
+    /// keeps what was copied into it.
+    ///
+    /// The heap is sized so the garbage *must* collect, and the assertion on
+    /// `collections` is what makes the test mean anything.
+    #[test]
+    fn references_copied_into_a_run_survive_a_collection() {
+        const COUNT: i64 = 10;
+        const GARBAGE: u32 = 200;
+        let mut build = Build::default();
+        let int = build.scalar(Repr::Int);
+        let text = build.string_layout();
+        let strings = build.layout(
+            "Array<String>",
+            Shape::Elements {
+                elem: text,
+                growable: false,
+            },
+        );
+        let ints = build.layout(
+            "Array<Int>",
+            Shape::Elements {
+                elem: int,
+                growable: false,
+            },
+        );
+        // s0 is the source, s1 the destination, s2 the half, s3 zero, s4 the
+        // count, s5 the garbage.
+        let first = build.args(&[(1, strings), (3, int), (0, strings), (3, int), (2, int)]);
+        let second = build.args(&[(1, strings), (2, int), (0, strings), (2, int), (2, int)]);
+        let garbage = |code: &mut Vec<Inst>| {
+            for _ in 0..3 {
+                code.push(Inst::Alloc {
+                    dst: 5,
+                    layout: ints,
+                    len: Len::Count(GARBAGE),
+                });
+                code.push(Inst::Clear {
+                    slot: 5,
+                    layout: ints,
+                });
+            }
+        };
+        let mut code = vec![
+            Inst::Int {
+                dst: 4,
+                value: COUNT,
+            },
+            Inst::Alloc {
+                dst: 1,
+                layout: strings,
+                len: Len::Slot(4),
+            },
+            Inst::Int {
+                dst: 2,
+                value: COUNT / 2,
+            },
+            Inst::Int { dst: 3, value: 0 },
+            Inst::RunCopy {
+                args: first,
+                storage: Storage::Words(text),
+            },
+        ];
+        garbage(&mut code);
+        code.push(Inst::RunCopy {
+            args: second,
+            storage: Storage::Words(text),
+        });
+        code.push(Inst::Clear {
+            slot: 0,
+            layout: strings,
+        });
+        garbage(&mut code);
+        code.push(Inst::Return { src: 1 });
+        let entry = build.function(
+            "copy_strings",
+            &[strings],
+            &[
+                Repr::Ref,
+                Repr::Ref,
+                Repr::Int,
+                Repr::Int,
+                Repr::Int,
+                Repr::Ref,
+            ],
+            strings,
+            code,
+        );
+        let program = build.done();
+
+        let mut machine = Machine::new(&program, 600);
+        let src = machine.allocate(strings, COUNT).unwrap();
+        for at in 0..COUNT {
+            let word = machine.new_string(&format!("string {at}")).unwrap();
+            machine.set_payload(src, at as u32, word);
+        }
+        let before = machine.collected().collections;
+        let dst = machine
+            .run(entry, &[src], &budget())
+            .expect("the run answers the destination")[0];
+        let after = machine.collected().collections;
+        assert!(
+            after >= before + 2,
+            "this fixture exists to collect with a half-copied run live and again \
+             after the source is dropped, and it collected {} time(s)",
+            after - before
+        );
+        for at in 0..COUNT {
+            let word = machine.payload(dst, at as u32);
+            assert_eq!(
+                machine.object_layout(word),
+                text,
+                "element {at} is a string"
+            );
+            assert_eq!(
+                machine.string_bytes(word),
+                format!("string {at}").into_bytes(),
+                "element {at} kept its text"
             );
         }
     }

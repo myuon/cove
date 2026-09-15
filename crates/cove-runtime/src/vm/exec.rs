@@ -2473,7 +2473,7 @@ impl<'a> Machine<'a> {
     /// one the verifier could. A slot's `Repr` is `Ref` and nothing static says
     /// which family the object behind it belongs to, so reading an arbitrary
     /// object's payload word 1 as an address is how a wrong program becomes a
-    /// write into the middle of the heap. `Inst::CopyBytes` checks its
+    /// write into the middle of the heap. `Inst::RunCopy` checks its
     /// destination's shape for the same reason.
     ///
     /// A null store is a buffer [`Inst::FinishBuffer`] already consumed. For a
@@ -2699,7 +2699,7 @@ impl<'a> Machine<'a> {
     ) {
         // A range copy answers the source as it *was*, which is `memmove` and
         // not `memcpy`. The two only differ when the ranges overlap, which
-        // they can: `Inst::CopyBytes` admits a `Shape::Bytes` source, so `src`
+        // they can: `Inst::RunCopy` admits a `Shape::Bytes` source, so `src`
         // and `dst` may be the same run — a builder shifting its own bytes
         // along is the obvious use and there is no reason for it to be the one
         // shape of copy that corrupts.
