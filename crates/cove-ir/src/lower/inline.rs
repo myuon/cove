@@ -249,31 +249,58 @@ const ROUNDS: usize = 8;
 /// of the tree, so what a wide budget bought in frames it was handing back in
 /// the zeroing of the one frame that is pushed most. The whole run was still
 /// 5% faster, which is the sort of number that hides a mistake rather than
-/// showing it.
+/// showing it. That is the argument for there being a budget at all, and it
+/// is not the argument for any particular one.
 ///
-/// Ninety-six, which is where the curve stops. Swept against the same corpus:
+/// **A hundred and sixty**, and the number is a fact about the tier that runs
+/// the code rather than about the pass. Swept on `examples/covefmt` over this
+/// repository at `fa31182` — 248 files, 698,481 bytes — against the native
+/// tier's template arm, thirty-eight interleaved rounds after a dropped cold
+/// one, paired within each round:
 ///
-/// | budget | widest frame | `cove fmt --check`'s work |
-/// |---:|---:|---:|
-/// | none (16, one round) | 66 | 905 ms |
-/// | 64 | 63 | 880 ms |
-/// | **96** | **93** | **864 ms** |
-/// | 128 | 122 | 864 ms |
-/// | 192 | 174 | 865 ms |
-/// | unbounded | 223 | 864 ms |
+/// | budget | print's Cove calls | program IR | machine code | `whole` | `execute=` | `whole` faster in |
+/// |---:|---:|---:|---:|---:|---:|---:|
+/// | **96** (was) | 871,722 | 10,551 | 813,105 | 228.0 ms | 1,818.4 ms | — |
+/// | 128 | 783,480 | 10,719 | 823,153 | 225.5 ms | 1,799.1 ms | 26/38 |
+/// | **160** | **774,510** | **10,761** | **825,880** | **226.0 ms** | **1,800.3 ms** | **34/38** |
+/// | 192 | 767,432 | 10,819 | 828,986 | 226.0 ms | 1,810.0 ms | 25/38 |
 ///
-/// Everything past ninety-six is frame words for nothing. The unbounded pass
-/// looked like the fastest one until the curve was swept, and it was not: it
-/// was the same speed having also tripled the frame of the function that is
-/// pushed most.
+/// The medians cannot tell those four apart — `whole` is reported in whole
+/// milliseconds and every arm past the first reads 225 or 226 — so what
+/// decides is the paired column, the same binary pair compared round by round:
+/// −1.3% and 34/38 at a hundred and sixty against 26/38 and 25/38 either side
+/// of it, and −1.2% on `execute=` in 36 rounds of 38. The encoded tier moves
+/// the same way and is not the reason to do it: −0.5% on `whole`, 30/38.
 ///
-/// The ratchet in `crates/cove-cli/tests/bytecode_corpus.rs` watches the rest,
-/// and this keeps it where it was.
+/// **The whole of the effect is in `print`**, which is where the budget is
+/// short: a run that lexes and parses and stops makes 369,120 calls at every
+/// budget in the table, to the call. `emit` is 93 words at ninety-six and
+/// spends what room it has in pc order on the predicates that come first, so
+/// the hot ones after it meet a budget of three; a hundred and sixty is what
+/// reaches them, and it recovers 97,212 of print's 871,722 calls.
+///
+/// It stops there because the calls past it are not worth their words. An
+/// effectively unbounded budget (1,024) recovers 55,724 more, for another 234
+/// instructions of IR and 18,364 bytes of machine code, and measures no faster
+/// than this — the trade has gone even. 174 of 180 functions compile at every
+/// budget swept, and neither `emit` nor `writeBrokenBody` stops being
+/// expandable: both are refused for reasons this does not touch.
+///
+/// **Ninety-six was measured before there was a native tier**, on the encoded
+/// interpreter alone, and the table it was chosen from is the one this
+/// replaces: 864 ms at 96 and 864 ms at 128, 192 and unbounded, which is why
+/// it read "everything past ninety-six is frame words for nothing". It was
+/// right about the machine it was measured on. The budget trades calls against
+/// frame words, ADR 0055's tier changed what a call costs and left the zeroing
+/// where it was, and the optimum moved with it — so this is a number to sweep
+/// again when the tier under it changes again, not one to derive.
+///
+/// The ratchet in `crates/cove-cli/tests/bytecode_corpus.rs` watches the rest.
 ///
 /// A callee is charged the words its expansion actually appends —
 /// [`appended_words`] — and not its whole frame, and a thin standard-library
 /// wrapper is charged nothing at all: see [`is_thin_library`].
-pub(super) const FRAME_BUDGET: usize = 96;
+pub(super) const FRAME_BUDGET: usize = 160;
 
 /// How many instructions a function may hold and still be expanded into a
 /// call site that runs often.
