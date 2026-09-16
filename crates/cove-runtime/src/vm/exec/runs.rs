@@ -270,7 +270,7 @@ pub(crate) fn growable_finish(
     target: LayoutId,
     validation: Validation,
 ) -> Result<u64, RuntimeError> {
-    if validation == Validation::Utf8 && std::str::from_utf8(&live_bytes(machine, run)).is_err() {
+    if validation == Validation::Utf8 && !live_prefix_is_utf8(machine, run) {
         return Err(RuntimeError::new("this string's bytes are not valid UTF-8"));
     }
     let spare = match run.storage {
@@ -281,6 +281,29 @@ pub(crate) fn growable_finish(
     machine.mem.set_payload(run.owner, GROWABLE_LEN, 0);
     machine.mem.set_payload(run.owner, GROWABLE_STORE, 0);
     Ok(run.store)
+}
+
+/// Whether the live prefix of a byte run is valid UTF-8.
+///
+/// Read a word at a time first: a prefix none of whose bytes has its high bit
+/// set is ASCII, and ASCII is UTF-8, so the common case copies nothing and
+/// decodes nothing. Only a prefix that holds a byte of `0x80` or above is
+/// copied out and handed to the decoder. The bytes above the length in the
+/// last word are masked off rather than trusted to be zero: they are spare
+/// room, and spare room is not the value.
+fn live_prefix_is_utf8(machine: &Machine<'_>, run: &Growable) -> bool {
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    let len = run.len as usize;
+    let whole = len / 8;
+    let ascii = (0..whole).all(|at| machine.mem.payload(run.store, at as u32) & HIGH == 0)
+        && match len % 8 {
+            0 => true,
+            tail => {
+                let mask = (1u64 << (tail * 8)) - 1;
+                machine.mem.payload(run.store, whole as u32) & mask & HIGH == 0
+            }
+        };
+    ascii || std::str::from_utf8(&live_bytes(machine, run)).is_ok()
 }
 
 /// The live prefix of a byte run, as bytes.
@@ -563,6 +586,34 @@ mod tests {
             );
         }
         assert_eq!(reread(&machine, &words), (4, words.store, 8));
+    }
+
+    /// The word-at-a-time ASCII check reads the live prefix and nothing past
+    /// it: a high byte in the spare room of the last word does not refuse a
+    /// finish, and one inside the prefix — at a word boundary as well as
+    /// inside a word — still reaches the decoder and does.
+    #[test]
+    fn a_byte_finish_reads_only_the_live_prefix_a_word_at_a_time() {
+        let f = layouts();
+        let mut machine = Machine::new(&f.program, 1 << 14);
+        let mut bytes = bytes_run(&mut machine, 0);
+        push_bytes(&mut machine, &mut bytes, b"eleven byte");
+        // Spare room, in the live prefix's last word and in the next one.
+        machine.put_bytes(bytes.store, 11, 1, 0xC3);
+        machine.put_bytes(bytes.store, 13, 1, 0xFF);
+        let text =
+            growable_finish(&mut machine, &bytes, f.program.str_layout, Validation::Utf8).unwrap();
+        assert_eq!(machine.string_bytes(text), b"eleven byte".to_vec());
+
+        for (prefix, broken) in [(16, 0xFF), (13, 0xC3)] {
+            let mut bytes = bytes_run(&mut machine, 0);
+            push_bytes(&mut machine, &mut bytes, &vec![b'a'; prefix]);
+            push_bytes(&mut machine, &mut bytes, &[broken]);
+            let error =
+                growable_finish(&mut machine, &bytes, f.program.str_layout, Validation::Utf8)
+                    .unwrap_err();
+            assert_eq!(error.message, "this string's bytes are not valid UTF-8");
+        }
     }
 
     #[test]

@@ -76,6 +76,7 @@ mod frame;
 mod frees;
 mod gap;
 mod inline;
+mod interpolate;
 mod limits;
 mod methods;
 mod pattern;

@@ -1403,28 +1403,18 @@ impl Check<'_> {
             return;
         };
         let fixed = signature.operands.len();
-        let counted = match signature.rest {
-            None => list.len() == fixed,
-            Some(_) => list.len() >= fixed,
-        };
-        if !counted {
-            let wanted = match signature.rest {
-                None => format!("{fixed}"),
-                Some(_) => format!("at least {fixed}"),
-            };
+        if list.len() != fixed {
             self.fault(
                 at,
                 format!(
-                    "`{intrinsic}` takes {wanted} operand(s), and this call passes {}",
+                    "`{intrinsic}` takes {fixed} operand(s), and this call passes {}",
                     list.len()
                 ),
             );
             return;
         }
         for (index, arg) in list.clone().into_iter().enumerate() {
-            let Some(class) = signature.operands.get(index).copied().or(signature.rest) else {
-                continue;
-            };
+            let class = signature.operands[index];
             if arg.layout.index() >= self.program.layouts.len() {
                 // `each_arg` reports a layout that is not there.
                 continue;
@@ -1432,6 +1422,7 @@ impl Check<'_> {
             let described = self.program.layout(arg.layout);
             if intrinsic.category() != Category::Value
                 && class != Class::Strings
+                && class != Class::Buffer
                 && is_collection(&described.shape)
             {
                 let name = described.name.clone();
@@ -1456,6 +1447,7 @@ impl Check<'_> {
         let word = |repr: Repr| described.shape == Shape::Word(repr);
         let fits = match class {
             Class::Value => true,
+            Class::Buffer => described.shape == Shape::ByteBuffer,
             Class::Unit => word(Repr::Unit),
             Class::Bool => word(Repr::Bool),
             Class::Int => word(Repr::Int),
@@ -2560,21 +2552,39 @@ mod tests {
             vec!["the answer of `String.indexOf` is `Option`, where its signature has Option<Int>"]
         );
 
-        // Interpolation takes any number of pieces of any layout.
+        // A rendering takes a piece of any layout, and appends it to a byte
+        // buffer and nothing else. No intrinsic takes a list of pieces any
+        // more (#403), so a third operand is a count fault like any other.
+        let point = |slot| Arg {
+            slot,
+            layout: POINT,
+        };
         let held = calling(
-            crate::Intrinsic::StringInterpolate,
-            STR,
-            vec![Repr::Ref, Repr::Int, Repr::Ref],
-            vec![
-                int(1),
-                string(2),
-                Arg {
-                    slot: 1,
-                    layout: INT,
-                },
-            ],
+            crate::Intrinsic::ValueRenderInto,
+            INT,
+            vec![Repr::Int, Repr::Int, Repr::Int, Repr::Ref],
+            vec![point(1), string(3)],
         );
-        assert_eq!(faults(&held), Vec::<String>::new());
+        assert_eq!(
+            faults(&held),
+            vec![
+                "the answer of `Value.renderInto` is `Int`, where its signature has Unit",
+                "operand 1 of `Value.renderInto` is `String`, where its signature has ByteBuffer",
+            ]
+        );
+        let held = calling(
+            crate::Intrinsic::ValueRenderInto,
+            INT,
+            vec![Repr::Int, Repr::Int, Repr::Int, Repr::Ref],
+            vec![point(1), string(3), string(3)],
+        );
+        assert_eq!(
+            faults(&held),
+            vec![
+                "the answer of `Value.renderInto` is `Int`, where its signature has Unit",
+                "`Value.renderInto` takes 2 operand(s), and this call passes 3",
+            ]
+        );
     }
 
     /// A text or scalar intrinsic handed a collection is refused as that,

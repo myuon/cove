@@ -152,12 +152,17 @@ fn the_run_writes_the_recording_a_run_writes() {
     // standard library attached to it, and `refuseRange`'s five sentences are
     // literals too. `cove run` lowers the slice its entry reaches, where an
     // unreached library body is a stub and places nothing.
+    //
+    // It is 38 since an interpolation became appends (#403): the closing
+    // backtick of `assertEqual`'s message is one byte, and a one-byte run of
+    // literal text is pushed as its byte rather than loaded from the pool, so
+    // its two words — a header and one payload word — are no longer placed.
     assert_eq!(
         steady(&ran.events),
         vec![
             "EntryEnter { module: \"m\", function: \"main\" }".to_string(),
             "EntryExit { module: \"m\", function: \"main\" }".to_string(),
-            "HeapSummary { collections: 0, allocated_words: Some(40), capacity_words: Some(40) }"
+            "HeapSummary { collections: 0, allocated_words: Some(38), capacity_words: Some(38) }"
                 .to_string(),
             "RunEnded { outcome: Success, message: None }".to_string(),
         ]

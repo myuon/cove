@@ -151,23 +151,25 @@ fn @m.early(Int) -> Int
 /// A temporary held across a **diverging** sub-expression is cleared on the
 /// path that leaves, and that is a fix rather than a tidying.
 ///
-/// `both("{x}", if total > 0 { x } else { break })` evaluates the
-/// interpolated string into `s9` and then leaves the call through the
-/// `break`. Nothing ever reaches the release that would have ended `s9`'s
-/// live range, and `s9` belongs to no scope and is not the loop's element —
+/// `both("{x}", if total > 0 { x } else { break })` assembles the
+/// interpolated string into `s12` and then leaves the call through the
+/// `break`. Nothing ever reaches the release that would have ended `s12`'s
+/// live range, and `s12` belongs to no scope and is not the loop's element —
 /// so before this the object stayed reachable from a slot of a live frame
 /// for the rest of the frame. A leak rather than a crash, and one at every
 /// call site rather than only in a walk.
 ///
-/// Instructions 16–18 are the answer, in the order a turn ends in: the
+/// Instructions 19–21 are the answer, in the order a turn ends in: the
 /// temporaries this turn made, innermost first, then the bindings its scopes
 /// own, then the element. `s8` is the element and is cleared by the loop
-/// because the loop owns it; `s9` and `s10` are cleared because
+/// because the loop owns it; `s10` and `s12` are cleared because
 /// [`Body::held`](super::super::Body) records every temporary that holds a
-/// reference and the loop took a mark of that list when it began.
+/// reference and the loop took a mark of that list when it began. The byte
+/// buffer the string was assembled in is not among them: it was released at
+/// 15, as soon as the finish had consumed it.
 ///
 /// What is *not* cleared is as much of the point: `s3`, the array being
-/// walked, is below the mark and is read again at 26, where the `break`'s
+/// walked, is below the mark and is read again at 28, where the `break`'s
 /// jump lands.
 #[test]
 fn a_break_clears_the_temporaries_the_turn_was_holding() {
@@ -185,10 +187,10 @@ fn a_break_clears_the_temporaries_the_turn_was_holding() {
         ),
         "\
 fn @m.f(Array) -> Int
-  frame 13: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:ref s10:ref s11:unit s12:int
-  local xs -> s0:Array [0, 25)
-  local total -> s2:Int [1, 24)
-  local x -> s8:String [9, 20)
+  frame 15: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int s10:ref s11:int s12:ref s13:unit s14:int
+  local xs -> s0:Array [0, 31)
+  local total -> s2:Int [1, 30)
+  local x -> s8:String [9, 26)
      0  int s2:int 0
      1  copy s3:Array s0:Array
      2  len s4:int s3:ref
@@ -196,24 +198,30 @@ fn @m.f(Array) -> Int
      4  int s6:int 1
      5  jump 7
      6  add.int s5:int s5:int s6:int
-     7  lt.int.branch s7:bool s5:int s4:int 22
+     7  lt.int.branch s7:bool s5:int s4:int 28
      8  load-elem s8:String s3:ref s5:int
-     9  intrinsic-call s9:String String.interpolate (s8:String)
-    10  gt.int.imm.branch s7:bool s2:int 0 13
-    11  copy s10:String s8:String
-    12  jump 17
-    13  clear s10:String
-    14  clear s9:String
-    15  clear s8:String
-    16  jump 22
-    17  int s2:int 0
-    18  clear s10:String
-    19  clear s9:String
-    20  clear s8:String
-    21  jump 6
-    22  clear s3:Array
-    23  copy s1:Int s2:Int
-    24  return s1:Int
+     9  int s9:int 16
+    10  growable-alloc.bytes s10:ref s9:int
+    11  len s9:int s8:ref
+    12  int s11:int 0
+    13  growable-extend.bytes (s10:ByteBuffer s8:String s11:Int s9:Int)
+    14  run-finish.bytes s12:ref s10:ref String utf8
+    15  clear s10:ByteBuffer
+    16  gt.int.imm.branch s7:bool s2:int 0 19
+    17  copy s10:String s8:String
+    18  jump 23
+    19  clear s10:String
+    20  clear s12:String
+    21  clear s8:String
+    22  jump 28
+    23  int s2:int 0
+    24  clear s10:String
+    25  clear s12:String
+    26  clear s8:String
+    27  jump 6
+    28  clear s3:Array
+    29  copy s1:Int s2:Int
+    30  return s1:Int
 "
     );
 }

@@ -1018,7 +1018,7 @@ impl Body<'_> {
 
     /// One [`Inst::IntrinsicCall`] of `intrinsic` over `args`, answering a
     /// value of `result` into `dst`.
-    fn intrinsic_call(
+    pub(super) fn intrinsic_call(
         &mut self,
         intrinsic: Intrinsic,
         result: LayoutId,

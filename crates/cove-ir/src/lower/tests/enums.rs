@@ -79,19 +79,26 @@ fn a_reference_word_of_another_case_reads_null() {
         ),
         "\
 fn @m.f(String) -> m.Msg
-  frame 7: s0!:ref s1:tag s2:ref s3:ref s4:ref s5:tag s6:ref
-  local what -> s0:String [0, 10)
-  local said -> s5..s6:m.Msg [5, 5)
-     0  str s3:ref \"!\"
-     1  intrinsic-call s4:String String.interpolate (s0:String s3:String)
-     2  tag s5:tag m.Msg.Text
-     3  copy s6:String s4:String
-     4  clear s4:String
-     5  clear s5..s6:m.Msg
-     6  tag s5:tag m.Msg.Ping
-     7  clear s6:<ref>
-     8  copy s1..s2:m.Msg s5..s6:m.Msg
-     9  return s1..s2:m.Msg
+  frame 9: s0!:ref s1:tag s2:ref s3:int s4:ref s5:int s6:ref s7:tag s8:ref
+  local what -> s0:String [0, 17)
+  local said -> s7..s8:m.Msg [12, 12)
+     0  int s3:int 17
+     1  growable-alloc.bytes s4:ref s3:int
+     2  len s3:int s0:ref
+     3  int s5:int 0
+     4  growable-extend.bytes (s4:ByteBuffer s0:String s5:Int s3:Int)
+     5  int s3:int 33
+     6  growable-push.bytes s4:ref s3:int
+     7  run-finish.bytes s6:ref s4:ref String utf8
+     8  clear s4:ByteBuffer
+     9  tag s7:tag m.Msg.Text
+    10  copy s8:String s6:String
+    11  clear s6:String
+    12  clear s7..s8:m.Msg
+    13  tag s7:tag m.Msg.Ping
+    14  clear s8:<ref>
+    15  copy s1..s2:m.Msg s7..s8:m.Msg
+    16  return s1..s2:m.Msg
 "
     );
 }

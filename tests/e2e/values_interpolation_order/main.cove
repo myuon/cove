@@ -1,0 +1,76 @@
+use console.println
+
+/// A two-word value a piece can hold inline.
+struct Point {
+  x: Int
+  y: Int
+}
+
+/// A case with a payload and one without.
+enum Shape {
+  Dot
+  Circle(Point, Int)
+}
+
+/// A trait a value can be erased to.
+trait Named {
+  /// Returns what the value is called.
+  fn name(self) -> String
+}
+
+impl Named for Point {
+  /// Returns the point's coordinates as a name.
+  fn name(self) -> String {
+    "p{self.x}"
+  }
+}
+
+/// Moves a point one step right and answers its new `x`.
+fn step(var point: Point) -> Int {
+  point = Point(x: point.x + 1, y: point.y)
+  point.x
+}
+
+/// Adds one to a counter and answers what it became.
+fn bump(var counter: Int) -> Int {
+  counter = counter + 1
+  counter
+}
+
+/// Renders an erased value, which crosses into the string boxed.
+fn erased(value: dyn Named) -> String {
+  "{value.name()} as {value}"
+}
+
+/// Pins that an interpolation renders each piece when it is evaluated, not
+/// after the pieces to its right have run (#389), and that every family a
+/// piece can be renders the way the oracle renders it.
+export fn main() -> Result<Unit, Error> {
+  // A piece that mutates a vector an earlier piece rendered, and one that
+  // mutates the vector a later piece renders.
+  var items = Vector.of(1, 2, 3)
+  println("{items.pop()} {items}")?
+  println("{items} {items.pop()} {items}")?
+  println("{items} {items.push(9)} {items}")?
+
+  // A scalar and an inline struct read out of a local that a later piece
+  // writes through a `var` parameter.
+  var counter = 1
+  println("{counter} {bump(var counter)} {counter}")?
+  var at = Point(x: 1, y: 2)
+  println("{at} {step(var at)} {at}")?
+
+  // Every family a piece can be.
+  let noName: Option<String> = None
+  println("scalars {7} {-7} {1.5} {2.0} {true} {false} {()} {90s} {'a'}")?
+  println("strings {"plain"} {""} {"ünïcödé"} {noName} {Some("x")}")?
+  println("ranges {1..3} {1..<4}")?
+  println("structs {at} {Shape.Dot} {Shape.Circle(at, 3)}")?
+  println("collections {[1, 2]} {Set.of("b", "a")} {Map.of(MapEntry(key: "k", value: 1))}")?
+  let result: Result<Int, Error> = Err(Error("boom"))
+  println("errors {Error("went wrong")} {result}")?
+  println("erased {erased(at)}")?
+  println("closures {fn(n: Int) { n }}")?
+  println("nested {"a{"b{counter}c"}d"} and empty {""}{""}")?
+  Ok(())
+}

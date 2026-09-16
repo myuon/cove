@@ -167,25 +167,48 @@ fn a_trait_method_s_default_body_is_lowered_once_per_conforming_type() {
         listing(source, "Booking.line"),
         "\
 fn @m.Booking.line(m.Booking) -> String
-  frame 6: s0!:int s1:ref s2:ref s3:ref s4:ref s5:ref
-  local self -> s0:m.Booking [0, 5)
-     0  str s2:ref \"- \"
-     1  str s5:ref \"booking \"
-     2  intrinsic-call s3:String String.interpolate (s5:String s0:Int)
-     3  intrinsic-call s1:String String.interpolate (s2:String s3:String)
-     4  return s1:String
+  frame 12: s0!:int s1:ref s2:int s3:ref s4:ref s5:int s6:ref s7:int s8:ref s9:ref s10:int s11:unit
+  local self -> s0:m.Booking [0, 21)
+     0  int s2:int 18
+     1  growable-alloc.bytes s3:ref s2:int
+     2  str s4:ref \"- \"
+     3  int s2:int 2
+     4  int s5:int 0
+     5  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
+     6  int s7:int 24
+     7  growable-alloc.bytes s8:ref s7:int
+     8  str s9:ref \"booking \"
+     9  int s7:int 8
+    10  int s10:int 0
+    11  growable-extend.bytes (s8:ByteBuffer s9:String s10:Int s7:Int)
+    12  intrinsic-call s11:Unit Int.renderInto (s0:Int s8:ByteBuffer)
+    13  run-finish.bytes s4:ref s8:ref String utf8
+    14  clear s8:ByteBuffer
+    15  clear s8:<ref>
+    16  len s2:int s4:ref
+    17  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
+    18  clear s4:String
+    19  run-finish.bytes s1:ref s3:ref String utf8
+    20  return s1:String
 "
     );
     assert_eq!(
         listing(source, "Receipt.line"),
         "\
 fn @m.Receipt.line(m.Receipt) -> String
-  frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
-  local self -> s0:m.Receipt [0, 4)
-     0  str s2:ref \"- \"
-     1  str s3:ref \"receipt\"
-     2  intrinsic-call s1:String String.interpolate (s2:String s3:String)
-     3  return s1:String
+  frame 7: s0!:int s1:ref s2:int s3:ref s4:ref s5:int s6:ref
+  local self -> s0:m.Receipt [0, 11)
+     0  int s2:int 18
+     1  growable-alloc.bytes s3:ref s2:int
+     2  str s4:ref \"- \"
+     3  int s2:int 2
+     4  int s5:int 0
+     5  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
+     6  str s4:ref \"receipt\"
+     7  len s2:int s4:ref
+     8  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
+     9  run-finish.bytes s1:ref s3:ref String utf8
+    10  return s1:String
 "
     );
 }
@@ -206,12 +229,19 @@ fn a_conformance_that_writes_its_own_body_does_not_get_the_default() {
         ),
         "\
 fn @m.Receipt.line(m.Receipt) -> String
-  frame 5: s0!:int s1:ref s2:ref s3:ref s4:ref
-  local self -> s0:m.Receipt [0, 4)
-     0  str s2:ref \"  $ \"
-     1  str s3:ref \"receipt\"
-     2  intrinsic-call s1:String String.interpolate (s2:String s3:String)
-     3  return s1:String
+  frame 7: s0!:int s1:ref s2:int s3:ref s4:ref s5:int s6:ref
+  local self -> s0:m.Receipt [0, 11)
+     0  int s2:int 20
+     1  growable-alloc.bytes s3:ref s2:int
+     2  str s4:ref \"  $ \"
+     3  int s2:int 4
+     4  int s5:int 0
+     5  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
+     6  str s4:ref \"receipt\"
+     7  len s2:int s4:ref
+     8  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
+     9  run-finish.bytes s1:ref s3:ref String utf8
+    10  return s1:String
 "
     );
 }
