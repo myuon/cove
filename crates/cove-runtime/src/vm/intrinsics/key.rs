@@ -347,11 +347,9 @@ pub(super) fn refuse_duplicate(machine: &Machine, frame: Frame<'_>) -> Result<()
         String::from_utf8_lossy(&machine.string_bytes(frame.word(machine, at))).into_owned()
     };
     let key = frame.operand(machine, 0);
-    Err(duplicate(
-        &text(1),
-        &text(2),
-        render_value(machine, key.layout, key.words, 0),
-    ))
+    let mut shown = String::new();
+    let shown = render_value(machine, key.layout, key.words, 0, &mut shown).map(|()| shown);
+    Err(duplicate(&text(1), &text(2), shown))
 }
 
 /// `` `{method}` was given the {role} `{key}` more than once ``.
@@ -550,7 +548,8 @@ fn admits_object(
             let base = path(anchor, String::new);
             for at in 0..machine.object_len(addr) {
                 let key = pairs.key_words(machine, addr, at);
-                let shown = render_value(machine, pairs.key, &key, 0)?;
+                let mut shown = String::new();
+                render_value(machine, pairs.key, &key, 0, &mut shown)?;
                 let value = pairs.value_words(machine, addr, at);
                 let anchor = format!("{base}[{shown}]");
                 admits(
