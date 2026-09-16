@@ -231,30 +231,39 @@ pub(crate) fn call(
 /// value it is rather than as its first word — which is what
 /// `"{Point(x: 1)}"` answering `1` was. The pieces are walked where they are,
 /// however many there are: the one variadic intrinsic collects no operand
-/// list to do it.
+/// list to do it. Each piece writes into the same buffer as it renders,
+/// rather than building and returning a `String` of its own, so an
+/// interpolation over nested values allocates once for the whole answer
+/// rather than once per piece.
 fn interpolate(machine: &mut Machine, frame: Frame<'_>, dest: Dest) -> Result<(), RuntimeError> {
     let mut text = String::new();
     for at in 0..frame.len() {
         let operand = frame.operand(machine, at);
-        text.push_str(&render_value(machine, operand.layout, operand.words, 0)?);
+        render_value(machine, operand.layout, operand.words, 0, &mut text)?;
     }
     let word = machine.new_string(&text)?;
     dest.word(machine, word);
     Ok(())
 }
 
-/// The text of `word`, read as `repr`.
+/// The text of `word`, read as `repr`, appended to `out`.
 ///
 /// The width-one case of [`render_value`], and what every walk below reaches
 /// when it gets down to one word of scalar bits or one address.
-fn render(machine: &Machine, repr: Repr, word: u64, depth: usize) -> Result<String, RuntimeError> {
-    Ok(match repr {
-        Repr::Unit => "()".to_string(),
-        Repr::Bool => if word != 0 { "true" } else { "false" }.to_string(),
-        Repr::Int => (word as i64).to_string(),
-        Repr::Float => float(f64::from_bits(word)),
-        Repr::Duration => duration(word as i64),
-        Repr::Ref => return render_object(machine, word, depth),
+fn render(
+    machine: &Machine,
+    repr: Repr,
+    word: u64,
+    depth: usize,
+    out: &mut String,
+) -> Result<(), RuntimeError> {
+    match repr {
+        Repr::Unit => out.push_str("()"),
+        Repr::Bool => out.push_str(if word != 0 { "true" } else { "false" }),
+        Repr::Int => write!(out, "{}", word as i64).expect("a string never fails to be written to"),
+        Repr::Float => float(out, f64::from_bits(word)),
+        Repr::Duration => duration(out, word as i64),
+        Repr::Ref => return render_object(machine, word, depth, out),
         // None of them is a value: an address is a place, a handle is the
         // host's, and a task or a scope is the scheduler's. Interpolating one
         // would be putting this run's bookkeeping into a string a program
@@ -266,10 +275,12 @@ fn render(machine: &Machine, repr: Repr, word: u64, depth: usize) -> Result<Stri
         Repr::Addr | Repr::Host | Repr::Task | Repr::Scope | Repr::Tag => {
             return Err(RuntimeError::new("this value has no text of its own"))
         }
-    })
+    }
+    Ok(())
 }
 
-/// The text of the value location of `layout` holding `words`.
+/// The text of the value location of `layout` holding `words`, appended to
+/// `out`.
 ///
 /// A struct is its fields in place and an enum is a discriminant and a
 /// payload region, so rendering one is reading runs of words rather than
@@ -281,16 +292,16 @@ fn render_value(
     layout: LayoutId,
     words: &[u64],
     depth: usize,
-) -> Result<String, RuntimeError> {
+    out: &mut String,
+) -> Result<(), RuntimeError> {
     if depth >= MAX_DEPTH {
         return Err(too_deep());
     }
     let deeper = depth + 1;
     let program = machine.program();
     let described = program.layout(layout);
-    let mut out = String::new();
     match &described.shape {
-        Shape::Word(repr) => return render(machine, *repr, at(words, 0)?, depth),
+        Shape::Word(repr) => return render(machine, *repr, at(words, 0)?, depth, out),
         // A builtin `Error` renders as the message it carries, not as the
         // struct it happens to be. The oracle special-cases it in
         // `Display for Value` for the reason this one does: a program that
@@ -303,12 +314,13 @@ fn render_value(
                 && fields.first().map(|field| &*field.name) == Some(MESSAGE_FIELD.name) =>
         {
             let field = &fields[0];
-            out.push_str(&render_value(
+            render_value(
                 machine,
                 field.layout,
                 run(program, words, field)?,
                 deeper,
-            )?);
+                out,
+            )?;
         }
         // An opaque type renders as its name and nothing else. Its fields are
         // the declaring module's own business, and a rendering is read by
@@ -338,12 +350,13 @@ fn render_value(
                     out.push_str(", ");
                 }
                 write!(out, "{}: ", field.name).expect("a string never fails to be written to");
-                out.push_str(&render_value(
+                render_value(
                     machine,
                     field.layout,
                     run(program, words, field)?,
                     deeper,
-                )?);
+                    out,
+                )?;
             }
             out.push(')');
         }
@@ -371,20 +384,25 @@ fn render_value(
                     let held = words
                         .get(from..from + width)
                         .ok_or_else(|| short_run(&described.name))?;
-                    out.push_str(&render_value(machine, part.layout, held, deeper)?);
+                    render_value(machine, part.layout, held, deeper, out)?;
                 }
                 out.push(')');
             }
         }
         Shape::Free => return Err(reclaimed()),
         // Everything left lives in the heap, so the location is one address.
-        _ => return render_object(machine, at(words, 0)?, depth),
+        _ => return render_object(machine, at(words, 0)?, depth, out),
     }
-    Ok(out)
+    Ok(())
 }
 
-/// The text of the object at `addr`.
-fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, RuntimeError> {
+/// The text of the object at `addr`, appended to `out`.
+fn render_object(
+    machine: &Machine,
+    addr: u64,
+    depth: usize,
+    out: &mut String,
+) -> Result<(), RuntimeError> {
     if addr == 0 {
         return Err(RuntimeError::new(
             "this value was read before it was given one",
@@ -397,7 +415,6 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
     let program = machine.program();
     let id = machine.object_layout(addr);
     let layout = program.layout(id);
-    let mut out = String::new();
     match &layout.shape {
         Shape::Str => out.push_str(&string_of(machine, addr)?),
         // Not a Cove value, so nothing renders it deliberately — reached only
@@ -411,7 +428,7 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
         // `Layout::payload_words` answers that same width.
         Shape::Word(_) | Shape::Struct { .. } | Shape::Enum { .. } => {
             let words = machine.payload_run(addr, 0, layout.width());
-            return render_value(machine, id, &words, depth);
+            return render_value(machine, id, &words, depth, out);
         }
         // A cell shows as the handle it is rather than as what it currently
         // holds, which is `Display for Value`'s answer for the same value:
@@ -431,7 +448,7 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
             let store = machine.payload(addr, 1);
             out.push('[');
             if store != 0 {
-                out.push_str(&joined(machine, store, *elem, len, ", ", deeper)?);
+                joined(machine, store, *elem, len, ", ", deeper, out)?;
             }
             out.push(']');
         }
@@ -440,14 +457,15 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
         // `Array<Point>` renders two words at a time.
         Shape::Elements { elem, .. } => {
             out.push('[');
-            out.push_str(&joined(
+            joined(
                 machine,
                 addr,
                 *elem,
                 machine.object_len(addr),
                 ", ",
                 deeper,
-            )?);
+                out,
+            )?;
             out.push(']');
         }
         // A set and a map both render inside braces, which is how the
@@ -455,14 +473,15 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
         // hashed ones: the order is part of what a program sees.
         Shape::Members { elem } => {
             out.push('{');
-            out.push_str(&joined(
+            joined(
                 machine,
                 addr,
                 *elem,
                 machine.object_len(addr),
                 ", ",
                 deeper,
-            )?);
+                out,
+            )?;
             out.push('}');
         }
         Shape::Entries { key, value } => {
@@ -475,9 +494,9 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
                 }
                 let one = machine.payload_run(addr, nth * stride, widths.0);
                 let other = machine.payload_run(addr, nth * stride + widths.0, widths.1);
-                out.push_str(&render_value(machine, *key, &one, deeper)?);
+                render_value(machine, *key, &one, deeper, out)?;
                 out.push_str(": ");
-                out.push_str(&render_value(machine, *value, &other, deeper)?);
+                render_value(machine, *value, &other, deeper, out)?;
             }
             out.push('}');
         }
@@ -492,15 +511,16 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
                 .get(held.index())
                 .ok_or_else(|| RuntimeError::new("this boxed value carries no known type"))?;
             let words = machine.payload_run(addr, 1, described.width());
-            return render_value(machine, held, &words, deeper);
+            return render_value(machine, held, &words, deeper, out);
         }
         Shape::Closure { .. } => out.push_str("<fn>"),
         Shape::Free => return Err(reclaimed()),
     }
-    Ok(out)
+    Ok(())
 }
 
-/// `len` elements of `elem` from the payload of `addr`, rendered and joined.
+/// `len` elements of `elem` from the payload of `addr`, rendered and joined
+/// into `out`.
 fn joined(
     machine: &Machine,
     addr: u64,
@@ -508,17 +528,17 @@ fn joined(
     len: u32,
     between: &str,
     depth: usize,
-) -> Result<String, RuntimeError> {
+    out: &mut String,
+) -> Result<(), RuntimeError> {
     let stride = machine.program().layout(elem).width();
-    let mut out = String::new();
     for nth in 0..len {
         if nth > 0 {
             out.push_str(between);
         }
         let words = machine.payload_run(addr, nth * stride, stride);
-        out.push_str(&render_value(machine, elem, &words, depth)?);
+        render_value(machine, elem, &words, depth, out)?;
     }
-    Ok(out)
+    Ok(())
 }
 
 /// The word at `at` of a value location.
@@ -576,21 +596,24 @@ pub(super) fn string_of(machine: &Machine, addr: u64) -> Result<String, RuntimeE
         .map_err(|_| RuntimeError::new("this string's bytes are not valid UTF-8"))
 }
 
-/// Renders a `Float` so that it is never mistaken for an `Int`.
+/// Renders a `Float` so that it is never mistaken for an `Int`, appended to
+/// `out`.
 ///
 /// The language performs no implicit numeric conversions, so a float with no
 /// fractional part still shows its point.
-fn float(x: f64) -> String {
+fn float(out: &mut String, x: f64) {
     if x.is_nan() {
-        return "NaN".to_string();
+        out.push_str("NaN");
+        return;
     }
     if x.is_infinite() {
-        return if x.is_sign_negative() { "-inf" } else { "inf" }.to_string();
+        out.push_str(if x.is_sign_negative() { "-inf" } else { "inf" });
+        return;
     }
     if x.fract() == 0.0 {
-        format!("{x:.1}")
+        write!(out, "{x:.1}").expect("a string never fails to be written to");
     } else {
-        format!("{x}")
+        write!(out, "{x}").expect("a string never fails to be written to");
     }
 }
 
@@ -605,14 +628,17 @@ const DURATION_UNITS: [(i64, &str); 6] = [
     (1, "ns"),
 ];
 
-/// Renders a `Duration` in the largest unit that divides it exactly.
-fn duration(ns: i64) -> String {
+/// Renders a `Duration` in the largest unit that divides it exactly,
+/// appended to `out`.
+fn duration(out: &mut String, ns: i64) {
     if ns == 0 {
-        return "0ns".to_string();
+        out.push_str("0ns");
+        return;
     }
     for (factor, suffix) in DURATION_UNITS {
         if ns % factor == 0 {
-            return format!("{}{suffix}", ns / factor);
+            write!(out, "{}{suffix}", ns / factor).expect("a string never fails to be written to");
+            return;
         }
     }
     unreachable!("every duration is divisible by one nanosecond")
@@ -1195,19 +1221,18 @@ mod tests {
         let point = named(&program, "Point");
         let option = two_case(&program, "Option", "Some", point);
 
-        assert_eq!(
-            render_value(&machine, point, &[1, (-2i64) as u64], 0).unwrap(),
-            "Point(x: 1, y: -2)"
-        );
+        let mut out = String::new();
+        render_value(&machine, point, &[1, (-2i64) as u64], 0, &mut out).unwrap();
+        assert_eq!(out, "Point(x: 1, y: -2)");
+
         // `[disc, x, y]`: the `Point` is inline in the payload region.
-        assert_eq!(
-            render_value(&machine, option, &[1, 1, (-2i64) as u64], 0).unwrap(),
-            "Some(Point(x: 1, y: -2))"
-        );
-        assert_eq!(
-            render_value(&machine, option, &[0, 0, 0], 0).unwrap(),
-            "None"
-        );
+        let mut out = String::new();
+        render_value(&machine, option, &[1, 1, (-2i64) as u64], 0, &mut out).unwrap();
+        assert_eq!(out, "Some(Point(x: 1, y: -2))");
+
+        let mut out = String::new();
+        render_value(&machine, option, &[0, 0, 0], 0, &mut out).unwrap();
+        assert_eq!(out, "None");
 
         // An `Array<Point>` is a run of two-word elements, walked at that
         // stride.
@@ -1215,10 +1240,9 @@ mod tests {
             .new_object(elements(&program, point, false), 2)
             .unwrap();
         machine.set_payload_run(items, 0, &[1, 2, 3, 4]);
-        assert_eq!(
-            render(&machine, Repr::Ref, items, 0).unwrap(),
-            "[Point(x: 1, y: 2), Point(x: 3, y: 4)]"
-        );
+        let mut out = String::new();
+        render(&machine, Repr::Ref, items, 0, &mut out).unwrap();
+        assert_eq!(out, "[Point(x: 1, y: 2), Point(x: 3, y: 4)]");
         let _ = int;
     }
 
