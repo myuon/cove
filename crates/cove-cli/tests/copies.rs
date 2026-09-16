@@ -618,13 +618,26 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// four copies here against 97,212 calls that are no longer made at all in
 /// `covefmt`'s print phase.
 ///
+/// **The twenty-fourth rise is the formatter building a vector only when it has
+/// something to put in it.** 2394 to 2400, and `examples:covefmtBench` is the
+/// only row that moves: 60 after a producer and 119 before a `return` become
+/// 64 and 121. `examples/covefmt`'s `emit` used to open four `Vector.of()` for
+/// every node it descended into and push into 362 of them over a whole corpus
+/// (#398); it now holds two `Option<Vector<…>>` that begin at `None`, and the
+/// six small functions that read and extend them each answer through the
+/// location their caller named — which is the copy into a `return`'s answer
+/// this counts. It buys 108,240 allocations and 216,936 words off the print
+/// phase and 8.5% of its wall time, and the six are static: none of them is
+/// inside a loop, and a program that runs the corpus makes at most a few
+/// hundred of the calls that carry them.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2394;
+const FORWARDABLE_COPIES: usize = 2400;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

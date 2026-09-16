@@ -606,6 +606,30 @@ test fn an_expression_breaks_at_its_operator() -> Result<Unit, Error> {
   Ok(())
 }
 
+/// **A continuation inside a continuation indents one step further.**
+///
+/// The stack of open operators, which is what says how far a continuation is
+/// indented, and the only test that puts more than one thing on it. `binary`
+/// writes a broken right operand at `indent + INDENT` and then writes *that*
+/// operand from there, so a break inside it is a step further again: the `<`
+/// line is one step in from the `&&` line and the `+` operands are one step
+/// in from that.
+///
+/// It is here because that stack is built only when something is pushed onto
+/// it — almost no node pushes anything — and a stack that is never built is
+/// easy to get wrong in the one case that builds it twice.
+///
+/// The answer below was read off `cove fmt` by running it.
+test fn a_continuation_nests_inside_a_continuation() -> Result<Unit, Error> {
+  let flat = "\n".join(["fn f(a: Int, b: Int, c: Int, d: Int) -> Bool \{", "  aReasonablyLongName(a) && anotherReasonablyLong(b) + aThirdReasonableName(c) < yetAnotherLongName(d) + oneMoreLongName(a)", "\}", ""])
+  let want = "\n".join(["fn f(a: Int, b: Int, c: Int, d: Int) -> Bool \{", "  aReasonablyLongName(a) &&", "    anotherReasonablyLong(b) + aThirdReasonableName(c) <", "      yetAnotherLongName(d) + oneMoreLongName(a)", "\}", ""])
+  let held = tokens(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  // And the form it reaches is a form it leaves alone.
+  assert(roundTrips(want))?
+  Ok(())
+}
+
 /// **A chain of calls breaks before its dots.**
 ///
 /// `call` asks this before anything else it would do: when the chain has two
