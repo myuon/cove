@@ -631,13 +631,23 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// inside a loop, and a program that runs the corpus makes at most a few
 /// hundred of the calls that carry them.
 ///
+/// **The twenty-fifth rise is the formatter's lexer answering one more
+/// question.** 2400 to 2405, and `examples:covefmtBench` is again the only row
+/// that moves: 64 and 121 become 67 and 123. `examples/covefmt`'s `tokens` is
+/// now `lex` and answers a `Lexed` — the runs, and whether any comment in the
+/// file is trailing — so a call that used to hand back a one-word `Array`
+/// hands back a struct built beside the `return` and read through a field at
+/// each of its callers. It removes a walk of every token of every file that
+/// was **6.30% of the print phase's instructions** (#398): 3.47 M instructions
+/// and 248 calls off print for 0.70 M onto lex, and 2.77 M off the run.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2400;
+const FORWARDABLE_COPIES: usize = 2405;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

@@ -17,7 +17,7 @@ fn named(kind: Kind) -> String {
 
 /// The kinds `source` cuts into, as one line.
 fn shape(source: String) -> String {
-  let held = tokens(source)
+  let held = lex(source).tokens
   var parts = Vector.of()
   var i = 0
   while i < held.length() {
@@ -33,7 +33,7 @@ fn shape(source: String) -> String {
 /// The text of the tokens, joined — which is the file again, or the lexer has
 /// lost something.
 fn rejoined(source: String) -> String {
-  let held = tokens(source)
+  let held = lex(source).tokens
   var parts = Vector.of()
   var i = 0
   while i < held.length() {
@@ -117,8 +117,8 @@ test fn an_unterminated_literal_reaches_the_end() -> Result<Unit, Error> {
 
 /// Nothing cuts into nothing, and that tiles too.
 test fn an_empty_source_is_no_tokens() -> Result<Unit, Error> {
-  assertEqual(tokens("").length(), 0)?
-  assert(tiles("", tokens("")))?
+  assertEqual(lex("").tokens.length(), 0)?
+  assert(tiles("", lex("").tokens))?
   Ok(())
 }
 
@@ -138,6 +138,34 @@ test fn a_wide_character_does_not_end_the_run_it_is_in(
   Ok(())
 }
 
+/// **A comment is trailing when something of its line stands in front of it.**
+///
+/// The one thing [`lex`] answers beside the runs, and the whole of what the
+/// printer's alignment pass is owed: a `//` with code before it on its line
+/// has to be lined up with the ones above and below it, and a `//` that opens
+/// its line is placed by the indentation rules instead.
+///
+/// The cases below are the ones the corpus cannot show, because every file in
+/// it is already formatted. A file that opens with space and then a comment is
+/// the one that a rule reading only "is the token in front of it a space"
+/// gets wrong: nothing stands on that line, so nothing is being trailed.
+test fn a_trailing_comment_has_its_line_in_front_of_it(
+) -> Result<Unit, Error> {
+  assert(lex("let a = 1 // why\n").trailing)?
+  assert(lex("let a = 1// why\n").trailing)?
+  assert(lex("let a = 1 /* why */\n").trailing)?
+  assert(lex("let a = 1 /// why\n").trailing)?
+  assert(!lex("// why\nlet a = 1\n").trailing)?
+  assert(!lex("  // why\nlet a = 1\n").trailing)?
+  assert(!lex("let a = 1\n// why\n").trailing)?
+  assert(!lex("let a = 1\n").trailing)?
+  assert(!lex("").trailing)?
+  // A `//` inside a string is not a comment, which is the reason the question
+  // is asked of the tokens rather than of the bytes.
+  assert(!lex("let a = \"// why\"\n").trailing)?
+  Ok(())
+}
+
 /// The property the whole lexer exists for, over source with every form in
 /// it: the runs cover the text exactly, and joining them gives it back.
 ///
@@ -147,7 +175,7 @@ test fn a_wide_character_does_not_end_the_run_it_is_in(
 /// unreadable. One line to a line is what a reader can check.
 test fn the_tokens_tile_the_source() -> Result<Unit, Error> {
   let source = "\n".join(["/// Doubles `n`.", "fn twice(n: Int) -> Int \{", "  // a comment", "  /* and a /* nested */ one */", "  let tick = 500ms", "  let c = 'a'", "  let text = \"n is \{n\}\"", "  n * 2", "\}", ""])
-  assert(tiles(source, tokens(source)))?
+  assert(tiles(source, lex(source).tokens))?
   assertEqual(rejoined(source), source)?
   Ok(())
 }

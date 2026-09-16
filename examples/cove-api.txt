@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:db8a7cde6b99e2f1
+hash fnv1a64:209f7ba058d23d4b
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -269,6 +269,21 @@ module covefmt
     case Word
     case Punct
     case Unknown
+  /// What one pass over a source produces: the runs it tiles into, and the one
+  /// thing about them a formatter would otherwise go back and scan for.
+  ///
+  /// There is exactly one field beside the tokens, and it is here rather than
+  /// in the printer because it is free here and it is not free there. Deciding
+  /// whether the alignment pass is owed means asking whether any comment in the
+  /// file has something of its line in front of it; asked as a walk of its own
+  /// it was **6.30% of the print phase's instructions for 248 answers** (#398),
+  /// and the answer is *yes* on two files of the 248. Asked while the tokens
+  /// are being cut it is a comparison a token, and a look at the run of space
+  /// in front of a comment — which is the only place the question can be
+  /// answered without a walk.
+  export struct Lexed
+    field tokens: Array<Token>
+    field trailing: Bool
   /// What a node of the tree is.
   ///
   /// One kind per shape the item level of Cove has, plus the three a lossless
@@ -328,6 +343,9 @@ module covefmt
   export fn covers(tree: Tree, from: Int, to: Int) -> Bool
   /// A leaf: one token, no children.
   export fn leafAt(at: Int) -> Tree
+  /// Cuts `source` into tokens that tile it, noticing on the way past whether
+  /// any comment in it has something of its line in front of it.
+  export fn lex(source: String) -> Lexed
   /// How long each phase of the formatter takes over a corpus of Cove source.
   ///
   /// # A phase is measured by difference, and that is the whole design
@@ -359,7 +377,7 @@ module covefmt
   ///
   /// A caller that already holds the tokens should not have to lex again, and a
   /// measurement that made it do so is what made this exist: a benchmark timing
-  /// the three phases called `tokens` inside the print loop, so "print" was
+  /// the three phases called `lex` inside the print loop, so "print" was
   /// lex and parse and print, and the numbers it reported counted two of them
   /// three times.
   export fn parseTokens(source: String, held: Array<Token>) -> Tree
@@ -399,7 +417,7 @@ module covefmt
   /// formatter's whole output is one append after another. Cove has no string
   /// builder, and a `Vector<String>` joined once is the shape of one.
   /// The text a tree prints as.
-  export fn print(source: String, held: Array<Token>, tree: Tree) -> String
+  export fn print(source: String, held: Lexed, tree: Tree) -> String
   /// Whether printing the tree of `source` gives `source` back.
   export fn roundTrips(source: String) -> Bool
   /// How many nodes the tree holds, itself included.
@@ -432,8 +450,6 @@ module covefmt
   /// a token the lexer produced never names such a range, and `byteAt` traps
   /// where `sliceBytes` merely declines.
   export fn tokenWidth(source: String, token: Token) -> Int
-  /// Cuts `source` into tokens that tile it.
-  export fn tokens(source: String) -> Array<Token>
 
 module cq
   /// Runs one transformation over one file.

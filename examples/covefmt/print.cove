@@ -36,19 +36,23 @@ use std.stringbuilder.StringBuilder
 /// formatter's whole output is one append after another. Cove has no string
 /// builder, and a `Vector<String>` joined once is the shape of one.
 /// The text a tree prints as.
-export fn print(source: String, held: Array<Token>, tree: Tree) -> String {
+export fn print(source: String, held: Lexed, tree: Tree) -> String {
   var out = Vector.of()
   // `-1` is "nothing has been written", which is what makes a blank at the
   // very top of a file fall under the same rule as a blank at the top of a
   // block: both open on nothing.
-  emit(source, held, tree, -1, 0, -1, var out)
+  emit(source, held.tokens, tree, -1, 0, -1, var out)
   let text = "".join(out.freeze())
   // The alignment pass lexes its own output, which is the price of not
   // lining up on a `//` inside a string. It is only owed when there is a
   // trailing comment to line up, and whether there is one is already
   // readable here: this printer never moves a comment from its line, so a
   // source with none produces an output with none.
-  if !holdsATrailingComment(source, held) {
+  //
+  // The lexer noticed it on the way past. Asking it here instead was a walk
+  // of every token of every file for an answer that is *yes* on two files of
+  // 248 — 6.30% of this phase's instructions (#398).
+  if !held.trailing {
     return text
   }
   aligned(text)
@@ -75,7 +79,7 @@ export fn print(source: String, held: Array<Token>, tree: Tree) -> String {
 /// and almost none carry a trailing comment, so what is collected is the three
 /// offsets each of those few needs.
 fn aligned(text: String) -> String {
-  let held = tokens(text)
+  let held = lex(text).tokens
   // For each line that carries one: where the line begins, where its code
   // ends, and where its comment begins.
   var opens = Vector.of<Int>()
@@ -608,8 +612,8 @@ fn emit(
 
 /// Whether printing the tree of `source` gives `source` back.
 export fn roundTrips(source: String) -> Bool {
-  let held = tokens(source)
-  print(source, held, parse(source)) == source
+  let held = lex(source)
+  print(source, held, parseTokens(source, held.tokens)) == source
 }
 
 /// A run of space, with the blanks a line ends on taken out.
@@ -3035,29 +3039,4 @@ fn lastSignificantIn(held: Array<Token>, from: Int, to: Int) -> Int {
     at = at - 1
   }
   from
-}
-
-/// Whether any comment in `held` has something of its line in front of it.
-fn holdsATrailingComment(source: String, held: Array<Token>) -> Bool {
-  var open = false
-  var i = 0
-  while i < held.length() {
-    match held.get(i) {
-      Some(token) => {
-        if token.kind == Kind.Space {
-          if endsLine(source, token) {
-            open = false
-          }
-        } else {
-          if open && isAComment(token) {
-            return true
-          }
-          open = true
-        }
-      }
-      None => { }
-    }
-    i = i + 1
-  }
-  false
 }

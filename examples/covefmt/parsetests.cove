@@ -66,7 +66,7 @@ fn parts(source: String) -> String {
 /// Whether the tree covers every token of `source`.
 fn whole(source: String) -> Bool {
   let tree = parse(source)
-  covers(tree, 0, tokens(source).length())
+  covers(tree, 0, lex(source).tokens.length())
 }
 
 /// A file is a list of declarations, and the words in front of one belong to
@@ -256,8 +256,8 @@ test fn a_nested_block_is_a_body() -> Result<Unit, Error> {
 /// `cove fmt --check`, so a rule that correctly changes nothing there is
 /// indistinguishable from a rule that does nothing at all.
 test fn a_line_does_not_end_on_a_blank() -> Result<Unit, Error> {
-  let held = tokens("fn f() \{   \n  1\n\}   \n")
-  let tree = parseTokens("fn f() \{   \n  1\n\}   \n", held)
+  let held = lex("fn f() \{   \n  1\n\}   \n")
+  let tree = parseTokens("fn f() \{   \n  1\n\}   \n", held.tokens)
   assertEqual(
     print("fn f() \{   \n  1\n\}   \n", held, tree),
     "fn f() \{\n  1\n\}\n",
@@ -265,16 +265,16 @@ test fn a_line_does_not_end_on_a_blank() -> Result<Unit, Error> {
   // Space *within* a line is not trailing, and this rule leaves it to the
   // one that reads what stands on either side — which now answers.
   let wide = "fn f(a: Int,  b: Int) -> Int \{\n  a\n\}\n"
-  let heldWide = tokens(wide)
+  let heldWide = lex(wide)
   assertEqual(
-    print(wide, heldWide, parseTokens(wide, heldWide)),
+    print(wide, heldWide, parseTokens(wide, heldWide.tokens)),
     "fn f(a: Int, b: Int) -> Int \{\n  a\n\}\n",
   )?
   // A blank line is blank, not indented.
   let blank = "fn f() \{\n  1\n   \n  2\n\}\n"
-  let heldBlank = tokens(blank)
+  let heldBlank = lex(blank)
   assertEqual(
-    print(blank, heldBlank, parseTokens(blank, heldBlank)),
+    print(blank, heldBlank, parseTokens(blank, heldBlank.tokens)),
     "fn f() \{\n  1\n\n  2\n\}\n",
   )?
   Ok(())
@@ -297,8 +297,8 @@ test fn blank_lines_collapse_to_one() -> Result<Unit, Error> {
   let a = "fn a() \{\n  1\n\}"
   let b = "fn b() \{\n  2\n\}"
   let many = "{a}\n\n\n\n\n{b}\n"
-  let held = tokens(many)
-  assertEqual(print(many, held, parseTokens(many, held)), "{a}\n\n{b}\n")?
+  let held = lex(many)
+  assertEqual(print(many, held, parseTokens(many, held.tokens)), "{a}\n\n{b}\n")?
   // One blank line is already one, and stays.
   assert(roundTrips("{a}\n\n{b}\n"))?
   // No blank line stays none: the rule is a ceiling, not a floor.
@@ -306,9 +306,9 @@ test fn blank_lines_collapse_to_one() -> Result<Unit, Error> {
   // Inside a body too, and the indentation after the last newline is kept —
   // what the rule takes out is newlines, not the line they leave behind.
   let inside = "fn f() \{\n  1\n\n\n  2\n\}\n"
-  let heldInside = tokens(inside)
+  let heldInside = lex(inside)
   assertEqual(
-    print(inside, heldInside, parseTokens(inside, heldInside)),
+    print(inside, heldInside, parseTokens(inside, heldInside.tokens)),
     "fn f() \{\n  1\n\n  2\n\}\n",
   )?
   Ok(())
@@ -322,9 +322,9 @@ test fn blank_lines_collapse_to_one() -> Result<Unit, Error> {
 /// the brace above it, which is nothing to separate it from.
 test fn a_block_does_not_open_on_a_blank() -> Result<Unit, Error> {
   let source = "fn f() \{\n\n  1\n\}\n"
-  let held = tokens(source)
+  let held = lex(source)
   assertEqual(
-    print(source, held, parseTokens(source, held)),
+    print(source, held, parseTokens(source, held.tokens)),
     "fn f() \{\n  1\n\}\n",
   )?
   Ok(())
@@ -338,9 +338,9 @@ test fn a_block_does_not_open_on_a_blank() -> Result<Unit, Error> {
 /// answer instead of two.
 test fn a_file_does_not_open_on_a_blank() -> Result<Unit, Error> {
   let source = "\n\n\nfn f() \{\n  1\n\}\n"
-  let held = tokens(source)
+  let held = lex(source)
   assertEqual(
-    print(source, held, parseTokens(source, held)),
+    print(source, held, parseTokens(source, held.tokens)),
     "fn f() \{\n  1\n\}\n",
   )?
   Ok(())
@@ -358,24 +358,24 @@ test fn a_file_does_not_open_on_a_blank() -> Result<Unit, Error> {
 /// straighten, and a rule that straightened nothing would pass there too.
 test fn a_body_indents_what_is_inside_it() -> Result<Unit, Error> {
   let flat = "fn f() \{\nlet x = 1\nx\n\}\n"
-  let held = tokens(flat)
+  let held = lex(flat)
   assertEqual(
-    print(flat, held, parseTokens(flat, held)),
+    print(flat, held, parseTokens(flat, held.tokens)),
     "fn f() \{\n  let x = 1\n  x\n\}\n",
   )?
   // Nesting multiplies, and the closing braces walk back out.
   let nested = "fn f() \{\nif a \{\nb\n\}\nc\n\}\n"
-  let heldNested = tokens(nested)
+  let heldNested = lex(nested)
   assertEqual(
-    print(nested, heldNested, parseTokens(nested, heldNested)),
+    print(nested, heldNested, parseTokens(nested, heldNested.tokens)),
     "fn f() \{\n  if a \{\n    b\n  \}\n  c\n\}\n",
   )?
   // Over-indentation is straightened too: the rule sets the depth rather
   // than adding to what was there.
   let deep = "fn f() \{\n        let x = 1\n\}\n"
-  let heldDeep = tokens(deep)
+  let heldDeep = lex(deep)
   assertEqual(
-    print(deep, heldDeep, parseTokens(deep, heldDeep)),
+    print(deep, heldDeep, parseTokens(deep, heldDeep.tokens)),
     "fn f() \{\n  let x = 1\n\}\n",
   )?
   Ok(())
@@ -403,9 +403,9 @@ test fn what_the_tree_cannot_see_is_left_alone() -> Result<Unit, Error> {
   assert(roundTrips("fn f<\n  T,\n  E,\n>(a: T) -> T \{\n  a\n\}\n"))?
   // `cove fmt` on the left-hand source answers the right-hand one.
   let broken = "export type H = fn(\n  a: Int\n) -> Int\n"
-  let held = tokens(broken)
+  let held = lex(broken)
   assertEqual(
-    print(broken, held, parseTokens(broken, held)),
+    print(broken, held, parseTokens(broken, held.tokens)),
     "export type H = fn(a: Int) -> Int\n",
   )?
   Ok(())
@@ -427,8 +427,8 @@ test fn a_parameter_list_indents_its_members() -> Result<Unit, Error> {
   // indentation and not the width rule.
   let flat = "\n".join(["fn aRatherLongFunctionName(", "firstParameter: String,", "secondParameter: String,", ") -> Result<Unit, Error> \{", "  Ok(())", "\}", ""])
   let want = "\n".join(["fn aRatherLongFunctionName(", "  firstParameter: String,", "  secondParameter: String,", ") -> Result<Unit, Error> \{", "  Ok(())", "\}", ""])
-  let held = tokens(flat)
-  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  let held = lex(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held.tokens)), want)?
   Ok(())
 }
 
@@ -446,16 +446,16 @@ test fn an_argument_list_indents_its_members() -> Result<Unit, Error> {
   // `a_body_never_folds` — so the indentation can be asserted without the
   // width rule answering first.
   let flat = "fn f() \{\n  g(\n// why\n1,\n2,\n)\n\}\n"
-  let held = tokens(flat)
+  let held = lex(flat)
   assertEqual(
-    print(flat, held, parseTokens(flat, held)),
+    print(flat, held, parseTokens(flat, held.tokens)),
     "fn f() \{\n  g(\n    // why\n    1,\n    2,\n  )\n\}\n",
   )?
   // Nesting multiplies here as it does for a body.
   let nested = "fn f() \{\n  g(\n// why\nh(\n1,\n),\n)\n\}\n"
-  let heldNested = tokens(nested)
+  let heldNested = lex(nested)
   assertEqual(
-    print(nested, heldNested, parseTokens(nested, heldNested)),
+    print(nested, heldNested, parseTokens(nested, heldNested.tokens)),
     "fn f() \{\n  g(\n    // why\n    h(1),\n  )\n\}\n",
   )?
   Ok(())
@@ -473,17 +473,17 @@ test fn an_argument_list_indents_its_members() -> Result<Unit, Error> {
 /// line of its own; flattened there is no last line to end.
 test fn a_group_that_fits_goes_back_on_one_line() -> Result<Unit, Error> {
   let broken = "fn f() \{\n  g(\n    1,\n    2,\n  )\n\}\n"
-  let held = tokens(broken)
+  let held = lex(broken)
   assertEqual(
-    print(broken, held, parseTokens(broken, held)),
+    print(broken, held, parseTokens(broken, held.tokens)),
     "fn f() \{\n  g(1, 2)\n\}\n",
   )?
   // A generic list folds too, which is the `<` case `cove fmt` settles by
   // width rather than by structure.
   let params = "fn f(\n  a: Int,\n  b: Int,\n) -> Int \{\n  a\n\}\n"
-  let heldParams = tokens(params)
+  let heldParams = lex(params)
   assertEqual(
-    print(params, heldParams, parseTokens(params, heldParams)),
+    print(params, heldParams, parseTokens(params, heldParams.tokens)),
     "fn f(a: Int, b: Int) -> Int \{\n  a\n\}\n",
   )?
   Ok(())
@@ -528,8 +528,8 @@ test fn a_body_never_folds() -> Result<Unit, Error> {
 test fn a_group_that_does_not_fit_is_broken() -> Result<Unit, Error> {
   let long = "\n".join(["fn f() -> Int \{", "  someFunction(aLongArgument, anotherLongArgument, aThirdOne, andYetMoreHereTools)", "\}", ""])
   let want = "\n".join(["fn f() -> Int \{", "  someFunction(", "    aLongArgument,", "    anotherLongArgument,", "    aThirdOne,", "    andYetMoreHereTools,", "  )", "\}", ""])
-  let held = tokens(long)
-  assertEqual(print(long, held, parseTokens(long, held)), want)?
+  let held = lex(long)
+  assertEqual(print(long, held, parseTokens(long, held.tokens)), want)?
   Ok(())
 }
 
@@ -576,8 +576,8 @@ test fn a_break_that_buys_nothing_is_not_made() -> Result<Unit, Error> {
 test fn a_match_arm_and_a_generic_comma() -> Result<Unit, Error> {
   let flat = "\n".join(["export fn isEmpty<K, V>(entries: Map<K, V>) -> Bool \{ entries.length() == 0 \}", "", "fn step(at: Int, c: Option<Int>) -> Int \{", "  match c \{", "    Some(n) => n", "    None => \{ at + 1 \}", "  \}", "\}", ""])
   let want = "\n".join(["export fn isEmpty<K, V>(entries: Map<K, V>) -> Bool \{", "  entries.length() == 0", "\}", "", "fn step(at: Int, c: Option<Int>) -> Int \{", "  match c \{", "    Some(n) => n", "    None => \{", "      at + 1", "    \}", "  \}", "\}", ""])
-  let held = tokens(flat)
-  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  let held = lex(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held.tokens)), want)?
   Ok(())
 }
 
@@ -598,8 +598,8 @@ test fn a_match_arm_and_a_generic_comma() -> Result<Unit, Error> {
 test fn an_expression_breaks_at_its_operator() -> Result<Unit, Error> {
   let flat = "\n".join(["fn f(a: Int, b: Int, c: Int, d: Int) -> Bool \{", "  if aVeryLongCondition(a, b) && anotherLongCondition(c, d) && aThirdOneHere(a, c) \{", "    return true", "  \}", "  false", "\}", ""])
   let want = "\n".join(["fn f(a: Int, b: Int, c: Int, d: Int) -> Bool \{", "  if aVeryLongCondition(a, b) && anotherLongCondition(c, d) &&", "    aThirdOneHere(a, c) \{", "    return true", "  \}", "  false", "\}", ""])
-  let held = tokens(flat)
-  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  let held = lex(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held.tokens)), want)?
   // One column narrower and `cove fmt` leaves it, so this one must too.
   let fits = "\n".join(["fn f(a: Int, b: Int, c: Int, d: Int) -> Bool \{", "  if aVeryLongCondition(a, b) && anotherLongCondition(c, d) && aThirdOne(a, c) \{", "    return true", "  \}", "  false", "\}", ""])
   assert(roundTrips(fits))?
@@ -623,8 +623,8 @@ test fn an_expression_breaks_at_its_operator() -> Result<Unit, Error> {
 test fn a_continuation_nests_inside_a_continuation() -> Result<Unit, Error> {
   let flat = "\n".join(["fn f(a: Int, b: Int, c: Int, d: Int) -> Bool \{", "  aReasonablyLongName(a) && anotherReasonablyLong(b) + aThirdReasonableName(c) < yetAnotherLongName(d) + oneMoreLongName(a)", "\}", ""])
   let want = "\n".join(["fn f(a: Int, b: Int, c: Int, d: Int) -> Bool \{", "  aReasonablyLongName(a) &&", "    anotherReasonablyLong(b) + aThirdReasonableName(c) <", "      yetAnotherLongName(d) + oneMoreLongName(a)", "\}", ""])
-  let held = tokens(flat)
-  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  let held = lex(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held.tokens)), want)?
   // And the form it reaches is a form it leaves alone.
   assert(roundTrips(want))?
   Ok(())
@@ -640,8 +640,8 @@ test fn a_continuation_nests_inside_a_continuation() -> Result<Unit, Error> {
 test fn a_chain_breaks_before_its_dots() -> Result<Unit, Error> {
   let flat = "\n".join(["fn f() -> Int \{", "  assertEqual(", "    judge(checking(None, Some(\"stack trace\"), None), answering(\"a stack trace\")).detail(),", "    \"the body contains `stack trace`\",", "  )?", "\}", ""])
   let want = "\n".join(["fn f() -> Int \{", "  assertEqual(", "    judge(checking(None, Some(\"stack trace\"), None), answering(\"a stack trace\"))", "      .detail(),", "    \"the body contains `stack trace`\",", "  )?", "\}", ""])
-  let held = tokens(flat)
-  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  let held = lex(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held.tokens)), want)?
   Ok(())
 }
 
@@ -659,8 +659,8 @@ test fn a_chain_breaks_before_its_dots() -> Result<Unit, Error> {
 test fn a_comparison_is_not_an_assignment() -> Result<Unit, Error> {
   let flat = "\n".join(["fn f() -> Int \{", "  var total = 0", "  var i = 0", "  while i < 10 \{", "    if i % 7 == 0 \{ total += 1 \}", "    i += 1", "  \}", "  total", "\}", ""])
   let want = "\n".join(["fn f() -> Int \{", "  var total = 0", "  var i = 0", "  while i < 10 \{", "    if i % 7 == 0 \{", "      total += 1", "    \}", "    i += 1", "  \}", "  total", "\}", ""])
-  let held = tokens(flat)
-  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  let held = lex(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held.tokens)), want)?
   Ok(())
 }
 
@@ -682,15 +682,15 @@ test fn a_comparison_is_not_an_assignment() -> Result<Unit, Error> {
 /// Both answers were read off `cove fmt` by running it.
 test fn a_modifier_does_not_hide_the_declaration() -> Result<Unit, Error> {
   let flat = "export fn greeting(name: String) -> String \{ \"Hello, \{name\}!\" \}\n"
-  let held = tokens(flat)
+  let held = lex(flat)
   assertEqual(
-    print(flat, held, parseTokens(flat, held)),
+    print(flat, held, parseTokens(flat, held.tokens)),
     "export fn greeting(name: String) -> String \{\n  \"Hello, \{name\}!\"\n\}\n",
   )?
   let nested = "fn classify(n: Int) -> String \{ if n < 0 \{ \"neg\" \} else \{ \"pos\" \} \}\n"
-  let heldNested = tokens(nested)
+  let heldNested = lex(nested)
   assertEqual(
-    print(nested, heldNested, parseTokens(nested, heldNested)),
+    print(nested, heldNested, parseTokens(nested, heldNested.tokens)),
     "\n".join(["fn classify(n: Int) -> String \{", "  if n < 0 \{", "    \"neg\"", "  \} else \{", "    \"pos\"", "  \}", "\}", ""]),
   )?
   Ok(())
@@ -710,16 +710,16 @@ test fn a_modifier_does_not_hide_the_declaration() -> Result<Unit, Error> {
 /// keeps its line, checked by running it.
 test fn a_declaration_body_is_written_broken() -> Result<Unit, Error> {
   let flat = "fn sum(a: Int) -> Int \{ a + 1 \}\n"
-  let held = tokens(flat)
+  let held = lex(flat)
   assertEqual(
-    print(flat, held, parseTokens(flat, held)),
+    print(flat, held, parseTokens(flat, held.tokens)),
     "fn sum(a: Int) -> Int \{\n  a + 1\n\}\n",
   )?
   // A control flow body too, and at the depth it is written at.
   let nested = "fn f(x: Int) -> Int \{\n  if x > 0 \{ 1 \} else \{ 2 \}\n\}\n"
-  let heldNested = tokens(nested)
+  let heldNested = lex(nested)
   assertEqual(
-    print(nested, heldNested, parseTokens(nested, heldNested)),
+    print(nested, heldNested, parseTokens(nested, heldNested.tokens)),
     "fn f(x: Int) -> Int \{\n  if x > 0 \{\n    1\n  \} else \{\n    2\n  \}\n\}\n",
   )?
   // A trailing closure of one statement keeps its line.
@@ -763,8 +763,8 @@ test fn a_hug_inside_a_hug() -> Result<Unit, Error> {
 test fn a_control_flow_body_always_breaks() -> Result<Unit, Error> {
   let source = "\n".join(["fn f(world: World) -> Array<Patch> \{", "  var found = Vector.of()", "  for heading in headings() \{", "    found.push(Patch(heading: heading, food: if outside \{", "      0", "    \} else \{", "      foodAt(world)", "    \}, occupied: seen))", "  \}", "  found.freeze()", "\}", ""])
   let want = "\n".join(["fn f(world: World) -> Array<Patch> \{", "  var found = Vector.of()", "  for heading in headings() \{", "    found.push(Patch(", "      heading: heading,", "      food: if outside \{", "        0", "      \} else \{", "        foodAt(world)", "      \},", "      occupied: seen,", "    ))", "  \}", "  found.freeze()", "\}", ""])
-  let held = tokens(source)
-  assertEqual(print(source, held, parseTokens(source, held)), want)?
+  let held = lex(source)
+  assertEqual(print(source, held, parseTokens(source, held.tokens)), want)?
   Ok(())
 }
 
@@ -806,8 +806,8 @@ test fn a_call_reserves_only_a_trailing_closure() -> Result<Unit, Error> {
 test fn an_empty_parameter_list_still_breaks() -> Result<Unit, Error> {
   let flat = "\n".join(["test fn writesADecimalsPlacesInCsvAndItsValueInJsonLines() -> Result<Unit, Error> \{", "  Ok(())", "\}", ""])
   let want = "\n".join(["test fn writesADecimalsPlacesInCsvAndItsValueInJsonLines(", ") -> Result<Unit, Error> \{", "  Ok(())", "\}", ""])
-  let held = tokens(flat)
-  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  let held = lex(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held.tokens)), want)?
   Ok(())
 }
 
@@ -835,8 +835,8 @@ test fn an_empty_parameter_list_still_breaks() -> Result<Unit, Error> {
 test fn a_member_of_a_broken_group_breaks_too() -> Result<Unit, Error> {
   let flat = "\n".join(["fn f() -> Int \{", "  let x = [someVeryLongFunctionCallHere(aaaaaaaaaa, bbbbbbbbbb, cccccccccc, dddddddddddddd)]", "\}", ""])
   let want = "\n".join(["fn f() -> Int \{", "  let x = [", "    someVeryLongFunctionCallHere(", "      aaaaaaaaaa,", "      bbbbbbbbbb,", "      cccccccccc,", "      dddddddddddddd,", "    ),", "  ]", "\}", ""])
-  let held = tokens(flat)
-  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  let held = lex(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held.tokens)), want)?
   Ok(())
 }
 
@@ -856,8 +856,8 @@ test fn a_member_of_a_broken_group_breaks_too() -> Result<Unit, Error> {
 test fn a_comma_inside_angles_stays_in_its_member() -> Result<Unit, Error> {
   let flat = "\n".join(["fn wrap(result: Result<T, E>, label: String, fallback: Int, verbose: Bool) -> Int \{", "  1", "\}", ""])
   let want = "\n".join(["fn wrap(", "  result: Result<T, E>,", "  label: String,", "  fallback: Int,", "  verbose: Bool,", ") -> Int \{", "  1", "\}", ""])
-  let held = tokens(flat)
-  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  let held = lex(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held.tokens)), want)?
   Ok(())
 }
 
@@ -883,8 +883,8 @@ test fn an_array_that_does_not_fit_breaks() -> Result<Unit, Error> {
     "\}",
     "",
   ])
-  let held = tokens(flat)
-  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  let held = lex(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held.tokens)), want)?
   Ok(())
 }
 
@@ -905,8 +905,8 @@ test fn an_array_that_does_not_fit_breaks() -> Result<Unit, Error> {
 test fn a_call_writes_the_hugged_form() -> Result<Unit, Error> {
   let flat = "\n".join(["fn f() -> Int \{", "  self.routes.push(http.Route(method: http.Method.Get, path: path, handler: handler))", "\}", ""])
   let want = "\n".join(["fn f() -> Int \{", "  self.routes.push(http.Route(", "    method: http.Method.Get,", "    path: path,", "    handler: handler,", "  ))", "\}", ""])
-  let held = tokens(flat)
-  assertEqual(print(flat, held, parseTokens(flat, held)), want)?
+  let held = lex(flat)
+  assertEqual(print(flat, held, parseTokens(flat, held.tokens)), want)?
   Ok(())
 }
 
@@ -950,11 +950,11 @@ test fn a_trailing_closure_of_one_statement_keeps_its_line(
 test fn a_call_hugs_a_last_argument_that_expands() -> Result<Unit, Error> {
   let flat = "\n".join(["fn f(tasks: Int) -> Int \{", "  spawnSomething(firstArgument, fn(value) \{ value * 2 + someMoreHereToo \})", "\}", ""])
   let want = "\n".join(["fn f(tasks: Int) -> Int \{", "  spawnSomething(firstArgument, fn(value) \{", "    value * 2 + someMoreHereToo", "  \})", "\}", ""])
-  let heldFlat = tokens(flat)
-  assertEqual(print(flat, heldFlat, parseTokens(flat, heldFlat)), want)?
+  let heldFlat = lex(flat)
+  assertEqual(print(flat, heldFlat, parseTokens(flat, heldFlat.tokens)), want)?
   // Without a huggable last argument the same width does break.
   let plain = "\n".join(["fn f() -> Int \{", "  someFunction(aLongArgument, anotherLongArgument, aThirdOne, andYetMoreHereTools)", "\}", ""])
-  let held = tokens(plain)
-  assert(print(plain, held, parseTokens(plain, held)) != plain)?
+  let held = lex(plain)
+  assert(print(plain, held, parseTokens(plain, held.tokens)) != plain)?
   Ok(())
 }
