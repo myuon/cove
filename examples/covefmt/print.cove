@@ -36,19 +36,23 @@ use std.stringbuilder.StringBuilder
 /// formatter's whole output is one append after another. Cove has no string
 /// builder, and a `Vector<String>` joined once is the shape of one.
 /// The text a tree prints as.
-export fn print(source: String, held: Array<Token>, tree: Tree) -> String {
+export fn print(source: String, held: Lexed, tree: Tree) -> String {
   var out = Vector.of()
   // `-1` is "nothing has been written", which is what makes a blank at the
   // very top of a file fall under the same rule as a blank at the top of a
   // block: both open on nothing.
-  emit(source, held, tree, -1, 0, -1, var out)
+  emit(source, held.tokens, tree, -1, 0, -1, var out)
   let text = "".join(out.freeze())
   // The alignment pass lexes its own output, which is the price of not
   // lining up on a `//` inside a string. It is only owed when there is a
   // trailing comment to line up, and whether there is one is already
   // readable here: this printer never moves a comment from its line, so a
   // source with none produces an output with none.
-  if !holdsATrailingComment(source, held) {
+  //
+  // The lexer noticed it on the way past. Asking it here instead was a walk
+  // of every token of every file for an answer that is *yes* on two files of
+  // 248 — 6.30% of this phase's instructions (#398).
+  if !held.trailing {
     return text
   }
   aligned(text)
@@ -75,7 +79,7 @@ export fn print(source: String, held: Array<Token>, tree: Tree) -> String {
 /// and almost none carry a trailing comment, so what is collected is the three
 /// offsets each of those few needs.
 fn aligned(text: String) -> String {
-  let held = tokens(text)
+  let held = lex(text).tokens
   // For each line that carries one: where the line begins, where its code
   // ends, and where its comment begins.
   var opens = Vector.of<Int>()
@@ -402,9 +406,9 @@ fn emit(
   var i = 0
   // The operators whose right operands this node is currently inside, and the
   // depth each of them broke at. Only ever used by a node holding a run of
-  // leaves, which is the only place a continuation can happen.
-  var opened: Vector<Int> = Vector.of()
-  var nested: Vector<Int> = Vector.of()
+  // leaves, which is the only place a continuation can happen — so it is
+  // `None`, a tag word and no allocation, until one happens.
+  var stack: Option<Vector<Continuation>> = None
   // Where this node starts, read before anything of it is written. The
   // question a trailing closure's body asks is whether the *expression* fit,
   // and `expr` asks that before `arg_list` has broken anything — by the time
@@ -413,26 +417,23 @@ fn emit(
   // only on because the arguments above it broke.
   let began = col
   // Where this node's run of leaves must break, and at what depth. Empty for
-  // everything that already fits, which is almost everything.
-  var marks = Vector.of<Int>()
-  var levels = Vector.of<Int>()
+  // everything that already fits, which is almost everything — so "empty" is
+  // `None` here and not a vector allocated to hold nothing. Four of those a
+  // node, over a corpus, was 108,248 allocations and 216,496 words for 362
+  // pushes in the whole phase (#398).
+  var marks: Option<Vector<Mark>> = None
   // A node with no operator of its own has nothing to plan, and that is
   // almost every node. The width is measured only for the few that could.
   let span = expressionEnds(held, tree, tree.from)
   if continuing(tree.kind) && overflows(source, held, tree.from, span, began) &&
     loosestIn(source, held, tree.from, span) > 0 &&
     !holdsABrokenGroup(source, held, tree) {
-    planBreaks(
-      source,
-      held,
-      tree.from,
-      span,
-      began,
-      depth,
-      var marks,
-      var levels,
-    )
+    planBreaks(source, held, tree.from, span, began, depth, var marks)
   }
+  // Read once. The plan is made before any child of this node is written and
+  // does not change while they are, so asking whether there is one is a
+  // question about the node and not about each of its children.
+  let plans = markCount(marks) > 0
   while i < count {
     match children.get(i) {
       Some(child) => {
@@ -501,14 +502,10 @@ fn emit(
           //
           // `planned` is that recursion, run once over this node's run of
           // leaves before any of it is written.
-          let planned = if marks.length() == 0 {
+          let planned = if !plans {
             -1
           } else {
-            levelPlanned(
-              marks,
-              levels,
-              nextSignificant(held, child.to, tree.to),
-            )
+            levelPlanned(marks, nextSignificant(held, child.to, tree.to))
           }
           let makes = begun && i + 1 < count && isARunOfSpace(held, child) &&
             !breaksLine(source, held, child) && planned >= 0
@@ -530,19 +527,17 @@ fn emit(
               held,
               previousSignificant(held, child.from),
             )
-            while opened.length() > 0 && topOf(opened) >= binds {
-              opened.pop()
-              nested.pop()
+            while openCount(stack) > 0 && innermost(stack).binds >= binds {
+              stack = closing(stack)
             }
             at = if makes {
               planned
-            } else if nested.length() > 0 {
-              topOf(nested) + 1
+            } else if openCount(stack) > 0 {
+              innermost(stack).at + 1
             } else {
               depth + 1
             }
-            opened.push(binds)
-            nested.push(at)
+            stack = opening(stack, Continuation(binds: binds, at: at))
             if makes {
               // The run of space is what the line break replaces, and what
               // follows it is a new segment: the operand written there is
@@ -572,8 +567,8 @@ fn emit(
         // `if_expr` hands `block` the indent it was given and not the one the
         // condition ended at.
         if child.kind != Node.Body && indenting(child.kind) &&
-          nested.length() > 0 {
-          at = topOf(nested)
+          openCount(stack) > 0 {
+          at = innermost(stack).at
         }
         // A body that must break and was written on one line is the one
         // place this printer puts a newline where the source has none. Every
@@ -617,8 +612,8 @@ fn emit(
 
 /// Whether printing the tree of `source` gives `source` back.
 export fn roundTrips(source: String) -> Bool {
-  let held = tokens(source)
-  print(source, held, parse(source)) == source
+  let held = lex(source)
+  print(source, held, parseTokens(source, held.tokens)) == source
 }
 
 /// A run of space, with the blanks a line ends on taken out.
@@ -1884,11 +1879,69 @@ fn hasAMember(tree: Tree) -> Bool {
   false
 }
 
-/// The top of a stack of depths, which is never asked of an empty one.
-fn topOf(stack: Vector<Int>) -> Int {
-  match stack.get(stack.length() - 1) {
-    Some(top) => top
+/// One operator a continuation is inside: how tightly it binds, and the
+/// depth the line it broke was written at.
+///
+/// The two used to be two `Vector<Int>`s pushed in lockstep. One vector of
+/// pairs is the same stack, says in its field names what each number is, and
+/// is one allocation rather than two on the rare node that opens one.
+struct Continuation {
+  binds: Int
+  at: Int
+}
+
+/// How many continuations are open.
+///
+/// `None` is not an empty stack, it is the absence of one — and it is what
+/// almost every node has, because a continuation needs a line break in the
+/// middle of a run of leaves and most nodes fit. Asking the count through
+/// here is what lets the vector be built only by [`opening`].
+fn openCount(stack: Option<Vector<Continuation>>) -> Int {
+  match stack {
+    Some(open) => open.length()
     None => 0
+  }
+}
+
+/// The innermost open continuation, which is never asked of a stack with
+/// none.
+fn innermost(stack: Option<Vector<Continuation>>) -> Continuation {
+  match stack {
+    Some(open) => match open.get(open.length() - 1) {
+      Some(top) => top
+      None => Continuation(binds: 0, at: 0)
+    }
+    None => Continuation(binds: 0, at: 0)
+  }
+}
+
+/// The stack with one more continuation on it, made where there was none.
+fn opening(
+  stack: Option<Vector<Continuation>>,
+  next: Continuation,
+) -> Option<Vector<Continuation>> {
+  match stack {
+    Some(open) => {
+      var open = open
+      open.push(next)
+      Some(open)
+    }
+    None => Some(Vector.of(next))
+  }
+}
+
+/// The stack with its innermost continuation closed. A stack that was never
+/// opened has nothing to close.
+fn closing(
+  stack: Option<Vector<Continuation>>,
+) -> Option<Vector<Continuation>> {
+  match stack {
+    Some(open) => {
+      var open = open
+      open.pop()
+      Some(open)
+    }
+    None => None
   }
 }
 
@@ -2482,23 +2535,65 @@ fn loosestIn(source: String, held: Array<Token>, from: Int, to: Int) -> Int {
   loosest
 }
 
-/// The depth a token is planned to begin a line at, or `-1`.
-fn levelPlanned(marks: Vector<Int>, levels: Vector<Int>, at: Int) -> Int {
-  var i = 0
-  while i < marks.length() {
-    if marks.get(i) == Some(at) {
-      return match levels.get(i) {
-        Some(level) => level
-        None => -1
-      }
-    }
-    i = i + 1
-  }
-  -1
+/// One break a run of leaves has to take: the token that must begin a line,
+/// and the depth it begins it at.
+///
+/// A pair rather than two `Vector<Int>`s pushed together, for the reason
+/// [`Continuation`] is one: the plan is one allocation instead of two, and
+/// nothing has to keep two lists the same length.
+struct Mark {
+  at: Int
+  level: Int
 }
 
-/// Where the leaves in `[from, to)` have to break, written into `marks` and
-/// `levels`.
+/// How many breaks a plan holds.
+///
+/// `None` is "this node has no plan", which is what every node that already
+/// fits has — and there are 27,000 of those to a corpus against a few
+/// hundred breaks, so the plan is not built until [`noting`] has something
+/// to put in it.
+fn markCount(marks: Option<Vector<Mark>>) -> Int {
+  match marks {
+    Some(held) => held.length()
+    None => 0
+  }
+}
+
+/// The plan with one more break in it, made where there was none.
+fn noting(marks: Option<Vector<Mark>>, mark: Mark) -> Option<Vector<Mark>> {
+  match marks {
+    Some(held) => {
+      var held = held
+      held.push(mark)
+      Some(held)
+    }
+    None => Some(Vector.of(mark))
+  }
+}
+
+/// The depth a token is planned to begin a line at, or `-1`.
+fn levelPlanned(marks: Option<Vector<Mark>>, at: Int) -> Int {
+  match marks {
+    Some(held) => {
+      var i = 0
+      while i < held.length() {
+        match held.get(i) {
+          Some(mark) => {
+            if mark.at == at {
+              return mark.level
+            }
+          }
+          None => { }
+        }
+        i = i + 1
+      }
+      -1
+    }
+    None => -1
+  }
+}
+
+/// Where the leaves in `[from, to)` have to break, noted into `marks`.
 ///
 /// `binary`, unrolled. The expression is split at its top operator — the
 /// **last** of the loosest, because the language associates to the left — and
@@ -2508,7 +2603,9 @@ fn levelPlanned(marks: Vector<Int>, levels: Vector<Int>, at: Int) -> Int {
 ///
 /// It is only ever called for a run of leaves that does not fit, which is why
 /// a list of the few positions it finds costs less than a mark for every
-/// token in the file.
+/// token in the file. It is called for a few thousand nodes of a corpus and
+/// notes a few hundred breaks, so `marks` is `None` on the way in and stays
+/// that way unless one is found.
 fn planBreaks(
   source: String,
   held: Array<Token>,
@@ -2516,8 +2613,7 @@ fn planBreaks(
   to: Int,
   col: Int,
   level: Int,
-  var marks: Vector<Int>,
-  var levels: Vector<Int>,
+  var marks: Option<Vector<Mark>>,
 ) {
   if col + widthBetween(source, held, from, to) <= maxWidth() {
     return
@@ -2532,32 +2628,22 @@ fn planBreaks(
   let lhsEnd = op + 1
   // The left half is asked without the operator in it. Left in, the search
   // finds the same operator again and the recursion never ends.
-  planBreaks(source, held, from, op, col, level, var marks, var levels)
+  planBreaks(source, held, from, op, col, level, var marks)
   let rhs = nextSignificant(held, lhsEnd, to)
   if rhs < 0 {
     return
   }
-  let after = columnAfter(source, held, from, lhsEnd, col, level, marks, levels)
+  let after = columnAfter(source, held, from, lhsEnd, col, level, marks)
   // The operand, and not the run of space behind it that the *next* operator
   // stands on. `binary` writes that operator after the operand without asking
   // anything, which is how `cove fmt` comes to leave an 83-column line: the
   // fit it checked was the 80 in front of it.
   let operand = lastSignificantIn(held, rhs, to)
   if after + 1 + widthBetween(source, held, rhs, operand) > maxWidth() {
-    marks.push(rhs)
-    levels.push(level + 1)
-    planBreaks(
-      source,
-      held,
-      rhs,
-      to,
-      (level + 1) * 2,
-      level + 1,
-      var marks,
-      var levels,
-    )
+    marks = noting(marks, Mark(at: rhs, level: level + 1))
+    planBreaks(source, held, rhs, to, (level + 1) * 2, level + 1, var marks)
   } else {
-    planBreaks(source, held, rhs, to, after + 1, level, var marks, var levels)
+    planBreaks(source, held, rhs, to, after + 1, level, var marks)
   }
 }
 
@@ -2578,13 +2664,12 @@ fn columnAfter(
   to: Int,
   col: Int,
   level: Int,
-  marks: Vector<Int>,
-  levels: Vector<Int>,
+  marks: Option<Vector<Mark>>,
 ) -> Int {
   var c = col
   var i = from
   while i < to {
-    let planned = levelPlanned(marks, levels, i)
+    let planned = levelPlanned(marks, i)
     if planned >= 0 {
       c = planned * 2
     }
@@ -2954,29 +3039,4 @@ fn lastSignificantIn(held: Array<Token>, from: Int, to: Int) -> Int {
     at = at - 1
   }
   from
-}
-
-/// Whether any comment in `held` has something of its line in front of it.
-fn holdsATrailingComment(source: String, held: Array<Token>) -> Bool {
-  var open = false
-  var i = 0
-  while i < held.length() {
-    match held.get(i) {
-      Some(token) => {
-        if token.kind == Kind.Space {
-          if endsLine(source, token) {
-            open = false
-          }
-        } else {
-          if open && isAComment(token) {
-            return true
-          }
-          open = true
-        }
-      }
-      None => { }
-    }
-    i = i + 1
-  }
-  false
 }

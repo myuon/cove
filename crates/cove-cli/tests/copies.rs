@@ -618,13 +618,36 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// four copies here against 97,212 calls that are no longer made at all in
 /// `covefmt`'s print phase.
 ///
+/// **The twenty-fourth rise is the formatter building a vector only when it has
+/// something to put in it.** 2394 to 2400, and `examples:covefmtBench` is the
+/// only row that moves: 60 after a producer and 119 before a `return` become
+/// 64 and 121. `examples/covefmt`'s `emit` used to open four `Vector.of()` for
+/// every node it descended into and push into 362 of them over a whole corpus
+/// (#398); it now holds two `Option<Vector<…>>` that begin at `None`, and the
+/// six small functions that read and extend them each answer through the
+/// location their caller named — which is the copy into a `return`'s answer
+/// this counts. It buys 108,240 allocations and 216,936 words off the print
+/// phase and 8.5% of its wall time, and the six are static: none of them is
+/// inside a loop, and a program that runs the corpus makes at most a few
+/// hundred of the calls that carry them.
+///
+/// **The twenty-fifth rise is the formatter's lexer answering one more
+/// question.** 2400 to 2405, and `examples:covefmtBench` is again the only row
+/// that moves: 64 and 121 become 67 and 123. `examples/covefmt`'s `tokens` is
+/// now `lex` and answers a `Lexed` — the runs, and whether any comment in the
+/// file is trailing — so a call that used to hand back a one-word `Array`
+/// hands back a struct built beside the `return` and read through a field at
+/// each of its callers. It removes a walk of every token of every file that
+/// was **6.30% of the print phase's instructions** (#398): 3.47 M instructions
+/// and 248 calls off print for 0.70 M onto lex, and 2.77 M off the run.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2394;
+const FORWARDABLE_COPIES: usize = 2405;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

@@ -62,23 +62,23 @@ export fn main() -> Result<Unit, Error> {
   let lexFrom = now()
   var counted = 0
   for source in sources {
-    counted = counted + tokens(source).length()
+    counted = counted + lex(source).tokens.length()
   }
   let lexTo = now()
 
   let parseFrom = now()
   var nodes = 0
   for source in sources {
-    nodes = nodes + parseTokens(source, tokens(source)).children.length()
+    nodes = nodes + parseTokens(source, lex(source).tokens).children.length()
   }
   let parseTo = now()
 
   let wholeFrom = now()
   var written = 0
   for source in sources {
-    let held = tokens(source)
+    let held = lex(source)
     written = written +
-      print(source, held, parseTokens(source, held)).byteLength()
+      print(source, held, parseTokens(source, held.tokens)).byteLength()
   }
   let wholeTo = now()
 
@@ -102,12 +102,12 @@ export fn main() -> Result<Unit, Error> {
   var broken = 0
   var uncovered = 0
   for source in sources {
-    let held = tokens(source)
-    let tree = parseTokens(source, held)
+    let held = lex(source)
+    let tree = parseTokens(source, held.tokens)
     if print(source, held, tree) != source {
       broken = broken + 1
     }
-    if !covers(tree, 0, held.length()) {
+    if !covers(tree, 0, held.tokens.length()) {
       uncovered = uncovered + 1
     }
   }
@@ -140,8 +140,8 @@ export fn main() -> Result<Unit, Error> {
   var at = 0
   for source in sources {
     let flat = deindented(source)
-    let held = tokens(flat)
-    if print(flat, held, parseTokens(flat, held)) == source {
+    let held = lex(flat)
+    if print(flat, held, parseTokens(flat, held.tokens)) == source {
       restored = restored + 1
     } else {
       match paths.get(at) {
@@ -169,8 +169,8 @@ export fn main() -> Result<Unit, Error> {
   var where = 0
   for source in sources {
     let joined = joinedUp(source)
-    let held = tokens(joined)
-    if print(joined, held, parseTokens(joined, held)) == source {
+    let held = lex(joined)
+    if print(joined, held, parseTokens(joined, held.tokens)) == source {
       rebroken = rebroken + 1
     } else {
       match paths.get(where) {
@@ -195,8 +195,8 @@ export fn main() -> Result<Unit, Error> {
   var reopened = 0
   for source in sources {
     let closed = closedUp(source)
-    let held = tokens(closed)
-    if print(closed, held, parseTokens(closed, held)) == source {
+    let held = lex(closed)
+    if print(closed, held, parseTokens(closed, held.tokens)) == source {
       reopened = reopened + 1
     }
   }
@@ -213,8 +213,8 @@ export fn main() -> Result<Unit, Error> {
   var respaced = 0
   for source in sources {
     let wide = spacedOut(source)
-    let held = tokens(wide)
-    if print(wide, held, parseTokens(wide, held)) == source {
+    let held = lex(wide)
+    if print(wide, held, parseTokens(wide, held.tokens)) == source {
       respaced = respaced + 1
     }
   }
@@ -343,7 +343,7 @@ fn mustReBreak() -> Int {
 /// breaking rules this is here to measure, and the number would say something
 /// other than what it claims.
 fn joinedUp(source: String) -> String {
-  let held = tokens(source)
+  let held = lex(source).tokens
   var out = Vector.of<String>()
   var open = Vector.of<Int>()
   var i = 0
@@ -512,7 +512,7 @@ fn mustReOpen() -> Int {
 /// The tree is asked rather than the brackets counted, because "one
 /// statement" is not something a bracket stack knows.
 fn closedUp(source: String) -> String {
-  let held = tokens(source)
+  let held = lex(source).tokens
   let alone = insideABodyOfOne(source, held)
   var out = Vector.of<String>()
   var i = 0
@@ -552,7 +552,7 @@ fn insideALiteral(source: String) -> Vector<Bool> {
     marked.push(false)
     i = i + 1
   }
-  for token in tokens(source) {
+  for token in lex(source).tokens {
     if token.kind == Kind.Str || token.kind == Kind.Char {
       var at = token.from + 1
       while at < token.to {
@@ -582,7 +582,7 @@ fn mustReSpace() -> Int {
 /// is safe for every pair there is, and a formatter that decides the space
 /// between two tokens puts back exactly one.
 fn spacedOut(source: String) -> String {
-  let held = tokens(source)
+  let held = lex(source).tokens
   var out = Vector.of<String>()
   for token in held {
     match source.sliceBytes(token.from, token.to) {

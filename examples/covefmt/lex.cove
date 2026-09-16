@@ -63,11 +63,69 @@ fn isOperatorByte(c: Int) -> Bool {
     c == ']'
 }
 
-/// Cuts `source` into tokens that tile it.
-export fn tokens(source: String) -> Array<Token> {
+/// What one pass over a source produces: the runs it tiles into, and the one
+/// thing about them a formatter would otherwise go back and scan for.
+///
+/// There is exactly one field beside the tokens, and it is here rather than
+/// in the printer because it is free here and it is not free there. Deciding
+/// whether the alignment pass is owed means asking whether any comment in the
+/// file has something of its line in front of it; asked as a walk of its own
+/// it was **6.30% of the print phase's instructions for 248 answers** (#398),
+/// and the answer is *yes* on two files of the 248. Asked while the tokens
+/// are being cut it is a comparison a token, and a look at the run of space
+/// in front of a comment — which is the only place the question can be
+/// answered without a walk.
+export struct Lexed {
+  /// The runs the source is cut into, which tile it.
+  tokens: Array<Token>
+  /// Whether any comment has something of its line in front of it.
+  trailing: Bool
+}
+
+/// Whether a comment beginning here has something of its line in front of it.
+///
+/// Asked where a comment is cut and nowhere else, which is the whole of what
+/// makes [`Lexed`]'s second field free. `open` says something already stands
+/// on this line; the run of space directly in front of the comment is the only
+/// thing that can have ended the line since, so it is the only run ever
+/// looked at — and a formatted file's runs hold their newline at the first
+/// byte or not at all.
+fn trails(
+  source: String,
+  open: Bool,
+  afterSpace: Bool,
+  from: Int,
+  to: Int,
+) -> Bool {
+  if !open {
+    return false
+  }
+  if !afterSpace {
+    return true
+  }
+  !endsLine(source, Token(kind: Kind.Space, from: from, to: to))
+}
+
+/// Cuts `source` into tokens that tile it, noticing on the way past whether
+/// any comment in it has something of its line in front of it.
+export fn lex(source: String) -> Lexed {
   let scan = Scan(source: source, size: source.byteLength())
   var out = Vector.of()
   var at = 0
+  // What [`trails`] is asked about: whether anything of the line the cursor is
+  // on already stands in front of it, and where the run of space it stands
+  // directly behind began and ended.
+  //
+  // `open` is never cleared by a newline, and it does not need to be, because
+  // only a comment ever reads it and a comment behind a run of space asks the
+  // run instead. Keeping these three costs two stores a token; the walk this
+  // replaces read every token of every file to answer the same question 248
+  // times.
+  var open = false
+  var afterSpace = false
+  var spaceFrom = 0
+  var spaceTo = 0
+  var trailing = false
   while at < scan.size {
     let c = scan.at(at)
     var kind = Kind.Unknown
@@ -93,9 +151,15 @@ export fn tokens(source: String) -> Array<Token> {
         kind = Kind.DocComment
       }
       to = scan.line(at)
+      if !trailing {
+        trailing = trails(source, open, afterSpace, spaceFrom, spaceTo)
+      }
     } else if c == '/' && scan.at(at + 1) == '*' {
       kind = Kind.BlockComment
       to = scan.block(at)
+      if !trailing {
+        trailing = trails(source, open, afterSpace, spaceFrom, spaceTo)
+      }
     } else {
       let width = operatorWidth(c, scan.at(at + 1), scan.at(at + 2))
       if width > 0 {
@@ -105,10 +169,18 @@ export fn tokens(source: String) -> Array<Token> {
         to = at + utf8Width(c)
       }
     }
+    if kind == Kind.Space {
+      spaceFrom = at
+      spaceTo = to
+      afterSpace = true
+    } else {
+      open = true
+      afterSpace = false
+    }
     out.push(Token(kind: kind, from: at, to: to))
     at = to
   }
-  out.freeze()
+  Lexed(tokens: out.freeze(), trailing: trailing)
 }
 
 /// Whether `held` tiles `source`.
