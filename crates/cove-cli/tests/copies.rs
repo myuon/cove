@@ -607,13 +607,24 @@ fn survey() -> (Counts, Vec<(String, Counts)>) {
 /// `coll_set`, `fail_invalid_map_key`, `fail_key_duplicate_map` and
 /// `fail_key_duplicate_set` +1 each.
 ///
+/// **The twenty-third rise is `lower::inline`'s frame budget.** 2390 to 2394,
+/// all four of them in the `prod` column and in two programs:
+/// `examples:covecheck` +2 and `examples:covefmtBench` +2. `FRAME_BUDGET` went
+/// from 96 to 160 (#398), so a caller absorbs more leaves, and every `Return`
+/// an expansion replaces becomes a copy of the answer into the call's
+/// destination. Where the body assembled that answer with a producer, the
+/// copy stands after one — which is a copy the call did not make, because a
+/// call is *handed* the destination to write. So the bound follows the pass:
+/// four copies here against 97,212 calls that are no longer made at all in
+/// `covefmt`'s print phase.
+///
 /// It is an upper bound on what forwarding can remove and not a target, for
 /// the reason the module documentation gives. What is left is mostly two
 /// things: a producer this lowering does not hand a destination to yet (a
 /// host call, a string literal, an argument list assembled elsewhere), and a
 /// `copy` whose source is a **borrowed** location — a binding, a field — which
 /// is ADR 0001's value semantics and is not waste at all.
-const FORWARDABLE_COPIES: usize = 2390;
+const FORWARDABLE_COPIES: usize = 2394;
 
 #[test]
 fn the_corpus_says_how_much_of_it_is_a_value_being_moved() {

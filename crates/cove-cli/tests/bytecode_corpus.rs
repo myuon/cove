@@ -173,16 +173,24 @@ fn every_program_the_repository_keeps_encodes_verifies_and_reads_back() {
     // comes near, and the whole argument for adopting it rests on that
     // staying true — so it is asserted rather than remembered.
     //
-    // The margin was 500× and is 400×, moved once and deliberately.
-    // `lower::inline` expands a call to a small leaf where it is made, and an
-    // expansion appends the callee's run to the caller's frame: the widest
-    // frame here went from 131 words to 147, a 12% cost paid for the frames
-    // that are no longer pushed at all. 445× is what that leaves, and what the
-    // ADR's argument needs is "nowhere near", which 445 is as much as 500 was.
-    // A number that moved because a pass was added is worth moving with a
-    // sentence rather than quietly widening to fit.
+    // The margin was 500×, then 400×, and is 350×, moved twice and each time
+    // deliberately. `lower::inline` expands a call to a small leaf where it is
+    // made, and an expansion appends the callee's run to the caller's frame:
+    // the widest frame here went from 131 words to 147 when the pass was
+    // added, a 12% cost paid for the frames that are no longer pushed at all,
+    // and 445× is what that left.
+    //
+    // It is 168 words since `lower::inline`'s `FRAME_BUDGET` went from 96 to
+    // 160 (#398): that budget is the cap on what one caller may absorb, so the
+    // widest frame in the repository follows it almost exactly, and this is
+    // the number the sweep that chose 160 was weighed against — +1.6% of
+    // machine code and 21 words of the widest frame, for 97,212 of `covefmt`'s
+    // print calls. 390× is what that leaves, and what the ADR's argument needs
+    // is "nowhere near", which 390 is as much as 445 and 500 were. A number
+    // that moved because a constant moved is worth moving with a sentence
+    // rather than quietly widening to fit.
     assert!(
-        found.widest_frame * 400 < MAX_FRAME_WORDS,
+        found.widest_frame * 350 < MAX_FRAME_WORDS,
         "the widest frame in the repository is {} words, which is no longer far under the \
          {MAX_FRAME_WORDS}-word limit ADR 0041 adopts",
         found.widest_frame
