@@ -445,6 +445,13 @@ impl Raise {
 /// is the number of IR instructions executed since the last safepoint — see
 /// [`NativeCtx::pending_work`] for what that number is and is not.
 ///
+/// **Generated code calls this only when the poll is due.** The threshold is
+/// [`NativeCtx::poll_at`] and the test is emitted at the backedge, so a helper
+/// that is entered has a safepoint to take rather than a stride to test. A
+/// helper must therefore not assume it is reached once per turn of any loop,
+/// and must republish the threshold before it answers `true` — see
+/// [`NativeCtx::poll_at`] for who owes that and why.
+///
 /// `false` means stop. The helper is where [ADR 0040]'s three-step order
 /// lives, in that order and not this crate's: cancellation and task-local
 /// stops, then fuel and deadline accounting, then the collector rendezvous.
@@ -1305,6 +1312,46 @@ pub struct NativeCtx {
     /// backend-specific, and "aggregated static IR-work counts … are a
     /// different metric with a different name".
     pub pending_work: u64,
+    /// The [`NativeCtx::pending_work`] at which compiled code must call
+    /// [`SafepointFn`], and below which a backedge falls through.
+    ///
+    /// The *poll threshold*, published by the runtime and read by generated
+    /// code at every backedge. A backedge used to call the helper
+    /// unconditionally and the helper tested the stride inside itself; on
+    /// `examples/covefmt` that was 1,845,706 calls in the print phase alone,
+    /// ≈20 ns each, to answer "not yet" almost every time. The test moved out
+    /// here so that the call happens only when the answer is "now".
+    ///
+    /// It is a *published* number and not a constant compiled into the code
+    /// generator, for two reasons and the second is the load-bearing one:
+    ///
+    /// - this crate does not depend on `cove-runtime` and so cannot name
+    ///   `SAFEPOINT_STRIDE`, which is that crate's contract arithmetic (see
+    ///   the crate documentation for the inversion this ABI exists to buy);
+    /// - the stride bounds work done by the *machine*, not by one compiled
+    ///   call, and a compiled call is entered with work the encoded tier has
+    ///   already done and not yet charged. The runtime publishes what is left
+    ///   of the stride — `SAFEPOINT_STRIDE - (work - charged)` — so that the
+    ///   poll compiled code takes lands at the same coordinate the dispatch
+    ///   loop's own `work() - charged_work >= SAFEPOINT_STRIDE` would have
+    ///   landed at. A constant here would let a compiled call gather a whole
+    ///   second stride on top of an encoded one, which is a *looser* bound
+    ///   than [ADR 0040] states.
+    ///
+    /// Zero therefore means "poll at every backedge", which is what a fresh
+    /// context holds and what compiled code did before this field existed:
+    /// the accumulator is never negative, so the test is always true. That is
+    /// the safe default in both directions — a caller that publishes nothing
+    /// polls too often rather than too rarely.
+    ///
+    /// Republished by every helper that charges what it was handed and takes a
+    /// safepoint, because after one the machine has been charged up to date
+    /// and a whole stride is available again; and by the close of a direct
+    /// call, which charges the callee's pending work *without* a safepoint and
+    /// so leaves less than a stride.
+    ///
+    /// [ADR 0040]: ../../../../docs/adr/0040-a-bound-outlives-its-backend.md
+    pub poll_at: u64,
     /// Which error, when the outcome is [`Outcome::Raised`]. See
     /// [`Raise::from_abi`].
     pub raise_code: u32,
@@ -1357,6 +1404,10 @@ impl NativeCtx {
             fixed_payload_words: std::ptr::null(),
             stack_origin,
             pending_work: 0,
+            // "Poll at every backedge", which is what compiled code did before
+            // the threshold existed. See [`NativeCtx::poll_at`]: a caller that
+            // publishes nothing polls too often rather than too rarely.
+            poll_at: 0,
             raise_code: 0,
             raise_detail: 0,
             raise_pc: u32::MAX,
@@ -1392,6 +1443,17 @@ impl NativeCtx {
     /// changes, so it is a builder rather than a field a helper republishes.
     pub fn over_payload_words(mut self, fixed_payload_words: *const u32) -> Self {
         self.fixed_payload_words = fixed_payload_words;
+        self
+    }
+
+    /// The same context, polling once its unpaid work reaches `poll_at`.
+    ///
+    /// See [`NativeCtx::poll_at`]. A builder rather than a parameter of
+    /// [`NativeCtx::new`] because the default is the conservative one — poll at
+    /// every backedge — and a caller with no budget to publish is a caller that
+    /// wants it.
+    pub fn polling_at(mut self, poll_at: u64) -> Self {
+        self.poll_at = poll_at;
         self
     }
 
@@ -1474,6 +1536,11 @@ mod tests {
         assert_eq!(ctx.raise(), None);
         assert_eq!(ctx.pending_work, 0);
         assert_eq!(ctx.stack_origin, 0);
+        assert_eq!(
+            ctx.poll_at, 0,
+            "a context that was published no budget polls at every backedge"
+        );
+        assert_eq!(ctx.polling_at(1024).poll_at, 1024);
     }
 
     /// Both tables start null, and both builders publish only their own.

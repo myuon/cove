@@ -55,6 +55,20 @@ thread_local! {
     pub static POLLS: RefCell<Vec<(u32, u64)>> = const { RefCell::new(Vec::new()) };
     /// How many safepoints to allow before answering "stop".
     pub static POLLS_ALLOWED: Cell<usize> = const { Cell::new(usize::MAX) };
+    /// What `NativeCtx::poll_at` is published as — the unpaid work a backedge
+    /// must have gathered before it calls the helper at all.
+    ///
+    /// Nought, the default, is "poll at every backedge", which is what every
+    /// case written before the threshold existed asserts and what a context
+    /// that was published no budget gets. A case that wants the stride tested
+    /// sets it with [`poll_at`].
+    ///
+    /// The runtime publishes what is *left* of `SAFEPOINT_STRIDE` and
+    /// republishes it at every charge point; this double publishes one number
+    /// and leaves it there, which is the same arithmetic when nothing but
+    /// compiled code is charging: the accumulator is cleared at each poll, so
+    /// a fixed threshold is a fixed stride.
+    pub static POLL_AT: Cell<u64> = const { Cell::new(0) };
     /// A word of the frame the safepoint helper reads, by index into `words`.
     ///
     /// How the claim in `cove_native::abi` — "at a safepoint every live reference
@@ -775,9 +789,15 @@ pub fn polls() -> Vec<(u32, u64)> {
     POLLS.with(|polls| polls.borrow().clone())
 }
 
+/// Publishes `at` as the poll threshold for the next entry. See [`POLL_AT`].
+pub fn poll_at(at: u64) {
+    POLL_AT.with(|poll_at| poll_at.set(at));
+}
+
 pub fn forget_polls() {
     POLLS.with(|polls| polls.borrow_mut().clear());
     POLLS_ALLOWED.with(|allowed| allowed.set(usize::MAX));
+    POLL_AT.with(|poll_at| poll_at.set(0));
     WATCHED.with(|watched| watched.set(None));
     WATCHED_SAW.with(|saw| saw.borrow_mut().clear());
 }
@@ -1355,7 +1375,8 @@ pub fn enter_with_tables<A: Arm>(
         .over_payload_words(match payload_words.is_empty() {
             true => std::ptr::null(),
             false => payload_words.as_ptr(),
-        });
+        })
+        .polling_at(POLL_AT.with(Cell::get));
     let entry = jit.entry(compiled);
     // Safety: `ctx.words` is `held`, `base` indexes into it, the functions below
     // are all built with frames that fit inside the prefix, and the destination
@@ -1498,6 +1519,109 @@ pub fn the_work_charge_is_the_static_block_count<A: Arm>() {
     assert_eq!(answer.outcome, Outcome::Returned);
     assert_eq!(polls(), vec![(2, 7), (2, 5), (2, 5)]);
     assert_eq!(answer.pending_work, 3);
+}
+
+/// A backedge below the threshold falls through, and the work it did not pay
+/// for is still there at the next one.
+///
+/// ADR 0060's whole claim, in the one fixture whose block lengths are already
+/// written down. [`summing_loop`]'s blocks are 2, 2, 3 and 1, so a turn is
+/// 5 and the first backedge is reached at 7. With a threshold of 16:
+///
+/// | turn | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+/// | ---- | - | - | - | - | - | - | - | - | - | -- |
+/// | work at the backedge | 7 | 12 | **17** | 5 | 10 | 15 | **20** | 5 | 10 | 15 |
+///
+/// Two polls in ten turns rather than ten, and both of them at or past the
+/// threshold. The second number of each is what makes this a bound and not a
+/// count: **no interval exceeds the threshold plus one turn**, which is
+/// ADR 0040's `S + T` with `S` the published stride and `T` a turn, and the
+/// reason the interval cannot drift is that the accumulator is *not* cleared
+/// by a fall-through.
+///
+/// The 15 left after the tenth turn is not lost either: the loop leaves
+/// through blocks 2 and 7, so 15 + 2 + 1 = 18 is pending at the return, which
+/// is ADR 0055's "pending work charged on every exit" doing the work a poll
+/// that never came would have done.
+pub fn a_backedge_polls_only_once_the_threshold_is_reached<A: Arm>() {
+    forget_polls();
+    poll_at(16);
+    let mut words = vec![0u64; 8];
+    words[0] = 10;
+    let answer = run::<A>(&summing_loop(), &mut words, 0);
+
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(words[1], 55, "the loop still answers what it answered");
+    assert_eq!(
+        polls(),
+        vec![(2, 17), (2, 20)],
+        "two polls in ten backedges, each carrying everything since the last"
+    );
+    for (_, work) in polls() {
+        assert!(
+            (16..=16 + 5).contains(&work),
+            "no interval is shorter than the threshold or longer than it plus \
+             one turn of the loop: {work}"
+        );
+    }
+    assert_eq!(
+        answer.pending_work, 18,
+        "the work below the threshold is charged at the exit instead"
+    );
+}
+
+/// A threshold of nought is a poll at every backedge, which is what a context
+/// that was published no budget holds.
+///
+/// The default matters more than it looks: `NativeCtx::poll_at` is a field an
+/// embedder's own harness could forget to publish, and forgetting it has to
+/// cost a poll that was not needed rather than skip one that was. This is the
+/// same assertion as [`a_loop_answers_and_polls_once_per_backedge`] made
+/// against the threshold set explicitly, so that the default is pinned as a
+/// *value* and not only as whatever `NativeCtx::new` happens to leave.
+pub fn a_threshold_of_nothing_polls_at_every_backedge<A: Arm>() {
+    forget_polls();
+    poll_at(0);
+    let mut words = vec![0u64; 8];
+    words[0] = 3;
+    let answer = run::<A>(&summing_loop(), &mut words, 0);
+
+    assert_eq!(answer.outcome, Outcome::Returned);
+    assert_eq!(polls(), vec![(2, 7), (2, 5), (2, 5)]);
+    assert_eq!(answer.pending_work, 3);
+}
+
+/// A stop is answered at the poll that is due, not at the backedge that is not.
+///
+/// The threshold is in front of the helper, so a run that is asked to stop is
+/// stopped by the *first poll that happens* — and that is the thing a reader
+/// should be able to check rather than infer, because it is the half of
+/// ADR 0060 that could have gone wrong silently. With a threshold of 16 the
+/// third backedge is the first poll, so a helper allowed one safepoint stops
+/// the run there: three turns of work, and nothing pending, because the charge
+/// went over before the helper answered.
+pub fn a_stop_is_taken_at_the_first_poll_past_the_threshold<A: Arm>() {
+    forget_polls();
+    poll_at(16);
+    POLLS_ALLOWED.with(|allowed| allowed.set(1));
+    let mut words = vec![0u64; 8];
+    words[0] = 1_000_000;
+    let answer = run::<A>(&summing_loop(), &mut words, 0);
+
+    assert_eq!(answer.outcome, Outcome::Stopped);
+    assert_eq!(
+        polls(),
+        vec![(2, 17)],
+        "the first poll past the threshold is the one that stopped it"
+    );
+    assert_eq!(
+        answer.pending_work, 0,
+        "the charge went to the helper before it answered, so nothing is pending"
+    );
+    assert_eq!(
+        words[2], 4,
+        "three turns ran and the fourth did not: the counter is one past them"
+    );
 }
 
 /// A safepoint that answers "stop" stops the run, and leaves nothing pending.

@@ -106,6 +106,7 @@ const OFF_LITERALS: i32 = offset_of!(NativeCtx, literals) as i32;
 const OFF_FIXED_PAYLOAD_WORDS: i32 = offset_of!(NativeCtx, fixed_payload_words) as i32;
 const OFF_STACK_ORIGIN: i32 = offset_of!(NativeCtx, stack_origin) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
+const OFF_POLL_AT: i32 = offset_of!(NativeCtx, poll_at) as i32;
 const OFF_RAISE_CODE: i32 = offset_of!(NativeCtx, raise_code) as i32;
 const OFF_RAISE_DETAIL: i32 = offset_of!(NativeCtx, raise_detail) as i32;
 const OFF_RAISE_PC: i32 = offset_of!(NativeCtx, raise_pc) as i32;
@@ -2184,10 +2185,28 @@ impl<'a, 'f> Lower<'a, 'f> {
         }
     }
 
-    /// A safepoint: hand the runtime the unpaid work, and leave if it says to.
+    /// A poll: test the stride, and only then hand the runtime the unpaid work.
+    ///
+    /// **The test is emitted; the safepoint is called.** Three instructions
+    /// stand in front of the hand-over — a load of [`NativeCtx::poll_at`], a
+    /// compare against the work accumulator and a branch — and the helper is
+    /// entered only when the accumulator has reached the threshold the runtime
+    /// published. ADR 0060 is why: on `examples/covefmt` this site was entered
+    /// 1,845,706 times in the print phase to be told "not yet" almost every
+    /// time, at ≈20 ns a call, and the stride it was testing is the *machine's*
+    /// and was already being tested inside `Machine::safepoint`.
+    ///
+    /// What that costs the bound is nothing, because the threshold is
+    /// `SAFEPOINT_STRIDE` minus the work the machine has already done and not
+    /// charged: the poll lands where `encoded::dispatch`'s own
+    /// `work() - charged_work >= SAFEPOINT_STRIDE` would have landed, so the
+    /// interval is ADR 0040's `S + T` with `T` one turn of this loop. See
+    /// [`NativeCtx::poll_at`] for who publishes it and when.
     ///
     /// Emitted on every backedge, which is the floor ADR 0055 sets
-    /// ("Safepoints occur at least: on loop backedges; …"). It is no longer the
+    /// ("Safepoints occur at least: on loop backedges; …") read as ADR 0060
+    /// reads it — a poll at every backedge and a safepoint when the stride is
+    /// reached. It is no longer the
     /// only one: [`Lower::allocate`] and [`Lower::growable_op`] are the ADR's
     /// "around allocation or runtime calls which may collect", and each of their
     /// helpers takes the same three steps in the same order before it does
@@ -2205,6 +2224,25 @@ impl<'a, 'f> Lower<'a, 'f> {
     /// should be.
     fn safepoint(&mut self, pc: u32) {
         let work = self.b.use_var(self.work);
+        // Unsigned, and that is exact rather than defensive: both numbers are
+        // counts, the accumulator only ever grows between two safepoints, and
+        // a published threshold of nought — a context that was given no budget
+        // — makes this always true, which is the "poll at every backedge"
+        // behaviour this site had before the threshold existed.
+        let threshold =
+            self.b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), self.ctx, OFF_POLL_AT);
+        let due = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, work, threshold);
+        let poll = self.b.create_block();
+        let on = self.b.create_block();
+        self.b.ins().brif(due, poll, &[], on, &[]);
+
+        self.b.switch_to_block(poll);
+        let work = self.b.use_var(self.work);
         let at = self.b.ins().iconst(types::I32, i64::from(pc));
         let call = self
             .b
@@ -2212,6 +2250,8 @@ impl<'a, 'f> Lower<'a, 'f> {
             .call(self.bound.safepoint, &[self.ctx, at, work]);
         let carry_on = self.b.inst_results(call)[0];
         // Charged, so no longer pending — on both sides of the branch below.
+        // The fall-through above keeps what it had, which is what makes the
+        // next turn's test a test of the accumulated total.
         let zero = self.b.ins().iconst(types::I64, 0);
         self.b.def_var(self.work, zero);
         // The helper is allowed to have grown the stack and to have committed a
@@ -2221,7 +2261,6 @@ impl<'a, 'f> Lower<'a, 'f> {
         self.forget();
 
         let stop = self.b.create_block();
-        let on = self.b.create_block();
         self.b.ins().brif(carry_on, on, &[], stop, &[]);
 
         self.b.switch_to_block(stop);
@@ -2231,6 +2270,10 @@ impl<'a, 'f> Lower<'a, 'f> {
         self.store_ctx(OFF_PENDING_WORK, nothing);
         self.leave(Outcome::Stopped);
 
+        // Reached both ways: from the branch that found the poll not due, and
+        // from the helper that said carry on. Nothing derived on either side
+        // of it is live here — which is the rule anyway, because a `Value` a
+        // predecessor defined does not dominate this block.
         self.b.switch_to_block(on);
         self.forget();
     }

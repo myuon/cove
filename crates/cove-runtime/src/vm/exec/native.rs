@@ -505,13 +505,21 @@ struct Destination {
     slot: u32,
 }
 
-/// Re-publishes both pointers compiled code re-loads, after anything that could
-/// have moved either.
+/// Re-publishes both pointers compiled code re-loads and the poll threshold it
+/// tests, after anything that could have moved any of the three.
 ///
 /// The stack's `Vec` reallocates when a frame is pushed, and the heap commits a
 /// chunk when it grows — so a helper that ran a callee has to hand back the
 /// current stack pointer and the current chunk table. The table's *address* does
 /// not change, for the reason [`Bridge::chunks`] gives, but its contents do.
+///
+/// The third is [`NativeCtx::poll_at`], and it is here rather than in each
+/// helper because every helper that reaches this line has just charged what it
+/// was handed: a safepoint leaves a whole stride available, a bulk chunk loop
+/// may have left none, and `Machine::poll_budget` is the one place that knows
+/// which. The one charge point that does *not* pass through here is
+/// [`close`], which charges without a safepoint and publishes the threshold
+/// itself.
 ///
 /// # Safety
 ///
@@ -526,6 +534,7 @@ unsafe fn republish(ctx: *mut NativeCtx, host: *mut Bridge<'_, '_>) {
     (*machine).mem.chunk_bases(&mut (*tier).chunks);
     (*ctx).words = (*machine).mem.words_ptr();
     (*ctx).chunks = (*tier).chunks.as_ptr();
+    (*ctx).poll_at = (*machine).poll_budget();
 }
 
 /// The safepoint helper: [ADR 0040]'s three steps, in that order, and none of
@@ -1513,7 +1522,12 @@ unsafe fn enter<const MASK: u64>(
         )
         .over_heap((*host).table())
         .over_literals(machine.literals_ptr())
-        .over_payload_words(machine.fixed_payload_words_ptr());
+        .over_payload_words(machine.fixed_payload_words_ptr())
+        // What is left of the stride, not a fresh one: this call is entered
+        // with whatever the encoded tier has run and not yet charged, and
+        // compiled code's poll has to land where the dispatch loop's own would
+        // have. See `Machine::poll_budget` and `NativeCtx::poll_at`.
+        .polling_at(machine.poll_budget());
         // The destination as the callee is given it: a word index, taken *after*
         // the frame was pushed and stable whatever a later `push_frame` does to
         // the `Vec`. This is the line ADR 0057's "never pointers" is about.
@@ -1529,6 +1543,15 @@ unsafe fn enter<const MASK: u64>(
     // alike, which is ADR 0055's own requirement.
     machine.bulk_work += ctx.pending_work;
     ctx.pending_work = 0;
+    // And the dispatch loop's threshold is moved down by what just landed on
+    // it, which is `encoded::in_chunks`' line for the same reason: `next_check`
+    // is in *instruction* coordinates, so work charged in bulk while the loop
+    // was not running leaves it too far away — the loop would dispatch a whole
+    // stride of its own past a stride that is already due. A compiled callee
+    // can leave a stride of unpaid work behind it now that it polls on the
+    // stride rather than on every backedge, so this is the line that keeps
+    // ADR 0040's `S + T` true across a VM-to-native call.
+    machine.next_check = machine.next_question();
     match outcome {
         // The answer is already where it belongs: the callee wrote it before it
         // returned, so all that is left is to take its frame away.
@@ -2431,12 +2454,20 @@ unsafe extern "C" fn open(
 /// standing on anything else, and the callee's [`Raise`] turned into the sentence
 /// the encoded tier would have produced.
 ///
-/// Nothing is republished, and that is a property of the direct path rather than
-/// an omission. A direct call hands the callee the *caller's* context, so every
-/// helper the callee reached — its own safepoints, its own calls — stored the
-/// current words pointer and chunk table into the context the caller will re-read.
-/// `pop_frame` is a truncation and moves nothing. [`call`] republishes because the
-/// callee it entered was given a context of its own.
+/// Neither pointer is republished, and that is a property of the direct path
+/// rather than an omission. A direct call hands the callee the *caller's*
+/// context, so every helper the callee reached — its own safepoints, its own
+/// calls — stored the current words pointer and chunk table into the context the
+/// caller will re-read. `pop_frame` is a truncation and moves nothing. [`call`]
+/// republishes because the callee it entered was given a context of its own.
+///
+/// [`NativeCtx::poll_at`] is the one thing that *is* published here, and for the
+/// opposite reason: this is a charge point that is deliberately not a safepoint,
+/// so the callee's last block of unpaid work lands on the machine with nothing
+/// polling for it. Left alone, the caller would resume with a threshold that
+/// promised a whole stride it no longer has, and the interval between two polls
+/// would be the stride plus whatever the callee left — which is the one way a
+/// direct call could loosen ADR 0040's bound.
 ///
 /// # Safety
 ///
@@ -2448,6 +2479,9 @@ unsafe extern "C" fn close(ctx: *mut NativeCtx, outcome: u32, callee: u32) -> u3
     // which is ADR 0055's own requirement and `enter`'s own line.
     machine.bulk_work += (*ctx).pending_work;
     (*ctx).pending_work = 0;
+    // The charge above moved the machine's unpaid total and nothing polled for
+    // it, so what is left of the stride is smaller than the caller was given.
+    (*ctx).poll_at = machine.poll_budget();
     if outcome == Outcome::Returned.abi() {
         // The answer is already where it belongs: the callee wrote it before it
         // returned, so all that is left is to take its frame away.

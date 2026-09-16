@@ -1185,6 +1185,31 @@ impl<'a> Machine<'a> {
         }
     }
 
+    /// How much more work may be done before a safepoint is due — the
+    /// compiled tier's [`next_question`](Machine::next_question).
+    ///
+    /// The same question [`crate::vm::exec::encoded`]'s loop asks with
+    /// `work() - charged_work >= SAFEPOINT_STRIDE`, answered in the one
+    /// coordinate compiled code keeps: `NativeCtx::pending_work`, which counts
+    /// from nought at every native safepoint. Subtracting what the machine has
+    /// already done and not charged is what makes the two the same question —
+    /// a compiled call entered after 1,000 uncharged instructions polls at 24,
+    /// not at a fresh 1,024, so the interval stays ADR 0040's `S + T` rather
+    /// than becoming `2S + T`.
+    ///
+    /// Saturating for `next_question`'s reason: a bulk charge can already have
+    /// passed the stride, and a poll that is due now is exactly what nought
+    /// asks for — compiled code's test is `pending_work >= poll_at` and its
+    /// accumulator is never negative.
+    ///
+    /// It is not `next_question`, and the difference is the debugger: a native
+    /// frame has no dispatch loop to stop in, so a debugger does not make every
+    /// compiled instruction a question. See `crate::vm::debug`.
+    #[inline]
+    pub(crate) fn poll_budget(&self) -> u64 {
+        SAFEPOINT_STRIDE.saturating_sub(self.work().saturating_sub(self.charged_work))
+    }
+
     /// What every collection so far has done.
     pub(crate) fn collected(&self) -> Collected {
         self.collected
@@ -8952,5 +8977,50 @@ pub(crate) mod tests {
             !machine.work().is_multiple_of(SAFEPOINT_STRIDE),
             "and 2500 is not a multiple of the stride, which is the bug"
         );
+    }
+
+    /// **What compiled code is allowed to do before it polls is what is left
+    /// of the stride, and never a fresh one.**
+    ///
+    /// `Machine::poll_budget` is the number `NativeCtx::poll_at` carries and
+    /// therefore the compiled tier's whole safepoint schedule — ADR 0060 moved
+    /// the stride test into generated code and this is the arithmetic it tests
+    /// against. The property that matters is the *sum*: the work the machine
+    /// has already done and not charged, plus the work compiled code may still
+    /// do, is one stride. Anything else is a bound that depends on which tier a
+    /// program happened to be running in, which is the one thing ADR 0040's
+    /// table may not say.
+    #[test]
+    fn the_poll_budget_is_what_is_left_of_the_stride() {
+        let program = Build::default().done();
+        let mut machine = Machine::new(&program, 1 << 12);
+
+        // Nothing done since the last charge: a whole stride is available, and
+        // this is the number a compiled call entered straight after a safepoint
+        // is given.
+        assert_eq!(machine.poll_budget(), SAFEPOINT_STRIDE);
+
+        // And after any amount of uncharged work, the two halves still sum to
+        // one stride — which is the same question `next_question` answers in
+        // instruction coordinates, asked in the coordinate compiled code keeps.
+        for done in [1u64, 2, 500, 1023, SAFEPOINT_STRIDE - 1] {
+            machine.charged_work = 4 * SAFEPOINT_STRIDE;
+            machine.instructions = machine.charged_work + done;
+            machine.bulk_work = 0;
+            assert_eq!(
+                machine.work() - machine.charged_work + machine.poll_budget(),
+                SAFEPOINT_STRIDE,
+                "with {done} done and not charged, the budget is the rest"
+            );
+        }
+
+        // A bulk charge can already have passed the stride, and then the budget
+        // is nought: the first backedge compiled code reaches polls, because
+        // its accumulator is never below nought. Saturating, not wrapping —
+        // a wrap here would be an interval of 2^64 units of work.
+        machine.charged_work = 0;
+        machine.instructions = 500;
+        machine.bulk_work = 2000;
+        assert_eq!(machine.poll_budget(), 0);
     }
 }
