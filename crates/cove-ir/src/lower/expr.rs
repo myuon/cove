@@ -52,9 +52,8 @@ use super::pattern::UNPLACED;
 use super::shapes;
 use super::{Body, Dest, Loop, PENDING};
 use crate::inst::{ArithOp, CmpOp, Compare, Inst, Num, Slot};
-use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
-use crate::program::{HostOp, IntrinsicSite};
+use crate::program::HostOp;
 use crate::repr::Repr;
 
 /// An assignable location, found by walking a chain of field accesses back
@@ -491,26 +490,11 @@ impl Body<'_> {
     /// object behind it is allocated once for the run: a literal in a loop
     /// costs no allocation per turn.
     ///
-    /// An interpolation is where a value has to become text, and that is not
-    /// something the instruction set should grow a case for — what `{x}`
-    /// puts in a string is a rule of the language, stated in the language
-    /// reference and not in the IR. So the whole literal becomes one
-    /// [`Inst::IntrinsicCall`].
-    ///
-    /// # What the builtin must do
-    ///
-    /// `String.interpolate` takes any number of operands and answers one new
-    /// `String`: each operand rendered as `Display for Value` renders it,
-    /// joined in order. Every operand is one word, because an operand that
-    /// is not is boxed on the way in — a builtin receives slots and there is
-    /// no channel on [`Inst::IntrinsicCall`] for the layout of each, so a
-    /// value whose width is not one has to carry its own description.
-    ///
-    /// The runs of literal text are operands too, as `Str` objects, so the
-    /// pieces are one list and the join is one call. An empty run is left
-    /// out: the parser leaves one wherever an interpolation sits at an end
-    /// of the literal, and joining it would be an allocation and an argument
-    /// per `"{x}"` in the program.
+    /// An interpolation is assembled: a byte buffer, one append per run of
+    /// literal text and per piece — each piece appended as soon as it has been
+    /// evaluated, so that what it shows is what it was — and a finish into the
+    /// answer. `super::interpolate` says how each piece is appended and why
+    /// the order is the whole of the design (#389, #403).
     fn string_expr(&mut self, expr: &Expr, parts: &[StrPart], want: Option<Dest>) -> Val {
         let literal_only = parts.iter().all(|part| matches!(part, StrPart::Text(_)));
         if literal_only {
@@ -535,49 +519,27 @@ impl Body<'_> {
             return dst;
         }
 
-        let mut pieces: Vec<Val> = Vec::with_capacity(parts.len());
+        let (literal, pieces) = parts
+            .iter()
+            .fold((0, 0), |(bytes, pieces), part| match part {
+                StrPart::Text(text) => (bytes + text.len(), pieces),
+                StrPart::Interpolation(_) => (bytes, pieces + 1),
+            });
+        let mut assembly = self.assembly_open(literal, pieces, expr.span);
         for part in parts {
             match part {
-                StrPart::Text(literal) if literal.is_empty() => {}
-                StrPart::Text(literal) => {
-                    let id = self.string(literal);
-                    let dst = self.temp(shapes::STR);
-                    self.emit(
-                        Inst::Str {
-                            dst: dst.slot,
-                            text: id,
-                        },
-                        expr.span,
-                    );
-                    pieces.push(dst);
-                }
+                StrPart::Text(text) => self.append_literal(&mut assembly, text, expr.span),
                 StrPart::Interpolation(inner) => {
                     let value = self.expr(inner);
-                    pieces.push(value);
+                    let ty = self.ty(inner);
+                    self.append_piece(&mut assembly, ty.as_ref(), &value, inner.span);
+                    self.release(value, inner.span);
                 }
             }
         }
-
-        let args = self.pool.args.intern(pieces.iter().map(Val::arg).collect());
-        let site = self.pool.intrinsic_site(IntrinsicSite {
-            intrinsic: Intrinsic::StringInterpolate,
-            result: shapes::STR,
-        });
-        // The pieces are in locations of their own by now, so the join
-        // writes the destination the surrounding form asked for.
-        let dst = self.answer_at(want, shapes::STR);
-        self.emit(
-            Inst::IntrinsicCall {
-                dst: dst.slot,
-                site,
-                args,
-            },
-            expr.span,
-        );
-        for piece in pieces.into_iter().rev() {
-            self.release(piece, expr.span);
-        }
-        dst
+        // Every piece is in the buffer by now, so the finish writes the
+        // destination the surrounding form asked for.
+        self.assembly_finish(assembly, want, expr.span)
     }
 
     // ---- operators -------------------------------------------------------

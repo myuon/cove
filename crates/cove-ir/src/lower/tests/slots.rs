@@ -95,12 +95,20 @@ fn a_temporary_holding_a_reference_is_cleared_at_its_last_use() {
         ),
         "\
 fn @m.shout(String String) -> Int
-  frame 4: s0!:ref s1!:ref s2:int s3:ref
-  local a -> s0:String [0, 3)
-  local b -> s1:String [0, 3)
-     0  intrinsic-call s3:String String.interpolate (s0:String s1:String)
-     1  intrinsic-call s2:Int String.length (s3:String)
-     2  return s2:Int
+  frame 7: s0!:ref s1!:ref s2:int s3:int s4:ref s5:int s6:ref
+  local a -> s0:String [0, 11)
+  local b -> s1:String [0, 11)
+     0  int s3:int 32
+     1  growable-alloc.bytes s4:ref s3:int
+     2  len s3:int s0:ref
+     3  int s5:int 0
+     4  growable-extend.bytes (s4:ByteBuffer s0:String s5:Int s3:Int)
+     5  len s3:int s1:ref
+     6  growable-extend.bytes (s4:ByteBuffer s1:String s5:Int s3:Int)
+     7  run-finish.bytes s6:ref s4:ref String utf8
+     8  clear s4:ByteBuffer
+     9  intrinsic-call s2:Int String.length (s6:String)
+    10  return s2:Int
 "
     );
 }
@@ -121,17 +129,24 @@ fn a_local_holding_a_reference_is_cleared_when_its_scope_ends() {
         ),
         "\
 fn @m.f(String) -> Int
-  frame 5: s0!:ref s1:int s2:int s3:ref s4:ref
-  local what -> s0:String [0, 7)
-  local n -> s2:Int [1, 6)
-  local s -> s4:String [3, 4)
+  frame 7: s0!:ref s1:int s2:int s3:int s4:ref s5:int s6:ref
+  local what -> s0:String [0, 14)
+  local n -> s2:Int [1, 13)
+  local s -> s6:String [10, 11)
      0  int s2:int 0
-     1  str s3:ref \"!\"
-     2  intrinsic-call s4:String String.interpolate (s0:String s3:String)
-     3  intrinsic-call s2:Int String.length (s4:String)
-     4  clear s4:String
-     5  copy s1:Int s2:Int
-     6  return s1:Int
+     1  int s3:int 17
+     2  growable-alloc.bytes s4:ref s3:int
+     3  len s3:int s0:ref
+     4  int s5:int 0
+     5  growable-extend.bytes (s4:ByteBuffer s0:String s5:Int s3:Int)
+     6  int s3:int 33
+     7  growable-push.bytes s4:ref s3:int
+     8  run-finish.bytes s6:ref s4:ref String utf8
+     9  clear s4:ByteBuffer
+    10  intrinsic-call s2:Int String.length (s6:String)
+    11  clear s6:String
+    12  copy s1:Int s2:Int
+    13  return s1:Int
 "
     );
 }

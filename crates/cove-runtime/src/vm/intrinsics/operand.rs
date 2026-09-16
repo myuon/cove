@@ -76,8 +76,7 @@ pub(super) type Word = (Repr, u64);
 /// is copied to make one: it is a frame base and the program's own
 /// [`cove_ir::Arg`] list, and an arm reads operand `n` by reading the frame —
 /// [`Frame::word`] for a one-word operand, [`Frame::operand`] for a value
-/// location as wide as its layout. A variadic intrinsic walks the list
-/// rather than collecting it.
+/// location as wide as its layout.
 ///
 /// # Every operand is read before the answer is written
 ///
@@ -98,11 +97,6 @@ impl<'a> Frame<'a> {
     /// The operands `args` names in the frame based at `base`.
     pub(crate) fn new(base: u64, args: &'a [Arg]) -> Frame<'a> {
         Frame { base, args }
-    }
-
-    /// How many operands the call passes.
-    pub(crate) fn len(self) -> usize {
-        self.args.len()
     }
 
     /// The layout of operand `at`.

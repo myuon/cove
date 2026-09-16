@@ -87,7 +87,14 @@ pub(crate) fn call(
     // through on, because `Intrinsic` is the closed set this backend has
     // been taught.
     match intrinsic {
-        Intrinsic::StringInterpolate => interpolate(machine, frame, dest),
+        // ---- rendering ---------------------------------------------------
+        //
+        // What `"{x}"` appends for a piece: an `Int` formatted where it goes,
+        // and any other value through the one layout-directed walk. A `String`
+        // piece is not here — it is a byte `Inst::GrowableExtend` — and neither
+        // is the assembly around them, which is run instructions (#403).
+        Intrinsic::ValueRenderInto => render_into(machine, frame, dest),
+        Intrinsic::IntRenderInto => int_render_into(machine, frame, dest),
 
         // ---- Array -------------------------------------------------------
         //
@@ -225,25 +232,68 @@ pub(crate) fn call(
     }
 }
 
-/// What `"{p}"` puts in the string.
+/// `Value.renderInto(buffer)`: what `"{p}"` puts in the string, appended to
+/// the byte buffer the interpolation is assembled in.
 ///
 /// An operand is a value location, so an inline struct or enum renders as the
 /// value it is rather than as its first word — which is what
-/// `"{Point(x: 1)}"` answering `1` was. The pieces are walked where they are,
-/// however many there are: the one variadic intrinsic collects no operand
-/// list to do it. Each piece writes into the same buffer as it renders,
-/// rather than building and returning a `String` of its own, so an
-/// interpolation over nested values allocates once for the whole answer
-/// rather than once per piece.
-fn interpolate(machine: &mut Machine, frame: Frame<'_>, dest: Dest) -> Result<(), RuntimeError> {
+/// `"{Point(x: 1)}"` answering `1` was. The piece is rendered into Rust text
+/// first and appended once, so a growth of the buffer happens after the walk
+/// and never under it.
+///
+/// The piece is rendered when the lowering calls this, which is right after
+/// the piece was evaluated: a later piece that changes what this one showed
+/// cannot change its text (#389).
+fn render_into(machine: &mut Machine, frame: Frame<'_>, dest: Dest) -> Result<(), RuntimeError> {
+    let piece = frame.operand(machine, 0);
     let mut text = String::new();
-    for at in 0..frame.len() {
-        let operand = frame.operand(machine, at);
-        render_value(machine, operand.layout, operand.words, 0, &mut text)?;
-    }
-    let word = machine.new_string(&text)?;
-    dest.word(machine, word);
+    render_value(machine, piece.layout, piece.words, 0, &mut text)?;
+    let owner = frame.word(machine, 1);
+    machine.append_text(owner, text.as_bytes())?;
+    dest.word(machine, 0);
     Ok(())
+}
+
+/// `Int.renderInto(buffer)`: an `Int` piece's decimal digits, appended to the
+/// byte buffer the interpolation is assembled in.
+///
+/// Formatted on the stack — twenty bytes hold `i64::MIN` and its sign — so
+/// the piece allocates nothing of its own, which is the whole difference from
+/// [`render_into`] over the same word.
+fn int_render_into(
+    machine: &mut Machine,
+    frame: Frame<'_>,
+    dest: Dest,
+) -> Result<(), RuntimeError> {
+    let value = operand::int(machine, frame, 0);
+    let owner = frame.word(machine, 1);
+    let mut digits = [0u8; 20];
+    let text = decimal(value, &mut digits);
+    machine.append_text(owner, text)?;
+    dest.word(machine, 0);
+    Ok(())
+}
+
+/// The decimal text of `value`, written into the end of `out`.
+///
+/// What `write!(out, "{value}")` writes, without a formatter: the digits of
+/// the magnitude from the last byte back, then the sign.
+fn decimal(value: i64, out: &mut [u8; 20]) -> &[u8] {
+    let mut magnitude = value.unsigned_abs();
+    let mut at = out.len();
+    loop {
+        at -= 1;
+        out[at] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if value < 0 {
+        at -= 1;
+        out[at] = b'-';
+    }
+    &out[at..]
 }
 
 /// The text of `word`, read as `repr`, appended to `out`.
@@ -1091,31 +1141,74 @@ mod tests {
         machine.payload_run(addr, 0, machine.object_len(addr) * stride)
     }
 
-    /// A one-argument builtin over a value the program can build, run through
-    /// the dispatch loop rather than called directly, so what is under test is
-    /// the instruction as well as the operation.
+    /// The text a value the program can build appends to an interpolation's
+    /// buffer, run through the dispatch loop rather than called directly, so
+    /// what is under test is the instruction as well as the operation.
+    ///
+    /// The value is in slot 0 by construction and one word wide; the buffer,
+    /// the `()` the rendering answers and the finished text take the slots
+    /// after it — the assembly the lowering emits for `"{value}"`.
     fn text_of(build_value: impl FnOnce(&mut Build) -> (Vec<Repr>, Vec<Inst>)) -> String {
         let mut build = Build::default();
-        let str_layout = build.layout("String", Shape::Str);
-        build.program.str_layout = str_layout;
-        let (mut reprs, mut code) = build_value(&mut build);
-        // The value is in slot 0 by construction; the next slot takes the text.
+        let str_layout = build.string_layout();
+        let (reprs, code) = build_value(&mut build);
         // An operand carries the layout of the location it names, and every
         // value this fixture builds is one word of it.
         let held = match reprs[0] {
             Repr::Ref => str_layout,
             repr => build.scalar(repr),
         };
-        let operand = build.args(&[(0, held)]);
-        let dst = reprs.len() as u32;
-        reprs.push(Repr::Ref);
-        let site = site(&mut build.program, "String", "interpolate", str_layout);
-        code.push(Inst::IntrinsicCall {
-            dst,
-            site,
-            args: operand,
+        rendered(build, held, reprs, code, &[Intrinsic::ValueRenderInto])
+    }
+
+    /// Runs `code`, then renders the value in slot 0 of `held` into a fresh
+    /// buffer through each of `renderings` in turn, and answers the finished
+    /// text.
+    fn rendered(
+        mut build: Build,
+        held: LayoutId,
+        mut reprs: Vec<Repr>,
+        mut code: Vec<Inst>,
+        renderings: &[Intrinsic],
+    ) -> String {
+        let str_layout = build.program.str_layout;
+        build.bytes_layout();
+        let buffer_layout = build.buffer_layout();
+        let unit = build.scalar(Repr::Unit);
+        let base = reprs.len() as u32;
+        let (capacity, buffer, answer, text) = (base, base + 1, base + 2, base + 3);
+        reprs.extend([Repr::Int, Repr::Ref, Repr::Unit, Repr::Ref]);
+        let operands = build.args(&[(0, held), (buffer, buffer_layout)]);
+        code.push(Inst::Int {
+            dst: capacity,
+            value: 16,
         });
-        code.push(Inst::Return { src: dst });
+        code.push(Inst::GrowableAlloc {
+            dst: buffer,
+            capacity,
+            storage: cove_ir::Storage::PackedBytes,
+        });
+        for rendering in renderings {
+            let site = site(
+                &mut build.program,
+                rendering.receiver(),
+                rendering.operation(),
+                unit,
+            );
+            code.push(Inst::IntrinsicCall {
+                dst: answer,
+                site,
+                args: operands,
+            });
+        }
+        code.push(Inst::RunFinish {
+            dst: text,
+            owner: buffer,
+            target: str_layout,
+            validation: cove_ir::Validation::Utf8,
+            storage: cove_ir::Storage::PackedBytes,
+        });
+        code.push(Inst::Return { src: text });
         let f = build.function("f", &[], &reprs, str_layout, code);
         let program = build.done();
         let mut machine = Machine::new(&program, 1 << 14);
@@ -1179,33 +1272,19 @@ mod tests {
     #[test]
     fn a_string_renders_as_itself_rather_than_quoted() {
         let mut build = Build::default().strings(&["ha"]);
-        let str_layout = build.layout("String", Shape::Str);
-        build.program.str_layout = str_layout;
-        let operand = build.args(&[(0, str_layout)]);
-        let site = site(&mut build.program, "String", "interpolate", str_layout);
-        let f = build.function(
-            "f",
-            &[],
-            &[Repr::Ref, Repr::Ref],
-            str_layout,
-            vec![
-                Inst::Str {
-                    dst: 0,
-                    text: cove_ir::StrId(0),
-                },
-                Inst::IntrinsicCall {
-                    dst: 1,
-                    site,
-                    args: operand,
-                },
-                Inst::Return { src: 1 },
-            ],
-        );
-        let program = build.done();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let word = machine.run(f, &[], &budget()).unwrap();
+        let str_layout = build.string_layout();
+        let code = vec![Inst::Str {
+            dst: 0,
+            text: cove_ir::StrId(0),
+        }];
         assert_eq!(
-            String::from_utf8(machine.string_bytes(word[0])).unwrap(),
+            rendered(
+                build,
+                str_layout,
+                vec![Repr::Ref],
+                code,
+                &[Intrinsic::ValueRenderInto]
+            ),
             "ha"
         );
     }
@@ -1246,70 +1325,63 @@ mod tests {
         let _ = int;
     }
 
+    /// An `Int` piece is formatted on the stack, and says what the general
+    /// walk says about the same word — at both ends of the range and at zero.
     #[test]
-    fn interpolation_joins_the_text_of_every_operand() {
-        let mut build = Build::default().strings(&["n is ", "!"]);
-        let str_layout = build.layout("String", Shape::Str);
-        build.program.str_layout = str_layout;
-        let ints = build.scalar(Repr::Int);
-        let parts = build.args(&[(0, str_layout), (1, ints), (2, str_layout)]);
-        let site = site(&mut build.program, "String", "interpolate", str_layout);
-        let f = build.function(
-            "f",
-            &[],
-            &[Repr::Ref, Repr::Int, Repr::Ref, Repr::Ref],
-            str_layout,
-            vec![
-                Inst::Str {
-                    dst: 0,
-                    text: cove_ir::StrId(0),
-                },
-                Inst::Int { dst: 1, value: 7 },
-                Inst::Str {
-                    dst: 2,
-                    text: cove_ir::StrId(1),
-                },
-                Inst::IntrinsicCall {
-                    dst: 3,
-                    site,
-                    args: parts,
-                },
-                Inst::Return { src: 3 },
-            ],
+    fn an_int_renders_into_the_buffer_as_the_walk_renders_it() {
+        for value in [0, 7, -7, 1_000_000, i64::MAX, i64::MIN] {
+            let mut build = Build::default();
+            build.string_layout();
+            let int = build.scalar(Repr::Int);
+            let code = vec![Inst::Int { dst: 0, value }];
+            let text = rendered(
+                build,
+                int,
+                vec![Repr::Int],
+                code,
+                &[Intrinsic::IntRenderInto, Intrinsic::ValueRenderInto],
+            );
+            assert_eq!(text, format!("{value}{value}"));
+        }
+    }
+
+    /// Appends go on where the last one ended, and a buffer grows past the
+    /// capacity it was allocated with rather than refusing: twenty renderings
+    /// of `-1234567` are 160 bytes in a sixteen-byte store.
+    #[test]
+    fn renderings_append_in_order_and_grow_the_buffer() {
+        let mut build = Build::default();
+        build.string_layout();
+        let int = build.scalar(Repr::Int);
+        let code = vec![Inst::Int {
+            dst: 0,
+            value: -1_234_567,
+        }];
+        let text = rendered(
+            build,
+            int,
+            vec![Repr::Int],
+            code,
+            &[Intrinsic::IntRenderInto; 20],
         );
-        let program = build.done();
-        let mut machine = Machine::new(&program, 1 << 14);
-        let word = machine.run(f, &[], &budget()).unwrap();
-        assert_eq!(
-            String::from_utf8(machine.string_bytes(word[0])).unwrap(),
-            "n is 7!"
-        );
+        assert_eq!(text, "-1234567".repeat(20));
     }
 
     /// An answer may be written over one of its own operands: `x = x.trim()`
     /// lowers to a call whose destination is `x`, and since the operands are
     /// read where they are rather than copied out first, every arm reads all
-    /// of them before it writes (#378, Q5.2). Interpolation over its first
-    /// piece, and past eight pieces, is the same.
+    /// of them before it writes (#378, Q5.2).
     #[test]
     fn an_answer_may_be_written_over_its_own_operand() {
-        let mut build = Build::default().strings(&["  ha  ", "-"]);
+        let mut build = Build::default().strings(&["  ha  "]);
         let str_layout = build.layout("String", Shape::Str);
         build.program.str_layout = str_layout;
-        let ints = build.scalar(Repr::Int);
         let trimmed = build.args(&[(0, str_layout)]);
-        let mut pieces = vec![(0, str_layout)];
-        for _ in 0..5 {
-            pieces.push((1, ints));
-            pieces.push((2, str_layout));
-        }
-        let pieces = build.args(&pieces);
         let trim = site(&mut build.program, "String", "trim", str_layout);
-        let interpolate = site(&mut build.program, "String", "interpolate", str_layout);
         let f = build.function(
             "f",
             &[],
-            &[Repr::Ref, Repr::Int, Repr::Ref],
+            &[Repr::Ref],
             str_layout,
             vec![
                 Inst::Str {
@@ -1321,16 +1393,6 @@ mod tests {
                     site: trim,
                     args: trimmed,
                 },
-                Inst::Int { dst: 1, value: 7 },
-                Inst::Str {
-                    dst: 2,
-                    text: cove_ir::StrId(1),
-                },
-                Inst::IntrinsicCall {
-                    dst: 0,
-                    site: interpolate,
-                    args: pieces,
-                },
                 Inst::Return { src: 0 },
             ],
         );
@@ -1339,7 +1401,7 @@ mod tests {
         let word = machine.run(f, &[], &budget()).unwrap();
         assert_eq!(
             String::from_utf8(machine.string_bytes(word[0])).unwrap(),
-            "ha7-7-7-7-7-"
+            "ha"
         );
     }
 
@@ -1361,31 +1423,52 @@ mod tests {
         });
     }
 
-    /// A rendering that allocates once, whatever it renders.
+    /// A rendering allocates nothing of its own when the text fits.
     ///
     /// `Inst::Alloc` is not reached from here: the text is built in Rust and
-    /// the heap is touched once, at the end. That is what keeps a builtin
-    /// free of the rooting discipline the boundary needs — there is no
-    /// half-built object for a collection to land on.
+    /// copied into the buffer's store, so there is no half-built object for a
+    /// collection to land on, and a store with room is not replaced.
     #[test]
-    fn rendering_allocates_exactly_the_answer() {
-        let program = world();
+    fn rendering_allocates_nothing_when_the_text_fits() {
+        let program = world_with_buffer();
         let mut machine = Machine::new(&program, 1 << 14);
         let int = scalar(&program, Repr::Int);
+        let unit = scalar(&program, Repr::Unit);
         let items = machine
             .new_object(elements(&program, int, false), 3)
             .unwrap();
         for at in 0..3u32 {
             machine.set_payload(items, at, at as u64 + 1);
         }
+        let buffer = machine.alloc_buffer(64).unwrap();
         let before = machine.allocated_words();
-        let word = word(&mut machine, "String", "interpolate", &[(Repr::Ref, items)]).unwrap();
-        assert_eq!(
-            String::from_utf8(machine.string_bytes(word)).unwrap(),
-            "[1, 2, 3]"
-        );
-        // One header and one payload word: "[1, 2, 3]" is nine bytes.
-        assert_eq!(machine.allocated_words() - before, 3);
-        assert_ne!(machine.object_layout(word), LayoutId::FREE);
+        let answer = in_frame(
+            &mut machine,
+            &[
+                (elements(&program, int, false), &[items]),
+                (program.buffer_layout, &[buffer]),
+            ],
+            unit,
+            render_into,
+        )
+        .unwrap();
+        assert_eq!(answer, vec![0]);
+        assert_eq!(machine.allocated_words() - before, 0);
+        let text = machine.finish_buffer(buffer, program.str_layout, cove_ir::Validation::Utf8);
+        assert_eq!(read(&machine, text.unwrap()), "[1, 2, 3]");
+    }
+
+    /// [`world`], with the byte buffer's two program-wide layouts declared.
+    fn world_with_buffer() -> Program {
+        let mut program = world();
+        program.bytes_layout = LayoutId(program.layouts.len() as u32);
+        program
+            .layouts
+            .push(cove_ir::Layout::object("Bytes", Shape::Bytes));
+        program.buffer_layout = LayoutId(program.layouts.len() as u32);
+        program
+            .layouts
+            .push(cove_ir::Layout::object("ByteBuffer", Shape::ByteBuffer));
+        program
     }
 }

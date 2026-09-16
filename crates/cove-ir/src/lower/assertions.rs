@@ -55,9 +55,7 @@ use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Arg, Expr};
 
 use crate::inst::{CmpOp, Inst, Slot};
-use crate::intrinsic::Intrinsic;
 use crate::layout::LayoutId;
-use crate::program::IntrinsicSite;
 use crate::repr::Repr;
 
 use super::expr::compare_of;
@@ -265,7 +263,7 @@ impl Body<'_> {
     /// interned string and the failing arm costs one instruction.
     /// `assertEqual` reports both values as well, since knowing only that
     /// they differ rarely explains why — and a value becomes text the one
-    /// way the language has, which is the builtin `"{x}"` already goes
+    /// way the language has, which is the assembly `"{x}"` already goes
     /// through.
     fn assertion_message(
         &mut self,
@@ -278,34 +276,19 @@ impl Body<'_> {
         if schema.arity() == 1 {
             return Some(self.text(&format!("assertion failed: `{quoted}`"), expr.span));
         }
-        let opening = self.text(&format!("assertion failed: `{quoted}` is `"), expr.span);
-        let between = self.text("`, expected `", expr.span);
-        let closing = self.text("`", expr.span);
-        let pieces = vec![
-            opening.arg(),
-            held[0].arg(),
-            between.arg(),
-            held[1].arg(),
-            closing.arg(),
-        ];
-        let list = self.pool.args.intern(pieces);
-        let site = self.pool.intrinsic_site(IntrinsicSite {
-            intrinsic: Intrinsic::StringInterpolate,
-            result: shapes::STR,
-        });
-        let dst = self.temp(shapes::STR);
-        self.emit(
-            Inst::IntrinsicCall {
-                dst: dst.slot,
-                site,
-                args: list,
-            },
-            expr.span,
-        );
-        self.release(closing, expr.span);
-        self.release(between, expr.span);
-        self.release(opening, expr.span);
-        Some(dst)
+        let opening = format!("assertion failed: `{quoted}` is `");
+        let between = "`, expected `";
+        let closing = "`";
+        let literal = opening.len() + between.len() + closing.len();
+        let mut assembly = self.assembly_open(literal, 2, expr.span);
+        self.append_literal(&mut assembly, &opening, expr.span);
+        let found = self.ty(&args[0].value);
+        self.append_piece(&mut assembly, found.as_ref(), &held[0], expr.span);
+        self.append_literal(&mut assembly, between, expr.span);
+        let expected = self.ty(&args[1].value);
+        self.append_piece(&mut assembly, expected.as_ref(), &held[1], expr.span);
+        self.append_literal(&mut assembly, closing, expr.span);
+        Some(self.assembly_finish(assembly, None, expr.span))
     }
 
     /// A location holding a string of the program's pool.

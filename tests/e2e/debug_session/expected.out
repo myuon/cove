@@ -55,8 +55,8 @@ total = 20  (word 12, 1 word(s))
     35 |   Ok(())
 (cove) disassemble 1
 debug_session.main:
-     11 | str s3:ref "answer "
-=>   12 | call s13:Int debug_session.raise (s12:Int)
-     13 | intrinsic-call s14:String String.interpolate (s3:String s13:Int)
+     16 | growable-extend.bytes (s3:ByteBuffer s14:String s15:Int s13:Int)
+=>   17 | call s13:Int debug_session.raise (s12:Int)
+     18 | intrinsic-call s7:Unit Int.renderInto (s13:Int s3:ByteBuffer)
 (cove) quit
-the run was halted after 15 instruction(s).
+the run was halted after 20 instruction(s).

@@ -2053,10 +2053,7 @@ impl<'a> Machine<'a> {
         let allocations_before = {
             let signature = called.intrinsic.signature();
             debug_assert!(
-                match signature.rest {
-                    None => list.len() == signature.operands.len(),
-                    Some(_) => list.len() >= signature.operands.len(),
-                },
+                list.len() == signature.operands.len(),
                 "`{}` was verified to take {} operand(s), and was handed {}",
                 called.intrinsic,
                 signature.operands.len(),
@@ -2633,6 +2630,29 @@ impl<'a> Machine<'a> {
             capacity,
             storage: cove_ir::Storage::PackedBytes,
         })
+    }
+
+    /// `bytes` onto the end of the byte buffer at `owner`, growing its store
+    /// at most once: the append a rendering intrinsic makes of the text it
+    /// formatted (#403).
+    ///
+    /// The bytes are Rust's, so nothing a growth collects can move them, and
+    /// the owner came out of a frame slot, so the collection finds the store
+    /// being replaced where it finds every other live reference. The length
+    /// word is written last, as every append's is.
+    pub(crate) fn append_text(&mut self, owner: u64, bytes: &[u8]) -> Result<(), RuntimeError> {
+        let mut buffer = self.buffer("renderInto", owner)?;
+        runs::growable_ensure(self, &mut buffer, bytes.len() as u64)?;
+        let mut at = buffer.len as usize;
+        for chunk in bytes.chunks(8) {
+            let word = chunk.iter().enumerate().fold(0u64, |word, (nth, byte)| {
+                word | u64::from(*byte) << (nth * 8)
+            });
+            self.put_bytes(buffer.store, at, chunk.len(), word);
+            at += chunk.len();
+        }
+        runs::growable_commit(self, &mut buffer, bytes.len() as u64);
+        Ok(())
     }
 
     /// A byte [`Inst::GrowablePush`]: one checked byte onto the end of a buffer.

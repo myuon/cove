@@ -40,7 +40,8 @@ use std::fmt;
 /// directly instead of reconstructing a name to dispatch on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Intrinsic {
-    StringInterpolate,
+    ValueRenderInto,
+    IntRenderInto,
     StringLength,
     StringWords,
     StringChars,
@@ -78,7 +79,8 @@ pub enum Intrinsic {
 /// walk to check the table has no gap and no duplicate — the two ways a hand-
 /// written list like this one goes wrong.
 pub const ALL: &[Intrinsic] = &[
-    Intrinsic::StringInterpolate,
+    Intrinsic::ValueRenderInto,
+    Intrinsic::IntRenderInto,
     Intrinsic::StringLength,
     Intrinsic::StringWords,
     Intrinsic::StringChars,
@@ -118,10 +120,13 @@ impl Intrinsic {
     /// comment where `cove-runtime` dispatches it. `Value` for the three a
     /// keyed collection's standard-library body reaches through `core.order`,
     /// `core.admitKey` and `core.refuseDuplicate`, which are rules over any
-    /// key's layout rather than methods of a type either.
+    /// key's layout rather than methods of a type either, and for
+    /// [`Intrinsic::ValueRenderInto`], which is what `"{x}"` appends for a
+    /// piece of any layout.
     pub const fn receiver(self) -> &'static str {
         match self {
-            Intrinsic::StringInterpolate => "String",
+            Intrinsic::ValueRenderInto => "Value",
+            Intrinsic::IntRenderInto => "Int",
             Intrinsic::StringLength => "String",
             Intrinsic::StringWords => "String",
             Intrinsic::StringChars => "String",
@@ -157,7 +162,8 @@ impl Intrinsic {
     /// The operation's own name: `split`, `join`, `parse`.
     pub const fn operation(self) -> &'static str {
         match self {
-            Intrinsic::StringInterpolate => "interpolate",
+            Intrinsic::ValueRenderInto => "renderInto",
+            Intrinsic::IntRenderInto => "renderInto",
             Intrinsic::StringLength => "length",
             Intrinsic::StringWords => "words",
             Intrinsic::StringChars => "chars",
@@ -237,11 +243,12 @@ impl Intrinsic {
             | Intrinsic::FloatMin
             | Intrinsic::FloatMax
             | Intrinsic::FloatFormat
-            | Intrinsic::FloatParse => Category::Scalar,
-            // Rendering is a walk directed by whatever layout each piece has,
+            | Intrinsic::FloatParse
+            | Intrinsic::IntRenderInto => Category::Scalar,
+            // Rendering is a walk directed by whatever layout the piece has,
             // which is what makes it a value rule rather than a text one: a
             // `"{items}"` renders an `Array` through it.
-            Intrinsic::StringInterpolate
+            Intrinsic::ValueRenderInto
             | Intrinsic::AnyEquals
             | Intrinsic::ValueOrder
             | Intrinsic::ValueAdmitKey
@@ -261,18 +268,13 @@ impl Intrinsic {
         use Carried as K;
         use Class as C;
         const fn fixed(operands: &'static [Class], result: Class) -> Signature {
-            Signature {
-                operands,
-                rest: None,
-                result,
-            }
+            Signature { operands, result }
         }
         match self {
-            Intrinsic::StringInterpolate => Signature {
-                operands: &[],
-                rest: Some(C::Value),
-                result: C::Str,
-            },
+            // The piece first, then the buffer it is appended to: the value
+            // is the receiver, as it is of every other operation here.
+            Intrinsic::ValueRenderInto => fixed(&[C::Value, C::Buffer], C::Unit),
+            Intrinsic::IntRenderInto => fixed(&[C::Int, C::Buffer], C::Unit),
             Intrinsic::StringLength => fixed(&[C::Str], C::Int),
             Intrinsic::StringWords | Intrinsic::StringChars => fixed(&[C::Str], C::Strings),
             Intrinsic::StringSplit => fixed(&[C::Str, C::Str], C::Strings),
@@ -334,9 +336,16 @@ impl Intrinsic {
         match self {
             // Rendering walks whatever value it was handed, which may be a
             // collection nested arbitrarily deep — past the depth a rendering
-            // may reach, which stops the run — and answers a freshly
-            // allocated `String`.
-            Intrinsic::StringInterpolate => allocate.union(E::READS_MEMORY).union(E::BULK_WORK),
+            // may reach, which stops the run — and appends the text to a byte
+            // buffer the caller holds: a write through a handle, and a growth
+            // of the buffer's store when the text does not fit.
+            Intrinsic::ValueRenderInto => allocate
+                .union(E::READS_MEMORY)
+                .union(E::WRITES_MEMORY)
+                .union(E::BULK_WORK),
+            // At most twenty digits and a sign, so bounded work; the rest is
+            // the same append, which may grow the buffer's store.
+            Intrinsic::IntRenderInto => allocate.union(E::READS_MEMORY).union(E::WRITES_MEMORY),
 
             // `length()` decodes every byte to count characters, and nothing
             // about a valid `String` can make that fail.
@@ -450,11 +459,11 @@ pub enum Category {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Signature {
     /// The operands every call passes, in order: a method's receiver first.
+    ///
+    /// Exactly these and no more. There was one variadic intrinsic,
+    /// `String.interpolate`, and an interpolation is now assembled by run
+    /// instructions and one append per piece (#403), so nothing takes a list.
     pub operands: &'static [Class],
-    /// What every operand past [`Signature::operands`] is, for a variadic
-    /// intrinsic, which may then be passed any number of them; `None` for one
-    /// that takes exactly [`Signature::operands`].
-    pub rest: Option<Class>,
     /// What the answer written into the destination is.
     pub result: Class,
 }
@@ -479,6 +488,11 @@ pub enum Class {
     ResultOf(Carried),
     /// A value of any layout, read as the layout says.
     Value,
+    /// A `ByteBuffer`: ADR 0052's growable byte run, which a rendering appends
+    /// its text to. The one collection an operand may be besides
+    /// [`Class::Strings`], and for the same reason: it is where text work
+    /// writes, not a collection the intrinsic manages.
+    Buffer,
 }
 
 /// What an [`Class::OptionOf`] or a [`Class::ResultOf`] carries.
@@ -506,6 +520,7 @@ impl fmt::Display for Class {
             Class::OptionOf(inner) => write!(f, "Option<{}>", carried(inner)),
             Class::ResultOf(inner) => write!(f, "Result<{}, Error>", carried(inner)),
             Class::Value => write!(f, "a value"),
+            Class::Buffer => write!(f, "ByteBuffer"),
         }
     }
 }
@@ -628,7 +643,8 @@ mod tests {
         // match has to name every one of them.
         fn count(intrinsic: Intrinsic) -> usize {
             match intrinsic {
-                Intrinsic::StringInterpolate
+                Intrinsic::ValueRenderInto
+                | Intrinsic::IntRenderInto
                 | Intrinsic::StringLength
                 | Intrinsic::StringWords
                 | Intrinsic::StringChars
@@ -764,8 +780,10 @@ mod tests {
     /// No intrinsic is a collection operation: ADR 0058 moved every one into
     /// run instructions and the standard library, and Phase 5 makes a new one
     /// a verification failure. No receiver is a collection, no category is
-    /// one — [`Category`] has none to be — and the one collection an operand
-    /// may be is `String.join`'s `Array<String>`, which is text work's input.
+    /// one — [`Category`] has none to be — and the two collections an operand
+    /// may be are `String.join`'s `Array<String>`, which is text work's input,
+    /// and the `ByteBuffer` a rendering appends to, which is text work's
+    /// output.
     #[test]
     fn no_intrinsic_is_a_collection_operation() {
         const COLLECTIONS: &[&str] = &[
@@ -782,10 +800,14 @@ mod tests {
                 "`{intrinsic}` is an operation of a collection"
             );
             let signature = intrinsic.signature();
-            for class in signature.operands.iter().chain(signature.rest.iter()) {
+            for class in signature.operands {
                 assert!(
                     *class != Class::Strings || *intrinsic == Intrinsic::StringJoin,
                     "`{intrinsic}` takes an `Array<String>`, which only `String.join` may"
+                );
+                assert!(
+                    *class != Class::Buffer || intrinsic.operation() == "renderInto",
+                    "`{intrinsic}` takes a `ByteBuffer`, which only a rendering may"
                 );
                 assert!(
                     *class != Class::Value || intrinsic.category() == Category::Value,
@@ -796,18 +818,12 @@ mod tests {
         }
     }
 
-    /// A variadic intrinsic is a `Value` one, and every fixed intrinsic's
-    /// operand list is short enough to be read without collecting it.
+    /// Every intrinsic's operand list is short enough to be read without
+    /// collecting it.
     #[test]
-    fn only_interpolation_is_variadic() {
+    fn every_operand_list_is_short() {
         for intrinsic in ALL {
-            let signature = intrinsic.signature();
-            assert_eq!(
-                signature.rest.is_some(),
-                *intrinsic == Intrinsic::StringInterpolate,
-                "`{intrinsic}`"
-            );
-            assert!(signature.operands.len() <= 3, "`{intrinsic}`");
+            assert!(intrinsic.signature().operands.len() <= 3, "`{intrinsic}`");
         }
     }
 

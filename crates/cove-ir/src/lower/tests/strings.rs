@@ -17,11 +17,14 @@ fn @m.hello() -> String
     );
 }
 
-/// What `{x}` puts in a string is a rule of the language, not an
-/// instruction: the whole literal becomes one call, with the runs of
-/// literal text as operands of their own. An empty run is left out.
+/// An interpolation is a byte buffer, one append per part, and a finish
+/// (#403). The buffer is sized for the literal bytes and a small allowance
+/// per piece (3 + 1 + 16 = 20). A literal run of several bytes is extended
+/// from the string pool, a `String` piece is extended whole — with no
+/// rendering call and no temporary string — and a one-byte run is a push of
+/// its byte. An empty run is left out.
 #[test]
-fn an_interpolation_is_one_builtin_over_the_pieces() {
+fn an_interpolation_appends_each_part_to_one_buffer() {
     assert_eq!(
         listing(
             "fn greet(name: String) -> String { \"hi {name}!\" }",
@@ -29,18 +32,27 @@ fn an_interpolation_is_one_builtin_over_the_pieces() {
         ),
         "\
 fn @m.greet(String) -> String
-  frame 4: s0!:ref s1:ref s2:ref s3:ref
-  local name -> s0:String [0, 4)
-     0  str s2:ref \"hi \"
-     1  str s3:ref \"!\"
-     2  intrinsic-call s1:String String.interpolate (s2:String s0:String s3:String)
-     3  return s1:String
+  frame 6: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int
+  local name -> s0:String [0, 12)
+     0  int s2:int 20
+     1  growable-alloc.bytes s3:ref s2:int
+     2  str s4:ref \"hi \"
+     3  int s2:int 3
+     4  int s5:int 0
+     5  growable-extend.bytes (s3:ByteBuffer s4:String s5:Int s2:Int)
+     6  len s2:int s0:ref
+     7  growable-extend.bytes (s3:ByteBuffer s0:String s5:Int s2:Int)
+     8  int s2:int 33
+     9  growable-push.bytes s3:ref s2:int
+    10  run-finish.bytes s1:ref s3:ref String utf8
+    11  return s1:String
 "
     );
 }
 
 /// An argument carries the layout of the location it names, so a `Point`
-/// crosses into an interpolation as the two words it already is.
+/// crosses into its rendering as the two words it already is: a piece that is
+/// neither a `String` nor an `Int` is one `Value.renderInto` into the buffer.
 ///
 /// It used to be boxed: a builtin was handed slot numbers and nothing else,
 /// so an operand wider than a word had to carry its own description. That
@@ -56,13 +68,38 @@ fn an_inline_value_crosses_into_an_interpolation_where_it_sits() {
         ),
         "\
 fn @m.show(m.Point) -> String
-  frame 4: s0!:int s1!:int s2:ref s3:ref
-  local p -> s0..s1:m.Point [0, 3)
-     0  str s3:ref \"p=\"
-     1  intrinsic-call s2:String String.interpolate (s3:String s0..s1:m.Point)
-     2  return s2:String
+  frame 8: s0!:int s1!:int s2:ref s3:int s4:ref s5:ref s6:int s7:unit
+  local p -> s0..s1:m.Point [0, 9)
+     0  int s3:int 18
+     1  growable-alloc.bytes s4:ref s3:int
+     2  str s5:ref \"p=\"
+     3  int s3:int 2
+     4  int s6:int 0
+     5  growable-extend.bytes (s4:ByteBuffer s5:String s6:Int s3:Int)
+     6  intrinsic-call s7:Unit Value.renderInto (s0..s1:m.Point s4:ByteBuffer)
+     7  run-finish.bytes s2:ref s4:ref String utf8
+     8  return s2:String
 "
     );
+}
+
+/// Each piece is appended as soon as it has been evaluated, so a later piece
+/// cannot change what an earlier one shows (#389): the `Point` is rendered
+/// before `n + 1` is computed, and the sum is formatted after it.
+#[test]
+fn a_piece_is_appended_before_the_next_piece_is_evaluated() {
+    let listed = listing(
+        "struct Point { x: Int, y: Int }\nfn show(p: Point, n: Int) -> String { \"{p}{n + 1}\" }",
+        "show",
+    );
+    let rendered = listed
+        .find("Value.renderInto (s0..s1:m.Point")
+        .unwrap_or_else(|| panic!("{listed}"));
+    let summed = listed.find("add.int").unwrap_or_else(|| panic!("{listed}"));
+    let formatted = listed
+        .find("Int.renderInto")
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert!(rendered < summed && summed < formatted, "{listed}");
 }
 
 #[test]

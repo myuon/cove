@@ -69,7 +69,19 @@ fn an_equality_assertion_renders_both_values_into_its_message() {
         "{listed}"
     );
     assert!(listed.contains("\"`, expected `\""), "{listed}");
-    assert!(listed.contains("String.interpolate"), "{listed}");
+    // Both values are `Int`s, so each is formatted straight into the message
+    // being assembled, in the order the message reads.
+    let found = listed
+        .find("Int.renderInto (s0:Int")
+        .unwrap_or_else(|| panic!("{listed}"));
+    let expected = listed
+        .find("\"`, expected `\"")
+        .unwrap_or_else(|| panic!("{listed}"));
+    let other = listed
+        .rfind("Int.renderInto")
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert!(found < expected && expected < other, "{listed}");
+    assert!(listed.contains("run-finish.bytes"), "{listed}");
 }
 
 /// A value the instruction set cannot compare in one step is walked, which
