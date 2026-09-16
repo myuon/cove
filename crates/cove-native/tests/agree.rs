@@ -332,6 +332,50 @@ fn both_arms_order_strings_alike() {
     }
 }
 
+/// One arm's poll threshold, and what the loop left unpaid under it.
+fn polling_at<A: Arm>(at: u64) -> (Vec<(u32, u64)>, u64, Vec<u64>) {
+    suite::forget_polls();
+    suite::poll_at(at);
+    let mut words = vec![10u64, 0, 0, 0];
+    let answer = suite::run::<A>(&suite::summing_loop(), &mut words, 0);
+    (suite::polls(), answer.pending_work, words)
+}
+
+/// The two arms test the stride at the same turns and leave the same amount
+/// unpaid, at every threshold.
+///
+/// ADR 0060 moved a test out of the helper and into two code generators, which
+/// is two places for it to be written differently — and a difference here would
+/// not be an answer a case could catch, because both arms would still sum to
+/// 55. What differs is *when the runtime is asked*, which is the thing the
+/// bound is about.
+///
+/// The thresholds are the boundaries rather than a spread: nought is the
+/// default and polls always; one is the smallest threshold a turn can reach; 7
+/// and 5 are exactly the first backedge's work and a later one's, so an arm
+/// that wrote `>` where the other wrote `>=` disagrees at one of them; 1024 is
+/// the real stride, which this loop never reaches, so both arms must poll
+/// *never* and charge everything at the exit.
+#[test]
+fn both_arms_poll_at_the_same_turns_under_a_threshold() {
+    for at in [0, 1, 5, 7, 12, 16, 1024] {
+        assert_eq!(
+            polling_at::<Cranelift>(at),
+            polling_at::<Template>(at),
+            "the poll threshold {at}"
+        );
+    }
+    let (polls, pending, words) = polling_at::<Cranelift>(1024);
+    assert!(polls.is_empty(), "a stride this loop never reaches");
+    assert_eq!(words[1], 55, "and it still answers");
+    assert_eq!(
+        pending, 55,
+        "everything it did is charged at the exit instead: 2 + 10 turns of 5 \
+         + the 2 and the 1 it leaves through"
+    );
+    suite::forget_polls();
+}
+
 /// The loop, the arithmetic, the comparisons, the copy and the trap — the whole
 /// subset, on both arms, word for word.
 #[test]

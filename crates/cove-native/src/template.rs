@@ -48,6 +48,7 @@ const OFF_LITERALS: i32 = offset_of!(NativeCtx, literals) as i32;
 const OFF_FIXED_PAYLOAD_WORDS: i32 = offset_of!(NativeCtx, fixed_payload_words) as i32;
 const OFF_STACK_ORIGIN: i32 = offset_of!(NativeCtx, stack_origin) as i32;
 const OFF_PENDING_WORK: i32 = offset_of!(NativeCtx, pending_work) as i32;
+const OFF_POLL_AT: i32 = offset_of!(NativeCtx, poll_at) as i32;
 const OFF_RAISE_CODE: i32 = offset_of!(NativeCtx, raise_code) as i32;
 const OFF_RAISE_DETAIL: i32 = offset_of!(NativeCtx, raise_detail) as i32;
 const OFF_RAISE_PC: i32 = offset_of!(NativeCtx, raise_pc) as i32;
@@ -1904,12 +1905,34 @@ impl<'a> Emit<'a> {
         }
     }
 
-    /// A safepoint: hand the runtime the unpaid work, and leave if it says to.
+    /// A poll: test the stride, and only then hand the runtime the unpaid work.
     ///
     /// Emitted on every backedge, with the same accumulated static work count
     /// the Cranelift arm hands the same helper, so the two arms pay the same
     /// runtime cost at the same places.
+    ///
+    /// Two instructions stand in front of the hand-over and they are the whole
+    /// of what a turn of a loop pays when the poll is not due:
+    ///
+    /// ```text
+    /// cmp r13, [rbx + poll_at]   ; the accumulator against the threshold
+    /// jb  through                ; below it: nothing is due, carry on
+    /// ```
+    ///
+    /// One compare with a memory operand rather than a load into a scratch
+    /// register and a register compare, because the threshold is read once and
+    /// this arm has the encoding — [`Emit::cmp_r_mem`]. So no scratch register
+    /// is touched at all, and the flags the caller left have already been spent
+    /// by [`Emit::branch_when_false`]'s own `jcc` before this is reached.
+    ///
+    /// ADR 0060 is the decision and [`NativeCtx::poll_at`] is the contract: the
+    /// threshold is what is *left* of the machine's stride, so this compare is
+    /// `encoded::dispatch`'s `work() - charged_work >= SAFEPOINT_STRIDE` asked
+    /// in the coordinate compiled code keeps.
     fn safepoint(&mut self, pc: u32) {
+        let through = self.label();
+        self.cmp_r_mem(WORK, CTX, OFF_POLL_AT);
+        self.jcc(CC_B, Target::Label(through));
         self.mov_rr(RDI, CTX);
         self.mov_imm32(RSI, pc as i32);
         self.mov_rr(RDX, WORK);
@@ -1926,8 +1949,15 @@ impl<'a> Emit<'a> {
         self.leave(Outcome::Stopped);
         self.bind(carry_on);
         self.xor_rr(WORK, WORK);
+        // Reached both ways from here on: the poll that was not due jumps
+        // straight to this label with its accumulator untouched, which is what
+        // makes the next turn's test a test of the accumulated total.
+        self.bind(through);
         // The helper is allowed to have grown the stack, so the frame pointer
-        // derived before the call is not to be used after it.
+        // derived before the call is not to be used after it. `through` is
+        // bound above rather than below this line on purpose: a fall-through
+        // that skipped the call did not invalidate the frame pointer, but the
+        // two paths merge here and only one of them may be assumed.
         self.frame_live = false;
     }
 
@@ -2465,6 +2495,18 @@ impl<'a> Emit<'a> {
         self.rex(true, src, dst);
         self.byte(0x31);
         self.modrm_reg(src, dst);
+    }
+
+    /// `cmp r64, [base + disp]`, which sets the flags for `r - [base + disp]`.
+    ///
+    /// The `0x3b` direction of the compare — register against memory — so that
+    /// the poll's threshold is read and compared in one instruction rather than
+    /// loaded into a scratch register first. See [`Emit::safepoint`], which is
+    /// the only caller and is on every backedge.
+    fn cmp_r_mem(&mut self, reg: u8, base: u8, disp: i32) {
+        self.rex(true, reg, base);
+        self.byte(0x3b);
+        self.modrm_mem(reg, base, disp);
     }
 
     /// `cmp a, b`, which sets the flags for `a - b`.

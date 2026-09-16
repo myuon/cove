@@ -503,6 +503,27 @@ because they would lose the order every `for` and rendering relies on, and the
 quadratic cost of building a map by repeated `inserted` is recorded as known
 rather than fixed here.
 
+[ADR 0060](docs/adr/0060-a-backedge-tests-the-stride-before-it-calls.md) moves
+the safepoint's stride test out of the runtime helper and into generated code.
+`covefmt`'s print phase entered the `safepoint` helper **1,845,706 times** —
+once per loop backedge, unconditionally — to be told almost every time that the
+1024-unit stride had not been reached; issue #398 measured that at 37.1 ms of
+the phase's 168.5. A backedge now emits two instructions, a compare of the
+block-work accumulator against a threshold the runtime publishes and a branch,
+and the helper is entered only when a poll is due. The threshold is *published*
+rather than compiled in, because `cove-native` cannot name `cove-runtime`'s
+`SAFEPOINT_STRIDE` and — the load-bearing reason — because a compiled call is
+entered with work the VM has already done and not charged: what is published is
+what is **left** of the stride, so the compiled poll lands at the coordinate the
+dispatch loop's own test would have landed at, and ADR 0040's `S + T` is the
+same bound as before. Interleaved and paired on the fixed corpus: print
+168.5 → 140.5 ms, whole 274 → 227.5 ms, `benches/keyed` and `benches/seqsearch`
+each 18% faster, and the helper entered 4,389 times where it was entered
+1,845,706 — with every other helper count and all four crossing counts
+unchanged. What the tier gives up is promptness it was never promised: a
+cancellation, a fuel limit or a collection is now seen within a stride and a
+turn rather than within a turn.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles

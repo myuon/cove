@@ -53,6 +53,21 @@ fn a_safepoint_can_stop_the_run() {
 }
 
 #[test]
+fn a_backedge_polls_only_once_the_threshold_is_reached() {
+    suite::a_backedge_polls_only_once_the_threshold_is_reached::<Cranelift>();
+}
+
+#[test]
+fn a_threshold_of_nothing_polls_at_every_backedge() {
+    suite::a_threshold_of_nothing_polls_at_every_backedge::<Cranelift>();
+}
+
+#[test]
+fn a_stop_is_taken_at_the_first_poll_past_the_threshold() {
+    suite::a_stop_is_taken_at_the_first_poll_past_the_threshold::<Cranelift>();
+}
+
+#[test]
 fn a_zero_width_return_writes_nothing() {
     suite::a_zero_width_return_writes_nothing::<Cranelift>();
 }
