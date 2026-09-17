@@ -298,6 +298,32 @@ pub fn decode(code: EncodedInst, pc: Pc) -> Result<Inst, Malformed> {
             len: b,
             storage: Storage::Words(LayoutId(lo)),
         },
+        Op::GrowableEnsureBytes => Inst::GrowableEnsure {
+            owner: a,
+            additional: b,
+            storage: Storage::PackedBytes,
+        },
+        Op::GrowableEnsureWords => Inst::GrowableEnsure {
+            owner: a,
+            additional: b,
+            storage: Storage::Words(LayoutId(lo)),
+        },
+        Op::GrowableCommitBytes => Inst::GrowableCommit {
+            owner: a,
+            count: b,
+            storage: Storage::PackedBytes,
+        },
+        Op::GrowableCommitWords => Inst::GrowableCommit {
+            owner: a,
+            count: b,
+            storage: Storage::Words(LayoutId(lo)),
+        },
+        Op::RunStoreBytes => Inst::RunStore {
+            run: a,
+            index: b,
+            src: c,
+            storage: Storage::PackedBytes,
+        },
         Op::RunFinishBytes => Inst::RunFinish {
             dst: a,
             owner: b,

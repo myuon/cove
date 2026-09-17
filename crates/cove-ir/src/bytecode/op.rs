@@ -188,8 +188,17 @@ mod base {
     /// the standard library asks once per step. Last rather than beside `CMP`,
     /// so that adding it renumbered nothing that was already there.
     pub const CMP_ORDER: u8 = ASSERT_FAILED + 1;
+    /// [ADR 0062](../../../../docs/adr/0062-an-append-is-ensure-store-commit.md)'s
+    /// buffer window — the ensure and the commit over each storage, and the
+    /// byte store between them — last, for `CMP_ORDER`'s reason: adding them
+    /// renumbered nothing already there.
+    pub const GROWABLE_ENSURE_BYTES: u8 = CMP_ORDER + COMPARES.len() as u8;
+    pub const GROWABLE_ENSURE_WORDS: u8 = GROWABLE_ENSURE_BYTES + 1;
+    pub const GROWABLE_COMMIT_BYTES: u8 = GROWABLE_ENSURE_WORDS + 1;
+    pub const GROWABLE_COMMIT_WORDS: u8 = GROWABLE_COMMIT_BYTES + 1;
+    pub const RUN_STORE_BYTES: u8 = GROWABLE_COMMIT_WORDS + 1;
     /// One past the last, which is how many opcodes there are.
-    pub const END: u8 = CMP_ORDER + COMPARES.len() as u8;
+    pub const END: u8 = RUN_STORE_BYTES + 1;
 }
 
 /// How many opcodes are defined, out of the 256 an opcode byte can name.
@@ -270,6 +279,19 @@ pub enum Op {
     /// [`crate::Validation::None`]; the target layout is the payload's low half
     /// and the element layout its high half.
     RunFinishWords,
+    /// [`crate::Inst::GrowableEnsure`] over [`crate::Storage::PackedBytes`].
+    GrowableEnsureBytes,
+    /// [`crate::Inst::GrowableEnsure`] over [`crate::Storage::Words`], whose
+    /// element layout is the payload's low half.
+    GrowableEnsureWords,
+    /// [`crate::Inst::GrowableCommit`] over [`crate::Storage::PackedBytes`].
+    GrowableCommitBytes,
+    /// [`crate::Inst::GrowableCommit`] over [`crate::Storage::Words`], whose
+    /// element layout is the payload's low half.
+    GrowableCommitWords,
+    /// [`crate::Inst::RunStore`] over [`crate::Storage::PackedBytes`], the one
+    /// storage it admits.
+    RunStoreBytes,
     Len,
     LayoutOf,
     AddrOfSlot,
@@ -562,6 +584,13 @@ impl Op {
             Op::AssertFailed,
         ]);
         all.extend(COMPARES.map(|on| Op::Cmp(on, CmpOp::Order)));
+        all.extend([
+            Op::GrowableEnsureBytes,
+            Op::GrowableEnsureWords,
+            Op::GrowableCommitBytes,
+            Op::GrowableCommitWords,
+            Op::RunStoreBytes,
+        ]);
         all
     }
 
@@ -632,6 +661,11 @@ impl Op {
             Op::GrowableTruncateWords => base::GROWABLE_TRUNCATE_WORDS,
             Op::RunFinishBytes => base::RUN_FINISH_BYTES,
             Op::RunFinishWords => base::RUN_FINISH_WORDS,
+            Op::GrowableEnsureBytes => base::GROWABLE_ENSURE_BYTES,
+            Op::GrowableEnsureWords => base::GROWABLE_ENSURE_WORDS,
+            Op::GrowableCommitBytes => base::GROWABLE_COMMIT_BYTES,
+            Op::GrowableCommitWords => base::GROWABLE_COMMIT_WORDS,
+            Op::RunStoreBytes => base::RUN_STORE_BYTES,
             Op::Len => base::LEN,
             Op::LayoutOf => base::LAYOUT_OF,
             Op::AddrOfSlot => base::ADDR_OF_SLOT,
@@ -939,6 +973,28 @@ impl Op {
                 NONE,
                 ids(Half::Layout, Half::Layout),
             ),
+            // ADR 0062's window: an owner and a count of units, as
+            // `Op::GrowableTruncateWords` is an owner and a length — the element
+            // layout rides in the payload for a word member so the machine can
+            // check the owner's family, and a byte member carries none, for
+            // `Op::GrowableAllocBytes`' reason.
+            Op::GrowableEnsureBytes | Op::GrowableCommitBytes => {
+                fields(Operand::Word(REF), Operand::Word(INT), NONE, Payload::Empty)
+            }
+            Op::GrowableEnsureWords | Op::GrowableCommitWords => fields(
+                Operand::Word(REF),
+                Operand::Word(INT),
+                NONE,
+                one(Half::Layout),
+            ),
+            // `Op::RunLoadBytes` backwards: the run, the byte offset, and the
+            // byte, each one word.
+            Op::RunStoreBytes => fields(
+                Operand::Word(REF),
+                Operand::Word(INT),
+                Operand::Word(INT),
+                Payload::Empty,
+            ),
             Op::Len => fields(Operand::Word(INT), Operand::Word(REF), NONE, Payload::Empty),
             Op::LayoutOf => fields(Operand::Word(INT), Operand::Word(REF), NONE, Payload::Empty),
             Op::AddrOfSlot => fields(
@@ -1055,15 +1111,16 @@ mod tests {
     /// and sixty-eight once ADR 0059's three-way order arrived for a keyed
     /// search, one per `Compare`, and a hundred and seventy once ADR 0058's
     /// Phase 5 made `Duration.nanos` two relabel conversions rather than an
-    /// intrinsic. What the number is for is that a reader can see the
-    /// headroom
-    /// rather than be told about it: more than a third of the byte is still
+    /// intrinsic, and a hundred and seventy-five once ADR 0062's buffer window
+    /// brought an ensure and a commit per storage and a byte store. What the
+    /// number is for is that a reader can see the headroom
+    /// rather than be told about it: nearly a third of the byte is still
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_seventy_opcodes() {
-        assert_eq!(Op::all().len(), 170);
-        assert_eq!(OPCODES, 170);
+    fn there_are_a_hundred_and_seventy_five_opcodes() {
+        assert_eq!(Op::all().len(), 175);
+        assert_eq!(OPCODES, 175);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

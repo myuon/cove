@@ -1287,7 +1287,24 @@ pub fn run_with_literals<A: Arm>(
         .compile(program, FunctionId(0))
         .expect("the function is inside the slice");
     jit.finalize();
-    enter_with_literals(&jit, compiled, words, base, heap.table(), literals)
+    // The payload table too, so that a case with a field read — ADR 0062's push
+    // window reads an owner's length and store — is comparable across the arms.
+    // A program with no field access never reads it, so publishing it changes
+    // nothing for the cases written before it was.
+    let payload_words: Vec<u32> = program
+        .layouts
+        .iter()
+        .map(|layout| layout.fixed_payload_words(&program.layouts).unwrap_or(0))
+        .collect();
+    enter_with_tables(
+        &jit,
+        compiled,
+        words,
+        base,
+        heap.table(),
+        literals,
+        &payload_words,
+    )
 }
 
 /// [`run_over`], with `NativeCtx::fixed_payload_words` published from
@@ -4455,6 +4472,417 @@ pub fn a_byte_push_refuses_a_null_owner<A: Arm>() {
         built().is_empty(),
         "the null was refused here, not handed over"
     );
+    forget_built();
+}
+
+// --- ADR 0062's buffer window -------------------------------------------------
+
+/// One `growable-ensure` — or, when `commit`, one `growable-commit` — of
+/// `storage`, then a `()`: slot 0 the owner, slot 1 the count, slot 2 the answer.
+pub fn reserving(storage: Storage, commit: bool) -> Program {
+    let inst = match commit {
+        false => Inst::GrowableEnsure {
+            owner: 0,
+            additional: 1,
+            storage,
+        },
+        true => Inst::GrowableCommit {
+            owner: 0,
+            count: 1,
+            storage,
+        },
+    };
+    program(function(
+        vec![Repr::Ref, Repr::Int, Repr::Unit],
+        UNIT,
+        vec![inst, Inst::Unit { dst: 2 }, Inst::Return { src: 2 }],
+    ))
+}
+
+/// One byte `run-store`, then a `()`: slot 0 the run, slot 1 the offset, slot 2
+/// the value and slot 3 the answer.
+pub fn storing_a_byte() -> Program {
+    program(function(
+        vec![Repr::Ref, Repr::Int, Repr::Int, Repr::Unit],
+        UNIT,
+        vec![
+            Inst::RunStore {
+                run: 0,
+                index: 1,
+                src: 2,
+                storage: Storage::PackedBytes,
+            },
+            Inst::Unit { dst: 3 },
+            Inst::Return { src: 3 },
+        ],
+    ))
+}
+
+/// A whole push window over `storage`, as ADR 0062's `Vector.push` and
+/// `appendByte` will lower: the length, a constant `1`, the ensure, the store read
+/// after it, the one write at the length, a clear of the store, a second `1`, and
+/// the commit.
+///
+/// Slot 0 is the owner, slot 1 the length, slot 2 the count, slot 3 the store,
+/// slots 4.. the unit — one `Int` for a byte or an `Int` element, two for a
+/// `Pair` — then the commit's count and the answer.
+pub fn a_push_window(storage: Storage) -> Program {
+    let (stride, write) = match storage {
+        Storage::PackedBytes => (
+            1,
+            Inst::RunStore {
+                run: 3,
+                index: 1,
+                src: 4,
+                storage,
+            },
+        ),
+        Storage::Words(elem) => (
+            if elem == PAIR { 2 } else { 1 },
+            Inst::StoreElem {
+                obj: 3,
+                index: 1,
+                src: 4,
+                layout: elem,
+            },
+        ),
+    };
+    let mut reprs = vec![Repr::Ref, Repr::Int, Repr::Int, Repr::Ref];
+    reprs.extend(std::iter::repeat_n(Repr::Int, stride as usize));
+    let count = 4 + stride;
+    reprs.push(Repr::Int);
+    reprs.push(Repr::Unit);
+    program(function(
+        reprs,
+        UNIT,
+        vec![
+            Inst::LoadField {
+                dst: 1,
+                obj: 0,
+                at: 0,
+                layout: INT,
+            },
+            Inst::Int { dst: 2, value: 1 },
+            Inst::GrowableEnsure {
+                owner: 0,
+                additional: 2,
+                storage,
+            },
+            Inst::LoadField {
+                dst: 3,
+                obj: 0,
+                at: 1,
+                layout: REF,
+            },
+            write,
+            Inst::Clear {
+                slot: 3,
+                layout: REF,
+            },
+            Inst::Int {
+                dst: count,
+                value: 1,
+            },
+            Inst::GrowableCommit {
+                owner: 0,
+                count,
+                storage,
+            },
+            Inst::Unit { dst: count + 1 },
+            Inst::Return { src: count + 1 },
+        ],
+    ))
+}
+
+/// `Machine::ensure_growable` and `Machine::commit_growable` where the room is
+/// there: an ensure does nothing and a commit writes `length + count`, and
+/// **nothing is handed to the runtime** — over bytes and words, for a count of
+/// nought, one, and exactly the room.
+pub fn a_reservation_with_room_is_answered_in_emitted_code<A: Arm>() {
+    let at = HEAP_CHUNK_WORDS + 33;
+    let words = Storage::Words(INT);
+    for (storage, build) in [
+        (
+            Storage::PackedBytes,
+            (|heap, at| a_byte_buffer(heap, at, 10, 16)) as Build,
+        ),
+        (words, |heap, at| a_vector(heap, at, VECTOR, 10, 16)),
+    ] {
+        for commit in [false, true] {
+            for count in [0u64, 1, 6] {
+                forget_built();
+                let what = format!("{storage:?}, commit {commit}, count {count}");
+                let held = reserving(storage, commit);
+                let mut heap = Heap::new(2);
+                let owner = build(&mut heap, at);
+                let mut frame = vec![owner, count, UNWRITTEN];
+                let answer = run_over::<A>(&held, &mut frame, 0, &heap);
+                assert_eq!(answer.outcome, Outcome::Returned, "{what}");
+                assert!(built().is_empty(), "{what}: {:?}", built());
+                let expected = if commit { 10 + count } else { 10 };
+                assert_eq!(heap.get(at + 1), expected, "{what}: the length");
+                assert_eq!(heap.get(at + 2), heap.addr(at + 8), "{what}: the store");
+                assert_eq!(frame[2], 0, "{what}: the `unit` after it ran");
+            }
+        }
+    }
+    forget_built();
+}
+
+/// The cold paths of an ensure and a commit, each handed to the runtime whole:
+/// a count past the room, a negative count, a consumed owner, an object of
+/// another family, and a length word past the capacity. What is asserted is that
+/// emitted code **did not try** — the operation went over at pc 0 with the
+/// owner's slot and the count's, nothing in the heap was written, and the
+/// instruction after it ran once the runtime answered.
+pub fn every_cold_path_of_a_reservation_goes_to_the_runtime<A: Arm>() {
+    let at = HEAP_CHUNK_WORDS + 33;
+    let bytes: [(&str, u64, Build); 5] = [
+        ("the count is past the room", 7, |heap, at| {
+            a_byte_buffer(heap, at, 10, 16)
+        }),
+        ("the count is negative", u64::MAX, |heap, at| {
+            a_byte_buffer(heap, at, 10, 16)
+        }),
+        ("`finish()` consumed the store", 1, |heap, at| {
+            let owner = a_byte_buffer(heap, at, 0, 16);
+            heap.set(at + 2, 0);
+            owner
+        }),
+        ("the object is not a byte buffer", 1, |heap, at| {
+            a_vector(heap, at, VECTOR, 0, 16)
+        }),
+        ("the length word is past the capacity", 0, |heap, at| {
+            a_byte_buffer(heap, at, 1 << 40, 16)
+        }),
+    ];
+    let words: [(&str, u64, Build); 5] = [
+        ("the count is past the room", 7, |heap, at| {
+            a_vector(heap, at, VECTOR, 10, 16)
+        }),
+        ("the count is negative", u64::MAX, |heap, at| {
+            a_vector(heap, at, VECTOR, 10, 16)
+        }),
+        ("`freeze()` consumed the store", 1, |heap, at| {
+            let owner = a_vector(heap, at, VECTOR, 0, 16);
+            heap.set(at + 2, 0);
+            owner
+        }),
+        ("the object is another vector", 1, |heap, at| {
+            a_vector(heap, at, PAIR_VECTOR, 0, 16)
+        }),
+        ("the length word is past the capacity", 0, |heap, at| {
+            let owner = a_vector(heap, at, VECTOR, 0, 16);
+            heap.set(at + 1, 1 << 40);
+            owner
+        }),
+    ];
+    for (storage, rows) in [(Storage::PackedBytes, bytes), (Storage::Words(INT), words)] {
+        for commit in [false, true] {
+            let op = match (storage, commit) {
+                (Storage::PackedBytes, false) => GrowableOp::EnsureBytes,
+                (Storage::PackedBytes, true) => GrowableOp::CommitBytes,
+                (Storage::Words(_), false) => GrowableOp::EnsureWords,
+                (Storage::Words(_), true) => GrowableOp::CommitWords,
+            };
+            for (why, count, build) in rows {
+                forget_built();
+                let what = format!("{op:?}: {why}");
+                let held = reserving(storage, commit);
+                let mut heap = Heap::new(2);
+                let owner = build(&mut heap, at);
+                let before: Vec<u64> = (0..16).map(|word| heap.get(at + word)).collect();
+                let mut frame = vec![owner, count, UNWRITTEN];
+                let answer = run_over::<A>(&held, &mut frame, 0, &heap);
+                assert_eq!(answer.outcome, Outcome::Returned, "{what}");
+                assert_eq!(
+                    built(),
+                    vec![Built {
+                        base: 0,
+                        pc: 0,
+                        op: op.abi(),
+                        a: 0,
+                        b: 1,
+                        work: 3,
+                    }],
+                    "{what}: the runtime was handed the instruction, whole"
+                );
+                let after: Vec<u64> = (0..16).map(|word| heap.get(at + word)).collect();
+                assert_eq!(before, after, "{what}: emitted code wrote nothing first");
+                assert_eq!(frame[2], 0, "{what}: the instruction after it ran");
+            }
+        }
+    }
+    forget_built();
+}
+
+/// A byte `run-store` into a byte run: the byte blended into its word at every
+/// offset inside a word that is easy to get wrong, the neighbours left as they
+/// were, and nothing handed to the runtime.
+pub fn a_byte_store_blends_the_byte<A: Arm>() {
+    let at = HEAP_CHUNK_WORDS + 33;
+    for index in [0u64, 7, 8, 15] {
+        for value in [0u64, 0x5C, 255] {
+            forget_built();
+            let what = format!("{value} at byte {index}");
+            let held = storing_a_byte();
+            let mut heap = Heap::new(2);
+            a_byte_buffer(&mut heap, at, 0, 16);
+            let run = heap.addr(at + 8);
+            let mut frame = vec![run, index, value, UNWRITTEN];
+            let answer = run_over::<A>(&held, &mut frame, 0, &heap);
+            assert_eq!(answer.outcome, Outcome::Returned, "{what}");
+            assert!(built().is_empty(), "{what}: {:?}", built());
+            for word in 0..2 {
+                let expected = if word == index / 8 {
+                    let shift = (index % 8) * 8;
+                    (0xAAAA_AAAA_AAAA_AAAAu64 & !(0xFF << shift)) | (value << shift)
+                } else {
+                    0xAAAA_AAAA_AAAA_AAAA
+                };
+                assert_eq!(heap.get(at + 8 + 1 + word), expected, "{what}: word {word}");
+            }
+            assert_eq!(heap.get(at + 1), 0, "{what}: a store publishes nothing");
+            assert_eq!(frame[3], 0, "{what}: the `unit` after it ran");
+        }
+    }
+    forget_built();
+}
+
+/// The cold paths of a byte `run-store`: an offset at the end of the run, a
+/// negative one, a value of `256` and of `-1`, and an object that is not a byte
+/// run. Each goes over as [`GrowableOp::StoreBytes`] with the run's slot and the
+/// offset's, and nothing is written first.
+pub fn every_cold_path_of_a_byte_store_goes_to_the_runtime<A: Arm>() {
+    let at = HEAP_CHUNK_WORDS + 33;
+    for (why, index, value, owner_not_run) in [
+        ("the offset is the run's length", 16u64, 7u64, false),
+        ("the offset is negative", u64::MAX, 7, false),
+        ("the value is 256", 0, 256, false),
+        ("the value is negative", 0, u64::MAX, false),
+        ("the object is a byte buffer, not its run", 0, 7, true),
+    ] {
+        forget_built();
+        let held = storing_a_byte();
+        let mut heap = Heap::new(2);
+        let owner = a_byte_buffer(&mut heap, at, 0, 16);
+        let run = if owner_not_run {
+            owner
+        } else {
+            heap.addr(at + 8)
+        };
+        let before: Vec<u64> = (0..16).map(|word| heap.get(at + word)).collect();
+        let mut frame = vec![run, index, value, UNWRITTEN];
+        let answer = run_over::<A>(&held, &mut frame, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "{why}");
+        assert_eq!(
+            built(),
+            vec![Built {
+                base: 0,
+                pc: 0,
+                op: GrowableOp::StoreBytes.abi(),
+                a: 0,
+                b: 1,
+                work: 3,
+            }],
+            "{why}: the runtime was handed the store, whole"
+        );
+        let after: Vec<u64> = (0..16).map(|word| heap.get(at + word)).collect();
+        assert_eq!(before, after, "{why}: emitted code wrote nothing first");
+        assert_eq!(frame[3], 0, "{why}: the instruction after it ran");
+    }
+    forget_built();
+}
+
+/// Each of the three refuses a null owner or run where it is read, as
+/// `null_object()`, and a helper that raised leaves with that outcome.
+pub fn a_window_instruction_refuses_null_and_leaves_when_refused<A: Arm>() {
+    let held = [
+        (reserving(Storage::PackedBytes, false), 3usize),
+        (reserving(Storage::Words(INT), true), 3),
+        (storing_a_byte(), 4),
+    ];
+    for (program, width) in &held {
+        forget_built();
+        let heap = Heap::new(2);
+        let mut frame = vec![0u64; *width];
+        frame[width - 1] = UNWRITTEN;
+        let answer = run_over::<A>(program, &mut frame, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Raised);
+        assert_eq!(answer.raise, Some(Raise::NullObject));
+        assert_eq!(answer.raise_pc, 0);
+        assert!(built().is_empty());
+    }
+    let at = HEAP_CHUNK_WORDS + 33;
+    for outcome in [Outcome::Raised, Outcome::Stopped] {
+        forget_built();
+        built_answers(&[outcome]);
+        let mut heap = Heap::new(2);
+        let owner = a_byte_buffer(&mut heap, at, 10, 16);
+        // Past the room, so the ensure is cold and the runtime answers.
+        let mut frame = vec![owner, 7, UNWRITTEN];
+        let answer = run_over::<A>(
+            &reserving(Storage::PackedBytes, false),
+            &mut frame,
+            0,
+            &heap,
+        );
+        assert_eq!(answer.outcome, outcome);
+        assert_eq!(built().len(), 1);
+        assert_eq!(frame[2], UNWRITTEN, "nothing after the ensure ran");
+    }
+    forget_built();
+}
+
+/// A whole push window, as a program will emit it: over a byte buffer, a vector
+/// of one-word elements and a vector of two-word ones, with room, the unit lands
+/// at the length and the length is one more — and nothing at all is handed to the
+/// runtime, because every instruction of the window is emitted.
+pub fn a_push_window_with_room_writes_the_unit_and_commits_it<A: Arm>() {
+    let at = HEAP_CHUNK_WORDS + 33;
+    for (storage, stride) in [
+        (Storage::PackedBytes, 1u64),
+        (Storage::Words(INT), 1),
+        (Storage::Words(PAIR), 2),
+    ] {
+        forget_built();
+        let what = format!("{storage:?}");
+        let held = a_push_window(storage);
+        let mut heap = Heap::new(2);
+        let owner = match storage {
+            Storage::PackedBytes => a_byte_buffer(&mut heap, at, 9, 16),
+            Storage::Words(elem) => {
+                let vector = if elem == PAIR { PAIR_VECTOR } else { VECTOR };
+                a_vector(&mut heap, at, vector, 3, 8)
+            }
+        };
+        let mut frame = vec![owner, UNWRITTEN, UNWRITTEN, UNWRITTEN];
+        frame.extend((0..stride).map(|word| 0x41 + word));
+        frame.push(UNWRITTEN);
+        frame.push(UNWRITTEN);
+        let answer = run_with_fields::<A>(&held, &mut frame, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "{what}");
+        assert!(built().is_empty(), "{what}: {:?}", built());
+        match storage {
+            Storage::PackedBytes => {
+                assert_eq!(heap.get(at + 1), 10, "{what}: the length");
+                let word = heap.get(at + 8 + 2);
+                assert_eq!((word >> 8) & 0xFF, 0x41, "{what}: byte 9");
+                assert_eq!(word & 0xFF, 0xAA, "{what}: byte 8, untouched");
+            }
+            Storage::Words(_) => {
+                assert_eq!(heap.get(at + 1), 4, "{what}: the length");
+                for word in 0..stride {
+                    assert_eq!(
+                        heap.get(at + 8 + 1 + 3 * stride + word),
+                        0x41 + word,
+                        "{what}: element word {word}"
+                    );
+                }
+            }
+        }
+        assert_eq!(frame[3], 0, "{what}: the store slot was cleared");
+    }
     forget_built();
 }
 

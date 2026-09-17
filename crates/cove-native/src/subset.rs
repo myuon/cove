@@ -282,6 +282,107 @@ pub(crate) fn byte_push(program: &Program, owner: Slot, src: Slot) -> Option<Byt
     .then_some(BytePush { owner, buffer, src })
 }
 
+/// An [`Inst::GrowableEnsure`] or an [`Inst::GrowableCommit`] — [ADR 0062]'s
+/// window — with the static facts its emitted test is made from.
+///
+/// Both read the owner the way [`WordPush`] and [`BytePush`] do: the header is
+/// compared with the one owner layout the storage implies — the program's
+/// `Shape::Vector` of the element, or its `Shape::ByteBuffer` — the store word
+/// with nought, and the length word with the store's capacity. What differs is
+/// the question asked of the count:
+///
+/// - **an ensure** asks whether `count <= capacity - length`, unsigned, and does
+///   nothing else when it holds: there is room, so there is nothing to grow. A
+///   negative count read unsigned is past any room, so it is cold, and the
+///   runtime's refusal is the one that words it. So is a length past the
+///   capacity, which is tested first so that the subtraction cannot wrap;
+/// - **a commit** asks the same question and, when it holds, writes
+///   `length + count` into the owner. When it does not, the commit is refused by
+///   the runtime, whose check the loader-side verifier's lack of dataflow is
+///   the reason for.
+///
+/// Every cold path is [`GrowableFn`](crate::abi::GrowableFn) with the
+/// operation's [`GrowableOp`](crate::abi::GrowableOp), which runs the whole
+/// instruction again from the start and rejoins. The null owner is emitted, as
+/// [`Raise::NullObject`].
+///
+/// Neither takes a safepoint on its fast path, for [`BytePush`]'s reason: it
+/// allocates nothing and moves nothing.
+///
+/// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Reserve {
+    /// The owner's slot: one `Repr::Ref` word.
+    pub(crate) owner: Slot,
+    /// The count's slot: one `Int` word.
+    pub(crate) count: Slot,
+    /// The owner layout the object's own header is compared against.
+    pub(crate) layout: LayoutId,
+    /// Which storage, so that each arm picks the cold operation.
+    pub(crate) words: bool,
+}
+
+/// The [`Reserve`] an ensure or a commit of `storage` is, or `None` for a
+/// program with no owner layout of that storage — which a lowering that reserved
+/// room in one always declared, so `None` is a bound and not a family.
+pub(crate) fn reserve(
+    program: &Program,
+    owner: Slot,
+    count: Slot,
+    storage: Storage,
+) -> Option<Reserve> {
+    let (layout, words) = match storage {
+        Storage::PackedBytes => (byte_push(program, owner, count)?.buffer, false),
+        Storage::Words(elem) => (word_push(program, owner, count, elem)?.vector, true),
+    };
+    Some(Reserve {
+        owner,
+        count,
+        layout,
+        words,
+    })
+}
+
+/// An [`Inst::RunStore`] over [`Storage::PackedBytes`] — [ADR 0062]'s byte
+/// write — with the static facts its emitted blend is made from.
+///
+/// `RUN_STORE_BYTES` is `RUN_LOAD_BYTES` backwards, with two more questions: the
+/// object is a byte run under construction, whose header is compared with the
+/// program's one `Shape::Bytes` layout, and the value is a byte, compared
+/// unsigned so a negative `Int` is past `255`. The offset is compared unsigned
+/// with the header length, which is `RUN_LOAD_BYTES`' comparison. Each refusal's
+/// sentence is the runtime's, so each goes to
+/// [`GrowableFn`](crate::abi::GrowableFn) as
+/// [`GrowableOp::StoreBytes`](crate::abi::GrowableOp::StoreBytes), which runs the
+/// whole store again; the null run is emitted, as [`Raise::NullObject`].
+///
+/// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ByteStore {
+    pub(crate) run: Slot,
+    pub(crate) index: Slot,
+    pub(crate) src: Slot,
+    /// The `Shape::Bytes` layout the object's own header is compared against.
+    pub(crate) bytes: LayoutId,
+}
+
+/// The [`ByteStore`] a byte `run-store` is, or `None` for a program whose
+/// `bytes_layout` is not a `Shape::Bytes`.
+pub(crate) fn byte_store(
+    program: &Program,
+    run: Slot,
+    index: Slot,
+    src: Slot,
+) -> Option<ByteStore> {
+    let bytes = program.bytes_layout;
+    matches!(program.layouts.get(bytes.index())?.shape, Shape::Bytes).then_some(ByteStore {
+        run,
+        index,
+        src,
+        bytes,
+    })
+}
+
 /// An [`Inst::RunFinish`] over [`Storage::Words`] — `Vector.freeze()` — with
 /// the static facts its relabel is emitted from.
 ///
@@ -955,6 +1056,37 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             len,
             storage: Storage::Words(elem),
         } => elem.index() < program.layouts.len() && slot(*owner) && slot(*len),
+        // [ADR 0062]'s window, each member admitted on its own so that admitting
+        // the protocol refuses no function that was compiled before it: an ensure
+        // and a commit over either storage, and a byte store. Each is an emitted
+        // test with the growable helper as its cold half — see [`Reserve`] and
+        // [`ByteStore`] — and each layout id has to fit an `i32`, for the word
+        // push's reason.
+        //
+        // [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+        Inst::GrowableEnsure {
+            owner,
+            additional: count,
+            storage,
+        }
+        | Inst::GrowableCommit {
+            owner,
+            count,
+            storage,
+        } => reserve(program, *owner, *count, *storage).is_some_and(|reserve| {
+            i32::try_from(reserve.layout.0).is_ok() && slot(reserve.owner) && slot(reserve.count)
+        }),
+        Inst::RunStore {
+            run,
+            index,
+            src,
+            storage: Storage::PackedBytes,
+        } => byte_store(program, *run, *index, *src).is_some_and(|store| {
+            i32::try_from(store.bytes.0).is_ok()
+                && slot(store.run)
+                && slot(store.index)
+                && slot(store.src)
+        }),
         // `encoded.rs`'s `INTRINSIC_CALL` arm, which is `Machine::call_intrinsic`
         // whole, handed over through the one helper with the protocol its
         // effects ask for — see [`IntrinsicFn`](crate::abi::IntrinsicFn). Bounded

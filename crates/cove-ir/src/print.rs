@@ -361,6 +361,40 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
                 format!("run-copy.words {} ({})", l(*elem), args_of(program, *args))
             }
         },
+        // ADR 0062's window, named the way the rest of the family is: the
+        // storage an encoding splits by, in the name.
+        Inst::GrowableEnsure {
+            owner,
+            additional,
+            storage,
+        } => format!(
+            "growable-ensure{} {} {}",
+            unit(program, *storage),
+            s(*owner),
+            s(*additional)
+        ),
+        Inst::GrowableCommit {
+            owner,
+            count,
+            storage,
+        } => format!(
+            "growable-commit{} {} {}",
+            unit(program, *storage),
+            s(*owner),
+            s(*count)
+        ),
+        Inst::RunStore {
+            run,
+            index,
+            src,
+            storage,
+        } => format!(
+            "run-store{} {} {} {}",
+            unit(program, *storage),
+            s(*run),
+            s(*index),
+            s(*src)
+        ),
         Inst::GrowableTruncate {
             owner,
             len,

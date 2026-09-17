@@ -2764,6 +2764,136 @@ impl<'a> Machine<'a> {
         Ok(())
     }
 
+    /// The growable run at `owner` over `storage`, read by its family's own
+    /// reader: [`Machine::buffer`] for bytes, whose refusals name `shown`, and
+    /// [`Machine::vector_run`] for words.
+    fn growable_run(
+        &self,
+        shown: &str,
+        owner: u64,
+        storage: cove_ir::Storage,
+    ) -> Result<Growable, RuntimeError> {
+        match storage {
+            cove_ir::Storage::PackedBytes => self.buffer(shown, owner),
+            cove_ir::Storage::Words(elem) => self.vector_run(owner, elem),
+        }
+    }
+
+    /// An [`Inst::GrowableEnsure`]: room for `additional` more units in the run
+    /// at `owner`, grown if they would not fit.
+    ///
+    /// The owner's checks are its family reader's, in the sentences
+    /// [`Inst::GrowablePush`] answers — a consumed vector in
+    /// [`consumed_vector`]'s one sentence and a consumed buffer in
+    /// [`Machine::buffer`]'s, naming the instruction as `growableTruncate`'s
+    /// refusal does. A negative room is refused before anything is read into a
+    /// `u64`: it is a broken invariant of the body that computed it, and read
+    /// unsigned it would be a growth nothing could satisfy, refused in the
+    /// wrong words.
+    ///
+    /// Never inlined into the dispatch loop, for [`Machine::finish_words`]'
+    /// reason: the arm is one call.
+    #[inline(never)]
+    pub(crate) fn ensure_growable(
+        &mut self,
+        owner: u64,
+        storage: cove_ir::Storage,
+        additional: i64,
+    ) -> Result<(), RuntimeError> {
+        let mut run = self.growable_run("growableEnsure", owner, storage)?;
+        if additional < 0 {
+            return Err(RuntimeError::new(format!(
+                "`growableEnsure` was asked for room for {additional} unit(s), and room is \
+                 never negative"
+            )));
+        }
+        runs::growable_ensure(self, &mut run, additional as u64)
+    }
+
+    /// An [`Inst::GrowableCommit`]: the run at `owner`'s length advanced over
+    /// `count` units its window wrote.
+    ///
+    /// The static reservation rule is what says the units were written; what
+    /// is checked here is what the loader-side bytecode verifier cannot prove
+    /// and every later read of the owner would believe — that the new length
+    /// is neither below the old one nor past the capacity. A commit outside that
+    /// is refused with the length unchanged.
+    #[inline(never)]
+    pub(crate) fn commit_growable(
+        &mut self,
+        owner: u64,
+        storage: cove_ir::Storage,
+        count: i64,
+    ) -> Result<(), RuntimeError> {
+        let mut run = self.growable_run("growableCommit", owner, storage)?;
+        let room = i64::from(run.capacity) - i64::from(run.len);
+        if !(0..=room).contains(&count) {
+            return Err(RuntimeError::new(format!(
+                "`growableCommit` would publish {count} unit(s) onto a length of {} in a store \
+                 of {}, and a commit publishes only room an ensure made",
+                run.len, run.capacity
+            )));
+        }
+        runs::growable_commit(self, &mut run, count as u64);
+        Ok(())
+    }
+
+    /// A byte [`Inst::RunStore`]'s refusals, in the order the arm asks them:
+    /// the run is live, is a byte run under construction, the offset is inside
+    /// it and the value is a byte. The arm has already found one of them false
+    /// before it calls this, and this says which, in words.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn run_store_refusal(&self, run: u64, at: i64, value: i64) -> RuntimeError {
+        if run == 0 {
+            return null_object();
+        }
+        if !matches!(
+            self.program.layout(self.mem.object_layout(run)).shape,
+            Shape::Bytes
+        ) {
+            return RuntimeError::new(
+                "`runStore`'s run is not a byte run under construction, and only one of those \
+                 may be written into",
+            );
+        }
+        let len = i64::from(self.mem.object_len(run));
+        if at < 0 || at >= len {
+            return RuntimeError::new(format!(
+                "`runStore` is at `{at}`, and a byte offset into this run is 0 to {}",
+                len - 1
+            ));
+        }
+        RuntimeError::new(format!(
+            "`runStore`'s value is `{value}`, and a byte is 0 to 255"
+        ))
+    }
+
+    /// A byte [`Inst::RunStore`], whole: `RUN_STORE_BYTES`' checks, the blend,
+    /// or [`Machine::run_store_refusal`]'s sentence. What the native tier's cold
+    /// path runs, so that a store emitted code declined answers what the encoded
+    /// arm answers.
+    #[inline(never)]
+    pub(crate) fn store_run_byte(
+        &mut self,
+        run: u64,
+        at: i64,
+        value: i64,
+    ) -> Result<(), RuntimeError> {
+        let fits = run != 0
+            && matches!(
+                self.program.layout(self.mem.object_layout(run)).shape,
+                Shape::Bytes
+            )
+            && (0..i64::from(self.mem.object_len(run))).contains(&at)
+            && (0..=255).contains(&value);
+        if !fits {
+            return Err(self.run_store_refusal(run, at, value));
+        }
+        self.put_bytes(run, at as usize, 1, value as u64);
+        Ok(())
+    }
+
     /// A word [`Inst::RunFinish`]: the vector's store relabelled to `target` at
     /// its live length, and the vector emptied.
     ///

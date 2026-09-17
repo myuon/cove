@@ -42,6 +42,7 @@
 //! lowering reads its answers rather than recomputing them.
 
 pub mod bytecode;
+pub mod flow;
 pub mod inst;
 pub mod intrinsic;
 pub mod layout;

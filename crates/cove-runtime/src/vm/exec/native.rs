@@ -1040,6 +1040,39 @@ unsafe extern "C" fn growable(
                         };
                         machine.truncate_words(owner, elem, len)
                     }
+                    // ADR 0062's window, each the cold half of an emitted test,
+                    // and each through the method its encoded arm calls. The
+                    // storage is the instruction's, read out of the IR at `pc`:
+                    // these helpers key on the instruction they were handed for,
+                    // never on a composite that used to stand there.
+                    GrowableOp::EnsureBytes | GrowableOp::EnsureWords => {
+                        let owner = machine.mem.slot(base, a as Slot);
+                        let additional = machine.mem.slot(base, b as Slot) as i64;
+                        let code = &machine.program.function(frame.function).code;
+                        let Inst::GrowableEnsure { storage, .. } = code[pc as usize] else {
+                            unreachable!("an ensure was handed over for a pc that is not one")
+                        };
+                        machine.ensure_growable(owner, storage, additional)
+                    }
+                    GrowableOp::CommitBytes | GrowableOp::CommitWords => {
+                        let owner = machine.mem.slot(base, a as Slot);
+                        let count = machine.mem.slot(base, b as Slot) as i64;
+                        let code = &machine.program.function(frame.function).code;
+                        let Inst::GrowableCommit { storage, .. } = code[pc as usize] else {
+                            unreachable!("a commit was handed over for a pc that is not one")
+                        };
+                        machine.commit_growable(owner, storage, count)
+                    }
+                    GrowableOp::StoreBytes => {
+                        let run = machine.mem.slot(base, a as Slot);
+                        let at = machine.mem.slot(base, b as Slot) as i64;
+                        let code = &machine.program.function(frame.function).code;
+                        let Inst::RunStore { src, .. } = code[pc as usize] else {
+                            unreachable!("a byte store was handed over for a pc that is not one")
+                        };
+                        let value = machine.mem.slot(base, src) as i64;
+                        machine.store_run_byte(run, at, value)
+                    }
                     GrowableOp::PushWords => {
                         let owner = machine.mem.slot(base, a as Slot);
                         let code = &machine.program.function(frame.function).code;

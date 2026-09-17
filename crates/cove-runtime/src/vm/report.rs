@@ -160,7 +160,7 @@ impl HelperCalls {
 ///
 /// A constant here rather than on the enum, because the enum is the ABI and a
 /// count is only this report's business. A test holds the two together.
-pub const GROWABLE_OPS: usize = 7;
+pub const GROWABLE_OPS: usize = 12;
 
 /// How many [`RunOp`]s there are, for [`GROWABLE_OPS`]' reason.
 pub const RUN_OPS: usize = 4;
@@ -651,7 +651,7 @@ mod tests {
             helpers: Some(HelperCalls {
                 intrinsic: 7,
                 growable: 3,
-                growable_ops: [0, 1, 0, 0, 2, 0, 0],
+                growable_ops: [0, 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0],
                 ..HelperCalls::default()
             }),
         };

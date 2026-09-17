@@ -93,7 +93,7 @@ use cove_diag::Span;
 use cove_ir::bytecode::{disasm, encode_program, verify, Encoded, EncodedInst, Op};
 use cove_ir::{
     ArgsId, ArithOp, CmpOp, Compare, Convert, FunctionId, HostOpId, LayoutId, Num, Program, Repr,
-    Shape, SiteId, Slot, StrId, TableId, Validation,
+    Shape, SiteId, Slot, Storage, StrId, TableId, Validation,
 };
 
 use crate::budget::Meter;
@@ -286,6 +286,11 @@ const GROWABLE_EXTEND_BYTES: u8 = Op::GrowableExtendBytes.number();
 const GROWABLE_TRUNCATE_WORDS: u8 = Op::GrowableTruncateWords.number();
 const RUN_FINISH_BYTES: u8 = Op::RunFinishBytes.number();
 const RUN_FINISH_WORDS: u8 = Op::RunFinishWords.number();
+const GROWABLE_ENSURE_BYTES: u8 = Op::GrowableEnsureBytes.number();
+const GROWABLE_ENSURE_WORDS: u8 = Op::GrowableEnsureWords.number();
+const GROWABLE_COMMIT_BYTES: u8 = Op::GrowableCommitBytes.number();
+const GROWABLE_COMMIT_WORDS: u8 = Op::GrowableCommitWords.number();
+const RUN_STORE_BYTES: u8 = Op::RunStoreBytes.number();
 const LEN: u8 = Op::Len.number();
 const LAYOUT_OF: u8 = Op::LayoutOf.number();
 
@@ -364,6 +369,11 @@ pub(crate) fn implemented(op: Op) -> bool {
         | Op::GrowableTruncateWords
         | Op::RunFinishBytes
         | Op::RunFinishWords
+        | Op::GrowableEnsureBytes
+        | Op::GrowableEnsureWords
+        | Op::GrowableCommitBytes
+        | Op::GrowableCommitWords
+        | Op::RunStoreBytes
         | Op::LoadField
         | Op::StoreField
         | Op::LoadElem
@@ -1146,6 +1156,46 @@ pub(super) fn run_slice_bytes(
 /// The owner's length word is written **last**, after the final chunk. A run
 /// stopped by a safepoint part way through therefore leaves the appended bytes
 /// above the logical length, where they are spare room rather than value.
+/// One of [ADR 0062]'s window instructions — `GROWABLE_ENSURE_*`,
+/// `GROWABLE_COMMIT_*` or `RUN_STORE_BYTES` — read out of `held` and the frame
+/// at `base_at`, and run.
+///
+/// # Why the dispatch arm is one call
+///
+/// Not only for `RUN_COPY_BYTES`' reason that the checks are more code than an
+/// arm should hold. **`dispatch`'s own stack frame is a budget.** A run that
+/// alternates compiled and encoded frames re-enters `dispatch` once per
+/// crossing on the Rust stack, and `native_tier`'s
+/// `a_var_survives_a_reallocation_under_an_alternating_chain` descends three
+/// hundred of them. Three arms written out in the loop — each with its operands,
+/// its `Storage` and its `Result` held across a call — grew that frame enough to
+/// overflow the test thread's stack there; one arm and one out-of-line call did
+/// not. So the byte store's fast path is here too, rather than inline beside
+/// `RUN_LOAD_BYTES`: until a producer makes it hot, and ADR 0062's fused heads
+/// replace the arm anyway, the frame is the dearer of the two.
+///
+/// [ADR 0062]: ../../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+#[inline(never)]
+fn buffer_window(
+    machine: &mut Machine<'_>,
+    held: EncodedInst,
+    base_at: usize,
+) -> Result<(), RuntimeError> {
+    let a = machine.mem.word_at(base_at + held.a() as usize);
+    let b = machine.mem.word_at(base_at + held.b() as usize) as i64;
+    let words = Storage::Words(LayoutId(held.lo()));
+    match held.opcode() {
+        GROWABLE_ENSURE_BYTES => machine.ensure_growable(a, Storage::PackedBytes, b),
+        GROWABLE_ENSURE_WORDS => machine.ensure_growable(a, words, b),
+        GROWABLE_COMMIT_BYTES => machine.commit_growable(a, Storage::PackedBytes, b),
+        GROWABLE_COMMIT_WORDS => machine.commit_growable(a, words, b),
+        _ => {
+            let value = machine.mem.word_at(base_at + held.c() as usize) as i64;
+            machine.store_run_byte(a, b, value)
+        }
+    }
+}
+
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn append_bytes(
@@ -2174,6 +2224,22 @@ pub(super) fn dispatch<'s, 'a>(
                 match machine.finish_words(owner, target, elem) {
                     Ok(array) => machine.mem.set_word_at(base_at + (a!()) as usize, array),
                     Err(error) => fail!(error),
+                }
+            }
+            // ADR 0062's window: all five opcodes in one arm and one call. An
+            // ensure may grow the store, and a growth allocates, so the arm is
+            // synced first, as `GROWABLE_PUSH_WORDS` is; the owner is a frame slot
+            // and the old store is reachable from it, so a collection inside the
+            // growth frees neither. See `buffer_window` for why the arm is no
+            // more than this.
+            GROWABLE_ENSURE_BYTES
+            | GROWABLE_ENSURE_WORDS
+            | GROWABLE_COMMIT_BYTES
+            | GROWABLE_COMMIT_WORDS
+            | RUN_STORE_BYTES => {
+                machine.sync(pc - 1);
+                if let Err(error) = buffer_window(machine, held, base_at) {
+                    fail!(error);
                 }
             }
             LEN => {
@@ -5109,7 +5175,11 @@ mod tests {
         ///
         /// Every parameter here is one word, which is what lets the frame be the
         /// parameters' own `Repr`s and one slot more for the answer.
-        fn through_a_call(build: &mut Build, inner: FunctionId, answer: Repr) -> FunctionId {
+        pub(super) fn through_a_call(
+            build: &mut Build,
+            inner: FunctionId,
+            answer: Repr,
+        ) -> FunctionId {
             let held = build.program.function(inner);
             let params = held.params.clone();
             let mut frame = held.reprs[..params.len()].to_vec();
@@ -5139,11 +5209,11 @@ mod tests {
         }
 
         /// What a run said: its words, or its error's sentence, span and outcome.
-        type Said = Result<Vec<u64>, (String, Option<Span>, crate::trace::RunOutcome)>;
+        pub(super) type Said = Result<Vec<u64>, (String, Option<Span>, crate::trace::RunOutcome)>;
 
         /// What a case places before a run, and what it reads back after one.
-        type Prepare<'p> = &'p dyn Fn(&mut Machine<'_>) -> Vec<u64>;
-        type Inspect<'i, T> = &'i dyn Fn(&Machine<'_>, &[u64]) -> T;
+        pub(super) type Prepare<'p> = &'p dyn Fn(&mut Machine<'_>) -> Vec<u64>;
+        pub(super) type Inspect<'i, T> = &'i dyn Fn(&Machine<'_>, &[u64]) -> T;
 
         /// One run of `entry` on a fresh machine of `heap` words, on the dispatch
         /// loop alone or with `native` installed: `prepare` places the arguments,
@@ -5173,7 +5243,7 @@ mod tests {
 
         /// [`on`] on both tiers, asserting they said and left the same thing and
         /// that the native run really crossed.
-        fn agree<T: PartialEq + std::fmt::Debug>(
+        pub(super) fn agree<T: PartialEq + std::fmt::Debug>(
             what: &str,
             program: &Program,
             native: &NativeProgram,
@@ -5202,7 +5272,7 @@ mod tests {
         }
 
         /// Compiles `program` and asserts `inner` is one of what compiled.
-        fn compiled(program: &Program, inner: FunctionId) -> NativeProgram {
+        pub(super) fn compiled(program: &Program, inner: FunctionId) -> NativeProgram {
             let native = crate::native::compile(program).expect("this host compiles");
             assert!(
                 native.entry(inner).is_some(),
@@ -5902,6 +5972,710 @@ mod tests {
             assert_eq!(texts, vm_texts);
             for (at, text) in texts.iter().enumerate() {
                 assert_eq!(text, format!("string {at}").as_bytes());
+            }
+        }
+    }
+
+    /// [ADR 0062]'s buffer window — `GROWABLE_ENSURE_*`, `GROWABLE_COMMIT_*` and
+    /// `RUN_STORE_BYTES` — before any Cove source produces it.
+    ///
+    /// The programs are written in the IR for the reason [`compiled`] gives: no
+    /// lowering emits these instructions yet, so a hand-written window is the only
+    /// thing that can run one. Each well-formed window passes `cove_ir::verify`'s
+    /// reservation rule, which `Build::done` asserts. The refusals a window could
+    /// never reach — a commit past the capacity is exactly what the rule proves
+    /// cannot happen — are built with `Build::program` directly, because the
+    /// runtime check exists for bytecode that no static rule has read.
+    ///
+    /// [ADR 0062]: ../../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+    mod window {
+        use super::*;
+
+        struct Windows {
+            program: Program,
+            /// `alloc(capacity) -> ByteBuffer`.
+            alloc: FunctionId,
+            /// `push_byte(owner, value) -> owner`, through a window.
+            push_byte: FunctionId,
+            /// `push_pair(owner, a, b) -> owner`, a two-word element through a
+            /// window.
+            push_pair: FunctionId,
+            /// `append(owner, text) -> owner`, a whole `String` through a window
+            /// whose write is a `run-copy`.
+            append: FunctionId,
+            /// `finish(owner) -> String`.
+            finish: FunctionId,
+            /// `ensure(owner, n) -> owner`, a byte ensure nothing is written into.
+            ensure: FunctionId,
+            /// `store(run, at, value) -> run`, a byte store on its own.
+            store: FunctionId,
+            pair_vector: LayoutId,
+            /// The element, which only the compiled cases name, in the call they
+            /// build in front of `push_pair`.
+            #[cfg_attr(not(feature = "template"), allow(dead_code))]
+            pair: LayoutId,
+            pair_store: LayoutId,
+        }
+
+        fn windows() -> Windows {
+            let mut build = Build::default();
+            let int = build.scalar(Repr::Int);
+            let str_layout = build.string_layout();
+            let bytes = build.bytes_layout();
+            let owner = build.buffer_layout();
+            let pair = build.structure("Pair", &[("a", int), ("b", int)]);
+            let pair_store = build.layout(
+                "Store<Pair>",
+                Shape::Elements {
+                    elem: pair,
+                    growable: true,
+                },
+            );
+            let pair_vector = build.layout("Vector<Pair>", Shape::Vector { elem: pair });
+            let packed = Storage::PackedBytes;
+            let words = Storage::Words(pair);
+            let length = |dst, obj| Inst::LoadField {
+                dst,
+                obj,
+                at: 0,
+                layout: int,
+            };
+            let store_of = |dst, obj, layout| Inst::LoadField {
+                dst,
+                obj,
+                at: 1,
+                layout,
+            };
+
+            let alloc = build.function(
+                "alloc",
+                &[int],
+                &[Repr::Int, Repr::Ref],
+                owner,
+                vec![
+                    Inst::GrowableAlloc {
+                        dst: 1,
+                        capacity: 0,
+                        storage: packed,
+                    },
+                    Inst::Return { src: 1 },
+                ],
+            );
+            // s0 owner, s1 value, s2 length, s3 count, s4 store, s5 commit count.
+            let push_byte = build.function(
+                "push_byte",
+                &[owner, int],
+                &[
+                    Repr::Ref,
+                    Repr::Int,
+                    Repr::Int,
+                    Repr::Int,
+                    Repr::Ref,
+                    Repr::Int,
+                ],
+                owner,
+                vec![
+                    length(2, 0),
+                    Inst::Int { dst: 3, value: 1 },
+                    Inst::GrowableEnsure {
+                        owner: 0,
+                        additional: 3,
+                        storage: packed,
+                    },
+                    store_of(4, 0, bytes),
+                    Inst::RunStore {
+                        run: 4,
+                        index: 2,
+                        src: 1,
+                        storage: packed,
+                    },
+                    Inst::Clear {
+                        slot: 4,
+                        layout: bytes,
+                    },
+                    Inst::Int { dst: 5, value: 1 },
+                    Inst::GrowableCommit {
+                        owner: 0,
+                        count: 5,
+                        storage: packed,
+                    },
+                    Inst::Return { src: 0 },
+                ],
+            );
+            // s0 owner, s1..s2 the pair, s3 length, s4 count, s5 store, s6 commit.
+            let push_pair = build.function(
+                "push_pair",
+                &[pair_vector, pair],
+                &[
+                    Repr::Ref,
+                    Repr::Int,
+                    Repr::Int,
+                    Repr::Int,
+                    Repr::Int,
+                    Repr::Ref,
+                    Repr::Int,
+                ],
+                pair_vector,
+                vec![
+                    length(3, 0),
+                    Inst::Int { dst: 4, value: 1 },
+                    Inst::GrowableEnsure {
+                        owner: 0,
+                        additional: 4,
+                        storage: words,
+                    },
+                    store_of(5, 0, pair_store),
+                    Inst::StoreElem {
+                        obj: 5,
+                        index: 3,
+                        src: 1,
+                        layout: pair,
+                    },
+                    Inst::Clear {
+                        slot: 5,
+                        layout: pair_store,
+                    },
+                    Inst::Int { dst: 6, value: 1 },
+                    Inst::GrowableCommit {
+                        owner: 0,
+                        count: 6,
+                        storage: words,
+                    },
+                    Inst::Return { src: 0 },
+                ],
+            );
+            // s0 owner, s1 text, s2 count, s3 length, s4 store, s5 nought.
+            let copy = build.args(&[(4, bytes), (3, int), (1, str_layout), (5, int), (2, int)]);
+            let append = build.function(
+                "append",
+                &[owner, str_layout],
+                &[
+                    Repr::Ref,
+                    Repr::Ref,
+                    Repr::Int,
+                    Repr::Int,
+                    Repr::Ref,
+                    Repr::Int,
+                ],
+                owner,
+                vec![
+                    Inst::Len { dst: 2, obj: 1 },
+                    length(3, 0),
+                    Inst::GrowableEnsure {
+                        owner: 0,
+                        additional: 2,
+                        storage: packed,
+                    },
+                    store_of(4, 0, bytes),
+                    Inst::Int { dst: 5, value: 0 },
+                    Inst::RunCopy {
+                        args: copy,
+                        storage: packed,
+                    },
+                    Inst::Clear {
+                        slot: 4,
+                        layout: bytes,
+                    },
+                    Inst::GrowableCommit {
+                        owner: 0,
+                        count: 2,
+                        storage: packed,
+                    },
+                    Inst::Return { src: 0 },
+                ],
+            );
+            let finish = build.function(
+                "finish",
+                &[owner],
+                &[Repr::Ref],
+                str_layout,
+                vec![
+                    Inst::RunFinish {
+                        dst: 0,
+                        owner: 0,
+                        target: str_layout,
+                        validation: Validation::Utf8,
+                        storage: packed,
+                    },
+                    Inst::Return { src: 0 },
+                ],
+            );
+            let ensure = build.function(
+                "ensure",
+                &[owner, int],
+                &[Repr::Ref, Repr::Int],
+                owner,
+                vec![
+                    Inst::GrowableEnsure {
+                        owner: 0,
+                        additional: 1,
+                        storage: packed,
+                    },
+                    Inst::Return { src: 0 },
+                ],
+            );
+            let store = build.function(
+                "store",
+                &[bytes, int, int],
+                &[Repr::Ref, Repr::Int, Repr::Int],
+                bytes,
+                vec![
+                    Inst::RunStore {
+                        run: 0,
+                        index: 1,
+                        src: 2,
+                        storage: packed,
+                    },
+                    Inst::Return { src: 0 },
+                ],
+            );
+            Windows {
+                program: build.done(),
+                alloc,
+                push_byte,
+                push_pair,
+                append,
+                finish,
+                ensure,
+                store,
+                pair_vector,
+                pair,
+                pair_store,
+            }
+        }
+
+        /// A `Vector<Pair>` of `capacity` elements and none of them value.
+        fn a_pair_vector(machine: &mut Machine<'_>, w: &Windows, capacity: i64) -> u64 {
+            let store = machine.allocate(w.pair_store, capacity).unwrap();
+            machine.push_temp(store);
+            let owner = machine.allocate(w.pair_vector, 0).unwrap();
+            machine.set_payload(owner, runs::GROWABLE_LEN, 0);
+            machine.set_payload(owner, runs::GROWABLE_STORE, store);
+            owner
+        }
+
+        fn message(result: Result<Vec<u64>, RuntimeError>) -> String {
+            result.expect_err("the run is refused").message
+        }
+
+        /// **A byte window is a push**: a hundred bytes one window at a time, from
+        /// a buffer with room for none of them, grow the store several times and
+        /// finish into the same `String` the composite push builds.
+        #[test]
+        fn a_byte_window_builds_what_a_push_builds() {
+            let w = windows();
+            let mut machine = Machine::new(&w.program, 1 << 16);
+            let owner = machine.run(w.alloc, &[0], &budget()).unwrap()[0];
+            let text: Vec<u8> = (0..100).map(|n| b'a' + (n % 26) as u8).collect();
+            for byte in &text {
+                let answered = machine
+                    .run(w.push_byte, &[owner, u64::from(*byte)], &budget())
+                    .unwrap();
+                assert_eq!(answered[0], owner, "the owner does not move");
+            }
+            let string = machine.run(w.finish, &[owner], &budget()).unwrap()[0];
+            assert_eq!(machine.string_bytes(string), text);
+        }
+
+        /// **A word window writes a whole element at the stride**, and the store
+        /// it grows into keeps every element pushed before.
+        #[test]
+        fn a_word_window_pushes_a_two_word_element() {
+            let w = windows();
+            let mut machine = Machine::new(&w.program, 1 << 16);
+            let owner = a_pair_vector(&mut machine, &w, 1);
+            for n in 0..20u64 {
+                machine
+                    .run(w.push_pair, &[owner, n, 1000 + n], &budget())
+                    .unwrap();
+            }
+            assert_eq!(machine.payload(owner, runs::GROWABLE_LEN), 20);
+            let store = machine.payload(owner, runs::GROWABLE_STORE);
+            for n in 0..20u32 {
+                assert_eq!(machine.payload(store, 2 * n), u64::from(n));
+                assert_eq!(machine.payload(store, 2 * n + 1), 1000 + u64::from(n));
+            }
+        }
+
+        /// **An append window is an append**: a copy into the room an ensure made,
+        /// published by one commit, across growths and word boundaries.
+        #[test]
+        fn an_append_window_copies_a_string() {
+            let w = windows();
+            let mut machine = Machine::new(&w.program, 1 << 16);
+            let owner = machine.run(w.alloc, &[0], &budget()).unwrap()[0];
+            let pieces = ["hello, ", "", "world", " — ", "a longer piece than a store"];
+            for piece in pieces {
+                let text = machine.new_string(piece).unwrap();
+                machine.run(w.append, &[owner, text], &budget()).unwrap();
+            }
+            let string = machine.run(w.finish, &[owner], &budget()).unwrap()[0];
+            assert_eq!(machine.string_bytes(string), pieces.concat().as_bytes());
+        }
+
+        /// **A growth inside a window that collects loses nothing**: the heap is
+        /// small, garbage is allocated between windows, and the assertion on
+        /// `collections` is what says a collection really happened while an
+        /// ensure grew the store.
+        #[test]
+        fn a_window_whose_ensure_collects_keeps_every_byte() {
+            const BYTES: i64 = 200;
+            let mut build = Build::default();
+            build.scalar(Repr::Int);
+            let str_layout = build.string_layout();
+            let bytes = build.bytes_layout();
+            let owner = build.buffer_layout();
+            let int = build.scalar(Repr::Int);
+            let packed = Storage::PackedBytes;
+            // s0 capacity, s1 owner, s2 value, s3 garbage, s4 length, s5 count,
+            // s6 store.
+            let mut code = vec![
+                Inst::Int { dst: 0, value: 0 },
+                Inst::GrowableAlloc {
+                    dst: 1,
+                    capacity: 0,
+                    storage: packed,
+                },
+                Inst::Int {
+                    dst: 2,
+                    value: i64::from(b'x'),
+                },
+                Inst::Int { dst: 0, value: 512 },
+            ];
+            for at in 0..BYTES {
+                code.extend([
+                    Inst::LoadField {
+                        dst: 4,
+                        obj: 1,
+                        at: 0,
+                        layout: int,
+                    },
+                    Inst::Int { dst: 5, value: 1 },
+                    Inst::GrowableEnsure {
+                        owner: 1,
+                        additional: 5,
+                        storage: packed,
+                    },
+                    Inst::LoadField {
+                        dst: 6,
+                        obj: 1,
+                        at: 1,
+                        layout: bytes,
+                    },
+                    Inst::RunStore {
+                        run: 6,
+                        index: 4,
+                        src: 2,
+                        storage: packed,
+                    },
+                    Inst::Clear {
+                        slot: 6,
+                        layout: bytes,
+                    },
+                    Inst::GrowableCommit {
+                        owner: 1,
+                        count: 5,
+                        storage: packed,
+                    },
+                ]);
+                if at % 8 == 0 {
+                    code.push(Inst::GrowableAlloc {
+                        dst: 3,
+                        capacity: 0,
+                        storage: packed,
+                    });
+                    code.push(Inst::Clear {
+                        slot: 3,
+                        layout: owner,
+                    });
+                }
+            }
+            code.push(Inst::RunFinish {
+                dst: 1,
+                owner: 1,
+                target: str_layout,
+                validation: Validation::Utf8,
+                storage: packed,
+            });
+            code.push(Inst::Return { src: 1 });
+            let entry = build.function(
+                "grow_in_windows",
+                &[],
+                &[
+                    Repr::Int,
+                    Repr::Ref,
+                    Repr::Int,
+                    Repr::Ref,
+                    Repr::Int,
+                    Repr::Int,
+                    Repr::Ref,
+                ],
+                str_layout,
+                code,
+            );
+            let program = build.done();
+            let mut machine = Machine::new(&program, 320);
+            let before = machine.collected().collections;
+            let answer = machine.run(entry, &[], &budget()).expect("a string");
+            assert!(
+                machine.collected().collections > before,
+                "this fixture exists to collect inside an ensure's growth"
+            );
+            assert_eq!(machine.string_bytes(answer[0]), vec![b'x'; BYTES as usize]);
+        }
+
+        /// **Each refusal is the machine's, in its own words**: a negative room,
+        /// an ensure on a consumed buffer, a byte that is not one, an offset past
+        /// the run, a store into a `String`.
+        #[test]
+        fn a_window_instruction_refuses_what_it_cannot_do() {
+            let w = windows();
+            let mut machine = Machine::new(&w.program, 1 << 16);
+            let owner = machine.run(w.alloc, &[0], &budget()).unwrap()[0];
+            assert!(
+                message(machine.run(w.ensure, &[owner, (-1i64) as u64], &budget()))
+                    .contains("room is never negative")
+            );
+            let run = machine.payload(owner, runs::GROWABLE_STORE);
+            assert!(message(machine.run(w.store, &[run, 0, 256], &budget()))
+                .contains("`runStore`'s value is `256`, and a byte is 0 to 255"));
+            assert!(
+                message(machine.run(w.store, &[run, 0, (-1i64) as u64], &budget()))
+                    .contains("a byte is 0 to 255")
+            );
+            let capacity = u64::from(machine.mem.object_len(run));
+            assert!(
+                message(machine.run(w.store, &[run, capacity, 1], &budget()))
+                    .contains("a byte offset into this run is 0 to")
+            );
+            let text = machine.new_string("text").unwrap();
+            assert!(message(machine.run(w.store, &[text, 0, 1], &budget()))
+                .contains("not a byte run under construction"));
+            machine.run(w.finish, &[owner], &budget()).unwrap();
+            assert_eq!(
+                message(machine.run(w.ensure, &[owner, 1], &budget())),
+                "`growableEnsure` was called on a byte buffer that `finish()` already consumed"
+            );
+        }
+
+        /// **A commit the bytecode could hold and no verified lowering can** —
+        /// past the room, or negative — is refused at run time with the length
+        /// unchanged. Built without `Build::done`, because the reservation rule
+        /// refuses a commit with no window, which is the point.
+        #[test]
+        fn a_commit_past_the_room_is_refused_and_changes_nothing() {
+            let mut build = Build::default();
+            let int = build.scalar(Repr::Int);
+            build.string_layout();
+            build.bytes_layout();
+            let owner = build.buffer_layout();
+            let alloc = build.function(
+                "alloc",
+                &[int],
+                &[Repr::Int, Repr::Ref],
+                owner,
+                vec![
+                    Inst::GrowableAlloc {
+                        dst: 1,
+                        capacity: 0,
+                        storage: Storage::PackedBytes,
+                    },
+                    Inst::Return { src: 1 },
+                ],
+            );
+            let commit = build.function(
+                "commit",
+                &[owner, int],
+                &[Repr::Ref, Repr::Int],
+                owner,
+                vec![
+                    Inst::GrowableCommit {
+                        owner: 0,
+                        count: 1,
+                        storage: Storage::PackedBytes,
+                    },
+                    Inst::Return { src: 0 },
+                ],
+            );
+            let program = build.program;
+            assert!(
+                cove_ir::verify(&program).is_err(),
+                "the static rule refuses a commit with no window"
+            );
+            let mut machine = Machine::new(&program, 1 << 16);
+            let buffer = machine.run(alloc, &[0], &budget()).unwrap()[0];
+            let capacity = u64::from(
+                machine
+                    .mem
+                    .object_len(machine.payload(buffer, runs::GROWABLE_STORE)),
+            );
+            for count in [capacity + 1, (-1i64) as u64] {
+                assert!(message(machine.run(commit, &[buffer, count], &budget()))
+                    .contains("a commit publishes only room an ensure made"));
+                assert_eq!(machine.payload(buffer, runs::GROWABLE_LEN), 0);
+            }
+            machine.run(commit, &[buffer, capacity], &budget()).unwrap();
+            assert_eq!(machine.payload(buffer, runs::GROWABLE_LEN), capacity);
+        }
+
+        /// The same windows with the template compiler's table installed: every
+        /// case above that a program reaches through a `call` answers what the
+        /// dispatch loop answers — the words, the bytes, and each refusal's
+        /// sentence and span.
+        #[cfg(feature = "template")]
+        mod compiled {
+            use super::super::compiled::{agree, compiled, through_a_call};
+            use super::*;
+            use crate::vm::exec::native::Tiered;
+
+            #[test]
+            fn a_compiled_window_agrees_with_the_vm() {
+                let w = windows();
+                let mut build = Build {
+                    program: w.program.clone(),
+                };
+                let byte_entry = through_a_call(&mut build, w.push_byte, Repr::Ref);
+                // `through_a_call` is for one-word parameters, and a `Pair` is two.
+                let pair_args = build.args(&[(0, w.pair_vector), (1, w.pair)]);
+                let pair_entry = build.function(
+                    "outer_pair",
+                    &[w.pair_vector, w.pair],
+                    &[Repr::Ref, Repr::Int, Repr::Int, Repr::Ref],
+                    w.pair_vector,
+                    vec![
+                        Inst::Call {
+                            dst: 3,
+                            callee: w.push_pair,
+                            args: pair_args,
+                        },
+                        Inst::Return { src: 3 },
+                    ],
+                );
+                let append_entry = through_a_call(&mut build, w.append, Repr::Ref);
+                let ensure_entry = through_a_call(&mut build, w.ensure, Repr::Ref);
+                let store_entry = through_a_call(&mut build, w.store, Repr::Ref);
+                let program = build.done();
+                let native = compiled(&program, w.push_byte);
+                for inner in [w.push_pair, w.append, w.ensure, w.store] {
+                    assert!(native.entry(inner).is_some(), "{:?}", native.refusals());
+                }
+
+                // A byte push into a store with room, one that has to grow, and a
+                // value that is not a byte.
+                for (len, capacity, value) in [(3u64, 16i64, 0x41u64), (16, 16, 0x42), (0, 16, 300)]
+                {
+                    let prepare = |machine: &mut Machine<'_>| {
+                        let owner = machine.alloc_buffer(capacity).unwrap();
+                        let store = machine.payload(owner, runs::GROWABLE_STORE);
+                        machine.write_bytes(store, &vec![b'.'; len as usize]);
+                        machine.set_payload(owner, runs::GROWABLE_LEN, len);
+                        vec![owner, value]
+                    };
+                    let inspect = |machine: &Machine<'_>, args: &[u64]| {
+                        let store = machine.payload(args[0], runs::GROWABLE_STORE);
+                        (
+                            machine.payload(args[0], runs::GROWABLE_LEN),
+                            machine.string_bytes(store),
+                        )
+                    };
+                    let (said, _) = agree(
+                        &format!("a byte window at {len} of {capacity}, value {value}"),
+                        &program,
+                        &native,
+                        byte_entry,
+                        &prepare,
+                        &inspect,
+                    );
+                    assert_eq!(said.is_ok(), value <= 255, "{said:?}");
+                }
+
+                // A pair push with room and without.
+                for capacity in [4i64, 1] {
+                    let prepare = |machine: &mut Machine<'_>| {
+                        let store = machine.allocate(w.pair_store, capacity).unwrap();
+                        machine.push_temp(store);
+                        let owner = machine.allocate(w.pair_vector, 0).unwrap();
+                        machine.set_payload(owner, runs::GROWABLE_STORE, store);
+                        machine.set_payload(owner, runs::GROWABLE_LEN, 1);
+                        vec![owner, 7, 8]
+                    };
+                    let inspect = |machine: &Machine<'_>, args: &[u64]| {
+                        let store = machine.payload(args[0], runs::GROWABLE_STORE);
+                        (
+                            machine.payload(args[0], runs::GROWABLE_LEN),
+                            machine.payload(store, 2),
+                            machine.payload(store, 3),
+                        )
+                    };
+                    let (said, _) = agree(
+                        &format!("a pair window into a store of {capacity}"),
+                        &program,
+                        &native,
+                        pair_entry,
+                        &prepare,
+                        &inspect,
+                    );
+                    assert!(said.is_ok(), "{said:?}");
+                }
+
+                // An append that fits and one that grows.
+                for piece in ["hi", "a piece longer than the sixteen bytes of room"] {
+                    let prepare = |machine: &mut Machine<'_>| {
+                        let owner = machine.alloc_buffer(16).unwrap();
+                        machine.push_temp(owner);
+                        let text = machine.new_string(piece).unwrap();
+                        vec![owner, text]
+                    };
+                    let inspect = |machine: &Machine<'_>, args: &[u64]| {
+                        let len = machine.payload(args[0], runs::GROWABLE_LEN);
+                        let store = machine.payload(args[0], runs::GROWABLE_STORE);
+                        (len, machine.string_bytes(store)[..len as usize].to_vec())
+                    };
+                    let (said, _) = agree(
+                        &format!("an append window of {piece:?}"),
+                        &program,
+                        &native,
+                        append_entry,
+                        &prepare,
+                        &inspect,
+                    );
+                    assert!(said.is_ok(), "{said:?}");
+                }
+
+                // A negative room, refused in the same words at the same span.
+                let prepare = |machine: &mut Machine<'_>| {
+                    let owner = machine.alloc_buffer(16).unwrap();
+                    vec![owner, (-5i64) as u64]
+                };
+                let inspect = |_: &Machine<'_>, _: &[u64]| ();
+                let (said, ()) = agree(
+                    "a negative ensure",
+                    &program,
+                    &native,
+                    ensure_entry,
+                    &prepare,
+                    &inspect,
+                );
+                assert!(said.is_err());
+
+                // A byte store that is not a byte, and one past the run.
+                for (at, value) in [(0u64, 256u64), (16, 1), (3, 0x7A)] {
+                    let prepare = |machine: &mut Machine<'_>| {
+                        let run = machine.allocate(machine.program.bytes_layout, 16).unwrap();
+                        vec![run, at, value]
+                    };
+                    let inspect =
+                        |machine: &Machine<'_>, args: &[u64]| machine.string_bytes(args[0]);
+                    let (said, _) = agree(
+                        &format!("a byte store of {value} at {at}"),
+                        &program,
+                        &native,
+                        store_entry,
+                        &prepare,
+                        &inspect,
+                    );
+                    assert_eq!(said.is_ok(), at < 16 && value <= 255, "{said:?}");
+                }
             }
         }
     }

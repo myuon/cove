@@ -921,6 +921,35 @@ pub enum GrowableOp {
     /// new length's; the element layout is read off the instruction at the pc,
     /// as for [`GrowableOp::PushWords`].
     TruncateWords = 6,
+    /// [`Inst::GrowableEnsure`](cove_ir::Inst::GrowableEnsure) over packed
+    /// bytes, reached only as the cold path of an emitted room test: a room the
+    /// store does not have, a negative count, a consumed owner, or an owner that
+    /// is not a byte buffer. `a` is the owner's slot and `b` the count's; the
+    /// helper runs the whole ensure — a growth, or a refusal — and compiled code
+    /// rejoins after it. [ADR 0062]'s window.
+    ///
+    /// [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+    EnsureBytes = 7,
+    /// [`GrowableOp::EnsureBytes`] over words: `a` and `b` the same two slots,
+    /// and the element layout read off the instruction at the pc, as for
+    /// [`GrowableOp::PushWords`].
+    EnsureWords = 8,
+    /// [`Inst::GrowableCommit`](cove_ir::Inst::GrowableCommit) over packed
+    /// bytes, reached only as the cold path of an emitted bound test and add: a
+    /// count outside the room, a consumed owner, or an owner that is not a byte
+    /// buffer. `a` is the owner's slot and `b` the count's. Every one of those is
+    /// refused by the runtime in its own words; the helper runs the whole commit
+    /// anyway, so a cold path that turns out to hold commits rather than lies.
+    CommitBytes = 9,
+    /// [`GrowableOp::CommitBytes`] over words, the element layout read off the
+    /// instruction at the pc.
+    CommitWords = 10,
+    /// [`Inst::RunStore`](cove_ir::Inst::RunStore) over packed bytes, reached
+    /// only as the cold path of an emitted blend: an object that is not a byte
+    /// run, an offset outside it, or a value that is not a byte. `a` is the run's
+    /// slot and `b` the offset's; the source slot is read off the instruction at
+    /// the pc, because the ABI carries two operands.
+    StoreBytes = 11,
 }
 
 impl GrowableOp {
@@ -939,6 +968,11 @@ impl GrowableOp {
             4 => Some(GrowableOp::PushWords),
             5 => Some(GrowableOp::FinishWords),
             6 => Some(GrowableOp::TruncateWords),
+            7 => Some(GrowableOp::EnsureBytes),
+            8 => Some(GrowableOp::EnsureWords),
+            9 => Some(GrowableOp::CommitBytes),
+            10 => Some(GrowableOp::CommitWords),
+            11 => Some(GrowableOp::StoreBytes),
             _ => None,
         }
     }
@@ -1513,11 +1547,16 @@ mod tests {
             (4, GrowableOp::PushWords),
             (5, GrowableOp::FinishWords),
             (6, GrowableOp::TruncateWords),
+            (7, GrowableOp::EnsureBytes),
+            (8, GrowableOp::EnsureWords),
+            (9, GrowableOp::CommitBytes),
+            (10, GrowableOp::CommitWords),
+            (11, GrowableOp::StoreBytes),
         ] {
             assert_eq!(op.abi(), code);
             assert_eq!(GrowableOp::from_abi(code), Some(op));
         }
-        assert_eq!(GrowableOp::from_abi(7), None);
+        assert_eq!(GrowableOp::from_abi(12), None);
 
         for (code, op) in [
             (0, RunOp::CopyBytes),

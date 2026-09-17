@@ -413,6 +413,9 @@ impl<'p> Flow<'p> {
             | Inst::GrowablePush { .. }
             | Inst::GrowableExtend { .. }
             | Inst::GrowableTruncate { .. }
+            | Inst::GrowableEnsure { .. }
+            | Inst::GrowableCommit { .. }
+            | Inst::RunStore { .. }
             | Inst::ScopeCancel { .. }
             | Inst::Cancel { .. }
             | Inst::SharedLock { .. }
@@ -512,6 +515,25 @@ impl<'p> Flow<'p> {
             Inst::GrowableTruncate { owner, len, .. } => {
                 f(owner, 1);
                 f(len, 1);
+            }
+            Inst::GrowableEnsure {
+                owner, additional, ..
+            } => {
+                f(owner, 1);
+                f(additional, 1);
+            }
+            Inst::GrowableCommit { owner, count, .. } => {
+                f(owner, 1);
+                f(count, 1);
+            }
+            // A byte store's source is one `Int` word: `PackedBytes` is the only
+            // storage `crate::verify` admits for it.
+            Inst::RunStore {
+                run, index, src, ..
+            } => {
+                f(run, 1);
+                f(index, 1);
+                f(src, 1);
             }
             // All four operands live in the args row, exactly as
             // `Inst::RunCopy`'s five do.

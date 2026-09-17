@@ -355,6 +355,56 @@ pub fn encode(inst: &Inst, pc: Pc) -> Result<EncodedInst, TooWide> {
                 halves(elem.0, 0),
             ),
         },
+        // ADR 0062's window: one opcode per storage for the ensure and the
+        // commit, a word member's element layout in the payload's low half as
+        // `Op::GrowableTruncateWords`' is, and a byte store alone.
+        Inst::GrowableEnsure {
+            owner,
+            additional,
+            storage,
+        } => match storage {
+            Storage::PackedBytes => build(
+                Op::GrowableEnsureBytes,
+                slot(owner)?,
+                slot(additional)?,
+                0,
+                0,
+            ),
+            Storage::Words(elem) => build(
+                Op::GrowableEnsureWords,
+                slot(owner)?,
+                slot(additional)?,
+                0,
+                halves(elem.0, 0),
+            ),
+        },
+        Inst::GrowableCommit {
+            owner,
+            count,
+            storage,
+        } => match storage {
+            Storage::PackedBytes => {
+                build(Op::GrowableCommitBytes, slot(owner)?, slot(count)?, 0, 0)
+            }
+            Storage::Words(elem) => build(
+                Op::GrowableCommitWords,
+                slot(owner)?,
+                slot(count)?,
+                0,
+                halves(elem.0, 0),
+            ),
+        },
+        Inst::RunStore {
+            run,
+            index,
+            src,
+            storage,
+        } => match storage {
+            Storage::PackedBytes => {
+                build(Op::RunStoreBytes, slot(run)?, slot(index)?, slot(src)?, 0)
+            }
+            Storage::Words(_) => return Err(TooWide::Storage { storage }),
+        },
         Inst::RunSlice { args, storage } => match storage {
             Storage::PackedBytes => build(Op::RunSliceBytes, 0, 0, 0, halves(args.0, 0)),
             Storage::Words(elem) => build(Op::RunSliceWords, 0, 0, 0, halves(args.0, elem.0)),
@@ -933,6 +983,47 @@ mod tests {
             ),
             (
                 0,
+                Inst::GrowableEnsure {
+                    owner: 1,
+                    additional: 2,
+                    storage: Storage::PackedBytes,
+                },
+            ),
+            (
+                0,
+                Inst::GrowableEnsure {
+                    owner: 1,
+                    additional: 2,
+                    storage: Storage::Words(L),
+                },
+            ),
+            (
+                0,
+                Inst::GrowableCommit {
+                    owner: 1,
+                    count: 2,
+                    storage: Storage::PackedBytes,
+                },
+            ),
+            (
+                0,
+                Inst::GrowableCommit {
+                    owner: 1,
+                    count: 2,
+                    storage: Storage::Words(L),
+                },
+            ),
+            (
+                0,
+                Inst::RunStore {
+                    run: 1,
+                    index: 2,
+                    src: 3,
+                    storage: Storage::PackedBytes,
+                },
+            ),
+            (
+                0,
                 Inst::GrowableAlloc {
                     dst: 1,
                     capacity: 2,
@@ -1378,6 +1469,12 @@ mod tests {
             },
             Inst::GrowableExtend {
                 args: ArgsId(0),
+                storage: words,
+            },
+            Inst::RunStore {
+                run: 0,
+                index: 1,
+                src: 2,
                 storage: words,
             },
         ] {
