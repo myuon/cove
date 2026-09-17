@@ -4,7 +4,8 @@
 - Date: 2026-09-17
 - Decides: what `"{x}"` renders when `x`, or any value nested inside `x`,
   has a type that conforms to a standard-library `Display`; where that trait
-  and the renderings of the builtin compound types live; how the VM lowering
+  lives; which builtin types conform to it without an `impl`, and how their
+  `describe` resolves, type-checks, lowers and dispatches; how the VM lowering
   chooses a rendering statically for each piece, including for erased values;
   and how the tree-walking oracle reaches the same answer without IR
 - Supersedes:
@@ -73,6 +74,15 @@ answer's *semantics*: `Display` applies at every depth, and `Some(b)` renders
 through the standard library's `Display` rendering of `Option<T>`. The owner
 did not choose its *mechanism*.
 
+The owner then went one step further. **Builtin types have a built-in
+`Display` conformance.** The compiler knows that `Int`, `Option<T>`,
+`Array<T>` and the other renderable builtins conform to the standard
+library's `Display`, for every type argument. So `Option<Booking>` satisfies
+`T: Display`, `Some(b).describe()` and `42.describe()` type-check, and a
+builtin value converts to `dyn Display`. This is not a general feature for
+writing an `impl` on a builtin: a program still cannot write
+`impl Display for Option<T>`, and neither can the standard library.
+
 The mechanism does not have to be a callback, because the IR is
 monomorphised. `Body::ty` completes every recorded type under the current
 instantiation (`crates/cove-ir/src/lower/mod.rs:1956-1964`), and
@@ -109,8 +119,8 @@ its interpolation reaches through `value.to_string()`
 
 What `"{x}"` renders, stated once for both evaluators:
 
-1. If the type of `x` conforms to `std.display.Display`, the text is
-   `x.describe()`.
+1. If the type of `x` is a declared struct or enum that conforms to
+   `std.display.Display` through an `impl`, the text is `x.describe()`.
 2. Otherwise, if `x` is a leaf (`()`, `Bool`, `Int`, `Float`, `Duration`,
    `String`, a closure, a `Shared`), the text is what it is today.
 3. Otherwise `x` is compound. Its text has the same shape as today, and
@@ -121,10 +131,16 @@ What `"{x}"` renders, stated once for both evaluators:
    parts to recurse into.
 4. A `dyn Trait` or `Any` value renders as the value it holds, by this rule.
    Rendering already looks through erasure (`docs/LANGUAGE_REFERENCE.md:592-597`).
+5. For every builtin type that conforms (see
+   [Builtin types conform to `Display` without an `impl`](#builtin-types-conform-to-display-without-an-impl)),
+   `describe()` answers exactly the text rules 2 to 4 give the value. So rule
+   1 can be read as applying to every conforming type, and the rule is not
+   circular: a builtin's `describe` is defined *by* rules 2 to 4, not used by
+   them.
 
-A program with no conformance to `std.display.Display` therefore renders
-every value byte for byte as it does today. The table under
-[Byte-identical output](#byte-identical-output-for-programs-without-a-conformance)
+A program with no `impl` of `std.display.Display` therefore renders every
+value byte for byte as it does today. The table under
+[Byte-identical output](#byte-identical-output-for-programs-without-an-impl)
 checks that row by row.
 
 **Where the rule applies:** string interpolation, and assertion failure
@@ -195,16 +211,19 @@ export trait Display {
 | `String` | whole-string extend (unchanged) |
 | `Int` | `Int.renderInto` (unchanged) |
 | does not **reach** `Display` | `Value.renderInto` (unchanged) |
-| conforms to `Display` | call `describe`, then extend with its `String` |
-| builtin compound that reaches | call the `std.display` rendering of that type (below), then extend |
+| declared struct or enum that conforms | call `describe`, then extend with its `String` |
+| builtin compound that reaches | call that type's `std.display` function (below), then extend |
 | declared struct or enum that reaches but does not conform | call its generated renderer (below) |
 | `dyn Trait` or `Any` that reaches | call the program's erased renderer (below) |
 
-A type **reaches** `Display` when a value of that type can contain a
-conforming value somewhere its rendering shows. This is a least fixed point
-over the completed type, memoised per type:
+A type **reaches** `Display` when a value of that type can contain a value
+whose type has a *declared* conformance, somewhere its rendering shows. A
+builtin's own conformance does not count. Its `describe` is the structural
+rendering, and the Rust walk already produces that text without a call, so
+`"{42}"` and `"{[1, 2]}"` still lower exactly as they do today. The predicate
+is a least fixed point over the completed type, memoised per type:
 
-- a struct or enum that conforms reaches;
+- a struct or enum with an `impl Display` reaches;
 - an **opaque** struct that does not conform does not reach, because its
   rendering shows no parts;
 - any other struct or enum reaches if one of its fields or case payloads does,
@@ -214,7 +233,8 @@ over the completed type, memoised per type:
 - `dyn Trait` reaches if some conformance to `Trait` reaches. The
   conformances are a finite list, because ADR 0006 makes conformance explicit
   (`dispatch.rs:1207-1219`);
-- `Any` reaches if any type in the package conforms to `std.display.Display`;
+- `Any` reaches if any type in the package has an `impl` of
+  `std.display.Display`;
 - `String`, the scalars, `Error`, `Range`, a closure, `Shared`, `Task`, a task
   scope and a host handle never reach. Their renderings show either no parts
   or only parts that are leaves.
@@ -239,11 +259,162 @@ edge to it. That is the case `Body::reached` and the `wanted` round of
 `lower_roots` already handle (`mod.rs:225-262`): the next round lowers it, just
 as a `dyn` dispatch's implementations are lowered (`dispatch.rs:1259-1266`).
 
-### The builtin compound types render in `std.display`
+### Builtin types conform to `Display` without an `impl`
 
-`std.display` holds one module-private generic function for each builtin
-compound type. Each is written in Cove and restates today's structural
-format:
+**Which builtins conform.** `Unit`, `Bool`, `Int`, `Float`, `String`,
+`Duration`, `Error`, `Range`, `Option<T>`, `Result<T, E>`, `Array<T>`,
+`Vector<T>`, `Set<T>`, `Map<K, V>` and `MapEntry<K, V>` conform to
+`std.display.Display`.
+
+A function type, `Shared<T>`, `Task<T>`, a task scope, a host handle,
+`ByteBuffer`, `Any`, `dyn Trait` and a type parameter do not. Their
+renderings are placeholders (`<fn>`, `<shared>`), or refusals on the VM
+("this value has no text of its own", `crates/cove-runtime/src/vm/intrinsics.rs:325-327`).
+A `describe` that promises `<fn>` describes nothing. Those values still render
+inside a compound value exactly as they do today.
+
+**Conformance holds for every type argument.** `Option<Pair>` conforms even
+though `Pair` has no `impl`, and so does `Array<fn() -> Int>`. That follows
+from what a builtin's `describe` is: rule 5 defines it as the rendering, and
+rendering is total over types. Interpolation already "renders any value and
+constrains none" (`docs/LANGUAGE_REFERENCE.md:227-228`), so the part a
+builtin shows is rendered, not described. A conditional conformance
+(`Option<T>: Display` only when `T: Display`) would make
+`fn f<T>(xs: Array<T>) -> String { xs.describe() }` fail to type-check, while
+`"{xs}"` in the same body is accepted. It would also need exactly the
+conditional-bound machinery the language does not have. That machinery is
+why `Option` has no `snapshot` (`crates/cove-schema/src/builtins.rs:3469-3470`).
+
+**A declared struct or enum without an `impl` does not conform.** The two
+cases differ because of who can speak for the type:
+
+- **A builtin's text is the language's.** The Language Reference states it
+  and both evaluators implement it, so the language can declare the
+  conformance for the type.
+- **A declared type's structural rendering is a fallback, not a choice its
+  module made.** ADR 0006 makes conformance explicit precisely so that a
+  trait's implementors are what their modules said
+  (`docs/adr/0006-traits-and-dispatch.md:47-53`).
+
+If every declared type conformed, `T: Display` would accept everything and
+mean nothing. And an opaque type would "describe" itself as its bare name,
+which is the opposite of what a module that writes an `impl` wants to be
+able to promise.
+
+**The checker.** `conforms` (`crates/cove-sema/src/typeck.rs:9041-9057`) gains
+an arm: a type from the list above conforms when `trait_name` denotes
+`std.display.Display`, and to no other trait. Two things make "denotes"
+harder than a string compare:
+
+- **Trait keys depend on the module.** A key is bare for a trait the current
+  module declares and `module.Name` for an imported one
+  (`Checker::key`, `typeck.rs:2314-2319`; `conformance_key`, `:797-809`).
+  So the key is `std.display.Display` in a program module and `Display`
+  inside `std.display` itself.
+- **`ConformanceView` does not carry the module name**
+  (`typeck.rs:9031-9034`, built at `:8240-8245`). It gains it.
+
+A program's own trait named `Display` never gets the builtin arm, because its
+key is `Display` or `app.display.Display`, not `std.display.Display`.
+
+`conforms` has two callers, which the arm reaches differently:
+
+- `check_bounds` (`typeck.rs:8267`) gets the arm in Phase 2.
+- `coerces` (`typeck.rs:9070-9075`) gets it only in Phase 3. See
+  [`dyn Display` over a builtin value](#dyn-display-over-a-builtin-value).
+
+**This is the first trait a builtin satisfies as a bound.** Builtins already
+carry a `snapshot()` method (`SNAPSHOT`, `builtins.rs:2260-2278`; `BOOL`'s
+whole method table, `:3855`). But `conforms` answers `false` for `Int`
+against `Snapshot`, through its final `_ => false` (`typeck.rs:9053-9055`), so
+`T: Snapshot` does not accept an `Int`. This ADR does not change
+`Snapshot`, and it does not copy that asymmetry for `Display`.
+
+**Resolution still refuses `impl Display for Option<T>`, deliberately.** An
+`impl` whose target is not a declared struct or enum fails with
+`cove::resolve::unknown_impl_type` (`crates/cove-sema/src/resolve.rs:823-839`,
+pinned for a local trait at `:4146-4154`). That holds in every module,
+`std.display` included, and it does not change. The built-in conformance
+belongs to the language, and its text is defined by rule 5, so there is no
+body to write.
+
+A general feature for generic `impl`s on builtin types would need several
+things this ADR does not provide:
+
+- an `impl` header that can bind a builtin's type parameters
+  (`ImplBlock.type_name` is one `Ident`, `crates/cove-syntax/src/ast.rs:200-208`,
+  and the header's generic list is never read, `typeck.rs:3280-3300`);
+- lowering of methods of generic types (`crates/cove-ir/src/lower/mod.rs:686-693`);
+- `dyn` tables with type arguments (`crates/cove-ir/src/lower/dispatch.rs:1285-1297`).
+
+That would be a later ADR's to decide, and it is out of scope here.
+
+### `x.describe()` on a builtin receiver
+
+**Type-checking.** One shared `DESCRIBE: MethodSchema`, `describe() -> String`,
+joins each conforming builtin's `methods`, beside `SNAPSHOT`. A call on a
+builtin receiver already reaches the schema through `builtin_method`
+(`typeck.rs:8686-8697`, `:9769-9778`), so `42.describe()` needs no new path.
+Through a bound, `param_method_call` finds `describe` in the trait's own
+signature (`bound_method`, `typeck.rs:8311-8318`; `:8325-8340`).
+
+The schema and `std.display`'s trait declaration now state one signature
+twice. A `cove-sema` test compares them, the way
+`declares_every_function_the_schema_binds_to_it` (`crates/cove-sema/src/stdlib.rs:292`)
+already ties the schema to the standard library.
+
+**Lowering.** Each conforming builtin's `describe` gets a `STANDARD_LIBRARY`
+binding to its `std.display` function: `("Option", "describe")` binds to
+`std.display.option`, `("Int", "describe")` to `std.display.int`, and so on.
+The chain from call to function already exists:
+
+- `call_builtin_method` resolves any binding generically
+  (`crates/cove-ir/src/lower/methods.rs:95-111`);
+- `call_std_binding` turns it into an ordinary call with the receiver as the
+  first argument (`methods.rs:226-262`);
+- `call_target` instantiates the generic function from the argument's
+  completed type (`dispatch.rs:123-130`, `:532-600`).
+
+So `Some(b).describe()` is an `Inst::Call` to `std.display.option<m.Booking>`.
+
+**Through a bound, the same path is reached, verified by reading.** Inside
+`fn f<T: Display>(v: T)`, `v.describe()` takes these steps:
+
+1. It is not a recorded target and not `dyn`, so it reaches the
+   type-parameter arm (`crates/cove-ir/src/lower/expr.rs:1957-1962`).
+2. `Body::conformance` answers `None` for any settled type that is not a
+   struct or enum (`dispatch.rs:756-763`).
+3. The call falls through to `call_builtin_method` (`expr.rs:1965`), which
+   reads the receiver's *completed* type (`settled_ty`, `methods.rs:64`) and
+   finds the binding.
+
+With `T = Option<Booking>`, that is again `std.display.option<m.Booking>`.
+
+**The "method of a generic type" gap is never met.** That gap applies to a
+method written in an `impl` block of a generic declared type
+(`on_generic_type`, `mod.rs:647-651`, reported at `:686-693`). A binding
+names a free function, numbered with every other function
+(`mod.rs:636-641`) and found by `Plan::resolve` (`mod.rs:814`). The
+functions can therefore stay module-private: `Plan::index` numbers every
+function in `resolved.functions`, exported or not. A program cannot call
+`std.display.option` directly; it writes `.describe()` or `"{x}"`.
+
+**The oracle.** A `describe` on a builtin receiver is caught before the
+standard-library hook (`crates/cove-runtime/src/interp.rs:3092-3118`), in the
+same way `snapshot()` is caught just after it (`:3121`), and answers
+`Interpreter::render(receiver)`. The oracle does not execute `std.display`
+(see [The oracle asks the conformance table as it walks](#the-oracle-asks-the-conformance-table-as-it-walks)).
+A bound call and a `dyn` call both reach that hook with the concrete value,
+because the oracle dispatches from the value (`interp.rs:2986-2999`).
+
+### The `std.display` functions
+
+`std.display` holds one module-private function for each conforming builtin.
+Each function is two things at once: the builtin's `describe`, through its
+binding, and the rendering the lowering calls for a piece whose type reaches.
+The scalars and `String` are one line each, `fn int(value: Int) -> String { "{value}" }`
+and `fn string(text: String) -> String { text }`. The compound ones restate
+today's structural format:
 
 ```cove
 fn option<T>(value: Option<T>) -> String {
@@ -270,8 +441,11 @@ fn array<T>(items: Array<T>) -> String {
 ```
 
 `result<T, E>` (`Ok(..)` and `Err(..)`), `vector<T>` (`[..]`), `set<T>`
-(`{a, b}` in ascending order) and `map<K, V>` (`{k: v, ...}`, iterated as
-`MapEntry`s in ascending key order) have the same form.
+(`{a, b}` in ascending order), `map<K, V>` (`{k: v, ...}`, iterated as
+`MapEntry`s in ascending key order) and `entry<K, V>`
+(`MapEntry(key: .., value: ..)`) have the same form. The leaves are one
+interpolation each: `unit`, `bool`, `float`, `duration`, `error` (the
+message), `range` and `int`.
 
 The pieces `"{held}"` and `"{item}"` are ordinary interpolations. Each
 instantiation is lowered with `T` concrete, so they go through the same
@@ -283,47 +457,6 @@ The lowering calls these functions only for a type that reaches `Display`.
 A type that does not reach keeps `Value.renderInto`, which by the table below
 produces the same bytes. The Rust walk is the fast path, and the Cove source
 is the definition.
-
-**These are renderings, not conformances.** `Option<Booking>` does not
-satisfy `T: Display`, `Some(b).describe()` is not a method, and `[b]` cannot
-become a `dyn Display`. That is a decision, not an oversight, and it is the
-largest difference from the direction as written. Making the builtin generic
-types conform needs all of the following, and none of it exists today:
-
-1. **Resolution** refuses an `impl` whose target is not a struct or enum some
-   module declares. `impl Display for Int`, written in the module that declares
-   `Display`, passes the orphan rule and still fails
-   `cove::resolve::unknown_impl_type` (`resolve.rs:823-839`, pinned by the test
-   at `resolve.rs:4146-4154`). A rule admitting builtin type names as targets
-   inside `std.display` would have to be added.
-2. **The header cannot bind a builtin's parameters.** `ImplBlock.type_name` is
-   one `Ident` (`crates/cove-syntax/src/ast.rs:200-208`), and `impl D for Option<T>`
-   parses as the name `Option` plus a generic list
-   (`crates/cove-syntax/src/parser.rs:1316-1324`). The checker never reads that
-   list: a method's type parameters come from the struct or enum declaration
-   (`crates/cove-sema/src/typeck.rs:3280-3300`), and a builtin type has none.
-   The schema's parameters for each builtin would have to be read instead.
-3. **`conforms` answers `false` for every builtin type**
-   (`typeck.rs:9041-9057`), so a bound and a `dyn` coercion would both need a
-   builtin arm. A method call on a builtin receiver would also have to look
-   through conformances rather than only through the builtin schema.
-4. **The lowering does not lower methods of a generic type.** It reports them
-   as a gap (`mod.rs:686-693`, pinned by
-   `crates/cove-ir/src/lower/tests/generics.rs:366-376`). `Body::conformance`
-   answers `None` for any receiver that is not a struct or enum
-   (`dispatch.rs:756-763`), and `Plan::methods` is keyed by the module that
-   declares the type (`mod.rs:647-655`), which a builtin does not have.
-5. **A `dyn` dispatch table builds each implementor's type without type
-   arguments** (`dispatch.rs:1285-1297`). A generic implementor has one layout
-   per instantiation, and that set is open.
-6. **The oracle finds a method by the value's declared type name**
-   (`interp.rs:1259-1297`, `value.rs:1402-1408`), which exists only for structs
-   and enums. It also admits only structs and enums behind a `dyn`
-   (`interp.rs:3710-3716`).
-
-No program in the repository asks for any of this. "Earn complexity through
-use" says it waits until one does. The renderings above are already the code
-those conformances would call, so adding the conformances later is additive.
 
 ### A struct or enum that reaches but does not conform gets a generated renderer
 
@@ -352,15 +485,16 @@ name, followed by its payload parts between `(` and `)` when there are any.
   gets a name no declaration can take, as an instantiation's `f<Int>` does
   (`dispatch.rs:679-683`).
 - **It prints the declaration's short name, not the instantiation's.** One
-  existing divergence has to be fixed before this can be byte-identical. From
-  reading the code, and not yet confirmed by running it: the VM prints
+  existing divergence has to be fixed before this can be byte-identical, and
+  it is filed as [#407](https://github.com/myuon/cove/issues/407) and
+  reproduced there: the VM prints `Cell(it: 1)` as `Cell<Int>(it: 1)`, and
+  the oracle prints `Cell(it: 1)` (`value.rs:2356-2368`). The VM prints
   `short(&described.name)` (`intrinsics.rs:381`, `:396`). A generic struct's
   layout is named by `instance_key`, including its arguments
   (`crates/cove-ir/src/lower/shapes.rs:996-1002`), and `short` splits at the
-  last `.` (`crates/cove-runtime/src/vm/boundary.rs:1298-1300`). So
-  `Cell(it: 1)` would print as `Cell<Int>(it: 1)` on the VM, and
-  `Cell(it: Point(...))` as `Point>(...)`. The oracle prints `Cell(it: 1)`
-  (`value.rs:2356-2368`). `boundary::declared` already strips the arguments
+  last `.` (`crates/cove-runtime/src/vm/boundary.rs:1298-1300`). So, by the
+  same reading, `Cell(it: Point(...))` prints as `Point>(...)`.
+  `boundary::declared` already strips the arguments
   (`boundary.rs:1320-1325`), and Phase 0 applies it.
 
 ### An erased value renders through a table the lowering builds
@@ -404,8 +538,9 @@ What the table covers:
   (`shapes.rs:172`, `:388`). A layout containing a `Boxed` part therefore
   reaches whenever `Any` would.
 - **When it is emitted.** Only when some piece's type contains an erased
-  position that reaches. With no conformance to `std.display.Display` in the
-  package, that never happens.
+  position that reaches, or a program calls `describe` on a `dyn Display`
+  (next section). With no `impl` of `std.display.Display` in the package, the
+  first never happens.
 
 What it costs:
 
@@ -420,6 +555,59 @@ What it costs:
 A narrower table for `dyn Trait`, covering only `Trait`'s conformances, is
 possible. It is not taken: `Any` needs the program-wide table anyway, and one
 mechanism is cheaper to keep correct than two.
+
+### `dyn Display` over a builtin value
+
+Once `coerces` admits builtins, `let d: dyn Display = Some(b)` boxes an
+`Option<m.Booking>`. `Body::erase` already boxes any value at its own layout
+(`dispatch.rs:1309-1335`), so the conversion itself needs nothing new. The
+call `d.describe()` does.
+
+**Per-instantiation arms in `call_dyn`'s table would work, but are not
+taken.** `call_dyn`'s table is built from the package's declared
+conformances (`dispatch.rs:1220-1240`), and each implementor's type is built
+with no type arguments (`dispatch.rs:1285-1297`). Adding builtins would mean
+an arm for every builtin instantiation whose layout the program interns
+(`Option<Int>`, `Array<String>`, `Result<Unit, Error>` and the rest), and
+each arm would instantiate a `std.display` function whether or not any box
+ever holds that type. The set is also known only once the layout table
+closes, which is after some of the call sites that need the table have
+already been emitted. The cost would be arms × `dyn Display` call sites, plus
+one function per builtin instantiation in the program. That is too much for
+what a `dyn Display` holding a builtin is used for.
+
+**Instead, `describe` through `dyn std.display.Display` lowers to what
+`"{d}"` lowers to:** an assembly, the erased renderer applied to the box, and
+a finish. That is exact, not an approximation. Every conforming type's
+`describe` is, by rules 1 and 5, the text the rule gives a value of that
+type, so rendering what the box holds *is* calling its `describe`. The erased
+renderer's arms cover the layouts that reach, whose `describe`s are declared
+or `std.display`'s. Its default, `Value.renderInto`, covers every builtin
+whose type does not reach, with the same bytes. A trait other than
+`std.display.Display` keeps `call_dyn` unchanged.
+
+**Phasing.** This lands in Phase 3 together with the erased renderer. Until
+then `coerces` does not get the builtin arm, so no program can check a
+builtin into `dyn Display` before the VM can lower it. Bounds and method
+calls, which need none of this, land in Phase 2.
+
+**The oracle needs one guard widened.** Converting and dispatching already
+work for any value:
+
+- `as_dyn` wraps whatever it is given (`interp.rs:3733-3741`);
+- dispatch unwraps before looking anything up (`interp.rs:2986-2999`,
+  `:3787-3792`).
+
+But `==` assumes that only a struct or enum can be inside a trait object.
+Its guard lets a comparison between two trait objects of different types
+through only when `conformable` says so (`interp.rs:3809-3820`), and
+`conformable` accepts only structs and enums (`:3710-3716`). So
+`dyn Display` holding `1` compared with `dyn Display` holding `"a"` would
+raise "cannot compare" in the oracle, while the VM answers `false`
+(`crates/cove-runtime/src/vm/intrinsics/equal.rs:35-38`). Phase 3 widens
+`conformable` to the builtins that conform. A `Map` key or `Set` element of
+`dyn Display` that mixes families goes through the same look-through, and
+Phase 3's fixtures pin how it orders.
 
 ### The oracle asks the conformance table as it walks
 
@@ -440,6 +628,9 @@ need any of them.
 - **Everything else.** Builtins, opaque structs, `Error` and `Range` render
   as `Display for Value` renders them today, with `render` for parts. A
   `Repr::Dyn` is looked through, as at `value.rs:2384-2386`.
+- **A builtin receiver's `describe`** is `render` itself, reached from the
+  catch in the method-call path described in
+  [`x.describe()` on a builtin receiver](#xdescribe-on-a-builtin-receiver).
 
 **Why the oracle agrees with a static choice.**
 
@@ -448,17 +639,20 @@ need any of them.
   `type_name` is qualified and carries no arguments (`interp.rs:3374`), and
   conformance ignores arguments too (`typeck.rs:9043-9045`). So the two
   evaluators agree about conformance for every value that is not erased, and
-  for erased ones the oracle is simply doing rule 4.
+  for erased ones the oracle is simply doing rule 4. A builtin conforms
+  whatever its arguments are, so there is nothing about it to disagree on.
 - **Reaching.** The oracle never asks whether a type reaches. That question
   only decides which of two byte-identical routes the VM takes.
 
 **The oracle does not execute `std.display`'s functions.** It states the rule
 again in Rust, so the differential corpus compares two implementations and
 not one implementation with itself. That is the opposite of ADR 0058's choice
-to have the oracle execute standard-library bodies. Here the functions are
-reached by no call the program writes, so there is nothing for the oracle to
-follow. An independent restatement is also the stronger check on the claim
-that the rendering is byte-identical.
+to have the oracle execute standard-library bodies. A program can now reach
+them by writing `x.describe()` on a builtin, but that call's meaning is fixed
+by rule 5, not by the Cove body, and the oracle states rule 5 directly. An
+independent restatement is also the stronger check on the claim that the
+rendering is byte-identical, and on the claim that `std.display`'s
+`describe`s agree with interpolation.
 
 ### `describe` keeps ADR 0006's signature
 
@@ -531,41 +725,53 @@ supersedes is the unconditional *rule*. Its *reasoning* stands:
 
 ### `dyn Display`
 
-`dyn std.display.Display` is an ordinary trait object. `d.describe()` is a
-`call_dyn` exactly as it is today. `"{d}"` is an erased piece, and every
-arm for a conformance to `Display` calls that conformance's `describe`. So
-the two spellings agree without either being defined in terms of the other.
+`dyn std.display.Display` is a trait object that can hold a declared
+conformer or, from Phase 3, a conforming builtin. `"{d}"` is an erased piece,
+and `d.describe()` lowers to the same assembly, as described in
+[`dyn Display` over a builtin value](#dyn-display-over-a-builtin-value). The
+two spellings agree by construction.
 
-## Byte-identical output for programs without a conformance
+`dyn Display` still satisfies no bound, not even `T: Display`, and never
+converts to another `dyn`. Both rules are ADR 0006's and the Language
+Reference's (`docs/LANGUAGE_REFERENCE.md:583-586`), and a builtin conformance
+changes neither. `dyn Display` is not in the list of conforming builtins.
+
+## Byte-identical output for programs without an `impl`
 
 Every rule in both walks is listed below, together with what renders it once
 this ADR is in place. A type that reaches `Display` is rendered by a
-`std.display` function or a generated renderer, which restate the "today" column.
-Any other type is rendered by the Rust walk, which is the "today" column.
+`std.display` function or a generated renderer, which restate the "today"
+column. Any other type is rendered by the Rust walk, which is the "today"
+column.
 
-| value | today (VM · oracle) | after this ADR |
-|---|---|---|
-| `()` | `()` (`intrinsics.rs:311` · `value.rs:2299`) | Rust leaf |
-| `Bool` | `true`/`false` (`:312` · `:2300`) | Rust leaf |
-| `Int` | decimal (`:313`, `Int.renderInto` `:263-297` · `:2301`) | Rust leaf |
-| `Float` | `NaN`, `inf`, `-inf`; one decimal place when integral, e.g. `4.0`; otherwise shortest (`:654-668` · `:2427-2439`) | Rust leaf |
-| `Duration` | largest unit that divides exactly, e.g. `0ns`, `1m`, `90s` (`:683-695` · `:2457-2467`) | Rust leaf |
-| `String`, top level or nested | raw text, **never quoted**, e.g. `Some(hello)`, `[a, b]` (`:469` · `:2304`) | extend, or Rust leaf |
-| `Error` | its message (`:362-380` · `:2346-2351`) | Rust leaf: its only part is a `String` |
-| `Range` | `1..3` inclusive, `1..<4` exclusive (`:386-391` · `:2402-2409`) | Rust leaf: its parts are `Int`s |
-| opaque struct | bare short name (`:381` · `:2358-2360`) | Rust leaf; `describe` if it conforms |
-| struct | `Name(a: 1, b: x)` (`:392-412` · `:2361-2368`) | Rust walk; generated renderer if it reaches |
-| enum case | `Case` or `Case(p, q)`, positional (`:417-441` · `:2370-2382`) | Rust walk; generated renderer if it reaches |
-| `Option` | `Some(10)`, `None`; an enum layout named `Option` (`shapes.rs:495-504`) | Rust walk; `std.display.option` if it reaches |
-| `Result` | `Ok(1)`, `Err(broken)` (`shapes.rs:505-513`) | Rust walk; `std.display.result` if it reaches |
-| `Array` | `[1, 2]` (`:508-520` · `:2305-2314`) | Rust walk; `std.display.array` if it reaches |
-| `Vector` | `[1, 2]`, at the vector's length, not the store's (`:496-505` · `:2315-2324`) | Rust walk; `std.display.vector` if it reaches |
-| `Set` | `{a, b, c}`, ascending (`:524-536` · `:2335-2344`) | Rust walk; `std.display.set` if it reaches |
-| `Map` | `{Alice: 30, Bob: 25}`, ascending by key (`:537-552` · `:2325-2334`) | Rust walk; `std.display.map` if it reaches |
-| `MapEntry` | an inline struct named `MapEntry` (`shapes.rs:479-494`) | as a struct |
-| `dyn Trait`, `Any` | the held value (`:557-565` · `:2386`) | Rust walk; erased renderer if it reaches |
-| closure | `<fn>` (`:566` · `:2387`) | Rust leaf |
-| `Shared` | `<shared>` (`:487` · `:2417`) | Rust leaf: never reads what it holds |
+The last column is new. For a builtin that conforms, `x.describe()` answers
+that row's text in both evaluators: on the VM through the `std.display`
+function, and in the oracle through `Interpreter::render`. So the table pins
+`describe` too, and Phase 1's switch is what proves the `std.display` column.
+
+| value | today (VM · oracle) | after this ADR | `describe()` |
+|---|---|---|---|
+| `()` | `()` (`intrinsics.rs:311` · `value.rs:2299`) | Rust leaf | `std.display.unit` |
+| `Bool` | `true`/`false` (`:312` · `:2300`) | Rust leaf | `std.display.bool` |
+| `Int` | decimal (`:313`, `Int.renderInto` `:263-297` · `:2301`) | Rust leaf | `std.display.int` |
+| `Float` | `NaN`, `inf`, `-inf`; one decimal place when integral, e.g. `4.0`; otherwise shortest (`:654-668` · `:2427-2439`) | Rust leaf | `std.display.float` |
+| `Duration` | largest unit that divides exactly, e.g. `0ns`, `1m`, `90s` (`:683-695` · `:2457-2467`) | Rust leaf | `std.display.duration` |
+| `String`, top level or nested | raw text, **never quoted**, e.g. `Some(hello)`, `[a, b]` (`:469` · `:2304`) | extend, or Rust leaf | `std.display.string`, the string itself |
+| `Error` | its message (`:362-380` · `:2346-2351`) | Rust leaf: its only part is a `String` | `std.display.error` |
+| `Range` | `1..3` inclusive, `1..<4` exclusive (`:386-391` · `:2402-2409`) | Rust leaf: its parts are `Int`s | `std.display.range` |
+| opaque struct | bare short name (`:381` · `:2358-2360`) | Rust leaf; `describe` if it has an `impl` | its `impl`, or none |
+| struct | `Name(a: 1, b: x)` (`:392-412` · `:2361-2368`) | Rust walk; generated renderer if it reaches | its `impl`, or none |
+| enum case | `Case` or `Case(p, q)`, positional (`:417-441` · `:2370-2382`) | Rust walk; generated renderer if it reaches | its `impl`, or none |
+| `Option` | `Some(10)`, `None`; an enum layout named `Option` (`shapes.rs:495-504`) | Rust walk; `std.display.option` if it reaches | `std.display.option` |
+| `Result` | `Ok(1)`, `Err(broken)` (`shapes.rs:505-513`) | Rust walk; `std.display.result` if it reaches | `std.display.result` |
+| `Array` | `[1, 2]` (`:508-520` · `:2305-2314`) | Rust walk; `std.display.array` if it reaches | `std.display.array` |
+| `Vector` | `[1, 2]`, at the vector's length, not the store's (`:496-505` · `:2315-2324`) | Rust walk; `std.display.vector` if it reaches | `std.display.vector` |
+| `Set` | `{a, b, c}`, ascending (`:524-536` · `:2335-2344`) | Rust walk; `std.display.set` if it reaches | `std.display.set` |
+| `Map` | `{Alice: 30, Bob: 25}`, ascending by key (`:537-552` · `:2325-2334`) | Rust walk; `std.display.map` if it reaches | `std.display.map` |
+| `MapEntry` | an inline struct named `MapEntry` (`shapes.rs:479-494`) | as a struct; `std.display.entry` if it reaches | `std.display.entry` |
+| `dyn Trait`, `Any` | the held value (`:557-565` · `:2386`) | Rust walk; erased renderer if it reaches | through `dyn Display` only, by the erased renderer |
+| closure | `<fn>` (`:566` · `:2387`) | Rust leaf | none: does not conform |
+| `Shared` | `<shared>` (`:487` · `:2417`) | Rust leaf: never reads what it holds | none: does not conform |
 
 Existing fixtures already pin most of these rows: about 37 of the 138 `expected.out`
 files show a compound value. For example, `coll_array` has `Some(10)` and
@@ -579,10 +785,10 @@ files show a compound value. For example, `coll_array` has `Some(10)` and
 (`:475` · `:2392-2394`). A task, a task scope and a host handle are an error
 on the VM ("this value has no text of its own", `:325-327`) and `<task>`,
 `<task scope ..>` and `<..>` around the handle in the oracle (`:2399`,
-`:2410`, `:2413`). None of them contains anything
-that could conform, so neither the rule nor its mechanism touches them. The
-generic-struct name divergence is the one that sits on the path, and Phase 0
-fixes it.
+`:2410`, `:2413`). None of them conforms or contains anything that could, so
+neither the rule nor its mechanism touches them. The generic-struct name
+divergence, [#407](https://github.com/myuon/cove/issues/407), is the one that
+sits on the path, and Phase 0 fixes it.
 
 ## Performance
 
@@ -592,17 +798,20 @@ contain no interpolation. Its 43 pieces are in `bench.cove`, 4 `String` and
 29 `Int`, and in `parsetests.cove`, 10 `String`. cq has 92 pieces outside its
 tests: 64 `String`, 22 `Int`, 5 `Float`, 1 `Bool`, **and no compound value**.
 Its hot pieces are `json.cove:322`'s `"{text}{...}"`, `:65`, `:514`, and the
-number renderers at `:498-503`. Neither program declares a conformance to
-`std.display.Display`. So every piece takes the arm it takes today, and **the
-lowered program is identical, instruction for instruction**. That is the gate.
+number renderers at `:498-503`. Neither program writes an `impl` of
+`std.display.Display`, and neither calls `describe` on a builtin. So every
+piece takes the arm it takes today, and **the lowered program is identical,
+instruction for instruction**. That is the gate.
 
 **What does change is compile time, slightly.**
 
 - Every compile parses and checks one more embedded file, because the
   standard library is parsed per compile (`stdlib.rs:10-20`).
 - Every piece that is neither `String` nor `Int` asks the memoised "reaches"
-  question, which returns false at once when the package has no conformance to
+  question, which returns false at once when the package has no `impl` of
   `std.display.Display`.
+- `conforms` asks one more question, and only on a bound or a `dyn`
+  conversion: whether the trait key is `std.display.Display`.
 
 Measure both on the `cove check` and lowering phases, interleaved. covefmt's
 rebuild noise floor is about 1%.
@@ -617,6 +826,12 @@ interpolated type that reaches `Display` adds at most:
 - one generated renderer for each declared-type instantiation that reaches
   without conforming;
 - at most one erased renderer.
+
+A written `describe` on a builtin adds the `std.display` instantiation it
+calls, one for each set of type arguments. `42.describe()` is a call where
+`"{42}"` is `Int.renderInto`, so a program that wants speed interpolates.
+Code that is generic over `T: Display` pays one call for each `describe`,
+whatever `T` turns out to be.
 
 The dead-body problem [recorded under ADR 0058](https://github.com/myuon/cove/issues/378#issuecomment-5678154161)
 applies to the `std.display` instantiations as it does to every
@@ -658,14 +873,15 @@ Each phase is one pull request, gated as #405 was:
   a `Map`, a `Range` in an `Array`, an enum case with more than one payload
   part, a `dyn Summary` in an `Array`, a host `Any` via `clock.timeout`, and a
   generic struct instance `Cell(it: 1)`.
-- Make the VM print `short(declared(name))` for struct and opaque names. The
-  order matters: `short` first would turn `m.Cell<m.Point>` into `Point>`.
+- Fix [#407](https://github.com/myuon/cove/issues/407): make the VM print
+  `short(declared(name))` for struct and opaque names. The order matters:
+  `short` first would turn `m.Cell<m.Point>` into `Point>`.
 - No other output changes.
 
 **Phase 1: the renderings exist, and are proven against the corpus.**
 
 - Add `std.display` holding only the module-private rendering functions, with
-  no trait yet.
+  no trait, no schema method and no binding yet.
 - Add the lowering's generated struct and enum renderers.
 - Add a lowering switch, used only by tests, that sends **every** compound
   piece through them in place of `Value.renderInto`. The e2e corpus, the
@@ -673,35 +889,61 @@ Each phase is one pull request, gated as #405 was:
   is the byte-identical claim, tested against every program in the repository
   instead of argued. With the switch off, the IR is identical.
 
-**Phase 2: the trait, statically typed pieces, and the oracle.**
+**Phase 2: the trait, the builtin conformances, statically typed pieces, and
+the oracle.**
 
-- Add `trait Display` and the "reaches" predicate, the `describe` arm, and the
+- Add `trait Display`, the "reaches" predicate, the `describe` arm, and the
   arms for std renderings and generated renderers.
-- Add `Interpreter::render`.
+- Add the builtin conformances, except for `dyn`:
+  - `DESCRIBE` in each conforming builtin's schema;
+  - its `STANDARD_LIBRARY` bindings;
+  - `conforms`'s builtin arm, reached from `check_bounds` only;
+  - the test that ties `DESCRIBE` to the trait's declaration.
+- Add `Interpreter::render` and the oracle's `describe` catch for builtin
+  receivers.
 - **The erased case is a named gap in this phase.** A piece whose type
   contains an erased position that reaches is reported as not yet lowered.
   It is neither lowered structurally nor given a disagreement, so
   `vm_coverage` counts such programs as not lowering, and its set of
   disagreements does not grow.
-- New fixtures: `display_nested`, with `Booking` in `Option`, `Result`,
-  `Array`, `Vector`, `Set`, as a `Map` key and as a `Map` value, in a
-  `Pair` field, in a `Cell<Booking>`, and in a recursive enum;
-  `module_opaque_display`; and a user-declared `Display` that interpolation
-  ignores.
+- New fixtures:
+  - `display_nested`, with `Booking` in `Option`, `Result`, `Array`,
+    `Vector`, `Set`, as a `Map` key and as a `Map` value, in a `Pair` field,
+    in a `Cell<Booking>`, and in a recursive enum;
+  - `display_builtin`: `42.describe()`, `Some(b).describe()`,
+    `render<T: Display>` given `Option<Booking>`, `Array<Pair>` and
+    `[fn() {}]`, and a `describe()` equal to `"{x}"` for every conforming
+    builtin;
+  - `module_opaque_display`;
+  - failure fixtures: `impl Display for Option<Int>` refused with
+    `cove::resolve::unknown_impl_type`, a `Pair` with no `impl` refused as a
+    `T: Display` argument, and an `Int` refused as an argument bounded by a
+    program's own trait named `Display`.
 
-**Phase 3: erased values.**
+**Phase 3: erased values, and `dyn Display` over a builtin.**
 
 - Add the type-per-layout record in `Shapes` and the erased renderer, and
   remove Phase 2's gap.
-- Fixtures: `Array<dyn Summary>` holding a conforming and a non-conforming
-  type, `dyn Display`, and `clock.timeout` answering a conforming value.
+- Add `coerces`'s builtin arm, and lower `describe` through
+  `dyn std.display.Display` as an assembly over the erased renderer.
+- Widen the oracle's `conformable` (`interp.rs:3710-3716`).
+- Fixtures:
+  - `Array<dyn Summary>` holding a conforming and a non-conforming type;
+  - `dyn Display` holding a `Booking`, an `Int` and an `Option<Booking>`,
+    through both `"{d}"` and `d.describe()`;
+  - `==` between `dyn Display`s of different families;
+  - a `Set<dyn Display>` that mixes families;
+  - `clock.timeout` answering a conforming value.
 
 **Phase 4: documentation.** Update `docs/LANGUAGE_REFERENCE.md`'s
-interpolation paragraph (`:227`), its opaque-rendering paragraph (`:629-640`)
-and its trait-object sentence (`:592-597`).
+interpolation paragraph (`:227`), its opaque-rendering paragraph
+(`:629-640`) and its trait-object sentences (`:583-597`). `docs/BUILTINS.md`
+and `docs/builtins.json` gain `describe` in Phase 2 itself: `cove reference`
+generates them from the schema (`crates/cove-cli/src/reference.rs:48-50`),
+and CI's `cove reference --check` fails until they are regenerated.
 
 **Only if measured, not scheduled:** the `describeInto`, or
-`core.appendRendered`, alternative above, and conformances for builtin types.
+`core.appendRendered`, alternative above.
 
 ## Alternatives considered
 
@@ -724,16 +966,46 @@ structural. It is the cheapest option, and it makes `"{b}"` and `"{[b]}"`
 disagree about what `b` looks like. #403 recorded that as an inconsistency
 that would take a later ADR to undo. The owner rejected it.
 
-### Builtin types conform to `Display` now
+### Builtin types render through `std.display` but do not conform
 
-This is `impl Display for Option<T>` in `std.display`, so that
-`Option<Booking>` satisfies a bound and `Some(b).describe()` is a method. It
-is the direction taken literally. It needs the six changes listed under
-[The builtin compound types render in `std.display`](#the-builtin-compound-types-render-in-stddisplay).
-Two of them are general language work of their own: methods of generic types
-in the lowering, and generic implementors in `dyn` tables. None of it changes
-what any interpolation prints. It is deferred until a program needs a builtin
-type to satisfy the bound.
+This was this ADR's first draft. `std.display`'s functions existed only for
+interpolation to call, and a builtin satisfied no bound. That printed exactly
+what this ADR prints, but it left `describe` meaning less than interpolation:
+
+- `fn f<T: Display>(v: T)` refused an `Option<Booking>` that `"{v}"` would have
+  rendered through `Booking`'s `describe`;
+- `"{[b]}"` worked, while `[b].describe()` was an unknown method.
+
+The owner chose the conformance. Once `describe` is bound to the same
+functions, the only extra cost is the checker arm and the `dyn` work above.
+
+### Builtin conformances written as `impl` blocks in `std.display`
+
+This means `impl<T> Display for Option<T>` written in Cove, with a body. It
+would make the conformance an ordinary declaration instead of a language
+fact. It needs a general feature: generic `impl`s on builtin types. That in
+turn needs an `impl` header that binds a builtin's parameters
+(`ast.rs:200-208`; the header's generic list is never read,
+`typeck.rs:3280-3300`), resolution that accepts builtin targets
+(`resolve.rs:823-839`), lowering of methods of generic types
+(`mod.rs:686-693`), `dyn` tables that carry type arguments
+(`dispatch.rs:1285-1297`), and an oracle that finds methods on a builtin
+receiver (`interp.rs:1259-1297` looks only at declared type names).
+
+None of that changes what anything prints or what any bound accepts under
+this ADR. It would also let a program ask to write its own
+`impl Display for Option<Booking>`, which this ADR refuses on purpose. It is
+out of scope, and a possible later ADR.
+
+### Per-instantiation arms for builtins in `call_dyn`'s table
+
+This would give `dyn Display` over a builtin the same dispatch every declared
+conformer gets. It is rejected in
+[`dyn Display` over a builtin value](#dyn-display-over-a-builtin-value) on
+cost: an arm and an instantiated function for every builtin instantiation in
+the program, at every `dyn Display` call site. It is also unnecessary,
+because `describe` through `dyn Display` is by definition the rendering of
+what the box holds.
 
 ### Generated renderers for the builtin types too
 
@@ -790,31 +1062,47 @@ so it lives in one.
 - Rust-side renderings (diagnostics, hosts, the debugger, the CLI) stay
   structural. A key named in a duplicate-key error shows its fields, not its
   `describe`.
-- The builtin compound types are rendered by the standard library but do not
-  conform. `T: Display` accepts only declared types. The six changes needed
-  to go further are named above.
+- Every renderable builtin conforms to `std.display.Display` for every type
+  argument. `T: Display` accepts `Int`, `Option<Pair>` and `Array<fn() -> Int>`,
+  and refuses a declared type with no `impl`. It is the first trait a builtin
+  satisfies as a bound. `Snapshot` still does not accept builtins as a bound.
+- A program cannot write `impl Display for Option<T>`, and neither can the
+  standard library. Generic `impl`s on builtins remain a possible later ADR.
+- `describe` exists in two statements that must agree: the schema's
+  `DESCRIBE` and `std.display`'s trait. A test ties them together.
 
 ## Open questions, with defaults
 
-1. **Should the builtin compound types *conform* to `Display`, not merely
-   render through `std.display`?** *(No, not until a program needs a builtin
-   to satisfy `T: Display`. The six prerequisites are listed above.)*
-2. **Should `std.display`'s rendering functions be exported?** *(No. They
-   would add public API, `std.display.option`, that duplicates `"{x}"`.)*
-3. **Should assertion messages use `Display`?** *(Yes. They are assembled by
+1. **Which builtins conform?** *(All of `Unit`, `Bool`, `Int`, `Float`,
+   `String`, `Duration`, `Error`, `Range`, `Option`, `Result`, `Array`,
+   `Vector`, `Set`, `Map` and `MapEntry`. Not function types, `Shared`,
+   `Task`, a task scope, host handles or `ByteBuffer`: their text is a
+   placeholder or a refusal. They still render inside a conforming compound.)*
+2. **Is a builtin's conformance conditional on its type arguments?** *(No.
+   Its `describe` is the rendering, which is total over types, and a
+   conditional conformance would refuse `xs.describe()` in a generic body
+   that `"{xs}"` accepts.)*
+3. **Should `Snapshot` get the same bound treatment for builtins, since they
+   already have `snapshot()`?** *(Not here. A separate question with its own
+   evidence.)*
+4. **Should `std.display`'s functions be exported?** *(No. `x.describe()` and
+   `"{x}"` already reach them. `std.display.option(x)` would be a third
+   spelling.)*
+5. **Should assertion messages use `Display`?** *(Yes. They are assembled by
    `append_piece` today, and a failing `assertEqual(b1, b2)` that showed
    different text from `"{b1}"` would be a second rule.)*
-4. **Should the oracle execute `std.display`'s functions instead of restating
+6. **Should the oracle execute `std.display`'s functions instead of restating
    them?** *(No. An independent restatement is what the differential corpus
-   needs to test the byte-identical claim.)*
-5. **One erased-render table for the program, or one per `dyn` trait?**
-   *(One: `Any` needs the program-wide table anyway.)*
-6. **Should the checker's call graph gain an edge from an interpolation to the
+   needs to test both the byte-identical claim and `describe`.)*
+7. **One erased-render table for the program, or one per `dyn` trait?**
+   *(One: `Any` needs the program-wide table anyway, and `dyn Display`'s
+   `describe` uses the same one.)*
+8. **Should the checker's call graph gain an edge from an interpolation to the
    `describe` it will reach?** *(No. The `wanted` round already lowers it, at
    the cost of one more round in programs that use the trait.)*
-7. **Should a `describe` that interpolates `"{self}"` be diagnosed?**
+9. **Should a `describe` that interpolates `"{self}"` be diagnosed?**
    *(No. It recurses and stops at the call-depth limit, as any
    self-recursive function does.)*
-8. **Must the two evaluators refuse at the same nesting depth?** *(No. The
-   oracle has had no render-depth limit, and cases added for this ADR stay
-   under 64 levels.)*
+10. **Must the two evaluators refuse at the same nesting depth?** *(No. The
+    oracle has had no render-depth limit, and cases added for this ADR stay
+    under 64 levels.)*
