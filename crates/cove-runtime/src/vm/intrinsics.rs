@@ -91,8 +91,8 @@ pub(crate) fn call(
         //
         // What `"{x}"` appends for a piece: an `Int` formatted where it goes,
         // and any other value through the one layout-directed walk. A `String`
-        // piece is not here — it is a byte `Inst::GrowableExtend` — and neither
-        // is the assembly around them, which is run instructions (#403).
+        // piece is not here — it is a byte append window — and neither is the
+        // assembly around them, which is run instructions (#403).
         Intrinsic::ValueRenderInto => render_into(machine, frame, dest),
 
         // ---- Array -------------------------------------------------------
@@ -123,9 +123,8 @@ pub(crate) fn call(
         // ---- Vector ------------------------------------------------------
         // `Vector.of` is not here: the lowering allocates it — see
         // `cove_ir::lower::collections`' `vector_of`.
-        // `Vector.push` is not here: it is `std.vector.push` over the core
-        // intrinsic that is a word `Inst::GrowablePush` — see
-        // `Machine::push_words`.
+        // `Vector.push` is not here: it is `std.vector.push`, an ensure, a
+        // `store-elem` and a commit in Cove — see `cove_ir::legalize`.
         // `Vector.set` is not here: it is `std.vector.set`, a range check and
         // an `Option` in Cove over an element `LoadElem` and `StoreElem`.
         // `Vector.pop` and `Vector.remove` are not here: they are `std.vector`

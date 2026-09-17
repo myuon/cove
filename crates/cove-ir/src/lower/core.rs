@@ -738,7 +738,7 @@ impl Body<'_> {
     /// that many elements, one [`Inst::RunCopy`] of whole elements into it, and
     /// the two-word header [`Body::vector_of`] builds. No spare room is
     /// allocated, so the allocations and the words they take are the builtin's.
-    /// It is not a word `growable-alloc` and `growable-extend`, which would
+    /// It is not a word `growable-alloc` and an append window, which would
     /// raise an empty or short store to the growable floor and so change what a
     /// program allocates for nothing a `toVector` needs.
     ///

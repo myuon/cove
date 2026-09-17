@@ -136,77 +136,43 @@ fn comparison_supported(on: Compare, op: CmpOp) -> bool {
     }
 }
 
-/// An [`Inst::GrowablePush`] over [`Storage::Words`] — `Vector.push` — with the
-/// static facts its fast path is emitted from.
+/// The owner layout a word run's operations are held to, and the stride the
+/// element implies.
 ///
-/// [ADR 0058] moved `Vector.push` into the standard library as
-/// `core.vectorPush(items, value)`, which lowered to this instruction, so this
-/// was no longer a builtin this crate recognised by name: it is a run
-/// instruction, decoded here once for both arms. ADR 0062 has since made
-/// `std.vector.push` an ensure, a store and a commit, which `windows`
-/// decodes; nothing lowers to a word `GrowablePush` now, and this goes with the
-/// instruction.
+/// [ADR 0058] moved `Vector.push` and `Vector.freeze` into the standard library
+/// over run instructions, so a word owner is no longer a builtin this crate
+/// recognises by name. It is decoded here once, for both arms and for every
+/// instruction that takes one — [ADR 0062]'s ensure and commit, and a word
+/// finish.
 ///
-/// `Machine::push_words` is three steps: read the owner, ensure room for one
-/// more element, and write the element's words and the new length. **Only the
-/// second of those has a cold half, and that is the whole shape of this.** What
-/// is emitted is the push into spare capacity; a push that has to grow calls
-/// [`GrowableFn`](crate::abi::GrowableFn) with
-/// [`GrowableOp::PushWords`](crate::abi::GrowableOp::PushWords) and the VM does
-/// the whole push.
+/// **The owner's object is the vector the element layout implies.**
+/// `Machine::vector_run` reads `Shape::Vector { elem }` out of the object's own
+/// header and holds it to the instruction's element layout — because the stride,
+/// and therefore where an element goes, is derived from that layout. The layout
+/// table interns one `Shape::Vector` per element layout, so the header is
+/// compared with [`WordOwner::vector`], found by searching the table the way
+/// `make::elements` searches it for an `Array`.
 ///
-/// Growth is where the *allocation* is, so it is not that it was hard — [ADR
-/// 0055]'s allocation helper is right there, and `Inst::Alloc` goes through it.
-/// It is that growth is also a payload *copy of unbounded length*, which is a
-/// loop over `len * stride` heap words, and `capacity` doubles: the copy is
-/// amortised over the pushes that filled the store, so emitting it would be code
-/// proportional to the run in exchange for a share of the work that falls as the
-/// vector grows. The fast path is what the census counted.
+/// Two refusals are the runtime's to word, so both go to the helper: a header of
+/// another family, and a store word of nought, which is what `freeze()` leaves.
+/// The null owner is the one refusal that is emitted, because
+/// [`Raise::NullObject`] already names it.
 ///
-/// Two other preconditions go the same way, and neither is a lowering bug a
-/// reader may dismiss:
-///
-/// - **the owner's object is the vector the element layout implies.**
-///   `Machine::vector_run` reads `Shape::Vector { elem }` out of the object's own
-///   header and holds it to the instruction's element layout — because the
-///   stride, and therefore where the element goes, is derived from that layout.
-///   The layout table interns one `Shape::Vector` per element layout, so the
-///   header is compared with [`WordPush::vector`], found by searching the table
-///   the way `make::elements` searches it for an `Array`;
-/// - **`freeze()` has not consumed it.** `Machine::vector_run` refuses a store
-///   word of nought, in a sentence this crate cannot build.
-///
-/// Both refusals are the runtime's to word, so both go to the helper. The null
-/// owner is the one refusal that is emitted, because [`Raise::NullObject`]
-/// already names it.
-///
-/// There is no destination: the `()` a push answers is a separate
-/// [`Inst::Unit`] the lowering writes after it.
-///
-/// [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
 /// [ADR 0058]: ../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+/// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct WordPush {
-    /// The owner's slot: one `Repr::Ref` word naming the `Vector` header.
-    pub(crate) owner: Slot,
-    /// The `Shape::Vector` layout over the instruction's element layout, which
-    /// the object's own header is compared against.
+pub(crate) struct WordOwner {
+    /// The `Shape::Vector` layout over the element, which the object's own
+    /// header is compared against.
     pub(crate) vector: LayoutId,
-    /// The head of the element's run in this frame, `stride` words wide.
-    pub(crate) src: Slot,
     /// The element layout's width, which is `Growable::stride`.
     pub(crate) stride: u32,
 }
 
-/// The [`WordPush`] a word `growable-push` of `elem` is, or `None` for a program
-/// whose layout table has no vector of `elem` — which a lowering that pushed
-/// onto one always declared, so `None` is a bound and not a family.
-pub(crate) fn word_push(
-    program: &Program,
-    owner: Slot,
-    src: Slot,
-    elem: LayoutId,
-) -> Option<WordPush> {
+/// The [`WordOwner`] a run of `elem` has, or `None` for a program whose layout
+/// table has no vector of `elem` — which a lowering that grew one always
+/// declared, so `None` is a bound and not a family.
+pub(crate) fn word_owner(program: &Program, elem: LayoutId) -> Option<WordOwner> {
     if elem.index() >= program.layouts.len() {
         return None;
     }
@@ -215,86 +181,39 @@ pub(crate) fn word_push(
         .iter()
         .position(|layout| matches!(layout.shape, Shape::Vector { elem: e } if e == elem))
         .map(|index| LayoutId(index as u32))?;
-    Some(WordPush {
-        owner,
+    Some(WordOwner {
         vector,
-        src,
         stride: program.layout(elem).width(),
     })
 }
 
-/// An [`Inst::GrowablePush`] over [`Storage::PackedBytes`] — what `appendByte`
-/// and the one-byte literal run of an interpolation were, before ADR 0062 made
-/// each a byte push window that `windows` decodes — with the static facts its
-/// fast path is emitted from. Nothing lowers to one now, and this goes with the
-/// instruction.
+/// The byte owner layout a packed run's operations are held to: the program's
+/// one `Shape::ByteBuffer`, which a `StringBuilder`'s header is.
 ///
-/// `Machine::append_byte` is [`WordPush`]'s three steps over a packed run: read
-/// the owner, ensure room for one more byte, and write the byte and the new
-/// length. What is emitted is the push into spare capacity, and everything else
-/// is [`GrowableFn`](crate::abi::GrowableFn) with
-/// [`GrowableOp::Push`](crate::abi::GrowableOp::Push), which performs the whole
-/// push again from the start.
+/// [`WordOwner`] over packed bytes, with the same two cold refusals —
+/// `Machine::buffer`'s "this object is not a byte buffer", and the store word of
+/// nought that `finish()` leaves — and the same emitted one for a null owner.
 ///
-/// The helper's documentation gives ADR 0052's reasons why none of its four
-/// operations had an emitted half: an allocation's second root, an extend's
-/// chunked safepoint, and a finish's UTF-8 walk. **A push into spare capacity
-/// meets none of them.** It allocates nothing, so there is no store a collector
-/// could miss and nothing to collect; it moves one byte, so there is no bulk work
-/// to charge in chunks; and it validates nothing, because a run is validated
-/// when it is finished. So the fast path takes no safepoint and publishes no
-/// work, exactly as [`WordPush`]'s does: the accumulator is charged at the next
-/// safepoint, and the cold half publishes it as every hand-over does.
-///
-/// The preconditions that go to the helper are `Machine::buffer`'s and
-/// `append_byte`'s own, and each has a sentence the runtime builds:
-///
-/// - **the owner's object is a byte buffer.** Its header's layout is compared
-///   with [`BytePush::buffer`], the program's one `Shape::ByteBuffer` layout;
-/// - **`finish()` has not consumed it**, which leaves a store word of nought;
-/// - **the length is below the capacity.** The owner's payload word 0 is the
-///   length in bytes, and the store's header length is its capacity in bytes —
-///   eight to a payload word, least significant first, which is how
-///   `RUN_LOAD_BYTES` reads the same run. The comparison is of the whole length
-///   word, unsigned, so a length past the capacity is cold and the runtime
-///   refuses it in its own words;
-/// - **the value is a byte**, `0` to `255`, compared unsigned so that a negative
-///   `Int` is cold too, where `appendByte`'s refusal is worded.
-///
-/// The null owner is the one refusal that is emitted, as [`Raise::NullObject`],
-/// which is what `Machine::buffer` answers for it.
-///
-/// [ADR 0052]: ../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct BytePush {
-    /// The owner's slot: one `Repr::Ref` word naming the `ByteBuffer` header.
-    pub(crate) owner: Slot,
-    /// The `Shape::ByteBuffer` layout the object's own header is compared against.
-    pub(crate) buffer: LayoutId,
-    /// The slot holding the byte, one `Int` word.
-    pub(crate) src: Slot,
-}
-
-/// The [`BytePush`] a byte `growable-push` is, or `None` for a program whose
-/// `buffer_layout` is not a `Shape::ByteBuffer` — which a lowering that pushed a
-/// byte always declared, so `None` is a bound and not a family.
-pub(crate) fn byte_push(program: &Program, owner: Slot, src: Slot) -> Option<BytePush> {
+/// `None` for a program whose `buffer_layout` is not a `Shape::ByteBuffer`,
+/// which a lowering that built one always declared, so `None` is a bound and not
+/// a family.
+pub(crate) fn byte_owner(program: &Program) -> Option<LayoutId> {
     let buffer = program.buffer_layout;
     matches!(
         program.layouts.get(buffer.index())?.shape,
         Shape::ByteBuffer
     )
-    .then_some(BytePush { owner, buffer, src })
+    .then_some(buffer)
 }
 
 /// An [`Inst::GrowableEnsure`] or an [`Inst::GrowableCommit`] — [ADR 0062]'s
 /// window — with the static facts its emitted test is made from.
 ///
-/// Both read the owner the way [`WordPush`] and [`BytePush`] do: the header is
-/// compared with the one owner layout the storage implies — the program's
-/// `Shape::Vector` of the element, or its `Shape::ByteBuffer` — the store word
-/// with nought, and the length word with the store's capacity. What differs is
-/// the question asked of the count:
+/// Both read the owner the way [`WordOwner`] and [`byte_owner`] describe: the
+/// header is compared with the one owner layout the storage implies — the
+/// program's `Shape::Vector` of the element, or its `Shape::ByteBuffer` — the
+/// store word with nought, and the length word with the store's capacity. What
+/// differs is the question asked of the count:
 ///
 /// - **an ensure** asks whether `count <= capacity - length`, unsigned, and does
 ///   nothing else when it holds: there is room, so there is nothing to grow. A
@@ -311,8 +230,21 @@ pub(crate) fn byte_push(program: &Program, owner: Slot, src: Slot) -> Option<Byt
 /// instruction again from the start and rejoins. The null owner is emitted, as
 /// [`Raise::NullObject`].
 ///
-/// Neither takes a safepoint on its fast path, for [`BytePush`]'s reason: it
-/// allocates nothing and moves nothing.
+/// **Growth is the whole of an ensure's cold half, and that is deliberate.**
+/// Growth is where the *allocation* is, so it is not that it was hard — [ADR
+/// 0055]'s allocation helper is right there, and `Inst::Alloc` goes through it.
+/// It is that growth is also a payload copy of unbounded length, a loop over
+/// `len * stride` heap words, and `capacity` doubles: the copy is amortised over
+/// the appends that filled the store, so emitting it would be code proportional
+/// to the run in exchange for a share of the work that falls as the owner grows.
+/// The fast path is what the census counted.
+///
+/// Neither takes a safepoint on its fast path, and neither needs one: an ensure
+/// with room allocates nothing and moves nothing, and a commit writes one word.
+/// So the accumulated work is charged at the next safepoint, and a cold half
+/// publishes it as every hand-over does.
+///
+/// [ADR 0055]: ../../../docs/adr/0055-native-execution-compiles-optimized-ir-one-function-at-a-time.md
 ///
 /// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -337,8 +269,8 @@ pub(crate) fn reserve(
     storage: Storage,
 ) -> Option<Reserve> {
     let (layout, words) = match storage {
-        Storage::PackedBytes => (byte_push(program, owner, count)?.buffer, false),
-        Storage::Words(elem) => (word_push(program, owner, count, elem)?.vector, true),
+        Storage::PackedBytes => (byte_owner(program)?, false),
+        Storage::Words(elem) => (word_owner(program, elem)?.vector, true),
     };
     Some(Reserve {
         owner,
@@ -396,9 +328,9 @@ pub(crate) fn byte_store(
 /// test of its own: [`Reserve`] twice, and [`ByteStore`] or a `store-elem`. Run
 /// row by row, a push reads the owner's header three times and asks the room
 /// question twice. What [`windows`] decodes is the one fast path the composite
-/// push had — [`WordPush`]'s and [`BytePush`]'s, whose questions these are — so
-/// that both arms can emit a window the way they emitted `GrowablePush`, and
-/// make the frame writes the rows would have made besides. **The window is not a
+/// `growable-push` had — [`WordOwner`]'s and [`byte_owner`]'s questions, which
+/// are these — so that both arms emit a window as one step, and make the frame
+/// writes the rows would have made besides. **The window is not a
 /// second definition of the shape**: [`cove_ir::legalize::recognize`] is asked,
 /// over this crate's own block partition, and nothing here matches a row.
 ///
@@ -459,7 +391,7 @@ pub(crate) struct BufferWindow {
     /// compared against — [`ByteStore::bytes`]. Unread otherwise.
     pub(crate) bytes: LayoutId,
     /// Whether the storage is words, so that each arm picks the cold ensure and
-    /// masks the length word as [`WordPush`] does.
+    /// masks the length word at the element's stride.
     pub(crate) words: bool,
     /// An append's `run-copy` argument row. Unread for a push.
     pub(crate) args: u32,
@@ -529,7 +461,7 @@ fn buffer_window(
 /// capacity it gives up — and the two payload words of the `Vector` header are
 /// zeroed, which is the consumed mark. `Memory::relabel` is documented as "two
 /// heap word writes and nothing else, no free-list surgery", so all of it is
-/// emitted; there is no cold half the way [`WordPush`]'s growth is.
+/// emitted; there is no cold half the way an ensure's growth is.
 ///
 /// The `Array<T>` layout `relabel` writes is the instruction's own `target`,
 /// which `cove_ir::verify` holds to the fixed `Elements` of the element — it is
@@ -537,7 +469,7 @@ fn buffer_window(
 ///
 /// Two preconditions go to [`GrowableFn`](crate::abi::GrowableFn) as
 /// [`GrowableOp::FinishWords`](crate::abi::GrowableOp::FinishWords), for
-/// [`WordPush`]'s reasons exactly: the owner's object is not the vector the
+/// [`WordOwner`]'s reasons exactly: the owner's object is not the vector the
 /// element layout implies, and the store word is already nought. The null owner
 /// is emitted as [`Raise::NullObject`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -568,7 +500,7 @@ pub(crate) fn word_finish(
     target: LayoutId,
     elem: LayoutId,
 ) -> Option<WordFinish> {
-    let push = word_push(program, owner, 0, elem)?;
+    let vector_of = word_owner(program, elem)?;
     // The fixed run of the element, or — a keyed finish, #378 P4-5 — the `Set`
     // of it or the `Map` whose entry it is. The emitted relabel is the same
     // header write and free block for all three: each is `len` units of
@@ -582,8 +514,8 @@ pub(crate) fn word_finish(
     fixed.then_some(WordFinish {
         dst,
         owner,
-        vector: push.vector,
-        stride: push.stride,
+        vector: vector_of.vector,
+        stride: vector_of.stride,
         array: target,
     })
 }
@@ -1079,22 +1011,19 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         Inst::Trap { .. } => true,
         // ---- [ADR 0052]'s growable buffer -----------------------------------
         //
-        // Three of the four handed to [`GrowableFn`](crate::abi::GrowableFn) whole,
-        // and that helper's own documentation is where the decision for each of
-        // them is written down. The fourth, a byte push, is an emitted push into
-        // spare capacity with that helper as its cold half: see [`BytePush`] for
-        // why none of the helper's reasons reaches it.
+        // An allocation and a finish handed to
+        // [`GrowableFn`](crate::abi::GrowableFn) whole, and that helper's own
+        // documentation is where the decision for each of them is written down.
+        // What fills the buffer between them is [ADR 0062]'s window, admitted
+        // row by row further below.
         //
-        // Each is admitted over `Storage::PackedBytes`, and the helper is the byte
-        // buffer's. The one word member that exists, a push, is admitted in an arm
-        // of its own below, because it is an emitted fast path and not this
-        // helper whole; the rest fall to the `_` with every other unlowered
-        // instruction, which `cove_ir::verify` refuses before they get here.
+        // Each is admitted over `Storage::PackedBytes`; the word members are
+        // admitted in arms of their own below, because each is an emitted fast
+        // path and not this helper whole.
         //
-        // They are admitted together. Three of them without the fourth would be a
-        // subset that could allocate a builder and not finish it, and the first
-        // function that appended one byte would be refused with no work behind the
-        // refusal.
+        // They are admitted together: one without the other would be a subset
+        // that could allocate a builder and not finish it, and the first function
+        // that built one would be refused with no work behind the refusal.
         //
         // What is bounded here is what the helper will *read out of this frame*,
         // which is [`Inst::Call`]'s rule: the helper resolves its operands through
@@ -1110,53 +1039,6 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             capacity,
             storage: Storage::PackedBytes,
         } => slot(*dst) && slot(*capacity),
-        // A byte push is an emitted fast path with this helper as its cold half —
-        // see [`BytePush`] — so it is admitted where that can be decoded. The
-        // buffer's layout id has to fit an `i32`, for the word push's reason
-        // below: the template arm compares a header's high half with an `imm32`.
-        Inst::GrowablePush {
-            owner,
-            src,
-            storage: Storage::PackedBytes,
-        } => byte_push(program, *owner, *src).is_some_and(|push| {
-            i32::try_from(push.buffer.0).is_ok() && slot(push.owner) && slot(push.src)
-        }),
-        // `Vector.push`, which is not the byte buffer's helper whole but an
-        // emitted fast path with [`WordPush`]'s cold half. The element is a run of
-        // `stride` words of this frame, so it is bounded the way an
-        // `Inst::Copy`'s source is — and by `MAX_RUN_WORDS` too, because the
-        // emitted write is one store per word of it.
-        //
-        // The vector's layout id has to fit an `i32`, and that is the *template*
-        // arm's bound rather than a bound on the language: it tests the header's
-        // high half with `cmp r64, imm32`, whose immediate is sign-extended, so an
-        // id above `i32::MAX` would be compared against a negative number. No
-        // program has two billion layouts, so this refuses nothing real — but an
-        // arm that was silently wrong above a threshold is worse than one that
-        // refuses at it.
-        Inst::GrowablePush {
-            owner,
-            src,
-            storage: Storage::Words(elem),
-        } => word_push(program, *owner, *src, *elem).is_some_and(|push| {
-            i32::try_from(push.vector.0).is_ok()
-                && push.stride <= MAX_RUN_WORDS
-                && slot(push.owner)
-                && run(push.src, push.stride)
-        }),
-        // Four operands behind an `ArgsId` — `owner`, `src`, `from`, `to` — which
-        // is the row `cove_ir::verify` already holds to that shape and width. Each
-        // is one word, so each is bounded as a slot rather than as a run.
-        Inst::GrowableExtend {
-            args,
-            storage: Storage::PackedBytes,
-        } => {
-            let list = program.arg_list(*args);
-            list.len() == 4
-                && list
-                    .iter()
-                    .all(|arg| program.layout(arg.layout).width() == 1 && slot(arg.slot))
-        }
         Inst::RunFinish {
             dst,
             owner,
@@ -1164,12 +1046,15 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             ..
         } => slot(*dst) && slot(*owner),
         // `Vector.freeze()`: an emitted relabel with [`WordFinish`]'s cold half,
-        // not the byte buffer's helper whole. No `run` bound the way a word
-        // push's is: the relabel is one header write and (at most) one
+        // not the byte buffer's helper whole. No `run` bound the way a window's
+        // element write has: the relabel is one header write and (at most) one
         // free-block write, whatever the stride — there is no per-element loop
         // for a width to bound. Both layout ids have to fit an `i32`, for the
-        // word push's reason: the *template* arm tests each against the header's
-        // high half with `cmp r64, imm32`.
+        // *template* arm's reason: it tests each against the header's high half
+        // with `cmp r64, imm32`, whose immediate is sign-extended, so an id above
+        // `i32::MAX` would be compared against a negative number. No program has
+        // two billion layouts, so this refuses nothing real — but an arm that was
+        // silently wrong above a threshold is worse than one that refuses at it.
         Inst::RunFinish {
             dst,
             owner,
@@ -1197,7 +1082,7 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // and a commit over either storage, and a byte store. Each is an emitted
         // test with the growable helper as its cold half — see [`Reserve`] and
         // [`ByteStore`] — and each layout id has to fit an `i32`, for the word
-        // push's reason.
+        // finish's reason.
         //
         // [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
         Inst::GrowableEnsure {
@@ -1265,11 +1150,11 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         // the instruction `Vector.toArray` lowers to, and the census named it as
         // the only blocker of several parser functions.
         //
-        // What is bounded is [`Inst::GrowableExtend`]'s: what the helper will read
+        // What is bounded is what the helper will read
         // out of this frame. Five operands behind an `ArgsId` — `dst`, `dst_at`,
         // `src`, `src_at`, `count` — each one word, each bounded as a slot. A word
         // copy's element layout is bounded against the program's table, because
-        // the helper reads its width, and against an `i32`, for [`WordPush`]'s
+        // the helper reads its width, and against an `i32`, for a word finish's
         // reason: the template arm materialises it as a 32-bit immediate. Neither
         // is reachable for a verified program, and each is a read past a table
         // rather than a wrong answer if it were.
@@ -1541,7 +1426,7 @@ mod tests {
         assert_eq!(blockers(&program, function), vec![expected]);
     }
 
-    // --- `word_push` and `word_finish` -------------------------------------------
+    // --- `word_owner` and `word_finish` ------------------------------------------
 
     const RUN_INT: LayoutId = LayoutId(1);
     const RUN_VECTOR: LayoutId = LayoutId(2);
@@ -1579,11 +1464,9 @@ mod tests {
     fn a_word_run_finds_its_vector_in_the_table() {
         let program = program_with_runs(true);
         assert_eq!(
-            word_push(&program, 0, 1, RUN_INT),
-            Some(WordPush {
-                owner: 0,
+            word_owner(&program, RUN_INT),
+            Some(WordOwner {
                 vector: RUN_VECTOR,
-                src: 1,
                 stride: 1,
             })
         );
@@ -1605,10 +1488,10 @@ mod tests {
     #[test]
     fn a_word_run_the_table_cannot_describe_is_refused() {
         let program = program_with_runs(false);
-        assert_eq!(word_push(&program, 0, 1, RUN_INT), None);
+        assert_eq!(word_owner(&program, RUN_INT), None);
         assert_eq!(word_finish(&program, 2, 0, RUN_ARRAY, RUN_INT), None);
         let program = program_with_runs(true);
-        assert_eq!(word_push(&program, 0, 1, LayoutId(99)), None);
+        assert_eq!(word_owner(&program, LayoutId(99)), None);
         assert_eq!(word_finish(&program, 2, 0, RUN_VECTOR, RUN_INT), None);
         assert_eq!(word_finish(&program, 2, 0, LayoutId(99), RUN_INT), None);
     }

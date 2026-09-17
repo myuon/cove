@@ -35,9 +35,8 @@ use crate::abi::{
     HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
-    by_zero_of, byte_push, byte_store, leaders, literal_offset, overflow_of, reserve, slot_offset,
-    supported, windows, word_finish, word_push, BufferWindow, BytePush, ByteStore, Reserve,
-    WordFinish, WordPush,
+    by_zero_of, byte_store, leaders, literal_offset, overflow_of, reserve, slot_offset, supported,
+    windows, word_finish, BufferWindow, ByteStore, Reserve, WordFinish,
 };
 use crate::Unavailable;
 
@@ -655,34 +654,6 @@ impl<'a> Emit<'a> {
                 capacity,
                 storage: Storage::PackedBytes,
             } => self.growable_op(GrowableOp::Alloc, *dst, *capacity),
-            // A push into spare capacity allocates nothing, moves one byte and
-            // validates nothing, so it is a memory store with the helper as its
-            // cold half. See [`BytePush`](crate::subset::BytePush).
-            Inst::GrowablePush {
-                owner,
-                src,
-                storage: Storage::PackedBytes,
-            } => {
-                let push = byte_push(self.program, *owner, *src)
-                    .expect("`supported` admitted a byte push it could decode");
-                self.byte_push(push)
-            }
-            // `Vector.push`: a fast path into spare capacity and the whole push as
-            // its cold half. See [`WordPush`](crate::subset::WordPush), decoded
-            // by the subset so that the two arms read one set of facts.
-            Inst::GrowablePush {
-                owner,
-                src,
-                storage: Storage::Words(elem),
-            } => {
-                let push = word_push(self.program, *owner, *src, *elem)
-                    .expect("`supported` admitted a word push it could decode");
-                self.vector_push(push)
-            }
-            Inst::GrowableExtend {
-                args,
-                storage: Storage::PackedBytes,
-            } => self.growable_op(GrowableOp::Extend, args.0, 0),
             // `Vector.pop` and `Vector.remove`'s truncate, handed over whole.
             Inst::GrowableTruncate {
                 owner,
@@ -1137,243 +1108,8 @@ impl<'a> Emit<'a> {
         self.store_slot(dst, RAX);
     }
 
-    /// A word `growable-push`'s fast path — `Vector.push` — the element into
-    /// spare capacity, and the length bumped.
-    ///
-    /// See [`WordPush`](crate::subset::WordPush) for which of
-    /// `Machine::push_words`' preconditions are emitted and which go to
-    /// [`GrowableFn`](crate::abi::GrowableFn), and why. This is the shape:
-    ///
-    /// ```text
-    ///   rax = the owner                  -- a `Vector` header, refused if null
-    ///   the header's layout is `vector`, or cold
-    ///   rcx = payload(header, 1)         -- the store; nought is `freeze()`d, cold
-    ///   rdx = payload(header, 0) as u32  -- the length
-    ///   rax = len(store)                 -- the capacity
-    ///   rdx < rax, or cold               -- no room is growth, and growth is cold
-    ///   rcx = store + 1 + len * stride   -- where the element goes
-    ///   rdx = len + 1
-    ///   the element's words, out of this frame and into the store
-    ///   payload(header, 0) = rdx
-    /// ```
-    ///
-    /// There is no answer to write: the `()` a push answers is the `Inst::Unit`
-    /// the lowering emits after it.
-    ///
-    /// Three things in it are load-bearing.
-    ///
-    /// **The owner is loaded twice.** Once at the top and once to bump the
-    /// length, because the register that held it is the one the capacity is
-    /// computed into — three scratch registers is what this arm has, and a frame
-    /// load is four bytes against a spill and a reload.
-    ///
-    /// **The comparison is unsigned and that is exact.** The length is a payload
-    /// word narrowed to `u32` and the capacity is a header's low half, so both are
-    /// below 2^32 and `jae` is `items.len < items.capacity` read the other way.
-    ///
-    /// **Every jump to the cold path is emitted before the first `push`.** The cold
-    /// path makes a C call, which wants `rsp` 16-byte aligned, and the element's
-    /// words wait on the machine stack the way [`Emit::copy`]'s do — so a cold jump
-    /// from inside that window would arrive misaligned. The order is the invariant
-    /// and it is checked by reading, which is why it is written down.
-    fn vector_push(&mut self, push: WordPush) {
-        let WordPush {
-            owner,
-            vector,
-            src,
-            stride,
-        } = push;
-        let cold = self.label();
-        let done = self.label();
-
-        self.load_slot(RAX, owner);
-        // `Machine::vector_run`'s `if owner == 0 { null_object() }`, which is the
-        // one refusal of a push this crate can name.
-        self.refuse_null(RAX);
-
-        // `machine.object_layout(addr)`: the header's high half. The element
-        // layout is what every static fact below was derived from, so a header
-        // that is not the vector of it is an owner this code cannot push to.
-        self.mov_rr(RDX, RAX);
-        self.heap_word(RDX);
-        self.shr_imm8(RDX, 32);
-        self.cmp_imm32(RDX, vector.0 as i32);
-        self.jcc(CC_NE, Target::Label(cold));
-
-        // `machine.payload(addr, 1)`: the store. `freeze()` leaves nought here.
-        self.mov_rr(RCX, RAX);
-        self.add_imm32(RCX, 2);
-        self.heap_word(RCX);
-        self.test_rr(RCX, RCX);
-        self.jcc(CC_E, Target::Label(cold));
-
-        // `machine.payload(addr, 0) as u32`: the length.
-        self.mov_rr(RDX, RAX);
-        self.add_imm32(RDX, 1);
-        self.heap_word(RDX);
-        self.mov_rr32(RDX, RDX);
-
-        // `machine.object_len(store)`: the capacity, in elements.
-        self.mov_rr(RAX, RCX);
-        self.object_len(RAX);
-        self.cmp_rr(RDX, RAX);
-        self.jcc(CC_AE, Target::Label(cold));
-
-        // Where the element goes: `store + 1 + len * stride`, as a linear address.
-        // The stride is a compile-time constant and the product is formed in `u64`,
-        // which agrees with `set_payload_run`'s `u32` on every product the test
-        // above admits — the store's payload words are a `u32` and this is inside
-        // them.
-        self.mov_imm64(RAX, i64::from(stride));
-        self.imul_rr(RAX, RDX);
-        self.add_rr(RCX, RAX);
-        self.add_imm32(RCX, 1);
-        // The new length, kept across the element's words.
-        self.add_imm32(RDX, 1);
-
-        if stride > 0 {
-            self.push(RDX);
-            for word in 0..stride {
-                self.load_slot(RAX, src + word);
-                self.push(RAX);
-            }
-            for word in (0..stride).rev() {
-                self.pop(RAX);
-                self.mov_rr(RDX, RCX);
-                self.add_imm32(RDX, word as i32);
-                self.heap_ptr(RDX);
-                self.store(HEAP_TABLE, 0, RAX);
-            }
-            self.pop(RDX);
-        }
-
-        // `growable_commit`: `machine.set_payload(owner, 0, len + 1)`.
-        self.load_slot(RAX, owner);
-        self.add_imm32(RAX, 1);
-        self.heap_ptr(RAX);
-        self.store(HEAP_TABLE, 0, RDX);
-        self.jmp(Target::Label(done));
-
-        self.bind(cold);
-        self.growable_op(GrowableOp::PushWords, owner, src);
-        self.bind(done);
-        // One predecessor of this join came through a helper, so the frame pointer
-        // the other one derived is not to be trusted here.
-        self.frame_live = false;
-    }
-
-    /// A byte `growable-push`'s fast path — `appendByte` — the byte into spare
-    /// capacity, and the length bumped.
-    ///
-    /// See [`BytePush`](crate::subset::BytePush) for which of
-    /// `Machine::append_byte`'s preconditions are emitted and which go to
-    /// [`GrowableFn`](crate::abi::GrowableFn), and why. This is the shape:
-    ///
-    /// ```text
-    ///   rax = the owner                  -- a `ByteBuffer` header, refused if null
-    ///   the header's layout is `buffer`, or cold
-    ///   rcx = payload(owner, 1)          -- the store; nought is `finish()`ed, cold
-    ///   rdx = payload(owner, 0)          -- the length in bytes, the whole word
-    ///   rdx < len(store), or cold        -- no room is growth, and growth is cold
-    ///   rsi = &payload(store, rdx / 8)   -- the word the byte goes into
-    ///   rax = the value; rax < 256, or cold
-    ///   cl  = (rdx % 8) * 8
-    ///   [rsi] = [rsi] & !(0xff << cl) | rax << cl
-    ///   payload(owner, 0) = rdx + 1
-    /// ```
-    ///
-    /// **The word's address is formed before the value is read.** Four values
-    /// are live at once — the store, the length, the value and the shift — and
-    /// this arm has three scratch registers. [`Emit::heap_ptr`] leaves its answer
-    /// in [`HEAP_TABLE`], which nothing but another heap address and a call
-    /// writes, so the address waits there while `RCX` becomes the shift, and
-    /// [`HEAP_INDEX`] and [`HEAP_SPARE`] are free for the mask and the word.
-    ///
-    /// **Nothing is pushed on the machine stack**, so every cold jump arrives with
-    /// `rsp` as the prologue left it — [`Emit::vector_push`]'s invariant, kept by
-    /// having no window to break it in.
-    ///
-    /// **Every comparison is unsigned**, for the reasons
-    /// [`BytePush`](crate::subset::BytePush) gives: a length word past the
-    /// capacity and a negative value are both cold.
-    fn byte_push(&mut self, push: BytePush) {
-        let BytePush { owner, buffer, src } = push;
-        let cold = self.label();
-        let done = self.label();
-
-        self.load_slot(RAX, owner);
-        // `Machine::buffer`'s `if owner == 0 { null_object() }`.
-        self.refuse_null(RAX);
-
-        // `Shape::ByteBuffer`, as the header's high half.
-        self.mov_rr(RDX, RAX);
-        self.heap_word(RDX);
-        self.shr_imm8(RDX, 32);
-        self.cmp_imm32(RDX, buffer.0 as i32);
-        self.jcc(CC_NE, Target::Label(cold));
-
-        // `machine.payload(owner, GROWABLE_STORE)`. `finish()` leaves nought here.
-        self.mov_rr(RCX, RAX);
-        self.add_imm32(RCX, 2);
-        self.heap_word(RCX);
-        self.test_rr(RCX, RCX);
-        self.jcc(CC_E, Target::Label(cold));
-
-        // `machine.payload(owner, GROWABLE_LEN)`, the whole word.
-        self.mov_rr(RDX, RAX);
-        self.add_imm32(RDX, 1);
-        self.heap_word(RDX);
-
-        // `machine.object_len(store)`: the capacity, in bytes.
-        self.mov_rr(RAX, RCX);
-        self.object_len(RAX);
-        self.cmp_rr(RDX, RAX);
-        self.jcc(CC_AE, Target::Label(cold));
-
-        // The payload word holding byte `len`: `store + 1 + len / 8`.
-        self.add_imm32(RCX, 1);
-        self.mov_rr(RAX, RDX);
-        self.shr_imm8(RAX, 3);
-        self.add_rr(RCX, RAX);
-        self.heap_ptr(RCX);
-
-        // `(0..=255).contains(&value)`.
-        self.load_slot(RAX, src);
-        self.cmp_imm32(RAX, 256);
-        self.jcc(CC_AE, Target::Label(cold));
-
-        // `blend(store, len / 8, len % 8, 1, value)`. `shl` by a variable amount
-        // reads `cl`.
-        self.mov_rr(RCX, RDX);
-        self.and_imm32(RCX, 7);
-        self.shl_imm8(RCX, 3);
-        self.shl_cl(RAX);
-        self.mov_imm32(HEAP_SPARE, 0xFF);
-        self.shl_cl(HEAP_SPARE);
-        self.not_r(HEAP_SPARE);
-        self.load(HEAP_INDEX, HEAP_TABLE, 0);
-        self.and_rr(HEAP_INDEX, HEAP_SPARE);
-        self.or_rr(HEAP_INDEX, RAX);
-        self.store(HEAP_TABLE, 0, HEAP_INDEX);
-
-        // `growable_commit`: `machine.set_payload(owner, GROWABLE_LEN, len + 1)`.
-        self.add_imm32(RDX, 1);
-        self.load_slot(RAX, owner);
-        self.add_imm32(RAX, 1);
-        self.heap_ptr(RAX);
-        self.store(HEAP_TABLE, 0, RDX);
-        self.jmp(Target::Label(done));
-
-        self.bind(cold);
-        self.growable_op(GrowableOp::Push, owner, src);
-        self.bind(done);
-        // One predecessor of this join came through a helper, so the frame pointer
-        // the other one derived is not to be trusted here.
-        self.frame_live = false;
-    }
-
     /// A `growable-ensure` or, when `commit`, a `growable-commit`: the owner read
-    /// as [`Emit::byte_push`] reads it, the room `capacity - length` compared
+    /// as [`Emit::byte_store`] reads its run, the room `capacity - length` compared
     /// unsigned with the count, and — for a commit — the new length written.
     ///
     /// See [`Reserve`](crate::subset::Reserve) for what is emitted and what goes
@@ -1448,8 +1184,8 @@ impl<'a> Emit<'a> {
         self.frame_live = false;
     }
 
-    /// A byte `run-store`: `RUN_STORE_BYTES`' checks and [`Emit::byte_push`]'s
-    /// blend, at the offset the instruction names rather than at a length.
+    /// A byte `run-store`: `RUN_STORE_BYTES`' checks and `Machine::blend`'s one
+    /// byte, at the offset the instruction names rather than at a length.
     ///
     /// `RAX` holds the run and `RCX` the offset; the value waits on the machine
     /// stack while the word's address is formed, for [`Emit::store_elem`]'s
@@ -1540,7 +1276,7 @@ impl<'a> Emit<'a> {
     /// ```
     ///
     /// **Every jump to a cold path is emitted before the first `push`**, for
-    /// [`Emit::vector_push`]'s reason, and each cold path re-derives the frame
+    /// [`Emit::reserve`]'s reason, and each cold path re-derives the frame
     /// pointer before it jumps back, so the path that never went cold keeps the
     /// one it had.
     ///
@@ -1625,7 +1361,7 @@ impl<'a> Emit<'a> {
         self.pc = window.write;
         match window.pattern {
             Pattern::PushWords => {
-                // `store + 1 + len * stride`, as `vector_push` forms it.
+                // `store + 1 + len * stride`: the element's address in the store.
                 self.mov_imm64(RAX, i64::from(window.stride));
                 self.imul_rr(RAX, RDX);
                 self.add_rr(RCX, RAX);
@@ -1661,7 +1397,7 @@ impl<'a> Emit<'a> {
                 self.load_slot(RAX, window.src);
                 self.cmp_imm32(RAX, 256);
                 self.jcc(CC_AE, Target::Label(cold_store));
-                // `blend(store, len / 8, len % 8, 1, value)`, `byte_push`'s.
+                // `blend(store, len / 8, len % 8, 1, value)`, one byte into its word.
                 self.mov_rr(RCX, RDX);
                 self.and_imm32(RCX, 7);
                 self.shl_imm8(RCX, 3);
@@ -1780,7 +1516,7 @@ impl<'a> Emit<'a> {
     ///
     /// See [`WordFinish`](crate::subset::WordFinish) for which preconditions are
     /// emitted and which go to [`GrowableFn`](crate::abi::GrowableFn) —
-    /// [`Emit::vector_push`]'s own two —
+    /// [`Emit::reserve`]'s own two —
     /// and for why there is no *third* cold half: `relabel` is O(1) whatever
     /// `len` and `capacity` are, so once both preconditions hold, every
     /// remaining step is unconditional.
@@ -1829,7 +1565,7 @@ impl<'a> Emit<'a> {
         self.test_rr(RCX, RCX);
         self.jcc(CC_E, Target::Label(cold));
 
-        // `items.len` and `items.capacity`, `Emit::vector_push`'s own reads.
+        // `items.len` and `items.capacity`, `Emit::reserve`'s own reads.
         self.load_slot(RDX, recv);
         self.add_imm32(RDX, 1);
         self.heap_word(RDX);

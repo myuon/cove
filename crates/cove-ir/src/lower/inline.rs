@@ -348,7 +348,7 @@ const HOT_LIMIT: usize = 48;
 /// `async`: the mandatory rule waives the frame budget and the size limits,
 /// never what makes an expansion correct. A `var self` builder method is one
 /// — `appendByte` is a load of the owner through the address and one byte
-/// `growable-push` — and is expanded in the order [`ordered_callees`] decides.
+/// window — and is expanded in the order [`ordered_callees`] decides.
 /// See [`is_thin_library`].
 const THIN: usize = 4;
 
@@ -371,7 +371,7 @@ const THIN: usize = 4;
 /// that is one fused dispatch on the encoded VM and one fast path in native
 /// code, so it is one here. [ADR 0062] says why this is not a detail —
 /// `std.vector.push` is a length read, an ensure, a store read, a write, a
-/// clear, a constant and a commit, eight rows that were one
+/// clear, a constant and a commit, eight rows that were one composite
 /// `growable-push` — and without it `push` would stop being a mandatory
 /// expansion the moment its body moved into Cove.
 ///
@@ -659,7 +659,7 @@ fn ordered_callees(program: &Program, caller: &Function) -> Vec<FunctionId> {
 /// `matches!` above — but that is a fact worth writing down here precisely
 /// because the compiler cannot check it. The same is true of
 /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
-/// `GrowableAlloc`, `GrowablePush`, `GrowableExtend` and `RunFinish`: they
+/// `GrowableAlloc` and `RunFinish`: they
 /// allocate and they copy, and an allocation is not a call. And of
 /// [ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md)'s
 /// `GrowableEnsure`, `GrowableCommit` and `RunStore`: an ensure may grow a store
@@ -839,8 +839,6 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::StoreElem { .. }
             | Inst::Store { .. }
             | Inst::RunCopy { .. }
-            | Inst::GrowablePush { .. }
-            | Inst::GrowableExtend { .. }
             | Inst::GrowableTruncate { .. }
             | Inst::GrowableEnsure { .. }
             | Inst::GrowableCommit { .. }
@@ -1247,7 +1245,6 @@ fn expand(program: &mut Program, id: FunctionId, eligible: &Eligible<'_>, called
             Inst::IntrinsicCall { args, .. }
             | Inst::RunCopy { args, .. }
             | Inst::RunSlice { args, .. }
-            | Inst::GrowableExtend { args, .. }
                 if args.0 >= PLACED =>
             {
                 *args = crate::ArgsId(listed + (args.0 - PLACED));
@@ -1332,13 +1329,12 @@ fn relocated(
         // An argument list is `Program::args` and not part of the
         // instruction, so shifting the slots the instruction names does not
         // reach it. A builtin is the one call a leaf may hold, and
-        // `Inst::RunCopy` and `Inst::GrowableExtend` are the non-call
+        // `Inst::RunCopy` and `Inst::RunSlice` are the non-call
         // instructions that also name one — each is the list relocated into a
         // list of its own.
         Inst::IntrinsicCall { args, .. }
         | Inst::RunCopy { args, .. }
-        | Inst::RunSlice { args, .. }
-        | Inst::GrowableExtend { args, .. } => {
+        | Inst::RunSlice { args, .. } => {
             lists.push(
                 program
                     .arg_list(*args)
@@ -1462,7 +1458,6 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
             dst, run, index, ..
         } => vec![dst, run, index],
         Inst::GrowableAlloc { dst, capacity, .. } => vec![dst, capacity],
-        Inst::GrowablePush { owner, src, .. } => vec![owner, src],
         Inst::GrowableTruncate { owner, len, .. } => vec![owner, len],
         Inst::GrowableEnsure {
             owner, additional, ..
@@ -1476,7 +1471,7 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         // instruction, exactly as a call's do — `relocated` moves that row
         // and repoints `args` at the copy, the same way it does for
         // `Inst::IntrinsicCall`.
-        Inst::RunCopy { .. } | Inst::RunSlice { .. } | Inst::GrowableExtend { .. } => Vec::new(),
+        Inst::RunCopy { .. } | Inst::RunSlice { .. } => Vec::new(),
         Inst::Len { dst, obj } | Inst::LayoutOf { dst, obj } => vec![dst, obj],
         Inst::AddrOfSlot { dst, slot } => vec![dst, slot],
         Inst::AddrOfField { dst, obj, .. } => vec![dst, obj],

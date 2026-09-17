@@ -2499,16 +2499,6 @@ impl<'a> Machine<'a> {
         out
     }
 
-    /// The byte at `at` of the packed run at `addr`.
-    ///
-    /// The payload holds eight bytes to a word, least-significant byte first —
-    /// the inverse of [`Machine::write_bytes`] — so one byte is one payload read
-    /// and a shift, and no part of the object is copied. The caller owns the
-    /// bound, as every reader of a packed run here does.
-    pub(crate) fn byte_of(&self, addr: u64, at: usize) -> u8 {
-        (self.mem.payload(addr, (at / 8) as u32) >> ((at % 8) * 8)) as u8
-    }
-
     /// A new string object holding `text`.
     ///
     /// Unlike [`Machine::place_literals`] this allocates every time, and is
@@ -2686,20 +2676,6 @@ impl<'a> Machine<'a> {
         Ok(())
     }
 
-    /// A byte [`Inst::GrowablePush`]: one checked byte onto the end of a buffer.
-    pub(crate) fn append_byte(&mut self, owner: u64, value: i64) -> Result<(), RuntimeError> {
-        let mut buffer = self.buffer("appendByte", owner)?;
-        if !(0..=255).contains(&value) {
-            return Err(RuntimeError::new(format!(
-                "`appendByte`'s value is `{value}`, and a byte is 0 to 255"
-            )));
-        }
-        runs::growable_ensure(self, &mut buffer, 1)?;
-        self.put_bytes(buffer.store, buffer.len as usize, 1, value as u64);
-        runs::growable_commit(self, &mut buffer, 1);
-        Ok(())
-    }
-
     /// A live `Vector` at `owner` whose elements are `elem`: its store, its
     /// logical length and its capacity.
     ///
@@ -2740,30 +2716,6 @@ impl<'a> Machine<'a> {
             capacity: self.mem.object_len(store),
             storage: cove_ir::Storage::Words(elem),
         })
-    }
-
-    /// A word [`Inst::GrowablePush`]: the element whose words begin at the
-    /// linear address `src` onto the end of the vector at `owner`.
-    ///
-    /// `vm::intrinsics::seq::vector_push` without the operand array: the ensure
-    /// first, because it may allocate, and then the element's words straight
-    /// out of the frame into the store at `len * stride`, and then the commit.
-    /// Nothing is lost to a collection in the ensure — the frame does not
-    /// move, a collection moves nothing, and the element is still in the slots
-    /// the frame's reference map names.
-    pub(crate) fn push_words(
-        &mut self,
-        owner: u64,
-        elem: LayoutId,
-        src: u64,
-    ) -> Result<(), RuntimeError> {
-        let mut run = self.vector_run(owner, elem)?;
-        runs::growable_ensure(self, &mut run, 1)?;
-        let width = self.width(elem);
-        let into = self.mem.payload_addr(run.store, run.len * width);
-        self.mem.copy_words(into, src, width);
-        runs::growable_commit(self, &mut run, 1);
-        Ok(())
     }
 
     /// A word [`Inst::GrowableTruncate`]: the vector at `owner` shortened to
@@ -2813,8 +2765,8 @@ impl<'a> Machine<'a> {
     /// An [`Inst::GrowableEnsure`]: room for `additional` more units in the run
     /// at `owner`, grown if they would not fit.
     ///
-    /// The owner's checks are its family reader's, in the sentences
-    /// [`Inst::GrowablePush`] answers — a consumed vector in
+    /// The owner's checks are its family reader's, in the sentences the
+    /// composite `growable-push` answered — a consumed vector in
     /// [`consumed_vector`]'s one sentence and a consumed buffer in
     /// [`Machine::buffer`]'s, naming the instruction as `growableTruncate`'s
     /// refusal does. A negative room is refused before anything is read into a

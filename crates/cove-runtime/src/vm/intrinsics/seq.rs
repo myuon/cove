@@ -87,8 +87,8 @@ use crate::vm::intrinsics::make;
 // are not here: each is `std.array` or `std.vector`, a Cove loop over `==`
 // (ADR 0058, #378). They were the last operations this module dispatched, so
 // what is left is the documentation above and the growable-run cases below,
-// which exercise `Machine::push_words`, `Machine::truncate_words` and
-// `Machine::finish_words` over sequences.
+// which exercise `Machine::ensure_growable`, `Machine::commit_growable`,
+// `Machine::truncate_words` and `Machine::finish_words` over sequences.
 
 #[cfg(test)]
 mod tests {
@@ -106,27 +106,27 @@ mod tests {
         make::vector_of(machine, int, &words).expect("the fixture declares every family")
     }
 
-    /// `Vector.push(value)`, which is `Machine::push_words` since ADR 0058 moved
-    /// `push` into the standard library over a word `growable-push`.
+    /// `Vector.push(value)`, which since ADR 0062 is what `std.vector.push`
+    /// lowers to: `growable-ensure` of one, the element's words into the store
+    /// at the logical length, and `growable-commit` of one.
     ///
-    /// The instruction reads the element straight out of the frame by address;
-    /// there is no frame here, so the words are placed in an object of their
-    /// own, rooted for the call, and handed over by the address of its payload.
+    /// The ensure comes first because it may allocate and so replace the store,
+    /// which is why the store is read *after* it — the same order the window's
+    /// rows are in, and the reason the reservation rule puts the store read
+    /// where it does.
     fn push(
         machine: &mut Machine,
         items: u64,
         elem: LayoutId,
         words: &[u64],
     ) -> Result<(), RuntimeError> {
-        let holder = machine
-            .new_object(elements(machine.program(), elem, false), 1)
-            .expect("the fixture's heap is large enough");
-        let mark = machine.temps();
-        machine.push_temp(holder);
-        machine.set_payload_run(holder, 0, words);
-        let answer = machine.push_words(items, elem, holder + 1);
-        machine.release_temps(mark);
-        answer
+        let storage = cove_ir::Storage::Words(elem);
+        machine.ensure_growable(items, storage, 1)?;
+        let stride = machine.program().layout(elem).width();
+        let at = machine.payload(items, 0) as u32 * stride;
+        let store = machine.payload(items, 1);
+        machine.set_payload_run(store, at, words);
+        machine.commit_growable(items, storage, 1)
     }
 
     /// An `Array<Point>` is a run of two-word elements. Everything that walks
@@ -200,9 +200,9 @@ mod tests {
         let store = machine.new_object(layout, 1).unwrap();
         let grown = machine.new_object(vector(&program, point), 0).unwrap();
         machine.set_payload(grown, 1, store);
-        // A word `growable-push` is given its element layout by the lowering
-        // rather than by an operand, so what it holds to the store's family is
-        // the owner: a vector of another element is refused before a word moves.
+        // A word window is given its element layout by the lowering rather than
+        // by an operand, so what it holds to the store's family is the owner: a
+        // vector of another element is refused before a word moves.
         let error = push(&mut machine, grown, int, &[1]).unwrap_err();
         assert_eq!(
             error.message,
@@ -471,14 +471,6 @@ mod tests {
         machine.set_payload(store, 0, kept);
         machine.set_payload(items, 0, 1);
         machine.set_payload(items, 1, store);
-        // The element a push reads by address, placed and rooted before the heap
-        // is filled: a frame's slot, in a fixture that has no frame.
-        let holder = machine
-            .new_object(elements(&program, text, false), 1)
-            .unwrap();
-        machine.push_temp(holder);
-        machine.set_payload(holder, 0, kept);
-
         // Dead strings, two words each, until the heap is exactly full — so
         // that the larger store below cannot fit and has to collect.
         while machine.heap_words() + 2 <= 1 << 12 {
@@ -486,7 +478,7 @@ mod tests {
         }
         let before = machine.collected().collections;
 
-        machine.push_words(items, text, holder + 1).unwrap();
+        push(&mut machine, items, text, &[kept]).unwrap();
         assert!(
             machine.collected().collections > before,
             "the fixture did not force a collection"

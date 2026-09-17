@@ -170,7 +170,7 @@ impl HelperCalls {
 ///
 /// A constant here rather than on the enum, because the enum is the ABI and a
 /// count is only this report's business. A test holds the two together.
-pub const GROWABLE_OPS: usize = 12;
+pub const GROWABLE_OPS: usize = 9;
 
 /// How many [`RunOp`]s there are, for [`GROWABLE_OPS`]' reason.
 pub const RUN_OPS: usize = 4;
@@ -652,16 +652,16 @@ mod tests {
     #[test]
     fn a_charge_is_counted_in_all_and_by_operation() {
         let mut calls = HelperCalls::default();
-        calls.charge_growable(GrowableOp::PushWords.abi());
-        calls.charge_growable(GrowableOp::PushWords.abi());
-        calls.charge_growable(GrowableOp::Extend.abi());
+        calls.charge_growable(GrowableOp::EnsureWords.abi());
+        calls.charge_growable(GrowableOp::EnsureWords.abi());
+        calls.charge_growable(GrowableOp::Alloc.abi());
         calls.charge_run_copy(RunOp::CopyBytes.abi());
         assert_eq!(calls.growable, 3);
         assert_eq!(calls.run_copy, 1);
         let rows = calls.growable_rows();
         assert_eq!(rows.iter().map(|(_, n)| n).sum::<u64>(), calls.growable);
-        assert!(rows.contains(&(GrowableOp::PushWords, 2)));
-        assert!(rows.contains(&(GrowableOp::Extend, 1)));
+        assert!(rows.contains(&(GrowableOp::EnsureWords, 2)));
+        assert!(rows.contains(&(GrowableOp::Alloc, 1)));
         assert!(calls.run_copy_rows().contains(&(RunOp::CopyBytes, 1)));
     }
 
@@ -703,7 +703,7 @@ mod tests {
             helpers: Some(HelperCalls {
                 intrinsic: 7,
                 growable: 3,
-                growable_ops: [0, 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0],
+                growable_ops: [1, 0, 0, 0, 0, 2, 0, 0, 0],
                 ..HelperCalls::default()
             }),
         };
@@ -720,11 +720,10 @@ mod tests {
         ));
         assert!(text.contains("VM->native 2,"));
         assert!(text.contains("helper calls, 10 in all"));
+        assert!(text.contains("\n    Alloc                     1\n"));
+        assert!(text.contains("\n    EnsureWords               2\n"));
         assert!(
-            text.contains("\n    Push                      1\n    PushWords                 2\n")
-        );
-        assert!(
-            !text.contains("    Alloc "),
+            !text.contains("    Finish "),
             "an operation that never ran is left out"
         );
         assert!(text.contains("           1,000              7       1  String.join"));

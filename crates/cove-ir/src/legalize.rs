@@ -5,7 +5,7 @@
 //! one typed write and `GrowableCommit`, and `crate::verify`'s reservation rule
 //! is what makes that sound. What the split costs is dispatch: a push the
 //! encoded VM runs row by row is seven or eight turns of its loop where the
-//! composite `GrowablePush` was one. The ADR's answer is legalization behind
+//! composite `growable-push` was one. The ADR's answer is legalization behind
 //! the backends rather than a composite instruction in front of them, and this
 //! module is the **one pattern definition** every consumer asks — the encoded
 //! VM's fused heads, both native code generators and the inliner's `THIN`

@@ -214,46 +214,6 @@ fn a_reference_is_in_its_slot_across_an_allocation() {
 }
 
 #[test]
-fn a_push_into_spare_capacity_writes_the_element_and_the_length() {
-    suite::a_push_into_spare_capacity_writes_the_element_and_the_length::<Template>();
-}
-
-#[test]
-fn every_cold_path_of_a_push_goes_to_the_runtime() {
-    suite::every_cold_path_of_a_push_goes_to_the_runtime::<Template>();
-}
-
-#[test]
-fn a_cold_push_that_raised_leaves_with_that_outcome() {
-    suite::a_cold_push_that_raised_leaves_with_that_outcome::<Template>();
-}
-
-#[test]
-fn a_push_refuses_a_null_receiver() {
-    suite::a_push_refuses_a_null_receiver::<Template>();
-}
-
-#[test]
-fn a_byte_push_into_spare_capacity_blends_the_byte_and_bumps_the_length() {
-    suite::a_byte_push_into_spare_capacity_blends_the_byte_and_bumps_the_length::<Template>();
-}
-
-#[test]
-fn every_cold_path_of_a_byte_push_goes_to_the_runtime() {
-    suite::every_cold_path_of_a_byte_push_goes_to_the_runtime::<Template>();
-}
-
-#[test]
-fn a_cold_byte_push_that_raised_leaves_with_that_outcome() {
-    suite::a_cold_byte_push_that_raised_leaves_with_that_outcome::<Template>();
-}
-
-#[test]
-fn a_byte_push_refuses_a_null_owner() {
-    suite::a_byte_push_refuses_a_null_owner::<Template>();
-}
-
-#[test]
 fn a_freeze_relabels_the_store_in_place() {
     suite::a_freeze_relabels_the_store_in_place::<Template>();
 }
@@ -823,6 +783,6 @@ fn an_append_window_is_an_ensure_a_copy_and_a_commit() {
 }
 
 #[test]
-fn a_window_is_about_the_code_a_composite_push_was() {
-    suite::a_window_is_about_the_code_a_composite_push_was::<Template>();
+fn a_window_is_less_code_than_its_rows() {
+    suite::a_window_is_less_code_than_its_rows::<Template>();
 }

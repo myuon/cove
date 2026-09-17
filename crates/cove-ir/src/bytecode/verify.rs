@@ -330,11 +330,6 @@ impl Check<'_> {
             // fixed shape (`dst`, `src`, `from`, `count`) is `crate::verify`'s
             // `check_run_slice`.
             Inst::RunSlice { args, .. } => self.args_fit(at, args),
-            // `Op::GrowableExtendBytes`'s four operands live behind an `ArgsId`
-            // for the same reason and are checked by the same uniform rule;
-            // `crate::verify`'s `check_growable_extend_args` is where the fixed
-            // shape (`owner`, `src`, `from`, `to`) is a lowering-time fact.
-            Inst::GrowableExtend { args, .. } => self.args_fit(at, args),
             // `Len::Count` is the one `Len` form this check can settle ahead
             // of time: both halves of the payload are right here, so the
             // layout `Op::AllocImm` names and the count it carries are known

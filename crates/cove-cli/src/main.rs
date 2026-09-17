@@ -2029,7 +2029,7 @@ const OPCODE_FLOOR: u64 = 1_000;
 ///
 /// Forty reaches the long tail on both sides. A caller who wants every row wants
 /// a file rather than a terminal, and asks for it with `--profile-rows all`: a
-/// per-site census — every `growable-push.words` instruction the run executed,
+/// per-site census — every `push.words` window the run executed,
 /// summed by the function it sits in, which is how issue #409 was surveyed — is
 /// a join over *all* the rows, and was once taken with a patched binary.
 const PROFILE_ROWS: usize = 40;

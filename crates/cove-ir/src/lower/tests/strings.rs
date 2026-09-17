@@ -222,8 +222,6 @@ fn an_int_piece_is_rendered_by_the_standard_library() {
     let body = crate::print::function(&program, id);
     assert!(!body.contains("call"), "{body}");
     assert!(!body.contains("str "), "{body}");
-    assert!(!body.contains("growable-extend"), "{body}");
-    assert!(!body.contains("growable-push"), "{body}");
     let function = program.function(id);
     let windows = crate::legalize::windows(&program, function);
     assert_eq!(

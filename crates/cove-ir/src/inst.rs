@@ -667,7 +667,7 @@ pub enum Inst {
     /// `copy-bytes`, and is that instruction with the unit named rather than
     /// assumed: for [`Storage::PackedBytes`] a unit is a byte, and for
     /// [`Storage::Words`] a unit is a whole element of the layout, `stride`
-    /// words wide. It is not a Cove loop over [`Inst::GrowablePush`] or
+    /// words wide. It is not a Cove loop over [`Inst::RunStore`] or
     /// [`Inst::StoreElem`], because that would turn one bulk operation into a
     /// dispatch and a safepoint per unit — which ADR 0051's "why a byte loop in
     /// IR is not enough" and ADR 0058 both reject.
@@ -861,160 +861,13 @@ pub enum Inst {
         capacity: Slot,
         storage: Storage,
     },
-    /// `owner.push(src)`: one unit onto the end of a growable run.
-    ///
-    /// # In ADR 0058's families
-    ///
-    /// `growable-ensure owner, 1` → `run-store store, length, src` →
-    /// `growable-commit owner, 1`, as one instruction. The owner and the unit
-    /// are checked first, so a refused push leaves the owner exactly as it was.
-    /// See [`Inst::GrowableExtend`] for why the three are not yet three
-    /// instructions and for the rule a split form will have to keep.
-    ///
-    /// There is no offset, and that is the difference between a growable run
-    /// and a fixed one: a write goes at the logical length and the logical
-    /// length becomes one more, so a caller never names a position and can
-    /// never leave a hole below one. Nothing is bounds-checked against the
-    /// capacity, because there is no bound to check: a full store grows.
-    ///
-    /// # For [`Storage::PackedBytes`]
-    ///
-    /// ADR 0052's scalar append. It existed for a delimiter or an encoded scalar
-    /// a lowering emits one at a time, not as how text is expected to move:
-    /// copying a run of bytes through this would be as many dispatches as there
-    /// are bytes, which is what [`Inst::GrowableExtend`] is for.
-    ///
-    /// What `StringBuilder.appendByte`, `std.int.renderInto` and an
-    /// interpolation's one-byte literal lowered to until ADR 0062 made each of
-    /// them an ensure, a `run-store` and a commit. No lowering emits it over
-    /// either storage now; it stays, with its encoding, its VM arm and its native
-    /// emission, until the stage of that ADR which deletes the composite
-    /// instructions together.
-    ///
-    /// `owner` must name a live byte buffer and `src` must be a byte,
-    /// `0..=255`, because this is an instruction that puts an arbitrary integer
-    /// into memory that [`Inst::RunFinish`] will later read back and validate.
-    ///
-    /// # For [`Storage::Words`]
-    ///
-    /// What `Vector.push` lowered to until
-    /// [ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md)
-    /// made `std.vector.push` an ensure, a `store-elem` and a commit.
-    ///
-    /// `owner` names a `Vector<T>` whose element layout is the storage's, and
-    /// `src` is the **head of a run** of that
-    /// layout's width in this frame — a `Point` element is two words, and both
-    /// are written at `length * stride` in the store. Nothing about the value
-    /// is checked, because a run of words of the right layout is every value
-    /// of that layout; what is checked is the owner, which a checked program
-    /// always hands over live. The `()` a push answers is the lowering's to
-    /// write, as it is for a byte.
-    GrowablePush {
-        owner: Slot,
-        src: Slot,
-        storage: Storage,
-    },
-    /// A bulk range append: `owner.extend(src[from .. to])`.
-    ///
-    /// # In ADR 0058's families
-    ///
-    /// Source-range check → `growable-ensure owner, to − from` →
-    /// `run-copy store, length, src, from, to − from` →
-    /// `growable-commit owner, to − from`, as one instruction: ADR 0052's
-    /// principal instruction, and [`Inst::RunCopy`]'s growable counterpart.
-    ///
-    /// The ensure happens **once, up front**, for the whole range rather than
-    /// per chunk. A growth part way through would have to copy a prefix the
-    /// chunks before it had already written, and the one allocation before the
-    /// first chunk is what keeps the copy a copy. The commit happens **last**,
-    /// after the final chunk, so a run stopped part way through leaves what it
-    /// copied above the logical length, where it is spare room rather than
-    /// value.
-    ///
-    /// # Why ensure and commit are not yet instructions of their own
-    ///
-    /// The encoding is 1:1 with this IR, so a split cannot be undone at the
-    /// encoder, and nothing yet combines two ensures or fuses a slice into an
-    /// append — a split form would pay three dispatches for what one does, and
-    /// would move the character-boundary check below out of the instruction
-    /// that makes it (#378, Q1). They arrive with their first producer.
-    ///
-    /// When they do, a commit is only as sound as the writes before it, and
-    /// the rule is this: **a `growable-commit {o, n}` is valid only if the same
-    /// block, with no branch target, call or collecting instruction between,
-    /// contains a prior `growable-ensure {o, ≥n}` and writes covering
-    /// `[len, len+n)`.** A call or a collecting instruction between the two
-    /// could reach the same owner — grow it, replace its store, commit onto it
-    /// — so that the room the ensure made is no longer the room the writes
-    /// filled; and a branch target between them could reach the commit along a
-    /// path that ensured and wrote nothing. [`Inst::GrowablePush`] and this
-    /// instruction keep the rule by construction, which is what defining them
-    /// as the sequence buys.
-    ///
-    /// # For [`Storage::PackedBytes`]
-    ///
-    /// One dispatch moves the whole range, for the reason ADR 0051 gave when it
-    /// refused a byte loop in IR: a loop of [`Inst::GrowablePush`] would
-    /// multiply dispatch by the number of bytes.
-    ///
-    /// `src` may be a `String` **or** a [`crate::Shape::Bytes`] run, which is
-    /// what lets a fused slice copy straight out of the run or the string that
-    /// produced it. The ADR's own example is the optimisation this enables:
-    /// `sliceBytes(source, from, to) -> append` becomes one checked append
-    /// from that source range and never materialises the slice.
-    ///
-    /// Where `src` is a `String`, `from` and `to` are checked to be character
-    /// boundaries and not merely in range — the same check, in the same words,
-    /// that `String.sliceBytes` makes. ADR 0052 requires it: "`appendSlice`
-    /// checks the same bounds and UTF-8 boundaries as `String.sliceBytes`".
-    /// Without it a program could assemble a run of valid pieces that is not
-    /// valid UTF-8, and discover it only at [`Inst::RunFinish`], where the
-    /// offset that did it is long gone. A [`crate::Shape::Bytes`] source is
-    /// held to no such rule, because a run under construction is not claiming
-    /// to be text. That this is String policy inside a run instruction is
-    /// #378's Q6, unchanged in Phase 2.
-    ///
-    /// # No lowering emits it
-    ///
-    /// The paragraph above is why. `StringBuilder.appendSlice` lowered to this
-    /// until ADR 0062, which moved the range policy into
-    /// `std.stringbuilder`'s `appendRange` — five questions in Cove, in
-    /// `String.sliceBytes`' own shape, raising through
-    /// `Intrinsic::StringRefuseByteRange` — so that what is left underneath is
-    /// a `core.bytesCopy` that validates nothing and can therefore be the write
-    /// half of a reservation window. A copy that also decides a policy cannot
-    /// be: the window a backend fuses has to be a write already known to be
-    /// legal.
-    ///
-    /// It stays, with its encoding, its VM arm and its native emission, until
-    /// the stage of that ADR which deletes the composite instructions together
-    /// — as [`Inst::GrowablePush`] does, and for the same reason.
-    ///
-    /// # What it costs, and what it is charged
-    ///
-    /// [`Inst::RunCopy`]'s answer, unchanged: one unit of work per payload
-    /// word moved, in bounded chunks with a safepoint between them, so a
-    /// stopped run gets no further than a stride past the bound whatever length
-    /// it was given. Growth is charged as the allocation it is.
-    ///
-    /// # Why four operands live behind an [`ArgsId`]
-    ///
-    /// [`Inst::RunCopy`]'s reason at one fewer operand: an encoded
-    /// instruction has room for three slot-sized operands and this needs four —
-    /// `owner`, `src`, `from` and `to`. Rather than spend a second instruction
-    /// to carry the overflow, this reuses the machinery a call's argument list
-    /// already is. The row holds exactly four [`crate::Arg`]s in the order
-    /// `owner`, `src`, `from`, `to`, and carries each one's layout the way a
-    /// call's arguments do, so the verifier checks them by the same rule. The
-    /// storage is the instruction's own, as [`Inst::RunCopy`]'s is.
-    GrowableExtend { args: ArgsId, storage: Storage },
     /// `growable-ensure owner, additional`: room for `additional` more units in
     /// the store `owner` names, growing it if they would not fit.
     ///
     /// # The first half of a buffer window
     ///
     /// [ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md)
-    /// splits [`Inst::GrowablePush`] and [`Inst::GrowableExtend`] into the three
+    /// split the composite `growable-push` and `growable-extend` into the three
     /// instructions [ADR 0058] always said they were: this, a write into the
     /// room it made — an [`Inst::StoreElem`], an [`Inst::RunStore`] or an
     /// [`Inst::RunCopy`] into the store at the logical length — and an
@@ -1062,9 +915,9 @@ pub enum Inst {
     /// `growable-commit owner, count`: the logical length advanced over `count`
     /// units the window already wrote.
     ///
-    /// The second half of [`Inst::GrowableEnsure`]'s window, and the only
-    /// instruction besides the composite [`Inst::GrowablePush`] and
-    /// [`Inst::GrowableExtend`] that raises a length: [ADR 0052]'s rule that a
+    /// The second half of [`Inst::GrowableEnsure`]'s window, and — since ADR
+    /// 0062 deleted the composite `growable-push` and `growable-extend` — the
+    /// only instruction that raises a length: [ADR 0052]'s rule that a
     /// unit becomes value only once written is what the reservation rule in
     /// `crate::verify` enforces about the instructions before it.
     ///
@@ -1140,7 +993,7 @@ pub enum Inst {
     /// **It only lowers.** A `len` above the current length, or below zero, is
     /// refused as a broken invariant: nothing between the length and the
     /// capacity is a written unit, so raising the length here would expose
-    /// zeroes as elements, which is what [`Inst::GrowablePush`] and a commit
+    /// zeroes as elements, which is what a window's write and its commit
     /// exist to rule out. Every producer computes `len` from the length it has
     /// just read.
     ///
@@ -1188,8 +1041,8 @@ pub enum Inst {
     ///
     /// ADR 0052's finish for a byte buffer: `crate::verify` requires
     /// [`Validation::Utf8`] and a `target` of [`crate::Program::str_layout`].
-    /// The bytes are checked as UTF-8 exactly once, because a run assembled from
-    /// [`Inst::GrowablePush`] may hold anything a byte can hold, and invalid
+    /// The bytes are checked as UTF-8 exactly once, because a run assembled by
+    /// [`Inst::RunStore`] may hold anything a byte can hold, and invalid
     /// UTF-8 fails with the same error a source-level string operation already
     /// raises for it. `target` is carried although it is a program-wide
     /// constant, because a word run's finish names an `Array` layout of its
