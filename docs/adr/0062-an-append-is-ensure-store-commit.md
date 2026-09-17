@@ -34,8 +34,13 @@
   their own units; ADR 0052's growth policy, unique finish and zeroed spare
   capacity
 - Changes no source-language API
-- Implementation status: none. Measured on this tree at `720df04`; the staged
-  order below is how it arrives
+- Implementation status: **stages 0 through 9 are merged**, as pull requests
+  [#413](https://github.com/myuon/cove/pull/413) through
+  [#422](https://github.com/myuon/cove/pull/422). Every number below is
+  measured against `720df04`, the commit before the first of them. The
+  Adoption section names which stage each pull request is, what the series
+  measured end to end, where the implementation decided differently from the
+  Decision above, and what is left open
 
 ## Context
 
@@ -185,9 +190,14 @@ core.bytesEnsure(buffer: ByteBuffer, additional: Int)
 core.bytesStore(buffer: ByteBuffer, at: Int, byte: Int)
 core.bytesCopy(buffer: ByteBuffer, at: Int, text: String, from: Int, count: Int)
 core.bytesCommit(buffer: ByteBuffer, count: Int)
-core.vectorCopyFromSet / core.vectorCopyFromMap(out, run, from, count)
+core.vectorCopyFromSet / core.vectorCopyFromMap(out, at, run, from, count)
 core.refuseByteRange(text: String, from: Int, to: Int)
 ```
+
+The keyed copies take the destination offset `at` rather than reading the
+owner's length themselves. A window's head row is the length read, and a copy
+that read the length would read it *after* the ensure, where the fact the
+verifier needs — `at ≡ len(o)` before any growth — is no longer available.
 
 and the algorithms are written over them:
 
@@ -212,16 +222,34 @@ fn appendText(buffer: ByteBuffer, text: String) {
 of one. `appendText` and `appendByteInto` take the buffer by value, not
 `var self`, so interpolation can call them as it calls `std.int.renderInto`,
 and so they stay on the mandatory-expansion path rather than the ordered one.
-Keyed extend is `at`, `vectorEnsure(out, n)`, `vectorCopyFromMap(out, entries,
-from, n)`, `vectorCommit(out, n)`, and its `StoreField VECTOR_LEN` goes.
+Keyed extend is `at`, `vectorEnsure(out, n)`, `vectorCopyFromMap(out, at,
+entries, from, n)`, `vectorCommit(out, n)`, and its `StoreField VECTOR_LEN`
+goes.
+
+`std.map` and `std.set` write the protocol out where they place an element,
+rather than calling `Vector.push`: `placeAt`'s run is a parameter and not a
+writable place, so a call would have to hand the owner over and get it back.
+The two sites are the protocol, not a second spelling of it — the same four
+core calls in the same order, and `legalize` recognises them as the same
+window.
 
 **`appendSlice`'s range policy moves into Cove.** One `if` per question, in
 `sliceBytes`'s shape, and each refusal calls `core.refuseByteRange`, an
 `IntrinsicCall` that always raises — an intrinsic rather than a Cove call, so
-`appendSlice` remains an inlinable leaf, and blamed at the caller's site under
+the body remains an inlinable leaf, and blamed at the caller's site under
 ADR 0058. This resolves #378's Q6. It is measured when it lands, and if its VM
 cost is above noise it falls back to a checked copy that keeps the test below
 the library.
+
+The five questions and the window live in a private `appendRange(buffer, text,
+from, to)`, which `appendSlice` calls, rather than in `appendSlice`'s own
+body. The checks and the window are one block, and keeping them one function
+is what lets `legalize` see the window whether or not the public method was
+expanded. `core.refuseByteRange` lowers to `Intrinsic::StringRefuseByteRange`,
+whose receiver is `String` although no `String` method is named
+`refuseByteRange`, as `ValueRenderInto` and `ValueRefuseDuplicate` already
+are. The fallback was not needed: the range policy in Cove measured −0.35% on
+covefmt against the build that had it in the run instruction.
 
 The division is ADR 0058's table, now true of the append: ranges, branches,
 arithmetic and ordering belong to Cove; allocation, collection, the grow slow
@@ -276,10 +304,13 @@ Issue #409's safety contract, clause by clause:
   A `RunCopy` stopped part way leaves its bytes above the length, where they
   are spare room. `appendSlice`'s range checks run before the `let at`.
 - **The destination is not visible before initialization.** Length changes
-  only at commit. Both field-store publications of length — keyed extend's and
-  `core.vectorWithCapacity`'s — are removed by the stages below, and a lowering
-  test then pins that no `StoreField` at a growable owner's length offset is
-  emitted anywhere.
+  only at commit. Keyed extend's field-store publication is removed by the
+  stages below, and a lowering test pins that the only `StoreField` at a
+  growable owner's length offset anywhere in the standard library is a
+  constant nought. `core.vectorWithCapacity` keeps that one: it allocates a
+  store and initializes the owner's header, and its length store publishes
+  nothing because it publishes emptiness. Admitting `GrowableAlloc{Words}` so
+  that even that store goes is stage 8's, and it is not done — see Adoption.
 - **Word truncation clears every vacated reference.** `GrowableTruncate` is
   unchanged.
 - **Allocation and growth keep the owner and source rooted.** Ensure is the
@@ -363,20 +394,41 @@ mismatched tail or a branch or table target in a window's interior.
 
 **Fusion is decided at run time, per window, and is skipped whenever a question
 falls inside it.** The arm fuses only when
-`instructions + k - 1 < next_check`; otherwise it executes the head as its
-primitive and the tail dispatches normally, which it can because the tail was
-never removed. An installed debugger or profiler makes `next_check` the next
+`instructions + WINDOW_TAIL < next_check`, where `WINDOW_TAIL` is the *longest*
+window's tail — `legalize::MAX_ROWS - 1`, eight — and not this window's own
+`k - 1`. The bound has to be decidable before the rows are decoded, and this
+window's `k` is not known until its commit has been found; a constant that
+bounds every window is. Otherwise the arm executes the head as its primitive
+and the tail dispatches normally, which it can because the tail was never
+removed. An installed debugger or profiler makes `next_check` the next
 instruction, so a breakpoint, a step and `--profile` see semantic instructions
-and never a fused one.
+and never a fused one. The price of the conservative bound is measured and
+small: between 0.4% and 0.8% of windows decline on the two programs, and they
+run as rows, which is correct.
+
+Each pattern gets its own fast path, out of line and reached first:
+`fused_push` for both push patterns, `fused_append_bytes` and
+`fused_append_words` for the two appends. Each writes every frame word the
+rows would have written, in their order and with their values, so a frame, a
+heap and a debugger reading after the window cannot tell it was fused; each
+declines — returning to the general `fused_window` — when the store has no
+room, so a growth finishes through `fused_tail` and the grow policy stays in
+one place. They are separate calls rather than arms inlined into `dispatch`
+because inlining them there enlarged the dispatch frame: a push measured 118 ms
+inlined against 94 ms out of line on two million `Int` pushes, and the
+alternating native-tier chain's stack margin is about fifty kilobytes.
 
 **Fuel counts semantic instructions.** A fused window charges `k`, not one.
 Fuel must not depend on whether fusion fired, because whether it fired depends
 on how close the window was to a safepoint; and native execution already
 charges static IR counts per block. This is a one-time, documented rise in
 `fuel_spent` against today's composite instructions — on covefmt, roughly five
-extra instructions per push over five million pushes, on the order of 4% of
-its 741 million, to be measured at the stage that migrates `push`. Dispatches
-are not expected to move.
+extra instructions per push over five million pushes, estimated here as on the
+order of 4%. Measured over the whole series it is **+4.92%**, 746,631,783 to
+783,352,704, and on cq **+0.15%**. Dispatches were expected not to move; they
+*fell*, by 0.54% on covefmt and 2.47% on cq, because a fused window is one
+dispatch where the composite instruction was one dispatch inside a Cove call
+the inliner now has less to expand.
 
 `cove run --boundary` reports semantic instructions, dispatches, and fusions
 fired per pattern, separately.
@@ -437,36 +489,52 @@ change in meaning.
 Each stage lands green on its own, with the full gate and `cove test` over
 `examples/`.
 
-0. **This ADR, and tooling.** `--boundary` reports helper counts per
-   `GrowableOp` and `RunOp`; a `--profile-rows` flag replaces editing
-   `PROFILE_ROWS` in source.
-1. **Primitives, no producers.** The three `Inst` variants, their opcodes and
-   VM arms, `check_reservations`, native admission and primitive lowering, and
-   `cove_ir::{targets, writes}`. Gate: every count byte-identical; verifier
-   accept and reject tests for each numbered rule; VM and native agree,
-   including a collection during growth.
-2. **Legalization and fused heads.** `cove_ir::legalize`, the four fused
-   opcodes, the bytecode verifier's re-match, boundary reporting. Gate: fused
-   and unfused agree in memory, errors, spans and fuel; an installed debugger
-   disables fusion; an interior target is refused.
+0. **This ADR, and tooling** — [#412](https://github.com/myuon/cove/pull/412)
+   and [#413](https://github.com/myuon/cove/pull/413). `--boundary` reports
+   helper counts per `GrowableOp` and `RunOp`; a `--profile-rows` flag replaces
+   editing `PROFILE_ROWS` in source.
+1. **Primitives, no producers** —
+   [#414](https://github.com/myuon/cove/pull/414). The three `Inst` variants,
+   their opcodes and VM arms, `check_reservations`, native admission and
+   primitive lowering, and `cove_ir::flow::{leaders, targets, writes}`. Gate:
+   every count byte-identical; verifier accept and reject tests for each
+   numbered rule; VM and native agree, including a collection during growth.
+2. **Legalization and fused heads** —
+   [#415](https://github.com/myuon/cove/pull/415). `cove_ir::legalize`, the
+   four fused opcodes, the bytecode verifier's re-match, boundary reporting.
+   Gate: fused and unfused agree in memory, errors, spans and fuel; an
+   installed debugger disables fusion; an interior target is refused.
 3. **Native window emission** in both code generators, with the
-   `cranelift,template` agreement test.
+   `cranelift,template` agreement test —
+   [#416](https://github.com/myuon/cove/pull/416).
 4. **`Vector.push`** for vectors, maps and sets through the protocol;
    `core.vectorEnsure/Commit`; oracle staging; `THIN` counting windows;
-   `core.vectorPush` deleted. Gate: fused `Push(Words)` fires 5,395,970 times on
-   covefmt; dispatches unchanged; native helper calls and wall time no worse.
+   `core.vectorPush` deleted — [#417](https://github.com/myuon/cove/pull/417).
+   Gate: fused `Push(Words)` fires 5,395,970 times on covefmt; dispatches
+   unchanged; native helper calls and wall time no worse. Measured: 5,360,296
+   of 5,395,970 fused, dispatches −1,007,264, machine code +21,802 bytes,
+   covefmt VM −1.35%.
 5. **Byte push**: `appendByte`, `int.renderInto`, interpolation's one-byte
-   literals.
-6. **Whole-string append**: the builder's `append` and interpolation.
+   literals — [#418](https://github.com/myuon/cove/pull/418), with stage 6.
+6. **Whole-string append**: the builder's `append` and interpolation —
+   [#418](https://github.com/myuon/cove/pull/418).
 7. **`appendSlice`'s range policy in Cove**, with `core.refuseByteRange`, or
-   the checked-copy fallback if its VM cost is above noise.
-8. **Keyed extend** through ensure, copy and commit; separately and measured,
-   `GrowableAlloc{Words}` admitted for `core.vectorWithCapacity`, which removes
-   the other field-store publication of length.
+   the checked-copy fallback if its VM cost is above noise —
+   [#419](https://github.com/myuon/cove/pull/419). The fallback was not needed.
+8. **Keyed extend** through ensure, copy and commit —
+   [#420](https://github.com/myuon/cove/pull/420), and then a word-append fast
+   path the plan had not asked for,
+   [#421](https://github.com/myuon/cove/pull/421), because stage 8 gave
+   `Pattern::AppendWords` its first producer and fusing it through the generic
+   arms cost 0.66% until it had one. The second half of stage 8 —
+   `GrowableAlloc{Words}` admitted for `core.vectorWithCapacity` — is **not
+   done**; see "What is left open" below.
 9. **Deletion** of `Inst::GrowablePush`, `Inst::GrowableExtend` and everything
    that exists for them, with the lowering test that no length is published by
-   a field store.
-10. **Re-profile**, reported against the table above.
+   a field store — [#422](https://github.com/myuon/cove/pull/422). The opcode
+   table falls from 179 to 176 and `GrowableOp` from twelve variants to nine.
+10. **Re-profile**, reported against the table above — issue #409's step 10,
+    and the tables below.
 
 Every migrating stage is held to issue #409's gates: identical results and
 diagnostics on the AST, VM and native backends; GC, aliasing, consumed-owner
@@ -477,6 +545,149 @@ number, because covefmt's rebuild noise floor is about one per cent; native
 fast-path wall time not worse; emitted IR showing the protocol; and a report
 of dispatches, fusions, helper calls, allocations, allocated words and
 machine-code size.
+
+### What the whole series measured
+
+Two builds, `720df04` and the tip after #422, each in its own target directory
+with `--features cove-cli/template,cove-bench/template`, run interleaved on one
+fixed `--files-root` copy of the tree. Counts are deterministic and taken once;
+wall times are medians of interleaved rounds.
+
+| covefmt, VM | `720df04` | after #422 | |
+| --- | ---: | ---: | ---: |
+| semantic instructions | 738,943,455 | 775,664,376 | +4.97% |
+| dispatches | 738,943,455 | 734,969,979 | −0.54% |
+| `fuel_spent` | 746,631,783 | 783,352,704 | +4.92% |
+| allocations | 3,890,981 | 3,890,981 | ±0 |
+| allocated words | 48,365,193 | 48,365,193 | ±0 |
+| emitted IR | 11,378 / 211 fns | 12,586 / 214 fns | |
+| std `Call` sites unexpanded | 45 | 45 | ±0 |
+
+| cq revenue-summary, 20k, VM | `720df04` | after #422 | |
+| --- | ---: | ---: | ---: |
+| semantic instructions | 264,820,020 | 265,212,294 | +0.15% |
+| dispatches | 264,820,020 | 258,285,837 | −2.47% |
+| `fuel_spent` | 269,371,851 | 269,764,125 | +0.15% |
+| allocations | 1,433,567 | 1,433,567 | ±0 |
+| allocated words | 9,614,096 | 9,614,096 | ±0 |
+| std `Call` sites unexpanded | 40 | 40 | ±0 |
+
+Windows fused, per pattern, after #422: covefmt `push.words` 5,402,548,
+`push.byte` 1,191, `append.bytes` 514,045, `append.words` 0; cq `push.words`
+195,401, `push.byte` 33, `append.bytes` 600,004, `append.words` 391,679. The
+dispatch fall is those windows: the protocol adds rows and the fusion removes
+more of them than the composite instruction ever was.
+
+Native, on the template code generator:
+
+| | covefmt `720df04` | covefmt after | cq `720df04` | cq after |
+| --- | ---: | ---: | ---: | ---: |
+| compiled / refused | 205 / 6 | 208 / 6 | 85 / 24 | 89 / 24 |
+| machine code | 861,737 B | 922,417 B | 269,626 B | 376,834 B |
+| VM → native | 153,122 | 153,122 | 953,363 | 953,363 |
+| native → VM | 148,587 | 148,587 | 260,000 | 260,000 |
+| `growable` helpers | 1,363,759 | 848,179 | 1,200,026 | 600,026 |
+| `run_copy` helpers | 1,248,538 | 1,764,118 | 753,354 | 1,353,354 |
+| the two together | 2,612,297 | 2,612,297 | 1,953,380 | 1,953,380 |
+
+The last row is the honest reading of the two above it. No bulk work was
+removed: what a composite `GrowableExtend` did inside the growable helper a
+window now does through `RunCopy`, and the same number of helper calls is made
+either way. What changed is that the capacity test and the length increment are
+emitted code on both sides of it. Machine code is +7.0% on covefmt and +39.8%
+on cq, the latter because cq's four newly compiled functions are the standard
+library's appends and keyed copies, which were a helper call before.
+
+Refusals are the same set of functions with the same reasons on both programs;
+only the pcs move, because the bodies are longer. No crossing count moved.
+
+The per-op breakdown of the native helper rows exists only after #413, which
+added it, so the `720df04` column is a total. After #422 it is: covefmt
+`Alloc` 163,198, `Finish` 163,198, `TruncateWords` 14,083, `EnsureWords`
+507,700; `CopyBytes` 515,580, `SliceWords` 270,856, `SliceBytes` 977,682. cq
+`Alloc` 300,006, `Finish` 300,006, `EnsureWords` 14; `CopyBytes` 600,000,
+`CopyWords` 393,354, `SliceBytes` 360,000. Every remaining `growable` call is
+an allocation, a finish, a truncate or a growth — never an append.
+
+Wall time, `execute=` medians, with `benches/arith` as the layout control
+because it executes no growable instruction at all. Two independent
+interleaved sets were taken, of thirteen and of fifteen rounds, and the second
+also paired each round's two runs against each other so that drift over the
+set cancels:
+
+| | `720df04` | after #422 | Δ (13) | Δ (15) | paired (15) | spread |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| covefmt VM | 4,843.5 ms | 4,905.7 ms | +1.23% | +1.28% | +1.20% | 1.2% / 1.5% |
+| cq 20k VM | 2,213.1 ms | 2,196.7 ms | +0.23% | −0.74% | −0.62% | 4.2% / 3.8% |
+| covefmt native | 1,990.9 ms | 1,996.6 ms | −0.19% | +0.28% | +0.17% | 5.7% / 2.8% |
+| cq 20k native | 1,450.7 ms | 1,449.8 ms | +0.43% | −0.06% | +0.22% | 3.7% / 3.0% |
+| `arith` VM (control) | 47.1 ms | 48.8 ms | **+3.18%** | **+3.50%** | **+3.22%** | 5.7% / 3.8% |
+
+**The control moved further than anything it controls, and it reproduced.**
+`arith` runs no append and executes not one of the new instructions; its
++3.2% to +3.5% is the dispatch loop's own layout, which this series changed by
+adding four opcodes and deleting three. Every VM workload moved *less* than
+that, in both sets. So the right statement about the append is "not worse",
+not "faster": the series bought the protocol and the dispatch counts, and paid
+nothing above what a program with no appends in it paid for the same rebuild.
+Native is flat on both programs — ±0.3% across both sets, against spreads of
+3% — which is the gate that mattered for the fast path. cq's VM figure is the
+one that will not hold still: +0.23% in one set and −0.74% in the other, on
+counts that are identical to the digit.
+
+### Where the implementation decided differently
+
+- **The three primitive VM arms are one out-of-line call, and each pattern's
+  fast path is another.** Written inline into `dispatch` they enlarged its
+  frame enough to overflow `native_tier`'s three-hundred-frame alternating
+  chain, and a push measured 118 ms inlined against 94 ms out of line. The
+  dispatch loop's frame is a budget, and it is spent on the loop.
+- **The fusion bound is the longest window's tail, not each window's own**, as
+  the Decision now says; it declines 0.4% to 0.8% of windows.
+- **Native's rejoin re-asks the room question** rather than trusting
+  `growable_ensure`'s postcondition, so that a disagreement between the emitted
+  test and the helper is one more helper call and not a write past capacity.
+- **`appendSlice` stopped being expanded at cold sites.** Its body is about
+  thirty rows, over `inline::LIMIT`'s sixteen and under `HOT_LIMIT`'s
+  forty-eight, so hot sites expand and cold ones call. The unexpanded-call
+  count did not move.
+- **A refusal from a byte store is worded as the instruction, not the method.**
+  `run-store`'s value is out of range where `appendByte`'s argument used to be,
+  because the check is now the instruction's.
+- **`cove debug`'s breakpoint rule changed**: a line's own instruction wins
+  over the start of an expansion at that line. Protocol rows made the older
+  rule pick the wrong one.
+
+### What is left open
+
+- **A window near a safepoint declines and runs as rows.** `WINDOW_TAIL` is the
+  longest window's tail, so 0.66% of covefmt's pushes, 0.70% of its builder
+  appends, 0.78% of its `appendSlice`s and 0.43% of cq's keyed extends decline.
+  Using each window's own `k` needs the commit found before the bound is
+  decided.
+- **A growth finishes through `fused_tail`.** All three fast paths decline when
+  the store has no room; whether finishing a grown window on the fast path
+  buys anything has not been measured. On covefmt 504,049 of 5.4 M pushes grow.
+- **`GrowableAlloc{Words}` for `core.vectorWithCapacity` is not done.** It is
+  the second half of stage 8, it touches `admit_storage`, the encoder, the
+  decoder, the VM's alloc arm, both code generators and the oracle, and it
+  would move the allocated-word count of cq's 180,000 constructions. It belongs
+  in a change that measures it.
+- **Native pays for a window's frame writes where they are dead.** In
+  `std.int.renderInto`'s loop nothing reads `at`, `n`, `m` or `st` after the
+  window, and both code generators write them anyway: the Int-piece rows of
+  `benches/builtincall` are about 0.9 ns a digit dearer on native. A
+  liveness-directed elision in `cove-native` would remove it.
+- **Nothing counts how often a fast path declines in a real run.**
+  `Machine::fused_fast` is `#[cfg(test)]` and `--boundary`'s `fusions` cannot
+  tell a fast path from `fused_tail`. A row that could would have priced #420's
+  37 ns a window without building a third binary.
+- **cq's VM wall time is layout-sensitive beyond this change's reach.** Three
+  interleaved sets of the same pair of builds have put it at +0.23%, at −0.74%
+  and — in #422's own set — at +3.76%, against `arith` controls of +3.18%,
+  +3.50% and +1.76%. The counts are identical to the digit in every one of
+  them; what moves is the dispatch loop's code layout, and nothing in this
+  series can hold it still.
 
 ## Alternatives considered
 
@@ -536,9 +747,13 @@ instruction — and the field store has no place for commit's runtime bound.
 - `fuel_spent` on the encoded VM rises once, by the protocol's instructions,
   and says so in the stage that causes it.
 - Both native code generators and the inliner consult one pattern definition,
-  and native gains no refusal.
+  and native gains no refusal. Measured: the same refused functions, for the
+  same reasons, on both programs.
+- Native code grows, because a window is emitted where a helper call was:
+  +7.0% on covefmt and +39.8% on cq, the latter over a small base.
 - Frames gain a few temporary words per inlined site, for `at`, `n`, `m` and
-  `st`.
+  `st`. Measured: the widest frame in `bytecode_corpus` goes from 184 words to
+  194, and its margin under the limit from 350× to 330×.
 
 ## What is not decided here
 

@@ -543,7 +543,12 @@ opcode and keeps its tail rows in place, so bytecode pc is still IR pc, fusion
 is skipped whenever a safepoint, debugger or profiler question falls inside,
 and fuel still counts the window's semantic instructions. Native admits each
 primitive and emits today's fast path for a window. Truncate, alloc and finish
-stay composite, with reasons.
+stay composite, with reasons. Measured over the whole series: dispatches fall
+0.54% on covefmt and 2.47% on cq, `fuel_spent` rises 4.92% and 0.15% because
+it now counts the protocol's instructions, allocations and allocated words are
+identical, no native refusal or tier crossing moved, and every VM wall time
+moved less than `benches/arith`, the layout control that executes no append at
+all.
 
 Syntax is still provisional and may change.
 
