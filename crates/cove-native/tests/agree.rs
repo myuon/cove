@@ -510,9 +510,45 @@ fn both_arms_answer_the_same_thing() {
         );
     }
 
-    // ADR 0052's four, each handed to the runtime whole: what the two arms have
-    // to agree on is the hand-over, its operands and its order, and on what the
-    // helper's outcome does to the frame when it is not `Returned`.
+    // A byte push: the fast path at each offset inside a word and at the push
+    // that fills the store, and each cold path — a full store, a finished one,
+    // another object, a length word past the capacity and a value that is not
+    // a byte. The store is in chunk zero and inside the words compared, so every
+    // byte either arm blends is compared.
+    for (what, len, capacity, value, finished, other) in [
+        ("at byte 0", 0u64, 16u32, 0x5Cu64, false, false),
+        ("at byte 7", 7, 16, 255, false, false),
+        ("at byte 8", 8, 16, 0, false, false),
+        ("that fills the store", 15, 16, 0x41, false, false),
+        ("that would grow the store", 16, 16, 0x41, false, false),
+        ("to a finished buffer", 0, 16, 0x41, true, false),
+        ("to another object", 0, 16, 0x41, false, true),
+        ("past the capacity", 1 << 40, 16, 0x41, false, false),
+        ("of 256", 0, 16, 256, false, false),
+        ("of -1", 0, 16, u64::MAX, false, false),
+    ] {
+        agree_over(
+            &format!("a byte push {what}"),
+            &suite::pushing_a_byte(),
+            &[cove_native::HEAP_ORIGIN_WORDS + 20, value, 0],
+            0,
+            move || {
+                let mut heap = Heap::new(2);
+                suite::a_byte_buffer(&mut heap, 20, len, capacity);
+                if finished {
+                    heap.set(22, 0);
+                }
+                if other {
+                    heap.object(20, suite::VECTOR, 0);
+                }
+                heap
+            },
+        );
+    }
+
+    // Three of ADR 0052's four, each handed to the runtime whole: what the two
+    // arms have to agree on is the hand-over, its operands and its order, and on
+    // what the helper's outcome does to the frame when it is not `Returned`.
     for words in [vec![0u64, 3, 0], vec![9, 9, 0, 3, 0]] {
         let base = if words.len() > 3 { 2 } else { 0 };
         agree_over(
@@ -849,11 +885,12 @@ fn literals() -> Program {
     )
 }
 
-/// ADR 0052's four in one body, in the order a builder is used.
+/// Three of ADR 0052's four in one body, in the order a builder is used.
 ///
 /// Neither arm emits a fast path for any of them, so what has to agree is what
 /// each hands over and in what order — and `agree` already compares
-/// `suite::built()` between the two arms for exactly that.
+/// `suite::built()` between the two arms for exactly that. The fourth, a byte
+/// push, has a fast path, and the cases above compare it.
 fn buffers() -> Program {
     suite::program_with_args(
         suite::function(
@@ -863,11 +900,6 @@ fn buffers() -> Program {
                 Inst::GrowableAlloc {
                     dst: 0,
                     capacity: 1,
-                    storage: Storage::PackedBytes,
-                },
-                Inst::GrowablePush {
-                    owner: 0,
-                    src: 1,
                     storage: Storage::PackedBytes,
                 },
                 Inst::GrowableExtend {

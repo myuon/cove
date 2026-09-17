@@ -978,10 +978,14 @@ impl GrowableOp {
 ///   the validation walks the live prefix through `std::str::from_utf8`, which is
 ///   not. Emitting the tail of an operation whose head is a helper call buys
 ///   nothing, because the call is already made;
-/// - **`GrowablePush` is three lines and is here anyway.** It is not on the census
-///   — the corpus appends ranges, not bytes — but a subset that lowered the other
-///   three would refuse a function for the one scalar append in it, which is a
-///   refusal with no work behind it.
+/// - **`GrowablePush` was three lines and was here anyway**, because the corpus
+///   appended ranges and not bytes, and a subset without it would refuse a
+///   function for one scalar append. **It is the one of the four that is now
+///   emitted, and this helper is its cold half.** An interpolation's `Int` piece
+///   rendered in standard-library Cove pushes a byte per digit (#403), and a push
+///   into spare capacity meets none of the three reasons above: it allocates
+///   nothing, moves one byte, and validates nothing. `subset::BytePush` is where
+///   the split is decided.
 ///
 /// # It is a lowering, and what it buys is the function around it
 ///

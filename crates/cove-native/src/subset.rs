@@ -220,6 +220,68 @@ pub(crate) fn word_push(
     })
 }
 
+/// An [`Inst::GrowablePush`] over [`Storage::PackedBytes`] — `appendByte`, and
+/// the one-byte literal run of an interpolation — with the static facts its fast
+/// path is emitted from.
+///
+/// `Machine::append_byte` is [`WordPush`]'s three steps over a packed run: read
+/// the owner, ensure room for one more byte, and write the byte and the new
+/// length. What is emitted is the push into spare capacity, and everything else
+/// is [`GrowableFn`](crate::abi::GrowableFn) with
+/// [`GrowableOp::Push`](crate::abi::GrowableOp::Push), which performs the whole
+/// push again from the start.
+///
+/// The helper's documentation gives ADR 0052's reasons why none of its four
+/// operations had an emitted half: an allocation's second root, an extend's
+/// chunked safepoint, and a finish's UTF-8 walk. **A push into spare capacity
+/// meets none of them.** It allocates nothing, so there is no store a collector
+/// could miss and nothing to collect; it moves one byte, so there is no bulk work
+/// to charge in chunks; and it validates nothing, because a run is validated
+/// when it is finished. So the fast path takes no safepoint and publishes no
+/// work, exactly as [`WordPush`]'s does: the accumulator is charged at the next
+/// safepoint, and the cold half publishes it as every hand-over does.
+///
+/// The preconditions that go to the helper are `Machine::buffer`'s and
+/// `append_byte`'s own, and each has a sentence the runtime builds:
+///
+/// - **the owner's object is a byte buffer.** Its header's layout is compared
+///   with [`BytePush::buffer`], the program's one `Shape::ByteBuffer` layout;
+/// - **`finish()` has not consumed it**, which leaves a store word of nought;
+/// - **the length is below the capacity.** The owner's payload word 0 is the
+///   length in bytes, and the store's header length is its capacity in bytes —
+///   eight to a payload word, least significant first, which is how
+///   `RUN_LOAD_BYTES` reads the same run. The comparison is of the whole length
+///   word, unsigned, so a length past the capacity is cold and the runtime
+///   refuses it in its own words;
+/// - **the value is a byte**, `0` to `255`, compared unsigned so that a negative
+///   `Int` is cold too, where `appendByte`'s refusal is worded.
+///
+/// The null owner is the one refusal that is emitted, as [`Raise::NullObject`],
+/// which is what `Machine::buffer` answers for it.
+///
+/// [ADR 0052]: ../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BytePush {
+    /// The owner's slot: one `Repr::Ref` word naming the `ByteBuffer` header.
+    pub(crate) owner: Slot,
+    /// The `Shape::ByteBuffer` layout the object's own header is compared against.
+    pub(crate) buffer: LayoutId,
+    /// The slot holding the byte, one `Int` word.
+    pub(crate) src: Slot,
+}
+
+/// The [`BytePush`] a byte `growable-push` is, or `None` for a program whose
+/// `buffer_layout` is not a `Shape::ByteBuffer` — which a lowering that pushed a
+/// byte always declared, so `None` is a bound and not a family.
+pub(crate) fn byte_push(program: &Program, owner: Slot, src: Slot) -> Option<BytePush> {
+    let buffer = program.buffer_layout;
+    matches!(
+        program.layouts.get(buffer.index())?.shape,
+        Shape::ByteBuffer
+    )
+    .then_some(BytePush { owner, buffer, src })
+}
+
 /// An [`Inst::RunFinish`] over [`Storage::Words`] — `Vector.freeze()` — with
 /// the static facts its relabel is emitted from.
 ///
@@ -780,10 +842,11 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
         Inst::Trap { .. } => true,
         // ---- [ADR 0052]'s growable buffer -----------------------------------
         //
-        // All four, handed to [`GrowableFn`](crate::abi::GrowableFn) whole, and that
-        // helper's own documentation is where the decision for each of them is
-        // written down — including why none of them has an emitted fast path and
-        // why `GrowablePush` is here although the census never named it.
+        // Three of the four handed to [`GrowableFn`](crate::abi::GrowableFn) whole,
+        // and that helper's own documentation is where the decision for each of
+        // them is written down. The fourth, a byte push, is an emitted push into
+        // spare capacity with that helper as its cold half: see [`BytePush`] for
+        // why none of the helper's reasons reaches it.
         //
         // Each is admitted over `Storage::PackedBytes`, and the helper is the byte
         // buffer's. The one word member that exists, a push, is admitted in an arm
@@ -810,11 +873,17 @@ fn inst_refused(program: &Program, function: &Function, inst: &Inst) -> Option<R
             capacity,
             storage: Storage::PackedBytes,
         } => slot(*dst) && slot(*capacity),
+        // A byte push is an emitted fast path with this helper as its cold half —
+        // see [`BytePush`] — so it is admitted where that can be decoded. The
+        // buffer's layout id has to fit an `i32`, for the word push's reason
+        // below: the template arm compares a header's high half with an `imm32`.
         Inst::GrowablePush {
             owner,
             src,
             storage: Storage::PackedBytes,
-        } => slot(*owner) && slot(*src),
+        } => byte_push(program, *owner, *src).is_some_and(|push| {
+            i32::try_from(push.buffer.0).is_ok() && slot(push.owner) && slot(push.src)
+        }),
         // `Vector.push`, which is not the byte buffer's helper whole but an
         // emitted fast path with [`WordPush`]'s cold half. The element is a run of
         // `stride` words of this frame, so it is bounded the way an

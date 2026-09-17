@@ -756,6 +756,45 @@ export fn callsBuildsWhileCollecting(s: String, n: Int) -> Int {
   buildsWhileCollecting(s, n)
 }
 
+/// `n` bytes appended one at a time to a builder with room for two, with an
+/// array allocated after every eighth.
+///
+/// A byte push into spare capacity is emitted code and one that grows is the
+/// runtime's, so a run of `n` pushes alternates between the two: every push that
+/// finds the store full replaces it, and the pushes after it blend into the new
+/// store. The arrays are what make a collection land between two pushes when the
+/// heap is small. The answer folds every byte of the finished text in order,
+/// with the length and the arrays' elements beside it, so a byte blended at the
+/// wrong offset, a length bumped twice and a prefix lost to a growth or a
+/// collection are each a wrong number.
+export fn pushesBytes(n: Int) -> Int {
+  var out = StringBuilder.withCapacity(2 + counts(0))
+  var made = 0
+  var i = 0
+  while i < n {
+    out.appendByte(97 + i % 26)
+    if i % 8 == 7 {
+      let held = [i, i + 1, i + 2, i + 3]
+      made = made + held.length()
+    }
+    i = i + 1
+  }
+  let text = out.finish()
+  var folded = 0
+  var at = 0
+  while at < text.byteLength() {
+    folded = (folded * 31 + text.byteAt(at)) % 1000003
+    at = at + 1
+  }
+  folded * 1000000 + text.byteLength() * 1000 + made
+}
+
+/// A refused caller, so the frame the pushes are made in is a compiled one.
+export fn callsPushesBytes(n: Int) -> Int {
+  let nothing = Shared(0).lock(fn(v) { v })
+  pushesBytes(n)
+}
+
 /// A refused caller, so the frame that clears a slot is a **compiled** one.
 ///
 /// `Vm::invoke` enters the encoded tier for the frame it opens itself, so
@@ -2425,6 +2464,94 @@ fn a_half_built_run_survives_a_collection_from_compiled_code() {
         vm.allocated_words() > SMALL_HEAP_WORDS as u64,
         "{} word(s) handed out over {calls} call(s) of a {SMALL_HEAP_WORDS}-word heap",
         vm.allocated_words()
+    );
+}
+
+/// **A byte push from compiled code: the emitted store, the growth path, and the
+/// text that comes out.**
+///
+/// `pushesBytes` is compiled and appends `n` bytes to a builder with room for
+/// two, so a run is mostly the emitted push into spare capacity, punctuated by
+/// pushes that find the store full and are handed to the runtime, which grows it.
+/// The rows are no push, the two that fit, the one that first grows, the push at
+/// each end of a word, and enough to grow several times.
+#[test]
+fn a_byte_push_from_compiled_code_is_the_vm_s_text() {
+    on_each_tier(&["pushesBytes"], &["callsPushesBytes"]);
+    for n in [0i64, 1, 2, 3, 8, 9, 16, 17, 100] {
+        let both = both("callsPushesBytes", vec![Value::int(n)]);
+        let text: Vec<u8> = (0..n).map(|i| b'a' + (i % 26) as u8).collect();
+        let folded = text.iter().fold(0i64, |held, byte| {
+            (held * 31 + i64::from(*byte)) % 1_000_003
+        });
+        assert_eq!(
+            both.vm,
+            Ok(format!("{}", folded * 1_000_000 + n * 1000 + n / 8 * 4)),
+            "n = {n}: the fold of the text, its length and the arrays"
+        );
+        assert_eq!(both.native, both.vm, "n = {n}: the compiled pushes' text");
+        assert!(
+            both.tiers.vm_to_native >= 1,
+            "n = {n}: the pushes were machine code: {:?}",
+            both.tiers
+        );
+    }
+}
+
+/// **Byte pushes with collections landing between them, in a compiled frame.**
+///
+/// [`a_half_built_run_survives_a_collection_from_compiled_code`]'s case with the
+/// run built a byte at a time: the emitted push reads the store out of the owner
+/// on every push rather than keeping it, so a collection that moved nothing and a
+/// growth that replaced the store are both seen by the next one. The loop runs
+/// until a collection has happened.
+#[test]
+fn byte_pushes_survive_collections_from_compiled_code() {
+    const SMALL_HEAP_WORDS: usize = 1 << 13;
+    const N: i64 = 200;
+    on_each_tier(&["pushesBytes"], &["callsPushesBytes"]);
+
+    let (sources, program) = checked();
+    let lowered = Arc::new(
+        cove_ir::lower(&program, &sources, &cove_sema::HostSchemas::new())
+            .expect("the fixture lowers"),
+    );
+    let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
+    let runtime = Runtime::new(
+        Arc::clone(&program),
+        Arc::clone(&sources),
+        Arc::clone(&hosts),
+    );
+    let native = cove_runtime::compile_native(&lowered).expect("this host compiles");
+
+    let mut vm = Vm::with_heap_words(&runtime, &hosts, &lowered, SMALL_HEAP_WORDS);
+    let (calls, crossings) = {
+        let mut session = vm
+            .native_session(MODULE, "callsPushesBytes", vec![Value::int(N)])
+            .expect("the session opens");
+        let words = session.arguments().to_vec();
+        let expected = session
+            .call(&cove_runtime::NothingCompiled, &words)
+            .expect("the vm answers");
+
+        let before = session.collections();
+        let mut calls = 0;
+        while session.collections() == before && calls < 20_000 {
+            let answered = session
+                .call(&native, &words)
+                .expect("the native tier answers");
+            assert_eq!(answered, expected, "call {calls} answered wrongly");
+            calls += 1;
+        }
+        assert!(
+            session.collections() > before,
+            "no collection ran in {calls} call(s), so this case proved nothing"
+        );
+        (calls, session.tiers().vm_to_native)
+    };
+    assert!(
+        crossings >= calls,
+        "every call crossed into machine code: {crossings} of {calls}"
     );
 }
 
