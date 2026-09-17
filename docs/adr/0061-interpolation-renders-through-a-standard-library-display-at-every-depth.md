@@ -13,12 +13,18 @@
   its name"**, which it made unconditional. An opaque type that conforms to
   `std.display.Display` now renders as its `describe()`. An opaque type that
   does not conform still renders as its bare name, everywhere, as before.
-  ADR 0014's header gets its `Superseded in part by` pointer when this ADR is
-  accepted, not while it is proposed. That is the order ADR 0058 followed
-  (`507ca4d` proposed it, `1d21697` accepted it and added the pointers)
+  Also supersedes
+  [ADR 0006](0006-traits-and-dispatch.md)'s **"`impl Trait for Type` is the
+  only way a type conforms"**. The renderable builtin types conform to
+  `std.display.Display` with no `impl`, as a fact of the language. Every other
+  trait, and every declared type, still conforms only through an `impl`, and
+  0006's remaining decisions (no blanket implementation, the orphan rule,
+  static and `dyn` dispatch) are untouched.
+  ADR 0014's and ADR 0006's headers get their `Superseded in part by`
+  pointers when this ADR is accepted, not while it is proposed. That is the
+  order ADR 0058 followed (`507ca4d` proposed it, `1d21697` accepted it and
+  added the pointers)
 - Refers to, without superseding:
-  [ADR 0006](0006-traits-and-dispatch.md), whose example trait this ADR puts
-  in the standard library, and
   [ADR 0058](0058-collection-apis-lower-through-typed-run-intrinsics.md),
   whose split between standard-library policy and core intrinsics this ADR
   applies to rendering
@@ -103,8 +109,13 @@ Three earlier decisions frame this one:
   the same line through rendering.
 - **ADR 0014** made an opaque value render as its bare name "unconditionally"
   (`docs/adr/0014-opaque-exported-types.md:151-161`,
-  `docs/LANGUAGE_REFERENCE.md:629-640`). That is the one decision this ADR
-  contradicts.
+  `docs/LANGUAGE_REFERENCE.md:629-640`). This ADR contradicts that decision.
+- **ADR 0006** also says "`impl Trait for Type` is the only way a type
+  conforms" (`docs/adr/0006-traits-and-dispatch.md:47-49`). The owner's
+  built-in conformance contradicts that sentence for one trait. The builtin
+  `Snapshot` trait already departs from it in code, where the departure is
+  called "deliberate, narrow" (`crates/cove-sema/src/resolve.rs:1652-1663`),
+  but no ADR records that. This one records its own departure.
 
 Rendering is written down twice today, and the differential corpus keeps the
 two copies aligned. The VM has `render_value` and `render_object`
@@ -294,7 +305,16 @@ cases differ because of who can speak for the type:
 - **A declared type's structural rendering is a fallback, not a choice its
   module made.** ADR 0006 makes conformance explicit precisely so that a
   trait's implementors are what their modules said
-  (`docs/adr/0006-traits-and-dispatch.md:47-53`).
+  (`docs/adr/0006-traits-and-dispatch.md:47-53`). This ADR supersedes that
+  sentence only for builtin types against this one trait, which no module
+  declares and whose text no module chooses.
+
+ADR 0006 also gives a second reason for explicit conformance: it makes the
+set of implementors "a fact the compiler can enumerate, which `cove impact`
+and API snapshots both need". That still holds. The builtin conformers are a
+fixed list in the compiler, not declarations in any package, so `cove api`
+and the outline, which list a declared type's conformances
+(`crates/cove-cli/src/api.rs:434-445`), have nothing new to list.
 
 If every declared type conformed, `T: Display` would accept everything and
 mean nothing. And an opaque type would "describe" itself as its bare name,
@@ -1068,6 +1088,8 @@ so it lives in one.
   satisfies as a bound. `Snapshot` still does not accept builtins as a bound.
 - A program cannot write `impl Display for Option<T>`, and neither can the
   standard library. Generic `impl`s on builtins remain a possible later ADR.
+- ADR 0006's "`impl Trait for Type` is the only way a type conforms" is
+  superseded in part, for builtin types against `std.display.Display` only.
 - `describe` exists in two statements that must agree: the schema's
   `DESCRIBE` and `std.display`'s trait. A test ties them together.
 
