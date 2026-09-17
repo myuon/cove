@@ -383,6 +383,137 @@ pub(crate) fn byte_store(
     })
 }
 
+/// A push or an append window — [ADR 0062]'s ensure, write and commit, as
+/// `cove_ir::legalize` recognises it — with the static facts both arms emit it
+/// from as **one fast path**.
+///
+/// The rows of a window are each admitted on their own, and each has an emitted
+/// test of its own: [`Reserve`] twice, and [`ByteStore`] or a `store-elem`. Run
+/// row by row, a push reads the owner's header three times and asks the room
+/// question twice. What [`windows`] decodes is the one fast path the composite
+/// push had — [`WordPush`]'s and [`BytePush`]'s, whose questions these are — so
+/// that both arms can emit a window the way they emitted `GrowablePush`, and
+/// make the frame writes the rows would have made besides. **The window is not a
+/// second definition of the shape**: [`cove_ir::legalize::recognize`] is asked,
+/// over this crate's own block partition, and nothing here matches a row.
+///
+/// Admission is the rows'. [`supported`] never looks at a window, so a function
+/// whose rows form one compiles exactly when the same rows unrecognised would,
+/// and `None` from [`windows`] for a head is not a refusal: the rows are emitted
+/// one at a time, as they would have been.
+///
+/// # The cold path is the rows
+///
+/// What is emitted in front of the write is the composite push's precondition
+/// list, and nothing past it: the owner is not null — refused at the head, as its
+/// `load-field` refuses it — its header is [`BufferWindow::layout`], its store is
+/// live, and there is room for the count. The frame writes the rows before the
+/// ensure make are made first, and every failure goes to a cold half that is the
+/// rows from where it failed:
+///
+/// - **a header of another family** is the head's `load-field` handed to the
+///   runtime's field helper whole — which answers any object exactly — then any
+///   constant before the ensure, and then the cold ensure below. The ensure is
+///   what refuses such an owner, in its own words at its own span;
+/// - **no room, or a consumed store**, is the ensure handed to
+///   [`GrowableFn`](crate::abi::GrowableFn) as `EnsureBytes` or `EnsureWords`,
+///   which grows, refuses or stops. When it returns, the owner and the length are
+///   read again and the store read and the room question are **asked again**:
+///   the rejoin is at the store row, not past the room test. A returned ensure
+///   leaves room, so the second question is answered yes; the test is there so
+///   that nothing written after it depends on the runtime having said so. Every
+///   turn through it is a call of a helper that takes a safepoint;
+/// - **a byte push's store of another family, or a value that is not a byte**,
+///   is the store written to its slot and the `run-store` handed over as
+///   [`GrowableOp::StoreBytes`](crate::abi::GrowableOp::StoreBytes), which
+///   refuses it at the write's span — after the ensure has grown, as the rows
+///   grow first.
+///
+/// So every refusal is a row's refusal, raised at that row's pc with that row's
+/// operands, and no helper ever does a whole push.
+///
+/// An append's write is [`RunCopyFn`](crate::abi::RunCopyFn) whole, as a
+/// `run-copy` row's is, and its commit is the commit row — the copy is a
+/// safepoint, so nothing the room test knew is known after it.
+///
+/// # The work is the rows'
+///
+/// Nothing here charges. A window never spans a block boundary — a row after the
+/// head that some branch lands on is not a window — so the block it is in charges
+/// its static instruction count at entry, rows included, as it always did.
+///
+/// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BufferWindow {
+    /// The rows, their operands and the frame writes they make.
+    pub(crate) window: cove_ir::legalize::Window,
+    /// The owner layout the object's own header is compared against:
+    /// [`Reserve::layout`].
+    pub(crate) layout: LayoutId,
+    /// For a byte push, the `Shape::Bytes` layout the store's header is
+    /// compared against — [`ByteStore::bytes`]. Unread otherwise.
+    pub(crate) bytes: LayoutId,
+    /// Whether the storage is words, so that each arm picks the cold ensure and
+    /// masks the length word as [`WordPush`] does.
+    pub(crate) words: bool,
+    /// An append's `run-copy` argument row. Unread for a push.
+    pub(crate) args: u32,
+}
+
+/// Every window of `function` that both arms emit as one fast path, indexed by
+/// its head's program counter.
+///
+/// `lengths` is [`leaders`] of the same function: a window is recognised over
+/// this crate's own blocks, which are the partition work is charged by. The scan
+/// is `cove_ir::legalize::windows`' own, from the top, so no pc is inside two.
+pub(crate) fn windows(
+    program: &Program,
+    function: &Function,
+    lengths: &[Option<u32>],
+) -> Vec<Option<BufferWindow>> {
+    let code = &function.code;
+    let starts: Vec<bool> = lengths.iter().map(Option::is_some).collect();
+    let mut found = vec![None; code.len()];
+    let mut pc = 0;
+    while pc < code.len() {
+        match cove_ir::legalize::recognize(program, code, &starts, pc) {
+            Some(window) => {
+                found[pc] = buffer_window(program, code, window);
+                pc += window.rows;
+            }
+            None => pc += 1,
+        }
+    }
+    found
+}
+
+/// The facts a recognised window is emitted from, or `None` where a row's own
+/// decoder has none — which [`supported`] has already refused, so `None` is a
+/// bound and not a family.
+fn buffer_window(
+    program: &Program,
+    code: &[Inst],
+    window: cove_ir::legalize::Window,
+) -> Option<BufferWindow> {
+    use cove_ir::legalize::Pattern;
+    let reserve = reserve(program, window.owner, window.count, window.storage)?;
+    let bytes = match window.pattern {
+        Pattern::PushByte => byte_store(program, window.store, window.at, window.src)?.bytes,
+        _ => program.bytes_layout,
+    };
+    let args = match code.get(window.write)? {
+        Inst::RunCopy { args, .. } => args.0,
+        _ => 0,
+    };
+    Some(BufferWindow {
+        window,
+        layout: reserve.layout,
+        bytes,
+        words: reserve.words,
+        args,
+    })
+}
+
 /// An [`Inst::RunFinish`] over [`Storage::Words`] — `Vector.freeze()` — with
 /// the static facts its relabel is emitted from.
 ///

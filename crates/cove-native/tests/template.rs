@@ -37,6 +37,10 @@ impl Arm for Template {
     fn entry(&self, handle: Compiled) -> Entry {
         self.0.entry(handle)
     }
+
+    fn code_bytes(handle: Compiled) -> u32 {
+        handle.code_bytes
+    }
 }
 
 #[test]
@@ -712,6 +716,10 @@ impl Arm for TemplateDirect {
     fn entry(&self, handle: Compiled) -> Entry {
         self.0.entry(handle)
     }
+
+    fn code_bytes(handle: Compiled) -> u32 {
+        handle.code_bytes
+    }
 }
 
 #[test]
@@ -802,4 +810,19 @@ fn a_window_instruction_refuses_null_and_leaves_when_refused() {
 #[test]
 fn a_push_window_with_room_writes_the_unit_and_commits_it() {
     suite::a_push_window_with_room_writes_the_unit_and_commits_it::<Template>();
+}
+
+#[test]
+fn every_cold_path_of_a_push_window_is_one_of_its_rows() {
+    suite::every_cold_path_of_a_push_window_is_one_of_its_rows::<Template>();
+}
+
+#[test]
+fn an_append_window_is_an_ensure_a_copy_and_a_commit() {
+    suite::an_append_window_is_an_ensure_a_copy_and_a_commit::<Template>();
+}
+
+#[test]
+fn a_window_is_about_the_code_a_composite_push_was() {
+    suite::a_window_is_about_the_code_a_composite_push_was::<Template>();
 }

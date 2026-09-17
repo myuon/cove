@@ -47,6 +47,10 @@ impl Arm for Cranelift {
     fn entry(&self, handle: Self::Handle) -> Entry {
         self.0.entry(handle)
     }
+
+    fn code_bytes(handle: Self::Handle) -> u32 {
+        handle.code_bytes
+    }
 }
 
 struct Template(cove_native::template::Jit);
@@ -68,6 +72,10 @@ impl Arm for Template {
 
     fn entry(&self, handle: Self::Handle) -> Entry {
         self.0.entry(handle)
+    }
+
+    fn code_bytes(handle: Self::Handle) -> u32 {
+        handle.code_bytes
     }
 }
 
@@ -618,15 +626,58 @@ fn both_arms_answer_the_same_thing() {
             },
         );
     }
-    // And a whole push window, with room and without.
+    // And whole windows, each emitted as one fast path with its rows as the cold
+    // half — so what the arms have to agree on is every way out of it. A push
+    // over each storage and stride: with room; into a full store whose ensure
+    // refuses, stops, or returns having made room; onto a consumed owner whose
+    // ensure returns and is asked again; onto another family and onto null. A
+    // byte push's own two questions: a value that is not a byte, answered and
+    // refused, and a store that is not a byte run. An append over each storage:
+    // with room, of nothing, past the room refused and grown, and of a negative
+    // count.
     for storage in [
         Storage::PackedBytes,
         Storage::Words(INT),
         Storage::Words(PAIR),
     ] {
-        for (len, capacity) in [(3u32, 8u32), (8, 8)] {
-            agree_over(
-                &format!("a push window over {storage:?} at {len} of {capacity}"),
+        let other = match storage {
+            Storage::Words(elem) if elem == INT => suite::PAIR_VECTOR,
+            _ => suite::VECTOR,
+        };
+        for (what, len, owner, room, answers) in [
+            ("with room", 3u32, None, None, vec![]),
+            (
+                "into a full store, refused",
+                8,
+                None,
+                None,
+                vec![Outcome::Raised],
+            ),
+            (
+                "into a full store, stopped",
+                8,
+                None,
+                None,
+                vec![Outcome::Stopped],
+            ),
+            ("into a full store, grown", 8, None, Some(16), vec![]),
+            (
+                "onto a consumed owner, asked twice",
+                0,
+                Some(0u64),
+                None,
+                vec![Outcome::Returned, Outcome::Raised],
+            ),
+            (
+                "onto another family",
+                3,
+                Some(1),
+                None,
+                vec![Outcome::Raised],
+            ),
+        ] {
+            agree_answering(
+                &format!("a push window over {storage:?} {what}"),
                 &suite::a_push_window(storage),
                 &[
                     cove_native::HEAP_ORIGIN_WORDS + 20,
@@ -643,7 +694,7 @@ fn both_arms_answer_the_same_thing() {
                     let mut heap = Heap::new(2);
                     match storage {
                         Storage::PackedBytes => {
-                            suite::a_byte_buffer(&mut heap, 20, u64::from(len), capacity);
+                            suite::a_byte_buffer(&mut heap, 20, u64::from(len), 8);
                         }
                         Storage::Words(elem) => {
                             let vector = if elem == PAIR {
@@ -651,13 +702,102 @@ fn both_arms_answer_the_same_thing() {
                             } else {
                                 suite::VECTOR
                             };
-                            suite::a_vector(&mut heap, 20, vector, len, capacity);
+                            suite::a_vector(&mut heap, 20, vector, len, 8);
                         }
+                    }
+                    match owner {
+                        Some(0) => heap.set(22, 0),
+                        Some(_) => {
+                            heap.object(20, other, 0);
+                        }
+                        None => {}
+                    }
+                    if let Some(capacity) = room {
+                        suite::room_on_ensure(capacity);
                     }
                     heap
                 },
+                &answers,
             );
         }
+        agree_over(
+            &format!("a push window over {storage:?} onto null"),
+            &suite::a_push_window(storage),
+            &[0, 0, 0, 0, 0x41, 0x42, 0, 0],
+            0,
+            || Heap::new(2),
+        );
+    }
+    for (what, value, other_store, answers) in [
+        ("of 256, refused", 256u64, false, vec![Outcome::Raised]),
+        ("of -1, answered", u64::MAX, false, vec![]),
+        (
+            "into a store of another family",
+            0x41,
+            true,
+            vec![Outcome::Raised],
+        ),
+    ] {
+        agree_answering(
+            &format!("a byte push window {what}"),
+            &suite::a_push_window(Storage::PackedBytes),
+            &[cove_native::HEAP_ORIGIN_WORDS + 20, 0, 0, 0, value, 0, 0],
+            0,
+            move || {
+                let mut heap = Heap::new(2);
+                suite::a_byte_buffer(&mut heap, 20, 3, 16);
+                if other_store {
+                    heap.object(28, suite::STORE, 16);
+                }
+                heap
+            },
+            &answers,
+        );
+    }
+    for storage in [Storage::PackedBytes, Storage::Words(INT)] {
+        for (what, len, count, room, answers) in [
+            ("with room", 3u32, 4u64, None, vec![]),
+            ("of nothing", 8, 0, None, vec![]),
+            ("past the room, refused", 6, 4, None, vec![Outcome::Raised]),
+            ("past the room, grown", 6, 4, Some(16), vec![]),
+            (
+                "of a negative count",
+                3,
+                u64::MAX,
+                None,
+                vec![Outcome::Raised],
+            ),
+        ] {
+            agree_answering(
+                &format!("an append window over {storage:?} {what}"),
+                &suite::an_append_window(storage),
+                &[cove_native::HEAP_ORIGIN_WORDS + 20, 0, count, 0, 0x77, 0, 0],
+                0,
+                move || {
+                    let mut heap = Heap::new(2);
+                    match storage {
+                        Storage::PackedBytes => {
+                            suite::a_byte_buffer(&mut heap, 20, u64::from(len), 8);
+                        }
+                        Storage::Words(_) => {
+                            suite::a_vector(&mut heap, 20, suite::VECTOR, len, 8);
+                        }
+                    }
+                    if let Some(capacity) = room {
+                        suite::room_on_ensure(capacity);
+                    }
+                    heap
+                },
+                &answers,
+            );
+        }
+        agree_over(
+            &format!("an append window over {storage:?} onto null"),
+            &suite::an_append_window(storage),
+            &[0, 0, 1, 0, 0x77, 0, 0],
+            0,
+            || Heap::new(2),
+        );
     }
 
     // Three of ADR 0052's four, each handed to the runtime whole: what the two
