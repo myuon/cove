@@ -629,7 +629,12 @@ fn ordered_callees(program: &Program, caller: &Function) -> Vec<FunctionId> {
 /// because the compiler cannot check it. The same is true of
 /// [ADR 0052](../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md)'s
 /// `GrowableAlloc`, `GrowablePush`, `GrowableExtend` and `RunFinish`: they
-/// allocate and they copy, and an allocation is not a call.
+/// allocate and they copy, and an allocation is not a call. And of
+/// [ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md)'s
+/// `GrowableEnsure`, `GrowableCommit` and `RunStore`: an ensure may grow a store
+/// and a commit and a store write the heap, and none of the three leaves the
+/// function — the window they form is block-local by `crate::verify`'s rule, and
+/// an expansion moves a block whole.
 fn reaches_nothing(inst: &Inst) -> bool {
     !matches!(
         inst,
@@ -740,6 +745,9 @@ fn written(program: &Program, f: &Function) -> Vec<bool> {
             | Inst::GrowablePush { .. }
             | Inst::GrowableExtend { .. }
             | Inst::GrowableTruncate { .. }
+            | Inst::GrowableEnsure { .. }
+            | Inst::GrowableCommit { .. }
+            | Inst::RunStore { .. }
             | Inst::Jump { .. }
             | Inst::BranchFalse { .. }
             | Inst::Switch { .. }
@@ -1352,6 +1360,13 @@ fn slots_of(inst: &mut Inst) -> Vec<&mut Slot> {
         Inst::GrowableAlloc { dst, capacity, .. } => vec![dst, capacity],
         Inst::GrowablePush { owner, src, .. } => vec![owner, src],
         Inst::GrowableTruncate { owner, len, .. } => vec![owner, len],
+        Inst::GrowableEnsure {
+            owner, additional, ..
+        } => vec![owner, additional],
+        Inst::GrowableCommit { owner, count, .. } => vec![owner, count],
+        Inst::RunStore {
+            run, index, src, ..
+        } => vec![run, index, src],
         Inst::RunFinish { dst, owner, .. } => vec![dst, owner],
         // The five operands live in the args row rather than on the
         // instruction, exactly as a call's do — `relocated` moves that row

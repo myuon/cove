@@ -982,6 +982,114 @@ pub enum Inst {
     /// call's arguments do, so the verifier checks them by the same rule. The
     /// storage is the instruction's own, as [`Inst::RunCopy`]'s is.
     GrowableExtend { args: ArgsId, storage: Storage },
+    /// `growable-ensure owner, additional`: room for `additional` more units in
+    /// the store `owner` names, growing it if they would not fit.
+    ///
+    /// # The first half of a buffer window
+    ///
+    /// [ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md)
+    /// splits [`Inst::GrowablePush`] and [`Inst::GrowableExtend`] into the three
+    /// instructions [ADR 0058] always said they were: this, a write into the
+    /// room it made — an [`Inst::StoreElem`], an [`Inst::RunStore`] or an
+    /// [`Inst::RunCopy`] into the store at the logical length — and an
+    /// [`Inst::GrowableCommit`] that publishes the written units. The writes and
+    /// the commit are separate instructions so that one protocol serves a push,
+    /// a byte, an append and a keyed extend, and so that a policy which is not
+    /// the machine's — a range check, a clamp — can be Cove between the ensure
+    /// and the write rather than a clause of a composite instruction.
+    ///
+    /// Soundness is not the machine's to assume. `crate::verify`'s reservation
+    /// rule is what makes a window of these safe to run: the write is at the
+    /// length read before the ensure, into the store read after it, with no
+    /// call, allocation or branch target in between, and a written window is
+    /// committed in the same block. See `Check::check_reservations`.
+    ///
+    /// # What it means
+    ///
+    /// **Nothing a program can see changes.** The logical length is not
+    /// touched, and neither is any unit below it: a growth copies the live
+    /// prefix into a larger store and replaces the owner's store word, so a
+    /// store read *before* this instruction may name the old one. That is why
+    /// the reservation rule reads the store after it.
+    ///
+    /// **Refusals leave the owner as it was.** A null owner, an owner that is
+    /// not a growable run of `storage`, a consumed owner and a negative
+    /// `additional` are refused before anything is allocated — a negative room
+    /// is a broken invariant of the body that computed it, never a small one. A
+    /// room nothing could hold fails through the allocator's "this run has no
+    /// memory left".
+    ///
+    /// **What it costs.** One unit of work, as [`Inst::GrowableAlloc`] is: a
+    /// growth is an allocation and the copy of the live prefix that
+    /// `runs::growable_ensure` has never charged (issue #378, Q13).
+    ///
+    /// It writes no frame slot. `owner` is a `Vector<T>` whose element is the
+    /// storage's for [`Storage::Words`] and a byte buffer for
+    /// [`Storage::PackedBytes`], and `additional` an `Int`.
+    ///
+    /// [ADR 0058]: ../../../docs/adr/0058-collection-apis-lower-through-typed-run-intrinsics.md
+    GrowableEnsure {
+        owner: Slot,
+        additional: Slot,
+        storage: Storage,
+    },
+    /// `growable-commit owner, count`: the logical length advanced over `count`
+    /// units the window already wrote.
+    ///
+    /// The second half of [`Inst::GrowableEnsure`]'s window, and the only
+    /// instruction besides the composite [`Inst::GrowablePush`] and
+    /// [`Inst::GrowableExtend`] that raises a length: [ADR 0052]'s rule that a
+    /// unit becomes value only once written is what the reservation rule in
+    /// `crate::verify` enforces about the instructions before it.
+    ///
+    /// # A bound the machine still checks
+    ///
+    /// `0 <= count` and `len + count <= capacity` are checked at run time and a
+    /// commit outside them is refused with the length unchanged. The static
+    /// rule proves them for a lowered program, but the loader-side bytecode
+    /// verifier has no dataflow and cannot, and a length past the capacity is
+    /// the one corruption every later read of the owner would believe. What is
+    /// *not* checked is that the units were written — that is the static rule's
+    /// alone, and the reason a commit is never emitted outside a window.
+    ///
+    /// It writes no frame slot, and charges one unit of work. `owner` is
+    /// [`Inst::GrowableEnsure`]'s, and `count` an `Int`.
+    ///
+    /// [ADR 0052]: ../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
+    GrowableCommit {
+        owner: Slot,
+        count: Slot,
+        storage: Storage,
+    },
+    /// `run[index] = src`, one unit of a run in `storage`: ADR 0058's
+    /// `run-store run, index, src, storage`, and [`Inst::RunLoad`] backwards.
+    ///
+    /// For [`Storage::PackedBytes`] the unit is a byte: `run` is a
+    /// [`crate::Shape::Bytes`] run under construction — a byte buffer's store,
+    /// never a `String`, whose bytes are an invariant a finish establishes and
+    /// nothing reopens — `index` a byte offset bounded by the run's header
+    /// length, which for a store is its capacity, and `src` an `Int` that must
+    /// be `0..=255`. Every one of those is checked at run time, because the
+    /// value is a number a program computed and a byte outside the range would
+    /// be bits of the neighbouring bytes. The byte is blended into its word and
+    /// the other seven are left as they were.
+    ///
+    /// That is the only storage admitted, for [`Inst::RunLoad`]'s reason:
+    /// `crate::verify` refuses [`Storage::Words`], whose unit writes are
+    /// [`Inst::StoreElem`].
+    ///
+    /// It is the byte write of [ADR 0062]'s window — `appendByte` and an
+    /// interpolation's one-byte literal — and nothing else produces it: a byte
+    /// written at an offset below the length would change text a program
+    /// already holds a length for, which the reservation rule rules out.
+    ///
+    /// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+    RunStore {
+        run: Slot,
+        index: Slot,
+        src: Slot,
+        storage: Storage,
+    },
     /// `owner.truncate(len)`: the logical length lowered to `len`, and the
     /// units it vacates cleared.
     ///

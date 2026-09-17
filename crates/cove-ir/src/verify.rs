@@ -148,6 +148,7 @@ impl Check<'_> {
             self.check_inst(pc);
         }
         self.check_falls_off_the_end();
+        self.check_reservations();
     }
 
     /// Which slots hold an object whose layout is a static fact, and which
@@ -333,6 +334,12 @@ impl Check<'_> {
                 // Nor does a truncate: it lowers the owner's length word and
                 // clears units of its store.
                 Inst::GrowableTruncate { .. } => {}
+                // Nor does ADR 0062's window: an ensure may replace the owner's
+                // store word, a commit writes its length word, and a store writes
+                // a byte of the run — none of them a word of this frame.
+                Inst::GrowableEnsure { .. }
+                | Inst::GrowableCommit { .. }
+                | Inst::RunStore { .. } => {}
                 // Forming the address of a slot is also a write to it, as
                 // far as this is concerned: a `var` argument is that address
                 // handed to a callee, and what the callee stores through it
@@ -956,6 +963,37 @@ impl Check<'_> {
             Inst::GrowableExtend { args, storage } => {
                 self.admit_storage(at, "extends", storage);
                 self.check_growable_extend_args(at, args);
+            }
+            // ADR 0062's window, admitted over both storages from the start: the
+            // protocol is one for a vector and a byte buffer. What makes a window
+            // sound is not checked here, one instruction at a time, but by
+            // `Check::check_reservations` over the block.
+            Inst::GrowableEnsure {
+                owner,
+                additional: count,
+                storage,
+            }
+            | Inst::GrowableCommit {
+                owner,
+                count,
+                storage,
+            } => {
+                if let crate::Storage::Words(elem) = storage {
+                    self.layout_exists(at, elem);
+                }
+                self.expect(at, owner, &[Repr::Ref]);
+                self.expect(at, count, &[Repr::Int]);
+            }
+            Inst::RunStore {
+                run,
+                index,
+                src,
+                storage,
+            } => {
+                self.expect(at, run, &[Repr::Ref]);
+                self.expect(at, index, &[Repr::Int]);
+                self.admit_storage(at, "stores a unit of", storage);
+                self.expect(at, src, &[Repr::Int]);
             }
             // The one growable member admitted over words alone: a byte builder
             // has no operation that takes a byte back out.
@@ -1800,6 +1838,365 @@ impl Check<'_> {
         }
     }
 
+    /// [ADR 0062]'s reservation rule: every [`Inst::GrowableEnsure`] opens a
+    /// window, and a window that is written into is committed, block-locally,
+    /// by the one write the room was made for.
+    ///
+    /// # Why a rule and not a runtime check
+    ///
+    /// A commit publishes units as value, and the machine cannot tell a
+    /// written unit from a zeroed one: for a vector a zero is a null reference
+    /// or a `0`, and for a byte buffer it is a NUL. So what the runtime checks
+    /// of a commit is only that it stays inside the capacity, and what makes
+    /// the published units the ones the program wrote is this. It is the
+    /// provisional rule `Inst::GrowableExtend`'s documentation wrote down for
+    /// the day the instruction split, made precise:
+    ///
+    /// 1. **Facts.** `load-field a <- o +0` says `a` holds `o`'s length, an
+    ///    `int n` that `n` holds a constant, and — only after an ensure on `o`
+    ///    — `load-field s <- o +1` says `s` holds `o`'s store. A fact dies when
+    ///    a slot it names is written, when anything outside the instructions
+    ///    below runs, and at the end of the block.
+    /// 2. **An ensure opens a reservation** on its owner for its count. A second
+    ///    ensure while one is open is a fault.
+    /// 3. **Inside the window** only instructions that neither call, allocate,
+    ///    branch nor write the heap may run — constants, copies, clears,
+    ///    arithmetic, comparisons, conversions and reads — and none of them may
+    ///    write the owner's slot or the count's. After the write, only the ones
+    ///    that cannot fail: a refusal between the write and the commit would
+    ///    leave a written unit above the length, which a byte buffer's finish
+    ///    relies on never happening.
+    /// 4. **The write** is exactly one of: a `store-elem` of the storage's
+    ///    element, or a byte `run-store`, into the store at the length, with a
+    ///    count known to be `1`; or a `run-copy` of the storage into the store at
+    ///    the length whose count is the reservation's.
+    /// 5. **The commit** is on the reservation's owner, after the write, with
+    ///    the reservation's count, and closes the window.
+    /// 6. **A written window is committed before its block ends.** An unwritten
+    ///    one may lapse there. A branch, a terminator and a branch target all end
+    ///    a block, so a branch inside a written window is this fault rather than
+    ///    clause 3's, and nothing can reach a commit along a path that did not
+    ///    write.
+    ///
+    /// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+    fn check_reservations(&mut self) {
+        let function = self.function;
+        let leaders = crate::flow::leaders(self.program, function);
+        let mut facts = Facts::default();
+        let mut open: Option<Reservation> = None;
+        // Owners whose reservation was abandoned by a fault in this block, so
+        // that the commit which follows is not a second report of one mistake.
+        let mut abandoned: Vec<Slot> = Vec::new();
+        for (pc, inst) in function.code.iter().enumerate() {
+            if leaders[pc] {
+                self.lapse(open.take());
+                facts = Facts::default();
+                abandoned.clear();
+            }
+            let at = Some(pc);
+            let Some(window) = open.as_mut() else {
+                match *inst {
+                    Inst::GrowableEnsure {
+                        owner,
+                        additional,
+                        storage,
+                    } => {
+                        open = Some(Reservation {
+                            ensure: pc,
+                            owner,
+                            count: additional,
+                            constant: facts.constant(additional),
+                            storage,
+                            stores: Vec::new(),
+                            written: None,
+                        });
+                    }
+                    Inst::GrowableCommit { owner, .. } => {
+                        if !abandoned.contains(&owner) {
+                            self.fault(
+                                at,
+                                format!(
+                                    "commits onto slot {owner} with no reservation open on it \
+                                     in this block"
+                                ),
+                            );
+                        }
+                        facts.lengths.clear();
+                    }
+                    _ if admitted_in_a_window(inst, false) => {
+                        self.learn(inst, &mut facts, None);
+                    }
+                    _ => facts = Facts::default(),
+                }
+                continue;
+            };
+            let opened = window.ensure;
+            match *inst {
+                Inst::GrowableCommit {
+                    owner,
+                    count,
+                    storage,
+                } => {
+                    let window = open.take().expect("a reservation is open");
+                    if owner != window.owner || storage != window.storage {
+                        self.fault(
+                            at,
+                            format!(
+                                "commits onto slot {owner}, and the reservation open since \
+                                 +{opened} is on slot {}",
+                                window.owner
+                            ),
+                        );
+                    } else if window.written.is_none() {
+                        self.fault(
+                            at,
+                            format!(
+                                "commits the reservation opened at +{opened}, and nothing was \
+                                 written into it"
+                            ),
+                        );
+                    } else if !window.counts(count, &facts) {
+                        self.fault(
+                            at,
+                            format!(
+                                "commits slot {count}, which is not known to hold the count \
+                                 slot {} held when the reservation at +{opened} was made",
+                                window.count
+                            ),
+                        );
+                    }
+                    // The length changed, whichever owner a length fact is about:
+                    // two slots may name one owner.
+                    facts.lengths.clear();
+                }
+                Inst::GrowableEnsure { .. } => {
+                    self.fault(
+                        at,
+                        format!(
+                            "opens a second reservation while the one opened at +{opened} is \
+                             still open"
+                        ),
+                    );
+                    abandoned.push(window.owner);
+                    open = None;
+                    facts = Facts::default();
+                }
+                Inst::StoreElem {
+                    obj, index, layout, ..
+                } => {
+                    let fits = window.storage == crate::Storage::Words(layout);
+                    let one = window.constant == Some(1);
+                    self.window_write(pc, window, &facts, obj, index, fits, one);
+                }
+                Inst::RunStore {
+                    run,
+                    index,
+                    storage,
+                    ..
+                } => {
+                    let fits = window.storage == storage;
+                    let one = window.constant == Some(1);
+                    self.window_write(pc, window, &facts, run, index, fits, one);
+                }
+                Inst::RunCopy { args, storage } => {
+                    match self.program.args.get(args.index()).map(Vec::as_slice) {
+                        Some([dst, dst_at, _, _, count]) => {
+                            let fits = window.storage == storage;
+                            let all = window.counts(count.slot, &facts);
+                            self.window_write(pc, window, &facts, dst.slot, dst_at.slot, fits, all);
+                        }
+                        // A row of the wrong shape is `check_run_copy`'s fault
+                        // already; it is not also a write.
+                        _ => {
+                            abandoned.push(window.owner);
+                            open = None;
+                            facts = Facts::default();
+                        }
+                    }
+                }
+                _ if admitted_in_a_window(inst, window.written.is_some()) => {
+                    let (owner, count) = (window.owner, window.count);
+                    let mut held = None;
+                    inst.writes(self.program, &mut |base, width| {
+                        for slot in [owner, count] {
+                            if (base..base.saturating_add(width)).contains(&slot) {
+                                held.get_or_insert(slot);
+                            }
+                        }
+                    });
+                    match held {
+                        Some(slot) => {
+                            let role = if slot == owner { "owner" } else { "count" };
+                            self.fault(
+                                at,
+                                format!(
+                                    "writes slot {slot}, which holds the {role} of the \
+                                     reservation opened at +{opened}"
+                                ),
+                            );
+                            abandoned.push(owner);
+                            open = None;
+                            facts = Facts::default();
+                        }
+                        None => self.learn(inst, &mut facts, open.as_mut()),
+                    }
+                }
+                // A branch or a terminator ends the block, and clause 6 is what
+                // decides it: an unwritten reservation lapses there, and a
+                // written one is a fault.
+                _ if inst.ends_a_block() => {
+                    self.lapse(open.take());
+                    facts = Facts::default();
+                }
+                _ => {
+                    // The variant, from `Debug` rather than `crate::print`: a
+                    // listing reads the ids an instruction names, and this runs
+                    // over code whose ids another check may just have refused.
+                    let debug = format!("{inst:?}");
+                    let name = debug.split([' ', '{']).next().unwrap_or("?").to_string();
+                    let which = match window.written {
+                        None => "neither calls, allocates, branches nor writes the heap",
+                        Some(_) => "cannot fail, now that the reservation is written",
+                    };
+                    self.fault(
+                        at,
+                        format!(
+                            "`{name}` inside the reservation opened at +{opened}, which admits \
+                             only what {which}"
+                        ),
+                    );
+                    abandoned.push(window.owner);
+                    open = None;
+                    facts = Facts::default();
+                }
+            }
+        }
+        self.lapse(open);
+    }
+
+    /// A reservation that reached the end of its block: a fault if it was
+    /// written, and nothing if it was not.
+    fn lapse(&mut self, open: Option<Reservation>) {
+        if let Some(Reservation {
+            ensure,
+            owner,
+            written: Some(written),
+            ..
+        }) = open
+        {
+            self.fault(
+                Some(ensure),
+                format!(
+                    "opens a reservation on slot {owner} that is written at +{written} and not \
+                     committed before its block ends"
+                ),
+            );
+        }
+    }
+
+    /// The one write a reservation admits, into `store` at `index`: clause 4
+    /// of [`Self::check_reservations`]. `fits` is whether its storage is the
+    /// reservation's and `counts` whether its count is.
+    #[allow(clippy::too_many_arguments)]
+    fn window_write(
+        &mut self,
+        pc: usize,
+        window: &mut Reservation,
+        facts: &Facts,
+        store: Slot,
+        index: Slot,
+        fits: bool,
+        counts: bool,
+    ) {
+        let at = Some(pc);
+        let (opened, owner) = (window.ensure, window.owner);
+        if let Some(earlier) = window.written {
+            self.fault(
+                at,
+                format!(
+                    "writes into the reservation opened at +{opened} a second time, and it was \
+                     written at +{earlier}"
+                ),
+            );
+        } else if !fits {
+            self.fault(
+                at,
+                format!(
+                    "writes a unit of another storage into the reservation opened at +{opened}"
+                ),
+            );
+        } else if !window.stores.contains(&store) {
+            self.fault(
+                at,
+                format!(
+                    "writes into slot {store}, which is not known to hold the store of slot \
+                     {owner} read after the ensure at +{opened}"
+                ),
+            );
+        } else if !facts.lengths.contains(&(index, owner)) {
+            self.fault(
+                at,
+                format!(
+                    "writes at slot {index}, which is not known to hold the length of slot \
+                     {owner}"
+                ),
+            );
+        } else if !counts {
+            self.fault(
+                at,
+                format!(
+                    "writes a count that is not known to be the one the reservation at \
+                     +{opened} was made for"
+                ),
+            );
+        }
+        window.written = Some(pc);
+    }
+
+    /// Clause 1's facts, after `inst`: those naming a slot it writes forgotten,
+    /// and the one it establishes, if any, learnt.
+    fn learn(&self, inst: &Inst, facts: &mut Facts, window: Option<&mut Reservation>) {
+        let mut written: Vec<(Slot, u32)> = Vec::new();
+        inst.writes(self.program, &mut |base, width| written.push((base, width)));
+        let hit = |slot: Slot| {
+            written
+                .iter()
+                .any(|&(base, width)| (base..base.saturating_add(width)).contains(&slot))
+        };
+        facts
+            .lengths
+            .retain(|&(len, owner)| !hit(len) && !hit(owner));
+        facts.constants.retain(|&(slot, _)| !hit(slot));
+        let mut window = window;
+        if let Some(window) = window.as_deref_mut() {
+            window.stores.retain(|&store| !hit(store));
+        }
+        match *inst {
+            Inst::Int { dst, value } => facts.constants.push((dst, value)),
+            Inst::LoadField {
+                dst,
+                obj,
+                at,
+                layout,
+            } if dst != obj
+                && self
+                    .program
+                    .layouts
+                    .get(layout.index())
+                    .is_some_and(|held| held.width() == 1) =>
+            {
+                if at == GROWABLE_LEN {
+                    facts.lengths.push((dst, obj));
+                } else if at == GROWABLE_STORE {
+                    if let Some(window) = window.filter(|window| window.owner == obj) {
+                        window.stores.push(dst);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// What a layout is called, or its id where the table is too short.
     fn name_of(&self, layout: LayoutId) -> String {
         match self.program.layouts.get(layout.index()) {
@@ -1807,6 +2204,95 @@ impl Check<'_> {
             None => layout.to_string(),
         }
     }
+}
+
+/// Payload word 0 of a growable owner, its logical length: the lowering's
+/// `VECTOR_LEN` and `BUFFER_LEN`, and the runtime's `GROWABLE_LEN`.
+const GROWABLE_LEN: u32 = 0;
+
+/// Payload word 1 of a growable owner, its store: the lowering's
+/// `VECTOR_STORE`, and the runtime's `GROWABLE_STORE`.
+const GROWABLE_STORE: u32 = 1;
+
+/// What [`Check::check_reservations`] knows about the slots of the block it is
+/// in, at one program counter.
+#[derive(Default)]
+struct Facts {
+    /// `(a, o)`: slot `a` holds the length of the owner in slot `o`.
+    lengths: Vec<(Slot, Slot)>,
+    /// `(n, k)`: slot `n` holds the constant `k`.
+    constants: Vec<(Slot, i64)>,
+}
+
+impl Facts {
+    fn constant(&self, slot: Slot) -> Option<i64> {
+        self.constants
+            .iter()
+            .rev()
+            .find(|(held, _)| *held == slot)
+            .map(|(_, value)| *value)
+    }
+}
+
+/// An open [`Inst::GrowableEnsure`].
+struct Reservation {
+    /// Where it was opened.
+    ensure: usize,
+    owner: Slot,
+    /// The slot the room was asked for by, which nothing inside the window may
+    /// write.
+    count: Slot,
+    /// That slot's constant when the ensure ran, if it had one.
+    constant: Option<i64>,
+    storage: crate::Storage,
+    /// Slots known to hold the owner's store, each read after the ensure.
+    stores: Vec<Slot>,
+    /// Where the one write was, once it has been.
+    written: Option<usize>,
+}
+
+impl Reservation {
+    /// Whether `slot` is known to hold this reservation's count: the slot
+    /// itself, which the window may not write, or a slot holding the same
+    /// constant.
+    fn counts(&self, slot: Slot, facts: &Facts) -> bool {
+        slot == self.count || (self.constant.is_some() && facts.constant(slot) == self.constant)
+    }
+}
+
+/// Whether `inst` may run inside a reservation — before its write when
+/// `written` is false, and after it when it is true. See
+/// [`Check::check_reservations`], clause 3.
+fn admitted_in_a_window(inst: &Inst, written: bool) -> bool {
+    let cannot_fail = matches!(
+        inst,
+        Inst::Unit { .. }
+            | Inst::Bool { .. }
+            | Inst::Int { .. }
+            | Inst::Tag { .. }
+            | Inst::Float { .. }
+            | Inst::Str { .. }
+            | Inst::Copy { .. }
+            | Inst::Clear { .. }
+    );
+    cannot_fail
+        || (!written
+            && matches!(
+                inst,
+                Inst::Arith { .. }
+                    | Inst::ArithImm { .. }
+                    | Inst::Cmp { .. }
+                    | Inst::CmpImm { .. }
+                    | Inst::Neg { .. }
+                    | Inst::Not { .. }
+                    | Inst::Convert { .. }
+                    | Inst::LoadField { .. }
+                    | Inst::LoadElem { .. }
+                    | Inst::RunLoad { .. }
+                    | Inst::Len { .. }
+                    | Inst::LayoutOf { .. }
+                    | Inst::Load { .. }
+            ))
 }
 
 /// The id of the function being checked is carried so that a future fault
@@ -3170,6 +3656,357 @@ mod tests {
         assert_eq!(
             one(words, short),
             vec!["slices a run with 3 argument(s), and this needs 4 (dst, src, from, count)"]
+        );
+    }
+
+    /// The reservation rule's frame: `s0` an owner, `s1` its length, `s2` a
+    /// count, `s3` its store, `s4..s6` a unit (two words for a `Point`), `s5` a
+    /// second count, `s7` another reference, `s8` an `Int`, `s9` a `Bool`.
+    fn window_reprs() -> Vec<Repr> {
+        vec![
+            Repr::Ref,
+            Repr::Int,
+            Repr::Int,
+            Repr::Ref,
+            Repr::Int,
+            Repr::Int,
+            Repr::Int,
+            Repr::Ref,
+            Repr::Int,
+            Repr::Bool,
+        ]
+    }
+
+    /// The faults of `code` as `f`, beside a `g` that answers an `Int`, with one
+    /// argument row: `run-copy`'s `[s3, s1, s7, s8, s2]`.
+    fn window_faults(code: Vec<Inst>) -> Vec<String> {
+        let mut held = program(vec![
+            function(window_reprs(), INT, code),
+            function(
+                vec![Repr::Int],
+                INT,
+                vec![Inst::Int { dst: 0, value: 0 }, Inst::Return { src: 0 }],
+            ),
+        ]);
+        let arg = |slot, layout| Arg { slot, layout };
+        held.args.push(vec![
+            arg(3, STR),
+            arg(1, INT),
+            arg(7, STR),
+            arg(8, INT),
+            arg(2, INT),
+        ]);
+        held.args.push(Vec::new());
+        faults(&held)
+    }
+
+    fn length() -> Inst {
+        Inst::LoadField {
+            dst: 1,
+            obj: 0,
+            at: GROWABLE_LEN,
+            layout: INT,
+        }
+    }
+
+    fn store() -> Inst {
+        Inst::LoadField {
+            dst: 3,
+            obj: 0,
+            at: GROWABLE_STORE,
+            layout: STR,
+        }
+    }
+
+    fn ensure(storage: crate::Storage) -> Inst {
+        Inst::GrowableEnsure {
+            owner: 0,
+            additional: 2,
+            storage,
+        }
+    }
+
+    fn commit(count: Slot, storage: crate::Storage) -> Inst {
+        Inst::GrowableCommit {
+            owner: 0,
+            count,
+            storage,
+        }
+    }
+
+    fn put(index: Slot, layout: LayoutId) -> Inst {
+        Inst::StoreElem {
+            obj: 3,
+            index,
+            src: 4,
+            layout,
+        }
+    }
+
+    /// A push of one element: the length before the ensure, the store after
+    /// it, the write at the length, a clear of the store, and a commit of a
+    /// second constant `1`.
+    fn push_window(layout: LayoutId) -> Vec<Inst> {
+        let words = crate::Storage::Words(layout);
+        vec![
+            length(),
+            Inst::Int { dst: 2, value: 1 },
+            ensure(words),
+            store(),
+            put(1, layout),
+            Inst::Clear {
+                slot: 3,
+                layout: STR,
+            },
+            Inst::Int { dst: 5, value: 1 },
+            commit(5, words),
+            Inst::Return { src: 1 },
+        ]
+    }
+
+    /// The shapes ADR 0062's producers will emit are accepted: a push over a
+    /// one-word element and over a two-word one, a byte store, a bulk copy
+    /// whose count is not a constant, and an ensure nothing was written into,
+    /// which lapses at the end of its block.
+    #[test]
+    fn a_reservation_written_once_and_committed_is_well_formed() {
+        let none = Vec::<String>::new();
+        assert_eq!(window_faults(push_window(INT)), none);
+        assert_eq!(window_faults(push_window(POINT)), none);
+
+        let bytes = crate::Storage::PackedBytes;
+        assert_eq!(
+            window_faults(vec![
+                length(),
+                Inst::Int { dst: 2, value: 1 },
+                ensure(bytes),
+                store(),
+                Inst::RunStore {
+                    run: 3,
+                    index: 1,
+                    src: 4,
+                    storage: bytes,
+                },
+                commit(2, bytes),
+                Inst::Return { src: 1 },
+            ]),
+            none
+        );
+
+        // An append: the count is a length read at run time, so the copy and
+        // the commit are held to the count's slot rather than to a constant.
+        assert_eq!(
+            window_faults(vec![
+                Inst::Len { dst: 2, obj: 7 },
+                length(),
+                ensure(bytes),
+                store(),
+                Inst::Int { dst: 8, value: 0 },
+                Inst::RunCopy {
+                    args: ArgsId(0),
+                    storage: bytes,
+                },
+                Inst::Clear {
+                    slot: 3,
+                    layout: STR,
+                },
+                commit(2, bytes),
+                Inst::Return { src: 1 },
+            ]),
+            none
+        );
+
+        // An ensure that is never written lapses where its block ends.
+        assert_eq!(
+            window_faults(vec![
+                Inst::BranchFalse { cond: 9, to: 3 },
+                Inst::Int { dst: 2, value: 1 },
+                ensure(bytes),
+                Inst::Return { src: 1 },
+            ]),
+            none
+        );
+    }
+
+    /// Each clause of the rule, broken once.
+    #[test]
+    fn a_reservation_that_breaks_a_clause_is_a_fault() {
+        let words = crate::Storage::Words(INT);
+        let with = |at: usize, inst: Inst| {
+            let mut code = push_window(INT);
+            code[at] = inst;
+            window_faults(code)
+        };
+        let insert = |at: usize, inst: Inst| {
+            let mut code = push_window(INT);
+            code.insert(at, inst);
+            window_faults(code)
+        };
+        let has = |faults: Vec<String>, want: &str| {
+            assert!(
+                faults.iter().any(|fault| fault.contains(want)),
+                "wanted a fault containing {want:?}, got {faults:?}"
+            );
+        };
+
+        // A write before the ensure is not the window's write, so the commit
+        // has nothing to publish.
+        let mut early = push_window(INT);
+        early.swap(2, 4);
+        early.swap(2, 3);
+        has(window_faults(early), "nothing was written into it");
+
+        // A commit with no write.
+        has(
+            with(4, Inst::Int { dst: 8, value: 0 }),
+            "nothing was written",
+        );
+
+        // A commit of another count.
+        has(
+            with(6, Inst::Int { dst: 5, value: 2 }),
+            "commits slot 5, which is not known to hold the count",
+        );
+
+        // A write somewhere other than at the length.
+        has(with(4, put(8, INT)), "writes at slot 8");
+
+        // A write into a store read before the ensure, which a growth may have
+        // replaced.
+        let mut stale = push_window(INT);
+        stale.swap(2, 3);
+        has(
+            window_faults(stale),
+            "not known to hold the store of slot 0",
+        );
+
+        // A write of one unit into a reservation of two.
+        has(with(1, Inst::Int { dst: 2, value: 2 }), "writes a count");
+
+        // A call, an allocation, a heap store and a branch inside the window.
+        has(
+            insert(
+                4,
+                Inst::Call {
+                    dst: 8,
+                    callee: FunctionId(1),
+                    args: ArgsId(1),
+                },
+            ),
+            "`Call` inside the reservation opened at +2",
+        );
+        has(
+            insert(
+                4,
+                Inst::Alloc {
+                    dst: 7,
+                    layout: STR,
+                    len: Len::Count(1),
+                },
+            ),
+            "`Alloc` inside the reservation",
+        );
+        has(
+            insert(
+                4,
+                Inst::StoreField {
+                    obj: 7,
+                    at: 0,
+                    src: 8,
+                    layout: INT,
+                },
+            ),
+            "`StoreField` inside the reservation",
+        );
+        has(
+            insert(5, Inst::BranchFalse { cond: 9, to: 6 }),
+            "written at +4 and not committed before its block ends",
+        );
+
+        // After the write, only what cannot fail.
+        has(
+            insert(
+                5,
+                Inst::ArithImm {
+                    op: ArithOp::Div,
+                    dst: 8,
+                    a: 8,
+                    value: 1,
+                },
+            ),
+            "cannot fail, now that the reservation is written",
+        );
+
+        // The owner's slot written inside the window.
+        has(
+            insert(
+                3,
+                Inst::LoadField {
+                    dst: 0,
+                    obj: 7,
+                    at: 0,
+                    layout: STR,
+                },
+            ),
+            "holds the owner of the reservation opened at +2",
+        );
+
+        // A second ensure while one is open.
+        has(insert(3, ensure(words)), "opens a second reservation");
+
+        // A written window that reaches the end of its block uncommitted, and a
+        // branch target between the write and the commit: the target ends the
+        // block, so the commit after it has nothing open to commit.
+        let mut target = push_window(INT);
+        target.insert(0, Inst::BranchFalse { cond: 9, to: 7 });
+        let faults = window_faults(target);
+        has(
+            faults.clone(),
+            "written at +5 and not committed before its block ends",
+        );
+        has(faults, "commits onto slot 0 with no reservation open on it");
+    }
+
+    /// The instruction checks of the three: an ensure and a commit over either
+    /// storage with an owner and an `Int` count, and a byte store — only a
+    /// byte store — of an `Int` at an `Int` offset.
+    #[test]
+    fn a_buffer_primitive_is_checked_like_its_family() {
+        let bytes = crate::Storage::PackedBytes;
+        let words = crate::Storage::Words(INT);
+        let one = |inst: Inst| {
+            window_faults(vec![inst, Inst::Return { src: 1 }])
+                .into_iter()
+                // Each is alone in its block, so the rule has its own say about
+                // a commit; what is asked here is the instruction's own check.
+                .filter(|fault| !fault.contains("reservation"))
+                .collect::<Vec<_>>()
+        };
+        let none = Vec::<String>::new();
+        assert_eq!(one(ensure(bytes)), none);
+        assert_eq!(one(ensure(words)), none);
+        assert_eq!(one(commit(2, words)), none);
+        assert_eq!(
+            one(Inst::GrowableEnsure {
+                owner: 1,
+                additional: 3,
+                storage: bytes,
+            }),
+            vec![
+                "slot 1 holds int, but this wants ref".to_string(),
+                "slot 3 holds ref, but this wants int".to_string(),
+            ]
+        );
+        let byte = |storage| Inst::RunStore {
+            run: 3,
+            index: 1,
+            src: 4,
+            storage,
+        };
+        assert_eq!(one(byte(bytes)), none);
+        assert_eq!(
+            one(byte(words)),
+            vec!["stores a unit of a run of `Int` words, and this instruction admits only packed bytes"]
         );
     }
 }
