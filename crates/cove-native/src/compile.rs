@@ -52,8 +52,8 @@ use crate::abi::{
     HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
-    by_zero_of, leaders, literal_offset, overflow_of, slot_offset, supported, word_finish,
-    word_push, WordFinish, WordPush,
+    by_zero_of, byte_push, leaders, literal_offset, overflow_of, slot_offset, supported,
+    word_finish, word_push, BytePush, WordFinish, WordPush,
 };
 use crate::Unavailable;
 
@@ -816,10 +816,10 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.callee(*dst, callee.0, args.0);
                 false
             }
-            // ADR 0052's four, each handed to the runtime whole. See
-            // [`crate::abi::GrowableFn`] for why none of them has an emitted fast
-            // path — one rooting discipline that is not the frame's, one chunked
-            // safepoint contract, and one UTF-8 walk.
+            // ADR 0052's four. An alloc, an extend and a finish are handed to the
+            // runtime whole: see [`crate::abi::GrowableFn`] for why none of them
+            // has an emitted fast path — one rooting discipline that is not the
+            // frame's, one chunked safepoint contract, and one UTF-8 walk.
             Inst::GrowableAlloc {
                 dst,
                 capacity,
@@ -828,12 +828,18 @@ impl<'a, 'f> Lower<'a, 'f> {
                 self.growable_op(GrowableOp::Alloc, *dst, *capacity);
                 false
             }
+            // A byte push meets none of those three when there is room: it
+            // allocates nothing, moves one byte, and validates nothing. So the push
+            // into spare capacity is a memory store and the rest is the helper,
+            // whole. See [`BytePush`](crate::subset::BytePush).
             Inst::GrowablePush {
                 owner,
                 src,
                 storage: Storage::PackedBytes,
             } => {
-                self.growable_op(GrowableOp::Push, *owner, *src);
+                let push = byte_push(self.program, *owner, *src)
+                    .expect("`supported` admitted a byte push it could decode");
+                self.byte_push(push);
                 false
             }
             // `Vector.push`: a fast path into spare capacity and the whole push as
@@ -1481,6 +1487,100 @@ impl<'a, 'f> Lower<'a, 'f> {
 
         self.b.switch_to_block(cold);
         self.growable_op(GrowableOp::PushWords, owner, src);
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(join);
+        // One predecessor of this join came through a helper, so neither pointer the
+        // other one derived is to be trusted here.
+        self.forget();
+    }
+
+    /// A byte `growable-push`'s fast path — `appendByte` — the byte into spare
+    /// capacity, and the length bumped.
+    ///
+    /// See [`BytePush`](crate::subset::BytePush) for which of
+    /// `Machine::append_byte`'s preconditions are emitted and which go to
+    /// [`GrowableFn`](crate::abi::GrowableFn), and why. [`Lower::vector_push`]'s
+    /// shape, with a fourth test — the value is a byte — and a store that is a
+    /// blend rather than a copy: the payload word holding byte `len` is read, the
+    /// byte's eight bits in it cleared, the value shifted into them, and the word
+    /// written back. It is `Machine::blend` for one byte, and `RUN_LOAD_BYTES`'
+    /// addressing in the other direction.
+    ///
+    /// Every test is of a whole word and unsigned. The length is not narrowed
+    /// first, so a length word past the capacity is cold rather than
+    /// reinterpreted; the capacity is a header's low half, below 2^32; and a
+    /// negative value read as unsigned is past `255`.
+    fn byte_push(&mut self, push: BytePush) {
+        let BytePush { owner, buffer, src } = push;
+        let cold = self.b.create_block();
+        let join = self.b.create_block();
+
+        let header = self.load_slot(owner);
+        // `Machine::buffer`'s `if owner == 0 { null_object() }`.
+        self.refuse_null(header);
+
+        // `Shape::ByteBuffer`, as the header's high half.
+        let word = self.heap_word(header);
+        let named = self.b.ins().ushr_imm_u(word, 32);
+        let wrong = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, named, i64::from(buffer.0));
+        let known = self.b.create_block();
+        self.b.ins().brif(wrong, cold, &[], known, &[]);
+        self.b.switch_to_block(known);
+
+        // `machine.payload(owner, GROWABLE_STORE)`. `finish()` leaves nought here.
+        let one = self.b.ins().iconst(types::I64, 1);
+        let store = self.payload(header, one);
+        let finished = self.b.ins().icmp_imm_s(IntCC::Equal, store, 0);
+        let live = self.b.create_block();
+        self.b.ins().brif(finished, cold, &[], live, &[]);
+        self.b.switch_to_block(live);
+
+        // `machine.payload(owner, GROWABLE_LEN)` against `object_len(store)`, both
+        // in bytes.
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let len = self.payload(header, zero);
+        let capacity = self.object_len(store);
+        let full = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, len, capacity);
+        let room = self.b.create_block();
+        self.b.ins().brif(full, cold, &[], room, &[]);
+        self.b.switch_to_block(room);
+
+        // `(0..=255).contains(&value)`.
+        let value = self.load_slot(src);
+        let wide = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedGreaterThanOrEqual, value, 256);
+        let byte = self.b.create_block();
+        self.b.ins().brif(wide, cold, &[], byte, &[]);
+        self.b.switch_to_block(byte);
+
+        // `blend(store, len / 8, len % 8, 1, value)`.
+        let which = self.b.ins().ushr_imm_u(len, 3);
+        let held = self.payload(store, which);
+        let inside = self.b.ins().band_imm_u(len, 7);
+        let shift = self.b.ins().ishl_imm_u(inside, 3);
+        let ones = self.b.ins().iconst(types::I64, 0xFF);
+        let mask = self.b.ins().ishl(ones, shift);
+        let keep = self.b.ins().bnot(mask);
+        let cleared = self.b.ins().band(held, keep);
+        let placed = self.b.ins().ishl(value, shift);
+        let blended = self.b.ins().bor(cleared, placed);
+        self.set_payload(store, which, blended);
+        // `growable_commit`: `machine.set_payload(owner, GROWABLE_LEN, len + 1)`.
+        let grown = self.b.ins().iadd_imm_s(len, 1);
+        self.set_payload(header, zero, grown);
+        self.b.ins().jump(join, &[]);
+
+        self.b.switch_to_block(cold);
+        self.growable_op(GrowableOp::Push, owner, src);
         self.b.ins().jump(join, &[]);
 
         self.b.switch_to_block(join);

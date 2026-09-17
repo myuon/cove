@@ -927,6 +927,13 @@ pub const ENTRY_INT: LayoutId = LayoutId(21);
 pub const MAP_INT: LayoutId = LayoutId(22);
 /// `Vector<MapEntry<Int, Int>>`, the owner a map's next run is built in.
 pub const ENTRY_VECTOR: LayoutId = LayoutId(23);
+/// A `ByteBuffer`: ADR 0052's owner of a packed byte run, and the program's
+/// `buffer_layout` — which is what a byte push's fast path compares the owner's
+/// header with.
+pub const BUFFER: LayoutId = LayoutId(24);
+/// The packed store a [`BUFFER`] owns, whose header length is its capacity in
+/// bytes. The program's `bytes_layout`.
+pub const BYTES: LayoutId = LayoutId(25);
 
 pub fn span() -> Span {
     Span::new(FileId(0), 0, 0)
@@ -1059,9 +1066,13 @@ pub fn program(function: Function) -> Program {
         "Vector",
         cove_ir::Shape::Vector { elem: ENTRY_INT },
     ));
+    layouts.push(Layout::object("ByteBuffer", cove_ir::Shape::ByteBuffer));
+    layouts.push(Layout::object("Bytes", cove_ir::Shape::Bytes));
     Program {
         functions: vec![function],
         layouts,
+        buffer_layout: BUFFER,
+        bytes_layout: BYTES,
         // `ArgsId(0)` is the empty argument list, which is what a call in these
         // tests hands over: the double records the hand-over and does not read
         // the list, and a table with nothing in it would panic the subset
@@ -2981,19 +2992,24 @@ pub fn a_literal_past_the_table_refuses_the_function<A: Arm>() {
     );
 }
 
-/// ADR 0052's four, each handed to the runtime whole with its operands.
+/// Three of ADR 0052's four, each handed to the runtime whole with its operands.
 ///
 /// There is no fast path to check here and that is the design — see
-/// [`cove_native::GrowableFn`] for why each of the four is the helper and not half
-/// of one. So what a case can say is the three things that *are* emitted code:
-/// the operation and its two operands reach the helper unchanged; the unpaid
-/// work is published and the accumulator cleared, because every one of them is a
-/// safepoint; and the answer the helper wrote is in the frame afterwards.
+/// [`cove_native::GrowableFn`] for why each of the three is the helper and not
+/// half of one. So what a case can say is the three things that *are* emitted
+/// code: the operation and its two operands reach the helper unchanged; the
+/// unpaid work is published and the accumulator cleared, because every one of
+/// them is a safepoint; and the answer the helper wrote is in the frame
+/// afterwards.
 ///
-/// The four run in **one body**, in the order a builder is used, so the pcs are
-/// four different numbers and an emitter that dropped `self.pc` is a wrong pc
+/// The fourth, a byte push, is a memory store with the helper as its cold half,
+/// and [`a_byte_push_into_spare_capacity_blends_the_byte_and_bumps_the_length`]
+/// and the cases after it are where it is held.
+///
+/// The three run in **one body**, in the order a builder is used, so the pcs are
+/// three different numbers and an emitter that dropped `self.pc` is a wrong pc
 /// rather than a coincidence. `growable-alloc` and `run-finish` write a
-/// destination and the two appends do not, which is the double's own note.
+/// destination and the extend does not, which is the double's own note.
 pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
     forget_built();
     // `s0` is the owner, `s1` the capacity and the byte, `s2` the answer.
@@ -3005,11 +3021,6 @@ pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
                 Inst::GrowableAlloc {
                     dst: 0,
                     capacity: 1,
-                    storage: Storage::PackedBytes,
-                },
-                Inst::GrowablePush {
-                    owner: 0,
-                    src: 1,
                     storage: Storage::PackedBytes,
                 },
                 Inst::GrowableExtend {
@@ -3061,22 +3072,14 @@ pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
                 op: GrowableOp::Alloc.abi(),
                 a: 0,
                 b: 1,
-                // The block is five instructions and the charge is made at block
+                // The block is four instructions and the charge is made at block
                 // entry, so the first hand-over carries the whole of it and every
                 // one after it carries nought.
-                work: 5,
+                work: 4,
             },
             Built {
                 base: 0,
                 pc: 1,
-                op: GrowableOp::Push.abi(),
-                a: 0,
-                b: 1,
-                work: 0,
-            },
-            Built {
-                base: 0,
-                pc: 2,
                 op: GrowableOp::Extend.abi(),
                 // The `ArgsId`, not a slot: the four operands are behind it and the
                 // helper resolves them out of the program.
@@ -3086,14 +3089,14 @@ pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
             },
             Built {
                 base: 0,
-                pc: 3,
+                pc: 2,
                 op: GrowableOp::Finish.abi(),
                 a: 2,
                 b: 0,
                 work: 0,
             },
         ],
-        "the four operations, in order, with their operands"
+        "the three operations, in order, with their operands"
     );
     // What the double wrote, in the two slots that have a destination.
     assert_eq!(words[0], u64::from(GrowableOp::Alloc.abi()) * 1000);
@@ -3113,7 +3116,7 @@ pub fn a_growable_buffer_is_handed_to_the_runtime_whole<A: Arm>() {
     assert_eq!(answer.outcome, Outcome::Returned);
     assert_eq!(
         built().iter().map(|row| row.base).collect::<Vec<_>>(),
-        vec![4, 4, 4, 4],
+        vec![4, 4, 4],
         "the frame the operands are read out of"
     );
     assert_eq!(words[4], u64::from(GrowableOp::Alloc.abi()) * 1000);
@@ -4247,6 +4250,203 @@ pub fn a_push_refuses_a_null_receiver<A: Arm>() {
     let held = pushing(1);
     let heap = Heap::new(2);
     let mut words = vec![0u64, 70, UNWRITTEN];
+    let answer = run_over::<A>(&held, &mut words, 0, &heap);
+    assert_eq!(answer.outcome, Outcome::Raised);
+    assert_eq!(answer.raise, Some(Raise::NullObject));
+    assert_eq!(answer.raise_pc, 0);
+    assert!(
+        built().is_empty(),
+        "the null was refused here, not handed over"
+    );
+    forget_built();
+}
+
+// --- a byte push ---------------------------------------------------------------
+
+/// One `appendByte(value)`, answering `Unit`: what `StringBuilder.appendByte` is
+/// once the lowering has expanded it — a byte `growable-push` and the `()` it
+/// answers.
+///
+/// Slot 0 is the owner, slot 1 the value and slot 2 the answer.
+pub fn pushing_a_byte() -> Program {
+    program(function(
+        vec![Repr::Ref, Repr::Int, Repr::Unit],
+        UNIT,
+        vec![
+            Inst::GrowablePush {
+                owner: 0,
+                src: 1,
+                storage: Storage::PackedBytes,
+            },
+            Inst::Unit { dst: 2 },
+            Inst::Return { src: 2 },
+        ],
+    ))
+}
+
+/// A `ByteBuffer` owner and its packed store, in the shape `Machine::buffer`
+/// reads them: payload word 0 the length in bytes, payload word 1 the store, and
+/// the store's header length its capacity in bytes.
+///
+/// The store's payload is filled with `0xAA` bytes, so a push that cleared or
+/// shifted the wrong bits shows as a changed neighbour rather than a nought that
+/// happened to be there already.
+pub fn a_byte_buffer(heap: &mut Heap, at: u64, len: u64, capacity: u32) -> u64 {
+    let owner = heap.object(at, BUFFER, 0);
+    let store = heap.object(at + 8, BYTES, capacity);
+    for word in 0..u64::from(capacity).div_ceil(8) {
+        heap.set(at + 8 + 1 + word, 0xAAAA_AAAA_AAAA_AAAA);
+    }
+    heap.set(at + 1, len);
+    heap.set(at + 2, store);
+    owner
+}
+
+/// `Machine::append_byte`, where the store has room: the byte blended into its
+/// word at its offset, every other byte of that word left as it was, the length
+/// bumped, and **nothing handed to the runtime**.
+///
+/// The lengths are the offsets inside a word that are easiest to get wrong — the
+/// first byte of the first word, the last byte of it, the first byte of the
+/// second — and the one push that exactly fills the store. Two values, `0` and
+/// `255`, so that both a byte that clears bits and one that sets all of them are
+/// written.
+pub fn a_byte_push_into_spare_capacity_blends_the_byte_and_bumps_the_length<A: Arm>() {
+    for (len, capacity) in [(0u64, 16u32), (7, 16), (8, 16), (15, 16), (23, 24)] {
+        for value in [0u64, 0x5C, 255] {
+            forget_built();
+            let held = pushing_a_byte();
+            let at = HEAP_CHUNK_WORDS + 33;
+            let mut heap = Heap::new(2);
+            let owner = a_byte_buffer(&mut heap, at, len, capacity);
+            let mut words = vec![owner, value, UNWRITTEN];
+            let answer = run_over::<A>(&held, &mut words, 0, &heap);
+            let what = format!("{value} at byte {len} of {capacity}");
+            assert_eq!(answer.outcome, Outcome::Returned, "{what}");
+            assert!(
+                built().is_empty(),
+                "{what}: the fast path took it, so nothing went to the runtime: {:?}",
+                built()
+            );
+            let word = heap.get(at + 8 + 1 + len / 8);
+            let shift = (len % 8) * 8;
+            let expected = (0xAAAA_AAAA_AAAA_AAAAu64 & !(0xFF << shift)) | (value << shift);
+            assert_eq!(word, expected, "{what}: the word the byte went into");
+            for other in 0..u64::from(capacity).div_ceil(8) {
+                if other != len / 8 {
+                    assert_eq!(
+                        heap.get(at + 8 + 1 + other),
+                        0xAAAA_AAAA_AAAA_AAAA,
+                        "{what}: payload word {other} was not touched"
+                    );
+                }
+            }
+            assert_eq!(heap.get(at + 1), len + 1, "{what}: the length, bumped once");
+            assert_eq!(heap.get(at + 2), heap.addr(at + 8), "{what}: the store");
+            assert_eq!(words[2], 0, "{what}: the `unit` after it ran");
+        }
+    }
+    forget_built();
+}
+
+/// The cold paths of a byte push, each handed to the runtime whole.
+///
+/// A full store — the push after the one that filled it, which grows — a store
+/// word of nought, an object that is not a byte buffer, a length word past the
+/// capacity, and a value that is not a byte: `256`, and `-1`, which an unsigned
+/// comparison has to catch as well. Each one's sentence, and each growth, is
+/// the runtime's, so the assertion is that emitted code **did not try**: the push
+/// went over as [`GrowableOp::Push`] at the right pc with the owner and the value's
+/// slot, nothing in the heap was written, and the instruction after it ran once
+/// the runtime answered.
+pub fn every_cold_path_of_a_byte_push_goes_to_the_runtime<A: Arm>() {
+    let at = HEAP_CHUNK_WORDS + 33;
+    let rows: [(&str, u64, Build); 6] = [
+        (
+            "the store is exactly full, so the push would grow it",
+            7,
+            |heap, at| a_byte_buffer(heap, at, 16, 16),
+        ),
+        ("`finish()` consumed the store", 7, |heap, at| {
+            let owner = a_byte_buffer(heap, at, 0, 16);
+            heap.set(at + 2, 0);
+            owner
+        }),
+        ("the object is not a byte buffer", 7, |heap, at| {
+            let owner = a_byte_buffer(heap, at, 0, 16);
+            heap.object(at, VECTOR, 0);
+            owner
+        }),
+        ("the length word is past the capacity", 7, |heap, at| {
+            a_byte_buffer(heap, at, 1 << 40, 16)
+        }),
+        ("the value is 256", 256, |heap, at| {
+            a_byte_buffer(heap, at, 0, 16)
+        }),
+        ("the value is negative", u64::MAX, |heap, at| {
+            a_byte_buffer(heap, at, 0, 16)
+        }),
+    ];
+    for (why, value, build) in rows {
+        forget_built();
+        let held = pushing_a_byte();
+        let mut heap = Heap::new(2);
+        let owner = build(&mut heap, at);
+        let before: Vec<u64> = (0..16).map(|word| heap.get(at + word)).collect();
+        let mut words = vec![owner, value, UNWRITTEN];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, Outcome::Returned, "{why}");
+        assert_eq!(
+            built(),
+            vec![Built {
+                base: 0,
+                pc: 0,
+                op: GrowableOp::Push.abi(),
+                a: 0,
+                b: 1,
+                // The helper is a safepoint, so the block's static work — three
+                // instructions — went over with the hand-over.
+                work: 3,
+            }],
+            "{why}: the runtime was handed the push, whole"
+        );
+        let after: Vec<u64> = (0..16).map(|word| heap.get(at + word)).collect();
+        assert_eq!(before, after, "{why}: emitted code wrote nothing first");
+        assert_eq!(words[2], 0, "{why}: the instruction after the push ran");
+    }
+    forget_built();
+}
+
+/// A cold byte push whose helper *raised* or stopped leaves with that outcome —
+/// the shape every hand-over has.
+pub fn a_cold_byte_push_that_raised_leaves_with_that_outcome<A: Arm>() {
+    for outcome in [Outcome::Raised, Outcome::Stopped] {
+        forget_built();
+        built_answers(&[outcome]);
+        let held = pushing_a_byte();
+        let at = HEAP_CHUNK_WORDS + 33;
+        let mut heap = Heap::new(2);
+        let owner = a_byte_buffer(&mut heap, at, 0, 16);
+        // Not a byte, so the push is cold and the runtime refuses it.
+        let mut words = vec![owner, 300, UNWRITTEN];
+        let answer = run_over::<A>(&held, &mut words, 0, &heap);
+        assert_eq!(answer.outcome, outcome);
+        assert_eq!(built().len(), 1);
+        assert_eq!(
+            words[2], UNWRITTEN,
+            "and nothing after the push ran, because the function left"
+        );
+    }
+    forget_built();
+}
+
+/// A byte push to a null owner is refused where it is read, as
+/// `Machine::buffer`'s `null_object()`, and nothing goes to the runtime.
+pub fn a_byte_push_refuses_a_null_owner<A: Arm>() {
+    forget_built();
+    let held = pushing_a_byte();
+    let heap = Heap::new(2);
+    let mut words = vec![0u64, 7, UNWRITTEN];
     let answer = run_over::<A>(&held, &mut words, 0, &heap);
     assert_eq!(answer.outcome, Outcome::Raised);
     assert_eq!(answer.raise, Some(Raise::NullObject));

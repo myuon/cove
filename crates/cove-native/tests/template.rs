@@ -230,6 +230,26 @@ fn a_push_refuses_a_null_receiver() {
 }
 
 #[test]
+fn a_byte_push_into_spare_capacity_blends_the_byte_and_bumps_the_length() {
+    suite::a_byte_push_into_spare_capacity_blends_the_byte_and_bumps_the_length::<Template>();
+}
+
+#[test]
+fn every_cold_path_of_a_byte_push_goes_to_the_runtime() {
+    suite::every_cold_path_of_a_byte_push_goes_to_the_runtime::<Template>();
+}
+
+#[test]
+fn a_cold_byte_push_that_raised_leaves_with_that_outcome() {
+    suite::a_cold_byte_push_that_raised_leaves_with_that_outcome::<Template>();
+}
+
+#[test]
+fn a_byte_push_refuses_a_null_owner() {
+    suite::a_byte_push_refuses_a_null_owner::<Template>();
+}
+
+#[test]
 fn a_freeze_relabels_the_store_in_place() {
     suite::a_freeze_relabels_the_store_in_place::<Template>();
 }

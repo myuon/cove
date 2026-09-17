@@ -2075,14 +2075,45 @@ pub(super) fn dispatch<'s, 'a>(
             }
             // One checked byte at the logical length, which then becomes one
             // more. There is no `at` to bounds-check — that is the difference
-            // between a buffer and a fixed run — and no capacity to check
-            // either, because a full store grows.
+            // between a buffer and a fixed run — and no capacity to refuse,
+            // because a full store grows.
             GROWABLE_PUSH_BYTE => {
                 let owner = machine.mem.word_at(base_at + (a!() as usize));
                 let value = machine.mem.word_at(base_at + (b!() as usize)) as i64;
-                machine.sync(pc - 1);
-                if let Err(error) = machine.append_byte(owner, value) {
-                    fail!(error);
+                // A push into spare capacity is answered here: the owner is the
+                // program's byte buffer, its store is live, the length is below
+                // the store's capacity and the value is a byte, so the byte is
+                // blended into its word and the length bumped — what
+                // `Machine::append_byte` does when `growable_ensure` has nothing
+                // to grow. It allocates nothing and cannot fail, so it needs no
+                // `sync`. Anything else is `append_byte` whole, which asks every
+                // question again and words each refusal. The native tier emits
+                // the same split; see `cove_native::subset::BytePush`.
+                let mut pushed = false;
+                if owner != 0 && machine.mem.object_layout(owner) == program.buffer_layout {
+                    let store = machine.mem.payload(owner, runs::GROWABLE_STORE);
+                    let len = machine.mem.payload(owner, runs::GROWABLE_LEN);
+                    if store != 0
+                        && len < u64::from(machine.mem.object_len(store))
+                        && (0..=255).contains(&value)
+                    {
+                        let at = len as u32;
+                        let shift = (at % 8) * 8;
+                        let held = machine.mem.payload(store, at / 8);
+                        machine.mem.set_payload(
+                            store,
+                            at / 8,
+                            (held & !(0xFF << shift)) | ((value as u64) << shift),
+                        );
+                        machine.mem.set_payload(owner, runs::GROWABLE_LEN, len + 1);
+                        pushed = true;
+                    }
+                }
+                if !pushed {
+                    machine.sync(pc - 1);
+                    if let Err(error) = machine.append_byte(owner, value) {
+                        fail!(error);
+                    }
                 }
             }
             // One element at the logical length: `Vector.push`, since ADR 0058

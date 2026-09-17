@@ -35,8 +35,8 @@ use crate::abi::{
     HEAP_CHUNK_SHIFT, HEAP_CHUNK_WORDS, HEAP_ORIGIN_WORDS,
 };
 use crate::subset::{
-    by_zero_of, leaders, literal_offset, overflow_of, slot_offset, supported, word_finish,
-    word_push, WordFinish, WordPush,
+    by_zero_of, byte_push, leaders, literal_offset, overflow_of, slot_offset, supported,
+    word_finish, word_push, BytePush, WordFinish, WordPush,
 };
 use crate::Unavailable;
 
@@ -629,20 +629,27 @@ impl<'a> Emit<'a> {
                 storage: Storage::PackedBytes,
             } => self.byte_at(*dst, *run, *index),
             Inst::Call { dst, callee, args } => self.callee(*dst, callee.0, args.0),
-            // ADR 0052's four, each handed to the runtime whole. See
-            // [`crate::abi::GrowableFn`] for why none of them has an emitted fast
-            // path — one rooting discipline that is not the frame's, one chunked
-            // safepoint contract, and one UTF-8 walk.
+            // ADR 0052's four. An alloc, an extend and a finish are handed to the
+            // runtime whole: see [`crate::abi::GrowableFn`] for why none of them
+            // has an emitted fast path — one rooting discipline that is not the
+            // frame's, one chunked safepoint contract, and one UTF-8 walk.
             Inst::GrowableAlloc {
                 dst,
                 capacity,
                 storage: Storage::PackedBytes,
             } => self.growable_op(GrowableOp::Alloc, *dst, *capacity),
+            // A push into spare capacity allocates nothing, moves one byte and
+            // validates nothing, so it is a memory store with the helper as its
+            // cold half. See [`BytePush`](crate::subset::BytePush).
             Inst::GrowablePush {
                 owner,
                 src,
                 storage: Storage::PackedBytes,
-            } => self.growable_op(GrowableOp::Push, *owner, *src),
+            } => {
+                let push = byte_push(self.program, *owner, *src)
+                    .expect("`supported` admitted a byte push it could decode");
+                self.byte_push(push)
+            }
             // `Vector.push`: a fast path into spare capacity and the whole push as
             // its cold half. See [`WordPush`](crate::subset::WordPush), decoded
             // by the subset so that the two arms read one set of facts.
@@ -1200,6 +1207,116 @@ impl<'a> Emit<'a> {
 
         self.bind(cold);
         self.growable_op(GrowableOp::PushWords, owner, src);
+        self.bind(done);
+        // One predecessor of this join came through a helper, so the frame pointer
+        // the other one derived is not to be trusted here.
+        self.frame_live = false;
+    }
+
+    /// A byte `growable-push`'s fast path — `appendByte` — the byte into spare
+    /// capacity, and the length bumped.
+    ///
+    /// See [`BytePush`](crate::subset::BytePush) for which of
+    /// `Machine::append_byte`'s preconditions are emitted and which go to
+    /// [`GrowableFn`](crate::abi::GrowableFn), and why. This is the shape:
+    ///
+    /// ```text
+    ///   rax = the owner                  -- a `ByteBuffer` header, refused if null
+    ///   the header's layout is `buffer`, or cold
+    ///   rcx = payload(owner, 1)          -- the store; nought is `finish()`ed, cold
+    ///   rdx = payload(owner, 0)          -- the length in bytes, the whole word
+    ///   rdx < len(store), or cold        -- no room is growth, and growth is cold
+    ///   rsi = &payload(store, rdx / 8)   -- the word the byte goes into
+    ///   rax = the value; rax < 256, or cold
+    ///   cl  = (rdx % 8) * 8
+    ///   [rsi] = [rsi] & !(0xff << cl) | rax << cl
+    ///   payload(owner, 0) = rdx + 1
+    /// ```
+    ///
+    /// **The word's address is formed before the value is read.** Four values
+    /// are live at once — the store, the length, the value and the shift — and
+    /// this arm has three scratch registers. [`Emit::heap_ptr`] leaves its answer
+    /// in [`HEAP_TABLE`], which nothing but another heap address and a call
+    /// writes, so the address waits there while `RCX` becomes the shift, and
+    /// [`HEAP_INDEX`] and [`HEAP_SPARE`] are free for the mask and the word.
+    ///
+    /// **Nothing is pushed on the machine stack**, so every cold jump arrives with
+    /// `rsp` as the prologue left it — [`Emit::vector_push`]'s invariant, kept by
+    /// having no window to break it in.
+    ///
+    /// **Every comparison is unsigned**, for the reasons
+    /// [`BytePush`](crate::subset::BytePush) gives: a length word past the
+    /// capacity and a negative value are both cold.
+    fn byte_push(&mut self, push: BytePush) {
+        let BytePush { owner, buffer, src } = push;
+        let cold = self.label();
+        let done = self.label();
+
+        self.load_slot(RAX, owner);
+        // `Machine::buffer`'s `if owner == 0 { null_object() }`.
+        self.refuse_null(RAX);
+
+        // `Shape::ByteBuffer`, as the header's high half.
+        self.mov_rr(RDX, RAX);
+        self.heap_word(RDX);
+        self.shr_imm8(RDX, 32);
+        self.cmp_imm32(RDX, buffer.0 as i32);
+        self.jcc(CC_NE, Target::Label(cold));
+
+        // `machine.payload(owner, GROWABLE_STORE)`. `finish()` leaves nought here.
+        self.mov_rr(RCX, RAX);
+        self.add_imm32(RCX, 2);
+        self.heap_word(RCX);
+        self.test_rr(RCX, RCX);
+        self.jcc(CC_E, Target::Label(cold));
+
+        // `machine.payload(owner, GROWABLE_LEN)`, the whole word.
+        self.mov_rr(RDX, RAX);
+        self.add_imm32(RDX, 1);
+        self.heap_word(RDX);
+
+        // `machine.object_len(store)`: the capacity, in bytes.
+        self.mov_rr(RAX, RCX);
+        self.object_len(RAX);
+        self.cmp_rr(RDX, RAX);
+        self.jcc(CC_AE, Target::Label(cold));
+
+        // The payload word holding byte `len`: `store + 1 + len / 8`.
+        self.add_imm32(RCX, 1);
+        self.mov_rr(RAX, RDX);
+        self.shr_imm8(RAX, 3);
+        self.add_rr(RCX, RAX);
+        self.heap_ptr(RCX);
+
+        // `(0..=255).contains(&value)`.
+        self.load_slot(RAX, src);
+        self.cmp_imm32(RAX, 256);
+        self.jcc(CC_AE, Target::Label(cold));
+
+        // `blend(store, len / 8, len % 8, 1, value)`. `shl` by a variable amount
+        // reads `cl`.
+        self.mov_rr(RCX, RDX);
+        self.and_imm32(RCX, 7);
+        self.shl_imm8(RCX, 3);
+        self.shl_cl(RAX);
+        self.mov_imm32(HEAP_SPARE, 0xFF);
+        self.shl_cl(HEAP_SPARE);
+        self.not_r(HEAP_SPARE);
+        self.load(HEAP_INDEX, HEAP_TABLE, 0);
+        self.and_rr(HEAP_INDEX, HEAP_SPARE);
+        self.or_rr(HEAP_INDEX, RAX);
+        self.store(HEAP_TABLE, 0, HEAP_INDEX);
+
+        // `growable_commit`: `machine.set_payload(owner, GROWABLE_LEN, len + 1)`.
+        self.add_imm32(RDX, 1);
+        self.load_slot(RAX, owner);
+        self.add_imm32(RAX, 1);
+        self.heap_ptr(RAX);
+        self.store(HEAP_TABLE, 0, RDX);
+        self.jmp(Target::Label(done));
+
+        self.bind(cold);
+        self.growable_op(GrowableOp::Push, owner, src);
         self.bind(done);
         // One predecessor of this join came through a helper, so the frame pointer
         // the other one derived is not to be trusted here.
@@ -2469,6 +2586,34 @@ impl<'a> Emit<'a> {
         self.rex(true, 0, dst);
         self.byte(0xd3);
         self.modrm_reg(5, dst);
+    }
+
+    /// `shl r64, cl`
+    fn shl_cl(&mut self, dst: u8) {
+        self.rex(true, 0, dst);
+        self.byte(0xd3);
+        self.modrm_reg(4, dst);
+    }
+
+    /// `not r64`
+    fn not_r(&mut self, dst: u8) {
+        self.rex(true, 0, dst);
+        self.byte(0xf7);
+        self.modrm_reg(2, dst);
+    }
+
+    /// `and r64, r64`
+    fn and_rr(&mut self, dst: u8, src: u8) {
+        self.rex(true, src, dst);
+        self.byte(0x21);
+        self.modrm_reg(src, dst);
+    }
+
+    /// `or r64, r64`
+    fn or_rr(&mut self, dst: u8, src: u8) {
+        self.rex(true, src, dst);
+        self.byte(0x09);
+        self.modrm_reg(src, dst);
     }
 
     /// `and r64, imm32`, sign-extended — so every mask emitted through it is
