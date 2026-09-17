@@ -524,6 +524,32 @@ unchanged. What the tier gives up is promptness it was never promised: a
 cancellation, a fuel limit or a collection is now seen within a stride and a
 turn rather than within a turn.
 
+[ADR 0062](docs/adr/0062-an-append-is-ensure-store-commit.md) finishes moving
+the append into Cove. `Vector.push` was a Cove function whose body lowered to
+one composite `GrowablePush`, and the builder's appends to `GrowableExtend`,
+because under ADR 0041 an IR instruction is a dispatch: splitting an append
+into ensure, copy and commit in the executable stream cost about six
+dispatches an append and +0.42% on covefmt, and was dropped. The missing layer
+was legalization. Shared IR now spells an append as `GrowableEnsure`, a typed
+write (`StoreElem`, a new byte `RunStore`, or `RunCopy`) and `GrowableCommit`,
+and the standard library writes `push`, `append`, `appendByte`,
+`appendSlice`'s range policy and keyed extend over library-only core calls.
+The verifier checks a block-local reservation — no call, allocation or branch
+between ensure and commit, the write at the length read and the commit of the
+count ensured — and commit keeps a runtime bound. One pattern definition,
+`cove_ir::legalize`, is shared by the encoded VM, both native code generators
+and the inliner. The VM rewrites only a recognised window's head to a fused
+opcode and keeps its tail rows in place, so bytecode pc is still IR pc, fusion
+is skipped whenever a safepoint, debugger or profiler question falls inside,
+and fuel still counts the window's semantic instructions. Native admits each
+primitive and emits today's fast path for a window. Truncate, alloc and finish
+stay composite, with reasons. Measured over the whole series: dispatches fall
+0.54% on covefmt and 2.47% on cq, `fuel_spent` rises 4.92% and 0.15% because
+it now counts the protocol's instructions, allocations and allocated words are
+identical, no native refusal or tier crossing moved, and every VM wall time
+moved less than `benches/arith`, the layout control that executes no append at
+all.
+
 Syntax is still provisional and may change.
 
 ## MVP execution profiles

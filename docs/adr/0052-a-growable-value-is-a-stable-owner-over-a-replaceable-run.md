@@ -1,6 +1,11 @@
 # ADR 0052: A growable value is a stable owner over a replaceable run
 
-- Status: Accepted
+- Status: Accepted. Superseded in part by
+  [ADR 0062](0062-an-append-is-ensure-store-commit.md), which replaces its
+  "The IR exposes bulk owner operations": `append-byte` and `append-bytes`
+  leave shared IR for ensure, a typed store or run-copy, and commit, and one
+  dispatch per append becomes the encoded VM's fusion rather than the IR's
+  shape
 - Date: 2026-09-12
 - Decides: `FixedRun<E>` and `Buffer<E>` as the packed, nominally neutral
   storage foundation over which the standard library can implement String,
