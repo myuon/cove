@@ -3188,6 +3188,15 @@ fn the_boundary_report_counts_each_quantity_apart() {
         helpers.growable, 5,
         "one `growable` helper call per growth, and none for a push with room: {helpers:?}"
     );
+    // And every one of them was the cold path of an emitted word push, which is
+    // what a count by operation is for: the total alone could not say so.
+    for (op, calls) in helpers.growable_rows() {
+        let expected = match op {
+            cove_native::GrowableOp::PushWords => 5,
+            _ => 0,
+        };
+        assert_eq!(calls, expected, "{op:?}: {helpers:?}");
+    }
     assert_eq!(
         helpers.intrinsic, 0,
         "no intrinsic was mediated: {helpers:?}"

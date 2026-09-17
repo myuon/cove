@@ -47,6 +47,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use cove_ir::{FunctionId, Inst, Intrinsic, Program, SiteId};
+use cove_native::{GrowableOp, RunOp};
 
 use crate::vm::exec::native::Tiers;
 
@@ -73,8 +74,19 @@ pub struct HelperCalls {
     pub intrinsic: u64,
     /// [`GrowableFn`](cove_native::GrowableFn): one growable-run operation.
     pub growable: u64,
+    /// The same calls, by the [`GrowableOp`] each one named, indexed by
+    /// [`GrowableOp::abi`]. They sum to [`growable`](Self::growable).
+    ///
+    /// One helper serves every growable operation, and "a million growable
+    /// calls" does not say whether they were pushes that found a full store or
+    /// whole appends handed over: which operation is what issue #409's work is
+    /// measured against, and it is a field rather than a patched binary.
+    pub growable_ops: [u64; GROWABLE_OPS],
     /// [`RunCopyFn`](cove_native::RunCopyFn): one run copy, whole.
     pub run_copy: u64,
+    /// The same calls, by the [`RunOp`] each one named, indexed by
+    /// [`RunOp::abi`], for [`growable_ops`](Self::growable_ops)' reason.
+    pub run_copy_ops: [u64; RUN_OPS],
     /// [`FieldLoadFn`](cove_native::abi::FieldLoadFn): a field bound the emitted
     /// table could not answer.
     pub field_load: u64,
@@ -107,7 +119,51 @@ impl HelperCalls {
             ("order_str", self.order_str),
         ]
     }
+
+    /// Charges one `growable` call of the operation numbered `op`. A number no
+    /// arm emits is still a call, so it is charged to the total and to no row.
+    pub(crate) fn charge_growable(&mut self, op: u32) {
+        self.growable += 1;
+        if let Some(count) = self.growable_ops.get_mut(op as usize) {
+            *count += 1;
+        }
+    }
+
+    /// Charges one `run_copy` call of the operation numbered `op`, as
+    /// [`charge_growable`](Self::charge_growable) does.
+    pub(crate) fn charge_run_copy(&mut self, op: u32) {
+        self.run_copy += 1;
+        if let Some(count) = self.run_copy_ops.get_mut(op as usize) {
+            *count += 1;
+        }
+    }
+
+    /// Each `growable` operation compiled code called for, with its count, in
+    /// [`GrowableOp::abi`] order.
+    pub fn growable_rows(self) -> Vec<(GrowableOp, u64)> {
+        (0..GROWABLE_OPS as u32)
+            .filter_map(GrowableOp::from_abi)
+            .map(|op| (op, self.growable_ops[op.abi() as usize]))
+            .collect()
+    }
+
+    /// Each `run_copy` operation, with its count, in [`RunOp::abi`] order.
+    pub fn run_copy_rows(self) -> Vec<(RunOp, u64)> {
+        (0..RUN_OPS as u32)
+            .filter_map(RunOp::from_abi)
+            .map(|op| (op, self.run_copy_ops[op.abi() as usize]))
+            .collect()
+    }
 }
+
+/// How many [`GrowableOp`]s there are: one past the largest ABI number.
+///
+/// A constant here rather than on the enum, because the enum is the ABI and a
+/// count is only this report's business. A test holds the two together.
+pub const GROWABLE_OPS: usize = 7;
+
+/// How many [`RunOp`]s there are, for [`GROWABLE_OPS`]' reason.
+pub const RUN_OPS: usize = 4;
 
 /// One intrinsic's row: where the program names it, and how often each tier
 /// asked the runtime to perform it.
@@ -458,6 +514,25 @@ impl fmt::Display for BoundaryReport {
                 )?;
                 for (name, calls) in helpers.rows() {
                     writeln!(f, "  {name:<12} {:>14}", thousands(calls))?;
+                    // The operations under the two helpers that serve several,
+                    // indented once more and only where one ran, so a report
+                    // of a run that never grew anything reads as it did.
+                    let ops: Vec<(String, u64)> = match name {
+                        "growable" => helpers
+                            .growable_rows()
+                            .into_iter()
+                            .map(|(op, calls)| (format!("{op:?}"), calls))
+                            .collect(),
+                        "run_copy" => helpers
+                            .run_copy_rows()
+                            .into_iter()
+                            .map(|(op, calls)| (format!("{op:?}"), calls))
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    for (op, calls) in ops.into_iter().filter(|(_, calls)| *calls > 0) {
+                        writeln!(f, "    {op:<14} {:>12}", thousands(calls))?;
+                    }
                 }
             }
             (Some(_), None) => writeln!(
@@ -510,6 +585,36 @@ fn thousands(n: u64) -> String {
 mod tests {
     use super::*;
 
+    /// The two counts are the enums' lengths: every number below them names an
+    /// operation, and the first number past them names none. An operation added
+    /// to the ABI without raising the count fails here rather than being charged
+    /// to the total and to no row.
+    #[test]
+    fn the_operation_counts_are_the_abi_enums_lengths() {
+        assert!((0..GROWABLE_OPS as u32).all(|code| GrowableOp::from_abi(code).is_some()));
+        assert_eq!(GrowableOp::from_abi(GROWABLE_OPS as u32), None);
+        assert!((0..RUN_OPS as u32).all(|code| RunOp::from_abi(code).is_some()));
+        assert_eq!(RunOp::from_abi(RUN_OPS as u32), None);
+    }
+
+    /// A charge lands on the total and on its operation's row, and the rows sum
+    /// to the total.
+    #[test]
+    fn a_charge_is_counted_in_all_and_by_operation() {
+        let mut calls = HelperCalls::default();
+        calls.charge_growable(GrowableOp::PushWords.abi());
+        calls.charge_growable(GrowableOp::PushWords.abi());
+        calls.charge_growable(GrowableOp::Extend.abi());
+        calls.charge_run_copy(RunOp::CopyBytes.abi());
+        assert_eq!(calls.growable, 3);
+        assert_eq!(calls.run_copy, 1);
+        let rows = calls.growable_rows();
+        assert_eq!(rows.iter().map(|(_, n)| n).sum::<u64>(), calls.growable);
+        assert!(rows.contains(&(GrowableOp::PushWords, 2)));
+        assert!(rows.contains(&(GrowableOp::Extend, 1)));
+        assert!(calls.run_copy_rows().contains(&(RunOp::CopyBytes, 1)));
+    }
+
     /// The printed report says each quantity once and sorts intrinsics by calls.
     #[test]
     fn a_report_prints_each_quantity_apart() {
@@ -545,6 +650,8 @@ mod tests {
             }),
             helpers: Some(HelperCalls {
                 intrinsic: 7,
+                growable: 3,
+                growable_ops: [0, 1, 0, 0, 2, 0, 0],
                 ..HelperCalls::default()
             }),
         };
@@ -557,7 +664,14 @@ mod tests {
              1,001 from native"
         ));
         assert!(text.contains("VM->native 2,"));
-        assert!(text.contains("helper calls, 7 in all"));
+        assert!(text.contains("helper calls, 10 in all"));
+        assert!(
+            text.contains("\n    Push                      1\n    PushWords                 2\n")
+        );
+        assert!(
+            !text.contains("    Alloc "),
+            "an operation that never ran is left out"
+        );
         assert!(text.contains("           1,000              7       1  String.join"));
         assert!(text.contains("               0              0       3  String.fromCodePoint"));
     }
