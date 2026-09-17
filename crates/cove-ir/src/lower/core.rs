@@ -17,13 +17,12 @@
 //! growable packed byte run — and its operations are the `core.bytes*`
 //! intrinsics: a byte `growable-alloc`; ADR 0062's `growable-ensure`, a
 //! `run-store` or `run-copy` into the store, and `growable-commit`, which
-//! `appendByte` and `append` are written over; the `growable-extend` beneath
-//! `appendSlice`; a `run-finish` into `String`; and a field read of the
-//! owner's length word. The owner is a reference, so nothing needs an address:
-//! a `var self` builder is a `var` slot holding that reference, the body loads
-//! it, and every append writes *through* it — which is why a growth that
-//! replaces the store beneath the owner is visible to every frame naming the
-//! builder.
+//! `appendByte`, `append` and `appendSlice` are written over; a `run-finish`
+//! into `String`; and a field read of the owner's length word. The owner is a
+//! reference, so nothing needs an address: a `var self` builder is a `var` slot
+//! holding that reference, the body loads it, and every append writes *through*
+//! it — which is why a growth that replaces the store beneath the owner is
+//! visible to every frame naming the builder.
 //!
 //! A keyed collection's search is the one family here with runtime calls
 //! beneath it (ADR 0059, #378 Phase 4). Its element reads are run instructions
@@ -61,7 +60,7 @@ use cove_syntax::ast::{Arg, Expr, ExprKind};
 use super::frame::Val;
 use super::shapes::{self, BUFFER_LEN, BUFFER_STORE, VECTOR_LEN, VECTOR_STORE};
 use super::{Body, Dest};
-use crate::inst::{ArithOp, CmpOp, Compare, Inst, Len, Num, Slot, Storage, Validation};
+use crate::inst::{CmpOp, Compare, Inst, Len, Slot, Storage, Validation};
 use crate::intrinsic::Intrinsic;
 use crate::layout::{LayoutId, Shape};
 use crate::program::{Arg as Operand, IntrinsicSite};
@@ -100,8 +99,8 @@ impl Body<'_> {
         match (name, args) {
             ("byteLength", [text]) => self.core_byte_length(expr, &text.value, want),
             (
-                "vectorEnsure" | "vectorStore" | "vectorCommit" | "bytesEnsure" | "bytesStore"
-                | "bytesCopy" | "bytesCommit",
+                "vectorEnsure" | "vectorStore" | "vectorCommit" | "vectorCopyFromSet"
+                | "vectorCopyFromMap" | "bytesEnsure" | "bytesStore" | "bytesCopy" | "bytesCommit",
                 _,
             ) => {
                 if self.core_statement(expr, name, args) {
@@ -155,12 +154,6 @@ impl Body<'_> {
             ("vectorWithCapacity", [capacity]) => {
                 self.core_vector_with_capacity(expr, &capacity.value, want)
             }
-            ("extendFromSet" | "extendFromMap", [out, run, from, count]) => self.core_extend_keyed(
-                expr,
-                &out.value,
-                [&run.value, &from.value, &count.value],
-                want,
-            ),
             ("setFinish" | "mapFinish", [run]) => self.core_keyed_finish(expr, &run.value, want),
             ("setSlice", [items, from, count]) => {
                 self.core_set_slice(expr, &items.value, &from.value, &count.value, want)
@@ -276,6 +269,12 @@ impl Body<'_> {
                 &buffer.value,
                 [&at.value, &text.value, &from.value, &count.value],
             ),
+            ("vectorCopyFromSet" | "vectorCopyFromMap", [out, at, run, from, count]) => self
+                .core_vector_copy_from_keyed(
+                    expr,
+                    &out.value,
+                    [&at.value, &run.value, &from.value, &count.value],
+                ),
             _ => {
                 self.gap(&format!("`core.{name}`"), expr);
                 false
@@ -1477,60 +1476,60 @@ impl Body<'_> {
         dst
     }
 
-    /// `core.extendFromSet(out, items, from, count)` and
-    /// `core.extendFromMap(out, entries, from, count)`: `count` units of a
-    /// sorted run from `from`, appended to a vector whose store has room.
+    /// `core.vectorCopyFromSet(out, at, items, from, count)` and
+    /// `core.vectorCopyFromMap(out, at, entries, from, count)`: `count` units of
+    /// a sorted run from `from`, written into `out`'s store at `at`.
     ///
-    /// [`Inst::LoadField`] of the store and of the length, one word
-    /// [`Inst::RunCopy`] out of the keyed run into the store at the length, an
-    /// `Int` add, and the length written back: ADR 0058's run copy and commit,
-    /// with no ensure, because the one body that calls this allocated the room
-    /// with `core.vectorWithCapacity` (#378, P4-5). The copy is the ensure's
-    /// guard: its destination bound is the store's capacity, so a range with no
-    /// room is refused before anything is written, and the length is raised only
-    /// after the copy has written every unit below it, in the same block with
-    /// nothing between that could reach the vector. The unit is the vector's
-    /// element — a member, or a `MapEntry` a map's entry is word for word — and
-    /// the machine holds the source to being that run.
-    fn core_extend_keyed(
+    /// [`Body::core_bytes_copy`] over words: the store's [`Inst::LoadField`] and
+    /// one word [`Inst::RunCopy`] of `[store, at, src, from, count]`, with the
+    /// store read after every operand so that only a constant can land between
+    /// it and the copy. **It publishes nothing.**
+    ///
+    /// This replaced `core.extendFromSet`, whose instructions were the store
+    /// and the length read, the copy, an `Int` add and the length written back
+    /// with a plain [`Inst::StoreField`] — an unrestricted store to a growable
+    /// owner's length word, which
+    /// [ADR 0062](../../../../docs/adr/0062-an-append-is-ensure-store-commit.md)
+    /// forbids, and which no backend could run as one step. What `std.map` and
+    /// `std.set` write around this now is the length, an ensure, this and a
+    /// commit, which is the append window every other appending body in the
+    /// standard library is.
+    ///
+    /// The bound is the copy's own: its destination is the *store*, so the
+    /// range is held to the capacity, and a body that did not reserve the room
+    /// is refused with nothing written and the length unchanged. The unit is
+    /// the vector's element — a member, or a `MapEntry` a map's entry is word
+    /// for word — and the machine holds the source to being that run.
+    fn core_vector_copy_from_keyed(
         &mut self,
         expr: &Expr,
         out: &Expr,
-        [run, from, count]: [&Expr; 3],
-        want: Option<Dest>,
-    ) -> Val {
+        [at, run, from, count]: [&Expr; 4],
+    ) -> bool {
         let Some(elem) = self.vector_element(out) else {
-            return self.dead(expr);
+            return false;
         };
         let Some(ty) = self.settled_ty(run) else {
-            return self.dead(expr);
+            return false;
         };
         if !matches!(ty, Ty::Set(_) | Ty::Map(..)) || self.layout(&ty, run.span).is_none() {
-            return self.gap(
-                "a keyed extend from something that is not a `Set` or a `Map`",
+            self.gap(
+                "a keyed copy from something that is not a `Set` or a `Map`",
                 expr,
             );
+            return false;
         }
         let owner = self.expr(out);
+        let index = self.expr(at);
         let src = self.expr(run);
-        let at = self.expr(from);
+        let start = self.expr(from);
         let many = self.expr(count);
         let store = self.vector_store(owner.slot, expr.span);
-        let len = self.temp(shapes::INT);
-        self.emit(
-            Inst::LoadField {
-                dst: len.slot,
-                obj: owner.slot,
-                at: VECTOR_LEN,
-                layout: shapes::INT,
-            },
-            expr.span,
-        );
         let row = self.pool.args.intern(vec![
             store.arg(),
-            len.arg(),
+            index.arg(),
             src.arg(),
-            at.arg(),
+            start.arg(),
             many.arg(),
         ]);
         self.emit(
@@ -1540,32 +1539,13 @@ impl Body<'_> {
             },
             expr.span,
         );
-        self.emit(
-            Inst::Arith {
-                num: Num::Int,
-                op: ArithOp::Add,
-                dst: len.slot,
-                a: len.slot,
-                b: many.slot,
-            },
-            expr.span,
-        );
-        self.emit(
-            Inst::StoreField {
-                obj: owner.slot,
-                at: VECTOR_LEN,
-                src: len.slot,
-                layout: shapes::INT,
-            },
-            expr.span,
-        );
-        self.give_back(len.slot, len.layout);
         self.release(store, expr.span);
         self.release(many, expr.span);
-        self.release(at, expr.span);
+        self.release(start, expr.span);
         self.release(src, expr.span);
+        self.release(index, expr.span);
         self.release(owner, expr.span);
-        self.unit_answer(expr, want)
+        true
     }
 
     /// `core.setFinish(run)` and `core.mapFinish(run)`: the vector's store

@@ -2942,13 +2942,35 @@ fn probePush<T>(items: Vector<T>, value: T) {
   core.vectorCommit(items, 1)
 }
 
+/// A range of a set appended, as `std.set`'s `copyFromSet` writes it: ADR
+/// 0062's ensure, copy and commit.
+fn probeCopySet<T>(items: Vector<T>, run: Set<T>, from: Int, count: Int) {
+  let at = core.vectorLength(items)
+  core.vectorEnsure(items, count)
+  core.vectorCopyFromSet(items, at, run, from, count)
+  core.vectorCommit(items, count)
+}
+
+/// `probeCopySet` over a map's entries, as `std.map`'s `copyFromMap` writes it.
+fn probeCopyMap<K, V>(
+  items: Vector<MapEntry<K, V>>,
+  run: Map<K, V>,
+  from: Int,
+  count: Int,
+) {
+  let at = core.vectorLength(items)
+  core.vectorEnsure(items, count)
+  core.vectorCopyFromMap(items, at, run, from, count)
+  core.vectorCommit(items, count)
+}
+
 /// `Set<Int>`: a member pushed between two ranges of the old run.
 export fn probeSetInts() -> String {
   let old = Set.of(1, 3, 4)
   let out: Vector<Int> = core.vectorWithCapacity(4)
-  core.extendFromSet(out, old, 0, 1)
+  probeCopySet(out, old, 0, 1)
   probePush(out, 2)
-  core.extendFromSet(out, old, 1, 2)
+  probeCopySet(out, old, 1, 2)
   let built = core.setFinish(out)
   \"{built} {built.length()} {old}\"
 }
@@ -2958,11 +2980,11 @@ export fn probeSetStrings() -> String {
   let old = Set.of(\"b\", \"c\")
   let low: Vector<String> = core.vectorWithCapacity(3)
   probePush(low, \"a\")
-  core.extendFromSet(low, old, 0, 2)
+  probeCopySet(low, old, 0, 2)
   let high: Vector<String> = core.vectorWithCapacity(3)
-  core.extendFromSet(high, old, 0, 2)
+  probeCopySet(high, old, 0, 2)
   probePush(high, \"d\")
-  core.extendFromSet(high, old, 2, 0)
+  probeCopySet(high, old, 2, 0)
   let empty: Vector<String> = core.vectorWithCapacity(0)
   \"{core.setFinish(low)} {core.setFinish(high)} {core.setFinish(empty)}\"
 }
@@ -2975,9 +2997,9 @@ export fn probeMap() -> String {
     MapEntry(key: \"c\", value: ProbeSpot(x: 5, y: 6)),
   )
   let out: Vector<MapEntry<String, ProbeSpot>> = core.vectorWithCapacity(3)
-  core.extendFromMap(out, old, 0, 1)
+  probeCopyMap(out, old, 0, 1)
   probePush(out, MapEntry(key: \"b\", value: ProbeSpot(x: 9, y: 9)))
-  core.extendFromMap(out, old, 2, 1)
+  probeCopyMap(out, old, 2, 1)
   let built = core.mapFinish(out)
   \"{built} {built.length()} {old}\"
 }

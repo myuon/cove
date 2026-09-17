@@ -1494,8 +1494,9 @@ impl CoreIntrinsicSchema {
 /// [`CORE_MEMBER_AT`] and [`CORE_ENTRY_AT`], the element reads of a sorted run.
 /// A keyed update is Cove over five more (P4-5): [`CORE_VECTOR_WITH_CAPACITY`],
 /// a growable vector with room for exactly the run it will hold;
-/// [`CORE_EXTEND_FROM_SET`] and [`CORE_EXTEND_FROM_MAP`], a range of the old
-/// run copied onto it; and [`CORE_SET_FINISH`] and [`CORE_MAP_FINISH`], the
+/// [`CORE_VECTOR_COPY_FROM_SET`] and [`CORE_VECTOR_COPY_FROM_MAP`], a range of
+/// the old run written into the room an ensure made;
+/// and [`CORE_SET_FINISH`] and [`CORE_MAP_FINISH`], the
 /// keyed finish that relabels it into the new set or map. `Set.toArray` is
 /// [`CORE_SET_SLICE`], a run slice out of a set (P4-7).
 pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
@@ -1527,8 +1528,8 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_MEMBER_AT,
     CORE_ENTRY_AT,
     CORE_VECTOR_WITH_CAPACITY,
-    CORE_EXTEND_FROM_SET,
-    CORE_EXTEND_FROM_MAP,
+    CORE_VECTOR_COPY_FROM_SET,
+    CORE_VECTOR_COPY_FROM_MAP,
     CORE_SET_FINISH,
     CORE_MAP_FINISH,
     CORE_SET_SLICE,
@@ -2257,23 +2258,35 @@ pub const CORE_VECTOR_WITH_CAPACITY: CoreIntrinsicSchema = CoreIntrinsicSchema {
     fresh: true,
 };
 
-/// `core.extendFromSet<T>(out: Vector<T>, items: Set<T>, from: Int, count: Int)
-/// -> Unit`: the `count` members of `items` from `from` appended to `out`,
-/// whose store already has room for them.
+/// `core.vectorCopyFromSet<T>(out: Vector<T>, at: Int, items: Set<T>, from: Int,
+/// count: Int) -> Unit`: the `count` members of `items` from `from` written
+/// into `out`'s store at `at`.
 ///
-/// `Inst::LoadField` of the store and of the length, one word `Inst::RunCopy`
-/// out of the set into the store at the length — a set's run read as the
-/// elements it is (#378, P4-5) — and the length raised by `count`. **No growth.**
-/// The copy's destination bound is the store's capacity, so a body that did not
-/// allocate the room is refused by the copy, with nothing written and the length
-/// unchanged; `std.set` allocates it with [`CORE_VECTOR_WITH_CAPACITY`] first.
-pub const CORE_EXTEND_FROM_SET: CoreIntrinsicSchema = CoreIntrinsicSchema {
-    name: "extendFromSet",
+/// `Inst::LoadField` of the store and one word `Inst::RunCopy` out of the set
+/// into it — a set's run read as the elements it is (#378, P4-5) —
+/// and [`CORE_VECTOR_ENSURE`]'s byte member [`CORE_BYTES_COPY`] for a vector.
+/// **It publishes nothing**: the length moves at [`CORE_VECTOR_COMMIT`] and
+/// nowhere else.
+///
+/// It replaced `core.extendFromSet`, which read the length, copied, added and
+/// wrote the length back with a plain `StoreField` — the unrestricted length
+/// store
+/// [ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md)
+/// forbids, and the shape that made a keyed extend six instructions no backend
+/// could treat as one. `std.set` now writes the length, the ensure, this and
+/// the commit, which is the same append window `std.vector.push` and
+/// `std.stringbuilder`'s `appendText` are.
+pub const CORE_VECTOR_COPY_FROM_SET: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "vectorCopyFromSet",
     generics: &["T"],
     params: &[
         ParamSchema {
             name: "out",
             ty: BuiltinType::Vector(&BuiltinType::Param("T")),
+        },
+        ParamSchema {
+            name: "at",
+            ty: BuiltinType::Int,
         },
         ParamSchema {
             name: "items",
@@ -2292,11 +2305,12 @@ pub const CORE_EXTEND_FROM_SET: CoreIntrinsicSchema = CoreIntrinsicSchema {
     fresh: false,
 };
 
-/// `core.extendFromMap<K, V>(out: Vector<MapEntry<K, V>>, entries: Map<K, V>,
-/// from: Int, count: Int) -> Unit`: [`CORE_EXTEND_FROM_SET`] over a map's run,
-/// whose unit is a `MapEntry<K, V>` word for word.
-pub const CORE_EXTEND_FROM_MAP: CoreIntrinsicSchema = CoreIntrinsicSchema {
-    name: "extendFromMap",
+/// `core.vectorCopyFromMap<K, V>(out: Vector<MapEntry<K, V>>, at: Int, entries:
+/// Map<K, V>, from: Int, count: Int) -> Unit`:
+/// [`CORE_VECTOR_COPY_FROM_SET`] over a map's run, whose unit is a
+/// `MapEntry<K, V>` word for word.
+pub const CORE_VECTOR_COPY_FROM_MAP: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "vectorCopyFromMap",
     generics: &["K", "V"],
     params: &[
         ParamSchema {
@@ -2305,6 +2319,10 @@ pub const CORE_EXTEND_FROM_MAP: CoreIntrinsicSchema = CoreIntrinsicSchema {
                 &BuiltinType::Param("K"),
                 &BuiltinType::Param("V"),
             )),
+        },
+        ParamSchema {
+            name: "at",
+            ty: BuiltinType::Int,
         },
         ParamSchema {
             name: "entries",

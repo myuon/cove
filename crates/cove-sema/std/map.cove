@@ -82,13 +82,13 @@ export fn inserted<K, V>(entries: Map<K, V>, key: K, value: V) -> Map<K, V> {
   let out: Vector<MapEntry<K, V>> = core.vectorWithCapacity(
     gap + 1 + length - above,
   )
-  core.extendFromMap(out, entries, 0, gap)
+  copyFromMap(out, entries, 0, gap)
   let entry = MapEntry(key: key, value: value)
   let end = core.vectorLength(out)
   core.vectorEnsure(out, 1)
   core.vectorStore(out, end, entry)
   core.vectorCommit(out, 1)
-  core.extendFromMap(out, entries, above, length - above)
+  copyFromMap(out, entries, above, length - above)
   return core.mapFinish(out)
 }
 
@@ -106,8 +106,8 @@ export fn removed<K, V>(entries: Map<K, V>, key: K) -> Map<K, V> {
   }
   let length = entries.length()
   let out: Vector<MapEntry<K, V>> = core.vectorWithCapacity(length - 1)
-  core.extendFromMap(out, entries, 0, at)
-  core.extendFromMap(out, entries, at + 1, length - at - 1)
+  copyFromMap(out, entries, 0, at)
+  copyFromMap(out, entries, at + 1, length - at - 1)
   return core.mapFinish(out)
 }
 
@@ -160,6 +160,38 @@ fn seekPlaced<K, V>(run: Vector<MapEntry<K, V>>, key: K) -> Int {
     }
   }
   return -low - 1
+}
+
+/// `count` entries of `entries` from `from`, appended to `run`, whose store
+/// already has room for them.
+///
+/// [ADR 0062]'s append of a run, over a map's entries rather than a string's
+/// bytes: the length, room for `count` more, the copy into the room, and the
+/// length raised over it. It is `std.stringbuilder`'s `appendText` word for
+/// word with `core.vectorCopyFromMap` in place of `core.bytesCopy`, and it is
+/// one window to every backend.
+///
+/// It replaced `core.extendFromMap`, which copied and then raised the length
+/// with a field store — the unrestricted write to a growable owner's length
+/// word ADR 0062 forbids, and the reason a keyed extend was six instructions
+/// that no backend could run as one. The ensure never grows here: `inserted`
+/// and `removed` size the vector for exactly what they will write.
+///
+/// A function rather than four statements at each of the four sites, for
+/// `appendText`'s reason: it is one step, so the lowering expands it wherever
+/// it is written.
+///
+/// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+fn copyFromMap<K, V>(
+  run: Vector<MapEntry<K, V>>,
+  entries: Map<K, V>,
+  from: Int,
+  count: Int,
+) {
+  let at = core.vectorLength(run)
+  core.vectorEnsure(run, count)
+  core.vectorCopyFromMap(run, at, entries, from, count)
+  core.vectorCommit(run, count)
 }
 
 /// `entry` placed at `gap` of `run`, whose store has room for one more.
