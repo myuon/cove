@@ -60,7 +60,10 @@ intrinsics, lowered to run instructions rather than a builtin call.
 | `vectorMove` | `core.vectorMove(items: Vector<T>, to: Int, from: Int, count: Int) -> Unit` |
 | `stringSlice` | `core.stringSlice(text: String, from: Int, count: Int) -> String` |
 | `bytesAllocate` | `core.bytesAllocate(capacity: Int) -> ByteBuffer` |
-| `bytesPush` | `core.bytesPush(buffer: ByteBuffer, byte: Int) -> Unit` |
+| `bytesEnsure` | `core.bytesEnsure(buffer: ByteBuffer, additional: Int) -> Unit` |
+| `bytesStore` | `core.bytesStore(buffer: ByteBuffer, at: Int, byte: Int) -> Unit` |
+| `bytesCopy` | `core.bytesCopy(buffer: ByteBuffer, at: Int, text: String, from: Int, count: Int) -> Unit` |
+| `bytesCommit` | `core.bytesCommit(buffer: ByteBuffer, count: Int) -> Unit` |
 | `bytesExtend` | `core.bytesExtend(buffer: ByteBuffer, text: String, from: Int, to: Int) -> Unit` |
 | `bytesFinish` | `core.bytesFinish(buffer: ByteBuffer) -> String` |
 | `bytesLength` | `core.bytesLength(buffer: ByteBuffer) -> Int` |

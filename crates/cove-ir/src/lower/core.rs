@@ -14,9 +14,11 @@
 //!
 //! The string builder is the one core type here with no public method of its
 //! own. `std.stringbuilder`'s `StringBuilder` wraps a `ByteBuffer` — ADR 0052's
-//! growable packed byte run — and its five operations are the five
-//! `core.bytes*` intrinsics: a byte `growable-alloc`, `growable-push` and
-//! `growable-extend`, a `run-finish` into `String`, and a field read of the
+//! growable packed byte run — and its operations are the `core.bytes*`
+//! intrinsics: a byte `growable-alloc`; ADR 0062's `growable-ensure`, a
+//! `run-store` or `run-copy` into the store, and `growable-commit`, which
+//! `appendByte` and `append` are written over; the `growable-extend` beneath
+//! `appendSlice`; a `run-finish` into `String`; and a field read of the
 //! owner's length word. The owner is a reference, so nothing needs an address:
 //! a `var self` builder is a `var` slot holding that reference, the body loads
 //! it, and every append writes *through* it — which is why a growth that
@@ -52,7 +54,7 @@ use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Arg, Expr, ExprKind};
 
 use super::frame::Val;
-use super::shapes::{self, BUFFER_LEN, VECTOR_LEN, VECTOR_STORE};
+use super::shapes::{self, BUFFER_LEN, BUFFER_STORE, VECTOR_LEN, VECTOR_STORE};
 use super::{Body, Dest};
 use crate::inst::{ArithOp, CmpOp, Compare, Inst, Len, Num, Slot, Storage, Validation};
 use crate::intrinsic::Intrinsic;
@@ -92,7 +94,11 @@ impl Body<'_> {
     ) -> Val {
         match (name, args) {
             ("byteLength", [text]) => self.core_byte_length(expr, &text.value, want),
-            ("vectorEnsure" | "vectorStore" | "vectorCommit", _) => {
+            (
+                "vectorEnsure" | "vectorStore" | "vectorCommit" | "bytesEnsure" | "bytesStore"
+                | "bytesCopy" | "bytesCommit",
+                _,
+            ) => {
                 if self.core_statement(expr, name, args) {
                     self.unit_answer(expr, want)
                 } else {
@@ -123,9 +129,6 @@ impl Body<'_> {
                 self.core_string_slice(expr, &text.value, &from.value, &count.value, want)
             }
             ("bytesAllocate", [capacity]) => self.core_bytes_allocate(expr, &capacity.value, want),
-            ("bytesPush", [buffer, byte]) => {
-                self.core_bytes_push(expr, &buffer.value, &byte.value, want)
-            }
             ("bytesExtend", [buffer, text, from, to]) => self.core_bytes_extend(
                 expr,
                 &buffer.value,
@@ -185,8 +188,10 @@ impl Body<'_> {
     }
 
     /// Whether `expr` is a call of one of ADR 0062's protocol statements —
-    /// `core.vectorEnsure`, `core.vectorStore`, `core.vectorCommit` — written
-    /// where nothing reads its answer, and if it is, its instructions.
+    /// `core.vectorEnsure`, `core.vectorStore`, `core.vectorCommit`, and their
+    /// byte members `core.bytesEnsure`, `core.bytesStore`, `core.bytesCopy` and
+    /// `core.bytesCommit` — written where nothing reads its answer, and if it
+    /// is, its instructions.
     ///
     /// Asked by [`Body::discard`], so that a statement costs no `()`. That is
     /// not only a dispatch saved: [`crate::legalize`]'s windows admit nothing
@@ -218,7 +223,13 @@ impl Body<'_> {
             || self.frame.lookup(head).is_some()
             || !matches!(
                 name.node.as_str(),
-                "vectorEnsure" | "vectorStore" | "vectorCommit"
+                "vectorEnsure"
+                    | "vectorStore"
+                    | "vectorCommit"
+                    | "bytesEnsure"
+                    | "bytesStore"
+                    | "bytesCopy"
+                    | "bytesCommit"
             )
         {
             return false;
@@ -241,6 +252,28 @@ impl Body<'_> {
             ("vectorStore", [items, index, value]) => {
                 self.core_vector_store(expr, &items.value, &index.value, &value.value)
             }
+            ("bytesEnsure", [buffer, additional]) => self.reserve(
+                expr,
+                &buffer.value,
+                &additional.value,
+                Storage::PackedBytes,
+                Reserve::Ensure,
+            ),
+            ("bytesCommit", [buffer, count]) => self.reserve(
+                expr,
+                &buffer.value,
+                &count.value,
+                Storage::PackedBytes,
+                Reserve::Commit,
+            ),
+            ("bytesStore", [buffer, at, byte]) => {
+                self.core_bytes_store(expr, &buffer.value, &at.value, &byte.value)
+            }
+            ("bytesCopy", [buffer, at, text, from, count]) => self.core_bytes_copy(
+                expr,
+                &buffer.value,
+                [&at.value, &text.value, &from.value, &count.value],
+            ),
             _ => {
                 self.gap(&format!("`core.{name}`"), expr);
                 false
@@ -268,9 +301,22 @@ impl Body<'_> {
         let Some(elem) = self.vector_element(items) else {
             return false;
         };
-        let owner = self.expr(items);
+        self.reserve(expr, items, count, Storage::Words(elem), which)
+    }
+
+    /// One half of a reservation over `storage`: [`Body::core_vector_reserve`]
+    /// for a vector, and `core.bytesEnsure` or `core.bytesCommit` for a byte
+    /// buffer, which have no element to find first.
+    fn reserve(
+        &mut self,
+        expr: &Expr,
+        owner: &Expr,
+        count: &Expr,
+        storage: Storage,
+        which: Reserve,
+    ) -> bool {
+        let owner = self.expr(owner);
         let many = self.expr(count);
-        let storage = Storage::Words(elem);
         let inst = match which {
             Reserve::Ensure => Inst::GrowableEnsure {
                 owner: owner.slot,
@@ -845,32 +891,97 @@ impl Body<'_> {
         dst
     }
 
-    /// `core.bytesPush(buffer, byte)`: one byte [`Inst::GrowablePush`], then
-    /// the `()`.
+    /// `core.bytesStore(buffer, at, byte)`: the buffer's store, and one byte
+    /// [`Inst::RunStore`] into it at `at`.
     ///
-    /// The instruction writes no destination, so the unit is written where the
-    /// surrounding form asked for it — [`Body::unit_answer`] — and a value that
-    /// is not a byte stops the run in the machine's own words.
-    fn core_bytes_push(
-        &mut self,
-        expr: &Expr,
-        buffer: &Expr,
-        byte: &Expr,
-        want: Option<Dest>,
-    ) -> Val {
+    /// [`Body::core_vector_store`] for a byte run, and for the same reason
+    /// written as a statement with no `()`: `std.stringbuilder`'s
+    /// `appendByteInto` is a length read, an ensure of one, this at that length
+    /// and a commit of one, which is [`crate::legalize`]'s byte push. Bounded by
+    /// the store's capacity, so a byte write only into the room an ensure made;
+    /// a value that is not a byte stops the run in the instruction's words.
+    fn core_bytes_store(&mut self, expr: &Expr, buffer: &Expr, at: &Expr, byte: &Expr) -> bool {
         let owner = self.expr(buffer);
-        let value = self.expr(byte);
+        let index = self.expr(at);
+        let src = self.expr(byte);
+        let store = self.buffer_store(owner.slot, expr.span);
         self.emit(
-            Inst::GrowablePush {
-                owner: owner.slot,
-                src: value.slot,
+            Inst::RunStore {
+                run: store.slot,
+                index: index.slot,
+                src: src.slot,
                 storage: Storage::PackedBytes,
             },
             expr.span,
         );
-        self.release(value, expr.span);
+        self.release(store, expr.span);
+        self.release(src, expr.span);
+        self.release(index, expr.span);
         self.release(owner, expr.span);
-        self.unit_answer(expr, want)
+        true
+    }
+
+    /// `core.bytesCopy(buffer, at, text, from, count)`: the buffer's store, and
+    /// one byte [`Inst::RunCopy`] of `count` bytes of `text` from `from` into it
+    /// at `at`.
+    ///
+    /// The row is the copy's own five operands, `[store, at, text, from,
+    /// count]`, and the store is read after every operand is evaluated, so
+    /// that nothing but a constant lands between it and the copy: `appendText`
+    /// is a length read, an ensure of the text's length, this at the length and
+    /// from `0`, and a commit of the same count, which is
+    /// [`crate::legalize`]'s byte append. The copy's bounds are the store's
+    /// capacity and the text's length; a whole string's ends are character
+    /// boundaries, so it asks nothing about them.
+    fn core_bytes_copy(
+        &mut self,
+        expr: &Expr,
+        buffer: &Expr,
+        [at, text, from, count]: [&Expr; 4],
+    ) -> bool {
+        let owner = self.expr(buffer);
+        let index = self.expr(at);
+        let src = self.expr(text);
+        let start = self.expr(from);
+        let many = self.expr(count);
+        let store = self.buffer_store(owner.slot, expr.span);
+        let row = self.pool.args.intern(vec![
+            store.arg(),
+            index.arg(),
+            src.arg(),
+            start.arg(),
+            many.arg(),
+        ]);
+        self.emit(
+            Inst::RunCopy {
+                args: row,
+                storage: Storage::PackedBytes,
+            },
+            expr.span,
+        );
+        self.release(store, expr.span);
+        self.release(many, expr.span);
+        self.release(start, expr.span);
+        self.release(src, expr.span);
+        self.release(index, expr.span);
+        self.release(owner, expr.span);
+        true
+    }
+
+    /// The store a buffer's bytes are in, held in a reference slot of its own
+    /// for [`Body::vector_store`]'s reason.
+    fn buffer_store(&mut self, owner: Slot, span: Span) -> Val {
+        let store = self.temp(shapes::REF);
+        self.emit(
+            Inst::LoadField {
+                dst: store.slot,
+                obj: owner,
+                at: BUFFER_STORE,
+                layout: shapes::REF,
+            },
+            span,
+        );
+        store
     }
 
     /// `core.bytesExtend(buffer, text, from, to)`: one byte

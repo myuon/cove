@@ -1,12 +1,16 @@
-error[cove::runtime]: `appendByte`'s value is `300`, and a byte is 0 to 255
+error[cove::runtime]: `runStore`'s value is `300`, and a byte is 0 to 255
  --> <e2e>/fail_stringbuilder_byte_range/main.cove:6:3
   |
 6 |   out.appendByte(value)
   |   ^^^^^^^^^^^^^^^^^^^^^
+   --> std/stringbuilder.cove:202:3
+    |
+202 |   core.bytesStore(buffer, at, value)
+    |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
    --> std/stringbuilder.cove:147:5
     |
-147 |     core.bytesPush(self.buffer, value)
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ in the standard library
+147 |     appendByteInto(self.buffer, value)
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ called from here, in the standard library
   --> <e2e>/fail_stringbuilder_byte_range/main.cove:18:3
    |
 18 |   emit(var out, 300)

@@ -879,10 +879,17 @@ pub enum Inst {
     ///
     /// # For [`Storage::PackedBytes`]
     ///
-    /// ADR 0052's scalar append. It exists for a delimiter or an encoded scalar
+    /// ADR 0052's scalar append. It existed for a delimiter or an encoded scalar
     /// a lowering emits one at a time, not as how text is expected to move:
     /// copying a run of bytes through this would be as many dispatches as there
     /// are bytes, which is what [`Inst::GrowableExtend`] is for.
+    ///
+    /// What `StringBuilder.appendByte`, `std.int.renderInto` and an
+    /// interpolation's one-byte literal lowered to until ADR 0062 made each of
+    /// them an ensure, a `run-store` and a commit. No lowering emits it over
+    /// either storage now; it stays, with its encoding, its VM arm and its native
+    /// emission, until the stage of that ADR which deletes the composite
+    /// instructions together.
     ///
     /// `owner` must name a live byte buffer and `src` must be a byte,
     /// `0..=255`, because this is an instruction that puts an arbitrary integer
@@ -892,9 +899,7 @@ pub enum Inst {
     ///
     /// What `Vector.push` lowered to until
     /// [ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md)
-    /// made `std.vector.push` an ensure, a `store-elem` and a commit. No
-    /// lowering emits it any more; it stays until the stage of that ADR which
-    /// deletes the composite instructions together.
+    /// made `std.vector.push` an ensure, a `store-elem` and a commit.
     ///
     /// `owner` names a `Vector<T>` whose element layout is the storage's, and
     /// `src` is the **head of a run** of that

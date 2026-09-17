@@ -197,11 +197,21 @@ fn every_instruction_the_compiler_lowers_encodes() {
 
 /// The encoding is a genuine inverse over everything the compiler produces,
 /// not only over the samples the format's own tests build.
+///
+/// Every row decodes to its instruction. Every row is also that instruction's
+/// own encoding, except the head of an ADR 0062 window, which is that encoding
+/// under the fused opcode of its pattern — `std.int.renderInto`, which every
+/// one of these lowers, appends its digits through byte push windows.
 #[test]
 fn every_encoded_instruction_decodes_back_to_the_one_it_came_from() {
     for (name, program) in programs() {
         let encoded = encode_program(&program).expect("the program encodes");
         for (index, function) in program.functions.iter().enumerate() {
+            let heads: std::collections::BTreeMap<usize, Op> =
+                crate::legalize::windows(&program, function)
+                    .into_iter()
+                    .map(|window| (window.head, Op::fused(window.pattern)))
+                    .collect();
             for (pc, inst) in function.code.iter().enumerate() {
                 let bytes = encoded.functions[index][pc];
                 assert_eq!(
@@ -210,12 +220,15 @@ fn every_encoded_instruction_decodes_back_to_the_one_it_came_from() {
                     "`{name}` {}+{pc}",
                     function.qualified()
                 );
-                assert_eq!(
-                    encode(inst, pc as Pc),
-                    Ok(bytes),
-                    "`{name}` {}+{pc}",
-                    function.qualified()
-                );
+                let own = encode(inst, pc as Pc).map(|held| match heads.get(&pc) {
+                    Some(op) => {
+                        let mut raw = *held.bytes();
+                        raw[0] = op.number();
+                        crate::EncodedInst::from_bytes(raw)
+                    }
+                    None => held,
+                });
+                assert_eq!(own, Ok(bytes), "`{name}` {}+{pc}", function.qualified());
             }
         }
     }

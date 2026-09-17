@@ -1177,9 +1177,11 @@ const WINDOW_TAIL: u64 = (cove_ir::legalize::MAX_ROWS - 1) as u64;
 /// be. Answers how many rows after the head ran, which the loop steps over.
 ///
 /// **The head is the length read it decodes to.** A push is [`fused_push`]
-/// first, head and all, which the arm asks before this; what reaches here is an
-/// append, or a push that declined. The head runs as `LOAD_FIELD` runs it, so a
-/// refusal there is that arm's, in its words, at this pc.
+/// first, head and all, which the arm asks before this, and a byte append is
+/// [`fused_append`] first, which this asks before anything else; what goes on
+/// from there is a word append, or a window either declined. The head runs as
+/// `LOAD_FIELD` runs it, so a refusal there is that arm's, in its words, at
+/// this pc.
 ///
 /// **Then the rest, only when no question can fall inside.** The loop asks its
 /// one question — a safepoint, and before every instruction a debugger's or a
@@ -1226,6 +1228,12 @@ fn fused_window(
     let code = encoded.function(id);
     let held = code[head];
     let base_at = machine.mem.stack_index(base);
+    if held.opcode() == FUSED_APPEND_BYTES {
+        let rows = fused_append(machine, encoded, budget, id, base, base_at, head)?;
+        if rows > 0 {
+            return Ok(rows);
+        }
+    }
     let open = machine.instructions + WINDOW_TAIL < machine.next_check;
     let addr = machine.mem.word_at(base_at + held.b() as usize);
     let field = held.lo();
@@ -1239,7 +1247,7 @@ fn fused_window(
     if !open {
         return Ok(0);
     }
-    fused_tail(machine, program, budget, code, id, base, head)
+    fused_tail(machine, program, budget, code, id, base, head, head + 1)
 }
 
 /// A push window run whole, head included, in the one call the fused arm makes
@@ -1477,6 +1485,245 @@ fn fused_push(
     Ok(rows)
 }
 
+/// A byte append window run whole, head included, in one call: [ADR 0062]'s
+/// append of a run, as [`fused_push`] is its append of one.
+///
+/// The window is `cove_ir::legalize`'s append over bytes — the length read, an
+/// optional count constant, the ensure, an optional offset constant on either
+/// side of the store read, the `run-copy` into the store, an optional clear and
+/// an optional second count, and the commit — and `bytecode::verify` has
+/// re-matched it, so the rows are where this reads them.
+///
+/// # What it asks
+///
+/// Every question a row would refuse on, once and up front, of the words the
+/// rows would read: the owner is a live `Program::buffer_layout` whose store is
+/// `Program::bytes_layout`; the count is not negative; the source is a
+/// `String` and the range is inside it; and the copy's charge does not bring
+/// a safepoint due inside the window, which [`in_chunks`] would take between
+/// the copy and the commit. Any other answer writes nothing and answers `0`:
+/// [`fused_window`] then runs the rows the ordinary way, in their own words.
+///
+/// A `String` source and a `Bytes` store are never one object, so the copy
+/// has no overlap to walk backwards from.
+///
+/// # A growth is the ensure's own
+///
+/// For [`fused_push`]'s reason. The rows before the ensure are written and
+/// counted, the machine is synced to the ensure's pc and `Machine::ensure_growable`
+/// grows the store — collecting if it must, refusing at the ensure's span if it
+/// cannot — and [`fused_tail`] runs the rest from the row after it, so the copy
+/// reads the store the growth left.
+///
+/// # What it writes and counts
+///
+/// Every frame word the rows write, in their order — the length, the count,
+/// the offset, the store, the clear, the second count — the bytes, and the
+/// length. `Machine::instructions` rises by the rows and `bulk_work` by the
+/// copy's words, as the rows would have charged them.
+///
+/// # Why it exists, and why [`fused_window`] asks it
+///
+/// Without it, a byte append that fused ran its head through `Machine::checked`
+/// and each row after it through [`fused_tail`]'s generic arms, and two million
+/// appends of three bytes measured 439 ms against 234 ms for the composite
+/// `GROWABLE_EXTEND_BYTES` it replaced; with it they measure 191 ms (the
+/// `checked` profile, medians of interleaved runs). It is out of line and alone
+/// for [`fused_push`]'s reasons.
+///
+/// It is reached through [`fused_window`], which asks it first, rather than
+/// from an arm of the loop's own the way [`fused_push`] is: the loop is then
+/// exactly the loop it was, and an append pays one more call's entry, which
+/// is small beside a copy. With the loop calling it directly covefmt was no
+/// faster (4.78 s against 4.76 s over five interleaved runs, inside the noise),
+/// so the shape that leaves the loop alone is the one kept.
+///
+/// [ADR 0062]: ../../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn fused_append(
+    machine: &mut Machine<'_>,
+    encoded: &Encoded,
+    budget: &Meter,
+    id: FunctionId,
+    base: u64,
+    base_at: usize,
+    head: usize,
+) -> Result<usize, RuntimeError> {
+    if machine.instructions + WINDOW_TAIL >= machine.next_check {
+        return Ok(0);
+    }
+    let program = machine.program;
+    let code = encoded.function(id);
+    // The rows, by opcode: `legalize::recognize`'s grammar, which the byte
+    // verifier has already matched against this head. The shortest append is
+    // five rows and a function's last row is a terminator, so the slice below
+    // always holds the window; a `None` is a window this does not know.
+    let Some(rows) = code.get(head..code.len().min(head + cove_ir::legalize::MAX_ROWS)) else {
+        return Ok(0);
+    };
+    let is = |at: usize, op: u8| rows.get(at).is_some_and(|held| held.opcode() == op);
+    let first = rows[0];
+    let mut next = 1;
+    let count_const = is(next, CONST_INT).then(|| rows[next]);
+    next += usize::from(count_const.is_some());
+    let ensure_at = next;
+    if !is(ensure_at, GROWABLE_ENSURE_BYTES) {
+        return Ok(0);
+    }
+    let ensure = rows[ensure_at];
+    next += 1;
+    let mut offset = is(next, CONST_INT).then(|| rows[next]);
+    next += usize::from(offset.is_some());
+    if !is(next, LOAD_FIELD) {
+        return Ok(0);
+    }
+    let read = rows[next];
+    next += 1;
+    if offset.is_none() && is(next, CONST_INT) {
+        offset = Some(rows[next]);
+        next += 1;
+    }
+    if !is(next, RUN_COPY_BYTES) {
+        return Ok(0);
+    }
+    let copy = rows[next];
+    next += 1;
+    let clear = is(next, CLEAR).then(|| rows[next]);
+    next += usize::from(clear.is_some());
+    let second = is(next, CONST_INT).then(|| rows[next]);
+    next += usize::from(second.is_some());
+    if !is(next, GROWABLE_COMMIT_BYTES) {
+        return Ok(0);
+    }
+    let window = next;
+    let [_, _, src_arg, from_arg, _] = program.arg_list(ArgsId(copy.lo())) else {
+        return Ok(0);
+    };
+    let (src_slot, from_slot) = (src_arg.slot as usize, from_arg.slot as usize);
+
+    let (frame, heap) = machine.mem.stack_and_heap();
+    let owner = frame[base_at + first.b() as usize];
+    let Some([header, length, stored]) = heap.run_at(owner).and_then(|run| run.get(..3)) else {
+        return Ok(0);
+    };
+    if header_layout(header.load(Relaxed)) != program.buffer_layout {
+        return Ok(0);
+    }
+    let len = length.load(Relaxed);
+    let store = stored.load(Relaxed);
+    let Some(dst) = heap.run_at(store) else {
+        return Ok(0);
+    };
+    let store_header = dst[0].load(Relaxed);
+    if header_layout(store_header) != program.bytes_layout {
+        return Ok(0);
+    }
+    let src = frame[base_at + src_slot];
+    let Some(text) = heap.run_at(src) else {
+        return Ok(0);
+    };
+    let text_header = text[0].load(Relaxed);
+    if header_layout(text_header) != program.str_layout {
+        return Ok(0);
+    }
+    // The count and the offset as the copy would read them, after the
+    // constants before it have been written: `legalize::recognize` has already
+    // held the offset's slot apart from the count's.
+    let count_slot = ensure.b() as usize;
+    let count = match count_const {
+        Some(held) => held.payload(),
+        None => frame[base_at + count_slot],
+    } as i64;
+    let from = match offset {
+        Some(held) if held.a() as usize == from_slot => held.payload(),
+        _ => frame[base_at + from_slot],
+    } as i64;
+    let text_len = i64::from(header_len(text_header));
+    if count < 0 || from < 0 || from > text_len - count {
+        return Ok(0);
+    }
+    // In chunks the copy would poll once its charge reached a stride; one that
+    // would is left to the rows, whose copy polls where theirs would. So is a
+    // copy a chunk boundary of the heap cuts short.
+    let (at, from, count) = (len as usize, from as usize, count as usize);
+    let words = words_of_bytes(count as i64);
+    let reaches =
+        |run: &[std::sync::atomic::AtomicU64], bytes: usize| run.len() > bytes.div_ceil(8);
+    if count > BULK_CHUNK_BYTES as usize
+        || machine.instructions + window as u64 + machine.bulk_work + words
+            >= machine.charged_work + SAFEPOINT_STRIDE
+        || !reaches(text, from + count)
+    {
+        return Ok(0);
+    }
+
+    // The rows before the ensure: the head's length read and the count.
+    frame[base_at + first.a() as usize] = len;
+    if let Some(held) = count_const {
+        frame[base_at + held.a() as usize] = held.payload();
+    }
+    let capacity = header_len(store_header) as usize;
+    if at + count > capacity || !reaches(dst, at + count) {
+        // A growth — or a store a chunk boundary cuts short, which the rows
+        // copy into the ordinary way — is the ensure's, and the rest is the
+        // rows'.
+        machine.instructions += ensure_at as u64;
+        machine.sync(head + ensure_at);
+        if let Err(error) = machine.ensure_growable(owner, Storage::PackedBytes, count as i64) {
+            if machine.counting.is_some() {
+                machine.count_fusion(first.opcode(), ensure_at, false);
+            }
+            return Err(error.at(machine.span(id, head + ensure_at)));
+        }
+        return fused_tail(
+            machine,
+            program,
+            budget,
+            code,
+            id,
+            base,
+            head,
+            head + ensure_at + 1,
+        );
+    }
+
+    // Room: the rest of the window, in row order.
+    if let Some(held) = offset {
+        frame[base_at + held.a() as usize] = held.payload();
+    }
+    frame[base_at + read.a() as usize] = store;
+    let mut done = 0;
+    while done < count {
+        let (s, d) = (from + done, at + done);
+        let take = (8 - s % 8).min(8 - d % 8).min(count - done);
+        let mask = if take == 8 {
+            u64::MAX
+        } else {
+            (1u64 << (take * 8)) - 1
+        };
+        let bits = (text[1 + s / 8].load(Relaxed) >> ((s % 8) * 8)) & mask;
+        let shift = (d % 8) * 8;
+        let word = &dst[1 + d / 8];
+        let held = word.load(Relaxed);
+        word.store((held & !(mask << shift)) | (bits << shift), Relaxed);
+        done += take;
+    }
+    if let Some(clear) = clear {
+        frame[base_at + clear.a() as usize] = 0;
+    }
+    if let Some(second) = second {
+        frame[base_at + second.a() as usize] = second.payload();
+    }
+    length.store(len + count as u64, Relaxed);
+    machine.instructions += window as u64;
+    machine.bulk_work += words;
+    if machine.counting.is_some() {
+        machine.count_fusion(first.opcode(), window, true);
+    }
+    Ok(window)
+}
+
 /// The rows of a window after its head, run one by one without a dispatch
 /// each: [ADR 0062]'s fused arm for everything [`fused_push`] declines — an
 /// append, a push onto an owner it cannot vouch for, a refusal.
@@ -1501,6 +1748,10 @@ fn fused_push(
 /// fused head, and the loop's frame is the budget.
 ///
 /// [ADR 0062]: ../../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+///
+/// `start` is the first row it runs: `head + 1`, or the row after an ensure
+/// that [`fused_append`] ran and grew. The answer counts every row after the
+/// head either way, which is what the loop steps over.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn fused_tail(
@@ -1511,10 +1762,11 @@ fn fused_tail(
     id: FunctionId,
     base: u64,
     head: usize,
+    start: usize,
 ) -> Result<usize, RuntimeError> {
     let base_at = machine.mem.stack_index(base);
     let end = code.len().min(head + cove_ir::legalize::MAX_ROWS);
-    let mut pc = head + 1;
+    let mut pc = start;
     let mut committed = false;
     let mut failed = None;
     while pc < end && !committed && failed.is_none() {
@@ -7696,6 +7948,85 @@ mod tests {
                     "{what}"
                 );
             }
+        }
+
+        /// **A byte append that has to grow is grown by `fused_append` itself**,
+        /// and the rest of its window runs as `fused_tail` runs it: so one whose
+        /// growth collects first, and one the heap has no room for at all, must
+        /// still be the rows — the same collections, the same bytes, and the same
+        /// refusal at the ensure's span with the same instructions and fuel.
+        #[test]
+        fn a_fused_append_that_grows_collects_and_refuses_as_the_rows_do() {
+            let f = framed();
+            let text = "0123456789".repeat(60);
+            // A heap of 256 words: a full buffer of sixteen bytes, six hundred
+            // bytes to append to it, and garbage enough beside them that the
+            // store the growth asks for does not fit until it collects.
+            let collects = |machine: &mut Machine<'_>| {
+                let owner = machine.alloc_buffer(16).unwrap();
+                machine.push_temp(owner);
+                let store = machine.payload(owner, runs::GROWABLE_STORE);
+                machine.write_bytes(store, &[b'.'; 16]);
+                machine.set_payload(owner, runs::GROWABLE_LEN, 16);
+                let text = machine.new_string(&text).unwrap();
+                machine.push_temp(text);
+                while machine.new_string("garbage, and nothing holds it").is_ok()
+                    && machine.mem.heap_words() < 200
+                {}
+                vec![owner, text]
+            };
+            // A heap of 128 words, which holds the text and the buffer and has no
+            // room for a store that could hold both.
+            let refuses = |machine: &mut Machine<'_>| {
+                let owner = machine.alloc_buffer(16).unwrap();
+                machine.push_temp(owner);
+                let store = machine.payload(owner, runs::GROWABLE_STORE);
+                machine.write_bytes(store, &[b'.'; 16]);
+                machine.set_payload(owner, runs::GROWABLE_LEN, 16);
+                let text = machine.new_string(&text).unwrap();
+                vec![owner, text]
+            };
+            let inspect = |machine: &Machine<'_>, args: &[u64]| {
+                let len = machine.payload(args[0], runs::GROWABLE_LEN);
+                let store = machine.payload(args[0], runs::GROWABLE_STORE);
+                (len, machine.string_bytes(store)[..len as usize].to_vec())
+            };
+            let (fused, report) = fuses_as_unfused(
+                "an append whose growth collects",
+                &f.program,
+                f.append_text,
+                256,
+                None,
+                &collects,
+                &inspect,
+            );
+            assert!(fused.collections > 0, "the growth collected: {fused:?}");
+            assert_eq!(fused.heap.0, 616);
+            assert_eq!(&fused.heap.1[16..], text.as_bytes());
+            assert_eq!(report.fusions[APPEND_BYTES], 1);
+            // The length, the window's seven rows and the return, in three.
+            assert_eq!(
+                (report.encoded_instructions, report.encoded_dispatches),
+                (9, 3)
+            );
+
+            let (fused, report) = fuses_as_unfused(
+                "an append whose growth has no room anywhere",
+                &f.program,
+                f.append_text,
+                128,
+                None,
+                &refuses,
+                &inspect,
+            );
+            assert!(fused.said.contains("no memory left"), "{}", fused.said);
+            assert!(
+                fused.said.contains("start: 2"),
+                "at the ensure: {}",
+                fused.said
+            );
+            assert_eq!(fused.heap.0, 16, "nothing was published");
+            assert_eq!(report.fusions, [0; 4]);
         }
 
         /// Three hundred byte windows in one function, with garbage between them

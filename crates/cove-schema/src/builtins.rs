@@ -1476,10 +1476,12 @@ impl CoreIntrinsicSchema {
 /// [`CORE_VECTOR_TRUNCATE`], which gives the last element back.
 /// `String.sliceBytes` decides its range in Cove and copies it with
 /// [`CORE_STRING_SLICE`], the byte member of the same run slice. And
-/// `std.stringbuilder`'s `StringBuilder` is Cove over the five `bytes*`
-/// entries — [`CORE_BYTES_ALLOCATE`], [`CORE_BYTES_PUSH`],
-/// [`CORE_BYTES_EXTEND`], [`CORE_BYTES_FINISH`] and [`CORE_BYTES_LENGTH`] —
-/// which are ADR 0052's growable byte run with no method of its own left.
+/// `std.stringbuilder`'s `StringBuilder` is Cove over the `bytes*` entries —
+/// [`CORE_BYTES_ALLOCATE`], [`CORE_BYTES_EXTEND`], [`CORE_BYTES_FINISH`] and
+/// [`CORE_BYTES_LENGTH`], and ADR 0062's append of a byte or a whole string,
+/// [`CORE_BYTES_ENSURE`], [`CORE_BYTES_STORE`] or [`CORE_BYTES_COPY`], and
+/// [`CORE_BYTES_COMMIT`] — which are ADR 0052's growable byte run with no
+/// method of its own left.
 /// `length` of both sequences is [`CORE_ARRAY_LENGTH`] or
 /// [`CORE_VECTOR_LENGTH`].
 ///
@@ -1508,7 +1510,10 @@ pub static CORE_INTRINSICS: &[CoreIntrinsicSchema] = &[
     CORE_VECTOR_MOVE,
     CORE_STRING_SLICE,
     CORE_BYTES_ALLOCATE,
-    CORE_BYTES_PUSH,
+    CORE_BYTES_ENSURE,
+    CORE_BYTES_STORE,
+    CORE_BYTES_COPY,
+    CORE_BYTES_COMMIT,
     CORE_BYTES_EXTEND,
     CORE_BYTES_FINISH,
     CORE_BYTES_LENGTH,
@@ -1849,7 +1854,7 @@ pub const CORE_STRING_SLICE: CoreIntrinsicSchema = CoreIntrinsicSchema {
 /// answers for — the rule `core.` is resolved by. In a program `ByteBuffer`
 /// names no type, and a package may declare one of its own.
 ///
-/// What a builder *does* with one is the five `core.bytes*` intrinsics below,
+/// What a builder *does* with one is the `core.bytes*` intrinsics below,
 /// and what a program holds is `std.stringbuilder`'s `StringBuilder`.
 pub const CORE_BYTE_RUN_TYPE: &str = "ByteBuffer";
 
@@ -1871,15 +1876,18 @@ pub const CORE_BYTES_ALLOCATE: CoreIntrinsicSchema = CoreIntrinsicSchema {
     fresh: true,
 };
 
-/// `core.bytesPush(buffer: ByteBuffer, byte: Int) -> Unit`: one byte at the
-/// logical length, which then becomes one more.
+/// `core.bytesEnsure(buffer: ByteBuffer, additional: Int) -> Unit`: room in
+/// the buffer's store for `additional` more bytes above its length.
 ///
-/// One `Inst::GrowablePush` over `Storage::PackedBytes`. A value outside
-/// `0..=255` is not a byte and stops the run in `appendByte`'s words, because
-/// `StringBuilder.appendByte` is the one caller and that is the sentence a
-/// program which wrote the call is owed.
-pub const CORE_BYTES_PUSH: CoreIntrinsicSchema = CoreIntrinsicSchema {
-    name: "bytesPush",
+/// [ADR 0062](../../../docs/adr/0062-an-append-is-ensure-store-commit.md)'s
+/// `Inst::GrowableEnsure` over `Storage::PackedBytes`, and
+/// [`CORE_VECTOR_ENSURE`] for a byte run: it may grow the store, replacing the
+/// store reference beneath the owner, and it publishes nothing.
+/// `std.stringbuilder`'s `appendByteInto` is the length, this of one,
+/// [`CORE_BYTES_STORE`] at that length and [`CORE_BYTES_COMMIT`] of one; its
+/// `appendText` is the same around [`CORE_BYTES_COPY`].
+pub const CORE_BYTES_ENSURE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "bytesEnsure",
     generics: &[],
     params: &[
         ParamSchema {
@@ -1887,7 +1895,96 @@ pub const CORE_BYTES_PUSH: CoreIntrinsicSchema = CoreIntrinsicSchema {
             ty: BuiltinType::ByteBuffer,
         },
         ParamSchema {
+            name: "additional",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Unit,
+    fresh: false,
+};
+
+/// `core.bytesStore(buffer: ByteBuffer, at: Int, byte: Int) -> Unit`: one byte
+/// written at `at` of the buffer's store.
+///
+/// `Inst::LoadField` of the store and ADR 0062's `Inst::RunStore` into it.
+/// Bounded by the store's capacity and not by the length, which is why the one
+/// body that calls it writes at the length it read, into the room an ensure
+/// made; a value outside `0..=255` is not a byte and stops the run.
+pub const CORE_BYTES_STORE: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "bytesStore",
+    generics: &[],
+    params: &[
+        ParamSchema {
+            name: "buffer",
+            ty: BuiltinType::ByteBuffer,
+        },
+        ParamSchema {
+            name: "at",
+            ty: BuiltinType::Int,
+        },
+        ParamSchema {
             name: "byte",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Unit,
+    fresh: false,
+};
+
+/// `core.bytesCopy(buffer: ByteBuffer, at: Int, text: String, from: Int,
+/// count: Int) -> Unit`: `count` bytes of `text` from `from`, written at `at`
+/// of the buffer's store.
+///
+/// `Inst::LoadField` of the store and a byte `Inst::RunCopy` into it, bounded
+/// as that instruction is — by the store's capacity and the string's length,
+/// with no character-boundary rule, because a whole string's ends are
+/// boundaries. What the bytes publish is [`CORE_BYTES_COMMIT`]'s.
+pub const CORE_BYTES_COPY: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "bytesCopy",
+    generics: &[],
+    params: &[
+        ParamSchema {
+            name: "buffer",
+            ty: BuiltinType::ByteBuffer,
+        },
+        ParamSchema {
+            name: "at",
+            ty: BuiltinType::Int,
+        },
+        ParamSchema {
+            name: "text",
+            ty: BuiltinType::String,
+        },
+        ParamSchema {
+            name: "from",
+            ty: BuiltinType::Int,
+        },
+        ParamSchema {
+            name: "count",
+            ty: BuiltinType::Int,
+        },
+    ],
+    result: BuiltinType::Unit,
+    fresh: false,
+};
+
+/// `core.bytesCommit(buffer: ByteBuffer, count: Int) -> Unit`: the buffer's
+/// length raised over the `count` bytes the body has just written above it.
+///
+/// ADR 0062's `Inst::GrowableCommit` over `Storage::PackedBytes`, and
+/// [`CORE_VECTOR_COMMIT`] for a byte run: the one way a buffer's length rises
+/// outside [`CORE_BYTES_EXTEND`], held to the verifier's reservation rule and to
+/// the instruction's own runtime bound.
+pub const CORE_BYTES_COMMIT: CoreIntrinsicSchema = CoreIntrinsicSchema {
+    name: "bytesCommit",
+    generics: &[],
+    params: &[
+        ParamSchema {
+            name: "buffer",
+            ty: BuiltinType::ByteBuffer,
+        },
+        ParamSchema {
+            name: "count",
             ty: BuiltinType::Int,
         },
     ],

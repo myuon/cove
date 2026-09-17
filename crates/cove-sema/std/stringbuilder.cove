@@ -114,7 +114,7 @@ impl StringBuilder {
   /// allocated: the intermediate `String` a `slice` would have produced is
   /// exactly what a builder exists to avoid.
   export fn append(var self, text: String) {
-    core.bytesExtend(self.buffer, text, 0, core.byteLength(text))
+    appendText(self.buffer, text)
   }
 
   /// Appends the bytes of `text` from `from` up to but not including `to`.
@@ -144,7 +144,7 @@ impl StringBuilder {
   /// together to mean that character. [`finish`] is where a run that is not
   /// valid UTF-8 is caught.
   export fn appendByte(var self, value: Int) {
-    core.bytesPush(self.buffer, value)
+    appendByteInto(self.buffer, value)
   }
 
   /// The bytes appended so far, as a `String`, consuming the builder.
@@ -162,4 +162,43 @@ impl StringBuilder {
   export fn finish(var self) -> String {
     core.bytesFinish(self.buffer)
   }
+}
+
+/// Appends the whole of `text` to `buffer`: [ADR 0062]'s append of a run.
+///
+/// Room for the text's bytes, the bytes copied at the length read before the
+/// room was made, and the length raised over them. Nothing is published until
+/// the commit, so a growth that fails leaves the buffer as it was; the copy
+/// starts at `0` and takes the whole string, whose ends are always the starts
+/// of characters, so it has no range to refuse. The four statements after the
+/// count are one window to every backend.
+///
+/// It takes the buffer rather than `var self` so that interpolation can call
+/// it as it calls `std.int.renderInto` — an assembly holds a `ByteBuffer`, not
+/// a builder — and so that it is expanded wherever it is called, like
+/// `std.vector.push`. `StringBuilder.append` is this over its own buffer.
+///
+/// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+fn appendText(buffer: ByteBuffer, text: String) {
+  let count = core.byteLength(text)
+  let at = core.bytesLength(buffer)
+  core.bytesEnsure(buffer, count)
+  core.bytesCopy(buffer, at, text, 0, count)
+  core.bytesCommit(buffer, count)
+}
+
+/// Appends one byte to `buffer`: [ADR 0062]'s append of one, as
+/// `std.vector.push` is for an element.
+///
+/// A value outside `0` through `255` is refused by the store, before the
+/// commit, so the length does not move. Interpolation calls it for a literal
+/// run of one byte, for `appendText`'s reason, and
+/// `StringBuilder.appendByte` is this over its own buffer.
+///
+/// [ADR 0062]: ../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+fn appendByteInto(buffer: ByteBuffer, value: Int) {
+  let at = core.bytesLength(buffer)
+  core.bytesEnsure(buffer, 1)
+  core.bytesStore(buffer, at, value)
+  core.bytesCommit(buffer, 1)
 }

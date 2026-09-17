@@ -10,35 +10,41 @@
 //! to be one variadic `String.interpolate` over every piece, called after all
 //! of them had run, and `"{v} {v.pop()}"` showed the vector after the pop.
 //!
-//! # Run instructions, not `StringBuilder` calls
+//! # The builder's appends, not `StringBuilder`'s methods
 //!
-//! The appends are emitted here as the run instructions `super::core` lowers
-//! the `core.bytes*` intrinsics to, rather than as calls to `StringBuilder`'s
-//! methods for `super::inline` to expand. The instructions are what those
-//! methods become anyway, and writing them directly needs no synthetic call
-//! for them and no uniqueness proof for `finish` — the buffer is a temporary
-//! nothing else can name (#403).
+//! The buffer is allocated and finished here as the run instructions
+//! `super::core` lowers `core.bytesAllocate` and `core.bytesFinish` to, rather
+//! than through `StringBuilder`, so it needs no uniqueness proof for `finish`
+//! — the buffer is a temporary nothing else can name (#403). The appends in
+//! between are calls, through [`Body::call_library`], of the two functions
+//! `StringBuilder.append` and `appendByte` are written over:
+//! `std.stringbuilder`'s `appendText` and `appendByteInto`, which take the
+//! buffer itself. Each is [ADR 0062]'s ensure, write and commit in Cove, a
+//! thin library leaf that `super::inline` expands at every site, so an append
+//! here is the same window a builder's is, recognised by the same
+//! [`crate::legalize`] — and no lowering writes the protocol a second time.
 //!
 //! # One append per piece, chosen by the piece's type
 //!
 //! [`Body::append_piece`] is a single `match` on the checked type of a piece:
 //!
-//! - a `String` is appended whole, as the byte `growable-extend` a
-//!   `StringBuilder.append` is — no rendering and no temporary string;
+//! - a `String` is appended whole by `appendText` — no rendering and no
+//!   temporary string;
 //! - an `Int` is a call to `std.int.renderInto` over the value and the
-//!   buffer: standard-library Cove that pushes one digit at a time with
-//!   `core.bytesPush`, reached through [`Body::call_library`] and expanded
-//!   where the inliner finds it worth it, as any call is;
+//!   buffer: standard-library Cove that appends one digit at a time,
+//!   reached through [`Body::call_library`] and expanded where the inliner
+//!   finds it worth it, as any call is;
 //! - anything else is rendered into the buffer by `Value.renderInto`, which is
 //!   the runtime's one layout-directed rendering walk, so an `Error`, an
 //!   opaque value, a `Range`, a collection, a box and a closure all show
 //!   exactly as they did.
 //!
 //! A literal run of text is not a piece and never reaches that match: its
-//! bytes are known here, so it is a byte push when it is one byte and an
-//! extend from the string pool otherwise.
+//! bytes are known here, so it is `appendByteInto` of a constant when it is
+//! one byte and `appendText` of a string from the pool otherwise.
 //!
 //! [ADR 0052]: ../../../../docs/adr/0052-a-growable-value-is-a-stable-owner-over-a-replaceable-run.md
+//! [ADR 0062]: ../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
 
 use cove_diag::Span;
 use cove_sema::typeck::Ty;
@@ -59,16 +65,24 @@ const PIECE_ALLOWANCE: usize = 16;
 /// The standard-library function an `Int` piece is appended by: module, then
 /// name.
 ///
-/// `crates/cove-sema/std/int.cove` writes it over `core.bytesPush`, and says
-/// why it cannot overflow. It is not exported, because nothing but this
+/// `crates/cove-sema/std/int.cove` writes it over ADR 0062's byte append, and
+/// says why it cannot overflow. It is not exported, because nothing but this
 /// lowering calls it.
 const INT_RENDERING: (&str, &str) = ("std.int", "renderInto");
 
-/// A string under assembly: the buffer it is appended to, and the `0` every
-/// whole-string extend starts its range at.
+/// The standard-library function a whole `String` is appended by.
+///
+/// `crates/cove-sema/std/stringbuilder.cove` writes it, and
+/// `StringBuilder.append` is the same call over a builder's buffer.
+const TEXT_APPEND: (&str, &str) = ("std.stringbuilder", "appendText");
+
+/// The standard-library function one byte is appended by, which
+/// `StringBuilder.appendByte` also calls.
+const BYTE_APPEND: (&str, &str) = ("std.stringbuilder", "appendByteInto");
+
+/// A string under assembly: the buffer it is appended to.
 pub(super) struct Assembly {
     buffer: Val,
-    zero: Option<Val>,
 }
 
 impl Body<'_> {
@@ -94,15 +108,15 @@ impl Body<'_> {
             span,
         );
         self.release(size, span);
-        Assembly { buffer, zero: None }
+        Assembly { buffer }
     }
 
     /// Appends a run of literal text.
     pub(super) fn append_literal(&mut self, assembly: &mut Assembly, text: &str, span: Span) {
         match text.as_bytes() {
             [] => {}
-            // One byte — a separator, a quote, a newline — is a push of a
-            // constant, which needs no string loaded and no range.
+            // One byte — a separator, a quote, a newline — is a byte append of
+            // a constant, which needs no string loaded and no length.
             [byte] => {
                 let value = self.temp(shapes::INT);
                 self.emit(
@@ -112,17 +126,10 @@ impl Body<'_> {
                     },
                     span,
                 );
-                self.emit(
-                    Inst::GrowablePush {
-                        owner: assembly.buffer.slot,
-                        src: value.slot,
-                        storage: Storage::PackedBytes,
-                    },
-                    span,
-                );
+                self.append_by(BYTE_APPEND, assembly, &value, span);
                 self.release(value, span);
             }
-            bytes => {
+            _ => {
                 let id = self.string(text);
                 let literal = self.temp(shapes::STR);
                 self.emit(
@@ -132,16 +139,7 @@ impl Body<'_> {
                     },
                     span,
                 );
-                let len = self.temp(shapes::INT);
-                self.emit(
-                    Inst::Int {
-                        dst: len.slot,
-                        value: bytes.len() as i64,
-                    },
-                    span,
-                );
-                self.extend(assembly, &literal, &len, span);
-                self.release(len, span);
+                self.append_by(TEXT_APPEND, assembly, &literal, span);
                 self.release(literal, span);
             }
         }
@@ -164,16 +162,7 @@ impl Body<'_> {
     ) {
         match ty {
             Some(Ty::Str) if value.layout == shapes::STR => {
-                let len = self.temp(shapes::INT);
-                self.emit(
-                    Inst::Len {
-                        dst: len.slot,
-                        obj: value.slot,
-                    },
-                    span,
-                );
-                self.extend(assembly, value, &len, span);
-                self.release(len, span);
+                self.append_by(TEXT_APPEND, assembly, value, span);
             }
             Some(Ty::Int) if value.layout == shapes::INT => {
                 let (module, function) = INT_RENDERING;
@@ -199,9 +188,6 @@ impl Body<'_> {
         want: Option<Dest>,
         span: Span,
     ) -> Val {
-        if let Some(zero) = assembly.zero {
-            self.release(zero, span);
-        }
         let dst = self.answer_at(want, shapes::STR);
         self.emit(
             Inst::RunFinish {
@@ -217,41 +203,18 @@ impl Body<'_> {
         dst
     }
 
-    /// One byte `growable-extend` of the whole of `text`, whose byte length is
-    /// in `len`.
-    fn extend(&mut self, assembly: &mut Assembly, text: &Val, len: &Val, span: Span) {
-        let zero = match &assembly.zero {
-            Some(zero) => zero.slot,
-            None => {
-                let zero = self.temp(shapes::INT);
-                self.emit(
-                    Inst::Int {
-                        dst: zero.slot,
-                        value: 0,
-                    },
-                    span,
-                );
-                let slot = zero.slot;
-                assembly.zero = Some(zero);
-                slot
-            }
-        };
-        let row = self.pool.args.intern(vec![
-            assembly.buffer.arg(),
-            text.arg(),
-            crate::program::Arg {
-                slot: zero,
-                layout: shapes::INT,
-            },
-            len.arg(),
-        ]);
-        self.emit(
-            Inst::GrowableExtend {
-                args: row,
-                storage: Storage::PackedBytes,
-            },
-            span,
-        );
+    /// A call of one of `std.stringbuilder`'s appends over the buffer and
+    /// `piece`, whose answer nobody reads.
+    fn append_by(
+        &mut self,
+        (module, function): (&str, &str),
+        assembly: &Assembly,
+        piece: &Val,
+        span: Span,
+    ) {
+        if let Some(unit) = self.call_library(module, function, &[&assembly.buffer, piece], span) {
+            self.release(unit, span);
+        }
     }
 
     /// One call of a rendering intrinsic over `value` and the buffer.

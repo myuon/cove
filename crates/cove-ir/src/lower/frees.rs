@@ -22,6 +22,19 @@
 //!   the static map walks it anyway. Zeroing such a word writes zero over
 //!   zero.
 //!
+//! # A `unit` is a clear
+//!
+//! [`Inst::Unit`] writes the zero word — `Repr::Unit` is "nothing, the word is
+//! zero" — so over a word that is `Null` it is exactly a `Null` clear: the run
+//! is bit-identical with it and without it, and it is dropped by the same rule
+//! and says nothing in the transfer for the same reason. That matters because
+//! an expanded leaf that answers `()` writes one into its call's destination,
+//! which is almost always a temporary nothing wrote before: a `Vector.push` or
+//! an interpolation's append, which [ADR 0062](../../../../docs/adr/0062-an-append-is-ensure-store-commit.md)
+//! made standard-library calls, would otherwise pay a dispatch per append for
+//! a `()` nobody reads. A unit over a word that may hold something else is
+//! kept: it is not the same store.
+//!
 //! # Three answers, not two
 //!
 //! `Null` and `Free` are separate lattice values, below `Unknown`, and the
@@ -167,7 +180,8 @@ fn fill<T: Copy>(state: &mut [T], slot: Slot, width: u32, value: T) {
     }
 }
 
-/// Drops every clear whose words are already null or already rooted.
+/// Drops every clear whose words are already null or already rooted, and
+/// every `unit` whose word is already null.
 pub(super) fn drop_clears_that_free_nothing(program: &mut Program) {
     let dropped: Vec<Vec<bool>> = program
         .functions
@@ -182,7 +196,8 @@ pub(super) fn drop_clears_that_free_nothing(program: &mut Program) {
     }
 }
 
-/// Which of a function's instructions are clears that free nothing.
+/// Which of a function's instructions are clears that free nothing, or units
+/// written over a word that is already zero.
 fn pointless(function: &Function, program: &Program) -> Vec<bool> {
     let mut dropped = vec![false; function.code.len()];
     let Some(flow) = Flow::of(function, program) else {
@@ -191,10 +206,14 @@ fn pointless(function: &Function, program: &Program) -> Vec<bool> {
     let free = flow.free();
     let live = flow.live();
     for (at, inst) in function.code.iter().enumerate() {
-        let Inst::Clear { slot, layout } = *inst else {
-            continue;
+        let (slot, width) = match *inst {
+            Inst::Clear { slot, layout } => (slot, flow.width(layout)),
+            // A `()` is the zero word, so writing one over a word that is
+            // already zero is a clear of it: see *A `unit` is a clear*.
+            Inst::Unit { dst } => (dst, 1),
+            _ => continue,
         };
-        let last = slot as usize + flow.width(layout) as usize;
+        let last = slot as usize + width as usize;
         if last > flow.size {
             continue;
         }
@@ -208,8 +227,10 @@ fn pointless(function: &Function, program: &Program) -> Vec<bool> {
         // Zeroing words that are already zero changes nothing a run can see,
         // whoever reads them. Zeroing away an interned address does — the
         // word stops being null and starts being that address — so that one
-        // is dropped only where nothing reads it.
-        dropped[at] = holds == NULL || (holds == FREE && dead);
+        // is dropped only where nothing reads it, and only as a clear: a unit
+        // is kept anywhere but over zero.
+        let clear = matches!(inst, Inst::Clear { .. });
+        dropped[at] = holds == NULL || (clear && holds == FREE && dead);
     }
     dropped
 }
@@ -635,7 +656,10 @@ impl<'p> Flow<'p> {
             // is the one reading that stays true either way, which is what
             // lets the whole function be decided from one walk rather than
             // from dropping a clear, recomputing, and repeating.
-            Inst::Clear { .. } => {}
+            //
+            // A `unit` is the same store of zero, dropped by the same rule, and
+            // so it says nothing for the same reason.
+            Inst::Clear { .. } | Inst::Unit { .. } => {}
             // The object this loads the address of was placed below the
             // collector's floor before the run began, and stays there for
             // the run's whole life — see ADR 0045.

@@ -117,7 +117,9 @@ fn @m.flip(Bool) -> Bool
 
 /// `()` compares equal to `()` and there is nothing in the word to look
 /// at, so no `Compare` needs a case for it. Both sides are still
-/// evaluated, because either of them may have done something.
+/// evaluated, because either of them may have done something — and here
+/// neither did: each is a `unit` into a word nothing wrote, which is zero
+/// already, so `lower::frees` drops both and the answer is all that is left.
 #[test]
 fn comparing_two_units_is_the_answer_rather_than_an_instruction() {
     assert_eq!(
@@ -125,10 +127,8 @@ fn comparing_two_units_is_the_answer_rather_than_an_instruction() {
         "\
 fn @m.same() -> Bool
   frame 3: s0:bool s1:unit s2:unit
-     0  unit s1:unit
-     1  unit s2:unit
-     2  bool s0:bool true
-     3  return s0:Bool
+     0  bool s0:bool true
+     1  return s0:Bool
 "
     );
 }
@@ -157,6 +157,9 @@ fn @m.count() -> Int
     );
 }
 
+/// The `()` it answers is the zero word the machine already made that slot, so
+/// the `unit` that would write it is dropped by `lower::frees` and the body is
+/// its `return`.
 #[test]
 fn a_body_that_falls_off_the_end_answers_unit() {
     assert_eq!(
@@ -164,8 +167,7 @@ fn a_body_that_falls_off_the_end_answers_unit() {
         "\
 fn @m.nothing() -> Unit
   frame 1: s0:unit
-     0  unit s0:unit
-     1  return s0:Unit
+     0  return s0:Unit
 "
     );
 }

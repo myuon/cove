@@ -15685,7 +15685,7 @@ fn secret() -> Int {
     fn only_the_standard_library_can_name_the_byte_run() {
         accepts_modules(&[(
             "std.stringbuilder",
-            "/// Bytes.\nexport fn probe(text: String) -> String {\n  let buffer: ByteBuffer = core.bytesAllocate(4)\n  core.bytesExtend(buffer, text, 0, core.byteLength(text))\n  core.bytesPush(buffer, 33)\n  let n = core.bytesLength(buffer)\n  core.bytesFinish(buffer)\n}\n",
+            "/// Bytes.\nexport fn probe(text: String) -> String {\n  let buffer: ByteBuffer = core.bytesAllocate(4)\n  core.bytesExtend(buffer, text, 0, core.byteLength(text))\n  let at = core.bytesLength(buffer)\n  core.bytesEnsure(buffer, 2)\n  core.bytesStore(buffer, at, 33)\n  core.bytesCopy(buffer, at + 1, text, 0, 1)\n  core.bytesCommit(buffer, 2)\n  let n = core.bytesLength(buffer)\n  core.bytesFinish(buffer)\n}\n",
         )]);
         let error = rejects_modules(&[(
             "app",

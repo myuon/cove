@@ -1,25 +1,28 @@
 //! Calls, and the frame boundary they have to match.
 //!
-//! # `keep()`
+//! # `keep(0)`
 //!
-//! Several fixtures here declare a `fn keep() {}` and call it from the callee
-//! whose call they are about. It is not part of what any of them assert and it
-//! never appears in a listing, because every listing here is the *caller's*.
+//! Several fixtures here declare a `fn keep(n: Int)` that calls itself and call
+//! it from the callee whose call they are about. It is not part of what any of
+//! them assert and it never appears in a listing, because every listing here is
+//! the *caller's*.
 //!
 //! `super::super::inline` expands a call to a small leaf where it is made,
 //! and a two-instruction callee is exactly the shape it expands. A fixture whose
 //! callee is that small has no `call` left in it, and a test of how a call
 //! lowers that holds no call is a test of nothing. Calling anything at all is
-//! what makes a function not a leaf, and `keep()` is the smallest thing there
-//! is to call.
+//! what makes a function not a leaf, and `keep(0)` is the smallest thing to
+//! call that stays a call.
 //!
-//! That holds for one round of the pass. `keep()` is itself a leaf and is
-//! expanded in the first, and a round that expanded a thin standard-library
-//! wrapper is followed by another in which the callee `keep()` was in has
-//! become a leaf too — so a callee here that asks a sequence its `length()`,
-//! which is `std.array.length` since ADR 0058's P3-15, would be expanded after
-//! all. The variadic fixtures sum their elements in a loop instead, which calls
-//! nothing the pass counts.
+//! It calls itself because a leaf would not do. The pass runs again after any
+//! round that expanded something, and every package lowered whole holds
+//! expansions of its own now: `std.stringbuilder`'s `append` and `appendByte`
+//! call `appendText` and `appendByteInto`, which are thin, since ADR 0062. So a
+//! `fn keep() {}` is expanded in the first round and the callee it was in has
+//! become a leaf by the second — as a callee that asks a sequence its
+//! `length()`, which is `std.array.length` since ADR 0058's P3-15, already was.
+//! Nothing expands a function that calls itself. The variadic fixtures sum their
+//! elements in a loop instead, which calls nothing the pass counts.
 //!
 //! Where the callee's *own* listing is what a case is about — the multiword
 //! parameters one — the fixture is left alone, because nothing expands a
@@ -37,7 +40,7 @@ use super::listing;
 fn a_call_names_the_arguments_and_the_destination_location() {
     assert_eq!(
         listing(
-            "fn keep() {}\nfn add(a: Int, b: Int) -> Int { keep()\n  a + b }\nfn f() -> Int { add(1, 2) }",
+            "fn keep(n: Int) { if n > 0 { keep(n - 1) } }\nfn add(a: Int, b: Int) -> Int { keep(0)\n  a + b }\nfn f() -> Int { add(1, 2) }",
             "f"
         ),
         "\
@@ -103,7 +106,7 @@ fn @m.take(Int m.Point Int) -> Int
 fn a_call_passing_a_multiword_argument_names_its_base_slot() {
     assert_eq!(
         listing(
-            "struct Point { x: Int, y: Int }\nfn keep() {}\nfn take(a: Int, p: Point, b: Int) -> Int { keep()\n  a + p.x + p.y + b }\nfn f() -> Int { take(1, Point(x: 2, y: 3), 4) }",
+            "struct Point { x: Int, y: Int }\nfn keep(n: Int) { if n > 0 { keep(n - 1) } }\nfn take(a: Int, p: Point, b: Int) -> Int { keep(0)\n  a + p.x + p.y + b }\nfn f() -> Int { take(1, Point(x: 2, y: 3), 4) }",
             "f"
         ),
         "\
@@ -130,13 +133,12 @@ fn a_var_parameter_is_a_slot_holding_an_address() {
         "\
 fn @m.bump(<addr>) -> Unit
   frame 5: s0!:addr s1:unit s2:int s3:int s4:unit
-  local n -> s0:<addr> [0, 6)
+  local n -> s0:<addr> [0, 5)
      0  load s2:Int s0:addr
      1  add.int.imm s3:int s2:int 1
      2  store s0:addr s3:Int
-     3  unit s4:unit
-     4  copy s1:Unit s4:Unit
-     5  return s1:Unit
+     3  copy s1:Unit s4:Unit
+     4  return s1:Unit
 "
     );
 }
@@ -224,7 +226,7 @@ fn @m.f() -> Int
 fn a_labelled_argument_is_not_a_permutation() {
     assert_eq!(
         listing(
-            "fn keep() {}\nfn scaled(value: Int, by: Int) -> Int { keep()\n  value * by }\nfn f() -> Int { scaled(2, by: 3) }",
+            "fn keep(n: Int) { if n > 0 { keep(n - 1) } }\nfn scaled(value: Int, by: Int) -> Int { keep(0)\n  value * by }\nfn f() -> Int { scaled(2, by: 3) }",
             "f"
         ),
         "\
@@ -252,7 +254,7 @@ fn @m.f() -> Int
 fn a_variadic_parameter_collects_its_arguments_into_an_array() {
     assert_eq!(
         listing(
-            "fn keep() {}\nfn total(items: Int...) -> Int { keep()\n  var n = 0\n  for item in items {\n    n += item\n  }\n  n }\nfn f() -> Int { total(1, 2, 3) }",
+            "fn keep(n: Int) { if n > 0 { keep(n - 1) } }\nfn total(items: Int...) -> Int { keep(0)\n  var n = 0\n  for item in items {\n    n += item\n  }\n  n }\nfn f() -> Int { total(1, 2, 3) }",
             "f"
         ),
         "\
@@ -283,7 +285,7 @@ fn @m.f() -> Int
 fn a_variadic_parameter_given_nothing_is_an_empty_array() {
     assert_eq!(
         listing(
-            "fn keep() {}\nfn total(items: Int...) -> Int { keep()\n  var n = 0\n  for item in items {\n    n += item\n  }\n  n }\nfn f() -> Int { total() }",
+            "fn keep(n: Int) { if n > 0 { keep(n - 1) } }\nfn total(items: Int...) -> Int { keep(0)\n  var n = 0\n  for item in items {\n    n += item\n  }\n  n }\nfn f() -> Int { total() }",
             "f"
         ),
         "\
@@ -308,7 +310,7 @@ fn @m.f() -> Int
 fn a_spread_argument_is_counted_and_then_walked_into_the_run() {
     assert_eq!(
         listing(
-            "fn keep() {}\nfn total(items: Int...) -> Int { keep()\n  var n = 0\n  for item in items {\n    n += item\n  }\n  n }\n\
+            "fn keep(n: Int) { if n > 0 { keep(n - 1) } }\nfn total(items: Int...) -> Int { keep(0)\n  var n = 0\n  for item in items {\n    n += item\n  }\n  n }\n\
              fn f(xs: Array<Int>) -> Int { total(0, ...xs, 9) }",
             "f"
         ),
@@ -348,7 +350,7 @@ fn @m.f(Array) -> Int
 #[test]
 fn a_vector_spread_is_copied_out_before_it_is_walked() {
     let text = listing(
-        "fn keep() {}\nfn total(items: Int...) -> Int { keep()\n  items.length() }\n\
+        "fn keep(n: Int) { if n > 0 { keep(n - 1) } }\nfn total(items: Int...) -> Int { keep(0)\n  items.length() }\n\
          fn f(xs: Vector<Int>) -> Int { total(...xs) }",
         "f",
     );
@@ -487,7 +489,7 @@ fn a_call_through_a_module_imported_whole_names_the_declaration_it_exports() {
             &[
                 (
                     "greet",
-                    "fn keep() {}\nexport fn twice(n: Int) -> Int { keep()\n  n * 2 }\n"
+                    "fn keep(n: Int) { if n > 0 { keep(n - 1) } }\nexport fn twice(n: Int) -> Int { keep(0)\n  n * 2 }\n"
                 ),
                 ("app", "use greet\nfn f() -> Int { greet.twice(21) }\n"),
             ],
@@ -517,7 +519,7 @@ fn a_program_s_own_core_module_is_an_ordinary_call() {
             &[
                 (
                     "core",
-                    "fn keep() {}\nexport fn byteLength(n: Int) -> Int { keep()\n  n * 2 }\n"
+                    "fn keep(n: Int) { if n > 0 { keep(n - 1) } }\nexport fn byteLength(n: Int) -> Int { keep(0)\n  n * 2 }\n"
                 ),
                 ("app", "use core\nfn f() -> Int { core.byteLength(21) }\n"),
             ],

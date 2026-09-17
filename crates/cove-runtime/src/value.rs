@@ -362,6 +362,14 @@ pub struct ByteBufferStorage {
     /// reaching this flag means the proof let one through and saying so is
     /// better than reading a consumed buffer as empty.
     pub finished: RefCell<bool>,
+    /// Bytes written above the length and not yet committed:
+    /// [`VectorStorage::staged`] for a byte run, and for its reason.
+    ///
+    /// `core.bytesStore` and `core.bytesCopy` at `length + staged.len()` stage
+    /// bytes; `core.bytesCommit(n)` moves exactly `n` of them into
+    /// [`ByteBufferStorage::bytes`], and refuses to publish one that was never
+    /// written. A staged byte is not in the length and not in the finish.
+    pub staged: RefCell<Vec<u8>>,
 }
 
 impl ByteBufferStorage {
@@ -373,6 +381,7 @@ impl ByteBufferStorage {
         Rc::new(ByteBufferStorage {
             bytes: RefCell::new(Vec::with_capacity(capacity)),
             finished: RefCell::new(false),
+            staged: RefCell::new(Vec::new()),
         })
     }
 

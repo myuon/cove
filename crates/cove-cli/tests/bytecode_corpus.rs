@@ -220,8 +220,15 @@ fn every_program_the_repository_keeps_encodes_verifies_and_reads_back() {
     // is "nowhere near", which 390 is as much as 445 and 500 were. A number
     // that moved because a constant moved is worth moving with a sentence
     // rather than quietly widening to fit.
+    //
+    // It is 330× since ADR 0062 made an interpolation's appends calls of
+    // `std.stringbuilder`'s `appendText` and `appendByteInto`, which are
+    // expanded: each appends its run to the caller's frame once, whatever the
+    // number of pieces, and `examples/life`'s `world.resolve` — seven messages
+    // assembled in one function, and the widest frame here — went from 184
+    // words to 194 with them. 337× is what that leaves.
     assert!(
-        found.widest_frame * 350 < MAX_FRAME_WORDS,
+        found.widest_frame * 330 < MAX_FRAME_WORDS,
         "the widest frame in the repository is {} words, which is no longer far under the \
          {MAX_FRAME_WORDS}-word limit ADR 0041 adopts",
         found.widest_frame

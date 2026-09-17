@@ -613,26 +613,127 @@ pub fn call_core(
             };
             Ok(Value(Repr::ByteBuffer(ByteBufferStorage::new(capacity))))
         }
-        // `StringBuilder.appendByte`'s whole body: one byte at the logical
-        // length. A value outside `0..=255` is not a byte, and it stops the run
-        // rather than being masked down — `Machine::append_byte` refuses it in
-        // these words, and the two backends must refuse the same argument.
-        "bytesPush" => {
+        // ADR 0062's append over a byte run, beneath `std.stringbuilder`'s
+        // `appendByteInto` and `appendText`: an ensure, a store or a copy at the
+        // length, and a commit — `vectorEnsure` above, for bytes, and staged the
+        // same way, so a commit publishes exactly what its window wrote. The
+        // refusals are the machine's, in its words: a consumed buffer is the
+        // ensure's, a byte that is not one is the store's, and a range outside
+        // the text is the copy's.
+        "bytesEnsure" => {
             let Value(Repr::ByteBuffer(storage)) = &args[0] else {
                 return Err(type_error(&shown, "buffer", "ByteBuffer", &args[0], span));
             };
-            check_buffer_live(storage, "appendByte", span)?;
-            let Value(Repr::Int(value)) = &args[1] else {
-                return Err(type_error("appendByte", "value", "Int", &args[1], span));
+            check_buffer_live(storage, "growableEnsure", span)?;
+            let Value(Repr::Int(additional)) = &args[1] else {
+                return Err(type_error(&shown, "additional", "Int", &args[1], span));
             };
+            if *additional < 0 {
+                return Err(RuntimeError::new(format!(
+                    "`growableEnsure` was asked for room for {additional} unit(s), and room is \
+                     never negative"
+                ))
+                .at(span));
+            }
+            storage.staged.borrow_mut().clear();
+            Ok(Value(Repr::Unit))
+        }
+        "bytesStore" => {
+            let Value(Repr::ByteBuffer(storage)) = &args[0] else {
+                return Err(type_error(&shown, "buffer", "ByteBuffer", &args[0], span));
+            };
+            check_buffer_live(storage, "runStore", span)?;
+            let Value(Repr::Int(value)) = &args[2] else {
+                return Err(type_error(&shown, "byte", "Int", &args[2], span));
+            };
+            let len = storage.len();
+            let mut staged = storage.staged.borrow_mut();
+            let at = core_index(&shown, &args[1], len + staged.len() + 1, span)?;
             let Ok(byte) = u8::try_from(*value) else {
                 return Err(RuntimeError::new(format!(
-                    "`appendByte`'s value is `{value}`, and a byte is 0 to 255"
+                    "`runStore`'s value is `{value}`, and a byte is 0 to 255"
                 ))
                 .at(span));
             };
-            storage.bytes.borrow_mut().push(byte);
+            if at < len {
+                storage.bytes.borrow_mut()[at] = byte;
+            } else if at - len < staged.len() {
+                staged[at - len] = byte;
+            } else {
+                staged.push(byte);
+            }
             Ok(Value(Repr::Unit))
+        }
+        "bytesCopy" => {
+            let Value(Repr::ByteBuffer(storage)) = &args[0] else {
+                return Err(type_error(&shown, "buffer", "ByteBuffer", &args[0], span));
+            };
+            check_buffer_live(storage, "runCopy", span)?;
+            let Value(Repr::Str(text)) = &args[2] else {
+                return Err(type_error(&shown, "text", "String", &args[2], span));
+            };
+            let Value(Repr::Int(from)) = &args[3] else {
+                return Err(type_error(&shown, "from", "Int", &args[3], span));
+            };
+            let Value(Repr::Int(count)) = &args[4] else {
+                return Err(type_error(&shown, "count", "Int", &args[4], span));
+            };
+            if *count < 0 {
+                return Err(RuntimeError::new(format!(
+                    "`runCopy`'s count is `{count}`, and a copy cannot have a negative length"
+                ))
+                .at(span));
+            }
+            let bytes = text.as_bytes();
+            let src_len = bytes.len() as i64;
+            if *from < 0 || from.checked_add(*count).is_none_or(|end| end > src_len) {
+                return Err(RuntimeError::new(format!(
+                    "`runCopy` reads {count} byte(s) from {from} of a source of {src_len}"
+                ))
+                .at(span));
+            }
+            let len = storage.len();
+            let mut staged = storage.staged.borrow_mut();
+            // The oracle has no capacity, so the one destination it can vouch
+            // for is the end of what is already staged: a copy there stages the
+            // bytes, and one anywhere else is a write past the room.
+            let Value(Repr::Int(at)) = &args[1] else {
+                return Err(type_error(&shown, "at", "Int", &args[1], span));
+            };
+            let end = len + staged.len();
+            if usize::try_from(*at) != Ok(end) {
+                return Err(RuntimeError::new(format!(
+                    "`runCopy` writes {count} byte(s) to {at} of a buffer whose room begins at {end}"
+                ))
+                .at(span));
+            }
+            staged.extend_from_slice(&bytes[*from as usize..(*from + *count) as usize]);
+            Ok(Value(Repr::Unit))
+        }
+        "bytesCommit" => {
+            let Value(Repr::ByteBuffer(storage)) = &args[0] else {
+                return Err(type_error(&shown, "buffer", "ByteBuffer", &args[0], span));
+            };
+            check_buffer_live(storage, "growableCommit", span)?;
+            let Value(Repr::Int(count)) = &args[1] else {
+                return Err(type_error(&shown, "count", "Int", &args[1], span));
+            };
+            let mut staged = storage.staged.borrow_mut();
+            let mut bytes = storage.bytes.borrow_mut();
+            match usize::try_from(*count) {
+                Ok(count) if count <= staged.len() => {
+                    bytes.extend(staged.drain(..count));
+                    staged.clear();
+                    Ok(Value(Repr::Unit))
+                }
+                _ => Err(RuntimeError::new(format!(
+                    "`growableCommit` would publish {count} unit(s) onto a length of {} with {} \
+                     written above it, and a commit publishes only units its window wrote",
+                    bytes.len(),
+                    staged.len()
+                ))
+                .at(span)),
+            }
         }
         // Beneath `StringBuilder.append` and `appendSlice`: the range copied
         // straight out of `text`, the slice never materialised.

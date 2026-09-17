@@ -260,7 +260,7 @@ fn a_var_self_receiver_is_an_address() {
         "\
 fn @m.Point.bump(<addr>) -> Unit
   frame 6: s0!:addr s1:unit s2:addr s3:int s4:int s5:unit
-  local self -> s0:<addr> [0, 10)
+  local self -> s0:<addr> [0, 9)
      0  addr-of-part s2:addr s0:addr +1
      1  load s3:Int s2:addr
      2  clear s2:<addr>
@@ -268,20 +268,20 @@ fn @m.Point.bump(<addr>) -> Unit
      4  addr-of-part s2:addr s0:addr +1
      5  store s2:addr s4:Int
      6  clear s2:<addr>
-     7  unit s5:unit
-     8  copy s1:Unit s5:Unit
-     9  return s1:Unit
+     7  copy s1:Unit s5:Unit
+     8  return s1:Unit
 "
     );
 }
 
 /// `Vector.push` is `std.vector.push`, whose body is ADR 0062's append over the
 /// element's words: the length, `growable-ensure` of one, the store read after
-/// it, a `store-elem` at the length, and `growable-commit` of one — and then
-/// the `()` the call answers. No statement of the body writes a `()` of its
-/// own, and the expansion does not clear the store slot the body already
-/// cleared, so each push is exactly `crate::legalize`'s window and one `unit`,
-/// the two rows the composite `growable-push` and its `unit` were. The body is
+/// it, a `store-elem` at the length, and `growable-commit` of one. No statement
+/// of the body writes a `()` of its own, the `()` the call answers is written
+/// into a word nothing wrote before — which `lower::frees` drops as the zero it
+/// already is — and the expansion does not clear the store slot the body
+/// already cleared, so each push is exactly `crate::legalize`'s window: one row
+/// fewer than the composite `growable-push` and its `unit` were. The body is
 /// expanded wherever it is called, and neither a `call` nor an `intrinsic-call`
 /// is left — at a one-word element and at a two-word one, whose source is the
 /// whole run.
@@ -297,11 +297,11 @@ fn a_push_is_ensure_store_commit_where_it_is_written() {
         "\
 fn @m.f(Vector Vector m.Point) -> Int
   frame 19: s0!:ref s1!:ref s2!:int s3!:int s4:int s5:ref s6:ref s7:int s8:unit s9:unit s10:int s11:int s12:ref s13:int s14:unit s15:int s16:int s17:ref s18:int
-  local xs -> s0:Vector [0, 23)
-  local ps -> s1:Vector [0, 23)
-  local p -> s2..s3:m.Point [0, 23)
-  local ints -> s5:Vector [1, 22)
-  local points -> s6:Vector [2, 22)
+  local xs -> s0:Vector [0, 21)
+  local ps -> s1:Vector [0, 21)
+  local p -> s2..s3:m.Point [0, 21)
+  local ints -> s5:Vector [1, 20)
+  local points -> s6:Vector [2, 20)
      0  copy s5:Vector s0:Vector
      1  copy s6:Vector s1:Vector
      2  int s7:int 7
@@ -313,18 +313,16 @@ fn @m.f(Vector Vector m.Point) -> Int
      8  clear s12:<ref>
      9  int s13:int 1
     10  growable-commit.words Int s5:ref s13:int
-    11  unit s8:unit
-    12  load-field s15:Int s6:ref +0
-    13  int s16:int 1
-    14  growable-ensure.words m.Point s6:ref s16:int
-    15  load-field s17:<ref> s6:ref +1
-    16  store-elem s17:ref s15:int s2..s3:m.Point
-    17  clear s17:<ref>
-    18  int s18:int 1
-    19  growable-commit.words m.Point s6:ref s18:int
-    20  unit s8:unit
-    21  int s4:int 0
-    22  return s4:Int
+    11  load-field s15:Int s6:ref +0
+    12  int s16:int 1
+    13  growable-ensure.words m.Point s6:ref s16:int
+    14  load-field s17:<ref> s6:ref +1
+    15  store-elem s17:ref s15:int s2..s3:m.Point
+    16  clear s17:<ref>
+    17  int s18:int 1
+    18  growable-commit.words m.Point s6:ref s18:int
+    19  int s4:int 0
+    20  return s4:Int
 "
     );
 }
@@ -370,8 +368,8 @@ fn a_freeze_is_a_word_run_finish_where_it_is_written() {
         "\
 fn @m.f(Int) -> Array
   frame 12: s0!:int s1:ref s2:ref s3:int s4:ref s5:unit s6:unit s7:int s8:int s9:ref s10:int s11:ref
-  local n -> s0:Int [0, 17)
-  local building -> s4:Vector [6, 16)
+  local n -> s0:Int [0, 16)
+  local building -> s4:Vector [6, 15)
      0  alloc s2:ref Vector<store> x0
      1  alloc s4:ref Vector<vector>
      2  int s3:int 0
@@ -386,9 +384,8 @@ fn @m.f(Int) -> Array
     11  clear s9:<ref>
     12  int s10:int 1
     13  growable-commit.words Int s4:ref s10:int
-    14  unit s5:unit
-    15  run-finish.words Int s1:ref s4:ref Array unchecked
-    16  return s1:Array
+    14  run-finish.words Int s1:ref s4:ref Array unchecked
+    15  return s1:Array
 "
     );
 }
@@ -492,25 +489,24 @@ fn pop_and_remove_are_cove_over_a_growable_truncate() {
         "\
 fn @std.vector.pop<Int>(Vector) -> Option
   frame 11: s0!:ref s1:tag s2:int s3:int s4:bool s5:tag s6:int s7:int s8:ref s9:int s10:unit
-  local items -> s0:Vector [0, 16)
-  local length -> s3:Int [1, 15)
-  local last -> s9:Int [9, 15)
+  local items -> s0:Vector [0, 15)
+  local length -> s3:Int [1, 14)
+  local last -> s9:Int [9, 14)
      0  load-field s3:Int s0:ref +0
      1  eq.int.imm.branch s4:bool s3:int 0 5
      2  tag s5:tag Option.None
      3  copy s1..s2:Option s5..s6:Option
-     4  jump 15
+     4  jump 14
      5  sub.int.imm s7:int s3:int 1
      6  load-field s8:<ref> s0:ref +1
      7  load-elem s9:Int s8:ref s7:int
      8  clear s8:<ref>
      9  sub.int.imm s7:int s3:int 1
     10  growable-truncate.words Int s0:ref s7:int
-    11  unit s10:unit
-    12  tag s5:tag Option.Some
-    13  copy s6:Int s9:Int
-    14  copy s1..s2:Option s5..s6:Option
-    15  return s1..s2:Option
+    11  tag s5:tag Option.Some
+    12  copy s6:Int s9:Int
+    13  copy s1..s2:Option s5..s6:Option
+    14  return s1..s2:Option
 "
     );
     assert_eq!(
@@ -518,14 +514,14 @@ fn @std.vector.pop<Int>(Vector) -> Option
         "\
 fn @std.vector.remove<Int>(Vector Int) -> Option
   frame 14: s0!:ref s1!:int s2:tag s3:int s4:int s5:bool s6:ref s7:int s8:int s9:int s10:int s11:unit s12:tag s13:int
-  local items -> s0:Vector [0, 24)
-  local index -> s1:Int [0, 24)
-  local length -> s4:Int [1, 23)
-  local was -> s7:Int [7, 20)
+  local items -> s0:Vector [0, 22)
+  local index -> s1:Int [0, 22)
+  local length -> s4:Int [1, 21)
+  local was -> s7:Int [7, 18)
      0  load-field s4:Int s0:ref +0
      1  ge.int.imm.branch s5:bool s1:int 0 3
      2  lt.int s5:bool s1:int s4:int
-     3  branch-false s5:bool 21
+     3  branch-false s5:bool 19
      4  load-field s6:<ref> s0:ref +1
      5  load-elem s7:Int s6:ref s1:int
      6  clear s6:<ref>
@@ -535,17 +531,15 @@ fn @std.vector.remove<Int>(Vector Int) -> Option
     10  load-field s6:<ref> s0:ref +1
     11  run-copy.words Int (s6:<ref> s1:Int s6:<ref> s8:Int s10:Int)
     12  clear s6:<ref>
-    13  unit s11:unit
-    14  sub.int.imm s8:int s4:int 1
-    15  growable-truncate.words Int s0:ref s8:int
-    16  unit s11:unit
-    17  tag s12:tag Option.Some
-    18  copy s13:Int s7:Int
-    19  copy s2..s3:Option s12..s13:Option
-    20  jump 23
-    21  tag s12:tag Option.None
-    22  copy s2..s3:Option s12..s13:Option
-    23  return s2..s3:Option
+    13  sub.int.imm s8:int s4:int 1
+    14  growable-truncate.words Int s0:ref s8:int
+    15  tag s12:tag Option.Some
+    16  copy s13:Int s7:Int
+    17  copy s2..s3:Option s12..s13:Option
+    18  jump 21
+    19  tag s12:tag Option.None
+    20  copy s2..s3:Option s12..s13:Option
+    21  return s2..s3:Option
 "
     );
 }

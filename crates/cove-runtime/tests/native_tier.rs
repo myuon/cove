@@ -646,11 +646,11 @@ export fn callsFillsTheHeap(n: Int) -> Int {
 /// **A builder allocated, appended to and finished in one compiled frame.**
 ///
 /// [ADR 0052]'s four, as a Cove program reaches them: `withCapacity` is an
-/// `growable-alloc`, each `append` an `growable-extend`, and `finish` a
-/// `run-finish`. Every one of them is a call into the runtime — see
-/// `cove_native::abi`'s `GrowableFn` for why all four are and none is half emitted
-/// — so what a differential case says is that the *frame around them* is compiled
-/// and the answer is still the VM's, byte for byte.
+/// `growable-alloc`, each `append` ADR 0062's append window — an ensure, a
+/// `run-copy` and a commit — and `finish` a `run-finish`. The alloc, the finish,
+/// the copy and a growth are calls into the runtime — see `cove_native::abi`'s
+/// `GrowableFn` — so what a differential case says is that the *frame around
+/// them* is compiled and the answer is still the VM's, byte for byte.
 ///
 /// The capacity is deliberately small, so a caller that hands it more than four
 /// bytes makes the store grow: growth allocates a larger run, copies the live
@@ -810,7 +810,7 @@ export fn callsKeepsWhatItStillNeeds(a: String, b: String, n: Int) -> Int {
 
 /// A compiled loop over one operation that never reaches the runtime and one that
 /// sometimes does: `String.byteLength()` is an expanded `Inst::Len`, and
-/// `Vector.push` is an expanded word `growable-push`, an emitted fast path whose
+/// `Vector.push` is an expanded ADR 0062 push window, an emitted fast path whose
 /// growth is the `growable` helper.
 /// `counts(0)` for `pushesOnto`'s reason.
 export fn measuresAndPushes(s: String, given: Vector<Int>, n: Int) -> Int {
@@ -2178,8 +2178,9 @@ fn a_builder_is_built_and_finished_in_compiled_code() {
 /// `GrowableFn`-shaped version of the claim every raise in this file makes: the
 /// message, the rule and the span are the runtime's whichever tier the frame was
 /// on. Two failures and one success, because the two failures are raised by
-/// *different* instructions — `growable-push` refuses a value that is not a byte
-/// and `run-finish` refuses bytes that are not text — and a tier that reported
+/// *different* instructions — `run-store`, in ADR 0062's byte push window,
+/// refuses a value that is not a byte and `run-finish` refuses bytes that are
+/// not text — and a tier that reported
 /// one instruction's span for the other's error would still print a sentence.
 #[test]
 fn a_finish_of_invalid_utf8_is_the_vm_s_sentence() {
@@ -2200,7 +2201,7 @@ fn a_finish_of_invalid_utf8_is_the_vm_s_sentence() {
         ),
         (
             256,
-            Err("`appendByte`'s value is `256`, and a byte is 0 to 255".to_string()),
+            Err("`runStore`'s value is `256`, and a byte is 0 to 255".to_string()),
         ),
         (65, Ok("A".to_string())),
     ] {

@@ -187,10 +187,10 @@ fn a_break_clears_the_temporaries_the_turn_was_holding() {
         ),
         "\
 fn @m.f(Array) -> Int
-  frame 15: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int s10:ref s11:int s12:ref s13:unit s14:int
-  local xs -> s0:Array [0, 31)
-  local total -> s2:Int [1, 30)
-  local x -> s8:String [9, 26)
+  frame 19: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int s10:ref s11:unit s12:ref s13:unit s14:int s15:int s16:int s17:ref s18:int
+  local xs -> s0:Array [0, 36)
+  local total -> s2:Int [1, 35)
+  local x -> s8:String [9, 31)
      0  int s2:int 0
      1  copy s3:Array s0:Array
      2  len s4:int s3:ref
@@ -198,30 +198,35 @@ fn @m.f(Array) -> Int
      4  int s6:int 1
      5  jump 7
      6  add.int s5:int s5:int s6:int
-     7  lt.int.branch s7:bool s5:int s4:int 28
+     7  lt.int.branch s7:bool s5:int s4:int 33
      8  load-elem s8:String s3:ref s5:int
      9  int s9:int 16
     10  growable-alloc.bytes s10:ref s9:int
-    11  len s9:int s8:ref
-    12  int s11:int 0
-    13  growable-extend.bytes (s10:ByteBuffer s8:String s11:Int s9:Int)
-    14  run-finish.bytes s12:ref s10:ref String utf8
-    15  clear s10:ByteBuffer
-    16  gt.int.imm.branch s7:bool s2:int 0 19
-    17  copy s10:String s8:String
-    18  jump 23
-    19  clear s10:String
-    20  clear s12:String
-    21  clear s8:String
-    22  jump 28
-    23  int s2:int 0
+    11  len s14:int s8:ref
+    12  load-field s15:Int s10:ref +0
+    13  growable-ensure.bytes s10:ref s14:int
+    14  int s16:int 0
+    15  load-field s17:<ref> s10:ref +1
+    16  run-copy.bytes (s17:<ref> s15:Int s8:String s16:Int s14:Int)
+    17  clear s17:<ref>
+    18  growable-commit.bytes s10:ref s14:int
+    19  run-finish.bytes s12:ref s10:ref String utf8
+    20  clear s10:ByteBuffer
+    21  gt.int.imm.branch s7:bool s2:int 0 24
+    22  copy s10:String s8:String
+    23  jump 28
     24  clear s10:String
     25  clear s12:String
     26  clear s8:String
-    27  jump 6
-    28  clear s3:Array
-    29  copy s1:Int s2:Int
-    30  return s1:Int
+    27  jump 33
+    28  int s2:int 0
+    29  clear s10:String
+    30  clear s12:String
+    31  clear s8:String
+    32  jump 6
+    33  clear s3:Array
+    34  copy s1:Int s2:Int
+    35  return s1:Int
 "
     );
 }
