@@ -2175,14 +2175,49 @@ counted!(
     /// itself, whichever table was bound; see `crate::vm::report`.
     counted_intrinsic => intrinsic.intrinsic(base: u64, pc: u32, dst: u32, id: u32, args: u32) -> u32
 );
-counted!(
-    /// [`growable`], counted.
-    counted_growable => growable.growable(base: u64, pc: u32, op: u32, a: u32, b: u32) -> u32
-);
-counted!(
-    /// [`run_copy`], counted.
-    counted_run_copy => run_copy.run_copy(base: u64, pc: u32, args: u32, kind: u32, elem: u32) -> u32
-);
+/// [`growable`], counted, and charged to the operation it names as well as to
+/// the helper.
+///
+/// # Safety
+///
+/// As [`growable`].
+unsafe extern "C" fn counted_growable(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    op: u32,
+    a: u32,
+    b: u32,
+) -> u32 {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+    if let Some(counting) = (*machine).counting.as_deref_mut() {
+        counting.helpers.charge_growable(op);
+    }
+    growable(ctx, base, pc, op, a, b)
+}
+
+/// [`run_copy`], counted, and charged to the operation it names, as
+/// [`counted_growable`] is.
+///
+/// # Safety
+///
+/// As [`run_copy`].
+unsafe extern "C" fn counted_run_copy(
+    ctx: *mut NativeCtx,
+    base: u64,
+    pc: u32,
+    args: u32,
+    kind: u32,
+    elem: u32,
+) -> u32 {
+    let host = (*ctx).host.cast::<Bridge>();
+    let machine = (*host).machine;
+    if let Some(counting) = (*machine).counting.as_deref_mut() {
+        counting.helpers.charge_run_copy(kind);
+    }
+    run_copy(ctx, base, pc, args, kind, elem)
+}
 counted!(
     /// [`field_load`], counted.
     counted_field_load => field_load.field_load(pc: u32, addr: u64, at: u32, width: u32, into: u64) -> u32

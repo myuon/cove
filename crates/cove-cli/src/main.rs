@@ -192,6 +192,7 @@ literal `--` is a program argument, even if it looks like a flag):
   --stats               print the backend's lowering and execution times and the instructions it executed, then fuel spent, host calls, irreversible writes, elapsed time, host-call wait, and the heap, to stderr
   --boundary            report what the run sent across each boundary, to stderr: the lowered program's IR instructions and `IntrinsicCall` sites, the builtin calls that reached the runtime by intrinsic and by the tier that made them, the instructions the encoded VM dispatched, and on `--backend native` the tier crossings and each call compiled code made into a runtime helper. Off by default, and a run without it pays nothing for it; `vm` and `native` only
   --profile             count every instruction the run executes and report which functions and which instructions they were, to stderr. A profiler is a debugger that never stops, so a run without it is unchanged and a run with it is several times slower; the counts are of instructions and not of time
+  --profile-rows <n|all>  how many rows each table of `--profile` prints, 40 by default; `all` prints every one, which is the per-site reading a script aggregates. Needs `--profile`
   --files-root <path>   the one directory the `files` host may reach; defaults to `files/` in the package
   --allow-exec <path>   an absolute path `process.run` may start; repeat to allow more, and omit to allow none
 ";
@@ -1439,7 +1440,7 @@ pub(crate) fn execute_entry(
     }
 
     if let (Some(profiler), Some(held)) = (profiler.as_ref(), lowered.as_ref()) {
-        print_profile(&held.program, profiler);
+        print_profile(&held.program, profiler, flags.profile_rows);
     }
     if flags.stats {
         print_backend_stats(flags.backend, lowered.as_ref(), execution, instructions);
@@ -1838,7 +1839,7 @@ enum Memory {
 /// number. The footer says the short version of it, because a reader who
 /// takes an absolute nanosecond from here will be wrong by the profiler's own
 /// weight.
-fn print_profile(program: &cove_ir::Program, profiler: &Profiler) {
+fn print_profile(program: &cove_ir::Program, profiler: &Profiler, rows: usize) {
     use std::cmp::Ordering;
     use std::collections::HashMap;
     let total = profiler.total();
@@ -1889,7 +1890,7 @@ fn print_profile(program: &cove_ir::Program, profiler: &Profiler) {
         "  {:>13} {:>7} {:>7} {:>6} {:>11} {:>12}  function",
         "instr", "instr%", "time%", "ns/in", "calls", "words"
     );
-    for (id, cost) in by_time.iter().take(PROFILE_ROWS) {
+    for (id, cost) in by_time.iter().take(rows) {
         eprintln!(
             "  {:>13} {:>6.2}% {:>6.2}% {:>6.0} {:>11} {:>12}  {}",
             cost.ran,
@@ -1933,7 +1934,7 @@ fn print_profile(program: &cove_ir::Program, profiler: &Profiler) {
         "  {:>13} {:>7} {:>7} {:>6} {:>11} {:>12}  opcode",
         "instr", "instr%", "time%", "ns/in", "allocs", "words"
     );
-    for (name, cost) in opcodes.iter().take(PROFILE_ROWS) {
+    for (name, cost) in opcodes.iter().take(rows) {
         eprintln!(
             "  {:>13} {:>6.2}% {:>6.2}% {:>6.0} {:>11} {:>12}  {name}",
             cost.ran,
@@ -1952,7 +1953,7 @@ fn print_profile(program: &cove_ir::Program, profiler: &Profiler) {
         "  {:>13} {:>7} {:>7} {:>6}  instruction",
         "instr", "instr%", "time%", "ns/in"
     );
-    for ((id, pc), cost) in hottest.iter().take(PROFILE_ROWS) {
+    for ((id, pc), cost) in hottest.iter().take(rows) {
         let function = program.function(*id);
         let line = match function.code.get(*pc as usize) {
             Some(inst) => cove_ir::print::one(program, function, inst),
@@ -2027,7 +2028,10 @@ const OPCODE_FLOOR: u64 = 1_000;
 /// asked at all.
 ///
 /// Forty reaches the long tail on both sides. A caller who wants every row wants
-/// a file rather than a terminal, and that is a flag this does not have yet.
+/// a file rather than a terminal, and asks for it with `--profile-rows all`: a
+/// per-site census — every `growable-push.words` instruction the run executed,
+/// summed by the function it sits in, which is how issue #409 was surveyed — is
+/// a join over *all* the rows, and was once taken with a patched binary.
 const PROFILE_ROWS: usize = 40;
 
 fn print_backend_stats(
@@ -2095,6 +2099,9 @@ pub(crate) struct RunFlags {
     trace_values: ValueCapture,
     stats: bool,
     profile: bool,
+    /// How many rows each table of the profile prints: [`PROFILE_ROWS`] unless
+    /// `--profile-rows` said otherwise, and `usize::MAX` for `all`.
+    profile_rows: usize,
     /// Whether to count and print ADR 0058's boundary report. See
     /// [`cove_runtime::BoundaryReport`].
     boundary: bool,
@@ -2127,6 +2134,7 @@ impl RunFlags {
             trace_values: ValueCapture::Full,
             stats: false,
             profile: false,
+            profile_rows: PROFILE_ROWS,
             boundary: false,
             files_root: None,
             allow_exec: Vec::new(),
@@ -2377,12 +2385,14 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
         trace_values: ValueCapture::Full,
         stats: false,
         profile: false,
+        profile_rows: PROFILE_ROWS,
         boundary: false,
         files_root: None,
         allow_exec: Vec::new(),
         program_args: Vec::new(),
     };
     let mut passthrough = false;
+    let mut rows_asked = false;
     let mut i = 0;
     while i < args.len() {
         if passthrough {
@@ -2449,6 +2459,19 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
             }
             "--stats" => flags.stats = true,
             "--profile" => flags.profile = true,
+            "--profile-rows" => {
+                let value = flag_value(args, &mut i, "--profile-rows")?;
+                flags.profile_rows = match value.as_str() {
+                    "all" => usize::MAX,
+                    _ => value.parse().map_err(|_| {
+                        CliError::Message(format!(
+                            "`--profile-rows` must be a non-negative integer or `all`, \
+                             found `{value}`"
+                        ))
+                    })?,
+                };
+                rows_asked = true;
+            }
             "--boundary" => flags.boundary = true,
             "--files-root" => {
                 let value = flag_value(args, &mut i, "--files-root")?;
@@ -2470,6 +2493,16 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
             other => flags.program_args.push(other.to_string()),
         }
         i += 1;
+    }
+    // Refused rather than ignored, for `--boundary`'s reason on the AST backend:
+    // a flag that shapes a report nobody asked for would read as though it had
+    // been obeyed. Checked after the loop, because flags may come in any order.
+    if rows_asked && !flags.profile {
+        return Err(CliError::Message(
+            "`--profile-rows` says how many rows `--profile` prints, and there is no \
+             profile without `--profile`"
+                .to_string(),
+        ));
     }
     Ok(flags)
 }
@@ -3101,6 +3134,27 @@ module auth
         assert!(asked.boundary);
         assert_eq!(asked.backend, Backend::Native);
         assert_eq!(asked.program_args, ["first", "second"]);
+    }
+
+    /// `--profile-rows` takes a count or `all`, defaults to forty, and is refused
+    /// without the profile it shapes.
+    #[test]
+    fn profile_rows_are_forty_unless_asked_and_need_a_profile() {
+        assert_eq!(flags(&["--profile"]).profile_rows, PROFILE_ROWS);
+        assert_eq!(RunFlags::none().profile_rows, PROFILE_ROWS);
+        let some = flags(&["--profile-rows", "7", "first", "--profile"]);
+        assert_eq!(some.profile_rows, 7);
+        assert_eq!(some.program_args, ["first"]);
+        assert_eq!(
+            flags(&["--profile", "--profile-rows", "all"]).profile_rows,
+            usize::MAX
+        );
+        let refused = |args: &[&str]| {
+            parse_run_flags(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>()).is_err()
+        };
+        assert!(refused(&["--profile-rows", "7"]), "no profile to shape");
+        assert!(refused(&["--profile", "--profile-rows", "many"]));
+        assert!(refused(&["--profile", "--profile-rows"]));
     }
 
     #[test]
