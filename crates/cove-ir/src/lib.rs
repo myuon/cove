@@ -46,6 +46,7 @@ pub mod flow;
 pub mod inst;
 pub mod intrinsic;
 pub mod layout;
+pub mod legalize;
 pub mod lower;
 pub mod print;
 pub mod program;

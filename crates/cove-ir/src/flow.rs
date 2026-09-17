@@ -183,12 +183,18 @@ impl Inst {
 /// charges work by. A target past the end of the code is ignored here, as it
 /// is there: the verifier refuses it on its own.
 pub fn leaders(program: &Program, function: &Function) -> Vec<bool> {
-    let end = function.code.len();
+    leaders_in(program, &function.code)
+}
+
+/// [`leaders`] over a run of instructions that is not a [`Function`]'s own:
+/// what `bytecode::verify` holds, having decoded it out of bytes.
+pub fn leaders_in(program: &Program, code: &[Inst]) -> Vec<bool> {
+    let end = code.len();
     let mut leader = vec![false; end];
     if let Some(first) = leader.first_mut() {
         *first = true;
     }
-    for (pc, inst) in function.code.iter().enumerate() {
+    for (pc, inst) in code.iter().enumerate() {
         inst.targets(program, &mut |to| {
             if let Some(held) = leader.get_mut(to as usize) {
                 *held = true;

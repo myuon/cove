@@ -122,19 +122,47 @@ impl Encoded {
 pub fn encode_program(program: &Program) -> Result<Encoded, TooWide> {
     let mut functions = Vec::with_capacity(program.functions.len());
     for function in &program.functions {
-        functions.push(encode_function(function)?);
+        functions.push(encode_function(program, function)?);
     }
     Ok(Encoded { functions })
 }
 
-/// Encodes one function's code.
-pub fn encode_function(function: &Function) -> Result<Vec<EncodedInst>, TooWide> {
-    function
+/// Encodes one function's code, with each window's head fused.
+///
+/// Row for row, this is [`encode`] at every pc. The one exception is
+/// [ADR 0062](../../../../docs/adr/0062-an-append-is-ensure-store-commit.md)'s:
+/// where [`crate::legalize`] recognises a push or an append window, **only the
+/// head row's opcode changes**, to the [`Op::fused`] of its pattern. The head
+/// keeps its own `a`, `b` and payload, so it still decodes to the length read
+/// it is, and the rows after it stay encoded as the primitives they are — the
+/// shadow tail a fused arm reads its operands from and an unfused run
+/// dispatches. So bytecode pc is still IR pc, every `Inst` still has one row,
+/// and a VM that declines to fuse runs exactly the rows it would have run.
+///
+/// What is given up is that the head's bytes are a function of its own
+/// `Inst`: they depend on the rows after it, which is why
+/// [`verify`](super::verify()) re-matches every fused head.
+pub fn encode_function(
+    program: &Program,
+    function: &Function,
+) -> Result<Vec<EncodedInst>, TooWide> {
+    let mut code = function
         .code
         .iter()
         .enumerate()
         .map(|(pc, inst)| encode(inst, pc as Pc))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    for window in crate::legalize::windows(program, function) {
+        let head = code[window.head];
+        code[window.head] = EncodedInst::new(
+            Op::fused(window.pattern).number(),
+            head.a(),
+            head.b(),
+            head.c(),
+            head.payload(),
+        );
+    }
+    Ok(code)
 }
 
 /// Encodes one instruction.
@@ -1399,13 +1427,21 @@ mod tests {
     ///
     /// The structural half of the round trip: a variant added to `Inst`
     /// cannot pass this without an instruction here that encodes to it.
+    ///
+    /// ADR 0062's four fused heads are not here, because no instruction encodes
+    /// to one alone: `encode_function` gives one to a window's head, and
+    /// `bytecode::verify`'s window tests are where one is reached.
     #[test]
     fn every_opcode_is_reached_by_a_sample() {
         let reached: BTreeSet<u8> = samples()
             .into_iter()
             .map(|(pc, inst)| encode(&inst, pc).expect("the sample encodes").opcode())
             .collect();
-        let defined: BTreeSet<u8> = Op::all().into_iter().map(Op::number).collect();
+        let defined: BTreeSet<u8> = Op::all()
+            .into_iter()
+            .filter(|op| op.pattern().is_none())
+            .map(Op::number)
+            .collect();
         let missing: Vec<Op> = defined
             .difference(&reached)
             .map(|number| Op::from_number(*number).expect("a defined opcode"))

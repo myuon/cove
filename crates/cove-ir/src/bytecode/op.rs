@@ -42,6 +42,7 @@
 use std::sync::LazyLock;
 
 use crate::inst::{ArithOp, CmpOp, Compare, Convert, Num};
+use crate::legalize::Pattern;
 use crate::repr::Repr;
 
 /// Every [`Num`], in opcode order.
@@ -197,8 +198,16 @@ mod base {
     pub const GROWABLE_COMMIT_BYTES: u8 = GROWABLE_ENSURE_WORDS + 1;
     pub const GROWABLE_COMMIT_WORDS: u8 = GROWABLE_COMMIT_BYTES + 1;
     pub const RUN_STORE_BYTES: u8 = GROWABLE_COMMIT_WORDS + 1;
+    /// ADR 0062's fused heads, one per `crate::legalize::Pattern`, last for the
+    /// same reason. No `Inst` encodes to one alone: each is the opcode a
+    /// window's length read is given when `encode_function` recognises the rows
+    /// after it.
+    pub const FUSED_PUSH_WORDS: u8 = RUN_STORE_BYTES + 1;
+    pub const FUSED_PUSH_BYTE: u8 = FUSED_PUSH_WORDS + 1;
+    pub const FUSED_APPEND_BYTES: u8 = FUSED_PUSH_BYTE + 1;
+    pub const FUSED_APPEND_WORDS: u8 = FUSED_APPEND_BYTES + 1;
     /// One past the last, which is how many opcodes there are.
-    pub const END: u8 = RUN_STORE_BYTES + 1;
+    pub const END: u8 = FUSED_APPEND_WORDS + 1;
 }
 
 /// How many opcodes are defined, out of the 256 an opcode byte can name.
@@ -292,6 +301,18 @@ pub enum Op {
     /// [`crate::Inst::RunStore`] over [`crate::Storage::PackedBytes`], the one
     /// storage it admits.
     RunStoreBytes,
+    /// The head of a [`crate::legalize::Pattern::PushWords`] window: an
+    /// [`crate::Inst::LoadField`] of the owner's length, whose row is
+    /// `Op::LoadField`'s and whose opcode says the rows after it are the rest of
+    /// the window. [ADR 0062](../../../../docs/adr/0062-an-append-is-ensure-store-commit.md)
+    /// supersedes ADR 0041's one-row-one-`Inst` encoding for these four alone.
+    FusedPushWords,
+    /// The head of a [`crate::legalize::Pattern::PushByte`] window.
+    FusedPushByte,
+    /// The head of a [`crate::legalize::Pattern::AppendBytes`] window.
+    FusedAppendBytes,
+    /// The head of a [`crate::legalize::Pattern::AppendWords`] window.
+    FusedAppendWords,
     Len,
     LayoutOf,
     AddrOfSlot,
@@ -590,6 +611,10 @@ impl Op {
             Op::GrowableCommitBytes,
             Op::GrowableCommitWords,
             Op::RunStoreBytes,
+            Op::FusedPushWords,
+            Op::FusedPushByte,
+            Op::FusedAppendBytes,
+            Op::FusedAppendWords,
         ]);
         all
     }
@@ -666,6 +691,10 @@ impl Op {
             Op::GrowableCommitBytes => base::GROWABLE_COMMIT_BYTES,
             Op::GrowableCommitWords => base::GROWABLE_COMMIT_WORDS,
             Op::RunStoreBytes => base::RUN_STORE_BYTES,
+            Op::FusedPushWords => base::FUSED_PUSH_WORDS,
+            Op::FusedPushByte => base::FUSED_PUSH_BYTE,
+            Op::FusedAppendBytes => base::FUSED_APPEND_BYTES,
+            Op::FusedAppendWords => base::FUSED_APPEND_WORDS,
             Op::Len => base::LEN,
             Op::LayoutOf => base::LAYOUT_OF,
             Op::AddrOfSlot => base::ADDR_OF_SLOT,
@@ -687,6 +716,29 @@ impl Op {
             Op::SharedUnlock => base::SHARED_UNLOCK,
             Op::Trap => base::TRAP,
             Op::AssertFailed => base::ASSERT_FAILED,
+        }
+    }
+
+    /// The fused head [`encode_function`](super::encode_function) gives a
+    /// window of `pattern`.
+    pub const fn fused(pattern: Pattern) -> Op {
+        match pattern {
+            Pattern::PushWords => Op::FusedPushWords,
+            Pattern::PushByte => Op::FusedPushByte,
+            Pattern::AppendBytes => Op::FusedAppendBytes,
+            Pattern::AppendWords => Op::FusedAppendWords,
+        }
+    }
+
+    /// The window pattern this opcode is the fused head of, or `None` for every
+    /// opcode that is one instruction.
+    pub const fn pattern(self) -> Option<Pattern> {
+        match self {
+            Op::FusedPushWords => Some(Pattern::PushWords),
+            Op::FusedPushByte => Some(Pattern::PushByte),
+            Op::FusedAppendBytes => Some(Pattern::AppendBytes),
+            Op::FusedAppendWords => Some(Pattern::AppendWords),
+            _ => None,
         }
     }
 
@@ -995,6 +1047,13 @@ impl Op {
                 Operand::Word(INT),
                 Payload::Empty,
             ),
+            // A fused head is its own row: `Op::LoadField`'s, whatever the rows
+            // after it are, so the uniform checks read it as the length read it
+            // decodes to.
+            Op::FusedPushWords
+            | Op::FusedPushByte
+            | Op::FusedAppendBytes
+            | Op::FusedAppendWords => Op::LoadField.fields(),
             Op::Len => fields(Operand::Word(INT), Operand::Word(REF), NONE, Payload::Empty),
             Op::LayoutOf => fields(Operand::Word(INT), Operand::Word(REF), NONE, Payload::Empty),
             Op::AddrOfSlot => fields(
@@ -1112,15 +1171,17 @@ mod tests {
     /// search, one per `Compare`, and a hundred and seventy once ADR 0058's
     /// Phase 5 made `Duration.nanos` two relabel conversions rather than an
     /// intrinsic, and a hundred and seventy-five once ADR 0062's buffer window
-    /// brought an ensure and a commit per storage and a byte store. What the
+    /// brought an ensure and a commit per storage and a byte store, and a
+    /// hundred and seventy-nine once the same ADR's fused heads brought one per
+    /// window pattern. What the
     /// number is for is that a reader can see the headroom
     /// rather than be told about it: nearly a third of the byte is still
     /// unspent, so the format has room for what comes and this test is where
     /// that claim is kept honest.
     #[test]
-    fn there_are_a_hundred_and_seventy_five_opcodes() {
-        assert_eq!(Op::all().len(), 175);
-        assert_eq!(OPCODES, 175);
+    fn there_are_a_hundred_and_seventy_nine_opcodes() {
+        assert_eq!(Op::all().len(), 179);
+        assert_eq!(OPCODES, 179);
     }
 
     /// The numbering *is* the enumeration. `number` computes by arithmetic

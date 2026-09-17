@@ -141,7 +141,7 @@ mod tests {
     fn the_disassembly_of_an_encoding_is_the_readable_listing_of_it() {
         let program = held();
         let id = FunctionId(0);
-        let code = encode_function(program.function(id)).expect("it encodes");
+        let code = encode_function(&program, program.function(id)).expect("it encodes");
         let read: Vec<String> = code
             .iter()
             .enumerate()
@@ -167,7 +167,7 @@ mod tests {
     fn a_listing_shows_the_pc_the_byte_offset_and_the_raw_bytes() {
         let program = held();
         let id = FunctionId(0);
-        let code = encode_function(program.function(id)).expect("it encodes");
+        let code = encode_function(&program, program.function(id)).expect("it encodes");
         let text = listing(&program, id, &code);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 4);
