@@ -1177,11 +1177,11 @@ const WINDOW_TAIL: u64 = (cove_ir::legalize::MAX_ROWS - 1) as u64;
 /// be. Answers how many rows after the head ran, which the loop steps over.
 ///
 /// **The head is the length read it decodes to.** A push is [`fused_push`]
-/// first, head and all, which the arm asks before this, and a byte append is
-/// [`fused_append`] first, which this asks before anything else; what goes on
-/// from there is a word append, or a window either declined. The head runs as
-/// `LOAD_FIELD` runs it, so a refusal there is that arm's, in its words, at
-/// this pc.
+/// first, head and all, which the arm asks before this, and an append is
+/// [`fused_append_bytes`] or [`fused_append_words`] first, which this asks
+/// before anything else; what goes on from there is a window one of the three
+/// declined. The head runs as `LOAD_FIELD` runs it, so a refusal there is that
+/// arm's, in its words, at this pc.
 ///
 /// **Then the rest, only when no question can fall inside.** The loop asks its
 /// one question — a safepoint, and before every instruction a debugger's or a
@@ -1228,11 +1228,17 @@ fn fused_window(
     let code = encoded.function(id);
     let held = code[head];
     let base_at = machine.mem.stack_index(base);
-    if held.opcode() == FUSED_APPEND_BYTES {
-        let rows = fused_append(machine, encoded, budget, id, base, base_at, head)?;
-        if rows > 0 {
-            return Ok(rows);
+    let fast = match held.opcode() {
+        FUSED_APPEND_BYTES => {
+            fused_append_bytes(machine, encoded, budget, id, base, base_at, head)?
         }
+        FUSED_APPEND_WORDS => {
+            fused_append_words(machine, encoded, budget, id, base, base_at, head)?
+        }
+        _ => 0,
+    };
+    if fast > 0 {
+        return Ok(fast);
     }
     let open = machine.instructions + WINDOW_TAIL < machine.next_check;
     let addr = machine.mem.word_at(base_at + held.b() as usize);
@@ -1428,6 +1434,10 @@ fn fused_push(
         }
         length.store(len + 1, Relaxed);
         machine.instructions += rows as u64;
+        #[cfg(test)]
+        {
+            machine.fused_fast += 1;
+        }
         if machine.counting.is_some() {
             machine.count_fusion(first.opcode(), rows, true);
         }
@@ -1485,14 +1495,117 @@ fn fused_push(
     Ok(rows)
 }
 
+/// An append window's rows, found by opcode: the members
+/// [`fused_append_bytes`] and [`fused_append_words`] read their operands out
+/// of, and where the commit is.
+///
+/// One decode for both storages, because there is one grammar. The two fast
+/// paths differ in what a unit is and in which questions its family asks, and
+/// in nothing about the shape of the window — so a change to
+/// `cove_ir::legalize`'s append arrives at both of them or at neither, rather
+/// than at whichever of two copies somebody remembered.
+struct AppendRows {
+    /// The head, the length read.
+    first: EncodedInst,
+    /// The count constant before the ensure, if one is there.
+    count: Option<EncodedInst>,
+    /// Where the ensure is, counted from the head — which is also how many
+    /// instructions the head and the rows before it are.
+    ensure_at: usize,
+    ensure: EncodedInst,
+    /// The offset constant, on either side of the store read.
+    offset: Option<EncodedInst>,
+    /// The store read.
+    read: EncodedInst,
+    /// The `run-copy` into the store.
+    copy: EncodedInst,
+    /// The clear of the store slot.
+    clear: Option<EncodedInst>,
+    /// The second count constant, which the commit names.
+    second: Option<EncodedInst>,
+    /// Where the commit is, counted from the head: the rows after the head,
+    /// which is what a fused head answers.
+    window: usize,
+}
+
+/// [`AppendRows`] of the window whose head is `code[head]`, over the storage
+/// whose three opcodes are named.
+///
+/// `cove_ir::legalize`'s append grammar, and `bytecode::verify` has already
+/// matched it against this head — so this is a decode rather than a second
+/// recognition, and a `None` is a window shape this does not know, which the
+/// rows then run as the primitives they are still encoded as.
+///
+/// `#[inline(always)]` because each caller is already out of line, and the
+/// answer is a handful of registers a caller reads once.
+#[inline(always)]
+fn append_rows(
+    code: &[EncodedInst],
+    head: usize,
+    ensure_op: u8,
+    copy_op: u8,
+    commit_op: u8,
+) -> Option<AppendRows> {
+    // The shortest append is five rows and a function's last row is a
+    // terminator, which no window's commit is, so the slice below always holds
+    // the whole window.
+    let rows = code.get(head..code.len().min(head + cove_ir::legalize::MAX_ROWS))?;
+    let is = |at: usize, op: u8| rows.get(at).is_some_and(|held| held.opcode() == op);
+    let first = rows[0];
+    let mut next = 1;
+    let count = is(next, CONST_INT).then(|| rows[next]);
+    next += usize::from(count.is_some());
+    let ensure_at = next;
+    if !is(ensure_at, ensure_op) {
+        return None;
+    }
+    let ensure = rows[ensure_at];
+    next += 1;
+    let mut offset = is(next, CONST_INT).then(|| rows[next]);
+    next += usize::from(offset.is_some());
+    if !is(next, LOAD_FIELD) {
+        return None;
+    }
+    let read = rows[next];
+    next += 1;
+    if offset.is_none() && is(next, CONST_INT) {
+        offset = Some(rows[next]);
+        next += 1;
+    }
+    if !is(next, copy_op) {
+        return None;
+    }
+    let copy = rows[next];
+    next += 1;
+    let clear = is(next, CLEAR).then(|| rows[next]);
+    next += usize::from(clear.is_some());
+    let second = is(next, CONST_INT).then(|| rows[next]);
+    next += usize::from(second.is_some());
+    if !is(next, commit_op) {
+        return None;
+    }
+    Some(AppendRows {
+        first,
+        count,
+        ensure_at,
+        ensure,
+        offset,
+        read,
+        copy,
+        clear,
+        second,
+        window: next,
+    })
+}
+
 /// A byte append window run whole, head included, in one call: [ADR 0062]'s
 /// append of a run, as [`fused_push`] is its append of one.
 ///
 /// The window is `cove_ir::legalize`'s append over bytes — the length read, an
 /// optional count constant, the ensure, an optional offset constant on either
 /// side of the store read, the `run-copy` into the store, an optional clear and
-/// an optional second count, and the commit — and `bytecode::verify` has
-/// re-matched it, so the rows are where this reads them.
+/// an optional second count, and the commit — read out by [`append_rows`],
+/// which [`fused_append_words`] shares.
 ///
 /// # What it asks
 ///
@@ -1541,7 +1654,7 @@ fn fused_push(
 /// [ADR 0062]: ../../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn fused_append(
+fn fused_append_bytes(
     machine: &mut Machine<'_>,
     encoded: &Encoded,
     budget: &Meter,
@@ -1555,48 +1668,27 @@ fn fused_append(
     }
     let program = machine.program;
     let code = encoded.function(id);
-    // The rows, by opcode: `legalize::recognize`'s grammar, which the byte
-    // verifier has already matched against this head. The shortest append is
-    // five rows and a function's last row is a terminator, so the slice below
-    // always holds the window; a `None` is a window this does not know.
-    let Some(rows) = code.get(head..code.len().min(head + cove_ir::legalize::MAX_ROWS)) else {
+    let Some(AppendRows {
+        first,
+        count: count_const,
+        ensure_at,
+        ensure,
+        offset,
+        read,
+        copy,
+        clear,
+        second,
+        window,
+    }) = append_rows(
+        code,
+        head,
+        GROWABLE_ENSURE_BYTES,
+        RUN_COPY_BYTES,
+        GROWABLE_COMMIT_BYTES,
+    )
+    else {
         return Ok(0);
     };
-    let is = |at: usize, op: u8| rows.get(at).is_some_and(|held| held.opcode() == op);
-    let first = rows[0];
-    let mut next = 1;
-    let count_const = is(next, CONST_INT).then(|| rows[next]);
-    next += usize::from(count_const.is_some());
-    let ensure_at = next;
-    if !is(ensure_at, GROWABLE_ENSURE_BYTES) {
-        return Ok(0);
-    }
-    let ensure = rows[ensure_at];
-    next += 1;
-    let mut offset = is(next, CONST_INT).then(|| rows[next]);
-    next += usize::from(offset.is_some());
-    if !is(next, LOAD_FIELD) {
-        return Ok(0);
-    }
-    let read = rows[next];
-    next += 1;
-    if offset.is_none() && is(next, CONST_INT) {
-        offset = Some(rows[next]);
-        next += 1;
-    }
-    if !is(next, RUN_COPY_BYTES) {
-        return Ok(0);
-    }
-    let copy = rows[next];
-    next += 1;
-    let clear = is(next, CLEAR).then(|| rows[next]);
-    next += usize::from(clear.is_some());
-    let second = is(next, CONST_INT).then(|| rows[next]);
-    next += usize::from(second.is_some());
-    if !is(next, GROWABLE_COMMIT_BYTES) {
-        return Ok(0);
-    }
-    let window = next;
     let [_, _, src_arg, from_arg, _] = program.arg_list(ArgsId(copy.lo())) else {
         return Ok(0);
     };
@@ -1718,6 +1810,265 @@ fn fused_append(
     length.store(len + count as u64, Relaxed);
     machine.instructions += window as u64;
     machine.bulk_work += words;
+    #[cfg(test)]
+    {
+        machine.fused_fast += 1;
+    }
+    if machine.counting.is_some() {
+        machine.count_fusion(first.opcode(), window, true);
+    }
+    Ok(window)
+}
+
+/// A word append window run whole, head included, in one call:
+/// [`fused_append_bytes`] over [`Storage::Words`], where a unit is an element
+/// of `stride` words rather than a byte.
+///
+/// The window is the same grammar — [`append_rows`] reads both — with a word
+/// ensure, a word `run-copy` and a word commit, and `bytecode::verify` has
+/// re-matched it, so the rows are where this reads them.
+///
+/// # What it asks
+///
+/// Every question a row would refuse on, once and up front, of the words the
+/// rows would read, and each in its own row's terms:
+///
+/// - the owner is a `Vector` of the ensure's element, as `Machine::vector_run`
+///   asks, and its store is live;
+/// - the store is a `Shape::Elements` of exactly that element and the source
+///   `cove_ir::reads_as_units_of` it — a run, a `Set` or a `Map` — which is
+///   [`run_copy_words`]' family rule and not a courtesy: the collector traces
+///   each object by its *own* layout's reference map, so a unit copied between
+///   runs of two families would be words one map calls integers and the other
+///   follows as addresses;
+/// - the count is not negative and the source range is inside the source;
+/// - the copy's charge does not bring a safepoint due inside the window, which
+///   [`in_chunks`] would take between the copy and the commit.
+///
+/// Any other answer writes nothing and answers `0`: [`fused_window`] then runs
+/// the rows the ordinary way, in their own words. So an element of no words
+/// is left to the rows too, rather than given a stride of zero here.
+///
+/// # Overlap, and why nothing more is needed for a run of references
+///
+/// A word `run-copy`'s two ends may be one object — `RunRange::descending` is
+/// what says so — so this walks the words from the tail when the destination
+/// is above the source in the store they share, which is the direction
+/// `Space::copy` takes for the same range.
+///
+/// The words moved may be references, and this adds no barrier for the reason
+/// [`run_copy_words`] gives: the collector is non-moving and stop-the-world
+/// and marks from the roots, with no remembered set a store could fall behind.
+/// What a collection needs is a destination it can walk, and no collection can
+/// fall inside this copy at all — a poll due inside the window is what the
+/// charge question above declines on, so the store is whole before anything
+/// may look at it.
+///
+/// # A growth is the ensure's own
+///
+/// [`fused_append_bytes`]' arrangement exactly: the rows before the ensure are
+/// written and counted, the machine is synced to the ensure's pc and
+/// `Machine::ensure_growable` grows the store — collecting if it must,
+/// refusing at the ensure's span if it cannot — and [`fused_tail`] runs the
+/// rest from the row after it, so the copy reads the store the growth left.
+///
+/// # What it writes and counts
+///
+/// Every frame word the rows write, in their order — the length, the count,
+/// the offset, the store, the clear, the second count — the elements, and the
+/// length. `Machine::instructions` rises by the rows and `bulk_work` by the
+/// copy's words, as the rows would have charged them.
+///
+/// # Why it exists
+///
+/// `Pattern::AppendWords` had a definition from the start and no producer
+/// until the standard library's keyed extend became a window (#409), and until
+/// then its head ran through `Machine::checked` and its rows through
+/// [`fused_tail`]'s generic arms — the arrangement [`fused_push`] and
+/// [`fused_append_bytes`] were each written to replace. Measured on
+/// `examples/cq` over 20,000 bookings, which makes 391,679 word append
+/// windows, fusing them that way *cost* 0.66% against a build that did not
+/// fuse them at all: about 37 ns a window, which is what the five dispatches
+/// each one saves are worth. See the module's own note on why this is out of
+/// line and why [`fused_window`] asks it rather than the loop.
+///
+/// [ADR 0062]: ../../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn fused_append_words(
+    machine: &mut Machine<'_>,
+    encoded: &Encoded,
+    budget: &Meter,
+    id: FunctionId,
+    base: u64,
+    base_at: usize,
+    head: usize,
+) -> Result<usize, RuntimeError> {
+    if machine.instructions + WINDOW_TAIL >= machine.next_check {
+        return Ok(0);
+    }
+    let program = machine.program;
+    let code = encoded.function(id);
+    let Some(AppendRows {
+        first,
+        count: count_const,
+        ensure_at,
+        ensure,
+        offset,
+        read,
+        copy,
+        clear,
+        second,
+        window,
+    }) = append_rows(
+        code,
+        head,
+        GROWABLE_ENSURE_WORDS,
+        RUN_COPY_WORDS,
+        GROWABLE_COMMIT_WORDS,
+    )
+    else {
+        return Ok(0);
+    };
+    let [_, _, src_arg, from_arg, _] = program.arg_list(ArgsId(copy.lo())) else {
+        return Ok(0);
+    };
+    let (src_slot, from_slot) = (src_arg.slot as usize, from_arg.slot as usize);
+    // The element the ensure names, which `bytecode::verify` has matched with
+    // the copy's. Its width is asked before the frame and the heap are
+    // borrowed apart, because that reads the whole machine.
+    let elem = LayoutId(ensure.lo());
+    let stride = machine.width(elem) as usize;
+    if stride == 0 {
+        return Ok(0);
+    }
+
+    let (frame, heap) = machine.mem.stack_and_heap();
+    let owner = frame[base_at + first.b() as usize];
+    let Some([header, length, stored]) = heap.run_at(owner).and_then(|run| run.get(..3)) else {
+        return Ok(0);
+    };
+    let family = program.layout(header_layout(header.load(Relaxed)));
+    if !matches!(family.shape, Shape::Vector { elem: held } if held == elem) {
+        return Ok(0);
+    }
+    let len = length.load(Relaxed);
+    let store = stored.load(Relaxed);
+    let Some(dst) = heap.run_at(store) else {
+        return Ok(0);
+    };
+    let store_header = dst[0].load(Relaxed);
+    let store_shape = &program.layout(header_layout(store_header)).shape;
+    if !matches!(store_shape, Shape::Elements { elem: held, .. } if *held == elem) {
+        return Ok(0);
+    }
+    let src = frame[base_at + src_slot];
+    let Some(run) = heap.run_at(src) else {
+        return Ok(0);
+    };
+    let run_header = run[0].load(Relaxed);
+    let run_shape = &program.layout(header_layout(run_header)).shape;
+    if !cove_ir::reads_as_units_of(&program.layouts, run_shape, elem) {
+        return Ok(0);
+    }
+    // The count and the offset as the copy would read them, after the
+    // constants before it have been written: `legalize::recognize` has already
+    // held the offset's slot apart from the count's.
+    let count_slot = ensure.b() as usize;
+    let count = match count_const {
+        Some(held) => held.payload(),
+        None => frame[base_at + count_slot],
+    } as i64;
+    let from = match offset {
+        Some(held) if held.a() as usize == from_slot => held.payload(),
+        _ => frame[base_at + from_slot],
+    } as i64;
+    let run_len = i64::from(header_len(run_header));
+    if count < 0 || from < 0 || from > run_len - count {
+        return Ok(0);
+    }
+    // In chunks the copy would poll once its charge reached a stride; one that
+    // would is left to the rows, whose copy polls where theirs would. So is a
+    // copy a chunk boundary of the heap cuts short.
+    //
+    // The chunk bound is [`run_copy_words`]' — whole elements, and at least
+    // one — and it is stated here as well as implied by the charge beside it,
+    // so that the rule a reader has to know is `in_chunks`' rather than an
+    // argument about when `charged_work` was last moved.
+    let (at, from, count) = (len as usize, from as usize, count as usize);
+    let words = (count * stride) as u64;
+    let reaches = |held: &[std::sync::atomic::AtomicU64], units: usize| {
+        units
+            .checked_mul(stride)
+            .is_some_and(|words| held.len() > words)
+    };
+    if count > (BULK_CHUNK_WORDS as usize / stride).max(1)
+        || machine.instructions + window as u64 + machine.bulk_work + words
+            >= machine.charged_work + SAFEPOINT_STRIDE
+        || !reaches(run, from + count)
+    {
+        return Ok(0);
+    }
+
+    // The rows before the ensure: the head's length read and the count.
+    frame[base_at + first.a() as usize] = len;
+    if let Some(held) = count_const {
+        frame[base_at + held.a() as usize] = held.payload();
+    }
+    let capacity = header_len(store_header) as usize;
+    if at + count > capacity || !reaches(dst, at + count) {
+        // A growth — or a store a chunk boundary cuts short, which the rows
+        // copy into the ordinary way — is the ensure's, and the rest is the
+        // rows'.
+        machine.instructions += ensure_at as u64;
+        machine.sync(head + ensure_at);
+        if let Err(error) = machine.ensure_growable(owner, Storage::Words(elem), count as i64) {
+            if machine.counting.is_some() {
+                machine.count_fusion(first.opcode(), ensure_at, false);
+            }
+            return Err(error.at(machine.span(id, head + ensure_at)));
+        }
+        return fused_tail(
+            machine,
+            program,
+            budget,
+            code,
+            id,
+            base,
+            head,
+            head + ensure_at + 1,
+        );
+    }
+
+    // Room: the rest of the window, in row order.
+    if let Some(held) = offset {
+        frame[base_at + held.a() as usize] = held.payload();
+    }
+    frame[base_at + read.a() as usize] = store;
+    let (into, outof) = (1 + at * stride, 1 + from * stride);
+    if store == src && into > outof {
+        // One object, shifted up: from the tail, as `Space::copy` walks it.
+        for word in (0..words as usize).rev() {
+            dst[into + word].store(run[outof + word].load(Relaxed), Relaxed);
+        }
+    } else {
+        for word in 0..words as usize {
+            dst[into + word].store(run[outof + word].load(Relaxed), Relaxed);
+        }
+    }
+    if let Some(clear) = clear {
+        frame[base_at + clear.a() as usize] = 0;
+    }
+    if let Some(second) = second {
+        frame[base_at + second.a() as usize] = second.payload();
+    }
+    length.store(len + count as u64, Relaxed);
+    machine.instructions += window as u64;
+    machine.bulk_work += words;
+    #[cfg(test)]
+    {
+        machine.fused_fast += 1;
+    }
     if machine.counting.is_some() {
         machine.count_fusion(first.opcode(), window, true);
     }
@@ -1750,8 +2101,9 @@ fn fused_append(
 /// [ADR 0062]: ../../../../../docs/adr/0062-an-append-is-ensure-store-commit.md
 ///
 /// `start` is the first row it runs: `head + 1`, or the row after an ensure
-/// that [`fused_append`] ran and grew. The answer counts every row after the
-/// head either way, which is what the loop steps over.
+/// that [`fused_append_bytes`] or [`fused_append_words`] ran and grew. The
+/// answer counts every row after the head either way, which is what the loop
+/// steps over.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn fused_tail(
@@ -7260,11 +7612,28 @@ mod tests {
             /// `(Vector<Pair>, Array<Pair>)`: a word append whose offset constant
             /// precedes it, with no clear.
             append_pairs: FunctionId,
+            /// `(Vector<Int>, Array<Int>, from, count)`: a word append of
+            /// one-word elements whose offset and count are the frame's, which
+            /// is `std.map`'s keyed extend's shape — so a test may choose any
+            /// range, the source may be the destination's own store, and a
+            /// copy may be longer than a bulk chunk.
+            append_run: FunctionId,
+            /// `(Vector<String>, Array<String>)`: a word append of 32
+            /// *references* from offset 1 with every optional row — a count
+            /// constant, an offset constant after the store read, a clear and
+            /// a second count, which is the longest window there is.
+            append_texts: FunctionId,
             int_vector: LayoutId,
             int_store: LayoutId,
             pair_vector: LayoutId,
             pair_store: LayoutId,
             pairs: LayoutId,
+            /// `Array<Int>`, the source `append_run` reads.
+            ints: LayoutId,
+            text_vector: LayoutId,
+            text_store: LayoutId,
+            /// `Array<String>`, the source `append_texts` reads.
+            texts: LayoutId,
         }
 
         fn framed() -> Framed {
@@ -7294,6 +7663,30 @@ mod tests {
                 "Array<Pair>",
                 Shape::Elements {
                     elem: pair,
+                    growable: false,
+                },
+            );
+            let ints = build.layout(
+                "Array<Int>",
+                Shape::Elements {
+                    elem: int,
+                    growable: false,
+                },
+            );
+            // A run of `String`s: one word an element, and every one of them a
+            // reference the collector follows.
+            let text_store = build.layout(
+                "Store<String>",
+                Shape::Elements {
+                    elem: str_layout,
+                    growable: true,
+                },
+            );
+            let text_vector = build.layout("Vector<String>", Shape::Vector { elem: str_layout });
+            let texts = build.layout(
+                "Array<String>",
+                Shape::Elements {
+                    elem: str_layout,
                     growable: false,
                 },
             );
@@ -7494,6 +7887,81 @@ mod tests {
                     Inst::Return { src: 0 },
                 ],
             );
+            // `std.map`'s keyed extend, in the shape ADR 0062 asks for it: the
+            // range is the frame's, so a test says which elements move.
+            // s0 owner, s1 run, s2 from, s3 count, s4 length, s5 store.
+            let int_words = Storage::Words(int);
+            let copy = build.args(&[(5, int_store), (4, int), (1, ints), (2, int), (3, int)]);
+            let append_run = framed(
+                &mut build,
+                "append_run",
+                &[int_vector, ints, int, int],
+                &[int_vector, ints, int, int, int, int_store],
+                vec![
+                    length(4, 0),
+                    Inst::GrowableEnsure {
+                        owner: 0,
+                        additional: 3,
+                        storage: int_words,
+                    },
+                    store_of(5, 0, int_store),
+                    Inst::RunCopy {
+                        args: copy,
+                        storage: int_words,
+                    },
+                    Inst::Clear {
+                        slot: 5,
+                        layout: int_store,
+                    },
+                    Inst::GrowableCommit {
+                        owner: 0,
+                        count: 3,
+                        storage: int_words,
+                    },
+                    Inst::Return { src: 0 },
+                ],
+            );
+            // The longest window there is: every optional row, over elements
+            // that are references.
+            // s0 owner, s1 run, s2 count, s3 length, s4 store, s5 nought,
+            // s6 second count.
+            let text_words = Storage::Words(str_layout);
+            let copy = build.args(&[(4, text_store), (3, int), (1, texts), (5, int), (2, int)]);
+            let append_texts = framed(
+                &mut build,
+                "append_texts",
+                &[text_vector, texts],
+                &[text_vector, texts, int, int, text_store, int, int],
+                vec![
+                    length(3, 0),
+                    Inst::Int { dst: 2, value: 32 },
+                    Inst::GrowableEnsure {
+                        owner: 0,
+                        additional: 2,
+                        storage: text_words,
+                    },
+                    store_of(4, 0, text_store),
+                    // Not nought: a fast path that did not write this word
+                    // would be indistinguishable from one that did, since a
+                    // fresh frame is zeroed.
+                    Inst::Int { dst: 5, value: 1 },
+                    Inst::RunCopy {
+                        args: copy,
+                        storage: text_words,
+                    },
+                    Inst::Clear {
+                        slot: 4,
+                        layout: text_store,
+                    },
+                    Inst::Int { dst: 6, value: 32 },
+                    Inst::GrowableCommit {
+                        owner: 0,
+                        count: 6,
+                        storage: text_words,
+                    },
+                    Inst::Return { src: 0 },
+                ],
+            );
             let program = build.done();
             // Every window here is one `crate::legalize` recognises, of the
             // pattern the fixture is named for.
@@ -7503,6 +7971,8 @@ mod tests {
                 (push_byte, cove_ir::legalize::Pattern::PushByte),
                 (append_text, cove_ir::legalize::Pattern::AppendBytes),
                 (append_pairs, cove_ir::legalize::Pattern::AppendWords),
+                (append_run, cove_ir::legalize::Pattern::AppendWords),
+                (append_texts, cove_ir::legalize::Pattern::AppendWords),
             ] {
                 let found = cove_ir::legalize::windows(&program, program.function(id));
                 assert_eq!(
@@ -7520,11 +7990,17 @@ mod tests {
                 push_byte,
                 append_text,
                 append_pairs,
+                append_run,
+                append_texts,
                 int_vector,
                 int_store,
                 pair_vector,
                 pair_store,
                 pairs,
+                ints,
+                text_vector,
+                text_store,
+                texts,
             }
         }
 
@@ -7573,7 +8049,7 @@ mod tests {
             fuel: Option<u64>,
             prepare: &dyn Fn(&mut Machine<'_>) -> Vec<u64>,
             inspect: &dyn Fn(&Machine<'_>, &[u64]) -> T,
-        ) -> (Ran<T>, crate::vm::report::BoundaryReport) {
+        ) -> (Ran<T>, crate::vm::report::BoundaryReport, u64) {
             let limits = crate::budget::Limits {
                 fuel,
                 ..crate::budget::Limits::default()
@@ -7594,13 +8070,16 @@ mod tests {
                 fuel: budget.fuel_spent(),
                 collections: machine.collected().collections,
             };
-            (ran, report)
+            (ran, report, machine.fused_fast)
         }
 
         /// **A fused window is the rows it stands for**: the same answer or the
         /// same refusal at the same span, the same heap, the same instructions,
-        /// fuel and collections. Answers the fused run and its report, which says
-        /// how many windows fused and how many dispatches they took.
+        /// fuel and collections. Answers the fused run, its report — which says
+        /// how many windows fused and how many dispatches they took — and how
+        /// many windows a fused head's own fast path ran whole, which is
+        /// `Machine::fused_fast` and the only thing that separates a fast path
+        /// that is right from one that declines everything.
         #[allow(clippy::too_many_arguments)]
         fn fuses_as_unfused<T: PartialEq + std::fmt::Debug>(
             what: &str,
@@ -7610,20 +8089,20 @@ mod tests {
             fuel: Option<u64>,
             prepare: &dyn Fn(&mut Machine<'_>) -> Vec<u64>,
             inspect: &dyn Fn(&Machine<'_>, &[u64]) -> T,
-        ) -> (Ran<T>, crate::vm::report::BoundaryReport) {
-            let (fused, report) = ran(program, entry, true, heap, fuel, prepare, inspect);
-            let (rows, unreport) = ran(program, entry, false, heap, fuel, prepare, inspect);
+        ) -> (Ran<T>, crate::vm::report::BoundaryReport, u64) {
+            let (fused, report, fast) = ran(program, entry, true, heap, fuel, prepare, inspect);
+            let (rows, unreport, unfast) = ran(program, entry, false, heap, fuel, prepare, inspect);
             assert_eq!(fused, rows, "{what}");
             assert_eq!(
-                (unreport.fusions, unreport.encoded_dispatches),
-                ([0; 4], unreport.encoded_instructions),
+                (unreport.fusions, unreport.encoded_dispatches, unfast),
+                ([0; 4], unreport.encoded_instructions, 0),
                 "{what}: the unfused run fused nothing"
             );
             assert_eq!(
                 report.encoded_instructions, unreport.encoded_instructions,
                 "{what}"
             );
-            (fused, report)
+            (fused, report, fast)
         }
 
         /// The words of a run's store, a unit being `stride` words.
@@ -7677,7 +8156,7 @@ mod tests {
                 };
                 let inspect =
                     |machine: &Machine<'_>, args: &[u64]| store_words(machine, args[0], 1);
-                let (fused, report) = fuses_as_unfused(
+                let (fused, report, fast) = fuses_as_unfused(
                     &what,
                     &f.program,
                     f.push_int,
@@ -7685,6 +8164,13 @@ mod tests {
                     None,
                     &prepare,
                     &inspect,
+                );
+                // The fast path runs a window whole only where the store has
+                // room: a growth is `fused_push`' own slower half.
+                assert_eq!(
+                    fast,
+                    u64::from(!consumed && len < capacity as u64),
+                    "{what}"
                 );
                 if consumed {
                     assert!(fused.said.contains("consumed"), "{what}: {}", fused.said);
@@ -7713,7 +8199,7 @@ mod tests {
                     vec![owner, 42]
                 };
                 let inspect = |_: &Machine<'_>, _: &[u64]| ();
-                let (fused, report) = fuses_as_unfused(
+                let (fused, report, fast) = fuses_as_unfused(
                     &what,
                     &f.program,
                     f.push_int,
@@ -7723,7 +8209,7 @@ mod tests {
                     &inspect,
                 );
                 assert!(fused.said.starts_with("Err("), "{what}: {}", fused.said);
-                assert_eq!(report.fusions, [0; 4], "{what}");
+                assert_eq!((report.fusions, fast), ([0; 4], 0), "{what}");
             }
             for capacity in [4i64, 1] {
                 let what = format!("a Pair push into {capacity}");
@@ -7733,7 +8219,7 @@ mod tests {
                 };
                 let inspect =
                     |machine: &Machine<'_>, args: &[u64]| store_words(machine, args[0], 2);
-                let (fused, report) = fuses_as_unfused(
+                let (fused, report, fast) = fuses_as_unfused(
                     &what,
                     &f.program,
                     f.push_pair,
@@ -7746,6 +8232,7 @@ mod tests {
                 assert_eq!(&fused.heap.1[2..4], &[7, 8], "{what}");
                 assert_eq!(report.fusions[PUSH_WORDS], 1, "{what}");
                 assert_eq!(report.encoded_dispatches, 2, "{what}");
+                assert_eq!(fast, u64::from(capacity > 1), "{what}");
             }
         }
 
@@ -7773,7 +8260,7 @@ mod tests {
                 vec![owner, 42]
             };
             let inspect = |machine: &Machine<'_>, args: &[u64]| store_words(machine, args[0], 1);
-            let (fused, report) = fuses_as_unfused(
+            let (fused, report, fast) = fuses_as_unfused(
                 "a growth that collects",
                 &f.program,
                 f.push_int,
@@ -7787,8 +8274,9 @@ mod tests {
             assert_eq!(fused.heap.1[32], 42);
             assert_eq!(report.fusions[PUSH_WORDS], 1);
             assert_eq!(report.encoded_dispatches, 2);
+            assert_eq!(fast, 0, "a growth is not the fast path");
 
-            let (fused, report) = fuses_as_unfused(
+            let (fused, report, fast) = fuses_as_unfused(
                 "a growth with no room anywhere",
                 &f.program,
                 f.push_int,
@@ -7804,7 +8292,7 @@ mod tests {
                 fused.said
             );
             assert_eq!(fused.heap.0, 64, "nothing was published");
-            assert_eq!(report.fusions, [0; 4]);
+            assert_eq!((report.fusions, fast), ([0; 4], 0));
         }
 
         /// **A byte push**: into room, into a full store, of a value that is not a
@@ -7839,7 +8327,7 @@ mod tests {
                     };
                     (machine.payload(args[0], runs::GROWABLE_LEN), bytes)
                 };
-                let (fused, report) = fuses_as_unfused(
+                let (fused, report, fast) = fuses_as_unfused(
                     &what,
                     &f.program,
                     f.push_byte,
@@ -7847,6 +8335,12 @@ mod tests {
                     None,
                     &prepare,
                     &inspect,
+                );
+                // Room for the byte, and a byte to store: the fast path's case.
+                assert_eq!(
+                    fast,
+                    u64::from(value <= 255 && !consumed && len < capacity as u64),
+                    "{what}"
                 );
                 match (value <= 255, consumed) {
                     (true, false) => {
@@ -7867,10 +8361,10 @@ mod tests {
             }
         }
 
-        /// **An append of bytes and of elements**, which always runs through
-        /// `fused_tail`: one that fits, one that grows, an empty one, one longer
-        /// than a bulk chunk — whose copy safepoints part way and moves the next
-        /// question — and one onto a consumed buffer.
+        /// **An append of bytes and of elements**: one that fits, one that
+        /// grows, an empty one, one longer than a bulk chunk — whose copy
+        /// safepoints part way and moves the next question, so the fast path
+        /// declines it — and one onto a consumed buffer.
         #[test]
         fn a_fused_append_is_the_rows_it_stands_for() {
             let f = framed();
@@ -7900,7 +8394,7 @@ mod tests {
                         _ => (len, machine.string_bytes(store)[..len as usize].to_vec()),
                     }
                 };
-                let (fused, report) = fuses_as_unfused(
+                let (fused, report, fast) = fuses_as_unfused(
                     &what,
                     &f.program,
                     f.append_text,
@@ -7908,6 +8402,14 @@ mod tests {
                     None,
                     &prepare,
                     &inspect,
+                );
+                // Sixteen bytes of room, and a chunk is 8,192: what runs whole
+                // on the fast path is the piece that fits and the empty one.
+                assert_eq!(
+                    fast,
+                    u64::from(!consumed && text.len() <= 16),
+                    "{what}: {} byte(s)",
+                    text.len()
                 );
                 if consumed {
                     assert!(fused.said.contains("already consumed"), "{}", fused.said);
@@ -7929,7 +8431,7 @@ mod tests {
                 };
                 let inspect =
                     |machine: &Machine<'_>, args: &[u64]| store_words(machine, args[0], 2);
-                let (fused, report) = fuses_as_unfused(
+                let (fused, report, fast) = fuses_as_unfused(
                     &what,
                     &f.program,
                     f.append_pairs,
@@ -7941,6 +8443,9 @@ mod tests {
                 assert_eq!(fused.heap.0, 4, "{what}");
                 assert_eq!(&fused.heap.1[2..8], &[100, 101, 102, 103, 104, 105]);
                 assert_eq!(report.fusions[APPEND_WORDS], 1, "{what}");
+                // Three elements onto one: room in a store of four and not in
+                // one of one, which is the growth.
+                assert_eq!(fast, u64::from(capacity == 4), "{what}");
                 // A length, the window's six rows and a return, in three.
                 assert_eq!(
                     (report.encoded_instructions, report.encoded_dispatches),
@@ -7950,7 +8455,303 @@ mod tests {
             }
         }
 
-        /// **A byte append that has to grow is grown by `fused_append` itself**,
+        /// **A word append over a range the frame chooses** — `std.map`'s keyed
+        /// extend's shape — is the rows it stands for: into room, an empty one,
+        /// one that grows, the whole source, and every way the range can be
+        /// wrong. Each refusal is the row's own, at the row's span, with the
+        /// frame and the fuel the rows would have left.
+        #[test]
+        fn a_fused_word_append_over_a_chosen_range_is_the_rows_it_stands_for() {
+            let f = framed();
+            const SOURCE: u64 = 8;
+            for (len, capacity, from, count, consumed) in [
+                (2u64, 16i64, 1i64, 3i64, false),
+                (2, 16, 0, 0, false),
+                (0, 16, 0, 8, false),
+                (2, 4, 0, 4, false),
+                (2, 16, 5, 10, false),
+                (2, 16, -1, 2, false),
+                (2, 16, 0, -1, false),
+                (2, 16, 0, 2, true),
+            ] {
+                let what = format!(
+                    "{count} element(s) from {from} onto {len} of {capacity}, \
+                     consumed: {consumed}"
+                );
+                let prepare = |machine: &mut Machine<'_>| {
+                    let run = machine.allocate(f.ints, SOURCE as i64).unwrap();
+                    for at in 0..SOURCE as u32 {
+                        machine.set_payload(run, at, 100 + u64::from(at));
+                    }
+                    machine.push_temp(run);
+                    let owner =
+                        vector_of(machine, f.int_vector, f.int_store, len, capacity, consumed);
+                    let store = machine.payload(owner, runs::GROWABLE_STORE);
+                    for at in (0..len as u32).take_while(|_| store != 0) {
+                        machine.set_payload(store, at, u64::from(at));
+                    }
+                    vec![owner, run, from as u64, count as u64]
+                };
+                let inspect =
+                    |machine: &Machine<'_>, args: &[u64]| store_words(machine, args[0], 1);
+                let (fused, report, fast) = fuses_as_unfused(
+                    &what,
+                    &f.program,
+                    f.append_run,
+                    1 << 16,
+                    None,
+                    &prepare,
+                    &inspect,
+                );
+                // What the fast path runs whole: a live store with room for a
+                // range the source holds.
+                let room = !consumed
+                    && (0..=SOURCE as i64).contains(&count)
+                    && from >= 0
+                    && from + count <= SOURCE as i64
+                    && len as i64 + count <= capacity;
+                assert_eq!(fast, u64::from(room), "{what}");
+                if room {
+                    let copied: Vec<u64> =
+                        (0..count as u64).map(|at| 100 + from as u64 + at).collect();
+                    assert_eq!(fused.heap.0, len + count as u64, "{what}");
+                    assert_eq!(
+                        &fused.heap.1[len as usize..][..count as usize],
+                        copied,
+                        "{what}"
+                    );
+                    assert_eq!(report.fusions[APPEND_WORDS], 1, "{what}");
+                } else if consumed {
+                    assert!(fused.said.contains("consumed"), "{what}: {}", fused.said);
+                    assert!(fused.said.contains("start: 1"), "{what}: at the ensure");
+                } else if count < 0 {
+                    assert!(
+                        fused.said.contains("room is never negative"),
+                        "{what}: {}",
+                        fused.said
+                    );
+                    assert!(fused.said.contains("start: 1"), "{what}: at the ensure");
+                } else if from < 0 || from + count > SOURCE as i64 {
+                    assert!(
+                        fused.said.contains("`runCopy` reads"),
+                        "{what}: {}",
+                        fused.said
+                    );
+                    assert!(fused.said.contains("start: 3"), "{what}: at the copy");
+                } else {
+                    // The growth, which the ensure makes and `fused_tail`
+                    // finishes: the elements still arrive.
+                    assert_eq!(fused.heap.0, len + count as u64, "{what}");
+                    assert_eq!(report.fusions[APPEND_WORDS], 1, "{what}");
+                }
+            }
+
+            // A source that is not a run of these elements at all: the family
+            // check the collector's reference maps depend on, refused at the
+            // copy in `runCopy`'s words.
+            let prepare = |machine: &mut Machine<'_>| {
+                let text = machine.new_string("not a run of Int").unwrap();
+                machine.push_temp(text);
+                let owner = vector_of(machine, f.int_vector, f.int_store, 0, 4, false);
+                vec![owner, text, 0, 1]
+            };
+            let inspect = |machine: &Machine<'_>, args: &[u64]| store_words(machine, args[0], 1);
+            let (fused, report, fast) = fuses_as_unfused(
+                "a copy out of a String",
+                &f.program,
+                f.append_run,
+                1 << 16,
+                None,
+                &prepare,
+                &inspect,
+            );
+            assert!(
+                fused.said.contains("is not a run of `int` elements"),
+                "{}",
+                fused.said
+            );
+            assert!(
+                fused.said.contains("start: 3"),
+                "at the copy: {}",
+                fused.said
+            );
+            assert_eq!((report.fusions, fast), ([0; 4], 0));
+        }
+
+        /// **A word copy whose source is the destination's own store** is a
+        /// move and not a smear: shifted up it is walked from the tail, shifted
+        /// down from the front, and a range onto itself changes nothing. The
+        /// fused run is the rows', which go through `Space::copy`.
+        #[test]
+        fn a_fused_word_append_that_overlaps_itself_moves_rather_than_smears() {
+            let f = framed();
+            const CAPACITY: i64 = 16;
+            for (len, from, count) in [(2u64, 0i64, 4i64), (0, 2, 4), (4, 4, 4), (6, 0, 6)] {
+                let what = format!("{count} element(s) from {from} onto {len} of itself");
+                let prepare = |machine: &mut Machine<'_>| {
+                    let owner = vector_of(machine, f.int_vector, f.int_store, len, CAPACITY, false);
+                    let store = machine.payload(owner, runs::GROWABLE_STORE);
+                    for at in 0..CAPACITY as u32 {
+                        machine.set_payload(store, at, 1000 + u64::from(at));
+                    }
+                    vec![owner, store, from as u64, count as u64]
+                };
+                let inspect =
+                    |machine: &Machine<'_>, args: &[u64]| store_words(machine, args[0], 1);
+                let (fused, report, fast) = fuses_as_unfused(
+                    &what,
+                    &f.program,
+                    f.append_run,
+                    1 << 16,
+                    None,
+                    &prepare,
+                    &inspect,
+                );
+                // What a `memmove` of the same range leaves, written out here
+                // rather than read back off the machine that is under test.
+                let mut want: Vec<u64> = (0..CAPACITY as u64).map(|at| 1000 + at).collect();
+                want.copy_within(from as usize..(from + count) as usize, len as usize);
+                assert_eq!(fused.heap, (len + count as u64, want), "{what}");
+                assert_eq!((report.fusions[APPEND_WORDS], fast), (1, 1), "{what}");
+            }
+        }
+
+        /// **A word append longer than a bulk chunk is left to the rows**, whose
+        /// copy polls between chunks: the fast path may not, because a
+        /// safepoint inside a window is a question falling where a fused head
+        /// promised none would. The answer is still the rows'.
+        #[test]
+        fn a_word_append_longer_than_a_chunk_is_left_to_the_rows() {
+            let f = framed();
+            const COUNT: u64 = 2_000;
+            let prepare = |machine: &mut Machine<'_>| {
+                let run = machine.allocate(f.ints, COUNT as i64).unwrap();
+                for at in 0..COUNT as u32 {
+                    machine.set_payload(run, at, u64::from(at));
+                }
+                machine.push_temp(run);
+                let owner = vector_of(machine, f.int_vector, f.int_store, 0, COUNT as i64, false);
+                vec![owner, run, 0, COUNT]
+            };
+            let inspect = |machine: &Machine<'_>, args: &[u64]| store_words(machine, args[0], 1);
+            let (fused, report, fast) = fuses_as_unfused(
+                "two thousand elements, which is two bulk chunks",
+                &f.program,
+                f.append_run,
+                1 << 16,
+                None,
+                &prepare,
+                &inspect,
+            );
+            assert_eq!(fused.heap.0, COUNT);
+            assert_eq!(fused.heap.1, (0..COUNT).collect::<Vec<_>>());
+            // It still fuses — the rows run in the head's one dispatch — and it
+            // still does not run on the fast path.
+            assert_eq!((report.fusions[APPEND_WORDS], fast), (1, 0));
+        }
+
+        /// **A word append of references**: the elements copied are addresses
+        /// the collector follows, so a growth that collects inside the window
+        /// must leave every one of them readable, and so must a copy the fast
+        /// path runs whole. Both are the rows'.
+        #[test]
+        fn a_fused_word_append_of_references_keeps_every_one() {
+            let f = framed();
+            // The window copies 32 of them, which is what makes the growth
+            // below big enough that the heap has to collect to satisfy it.
+            let pieces: Vec<String> = (0..33).map(|at| format!("piece {at}")).collect();
+            // The window copies `pieces[1..]`, which is its offset constant.
+            let copied = &pieces[1..];
+            let held = ["already here", "and here"];
+            // `(capacity, heap, garbage)`: room with no growth, a growth, and a
+            // growth on a heap small enough that it collects first.
+            for (capacity, heap, garbage) in [
+                (64i64, 1 << 16, false),
+                (2, 1 << 16, false),
+                (2, 1 << 10, true),
+            ] {
+                let what = format!("a store of {capacity} on a heap of {heap}, garbage: {garbage}");
+                let prepare = |machine: &mut Machine<'_>| {
+                    let run = machine.allocate(f.texts, pieces.len() as i64).unwrap();
+                    machine.push_temp(run);
+                    for (at, piece) in pieces.iter().enumerate() {
+                        let text = machine.new_string(piece).unwrap();
+                        machine.set_payload(run, at as u32, text);
+                    }
+                    // One more than the 32 the window copies from offset 1.
+                    assert_eq!(pieces.len(), 33);
+                    let owner = vector_of(
+                        machine,
+                        f.text_vector,
+                        f.text_store,
+                        held.len() as u64,
+                        capacity,
+                        false,
+                    );
+                    machine.push_temp(owner);
+                    let store = machine.payload(owner, runs::GROWABLE_STORE);
+                    for (at, piece) in held.iter().enumerate() {
+                        let text = machine.new_string(piece).unwrap();
+                        machine.set_payload(store, at as u32, text);
+                    }
+                    if garbage {
+                        // Up to within a few words of the whole heap, so that
+                        // the store the growth asks for does not fit until the
+                        // garbage has been collected.
+                        while machine.new_string("garbage, and nothing holds it").is_ok()
+                            && machine.mem.heap_words() < 1_000
+                        {}
+                    }
+                    vec![owner, run]
+                };
+                // Every element as the text it points at: a reference the copy
+                // lost or a collection freed would not read back.
+                let inspect = |machine: &Machine<'_>, args: &[u64]| {
+                    let len = machine.payload(args[0], runs::GROWABLE_LEN);
+                    let store = machine.payload(args[0], runs::GROWABLE_STORE);
+                    let held: Vec<String> = (0..len as u32)
+                        .map(|at| {
+                            let text = machine.payload(store, at);
+                            String::from_utf8(machine.string_bytes(text)).expect("text")
+                        })
+                        .collect();
+                    (len, held)
+                };
+                let (fused, report, fast) = fuses_as_unfused(
+                    &what,
+                    &f.program,
+                    f.append_texts,
+                    heap,
+                    None,
+                    &prepare,
+                    &inspect,
+                );
+                let want: Vec<String> = held
+                    .iter()
+                    .map(|piece| (*piece).to_owned())
+                    .chain(copied.iter().cloned())
+                    .collect();
+                assert_eq!(fused.heap, (2 + copied.len() as u64, want), "{what}");
+                assert_eq!(report.fusions[APPEND_WORDS], 1, "{what}");
+                assert_eq!(
+                    fast,
+                    u64::from(capacity >= (held.len() + copied.len()) as i64),
+                    "{what}"
+                );
+                if garbage {
+                    assert!(fused.collections > 0, "{what}: the growth collected");
+                }
+                // The longest window there is: a length, its eight rows and a
+                // return, in two dispatches.
+                assert_eq!(
+                    (report.encoded_instructions, report.encoded_dispatches),
+                    (10, 2),
+                    "{what}"
+                );
+            }
+        }
+
+        /// **A byte append that has to grow is grown by `fused_append_bytes` itself**,
         /// and the rest of its window runs as `fused_tail` runs it: so one whose
         /// growth collects first, and one the heap has no room for at all, must
         /// still be the rows — the same collections, the same bytes, and the same
@@ -7991,7 +8792,7 @@ mod tests {
                 let store = machine.payload(args[0], runs::GROWABLE_STORE);
                 (len, machine.string_bytes(store)[..len as usize].to_vec())
             };
-            let (fused, report) = fuses_as_unfused(
+            let (fused, report, fast) = fuses_as_unfused(
                 "an append whose growth collects",
                 &f.program,
                 f.append_text,
@@ -8004,13 +8805,14 @@ mod tests {
             assert_eq!(fused.heap.0, 616);
             assert_eq!(&fused.heap.1[16..], text.as_bytes());
             assert_eq!(report.fusions[APPEND_BYTES], 1);
+            assert_eq!(fast, 0, "a growth is not the fast path");
             // The length, the window's seven rows and the return, in three.
             assert_eq!(
                 (report.encoded_instructions, report.encoded_dispatches),
                 (9, 3)
             );
 
-            let (fused, report) = fuses_as_unfused(
+            let (fused, report, fast) = fuses_as_unfused(
                 "an append whose growth has no room anywhere",
                 &f.program,
                 f.append_text,
@@ -8026,7 +8828,7 @@ mod tests {
                 fused.said
             );
             assert_eq!(fused.heap.0, 16, "nothing was published");
-            assert_eq!(report.fusions, [0; 4]);
+            assert_eq!((report.fusions, fast), ([0; 4], 0));
         }
 
         /// Three hundred byte windows in one function, with garbage between them
@@ -8138,7 +8940,7 @@ mod tests {
 
             let prepare = |_: &mut Machine<'_>| Vec::new();
             let inspect = |_: &Machine<'_>, _: &[u64]| ();
-            let (fused, report) =
+            let (fused, report, _) =
                 fuses_as_unfused("whole", &program, entry, 320, None, &prepare, &inspect);
             assert!(fused.said.starts_with("Ok("), "{}", fused.said);
             assert!(fused.collections > 0, "a growth collected");
@@ -8152,7 +8954,7 @@ mod tests {
                 report.encoded_instructions - 6 * windows
             );
             for limit in [1u64, 700, 1_000, 1_500, 2_000] {
-                let (stopped, _) = fuses_as_unfused(
+                let (stopped, ..) = fuses_as_unfused(
                     &format!("under {limit} fuel"),
                     &program,
                     entry,
@@ -8162,6 +8964,178 @@ mod tests {
                     &inspect,
                 );
                 assert!(stopped.said.contains("fuel"), "{}", stopped.said);
+            }
+        }
+
+        /// The same thing for **word** appends: a hundred and seventy of them in
+        /// one function, three elements a window, with garbage between them on a
+        /// heap small enough that growing the store collects. The fused run is
+        /// the unfused one in its answer, its heap, its fuel and its
+        /// collections, and so it is under fuel limits that stop it part way.
+        ///
+        /// It is where both halves of a word window are reached by one program:
+        /// the fast path for the copies the store has room for, and
+        /// `Machine::ensure_growable` — collecting, at the ensure's pc — for
+        /// the ones it does not. The bounds on `fast` below are what say so.
+        #[test]
+        fn word_windows_that_grow_and_collect_agree_with_their_rows() {
+            const WINDOWS: i64 = 170;
+            const SOURCE: i64 = 8;
+            // Room for the store the last growth asks for and the one it
+            // replaces, and not much more: so a growth part way through has to
+            // collect the garbage between the windows before it fits.
+            const HEAP: usize = 1_300;
+            const COUNT: i64 = 3;
+            let mut build = Build::default();
+            let int = build.scalar(Repr::Int);
+            build.string_layout();
+            build.bytes_layout();
+            let buffer = build.buffer_layout();
+            let int_store = build.layout(
+                "Store<Int>",
+                Shape::Elements {
+                    elem: int,
+                    growable: true,
+                },
+            );
+            let int_vector = build.layout("Vector<Int>", Shape::Vector { elem: int });
+            let ints = build.layout(
+                "Array<Int>",
+                Shape::Elements {
+                    elem: int,
+                    growable: false,
+                },
+            );
+            let words = Storage::Words(int);
+            let copy = build.args(&[(5, int_store), (4, int), (1, ints), (2, int), (3, int)]);
+            // s0 owner, s1 run, s2 from, s3 count, s4 length, s5 store,
+            // s6 garbage, s7 the garbage's capacity.
+            let mut code = vec![
+                Inst::Int { dst: 2, value: 0 },
+                Inst::Int {
+                    dst: 3,
+                    value: COUNT,
+                },
+                Inst::Int { dst: 7, value: 64 },
+            ];
+            for at in 0..WINDOWS {
+                code.extend([
+                    Inst::LoadField {
+                        dst: 4,
+                        obj: 0,
+                        at: 0,
+                        layout: int,
+                    },
+                    Inst::GrowableEnsure {
+                        owner: 0,
+                        additional: 3,
+                        storage: words,
+                    },
+                    Inst::LoadField {
+                        dst: 5,
+                        obj: 0,
+                        at: 1,
+                        layout: int_store,
+                    },
+                    Inst::RunCopy {
+                        args: copy,
+                        storage: words,
+                    },
+                    Inst::Clear {
+                        slot: 5,
+                        layout: int_store,
+                    },
+                    Inst::GrowableCommit {
+                        owner: 0,
+                        count: 3,
+                        storage: words,
+                    },
+                ]);
+                if at % 8 == 0 {
+                    // Sixty-four bytes nothing holds: enough garbage between
+                    // the windows that collecting it is what lets a growth fit.
+                    code.push(Inst::GrowableAlloc {
+                        dst: 6,
+                        capacity: 7,
+                        storage: Storage::PackedBytes,
+                    });
+                    code.push(Inst::Clear {
+                        slot: 6,
+                        layout: buffer,
+                    });
+                }
+            }
+            code.push(Inst::Return { src: 0 });
+            let spans = code.len();
+            let entry = build.function(
+                "append_in_windows",
+                &[int_vector, ints],
+                &[
+                    Repr::Ref,
+                    Repr::Ref,
+                    Repr::Int,
+                    Repr::Int,
+                    Repr::Int,
+                    Repr::Ref,
+                    Repr::Ref,
+                    Repr::Int,
+                ],
+                int_vector,
+                code,
+            );
+            build.program.functions[entry.index()].spans = (0..spans)
+                .map(|pc| Span::new(cove_diag::FileId(0), pc as _, pc as _))
+                .collect();
+            let program = build.done();
+
+            let prepare = |machine: &mut Machine<'_>| {
+                let run = machine.allocate(ints, SOURCE).unwrap();
+                for at in 0..SOURCE as u32 {
+                    machine.set_payload(run, at, 100 + u64::from(at));
+                }
+                machine.push_temp(run);
+                let owner = vector_of(machine, int_vector, int_store, 0, 2, false);
+                vec![owner, run]
+            };
+            let inspect = |machine: &Machine<'_>, args: &[u64]| {
+                let len = machine.payload(args[0], runs::GROWABLE_LEN);
+                let store = machine.payload(args[0], runs::GROWABLE_STORE);
+                let held: Vec<u64> = (0..len as u32)
+                    .map(|at| machine.payload(store, at))
+                    .collect();
+                (len, held)
+            };
+            let (fused, report, fast) =
+                fuses_as_unfused("whole", &program, entry, HEAP, None, &prepare, &inspect);
+            assert!(fused.said.starts_with("Ok("), "{}", fused.said);
+            assert!(fused.collections > 0, "a growth collected");
+            let want: Vec<u64> = (0..WINDOWS as u64)
+                .flat_map(|_| (0..COUNT as u64).map(|at| 100 + at))
+                .collect();
+            assert_eq!(fused.heap, ((WINDOWS * COUNT) as u64, want));
+            let windows = report.fusions[APPEND_WORDS];
+            assert_eq!(windows, WINDOWS as u64, "every window fused");
+            // A growth is not the fast path, so `fast` is short of the windows
+            // that fused; and it is above nought, which is the whole of what
+            // this change adds. A window a safepoint would fall inside declines
+            // too — `a_word_append_longer_than_a_chunk_is_left_to_the_rows` is
+            // where that one is reached on its own.
+            assert!(fast > 0 && fast < windows, "{fast} of {windows} ran whole");
+            assert_eq!(
+                report.encoded_dispatches,
+                report.encoded_instructions - 5 * windows
+            );
+            for limit in [1u64, 500, 1_000] {
+                let (stopped, ..) = fuses_as_unfused(
+                    &format!("under {limit} fuel"),
+                    &program,
+                    entry,
+                    HEAP,
+                    Some(limit),
+                    &prepare,
+                    &inspect,
+                );
+                assert!(stopped.said.contains("fuel"), "{limit}: {}", stopped.said);
             }
         }
 
@@ -8496,31 +9470,27 @@ mod tests {
             }
 
             /// Every framed fixture, each behind a caller, and compiled.
-            fn tiered() -> (Framed, [FunctionId; 5], NativeProgram) {
+            fn tiered() -> (Framed, [FunctionId; 7], NativeProgram) {
                 let f = framed();
                 let mut build = Build {
                     program: f.program.clone(),
                 };
-                let outers = [
+                let inners = [
                     f.push_int,
                     f.push_pair,
                     f.push_byte,
                     f.append_text,
                     f.append_pairs,
-                ]
-                .map(|inner| calling(&mut build, inner));
+                    f.append_run,
+                    f.append_texts,
+                ];
+                let outers = inners.map(|inner| calling(&mut build, inner));
                 let f = Framed {
                     program: build.done(),
                     ..f
                 };
                 let native = crate::native::compile(&f.program).expect("this host compiles");
-                for inner in [
-                    f.push_int,
-                    f.push_pair,
-                    f.push_byte,
-                    f.append_text,
-                    f.append_pairs,
-                ] {
+                for inner in inners {
                     assert!(native.entry(inner).is_some(), "{:?}", native.refusals());
                 }
                 (f, outers, native)
@@ -8657,11 +9627,11 @@ mod tests {
             }
 
             /// **An append, compiled**: bytes that fit, grow, are empty, are
-            /// longer than a bulk chunk, and go onto a consumed buffer; and pairs
-            /// into room and through a growth.
+            /// longer than a bulk chunk, and go onto a consumed buffer; and
+            /// pairs into room and through a growth.
             #[test]
             fn a_compiled_append_is_its_rows() {
-                let (f, [_, _, _, append_text, append_pairs], native) = tiered();
+                let (f, [_, _, _, append_text, append_pairs, ..], native) = tiered();
                 let long = "0123456789abcdef".repeat(2_000);
                 for (text, consumed) in [
                     ("hi", false),
@@ -8727,6 +9697,113 @@ mod tests {
                     );
                     assert_eq!(left.heap.0, 4, "{what}");
                     assert_eq!(&left.heap.1[2..8], &[100, 101, 102, 103, 104, 105]);
+                }
+            }
+
+            /// **A word append over a range the frame chooses, compiled**: into
+            /// room, empty, the whole source, through a growth, over a range
+            /// the source does not hold, onto a consumed vector, and out of a
+            /// source that is not a run of these elements at all. The compiled
+            /// tier answers or refuses exactly as the rows do, and it is the
+            /// one shape `std.map`'s keyed extend has.
+            #[test]
+            fn a_compiled_word_append_over_a_chosen_range_is_its_rows() {
+                let (f, [.., append_run, _], native) = tiered();
+                const SOURCE: i64 = 8;
+                for (len, capacity, from, count, consumed) in [
+                    (2u64, 16i64, 1i64, 3i64, false),
+                    (2, 16, 0, 0, false),
+                    (0, 16, 0, 8, false),
+                    (2, 4, 0, 4, false),
+                    (2, 16, 5, 10, false),
+                    (2, 16, 0, -1, false),
+                    (2, 16, 0, 2, true),
+                ] {
+                    let what = format!(
+                        "{count} element(s) from {from} onto {len} of {capacity}, \
+                         consumed: {consumed}"
+                    );
+                    let prepare = |machine: &mut Machine<'_>| {
+                        let run = machine.allocate(f.ints, SOURCE).unwrap();
+                        for at in 0..SOURCE as u32 {
+                            machine.set_payload(run, at, 100 + u64::from(at));
+                        }
+                        machine.push_temp(run);
+                        let owner =
+                            vector_of(machine, f.int_vector, f.int_store, len, capacity, consumed);
+                        vec![owner, run, from as u64, count as u64]
+                    };
+                    let inspect =
+                        |machine: &Machine<'_>, args: &[u64]| store_words(machine, args[0], 1);
+                    let left = compiled_as_rows(
+                        &what,
+                        &f.program,
+                        &native,
+                        append_run,
+                        1 << 16,
+                        &prepare,
+                        &inspect,
+                    );
+                    let ok = !consumed && count >= 0 && from + count <= SOURCE;
+                    assert_eq!(left.said.starts_with("Ok("), ok, "{what}: {}", left.said);
+                    if ok {
+                        assert_eq!(left.heap.0, len + count as u64, "{what}");
+                    }
+                }
+            }
+
+            /// **A word append of references through a growth that collects,
+            /// compiled**: the elements are addresses, so a tier that lost one
+            /// or a collection that did not see the half-built store reads back
+            /// as the wrong text.
+            #[test]
+            fn a_compiled_word_append_of_references_keeps_every_one() {
+                let (f, [.., append_texts], native) = tiered();
+                let pieces: Vec<String> = (0..33).map(|at| format!("piece {at}")).collect();
+                let copied = pieces[1..].to_vec();
+                for (capacity, heap, garbage) in [(64i64, 1 << 16, false), (2, 1 << 10, true)] {
+                    let what = format!("a store of {capacity}, garbage: {garbage}");
+                    let prepare = |machine: &mut Machine<'_>| {
+                        let run = machine.allocate(f.texts, pieces.len() as i64).unwrap();
+                        machine.push_temp(run);
+                        for (at, piece) in pieces.iter().enumerate() {
+                            let text = machine.new_string(piece).unwrap();
+                            machine.set_payload(run, at as u32, text);
+                        }
+                        let owner =
+                            vector_of(machine, f.text_vector, f.text_store, 0, capacity, false);
+                        machine.push_temp(owner);
+                        if garbage {
+                            while machine.new_string("garbage, and nothing holds it").is_ok()
+                                && machine.mem.heap_words() < 1_000
+                            {}
+                        }
+                        vec![owner, run]
+                    };
+                    let inspect = |machine: &Machine<'_>, args: &[u64]| {
+                        let len = machine.payload(args[0], runs::GROWABLE_LEN);
+                        let store = machine.payload(args[0], runs::GROWABLE_STORE);
+                        let held: Vec<String> = (0..len as u32)
+                            .map(|at| {
+                                let text = machine.payload(store, at);
+                                String::from_utf8(machine.string_bytes(text)).expect("text")
+                            })
+                            .collect();
+                        (len, held)
+                    };
+                    let left = compiled_as_rows(
+                        &what,
+                        &f.program,
+                        &native,
+                        append_texts,
+                        heap,
+                        &prepare,
+                        &inspect,
+                    );
+                    assert_eq!(left.heap, (copied.len() as u64, copied.clone()), "{what}");
+                    if garbage {
+                        assert!(left.collections > 0, "{what}: the growth collected");
+                    }
                 }
             }
 

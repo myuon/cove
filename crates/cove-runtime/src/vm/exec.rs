@@ -634,6 +634,21 @@ pub(crate) struct Machine<'a> {
     /// an arm it read a slot it had already overwritten.
     #[cfg(debug_assertions)]
     answered: bool,
+    /// How many windows a fused head ran whole on its own fast path, rather
+    /// than declining to [`encoded::fused_tail`]'s row-by-row code.
+    ///
+    /// The only thing that tells the two apart, and it exists for the tests.
+    /// A fast path that is right and a fast path that always declines leave
+    /// the same frame, the same heap, the same instructions, the same fuel and
+    /// the same boundary counts — that is exactly what each one promises — so
+    /// a window test that asks only for agreement passes just as well over a
+    /// fast path nothing reaches. This is how `mod window`'s fixtures ask
+    /// whether the path under test ran at all.
+    ///
+    /// `#[cfg(test)]`, so the field is in this crate's own test binary and in
+    /// nothing a measurement is taken on.
+    #[cfg(test)]
+    pub(crate) fused_fast: u64,
     /// The last case index each enum wrapper resolved to, and for which
     /// layout.
     ///
@@ -803,6 +818,8 @@ impl<'a> Machine<'a> {
             encoded: encoded::prepare(program),
             #[cfg(debug_assertions)]
             answered: false,
+            #[cfg(test)]
+            fused_fast: 0,
             cases: [None; 4],
             widths: program
                 .layouts
@@ -885,6 +902,8 @@ impl<'a> Machine<'a> {
             encoded: Ok(encoded),
             #[cfg(debug_assertions)]
             answered: false,
+            #[cfg(test)]
+            fused_fast: 0,
             cases: [None; 4],
             // The parent's, for the reason `encoded` is: a table derived from
             // a program the whole run shares is the same table in every task.
