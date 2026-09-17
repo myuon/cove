@@ -1,0 +1,83 @@
+use console.println
+
+/// Every decimal edge an `Int` piece has to render: zero, one digit, each side
+/// of a change in the digit count, the largest power of ten an `Int` holds,
+/// and both ends of the range.
+///
+/// The least `Int` is written as a difference because its magnitude is not an
+/// `Int` and so cannot be a literal.
+fn edges() -> Array<Int> {
+  [
+    0,
+    7,
+    -7,
+    9,
+    10,
+    -10,
+    99,
+    100,
+    -100,
+    1000000,
+    -1000000,
+    999999999999999999,
+    1000000000000000000,
+    -1000000000000000000,
+    9223372036854775807,
+    -9223372036854775807,
+    -9223372036854775807 - 1,
+  ]
+}
+
+/// An `Int` piece between two runs of literal text.
+///
+/// Apart from `main` so that a tier which compiles a function without a host
+/// call in it renders this one itself.
+fn labelled(n: Int) -> String {
+  "n={n};"
+}
+
+/// Two `Int` pieces with nothing between them.
+fn adjacent(first: Int, second: Int) -> String {
+  "{first}{second}"
+}
+
+/// Every value, each followed by a comma, in one string.
+///
+/// A loop with no host call in it, so that a tier which compiles such a
+/// function renders these pieces itself rather than leaving them to `main`.
+fn joined(values: Array<Int>) -> String {
+  var text = ""
+  for n in values {
+    text = "{text}{n},"
+  }
+  text
+}
+
+/// Pins how an `Int` piece of an interpolation renders: alone, beside literal
+/// text on either side, beside another `Int` piece with nothing between them,
+/// and as a value computed at run time rather than written.
+export fn main() -> Result<Unit, Error> {
+  for n in edges() {
+    println("{n}")?
+  }
+  for n in edges() {
+    println(labelled(n))?
+  }
+  println(joined(edges()))?
+  let least = -9223372036854775807 - 1
+  let most = 9223372036854775807
+  println(adjacent(least, most))?
+  println(adjacent(most, least))?
+  println("{0}{-1}{10}")?
+  println("[{most}|{least}]")?
+  var power = 1
+  var negative = -1
+  for step in 0..19 {
+    println("{step}: {power} {negative}")?
+    if power < 1000000000000000000 {
+      power = power * 10
+      negative = negative * 10
+    }
+  }
+  Ok(())
+}

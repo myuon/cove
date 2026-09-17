@@ -8,6 +8,34 @@ struct Point {
   y: Int
 }
 
+/// What one of the `Int` piece rows took, and the bytes it rendered.
+struct Rendering {
+  micros: Int
+  bytes: Int
+}
+
+/// `rounds` turns of `"{value}"`, one `Int` piece and nothing else, answering
+/// the bytes rendered.
+///
+/// No host call, so that the native tier compiles the loop and the rows price
+/// the rendering on the tier that runs it.
+fn renderMany(value: Int, rounds: Int) -> Int {
+  var bytes = 0
+  var i = 0
+  while i < rounds {
+    bytes = bytes + "{value}".byteLength()
+    i = i + 1
+  }
+  bytes
+}
+
+/// [`renderMany`], timed.
+fn rendering(value: Int, rounds: Int) -> Rendering {
+  let from = now()
+  let bytes = renderMany(value, rounds)
+  Rendering(micros: (now() - from).micros(), bytes: bytes)
+}
+
 /// One builtin call per turn, and nothing else the loop can be about.
 ///
 /// The first three rows are where the boundary was first priced: `byteLength`
@@ -27,6 +55,10 @@ struct Point {
 ///   word;
 /// - a ten-piece interpolation is a variadic call past eight operands, which
 ///   is where an operand list stops fitting inline.
+///
+/// The last four are one `Int` piece and nothing else, at 1, 3, 10 and 19
+/// digits (#403): what rendering an `Int` into an interpolation costs, and how
+/// that cost grows with the digits it writes.
 export fn main() -> Result<Unit, Error> {
   let text = "the quick brown fox jumps over the lazy dog"
   let digits = "1234567"
@@ -113,6 +145,11 @@ export fn main() -> Result<Unit, Error> {
   }
   let pieceTo = now()
 
+  let one = rendering(7, rounds)
+  let three = rendering(123, rounds)
+  let ten = rendering(1234567890, rounds)
+  let nineteen = rendering(1234567890123456789, rounds)
+
   let bare = (bareTo - bareFrom).micros()
   let word = (wordTo - wordFrom).micros()
   let option = (optionTo - optionFrom).micros()
@@ -135,5 +172,9 @@ export fn main() -> Result<Unit, Error> {
     "==          (wide)   {(wide - bare) * 1000 / rounds} ns/call ({same})",
   )?
   println("interpolate (10 pieces) {(piece - bare) * 1000 / rounds} ns/call ({built})")?
+  println("Int piece  (1 digit)  {(one.micros - bare) * 1000 / rounds} ns/call ({one.bytes})")?
+  println("Int piece  (3 digits) {(three.micros - bare) * 1000 / rounds} ns/call ({three.bytes})")?
+  println("Int piece (10 digits) {(ten.micros - bare) * 1000 / rounds} ns/call ({ten.bytes})")?
+  println("Int piece (19 digits) {(nineteen.micros - bare) * 1000 / rounds} ns/call ({nineteen.bytes})")?
   Ok(())
 }
